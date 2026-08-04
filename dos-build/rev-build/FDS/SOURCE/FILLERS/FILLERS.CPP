@@ -907,9 +907,21 @@ void The_BiTTrue(Vertex *A,Vertex *B,Vertex *C)
 // Transparent textured Gouraud = 2-pass (there is no single combined filler):
 //   pass 1: transparent texture (PT_Texture_32),
 //   pass 2: transparent Gouraud light (RGBTGouraudMMX) blended over it.
+#ifdef FDS_XPARPROF
+// Sizing the fused-mapper prize: how much of the frame do the TWO passes of the transparent
+// textured-gouraud pair actually cost, split by pass? Fusion can at best save the second
+// span walk + the second framebuffer read-modify-write, not the texel fetch or the light.
+extern "C" unsigned long RDTSC(void);
+#pragma aux RDTSC = 0x0F 0x31 value [eax] modify [eax edx];
+extern "C" { unsigned long g_XparTexCy=0, g_XparLitCy=0, g_XparN=0; }
+#endif
+
 void The_BiGTTrue(Vertex *A,Vertex *B,Vertex *C)
 {
   Bi_Triangle BT[3];
+#ifdef FDS_XPARPROF
+  unsigned long _xt0 = RDTSC();
+#endif
   BT[0].X=SCRFIX(A->PX); BT[0].Y=SCRFIX(A->PY);
   BT[1].X=SCRFIX(B->PX); BT[1].Y=SCRFIX(B->PY);
   BT[2].X=SCRFIX(C->PX); BT[2].Y=SCRFIX(C->PY);
@@ -929,6 +941,9 @@ void The_BiGTTrue(Vertex *A,Vertex *B,Vertex *C)
 #else
   PT_Texture_32(BT,DoFace->Txtr->Txtr->Data,(unsigned long)VPage);
 #endif
+#ifdef FDS_XPARPROF
+  { unsigned long _t=RDTSC(); g_XparTexCy += _t-_xt0; _xt0=_t; }
+#endif
 
   // pass 2 : transparent Gouraud light over it (lighting in Z/U/V = LB/LG/LR),
   // fogged per-pixel by the (valid, clipped) vertex Z = 1/RZ: 1 - Z/FZP, so the
@@ -942,6 +957,9 @@ void The_BiGTTrue(Vertex *A,Vertex *B,Vertex *C)
   BT[1].Z=B->LB*fb; BT[1].U=B->LG*fb; BT[1].V=B->LR*fb;
   BT[2].Z=C->LB*fc; BT[2].U=C->LG*fc; BT[2].V=C->LR*fc;
   RGBTGouraudMMX(BT,(unsigned long)VPage);
+#ifdef FDS_XPARPROF
+  { unsigned long _t=RDTSC(); g_XparLitCy += _t-_xt0; g_XparN++; }
+#endif
 }
 
 void The_BiPTrue(Vertex *A,Vertex *B,Vertex *C)
@@ -1769,6 +1787,9 @@ void The_BiGTTrue_N(Vertex **V,long n)
   Bi_Triangle BT[12];
   NGonChains pc;
   long i;
+#ifdef FDS_XPARPROF
+  unsigned long _xt0 = RDTSC();
+#endif
   for (i=0;i<n;i++)
   {
     BT[i].X = SCRFIX(V[i]->PX); BT[i].Y = SCRFIX(V[i]->PY);
@@ -1777,10 +1798,23 @@ void The_BiGTTrue_N(Vertex **V,long n)
   if (!NGon_BuildChains(BT,n,&pc)) return;
 #ifdef FDS_TEX_SWIZZLE
   { Texture *_t=DoFace->Txtr->Txtr;
+#ifdef FDS_XPARPROF
+    // Is the transparent pair's texture on the cache-friendly TILED fetch, or the linear one?
+    // Linear = a one-texel vertical step costs a whole 1KB row; the water's UVs move in both
+    // screen axes over a 256KB texture, i.e. 16x the P55C L1.
+    { static Texture *_seen=0;
+      if (_t!=_seen) { _seen=_t;
+        fprintf(LogFile,"XPARTEX Txtr=%p tiled=%d matFlags=%lx BPP=%d\n",
+          (void*)_t,(int)(TEX_IS_TILED(_t)?1:0),(unsigned long)DoFace->Txtr->Flags,(int)_t->BPP);
+        fflush(LogFile); } }
+#endif
     if (TEX_IS_TILED(_t)) PT_Texture_32_N(&pc,_t->Data,(unsigned long)VPage);
     else PT_TextureLin_32_N(&pc,_t->Data,(unsigned long)VPage); }
 #else
   PT_Texture_32_N(&pc,DoFace->Txtr->Txtr->Data,(unsigned long)VPage);
+#endif
+#ifdef FDS_XPARPROF
+  { unsigned long _t=RDTSC(); g_XparTexCy += _t-_xt0; _xt0=_t; }
 #endif
   for (i=0;i<n;i++)
   {
@@ -1789,6 +1823,9 @@ void The_BiGTTrue_N(Vertex **V,long n)
     BT[i].Z = V[i]->LB*f; BT[i].U = V[i]->LG*f; BT[i].V = V[i]->LR*f;
   }
   RGBTGouraudMMX_N(&pc,(unsigned long)VPage);
+#ifdef FDS_XPARPROF
+  { unsigned long _t=RDTSC(); g_XparLitCy += _t-_xt0; g_XparN++; }
+#endif
 }
 
 // Asked once per clipped face. 0 means "this filler has no n-gon entry yet" and the

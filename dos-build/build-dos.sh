@@ -60,6 +60,7 @@ DEFS=""
 [ -n "${FDS_NEARSPHERE_PROBE:-}" ] && DEFS="$DEFS -dFDS_NEARSPHERE_PROBE"  # log meshes whose Tri_Ahead promise is broken
 [ -n "${FDS_ARMPROBE:-}" ] && DEFS="$DEFS -dFDS_ARMPROBE"            # per-mesh face fate when the near plane CUTS a mesh
 [ -n "${FDS_FNTLIGHTS:-}" ] && DEFS="$DEFS -dFDS_FNTLIGHTS"          # fountain stream lights (omnis riding the 3 orbiting emitters)
+[ -n "${FDS_XPARPROF:-}" ] && DEFS="$DEFS -dFDS_XPARPROF"            # split cost of the 2-pass transparent textured-gouraud pair
 [ -n "${FNT_STREAM_LIGHTS:-}" ] && DEFS="$DEFS -dFNT_STREAM_LIGHTS=$FNT_STREAM_LIGHTS"  # per emitter (1..3)
 # LOGSYNC = fflush instead of close+reopen. DEFAULT ON: 482 of those fire while CITY.FLD
 # loads and each is a FAT dir search + flush + seek-to-end via int21. Measured on 86Box:

@@ -5,6 +5,7 @@
 extern "C" long g_TriIn, g_TriDraw;   // fused-mapper triangle accept/reject census
 extern "C" long g_ClipFaces, g_ClipTris, g_DirectTris, g_ScreenPolys;
 extern "C" unsigned long g_LdTexCy, g_LdSwzCy, g_LdTexN;  // startup load profile
+extern "C" unsigned long g_XparTexCy, g_XparLitCy, g_XparN;   // 2-pass xpar split
 extern "C" unsigned long g_LdColdCy, g_LdWarmCy, g_LdDetCy, g_LdJpgCy,
                          g_LdSwapCy, g_LdScaleCy, g_LdBytes;   // A2 breakdown  // clipper fan-out census (see FRUSTRUM.CPP)
 
@@ -1249,6 +1250,10 @@ void Run_City()
 	    pfC,cSetup*100/tot,cRefl*100/tot,cMain*100/tot,cFlip*100/tot,(pfC>0?tot/pfC/1e6:0),g_FlipBack);
 	  fprintf(pf,"  LOAD: textures=%lu load=%.1f Mcy swizzle=%.1f Mcy (per-texture work, summed)\n",
 	    g_LdTexN,g_LdTexCy/1e6,g_LdSwzCy/1e6);
+#ifdef FDS_XPARPROF
+	  { fprintf(pf,"  XPAR2PASS: calls=%lu texpass=%.1f Mcy lightpass=%.1f Mcy (city water)\n",
+	      g_XparN,g_XparTexCy/1e6,g_XparLitCy/1e6); }
+#endif
 	  fprintf(pf,"  LOAD2: cold=%.1f warm=%.1f det=%.1f jpg=%.1f swap=%.1f scale=%.1f Mcy bytes=%lu\n",
 	    g_LdColdCy/1e6,g_LdWarmCy/1e6,g_LdDetCy/1e6,g_LdJpgCy/1e6,g_LdSwapCy/1e6,
 	    g_LdScaleCy/1e6,g_LdBytes);
