@@ -1693,6 +1693,31 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		const float kMinFloorTex = 1.5f;   // min flat floor width to earn its own row
 		std::vector<StoneRowT> rowTpl;     // one v-period, ascending, contiguous
 		std::vector<std::vector<float>> colTpl;   // per band: column LINE x-positions, one period
+		// Per-LINE representative heights (--greets_displace_line_height, the
+		// GRAZING-ZIGZAG fix). Two populations, one principle — verts tracing a
+		// groove must displace CONSISTENTLY along it:
+		//   * EDGE-aligned patches: every line vert takes the line's rep (median
+		//     of the height field along the line) instead of its own mid-slope
+		//     bilinear sample. Keeps the edge path's clean carve, kills its
+		//     along-line variance.
+		//   * FAN/LONE fallback patches (charts the edge path rejects — e.g. the
+		//     t=2845 repro wall, whose authored UV chart is a 4:1 TRAPEZOID):
+		//     the block-pitch lattice cannot represent a few-texel groove; verts
+		//     inside a groove's influence zone each sampled mid-slope and the
+		//     resulting smeared carve shears into a per-cell chevron sawtooth at
+		//     grazing views (measured: zeroing just the strip's displacement
+		//     straightens the groove; making the strip's heights merely
+		//     CONSISTENT does not). Those verts pin to the groove's PLATEAU
+		//     reference (median sampled at an inset well outside the groove's
+		//     mip-blur), so the plateau continues across the groove and the
+		//     mortar reads via texture/normal map/POM — which at fallback
+		//     granularity it already did.
+		// pos uses the same float expressions as rowTpl/colTpl so emitted verts
+		// land on it; plateau is the groove-side inset reference.
+		struct StoneLineRep { float pos; float rep; float plateau; };
+		std::vector<StoneLineRep> hLineRep;                 // horizontal groove lines (y)
+		std::vector<std::vector<StoneLineRep>> vLineRep;    // per band: vertical lines (x)
+		const bool lineHeightOn = fds::FeatureFlags::greets_displace_line_height();
 		if (edgeMode && havePitch) {
 			const byte *gdat = hm->Mipmap[useMip];
 			const int gbx = hm->blockSizeX, gby = hm->blockSizeY;
@@ -1821,6 +1846,89 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			for (const auto &vb : grid.vPerBand) std::fprintf(stderr, " %zu", vb.size());
 			std::fprintf(stderr, " (edge-aligned tessellation %s)\n",
 				grid.valid ? "ON" : "off -> fan path");
+
+			// ── per-LINE representative heights (--greets_displace_line_height,
+			// default on). Reps are MEDIANs of the height field bilinear-sampled
+			// ALONG a map-space line, at exactly the coordinates a vert on the
+			// line samples (u = X/mw on a vertical line, v = Y/mh on a horizontal
+			// one — SampleHeight8Bilinear's texel-center convention). Line set
+			// mirrors the rowTpl/colTpl construction exactly: per groove
+			// A=lo-pad / D=hi+pad (shoulders), plus B=lo+pad / C=hi-pad for wide
+			// grooves or M=(lo+hi)/2 for narrow ones (floors). ──
+			if (grid.valid && lineHeightOn) {
+				auto medianOf = [](std::vector<float> &s) -> float {
+					const size_t m = s.size() / 2;
+					std::nth_element(s.begin(), s.begin() + m, s.end());
+					return s[m];
+				};
+				auto medH = [&](float yTex) -> float {
+					std::vector<float> s(static_cast<size_t>(useMipW));
+					for (int x = 0; x < useMipW; ++x)
+						s[size_t(x)] = SampleHeight8Bilinear(hm, useMip,
+							(float(x) + 0.5f) / float(useMipW), yTex / float(useMipH));
+					return medianOf(s);
+				};
+				auto medV = [&](float xTex, float y0, float y1) -> float {
+					const int n = std::max(8, int(y1 - y0));
+					std::vector<float> s(static_cast<size_t>(n));
+					for (int k = 0; k < n; ++k) {
+						const float y = y0 + (y1 - y0) * (float(k) + 0.5f) / float(n);
+						s[size_t(k)] = SampleHeight8Bilinear(hm, useMip,
+							xTex / float(useMipW), y / float(useMipH));
+					}
+					return medianOf(s);
+				};
+				// Line reps = MEDIAN along the line itself (the edge path keeps
+				// its authored depth profile, variance removed). Plateau refs =
+				// median along a line INSET kPlatIns texels beyond the shoulder
+				// pads — outside the groove's mip-blur, so it reads the true
+				// plateau level (the pad lines themselves sample down-slope on
+				// a narrow blurred groove — measured 0.37 vs plateau 0.60 on
+				// the repro wall, which is why the fallback pin must NOT use
+				// the shoulder-line rep).
+				const float kPlatIns = kPadTex + 1.25f;
+				for (const StoneGRun &r : grid.h) {
+					const float A = r.lo - kPadTex, B = r.lo + kPadTex;
+					const float C = r.hi - kPadTex, D = r.hi + kPadTex;
+					const float ctr = 0.5f * (r.lo + r.hi);
+					const float pLo = medH(r.lo - kPlatIns), pHi = medH(r.hi + kPlatIns);
+					const float pMid = 0.5f * (pLo + pHi);
+					hLineRep.push_back({A, medH(A), pLo});
+					if (C - B >= kMinFloorTex) {
+						hLineRep.push_back({B, medH(B), pMid});
+						hLineRep.push_back({C, medH(C), pMid});
+					} else {
+						hLineRep.push_back({ctr, medH(ctr), pMid});
+					}
+					hLineRep.push_back({D, medH(D), pHi});
+				}
+				vLineRep.resize(grid.vPerBand.size());
+				for (size_t b = 0; b < grid.vPerBand.size(); ++b) {
+					const float y0 = grid.bandY[b].first, y1 = grid.bandY[b].second;
+					for (const StoneGRun &r : grid.vPerBand[b]) {
+						const float A = r.lo - kPadTex, B = r.lo + kPadTex;
+						const float C = r.hi - kPadTex, D = r.hi + kPadTex;
+						const float ctr = 0.5f * (r.lo + r.hi);
+						const float pLo = medV(r.lo - kPlatIns, y0, y1);
+						const float pHi = medV(r.hi + kPlatIns, y0, y1);
+						const float pMid = 0.5f * (pLo + pHi);
+						vLineRep[b].push_back({A, medV(A, y0, y1), pLo});
+						if (C - B >= kMinFloorTex) {
+							vLineRep[b].push_back({B, medV(B, y0, y1), pMid});
+							vLineRep[b].push_back({C, medV(C, y0, y1), pMid});
+						} else {
+							vLineRep[b].push_back({ctr, medV(ctr, y0, y1), pMid});
+						}
+						vLineRep[b].push_back({D, medV(D, y0, y1), pHi});
+					}
+				}
+				size_t nvl = 0;
+				for (const auto &vb : vLineRep) nvl += vb.size();
+				std::fprintf(stderr,
+					"[STONE-LINE] '%s' per-line rep heights (median-along-line "
+					"+ plateau insets): %zu h-lines, %zu v-lines over %zu bands\n",
+					matName, hLineRep.size(), nvl, vLineRep.size());
+			}
 		}
 
 		Vertex *const oldV = T->Verts;
@@ -2013,14 +2121,18 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 
 		std::vector<Face> faces;
 		std::vector<std::array<uint32_t,3>> fIdx;
+		std::vector<char> faceFromEdge;      // emitted by the edge-aligned path?
+		bool curPatchEdge = false;           // set around edgeAlignedQuad emission
 		faces.reserve(size_t(T->FIndex) * 4);
 		fIdx.reserve(faces.capacity());
+		faceFromEdge.reserve(faces.capacity());
 		auto emit = [&](const Face &proto, uint32_t i0, uint32_t i1, uint32_t i2,
 		                float u0,float v0,float u1,float v1,float u2,float v2){
 			Face f = proto; f.frame = nullptr;
 			f.U1=u0;f.V1=v0;f.U2=u1;f.V2=v1;f.U3=u2;f.V3=v2;
 			f.EU1=u0;f.EV1=v0;f.EU2=u1;f.EV2=v1;f.EU3=u2;f.EV3=v2;
 			faces.push_back(f); fIdx.push_back({i0,i1,i2});
+			faceFromEdge.push_back(curPatchEdge ? 1 : 0);
 		};
 
 		// Smallest level whose refinement error passes (see kRefineEps above),
@@ -2416,10 +2528,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// onto the detected groove lines, flat plateaus, narrow step bands.
 			// Falls through to the adaptive fan grid when the quad's UV chart
 			// can't take it (rotated/skewed) or no grid was detected.
+			curPatchEdge = true;
 			if (grid.valid && edgeAlignedQuad(cn, cu, cv, Ff)) {
+				curPatchEdge = false;
 				++builtQuads; ++edgeQuads;
 				continue;
 			}
+			curPatchEdge = false;
 			// UV footprint → level
 			float u0=std::min(std::min(cu[0],cu[1]),std::min(cu[2],cu[3]));
 			float u1=std::max(std::max(cu[0],cu[1]),std::max(cu[2],cu[3]));
@@ -2550,6 +2665,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (isTarget(&F) && i < int32_t(consumed.size()) && consumed[i]) continue;
 			faces.push_back(F);
 			fIdx.push_back({ F.A?vidx(F.A):0u, F.B?vidx(F.B):0u, F.C?vidx(F.C):0u });
+			faceFromEdge.push_back(0);
 		}
 
 		// canonical vertex on the shared side at `param` (used by both the S4a
@@ -2616,6 +2732,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					auto it=edgeFace.find({std::min(vLo,vHi),std::max(vLo,vHi)});
 					if (it==edgeFace.end()) return;             // defensive: no clean edge
 					const int fi=it->second;
+					curPatchEdge = faceFromEdge[size_t(fi)] != 0;   // clones inherit origin
 					const Face proto=faces[fi];
 					const uint32_t tri[3]={fIdx[fi][0],fIdx[fi][1],fIdx[fi][2]};
 					const float triU[3]={proto.U1,proto.U2,proto.U3};
@@ -2653,6 +2770,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						}
 						++nSeamSplits;
 					}
+					curPatchEdge = false;
 				};
 				// conform BOTH patches: for each, split each own segment that a
 				// union param falls strictly inside.
@@ -2678,24 +2796,128 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		if (pinnedZero.size() < nV) pinnedZero.resize(nV, 0);
 		std::vector<float> hSum(nV, 0.0f); std::vector<int> hCnt(nV, 0);
 		auto isTargetNew=[&](const Face &F){ return F.Txtr && F.Txtr->Name && !std::strcmp(F.Txtr->Name,matName); };
+		// ── per-LINE height override (--greets_displace_line_height): a vertex
+		// whose MAP-space position lies ON a detected groove line — or NEAR one,
+		// inside the groove's mid-slope influence zone — displaces consistently
+		// with the line instead of by its own bilinear sample. Classification is
+		// by UV (wrap-aware) — semantically exact, since the relief is a
+		// function of UV — so it also catches the verts the S4a seam-union
+		// inserts on groove sides. What a vert takes depends on its PATCH
+		// population (see the line-rep table comment above):
+		//   EDGE-path verts (edgeOwned): ON-line hits (≤ kLineEps — line
+		//     placement is quantized to the 1/2048 param lattice, ≤0.25 texel on
+		//     the deepest quads) take the line rep, MINIMUM at crossings (the
+		//     mortar recess dominates, matching the map); in-capture near-line
+		//     hits take the nearest line's rep (nearest, not min, so a wide
+		//     groove's B floor line — 2·pad from its A shoulder line — can't
+		//     drag the shoulder ring down).
+		//   FALLBACK (fan/lone) verts: any line within kLineCapture pins the
+		//     vert to the NEAREST line's PLATEAU ref — the fallback lattice
+		//     cannot represent the groove, so it must not carve it (the t=2845
+		//     zigzag was exactly this population's smeared carve shearing at
+		//     grazing; consistent heights alone measured insufficient).
+		// Plateau-interior verts (beyond capture) are untouched everywhere.
+		// Pinned border verts are never overridden (they don't displace at all).
+		const bool lineHeight = lineHeightOn && grid.valid &&
+		                        !(hLineRep.empty() && vLineRep.empty());
+		const float kLineEps = 0.45f;                 // texels at the bake mip
+		const float kLineCapture = 2.0f * kPadTex;    // groove influence zone
+		std::vector<float> lineRepV, linePlatV, linePlatD;
+		std::vector<char> edgeOwned;                  // vert used by an edge-path face
+		if (lineHeight) {
+			lineRepV.assign(nV, 1e30f);
+			linePlatV.assign(nV, 1e30f);
+			linePlatD.assign(nV, 1e30f);
+			edgeOwned.assign(nV, 0);
+			for (size_t i = 0; i < faces.size(); ++i) {
+				if (!faceFromEdge[i]) continue;
+				for (int k = 0; k < 3; ++k)
+					if (fIdx[i][k] < nV) edgeOwned[fIdx[i][k]] = 1;
+			}
+		}
+		auto wrapDist = [](float a, float b, float extent) -> float {
+			float d = std::fmod(std::fabs(a - b), extent);
+			return std::min(d, extent - d);
+		};
 		for (size_t i=0;i<faces.size();++i){
 			const Face &F=faces[i]; if (!isTargetNew(F)) continue;
 			const uint32_t vi[3]={fIdx[i][0],fIdx[i][1],fIdx[i][2]};
 			const float cu2[3]={F.U1,F.U2,F.U3}, cv2[3]={F.V1,F.V2,F.V3};
 			for (int k=0;k<3;++k){ if (vi[k]>=nV||pinnedZero[vi[k]]) continue;
-				hSum[vi[k]]+=SampleHeight8Bilinear(hm,useMip,cu2[k],cv2[k]); hCnt[vi[k]]+=1; }
+				hSum[vi[k]]+=SampleHeight8Bilinear(hm,useMip,cu2[k],cv2[k]); hCnt[vi[k]]+=1;
+				if (!lineHeight) continue;
+				const float mwF = float(useMipW), mhF = float(useMipH);
+				float xm = std::fmod(cu2[k]*mwF, mwF); if (xm < 0.0f) xm += mwF;
+				float ym = std::fmod(cv2[k]*mhF, mhF); if (ym < 0.0f) ym += mhF;
+				float bestOn = 1e30f;                 // min rep over ON-line hits
+				float nearRep = 1e30f, nearDist = 1e30f;   // nearest in-capture line
+				float nearPlat = 1e30f, nearPlatD = 1e30f; // nearest line's plateau ref
+				auto consider = [&](float d, float rep, float plat){
+					if (d <= kLineEps) bestOn = std::min(bestOn, rep);
+					else if (d <= kLineCapture && d < nearDist) { nearDist = d; nearRep = rep; }
+					if (d <= kLineCapture && d < nearPlatD) { nearPlatD = d; nearPlat = plat; }
+				};
+				for (const auto &L : hLineRep)
+					consider(wrapDist(ym, L.pos, mhF), L.rep, L.plateau);
+				// vertical lines: candidate bands from the row template — every
+				// row whose y-range (widened by the capture radius) contains
+				// this vertex's map y contributes its bandA/bandB, mirroring
+				// rowBreaks.
+				if (!vLineRep.empty() && !rowTpl.empty()) {
+					const float base = rowTpl.front().y0;
+					float yr = std::fmod(ym - base, mhF); if (yr < 0.0f) yr += mhF;
+					yr += base;
+					int cand[6]; int nCand = 0;
+					auto addBandC = [&](int b2){
+						if (b2 < 0 || b2 >= int(vLineRep.size())) return;
+						for (int c2 = 0; c2 < nCand; ++c2) if (cand[c2] == b2) return;
+						if (nCand < 6) cand[nCand++] = b2;
+					};
+					for (const StoneRowT &R : rowTpl)
+						if (yr >= R.y0 - kLineCapture && yr < R.y1 + kLineCapture) {
+							addBandC(R.bandA); addBandC(R.bandB);
+						}
+					for (int c2 = 0; c2 < nCand; ++c2)
+						for (const auto &L : vLineRep[size_t(cand[c2])])
+							consider(wrapDist(xm, L.pos, mwF), L.rep, L.plateau);
+				}
+				const float chosen = bestOn < 1e29f ? bestOn
+				                   : (nearDist < 1e29f ? nearRep : 1e30f);
+				if (chosen < 1e29f) lineRepV[vi[k]] = std::min(lineRepV[vi[k]], chosen);
+				if (nearPlatD < linePlatD[vi[k]]) {
+					linePlatD[vi[k]] = nearPlatD;
+					linePlatV[vi[k]] = nearPlat;
+				}
+			}
 		}
 		std::vector<Vector> basePos(nV);
 		for (uint32_t i=0;i<nV;++i) basePos[i]=verts[i].Pos;
-		int nMoved=0; float dMin=1e30f,dMax=-1e30f;
+		int nMoved=0, nLineSnap=0, nPlatPin=0; float dMin=1e30f,dMax=-1e30f;
 		for (uint32_t i=0;i<nV;++i){
 			if (pinnedZero[i]||hCnt[i]==0) continue;
 			const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
 			if (nl<1e-6f) continue;
-			const float h=hSum[i]/float(hCnt[i]); const float dsp=amp*(h-mipMean);
+			// Two-population override (see the line-rep table comment):
+			//  * edge-path verts on/near a line -> the line's rep;
+			//  * fallback-path verts inside a groove's influence zone -> the
+			//    groove's plateau ref (no carve — the zigzag's causal set).
+			float h = hCnt[i] ? hSum[i]/float(hCnt[i]) : mipMean;
+			if (lineHeight) {
+				if (edgeOwned[i]) {
+					if (lineRepV[i] < 1e29f) { h = lineRepV[i]; ++nLineSnap; }
+				} else if (linePlatD[i] < 1e29f) {
+					h = linePlatV[i]; ++nPlatPin;
+				}
+			}
+			float dsp=amp*(h-mipMean);
 			verts[i].Pos.x+=N.x/nl*dsp; verts[i].Pos.y+=N.y/nl*dsp; verts[i].Pos.z+=N.z/nl*dsp;
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
 		}
+		if (lineHeight)
+			std::fprintf(stderr, "[STONE-LINE] '%s': %d of %d displaced verts "
+				"snapped to their groove line's rep (edge path); %d fallback-path "
+				"verts plateau-pinned inside groove zones\n",
+				matName, nLineSnap, nMoved, nPlatPin);
 
 		// ── FOLD RELAXATION (--greets_displace_fold_relax, default on) — the
 		// t=6097 SLIVER-GAP fix. A displaced target face whose geometric normal
