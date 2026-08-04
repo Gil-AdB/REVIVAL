@@ -223,6 +223,92 @@ discarded pixel:
   (`x_shellnd_s.png` vs `x_shellcone_s.png`) differed in TWO variables at once
   (naive vs cone march AND domain on/off), not one.
 
+### S1b follow-ups (session 4, 2026-08-04) — the LID-OVERHANG defect
+
+User report, reviewing the three-way crops: *"some pixels ran away to the left
+from the edge, and are floating mid air… it seems like an actual discontinuity,
+and not just a few pixels gap"* (t=6097), and at t=5780 the background wrongly
+hidden behind a wall edge.
+
+**New instrument — `--poly_viz` (default OFF), and it settles this class of
+question in ONE render.** A rasterizer can only write inside the triangle it
+fills, so a fragment of foreign texture appearing mid-surface is EITHER (1)
+another surface's triangle genuinely covering that screen area — geometry
+inflated through a neighbour — or (2) the surface's OWN triangle shading wrong
+(bad UV/height march). Those need completely different fixes and the campaign
+had twice tried to tell them apart from ordinary crops. `--poly_viz` replaces
+every textured face's albedo with: **hue = material id** (fixed 12-entry
+palette), **bright = a `--pom_shell` LID face / dark = not**, plus a
+**per-triangle hash jitter** so every triangle boundary is visible. Lighting
+still runs, so the shape reads. It allocates + reads the `gb.albedo` plane on
+its own (it does NOT need `--texture_filter`, whose default 0 would otherwise
+have made the viz a silent no-op).
+
+**VERDICT at t=6097: CLASS (1), geometry — measured, not inferred.** The floating
+tan fragments render MAGENTA (`rooms::mirUV`) sitting on a CYAN surface
+(`rooms`), i.e. a different material id from the surface they sit on, so they
+are the tan wall's LID triangles drawn over the blue-grey block. Confirmed
+independently in the matID G-buffer dump: the fix below changes **14 379 px** at
+this pose, every one of them `rooms::mirUV` before, and the tessellation
+reference agrees with the new owner on **14 262 of them (99.2 %)**. Crops:
+`scratchpad/D1/PV_pvshell.png` (before) vs `PV_pvbc.png` (after),
+`PV_pvtess.png` (reference).
+
+**Mechanism.** `PomShell_Build` moves the patch's verts OUT along their normals
+by half the relief amplitude, so the lid is a RIGID TRANSLATION of the patch:
+at a patch border it covers screen area the authored plane never covered, and
+rays entering there march INWARD, land inside the patch's UV box, and shade as
+stone — the lateral-exit discard cannot fire. The tessellation reference has no
+such overhang because its bake PINS patch-border verts to zero displacement
+(`pinnedZero`, MeshOps.cpp) — measured: flat-POM and tessellation cover the same
+wall pixels to within **3 px** at t=6097.
+
+**Fix — `--pom_shell_base_clip` (ON inside `--pom_shell`, like
+`--pom_shell_domain`; inert without it, so flags-off stays byte-null).** Ask
+where THIS pixel's view ray crosses the AUTHORED plane (h = 0.5). Same affine UV
+chart, so `uv_base = uv_lid + (V·T, V·B)·(0.5 − hEnter)·A/(V·N)`; outside the
+domain (own box OR a sibling's — the same union the lateral-exit test uses) the
+flat wall does not cover this pixel, so the lane is lid overhang and is killed.
+2 FMAs + one compare group per covered pixel, no per-step work.
+
+**The ray must be the march's CAPPED one, and that is a measured correction, not
+a preference.** The uncapped 1/(V·N) is the exact footprint of an INFINITE
+affine patch, but at 84° incidence (measured on a t=5780 corridor wall: V·N =
+0.07–0.16) the crossing lands ~1.1 world units along the surface, where that
+model no longer describes the authored geometry, and the clip ate **81 px past
+the flat wall's own edge**. `--pom_shell_base_clip_raw` (default OFF) keeps the
+uncapped form for A/B.
+
+**Measured** (per-surface material masks over `rooms`, `rooms::mirUV`, `floor`,
+`floor::mirUV` — merging them hides the biggest over-coverage there is, wall lid
+over the NEIGHBOURING wall). "wrong-surface" = px where the arm paints a shelled
+surface that is not what tessellation shows there:
+
+| arm | t=6097 | t=5780 |
+|---|---|---|
+| flat POM (= the authored footprint) | 3 | 7 537 |
+| lid only (no discard, no clip) | 132 871 | 83 729 |
+| shell BEFORE (discard only) | 38 814 | 54 625 |
+| **shell AFTER (+ base clip, capped)** | **24 990** | **45 699** |
+| shell + base clip, UNCAPPED (rejected) | 24 990 | 72 569 |
+
+With the lateral-exit discard OFF — i.e. the pure geometry error — the clip
+takes t=6097 from **132 871 → 8 801 px**. The remaining ~16 k at that pose is
+the lateral-exit discard's own see-through, which is the stage's purpose and was
+adjudicated in session 3. Crops (identical framing):
+`scratchpad/D1/L6097_{tess,before,after}.png`,
+`scratchpad/D1/R5780_{tess,before,after}.png`.
+
+**What is NOT fixed (honest residual).** The base clip removes overhang OUTSIDE
+the authored footprint. It cannot remove interpenetration INSIDE it: at a corner
+the lid of wall A is A/2 proud of A's own plane and still pokes into wall B's
+space, and Z resolves that per pixel. Measured residual at t=6097 with the
+discard off: **8 801 px** vs flat POM's 3. Removing that needs the plan's §S1b
+step 3 proper — a GEOMETRIC border taper (subdivide the shell faces, then pin
+the patch-border ring by POSITION, since `--pom_shell_pin`'s pointer-based
+`nonTarget` test never fires on a mesh split by `MakeFacesIndependentByAngle`,
+and un-subdivided quads have nothing but border verts). Not attempted here.
+
 Goal: true block-edge silhouettes. When a ray misses all stone, the pixel is
 DISCARDED and the geometry behind shows through — the user named this the one
 major visual win of tessellation; it is the primary acceptance criterion.

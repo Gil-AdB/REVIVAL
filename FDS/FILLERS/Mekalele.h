@@ -509,6 +509,18 @@ struct TileRasterizerCtx {
 	// discard. The on/off pair IS the discard viz (the changed pixels are
 	// exactly the discarded ones) at zero hot-loop cost.
 	bool  pomShellDomain = true;
+	// --pom_shell_base_clip: BASE-FOOTPRINT clip (the lid-overhang fix). The lid
+	// is a rigid outward translation of the patch, so at a patch border it
+	// rasterizes screen area the AUTHORED plane never covered, and rays there
+	// march INWARD and hit legally — stone floating past the wall's end. This
+	// tests the view ray's crossing of the AUTHORED plane (h = 0.5) against the
+	// same UV domain: outside ⇒ this pixel is lid overhang ⇒ kill it. Matches the
+	// tessellation bake, which pins its patch-border verts to zero displacement
+	// and therefore never covers past the authored footprint either.
+	bool  pomShellBaseClip = true;
+	// --pom_shell_base_clip_raw: use the UNCAPPED 1/(V·N) for the base-clip ray
+	// instead of the march's capped one. Diagnostic A/B (see the flag).
+	bool  pomShellBaseClipRaw = false;
 	// AUTHORED face UV bounding box (from Face::U1..V3 — NOT the post-clip /
 	// post-poly-split vertex set, both of which pass the Face through
 	// unchanged, so this stays the authored patch's domain at every
@@ -825,6 +837,10 @@ struct TileRasterizer {
 	// UVs — the same Lengyel solve tangents come from). Zero when the depth
 	// write is off or the face's UV mapping is degenerate → flat depth.
 	float pomDepthWorldAmp = 0.0f;
+	// --poly_viz: this TRIANGLE's ownership colour (0 = viz off). Material id in
+	// the hue, shell-lid vs not in the brightness, per-triangle hash in a small
+	// jitter so triangle boundaries read. Set per triangle beside the amp above.
+	uint32_t polyVizColor = 0;
 	// --pom_shell: the slab amplitude expressed in UV units for THIS triangle
 	// = Material::PomShellUvAmp × (world-per-UV-tile). The march's lateral travel
 	// per unit height drop is this × the tangent-space view direction, so the
@@ -906,7 +922,8 @@ struct TileRasterizer {
 		// float fraction is only present here at raster time. The kernel reads
 		// gb.albedo for these too (its !Mat->HeightMap exclusion was dropped in
 		// lockstep). texFilter==0 → this whole block is off → byte-identical.
-		const bool wantAlbedo = (texFilter > 0) && (span.albedo != nullptr)
+		const bool wantAlbedo = ((texFilter > 0) || polyVizColor)
+		                        && (span.albedo != nullptr)
 		                        && (albedoTex0 != nullptr);
 		// mip+1 masks for the trilinear cross-mip blend.
 		const bool wantTri = wantAlbedo && (texFilter >= 2)
@@ -1154,9 +1171,16 @@ struct TileRasterizer {
 						// strength flag, so march and lid can't disagree.
 						const Vec8f hEnter = shell ? (p_shz * p_z) : Vec8f(0.5f);
 						const Vec8f hStart = shell ? hEnter : Vec8f(1.0f);
+						// UNCAPPED 1/(V·N): the geometry's true lateral travel per
+						// unit height, which --pom_shell_base_clip needs (the lid's
+						// screen overhang is pure geometry and knows nothing about
+						// the march's grazing cap; capping it would under-clip
+						// exactly where the overhang is worst).
+						const Vec8f invVtNRaw = shell
+						    ? (Vec8f(1.0f) / max(VtN, Vec8f(1.0f / 64.0f)))
+						    : Vec8f(1.0f);
 						const Vec8f invVtN = shell
-						    ? min(Vec8f(1.0f) / max(VtN, Vec8f(1.0f / 64.0f)),
-						          Vec8f(ctx.pomShellCap))
+						    ? min(invVtNRaw, Vec8f(ctx.pomShellCap))
 						    : Vec8f(1.0f);
 						const Vec8f rayScale = shell
 						    ? (Vec8f(ctx.pomShellUvAmp) * invVtN)
@@ -1482,24 +1506,52 @@ struct TileRasterizer {
 						// FARTHER face rasterized later win them (front-to-back order).
 						if (shell) {
 							Vec8fb keep = pomCrossed;
-							if (ctx.pomShellDomain) {
-								Vec8fb ins = (uf >= Vec8f(ctx.shellUMin))
-								           & (uf <= Vec8f(ctx.shellUMax))
-								           & (vf >= Vec8f(ctx.shellVMin))
-								           & (vf <= Vec8f(ctx.shellVMax));
-								// Sibling patches on the same plane (ctx.shellSibs,
-								// --pom_shell_merge_uv): the domain is the UNION of
-								// the boxes, never their bounding box. Skipped while
-								// every lane is already inside its own box — the
-								// overwhelming majority of covered pixels — so the
-								// multi-box domain costs nothing away from a border.
+							// Inside the patch DOMAIN = inside its own UV box OR any
+							// sibling patch's (ctx.shellSibs, --pom_shell_merge_uv):
+							// the UNION of the boxes, never their bounding box.
+							// Siblings are skipped while every lane is already inside
+							// its own box — the overwhelming majority of covered
+							// pixels — so the multi-box domain costs nothing away
+							// from a border.
+							auto inDomain = [&](const Vec8f &u, const Vec8f &v) {
+								Vec8fb ins = (u >= Vec8f(ctx.shellUMin))
+								           & (u <= Vec8f(ctx.shellUMax))
+								           & (v >= Vec8f(ctx.shellVMin))
+								           & (v <= Vec8f(ctx.shellVMax));
 								for (int sb = 0; sb < ctx.shellSibCount
 								     && !horizontal_and(ins); ++sb) {
 									const float *bx = ctx.shellSibs + 4 * sb;
-									ins |= (uf >= Vec8f(bx[0])) & (uf <= Vec8f(bx[1]))
-									     & (vf >= Vec8f(bx[2])) & (vf <= Vec8f(bx[3]));
+									ins |= (u >= Vec8f(bx[0])) & (u <= Vec8f(bx[1]))
+									     & (v >= Vec8f(bx[2])) & (v <= Vec8f(bx[3]));
 								}
-								keep &= ins;
+								return ins;
+							};
+							if (ctx.pomShellDomain)
+								keep &= inDomain(uf, vf);
+							// --pom_shell_base_clip (the lid-overhang fix): the lid is
+							// a rigid outward translation of the patch, so at a patch
+							// BORDER it covers screen the authored plane never did,
+							// and rays entering there march INWARD, hit legally and
+							// paint stone over whatever is really behind — the user's
+							// "pixels ran away to the left from the edge, floating mid
+							// air", measured as 12 162 px of over-coverage vs the
+							// tessellation reference at t=6097 and 19 335 at t=5780.
+							// The test: where does THIS pixel's view ray cross the
+							// AUTHORED plane (h = 0.5)? Same affine UV chart, so
+							//   uv_base = uv_lid + (Vt_T,Vt_B)·(0.5 − hEnter)·A/(V·N)
+							// with A = the slab's UV amplitude and the UNCAPPED
+							// 1/(V·N) (see invVtNRaw). Outside the domain ⇒ the flat
+							// wall does not cover this pixel ⇒ it is lid overhang ⇒
+							// kill it. That reproduces the tessellation bake's
+							// convention exactly: it pins patch-border verts to zero
+							// displacement, so its relief never crosses the authored
+							// footprint either. Costs 2 FMAs + one compare group per
+							// pixel, no per-step work.
+							if (ctx.pomShellBaseClip) {
+								const Vec8f s = Vec8f(ctx.pomShellUvAmp)
+								              * (ctx.pomShellBaseClipRaw ? invVtNRaw : invVtN)
+								              * (Vec8f(0.5f) - hEnter);
+								keep &= inDomain(ufGeo + VtT * s, vfGeo + VtB * s);
 							}
 							p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
 						}
@@ -1603,6 +1655,27 @@ struct TileRasterizer {
 						// mipmap-via-subdivision sub-face boundaries (the diagonal
 						// seams' cause) read directly. A tiny fixed palette keyed on
 						// ctx.miplevel; applies to every textured face.
+						// --poly_viz: WHO OWNS THIS PIXEL. A rasterizer can only write
+						// inside the triangle it fills, so when a fragment of foreign
+						// texture appears mid-surface there are exactly two
+						// possibilities — a triangle of ANOTHER surface genuinely
+						// covers that screen area (geometry), or the surface's OWN
+						// triangle is shading wrong (texturing). This viz separates
+						// them by eye in one render:
+						//   HUE       = material id (a fixed 12-entry palette), so a
+						//               foreign fragment is a different colour from
+						//               the surface it sits on ⇒ geometry;
+						//   BRIGHT    = the face is a --pom_shell LID face,
+						//   DARK      = it is not (45 %);
+						//   ±jitter   = per-TRIANGLE hash, so every triangle boundary
+						//               is visible and "which triangle" is answerable.
+						// Replaces the albedo only; lighting still runs, so the shape
+						// reads. Default OFF.
+						if (polyVizColor) {
+							alignas(32) uint32_t t8[8];
+							for (int k = 0; k < 8; ++k) t8[k] = polyVizColor;
+							albedoCol.load_a(t8);
+						}
 						if (ctx.pomMipViz) {
 							static const uint32_t kMipPal[8] = {
 								0xFFE03030u, 0xFF30E030u, 0xFF3060E0u, 0xFFE0E030u,
@@ -2155,6 +2228,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomShellUvAmp = pomShellFace ? F->Txtr->PomShellUvAmp : 0.0f,
 		.pomShellCap = fds::FeatureFlags::pom_shell_cap(),
 		.pomShellDomain = fds::FeatureFlags::pom_shell_domain(),
+		.pomShellBaseClip = fds::FeatureFlags::pom_shell_base_clip(),
+		.pomShellBaseClipRaw = fds::FeatureFlags::pom_shell_base_clip_raw(),
 		// The lateral-exit domain: the PATCH's UV box (Face::PomShellGroup ->
 		// Material::PomShellDomains) when PomShell_Build grouped this face,
 		// else the authored face's own box. Either way it comes off the Face,
@@ -2275,8 +2350,28 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// lengths of one UV tile along each axis; geometric mean because the
 		// march applies one strength to both axes. Degenerate mapping (zero UV
 		// area, behind-camera junk) → w = 0 → flat depth for this triangle.
+		// --poly_viz (see the tint site): per-triangle ownership colour.
+		if (fds::FeatureFlags::poly_viz()) {
+			static const uint32_t kMatHue[12] = {
+				0xFFE04040u, 0xFF40E040u, 0xFF4060E0u, 0xFFE0E040u,
+				0xFFE040E0u, 0xFF40E0E0u, 0xFFE09030u, 0xFF9040E0u,
+				0xFF40A070u, 0xFFB06060u, 0xFF6090B0u, 0xFFC0C0C0u };
+			uint32_t c = kMatHue[ctx.matID % 12u];
+			// per-triangle hash -> ±20 % brightness so boundaries read
+			uint32_t h = (uint32_t(uintptr_t(F) >> 4) * 2654435761u)
+			           + (uint32_t(i) * 40503u);
+			const int jit = 80 + int((h >> 24) & 0x3F);          // 80..143 of 128
+			const int sc  = (ctx.pomShell ? 128 : 58) * jit / 128;  // lid vs not
+			uint32_t o = 0xFF000000u;
+			for (int ch = 0; ch < 3; ++ch) {
+				int v = int((c >> (8 * ch)) & 0xFFu) * sc / 128;
+				if (v > 255) v = 255;
+				o |= uint32_t(v) << (8 * ch);
+			}
+			r.polyVizColor = o;
+		}
 		if (ctx.pomDepthWrite || ctx.pomShell) {
-			float w = 0.0f;
+			float w = 0.0f, wAniso = 1.0f;
 			if (v1.RZ > 0.0f && v2.RZ > 0.0f && v3.RZ > 0.0f) {
 				const float z1 = 1.0f / v1.RZ, z2 = 1.0f / v2.RZ, z3 = 1.0f / v3.RZ;
 				const float x1 = (v1.PX - ctx.cntrEX) * ctx.invFOVX * z1;
@@ -2299,6 +2394,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 					const float t2 = tx * tx + ty * ty + tz * tz;
 					const float b2 = bx * bx + by * by + bz * bz;
 					w = std::sqrt(std::sqrt(t2 * b2));
+					wAniso = (b2 > 1e-20f) ? std::sqrt(std::sqrt(t2 / b2)) : 1.0f;
 				}
 			}
 			// Shell faces take the amplitude from the GEOMETRY (the UV amp the
@@ -2325,11 +2421,11 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 					const uint32_t loB = wLo.load(), hiB = wHi.load();
 					const float lo = *reinterpret_cast<const float*>(&loB);
 					const float hi = *reinterpret_cast<const float*>(&hiB);
-					std::fprintf(stderr, "[POM-SHELL-STATS] #%d mat=%s w=%.4f A=%.4f "
+					std::fprintf(stderr, "[POM-SHELL-STATS] #%d mat=%s w=%.4f aniso=%.3f A=%.4f "
 						"(running w %.4f..%.4f) dom u[%.3f..%.3f] v[%.3f..%.3f] "
 						"screenArea=%.0f\n", n,
 						(F->Txtr && F->Txtr->Name) ? F->Txtr->Name : "?",
-						(double)w, (double)r.pomDepthWorldAmp, (double)lo, (double)hi,
+						(double)w, (double)wAniso, (double)r.pomDepthWorldAmp, (double)lo, (double)hi,
 						(double)ctx.shellUMin, (double)ctx.shellUMax,
 						(double)ctx.shellVMin, (double)ctx.shellVMax,
 						(double)std::fabs(det) * 0.5);

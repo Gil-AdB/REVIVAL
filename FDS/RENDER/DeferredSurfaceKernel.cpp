@@ -1388,7 +1388,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// wrote a filtered BGRA into gb.albedo; read that instead of point-
 	// sampling the packed texel address. Metal/rough/AO/normal maps keep
 	// using the suv address decoded from `txtr`.
-	const bool texFilterOn  = fds::FeatureFlags::texture_filter() > 0;
+	// --poly_viz rides the same plane (the rasterizer writes its per-triangle
+	// ownership colour there), so it must be read here too or the viz is inert.
+	const bool texFilterOn  = (fds::FeatureFlags::texture_filter() > 0
+	                           || fds::FeatureFlags::poly_viz())
+	                          && !gb.albedo.empty();
 	const bool profNoLights = fds::FeatureFlags::prof_no_lights();
 	const bool profNoSpec   = fds::FeatureFlags::prof_no_spec();
 	const bool profNoFog    = fds::FeatureFlags::prof_no_fog();
@@ -3912,7 +3916,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	// Texture filtering: read the raster-time filtered albedo (see the
 	// scalar kernel). Only the diffuse texel moves to gb.albedo; the
 	// normal-map chase below keeps its suv address.
-	const bool   texFilterOn  = fds::FeatureFlags::texture_filter() > 0
+	const bool   texFilterOn  = (fds::FeatureFlags::texture_filter() > 0
+	                             || fds::FeatureFlags::poly_viz())
 	                            && !gb.albedo.empty();
 	// Env-specular state (--env_refl): OuterVec had NO env compose at all —
 	// --env_refl was silently inert on every PreferOuterVec scene (city).

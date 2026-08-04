@@ -83,7 +83,11 @@ void EngineGBuffer_Resize(int X, int Y) {
     // pass samples at raster time (the sub-texel fraction is gone by the
     // time the kernel sees the swizzled address in `txtr`). Empty → the
     // deferred kernel falls back to point-sampling, byte-identical.
-    if (fds::FeatureFlags::texture_filter() > 0) {
+    // --poly_viz writes its ownership colour into the same plane, so it needs
+    // the plane allocated even with texture filtering off (which is the default
+    // — without this the viz is a silent no-op, and this campaign has already
+    // lost time to silently-defaulted renders).
+    if (fds::FeatureFlags::texture_filter() > 0 || fds::FeatureFlags::poly_viz()) {
         s_engineGBuffer.albedo.assign(numPixels, 0);
     } else {
         s_engineGBuffer.albedo.clear();
