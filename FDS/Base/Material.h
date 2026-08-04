@@ -15,6 +15,41 @@
 // (~0.016) where it matters most (small ratios, near tall features).
 inline constexpr float kPomConeMax = 4.0f;
 
+// S1c HORIZON MAP (--pom_horizon, docs/S1_PIXEL_DISPLACEMENT_PLAN.md §S1c):
+// per texel of a height map, the elevation of the relief's own horizon in
+// kPomHorizonAzimuths evenly spaced tangent-space azimuths, stored as
+// u8 sin(horizon). A light whose tangent-space elevation is below the horizon
+// in its azimuth is occluded BY THE RELIEF ITSELF — the light-responsive
+// mortar/block self-shadow that NEITHER the tessellation bake nor the shell
+// march can produce (the PolyId shadow test is identity-only, one id per
+// authored wall plane, so no intra-wall shadow exists in either path).
+//
+// Layout: 8 bytes per texel, mip chain contiguous, in the SAME block-tile order
+// as the source height map — so the swizzled texel index the rasterizer already
+// computed for the albedo indexes this too (mipOfs[mip] + swizzledUV, ×8). The
+// 8 azimuths of one texel are adjacent, so a lookup that needs two neighbouring
+// azimuths touches one cache line, not two.
+inline constexpr int kPomHorizonAzimuths = 8;
+
+struct PomHorizonMap {
+	unsigned char *data = nullptr;      // kPomHorizonAzimuths bytes per texel
+	size_t         mipOfs[16] = {};     // TEXEL offset of each mip (×8 for bytes)
+	unsigned       numMipmaps = 0;
+	size_t         texels = 0;          // total texels across the chain
+	// The bake's "height units per texel of lateral travel" at mip 0 =
+	// (UV amplitude the relief is displaced by) × (texels per UV tile). The
+	// horizon angle is scale-free in world units — worldPerUV cancels between
+	// the height amplitude and the texel pitch — so this one number, plus the
+	// height field, fully determines the bake. Part of the disk-cache key.
+	float          heightScaleTexels = 0.0f;
+	int            radiusTexels = 0;
+	// The SOURCE height map's layout. The kernel addresses this map with the
+	// ALBEDO's swizzled UV + mip (exactly as it does the normal and AO maps),
+	// so these must match the albedo's or the lookup reads the wrong texel —
+	// checked once after the textures are unified, never per pixel.
+	int            sizeX = 0, sizeY = 0, blockSizeX = 0, blockSizeY = 0;
+};
+
 #pragma pack(push, 1)
 
 struct Scene;
@@ -83,6 +118,15 @@ struct Material
     // advance without hitting the height field. Offline-baked once at material
     // setup (MakeConeMap) only when --parallax_pom is on; null = no cone march.
     Texture             * ConeMap                = nullptr;
+    // S1c: horizon map for this material's HeightMap (see PomHorizonMap above).
+    // Baked once at scene setup when --pom_horizon is on, disk-cached; null =
+    // no relief self-shadow for this material. PATH-AGNOSTIC: it is a shading
+    // term, so it serves the tessellation bake and the per-pixel shell equally,
+    // and it is baked from the FULL height field in both (under
+    // --greets_displace the POM input becomes the RESIDUAL, but the geometry
+    // still carries the low band, so the shadow term must model the whole
+    // relief — hence the bake runs at height-load time, before the swap).
+    PomHorizonMap       * PomHorizon             = nullptr;
     // S1b SHELL POM (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md): the
     // relief slab's amplitude for the full 0..1 height range, in UV UNITS
     // (= the effective parallax strength the shell was BUILT with, i.e.

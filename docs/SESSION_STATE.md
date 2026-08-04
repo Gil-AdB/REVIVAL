@@ -1,18 +1,31 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
-> **2026-08-04 (later) — S1a AND S1b ARE IN.** `--pom_depth_write` (S1a,
-> c2616e4) and `--pom_shell` (S1b, c556148) both land default OFF and
-> byte-null (render_gate 3/3, city `37e62845`, fountain `51fff7cd`). S1b is
-> the silhouette stage: the shell march discards rays that leave the
-> contiguous coplanar PATCH before crossing the height field, which is the
-> mechanism that lets the geometry behind show through at block edges (a
-> plain "miss" never happens inside a height field — see the S1b entry in
-> docs/S1_PIXEL_DISPLACEMENT_PLAN.md, which now records every deviation from
-> the original sketch and why). Measured at t=5780: tessellation 123.9 ms vs
-> shell-cone 63.0 ms. OPEN: the floor's deep slab still opens ~6 k px of void
-> at extreme grazing (candidates listed in the plan); tuning of
-> `--pom_shell_cap` is the main dial; S1c (horizon-map self-shadow) not
-> started.
+> **2026-08-04 (session 3) — S1a + S1b + S1c ARE ALL IN, all default OFF, all
+> byte-null** (render_gate 3/3, city `37e62845`, fountain `51fff7cd`, wasm
+> links). Read `docs/S1_PIXEL_DISPLACEMENT_PLAN.md` for the full record.
+> - S1a `--pom_depth_write` (c2616e4), S1b `--pom_shell` (c556148).
+> - **Floor void CLOSED** (dfb4272): `--pom_shell_merge_uv` gives each patch a
+>   SIBLING BOX LIST (coplanar patches whose UV rects abut), and the domain is
+>   the UNION OF THE BOXES — never their bounding box, which was tried first
+>   and destroyed the t=6097 corner silhouette. Void at t=5780 **6175 → 404 px**
+>   with the corner discard pixel-identical.
+> - **t=6097 corner band ADJUDICATED**: the discard is CORRECTING the lid, not
+>   eating wall. Of 178 802 discard-affected px: 0 void, 100 % revealing a real
+>   surface ~5 world units behind. Reference framing: tess == flat POM exactly;
+>   shell-no-discard over-covers by 35 436 px, shell by 12 162 — the discard
+>   removes 23 k px of lid inflation. Instrument: `FDS_SNAPSHOT_GBUFDUMP=1`
+>   (G-buffer matID plane) + `scratchpad/classify.py`.
+> - **S1c `--pom_horizon` LANDED**: 8-azimuth horizon bake (disk-cached, 99–128
+>   ms, NOT minutes) + per-light tangent-space elevation-vs-horizon compare.
+>   The groove shadow MOVES with the light — the one thing neither the
+>   tessellation bake nor the shell march can do (PolyId shadows are
+>   identity-only). Path-agnostic: works under `--greets_displace` too.
+> - **Perf [M]** greets t=5780, iters=40, 4 interleaved pairs, load 2.3–4.9:
+>   flat POM 56.9 · **shell 58.1** · **shell+horizon 61.0** · **tessellation
+>   104.7** · tess+horizon 106.8 ms/iter. Horizon = +2.9 ms median for all 7
+>   omnis.
+> - OPEN: nothing blocking. The user picks the defaults; the three-way crop
+>   list is at the end of the plan doc.
 >
 > **2026-08-04 — ACTIVE CAMPAIGN REDIRECT:** the current campaign is
 > **S1 per-pixel shell displacement** — read `docs/S1_PIXEL_DISPLACEMENT_PLAN.md`

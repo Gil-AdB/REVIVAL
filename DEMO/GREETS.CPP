@@ -1477,6 +1477,24 @@ void Initialize_Greets()
 						std::fprintf(stderr, "[GREETS] parallax_pom '%s' -> cone map %s (%.0f ms)\n",
 						             M->Name, M->ConeMap ? "baked" : "FAILED", ms);
 					}
+					// S1c (--pom_horizon): bake the relief self-shadow horizon
+					// HERE, off the FULL height field — the --greets_displace
+					// path swaps M->HeightMap for the RESIDUAL further down, but
+					// the geometry still carries the low band, so the shadow term
+					// must model the whole relief in both paths. The amplitude is
+					// the same UV number the shell geometry is built with.
+					// The kernel addresses the horizon map with the ALBEDO's
+					// swizzledUV + miplevel (exactly as it does the normal and AO
+					// maps). The albedo is only RE-POINTED here (BPP=0 forces
+					// Unify_Textures to reload it inside Preprocess_Scene), so it
+					// is still the OLD 256² texture at this moment and cannot be
+					// compared yet — the layout check runs post-Preprocess below.
+					if (fds::FeatureFlags::pom_horizon() && M->HeightMap->BPP == 8) {
+						M->PomHorizon = LoadOrBakeHorizonMap(
+							M->HeightMap,
+							fds::FeatureFlags::parallax_strength() * M->ParallaxScale,
+							fds::FeatureFlags::pom_horizon_radius(), M->Name);
+					}
 				}
 			}
 			if (Texture *n = GreetsLoadNormalMap(normal, flipG)) {
@@ -1500,6 +1518,29 @@ void Initialize_Greets()
 	}
 
 	Preprocess_Scene(GreetSc, "GREETS");
+
+	// S1c layout check, now that Unify_Textures has actually LOADED the albedo
+	// (before Preprocess the stone materials still point at their old 256²
+	// texture — see the bake site above). The kernel indexes the horizon map
+	// with the albedo's swizzled UV + miplevel, so a layout mismatch would read
+	// a wrong texel silently; drop the map instead.
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != GreetSc || !M->PomHorizon) continue;
+		const Texture *A = M->Txtr;
+		const PomHorizonMap *Hz = M->PomHorizon;
+		if (A && A->SizeX == Hz->sizeX && A->SizeY == Hz->sizeY
+		    && A->blockSizeX == Hz->blockSizeX && A->blockSizeY == Hz->blockSizeY
+		    && A->numMipmaps == Hz->numMipmaps)
+			continue;
+		std::fprintf(stderr, "[POM-HORIZON] '%s': height layout (%dx%d bs=%d,%d "
+			"mips=%u) != albedo (%dx%d bs=%d,%d mips=%u) — the kernel addresses "
+			"the horizon map with the albedo's swizzled UV, so it is DROPPED for "
+			"this material\n", M->Name ? M->Name : "?",
+			Hz->sizeX, Hz->sizeY, Hz->blockSizeX, Hz->blockSizeY, Hz->numMipmaps,
+			A ? A->SizeX : 0, A ? A->SizeY : 0, A ? A->blockSizeX : 0,
+			A ? A->blockSizeY : 0, A ? A->numMipmaps : 0);
+		M->PomHorizon = nullptr;
+	}
 
 	// Refraction OPT-IN (Mat_Refractive) — CODE DEFAULTS: mark the greets glass
 	// display panels so they keep refracting the room behind them under

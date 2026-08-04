@@ -16,6 +16,8 @@
 #include <functional>
 #include <map>
 #include <semaphore>
+#include <chrono>
+#include <filesystem>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -551,6 +553,193 @@ Texture *MakeConeMap(Texture *height) {
 		}
 	}
 	return cone;
+}
+
+// ── S1c HORIZON MAP BAKE (--pom_horizon) ───────────────────────────────────
+// Per texel of an 8-bit height map, the elevation of the relief's own horizon
+// in kPomHorizonAzimuths evenly spaced tangent-space azimuths, as u8
+// sin(horizon). Output layout: 8 bytes per texel in the SAME block-tile + mip
+// order as the source, so the swizzled index the rasterizer already computed
+// addresses it (see PomHorizonMap).
+//
+// THE SCALE IS UV-ONLY. tan(horizon) = Δh_world / Δlateral_world, and both
+// scale with the face's world-per-UV: Δh_world = A_uv·worldPerUV·Δh,
+// Δlateral_world = (Δtexels/N)·worldPerUV. The worldPerUV cancels, leaving
+//   tan(horizon) = (A_uv · N) · Δh / Δtexels
+// with A_uv the relief's UV amplitude (parallax_strength × ParallaxScale — the
+// SAME number the shell is built with) and N the texels per UV tile at that
+// mip. So one scalar, `heightScaleTexels`, plus the height field determines the
+// bake at every mip, and a mesh rescale can never desync it.
+//
+// Sampling: dense for the first 8 texels then geometrically spaced to the scan
+// radius. A distant occluder only matters if it is TALL, and max(Δh/r) is
+// dominated by the near samples, so log spacing costs ~nothing in quality and
+// turns an O(R) per-azimuth march into O(8 + log R). Toroidal wrap keeps a
+// tiling map seamless (the cone bake wraps for the same reason).
+// Threaded over rows. Caller owns the result.
+PomHorizonMap *MakeHorizonMap(const Texture *height, float heightScaleUV,
+                              int radiusTexels) {
+	if (!height || height->BPP != 8 || !height->Mipmap[0] || height->numMipmaps == 0)
+		return nullptr;
+	if (!(heightScaleUV > 0.0f) || radiusTexels < 2) return nullptr;
+	const int blockX = height->blockSizeX, blockY = height->blockSizeY;
+	const int BX = 1 << blockX, BY = 1 << blockY;
+	size_t total = 0;
+	{ int cx = height->SizeX >> blockX, cy = height->SizeY >> blockY;
+	  for (dword i = 0; i < height->numMipmaps; ++i) {
+	      total += size_t(cx) * size_t(cy) * size_t(BX) * size_t(BY);
+	      cx = (cx + 1) >> 1; cy = (cy + 1) >> 1; } }
+	PomHorizonMap *hz = new PomHorizonMap;
+	hz->numMipmaps = height->numMipmaps;
+	hz->texels = total;
+	hz->heightScaleTexels = heightScaleUV * float(height->SizeX);
+	hz->radiusTexels = radiusTexels;
+	hz->sizeX = height->SizeX; hz->sizeY = height->SizeY;
+	hz->blockSizeX = height->blockSizeX; hz->blockSizeY = height->blockSizeY;
+	hz->data = (unsigned char *)getAlignedBlock(total * kPomHorizonAzimuths);
+	std::memset(hz->data, 0, total * kPomHorizonAzimuths);   // 0 = flat horizon
+	const byte *h0 = height->Mipmap[0];
+	for (dword i = 0; i < height->numMipmaps; ++i)
+		hz->mipOfs[i] = size_t(height->Mipmap[i] - h0);
+	// Azimuth k points along (cos, sin) of k·(360/kPomHorizonAzimuths)°.
+	float dirX[kPomHorizonAzimuths], dirY[kPomHorizonAzimuths];
+	for (int k = 0; k < kPomHorizonAzimuths; ++k) {
+		const float a = float(k) * (6.283185307f / float(kPomHorizonAzimuths));
+		dirX[k] = std::cos(a); dirY[k] = std::sin(a);
+	}
+	for (dword mip = 0; mip < height->numMipmaps; ++mip) {
+		const int mw = std::max(1, height->SizeX >> mip);
+		const int mh = std::max(1, height->SizeY >> mip);
+		if (mw < BX || mh < BY) continue;         // tiny mip → leave flat (0)
+		// Height units per texel HALVES with each mip (same world relief over
+		// half the texels), and so does the useful scan radius.
+		const float hst = heightScaleUV * float(mw);
+		const int   R   = std::max(4, radiusTexels >> mip);
+		// Sample radii: 1..8 dense, then ×1.3 out to R.
+		std::vector<float> radii;
+		for (int r = 1; r <= 8 && r <= R; ++r) radii.push_back(float(r));
+		for (float r = 8.0f * 1.3f; r <= float(R); r *= 1.3f) radii.push_back(r);
+		const byte *hmip = height->Mipmap[mip];
+		unsigned char *out = hz->data + hz->mipOfs[mip] * kPomHorizonAzimuths;
+		std::counting_semaphore<INT_MAX> done{0};
+		auto rowFn = [&](int y) {
+			for (int x = 0; x < mw; ++x) {
+				const float hp = float(hmip[SwizzledOffset(x, y, blockX, blockY, mh)])
+				               * (1.0f / 255.0f);
+				unsigned char *dst = out + SwizzledOffset(x, y, blockX, blockY, mh)
+				                         * kPomHorizonAzimuths;
+				for (int k = 0; k < kPomHorizonAzimuths; ++k) {
+					float maxSlope = 0.0f;             // max Δh / Δtexels
+					for (float r : radii) {
+						int qx = int(std::lround(float(x) + dirX[k] * r));
+						int qy = int(std::lround(float(y) + dirY[k] * r));
+						qx %= mw; if (qx < 0) qx += mw;      // toroidal
+						qy %= mh; if (qy < 0) qy += mh;
+						const float dh = float(hmip[SwizzledOffset(qx, qy, blockX, blockY, mh)])
+						               * (1.0f / 255.0f) - hp;
+						if (dh <= 0.0f) continue;
+						const float s = dh / r;
+						if (s > maxSlope) maxSlope = s;
+					}
+					// tan → sin, then quantize. tan/sqrt(1+tan²) saturates
+					// gracefully, so even a texel-scale cliff stays in range.
+					const float t = maxSlope * hst;
+					const float sinH = t * (1.0f / std::sqrt(1.0f + t * t));
+					const int q = int(sinH * 255.0f + 0.5f);
+					dst[k] = (unsigned char)(q < 0 ? 0 : (q > 255 ? 255 : q));
+				}
+			}
+		};
+		dispatchIndexed(mh, &done, rowFn);
+		for (int k = 0; k < mh; ++k) done.acquire();
+	}
+	return hz;
+}
+
+// Disk cache for the horizon bake. A full 1024² × 8-azimuth bake is seconds,
+// which is fine once and intolerable every launch, so the result is keyed on
+// the height field's own bytes plus every bake parameter — change the map, the
+// amplitude or the radius and the key moves, so a stale cache is impossible
+// without a version bump. Same self-validating single-file shape as the city
+// panorama cache (Runtime/cache/).
+static uint64_t HorizonCacheKey(const Texture *height, float heightScaleUV,
+                                int radiusTexels) {
+	uint64_t h = 1469598103934665603ull;                       // FNV-1a
+	auto mix = [&](const void *p, size_t n) {
+		const unsigned char *b = (const unsigned char *)p;
+		for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+	};
+	// The mip-0 plane is the content; dims/params disambiguate the rest.
+	const size_t n0 = size_t(height->SizeX) * size_t(height->SizeY);
+	mix(height->Mipmap[0], n0);
+	const int32_t dims[5] = { height->SizeX, height->SizeY, int32_t(height->numMipmaps),
+	                          radiusTexels, kPomHorizonAzimuths };
+	mix(dims, sizeof(dims));
+	mix(&heightScaleUV, sizeof(heightScaleUV));
+	return h;
+}
+
+PomHorizonMap *LoadOrBakeHorizonMap(const Texture *height, float heightScaleUV,
+                                    int radiusTexels, const char *tag) {
+	if (!height || height->BPP != 8 || !height->Mipmap[0]) return nullptr;
+	constexpr uint32_t kMagic = 0x315A4850u;      // "PHZ1"
+	const uint64_t key = HorizonCacheKey(height, heightScaleUV, radiusTexels);
+	char path[512];
+	std::snprintf(path, sizeof(path), "cache/pom_horizon_%016llx.bin",
+	              (unsigned long long)key);
+	if (FILE *f = std::fopen(path, "rb")) {
+		uint32_t magic = 0; uint64_t texels = 0; uint32_t nmip = 0;
+		if (std::fread(&magic, 4, 1, f) == 1 && magic == kMagic
+		    && std::fread(&texels, 8, 1, f) == 1
+		    && std::fread(&nmip, 4, 1, f) == 1 && nmip <= 16) {
+			PomHorizonMap *hz = new PomHorizonMap;
+			hz->numMipmaps = nmip;
+			hz->texels = size_t(texels);
+			hz->heightScaleTexels = heightScaleUV * float(height->SizeX);
+			hz->radiusTexels = radiusTexels;
+			hz->sizeX = height->SizeX; hz->sizeY = height->SizeY;
+			hz->blockSizeX = height->blockSizeX; hz->blockSizeY = height->blockSizeY;
+			uint64_t ofs[16] = {};
+			const size_t bytes = size_t(texels) * kPomHorizonAzimuths;
+			if (std::fread(ofs, 8, nmip, f) == nmip) {
+				hz->data = (unsigned char *)getAlignedBlock(bytes);
+				if (std::fread(hz->data, 1, bytes, f) == bytes) {
+					for (unsigned i = 0; i < nmip; ++i) hz->mipOfs[i] = size_t(ofs[i]);
+					std::fclose(f);
+					std::fprintf(stderr, "[POM-HORIZON] '%s': cache hit %s\n", tag, path);
+					return hz;
+				}
+			}
+			delete hz;
+		}
+		std::fclose(f);
+	}
+	auto t0 = std::chrono::high_resolution_clock::now();
+	PomHorizonMap *hz = MakeHorizonMap(height, heightScaleUV, radiusTexels);
+	const double ms = std::chrono::duration<double, std::milli>(
+		std::chrono::high_resolution_clock::now() - t0).count();
+	if (!hz) {
+		std::fprintf(stderr, "[POM-HORIZON] '%s': bake FAILED\n", tag);
+		return nullptr;
+	}
+	std::fprintf(stderr, "[POM-HORIZON] '%s': baked %zu texels x %d azimuths, "
+		"scale %.1f height-units/texel, radius %d (%.0f ms) -> %s\n",
+		tag, hz->texels, kPomHorizonAzimuths, (double)hz->heightScaleTexels,
+		radiusTexels, ms, path);
+	std::filesystem::create_directories("cache");
+	if (FILE *f = std::fopen(path, "wb")) {
+		const uint64_t texels = hz->texels;
+		const uint32_t nmip = hz->numMipmaps;
+		uint64_t ofs[16] = {};
+		for (unsigned i = 0; i < nmip && i < 16; ++i) ofs[i] = hz->mipOfs[i];
+		std::fwrite(&kMagic, 4, 1, f);
+		std::fwrite(&texels, 8, 1, f);
+		std::fwrite(&nmip, 4, 1, f);
+		std::fwrite(ofs, 8, nmip, f);
+		std::fwrite(hz->data, 1, size_t(texels) * kPomHorizonAzimuths, f);
+		std::fclose(f);
+	}
+	return hz;
 }
 
 // Pack a 32-bit (BGRA) tangent-space normal map down to 16-bit RG (X,Y only;

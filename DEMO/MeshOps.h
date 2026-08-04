@@ -9,6 +9,7 @@ struct Scene;
 struct Object;
 struct Vector;
 struct Texture;
+struct PomHorizonMap;
 
 // Build a render-ready Texture from a LINEAR, row-major 32-bpp pixel buffer
 // (0xAARRGGBB DWords, `width*height` of them).
@@ -68,6 +69,23 @@ Texture *MakeConeMap(Texture *height);
 // in-shader), same layout (half the memory). BPP=16 marks the kernel decode.
 // Caller owns.
 Texture *MakeNormal16(Texture *src);
+
+// S1c (--pom_horizon): bake the relief's own horizon elevation in
+// kPomHorizonAzimuths tangent-space azimuths from an 8-bit height map — u8
+// sin(horizon) per azimuth, 8 bytes/texel, SAME block-tile + mip layout as the
+// source so the rasterizer's swizzled index addresses it (see PomHorizonMap in
+// Material.h). heightScaleUV is the relief's UV amplitude (parallax_strength ×
+// ParallaxScale — the same number the shell geometry is built with); the world
+// scale cancels out of the horizon angle, so nothing else is needed.
+// radiusTexels is the mip-0 scan radius (~1.5 block pitches). Threaded;
+// seconds for a 1024². Caller owns.
+PomHorizonMap *MakeHorizonMap(const Texture *height, float heightScaleUV,
+                              int radiusTexels);
+// Same, with a Runtime/cache/ disk cache keyed on the height bytes + every bake
+// parameter (a stale hit is impossible without a format version bump). `tag` is
+// only used for the log line.
+PomHorizonMap *LoadOrBakeHorizonMap(const Texture *height, float heightScaleUV,
+                                    int radiusTexels, const char *tag);
 
 // Invert the GREEN channel of a normal map IN PLACE, across the full mip chain
 // (OGL ↔ DX tangent-space convention). Handles both kernel formats: 32-bit

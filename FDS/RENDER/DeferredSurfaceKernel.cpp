@@ -1413,6 +1413,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool  aoDirectG       = fds::FeatureFlags::ao_direct();
 	const float aoDirectStrG    = fds::FeatureFlags::ao_direct_strength();
 	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
+	// S1c relief self-shadow (--pom_horizon). hzInvSoft2 turns the softness
+	// half-width into the smoothstep's 1/(hi-lo) so the inner loop needs one
+	// multiply-add; a softness of 0 degenerates to a hard step (huge slope).
+	const bool  pomHorizonOnG   = fds::FeatureFlags::pom_horizon();
+	const bool  pomHorizonVizG  = pomHorizonOnG && fds::FeatureFlags::pom_horizon_viz();
+	const float hzStrengthG     = fds::FeatureFlags::pom_horizon_strength();
+	const float hzSoftG         = fds::FeatureFlags::pom_horizon_soft();
+	const float hzInvSoft2      = hzSoftG > 1e-4f ? (0.5f / hzSoftG) : 1e4f;
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const bool sPbr             = fds::FeatureFlags::pbr();
 	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
@@ -1897,6 +1905,51 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
 				ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
 
+			// ── S1c HORIZON-MAP RELIEF SELF-SHADOW (--pom_horizon) ──────────
+			// Resolve this pixel's horizon record (8 azimuths of u8
+			// sin(horizon), addressed by the SAME swizzled index + mip as the
+			// albedo) and the tangent frame the azimuths are measured in.
+			//
+			// The frame is built from the GEOMETRIC normal, not the
+			// normal-mapped one: the bake's azimuths are defined on the
+			// authored surface's UV axes, and re-basing them on a per-texel
+			// perturbed normal would rotate the lookup by the bump. The tangent
+			// comes from the same G-buffer channel the normal-map path reads,
+			// decoded independently here so that path stays untouched (this
+			// whole block is dead with the flag off).
+			//
+			// Azimuth 0 is +U (= T), azimuth 2 is +V (= handedness·(N×T)) —
+			// the same axes the bake walks, and the handedness flip is what
+			// keeps the mirrored-UV clones' shadows from running backwards.
+			const PomHorizonMap *hzMap =
+				(pomHorizonOnG && !gb.tangent.empty()) ? Mat->PomHorizon : nullptr;
+			const unsigned char *hzTexel = nullptr;
+			float hzTx = 0, hzTy = 0, hzTz = 0, hzBx = 0, hzBy = 0, hzBz = 0;
+			if (hzMap && miplevel < hzMap->numMipmaps && hzMap->data) {
+				const meka::u16 packedT = gb.tangent[i];
+				if (packedT != 0) {
+					float tx, ty, tz;
+					meka::oct_decode_u16(packedT, tx, ty, tz);
+					const float tDotN = tx*nGeoX + ty*nGeoY + tz*nGeoZ;
+					tx -= nGeoX * tDotN; ty -= nGeoY * tDotN; tz -= nGeoZ * tDotN;
+					const float tLen2 = tx*tx + ty*ty + tz*tz;
+					if (tLen2 > 1e-12f) {
+						const float inv = fast_rsqrt(tLen2);
+						hzTx = tx*inv; hzTy = ty*inv; hzTz = tz*inv;
+						const float hs = Mat->TbnHandedness;
+						hzBx = (nGeoY*hzTz - nGeoZ*hzTy) * hs;
+						hzBy = (nGeoZ*hzTx - nGeoX*hzTz) * hs;
+						hzBz = (nGeoX*hzTy - nGeoY*hzTx) * hs;
+						hzTexel = hzMap->data
+						        + (hzMap->mipOfs[miplevel] + swizzledUV) * kPomHorizonAzimuths;
+					}
+				}
+			}
+			// --pom_horizon_viz: accumulate the term itself over the lights that
+			// actually reach this pixel, so the shadow's shape (and its motion
+			// with the light) is visible without albedo or ambient hiding it.
+			float hzVizSum = 0.0f, hzVizWeight = 0.0f;
+
 			if (!isWater && !profNoLights) {
 				if (useVecHere) {
 					// 8-wide SIMD inner loop — written directly against
@@ -2253,6 +2306,60 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							if (cubeAtten <= 0.0f) continue;
 							shadowAtten *= cubeAtten;
 						}
+						// S1c: relief self-shadow. Take the (already unit-length
+						// after ×lenInv) pixel→light direction into the surface's
+						// tangent frame; its Z is sin(elevation), its XY give the
+						// azimuth. The azimuth picks the two adjacent baked
+						// channels and a blend weight, and the light is faded out
+						// where its elevation drops below that interpolated
+						// horizon. This is the ONLY intra-wall shadow either
+						// displacement path can have (the PolyId shadow test is
+						// identity-only, one id per authored wall plane), and
+						// being a shading term it works the same for the
+						// tessellation bake and the per-pixel shell.
+						//
+						// atan2 is avoided: for 8 evenly spaced azimuths the
+						// octant follows from two signs and one magnitude
+						// compare, and the in-octant weight from the ratio of
+						// the smaller to the larger component. Using the ratio
+						// where the angle wants atan(ratio)/45° is at most ~4%
+						// of an octant off — invisible under a term whose whole
+						// point is a soft edge, and it costs one divide instead
+						// of a transcendental.
+						if (hzTexel) {
+							const float lx = wx * lenInv, ly = wy * lenInv, lzv = wz * lenInv;
+							const float sinElev = lx*nGeoX + ly*nGeoY + lzv*nGeoZ;
+							if (sinElev <= 0.0f) continue;      // below the plane
+							const float ltx = lx*hzTx + ly*hzTy + lzv*hzTz;
+							const float lbv = lx*hzBx + ly*hzBy + lzv*hzBz;
+							const float ax = std::fabs(ltx), ay = std::fabs(lbv);
+							const float mx = ax > ay ? ax : ay;
+							const float mn = ax > ay ? ay : ax;
+							const float rat = mn / (mx + 1e-20f);
+							int k0; float w;
+							if (ltx >= 0.0f) {
+								if (lbv >= 0.0f) { if (ax >= ay) { k0 = 0; w = rat; }
+								                   else          { k0 = 1; w = 1.0f - rat; } }
+								else             { if (ax >= ay) { k0 = 7; w = 1.0f - rat; }
+								                   else          { k0 = 6; w = rat; } }
+							} else {
+								if (lbv >= 0.0f) { if (ay >= ax) { k0 = 2; w = rat; }
+								                   else          { k0 = 3; w = 1.0f - rat; } }
+								else             { if (ay >= ax) { k0 = 5; w = 1.0f - rat; }
+								                   else          { k0 = 4; w = rat; } }
+							}
+							const float h0 = float(hzTexel[k0]);
+							const float h1 = float(hzTexel[(k0 + 1) & (kPomHorizonAzimuths - 1)]);
+							const float sinHor = (h0 + (h1 - h0) * w) * (1.0f / 255.0f);
+							// smoothstep over [sinHor-soft, sinHor+soft].
+							float t = (sinElev - sinHor) * hzInvSoft2 + 0.5f;
+							t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+							const float vis = t * t * (3.0f - 2.0f * t);
+							const float hzAtten = 1.0f - hzStrengthG * (1.0f - vis);
+							if (pomHorizonVizG) { hzVizSum += hzAtten * k; hzVizWeight += k; }
+							shadowAtten *= hzAtten;
+							if (shadowAtten <= 0.0f) continue;
+						}
 						const float intensity = k * Mat->Diffuse * shadowAtten;
 						const float Lcb = tl.colB[n];
 						const float Lcg = tl.colG[n];
@@ -2330,6 +2437,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (hasAoMap && aoDirectG) {
 				const float aoD = 1.0f - aoDirectStrG * Mat->AoStrength * (1.0f - aoRaw);
 				lB *= aoD; lG *= aoD; lR *= aoD;
+			}
+
+			// --pom_horizon_viz: replace the surface with the horizon TERM,
+			// N·L-weighted over the lights that actually reached this pixel, so
+			// the relief shadow's shape and its motion with the light read
+			// directly. A horizon pixel no light reaches shows mid grey; a
+			// non-horizon surface is left alone so the scene stays legible.
+			if (pomHorizonVizG && hzTexel) {
+				const float v = hzVizWeight > 0.0f ? (hzVizSum / hzVizWeight) : 0.5f;
+				lB = lG = lR = 256.0f * v;
+				sB = sG = sR = 0.0f;
+				texB = texG = texR = 255.0f;   // neutral albedo: the TERM, alone
 			}
 
 			// Saturation cap (matches forward at 250). The 250/255 caps are

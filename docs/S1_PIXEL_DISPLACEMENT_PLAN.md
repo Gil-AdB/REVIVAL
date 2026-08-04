@@ -265,7 +265,72 @@ Acceptance: side-by-side vs tessellation at the pose battery (below) —
 silhouettes, see-through edges, no cracks at borders, no shimmer; perf at
 worst pose ≤ +12 ms converged (research estimate +8–12); flags-off byte-null.
 
-## Stage S1c — horizon-map self-shadow  [SHADOW QUALITY]
+## Stage S1c — horizon-map self-shadow  [IMPLEMENTED 2026-08-04]
+
+> **✅ LANDED — `--pom_horizon`, default OFF.** Flags-off byte-null (see the
+> gate line below). What it does and what it cost, measured:
+>
+> - **Bake** `MakeHorizonMap` / `LoadOrBakeHorizonMap` (DEMO/MeshOps.cpp): per
+>   texel of the 8-bit height map, the elevation of the relief's own horizon in
+>   **8 azimuths**, u8 sin(horizon), **8 bytes/texel in the SAME block-tile+mip
+>   layout as the source** so the albedo's swizzled index addresses it (the 8
+>   azimuths of a texel are adjacent → one cache line per lookup). Disk-cached
+>   under `Runtime/cache/pom_horizon_<key>.bin`, keyed on the mip-0 height
+>   bytes + dims + radius + azimuth count + amplitude.
+> - **The scale is UV-only, and that is a correctness point, not a shortcut.**
+>   `tan(horizon) = Δh_world / Δlateral_world`, and both sides carry the face's
+>   world-per-UV, which cancels:
+>   `tan(horizon) = (A_uv · N) · Δh / Δtexels`, with `A_uv` the relief's UV
+>   amplitude (`parallax_strength × ParallaxScale` — the SAME number
+>   `PomShell_Build` builds the lid with) and `N` the texels per UV tile at that
+>   mip. So one scalar per mip, and a mesh rescale can never desync the shadow
+>   from the relief.
+> - Bake cost **99 ms (rooms) / 128 ms (floor)** for 1024² × 9 mips, threaded —
+>   NOT the minutes the plan feared, because the per-azimuth march is dense for
+>   8 texels then geometrically spaced to the radius (a distant occluder only
+>   matters if it is tall, and `max(Δh/r)` is dominated by the near samples).
+>   The disk cache is still there so a launch never pays even that.
+> - **Runtime** (`DeferredSurfaceKernel.cpp`, scalar light loop — stone always
+>   takes it, it is normal-mapped): the unit pixel→light direction goes into the
+>   surface's tangent frame; `L·N_geo` is sin(elevation), `L·T` / `L·B` give the
+>   azimuth, which picks two adjacent baked channels + a blend weight, and the
+>   light is faded out below the interpolated horizon
+>   (`smoothstep`, `--pom_horizon_soft`, `--pom_horizon_strength`). The frame is
+>   built from the **geometric** normal (the bake's azimuths live on the
+>   authored UV axes; re-basing on the bumped normal would rotate the lookup by
+>   the bump) with `Mat->TbnHandedness` on B, which is what keeps the mirrored-UV
+>   clones' shadows from running backwards. **No atan2**: for 8 even azimuths
+>   the octant is two sign tests and one magnitude compare, and the in-octant
+>   weight is the ratio of the smaller to the larger component (≤ ~4 % of an
+>   octant off — invisible under a deliberately soft edge, one divide instead of
+>   a transcendental).
+> - **It serves BOTH paths.** It is a shading term, and the bake runs at
+>   height-LOAD time, i.e. on the FULL height field, before `--greets_displace`
+>   swaps the POM input for the residual. `--greets_displace --pom_horizon` is
+>   a valid configuration and is in the comparison table.
+>
+> **Measured — the acceptance test.** `--pom_horizon_viz` renders the term
+> alone (neutral albedo, no specular, N·L-weighted over the lights that reach
+> the pixel). At the p6097 wall, t=6097 vs t=6217 (same camera, lights moved):
+> the shadow goes from a thin line on the mortar joint to a **wide band
+> spreading up from the joint** — 757 214 px differ by >12/255 between the two.
+> **The groove shadow moves with the light**, which is exactly what neither the
+> tessellation bake nor the shell march can do (PolyId identity-only shadows).
+> Crops: `scratchpad/viz2_6097_s.png` vs `viz2_6217_s.png`.
+>
+> Bake sanity (mip 0 sin(horizon) bytes): rooms mean 23.9, 12.3 % of texels
+> > 0.25, 6.5 % > 0.5 — the grooves, and only the grooves, as designed (a block
+> top has nothing above it, so its horizon is 0). floor mean 75.6, 47.8 % > 0.25
+> — its relief is 2.5× deeper in UV terms, so the floor is where the term reads
+> strongest. On final colour the term moves 186 653 px at t=5780 (61 574 by
+> >12/255) and the frame mean luminance by −0.4/255: a groove-local effect, not
+> a global darkening.
+>
+> **Perf [M]**: see the three-way table at the end of this file.
+>
+> Original sketch below, kept for the record.
+
+
 
 Goal: light-responsive relief self-shadow, which NEITHER path has today (see
 engine facts). Works for both tessellation and per-pixel modes — a pure
@@ -364,6 +429,50 @@ the three-way comparison (tessellation / S1 / S1+horizon) to the user with
 crops + ms table; they pick defaults. 5. S3 if cone march shipped. Keep
 `docs/SESSION_STATE.md` updated (resume protocol) and this file's stage
 statuses current as stages land.
+
+## Three-way comparison — the numbers to judge by  [M, 2026-08-04]
+
+Bench recipe, stated so it can be attacked: `./DEMO --bench=scene@scene=greets,
+t=5780,iters=40 --profiler=0 <flags>`, headless (`SDL_VIDEODRIVER=dummy
+SDL_AUDIODRIVER=dummy`) from `Runtime/`, 1080p, macOS arm64 Release. A and B
+INTERLEAVED in the same script, 4 pairs, 1-minute load average recorded per
+pair (2.27 → 4.88 — the machine was not idle; that is the honest condition, and
+the pair structure is what makes it survivable). Run-to-run spread within an arm
+was 1.7 ms (shell) and 2.0 ms (shell+horizon); the references are single runs at
+load 4.60, so treat them as ±2 ms, not as three-digit precision.
+
+| configuration | mean ms/iter @ t=5780 |
+|---|---|
+| flat POM (cone-8), no shell, no horizon | 56.9 |
+| **S1: shell (cone-8, cap 2) + depth write** | **58.1** (57.40 / 58.12 / 57.70 / 59.14) |
+| **S1 + horizon** | **61.0** (60.14 / 61.08 / 62.10 / 60.48) |
+| **tessellation (`--greets_displace`)** | **104.7** |
+| tessellation + horizon | 106.8 |
+
+Per-pair horizon deltas on the shell path: **+2.74 / +2.96 / +4.41 / +1.35 ms**
+→ median **+2.9 ms** for all 7 omnis, no per-light budget needed (the plan's
+"K strongest lights" fallback was not required). On the tessellation path the
+same term costs +2.1 ms. The shell itself is +1.2 ms over flat POM — inside the
+run-to-run spread, as in the earlier session.
+
+**Headline: the per-pixel path renders this frame in 55 % of the tessellation
+path's time (58.1 vs 104.7 ms), and 58 % with the relief self-shadow the
+tessellation path cannot produce at all (61.0 vs 104.7).** Caveats stated
+plainly: one pose, one resolution, a loaded machine, single-run references.
+
+Crops for the eye (all `scratchpad/`, 1080p downscaled to 900 px wide):
+
+| what | file |
+|---|---|
+| t=5780 tessellation / flat / shell(pre-fix) / shell(landed) | `t_tess_s.png` `t_flat_s.png` `t_shellm0_s.png` `m_shell5780_s.png` |
+| t=5780 discard classification (green = see-through, red = void) | `base_cls_p5780_s.png` |
+| t=6097 tess / flat / shell / shell-no-discard | `v_tess_6097_s.png` `v_flat_6097_s.png` `v_shell_6097_s.png` `v_shellnd_6097_s.png` |
+| t=6097 discard classification | `base_cls_p6097_s.png` |
+| horizon term alone, light moved (t=6097 → t=6217) | `H_shellviz_p6097_s.png` `H_shellviz_p6217_s.png` |
+| horizon on/off at the grazing acne pose t=2845 | `H_shell_p2845_s.png` `H_shellhz_p2845_s.png` |
+
+Defaults are ALL still OFF (`--pom_depth_write`, `--pom_shell`,
+`--pom_horizon`); `--greets_displace` remains the shipping look. The user picks.
 
 ## Parked (do not chase)
 
