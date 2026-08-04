@@ -623,7 +623,10 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             if (FILE* zf = std::fopen(zp, "wb")) {
                 std::fwrite(ZPage16, sizeof(word), size_t(xres) * yres, zf);
                 std::fclose(zf);
-                std::fprintf(stderr, "[GREETSSNAP] depth -> %s\n", zp);
+                // g_zscale printed so a z16 diff converts to world units
+                // offline (zEnc = 0xFF80 - g_zscale*z).
+                std::fprintf(stderr, "[GREETSSNAP] depth -> %s (zscale=%.4f)\n",
+                             zp, (double)g_zscale);
             }
         }
 

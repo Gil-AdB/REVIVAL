@@ -477,6 +477,13 @@ struct TileRasterizerCtx {
 	// skip risk for speed; the binary refine recovers the crossing inside any
 	// bracket it lands. 1 = the raw conservative bake.
 	float pomRelax = 1.0f;
+	// --pom_depth_write (S1a, docs/DISPLACEMENT_RESEARCH.md): write the marched
+	// intersection's view depth to the Z buffer instead of the flat plane's.
+	// Set by the dispatcher ONLY when the flag is on AND a march is configured
+	// for this face (heightData + naive or cone steps), so apply_exact can key
+	// its deferred Z store off this alone. The per-face world scale lives in
+	// TileRasterizer::pomDepthWorldAmp (set per triangle with the gradients).
+	bool pomDepthWrite = false;
 	// --pom_viz: replace the albedo with the height field sampled at the FINAL
 	// (post-march) UV, grayscale — the parallax result made directly visible
 	// (block domes, mortar cuts, march terracing/banding). Debug only; rides
@@ -763,6 +770,14 @@ struct TileRasterizer {
 	float dobBdx, dobBdy;
 	float dobCdx, dobCdy;
 
+	// --pom_depth_write: the marched relief's WORLD amplitude for the FULL
+	// height range 0..1, per face = ctx.parallaxStrength (UV units, incl. the
+	// material's ParallaxScale) × the face's world-units-per-UV-tile density
+	// (geometric mean of |dP/du|, |dP/dv| from the triangle's view positions +
+	// UVs — the same Lengyel solve tangents come from). Zero when the depth
+	// write is off or the face's UV mapping is degenerate → flat depth.
+	float pomDepthWorldAmp = 0.0f;
+
 	uint32_t umask;// = (1 << LogWidth) - 1);
 	uint32_t vmask;// = (1 << LogHeight) - 1);
 	//size_t v1 = 0 , v2 = 0, v3 = 0;
@@ -857,6 +872,13 @@ struct TileRasterizer {
 		Vec8f p_ny = v8_from_arith_seq(tile.ny0, dnydx);
 		Vec8f p_nz = v8_from_arith_seq(tile.nz0, dnzdx);
 		const bool wantTangent = (span.tangent != nullptr) && ctx.writeTangent;
+		// --pom_depth_write (S1a): the march below replaces the flat plane's Z
+		// with the marched intersection depth. ctx.pomDepthWrite already
+		// implies heightData + a configured march; wantTangent is the same
+		// gate the march block itself runs under, so pomZ true ⟺ the march
+		// runs ⟺ the Z store is DEFERRED to the end of the parallax block.
+		const bool pomZ = ctx.pomDepthWrite && (ctx.heightData != nullptr)
+		                  && wantTangent;
 		Vec8f p_tx = wantTangent ? v8_from_arith_seq(tile.tx0, dtxdx) : Vec8f(0.0f);
 		Vec8f p_ty = wantTangent ? v8_from_arith_seq(tile.ty0, dtydx) : Vec8f(0.0f);
 		Vec8f p_tz = wantTangent ? v8_from_arith_seq(tile.tz0, dtzdx) : Vec8f(0.0f);
@@ -1002,7 +1024,12 @@ struct TileRasterizer {
 				}
 
 				if (barry::any_lane_set(p_mask)) {
-					*(__m128i*)span.zbuffer = _mm_blendv_epi8(*(__m128i*)span.zbuffer, compress(z_candidate), compress(Vec8ui(p_mask)));
+					// pomZ defers this store to the end of the parallax block
+					// below, where the flat z is replaced by the marched relief
+					// depth. Same value+mask semantics otherwise; the Z TEST and
+					// every gate above already ran against the flat z_candidate.
+					if (!pomZ)
+						*(__m128i*)span.zbuffer = _mm_blendv_epi8(*(__m128i*)span.zbuffer, compress(z_candidate), compress(Vec8ui(p_mask)));
 					// UV (pre-scale, [0,1) tiled). Parallax (--parallax) nudges it
 					// along the tangent-space view ray before the texel pack, so
 					// albedo/normal/AO all sample the shifted texel.
@@ -1049,6 +1076,11 @@ struct TileRasterizer {
 						Vec8f hc  = (H - Vec8f(0.5f)) * Vec8f(ctx.parallaxStrength);
 						uf += VtT * hc;
 						vf += VtB * hc;
+						// --pom_depth_write: crossing height the march landed on
+						// (0.5 = the flat plane; <0.5 recess, >0.5 protrusion).
+						// Stays 0.5 (flat depth) when no march ran on this row
+						// (rowFar LOD skip) or a lane never bracketed a crossing.
+						Vec8f pomHitH(0.5f);
 						// Tier-2 CONE-STEP POM (--parallax_pom, docs/HEIGHTMAP_POM_PLAN.md):
 						// relaxed cone stepping (Policarpo, GPU Gems 3 ch.18). Advance the
 						// tangent-space view ray by the cone-safe distance c*gap/(c+dlen)
@@ -1164,6 +1196,14 @@ struct TileRasterizer {
 							// The refined below sample is the first crossing (matches the naive
 							// spike "first rayH<=Hs" convention, now sub-texel accurate).
 							const Vec8f resU = belU, resV = belV;
+							// --pom_depth_write: the refined below-bracket height IS the
+							// crossing height. Lanes that never bracketed (found==false —
+							// rare non-converged march) keep the flat 0.5: their bel* is
+							// still the field-top start, and writing a half-band-CLOSER
+							// depth for a lane whose texel fell back to minimal shift
+							// would punch a false near-plateau into the Z relief.
+							if (pomZ)
+								pomHitH = select(found, belH, Vec8f(0.5f));
 							// STEP-3 LOD blend: continuous fade cone->single-shift as view-Z
 							// grows from lodDist (full cone) to 2x lodDist (pure single-shift).
 							// lod==0 -> full cone everywhere (fade=0).
@@ -1173,6 +1213,10 @@ struct TileRasterizer {
 									Vec8f(0.0f)), Vec8f(1.0f));
 								uf = resU + (ssU - resU) * fade;
 								vf = resV + (ssV - resV) * fade;
+								// Depth fades in lockstep with the UV blend: pure
+								// single-shift (fade=1) writes the flat plane again.
+								if (pomZ)
+									pomHitH += (Vec8f(0.5f) - pomHitH) * fade;
 							} else {
 								uf = resU;
 								vf = resV;
@@ -1218,6 +1262,11 @@ struct TileRasterizer {
 								Vec8fb hit = Vec8fb(rayH <= Hs) & (~found);
 								foundU = select(hit, curU, foundU);
 								foundV = select(hit, curV, foundV);
+								// --pom_depth_write: the rayH at the first crossing
+								// sample is the marched height. No-hit lanes (only
+								// possible through float residue at rayH≈0) keep 0.5.
+								if (pomZ)
+									pomHitH = select(hit, rayH, pomHitH);
 								found |= hit;
 							}
 							if (lod > 0.0f) {
@@ -1226,6 +1275,9 @@ struct TileRasterizer {
 									Vec8f(0.0f)), Vec8f(1.0f));
 								uf = foundU + (ssU - foundU) * fade;
 								vf = foundV + (ssV - foundV) * fade;
+								// Depth fades with the UV blend (flat at fade=1).
+								if (pomZ)
+									pomHitH += (Vec8f(0.5f) - pomHitH) * fade;
 							} else {
 								uf = foundU;
 								vf = foundV;
@@ -1249,6 +1301,58 @@ struct TileRasterizer {
 								maxT / max(len, Vec8f(1e-6f)), Vec8f(1.0f));
 							uf = ufGeo + (uf - ufGeo) * s;
 							vf = vfGeo + (vf - vfGeo) * s;
+						}
+						// --pom_depth_write (S1a): store the MARCHED depth instead of the
+						// flat plane's (the store at the top of the row was skipped when
+						// pomZ). The landed crossing (uf,vf,pomHitH) lies on the offset-
+						// limited march ray, so the true 3D point it names is
+						//   P_hit = P0 + T·w·Δu + B·w·Δv + N·(h−0.5)·A
+						// with Δu,Δv = strength·VtT/VtB·(h−0.5), w = world-per-UV-tile,
+						// A = strength·w (the world amplitude the tuned strength implies
+						// at this face's texel density). Its z-component collapses via
+						// V = VtT·T + VtB·B + VtN·N (so Tz·VtT + Bz·VtB = Vz − VtN·Nz) to
+						//   Δz = (h−0.5) · strength·w · (Vz + Nz·(1−VtN))
+						// — no divide, bounded (|Δz| ≤ A) at ANY angle because the march
+						// itself is offset-limited: depth stays exactly consistent with
+						// the texels shown, and grazing cannot explode it. h uses the
+						// CENTERED convention (0.5 = authored plane, matching the
+						// zero-mean geometric bake): mortar (h<0.5) writes DEEPER z,
+						// block tops (h>0.5) write slightly CLOSER z.
+						//
+						// ORDERING HAZARD (documented deliberately): the tiled raster is
+						// front-to-back with Z-early-reject, and this store happens at
+						// G-buffer fill time — a face rasterized LATER that lies between
+						// the flat wall plane and the recessed relief (inside the ±A/2
+						// band, e.g. a trim/jamb/prop face abutting the wall) will now
+						// PASS the Z test at groove pixels and win them. For wall
+						// content that is usually CORRECT — it is exactly what true
+						// displacement geometry would do (the bake path shows the same
+						// thing) — but it is a semantic change to Z: intersections of
+						// props with relief walls (momy statues, letters near walls)
+						// resolve per-pixel against the relief, not the plane. The
+						// reverse hazard is bounded the same way: a protruding block
+						// writes at most A/2 closer, so it can steal at most that band
+						// from later coplanar geometry. Within ONE face there is no
+						// hazard (each pixel is owned by one face via the edge mask);
+						// across the two triangles of a quad the height field is
+						// continuous, so seam pixels agree. Z consumers (SSAO/GTAO,
+						// fog, DoF, quarter-res reconstruction, z-dumps) simply see the
+						// relief — that is the point of the flag.
+						if (pomZ) {
+							const Vec8f VtN = Vx*Nx + Vy*Ny + Vz*Nz;
+							const Vec8f dz  = (pomHitH - Vec8f(0.5f))
+							                * Vec8f(pomDepthWorldAmp)
+							                * (Vz + Nz * (Vec8f(1.0f) - VtN));
+							// Near guard: a protrusion written from a wall the camera
+							// is nearly touching must not cross z<=0 (encode wrap /
+							// negative-z reconstruction downstream). Clamp the DEPTH,
+							// not the offset, so the recess side is untouched.
+							const Vec8f zRelief = max(p_z + dz, Vec8f(1.0f / 128.0f));
+							const auto zMarched = (Vec8ui(0xFF80)
+								- static_cast<Vec8ui>(roundi(ctx.zScale * zRelief)));
+							*(__m128i*)span.zbuffer = _mm_blendv_epi8(
+								*(__m128i*)span.zbuffer, compress(zMarched),
+								compress(Vec8ui(p_mask)));
 						}
 						// Debug (FDS_DUMP_TXTR): record the finalized parallax UV for covered
 						// lanes so a headless A/B can diff the MARCH output directly.
@@ -1796,6 +1900,13 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	const bool useCone    = fds::FeatureFlags::parallax_pom_cone();
 	const int  naiveSteps = useCone ? 0 : pomSteps;
 	const int  coneSteps  = (useCone && coneData) ? pomSteps : 0;
+	// --pom_depth_write (S1a): armed only when a march is actually configured
+	// for this face — the depth written must be the MARCHED crossing, and
+	// single-shift-only faces have no crossing to write. apply_exact keys its
+	// deferred Z store off ctx.pomDepthWrite alone (plus its own tangent gate).
+	const bool pomDepthWrite = fds::FeatureFlags::pom_depth_write()
+	    && (heightData != nullptr)
+	    && (naiveSteps > 0 || (coneSteps > 0 && coneData != nullptr));
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -1838,6 +1949,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomQuarter = fds::FeatureFlags::parallax_pom_quarter(),
 		.pomRefine = fds::FeatureFlags::parallax_pom_refine(),
 		.pomRelax = fds::FeatureFlags::parallax_pom_relax(),
+		.pomDepthWrite = pomDepthWrite,
 		.pomViz = fds::FeatureFlags::pom_viz(),
 		.pomMipViz = fds::FeatureFlags::pom_mip_viz(),
 		.heightLogW = heightLogW,
@@ -1930,6 +2042,43 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 
 		r.umask = (1 << r.LogWidth) - 1;
 		r.vmask = (1 << r.LogHeight) - 1;
+
+		// --pom_depth_write: per-triangle world-per-UV-tile density for the
+		// depth write's world amplitude (A = parallaxStrength × w). Recover
+		// view-space positions + UVs from the raster inputs (PX/PY/RZ, UZ/VZ —
+		// valid for ANY post-clip vertex, unlike the transient AoS position),
+		// then the Lengyel tangent solve: |dP/du| and |dP/dv| are the world
+		// lengths of one UV tile along each axis; geometric mean because the
+		// march applies one strength to both axes. Degenerate mapping (zero UV
+		// area, behind-camera junk) → w = 0 → flat depth for this triangle.
+		if (ctx.pomDepthWrite) {
+			float w = 0.0f;
+			if (v1.RZ > 0.0f && v2.RZ > 0.0f && v3.RZ > 0.0f) {
+				const float z1 = 1.0f / v1.RZ, z2 = 1.0f / v2.RZ, z3 = 1.0f / v3.RZ;
+				const float x1 = (v1.PX - ctx.cntrEX) * ctx.invFOVX * z1;
+				const float y1 = (ctx.cntrEY - v1.PY) * ctx.invFOVY * z1;
+				const float x2 = (v2.PX - ctx.cntrEX) * ctx.invFOVX * z2;
+				const float y2 = (ctx.cntrEY - v2.PY) * ctx.invFOVY * z2;
+				const float x3 = (v3.PX - ctx.cntrEX) * ctx.invFOVX * z3;
+				const float y3 = (ctx.cntrEY - v3.PY) * ctx.invFOVY * z3;
+				const float du1 = v2.UZ * z2 - v1.UZ * z1, dv1 = v2.VZ * z2 - v1.VZ * z1;
+				const float du2 = v3.UZ * z3 - v1.UZ * z1, dv2 = v3.VZ * z3 - v1.VZ * z1;
+				const float uvDet = du1 * dv2 - du2 * dv1;
+				if (std::fabs(uvDet) > 1e-12f) {
+					const float inv = 1.0f / uvDet;
+					const float tx = ((x2 - x1) * dv2 - (x3 - x1) * dv1) * inv;  // dP/du
+					const float ty = ((y2 - y1) * dv2 - (y3 - y1) * dv1) * inv;
+					const float tz = ((z2 - z1) * dv2 - (z3 - z1) * dv1) * inv;
+					const float bx = ((x3 - x1) * du1 - (x2 - x1) * du2) * inv;  // dP/dv
+					const float by = ((y3 - y1) * du1 - (y2 - y1) * du2) * inv;
+					const float bz = ((z3 - z1) * du1 - (z2 - z1) * du2) * inv;
+					const float t2 = tx * tx + ty * ty + tz * tz;
+					const float b2 = bx * bx + by * by + bz * bz;
+					w = std::sqrt(std::sqrt(t2 * b2));
+				}
+			}
+			r.pomDepthWorldAmp = ctx.parallaxStrength * w;
+		}
 
 		r.rasterize_triangle(v1, v2, v3);
 	}
