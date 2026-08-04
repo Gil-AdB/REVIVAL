@@ -1,10 +1,12 @@
 # S1 — Displacement discrepancy inventory (evidence only)
 
-Status: EVIDENCE DOCUMENT, 2026-08-04, branch `fog-wt`. **Nothing here is a fix,
-a tuning, or a default change.** Every flag this campaign added is diagnostic and
-default OFF. No recommendation is made about which architecture to adopt — that
-call is the user's, and this file exists so it can be made from measurements
-instead of from a story.
+Status: EVIDENCE DOCUMENT, 2026-08-04, branch `fog-wt`. **No default changes.**
+Every flag this campaign added is default OFF. Sections 0–7 are evidence only,
+with no fix in them. **§8 is the one exception and says so**: it adds a candidate
+fix (`--pom_shell_world_amp`, default OFF) after its audit, and reports the
+before/after as a measured TRADE rather than a win. No recommendation is made
+about which architecture to adopt — that call is the user's, and this file exists
+so it can be made from measurements instead of from a story.
 
 Companion plan: `docs/S1_PIXEL_DISPLACEMENT_PLAN.md`. Where a number here
 contradicts a number there, this file's method is stated in full and the earlier
@@ -94,6 +96,8 @@ exact.
 | `--face_id_dump` | per-pixel FACE identity plane + `greets_t<t>_face.u32` dump + a `[FACEID]` key→(mesh, face index, material, world plane, verts, UVs) table. matID is one byte shared by every greets wall, so it can never answer "which polygon won this pixel, and should it have been occluded" |
 | `--pom_shell_lid_probe` | DIAGNOSTIC PROBE: forces `PomShell_Build`'s lid offset to ZERO while leaving `Vertex::ShellH`, `Material::PomShellUvAmp`, the patch domains, the sibling boxes and every kernel path bit-for-bit identical. Differencing it against the real shell attributes a discrepancy to the MOVED VERTICES (it vanishes) or to the MARCH (it survives). **It is not a proposal** — with the geometry unmoved the relief hangs entirely below the authored plane instead of straddling it |
 | `--snapshot_ss` | render a snapshot at N× resolution (snapshot path only) |
+| `--pom_shell_census` | §8: per-face amplitude census from `PomShell_Build` **and** from the tessellation bake. Init-time print only. Also, in a `-DFDS_DEV=ON` build, a raster-time histogram of the height-map mip each shell face actually marched |
+| `--pom_shell_world_amp`, `--pom_shell_world_amp_set` | §8's candidate: amplitude authored in WORLD units. **Default OFF; this is the one entry in this table that is a proposal, not an instrument.** |
 
 The face-id plane is image-neutral: `--pom_shell --pom_shell_cap=2` at t=6097
 gives md5 `193427ccb28163705ea6baa5500afd0c` with and without `--face_id_dump`.
@@ -581,3 +585,310 @@ Evidence images: `docs/img/s1_discrepancy/`.
 | `6097_M_map_*_vs_ref.png` (+`_crop`) | class maps: RED = drawn nearer than truth, BLUE = drawn farther, GREEN = same owner colour >32/255, YELLOW = same owner depth >0.05 world |
 | `6097_M_map_MARCHONLY_shell_vs_converged.png` | C1 with geometry, masks and cap held fixed |
 | `5780_*`, `4200_*`, `mir_*`, `2845_*` | full frames, `ref` / `tess` / `shell` at the other four poses |
+
+---
+
+## 8. P0 — AMPLITUDE SEMANTICS. Why "different parts of the same render moved by different amounts"
+
+Added 2026-08-04, same branch, same build discipline. The user's report this
+round: *"it feels like there is a mismatch between different parts of the same
+render regarding how much the face moved."* This section is the audit of that,
+followed by one default-OFF candidate fix.
+
+### 8.0 The mechanism, from the code
+
+The two paths author the amplitude in **different units**:
+
+| path | where | units | consequence |
+|---|---|---|---|
+| tessellation bake | `DisplaceStoneSubdiv`: `dsp = amp*(h − mipMean)` along the vertex normal, `amp = --greets_displace_amp` | **WORLD** | one authored number, the same world depth on every face of every material |
+| per-pixel shell | `PomShell_Build(… uvAmp = --parallax_strength × Material::ParallaxScale)`; lid offset `= uvAmp × w × 0.5`; the march's `rayScale = uvAmp × 1/(V·N)`; `pomDepthWorldAmp = uvAmp × w` | **UV** | the world depth is `uvAmp × w`, i.e. it follows each face's own world-per-UV `w` |
+
+`Material::ParallaxScale` was tuned as a **UV-offset magnitude** for flat
+offset-parallax (the floor's 0.25 carries the comment *"offset-parallax swims on
+the grazing, densely-tiled floor → dial it down"*). S1b reused that number as a
+**slab depth**. Nobody had ever printed what depth it implies.
+
+### 8.1 Instrument: `--pom_shell_census` (DIAGNOSTIC, default OFF)
+
+Per target face, at build time, from the AUTHORED positions: `|dP/du|`,
+`|dP/dv|` (Lengyel, per axis), their geometric mean `w`, the anisotropy
+`|dP/du|/|dP/dv|`, the implied world amplitude, the lid offset actually applied
+to its vertices, and — grouped by AUTHORED plane (normal dot ≥ 0.9995, |Δd| ≤
+2e-3, the same tolerances the patch union-find uses) — how many distinct LID
+plane constants that one authored plane became. The same census runs in
+`DisplaceStoneSubdiv`. Image-neutral: with the flag on, greets t=6097 is
+byte-identical on all four arms (§8.7).
+
+### 8.2 CENSUS — the per-pixel shell (`--pom_shell`, defaults)
+
+```
+'rooms'  uvAmp=0.0300   196 faces   51 authored planes
+  |dP/du| min/med/max = 6.0000 / 6.0000 / 7.9069
+  |dP/dv| min/med/max = 6.0000 / 6.0000 / 8.4853
+  w       min/med/max = 6.0000 / 6.0000 / 7.5446   (x1.26)
+  ANISOTROPY          = 0.791 / 1.000 / 1.318
+  WORLD AMPLITUDE     = 0.1800 / 0.1800 / 0.2263   (x1.26 across the material)
+'floor'  uvAmp=0.0750    30 faces    1 authored plane
+  |dP/du| min/med/max = 14.6909 / 14.7243 / 14.9001
+  |dP/dv| min/med/max = 14.9779 / 15.1875 / 15.2339
+  w       min/med/max = 14.8338 / 14.9598 / 15.0661 (x1.02)
+  ANISOTROPY          = 0.968 / 0.973 / 0.981
+  WORLD AMPLITUDE     = 1.1125 / 1.1220 / 1.1300   (x1.02 across the material)
+```
+
+Per authored plane (`[POM-SHELL-CENSUS-PLANE]`, 52 rows; the shape of every row):
+
+| plane | faces | w | world amp | ratio | lid offset | lid planes |
+|---|---|---|---|---|---|---|
+| `rooms` P17 N=(0,0,1) d=+37.030 | 30 | 6.000..6.000 | 0.1800..0.1800 | **×1.00** | 0.0900 | 1 |
+| `rooms` P30 N=(−.447,0,.894) d=+27.601 | 4 | 6.344..6.344 | 0.1903..0.1903 | **×1.00** | 0.0952 | 1 |
+| `rooms` P25 N=(−.333,−.667,−.667) | 1 | 7.545..7.545 | 0.2263..0.2263 | ×1.00 | 0.1132 | 1 |
+| `rooms` P44 N=(+.759,0,−.651) d=+5.089 | 3 | 6.888..6.888 | 0.2066..0.2066 | ×1.00 | 0.1033 | **2, spread 0.0503** |
+| `floor` P00 N=(0,1,0) d=0 | 30 | 14.834..15.066 | 1.1125..1.1300 | ×1.02 | 0.5563..0.5650 | **2, spread 0.0087** |
+
+### 8.3 FINDINGS — and the hypothesis this audit does NOT support
+
+1. **WITHIN one authored plane the world amplitude is CONSTANT.** Every one of
+   `rooms`' 51 planes reports ×1.00; `floor`'s single plane reports ×1.02. The
+   hypothesis handed to this task — *"faces on the SAME authored surface
+   displace by DIFFERENT world distances whenever their UV charts differ in
+   scale"* — is **NOT what greets has**. The wall/floor UVs are a world-axis
+   PLANAR PROJECTION at a fixed 6 (rooms) / ~15 (floor) world per tile, so the
+   density is one number per plane to four decimals. The trapezoid-chart wall
+   that defeats the bake's `edgeAlignedQuad` is a *tessellation* problem, not an
+   amplitude one.
+2. **BETWEEN authored planes of one material: ×1.26** (0.1800 world on the
+   axis-aligned walls, up to 0.2263 on the most tilted). Mechanism: the planar
+   projection stretches on faces not perpendicular to its axis, `w = 6/cos θ`.
+   Real, modest, and a genuine "neighbouring faces moved by different amounts"
+   at the corners where an axis-aligned wall meets a tilted one — 0.0900 vs
+   0.1132 world of lid offset, a **0.023 world** step.
+3. **BETWEEN MATERIALS: ×6.2, and this is the dominant term.** `rooms` 0.180
+   world, `floor` 1.113 world — a stone wall and the stone floor it stands on,
+   in the same shot, given relief depths that differ by a factor of six. The
+   tessellation bake gives both exactly 0.300. Where they meet, the floor's lid
+   stands **0.5650** world proud of the authored floor while the wall's lid
+   stands **0.0900** proud of the wall: a **0.475 world** step at a junction
+   that is one continuous stone surface in the model.
+4. **LID PLANES.** 13 of 51 `rooms` planes became more than one lid plane, worst
+   spread 0.0503 world (P44/P45); `floor`'s single plane became 2 constants
+   spanning 0.0087 world. **The earlier claim of "SIX lid planes 0.0087 world
+   apart" on the floor is NOT REPRODUCED** — at the 1e-3 clustering tolerance
+   the code itself uses I measure TWO clusters with a 0.0087 total spread.
+   **And the mechanism attributed to it is wrong**: on 13 of those 13 `rooms`
+   planes the applied lid offset has min == max (0.0900..0.0900), so the split
+   is not per-face UV density at all. It is that `PomShell_Build` moves each
+   vertex along its **smooth vertex normal**, so at a hard corner the component
+   perpendicular to a given face is `off·(N_v·N_f) < off` and that face's plane
+   TILTS. Different defect, different fix; §8.6 does not address it.
+5. **ANISOTROPY.** `rooms` 0.791..1.318 (median 1.000), `floor` 0.968..0.981.
+   A minority of `rooms` faces map the height map's square texels onto world
+   rectangles up to 32 % out of square, and since one amplitude serves both
+   axes the relief's slope differs by that much between U and V there. Both
+   paths sample the height field in UV, so this is shared by the shell and the
+   bake and is an authoring property, not a path defect. No plane exceeds ×1.32.
+6. **HEIGHT MIP.** Dev-build instrument, t=6097: the shell march sampled
+   **mip 0 on 100 %** of shell faces (3 materials, 4 438 faces). The bake
+   samples **mip 2** (256²). Two different bands of one height field — already
+   §0's point, now measured on the shell side. Pose-dependent: only t=6097 was
+   counted.
+
+### 8.4 CENSUS — the tessellation bake. It does NOT share the defect, and has a worse one
+
+`[STONE-CENSUS]`, defaults (`--greets_displace`, amp 0.300, mip 2):
+
+```
+'rooms' WORLD amp=0.300 mip=2: 51 planes, per-face w 5.985/6.000/7.545 (x1.26)
+'floor' WORLD amp=0.300 mip=2:  1 plane,  per-face w 14.834/14.922/15.065 (x1.02)
+  -> the amplitude is the SAME 0.300 world on every face; w only sets the
+     relief WAVELENGTH.
+```
+
+So the bake's **amplitude** is world-consistent by construction. Its
+inconsistency is the relief its LATTICE actually CARRIES — the p05..p95 spread
+of the displacement actually applied to its vertices, per authored plane:
+
+| plane | verts | carried relief span | % of amp |
+|---|---|---|---|
+| `floor` P01 | 9 780 | 0.0318 | **11 %** |
+| `rooms` P01/P02/P03/P04 (the four big walls) | 3.4–4.3 k each | 0.1312 | **44 %** |
+| `rooms` P10 | 224 | 0.2059 | 69 % |
+| `rooms` P33/P36 | 107 | 0.0263–0.0265 | 9 % |
+| `rooms` P45/P46 | 66 | 0.0223–0.0274 | 7–9 % |
+| `rooms` P43/P44/P48/P49 | 0–1 | 0.0000 | 0 % |
+
+**In the shipping look the floor's stone moves 0.032 world while the wall beside
+it moves 0.131 — 4.1×, and the range across planes is 0 % to 69 % of the
+authored amplitude.** That is the same complaint the user made, in the arm he
+actually looks at, and it is the *opposite sign* to the shell's (there the floor
+moves 6.2× MORE than the wall). Cause is C4 (relief only at the lattice), not
+amplitude semantics — §8.6 does not fix it either.
+
+### 8.5 The consequence in the render, and in PIXELS
+
+Relief depth actually written to Z, per authored plane, converged reference
+(`refUV`, i.e. today's amplitude semantics). Method as §C4 (least-squares 1/z
+plane fit, residual span in world units):
+
+| pose | `floor` span | wall spans | floor / wall |
+|---|---|---|---|
+| t=6097 | 0.2083 | 0.1164, 0.0687 | 1.8–3.0× |
+| t=5780 | 0.5382 | 0.1106, 0.1886 | 2.9–4.9× |
+| t=4200 (vista) | 0.4635 | 0.0550, 0.1108, 0.1952 | 2.4–8.4× |
+
+Same measurement on `tess`: floor 0.0159–0.0279, walls 0.0029–0.0718 — the two
+surfaces sit in the same band. And on `shell` (cone-8) at t=4200 the floor's
+span is **1.7144** and at t=5780 **3.4675**: the march's error scales with the
+slab it is marching, so the deepest slab in the scene is also where the shipping
+march fails worst. That is the link between this section and C1.
+
+**Pixels.** A world displacement along the surface normal shows up as a depth
+step; the screen distance you would have to travel *along the surface* to cover
+that step is `|Δz| / |∇z|`, both read straight off the depth dump (no focal
+length, no camera pose needed). Measured per stone surface:
+
+| what | pose | median | p95 |
+|---|---|---|---|
+| the floor's surface moves when its amplitude is put on the wall's world scale (`refW03` vs `refUV`) | t=4200 | **16.9 px** | 111 px |
+| same, the walls | t=4200 | 7.1 px | 12 px |
+| same, floor | t=6097 | 24.7 px | 88 px |
+| the cone march's own floor error, current semantics (`shUV` vs `refUV`) | t=4200 | **45.0 px** | 265 px |
+| the same march's floor error at one world amplitude (`shW03` vs `refW03`) | t=4200 | **9.3 px** | 33 px |
+
+Crops (identical framing per pose, one transform for every arm):
+`docs/img/s1_discrepancy/P0_4200_floor_amp.png` — the wall/floor junction at the
+vista, `refUV | refW03 | shUV | shW03`. In the two `UV` panels the floor's
+1.11-deep slab undercuts the wall and opens a black gash along the skirting; in
+the two `W03` panels the junction is solid. `P0_6097_corner_amp.png` is the
+user's corner framing (there the wall's slab GROWS 0.18 → 0.30 and the grazing
+march artefacts on the tan wall grow with it). `P0_4200_full_amp.png` is the
+whole vista frame, `refUV | refW03`.
+
+### 8.6 CANDIDATE FIX — `--pom_shell_world_amp` (default OFF)
+
+Amplitude authored in **WORLD** units; each patch's UV amplitude derived from
+its own world-per-UV, so one authored surface displaces by one world distance
+and `pomDepthWorldAmp` is constant across the material.
+
+- `PomShell_Build` picks the material's world amplitude as `uvAmp ×` its
+  **area-weighted median** `w` — *derived, not invented*, so the material's
+  typical slab depth is unchanged and the A/B isolates the DISTRIBUTION. The
+  vertex offset becomes a constant `worldAmp/2` (one authored plane → one lid
+  plane, as far as the offset is concerned).
+- `--pom_shell_world_amp_set=<world>` forces one amplitude on **every** shelled
+  material. `=0.3` puts the shell on the tessellation bake's world depth and is
+  what makes the wall and the floor agree.
+- Implementation note that matters: the per-patch UV amplitude is published as a
+  **build-time table** on the material (`Material::PomShellPatchUvAmp`, indexed
+  by `Face::PomShellGroup` — a patch is coplanar by construction, so one number
+  is exact for it) and read once per FACE in the dispatcher. The per-triangle
+  and per-pixel code is not touched at all. Two earlier variants that moved the
+  amplitude into the per-triangle path — a rasterizer member, then a mutated
+  `r.ctx` — were both **measured** to shift 5 px by 1/255 at t=6097 through
+  inliner/FMA-contraction drift; that is why the table exists.
+
+What it changes (census, `--pom_shell_world_amp_set=0.3`):
+
+| | before (UV) | after (world = 0.3) |
+|---|---|---|
+| `rooms` world amplitude | 0.1800..0.2263 (**×1.26**) | 0.3000..0.3000 (**×1.00**) |
+| `floor` world amplitude | 1.1125..1.1300 | 0.3000..0.3000 |
+| wall : floor ratio | **6.2 : 1** | **1 : 1** |
+| `rooms` lid offset | 0.0900..0.1132 | 0.0900 flat (at `worldAmp/2` = 0.15 for the 0.3 arm) |
+| `floor` authored planes that became >1 lid plane | 1 of 1 | **0 of 1** |
+| `rooms` authored planes that became >1 lid plane | 13 of 51 | 13 of 51 — **unchanged**, this is finding 4's smooth-normal mechanism, not amplitude |
+| `rooms` per-patch UV amplitude | one 0.03000 for all 67 | 0.03976..0.05000 |
+| `floor` per-patch UV amplitude | one 0.07500 for all 6 | 0.01998..0.02019 |
+
+### 8.7 How the comparison was kept honest
+
+Changing the amplitude changes **what the reference renders**, so "error vs the
+reference" is meaningless unless the reference is stated. Two separate questions,
+never mixed:
+
+1. **What did the amplitude do to the SURFACE?** `refUV` vs `refW` / `refW03` —
+   the converged march (`--pom_ref_march --pom_ref_steps=512`,
+   `--pom_shell_cap=64`) on BOTH sides, so the march is not a variable. This
+   pair *is* the honest statement that the reference moved.
+2. **Did the shipping march get better or worse?** Each arm is scored against
+   the reference built with **its own** semantics — `shUV` vs `refUV`, `shW` vs
+   `refW`, `shW03` vs `refW03`. Never `shUV` vs `refW`.
+
+A third honesty property is structural: `[POM-SHELL-WORLDAMP]` reports that
+**114 of 196 `rooms` faces have `w == wRef` exactly**, so under the per-material
+derivation their surface is unchanged *by construction* and the whole difference
+is confined to the faces the fix targets. Measured, t=4200, `refW` vs `refUV`:
+`rooms` and `rooms::mirUV` move 0.00 px, `floor::mirUV` moves 0.14 px median.
+
+**Results.**
+
+(1) SURFACE, converged march both sides:
+
+| pair | pose | colour >12 | colour >32 | \|dz\|>0.05 | \|dz\|>0.20 |
+|---|---|---|---|---|---|
+| `refW` vs `refUV` (per-material) | t=6097 | 69 354 | 9 946 | 1 420 | 53 |
+| `refW` vs `refUV` | t=4200 | 97 949 | 26 969 | 8 878 | 2 155 |
+| `refW03` vs `refUV` (one world amp) | t=6097 | 707 174 | 171 886 | 151 177 | 23 186 |
+| `refW03` vs `refUV` | t=4200 | 963 468 | 311 638 | 643 952 | 531 773 |
+
+(2) MARCH, each arm vs the reference of its own semantics:
+
+| arm pair | pose | colour >12 | colour >32 | \|dz\|>0.05 | \|dz\|>0.20 | floor dz med | floor shift med |
+|---|---|---|---|---|---|---|---|
+| `shUV` vs `refUV` | t=4200 | 621 298 | 275 762 | 757 117 | 637 643 | **−1.019** | **45.0 px** |
+| `shW` vs `refW` | t=4200 | 621 299 | 275 337 | 757 306 | 637 819 | −1.024 | 45.2 px |
+| `shW03` vs `refW03` | t=4200 | **589 092** | **243 627** | 771 777 | **441 522** | **−0.245** | **9.3 px** |
+| `shUV` vs `refUV` | t=6097 | 217 217 | 49 510 | 201 217 | 23 431 | 0.000 | 0.29 px |
+| `shW` vs `refW` | t=6097 | 217 016 | 49 339 | 201 199 | 23 274 | 0.000 | 0.30 px |
+| `shW03` vs `refW03` | t=6097 | 246 355 | 48 681 | 216 971 | **105 936** | 0.000 | 0.00 px |
+
+**Read it as a trade, not a win.** One world amplitude at 0.3 cuts the floor's
+march error by 4.1× (45.0 → 9.3 px median at the vista, 265 → 33 px p95) and
+takes 196 k pixels off the vista's `|dz|>0.20` count, because the cone march's
+absolute error scales with the slab it marches and the floor's slab shrinks
+3.7×. It makes the WALLS worse by the same mechanism in reverse — their slab
+grows 1.67×, and at t=6097 `|dz|>0.20` goes 23 431 → 105 936. The per-material
+derivation (`--pom_shell_world_amp` alone) is nearly inert by design: it only
+removes the ×1.26 between tilted and axis-aligned wall planes.
+
+### 8.8 Gates for this section's commit
+
+`--pom_shell_world_amp`, `--pom_shell_world_amp_set` and `--pom_shell_census`
+all default OFF, and `--pom_shell` itself is default OFF.
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (mirrortest / conetest / halotest) |
+| city `t=1961` | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact |
+| greets `shell` cone-8 t=6097 | `193427ccb28163705ea6baa5500afd0c` — byte-exact vs the pre-change binary (this is §2's own pin) |
+| greets `shell` naive-8 t=6097 | `13dcf8e54416816a29ba90f0fe468756` — byte-exact |
+| greets `tess` t=6097 | `3f86c73cc7ed8f0ad8f57b12984537d0` — byte-exact |
+| greets `flat` t=6097 | `9d095fbcac0c00888578d56172786997` — byte-exact |
+
+The four greets hashes were taken by `git stash`-ing this section's source
+changes, rebuilding, rendering, unstashing, rebuilding and rendering again —
+not by trusting that the code "looks inert". That A/B is what caught the 5-px
+1-LSB drift of the two rejected implementations.
+
+### 8.9 Verdict on the user's observation
+
+There **is** a real mismatch in how far different parts of the render move, and
+it is measured; but it is not per-face UV charts within one surface (finding 1).
+It is:
+
+- **shell / per-pixel path:** the floor's relief is **6.2× deeper in world units
+  than the wall's** (1.113 vs 0.180), because one number tuned as a UV offset
+  was reused as a slab depth on surfaces whose UV tiles are 15 and 6 world units
+  wide. At the junction the two lids are 0.475 world apart. Between wall planes
+  the same mechanism gives a further ×1.26 (0.023 world at a corner).
+- **tessellation / the shipping look:** the amplitude is world-consistent, but
+  the relief the lattice CARRIES ranges from **0 % to 69 % of it** across
+  authored planes — floor 11 %, main walls 44 %. That is a 4.1× floor↔wall
+  mismatch in the arm the user actually watches, and it is C4, not this section.
+
+Both are "different parts of the same render moved by different amounts", they
+point in **opposite directions**, and no single flag fixes both.
+`--pom_shell_world_amp_set=0.3` fixes the first and puts the per-pixel path on
+the bake's world scale; C4 remains open.

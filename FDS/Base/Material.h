@@ -141,6 +141,24 @@ struct Material
     // (strength is consumed once, at build time). 0 = not a shell material →
     // the legacy centered march runs.
     float                 PomShellUvAmp          = 0.0f;
+    // S1b P0 (--pom_shell_world_amp, DIAGNOSTIC/OPT-IN, default 0 = OFF): the
+    // slab amplitude authored in WORLD units instead of UV. With PomShellUvAmp
+    // the world depth of the relief is uvAmp x that face's OWN world-per-UV, so
+    // two faces of one material displace by different world distances whenever
+    // their charts differ in scale (measured on greets: x1.26 across 'rooms'
+    // authored planes, and x6.2 between 'rooms' 0.180 and 'floor' 1.113 —
+    // docs/S1_DISCREPANCY_INVENTORY.md S8). When this is > 0 the builder offsets
+    // every lid vertex by exactly WorldAmp/2 and the rasterizer derives each
+    // triangle's UV amplitude as WorldAmp / w, so one authored surface displaces
+    // by ONE world distance and pomDepthWorldAmp is constant. 0 keeps the UV
+    // semantics byte-for-byte.
+    float                 PomShellWorldAmp       = 0.0f;
+    // S1b P0 (--pom_shell_world_amp): per-PATCH UV amplitude, one float per
+    // patch, indexed by Face::PomShellGroup - 1 — worldAmp / that patch's
+    // world-per-UV. A patch is coplanar by construction, so its UV density is a
+    // single number and a per-patch table is exact. Null (the default) = every
+    // face marches with the material's single PomShellUvAmp.
+    float               * PomShellPatchUvAmp     = nullptr;
     // S1b: per-patch UV domain table for this material, 4 floats per patch
     // (uMin, uMax, vMin, vMax), indexed by Face::PomShellGroup - 1. Built by
     // PomShell_Build (union-find over edge-adjacent coplanar target faces);

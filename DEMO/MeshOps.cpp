@@ -3371,6 +3371,83 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			}
 		}
 
+		// ── --pom_shell_census, TESSELLATION HALF (DIAGNOSTIC, default OFF) ──
+		// Same table as PomShell_Build's, for the arm that ships. The bake's
+		// amplitude is authored in WORLD units (dsp = amp*(h-mipMean)), so per
+		// authored plane the interesting number is not the amplitude — it is
+		// constant by construction — but the relief the lattice actually CARRIES
+		// (the spread of the applied offsets) and the per-face world-per-UV that
+		// sets the relief's world WAVELENGTH. Run here: the parent planes are
+		// stamped, `basePos` still holds the pre-displacement positions, and the
+		// faces still carry their parent's authored N.
+		if (fds::FeatureFlags::pom_shell_census() && !faces.empty()) {
+			struct BRow { int n = 0; float wLo = 1e30f, wHi = -1e30f; std::vector<float> d; };
+			std::map<uint16_t, BRow> byPlane;
+			std::vector<char> seen(verts.size(), 0);
+			std::vector<float> allW;
+			for (size_t i = 0; i < faces.size(); ++i) {
+				Face &F = faces[i];
+				if (!isTargetNew(F) || !F.ShadowMatID) continue;
+				BRow &r = byPlane[F.ShadowMatID];
+				++r.n;
+				const uint32_t vi[3] = { fIdx[i][0], fIdx[i][1], fIdx[i][2] };
+				if (vi[0] >= verts.size() || vi[1] >= verts.size() || vi[2] >= verts.size())
+					continue;
+				const Vector &pa = basePos[vi[0]], &pb = basePos[vi[1]], &pc = basePos[vi[2]];
+				const float du1 = F.U2 - F.U1, dv1 = F.V2 - F.V1;
+				const float du2 = F.U3 - F.U1, dv2 = F.V3 - F.V1;
+				const float det = du1*dv2 - du2*dv1;
+				if (std::fabs(det) > 1e-12f) {
+					const float inv = 1.0f/det;
+					const float e1x=pb.x-pa.x,e1y=pb.y-pa.y,e1z=pb.z-pa.z;
+					const float e2x=pc.x-pa.x,e2y=pc.y-pa.y,e2z=pc.z-pa.z;
+					const float tx=(e1x*dv2-e2x*dv1)*inv, ty=(e1y*dv2-e2y*dv1)*inv, tz=(e1z*dv2-e2z*dv1)*inv;
+					const float bx=(e2x*du1-e1x*du2)*inv, by=(e2y*du1-e1y*du2)*inv, bz=(e2z*du1-e1z*du2)*inv;
+					const float w = std::sqrt(std::sqrt((tx*tx+ty*ty+tz*tz)*(bx*bx+by*by+bz*bz)));
+					if (w > 0.0f) {
+						r.wLo = std::min(r.wLo, w); r.wHi = std::max(r.wHi, w);
+						allW.push_back(w);
+					}
+				}
+				for (int k = 0; k < 3; ++k) {
+					if (seen[vi[k]]) continue;
+					seen[vi[k]] = 1;
+					const Vector &b0 = basePos[vi[k]], &p1 = verts[vi[k]].Pos;
+					const float dx=p1.x-b0.x, dy=p1.y-b0.y, dz=p1.z-b0.z;
+					float s = std::sqrt(dx*dx+dy*dy+dz*dz);
+					if (dx*F.N.x + dy*F.N.y + dz*F.N.z < 0.0f) s = -s;
+					r.d.push_back(s);
+				}
+			}
+			auto pctv = [](std::vector<float> &v, double p) {
+				if (v.empty()) return 0.0f;
+				std::sort(v.begin(), v.end());
+				return v[size_t(p*double(v.size()-1)+0.5)];
+			};
+			std::fprintf(stderr,
+				"[STONE-CENSUS] '%s' WORLD amp=%.3f mip=%d: planes=%zu, mesh faces=%zu, "
+				"per-face w min/med/max = %.3f / %.3f / %.3f (x%.2f). The amplitude is "
+				"the SAME %.3f world on every face; w only sets the relief WAVELENGTH.\n",
+				matName, (double)amp, useMip, byPlane.size(), faces.size(),
+				(double)pctv(allW,0.0), (double)pctv(allW,0.5), (double)pctv(allW,1.0),
+				(double)(pctv(allW,0.0) > 0.0f ? pctv(allW,1.0)/pctv(allW,0.0) : 0.0),
+				(double)amp);
+			for (auto &kv : byPlane) {
+				BRow &r = kv.second;
+				const StoneParentPlane *pp = MeshOps_StoneParentPlane(matName, kv.first);
+				const float p05 = pctv(r.d, 0.05), p50 = pctv(r.d, 0.50), p95 = pctv(r.d, 0.95);
+				std::fprintf(stderr,
+					"[STONE-CENSUS-PLANE] '%s' P%02u N=(%+.3f,%+.3f,%+.3f) d=%+9.3f "
+					"faces=%5d verts=%5zu  w=%.3f..%.3f  carriedRelief p05/p50/p95 = "
+					"%+.4f/%+.4f/%+.4f span=%.4f (%.0f%% of amp)\n",
+					matName, kv.first,
+					pp ? (double)pp->nx : 0.0, pp ? (double)pp->ny : 0.0,
+					pp ? (double)pp->nz : 0.0, pp ? (double)pp->d : 0.0,
+					r.n, r.d.size(), (double)r.wLo, (double)r.wHi,
+					(double)p05, (double)p50, (double)p95, (double)(p95 - p05),
+					(double)(amp > 0.0f ? 100.0f*(p95-p05)/amp : 0.0f));
+			}
+		}
 		// Commit new arrays.
 		Vertex *nv = new Vertex[verts.size()];
 		std::memcpy(nv, verts.data(), verts.size()*sizeof(Vertex));
@@ -3617,6 +3694,17 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	// authored plane becomes six lid planes 0.0087 world apart, which silently
 	// fails any 1e-3 coplanarity test done afterwards).
 	std::vector<std::array<float,4>> refPlane;
+	// --pom_shell_census (DIAGNOSTIC, default OFF): per-face UV-density census.
+	// Filled here because this loop still sees the AUTHORED positions — the
+	// vertex move below is what the census exists to characterise.
+	// --pom_shell_world_amp (P0, default OFF) needs the same per-face table, so
+	// the fill below runs for either flag.
+	const bool worldAmpMode = fds::FeatureFlags::pom_shell_world_amp();
+	const bool censusPrint = fds::FeatureFlags::pom_shell_census();
+	const bool census = censusPrint || worldAmpMode;      // fill the table
+	struct CensusFace { float wu, wv, w, area; };
+	std::vector<CensusFace> cenF;                       // parallel to refs
+	std::map<std::pair<const TriMesh*, int32_t>, int> refIdx;
 	{
 		std::map<EdgeKey, std::vector<int>> edges;
 		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
@@ -3628,6 +3716,39 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				refs.push_back({ T, i });
 				refPlane.push_back({ F.N.x, F.N.y, F.N.z, F.NormProd });
 				uf.push_back(id);
+				if (census) {
+					refIdx[{ T, i }] = id;
+					// Authored-position Lengyel solve, per AXIS (the shell's own
+					// solve keeps only the geometric mean).
+					const Vector &pa = F.A->Pos, &pb = F.B->Pos, &pc = F.C->Pos;
+					const float du1 = F.U2 - F.U1, dv1 = F.V2 - F.V1;
+					const float du2 = F.U3 - F.U1, dv2 = F.V3 - F.V1;
+					const float det = du1 * dv2 - du2 * dv1;
+					CensusFace cf{ 0.0f, 0.0f, 0.0f, 0.0f };
+					{   // object-space triangle area — the weight for the median w
+						const float ax = pb.x-pa.x, ay = pb.y-pa.y, az = pb.z-pa.z;
+						const float bx0 = pc.x-pa.x, by0 = pc.y-pa.y, bz0 = pc.z-pa.z;
+						const float cx0 = ay*bz0 - az*by0;
+						const float cy0 = az*bx0 - ax*bz0;
+						const float cz0 = ax*by0 - ay*bx0;
+						cf.area = 0.5f * std::sqrt(cx0*cx0 + cy0*cy0 + cz0*cz0);
+					}
+					if (std::fabs(det) > 1e-12f) {
+						const float inv = 1.0f / det;
+						const float e1x = pb.x-pa.x, e1y = pb.y-pa.y, e1z = pb.z-pa.z;
+						const float e2x = pc.x-pa.x, e2y = pc.y-pa.y, e2z = pc.z-pa.z;
+						const float tx = (e1x*dv2 - e2x*dv1) * inv;
+						const float ty = (e1y*dv2 - e2y*dv1) * inv;
+						const float tz = (e1z*dv2 - e2z*dv1) * inv;
+						const float bx = (e2x*du1 - e1x*du2) * inv;
+						const float by = (e2y*du1 - e1y*du2) * inv;
+						const float bz = (e2z*du1 - e1z*du2) * inv;
+						cf.wu = std::sqrt(tx*tx + ty*ty + tz*tz);
+						cf.wv = std::sqrt(bx*bx + by*by + bz*bz);
+						cf.w  = std::sqrt(cf.wu * cf.wv);
+					}
+					cenF.push_back(cf);
+				}
 				const Vector *pv[3] = { &F.A->Pos, &F.B->Pos, &F.C->Pos };
 				for (int e = 0; e < 3; ++e) {
 					long long ka = qpos(*pv[e]), kb = qpos(*pv[(e + 1) % 3]);
@@ -3650,6 +3771,42 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	}
 	float offMin = 1e30f, offMax = -1e30f, wMin = 1e30f, wMax = -1e30f;
 	float hMinStamp = 1e30f;
+	// --pom_shell_census: what the vertex move BELOW actually did, per face.
+	std::vector<float> cenOffMin, cenOffMax, cenOffMean;
+	std::vector<std::array<float,4>> cenLidPlane;
+	if (census) {
+		cenOffMin.assign(refs.size(), 0.0f);
+		cenOffMax.assign(refs.size(), 0.0f);
+		cenOffMean.assign(refs.size(), 0.0f);
+		cenLidPlane.assign(refs.size(), { 0,0,0,0 });
+	}
+	// ── --pom_shell_world_amp (P0, default OFF) ─────────────────────────────
+	// One WORLD amplitude for the whole material instead of one UV amplitude
+	// converted per face. Derived (not invented) as uvAmp × the AREA-WEIGHTED
+	// MEDIAN world-per-UV, so the material's typical slab depth is unchanged and
+	// the A/B isolates the per-face DISTRIBUTION; --pom_shell_world_amp_set
+	// overrides it with an explicit world number for every material at once.
+	float worldAmp = 0.0f, wRef = 0.0f;
+	if (worldAmpMode) {
+		std::vector<std::pair<float,float>> ws;      // (w, area)
+		double totA = 0.0;
+		for (const auto &c : cenF)
+			if (c.w > 0.0f && c.area > 0.0f) { ws.push_back({ c.w, c.area }); totA += c.area; }
+		std::sort(ws.begin(), ws.end());
+		double acc = 0.0;
+		for (const auto &p : ws) { acc += p.second; if (acc >= 0.5 * totA) { wRef = p.first; break; } }
+		if (wRef <= 0.0f && !ws.empty()) wRef = ws[ws.size()/2].first;
+		const float forced = fds::FeatureFlags::pom_shell_world_amp_set();
+		worldAmp = (forced > 0.0f) ? forced : (uvAmp * wRef);
+		int exact = 0;
+		for (const auto &c : cenF) if (c.w > 0.0f && std::fabs(c.w - wRef) < 1e-4f) ++exact;
+		std::fprintf(stderr, "[POM-SHELL-WORLDAMP] '%s': worldAmp=%.4f world "
+			"(%s; uvAmp=%.4f x area-weighted median w=%.4f); %d of %zu faces have "
+			"w == wRef so their surface is UNCHANGED by this flag\n",
+			matName, (double)worldAmp,
+			forced > 0.0f ? "--pom_shell_world_amp_set" : "derived per material",
+			(double)uvAmp, (double)wRef, exact, cenF.size());
+	}
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
 		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
 		Vertex *const V = T->Verts;
@@ -3659,6 +3816,8 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		std::vector<float>  ndSum(nV, 0.0f);     // N_v·N_face over the same
 		std::vector<int>    cnt(nV, 0);
 		std::vector<char>   nonTarget(nV, 0);
+		std::vector<float>  offVert;                 // census: offset actually applied
+		if (census) offVert.assign(nV, 0.0f);
 		int nTargetHere = 0;
 		for (int32_t i = 0; i < T->FIndex; ++i) {
 			Face &F = T->Faces[i];
@@ -3724,11 +3883,15 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			// VERTICES (it vanishes) or to the MARCH (it survives). Not a
 			// rendering proposal: with the geometry unmoved the relief hangs
 			// entirely below the authored plane instead of straddling it.
+			// --pom_shell_world_amp: half the WORLD amplitude, the same on every
+			// vertex, so one authored plane produces exactly one lid plane.
 			const float off = fds::FeatureFlags::pom_shell_lid_probe()
-			                ? 0.0f : (uvAmp * wv * 0.5f);
+			                ? 0.0f
+			                : (worldAmpMode ? (worldAmp * 0.5f) : (uvAmp * wv * 0.5f));
 			V[i].Pos.x += vn.x / nl * off;
 			V[i].Pos.y += vn.y / nl * off;
 			V[i].Pos.z += vn.z / nl * off;
+			if (census) offVert[i] = off;
 			// Height actually reached, measured against the incident faces'
 			// planes (ndv = 1 on a flat patch → exactly the lid at h = 1).
 			V[i].ShellH = 0.5f + 0.5f * ndv;
@@ -3755,6 +3918,19 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				F.N.x = gx; F.N.y = gy; F.N.z = gz;
 			}
 			F.NormProd = -(F.N.x*A.x + F.N.y*A.y + F.N.z*A.z);
+			if (census) {
+				auto it = refIdx.find({ T, i });
+				if (it != refIdx.end()) {
+					const uint32_t va = vidx(F.A), vb = vidx(F.B), vc = vidx(F.C);
+					const float o[3] = { (va < nV ? offVert[va] : 0.0f),
+					                     (vb < nV ? offVert[vb] : 0.0f),
+					                     (vc < nV ? offVert[vc] : 0.0f) };
+					cenOffMin [it->second] = std::min({ o[0], o[1], o[2] });
+					cenOffMax [it->second] = std::max({ o[0], o[1], o[2] });
+					cenOffMean[it->second] = (o[0] + o[1] + o[2]) / 3.0f;
+					cenLidPlane[it->second] = { F.N.x, F.N.y, F.N.z, F.NormProd };
+				}
+			}
 		}
 		// The lid sticks out past the authored bsphere by at most the offset.
 		if (offMax > 0.0f) {
@@ -3927,7 +4103,149 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			}
 		}
 	}
+	// ── --pom_shell_census (DIAGNOSTIC, default OFF) ────────────────────────
+	// The amplitude is authored in UV and converted per FACE by that face's own
+	// world-per-UV, so one authored surface can displace by several different
+	// world distances. This prints exactly how many and how far apart.
+	if (censusPrint && !cenF.empty()) {
+		auto pct = [](std::vector<float> v, double p) {
+			if (v.empty()) return 0.0f;
+			std::sort(v.begin(), v.end());
+			return v[size_t(p * double(v.size() - 1) + 0.5)];
+		};
+		// Authored-plane clustering (same tolerances the union-find uses).
+		std::vector<std::array<float,4>> planes;
+		std::vector<int> planeOf(cenF.size(), -1);
+		for (size_t i = 0; i < cenF.size(); ++i) {
+			const auto &p = refPlane[i];
+			int hit = -1;
+			for (size_t k = 0; k < planes.size(); ++k) {
+				const auto &q = planes[k];
+				if (p[0]*q[0] + p[1]*q[1] + p[2]*q[2] < 0.9995f) continue;
+				if (std::fabs(p[3] - q[3]) > 2e-3f) continue;
+				hit = int(k); break;
+			}
+			if (hit < 0) { hit = int(planes.size()); planes.push_back(p); }
+			planeOf[i] = hit;
+		}
+		std::vector<float> allWu, allWv, allW, allA, allAmp;
+		for (const auto &c : cenF) {
+			if (!(c.w > 0.0f)) continue;
+			allWu.push_back(c.wu); allWv.push_back(c.wv); allW.push_back(c.w);
+			allA.push_back(c.wv > 1e-9f ? c.wu / c.wv : 1.0f);
+			// EFFECTIVE world amplitude: constant under --pom_shell_world_amp,
+			// uvAmp x this face's own density otherwise.
+			allAmp.push_back(worldAmpMode ? worldAmp : uvAmp * c.w);
+		}
+		const float ampLo = allAmp.empty() ? 0.0f : *std::min_element(allAmp.begin(), allAmp.end());
+		const float ampHi = allAmp.empty() ? 0.0f : *std::max_element(allAmp.begin(), allAmp.end());
+		std::fprintf(stderr,
+			"[POM-SHELL-CENSUS] '%s' uvAmp=%.4f  faces=%zu  authored planes=%zu\n"
+			"[POM-SHELL-CENSUS]   |dP/du| (world per U tile)  min/med/max = %.4f / %.4f / %.4f\n"
+			"[POM-SHELL-CENSUS]   |dP/dv| (world per V tile)  min/med/max = %.4f / %.4f / %.4f\n"
+			"[POM-SHELL-CENSUS]   w = sqrt(|dP/du||dP/dv|)    min/med/max = %.4f / %.4f / %.4f  (x%.2f)\n"
+			"[POM-SHELL-CENSUS]   UV ANISOTROPY |dP/du|/|dP/dv| min/med/max = %.3f / %.3f / %.3f  "
+			"(1 = square texels; !=1 = relief stretched along one axis)\n"
+			"[POM-SHELL-CENSUS]   IMPLIED WORLD AMPLITUDE uvAmp*w min/med/max = %.4f / %.4f / %.4f  "
+			"(x%.2f across the material)\n",
+			matName, (double)uvAmp, cenF.size(), planes.size(),
+			(double)pct(allWu,0.0), (double)pct(allWu,0.5), (double)pct(allWu,1.0),
+			(double)pct(allWv,0.0), (double)pct(allWv,0.5), (double)pct(allWv,1.0),
+			(double)pct(allW,0.0),  (double)pct(allW,0.5),  (double)pct(allW,1.0),
+			(double)(pct(allW,0.0) > 0.0f ? pct(allW,1.0)/pct(allW,0.0) : 0.0f),
+			(double)pct(allA,0.0),  (double)pct(allA,0.5),  (double)pct(allA,1.0),
+			(double)ampLo, (double)pct(allAmp,0.5), (double)ampHi,
+			(double)(ampLo > 0.0f ? ampHi/ampLo : 0.0f));
+		// Histogram of the implied world amplitude (12 linear bins).
+		if (ampHi > ampLo) {
+			int bins[12] = {0};
+			for (float a : allAmp) {
+				int b = int(12.0f * (a - ampLo) / (ampHi - ampLo));
+				if (b < 0) b = 0; if (b > 11) b = 11;
+				++bins[b];
+			}
+			for (int b = 0; b < 12; ++b) {
+				const float lo = ampLo + (ampHi-ampLo)*float(b)/12.0f;
+				const float hi = ampLo + (ampHi-ampLo)*float(b+1)/12.0f;
+				std::fprintf(stderr, "[POM-SHELL-CENSUS-HIST] '%s' [%.4f..%.4f) %5d %s\n",
+					matName, (double)lo, (double)hi, bins[b],
+					std::string(size_t(std::min(60, bins[b] ? 1 + 59*bins[b]/std::max(1,
+						*std::max_element(bins, bins+12)) : 0)), '#').c_str());
+			}
+		}
+		// Per authored plane: the spread, and how many LID planes it became.
+		struct PlaneRow { int p, n, lidDistinct; float wLo, wHi, aLo, aHi, oLo, oHi,
+		                  lidSpread, ratio, anLo, anHi; };
+		std::vector<PlaneRow> rows;
+		for (size_t k = 0; k < planes.size(); ++k) {
+			PlaneRow r{ int(k), 0, 0, 1e30f, -1e30f, 1e30f, -1e30f, 1e30f, -1e30f,
+			            0.0f, 1.0f, 1e30f, -1e30f };
+			std::vector<float> lidD;
+			for (size_t i = 0; i < cenF.size(); ++i) {
+				if (planeOf[i] != int(k) || !(cenF[i].w > 0.0f)) continue;
+				++r.n;
+				r.wLo = std::min(r.wLo, cenF[i].w);   r.wHi = std::max(r.wHi, cenF[i].w);
+				const float a = worldAmpMode ? worldAmp : uvAmp * cenF[i].w;
+				r.aLo = std::min(r.aLo, a);           r.aHi = std::max(r.aHi, a);
+				r.oLo = std::min(r.oLo, cenOffMin[i]); r.oHi = std::max(r.oHi, cenOffMax[i]);
+				const float an = (cenF[i].wv > 1e-9f) ? cenF[i].wu / cenF[i].wv : 1.0f;
+				r.anLo = std::min(r.anLo, an); r.anHi = std::max(r.anHi, an);
+				if (cenLidPlane[i][0] != 0.0f || cenLidPlane[i][1] != 0.0f
+				    || cenLidPlane[i][2] != 0.0f)
+					lidD.push_back(cenLidPlane[i][3]);
+			}
+			if (!r.n) continue;
+			std::sort(lidD.begin(), lidD.end());
+			for (size_t i = 0; i < lidD.size(); ++i)
+				if (i == 0 || lidD[i] - lidD[i-1] > 1e-3f) ++r.lidDistinct;
+			r.lidSpread = lidD.empty() ? 0.0f : (lidD.back() - lidD.front());
+			r.ratio = (r.aLo > 0.0f) ? r.aHi / r.aLo : 0.0f;
+			rows.push_back(r);
+		}
+		std::sort(rows.begin(), rows.end(),
+		          [](const PlaneRow &a, const PlaneRow &b) { return a.ratio > b.ratio; });
+		int nSplit = 0;
+		for (const auto &r : rows) if (r.lidDistinct > 1) ++nSplit;
+		std::fprintf(stderr, "[POM-SHELL-CENSUS] '%s' %d of %zu authored planes became "
+			"MORE THAN ONE lid plane\n", matName, nSplit, rows.size());
+		for (const auto &r : rows)
+			std::fprintf(stderr,
+				"[POM-SHELL-CENSUS-PLANE] '%s' P%02d N=(%+.3f,%+.3f,%+.3f) d=%+9.3f "
+				"faces=%3d  w=%.3f..%.3f  worldAmp=%.4f..%.4f (x%.2f)  "
+				"aniso=%.3f..%.3f  lidOff=%.4f..%.4f  lidPlanes=%d spread=%.4f world\n",
+				matName, r.p, (double)planes[r.p][0], (double)planes[r.p][1],
+				(double)planes[r.p][2], (double)planes[r.p][3], r.n,
+				(double)r.wLo, (double)r.wHi, (double)r.aLo, (double)r.aHi,
+				(double)r.ratio, (double)r.anLo, (double)r.anHi,
+				(double)r.oLo, (double)r.oHi,
+				r.lidDistinct, (double)r.lidSpread);
+	}
 	mat->PomShellUvAmp = uvAmp;
+	mat->PomShellWorldAmp = worldAmp;      // 0 = UV semantics (the default)
+	// --pom_shell_world_amp: publish the PER-PATCH UV amplitude the rasterizer
+	// looks up (worldAmp / that patch's world-per-UV). A patch is coplanar by
+	// construction so one number is exact for it; this is what lets the whole
+	// per-triangle and per-pixel code path stay untouched.
+	if (worldAmpMode && nGroups) {
+		std::vector<float> amps(nGroups, uvAmp);
+		std::vector<char>  have(nGroups, 0);
+		for (size_t i = 0; i < refs.size(); ++i) {
+			const Face &F = refs[i].T->Faces[refs[i].fi];
+			const unsigned g = F.PomShellGroup;
+			if (!g || g > nGroups || have[g-1]) continue;
+			if (i < cenF.size() && cenF[i].w > 0.0f) {
+				amps[g-1] = worldAmp / cenF[i].w;
+				have[g-1] = 1;
+			}
+		}
+		mat->PomShellPatchUvAmp = new float[nGroups];
+		std::memcpy(mat->PomShellPatchUvAmp, amps.data(), nGroups * sizeof(float));
+		float aLo = 1e30f, aHi = -1e30f;
+		for (unsigned g = 0; g < nGroups; ++g) { aLo = std::min(aLo, amps[g]); aHi = std::max(aHi, amps[g]); }
+		std::fprintf(stderr, "[POM-SHELL-WORLDAMP] '%s': per-patch UV amplitude "
+			"%.5f..%.5f over %u patches (was one %.5f for all)\n",
+			matName, (double)aLo, (double)aHi, nGroups, (double)uvAmp);
+	}
 	std::fprintf(stderr,
 		"[POM-SHELL] '%s' amp=%.3f UV: %lld verts moved [%.4f..%.4f world] over "
 		"%lld faces, worldPerUV %.3f..%.3f, %lld corner verts (ShellH min %.3f), "

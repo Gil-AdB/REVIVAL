@@ -42,6 +42,38 @@ inline const bool g_mirrorClampStats = std::getenv("FDS_MIRROR_CLAMP_STATS") != 
 // A/B escape (validation): disable the clone wall-depth clamp.
 inline const bool g_mirrorNoWallZClamp = std::getenv("FDS_NO_MIRROR_WALLZ_CLAMP") != nullptr;
 
+#if FDS_DEV
+// --pom_shell_census (DIAGNOSTIC, default OFF, DEV BUILD ONLY): which height-map
+// MIP each shell face's march actually sampled. The bake's mip is a flag (one
+// number); the shell's is per FACE — the albedo miplevel the mipmap-via-
+// subdivision clipper chose, unless --pom_height_mip pins it — so it can only be
+// counted at raster time. Printed once at teardown; silent when nothing was
+// counted. Kept behind FDS_DEV because even a flag-gated branch in this
+// dispatcher perturbs the shell march's last bit through the inliner (measured:
+// 5 px at 1/255 at t=6097), and the release build must stay byte-exact.
+struct PomShellMipHist {
+	std::atomic<long long> n[16][16] = {};
+	~PomShellMipHist() {
+		long long tot = 0;
+		for (int m = 0; m < 16; ++m)
+			for (int k = 0; k < 16; ++k) tot += n[m][k].load();
+		if (!tot) return;
+		for (int m = 0; m < 16; ++m) {
+			long long sub = 0;
+			for (int k = 0; k < 16; ++k) sub += n[m][k].load();
+			if (!sub) continue;
+			std::fprintf(stderr, "[POM-SHELL-CENSUS-MIP] matID=%d shell faces=%lld by height mip:", m, sub);
+			for (int k = 0; k < 16; ++k) {
+				const long long c = n[m][k].load();
+				if (c) std::fprintf(stderr, " mip%d=%lld(%.1f%%)", k, c, 100.0*double(c)/double(sub));
+			}
+			std::fprintf(stderr, "\n");
+		}
+	}
+};
+inline PomShellMipHist g_pomShellMipHist;
+#endif
+
 using u8  = uint8_t;
 using u16 = uint16_t;
 using i32 = int32_t;
@@ -2214,6 +2246,23 @@ inline void SetGBuffer(meka::GBuffer *gbuffer) {
 // for the headless snapshot path.
 void EngineGBuffer_Resize(int X, int Y);
 
+// The UV amplitude this FACE's shell march runs at. Default = the material's
+// single PomShellUvAmp, so the WORLD depth of the relief follows each chart's
+// world-per-UV (measured on greets: 'rooms' 0.180..0.226 world, 'floor' 1.113 —
+// docs/S1_DISCREPANCY_INVENTORY.md §8). With --pom_shell_world_amp on,
+// PomShell_Build publishes a PER-PATCH amplitude (worldAmp / that patch's
+// world-per-UV; a patch is coplanar by construction, so its density is one
+// number) and this picks it up. Doing it here, once per face, is deliberate: the
+// per-triangle and per-pixel code paths are not touched at all, which is what
+// keeps the default path's codegen — and therefore its last bit — identical.
+inline float PomShellFaceUvAmp(const Face *F) {
+	const Material *M = F->Txtr;
+	if (M->PomShellPatchUvAmp && F->PomShellGroup != 0
+	    && F->PomShellGroup <= M->PomShellDomainCount)
+		return M->PomShellPatchUvAmp[F->PomShellGroup - 1];
+	return M->PomShellUvAmp;
+}
+
 // Which deferred buffer set a Mekalele dispatch writes into.
 //   Opaque           — opaque G-buffer + ZPage16
 //   TransparentFront — front-layer xpar G-buffer + g_xparZ; the closest
@@ -2366,6 +2415,11 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	    && (F->Txtr->PomShellUvAmp > 0.0f);
 	const bool pomDepthWrite = (fds::FeatureFlags::pom_depth_write() || pomShellFace)
 	    && marchArmed;
+#if FDS_DEV
+	if (pomShellFace && fds::FeatureFlags::pom_shell_census())
+		meka::g_pomShellMipHist.n[F->Txtr->ID & 15][heightMipUsed & 15]
+			.fetch_add(1, std::memory_order_relaxed);
+#endif
 	// Patch domain for the lateral-exit test (see Face::PomShellGroup), plus the
 	// patch's SIBLING boxes — the other patches on the same plane whose UV rects
 	// abut it (Material::PomShellSibBoxes, built when --pom_shell_merge_uv > 0).
@@ -2430,7 +2484,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomRelax = fds::FeatureFlags::parallax_pom_relax(),
 		.pomDepthWrite = pomDepthWrite,
 		.pomShell = pomShellFace,
-		.pomShellUvAmp = pomShellFace ? F->Txtr->PomShellUvAmp : 0.0f,
+		.pomShellUvAmp = pomShellFace ? PomShellFaceUvAmp(F) : 0.0f,
 		.pomShellCap = fds::FeatureFlags::pom_shell_cap(),
 		.pomShellDomain = fds::FeatureFlags::pom_shell_domain(),
 		.pomShellBaseClip = fds::FeatureFlags::pom_shell_base_clip(),
