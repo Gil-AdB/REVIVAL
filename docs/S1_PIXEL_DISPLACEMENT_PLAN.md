@@ -22,14 +22,17 @@ Replace (or outcompete) the geometric tessellation bake for the greets stone
 relief with per-pixel shell-traced displacement built on the EXISTING POM
 march, at a fraction of the cost:
 
-- Tessellation (current shipping look, default ON): measured **+54.5 ms** at
+- Tessellation (opt-in, default OFF — NOT the shipping look; corrected
+  2026-08-05, and retired by the user as too slow): measured **+54.5 ms** at
   the worst full-screen-wall pose, plus ~9 ms camera-independent shadow
   re-raster and ~3 ms XFRM it drags along. Looks good.
 - Target: tessellation-comparable look — relief in Z-effects, block-edge
   silhouettes with see-through-to-background, light-responsive self-shadow —
   at **≤ 15 ms** at the same pose.
 
-Tessellation stays the shipping default until the user approves the switch.
+CORRECTION (2026-08-05): tessellation was never a default — `greets_displace`
+is default 0 and nothing enables it. The shipping default is FLAT POM. The user
+has retired tessellation as too slow; it survives as a measurement arm.
 Success is judged by the USER'S EYES against reference crops, not by metrics
 alone. Every stage lands flag-gated DEFAULT OFF; the user flips defaults.
 

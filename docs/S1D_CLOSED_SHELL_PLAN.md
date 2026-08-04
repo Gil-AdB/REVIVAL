@@ -163,7 +163,10 @@ fountain `51fff7cd`. Commit on fog-wt; do not push.
 ```
 
 Zero holes, correct shadows/mirrors, no protrusion, smears at grazing.
-Tessellation (`--greets_displace`) remains the shipping default.
+Tessellation (`--greets_displace`) is NOT a default and never was — it is
+opt-in, and the user has retired it (2026-08-05: "we are not going to use it
+anyway, it's way too slow"). The actual shipping default is FLAT POM (no
+geometric relief). Tessellation remains a measurement arm only.
 
 ---
 

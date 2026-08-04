@@ -140,7 +140,7 @@ with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`, `--deferred --profiler=0
 | `refcap2` | as `ref` but `--pom_shell_cap=2` (isolates the cap) |
 | `refnodisc` | as `ref` but `--no-pom_shell_domain --no-pom_shell_base_clip` |
 | `flatref` | `--no-greets_displace --pom_ref_march` (converged march, NO shell) |
-| `tess` | `--greets_displace` (today's shipping look) |
+| `tess` | `--greets_displace` (opt-in measurement arm; NOT a default — see the note in §0) |
 | `tessfine` | `--greets_displace --greets_displace_cpb=6 --greets_displace_mip=0` |
 | `flat` | `--no-greets_displace --parallax_pom_cone` |
 | `shell` | `--no-greets_displace --parallax_pom_cone --pom_shell --pom_shell_cap=2` |
