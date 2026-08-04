@@ -542,13 +542,42 @@ the alcoves; offer it in the comparison. Est. cost of S1d over flat S1b:
 +10–30% on the same covered pixels (setup + slightly larger hull area; the
 march dominates and is unchanged) — estimate, to be measured.
 
-## Stage S3 — march quality (optional, after S1b lands)
+## Stage S3 — march quality  [IMPLEMENTED 2026-08-04, all flags default OFF]
 
 EGSR 2024 exact relaxed-cone bake (Bán et al., impl:
 github.com/Bundas102/robust-cone-map) replacing our approximate cone bake +
 secant refinement in the march. Disk-cache the cone map (same key scheme as
-S1c). Research estimate −2–4 ms off the converged march. Only worth doing if
-S1b ships with the cone march.
+S1c). Research estimate −2–4 ms off the converged march.
+
+**DONE, and the estimate was wrong in an instructive direction.** Full results
+and every table: `docs/S1_DISCREPANCY_INVENTORY.md` §9. Landed as
+`--pom_cone_exact=1|2`, `--pom_cone_min_step`, `--pom_march_earlyout`,
+`--pom_march_steps_auto`, all default OFF.
+
+What the measurements changed about this stage's premise:
+
+- The bake was not merely "approximate" — it max-pools to 128² and comes out
+  **10.9× (`floor`) / 16.5× (`rooms`) TOO WIDE**, i.e. the cone map was barely
+  steering the march at all (`--parallax_pom_relax` 1 / 4 / 16 move the error
+  under 5 %). The exact per-texel bake is a genuine quality lever, not a speed
+  one: at 32 steps it is **17.7× better on depth** than the legacy map at the
+  same budget.
+- It is **not** −2–4 ms. Cost is dominated by the STEP BUDGET the exact map
+  lets you use well, and the whole quality recipe is **+1.39 ms** at t=5780 —
+  affordable only because of the byte-exact `--pom_march_earlyout`, without
+  which it is +18.29 ms. The early-out separately takes **2.17 ms off the arm
+  that ships today** with no image change at all.
+- The paper's construction is for a BILINEAR height field; ours point-samples,
+  so the implementation measures distance to a texel's CELL, not its centre,
+  and drops the falling-edge prune for a band bound that is exact for a
+  piecewise-constant surface. Stated in the code and in §9.6.
+- **Secant refinement was deliberately not added.** Refine 0 / 6 / 12 move the
+  vista error by 0.4 %; the bisection count is off the critical path at these
+  settings, so a secant there would be optimising a term measured not to matter.
+- The genuinely necessary companion nobody predicted: **`--pom_cone_min_step`**.
+  A true per-texel cone next to a cliff truncates to byte 0, the cone step
+  becomes exactly zero and the march FREEZES on the flat lid. Without the
+  minimum step the exact bake is far worse than the legacy one.
 
 ## Mode matrix + flags summary
 

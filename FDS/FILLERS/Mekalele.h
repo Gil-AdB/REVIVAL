@@ -2447,14 +2447,52 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// + binary-search refine, see the march block) which converges to the SAME
 	// crossing in fewer taps. --parallax_pom_refine = cone bisection count,
 	// --parallax_pom_relax = cone step-width relax factor.
+	// --pom_march_steps_auto (S1 P1, default 0 = off): DERIVE this face's march
+	// budget from the measured step rule instead of taking one global number.
+	//
+	// The rule, measured (docs/S1_DISCREPANCY_INVENTORY.md §9): what a march has
+	// to resolve is TEXELS OF LATERAL TRAVEL down the slab, and the quality knee
+	// sits at a fixed number of texels PER STEP. The travel is
+	//     T = uvAmp × texels-per-UV-tile × tan(incidence)
+	// and the shell's grazing cap bounds the last factor at sqrt(cap² − 1), so a
+	// face's worst case is computable at setup from quantities it already owns.
+	// The flag's value IS the texels-per-step target, so N = ceil(T / value).
+	//
+	// This is what makes the budget follow the SURFACE rather than a hand-set
+	// global: greets' floor tiles its map over ~15 world units and the walls over
+	// 6, and the floor's slab is 6.2× deeper, so the floor genuinely needs a
+	// bigger budget than the wall beside it — and a distant face, marching a
+	// higher height mip with half the texels, automatically needs half.
+	// Pair it with --pom_march_earlyout: the budget is then a CEILING that only
+	// the pixels that need it pay for.
+	const float autoStepTexels = fds::FeatureFlags::pom_march_steps_auto();
+	int pomStepsFace = pomSteps;
+	if (autoStepTexels > 0.0f && heightData && pomSteps > 0) {
+		const bool shellFace = fds::FeatureFlags::pom_shell()
+		                       && F->Txtr->PomShellUvAmp > 0.0f;
+		// The legacy centered march offset-limits its lateral travel at
+		// `parallax_strength` whatever the angle, so its travel does not grow
+		// with incidence at all; the shell marches the TRUE ray, capped.
+		const float cap  = fds::FeatureFlags::pom_shell_cap();
+		const float tanMax = (shellFace && cap > 1.0f)
+		                     ? std::sqrt(cap * cap - 1.0f) : 1.0f;
+		const float uvAmp = shellFace ? PomShellFaceUvAmp(F)
+		                              : fds::FeatureFlags::parallax_strength()
+		                                * F->Txtr->ParallaxScale;
+		const float travelTexels = uvAmp * float(1 << heightLogW) * tanMax;
+		int n = int(travelTexels / autoStepTexels) + 1;
+		if (n < 4)   n = 4;
+		if (n > 256) n = 256;
+		pomStepsFace = n;
+	}
 	const bool useCone    = fds::FeatureFlags::parallax_pom_cone();
 	// --pom_ref_march (DIAGNOSTIC, default OFF): the converged brute-force
 	// reference. It takes precedence over BOTH shipping marches — the point of a
 	// reference is that none of their approximations are in it.
 	const bool useRef     = fds::FeatureFlags::pom_ref_march() && (heightData != nullptr);
 	const int  refSteps   = useRef ? std::max(1, fds::FeatureFlags::pom_ref_steps()) : 0;
-	const int  naiveSteps = (useCone || useRef) ? 0 : pomSteps;
-	const int  coneSteps  = (useCone && coneData && !useRef) ? pomSteps : 0;
+	const int  naiveSteps = (useCone || useRef) ? 0 : pomStepsFace;
+	const int  coneSteps  = (useCone && coneData && !useRef) ? pomStepsFace : 0;
 	// --pom_depth_write (S1a): armed only when a march is actually configured
 	// for this face — the depth written must be the MARCHED crossing, and
 	// single-shift-only faces have no crossing to write. apply_exact keys its

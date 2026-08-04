@@ -98,6 +98,10 @@ exact.
 | `--snapshot_ss` | render a snapshot at N× resolution (snapshot path only) |
 | `--pom_shell_census` | §8: per-face amplitude census from `PomShell_Build` **and** from the tessellation bake. Init-time print only. Also, in a `-DFDS_DEV=ON` build, a raster-time histogram of the height-map mip each shell face actually marched |
 | `--pom_shell_world_amp`, `--pom_shell_world_amp_set` | §8's candidate: amplitude authored in WORLD units. **Default OFF; this is the one entry in this table that is a proposal, not an instrument.** |
+| `--pom_march_earlyout` | §9: break the march once every lane has bracketed. **BYTE-EXACT** — a bracketed lane's step is already forced to 0 and its bracket state frozen. Instrument and candidate at once: it changes no pixel and saves measured ms |
+| `--pom_cone_exact=1\|2` | §9.6: exact PER-TEXEL cone bake (EGSR'24) replacing the max-pooled 128² one, disk-cached. 1 = conservative, 2 = relaxed |
+| `--pom_cone_min_step` | §9.6: floor on the cone step in lateral TEXELS. Without it an exact cone quantising to byte 0 freezes the march on the flat lid |
+| `--pom_march_steps_auto` | §9.7: per-FACE step budget derived from the measured texels-per-step rule instead of one global `--parallax_pom` |
 
 The face-id plane is image-neutral: `--pom_shell --pom_shell_cap=2` at t=6097
 gives md5 `193427ccb28163705ea6baa5500afd0c` with and without `--face_id_dump`.
@@ -176,6 +180,14 @@ a surface in the wrong place) over classes that read as a small brightness shift
 
 **Rank 1. This is the largest colour class, the largest depth class, and it is
 what is visible in the user's own crop.**
+
+> **SUPERSEDED IN PART BY §9 (P1, 2026-08-04).** The class is real and the
+> numbers below reproduce, but two of this section's conclusions do not
+> generalise past t=6097: "the cap is not the mechanism" is false at the vista
+> (§9.1), and the cone map is not under-converged but 10–17× TOO WIDE (§9.2).
+> With `--pom_shell_cap=16 --parallax_pom=32 --pom_cone_exact=1
+> --pom_cone_min_step=1` (all default OFF) the depth term drops by 250–1 000×
+> at every pose — §9.8. **C1 is no longer rank 1 on depth.**
 
 **What it looks like:** long horizontal smears across a grazing wall, and a hard
 dark band under a wall edge. Crop path (identical framing):
@@ -892,3 +904,468 @@ Both are "different parts of the same render moved by different amounts", they
 point in **opposite directions**, and no single flag fixes both.
 `--pom_shell_world_amp_set=0.3` fixes the first and puts the per-pixel path on
 the bake's world scale; C4 remains open.
+
+---
+
+## 9. P1 — C1 ATTACKED. What the grazing streaks and the depth tail actually are
+
+Added 2026-08-04, same branch, same build discipline, same reference definition.
+This section supersedes two claims made earlier in this file — both are marked
+CORRECTED below — and it ends with a candidate recipe whose every flag is
+default OFF.
+
+### 9.0 Method, and the one comparison rule that decides everything
+
+Same converged reference as §1 (`--pom_ref_march --pom_ref_steps=512
+--pom_shell_cap=64`), and §8.7's rule applied without exception: **an arm is
+only ever scored against the reference built with its own amplitude
+semantics.** Every amplitude arm in this section has its own 512-step
+reference; `refUV` scores the UV arms, `refW018` the 0.18-world arms.
+
+One thing to hold on to while reading: **the reference marches the TRUE view
+ray** (`--pom_shell_cap=64` is the kernel's uncapped limit, and §1 states why a
+reference must not have a grazing hack in it). An arm rendered at
+`--pom_shell_cap=2` is therefore being scored against the true ray, which is
+exactly the question "is this surface where the relief actually is". That is
+not a stacked comparison — it is the comparison — but it means the cap enters
+these numbers, and §4's C1 table (which compared `shell` against `refcap2`,
+cap 2 on both sides) deliberately excluded it. Both are honest; they answer
+different questions, and the difference between them turns out to be most of
+the class.
+
+125 headless renders, `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`, sequential,
+every log grepped for `unknown flag` / `requires a value` (zero hits), flags
+passed as bash ARRAYS. Scripts: `p1_sweep.sh`, `p1_ctrl.sh`, `p1_cap.sh`,
+`p1_exact.sh`, `p1_rule.sh`, `p1_final.sh`, `p1_auto.sh`, `p1_bench.sh`,
+`p1_an.py` in the session scratchpad.
+
+### 9.1 CORRECTION 1 — the grazing cap IS the lever at the vista
+
+§4 says "**The cap is not the mechanism** … the `--pom_shell_cap` dial does
+essentially nothing at these poses" on the strength of a 4-px measurement at
+t=6097. That measurement reproduces exactly. **It does not generalise**, and the
+vista pose — where the 0.945-world floor error lives — is where it fails.
+
+Controls at t=4200, every arm UV amplitude, all scored against `refUV`
+(floor shift = the median distance, in screen pixels, you would travel along
+the surface to cover the depth error; it is amplitude-neutral, which the
+world-unit numbers are not):
+
+| arm | what it isolates | colour >12/255 | \|dz\|>0.05 | floor shift |
+|---|---|---|---|---|
+| cone-8, cap 2 (today's `shell`) | — | 621 446 | 757 117 | **45.00 px** |
+| cone-64, cap 2 | 8× the step budget | 602 271 | 728 110 | 42.33 px |
+| naive-256, cap 2 (**no cone map at all**) | the cone map | 603 141 | 726 983 | 42.50 px |
+| cone-8, relax 1 (¼ the cone width) | cone width | 666 831 | 833 232 | 55.73 px |
+| cone-8, relax 16 (4× the cone width) | cone width | 608 677 | 734 240 | 42.25 px |
+| cone-8, refine 0 / refine 12 | bisection count | 634 245 / 620 046 | 754 401 / 757 613 | 42.44 / 45.13 px |
+| **cone-8, cap 64** | **the cap** | **226 432** | **145 280** | **0.21 px** |
+
+**A 256-step uniform march with no cone map is no better than 8 cone steps, and
+removing the cap fixes the floor with 8 steps.** The 0.945-world floor error at
+the vista is the march running a ray that is *5–8× less oblique than the real
+one*: `--pom_shell_cap=2` bounds `1/(V·N)` at 2 (60° off the normal) while the
+vista floor is seen at ~85°. The march then lands on the right height of the
+wrong ray.
+
+### 9.2 CORRECTION 2 — the shipping cone map is 10–17× too WIDE, and is nearly inert
+
+Measured cone-ratio means at mip 0 (`FDS_CONE_HIST`, decoded through each bake's
+own encode ceiling):
+
+| material | legacy `MakeConeMap` | exact conservative | exact relaxed | legacy / exact |
+|---|---|---|---|---|
+| `floor` | 0.6055 | 0.0557 | 0.0716 | **10.9×** |
+| `rooms` | 1.5231 | 0.0922 | 0.1067 | **16.5×** |
+
+Mechanism, from the code: `MakeConeMap` max-pools the height field to a 128²
+grid before computing cones. The max over an 8×8 block of a stone height map is
+near 255 almost everywhere, so hardly any coarse cell has a TALLER cell left to
+be bounded by, and the cone comes out enormous; and lateral distance is
+quantised to 1/128 UV, so a texel one texel from a cliff is told the cliff is
+eight texels away. The march's competing quantity is `dlen = uvAmp × tan θ`,
+at most ~0.7 at the cap, so a cone of 1.5 means `c·gap/(c+dlen)` is a near-full
+gap every step: **the cone map barely steers the march**. That is why
+`--parallax_pom_relax` at 1, 4 and 16 moves the t=6097 error by under 5 % —
+the dial is multiplying something that was already saturated.
+
+(The commit message for `774a9cb` quotes this as "6.6× wider". That paired the
+two histogram blocks to the wrong materials; the correct figures are the table
+above. The direction and the mechanism are unchanged.)
+
+### 9.3 The AMPLITUDE × STEP-BUDGET error surface (P1 task 1)
+
+Every cell scored against the 512-step reference of its own amplitude. Cap held
+at the shipping 2 so this table is comparable to §8's.
+
+**t=4200, the vista.** `floorShift` is the amplitude-neutral column:
+
+| world amp | N=8 | N=16 | N=32 | N=64 | floor shift / unit world amp |
+|---|---|---|---|---|---|
+| UV (floor 1.113, wall 0.180–0.226) | 45.00 px | 42.37 | 42.33 | 42.33 | 38.0 |
+| 0.15 everywhere | 4.62 px | 4.61 | 4.61 | 4.61 | 30.8 |
+| **0.18 everywhere** | **5.52 px** | 5.50 | 5.50 | 5.50 | 30.6 |
+| 0.20 everywhere | 6.14 px | 6.12 | 6.12 | 6.12 | 30.7 |
+| 0.30 everywhere | 9.27 px | 9.19 | 9.19 | 9.19 | 30.9 |
+
+**The march's floor error is exactly proportional to the slab it marches** —
+30.6–30.9 px per unit world amplitude across a 2× amplitude range, four
+significant figures of linearity. The UV row sits above the line (38.0) because
+its slab is 6× deeper still and the budget starts to bite as well.
+
+**The `--pom_shell_world_amp_set=0.18` hypothesis is confirmed as a near-pure
+win at the cap the shipping arm uses.** At t=4200, N=8: floor 45.00 → 5.52 px
+(**8.2×**), walls 0.75 → 0.77 px (unchanged — 0.18 *is* the axis-aligned walls'
+existing depth, and the only wall faces that move are the tilted planes coming
+down from 0.226). At t=6097 the wall column is identical to four decimals.
+
+**t=6097, the corner.** Here the amplitude does little and the STEP BUDGET is
+the whole story (cap 2, since the cap does nothing at this pose):
+
+| world amp | metric | N=8 | N=16 | N=32 | N=64 |
+|---|---|---|---|---|---|
+| UV | colour >12 | 217 217 | 96 896 | 95 623 | 92 362 |
+| UV | \|dz\|>0.05 | 201 217 | 15 307 | 13 509 | 10 009 |
+| 0.18 | colour >12 | 202 452 | 86 281 | 84 973 | 81 713 |
+| 0.18 | \|dz\|>0.05 | 194 794 | 14 294 | 12 506 | 9 006 |
+
+**Going from the shipping 8 steps to 16 cuts the frame's colour error in half
+and its depth error by 13×.** Nobody had swept this.
+
+A trap worth recording: the `|dz|>0.20` column is not comparable across
+amplitudes. A march that fails completely lands on the lid, so its worst
+possible error is one slab; at 0.15 world a failure *cannot* cross a 0.20
+threshold and the count collapses for arithmetic reasons, not quality ones.
+Use `|dz|>0.05` and the pixel-shift column.
+
+### 9.4 The CAP × STEPS × AMPLITUDE surface — the three levers together
+
+t=4200, UV amplitude, scored against `refUV`:
+
+| cap | N=8 | N=32 | N=64 | floor shift @N=32 |
+|---|---|---|---|---|
+| 2 | 757 117 | 728 184 | 728 110 | 42.33 px |
+| 4 | 309 448 | 231 740 | 231 662 | 0.47 px |
+| 8 | 152 814 | 60 715 | 60 631 | 0.15 px |
+| 16 | 145 280 | **52 829** | 52 745 | 0.14 px |
+| 64 | 145 280 | 52 829 | 52 745 | 0.14 px |
+
+(cells are `|dz|>0.05`.) At 0.18 world amplitude the same table bottoms out at
+**2 909** px. At t=6097 the cap column is flat to 4 px — §4's finding, intact.
+
+So the three levers are **orthogonal and pose-selective**: the cap owns the
+vista/floor, the step budget owns the walls, the amplitude scales both.
+
+### 9.5 The STEP RULE, in texels per step (P1 task 1's deliverable)
+
+What a march has to resolve is not "a slab" and not "an angle" — it is
+**texels of lateral travel down the slab**:
+
+```
+T  =  uvAmp × texelsPerUVtile × tan(incidence)
+   =  worldAmp × texelsPerUVtile × tan(incidence) / worldPerUVtile
+```
+
+with `tan(incidence) ≤ sqrt(cap² − 1)` because `--pom_shell_cap` bounds
+`1/(V·N)` directly. For greets at mip 0 (1024 texels/tile), cap 16:
+
+| surface | uvAmp | worst-case T | N at 16 texels/step |
+|---|---|---|---|
+| `rooms` (walls) | 0.030 | 491 texels | 31 |
+| `floor`, UV amplitude | 0.075 | 1 226 texels | 77 |
+| `floor`, 0.18 world | 0.012 | 196 texels | 13 |
+
+`--pom_cone_min_step` is a direct dial on texels-per-step, so sweeping it
+against N measures the rule in exactly those units. t=6097, exact cone bake,
+cap 16, UV amplitude, cells are `|dz|>0.05` against `refUV`:
+
+| texels/step \ N | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|
+| 0.25 | 55 098 | 5 779 | 721 | 721 |
+| 0.5 | 47 592 | 3 680 | 739 | 739 |
+| 1 | 36 742 | 945 | 761 | 761 |
+| 2 | 20 838 | 846 | 846 | 846 |
+| 4 | 14 816 | 949 | 949 | 949 |
+| 8 | 14 594 | 1 398 | 1 398 | 1 398 |
+
+and t=4200:
+
+| texels/step \ N | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|
+| 0.25 | 420 835 | 59 073 | 11 727 | 10 508 |
+| 1 | 361 985 | 42 558 | 11 014 | 10 611 |
+| 4 | 277 675 | 24 448 | 13 892 | 13 889 |
+| 8 | 205 729 | 23 853 | 21 170 | 21 170 |
+
+**Read it as: the budget N is the binding constraint until N × (texels per
+step) covers T, and past that point the minimum step is irrelevant** (the
+N=32 and N=64 columns are flat in texels/step, and identical to each other).
+Below the knee, forcing a bigger step buys coverage at the cost of resolution —
+the N=8 column improves 3.8× as the forced step grows, and still never reaches
+the N=32 level.
+
+The knee sits at **T / N ≈ 16 texels per step** for the walls (T=491, knee at
+N≈31) and **≈ 38** for the floor (T=1 226, knee at N≈32, only 4 % left on the
+table at N=64 — grazing floor rays hit dense relief long before they travel
+their worst-case T). 16 texels/step is the conservative end of that measured
+range and is the number `--pom_march_steps_auto` is quoted at below.
+
+This is the rule the task asked for, and it replaces a hand-set global: it
+scales with the slab (uvAmp), with the map resolution (so a face marching a
+higher height mip needs proportionally fewer steps), and with the incidence
+bound the cap already imposes.
+
+### 9.6 EXACT PER-TEXEL CONE BAKE (P1 task 2)
+
+`--pom_cone_exact=1|2` (default 0 = OFF), after Bán/Valasek/Bálint/Vad,
+"Robust Cone Step Mapping", EGSR 2024 (github.com/Bundas102/robust-cone-map),
+with **one deliberate deviation, stated because it changes the construction**:
+the paper's cone is exact for a *bilinearly interpolated* height field, and
+ours point-samples (`roundi` → nearest texel), so the surface the ray actually
+intersects is piecewise CONSTANT over texel cells. Distance is therefore
+measured to the nearest point of a texel's **cell**, not to its centre — at
+r=1 that is a factor-of-two difference on the tightest constraint there is —
+and the paper's falling-edge (limiting-vertex) prune, which is a statement
+about bilinear patches, is replaced by the band bound (`every texel on ring r
+is ≥ (r−½)/size away and at most (1 − h) taller`), which is exact for this
+surface and prunes just as hard. Quantisation is by **truncation**, never
+rounding: a cone rounded up is precisely what makes a march skip geometry.
+Mode 1 = conservative, mode 2 = relaxed (Policarpo's construction: the cone may
+penetrate the field and is bounded by where the ray *leaves* it again).
+
+Disk-cached under `Runtime/cache/` on the S1c horizon-map pattern, keyed on the
+height field's mip-0 bytes + mode + encode ceiling + scan radius.
+
+**Bake cost, 1024², threaded, cold:** conservative **1 921 ms** (`floor`) /
+**1 927 ms** (`rooms`); relaxed **8 407 ms** / **5 027 ms**. Both then load from
+a 1 398 096-byte file per material. The relaxed bake is 2.6–4.4× the
+conservative one and, as the table below shows, does not earn it.
+
+t=6097, cap 16, UV amplitude, all against `refUV`:
+
+| arm | colour >12 | colour >32 | \|dz\|>0.05 | \|dz\|>0.20 |
+|---|---|---|---|---|
+| legacy bake, N=8 | 217 214 | 49 506 | 201 213 | 23 427 |
+| legacy bake, N=32 | 95 620 | 20 764 | 13 505 | 12 300 |
+| legacy bake, N=64 | 92 359 | 19 405 | 10 005 | 8 851 |
+| exact cons., N=8, **no min step** | 439 104 | 126 662 | 564 961 | 93 087 |
+| exact cons., N=32, no min step | 92 268 | 24 280 | 28 190 | 18 258 |
+| exact relaxed, N=8, no min step | 280 945 | 78 154 | 304 772 | 70 862 |
+| exact relaxed, N=32, no min step | 90 984 | 20 633 | 15 673 | 12 316 |
+| exact cons., N=8, **min step 1 texel** | 96 742 | 30 451 | 36 742 | 25 876 |
+| **exact cons., N=32, min step 1 texel** | **70 407** | **12 332** | **761** | **320** |
+
+Three things this says, in order of importance:
+
+1. **The exact bake is useless without `--pom_cone_min_step`, and excellent
+   with it.** A true per-texel cone next to a cliff is legitimately smaller than
+   the byte quantum, truncates to 0, and `c·gap/(c+dlen)` is then exactly ZERO:
+   **the march freezes in place**, never brackets, keeps the un-shifted entry
+   UV, and for the shell that renders the flat lid — up to a full slab in front
+   of the true surface. That is the 439 104 row, and it is the same failure the
+   legacy bake never had only because its cones were 16× too wide to ever
+   quantise to zero. Flooring the step at one lateral texel removes it.
+2. **With the floor in place, the exact bake beats the legacy bake by 17.7× on
+   depth at equal step count** (761 vs 13 505 at N=32) and by 13.1× against the
+   legacy bake at *eight times* the steps (761 vs 10 005 at N=64). At N=8 it
+   already matches the legacy bake's N=32 colour (96 742 vs 95 620).
+3. **The relaxed bake (mode 2) is not worth its 2.6–4.4× bake cost here.** It
+   is 1.16–1.29× wider than the conservative one, and at N=32 it lands at
+   15 673 — worse than conservative+min-step's 761. `--parallax_pom_relax=4` on
+   top of an exact conservative cone reaches the same place for free.
+   `--parallax_pom_relax=1` is much worse at every budget (313 077 colour at
+   N=32): the exact cone alone genuinely does need widening.
+
+Secant refinement was **not** added: the existing `--parallax_pom_refine` is a
+6-iteration bisection on the same bracket, and at the settings above the
+bisection count is already off the critical path (refine 0 vs 6 vs 12 at the
+vista: 754 401 / 757 117 / 757 613 `|dz|>0.05` — a 0.4 % spread). The converged
+reference already carries a secant solve; adding one to the shipping march
+would be optimising a term measured not to matter.
+
+### 9.7 PER-FACE STEP BUDGET FROM THE RULE (P1 task 3)
+
+`--pom_march_steps_auto=<texels per step>` (default 0 = off) computes §9.5's
+rule per FACE in the dispatcher and uses the result instead of
+`--parallax_pom`'s global number. The per-triangle and per-pixel paths are not
+touched, which is what keeps flag-off byte-exact (§8.6 records the two earlier
+variants that moved work into those paths and drifted 5 px by 1/255).
+
+At `=16` it derives N=31 for `rooms`, N=77 for the UV-amplitude `floor`, and
+N=13 for the floor once `--pom_shell_world_amp_set=0.18` shrinks its slab —
+the budget following the surface, and shrinking when the amplitude fix removes
+the reason for it.
+
+Quality against the hand-set N=32 (both with cap 16, exact bake, min step 1,
+`|dz|>0.05` / colour >12 against the matching reference):
+
+| pose | fixed N=32 | auto @16 tex/step | fixed N=32 + 0.18 | auto + 0.18 |
+|---|---|---|---|---|
+| t=6097 | 761 / 70 407 | **761 / 70 407** | 406 / 63 562 | 406 / 63 562 |
+| t=5780 | 11 378 / 105 496 | **10 393 / 102 260** | 4 140 / 67 559 | 5 045 / 67 708 |
+| t=2845 | 95 / 46 532 | **95 / 46 532** | 95 / 47 119 | 95 / 47 119 |
+| t=4200 | 11 014 / 113 302 | **10 837 / 114 601** | 740 / 56 188 | 1 096 / 55 086 |
+
+Equal to the hand-set budget within noise at three poses and slightly better at
+two, while spending 31 steps on a wall instead of 32 and 77 on the floor
+instead of 32. The one place it is measurably *worse* is `auto + 0.18` at the
+vista (1 096 vs 740): with the floor's slab shrunk to 0.18 the rule asks for
+only 13 steps, and that is the rule spending less than a hand-set 32 would.
+Whether that trade is right is a look question, not a metric one.
+
+### 9.8 BEFORE / AFTER, all four poses
+
+`BASE` = today's shipping shell arm (`--pom_shell --parallax_pom_cone
+--pom_shell_cap=2`, 8 steps, legacy cone bake).
+`BEST` = `--pom_shell_cap=16 --parallax_pom=32 --pom_cone_exact=1
+--pom_cone_min_step=1 --pom_march_earlyout`.
+`+AMP` adds `--pom_shell_world_amp --pom_shell_world_amp_set=0.18` and is
+scored against `refW018`. **Every flag involved is default OFF.**
+
+```
+pose  arm                            colour>12  colour>32  |dz|>.05  |dz|>.20   floor medDz  floor shift  wall shift
+t=6097 BASE                             217217      49510    201217     23431       +0.0000      0.29 px     0.00 px
+       AMP only (0.18)                  202452      42041    194794     17798       +0.0000      0.00 px     0.00 px
+       BEST                              70407      12332       761       320       +0.0000      0.00 px     0.00 px
+       BEST+AMP                          63562       8960       406       306       +0.0000      0.00 px     0.00 px
+t=5780 BASE                             809291     344168   1026343    609121       -0.6091     29.82 px     0.49 px
+       AMP only                         754858     311360    904568    411187       -0.0935      4.20 px     0.40 px
+       BEST                             105496      26802     11378      5671       +0.0000      0.00 px     0.00 px
+       BEST+AMP                          67559      16158      4140      2626       +0.0000      0.00 px     0.00 px
+t=2845 BASE                             165052      45136     84724     13728        (no floor in frame)     0.00 px
+       AMP only                         168250      46433     84676     13664                               0.00 px
+       BEST                              46532       9595        95        13                               0.00 px
+       BEST+AMP                          47119       9712        95        13                               0.00 px
+t=4200 BASE                             621446     275663    757117    637643       -1.0186     45.00 px     0.75 px
+ VISTA AMP only                         548793     225862    714862    239746       -0.1441      5.52 px     0.77 px
+       BEST                             113302      31361     11014      3163       +0.0000      0.00 px     0.00 px
+       BEST+AMP                          56188      17033       740       195       +0.0000      0.00 px     0.00 px
+```
+
+Against the acceptance target:
+
+| target | result |
+|---|---|
+| C1 **depth** error down ≥5× at the vista | `\|dz\|>0.05` 757 117 → **740** (**1 023×**); the floor's median signed error −1.0186 → **0.0000** world; median floor shift 45.00 px → **0.00 px**. **Hit, by three orders of magnitude.** |
+| no regression at the wall poses | t=6097 depth 201 217 → 406 (496×), colour 217 217 → 63 562 (3.4×). t=5780 depth 1 026 343 → 4 140 (248×), colour 809 291 → 67 559 (12.0×). t=2845 depth 84 724 → 95 (892×), colour 165 052 → 46 532 (3.5×). **No pose regresses on any column.** |
+
+Two caveats on those numbers, stated so they are not over-read:
+
+- t=5780's `BASE` row (809 291 colour) is far above §4's C1 figure for the same
+  arm (181 304). §4 scored `shell` against `refcap2` — cap 2 on both sides —
+  and this section scores it against the true-ray reference. The gap between
+  the two IS §9.1's cap term. Neither number is wrong; they answer different
+  questions, and this section's is the one that says where the surface is.
+- **Colour is improving far less than depth** (3.4–12× vs 250–1 000×). The
+  residual 46 k–113 k colour pixels are on the dithered grazing mortar bands,
+  which §1 already flagged as the one place the reference itself is only
+  converged to ±1 step. Do not read the colour column as "still broken" without
+  looking at where it lives.
+
+### 9.9 PERF
+
+Recipe: `./DEMO --bench=scene@scene=greets,t=5780,iters=60 --deferred
+--profiler=0`, five arms **interleaved** (A B C D E, repeated ×4) so thermal
+drift hits every arm equally, headless dummy drivers, load-guarded (the script
+refuses to start with another `DEMO` up; nothing else was running). t=5780 is
+the worst pose — walls fill the frame. Deltas are computed **per rep and then
+averaged**, so the ± is the spread of the paired difference, not of the arm.
+
+| arm | flags added to `--pom_shell --parallax_pom_cone --no-greets_displace` | mean ms/iter (4 reps) | run-to-run spread |
+|---|---|---|---|
+| A `BASE` | `--pom_shell_cap=2` (8 steps, legacy bake) | **58.13** | 0.97 ms |
+| B | A `+ --pom_march_earlyout` | **55.96** | 1.10 ms |
+| C | `--pom_shell_cap=16 --parallax_pom=32 --pom_cone_exact=1 --pom_cone_min_step=1` | **76.42** | 0.95 ms |
+| D `BEST` | C `+ --pom_march_earlyout` | **59.52** | 1.20 ms |
+| E `AUTO` | D but `--pom_march_steps_auto=16` instead of `--parallax_pom=32` | **58.82** | 0.81 ms |
+
+| paired delta | ms | sd over 4 reps |
+|---|---|---|
+| **early-out on today's 8-step arm** (B − A) | **−2.17** | 0.09 |
+| **early-out on the 32-step exact arm** (C − D) | **−16.90** | 0.25 |
+| BEST vs BASE, no early-out (C − A) | +18.29 | 0.45 |
+| **BEST vs BASE, with early-out** (D − A) | **+1.39** | 0.48 |
+| **AUTO vs BASE, with early-out** (E − A) | **+0.69** | 0.51 |
+
+Read honestly:
+
+- **The whole recipe costs +1.39 ms** at the worst pose — 2.4 % of a 58 ms
+  frame — for the error reductions in §9.8. That is not "tiny"; on a 58 ms
+  budget 1.4 ms is real and someone has to decide it is worth buying.
+- **The early-out is what makes it affordable, and it is byte-exact.** Without
+  it the same quality costs +18.29 ms. It also takes **2.17 ± 0.09 ms off the
+  arm that ships today**, changing nothing about the image — the cheapest
+  measured win in this section, and the one that needs no look review.
+- **The per-face budget (E) is 0.69 ± 0.51 ms over BASE**, i.e. **0.70 ± 0.24 ms
+  cheaper than the hand-set 32** while matching or beating its quality at three
+  of four poses (§9.7). The ± is comparable to the number, so state it as
+  "within about ±0.5 ms of free relative to BASE", not as zero.
+
+**Init cost.** The exact bake is 1 921 / 1 927 ms per 1024² material COLD, then
+written to `Runtime/cache/` (1 398 096 B each). Warm, the whole
+`LoadOrBakeConeMapExact` call is **1 ms per material** — against the legacy
+`MakeConeMap`'s **240 ms (`floor`) + 151 ms (`rooms`)** every launch. So on any
+run after the first, the exact bake is **389 ms FASTER to initialise** than the
+map it replaces.
+
+### 9.10 Gates
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (mirrortest / conetest / halotest) |
+| city `t=1961` colour | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact |
+| greets `shell` cone-8 t=6097 | `193427ccb28163705ea6baa5500afd0c` — byte-exact |
+| greets `shell` naive-8 t=6097 | `13dcf8e54416816a29ba90f0fe468756` — byte-exact |
+| greets `tess` t=6097 | `3f86c73cc7ed8f0ad8f57b12984537d0` — byte-exact |
+| greets `flat` t=6097 | `9d095fbcac0c00888578d56172786997` — byte-exact |
+| wasm | `cmake --build build-wasm` **links clean** (118/118, `DEMO.wasm` + `DEMO_snapshot.wasm`) — `Mekalele.h` is a shared kernel, so this was required |
+
+Taken by `git stash`-ing this section's source changes, rebuilding, rendering,
+unstashing, rebuilding and rendering again — not by trusting that the code looks
+inert. That A/B is what proves the `ctx.coneUnit` hoist (which replaced a
+constant-folded expression in the innermost march loop) did not drift.
+
+A second, independent check: `--pom_march_steps_auto` landed after most of this
+section's renders, so three arms captured with the earlier binary
+(`c8UV`, `k16c32UV`, `e1r4m1c32UV` at t=6097) were re-rendered with the final
+one and are **md5-identical**, which validates the whole earlier data set rather
+than assuming it.
+
+`--pom_march_earlyout`'s byte-exactness also showed up incidentally in the
+bench: the with- and without-early-out arms print identical
+`[GREETS-CENTROID post-bench]` masses to the last digit.
+
+**Note on §8.8's city pin.** It is the md5 of `city_t001961_color.ppm` alone.
+A gate script that concatenates the colour PPM *and* the `z.pgm` dump produces
+`7438016d804807154892c019b8b69c73`, which is not a regression — it is a
+different hash of a different set of bytes. Recorded here because it cost a
+stash-and-rebuild to establish.
+
+### 9.11 Verdict — is C1 small enough that the geometry fork decides?
+
+**On depth, yes, decisively.** C1's depth term is what made the per-pixel shell
+unusable as a surface: a floor most of a slab in front of where the relief is.
+It is now 740–4 140 px frame-wide at the two poses where it was 757 k and
+1 026 k, and 95 px at t=2845. For comparison, §C3 measures the *raw lid
+over-coverage* at 143 835 px and §C7 the reference's own boundary model at the
+same order. **The march's depth error is now two to three orders of magnitude
+below the geometry classes it was competing with**, so lid-vs-recess-vs-border-
+taper is no longer being decided against a moving surface.
+
+**On colour, not yet, and the honest reason is that I have not localised the
+residual.** 46 k–113 k pixels still differ by >12/255. §1 says the reference
+itself is only converged to ±1 march step on the dithered grazing mortar bands
+(49 301 px at t=6097 between 512 and 1024 reference steps), and the residual is
+the same order as that band at t=6097 — but I did **not** measure the overlap,
+so I cannot claim the residual *is* the reference's own uncertainty. That is
+the obvious next measurement and it is one render (`--pom_ref_steps=1024`
+against the BEST arm) plus one mask intersection.
+
+**What this section does NOT settle.** C2 (17 326 px of corner
+interpenetration), C3 (143 835 px of raw lid over-coverage), C6 (30 % of the
+shadow cube, 10 370 px of non-stone pixels moved) and C7 (the boundary model)
+are all untouched by anything here — they are properties of the moved geometry
+and of the shell's boundary definition, and every one of them is now LARGER
+than C1's depth term. If the campaign is ranking by size, the ranking in §4 is
+now stale: **C1 has dropped from rank 1 to below C3, C6 and C7 on depth.**
