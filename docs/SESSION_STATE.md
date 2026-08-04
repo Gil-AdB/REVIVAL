@@ -1,5 +1,71 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> **2026-08-05 — GREETS NOW SHIPS THE PBR STACK BY DEFAULT, and `--vanilla`
+> turns everything back off.** Two user-requested changes on fog-wt.
+>
+> **(A) Greets scene defaults gained five flags** (`GreetsApplyRunDefaults`,
+> DEMO/GREETS.CPP — the RUN block, not init, because all five are global render
+> flags): `pbr`, `env_brdf_analytic`, `pbr_multiscatter`, `diffuse_energy`,
+> `sh_ambient`. That is exactly the set the user typed on every greets launch.
+> Applied via `FF::setDefault` behind the existing `GreetsScenePreempted()`
+> guard, so an explicit `--no-pbr` still wins and `--scene-mirrortest` /
+> `--scene-conetest` never inherit them.
+> - Derived from the kernel, not from the flag list: `pbr` is read at
+>   DeferredSurfaceKernel.cpp:1429 and drives BOTH the scalar per-light branch
+>   (:2400) and the 8-wide vec loop (:2156) — the flag's own help text saying
+>   "vec path only" is STALE, greets' normal-mapped pixels take the scalar
+>   branch and do get GGX. `env_brdf_analytic` (:1439), `pbr_multiscatter`
+>   (:1440) and `diffuse_energy` (:1442) all sit behind `env_refl`, which greets
+>   gets for free: its RVSM metallic-map imports (momy / amudim / screen emiter)
+>   call `setDefault(env_refl,true)` in MaterialImport at init — **measured in
+>   the init log**, which is why those three are not dead defaults.
+>   `pbr_multiscatter` is a strict no-op without `env_brdf_analytic` (it reuses
+>   its A,B terms), so the pair ships together. `sh_ambient` (:1445 +
+>   RENDER.CPP:489) is independent of env_refl.
+> - `metal_map` / `roughness_map` / `ao_map` are ALREADY compile-default ON in
+>   FeatureFlags.def — verified, nothing added for them.
+> - NOT included: `pbr_roughness`, `deferred_vec_force` ([test] knobs), and
+>   `xpar_pbr` — which is not a dependent of `pbr` at all (the transparent
+>   kernel reads it independently at :2785 and never reads `pbr()`); turning the
+>   greets glass PBR is a separate look call nobody has made.
+> - **COST [M]** greets bench t=5780, 1920×1080, `FDS_THREADS=1` (one core is
+>   the only load-robust arm on a box other agents are rendering on), 6
+>   interleaved pairs: **+20.0 ms/frame (+5.3 %)** in the least-loaded pair,
+>   +25.9 ms on min-of-arms, ~+39 ms median. The 12-thread A/B could NOT resolve
+>   it — 10 interleaved pairs spanned 60.8–199 ms/iter under load 9–47 and min-ON
+>   (60.8) came in *under* min-OFF (63.3). Inferred, not measured: at the
+>   observed ~6.5× pool speedup that is **~3–6 ms/frame** in a normal run.
+>
+> **(B) `--vanilla` / `FDS_VANILLA=1`** (FeatureFlags.def + .cpp, category
+> engine, default OFF): forces EVERY flag to its compile-time default AND marks
+> it explicitly-set, so scene `setDefault` blocks (greets' new PBR set included)
+> and `SCRIPTS/*.params` are suppressed too — without the set marks "vanilla"
+> would be a lie. **Semantics are pure parse order: put it FIRST.** Proven on
+> conetest: `--vanilla` + the render_gate cone recipe = `b41894f9…`, byte-equal
+> to the gate baseline; the same recipe with `--vanilla` LAST = `1bc0dc35…`.
+> It CLEARS ENV-SET VALUES (the eager FDS_* scan runs before argv, so the CLI
+> form wipes it; the env form is applied after the env scan for the same rule),
+> works inside `--flags-file` and `FDS_BAKED_ARGS`, and prints a one-line
+> `[FLAGS] --vanilla: 424 flags forced…` note so a run is self-identifying. It
+> is compile-time DEFAULTS, not all-off: `deferred` defaults off, so a vanilla
+> run renders the FORWARD path. Startup-only — the tune console returns 400
+> rather than pretending a live mass reset works.
+>
+> **(A) is REAL and frame-wide, measured against the noise:** three ON runs vs
+> three OFF runs of the greets gate pose (`--no-shadows` variant), pairwise —
+> within-arm run-to-run noise touches 0.64–14.0 % of the frame, cross-arm ON-vs-OFF
+> touches **80.0 / 88.9 / 88.9 %** with max |Δ| 231 and mean |Δ| 4–10 on the changed
+> pixels. A broad low-amplitude shift over nearly every lit pixel is exactly the
+> signature of swapping the BRDF + the ambient model, and it is an order of
+> magnitude outside the noise. `[SHAMB]` appears in every ON run's log and in no
+> OFF run's — the SH probe really is baking.
+>
+> **Gates**: city `37e62845` and fountain `51fff7cd` byte-unchanged;
+> render_gate 3/3 (the preempt guard holds); chase byte-identical to the SAME
+> binary's pre-change run at all five poses + both cinematic poses. **The greets
+> pin could not be re-taken — greets is currently 100 % nondeterministic, before
+> and after this change. See the trap in the verification protocol.**
+
 > **2026-08-05 — S1d-1 SEAM CENSUS DONE, and it OVERTURNS the S1d plan's
 > premise.** Read `docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-1. Two new flags,
 > **both default OFF, byte-null**: `--pom_seam_census` (patch-boundary topology
@@ -104,7 +170,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | gate | recipe | pin |
 |---|---|---|
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
-| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
+| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **NO VALID PIN (2026-08-05).** Old value `de3e9a5fb3aa39e008ef41b83f2b8d1b` is stale twice over: greets now ships the PBR stack by default (see the top block) AND the recipe is currently 100 % nondeterministic — 9 runs, 9 distinct hashes, **before** any of that day's edits. Do not treat a greets mismatch as a regression until the nondeterminism is fixed; see the trap below. |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
 | chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` (t1600 unchanged) |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (cone-tile sky-clip fix; 3-run stable, byte==cull-off): t800 `28e5a2a78d64ae98a1fcc4b739991be2` t1600 `1cbde501c26d231a4295632dfbebd34b` (t1600 unchanged) |
@@ -112,10 +178,30 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | wasm | `make wasm` | links |
 
 Traps:
-- **greets flips ~1-in-12** to a random hash (unresolved kernel-internal
-  nondeterminism, see Known Issues). Majority over 3+ runs decides; a single
-  mismatch means rerun, not failure. Rate conclusions need the binomial
-  (24-run gates for race claims — see memory `measurement-tool-traps`).
+- **greets no longer flips ~1-in-12 — it is currently 100 % nondeterministic,
+  MEASURED 2026-08-05.** 9 runs of the exact gate recipe on an OTHERWISE
+  UNMODIFIED tree gave 9 distinct md5s, and the images are not close: two runs
+  differ on **22.7 %** of the 1920×1080 frame with mean |Δ| 28 and max Δ 212 on
+  the differing pixels (a second pair: 24.1 %, mean 53, max 223). That is not
+  the documented "subtle pano slivers" — something structural (background
+  lightmap bake / bake-vs-render ordering is the standing suspect) resolves
+  differently every run. Both measurements were taken with OTHER AGENTS' greets
+  renders running concurrently (load 4.3–19, one `./DEMO --snapshot=greets`
+  live), so widened race windows are the leading explanation, but the old
+  "majority over 3+ runs" rule is DEAD until someone re-measures on an idle
+  box: there is no majority to take. Until then greets cannot gate anything;
+  use city / fountain / render_gate, and judge greets by A/B crops.
+  Rate conclusions still need the binomial (24-run gates for race claims — see
+  memory `measurement-tool-traps`).
+  **First bisect result (3 runs each, 2026-08-05):** dropping the shadow /
+  lightmap bake from the recipe pulls it back into majority range —
+  `--no-shadow_lightmap` 2 unique / 3, `--no-shadows` 2/3,
+  `--no-shadow_lightmap --no-shadows --no-mirror_rtt --no-greets_mirror
+  --no-shard_deferred` 2/3, while `--no-mirror_rtt --no-greets_mirror` alone
+  stays 3 unique / 3. So the shadow-and-lightmap bake path is where to look
+  first; the mirror RTT is not the (only) culprit. This matches
+  tools/render_gate.sh's own comment ("greets is NOT [deterministic]
+  (timing-dependent background lightmap bake)") — it was never gate-worthy.
 - **city cache**: `cache/city_envmap_cube.bin` is keyed on CITY.FLD bytes.
   After ANY CITY.FLD install, discard the first run (cache rebuild), then hash.
 - Greets pin includes the USER'S UNCOMMITTED files (GREETS.FLD/MAT, momy
@@ -130,6 +216,13 @@ Traps:
   the pins are ONLY valid for the exact recipe `t=100,400,800,1200,1600` (and
   the cinematic `t=800,1600`). Running a subset/superset gives different (still
   deterministic) hashes — NOT a regression. Always gate with the exact list.
+  **STALE AT t=1600 (measured 2026-08-05):** with the user's uncommitted
+  `Runtime/SCENES/CHASE.FLD` + `Authoring/chase/*.lwo` in the tree, default
+  t1600 is `c8c93b886dd31fcc01363c806d7626de` and cinematic t1600 is
+  `debdb1f435a14949b2e05be0bb53b1e7`; t100/400/800/1200 and cinematic t800 all
+  still match the pins above. Those two are the mountain edits, not a code
+  regression — same binary, same values before and after that day's flag work.
+  Re-pin them when he commits the FLD.
   Valid snapshot range **t=0..1698** (past 1699 the harness re-dumps the last
   rendered VPage). Regen from `Authoring/chase/` via `pin_scene.py
   --legacy-vlum` is byte-identical to the shipping FLD (delta=0, 747,511 B) —

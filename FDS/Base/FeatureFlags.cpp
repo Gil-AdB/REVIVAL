@@ -147,6 +147,46 @@ bool ownedByOtherParser(const char *name) {
 
 bool applyOneToken(State &s, const char *arg);   // fwd (flags-file recursion)
 
+// ── --vanilla / FDS_VANILLA=1 ───────────────────────────────────────────
+// A true BARE BASELINE: every flag back to its compile-time default AND
+// marked explicitly-set. The set marks are the whole point — without them
+// the scene drivers' FeatureFlags::setDefault blocks (greets' PBR/HDR/
+// shadow look, chase's bolt-light reach, crash's exposure) and the
+// SCRIPTS/<scene>.params lines would re-enable everything a frame later
+// and "vanilla" would be a lie.
+//
+// ORDERING is pure parse order, exactly like --flags-file: applyVanilla
+// erases whatever came before it and anything named after it wins, so
+// `--vanilla --deferred --pbr` = bare + those two. That covers the CLI,
+// a `vanilla` line inside a --flags-file, and FDS_BAKED_ARGS, since all
+// three funnel through applyOneToken.
+//
+// ENV: the eager FDS_* scan in state() runs BEFORE argv, so a --vanilla on
+// the command line clears env-set values as a side effect of the reset —
+// intended ("turn everything off" means everything). The env FORM
+// (FDS_VANILLA=1) has no ordering of its own, so state() applies it AFTER
+// the env scan to keep the same rule: env counts as "before".
+//
+// NOT "everything off": flags whose compile default is ON stay on
+// (param_scripts, tune_server, warn_unknown_flags, deferred_zcull,
+// metal_map/roughness_map/ao_map, ...). `deferred` defaults off, so a
+// vanilla run renders the FORWARD path — a legitimate mode, not a crash.
+void applyVanilla(State &s) {
+    for (int i = 0; i < kNumBool;  ++i) { s.boolVals[i]  = kBoolDefs[i].defaultValue;  s.boolSet[i]  = true; }
+    for (int i = 0; i < kNumFloat; ++i) { s.floatVals[i] = kFloatDefs[i].defaultValue; s.floatSet[i] = true; }
+    for (int i = 0; i < kNumInt;   ++i) { s.intVals[i]   = kIntDefs[i].defaultValue;   s.intSet[i]   = true; }
+    // Keep the state self-describing: the reset above put `vanilla` itself
+    // back to its own compile default (off), which would make a vanilla run
+    // report that it is not one.
+    const int vi = findBoolByCliName("vanilla");
+    if (vi >= 0) s.boolVals[vi] = true;
+    std::fprintf(stderr,
+        "[FLAGS] --vanilla: %d flags forced to compile-time defaults and marked "
+        "explicitly-set (scene setDefault() + SCRIPTS/*.params suppressed; env-set "
+        "values cleared). Tokens named AFTER it still win.\n",
+        kNumBool + kNumFloat + kNumInt);
+}
+
 // ── --flags-file=<path> ─────────────────────────────────────────────────
 // Reads a text file of flag tokens, one per line, and applies each through
 // applyOneToken in file order. Canonical line form is the bare token WITHOUT
@@ -258,6 +298,14 @@ bool applyOneToken(State &s, const char *arg) {
     if (bi >= 0) {
         bool v = cliBoolValue(value);
         if (negate) v = !v;
+        // --vanilla is an ACTION, not a stored value (see applyVanilla): it
+        // rewrites the whole State in place, here in parse order, so later
+        // tokens override it. --no-vanilla / --vanilla=0 falls through to the
+        // plain store below and resets nothing.
+        if (v && std::strcmp(kBoolDefs[bi].name, "vanilla") == 0) {
+            applyVanilla(s);
+            return false;
+        }
         s.boolVals[bi] = v;
         s.boolSet[bi]  = true;
         return false;
@@ -339,6 +387,16 @@ State &state() {
                 init.intSet[i]  = true;
             }
         }
+        // FDS_VANILLA=1 — the env form of --vanilla. Applied AFTER the env
+        // scan above so it clears env-set values too (the CLI form clears
+        // them by construction, since argv is parsed after this whole
+        // lambda); FDS_BAKED_ARGS below and parseArgs later still win, which
+        // keeps the single rule "anything named after --vanilla wins".
+        {
+            const int vi = findBoolByCliName("vanilla");
+            if (vi >= 0 && envIsTruthy(std::getenv(kBoolDefs[vi].envVar)))
+                applyVanilla(init);
+        }
         // Compile-time-baked CLI string (mainly for wasm builds where
         // argv and getenv aren't routinely available). Set at CMake
         // configure time via -DFDS_BAKED_ARGS="..." or the env var of
@@ -402,7 +460,13 @@ void FeatureFlags::printHelp(std::FILE *out) {
         "  AFTER --flags-file= override the file, tokens inside the file\n"
         "  override what came before it. Files can include other files via a\n"
         "  flags-file= line (depth capped at 4, cycles detected).\n"
-        "  Starter preset: --flags-file=PRESETS/city-noir.flags\n\n");
+        "  Starter preset: --flags-file=PRESETS/city-noir.flags\n\n"
+        "  --vanilla       BARE BASELINE — every flag to its compile-time default,\n"
+        "  marked explicitly-set so the SCENE defaults (greets' PBR/HDR block, ...)\n"
+        "  and SCRIPTS/*.params are suppressed too. PUT IT FIRST: parse order wins,\n"
+        "  so `--vanilla --deferred --pbr` = bare + those two. Clears env-set values\n"
+        "  as well (FDS_VANILLA=1 is the env form). Compile DEFAULTS, not all-off —\n"
+        "  `deferred` defaults off, so a vanilla run renders the FORWARD path.\n\n");
     // Print by category, in table order. Walk both bool + value lists once
     // per distinct category we see, in order of first appearance.
     auto printedCategory = [](const char *cat, const char **seen, int seenCount) {
@@ -599,6 +663,14 @@ void FeatureFlags::dumpParamsJson(std::string &out) {
 
 bool FeatureFlags::setParamFromText(const char *name, const char *value) {
     const ParamRef r = findParam(name);
+    // --vanilla is a startup-only ACTION (see applyVanilla). Applying it live
+    // would contradict everything already built from the init-time flags
+    // (scene geometry, shadow/env/lightmap bakes, G-buffer layout), so the
+    // tune console gets an honest 400 instead of a knob that lies.
+    if (r.type == ParamType::Bool && r.index == findBoolByCliName("vanilla")) {
+        std::fprintf(stderr, "[FLAGS] 'vanilla' is startup-only — relaunch with --vanilla\n");
+        return false;
+    }
     switch (r.type) {
     case ParamType::Bool: {
         const bool on = !(std::strcmp(value, "0") == 0 ||
