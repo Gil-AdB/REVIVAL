@@ -633,6 +633,32 @@ struct TileRasterizerCtx {
 	// Evaluated only for lanes that failed the own box (horizontal_and early-out).
 	const float *shellSibs = nullptr;
 	int shellSibCount = 0;
+	// ── S1d-2a CLOSED SHELL (--pom_shell_side_faces) ────────────────────────
+	// The four SIDE FACES of the slab over this patch, in the order
+	// uMin, uMax, vMin, vMax. `shellSideLean` is how far each side plane leans
+	// OUTWARD per unit of slab height below the AUTHORED plane: at a convex
+	// ridge the side face is the neighbouring patch's own plane, the solid is
+	// the INTERSECTION of the two half-spaces, and the material therefore
+	// extends past the ridge line as the ray goes deeper — which the vertical
+	// UV box cuts off. 0 = the plain vertical extrusion (correct at a true
+	// boundary and at a concave fold). `shellSideCls` is that side's dominant
+	// boundary class (SeamClass: 0 coplanar, 1 concave, 2 convex, 3 true, 4
+	// unattributed) and drives the terminal action under --pom_shell_side_edge.
+	// shellH0 = the slab height of the AUTHORED plane: 1 under --pom_recess_only
+	// (the geometry was not moved, so the plane IS the top of the field), 0.5
+	// under the lid. The lean is measured from it in BOTH directions, so above
+	// the authored plane the shell NARROWS — which is the lid-overhang kill
+	// --pom_shell_base_clip approximates, done geometrically.
+	bool  pomShellSideFaces = false;
+	int   pomShellSideEdge = 0;
+	float shellH0 = 0.5f;
+	float shellSideLean[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	uint8_t shellSideCls[4] = { 4, 4, 4, 4 };
+	// (lo, hi) per side: the along-side UV span over which that side is a TRUE
+	// BOUNDARY (v for a u side, u for a v side). lo > hi = none. Kept separate
+	// from shellSideCls because a free edge is typically a small MINORITY of the
+	// box side it lands on, so a dominant-class lookup never fires on it.
+	float shellSideTrue[8] = { 1,-1, 1,-1, 1,-1, 1,-1 };
 	// --pom_viz: replace the albedo with the height field sampled at the FINAL
 	// (post-march) UV, grayscale — the parallax result made directly visible
 	// (block domes, mortar cuts, march terracing/banding). Debug only; rides
@@ -1803,11 +1829,7 @@ struct TileRasterizer {
 							// its own box — the overwhelming majority of covered
 							// pixels — so the multi-box domain costs nothing away
 							// from a border.
-							auto inDomain = [&](const Vec8f &u, const Vec8f &v) {
-								Vec8fb ins = (u >= Vec8f(ctx.shellUMin))
-								           & (u <= Vec8f(ctx.shellUMax))
-								           & (v >= Vec8f(ctx.shellVMin))
-								           & (v <= Vec8f(ctx.shellVMax));
+							auto inSibs = [&](const Vec8f &u, const Vec8f &v, Vec8fb ins) {
 								for (int sb = 0; sb < ctx.shellSibCount
 								     && !horizontal_and(ins); ++sb) {
 									const float *bx = ctx.shellSibs + 4 * sb;
@@ -1816,8 +1838,57 @@ struct TileRasterizer {
 								}
 								return ins;
 							};
-							if (ctx.pomShellDomain)
-								keep &= inDomain(uf, vf);
+							auto inDomain = [&](const Vec8f &u, const Vec8f &v) {
+								return inSibs(u, v, (u >= Vec8f(ctx.shellUMin))
+								                  & (u <= Vec8f(ctx.shellUMax))
+								                  & (v >= Vec8f(ctx.shellVMin))
+								                  & (v <= Vec8f(ctx.shellVMax)));
+							};
+							// ── S1d-2a: the shell's SIDE FACES, leaning ──────
+							// The UV box is a VERTICAL side face, which is only
+							// the right shape at a free edge. At a CONVEX ridge
+							// the real side face is the neighbouring patch's
+							// plane and the solid is the INTERSECTION of the two
+							// half-spaces, so at depth (h0 − h) below the
+							// authored plane the material reaches lean·(h0 − h)
+							// PAST the ridge line in UV — and the box cuts it
+							// off exactly there. S1d-1 measured 72.9 % of the
+							// pixels the march cannot answer (66.8 % of the ones
+							// that go black) sitting on such a ridge.
+							// Both endpoints of the ray segment are tested: the
+							// ENTRY (h = hEnter) and the marched HIT. The
+							// boundary and the ray are both affine in h, so if
+							// the ray's lateral rate exceeds the lean the exit
+							// is monotone (hit-side test suffices) and if it does
+							// not the ray can never leave (entry-side test
+							// suffices) — testing both is exact in either case.
+							// Under --pom_recess_only hEnter == h0 == 1 exactly,
+							// so the entry term is identically zero and every
+							// lean is >= 0: the test can only ADD domain.
+							// Cost: 8 FMAs + one compare group per covered pixel,
+							// and only for lanes that failed the plain box.
+							auto inSideFaces = [&](const Vec8f &u, const Vec8f &v,
+							                       const Vec8f &h) {
+							const Vec8f dh = Vec8f(ctx.shellH0) - h;
+							return (u >= Vec8f(ctx.shellUMin) - Vec8f(ctx.shellSideLean[0]) * dh)
+							     & (u <= Vec8f(ctx.shellUMax) + Vec8f(ctx.shellSideLean[1]) * dh)
+							     & (v >= Vec8f(ctx.shellVMin) - Vec8f(ctx.shellSideLean[2]) * dh)
+							     & (v <= Vec8f(ctx.shellVMax) + Vec8f(ctx.shellSideLean[3]) * dh);
+							};
+							// The domain a ray must stay inside. With the side faces off
+							// it is the union of the UV boxes, exactly as before. With
+							// them on the OWN box is replaced by the leaning side planes
+							// (the siblings are coplanar continuations and have no side
+							// face at all, so they keep their plain box).
+							if (ctx.pomShellDomain) {
+								if (ctx.pomShellSideFaces)
+									keep &= inSibs(uf, vf, ctx.pomShellBaseClip
+									        ? inSideFaces(uf, vf, pomHitH)
+									        : (inSideFaces(uf, vf, pomHitH)
+									         & inSideFaces(ufGeo, vfGeo, hEnter)));
+								else
+									keep &= inDomain(uf, vf);
+							}
 							// --pom_shell_base_clip (the lid-overhang fix): the lid is
 							// a rigid outward translation of the patch, so at a patch
 							// BORDER it covers screen the authored plane never did,
@@ -1867,22 +1938,94 @@ struct TileRasterizer {
 							//       so it is a box clamp, not a union clamp.
 							//   2 = discard, the lid model's behaviour, kept so the
 							//       void it produces stays measurable.
-							if (ctx.pomRecess && ctx.pomRecessEdge != 2) {
-								if (ctx.pomRecessEdge == 1) {
-									uf = select(keep, uf,
-									     min(max(uf, Vec8f(ctx.shellUMin)),
-									         Vec8f(ctx.shellUMax)));
-									vf = select(keep, vf,
-									     min(max(vf, Vec8f(ctx.shellVMin)),
-									         Vec8f(ctx.shellVMax)));
-								} else {
-									uf = select(keep, uf, ufGeo);
-									vf = select(keep, vf, vfGeo);
-									pomHitH = select(keep, pomHitH, hEnter);
+								// ── S1d-2b PER-BOUNDARY-CLASS TERMINAL ACTION ────────────
+								// (--pom_shell_side_edge, default 0 = the global policy).
+								// S1d-1 measured that the right answer for a ray that leaves
+								// the shell is NOT the same at every boundary: at a TRUE
+								// BOUNDARY the wall really ends and the geometry behind wins
+								// the pixel correctly (all 95 546 such px void ZERO under a
+								// discard), so the clamp is the bug there; at a convex ridge
+								// or a concave fold nothing is behind, so a discard is the
+								// black gash. Which side the ray left through is read off the
+								// same four comparisons the domain test just made, and the
+								// per-side CLASS is a bake-time constant, so a side that is
+								// not a true boundary costs literally nothing (the branch is
+								// scalar and folds away).
+								Vec8fb sideKill = Vec8fb(false);
+								Vec8f  exU = uf, exV = vf, exH = pomHitH;
+								const int sideEdge = ctx.pomShellSideFaces ? ctx.pomShellSideEdge : 0;
+								if (sideEdge > 0) {
+									const Vec8f dhX = Vec8f(ctx.shellH0) - pomHitH;
+									const Vec8f uLo = Vec8f(ctx.shellUMin) - Vec8f(ctx.shellSideLean[0]) * dhX;
+									const Vec8f uHi = Vec8f(ctx.shellUMax) + Vec8f(ctx.shellSideLean[1]) * dhX;
+									const Vec8f vLo = Vec8f(ctx.shellVMin) - Vec8f(ctx.shellSideLean[2]) * dhX;
+									const Vec8f vHi = Vec8f(ctx.shellVMax) + Vec8f(ctx.shellSideLean[3]) * dhX;
+									const Vec8fb o[4] = { uf < uLo, uf > uHi, vf < vLo, vf > vHi };
+									// A free edge is a MINORITY of the box side it lands on (measured on
+									// greets: 9.875 of 1847.73 world of 'rooms' boundary is TRUE, yet it
+									// owns 11.9 % of the pixels the march cannot answer), so the policy
+									// keys on the side's TRUE SUB-INTERVAL, not on its dominant class.
+									for (int k = 0; k < 4; ++k) {
+										const float lo = ctx.shellSideTrue[2*k], hi = ctx.shellSideTrue[2*k+1];
+										if (!(lo <= hi)) continue;          // no free edge on this side
+										const Vec8f along = (k < 2) ? vf : uf;
+										sideKill |= o[k] & (along >= Vec8f(lo)) & (along <= Vec8f(hi));
+									}
+									sideKill &= ~keep;
+									if (sideEdge >= 2) {
+										// Land ON the side face: solve the ray's own crossing of
+										// the leaning side plane. Ray and plane are both affine in
+										// h, so each side is one linear solve; the exit is the
+										// LARGEST crossing height still below the entry (the first
+										// one the descending ray meets). Depth and UV both come
+										// from that point, so the pixel shows a real face at a real
+										// depth instead of the un-marched flat wall.
+										const Vec8f du = VtT * rayScale, dv = VtB * rayScale;
+										const Vec8f H0 = Vec8f(ctx.shellH0);
+										const Vec8f NEG = Vec8f(-1.0e30f);
+										auto solve = [&](const Vec8f &d, const Vec8f &g,
+										                 float bound, float lean, bool upper) {
+											// upper:  g + d*(h-hEnter) = bound + lean*(H0-h)
+											// lower:  g + d*(h-hEnter) = bound - lean*(H0-h)
+											const Vec8f ln  = upper ? Vec8f(lean) : Vec8f(-lean);
+											const Vec8f den = d + ln;
+											const Vec8f num = Vec8f(bound) + ln * H0 - g + d * hEnter;
+											const Vec8f h   = num / select(abs(den) > Vec8f(1e-9f), den, Vec8f(1e-9f));
+											return select(abs(den) > Vec8f(1e-9f) & (h <= hEnter), h, NEG);
+										};
+										Vec8f hX = NEG;
+										hX = max(hX, solve(du, ufGeo, ctx.shellUMin, ctx.shellSideLean[0], false));
+										hX = max(hX, solve(du, ufGeo, ctx.shellUMax, ctx.shellSideLean[1], true));
+										hX = max(hX, solve(dv, vfGeo, ctx.shellVMin, ctx.shellSideLean[2], false));
+										hX = max(hX, solve(dv, vfGeo, ctx.shellVMax, ctx.shellSideLean[3], true));
+										const Vec8fb okX = (hX > Vec8f(-1.0e29f)) & (hX >= Vec8f(0.0f));
+										exH = select(okX, hX, hEnter);
+										exU = select(okX, ufGeo + du * (hX - hEnter), ufGeo);
+										exV = select(okX, vfGeo + dv * (hX - hEnter), vfGeo);
+									}
 								}
-							} else {
-								p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
-							}
+								if (ctx.pomRecess && ctx.pomRecessEdge != 2) {
+									if (ctx.pomRecessEdge == 1) {
+										uf = select(keep, uf,
+										     min(max(uf, Vec8f(ctx.shellUMin)),
+										         Vec8f(ctx.shellUMax)));
+										vf = select(keep, vf,
+										     min(max(vf, Vec8f(ctx.shellVMin)),
+										         Vec8f(ctx.shellVMax)));
+									} else if (sideEdge >= 2) {
+										uf      = select(keep, uf, exU);
+										vf      = select(keep, vf, exV);
+										pomHitH = select(keep, pomHitH, exH);
+									} else {
+										uf = select(keep, uf, ufGeo);
+										vf = select(keep, vf, vfGeo);
+										pomHitH = select(keep, pomHitH, hEnter);
+									}
+									if (sideEdge > 0)
+										p_mask &= Vec8ib(_mm256_castps_si256(__m256(~sideKill)));
+								} else {
+									p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
+								}
 						}
 						if (pomZ) {
 							// Shell depth uses the TRUE-ray form: the hit sits Δh·A below
@@ -2582,6 +2725,29 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 			pomShellSibCount = int(o1 - o0);
 		}
 	}
+	// S1d-2a --pom_shell_side_faces: this patch's four SIDE FACES (dominant
+	// boundary class + outward lean per unit slab height, in the order
+	// uMin, uMax, vMin, vMax). Baked by PomShell_Build from the same
+	// position-coincidence topology --pom_seam_census builds; null when the
+	// shell was built with the flag off, which is what keeps the flag
+	// byte-null rather than merely inert.
+	const uint8_t *pomShellSideCls  = nullptr;
+	const float   *pomShellSideLean = nullptr;
+	if (pomShellFace && F->PomShellGroup != 0 && F->Txtr->PomShellSideCls
+	    && F->Txtr->PomShellSideLean
+	    && F->PomShellGroup <= F->Txtr->PomShellDomainCount) {
+		pomShellSideCls  = F->Txtr->PomShellSideCls  + 4 * (F->PomShellGroup - 1);
+		pomShellSideLean = F->Txtr->PomShellSideLean + 4 * (F->PomShellGroup - 1);
+	}
+	// S1d-2b: the free-edge sub-intervals, read only when the per-class edge
+	// policy is armed (they are what it keys on).
+	const float *pomShellSideTrue = nullptr;
+	if (pomShellSideLean && F->Txtr->PomShellSideTrue
+	    && fds::FeatureFlags::pom_shell_side_edge() > 0
+	    && fds::FeatureFlags::pom_shell_side_faces() > 0)
+		pomShellSideTrue = F->Txtr->PomShellSideTrue + 8 * (F->PomShellGroup - 1);
+	const bool pomSideFaces = fds::FeatureFlags::pom_shell_side_faces() > 0
+	                          && pomShellSideLean != nullptr;
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -2644,6 +2810,15 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// unmoved there is no overhang to remove. Left on it would test the
 		// domain at a half-slab lateral offset (its s term is A·(0.5 − hEnter)
 		// = −0.5·A here) and clip real wall at every patch border.
+		// --pom_shell_side_faces can do the same job geometrically (the leaning
+		// side planes NARROW the shell above the authored plane by exactly the
+		// band this clip approximates with one lateral offset) — but only as a
+		// KILL: the march still enters through the LID only, so a pixel the
+		// side planes reject becomes a hole instead of a ray that enters lower
+		// down through the side face. Measured at the 13 review poses: replacing
+		// this clip with the side-plane entry test costs +520 k px of void. So
+		// the two are an A/B, not a stack, and the side faces' ENTRY term is
+		// applied only when this clip is OFF (see the domain test).
 		.pomShellBaseClip = fds::FeatureFlags::pom_shell_base_clip()
 		                    && !fds::FeatureFlags::pom_recess_only(),
 		.pomNormal = fds::FeatureFlags::pom_normal() && (heightData != nullptr)
@@ -2663,6 +2838,28 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.shellVMax = pomShellDom ? pomShellDom[3] : (pomShellFace ? std::max({F->V1, F->V2, F->V3}) : 0.0f),
 		.shellSibs = pomShellSibs,
 		.shellSibCount = pomShellSibCount,
+		// S1d-2a closed shell. shellH0 = the slab height of the AUTHORED plane:
+		// 1 under --pom_recess_only (the geometry was not moved, so the plane is
+		// the top of the field), 0.5 under the lid (the slab straddles it).
+		.pomShellSideFaces = pomSideFaces,
+		.pomShellSideEdge = fds::FeatureFlags::pom_shell_side_edge(),
+		.shellH0 = fds::FeatureFlags::pom_recess_only() ? 1.0f : 0.5f,
+		.shellSideLean = { pomSideFaces ? pomShellSideLean[0] : 0.0f,
+		                   pomSideFaces ? pomShellSideLean[1] : 0.0f,
+		                   pomSideFaces ? pomShellSideLean[2] : 0.0f,
+		                   pomSideFaces ? pomShellSideLean[3] : 0.0f },
+		.shellSideCls = { uint8_t(pomSideFaces ? pomShellSideCls[0] : 4),
+		                  uint8_t(pomSideFaces ? pomShellSideCls[1] : 4),
+		                  uint8_t(pomSideFaces ? pomShellSideCls[2] : 4),
+		                  uint8_t(pomSideFaces ? pomShellSideCls[3] : 4) },
+		.shellSideTrue = { pomShellSideTrue ? pomShellSideTrue[0] :  1.0f,
+		                   pomShellSideTrue ? pomShellSideTrue[1] : -1.0f,
+		                   pomShellSideTrue ? pomShellSideTrue[2] :  1.0f,
+		                   pomShellSideTrue ? pomShellSideTrue[3] : -1.0f,
+		                   pomShellSideTrue ? pomShellSideTrue[4] :  1.0f,
+		                   pomShellSideTrue ? pomShellSideTrue[5] : -1.0f,
+		                   pomShellSideTrue ? pomShellSideTrue[6] :  1.0f,
+		                   pomShellSideTrue ? pomShellSideTrue[7] : -1.0f },
 		.pomViz = fds::FeatureFlags::pom_viz(),
 		.pomMipViz = fds::FeatureFlags::pom_mip_viz(),
 		.heightLogW = heightLogW,

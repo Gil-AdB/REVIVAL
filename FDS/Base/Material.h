@@ -206,6 +206,32 @@ struct Material
     // can only ADD discards, never holes-by-omission of a real box, and the
     // build prints CLAMPED when it happens so it is never silent).
     static constexpr unsigned kPomShellMaxSibs = 12;
+    // S1d-2a CLOSED SHELL (--pom_shell_side_faces): the slab's four SIDE FACES,
+    // one per side of the patch's UV box, indexed 4*(PomShellGroup-1) + k with
+    // k = 0 uMin, 1 uMax, 2 vMin, 3 vMax.
+    //   PomShellSideCls  — the dominant boundary class along that side (the
+    //     SeamClass enum: 0 coplanar, 1 angled-in/concave, 2 angled-out/convex,
+    //     3 true boundary, 4 = the side carried no classified boundary at all).
+    //     The terminal action for a ray that leaves through this side is a table
+    //     lookup on it (--pom_shell_side_edge).
+    //   PomShellSideLean — how far the side plane leans OUTWARD per unit of slab
+    //     height below the authored plane, in UV units. At a CONVEX ridge the
+    //     side face is the neighbour's own plane and the solid is the
+    //     INTERSECTION of the half-spaces, so the material extends past the
+    //     ridge line as you go deeper; the vertical UV box cuts it short. 0 =
+    //     the plain vertical extrusion (a true boundary, a concave fold, or a
+    //     side the bake could not attribute).
+    // Both null = no side-face table (the flag was off when the shell was built).
+    uint8_t             * PomShellSideCls        = nullptr;
+    float               * PomShellSideLean       = nullptr;
+    //   PomShellSideTrue — the sub-interval of that side, in the ALONG-SIDE UV
+    //     coordinate (v for a u side, u for a v side), that is a TRUE BOUNDARY:
+    //     2 floats per side, (lo, hi), lo > hi = none. A per-side DOMINANT class
+    //     cannot carry this one: measured on greets, TRUE boundary is 9.875 of
+    //     1847.73 world of 'rooms' patch boundary (0.5 %) yet owns 11.9 % of the
+    //     pixels the march cannot answer, so it is always a minority of whatever
+    //     box side it lands on and the dominant-class lookup never fires.
+    float               * PomShellSideTrue       = nullptr;
     // Applied albedo tint (per-channel multipliers, 1 = untinted). The tint
     // mutates the shared Texture pixels; these echo the last applied values
     // for the editor UI + sidecar round-trip (see MaterialImport tintR/G/B).

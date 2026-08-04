@@ -3946,7 +3946,8 @@ static const char *SeamClassName(int c) {
 	case SC_COPLANAR:   return "COPLANAR";
 	case SC_ANGLED_IN:  return "ANGLED_IN";
 	case SC_ANGLED_OUT: return "ANGLED_OUT";
-	default:            return "TRUE_BOUNDARY";
+	case SC_TRUE:       return "TRUE_BOUNDARY";
+	default:            return "NONE";
 	}
 }
 
@@ -4098,8 +4099,13 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	// scene, authored positions and all, so the boundary classification below
 	// runs on the mesh as authored. Captured here for the same reason the
 	// amplitude census is: the vertex move further down is what would destroy it.
+	// S1d-2a --pom_shell_side_faces CONSUMES the same topology (it is what the
+	// side planes are derived from), so it arms the capture too — without the
+	// per-edge printing, which stays behind --pom_seam_census.
+	const int  sideFaces  = fds::FeatureFlags::pom_shell_side_faces();
 	const bool seamCensus = fds::FeatureFlags::pom_seam_census()
-	                     || fds::FeatureFlags::pom_seam_viz() > 0;
+	                     || fds::FeatureFlags::pom_seam_viz() > 0
+	                     || sideFaces > 0;
 	std::vector<SeamFace> seamAll;
 	std::map<SeamEdgeKey, std::vector<int>> seamEdges;
 	struct CensusFace { float wu, wv, w, area; };
@@ -4575,6 +4581,34 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		std::vector<std::array<int,SC_N>>    pCnt(nGroups, {0,0,0,0});
 		// Distinct UV transforms across CONTINUATION seams (the S1d-2 cost).
 		std::map<std::string, long long> xformHist;
+		// ── S1d-2a SIDE-FACE TABLE (--pom_shell_side_faces) ─────────────────
+		// The shell's four side faces, one per side of the patch's UV box
+		// (k = 0 uMin, 1 uMax, 2 vMin, 3 vMax). Each classified boundary segment
+		// is attributed to the box side its UV MIDPOINT is nearest, and the side
+		// takes the dominant class by length. `sideLean` is how far that side
+		// plane leans OUTWARD per unit of slab height below the authored plane:
+		// at a CONVEX ridge the side face IS the neighbour's plane and the solid
+		// is the INTERSECTION of the half-spaces, so the material extends
+		// cot(fold)·depth past the ridge line — which the vertical UV box cuts
+		// off, and that cut is where the user's gash and smear both live.
+		// Derivation (exact, no trig): the neighbour's half-space test
+		//   N_b·[P_uv(u,v) + N_a·(h−h0)·ampWorld] + d_b ≤ 0
+		// is LINEAR in (u, v, h). Along the box side's own axis it reads
+		//   u ≤ uBound + lean·(h0 − h),  lean = (N_a·N_b)·ampWorld / |N_b·dP/du|
+		// and the same with dP/dv on a v side. A negative lean (a fold past 90°,
+		// where the shell would NARROW with depth) is clamped to 0 so the test
+		// stays purely additive under recess-only; a lean above the ray's own
+		// maximum lateral rate (uvAmp × --pom_shell_cap) can never bind, so it
+		// is clamped there too and the kernel arithmetic stays in a sane range.
+		std::vector<std::array<double,SC_N>> sideLen(size_t(nGroups) * 4, {0.0,0.0,0.0,0.0});
+		std::vector<double> sideLeanSum(size_t(nGroups) * 4, 0.0);   // length-weighted, convex only
+		std::vector<double> sideLeanLen(size_t(nGroups) * 4, 0.0);
+		std::vector<float>  sideLeanMin(size_t(nGroups) * 4, 1e30f); // conservative variant
+		// S1d-2b: the along-side UV span over which each side is a FREE EDGE.
+		std::vector<float>  sideTrueLo(size_t(nGroups) * 4,  1e30f);
+		std::vector<float>  sideTrueHi(size_t(nGroups) * 4, -1e30f);
+		double sideOffLen = 0.0, sideAllLen = 0.0;   // boundary NOT near any box side
+		const float leanCapUv = fds::FeatureFlags::pom_shell_cap();
 		double maxCoplanarUvErr = 0.0;
 		int nMirroredChart = 0, nChartOk = 0;
 		for (int ai = 0; ai < int(seamAll.size()); ++ai) {
@@ -4696,6 +4730,55 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				const float vA = fa.V[i0] + (fa.V[i1]-fa.V[i0])*t0;
 				const float uB = fa.U[i0] + (fa.U[i1]-fa.U[i0])*t1;
 				const float vB = fa.V[i0] + (fa.V[i1]-fa.V[i0])*t1;
+				// ── S1d-2a: attribute this segment to a BOX SIDE, and derive that
+				// side's LEAN (--pom_shell_side_faces). See the sideLen/sideLean
+				// declarations above for the geometry this implements.
+				if (sideFaces > 0 && fa.chartOk) {
+					const float *bx = dom + 4 * (g - 1);
+					const float um = 0.5f * (uA + uB), vm = 0.5f * (vA + vB);
+					const float dS[4] = { um - bx[0], bx[1] - um, vm - bx[2], bx[3] - vm };
+					int k = 0;
+					for (int q = 1; q < 4; ++q) if (dS[q] < dS[k]) k = q;
+					const float diag = std::max(1e-6f,
+						std::max(bx[1] - bx[0], bx[3] - bx[2]));
+					sideAllLen += slen;
+					// A segment far from every box side is an L-shaped patch's inner
+					// corner: attributing it to the nearest side is an approximation,
+					// so it is counted and printed rather than hidden.
+					if (dS[k] > 0.02f * diag) sideOffLen += slen;
+					const size_t si = size_t(g - 1) * 4 + size_t(k);
+					sideLen[si][cls] += slen;
+					float lean = 0.0f;
+					if (cls == SC_ANGLED_OUT && nbIdx >= 0) {
+						const SeamFace &fb = seamAll[nbIdx];
+						const Vector &ax = (k < 2) ? fa.dPdu : fa.dPdv;
+						const float a = fb.N.x*ax.x + fb.N.y*ax.y + fb.N.z*ax.z;
+						const bool outPos = (k == 1 || k == 3);   // +axis is the outward one
+						const float wu = std::sqrt(fa.dPdu.x*fa.dPdu.x + fa.dPdu.y*fa.dPdu.y
+						                         + fa.dPdu.z*fa.dPdu.z);
+						const float wv = std::sqrt(fa.dPdv.x*fa.dPdv.x + fa.dPdv.y*fa.dPdv.y
+						                         + fa.dPdv.z*fa.dPdv.z);
+						const float wg = std::sqrt(wu * wv);
+						// Only when the neighbour plane's UV gradient points the SAME way
+						// as this side's outward normal does it bound this side at all.
+						if (wg > 1e-9f && std::fabs(a) > 1e-6f && ((a > 0.0f) == outPos)) {
+							const float ampW = worldAmpMode ? worldAmp : (uvAmp * wg);
+							const float ampU = worldAmpMode ? (worldAmp / wg) : uvAmp;
+							lean = bestDot * ampW / std::fabs(a);
+							if (!(lean > 0.0f)) lean = 0.0f;       // fold past 90 deg
+							lean = std::min(lean, ampU * leanCapUv);
+						}
+					}
+					if (lean > 0.0f) { sideLeanSum[si] += double(lean) * slen;
+					                   sideLeanLen[si] += slen; }
+					sideLeanMin[si] = std::min(sideLeanMin[si], lean);
+					if (cls == SC_TRUE) {
+						const float a0 = (k < 2) ? vA : uA;
+						const float a1 = (k < 2) ? vB : uB;
+						sideTrueLo[si] = std::min(sideTrueLo[si], std::min(a0, a1));
+						sideTrueHi[si] = std::max(sideTrueHi[si], std::max(a0, a1));
+					}
+				}
 				// ── the transform a continuation would have to apply ──
 				char xf[96] = "n/a";
 				if (nbIdx >= 0 && seamAll[nbIdx].chartOk && fa.chartOk) {
@@ -4820,6 +4903,71 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 					matName, g, (double)sf.U[0], (double)sf.V[0], (double)sf.U[1],
 					(double)sf.V[1], (double)sf.U[2], (double)sf.V[2]);
 			}
+			}
+		// ── S1d-2a PUBLISH THE SIDE-FACE TABLE (--pom_shell_side_faces) ──
+		// Per patch, per box side: the dominant boundary class (what the
+		// terminal action keys on) and the outward lean of that side plane
+		// (what closes the shell). Mode 1 takes the dominant class's lean,
+		// mode 2 the MINIMUM over every segment on the side, which zeroes any
+		// side that mixes a convex ridge with a free edge or a fold.
+		if (sideFaces > 0) {
+			std::vector<uint8_t> cls4(size_t(nGroups) * 4, uint8_t(SC_N));
+			std::vector<float>   lean4(size_t(nGroups) * 4, 0.0f);
+			long long nSideCls[SC_N + 1] = {0,0,0,0,0};
+			int nLeaning = 0; float leanLo = 1e30f, leanHi = 0.0f;
+			for (size_t si = 0; si < cls4.size(); ++si) {
+				const auto &L = sideLen[si];
+				int best = -1; double bl = 0.0, tot = 0.0;
+				for (int c = 0; c < SC_N; ++c) { tot += L[c]; if (L[c] > bl) { bl = L[c]; best = c; } }
+				if (best < 0 || tot <= 0.0) { ++nSideCls[SC_N]; continue; }
+				cls4[si] = uint8_t(best);
+				++nSideCls[best];
+				float ln = 0.0f;
+				if (sideFaces >= 2) {
+					ln = (sideLeanMin[si] < 1e29f) ? sideLeanMin[si] : 0.0f;
+				} else if (best == SC_ANGLED_OUT && sideLeanLen[si] > 0.0) {
+					ln = float(sideLeanSum[si] / sideLeanLen[si]);
+				}
+				lean4[si] = ln;
+				if (ln > 0.0f) { ++nLeaning; leanLo = std::min(leanLo, ln); leanHi = std::max(leanHi, ln); }
+			}
+			mat->PomShellSideCls  = new uint8_t[cls4.size()];
+			std::memcpy(mat->PomShellSideCls, cls4.data(), cls4.size());
+			mat->PomShellSideLean = new float[lean4.size()];
+			std::memcpy(mat->PomShellSideLean, lean4.data(), lean4.size() * sizeof(float));
+			std::vector<float> tru(cls4.size() * 2, 0.0f);
+			int nTrueSpan = 0;
+			for (size_t si = 0; si < cls4.size(); ++si) {
+				const bool has = sideTrueLo[si] <= sideTrueHi[si];
+				tru[2*si+0] = has ? sideTrueLo[si] :  1.0f;
+				tru[2*si+1] = has ? sideTrueHi[si] : -1.0f;
+				if (has) ++nTrueSpan;
+			}
+			mat->PomShellSideTrue = new float[tru.size()];
+			std::memcpy(mat->PomShellSideTrue, tru.data(), tru.size() * sizeof(float));
+			std::fprintf(stderr, "[POM-SIDE] '%s' %d of %zu sides carry a TRUE-BOUNDARY "
+				"sub-interval; --pom_shell_side_edge keys on THOSE, not on the dominant "
+				"class (a free edge is a minority of the box side it lands on)\n",
+				matName, nTrueSpan, cls4.size());
+			std::fprintf(stderr,
+				"[POM-SIDE] '%s' mode=%d: %u patches x 4 sides; dominant class "
+				"cop=%lld in=%lld out=%lld true=%lld none=%lld; %d sides LEAN "
+				"(%.5f..%.5f UV per unit slab height); %.1f%% of classified boundary "
+				"length sits >2%% of the box away from every box side (attributed to "
+				"the nearest one anyway)\n",
+				matName, sideFaces, nGroups, nSideCls[0], nSideCls[1], nSideCls[2],
+				nSideCls[3], nSideCls[SC_N], nLeaning,
+				(double)(nLeaning ? leanLo : 0.0f), (double)leanHi,
+				sideAllLen > 0.0 ? 100.0 * sideOffLen / sideAllLen : 0.0);
+			if (fds::FeatureFlags::pom_seam_census())
+				for (unsigned g = 0; g < nGroups; ++g)
+					std::fprintf(stderr, "[POM-SIDE-PATCH] '%s' g=%u "
+						"uMin=%s/%.5f uMax=%s/%.5f vMin=%s/%.5f vMax=%s/%.5f\n",
+						matName, g + 1,
+						SeamClassName(cls4[4*g+0]), (double)lean4[4*g+0],
+						SeamClassName(cls4[4*g+1]), (double)lean4[4*g+1],
+						SeamClassName(cls4[4*g+2]), (double)lean4[4*g+2],
+						SeamClassName(cls4[4*g+3]), (double)lean4[4*g+3]);
 		}
 	}
 	// ── --pom_shell_census (DIAGNOSTIC, default OFF) ────────────────────────

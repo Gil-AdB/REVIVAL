@@ -550,3 +550,320 @@ nothing, convex ridges are everything" is a property of this scene's
 architecture (closed rooms, symmetric wall pairs, no free edges), not a general
 truth about the shell model. The instrument is scene-agnostic — point it at
 another material and it will answer again.
+
+---
+
+# S1d-2 — CLOSING THE SHELL: side faces, and a per-boundary-class edge policy
+
+Added 2026-08-05, branch `fog-wt`. Three new flags, **all default OFF, all
+byte-null** (gates in §S1d-2.7): `--pom_shell_side_faces`,
+`--pom_shell_side_edge`. Built in the order S1d-1's census established, each
+measured before the next was started.
+
+Framing correction carried in from the coordinator mid-stage: **tessellation is
+NOT the shipping default and never was** (`greets_displace` = 0, nothing enables
+it) and the user has retired it as a candidate look. The incumbent is **FLAT
+POM**. Tessellation stays in every table below as the void-gate yardstick and as
+the reference for what correct relief looks like — not as a rival to beat on
+cost.
+
+## S1d-2.0 The mechanism S1d-1 pointed at, stated exactly
+
+At a CONVEX ridge the solid is the **intersection** of the two half-spaces, so
+the side face of patch A's slab is patch B's own plane — and that plane **leans
+outward with depth**. At depth d below the authored plane the material reaches
+`cot(fold)·d` PAST the ridge line. The shell's vertical UV box cuts it off
+exactly there, and that cut is where the user's gash (under a discard) and the
+grazing smear (under a clamp) both live.
+
+The derivation is exact and needs no trig. The neighbour's half-space test
+
+```
+N_b · [ P_uv(u,v) + N_a·(h − h0)·ampWorld ] + d_b  ≤  0
+```
+
+is LINEAR in `(u, v, h)`. Along a box side's own axis it reads
+
+```
+u ≤ uMax + lean·(h0 − h),   lean = (N_a·N_b)·ampWorld / |N_b · dP/du|
+```
+
+with `h0` = the slab height of the authored plane (1 under `--pom_recess_only`,
+0.5 under the lid). So the whole closed shell is four leaning half-planes, four
+FMAs and one compare group per covered pixel.
+
+Sanity check against the geometry: a 90° fold gives `N_a·N_b = 0` → lean 0 → the
+vertical extrusion, which is right for a box corner. The user's 27° ridge gives
+`cot 27° × uvAmp` = 1.96 × 0.03 = **0.059 UV**, and the bake independently
+measures **0.0431 / 0.0515** for that patch's two sides. A TRUE boundary and a
+concave fold both keep lean 0: at a free edge the wall really ends, and at a
+concave fold the material is a UNION, so the neighbour's plane does not bound
+this shell at all (that is the hand-off case, S1d-2c).
+
+## S1d-2.1 What the bake produces
+
+`PomShell_Build`, under `--pom_shell_side_faces`, reuses S1d-1's
+position-coincidence topology (no new authoring, no new flag for it — the flag
+arms the capture without arming its printing) and emits, per patch and per box
+side (`k` = 0 uMin, 1 uMax, 2 vMin, 3 vMax):
+
+- the **dominant boundary class** by length,
+- the **lean**, clamped to `[0, uvAmp × --pom_shell_cap]` (a lean above the ray's
+  own lateral rate can never bind),
+- the **TRUE-BOUNDARY sub-interval** of that side (see §S1d-2.4 for why a
+  dominant class cannot carry that one).
+
+```
+[POM-SIDE] 'rooms' mode=1: 67 patches x 4 sides; dominant class
+           cop=23 in=178 out=46 true=1 none=20;
+           31 sides LEAN (0.00118..0.06000 UV per unit slab height);
+           8.7% of classified boundary length sits >2% of the box away from
+           every box side (attributed to the nearest one anyway)
+[POM-SIDE] 'rooms' 2 of 268 sides carry a TRUE-BOUNDARY sub-interval
+[POM-SIDE] 'floor' mode=1: 6 patches x 4 sides; cop=5 in=19 out=0 true=0 none=0;
+           0 sides LEAN
+```
+
+`floor` gets **no leans at all** — its boundaries are entirely concave or
+coplanar — so this whole stage is a `rooms` change. The user's gash ridge is
+`rooms` g=9: `uMin=ANGLED_OUT/0.04314 uMax=ANGLED_OUT/0.05153`.
+
+Two approximations, both measured and stated rather than hidden: the segment is
+attributed to the box side its UV midpoint is nearest (8.7 % of `rooms` boundary
+length sits more than 2 % of the box away from every side — L-shaped patches'
+inner corners), and mode 1 takes the dominant class's lean. Mode 2 takes the
+MINIMUM lean over every segment on the side, so a side mixing convex with
+anything else gets 0. **Measured difference between the two: 685 px of depth over
+all 13 review poses** — the mixed-side risk is not real on this scene.
+
+## S1d-2.2 INSTRUMENT — and it reproduces S1d-1 to the digit
+
+Every number below is 1080p, 13 review poses from `docs/greets_review_poses.txt`,
+dummy SDL drivers, sequential renders. Void = `z == 0` px from
+`FDS_SNAPSHOT_ZDUMP`. Clamped = pixels whose dumped march UV (`FDS_DUMP_TXTR`)
+differs between the arm and the same arm plus `--no-pom_shell_domain` — S1d-1's
+own instrument.
+
+| quantity | S1d-1 published | this stage measured |
+|---|---|---|
+| `recdisc` void, p5743 | 85 065 | **85 065** |
+| `recdisc` void, p5958b | 20 244 | **20 244** |
+| `recdisc` void, 13 poses | 231 068 | 231 073 |
+| `rec` clamped, p5743 | 94 952 | **94 952** |
+| `rec` clamped, p6097 | 113 244 | **113 244** |
+| `rec` clamped, 13 poses | 800 513 | 809 415 |
+| `lid` void, 13 poses | 413 100 | **413 100** |
+| seam census, `rooms` total length | 1 847.73 world | **1 847.73** |
+
+The two totals that differ do so at three poses (p5773 +26, p5813 +1 435, p5958a
+−2 060, p5958b +1 512, p5958c +1 261, p5958d +895). Both runs are mine on the
+same binary family and the per-pose voids reproduce exactly, so I do not have an
+explanation and record both rather than picking one. Everything below is
+internally consistent — same instrument, same session, arm vs arm.
+
+## S1d-2.3 STEP 1 — SIDE FACES (`--pom_shell_side_faces=1`)
+
+### The population the march cannot answer
+
+| pose | clamped `rec` | clamped `+side faces` | Δ |
+|---|---|---|---|
+| p5743 | 94 952 | **38 485** | **−59.5 %** |
+| p5773 | 104 969 | 79 720 | −24.1 % |
+| p5813 | 116 901 | 102 380 | −12.4 % |
+| p5843 | 40 645 | 36 698 | −9.7 % |
+| p5963 | 37 252 | 35 411 | −4.9 % |
+| p6133 (mirror) | 8 940 | 8 950 | +0.1 % |
+| p6293 (mirror) | 7 961 | 7 967 | +0.1 % |
+| p5958a | 91 863 | 78 785 | −14.2 % |
+| p5958b | 75 069 | 51 375 | −31.6 % |
+| p5958c | 53 132 | 46 267 | −12.9 % |
+| p5958d | 64 259 | 30 187 | **−53.0 %** |
+| p6097 | 113 244 | 113 258 | +0.0 % |
+| p2845 | 228 | 228 | 0 |
+| **all 13** | **809 415 (3.0 % of pixels)** | **629 711** | **−22.2 %** |
+
+### The subset that actually goes BLACK — the user's gash
+
+Same geometry, same march, `--pom_recess_edge=2`:
+
+| pose | void `recdisc` | void `+side faces` | Δ |
+|---|---|---|---|
+| **p5743 (the reported gash)** | **85 065** | **28 634** | **−66.3 %** |
+| p5773 | 35 365 | 24 803 | −29.9 % |
+| p5813 | 19 030 | 16 747 | −12.0 % |
+| p5843 | 11 661 | 11 337 | −2.8 % |
+| p5963 | 13 343 | 13 250 | −0.7 % |
+| p6133 (mirror) | 7 324 | 7 334 | +0.1 % |
+| p6293 (mirror) | 7 080 | 7 086 | +0.1 % |
+| p5958a | 9 470 | 7 326 | −22.6 % |
+| **p5958b (the reported smear)** | **20 244** | **4 115** | **−79.7 %** |
+| p5958c | 5 784 | 5 137 | −11.2 % |
+| p5958d | 16 479 | 3 581 | −78.3 % |
+| p6097 | 0 | 1 | — |
+| p2845 | 228 | 228 | 0 |
+| **all 13** | **231 073** | **129 579** | **−43.9 %** |
+
+### The mandatory gates
+
+| gate | tess | flat POM (incumbent) | `rec` | `rec + side faces` |
+|---|---|---|---|---|
+| **void, 13 poses** | 13 | 5 | 5 | **5** |
+| clamp/fallback, % of frame | n/a | n/a | 0.01–5.6 % | **0.01–5.5 %** |
+| offscreen: vertices moved | yes | none | **none** | **none** |
+
+Offscreen deltas are **zero by construction and not by tuning**: this stage adds
+no geometry and moves no vertex — `--pom_recess_only` still builds the shell
+without the lid offset, so the shadow cube, the mirror RTT and the env probes see
+the authored wall exactly as P2-A measured (0 of 13 533 184 shadow texels). The
+kernel change is confined to the G-buffer fill's domain test. The mirror-pose
+numbers above (p6133/p6293, which render through the mirror RTT) move by 6–10 px,
+i.e. the mirror content is essentially unchanged.
+
+### LOOK — and this is where step 1 is not a clean win
+
+`docs/img/s1d_side/`.
+
+- **`p5743_A_gash_recdisc_sidedisc_tess.png`** (the discard arm, so the defect is
+  visible): the baseline's full-height black gash becomes a **thin black sliver**.
+  Narrowed, not closed. That is the 85 065 → 28 634 in a picture.
+- **`p5958b_D_joint_rec_side_tess.png`**: the panel-seam mortar joint **tightens
+  and regains structure**; the baseline's wide washed-out band is gone and the
+  joint reads closer to `tess`. At this pose the arm also stops painting flat
+  wall over a background element the tessellation arm shows — it agrees with the
+  reference where the clamp did not. **This one is a straight improvement.**
+- **`p5743_B_corner_rec_side_tess.png` — the problem.** At the user's primary
+  pose the recovered band renders as a **saturated rust/brown vertical stripe**
+  that is not in `tess` and not in the baseline (which shows a soft flat band
+  there). I looked at it at 1.6× and at full frame: at full frame it is a warm
+  vertical stripe near the right edge, noticeable but not glaring; at zoom it is
+  plainly an artefact.
+
+**Mechanism of the stripe, stated plainly.** The lean is geometrically correct —
+the material really is there — but the *content* the march finds there is patch
+A's chart EXTRAPOLATED past the ridge, and the true content belongs to patch B.
+The domain now reaches up to 0.06 UV beyond the ridge, which is **61 texels at
+mip 0** and **0.36 world**. So step 1 buys the right shell shape and pays for it
+with the wrong texture in the band it recovers. **That gap is exactly S1d-2c (the
+angled hand-off), and step 1 makes the case for it stronger, not weaker.**
+
+`--pom_shell_side_edge=2` (land the ray ON the side face — its own crossing of
+the leaning plane, so a real face at a real depth instead of the flat wall) makes
+this **worse**: 623 015 px of depth change over the 13 poses, and at p5743 the
+stripe widens and acquires a mirrored repeat
+(`p5743_C_sideedge2_rec_side_e2_tess.png`). Same root cause, more of it. Kept as
+a flag value because it is the honest implementation of "exit through a real
+face", and it is the arm a hand-off would replace.
+
+## S1d-2.4 STEP 2 — PER-BOUNDARY-CLASS EDGE POLICY (`--pom_shell_side_edge=1`)
+
+**First attempt: 0 pixels changed, at every pose.** A per-box-side DOMINANT class
+cannot express a TRUE boundary in greets. Measured: TRUE boundary is **9.875 of
+1 847.73 world** of `rooms` patch boundary (0.5 %) yet owns **11.9 %** of the
+pixels the march cannot answer. It is always a minority of whatever box side it
+lands on — `rooms` g=2 carries `true=20/4.937` against `in=71/35.796` and
+`cop=55/13.578` on the same patch — so the lookup never fired. (That first run
+also exposed a print bug: `SeamClassName`'s `default:` returned
+`"TRUE_BOUNDARY"`, so the 20 *unattributed* sides were printed as free edges.
+Fixed; the enum now prints `NONE`.)
+
+**Second attempt: key on the sub-interval, not the class.** The bake now stores,
+per side, the along-side UV span the free edge covers (`v` for a u side, `u` for
+a v side), 2 floats and one compare in the kernel. In `rooms` exactly **2 of 268
+sides** carry one — patches g=2 and g=12, 4.937 world each, i.e. one doorway jamb
+of the room's own height.
+
+| | void 13 poses | px changed vs `rec + side faces` |
+|---|---|---|
+| `--pom_shell_side_edge=1` | **5** (unchanged) | **100 570, all at p6097** |
+
+**This is the cheapest measured win in the stage.** 100 570 px — 4.85 % of the
+frame at p6097 — stop showing flat clamped wall and show the surface that is
+really behind, **at zero void cost**, exactly as S1d-1 predicted from "those
+95 546 px void ZERO under a discard".
+
+**LOOK: `p6097_E_trueboundary_rec_e1_tess.png`** (full frame, rec | side_edge=1 |
+tess). The baseline truncates the near stone block with a **hard straight
+vertical cut** and hides the floor behind it. With the policy on, the block
+carries down and right and the floor with its grout lines comes back — and that
+is what `tess` shows too. **The corner silhouette moves toward the reference.**
+Not identical to it, but the direction is unambiguous and it is the one change in
+this stage whose picture and whose metric agree.
+
+## S1d-2.5 PROTRUSION — NOT RESTORED. The numbers, and why.
+
+The task's premise was that side faces make outward displacement legal again.
+**On the measurement, they do not — they make the lid arm worse.** All arms at
+0.18 world amplitude, same march, 13 review poses:
+
+| arm | void, 13 poses | p5743 | p5958b |
+|---|---|---|---|
+| `rec` (recess-only, the standing arm) | **5** | 0 | 0 |
+| `rec + side faces` | **5** | 0 | 0 |
+| `lid` (protrusion, `--pom_shell_base_clip` on) | 413 100 | 92 306 | 109 815 |
+| `lid --no-pom_shell_base_clip` | 368 575 | — | — |
+| **`lid + side faces`** (clip kept) | **468 868** | 90 791 | **164 551** |
+| **`lid + side faces`** (clip replaced by the side planes) | **933 535** | 97 422 | **573 253 (27.6 % of the frame)** |
+
+**Why, mechanically.** The same leaning half-plane that WIDENS the shell below
+the authored plane NARROWS it above — correctly, because at a convex ridge the
+intersection solid does converge toward the ridge line as you rise. But my side
+faces are only a **domain test**: a ray that hits the lid outside the narrowed
+shell is **killed**, when the geometrically correct thing is for it to **enter
+the shell lower down through the side face and march from there**. A closed shell
+needs side-face ENTRY as well as side-face exit, and entry means a per-lane march
+START height — a kernel restructure of the march loop, not another test after it.
+That is the concrete next increment, and it is why the flag deliberately does not
+force `--pom_shell_base_clip` off: the two are an A/B, not a stack.
+
+**So the see-through-in-the-mortar-valleys demonstration the task asked for is
+not delivered by this stage, and I am not going to show a crop of a 413 k-void
+arm and call it protrusion.** Recess-only still cannot let stone stand proud;
+that remains the single thing flat POM structurally cannot do either, and the
+strongest argument for finishing the closed shell properly.
+
+## S1d-2.6 WHERE THIS LEAVES THE THREE ACCEPTANCE TESTS
+
+| the user's complaint | status | evidence |
+|---|---|---|
+| t=5743 full-height gash | **reduced, not gone.** 85 065 → 28 634 void px (−66 %); a wide band becomes a thin sliver. The recess arm never showed it at all (it clamps), and the clamp band there is now 59 % smaller — but it renders as a rust stripe, which is a new artefact | `p5743_A`, `p5743_B` |
+| t=5958 grazing smear | **improved.** clamped 75 069 → 51 375 (−32 %); would-be-black 20 244 → 4 115 (−80 %); the mortar joint tightens toward `tess` and stops covering background the reference shows | `p5958b_D` |
+| see-through in the mortar valleys | **NOT delivered.** Protrusion is not made legal by this stage; see §S1d-2.5 | — |
+
+## S1d-2.7 GATES — all three flags default OFF, flag-off byte-exact
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (mirrortest `4ac809e5`, conetest `b41894f9`, halotest `166fa25a`) |
+| city `t=1961` | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact |
+| greets recess arm, **all 13 review poses**, depth (`z16`) md5 | byte-identical to the pre-change binary |
+| wasm | `cmake --build build-wasm` links clean |
+| bad flags | **0** across all 299 snapshot run logs (`unknown flag` / `requires a value`) |
+
+Greets COLOUR is not a usable byte gate: the known kernel nondeterminism flips it
+about 1 run in 3 (measured here: 3 identical-recipe runs gave 2 identical colour
+hashes and 1 different, with the **depth identical 3/3**). Every byte claim above
+is on depth, which is deterministic.
+
+**One process failure worth recording so nobody repeats it.** `DEMO/CMakeLists.txt`
+has a POST_BUILD rule that copies the freshly-linked binary into `Runtime/DEMO`
+on every `cmake --build build`. I rebuilt while a render batch was running and
+got an arm that differed from its own baseline at all 13 poses — a "regression"
+that was entirely my own binary swap. **Never build while a render batch is in
+flight.**
+
+## S1d-2.8 WHAT I DID NOT BUILD, AND THE HONEST NEXT STEP
+
+- **S1d-2c angled continuation** — not started. Step 1's rust stripe is now a
+  *measured* argument for it rather than a projected one: the closed shell puts
+  the ray in the right place and then samples the wrong chart there.
+- **Side-face ENTRY** — the missing half of the closed shell, and the thing
+  protrusion actually needs (§S1d-2.5). It is a march-loop change (per-lane start
+  height), bounded and well-defined, and it should come before the hand-off:
+  without it the lid arm cannot be gated at all, and with it the hand-off has a
+  correct volume to hand off inside of.
+- **Cost** — not measured this stage. The kernel additions are 4 FMAs + one
+  compare group per covered pixel for the side faces and one compare per
+  free-edge side for the policy; that is a *hypothesis about the cost*, not a
+  measurement, and single-digit ms are not dismissible here. It must be benched
+  against flat POM (the incumbent) before anyone discusses defaults.
