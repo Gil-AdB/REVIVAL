@@ -1380,3 +1380,394 @@ are all untouched by anything here — they are properties of the moved geometry
 and of the shell's boundary definition, and every one of them is now LARGER
 than C1's depth term. If the campaign is ranking by size, the ranking in §4 is
 now stale: **C1 has dropped from rank 1 to below C3, C6 and C7 on depth.**
+
+---
+
+## 10. P2-A — RECESS-ONLY DISPLACEMENT. The hole class, and a model that cannot have it
+
+Added 2026-08-05, same branch, same build discipline. **`--pom_recess_only`
+(+ `--pom_recess_edge`) is new and DEFAULT OFF**, like every other flag in this
+file. This section exists because the user ran P1's recommended shell recipe and
+got **BLACK HOLES** — full-height gashes between wall panels and a black bar
+inside the mirror — and **no metric in §§1–9 could see them**: the converged
+reference shares the shell's open-patch-boundary model (C7), so it scores those
+holes as ZERO error. Every P1 number was measured against a yardstick blind to
+this artefact.
+
+**So VOID is now a mandatory column on every arm.** Void = pixels the arm left
+with `z == 0`, i.e. nothing rasterised at all.
+
+### 10.1 THE VOID TABLE (the headline)
+
+**The poses, and one honesty note about them.** The task named seven review
+poses and said the list was in the user's report and the progress files; I could
+not find such a list anywhere in `docs/`, the scratchpad or the worktrees, so I
+used the primary pose it DID give plus the campaign's five standards plus a
+second mirror capture: `p5743` (t=5743,
+`FDS_GREETS_CAM="9.07557869,3.19592357,-52.9277191,-0.20672597,-0.140846997,0.968207836"`
+— the user's own camera, the primary), `p6097`, `p5780`, `p2845`, `p4200`,
+`pmir` (t=5780 + `--greets-mirror-cam`) and `pmir5743` (t=5743 +
+`--greets-mirror-cam`). If the real seven differ, the void column is one script
+away for any pose.
+
+1080p, 2 073 600 px/frame, `FDS_SNAPSHOT_ZDUMP=1`, one script and one framing
+per pose across every arm. `lid` = P1's recommended recipe
+(`--pom_shell --parallax_pom_cone --pom_shell_cap=16 --parallax_pom=32
+--pom_cone_exact=1 --pom_cone_min_step=1 --pom_march_earlyout`); `rec` = the
+same recipe **plus `--pom_recess_only`**; `recW18` adds
+`--pom_shell_world_amp --pom_shell_world_amp_set=0.18` (§8's candidate).
+
+| arm | p5743 | p6097 | p5780 | p2845 | p4200 | pmir | pmir5743 |
+|---|---|---|---|---|---|---|---|
+| `tess` (`--greets_displace`) | 3 | 0 | 5 | 0 | 2 | 24 | 24 |
+| `flat` (flat POM, no shell) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| `lid` (P1 recipe) | **98 371** | 0 | **21 909** | 0 | **26 765** | **88 603** | **88 603** |
+| `refUV` (the converged LID reference) | 99 251 | 0 | 22 697 | 0 | 26 794 | 89 725 | 89 725 |
+| **`rec` (recess-only, clamp)** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
+| **`recW18`** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
+| `recdisc` (recess-only + `--pom_recess_edge=2`) | 129 606 | 0 | 73 399 | 228 | 68 112 | 119 818 | 119 818 |
+
+**The gate is PASSED: zero void at every pose, against tessellation's 0–24.**
+Not "single digits" — zero, and by construction rather than by tuning: the
+rastered surface is the authored polygon, and the clamp has no branch that can
+leave a pixel unwritten.
+
+Three reading notes, all measured:
+
+- **`refUV` has the SAME holes as the arm it scores** (99 251 vs 98 371 at
+  t=5743). That is C7 in one line, and it is why P1's error columns could not
+  see this class. The recess reference (`refrec`, §10.3) has **0 void at every
+  pose**, so from here on the reference is not blind to it.
+- **`recdisc` is the discriminator, and it is why the flag has a sub-flag.**
+  Same geometry, same march, same domain test as `rec`; the only difference is
+  that a ray leaving the patch is KILLED instead of clamped. It voids
+  68 k–130 k px. So the holes are not "the moved lid" alone — the *mandatory
+  discard* is the mechanism, and removing the need for it is what fixes them.
+- **pmir and pmir5743 give identical void counts** (88 603 / 119 818) although
+  the frames differ (different md5). The gashes sit on static wall seams; only
+  the robot moves between t=5743 and t=5780.
+
+**NOT REPRODUCED.** The task handed me a void table reading tessellation 24 /
+flat 0 / shell cap 2 16 539 / shell cap 16 34 944 at this pose. My independent
+counts with the recipes stated above are tessellation **3**, flat 0, shell cap 2
+**68 122**, shell cap 16 **97 329** — same direction, same conclusion, 2–4× the
+magnitude. I also rendered the cap-2 arm without the cone march (71 299) and
+both arms at `--pom_shell_world_amp_set=0.18` (66 951 / 92 306); none lands near
+16 539. I do not know which recipe difference accounts for it, so both numbers
+are recorded rather than one quietly replacing the other. The cap 2 → cap 16
+ratio is 1.43× in my data, not the 2.11× implied by the earlier pair.
+
+### 10.2 What the flag does, and the one thing it deliberately does NOT do
+
+`--pom_recess_only` is a MODE of `--pom_shell` (inert without it — the builder
+is what stamps the amplitude and the patch domains):
+
+1. **`PomShell_Build` moves nothing.** The lid offset is zero, so the authored
+   wall stays exactly where the artist put it. Every offscreen consumer sees the
+   true wall by construction (verified, §10.4 — not assumed).
+2. **The height field's maximum sits AT the authored plane.** `Vertex::ShellH`
+   is stamped **1.0 exactly**, with no smooth-normal corner correction: that
+   correction models how much of an *offset* a smooth vertex normal delivered
+   perpendicular to a given face, and with no offset it would only invent a
+   fictitious entry height below the real surface. The march therefore starts on
+   the authored surface and only ever goes deeper.
+3. **The lateral-exit kill becomes OPTIONAL, and killing becomes the wrong
+   default.** `--pom_recess_edge`: 0 (default) = clamp to FLAT (the geometric
+   UV + the plane's depth — always in-domain, invents no surface), 1 = clamp the
+   marched UV into the patch box, 2 = discard (the lid model's behaviour, kept
+   as the diagnostic that produces the `recdisc` row above).
+4. **`--pom_shell_base_clip` is forced OFF.** It exists to remove LID overhang
+   outside the authored footprint; with the geometry unmoved there is none, and
+   left on it would test the domain at a half-slab lateral offset
+   (`A·(0.5 − hEnter)` = `−0.5·A` here) and clip real wall at every patch border.
+
+What it does **not** do: it does not carry relief across a patch seam. The ray
+that leaves is clamped, not continued. That is the honest gap and §10.8 sizes it.
+
+### 10.3 Colour + depth error, each arm against the reference of ITS OWN semantics
+
+§8.7's rule applies without exception. `rec` is scored against `refrec`
+(`--pom_ref_march --pom_ref_steps=512 --pom_shell_cap=64 --pom_recess_only`),
+`recW18` against `refrecW18`, `lid` against `refUV`. Never across semantics.
+
+| arm | pose | colour >12 | colour >32 | \|dz\|>0.05 | \|dz\|>0.20 | void arm/ref |
+|---|---|---|---|---|---|---|
+| `lid` vs `refUV` | p5743 | 93 765 | 22 471 | 14 160 | 6 542 | 98 371 / 99 251 |
+| | p6097 | 70 407 | 12 332 | 761 | 320 | 0 / 0 |
+| | p5780 | 105 294 | 26 942 | 11 378 | 5 671 | 21 909 / 22 697 |
+| | p2845 | 46 532 | 9 595 | 95 | 13 | 0 / 0 |
+| | p4200 | 115 194 | 32 071 | 11 014 | 3 163 | 26 765 / 26 794 |
+| | pmir | 111 464 | 31 602 | 23 941 | 17 949 | 88 603 / 89 725 |
+| **`rec` vs `refrec`** | p5743 | 84 629 | 19 178 | 10 521 | 5 030 | **0 / 0** |
+| | p6097 | 62 638 | 12 020 | 738 | 41 | 0 / 0 |
+| | p5780 | 86 771 | 20 481 | 7 840 | 3 528 | 0 / 0 |
+| | p2845 | 45 888 | 9 209 | 112 | 12 | 0 / 0 |
+| | p4200 | 102 334 | 28 716 | 8 966 | 2 432 | 0 / 0 |
+| | pmir | 95 346 | 25 656 | 21 126 | 16 326 | 0 / 0 |
+| **`recW18` vs `refrecW18`** | p5743 | **54 093** | 11 071 | **5 361** | 3 336 | 0 / 0 |
+| | p6097 | 52 514 | 7 273 | 429 | 35 | 0 / 0 |
+| | p5780 | 61 193 | 14 470 | 3 390 | 2 186 | 0 / 0 |
+| | p2845 | 45 888 | 9 210 | 112 | 12 | 0 / 0 |
+| | p4200 | 56 021 | 17 141 | **706** | 203 | 0 / 0 |
+| | pmir | 64 656 | 15 479 | 14 097 | 11 612 | 0 / 0 |
+| `recdisc` vs `refrec` | p5743 | 218 969 | 150 364 | 20 096 | 14 621 | 129 606 / 0 |
+| | p5780 | 250 068 | 171 134 | 100 578 | 96 275 | 73 399 / 0 |
+| | p4200 | 171 940 | 98 176 | 10 403 | 3 870 | 68 112 / 0 |
+
+Three things this says:
+
+1. **The march is no worse under recess semantics.** `rec` scores at or slightly
+   below `lid` on every column at every pose (e.g. t=5743 colour 84 629 vs
+   93 765; depth 10 521 vs 14 160). Recess-only is not buying its zero void with
+   march quality.
+2. **The pipeline reproduces P1 exactly.** `lid` vs `refUV` at t=6097 is
+   70 407 / 12 332 / 761 / 320 — the same four numbers as §9.8's BEST row, taken
+   independently. That is the control that makes the rest of this table
+   comparable to §9.
+3. **`recdisc` is punished by its own reference, as it should be.** Its error is
+   2.5–3× `rec`'s precisely because `refrec` clamps and the arm voids. This is
+   the property C7 lacked: the recess reference *can* see a hole.
+
+**The surface DID move, and here is the honest statement of it** (converged
+march on both sides, so the march is not a variable):
+
+| pair | pose | colour >12 | colour >32 | \|dz\|>0.05 | median dz |
+|---|---|---|---|---|---|
+| `refrec` vs `refUV` | p5743 | 1 137 103 | 453 217 | 1 597 614 | **+0.1668** |
+| | p6097 | 1 270 325 | 404 190 | 1 929 554 | +0.1062 |
+| | p5780 | 1 167 114 | 501 507 | 1 695 646 | +0.1466 |
+| | p4200 | 1 094 476 | 380 129 | 1 895 260 | +0.0986 |
+| | pmir | 1 255 446 | 566 915 | 1 877 230 | +0.1820 |
+
+Recess-only is **a different surface**, not a bug fix applied to the same one:
+the whole relief hangs below the authored plane instead of straddling it, so the
+visible surface sits about half a slab deeper. Per material, view-space, against
+the flat arm:
+
+| pose | `rooms` median | `rooms::mirUV` median | `floor::mirUV` median | floor p95 |
+|---|---|---|---|---|
+| p5743 | +0.2300 | +0.1517 | **+1.6960** | +6.6905 |
+| p5780 | +0.3084 | +0.1415 | **+1.7718** | +6.4731 |
+| p4200 | +0.0784 | +0.1592 | **+2.0878** | +4.1579 |
+| pmir | +0.1719 | +0.1592 | **+2.0296** | +7.8203 |
+
+Those are VIEW depths, so a normal-direction recess of `A/2` shows up multiplied
+by `1/(V·N)` at grazing. The wall's `A/2` is 0.09 world and reads as +0.14..+0.31
+view depth — small. **The floor's is 0.56 world**, because §8 measured its slab
+at 1.11 world (6.2× the wall's, from a `ParallaxScale` tuned as a UV offset), and
+at the grazing angles this scene actually uses that becomes 1.7–2.1 world of view
+depth. Recess-only does not create that defect, it **exposes** it: the centred
+lid model hid half of it above the plane. `--pom_shell_world_amp_set=0.18` puts
+the floor on the wall's scale and is why every `recW18` column above is better.
+
+### 10.4 OFFSCREEN — C6 goes to zero, VERIFIED
+
+**Shadow bake, exact.** `--dump_shadowmap` from the `-DFDS_DEV=ON` build in
+`build-dev/` (which does not overwrite `Runtime/DEMO`), t=5780, 76 cube faces,
+13 533 184 depth texels:
+
+| pair | texels differing | by >8/255 |
+|---|---|---|
+| `flat` vs **`rec`** | **0 (0.00 %)** | **0** |
+| `flat` vs `lid` | 4 044 301 (29.88 %) | 181 301 |
+| `flat` vs `tess` | 720 250 (5.32 %) | 81 809 |
+
+The two control rows reproduce §C6's figures to the digit (4 044 301 / 29.88 %
+and 720 250 / 5.32 %), which is what makes the zero row trustworthy rather than
+a broken instrument. **The moved lid changes 30 % of the per-frame shadow depth
+cube; recess-only changes nothing at all.**
+
+**Final image, on NON-STONE pixels only** (the wall's own shading excluded, so
+what is left came through an offscreen consumer or a Z-ownership change):
+
+| pair | pose | non-stone px | >4/255 | >12/255 | >32/255 | max | worst-hit surfaces |
+|---|---|---|---|---|---|---|---|
+| `flat`→**`rec`** | p5743 | 354 312 | 3 807 | **1 423** | 306 | 97 | `Hull.lwo::cockpit_upper::mirUV` 1 128 |
+| | p5780 | 350 386 | 4 323 | **1 494** | 310 | 105 | cockpit 1 001, `amudim::mirUV` 278 |
+| | p4200 | 146 068 | 285 | **109** | 13 | 79 | cockpit 38 |
+| | pmir | 83 414 | 623 | **66** | 1 | 35 | `amudim::mirUV` 42, `sss` 1 |
+| `flat`→`lid` | p5743 | 354 312 | 34 089 | **26 328** | 19 964 | 168 | `siling` 8 491, robot legs 9 124 |
+| | p5780 | 350 386 | 35 669 | **28 615** | 22 490 | 208 | `siling` 6 881, legs 12 097 |
+| | p4200 | 146 068 | 7 909 | **4 467** | 2 775 | 184 | `siling` 3 132 |
+| | pmir | 83 414 | 8 377 | **6 065** | 4 165 | 204 | `sss` 2 447, `siling` 1 842 |
+
+**18× less off-target contamination** (26 328 → 1 423 px >12/255 at t=5743), and
+the residual is a different KIND of pixel: the lid arm moves the CEILING and the
+robot's legs — surfaces the wall has no business touching, reached through the
+shadow cube and the offscreen passes — while recess-only's residual is almost
+entirely `Hull.lwo::cockpit_upper::mirUV` and `amudim::mirUV`, i.e. reflective
+surfaces showing the wall's *changed shading*. The mirror shard material `sss`
+moves by 1 px at pmir under recess-only, against 2 447 px under the lid.
+
+Honest boundary on this: `rec` vs `flat` differs in the MARCH as well as the
+geometry, so a nonzero number in that table is not proof of moved geometry. The
+shadow-cube zero is the geometric proof; the non-stone table is the consequence.
+
+### 10.5 DEPTH — the S1a hazard is gone by construction, VERIFIED
+
+S1a's design comment flagged that a protruding block writes Z *closer* than the
+authored wall, so a later face inside that band wins pixels it should not.
+Recess-only cannot do that. Measured frame-wide (every rasterised pixel, both
+arms finite), against the flat arm, "nearer" = more than 2 zEnc codes
+(0.0051 world) closer:
+
+| arm | p5743 | p6097 | p5780 | p2845 | p4200 | pmir | worst nearer |
+|---|---|---|---|---|---|---|---|
+| **`rec`** | **0** | **0** | **0** | **0** | **0** | **0** | **+0.0000** |
+| **`recW18`** | **0** | **0** | **0** | **0** | **0** | **0** | **+0.0000** |
+| `lid` | 864 618 | 1 215 750 | 537 126 | 1 540 103 | 1 053 203 | 1 089 068 | **−31.85 world** |
+
+**Not one pixel in any of the six frames is drawn nearer than the authored
+plane.** The lid arm draws 26–74 % of the frame nearer, by up to 31.85 world
+units at grazing (that tail mixes the depth write with ownership changes; the
+sign and the population are the point).
+
+### 10.6 THE CLAMP — what it costs, and where it fires
+
+The clamp is not free: a clamped pixel shows the FLAT wall, with no relief. It
+is measurable exactly, by rendering the same arm with `--no-pom_shell_domain`
+(no clamp at all — the ray keeps its out-of-patch UV). The pixels that differ
+ARE the clamped ones:
+
+| arm | pose | clamped px | >12/255 | % of frame | (same arm's void if it discarded instead) |
+|---|---|---|---|---|---|
+| `rec` | p5743 | 147 618 | 116 199 | **7.12 %** | 129 606 |
+| | p5780 | 176 837 | 147 232 | 8.53 % | 73 399 |
+| | p4200 | 70 296 | 54 645 | 3.39 % | 68 112 |
+| | pmir | 132 542 | 112 307 | 6.39 % | 119 818 |
+| `recW18` | p5743 | 100 712 | 81 912 | **4.86 %** | 85 065 |
+| | p5780 | 119 508 | 105 654 | 5.76 % | 24 188 |
+| | p4200 | 17 243 | 12 322 | **0.83 %** | 14 049 |
+| | pmir | 68 468 | 52 859 | 3.30 % | 49 130 |
+
+So **3.4–8.5 % of the frame (0.8–5.8 % at the 0.18 world amplitude) renders as
+flat wall instead of carved stone**, and it is the same population that the lid
+model rendered as holes. `docs/img/s1_p2a/CLAMP_p5743_recW18.png` tints it red
+over the arm's own frame: it lies in thin bands along the panel seams and the
+wall/ceiling junctions — exactly where the gashes were. A band of flat stone is
+a far cheaper artefact than a void, but it is an artefact, and the literature fix
+(§10.8) is what removes it rather than trading it.
+
+### 10.7 LOOK, and PERF
+
+**Look.** Crops in `docs/img/s1_p2a/`, identical framing per pose (1920×1080 →
+900×506 LANCZOS), one transform for every arm:
+
+| file | what |
+|---|---|
+| `F_p5743_{tess,best,rec,recW18pn}.png` | the user's primary pose. `best` is the reported defect: a full-height black gash on the right wall. `rec` is solid. |
+| `F_pmir_{tess,best,recW18pn}.png` | the mirror pose. `best` has black bars along every panel seam and a black slab across the floor; `recW18pn` is solid and reads closest to `tess` of any per-pixel arm. |
+| `F_p4200_{tess,best,recW18}.png` | the vista. Black bar beside the doorway in `best`, absent in `recW18`. |
+| `CLAMP_p5743_recW18.png` | §10.6's clamp map (red = clamped). |
+| `Z_p2845_{tess,recW18}.png` | grazing close-up, ×2. Mortar groove and block face are equivalent; recess's groove is straighter. |
+
+My own read, having looked at all of them: **the wall reads as carved, and at
+the block scale it is competitive with tessellation** — but only with two
+companions. On its own (`rec`, UV amplitude) the FLOOR is visibly worse than
+`tess`: mottled and melted, because its 1.11-world slab now hangs entirely below
+the plane (§10.3). `--pom_shell_world_amp_set=0.18` fixes that (`F_pmir_recW18pn`
+vs `F_pmir_rec`), and `--pom_normal` (S1e) is what gives the blocks their
+bevelled edges — without it they read flat next to the bake. The honest ranking
+at pmir is `tess` ≈ `recW18pn` > `recW18` > `rec` >> `best`.
+
+**What it gives up is visible too, and it is structural, not a tuning miss:**
+the wall's outline is exactly the authored polygon. No stone stands proud, none
+breaks a silhouette, none occludes its neighbour across a corner. At p4200's
+doorway edge (`SIL` crops in the scratchpad) `tess` is *also* a straight line —
+its bake pins patch-border verts to zero — so at a patch BORDER the two models
+agree; the loss is inside the wall, where tessellation's blocks can rise above
+the mean surface and recess's can only sink below it.
+
+**Perf.** `./DEMO --bench=scene@scene=greets,t=5780,iters=60 --deferred
+--profiler=0`, five arms INTERLEAVED (A B C D E, ×4 reps) so thermal drift hits
+each equally, headless dummy drivers, load-guarded (the script refuses to start
+with another `DEMO` up). **Machine load 2.9 → 10.2 rising** — the user was
+running an 86Box VM and Firefox throughout; that is the honest condition and the
+paired structure is what makes it survivable. Deltas are per-rep then averaged.
+
+| arm | mean ms/iter | run-to-run spread |
+|---|---|---|
+| A `lid` (P1 recipe) | 57.80 | 3.06 |
+| B **`rec`** | **56.98** | 2.89 |
+| C **`recW18`** | **56.12** | 3.58 |
+| D `flat` (no shell) | 56.99 | 6.15 |
+| E `tess` (shipping) | 92.54 | 8.16 |
+
+| paired delta | ms | sd over 4 reps |
+|---|---|---|
+| `rec` − `lid` | **−0.82** | 0.93 |
+| `recW18` − `lid` | −1.68 | 1.10 |
+| `recW18` − `rec` | **−0.86** | **0.30** |
+| `rec` − `flat` | −0.01 | 1.42 |
+| `tess` − `rec` | **+35.56** | 2.26 |
+
+A second interleaved run isolating the mechanism (A `lid`, B `lid
+--no-pom_shell_base_clip`, C `rec`): B−A = −0.56 ± 1.72, C−B = **−1.80 ± 1.02**.
+
+Read honestly: **recess-only has no measured cost over the lid arm — it is
+0.8–2.4 ms FASTER, with a paired sd of 0.9–2.7 ms.** I will not claim a win of
+that size on a machine at load 8; the safe statement is "no cost, plausibly
+about a millisecond cheaper", and three mechanisms all point that way: it skips
+the base-clip test (2 FMAs + a compare group per covered pixel, measured at
+−0.56 ms on its own), it kills no lanes so the full-row vector-store path is
+never disabled by a partial mask, and it leaves no holes for later geometry to
+fill. `recW18` − `rec` = −0.86 ± 0.30 is the tightest number here and has a
+clean mechanism: the floor's slab is 6× shallower, so the march brackets sooner
+under `--pom_march_earlyout`. And `rec` sits **within 0.01 ms of flat POM**,
+i.e. at this pose the whole shell march is inside the noise, while tessellation
+costs **+35.6 ms** on the same frame.
+
+### 10.8 WHAT RECESS-ONLY CANNOT DO (state this before deciding)
+
+Not a caveat list — these are the terms of the trade:
+
+1. **Nothing can stand proud of the authored plane.** No protruding block, no
+   relief silhouette, no stone occluding its neighbour across a corner, and the
+   wall's outline is exactly the authored polygon's at every angle. Measured as
+   the flip side of §10.5's zero: 0 px of the frame is ever drawn nearer.
+2. **The visible surface recedes by half a slab.** Rooms get bigger: +0.09 world
+   on `rooms`, +0.56 on the `floor` under today's UV amplitude (measured as
+   +0.14..+0.31 and +1.70..+2.09 of VIEW depth at grazing). Under
+   `--pom_shell_world_amp_set=0.18` both become 0.09. Anything authored to touch
+   the wall (trim, props, the mirror frame) now has the stone receding behind it
+   — a gap the lid model hid by pushing the wall out instead.
+3. **Relief still does not cross a patch seam.** The clamp turns the hole into a
+   flat band, 0.8–8.5 % of the frame (§10.6). The march still cannot address a
+   neighbouring patch's UV chart, so the information is not there to shade with.
+4. **It is not the literature's model.** Hirche '04 / shell maps raster a CLOSED
+   shell volume — top *plus* side faces — so a ray only exits where the surface
+   genuinely ends and discarding there is CORRECT. That model keeps protrusion
+   AND has no internal holes; it costs prism geometry (side faces, extrusion
+   clamped by local curvature) and a cross-patch march continuation, which is
+   this campaign's S1d. Recess-only buys the hole fix by giving up the half of
+   the slab that made the holes necessary. **It is the cheap correct-by-
+   construction option, not the correct one.**
+5. **It changes the surface, so it invalidates cross-arm comparisons.** Every
+   number in §§1–9 was taken against `refUV`. A recess arm must be scored
+   against `refrec`, and the two references differ by 1.1–1.3 M px (§10.3).
+6. **It does not fix C4 (tessellation's lattice), C1's residual grazing colour
+   (§9.11's 48 k–68 k px) or the amplitude semantics of §8.** It is orthogonal
+   to all three, and it makes §8's floor amplitude MORE visible, not less.
+
+### 10.9 GATES
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (mirrortest / conetest / halotest) |
+| city `t=1961` colour | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact |
+| city colour+z concatenated | `7438016d804807154892c019b8b69c73` — matches §9.10's recorded value |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact |
+| greets `shell` cone-8 t=6097 | `193427ccb28163705ea6baa5500afd0c` — byte-exact |
+| greets `shell` naive-8 t=6097 | `13dcf8e54416816a29ba90f0fe468756` — byte-exact |
+| greets `tess` t=6097 | `3f86c73cc7ed8f0ad8f57b12984537d0` — byte-exact |
+| greets `flat` t=6097 | `9d095fbcac0c00888578d56172786997` — byte-exact |
+| `lid` vs `refUV` @ t=6097 | 70 407 / 12 332 / 761 / 320 — identical to §9.8's BEST row |
+| wasm | `cmake --build build-wasm` **links clean** (80/80, `DEMO.wasm` + `DEMO_snapshot.wasm`) — `Mekalele.h` is a shared kernel, so this was required |
+
+Every render's log was grepped for `unknown flag` / `requires a value` before
+its numbers were taken (zero hits across all 88 snapshot renders plus the four
+shadow-dump runs and the gate runs), and every flag list is
+a bash ARRAY, never an unquoted `$FLAGS`. Scripts: `p2_run.sh`, `p2_base.sh`,
+`p2_batt.sh`, `p2_amp.sh`, `p2_clamp.sh`, `p2_sm.sh`, `p2_bench.sh`,
+`p2_bench2.sh`, `p2_an.py`, `p2_err.py`, `p2_mat.py`, `p2_nonstone.py`,
+`p2_smdiff.py`, `p2_clampviz.py`, `p2_crop.py` in the session scratchpad.

@@ -603,6 +603,17 @@ struct TileRasterizerCtx {
 	// --pom_shell_base_clip_raw: use the UNCAPPED 1/(V·N) for the base-clip ray
 	// instead of the march's capped one. Diagnostic A/B (see the flag).
 	bool  pomShellBaseClipRaw = false;
+	// --pom_recess_only (P2-A): RECESS-ONLY mode of the shell. The geometry was
+	// NOT moved (PomShell_Build skipped the lid offset and stamped ShellH = 1),
+	// so the rastered surface is the AUTHORED wall and the whole relief carves
+	// inward from it. Everything the march does is unchanged — it still enters
+	// at hEnter and runs down the slab — but the LATERAL-EXIT KILL becomes
+	// optional, because every covered pixel now has real geometry under it.
+	// pomRecessEdge: 0 = clamp to flat (geometric UV + plane depth), 1 = clamp
+	// the marched UV into the patch box, 2 = discard (the lid model's kill,
+	// kept as the diagnostic that makes the clamp measurable).
+	bool  pomRecess = false;
+	int   pomRecessEdge = 0;
 	// AUTHORED face UV bounding box (from Face::U1..V3 — NOT the post-clip /
 	// post-poly-split vertex set, both of which pass the Face through
 	// unchanged, so this stays the authored patch's domain at every
@@ -1832,7 +1843,46 @@ struct TileRasterizer {
 								              * (Vec8f(0.5f) - hEnter);
 								keep &= inDomain(ufGeo + VtT * s, vfGeo + VtB * s);
 							}
-							p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
+							// --pom_recess_only (P2-A): the kill is OPTIONAL here, and
+							// killing is the wrong default. Under the LID model a lane
+							// that leaves the patch may have nothing under it (the lid
+							// covers screen the authored wall never did), so a discard
+							// is the only honest answer there. With the geometry
+							// unmoved the rastered surface IS the authored wall: the
+							// pixel is covered by a polygon that genuinely exists, and
+							// the only thing the march failed to do is follow the
+							// relief across a patch seam into a neighbour it cannot
+							// address. Voiding it punches a hole through solid wall —
+							// measured as full-height gashes between wall panels and a
+							// black bar inside the mirror. So CLAMP instead:
+							//   0 = fall back to the FLAT wall (geometric UV, plane
+							//       depth). Exact, always inside the domain (this
+							//       pixel's own interpolated UV lies inside its patch
+							//       box by construction) and it invents no surface.
+							//   1 = keep the marched height but clamp the landed UV
+							//       into the patch's own box — "the last valid sample"
+							//       approximately: for a ray leaving an axis-aligned
+							//       box, the closest box point is near its exit point.
+							//       Ignores the sibling boxes (a union is not a box),
+							//       so it is a box clamp, not a union clamp.
+							//   2 = discard, the lid model's behaviour, kept so the
+							//       void it produces stays measurable.
+							if (ctx.pomRecess && ctx.pomRecessEdge != 2) {
+								if (ctx.pomRecessEdge == 1) {
+									uf = select(keep, uf,
+									     min(max(uf, Vec8f(ctx.shellUMin)),
+									         Vec8f(ctx.shellUMax)));
+									vf = select(keep, vf,
+									     min(max(vf, Vec8f(ctx.shellVMin)),
+									         Vec8f(ctx.shellVMax)));
+								} else {
+									uf = select(keep, uf, ufGeo);
+									vf = select(keep, vf, vfGeo);
+									pomHitH = select(keep, pomHitH, hEnter);
+								}
+							} else {
+								p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
+							}
 						}
 						if (pomZ) {
 							// Shell depth uses the TRUE-ray form: the hit sits Δh·A below
@@ -2589,11 +2639,19 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomShellUvAmp = pomShellFace ? PomShellFaceUvAmp(F) : 0.0f,
 		.pomShellCap = fds::FeatureFlags::pom_shell_cap(),
 		.pomShellDomain = fds::FeatureFlags::pom_shell_domain(),
-		.pomShellBaseClip = fds::FeatureFlags::pom_shell_base_clip(),
+		// --pom_recess_only forces the BASE CLIP off: that clip exists to remove
+		// LID overhang outside the authored footprint, and with the geometry
+		// unmoved there is no overhang to remove. Left on it would test the
+		// domain at a half-slab lateral offset (its s term is A·(0.5 − hEnter)
+		// = −0.5·A here) and clip real wall at every patch border.
+		.pomShellBaseClip = fds::FeatureFlags::pom_shell_base_clip()
+		                    && !fds::FeatureFlags::pom_recess_only(),
 		.pomNormal = fds::FeatureFlags::pom_normal() && (heightData != nullptr)
 		             && marchArmed,
 		.pomNormalStrength = fds::FeatureFlags::pom_normal_strength(),
 		.pomShellBaseClipRaw = fds::FeatureFlags::pom_shell_base_clip_raw(),
+		.pomRecess = pomShellFace && fds::FeatureFlags::pom_recess_only(),
+		.pomRecessEdge = fds::FeatureFlags::pom_recess_edge(),
 		// The lateral-exit domain: the PATCH's UV box (Face::PomShellGroup ->
 		// Material::PomShellDomains) when PomShell_Build grouped this face,
 		// else the authored face's own box. Either way it comes off the Face,

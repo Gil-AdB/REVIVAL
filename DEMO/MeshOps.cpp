@@ -3971,6 +3971,12 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	// --pom_shell_world_amp (P0, default OFF) needs the same per-face table, so
 	// the fill below runs for either flag.
 	const bool worldAmpMode = fds::FeatureFlags::pom_shell_world_amp();
+	// --pom_recess_only (P2-A): build the shell WITHOUT moving anything. The
+	// patch grouping, the sibling boxes, the amplitude and every kernel path are
+	// unchanged; only the lid offset and the entry height differ, so the
+	// offscreen consumers (shadow bake, mirror RTT, env probes) see exactly the
+	// authored wall — C6 goes to zero by construction rather than by tuning.
+	const bool recessOnly = fds::FeatureFlags::pom_recess_only();
 	const bool censusPrint = fds::FeatureFlags::pom_shell_census();
 	const bool census = censusPrint || worldAmpMode;      // fill the table
 	struct CensusFace { float wu, wv, w, area; };
@@ -4156,7 +4162,10 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			// entirely below the authored plane instead of straddling it.
 			// --pom_shell_world_amp: half the WORLD amplitude, the same on every
 			// vertex, so one authored plane produces exactly one lid plane.
-			const float off = fds::FeatureFlags::pom_shell_lid_probe()
+			// --pom_recess_only (P2-A): no offset at all. The authored wall IS
+			// the surface; the relief carves inward from it.
+			const float off = (fds::FeatureFlags::pom_shell_lid_probe()
+			                   || recessOnly)
 			                ? 0.0f
 			                : (worldAmpMode ? (worldAmp * 0.5f) : (uvAmp * wv * 0.5f));
 			V[i].Pos.x += vn.x / nl * off;
@@ -4165,7 +4174,13 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			if (census) offVert[i] = off;
 			// Height actually reached, measured against the incident faces'
 			// planes (ndv = 1 on a flat patch → exactly the lid at h = 1).
-			V[i].ShellH = 0.5f + 0.5f * ndv;
+			// --pom_recess_only: the vertex was not moved, so it lies EXACTLY on
+			// every incident face's plane, and under the recess convention that
+			// plane is the top of the field — h = 1, with no corner correction
+			// (the ndv term models how much of an OFFSET a smooth normal
+			// delivered perpendicular to a given face; with no offset it would
+			// only invent a fictitious entry height below the real surface).
+			V[i].ShellH = recessOnly ? 1.0f : (0.5f + 0.5f * ndv);
 			if (V[i].ShellH < hMinStamp) hMinStamp = V[i].ShellH;
 			if (ndv < 0.99f) ++nCorner;
 			if (off < offMin) offMin = off;

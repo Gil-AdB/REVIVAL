@@ -320,6 +320,55 @@ the patch-border ring by POSITION, since `--pom_shell_pin`'s pointer-based
 `nonTarget` test never fires on a mesh split by `MakeFacesIndependentByAngle`,
 and un-subdivided quads have nothing but border verts). Not attempted here.
 
+## Stage S1b-P2A — RECESS-ONLY displacement  [IMPLEMENTED 2026-08-05, default OFF]
+
+> **✅ `--pom_recess_only` (+ `--pom_recess_edge`), both default OFF.**
+> Full results and every table: `docs/S1_DISCREPANCY_INVENTORY.md` §10.
+>
+> **Why it exists: a defect the whole measurement framework was blind to.** The
+> user ran P1's recommended shell recipe and got BLACK HOLES — full-height
+> gashes between wall panels and a black bar in the mirror. The converged
+> reference shares the shell's open-patch-boundary model (§C7), so it scores
+> those holes as ZERO error, and every P1 number was taken against that blind
+> yardstick. **VOID (z==0 px) is now a mandatory column on every arm reported.**
+>
+> | arm | p5743 | p6097 | p5780 | p2845 | p4200 | pmir | pmir5743 |
+> |---|---|---|---|---|---|---|---|
+> | tessellation | 3 | 0 | 5 | 0 | 2 | 24 | 24 |
+> | LID shell, P1 recipe | 98 371 | 0 | 21 909 | 0 | 26 765 | 88 603 | 88 603 |
+> | **recess-only** | **0** | **0** | **0** | **0** | **0** | **0** | **0** |
+>
+> **Mechanism** (research §3.3): Hirche '04 rasters a CLOSED shell (top + side
+> faces), so a ray only exits at a genuine silhouette and discarding there is
+> correct. Ours rasters the top lid only and substitutes a UV-box test for the
+> missing sides, so it also "exits" at INTERNAL patch seams where the surface
+> continues. Recess-only removes the NEED to exit: the vertices are not moved,
+> the height field's maximum sits AT the authored plane, all relief carves
+> inward, and a ray that leaves the patch CLAMPS (to the flat wall by default;
+> `--pom_recess_edge=1` clamps the UV, `=2` restores the discard as a
+> diagnostic). `--pom_shell_base_clip` is forced off — with nothing moved there
+> is no overhang to clip.
+>
+> **Verified, not assumed:** shadow cube `flat` vs recess = **0 of 13 533 184
+> texels** (the lid arm changes 29.88 %, reproducing §C6 to the digit) — C6 is
+> zero by construction. **Zero** pixels frame-wide drawn nearer than the
+> authored plane at six poses (the lid arm: 26–74 %, up to 31.85 world), which
+> retires S1a's ordering hazard. March quality against a reference of its OWN
+> semantics is at or slightly better than the lid arm's at every pose.
+>
+> **Cost, stated:** the clamp renders 0.8–8.5 % of the frame as FLAT wall in
+> thin bands along the seams (the same population the lid model voided); the
+> visible surface recedes half a slab (+0.09 world on `rooms`, +0.56 on the
+> `floor` — pair with `--pom_shell_world_amp_set=0.18`, which also improves
+> every error column and the floor's look); and **nothing can stand proud of the
+> authored plane ever again** — no protrusion, no relief silhouette, no stone
+> occluding a neighbour. Perf: **no measured cost** (−0.8 ± 0.9 ms vs the lid
+> arm at t=5780, within 0.01 ms of flat POM, against tessellation's +35.6 ms).
+>
+> It is the cheap correct-by-construction option, **not** the literature-correct
+> one. Closing the shell properly (prism side faces + cross-patch march
+> continuation = S1d) is what would keep protrusion and still have no holes.
+
 ## Stage S1e — height-field shading normal  [IMPLEMENTED 2026-08-04]
 
 > **✅ `--pom_normal`, default OFF** (+ `--pom_normal_strength`, 1.0).
@@ -585,6 +634,7 @@ What the measurements changed about this stage's premise:
 |---|---|
 | tessellation (today's default) | `--greets_displace` (+ residual POM) |
 | per-pixel S1 | `--no-greets_displace --pom_depth_write --pom_shell [--pom_horizon] --parallax_pom_cone` |
+| per-pixel S1, RECESS-ONLY (P2-A, no holes) | `--no-greets_displace --parallax_pom_cone --pom_shell --pom_recess_only --pom_shell_cap=16 --parallax_pom=32 --pom_cone_exact=1 --pom_cone_min_step=1 --pom_march_earlyout [--pom_shell_world_amp --pom_shell_world_amp_set=0.18] [--pom_normal]` |
 | hybrid eval | tessellation + `--pom_horizon` (S1c is path-agnostic) |
 
 All new flags default OFF. The user decides default flips and the eventual
