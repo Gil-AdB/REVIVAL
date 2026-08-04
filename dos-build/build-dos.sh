@@ -58,6 +58,7 @@ DEFS=""
 [ -n "${FDS_TEXDUMP:-}" ] && DEFS="$DEFS -dFDS_TEXDUMP"    # dump first 4 RAW decoded textures (decoder A/B evidence)
 [ -n "${FDS_NEARSPHERE:-}" ] && DEFS="$DEFS -dFDS_NEARSPHERE"          # Tri_Ahead vs NEAR plane, not Z=0
 [ -n "${FDS_NEARSPHERE_PROBE:-}" ] && DEFS="$DEFS -dFDS_NEARSPHERE_PROBE"  # log meshes whose Tri_Ahead promise is broken
+[ -n "${FDS_ARMPROBE:-}" ] && DEFS="$DEFS -dFDS_ARMPROBE"            # per-mesh face fate when the near plane CUTS a mesh
 # LOGSYNC = fflush instead of close+reopen. DEFAULT ON: 482 of those fire while CITY.FLD
 # loads and each is a FAT dir search + flush + seek-to-end via int21. Measured on 86Box:
 # LoadFLD 10.24s -> 1.15s, whole startup 20.47s -> 8.00s. The only thing lost is log

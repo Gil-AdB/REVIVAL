@@ -606,6 +606,41 @@ void Transform_Objects(Scene *Sc)
         F->SortZ.F = 100000.0-dz;
       }
 #endif
+#ifdef FDS_ARMPROBE
+    // Self-triggering near-plane cull attribution: fires on any mesh the near plane is
+    // actually CUTTING (>=1 vertex behind C_NZP but not all of them), which is exactly the
+    // moment the arms vanish -- no need to guess frame numbers. Shows whether the faces are
+    // trivially rejected, backface-culled, or inserted-and-then-lost downstream.
+    { long _nN=0,_nV=0; Vertex *_pv,*_pve=T->Verts+T->VIndex;
+      for(_pv=T->Verts;_pv<_pve;_pv++){ _nV++; if(_pv->Flags&Vtx_VisNear) _nN++; }
+      // One-shot inventory per scene so the mesh NAMES are known (the arms may not be
+      // called anything like "arm").
+      { static Scene *_invSc=0; static long _invN=0;
+        if (Sc!=_invSc) { _invSc=Sc; _invN=0;
+          Object *_o; for(_o=Sc->ObjectHead;_o && _invN<64;_o=_o->Next)
+            if (_o->Type==Obj_TriMesh && _o->Data)
+            { fprintf(LogFile,"MESHINV '%s' V=%ld F=%ld\n",_o->Name?_o->Name:"?",
+                (long)((TriMesh *)_o->Data)->VIndex,(long)((TriMesh *)_o->Data)->FIndex); _invN++; }
+          fflush(LogFile); } }
+      // Only the FAILURE signature: the near plane is cutting this mesh, yet not one face
+      // survived to the sort list. A partially-cut mesh should always insert something.
+      if (_nN && _nN<_nV && T->DbgIns==0)
+      {
+        static long _apn=0;
+        if (_apn<200)
+        {
+          const char *_nm="?"; Object *_o;
+          for(_o=Sc->ObjectHead;_o;_o=_o->Next)
+            if (_o->Type==Obj_TriMesh && _o->Data==(void *)T) { if(_o->Name) _nm=_o->Name; break; }
+          fprintf(LogFile,"ARMPROBE '%s' V=%ld nearV=%ld | faces=%ld rej=%ld back=%ld INS=%ld | Ahead=%d Inside=%d\n",
+            _nm,_nV,_nN,(long)T->DbgFaces,(long)T->DbgRej,(long)T->DbgBack,(long)T->DbgIns,
+            (int)((T->Flags&Tri_Ahead)!=0),(int)((T->Flags&Tri_Inside)!=0));
+          fflush(LogFile);
+        }
+        _apn++;
+      }
+    }
+#endif
   }
   CPolys = Ins-FList;
 #ifdef FDS_ZFLIP
