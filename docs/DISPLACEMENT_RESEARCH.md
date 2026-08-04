@@ -254,6 +254,33 @@ method. [P]
 
 ### S1 — depth-writing offset-shell POM (per-pixel path completed)
 
+> **✅ S1a IMPLEMENTED (2026-08-04, fog-wt) — `--pom_depth_write`, default OFF.**
+> Both marches (naive + cone) write the marched crossing's depth to ZPage16;
+> flag-off byte-identical (render_gate 3/3, city `37e62845`, fountain
+> `51fff7cd`). Implementation detail that superseded the sketch below: instead
+> of `Δz = t·amp/…` with a divide, the depth uses the offset-limited-consistent
+> closed form `Δz = (h−0.5)·strength·w·(Vz + Nz·(1−VtN))` — no divide, bounded
+> |Δz| ≤ strength·w at any angle, with `w` = per-face world-per-UV-tile from a
+> per-triangle Lengyel solve on the raster inputs (so the Z relief is exactly
+> the relief the texels show, and no `amp` flag is needed). Measured [M],
+> greets 1080p threaded: zscale 395.64 (FZP 150; 1 code = 2.5e-3 world);
+> zEnc relief span at t=5780 (naive-8, full map, strength 0.3): −185..+13
+> codes = −0.47..+0.03 world, 36.5 % of frame pixels moved; cone-8+refine:
+> med +5 codes (honest slight protrusion, map mean 0.55), grooves to −159.
+> Cost [M]: depth write itself = **+0.1 ms median** (7 interleaved pairs,
+> run noise ±1.3 ms) on top of the march — the +0.3–1 ms estimate's floor, so
+> naive-8 TOTAL ≈ +2 ms, under the +2.5–3 ms estimate. SSAO/GTAO is the
+> headline: the AO-debug field goes from a featureless gradient to crisp
+> per-joint contact darkening. Ordering hazard swept (momy statue, jambs,
+> t=6097): no geometry artifacts, only soft AO shifts; adjacent-t frame-step
+> deltas unchanged (13.34→13.30 mean|Δ|) = no added shimmer. Residual config
+> (`--greets_displace`): wall residual depth is sub-quantum (geometry carries
+> the band — no Z double-count by construction); the grazing FLOOR carries
+> near-full relief in its residual (cracks are finer than mip2) and the
+> naive-8 late-crossing bias shows as ~−0.29 world median there — a march-
+> quality issue (cone fixes it), not a depth-write issue. S1b (lid + discard)
+> remains open.
+
 **Tier S1a — depth write, no geometry change.** In the Mekalele fill, after the
 march lands at tangent-space depth t (uf,vf known; the code already has the
 per-lane marched height), compute the view-space depth delta along the ray and
