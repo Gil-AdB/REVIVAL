@@ -518,6 +518,10 @@ struct TileRasterizerCtx {
 	// tessellation bake, which pins its patch-border verts to zero displacement
 	// and therefore never covers past the authored footprint either.
 	bool  pomShellBaseClip = true;
+	// --pom_normal / --pom_normal_strength: replace the G-buffer normal with the
+	// marched height field's own surface normal (see the write site).
+	bool  pomNormal = false;
+	float pomNormalStrength = 1.0f;
 	// --pom_shell_base_clip_raw: use the UNCAPPED 1/(V·N) for the base-clip ray
 	// instead of the march's capped one. Diagnostic A/B (see the flag).
 	bool  pomShellBaseClipRaw = false;
@@ -1113,6 +1117,11 @@ struct TileRasterizer {
 					// albedo/normal/AO all sample the shifted texel.
 					Vec8f uf = p_uz * p_z;
 					Vec8f vf = p_vz * p_z;
+					// --pom_normal: the G-buffer normal this pixel hands to the
+					// deferred kernel. Defaults to the interpolated GEOMETRIC normal
+					// (byte-identical); the march block below replaces it with the
+					// marched height field's own surface normal when the flag is on.
+					Vec8f pnX = p_nx, pnY = p_ny, pnZ = p_nz;
 					if (ctx.heightData && wantTangent) {
 						// Geometric (un-shifted) UV, kept for --parallax_max_offset:
 						// the clamp bounds |final - geometric| in texels below.
@@ -1449,6 +1458,73 @@ struct TileRasterizer {
 							uf = ufGeo + (uf - ufGeo) * s;
 							vf = vfGeo + (vf - vfGeo) * s;
 						}
+						// --pom_normal (S1e): hand the deferred kernel the HEIGHT FIELD'S
+						// OWN surface normal at the marched hit instead of the flat
+						// polygon normal.
+						//
+						// Why this is a MISSING TERM and not a nicety - measured at greets
+						// t=5780 with --no-nmap (plan S1e): the TESSELLATION path still
+						// shows fully shaped, bevelled blocks with dark mortar, because its
+						// geometry carries the height map's low band and therefore tilts
+						// the shading normal; the per-pixel path shows a FLAT wall, because
+						// the march only moves UVs - nothing in it ever tilts a normal -
+						// and the material's normal map carries the fine grain, not the
+						// block-scale relief. That difference is the whole of the user's
+						// "the tessellated version's grooves sit in visibly deeper shadow".
+						//
+						// Central differences over +-1 texel of the height map's own mip.
+						// The world-per-UV cancels EXACTLY, so no per-triangle density term
+						// is needed: one texel of u spans w/heightUScale world and a unit of
+						// h spans A_uv*w world, hence dH/dU_world = dh * A_uv * heightUScale.
+						// A_uv is the SAME amplitude the march travelled with (the
+						// geometry's for a shell, the strength flag's otherwise), so the
+						// normal can never disagree with the parallax or the depth.
+						// N' = normalize(N - sU*T - sV*B) in the view-space TBN already
+						// built above; the encode below normalizes.
+						//
+						// Cost: 4 extra height gathers per covered pixel (the march itself
+						// runs 8-14) - not free, see the plan's measured ms. The bumped
+						// normal is also what --pom_horizon then builds its azimuth frame
+						// from, exactly as the tessellation path's bumped geometric normal
+						// already does, so the two paths stay consistent rather than
+						// diverging.
+						if (ctx.pomNormal) {
+							const Vec8f amp = shell ? Vec8f(ctx.pomShellUvAmp)
+							                        : Vec8f(ctx.parallaxStrength);
+							const Vec8f tU = uf * ctx.heightUScale;
+							const Vec8f tV = vf * ctx.heightVScale;
+								Vec8i muC = roundi(tU), mvC = roundi(tV);
+								Vec8i muP = roundi(tU + Vec8f(1.0f));
+								Vec8i muM = roundi(tU - Vec8f(1.0f));
+								Vec8i mvP = roundi(tV + Vec8f(1.0f));
+								Vec8i mvM = roundi(tV - Vec8f(1.0f));
+								const Vec8i tvC = packed_tile_v(mvC, ctx.heightVmask);
+								const Vec8i tuC = packed_tile_u(muC, ctx.heightLogH,
+								                                ctx.heightUmaskSwizzled);
+								alignas(32) int32_t aUp[8], aUm[8], aVp[8], aVm[8];
+								(packed_tile_u(muP, ctx.heightLogH, ctx.heightUmaskSwizzled)
+								 + tvC).store_a(aUp);
+								(packed_tile_u(muM, ctx.heightLogH, ctx.heightUmaskSwizzled)
+								 + tvC).store_a(aUm);
+								(tuC + packed_tile_v(mvP, ctx.heightVmask)).store_a(aVp);
+								(tuC + packed_tile_v(mvM, ctx.heightVmask)).store_a(aVm);
+							alignas(32) float dUa[8], dVa[8];
+							for (int q = 0; q < 8; ++q) {
+								dUa[q] = float(int(ctx.heightData[aUp[q]])
+								             - int(ctx.heightData[aUm[q]]));
+								dVa[q] = float(int(ctx.heightData[aVp[q]])
+								             - int(ctx.heightData[aVm[q]]));
+							}
+							Vec8f gU; gU.load_a(dUa);
+							Vec8f gV; gV.load_a(dVa);
+							const Vec8f kk = amp * Vec8f(ctx.pomNormalStrength)
+							               * Vec8f(0.5f / 255.0f);
+							const Vec8f sU = gU * kk * Vec8f(ctx.heightUScale);
+							const Vec8f sV = gV * kk * Vec8f(ctx.heightVScale);
+							pnX = Nx - Tx * sU - Bx * sV;
+							pnY = Ny - Ty * sU - By * sV;
+							pnZ = Nz - Tz * sU - Bz * sV;
+						}
 						// --pom_depth_write (S1a): store the MARCHED depth instead of the
 						// flat plane's (the store at the top of the row was skipped when
 						// pomZ). The landed crossing (uf,vf,pomHitH) lies on the offset-
@@ -1694,11 +1770,11 @@ struct TileRasterizer {
 					// Tangent: vec Gram-Schmidt + vec encode, with a
 					// degenerate-lane mask that zeros tangent for lanes
 					// where T became parallel to N after interpolation.
-					const Vec8f n2 = p_nx*p_nx + p_ny*p_ny + p_nz*p_nz;
+					const Vec8f n2 = pnX*pnX + pnY*pnY + pnZ*pnZ;
 					const Vec8f vInvN = approx_rsqrt(n2);
-					const Vec8f vnx = p_nx * vInvN;
-					const Vec8f vny = p_ny * vInvN;
-					const Vec8f vnz = p_nz * vInvN;
+					const Vec8f vnx = pnX * vInvN;
+					const Vec8f vny = pnY * vInvN;
+					const Vec8f vnz = pnZ * vInvN;
 					alignas(32) uint32_t normalEnc[8];
 					_mm256_store_si256((__m256i*)normalEnc,
 						oct_encode_u32_x8(*(const __m256*)&vnx,
@@ -2229,6 +2305,9 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomShellCap = fds::FeatureFlags::pom_shell_cap(),
 		.pomShellDomain = fds::FeatureFlags::pom_shell_domain(),
 		.pomShellBaseClip = fds::FeatureFlags::pom_shell_base_clip(),
+		.pomNormal = fds::FeatureFlags::pom_normal() && (heightData != nullptr)
+		             && marchArmed,
+		.pomNormalStrength = fds::FeatureFlags::pom_normal_strength(),
 		.pomShellBaseClipRaw = fds::FeatureFlags::pom_shell_base_clip_raw(),
 		// The lateral-exit domain: the PATCH's UV box (Face::PomShellGroup ->
 		// Material::PomShellDomains) when PomShell_Build grouped this face,

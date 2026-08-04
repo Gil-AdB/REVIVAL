@@ -309,6 +309,64 @@ the patch-border ring by POSITION, since `--pom_shell_pin`'s pointer-based
 `nonTarget` test never fires on a mesh split by `MakeFacesIndependentByAngle`,
 and un-subdivided quads have nothing but border verts). Not attempted here.
 
+## Stage S1e — height-field shading normal  [IMPLEMENTED 2026-08-04]
+
+> **✅ `--pom_normal`, default OFF** (+ `--pom_normal_strength`, 1.0).
+
+User report on the same three-way set: at t=5780 the TESSELLATED wall's grooves
+sit in visibly deeper shadow than the shell's.
+
+**Discriminator, cheapest first, and it settled it in one pair of renders:
+`--no-nmap` on both arms.** With the normal map removed, tessellation STILL
+shows fully shaped, bevelled blocks with dark mortar joints
+(`scratchpad/D1/G_tessNN.png`) while the per-pixel path shows an essentially
+FLAT wall (`G_shellNN.png`). So the depth difference is not the normal map and
+not AO — it is that **the POM march only moves UVs; nothing in it ever tilts a
+shading normal**, whereas the tessellation bake puts the height map's low band
+into the geometry, so its vertex normals tilt with the blocks. The material's
+normal map cannot close the gap: it carries the fine grain, not the block-scale
+relief, which lives in the HEIGHT map.
+
+Hypotheses that were checked and are NOT the cause:
+- **(a) `--pom_depth_write` off in the shell arm** — refuted in code:
+  `pomDepthWrite = (flag || pomShellFace) && marchArmed`, so `--pom_shell` arms
+  it implicitly. Moot anyway: **neither arm ran SSAO/GTAO** (`--ssao` defaults
+  OFF and no arm passes it), so no Z consumer could have produced the shadow.
+- **(d) unequal AO/shadow flags between arms** — `--ao_map` ON (default) and
+  `--ao_direct` OFF (default) in BOTH arms; `--pom_horizon` OFF in both of the
+  arms being compared. The arms differ only in `--greets_displace` vs
+  `--pom_shell --parallax_pom_cone`.
+- **(c) height domain** is real but secondary and it cuts the OTHER way: under
+  `--greets_displace` only the HEIGHT map is swapped to the residual, the NORMAL
+  map stays FULL — so the tessellation path DOUBLE-COUNTS the low band
+  (geometry + full normal map) and reads slightly deeper than physically
+  correct. `--pom_normal_strength` exists to match it by eye if wanted.
+
+**Implementation** (Mekalele.h, at the marched hit, after the offset clamp):
+central differences of the height map over ±1 texel of its own mip; the
+per-face world-per-UV cancels exactly, so `dH/dU_world = Δh · A_uv ·
+heightUScale` with `A_uv` the SAME amplitude the march travelled with (the shell
+geometry's under `--pom_shell`, `parallax_strength × ParallaxScale` otherwise) —
+the normal therefore cannot disagree with the parallax or the depth write.
+`N' = normalize(N − sU·T − sV·B)` in the view-space TBN the march already built,
+written to the G-buffer normal plane; the kernel applies the material's normal
+map ON TOP, in the rotated frame — the same layering the tessellation path
+already has. `--pom_horizon` consequently takes its azimuth frame from the
+bumped normal, exactly as it already does on the tessellation path.
+
+**Measured, greets t=5780:** 987 740 px change, 199 505 by >12/255, 48 720 by
+>32/255. Perf, `--bench=scene` iters=40, 3 interleaved pairs, load 1.7–3.2:
+off 58.89 / 58.04 / 58.73, on 59.09 / 60.67 / 59.12 → per-pair deltas
+**+0.21 / +2.62 / +0.39 ms, median +0.4 ms** for 4 extra height gathers per
+covered pixel. Honest caveat: one pair is 6× the other two; treat the cost as
+"a few tenths to ~2.5 ms at this pose", not as +0.4.
+
+Crops (identical framing, t=5780 wall):
+`scratchpad/D1/G_{tess,tessNN,shell,shellNN,shellPN,shellPNnn}.png`.
+NOTE: whole-image luminance statistics do NOT separate these arms (lumSD 19.4–22.0
+across all six) because the albedo texture dominates them — the judgement here is
+the eye's, and the `--no-nmap` pair is what makes it unambiguous.
+
 Goal: true block-edge silhouettes. When a ray misses all stone, the pixel is
 DISCARDED and the geometry behind shows through — the user named this the one
 major visual win of tessellation; it is the primary acceptance criterion.
