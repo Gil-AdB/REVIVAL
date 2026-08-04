@@ -268,7 +268,42 @@ void Transform_Objects(Scene *Sc)
         T->Flags |= Tri_Invisible;
         continue;
       }
+      // Tri_Ahead is a PROMISE to the Ahead/Inside vertex loops that no vertex needs near
+      // clipping: they compute RZ=1.0/TPos.Z unconditionally and never set Vtx_VisNear (only
+      // the Regular loop tests against C_NZP). Measured against Z=0, that promise is false --
+      // a sphere entirely in front of Z=0 can still straddle C_NZP, and those 0<Z<C_NZP
+      // vertices get RZ->huge, PX/PY explode past every screen edge, so all four Vtx_Vis
+      // edge flags set and the screen clipper discards the whole mesh. That is the robot arm
+      // vanishing the moment the near plane touches it; the window closes again once the
+      // sphere straddles Z=0 and the mesh correctly falls through to Regular.
+      // BSphereRad is r^2 (CAMERAS.CPP sqrt()s it), L2 the max RotMat row norm^2.
+#ifdef FDS_NEARSPHERE
+      { float _dz = S.Z - C_NZP;
+        if (_dz>0.0f && _dz*_dz > L2*T->BSphereRad) T->Flags |= Tri_Ahead; }
+#else
       T->Flags |= Tri_Ahead;
+#endif
+#ifdef FDS_NEARSPHERE_PROBE
+      // Fires exactly when the promise is broken, whether or not the fix is compiled in.
+      if (T->Flags&Tri_Ahead)
+      {
+        float _nz = S.Z - (float)sqrt((double)(L2*T->BSphereRad));
+        if (_nz <= C_NZP)
+        {
+          static long _nsn=0;
+          if (_nsn<60)
+          {
+            const char *_nm = "?"; Object *_o;
+            for(_o=Sc->ObjectHead;_o;_o=_o->Next)
+              if (_o->Type==Obj_TriMesh && _o->Data==(void *)T) { if(_o->Name) _nm=_o->Name; break; }
+            fprintf(LogFile,"NEARSPHERE '%s' V=%ld S.Z=%.4f r=%.4f nearest=%.4f NZP=%.4f\n",
+                    _nm,(long)T->VIndex,S.Z,(float)sqrt((double)(L2*T->BSphereRad)),_nz,C_NZP);
+            fflush(LogFile);
+          }
+          _nsn++;
+        }
+      }
+#endif
     }
     // Out by left/right.
     // The side-plane rejection is only MEANINGFUL when the bounding sphere lies entirely in
