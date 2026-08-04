@@ -464,6 +464,8 @@ Crops for the eye (all `scratchpad/`, 1080p downscaled to 900 px wide):
 
 | what | file |
 |---|---|
+| **THREE-WAY, one build**: tess / S1 shell / S1+horizon, t=5780 | `T_tess_5780_s.png` `T_shell_5780_s.png` `T_shellhz_5780_s.png` |
+| **THREE-WAY, one build**: tess / S1 shell / S1+horizon, t=6097 | `T_tess_6097_s.png` `T_shell_6097_s.png` `T_shellhz_6097_s.png` |
 | t=5780 tessellation / flat / shell(pre-fix) / shell(landed) | `t_tess_s.png` `t_flat_s.png` `t_shellm0_s.png` `m_shell5780_s.png` |
 | t=5780 discard classification (green = see-through, red = void) | `base_cls_p5780_s.png` |
 | t=6097 tess / flat / shell / shell-no-discard | `v_tess_6097_s.png` `v_flat_6097_s.png` `v_shell_6097_s.png` `v_shellnd_6097_s.png` |
