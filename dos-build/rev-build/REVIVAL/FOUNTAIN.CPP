@@ -137,6 +137,88 @@ void Particle_Rast(Vertex *A,Vertex *B,Vertex *C)
 }*/
 
 
+#ifdef FDS_FNTLIGHTS
+// ---------------------------------------------------------------------------------------
+// Stream lights: the three inner emitters orbit the fountain (Omit in Particle_Kinematics,
+// phase-offset by I*2pi/3), so the water arcs sweep around it. Hang FNT_STREAM_LIGHTS omnis
+// on each emitter's live particles so the arcs actually illuminate the basin as they pass.
+//
+// Two traps, both previously paid for:
+//   * Animate_Objects() rewrites every Om->IPos from its position spline, so these must be
+//     repositioned AFTER it and before lighting -- doing it at spawn time is silently undone.
+//   * a hand-built Omni whose F.A/B/C are null hangs Render(); AddOmni() sets those (and the
+//     Object/OmniHead links), so build them through AddOmni rather than by hand.
+// Created BEFORE Preprocess_Scene so Fit_FlareImage gives them a flare image like any other.
+// ---------------------------------------------------------------------------------------
+#ifndef FNT_STREAM_LIGHTS
+#define FNT_STREAM_LIGHTS 1        // per emitter; 3 emitters -> 3 lights. 3 -> 9.
+#endif
+#define FNT_STREAM_LIGHTS_MAX (FNT_STREAM_LIGHTS*3)
+static Omni *FntStreamLight[FNT_STREAM_LIGHTS_MAX];
+static long  FntStreamLightN = 0;
+
+// Lives in FDS/SOURCE/FLD/FLD_CONV.CPP; not in either FDS_DECS.H.
+void AddOmni(Scene *Sc,Omni *Om,char *ObjName);
+
+static void Fnt_MakeStreamLights(Scene *Sc)
+{
+	long i;
+	FntStreamLightN = 0;
+	for (i=0;i<FNT_STREAM_LIGHTS_MAX;i++)
+	{
+		Omni *O = new Omni;
+		memset(O,0,sizeof(Omni));
+		// No position spline: IPos is driven per frame from a live particle. Spline_Calc_3D
+		// in Animate_Objects leaves IPos alone when NumKeys==0, and we overwrite it anyway.
+		O->Pos.NumKeys = 0;
+		O->Pos.Keys    = NULL;
+		// Cool water-white. The DOS forward Lighting() is LR += L*cos*384/dist^2, so the
+		// magnitude is the same scale ConvertOmni uses (255*56.86 ~ 14500) knocked well down:
+		// these sit INSIDE the basin, metres from the geometry, where 1/dist^2 is enormous.
+		O->L.R = 1400.0f;
+		O->L.G = 2000.0f;
+		O->L.B = 2600.0f;
+		O->Flags |= Flare_LightSource;
+		AddOmni(Sc,O,"fnt stream light");
+		// AddOmni stamps Obj->Parent = (Object *)CurParent -- a raw FLD parent INDEX that only
+		// ConvertFLD's resolve pass turns into a pointer. Calling it after the load means no
+		// resolve pass follows, so the new Object would carry a bogus pointer. Null it.
+		{ Object *_o; for(_o=Sc->ObjectHead;_o && _o->Next;_o=_o->Next);
+		  if (_o && _o->Data==(void *)O) _o->Parent = NULL; }
+		FntStreamLight[FntStreamLightN++] = O;
+	}
+	fprintf(LogFile,"FNTLIGHTS: %ld stream lights (%d per emitter x3)\n",
+	        FntStreamLightN,(int)FNT_STREAM_LIGHTS);
+	fflush(LogFile);
+}
+
+// Park each light on a live particle of its emitter, spaced through the group so the lights
+// sit at different ages -- i.e. spread along the arc rather than bunched at the nozzle.
+// Call AFTER Animate_Objects and BEFORE lighting.
+static void Fnt_PlaceStreamLights(Scene *Sc)
+{
+	long e,k;
+	if (!FntStreamLightN) return;
+	for (e=0;e<3;e++)
+	{
+		long off = g_PclGroupOff[1+e], n = g_PclGroupN[1+e];
+		for (k=0;k<FNT_STREAM_LIGHTS;k++)
+		{
+			Omni *O = FntStreamLight[e*FNT_STREAM_LIGHTS+k];
+			long start = off + (long)((float)n*(float)(k+1)/(float)(FNT_STREAM_LIGHTS+1));
+			long j, idx = -1;
+			for (j=0;j<n;j++)                       // first live particle from that slot on
+			{ long c = off + ((start-off)+j)%n;
+			  if (Sc->Pcl[c].Flags & Particle_Active) { idx=c; break; } }
+			if (idx<0)                              // emitter momentarily empty: park it dark
+			{ O->Flags &= 0xFFFFFFFF-Flare_LightSource; continue; }
+			O->Flags |= Flare_LightSource;
+			Vector_Copy(&O->IPos,&Sc->Pcl[idx].V.Pos);
+		}
+	}
+}
+#endif /* FDS_FNTLIGHTS */
+
 void Initialize_Particles(Scene *Sc)
 {
 	long I,J;
@@ -659,6 +741,9 @@ void Initialize_Fountain()
 		M->Flags |= Mat_RGBInterp;
 	}
 	Add_Vortex_ToScene();
+#ifdef FDS_FNTLIGHTS
+	Fnt_MakeStreamLights(FntSc);   // before Preprocess_Scene, so Fit_FlareImage sees them
+#endif
 
 	Preprocess_Scene(FntSc);
 
@@ -1892,6 +1977,11 @@ void Run_Fountain()
 		} else VortexTri.Flags &= 0xFFFFFFFF-HTrack_Visible;
 
 		Particle_Kinematics(FntSc);
+#ifdef FDS_FNTLIGHTS
+		// after Animate_Objects (which rewrites IPos from the spline) and after the
+		// kinematics that moved the particles this frame; before FntLighting reads IPos.
+		Fnt_PlaceStreamLights(FntSc);
+#endif
 #ifdef FDS_CLIPCHK
 		{ static long _pf=0;
 		  fprintf(LogFile,"PCLSPAWN f%ld dTime=%ld live=%ld req=%ld granted=%ld\n",
