@@ -89,7 +89,12 @@ struct Scene {
     std::vector<TextureImage> textures;
     std::vector<Light>        lights;
     Camera                    camera;
-    float                     ambient[3] = {0, 0, 0};   // Scene::Ambient, 0..255
+    float                     ambient[3] = {0, 0, 0};    // Scene::Ambient, 0..255
+    // Authored backdrop gradient (Scene::SkyZenith / SkyNadir, 0..255). Projected
+    // into L2 SH for the --sh_ambient path, so the ambient term is real authored
+    // content rather than a flat constant.
+    float                     skyZenith[3] = {0, 0, 0};
+    float                     skyNadir[3] = {0, 0, 0};
 
     int      xres = 0, yres = 0;
     float    curFrame = 0.0f;

@@ -347,9 +347,24 @@ bool Load(Scene &out, const LoadOptions &opt) {
     out.ambient[0] = sc.Ambient.R;
     out.ambient[1] = sc.Ambient.G;
     out.ambient[2] = sc.Ambient.B;
+    out.skyZenith[0] = sc.SkyZenith.R;
+    out.skyZenith[1] = sc.SkyZenith.G;
+    out.skyZenith[2] = sc.SkyZenith.B;
+    out.skyNadir[0] = sc.SkyNadir.R;
+    out.skyNadir[1] = sc.SkyNadir.G;
+    out.skyNadir[2] = sc.SkyNadir.B;
+    // Which omnis are MECH-ATTACHED (greets' "moving" class, re-baked per frame at
+    // greets_moving_omni_shadow_res). Detected from the FLD Object hierarchy --
+    // NOT from a non-finite IPos, which only happens when CurFrame is outside the
+    // authored range and would report zero moving lights at every real pose.
+    std::vector<const void *> parentedOmnis;
+    for (Object *o = sc.ObjectHead; o; o = o->Next)
+        if (o->Type == Obj_Omni && o->Parent && o->Data) parentedOmnis.push_back(o->Data);
+
     for (Omni *O = sc.OmniHead; O; O = O->Next) {
         Light L;
-        L.parented = !FiniteVec(O->IPos);
+        L.parented = std::find(parentedOmnis.begin(), parentedOmnis.end(),
+                               (const void *)O) != parentedOmnis.end();
         L.pos[0] = O->IPos.x; L.pos[1] = O->IPos.y; L.pos[2] = O->IPos.z;
         L.color[0] = O->L.R;  L.color[1] = O->L.G;  L.color[2] = O->L.B;
         L.intensity = O->ISize;

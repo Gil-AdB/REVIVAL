@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 
 #include "SceneIngest.h"
+#include "Deferred.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +103,25 @@ const char *kUsage =
     "  --shaders=DIR     shader source dir     (default alongside the binary, then ./shaders)\n"
     "  --no-draw         issue zero draws — measures the render-pass FLOOR (clear + store\n"
     "                    of the target) so the scene number can be reported net of it\n"
+    "  --pass=albedo|deferred    albedo = Phase 2 arm (geometry + albedo, no lighting).\n"
+    "                    deferred = Phase 3: G-buffer -> cube shadows -> PBR lighting ->\n"
+    "                    ACES tonemap, with PER-PASS GPU timestamps. Default albedo.\n"
+    "  --no-shadows      deferred only: skip the cube bake and the per-pixel tap\n"
+    "  --rebake_all      deferred only: re-bake ALL cubes every frame instead of only the\n"
+    "                    moving ones. greets caches static cubes, so this is NOT its policy.\n"
+    "  --stages=1|2|3    deferred only: 1 = G-buffer only, 2 = +lighting, 3 = +tonemap.\n"
+    "                    Per-encoder timestamps OVERLAP and do not sum to the frame; take\n"
+    "                    pass costs from DIFFERENCES of whole-frame totals across stages.\n"
+    "  --shadow_res=N    deferred only: static-omni cube face res (default 512, as greets)\n"
+    "  --exposure=F      deferred only: tonemap exposure (default 1.0)\n"
+    "  --viz=MODE        deferred only: albedo|normal|ao|depth|gloss|shadow|lights —\n"
+    "                    per-stage verification output instead of the lit frame\n"
+    "  --light_range_scale=F   deferred only, MEASUREMENT ONLY (changes pixels). greets'\n"
+    "                    authored omni ranges are 3-20 units in a 60+ unit room, so the hard\n"
+    "                    cutoff culls nearly every light for nearly every pixel. Scale up to\n"
+    "                    measure the real per-light cost.\n"
+    "  --no-stone_tex    do NOT apply DEMO's greets_stone_tex wall/floor override. The\n"
+    "                    render is then the AUTHORED FLD wall, not the reviewed surface.\n"
     "  --help\n";
 
 }  // namespace
@@ -115,6 +135,8 @@ int main(int argc, const char *argv[]) {
     std::string outPath = "gpubench.ppm";
     std::string shaderDir;
     bool noDraw = false;
+    std::string passMode = "albedo";
+    gpubench::DeferredOptions dopt;
 
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
@@ -135,6 +157,27 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--out="))     outPath = v;
         else if (const char *v = val("--shaders=")) shaderDir = v;
         else if (a == "--no-draw")                  noDraw = true;
+        else if (const char *v = val("--pass="))    passMode = v;
+        else if (a == "--no-shadows")               dopt.shadows = false;
+        else if (a == "--rebake_all")               dopt.rebakeAll = true;
+        else if (const char *v = val("--stages="))   dopt.stages = std::atoi(v);
+        else if (const char *v = val("--light_range_scale=")) dopt.lightRangeScale = float(std::atof(v));
+        else if (const char *v = val("--viz_light="))  dopt.vizLight = std::atoi(v);
+        else if (const char *v = val("--shadow_res=")) dopt.staticShadowRes = std::atoi(v);
+        else if (const char *v = val("--exposure=")) dopt.exposure = float(std::atof(v));
+        else if (a == "--no-stone_tex")             opt.stoneTex = false;
+        else if (const char *v = val("--viz=")) {
+            const std::string m(v);
+            if      (m == "albedo") dopt.viz = 0;
+            else if (m == "normal") dopt.viz = 1;
+            else if (m == "ao")     dopt.viz = 2;
+            else if (m == "depth")  dopt.viz = 3;
+            else if (m == "gloss")  dopt.viz = 4;
+            else if (m == "shadow") dopt.viz = 5;
+            else if (m == "lights") dopt.viz = 6;
+            else if (m == "shadowraw") dopt.viz = 7;
+            else { std::fprintf(stderr, "unknown --viz mode: %s\n", v); return 2; }
+        }
         else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }
     }
 
@@ -147,6 +190,61 @@ int main(int argc, const char *argv[]) {
     if (!dev) Die("no Metal device", nil);
     std::fprintf(stderr, "[GPUBENCH] device: %s (unified=%d)\n",
                  [[dev name] UTF8String], (int)[dev hasUnifiedMemory]);
+
+    // ---- Phase 3: deferred arm --------------------------------------------
+    if (passMode == "deferred") {
+        std::string sp;
+        std::vector<std::string> t;
+        if (!shaderDir.empty()) t.push_back(shaderDir + "/deferred.metal");
+        if (const char *exe = argv[0]) {
+            std::string e(exe);
+            size_t slash = e.find_last_of('/');
+            if (slash != std::string::npos) t.push_back(e.substr(0, slash) + "/shaders/deferred.metal");
+        }
+        t.push_back("shaders/deferred.metal");
+        t.push_back("../GpuBench/shaders/deferred.metal");
+        for (const auto &p : t) if (!ReadFile(p.c_str()).empty()) { sp = p; break; }
+        if (sp.empty()) Die("could not find deferred.metal (use --shaders=DIR)", nil);
+        std::fprintf(stderr, "[GPUBENCH] shaders: %s\n", sp.c_str());
+
+        dopt.warmup = warmup;
+        dopt.iters = iters;
+        dopt.outPath = outPath;
+        gpubench::DeferredResult res;
+        if (!gpubench::RunDeferred(scene, dopt, sp, res)) return 3;
+
+        std::fprintf(stderr,
+            "\n[GPUBENCH] ===== DEFERRED RESULT =====\n"
+            "[GPUBENCH] scene=%s pose t=%d (CurFrame %.1f) %dx%d MSAA=1x\n"
+            "[GPUBENCH] draws=%zu tris=%u textures=%u lights=%d\n"
+            "[GPUBENCH] shadows: %s — %d cubes / %d faces / %.2f Mtexels (static %d^2, moving %d^2)\n"
+            "[GPUBENCH]   static cubes baked ONCE (Omni_StaticShadow, as greets caches them): %.3f ms\n"
+            "[GPUBENCH]   per-frame re-bake: %d moving cube(s) = %d faces%s\n"
+            "[GPUBENCH] PBR: GGX + Smith-Schlick + Schlick F, Karis split-sum env BRDF,\n"
+            "[GPUBENCH]      Fdez-Aguera multiscatter, (1-F) diffuse energy, L2 SH ambient\n"
+            "[GPUBENCH] GPU ms, median (p5/p95), %d frames after %d warmup:\n",
+            opt.fldPath, opt.demoT, scene.curFrame, scene.xres, scene.yres,
+            scene.batches.size(), scene.faceCount, scene.texturesLoaded, res.litLights,
+            dopt.shadows ? "ON" : "OFF", res.shadowCubes, res.shadowFaces,
+            double(res.shadowTexels) / 1e6, dopt.staticShadowRes, dopt.movingShadowRes,
+            res.staticBakeMs,
+            dopt.rebakeAll ? res.shadowCubes : res.movingCubes,
+            6 * (dopt.rebakeAll ? res.shadowCubes : res.movingCubes),
+            dopt.rebakeAll ? "  [--rebake_all: FULL cold bake, not greets' policy]" : "",
+            iters, warmup);
+        for (const auto &p : res.passes)
+            std::fprintf(stderr, "[GPUBENCH]   %-14s %8.4f  (%.4f / %.4f)\n",
+                         p.name.c_str(), p.median, p.p5, p.p95);
+        std::fprintf(stderr,
+            "[GPUBENCH]   %-14s %8.4f  (%.4f / %.4f)\n"
+            "[GPUBENCH]   => %.1f FPS equivalent\n",
+            "FRAME TOTAL", res.frame.median, res.frame.p5, res.frame.p95,
+            res.frame.median > 0.0 ? 1000.0 / res.frame.median : 0.0);
+        if (dopt.viz >= 0)
+            std::fprintf(stderr, "[GPUBENCH] NOTE: --viz active, the lighting pass was "
+                                 "replaced by a debug output — timings are not the lit path.\n");
+        return 0;
+    }
 
     // ---- shaders (runtime MSL compile; no offline `metal` on this machine) --
     std::string src;

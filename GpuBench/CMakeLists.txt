@@ -13,6 +13,8 @@ set(PROJECT_NAME GpuBench)
 
 add_executable(${PROJECT_NAME}
     GpuBenchMain.mm
+    Deferred.mm
+    Deferred.h
     SceneIngest.cpp
     SceneIngest.h)
 
@@ -27,7 +29,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 # Compile the .mm as Objective-C++ without enabling the OBJCXX language
 # project-wide (which would perturb the default configure).
-set_source_files_properties(GpuBenchMain.mm PROPERTIES
+set_source_files_properties(GpuBenchMain.mm Deferred.mm PROPERTIES
     LANGUAGE CXX
     COMPILE_OPTIONS "-ObjC++;-fobjc-arc")
 
