@@ -613,7 +613,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b74</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b75</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -724,7 +724,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b74";
+      var REV_BUILD = "b75";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1940,17 +1940,19 @@
           el.appendChild(note);
           // LID is the one mode where a live rebuild is not the same picture as
           // a relaunch, and saying so beats letting it be re-discovered. The
-          // shell build itself is IDENTICAL (verified: same patch counts, same
-          // moved-vert counts, same offset ranges). What differs is the greets
-          // SHADOW CLUSTERING, which runs after the shell at init and keys each
-          // face's ShadowMatID on its CENTROID's plane distance quantized to a
+          // shell build itself is IDENTICAL (same patch counts, same moved-vert
+          // counts, same offset ranges). What differs is the greets SHADOW
+          // CLUSTERING, which runs after the shell at init and keys each face's
+          // ShadowMatID on its CENTROID's plane distance quantised to a
           // 0.5-unit grid — a ~0.1-world lid offset can move a face across a
           // cell boundary, and the deferred PolyId self-shadow test then reads
-          // different ids. Measured at the t=5743 review pose (fresh-vs-fresh
-          // noise floor in brackets): recess-only rebuild vs relaunch 1.8%
-          // [1.9-2.6%] = inside noise; lid 6.3-6.7% [1.0-1.9%], mean 8/255.
-          // ISOLATED: with --no-shadows the lid delta collapses to 1.7% against
-          // a 1.5% floor, and with chunking off it stays at 7.0% — so it is the
+          // different ids. Measured at the t=5743 review pose on the
+          // now-deterministic greets binary (post-f4e81e9), 1920x1080:
+          //   recess-only  relaunch == 1 rebuild == 10 mode toggles, BYTE-IDENTICAL
+          //   lid          rebuild == 10 toggles byte-identical, but 5.40% of
+          //                pixels differ from a relaunch (mean 5/255)
+          // ISOLATED: with --no-shadows the lid delta collapses into the noise,
+          // and with the Piramid chunking off it does not move — so it is the
           // clustering, not the chunk binning.
           var curM = dispCurrentMode();
           if (curM && curM.id === 'lid') {
@@ -1958,9 +1960,9 @@
             w.style.cssText = 'color:#c9a;font-size:10px;margin:0 0 4px;line-height:1.4;';
             w.textContent = 'Lid mode moves vertices, and the shadow clustering that runs after ' +
               'the shell at scene init is NOT redone here — its per-face ids are keyed on the ' +
-              'AUTHORED centroids, so a live rebuild into lid differs from a relaunch on ~6% of ' +
+              'AUTHORED centroids, so a live rebuild into lid differs from a relaunch on 5.4% of ' +
               'pixels (measured; isolated to the shadow path). The shell itself is identical, and ' +
-              'recess-only is exact. Relaunch with the flags for a reviewable lid frame.';
+              'recess-only is byte-exact. Relaunch with the flags for a reviewable lid frame.';
             el.appendChild(w);
           }
         }

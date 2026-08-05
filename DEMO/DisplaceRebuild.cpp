@@ -324,15 +324,18 @@ bool DisplaceRebuild_Apply()
 	//   • "::mirUV" faces: 'floor' has no faces left under its own name, so
 	//     nothing is built for it at all.
 	if (fds::FeatureFlags::pom_shell()) {
-		// (a) unlink the clone meshes from the scene's TriMesh chain
+		// (a) HIDE the clone meshes from PomShell_Build's walks. Both of them
+		//     skip a mesh with FIndex == 0, so zeroing the count excludes the
+		//     clone without touching the TriMesh chain at all. (An earlier
+		//     version unlinked and relinked them; that is chain surgery whose
+		//     ordering is only correct by accident, and measurement showed it
+		//     bought nothing, so this is the cheaper and safer form.)
 		std::vector<TriMesh*> clones;
 		collectMirrorCloneMeshes(g_sc, clones);
-		std::vector<TriMesh*> savedPrev(clones.size()), savedNext(clones.size());
+		std::vector<int32_t> savedFIndex(clones.size());
 		for (size_t k = 0; k < clones.size(); ++k) {
-			TriMesh *C = clones[k];
-			savedPrev[k] = C->Prev; savedNext[k] = C->Next;
-			if (C->Prev) C->Prev->Next = C->Next; else g_sc->TriMeshHead = C->Next;
-			if (C->Next) C->Next->Prev = C->Prev;
+			savedFIndex[k] = clones[k]->FIndex;
+			clones[k]->FIndex = 0;
 		}
 		// (b) re-point every "::mirUV" face back onto its base material
 		std::vector<Face*>     splitFaces;
@@ -354,7 +357,19 @@ bool DisplaceRebuild_Apply()
 				}
 			}
 		}
-		// (c) build
+		// (c) build. --pom_shell_weld=3 needs ONE scene-wide position bucket
+		//     taken before the first build moves a vertex (see MeshOps.h), and
+		//     it must run AFTER (b) has folded the ::mirUV clones back onto
+		//     their base material so the clone faces are counted too.
+		{
+			const char *weldMats[sizeof(kStoneMats)/sizeof(kStoneMats[0])];
+			int nWeldMats = 0;
+			for (const char *n : kStoneMats) {
+				Material *M = stoneMat(g_sc, n);
+				if (M && M->HeightMap) weldMats[nWeldMats++] = n;
+			}
+			PomShell_WeldPrepare(g_sc, weldMats, nWeldMats);
+		}
 		for (const char *n : kStoneMats) {
 			Material *M = stoneMat(g_sc, n);
 			if (!M || !M->HeightMap) continue;
@@ -362,6 +377,7 @@ bool DisplaceRebuild_Apply()
 			               fds::FeatureFlags::parallax_strength() * M->ParallaxScale,
 			               fds::FeatureFlags::pom_shell_pin());
 		}
+		PomShell_WeldReset();
 		// (d) restore the handedness split and hand the clones the tables they
 		//     inherited by struct copy at init (shared, not owned — only the
 		//     base material's arrays are ever freed).
@@ -382,22 +398,34 @@ bool DisplaceRebuild_Apply()
 			C->PomShellSideLean    = base->PomShellSideLean;
 			C->PomShellPatchUvAmp  = base->PomShellPatchUvAmp;
 		}
-		// (e) relink the clone meshes and re-stamp each clone face's patch id
-		//     from its SOURCE face (Mirror::cloneFaceSrc is parallel to
+		// (e) restore the clone face counts and re-stamp each clone face's patch
+		//     id from its SOURCE face (Mirror::cloneFaceSrc is parallel to
 		//     cloneMesh->Faces). primed=false makes the next UpdateMirror do a
 		//     full re-mirror, so a lid offset propagates into the reflection.
-		for (size_t k = clones.size(); k-- > 0;) {
-			TriMesh *C = clones[k];
-			C->Prev = savedPrev[k]; C->Next = savedNext[k];
-			if (C->Prev) C->Prev->Next = C; else g_sc->TriMeshHead = C;
-			if (C->Next) C->Next->Prev = C;
-		}
+		for (size_t k = 0; k < clones.size(); ++k) clones[k]->FIndex = savedFIndex[k];
 		if (std::vector<fds::Mirror> *mirrors = Greets_MirrorList()) {
 			for (fds::Mirror &m : *mirrors) {
 				if (!m.cloneMesh) continue;
-				const size_t n = std::min<size_t>(size_t(m.cloneMesh->FIndex),
-				                                  m.cloneFaceSrc.size());
-				for (size_t f = 0; f < n; ++f)
+				// Vertex::ShellH — the march's ENTRY HEIGHT. At scene init the
+				// shell is built BEFORE BuildMirror, so the clone's vertex copies
+				// carry the stamped 1.0 (recess) / 0.5+ndv/2 (lid). Here the
+				// mirror already exists, and UpdateMirror re-mirrors Pos, N,
+				// Tangent and colour but NOT ShellH — so without this the
+				// reflection marches from the 0.5 default and the relief inside
+				// the mirror is wrong. Measured at the t=5743 review pose: this
+				// was the whole of the rebuild-vs-relaunch difference in
+				// recess-only mode (11 178 px, all inside the teleporter panel).
+				// Same source→clone vertex mapping UpdateMirror uses.
+				for (const fds::ClonedMeshRange &r : m.meshRanges) {
+					const TriMesh *T = r.sourceMesh;
+					if (!T || !T->Verts) continue;
+					const uint32_t n = std::min<uint32_t>(r.vCount, uint32_t(T->VIndex));
+					for (uint32_t vi = 0; vi < n; ++vi)
+						m.cloneMesh->Verts[r.vStart + vi].ShellH = T->Verts[vi].ShellH;
+				}
+				const size_t nf = std::min<size_t>(size_t(m.cloneMesh->FIndex),
+				                                   m.cloneFaceSrc.size());
+				for (size_t f = 0; f < nf; ++f)
 					if (m.cloneFaceSrc[f].face)
 						m.cloneMesh->Faces[f].PomShellGroup =
 							m.cloneFaceSrc[f].face->PomShellGroup;
