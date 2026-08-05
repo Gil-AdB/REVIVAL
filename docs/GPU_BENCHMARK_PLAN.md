@@ -637,6 +637,112 @@ would be exactly the category error §5.3 warns about. The CPU side of the compa
 `--bench=scene@scene=greets,…` with load recorded and the per-phase counters, under the §4
 condition set (mirrors/disco off).
 
+### 6.2 Phase 3 stage 1 — deferred arm built, output NOT YET CORRECT, timings RETRACTED
+
+The deferred path (G-buffer -> cube shadow bake -> PBR lighting -> ACES tonemap) is implemented
+and runs, but **its lighting is wrong, so every timing figure it produced is retracted.** A shadow
+tap that trivially passes is also cheaper than a correct one, so the numbers were suspect in both
+directions. Nothing from this stage may be quoted until `--viz=shadow` shows real wall occlusion.
+
+**Retracted:** the earlier "G-buffer 0.275 / lighting ~0.25 / dynamic bake 0.546 / tonemap 0.030 /
+frame 1.113 ms" table, and any ratio derived from it.
+
+#### Bugs found and fixed (all real, all in this arm)
+
+1. **Cube-face orientation.** Derived, not guessed. Metal maps a direction with
+   `u = ½(sc/ma+1)`, `v = ½(tc/ma+1)`; Metal's viewport origin is **upper-left**, so texel row 0
+   corresponds to `dot(up,d) = +ma` while the sampler puts `v=0` at `tc = -ma`. Hence
+   `right = sc_direction` and **`up = -tc_direction`** — all six of my `up` rows had the wrong
+   sign, baking every face vertically mirrored.
+2. **Light intensity.** Linearising by squaring `(colour x ISize)` also squared the intensity,
+   making every `ISize = 0.5` omni 4x too dim.
+3. **The viz itself was misleading** — it returned WHITE both for "lit and unshadowed" and for "no
+   shadow-casting light within range". That is what made the frame look like a broken shadow test
+   before anything was diagnosed. Now three distinct states. *Never encode "no data" as "the value
+   is 1".*
+4. **`--light_range_scale` didn't scale the baked cube's far plane**, so scaling a light's reach
+   put every surface outside the frustum it was baked in and read as occluded — a broken test, not
+   a broken tap.
+5. **Bake policy now matches greets**: static cubes baked ONCE and cached (`Omni_StaticShadow`),
+   only mech-parented omnis re-bake per frame — detected from the FLD Object **parent chain**, not
+   from a non-finite `IPos` (which only occurs outside the authored frame range and reported zero
+   moving lights at every real pose).
+6. **Render targets were `Shared`, now `Private`** — `Shared` forces write-through and disables
+   lossless compression; it inflated every pass several-fold.
+
+#### What is still wrong, and the evidence
+
+With a **single** light isolated (`--viz_light=N`), **0 % of in-range pixels are fully
+unshadowed** for every static omni. `--viz=shadowraw` decodes the baked depth back to a world
+distance; its two output channels, computed from the *same* `storedDist` expression, disagree
+irreconcilably (one implies ~0.3 units, the other >= 2). **Two channels of one variable cannot
+disagree**, so the sampled depth is almost certainly not a finite float — `saturate()` of NaN/Inf
+is unspecified and would produce exactly this.
+
+**Next step: establish whether `depthcube::sample()` returns valid data at all** — render one baked
+cube face to a visible target from the light's point of view — rather than continuing to adjust the
+face convention or the bias. An earlier "storedDist = 0.31" reading was byte quantisation in my own
+diagnostic, not data; that mistake cost a round and is why the next step is a direct look at the
+baked map.
+
+#### Ruled out along the way
+
+- **The walls ARE in the shadow draw list** — all 35 batches are drawn into every cube face.
+- **greets does NOT patch these omnis' ranges.** `GREETS.CPP:2652` applies
+  `greets_omni_default_range = 30` only to omnis whose `IRange` is **0**; all ten are authored
+  non-zero (3, 3, 10, 10, 7, 20, 20, 2, 2, 2).
+- **The scene genuinely has very little direct omni light at t=5743.** MEASURED with
+  `--viz=lights`: only **15.95 %** of covered pixels have even one light in range, because the
+  authored ranges are 3-20 units in a room spanning X[-13.6..49.4], Z[-75.9..4.9]. That is a
+  property of the *scene*, not a bug — and it means the corridor is lit mainly by lights this arm
+  **does not have yet** (see the inventory below).
+
+#### Light inventory — what this arm has, and what it is missing
+
+MEASURED, printed every run. All ten are FLD `Light_Omni`; **there are no spotlights at all yet.**
+
+| # | world position | linear rgb | range | cube |
+|--:|---|---|--:|---|
+| 0,1 | (+/-3.4, 3.79, 0.05) | (1,1,0) | 3.0 | 512^2 static |
+| 2,3 | (+/-13.1, 4.73, -21.57) | (0.5,0.5,0) | 10.0 | 512^2 static |
+| 4 | (-11.89, 3.41, -51.33) | (1,1,0) | 7.0 | 512^2 static |
+| 5,6 | (33.5, 10.9, -49.8 / -75.5) | (0.5,0.5,0) | 20.0 | 512^2 static |
+| 7,8,9 | mech-attached, ~(8-9, 2-3, -48..-50) | (0,0.25,1) | 2.0 | 128^2 moving |
+
+**Missing, and each is a real part of the look:**
+- **The 10 disco cone spotlights + glow clone** (`DEMO/GreetsDisco.cpp`, 256^2 shadow maps,
+  `Omni_ForceVolCone`). These are very likely most of "the lighting I'm not seeing" — they are what
+  actually lights the corridor.
+- The robot spot + 4 orbit spots are **correctly** absent: `no_greets_spots` defaults `true`.
+- Mirror **omni clones** (each mirror clones every omni across its plane).
+- Flare sprites / omni halos — the bright pools in the DEMO reference are these, not omni surface
+  lighting.
+- Bloom, mirror RTT, volumetric cones.
+- The procedural **code screen** (the black rectangle) — generated CPU-side by the greets
+  generator, so `LoadFLD` cannot produce it.
+
+#### Other known gaps in this arm
+
+- **Tone is not matched to DEMO** (`hdr_exposure` = `cine::kGreetsExposure` not looked up,
+  `hdr_refl_gain` 4.0 and bloom absent). Does not affect cost, but the image is not a visual ground
+  truth yet.
+- Tangent basis is derived from screen-space derivatives, not FDS's `Compute_Vertex_Tangents`
+  (unreachable from the loader). Relevant to §3.1 — this arm does not inherit the
+  handedness/material-clone split.
+- **Backface culling off**; **no frustum culling anywhere**, including the shadow bake, where the
+  CPU culls per cube face. Both make the GPU do more work than the CPU, not less.
+
+#### Method note that survives, and should be reused
+
+Per-pass costs must come from **differencing whole-frame `GPUEndTime - GPUStartTime` intervals**
+across `--stages=1|2|3`, not from per-encoder timestamps: stage-boundary timestamps are available
+and are reported, but on Apple GPUs a pass's vertex stage can begin before the previous pass's
+fragment stage retires, so they overlap and **sum to more than the frame**. Also, at machine load
+13-24 the run-to-run spread on sub-millisecond passes reaches +/-0.15 ms, which is comparable to
+the differences being taken — so every configuration needs repeated runs, min-of-medians, and the
+load recorded. One single-run set measured `stages=2` *slower* than `stages=3`, which is impossible;
+that is the size of the noise.
+
 ### Risks
 
 - **Objective-C++ enters the tree.** Contained to the new target.
