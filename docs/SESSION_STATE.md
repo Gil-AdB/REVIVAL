@@ -150,10 +150,18 @@
 >   fragment exists, because at an inside corner two walls ABUT on screen rather
 >   than overlap.
 > - Gates: render_gate 3/3, city `37e62845`, fountain `51fff7cd`, greets recess
->   AND lid arms depth byte-identical at all 13 poses with the flags off, wasm
->   links, 0 bad flags in 578 run logs. Perf: marginal cost ≤ ~0.5 ms/frame as an
->   upper bound from min-of-10 — the machine carried load average 5–15 all
->   session and I could not resolve it better.
+>   AND lid arms **depth AND colour** byte-identical at all 13 poses with the
+>   flags off — against a binary built from the PARENT COMMIT in a clean
+>   worktree, run from the same `Runtime/`. wasm links, 0 bad flags in 578 run
+>   logs. Perf: marginal cost ≤ ~0.5 ms/frame as an upper bound from min-of-10 —
+>   the machine carried load average 5–15 all session and I could not resolve it
+>   better.
+> - **greets COLOUR is a usable byte gate again.** After `f4e81e9` (the
+>   concurrent AO-width fix) the same recipe gives 3/3 identical colour hashes at
+>   p5743/p5958b/p6097. Before it my flags-off pair differed at 13/13. That
+>   commit also swapped `Runtime/DEMO` under one of my render batches, so every
+>   table in §S1d-2d was re-rendered on the post-fix binary and reproduced to the
+>   digit.
 > - **Trap recorded:** `--pom_shell_side_edge` must NOT be used with the lid.
 >   `PomShell_Build` runs once per material, so `floor`'s seam census sees
 >   `rooms` already displaced and mis-labels 19 of 24 sides as free edges.

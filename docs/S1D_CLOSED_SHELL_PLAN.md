@@ -1263,17 +1263,31 @@ outstanding work.
 | `tools/render_gate.sh` | **3/3 PASS** (mirrortest `4ac809e5`, conetest `b41894f9`, halotest `166fa25a`) |
 | city `t=1961` (`FDS_CITY_ENV_PIXEL=1`) | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact |
 | fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact |
-| greets **recess** arm, 13 review poses, depth md5 | **byte-identical** to the pre-change binary |
-| greets **lid** arm, 13 review poses, depth md5 | **byte-identical** to the pre-change binary |
+| greets **recess** arm, 13 review poses, depth **and colour** md5 | **byte-identical** to a binary built from the PARENT COMMIT in a clean worktree, run from the same `Runtime/` |
+| greets **lid** arm, 13 review poses, depth **and colour** md5 | **byte-identical**, same method |
 | recess + `weld=2` + `side_entry=1` + `lid_edge=1`, 13 poses | **byte-identical** to plain recess (all three inert there) |
 | recess `side_faces=1` vs `=3`, 13 poses | **byte-identical** (mode 3 is a lid-only correction) |
 | wasm | `cmake --build build-wasm` links clean (82/82) |
 | bad flags | **0** across 578 snapshot run logs + the shadow-dump runs |
 
-Greets COLOUR remains unusable as a byte gate: the flags-off pair differs at
-13/13 poses, and the difference splits into two populations — max delta 1 (pure
-rounding) at 6 poses and max delta 187–241 at 7, i.e. the known lightmap-bake
-flip. Depth was stable and is what every byte claim above rests on.
+**Greets colour became a usable byte gate DURING this stage.** A concurrent
+session landed `f4e81e9` ("AO maps are 8-bit — reading them as dwords was the
+greets nondeterminism") at 04:51, and after it the same recipe reproduces
+**3/3 identical colour hashes at p5743, p5958b and p6097**, and matches a fourth
+run from an earlier batch. Before it, my own flags-off pair differed at 13/13
+poses in two populations — max delta 1 at 6 poses (rounding) and 187–241 at 7
+(the lightmap flip). So the colour rows above are real byte gates, not depth
+proxies.
+
+**Process note, and it cost me a re-measurement.** That commit's build swapped
+`Runtime/DEMO` underneath a render batch of mine — the exact hazard S1d-2 §7
+recorded. Every headline table in this section was therefore RE-RENDERED end to
+end on the post-fix binary, and every number reproduced to the digit (void 13 /
+5 / 5 / 413 100 / 14 163; fallback 716 141 px; both recess byte-equalities). The
+flags-off gate was redone properly: a `git worktree` at the parent commit,
+configured and built separately (its own `Runtime/DEMO`, never the shared one),
+and run with cwd = the MAIN `Runtime/` so both binaries see the same uncommitted
+`GREETS.FLD`.
 
 ## S1d-2d.10 WHAT I DID NOT DO
 
