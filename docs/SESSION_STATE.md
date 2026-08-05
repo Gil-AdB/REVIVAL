@@ -244,6 +244,33 @@ Traps:
   first; the mirror RTT is not the (only) culprit. This matches
   tools/render_gate.sh's own comment ("greets is NOT [deterministic]
   (timing-dependent background lightmap bake)") — it was never gate-worthy.
+  **SUPERSEDED, 2026-08-05 (det-hunt, N=48 per arm via
+  `tools/flip_rate.sh`): IT IS NOT A BAKE AND NOT A RACE.** The 3-run bisect
+  above does not survive N=48 — at a ~0.85 flip rate a 3-run arm has P≈0.32 of
+  showing 2-of-3, so every one of those arms was noise. Measured facts, all
+  reproducible with `tools/flip_rate.sh`:
+  - Z-buffer and the ENTIRE G-buffer (matID, normal, tangent, txtr,
+    shadowMatID, mirrorId) are **byte-identical across runs**; only colour
+    moves. Geometry, transform, sort and rasterizer coverage are innocent.
+  - Every bake OUTPUT is byte-identical across divergent runs: 76 static
+    shadow maps (depth / polyId / dynamic), 370 static-shadow lightmaps +
+    their coverage bits, all 117 omnis, every vertex colour/pos/normal, and
+    every source texture **hashed at its true `BPP/8` extent**.
+  - It survives `FDS_THREADS=1`, and it survives `--vanilla` (compile
+    defaults, FORWARD path) — so it is not flag-gated and not thread-order.
+  - It reproduces **within a single process**: rendering `t=1588` four times
+    in one run gives four different frames.
+  **TRAP for whoever picks this up: the in-process repeat is NOT a valid
+  determinism instrument for greets.** The greets code-screen texture is an
+  ITERATIVE SMEAR (`OldBuf → GridRendererT → ScaledBuf → OldBuf`), so it is a
+  function of how many times `Render()` has run, not of `t`. Repeating a
+  timestamp in one process legitimately changes it. Compare separate
+  processes.
+  **TRAP: hash textures at `SizeX*SizeY*(BPP/8)`.** `Texture::BPP` is in BITS.
+  Hashing `SizeX*SizeY*BPP` over-reads 8× past the allocation and manufactures
+  a convincing "these 8 PBR maps mutate run-to-run" result. It cost an hour
+  here; it is the same over-read trap already recorded in
+  memory `measurement-tool-traps`.
 - **city cache**: `cache/city_envmap_cube.bin` is keyed on CITY.FLD bytes.
   After ANY CITY.FLD install, discard the first run (cache rebuild), then hash.
 - Greets pin includes the USER'S UNCOMMITTED files (GREETS.FLD/MAT, momy
@@ -461,12 +488,51 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   --deferred-quarter, --cone-fine-tiles. Parked deliberately
   ("finish the other threads first").
 
-- **Greets ~1-in-12 flip**: kernel-internal nondeterminism, survives
-  1-thread/noaslr/prescribble/pinned-seed with ALL kernel inputs
-  hash-verified identical. Full evidence matrix + next probe (per-pixel term
-  dump at amudim bake face 0 px 242,122) in memory `measurement-tool-traps`.
-  Bounded impact: subtle pano slivers; frames deterministic with bakes off.
-- Env-bake content varies run-to-run (same root cause family).
+- **Greets render nondeterminism — ONE ROOT CAUSE FOUND AND FIXED, A SECOND
+  STILL OPEN (2026-08-05, det-hunt).** The old "~1-in-12 flip / subtle pano
+  slivers / deterministic with bakes off" description is WRONG on every count;
+  see the Traps section for the measured replacement. Harness:
+  **`tools/flip_rate.sh`** — N sequential runs of a scene's gate recipe,
+  distinct-hash histogram, flip rate vs the modal hash, Wilson 95 % CI, and a
+  zero-event upper bound. Use it; a 3-run arm proves nothing at p≈0.85.
+  - **FIXED (proven, this commit): `GreetsGenerator::Init()` read
+    uninitialized heap as the greets code-screen SMEAR SEED.** `OldBuf` /
+    `ScaledBuf` / `CodeBuf` were `_aligned_malloc`'d and never zeroed, and
+    `OldBuf` is the feedback source that `Render()` resamples into the screen
+    texture (`Txtr->Mipmap[0] == OutBuf`) every frame. Causal chain measured
+    per pixel, not inferred: at px (1113,376) / material `screen2` every term
+    matched across runs (matID, zEnc, refracted background, blend alpha,
+    tile-light count) EXCEPT the sampled texel — `9bd0204f` vs `5ecf175c`;
+    after the memset it is stable. Stage trace: the divergence entered at
+    `TBR_Render` round 2 phase B1, with `beginframe`/`lighting`/`ssao`/
+    `hdr-activate`/`pre-tbr` all byte-identical.
+  - **Measured effect of the fix (N=48 per arm, same box, same load):** flip
+    RATE essentially unchanged — pre 40/48 = 0.833 [0.704, 0.913], post 43/48
+    = 0.896 [0.778, 0.955]. What moved is the SIZE of the divergence, over 6
+    run-pairs each: differing pixels median **18.2 % → 14.2 %** and max
+    per-channel |Δ| **251 → 95**. So the whole-object black-vs-lit flips are
+    gone; a smaller, low-amplitude residual remains. Landing it anyway: it is
+    a proven read of uninitialized memory into rendered output.
+  - **OPEN — residual, narrowed but NOT proven.** Post-fix the first divergent
+    stage moves EARLIER, to the main `Render_DeferredLighting` call
+    (`beginframe` identical → `lighting` differs, across separate processes),
+    and the surviving divergent pixels are the `amudim` / `amudim::mirUV`
+    pillar panels (matID 18/42, Reflection 4.5) plus a thin band at their
+    base. Ruled out for the residual, each re-measured at N≥12 post-fix:
+    mirror_rtt, greets_mirror, shard_deferred, greets_disco, sh_ambient
+    (never baked in this recipe), env table (absent under `--no-env_refl`),
+    ssao, the vec kernels, and all textures/bakes/G-buffer above. Next probe:
+    get a per-pixel term dump to fire on an `amudim` pixel — the scalar
+    `OPAQPROBE` hook did not hit there, so find which kernel path those
+    pixels take first (they are transparent panels, so try the transparent
+    kernel probe used for `screen2`).
+  - Gates after the fix: city `37e62845`, fountain `51fff7cd` byte-exact;
+    mirrortest/conetest/halotest all PASS. Greets-only change.
+- Env-bake content varies run-to-run — status UNKNOWN after the above. It was
+  filed as "same root cause family"; that family is now known to include at
+  least one uninitialized-buffer read, but the env bake was NOT exercised by
+  this hunt (`--no-env_refl` is in the greets gate recipe and no env table was
+  ever built). Re-measure with `tools/flip_rate.sh` before assuming either way.
 - The user's GREETS.MAT `momy#2|*` lines are DROPPED at load until he
   re-splits + re-saves in the editor (split-bake landed 6c6c972 — re-save now
   bakes momy2 into the LWO as a real surface; accepted, he regenerates).

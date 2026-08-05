@@ -347,6 +347,28 @@ struct GreetsGenerator
 		CodeBuf = (DWord *)_aligned_malloc(256 * 256 * 4, 16);
 		OldBuf = (DWord*)_aligned_malloc(256 * 256 * 4, 16);
 		ScaledBuf = (DWord*)_aligned_malloc(256 * 256 * 4, 16);
+		// ── DETERMINISM (2026-08-05) ────────────────────────────────────────
+		// OldBuf is the SMEAR FEEDBACK source. Render() does
+		//   GridRendererT(Smear_GP, &OldImage /* == OldBuf */, ScaledBuf, …)
+		//   AlphaBlend(CodeBuf, ScaledBuf, …);  memcpy(OldBuf, ScaledBuf, …)
+		//   TexutreRemap()          // OldBuf → OutBuf == Txtr->Mipmap[0]
+		// so the FIRST frame resampled whatever _aligned_malloc handed back and
+		// fed it forward into the greets screen texture from then on. Left
+		// uninitialized, the code screens rendered raw heap garbage: different
+		// every run, and different on every render of the SAME timestamp.
+		// PROVEN, not inferred: at greets@t=1588 every other kernel input hashes
+		// bit-identical across divergent runs (geometry, Z, all G-buffer planes,
+		// omnis, static shadow maps, static-shadow lightmaps + coverage bits,
+		// vertex colours, and every source texture at its true BPP extent) —
+		// only the sampled screen texel differed (`tex=9bd0204f` vs `5ecf175c`
+		// at px 1113,376, material `screen2`). Zeroing here makes that texel
+		// stable and is also the correct start for a decaying smear trail.
+		// ScaledBuf/CodeBuf are GridRendererT destinations; zero them too so a
+		// partial write can never resurrect the same bug class.
+		// Init-time only — no per-frame cost. See docs/SESSION_STATE.md.
+		memset(OldBuf,    0, 256 * 256 * 4);
+		memset(ScaledBuf, 0, 256 * 256 * 4);
+		memset(CodeBuf,   0, 256 * 256 * 4);
 
 
 		CodeTexture.FileName = strdup("TEXTURES/CODE.JPG");
