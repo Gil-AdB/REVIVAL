@@ -271,6 +271,18 @@ Traps:
   a convincing "these 8 PBR maps mutate run-to-run" result. It cost an hour
   here; it is the same over-read trap already recorded in
   memory `measurement-tool-traps`.
+  **TRAP: one greets frame runs `renderFrame` SEVEN+ times, at three
+  resolutions.** Six 512×512 offscreen passes (shard reflection / mirror RTT)
+  and six 32×32 `sh_ambient` probe cube faces run the SAME `renderFrame`
+  before the 1920×1080 main pass. Two consequences, both of which cost real
+  time in round 2:
+  (a) a stage-trace filter that caches "the main width" on its FIRST call
+      captures 512, not 1920, and silently hides the main frame;
+  (b) hashing the GLOBAL `g_gbuffer` is WRONG for those passes — each shades
+      `ctx.gb`, while the global still points at the main frame's buffer, so
+      a nested pass reads as "G-buffer identical" no matter what it does.
+      Hash `ctx.gb` / `ctx.zpage16` inside `Render_DeferredLighting`.
+  Always print the pass resolution on every trace line.
 - **city cache**: `cache/city_envmap_cube.bin` is keyed on CITY.FLD bytes.
   After ANY CITY.FLD install, discard the first run (cache rebuild), then hash.
 - Greets pin includes the USER'S UNCOMMITTED files (GREETS.FLD/MAT, momy
@@ -513,19 +525,49 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
     per-channel |Δ| **251 → 95**. So the whole-object black-vs-lit flips are
     gone; a smaller, low-amplitude residual remains. Landing it anyway: it is
     a proven read of uninitialized memory into rendered output.
-  - **OPEN — residual, narrowed but NOT proven.** Post-fix the first divergent
-    stage moves EARLIER, to the main `Render_DeferredLighting` call
-    (`beginframe` identical → `lighting` differs, across separate processes),
-    and the surviving divergent pixels are the `amudim` / `amudim::mirUV`
-    pillar panels (matID 18/42, Reflection 4.5) plus a thin band at their
-    base. Ruled out for the residual, each re-measured at N≥12 post-fix:
-    mirror_rtt, greets_mirror, shard_deferred, greets_disco, sh_ambient
-    (never baked in this recipe), env table (absent under `--no-env_refl`),
-    ssao, the vec kernels, and all textures/bakes/G-buffer above. Next probe:
-    get a per-pixel term dump to fire on an `amudim` pixel — the scalar
-    `OPAQPROBE` hook did not hit there, so find which kernel path those
-    pixels take first (they are transparent panels, so try the transparent
-    kernel probe used for `screen2`).
+  - **OPEN — residual, now a FIVE-PIXEL micro-reproduction (2026-08-05, round
+    2). Still not proven, but this is the smallest it has ever been — attack
+    it here, not at 1920×1080.**
+    THE REPRO: the FIRST divergence anywhere in a greets frame is inside the
+    **`sh_ambient` probe bake's 32×32 cube-face renders** (`kSHFaceRes = 32`,
+    EnvBake.cpp), at the `Render_DeferredLighting` call. Per face only
+    **2–3 pixels of 1024** differ, ~30 px summed over the six faces. Those 9
+    SH coefficients then modulate ambient over the whole frame, which is why
+    a handful of probe pixels smears into coherent low-amplitude regions on
+    the `amudim` / `amudim::mirUV` pillars (matID 18/42) in the final image.
+    WHAT IS IDENTICAL at the diverging 32×32 call (all hash-verified across
+    separate processes): VPage, `g_hdrBuf`, **the pass's OWN G-buffer
+    (`ctx.gb`, all ten planes)**, `ctx.zpage16`, the per-tile light lists
+    **contents AND order**, the `ViewLightsSoA`, mirror presence, tile depth
+    bounds, and every Material scalar the kernel reads.
+    WHAT DIFFERS — per-pixel term dump at those pixels: `matID`, texel,
+    normal, `z` and the SPECULAR accumulator are identical; **only the
+    DIFFUSE accumulator `lB/lG/lR` moves, flipping between 0 and a full
+    value** (0 ↔ 46.25, 0 ↔ 15.30, 0 ↔ 4.93 — three distinct states over
+    three runs, so not merely bistable), and on several pixels `lG == lR`
+    exactly with `lB` unchanged. That is the old note's "dim state exactly
+    B=0, G==R" signature, finally localised: it is one omni's diffuse
+    contribution being included, partially included, or dropped.
+    RULED OUT at this micro-scale (probe-diff-px stays 22–35 in every arm,
+    3 runs each): `--no-shadows`, `--no-greets_omni_shadows`,
+    `--no-shadow_dynamic`, `--no-shadow_lightmap`, `--no-shadow_polyid`,
+    `--no-shadow_gbuffer_overlap --no-bake_tick_overlap`,
+    `--no-deferred_checkerboard`, `--no-deferred_vec --no-deferred_outer_vec`,
+    `--no-deferred_zcull`, the whole PBR stack, `--no-greets_mirror`,
+    `--no-mirror_bounce`, and `FDS_THREADS=1/2/4`. Also
+    `--vanilla --deferred --hdr --sh_ambient` still shows 35 px, so it is not
+    flag-gated at all.
+    NOT the amplifier: `--no-sh_ambient` does NOT reduce the final-frame
+    divergence (median differing pixels 6.07 % vs 4.62 % with it on, 4 runs
+    each) — the SH probe is where the mechanism is EASIEST TO SEE, not the
+    only place it fires.
+    NEXT PROBE: instrument the 8-lights-wide diffuse batch in
+    `Render_DeferredLighting_Tile` (DeferredSurfaceKernel.cpp ~2100–2150:
+    `kArr`/`mask`/`accB/G/R` then the horizontal reduction into `lB/lG/lR`)
+    and record PER LIGHT INDEX what each lane contributed at one of the
+    diverging probe pixels. The question to answer is a single one: is one
+    light dropped entirely, or do all lights scale? That splits "a per-pixel
+    gate flips" from "an input to the k/attenuation chain is garbage".
   - Gates after the fix: city `37e62845`, fountain `51fff7cd` byte-exact;
     mirrortest/conetest/halotest all PASS. Greets-only change.
 - Env-bake content varies run-to-run — status UNKNOWN after the above. It was
