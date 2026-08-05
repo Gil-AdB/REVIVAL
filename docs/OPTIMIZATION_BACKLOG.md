@@ -198,6 +198,19 @@ items below stay PARKED.
   is the remaining step. Low priority: RNDR is pixel-bound at these poses (the
   displaced faces add little coverage — B2's ~2-2.8 µs/face is fixed cost, which
   S2 already reclaimed), so a main-pass geometric LOD buys little beyond S2+S1.
+  **CEILING MEASURED 2026-08-06 and it confirms "low priority" with numbers**
+  (docs/ENVDYN_DISPLACEMENT_PLAN.md §A4). Face-count ladder at t=5780 under
+  `--greets_displace`: 6 522 faces (uniform L1) → 87 256 (edge carve) moves RNDR
+  46.04 → 53.46 = **92 ns/face threaded ≈ 0.60 µs/face core**, i.e. **3.3–4.7×
+  cheaper than B2's 2–2.8 µs serial** — `--tile_bbox_cull` took most of it.
+  Halving the face count is worth −6.13 ms with the two new companions OFF, but
+  with them ON the 87 k edge carve and the 43 k dome path measure **55.86 vs
+  55.64, 0.22 ms apart**: the clone half of that work is already gone. So a
+  per-chunk screen-space-error LOD is worth **≈0.2–3 ms** against a bake-time-only
+  ladder (the bake is 2–6 s; no per-frame re-tessellation), 25–40 MB resident,
+  and DMM's per-edge min-level rule to keep boundaries watertight when neighbours
+  choose levels independently (today's border pins only close cracks for a FIXED
+  level assignment). NOT built, deliberately; reproducible in three bench runs.
 
 ## Geometry front-end (XFRM) — measured 2026-08-05, docs/SOA_VERTEX_REFACTOR.md
 

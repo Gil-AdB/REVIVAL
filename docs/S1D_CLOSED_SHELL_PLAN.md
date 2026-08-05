@@ -1,5 +1,19 @@
 # S1d — Closed shell + cross-patch march continuation
 
+> **CORRECTION 2026-08-06 — every "+54.5 ms" / "way too slow" statement about
+> `--greets_displace` in this file is STALE by 7.4×.** Re-measured from scratch
+> on fog-wt tip: the tessellated arm costs **+7.3 ms** over flat POM at t=5780
+> (and is CHEAPER than the recess-shell arm at three of six review poses). The
+> retirement number predated `9b6d70d --tile_bbox_cull` (which landed 1 h 40 m
+> after the edge-carve commit and measures −12.5 ms of delta on its own),
+> `a1f89d4 --xfrm_soa_inline` (−2.0 ms) and `799c808` (the faceless mesh was
+> **84.3 % of that arm's shadow verts**), and the mirror clone was
+> re-transforming the whole tessellated wall (−5.9 ms, now
+> `--greets_displace_flat_mirror`). Full tables, look crops and gates in
+> **`docs/ENVDYN_DISPLACEMENT_PLAN.md` §ADDENDUM 2026-08-06**. Leave the
+> historical numbers below as written; do not reason from them.
+
+
 Status: ACTIVE PLAN, written 2026-08-05. This is the design the campaign's
 evidence converged on. Read `docs/S1_DISCREPANCY_INVENTORY.md` (evidence,
 classes, converged reference, P0/P1/P2-A results) and

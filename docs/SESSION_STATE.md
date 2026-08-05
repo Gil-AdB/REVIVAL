@@ -1,6 +1,60 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
-> ## 2026-08-06 — WHERE THE DISPLACEMENT CAMPAIGN ACTUALLY STANDS (read this first)
+> ## 2026-08-06 — GEOMETRIC TESSELLATION IS BACK ON THE TABLE: +7.3 ms, NOT +54.5
+>
+> **`--greets_displace` was retired on a number that was wrong by 7.4×.** It is
+> now a first-class, working, one-flag option and it is **CHEAPER than the
+> recess-shell arm at three of six review poses**. Full tables, look crops, the
+> §C4 re-verification and the gates are in
+> **`docs/ENVDYN_DISPLACEMENT_PLAN.md` §ADDENDUM 2026-08-06** (commit `1a91ed5`).
+>
+> **Measured, t=5780, 1080p, 12 threads, iters=20, interleaved, min-of-arm:**
+> flat POM **48.5–49.5** · recess shell **56.1** · **tessellation 55.6–55.9**.
+> Per pose (min-of-5): tess−flat is +2.4 / +4.0 / +4.1 / +13.8 / +13.9 / +14.1
+> and **tess−recess is −4.2 / −2.0 / −1.3** at the corner, grazing-close-up and
+> corridor poses. The shell's cost is per-PIXEL and explodes at grazing;
+> tessellation's is per-FACE and nearly pose-independent.
+>
+> **Why the old number was wrong — three landings, none of them tessellation:**
+> `9b6d70d --tile_bbox_cull` (default ON) landed **1 h 40 m AFTER** the
+> edge-carve commit whose "107.0 ms" the plan quotes, and its own message
+> measures the displaced arm 100.0 → 87.0 ms; `a1f89d4 --xfrm_soa_inline` −2.0
+> ms; `799c808` removed a faceless mesh that was **84.3 % of that arm's 6.83 M
+> shadow verts/frame**. Then this session found the fourth: **the mirror clone
+> was re-transforming and re-rasterising the entire tessellated wall** (11.40
+> ms/frame vs 3.31 in the flat arm; the clone pushed 42 870 faces while the
+> direct view pushed 28 598, because a clone is culled by the frustum and not by
+> the mirror WINDOW).
+>
+> **`--greets_displace` now defaults two perf companions ON** (a `[STONE]` log
+> line names them; `--no-<flag>` still wins; both inert without displacement, so
+> the shipping flat-POM arm is byte-untouched): `--greets_shadow_proxy` (−5.9 ms;
+> **not look-neutral** — byte-identical at 5 of 16 review pairs, worst t=6097
+> 58 021 px >12/255 at the corner junction) and the new
+> `--greets_displace_flat_mirror` (−5.9 ms; **byte-identical at both mirror
+> review poses**, 2 990 px >12/255 at t=5743). One flag = the affordable arm,
+> byte-verified identical to spelling all three out.
+>
+> **Per-face cost, the user's own question, answered:** 92 ns/face threaded ≈
+> **0.60 µs/face core**, against the 2–2.8 µs serial the campaign has been
+> reasoning with — **3.3–4.7× cheaper**, almost all of it `--tile_bbox_cull`.
+> Which is also why the S2/S5 chunk LOD is **not built**: with the companions on,
+> the 87 k-face edge carve and the 43 k-face dome path are **0.22 ms apart**, so
+> halving the faces buys ≈0.2–3 ms. Ceiling measured, reasoning in §A4.
+>
+> **What tessellation still cannot do (§C4, re-verified today):** relief lives
+> only at the lattice. At t=6097 it writes **0.0023 world = one zEnc code** over
+> a 600×400 box that a depth-writing per-pixel arm resolves at 0.0110–0.0233; at
+> t=2845 it carries 83 %. **What only it can do:** true silhouettes, real depth
+> for every offscreen consumer, and geometry that cannot swim — at t=5958b, the
+> grazing pose where the shell smears and slip p99 hits 501, it renders a crisp
+> geometric step.
+>
+> **Still open:** `--greets_displace` at t=6097 is run-to-run nondeterministic
+> (6 runs, 6 hashes) while t=5780 is stable 6/6 — not root-caused, and the one
+> thing between this arm and full gate-worthiness.
+
+> ## 2026-08-06 — WHERE THE DISPLACEMENT CAMPAIGN ACTUALLY STANDS (the shell half)
 >
 > **The per-pixel shell can produce protrusion the user likes ("fantastic when
 > it works") but not at a setting that is also stable.** That tension is the
