@@ -637,12 +637,14 @@ would be exactly the category error §5.3 warns about. The CPU side of the compa
 `--bench=scene@scene=greets,…` with load recorded and the per-phase counters, under the §4
 condition set (mirrors/disco off).
 
-### 6.2 Phase 3 stage 1 — deferred arm built, output NOT YET CORRECT, timings RETRACTED
+### 6.2 Phase 3 stage 1 — deferred arm built, SHADOWS NOW CORRECT, timings still RETRACTED
 
-The deferred path (G-buffer -> cube shadow bake -> PBR lighting -> ACES tonemap) is implemented
-and runs, but **its lighting is wrong, so every timing figure it produced is retracted.** A shadow
-tap that trivially passes is also cheaper than a correct one, so the numbers were suspect in both
-directions. Nothing from this stage may be quoted until `--viz=shadow` shows real wall occlusion.
+The deferred path (G-buffer -> cube shadow bake -> PBR lighting -> ACES tonemap) is implemented and
+runs. Its shadows were wrong through the first two rounds; **they are now correct** (evidence below)
+and the cause turned out to be a missing shadow-caster filter, not a broken tap. **Every timing
+figure produced before that fix is retracted** and no replacement has been measured yet — a shadow
+tap whose reference trivially fails is cheaper *and* differently shaped than a correct one, so the
+old numbers were suspect in both directions.
 
 **Retracted:** the earlier "G-buffer 0.275 / lighting ~0.25 / dynamic bake 0.546 / tonemap 0.030 /
 frame 1.113 ms" table, and any ratio derived from it.
@@ -670,24 +672,87 @@ frame 1.113 ms" table, and any ratio derived from it.
 6. **Render targets were `Shared`, now `Private`** — `Shared` forces write-through and disables
    lossless compression; it inflated every pass several-fold.
 
-#### What is still wrong, and the evidence
+#### The shadow bug — RESOLVED. It was a missing caster filter, not a bad tap.
 
-With a **single** light isolated (`--viz_light=N`), **0 % of in-range pixels are fully
-unshadowed** for every static omni. `--viz=shadowraw` decodes the baked depth back to a world
-distance; its two output channels, computed from the *same* `storedDist` expression, disagree
-irreconcilably (one implies ~0.3 units, the other >= 2). **Two channels of one variable cannot
-disagree**, so the sampled depth is almost certainly not a finite float — `saturate()` of NaN/Inf
-is unspecified and would produce exactly this.
+The standing hypothesis was that `depthcube::sample()` returned a non-finite value (0 % of in-range
+pixels fully unshadowed; `--viz=shadowraw`'s two channels, computed from the *same* `storedDist`
+expression, disagreeing irreconcilably). **That hypothesis was wrong**, and it was settled by
+*looking at the baked bytes* rather than adjusting conventions again.
 
-**Next step: establish whether `depthcube::sample()` returns valid data at all** — render one baked
-cube face to a visible target from the light's point of view — rather than continuing to adjust the
-face convention or the bias. An earlier "storedDist = 0.31" reading was byte quantisation in my own
-diagnostic, not data; that mistake cost a round and is why the next step is a direct look at the
-baked map.
+`--dump_cube=N` (new) reads a light's baked cube into host memory and prints, per face,
+non-finite / cleared / min-max stored depth **and the decoded world distance**, plus a 3×2 face
+atlas PPM. First run, light 5 (range 20, room 60+ units across):
+
+```
++X valid=100.0% cleared=0 nonfinite=0  storedZ[0.1617..0.2623]  dist[0.189..0.305]
+-X valid=100.0% cleared=0 nonfinite=0  storedZ[0.1621..0.2626]  dist[0.189..0.305]
++Y valid=100.0% cleared=0 nonfinite=0  storedZ[0.0040..0.2387]  dist[0.208..7.670]
+-Y valid=100.0% cleared=0 nonfinite=0  storedZ[0.0021..0.2626]  dist[0.189..10.845]
++Z valid=100.0% cleared=0 nonfinite=0  storedZ[0.1585..0.2561]  dist[0.194..0.311]
+-Z valid=100.0% cleared=0 nonfinite=0  storedZ[0.1655..0.2626]  dist[0.189..0.298]
+```
+
+**Finite, 100 % covered, and ~0.25 units away on every face** — a shell around the light. (The
+±Y faces reaching 7.670 and 10.845 are the ceiling 7.65 above and the floor 10.85 below, which
+also confirms the depth *encode/decode is exact*.)
+
+A nearest-geometry probe added to the light inventory named the cause outright:
+
+| light | nearest geometry | material | verts within 1 u |
+|--:|--:|---|--:|
+| 0–4, 6 | 0.285–0.335 | `Piramid.lwo` / **`lamp light`** | ~1,180 |
+| 5 | 0.327 | `Piramid.lwo` / **`lamp`** | 1,143 |
+| 7, 8 | 0.051–0.057 | `Hull.lwo` / `canons` | 222 |
+| 9 | 0.006 | `Hull.lwo` / `hull not smooth` | 2,170 |
+
+**Every greets omni is authored INSIDE its own lamp fixture**, and the three mech omnis are inside
+the mech hull. Each light was faithfully baking the *inside of its housing*, so every surface in
+the room was correctly reported as occluded. The bake, the face convention, the reversed-Z encoding
+and the tap were all already right.
+
+The CPU engine has an explicit filter for exactly this, at `FDS/RENDER/Shadows.cpp:703-724`: its
+shadow bake skips any material that is `Mat_Transparent | Mat_Additive | Mat_SkipZ` **or whose NAME
+contains "lamp" or "emi"** — the FLD carries no emissive flag, so the engine infers it from the
+name — with a source comment about chasing *"lamps still cast shadows"*. GpuBench now reproduces
+that predicate byte-for-byte (`Batch::castsShadow`, applied in the shadow pass only). This is
+**parity, not an optimisation**: 27 of 35 batches and 5,988 of 8,952 tris cast; the 8 non-casters
+are `lamp`, `lamp light`, `screen2`, `screen 3`, `screen 4`, `screen emiter{, fance, green}`.
+
+**Acceptance, MEASURED** (t=5743, 1920×1080, `--viz=shadow`, three-state encoding). Of the 15.95 %
+of covered pixels that have any light in range:
+
+| arm | unshadowed | shadowed | partial | in-range px |
+|---|--:|--:|--:|--:|
+| all lights | **85.20 %** | 14.11 % | 0.69 % | 330,674 |
+| `--viz_light=7` (mech flare) | 46.03 % | 53.18 % | 0.79 % | 27,223 |
+| `--viz_light=8` | 100.00 % | 0 % | 0 % | 9,897 |
+| `--viz_light=9` | 97.21 % | 2.79 % | 0 % | 282,655 |
+| `--viz_light=3` | 0 % | 100.00 % | 0 % | 26,389 |
+
+Before the fix this column read **0 % unshadowed for every light**. Light 3's 100 % was verified
+*real* rather than a residual bug with `--viz=shadowraw`: its in-range pixels sit 9.3–9.7 units
+from the light while the cube's nearest occluder along the same direction is at 2.1 units — and
+the two `shadowraw` channels now **agree** (G ⇒ 2.20 u, B saturated ⇒ ≥2 u). The earlier
+irreconcilable disagreement was a symptom of the housing, not of NaN.
+
+One more no-data-as-a-value trap closed in the same pass: mode 5 returned **black** both for "lit
+but fully shadowed" and for "no G-buffer". Uncovered pixels are now dark **red** — and the count is
+**2 of 2,073,600**, which is precisely what proves light 3's reading is geometry and not sky.
+`--viz=lights` now honours `--viz_light` so the two diagnostics can be compared per light.
+
+**The timings in this section remain RETRACTED.** Correct shadows change the tap's cost, and no
+re-measurement to the §5.1 discipline (load-guarded, min-of-arm, stage differencing) has been run
+yet.
+
+**Method lesson worth keeping:** two rounds were spent adjusting the face convention and the bias
+against an indirect symptom. The thing that settled it in one run was reading the baked buffer back
+and printing decoded world distances next to a name for the nearest mesh. Prefer a direct look at
+the data over any amount of convention arithmetic.
 
 #### Ruled out along the way
 
-- **The walls ARE in the shadow draw list** — all 35 batches are drawn into every cube face.
+- **The walls ARE in the shadow draw list.** (At the time: all 35 batches. Now 27 of 35 — the
+  `lamp` / `screen*` non-casters are excluded, matching `Shadows.cpp`. The walls still cast.)
 - **greets does NOT patch these omnis' ranges.** `GREETS.CPP:2652` applies
   `greets_omni_default_range = 30` only to omnis whose `IRange` is **0**; all ten are authored
   non-zero (3, 3, 10, 10, 7, 20, 20, 2, 2, 2).
