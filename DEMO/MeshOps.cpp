@@ -4039,6 +4039,119 @@ static bool SeamPointOnFace(const SeamFace &f, const Vector &Q, float planeTol) 
 // before any chunk split (both copy Vertex/Face structs wholesale, so ShellH
 // and the moved positions propagate). Returns the amp stamped on the material
 // (0 = nothing built).
+// ── S1d-2e CROSS-MATERIAL LID WELD (--pom_shell_weld=3, default OFF) ────────
+// See MeshOps.h. One scene-wide position bucket over EVERY shelled material,
+// snapshotted before the first build moves a vertex, plus a memo of the offset
+// vector actually applied at each position so two materials with different
+// amplitudes still put their shared corner on ONE point.
+namespace {
+struct PomWeldShared {
+	bool armed = false;                                   // --pom_shell_weld>=3
+	std::map<long long, std::array<double, 4>> dir;       // pos -> (nx,ny,nz,count)
+	std::map<long long, std::array<float, 3>> applied;    // pos -> delta applied
+	std::map<long long, int> owner;                       // pos -> build serial that fixed it
+	std::set<long long> pinUnshelled;                     // pos an UNSHELLED face also uses
+	int serial = 0;                                       // ++ per PomShell_Build
+};
+PomWeldShared g_pomWeld;
+
+// Same quantization PomShell_Build's own topology uses (1e-4 world, 21 bits per
+// axis). Kept in one place so the shared bucket and the per-material one agree.
+inline long long PomWeldQPos(const Vector &p) {
+	auto q = [](float v) { return (long long)std::llround(v * 10000.0); };
+	return ((q(p.x) & 0x1FFFFF) << 42) ^ ((q(p.y) & 0x1FFFFF) << 21) ^ (q(p.z) & 0x1FFFFF);
+}
+}  // namespace
+
+void PomShell_WeldReset() {
+	g_pomWeld.armed = false;
+	g_pomWeld.dir.clear();
+	g_pomWeld.applied.clear();
+	g_pomWeld.owner.clear();
+	g_pomWeld.pinUnshelled.clear();
+	g_pomWeld.serial = 0;
+}
+
+void PomShell_WeldPrepare(Scene *Sc, const char *const *matNames, int numMats) {
+	PomShell_WeldReset();
+	if (!Sc || !matNames || numMats <= 0) return;
+	if (fds::FeatureFlags::pom_shell_weld() < 3) return;      // flag off: byte-null
+	if (fds::FeatureFlags::pom_recess_only()
+	    || fds::FeatureFlags::pom_shell_lid_probe()) return;  // no offset to weld
+	auto shelled = [&](const Face *F) {
+		if (!F || !F->Txtr || !F->Txtr->Name) return false;
+		for (int k = 0; k < numMats; ++k)
+			if (matNames[k] && !std::strcmp(F->Txtr->Name, matNames[k])) return true;
+		return false;
+	};
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || !shelled(&F)) continue;
+			const Vertex *vv[3] = { F.A, F.B, F.C };
+			for (int k = 0; k < 3; ++k) {
+				const Vector &n = vv[k]->N;
+				const float l = std::sqrt(n.x*n.x + n.y*n.y + n.z*n.z);
+				if (!(l > 1e-6f)) continue;
+				auto &a = g_pomWeld.dir[PomWeldQPos(vv[k]->Pos)];
+				a[0] += n.x / l; a[1] += n.y / l; a[2] += n.z / l; a[3] += 1.0;
+			}
+		}
+	}
+	// --pom_shell_weld=5: positions an UNSHELLED face also uses. Those cannot be
+	// welded — there is nothing on the other side that moves — so they are
+	// PINNED, which is what --pom_shell_weld=2 was for. Mode 2 is unusable
+	// because PomShell_Build sees the OTHER shelled material as "non-target"
+	// and pins against it too (measured: all 90 'floor' verts pinned, floor
+	// loses its shell entirely). Collected HERE, against the full shelled set,
+	// so a wall/floor corner welds while a wall/ceiling corner pins.
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || shelled(&F)) continue;
+			const Vertex *vv[3] = { F.A, F.B, F.C };
+			for (int k = 0; k < 3; ++k) {
+				const long long key = PomWeldQPos(vv[k]->Pos);
+				if (g_pomWeld.dir.count(key)) g_pomWeld.pinUnshelled.insert(key);
+			}
+		}
+	}
+	// Census: how many of these positions are CROSS-MATERIAL, i.e. exactly the
+	// junctions the per-material weld cannot close.
+	long long nMulti = 0, nCross = 0;
+	{
+		std::map<long long, int> firstMat;
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !shelled(&F)) continue;
+				int mi = 0;
+				for (int k = 0; k < numMats; ++k)
+					if (matNames[k] && !std::strcmp(F.Txtr->Name, matNames[k])) { mi = k + 1; break; }
+				const Vertex *vv[3] = { F.A, F.B, F.C };
+				for (int k = 0; k < 3; ++k) {
+					const long long key = PomWeldQPos(vv[k]->Pos);
+					auto it = firstMat.find(key);
+					if (it == firstMat.end()) firstMat[key] = mi;
+					else if (it->second > 0 && it->second != mi) it->second = -1;
+				}
+			}
+		}
+		for (const auto &kv : g_pomWeld.dir) if (kv.second[3] >= 2.0) ++nMulti;
+		for (const auto &kv : firstMat) if (kv.second < 0) ++nCross;
+	}
+	g_pomWeld.armed = true;
+	std::fprintf(stderr, "[POM-SHELL-WELD3] scene-wide weld armed over %d material(s): "
+		"%zu distinct vertex POSITIONS, %lld with 2+ copies, %lld shared by TWO "
+		"DIFFERENT shelled materials (the wall/floor junctions --pom_shell_weld=1 "
+		"cannot close because PomShell_Build runs once per material); %zu also "
+		"touched by UNSHELLED geometry (pinned at mode 5)\n",
+		numMats, g_pomWeld.dir.size(), nMulti, nCross, g_pomWeld.pinUnshelled.size());
+}
+
 float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
                      bool pinCrossMaterial) {
 	if (!Sc || !matName || uvAmp <= 0.0f) return 0.0f;
@@ -4047,6 +4160,8 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	};
 	Material *mat = nullptr;
 	long long nMoved = 0, nPinned = 0, nCorner = 0, nFaces = 0;
+	long long nWeld3Reused = 0, nWeld3Cross = 0;  // --pom_shell_weld=3 delta reuse
+	if (fds::FeatureFlags::pom_shell_weld() >= 3) ++g_pomWeld.serial;
 	// ── PATCH GROUPING (the lateral-exit domain) ────────────────────────────
 	// The march discards a ray that leaves the patch's UV box before crossing
 	// the height field — that discard IS the silhouette. The patch must
@@ -4284,6 +4399,10 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	// angle-split mesh shares nothing (measured: 0 pinned on greets).
 	std::set<long long> weldPin;
 	const int  weldMode = fds::FeatureFlags::pom_shell_weld();
+	// Mode bits: 3 = scene-wide weld; 4 = 3 + TRUE MITRE; 5 = 3 + pin against
+	// UNSHELLED neighbours; 6 = 5 + the mitre. The mitre is deliberately NOT
+	// implied by 5 — measured on greets it costs more than it buys.
+	const bool mitreWeld = (weldMode == 4 || weldMode == 6);
 	const bool weldLid = weldMode > 0 && !recessOnly
 	                     && !fds::FeatureFlags::pom_shell_lid_probe();
 	if (weldLid) {
@@ -4294,7 +4413,10 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				if (!F.A || !F.B || !F.C) continue;
 				const Vertex *vv[3] = { F.A, F.B, F.C };
 				if (!isTarget(&F)) {
-					if (weldMode >= 2)
+					// Mode 2 PINS a position a non-target face shares; mode 3 WELDS
+					// it instead, which is the whole point of mode 3 — mode 2's pin
+					// destroys the floor's shell outright (measured: 90 of 90 verts).
+					if (weldMode == 2)
 						for (int k = 0; k < 3; ++k) weldPin.insert(qpos(vv[k]->Pos));
 					continue;
 				}
@@ -4348,6 +4470,20 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		// every target copy at its POSITION, normalized. Falls back to the
 		// vertex's own normal when the weld is off or the position is unique.
 		auto offDir = [&](uint32_t i) -> Vector {
+			// --pom_shell_weld=3: the SCENE-WIDE bucket wins. It was built
+			// before ANY material moved and spans every shelled material, so
+			// both sides of a wall/floor junction extrude along ONE direction.
+			// Falls through to the per-material bucket for a position no other
+			// shelled material touches, where the two agree by construction.
+			if (weldLid && g_pomWeld.armed) {
+				auto it3 = g_pomWeld.dir.find(qpos(V[i].Pos));
+				if (it3 != g_pomWeld.dir.end() && it3->second[3] > 0.0) {
+					const auto &a = it3->second;
+					const double l = std::sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+					if (l > 1e-9)
+						return Vector{ float(a[0]/l), float(a[1]/l), float(a[2]/l) };
+				}
+			}
 			if (weldLid) {
 				auto it = weldN.find(qpos(V[i].Pos));
 				if (it != weldN.end() && it->second[3] > 0.0) {
@@ -4425,6 +4561,11 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			// build above). Leaves the vertex on the authored plane, ShellH 0.5,
 			// so the junction cannot be pulled apart by the offset.
 			if (!weldPin.empty() && weldPin.count(qpos(V[i].Pos))) { ++nPinned; continue; }
+			// --pom_shell_weld=5: pin ONLY against geometry that is not itself
+			// shelled (see PomShell_WeldPrepare). The other shelled material is
+			// welded, not pinned, so the floor keeps its shell.
+			if (weldMode >= 5 && g_pomWeld.armed
+			    && g_pomWeld.pinUnshelled.count(qpos(V[i].Pos))) { ++nPinned; continue; }
 			const Vector vn = offDir(i);            // already unit length
 			const float nl = std::sqrt(vn.x*vn.x + vn.y*vn.y + vn.z*vn.z);
 			if (nl < 1e-6f) { ++nPinned; continue; }
@@ -4446,18 +4587,75 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			                   || recessOnly)
 			                ? 0.0f
 			                : (worldAmpMode ? (worldAmp * 0.5f) : (uvAmp * wv * 0.5f));
+			// --pom_shell_weld>=3 takes a SEPARATE branch that leaves the original
+			// statements below textually intact. That is not style: routing the
+			// vertex move through a named float breaks the -ffp-contract=fast
+			// multiply-add the compiler folds `Pos += vn/nl*off` into, which moves
+			// every vertex by an LSB and changes the lid arm's depth hash even with
+			// the new flag OFF. Measured: it did, twice, before this split.
+			if (weldLid && g_pomWeld.armed) {
+				// --pom_shell_weld=4/6: the TRUE MITRE. Modes 1/3 move a welded corner
+				// `off` along the MEAN normal, so each incident face's plane is only
+				// offset by off*ndv (ndv = cos of the half-fold) and the boundary of
+				// every welded surface RETRACTS laterally. Measured consequence of
+				// mode 3 on greets: the floor's whole boundary pulls 0.064 world in
+				// from its UNSHELLED neighbours and opens more slit than the
+				// wall/floor junction it closes (lid void 14 163 -> 24 334 over the 13
+				// review poses). Dividing by ndv puts the vertex on the INTERSECTION
+				// of the offset planes instead: every incident plane is offset by
+				// exactly `off`, nothing retracts, and ShellH returns to 1 because the
+				// vertex really is on the lid. Clamped at 3x so a near-180 fold cannot
+				// fling a vertex across the room. (On greets the mitre LOSES: 51 012
+				// void at mode 4. Kept because it is the geometrically right answer
+				// and the loss is specific to this scene's unshelled neighbours.)
+				float offApplied = off, ndvEff = ndv;
+				if (mitreWeld && off != 0.0f && ndv > 1e-3f) {
+					const float sc = std::min(3.0f, 1.0f / ndv);
+					offApplied = off * sc;
+					ndvEff = std::min(1.0f, ndv * sc);
+				}
+				// MEMOISE the delta per POSITION. Welding the DIRECTION alone is not
+				// enough across materials: 'rooms' and 'floor' carry different
+				// amplitudes (uvAmp x world-per-UV is 0.18 vs 1.11 world on greets
+				// unless --pom_shell_world_amp_set pins them), so a shared corner
+				// would still land on two points. The FIRST material to claim a
+				// position fixes the delta and every later one reuses it EXACTLY.
+				float dx = vn.x / nl * offApplied, dy = vn.y / nl * offApplied,
+				      dz = vn.z / nl * offApplied;
+				const long long wk = qpos(V[i].Pos);
+				auto ins = g_pomWeld.applied.emplace(wk, std::array<float,3>{dx, dy, dz});
+				if (ins.second) {
+					g_pomWeld.owner[wk] = g_pomWeld.serial;
+				} else {
+					dx = ins.first->second[0];
+					dy = ins.first->second[1];
+					dz = ins.first->second[2];
+					++nWeld3Reused;
+					auto ow = g_pomWeld.owner.find(wk);
+					if (ow != g_pomWeld.owner.end() && ow->second != g_pomWeld.serial)
+						++nWeld3Cross;
+				}
+				V[i].Pos.x += dx;
+				V[i].Pos.y += dy;
+				V[i].Pos.z += dz;
+				if (census) offVert[i] = offApplied;
+				V[i].ShellH = recessOnly ? 1.0f : (0.5f + 0.5f * ndvEff);
+				if (V[i].ShellH < hMinStamp) hMinStamp = V[i].ShellH;
+				if (ndvEff < 0.99f) ++nCorner;
+				if (offApplied < offMin) offMin = offApplied;
+				if (offApplied > offMax) offMax = offApplied;
+				++nMoved;
+				continue;
+			}
 			V[i].Pos.x += vn.x / nl * off;
 			V[i].Pos.y += vn.y / nl * off;
 			V[i].Pos.z += vn.z / nl * off;
 			if (census) offVert[i] = off;
 			// Height actually reached, measured against the incident faces'
-			// planes (ndv = 1 on a flat patch → exactly the lid at h = 1).
+			// planes (ndv = 1 on a flat patch -> exactly the lid at h = 1).
 			// --pom_recess_only: the vertex was not moved, so it lies EXACTLY on
 			// every incident face's plane, and under the recess convention that
-			// plane is the top of the field — h = 1, with no corner correction
-			// (the ndv term models how much of an OFFSET a smooth normal
-			// delivered perpendicular to a given face; with no offset it would
-			// only invent a fictitious entry height below the real surface).
+			// plane is the top of the field -- h = 1, with no corner correction.
 			V[i].ShellH = recessOnly ? 1.0f : (0.5f + 0.5f * ndv);
 			if (V[i].ShellH < hMinStamp) hMinStamp = V[i].ShellH;
 			if (ndv < 0.99f) ++nCorner;
@@ -5239,6 +5437,13 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		pinCrossMaterial ? " (cross-material pinning ON)" : "",
 		nGroups, domUMin, domUMax, domVMin, domVMax,
 		(double)(uvAmp * fds::FeatureFlags::pom_shell_cap()));
+	if (weldLid && g_pomWeld.armed)
+		std::fprintf(stderr, "[POM-SHELL-WELD3] '%s': %lld of %lld moved verts reused a "
+			"delta already fixed at their POSITION, %lld of them fixed by a DIFFERENT "
+			"shelled material -- those are the cross-material junctions that used to "
+			"tear, and they are watertight by construction now\n",
+			matName, nWeld3Reused, nMoved, nWeld3Cross);
+
 	return uvAmp;
 }
 

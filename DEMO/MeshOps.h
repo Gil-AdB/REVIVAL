@@ -345,6 +345,26 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
                      bool pinCrossMaterial = false);
 
+// S1d-2e CROSS-MATERIAL LID WELD (--pom_shell_weld=3, default OFF).
+// PomShell_Build runs ONCE PER MATERIAL, so --pom_shell_weld=1's position-bucket
+// weld only ever averages normals within the material being built: greets'
+// 'rooms' and 'floor' (and their ::mirUV clones) still move their shared
+// wall/floor corners along DIFFERENT directions and tear against each other.
+// That residue is measured — 13 986 of the lid arm's 14 163 remaining void
+// pixels survive --no-parallax, i.e. they are geometry, at cross-material
+// junctions (docs/S1D_CLOSED_SHELL_PLAN.md §S1d-2d.5/§S1d-2d.10).
+//
+// Call PomShell_WeldPrepare ONCE with every material that is about to be
+// shelled, BEFORE the first PomShell_Build moves anything: it snapshots the
+// pristine mesh and buckets vertex normals by POSITION across all of them, so
+// every copy of a shared corner extrudes along one direction. It also memoises
+// the offset VECTOR actually applied at each position, so materials with
+// different amplitudes still land their shared corners on exactly one point.
+// PomShell_WeldReset releases it. Both are no-ops unless --pom_shell_weld >= 3;
+// with the flag off the tables stay empty and PomShell_Build is byte-identical.
+void PomShell_WeldPrepare(Scene *Sc, const char *const *matNames, int numMats);
+void PomShell_WeldReset();
+
 // B4 residual height map: full-res height minus the bilinear-upsampled lowMip
 // band (per mip, clamped, same 8-bit tiled+mip layout) — the POM input for a
 // displaced material, so geometry + parallax don't double-count the relief.

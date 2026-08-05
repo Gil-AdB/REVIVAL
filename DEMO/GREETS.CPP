@@ -1809,6 +1809,20 @@ void Initialize_Greets()
 				"surface and marches the RESIDUAL map. The campaign's per-pixel "
 				"mode is --no-greets_displace.\n");
 		const bool pin = fds::FeatureFlags::pom_shell_pin();
+		// --pom_shell_weld=3 (S1d-2e): PomShell_Build runs once per material,
+		// so its position-bucket weld can only ever average normals WITHIN the
+		// material being built and the wall/floor corners still tear. Snapshot
+		// the pristine mesh ONCE here, across every material about to be
+		// shelled, so both sides of a junction extrude along one direction and
+		// land on one point. No-op (and byte-null) below --pom_shell_weld=3.
+		{
+			const char *weldMats[2]; int nWeldMats = 0;
+			for (const char *nm : { "rooms", "floor" })
+				for (Material *m = MatLib; m; m = m->Next)
+					if (m->RelScene == GreetSc && m->Name && !std::strcmp(m->Name, nm)
+					    && m->HeightMap) { weldMats[nWeldMats++] = nm; break; }
+			PomShell_WeldPrepare(GreetSc, weldMats, nWeldMats);
+		}
 		for (const char *nm : { "rooms", "floor" }) {
 			Material *M = nullptr;
 			for (Material *m = MatLib; m; m = m->Next)
@@ -1822,6 +1836,7 @@ void Initialize_Greets()
 			PomShell_Build(GreetSc, nm,
 			               fds::FeatureFlags::parallax_strength() * M->ParallaxScale, pin);
 		}
+		PomShell_WeldReset();
 	}
 
 	// S1 offscreen proxy: NOW that the displace + face-independence + smooth-weld
