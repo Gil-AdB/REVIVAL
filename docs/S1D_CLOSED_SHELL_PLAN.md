@@ -1304,3 +1304,239 @@ and run with cwd = the MAIN `Runtime/` so both binaries see the same uncommitted
   under the lid). Harmless for side FACES (floor's leans are 0 either way) and
   for `rooms` (it is built first), but `--pom_shell_side_edge=1` must not be used
   with the lid until the topology snapshot is taken once for the whole scene.
+
+---
+
+# S1d-2e — THE SWIM, MEASURED (and it is the GRAZING CAP), plus the cross-material weld
+
+Added 2026-08-05, branch `fog-wt`. Two user-reported defects from a live review
+of the per-pixel arms: *"the lid protrusion looks fantastic — when it actually
+works. we have wall gaps, swimming textures, etc. for the other one, we still
+have swimming textures."* Swimming is present in BOTH arms, so it is in the
+march/shading, not the shell geometry. It is a MOTION artefact; nothing below
+was measured on a still.
+
+## S1d-2e.0 INSTRUMENT — a camera sweep, and a surface coordinate with no camera matrices
+
+**The sweep.** 16 consecutive frames along a pinned free-cam path, one `./DEMO`
+run per frame, dummy drivers, 1080p:
+
+| sweep | path | per-frame camera delta | t |
+|---|---|---|---|
+| **A** | p5958a → p5958b (pure lateral dolly, near-parallel to the wall) | 0.040 world | 5958 |
+| **B** | p5743 → half way to p5773 (dolly + yaw) | 0.052 world + 0.21° | 5743 |
+
+Both come straight out of `docs/greets_review_poses.txt`; sweep A is the pose
+the grazing smear was reported at, and its per-frame delta matches the demo
+camera's own speed there (1.57 world over 30 t between p5743 and p5773).
+
+**The surface coordinate.** The same arm plus **`--parallax_max_offset=0.000001`**
+clamps the final parallax offset to a millionth of a texel, so its
+`FDS_DUMP_TXTR` dump is the pixel's **GEOMETRIC UV**. That is a per-pixel
+surface coordinate on the authored plane, identical in every recess-family arm
+(none of them moves a vertex), so the SAME SURFACE POINT can be compared across
+frames with no camera matrices, no depth unprojection and no search. Everything
+below scatters a per-pixel quantity into a UV grid keyed on it.
+
+**The metric.** Correct POM returns the first intersection of the **TRUE view
+ray** with the height field. `--pom_ref_march --pom_ref_steps=512
+--pom_shell_cap=64` is exactly that: 512 uniform steps + a secant solve, and cap
+64 IS the kernel's own `1/max(V·N, 1/64)` ceiling, i.e. **no cap at all**. So
+
+```
+E(p)  = marchedUV_arm(p) − marchedUV_trueray(p)        [texels, same frame+pixel]
+SWIM  = |E(f−1) − 2·E(f) + E(f+1)|   registered on the surface
+```
+
+A static E is a static distortion and does not swim; the second temporal
+difference annihilates any smooth (linear-in-time) component — view-dependent
+ramps, the legitimate parallax motion — and leaves the jumps.
+
+## S1d-2e.1 THE ORDERED HYPOTHESES, cheapest first. Four of the five are dead.
+
+**1. `--pom_height_mip` (per-FACE height mip) — DEAD, structurally.**
+`--mips` **defaults to 0**, and `MiplevelClipper` ends every branch with
+`if (!FeatureFlags::mips()) g_MipLevel = 0`. Measured from the G-buffer's own
+mip nibble (`mat32 >> 28`): **every deferred pixel of every one of the 13 review
+poses is mip 0** — not just the stone, the whole frame. Over sweep A, **0 of
+29 484 424 stone pixel-pairs change mip.** `--pom_height_mip=0` is byte-identical
+to the default; `=1` is slightly worse (swim jerk p90 0.83 → 1.40 texels). The
+flag cannot be the cause at any pose the user reviews from, and the diagonal
+seam it was written for cannot occur while `--mips` is off.
+
+**2. March under-convergence — DEAD.** Cone-32 against the 512-step uniform +
+secant reference at the SAME cap, sweep A, stone pixels:
+**p50 0.02, p90 0.08, p99 0.5 texels.** `--parallax_pom=128` reproduces cone-32
+to the digit. The shipping march is converged.
+
+**3. `--parallax_pom_quarter` / 4. `--parallax_pom_lod`** — both default 0 and
+neither is in the user's recipe. Not active.
+
+**5. Clamp/fallback state flips — real, and secondary.** Pixels whose marched UV
+equals the geometric UV exactly (the `--pom_recess_edge=0` clamp, plus any cone
+march that never bracketed) are **3.4–4.8 % of stone pixels** on sweep A and
+5.6 % on sweep B, and **1.2–2.6 % of stone pixels change that state per frame**.
+It is a contiguous vertical band at the convex ridge, and it sweeps across the
+wall as the camera moves (`docs/img/s1d_swim/A_flatclamp_mask_f00_f08_f15.png`).
+
+**6. THE GRAZING CAP (`--pom_shell_cap`) — this is the dominant term, and it was
+not on the list.** `rayScale = uvAmp × min(1/(V·N), cap)` leaves the ray's UV
+AZIMUTH correct and clamps its RATE, so a capped ray dives into the height field
+too steeply and lands on a nearer feature. Sweep A, error against the true ray:
+
+| cap | \|E\| mean | \|E\| > 4 tx | **SWIM (jerk of E), mean** | jerk > 8 tx | flat-clamp area |
+|---|---|---|---|---|---|
+| 8 | 31.9 tx | 32.8 % | 12.64 tx | 7.71 % | 1.96 % |
+| **16 (the user's arm)** | **37.5 tx** | **21.4 %** | **12.64 tx** | **7.07 %** | **3.96 %** |
+| 32 | 22.1 tx | 6.8 % | 10.86 tx | 3.82 % | 8.92 % |
+| **64 (= uncapped)** | **0.08 tx** | **0.13 %** | **0.34 tx** | **0.37 %** | **12.81 %** |
+
+At the user's cap, **21 % of the wall is showing relief from a ray that is up to
+228 texels (p99; 426 max) away from the true one, and that error moves 6.5
+texels every frame.** The capped population is not static either: it grows
+8.7 % → 14.5 % of stone across the 16 frames of the sweep. Raising the cap to 64
+takes the swim to **1/37th** of the user's arm and the error to sub-texel.
+
+Two controls that make the attribution airtight: the 512-step reference at cap
+16 swims **exactly as much as the shipping cone march** (12.37 vs 12.64), and at
+cap 64 both go to zero. So it is the cap, not the march, not the budget, not the
+map resolution.
+
+**It is a GRAZING phenomenon.** On sweep B (an ordinary 3/4 view) the cap binds
+on only 2.23 % of surface points, swim is 1.27 tx, and raising the cap to 64
+costs 0.06 pp of clamp area. The wall poses the user reviews from are mostly
+near-parallel, which is why he sees it.
+
+## S1d-2e.2 LOOK — before any number
+
+`docs/img/s1d_swim/`, all from sweep A (t=5958), the crop is the grazing band on
+the right wall (screen 700,120–1120,960).
+
+- **`A_swim_cap16_vs_cap64.gif`** — the deliverable. 16 consecutive frames,
+  **left = `--pom_shell_cap=16` (the user's arm), right = `--pom_shell_cap=64`**,
+  110 ms/frame, looping. Open it in any browser or Preview. This is a motion
+  artefact; the still below only hints at it.
+- `A_swim_filmstrip_cap16_top_cap64_bottom.png` — 6 of those frames, cap 16 on
+  top, cap 64 underneath, if a GIF is inconvenient.
+- **`A_band_cap16_cap64_true512.png`** — the same frame three ways at full res:
+  `cap 16` | `cap 64, cone-32` | `cap 64, ref-512`. The left panel's stone is
+  **smeared into vertical ribbons**; the middle recovers the mottling and the
+  block structure; the middle and right are indistinguishable, which is the
+  picture of "cone-32 at cap 64 IS the converged answer".
+- `A_caperr_map_f08.png` — where the cap binds, over the frame. A broad vertical
+  band down the receding part of the wall, orange = the landed UV differs from
+  the true ray's by more than 4 texels.
+- `A_flatclamp_mask_f00_f08_f15.png` — the clamp band (magenta) at frames 0/8/15.
+
+## S1d-2e.3 WHAT TO DO — no code change, one flag value, and the honest trade
+
+`--pom_shell_cap=64` on the standing recess arm:
+
+| gate | cap 16 | cap 32 | cap 64 |
+|---|---|---|---|
+| void, 13 review poses | **5** | **5** | **5** |
+| swim (jerk of E vs the true ray), sweep A | 12.64 tx | 10.86 | **0.34** |
+| clamp/fallback area, sweep A | 3.96 % | 8.92 % | **12.81 %** |
+| clamp/fallback area, sweep B | 5.57 % | — | **5.63 %** |
+| offscreen deltas | zero by construction (recess-only moves no vertex) | | |
+| ms/frame, greets t=5958, min of 25, 3 interleaved rounds | 51.53 / 51.22 / 51.08 | 52.23 / 51.34 / 51.48 | 51.74 / 50.78 / 51.00 |
+
+Perf: the within-arm spread (0.45 ms) exceeds the between-arm difference at load
+average 7–14, so the cap's cost is **below my measurement resolution, ≤ ~0.5
+ms/frame** — not zero, and I am not calling it zero. It is cheap for a
+mechanical reason: `--pom_march_earlyout` breaks the loop when every lane has
+bracketed, and the cone step is proportional to the gap, so a longer ray takes
+BIGGER steps, not more of them.
+
+The trade is the one this whole document is about, seen from the swim side: a
+longer ray is a more correct ray AND a ray more likely to leave its patch. Cap
+16 buys a smaller clamp band by rendering the wrong surface on 21 % of the wall;
+cap 64 renders the right surface and clamps three times as much of it flat at
+grazing. **Neither is correct, and the closed shell is still what removes the
+choice.** What is new is that the cost of the cap is now a measured number
+instead of a quality knob, and it is the thing the user is seeing move.
+
+Not proposed as a default: `--pom_shell_cap` defaults to 8 and the user flips
+defaults.
+
+## S1d-2e.4 THE OTHER THING IN THE FRAME, stated because it is not the march
+
+`--texture_filter` defaults to **0**, so the G-buffer carries a 20-bit INTEGER
+swizzled texel address and the deferred kernel point-samples albedo, AO,
+roughness and the normal map at texel granularity. At every greets wall pose the
+stone is MAGNIFIED — measured on sweep A, one height texel covers ~15 screen
+pixels — so the wall is drawn as ~4 px texel blocks that crawl under camera
+motion (`Z_zoom` comparison: `--texture_filter=1` is visibly smooth where the
+default is blocky). The flag's own help calls this "full-facade texture crawl".
+It is present in flat POM and in `--no-parallax` alike, so it is NOT specific to
+the displacement arms, and on the surface-registered appearance metric
+`--texture_filter=1` moved the recess arm's colour jerk by under 10 %. I record
+it because it is a real, visible, always-on temporal artefact on these surfaces
+and the user may well be seeing it mixed in with the cap's — but I did not
+demonstrate that it is what he means, and I am not going to claim it.
+
+## S1d-2e.5 CROSS-MATERIAL WELD (`--pom_shell_weld` 3/4/5/6) — built, measured, DOES NOT meet the gate
+
+The task's premise: the lid arm's residual 14 163 void px are geometric, at
+CROSS-MATERIAL junctions, because `PomShell_Build` runs once per material and
+`--pom_shell_weld=1` can only weld within one. `PomShell_WeldPrepare` now takes
+ONE scene-wide position bucket over every material about to be shelled, before
+the first build moves a vertex, and memoises the offset VECTOR applied at each
+position so two materials with different amplitudes still land a shared corner
+on exactly one point. Modes: **3** = scene-wide weld, **4** = 3 + the true mitre
+(`off / cos(half-fold)`, so each incident plane is offset by exactly `off` and
+nothing retracts), **5** = 3 + pin against UNSHELLED neighbours only, **6** = 5 +
+the mitre. All default OFF.
+
+| arm | void, 13 review poses |
+|---|---|
+| flat POM / recess / lid `--pom_shell_lid_probe` | 5 / 5 / **10** |
+| **lid, `--pom_shell_weld=1` (the standing arm)** | **14 163** |
+| lid `--pom_shell_weld=3` | 24 334 — **worse** |
+| lid `--pom_shell_weld=4` | 51 012 — much worse |
+| **lid `--pom_shell_weld=5`** | **10 646 (−25 %)** |
+| lid `--pom_shell_weld=6` | 26 765 — worse |
+
+**The premise is wrong, and the measurement says why.** The weld does what it
+was built to do — all 42 rooms/floor positions weld, the floor keeps its shell
+(0 pinned, 90 of 90 verts reuse the wall's delta, against `--pom_shell_weld=2`'s
+90 of 90 PINNED and no shell at all) — and the void goes UP. Welding a corner to
+the mean normal RETRACTS the surface laterally by `off·(1−cos(half-fold))`,
+which pulls the floor 0.064 world in from its **UNSHELLED** neighbours (the
+mirror panel, `siling`, the columns, the stairs) and opens more slit than the
+rooms/floor junction it closes. Mode 5 pins exactly those and is the only
+variant that helps. **The dominant residue is a shelled-to-UNSHELLED junction,
+where there is nothing on the other side to weld to** — so the way out is
+shelling the neighbours, or mode 5's pin, not a better weld.
+
+**A control correction that matters for §S1d-2d.** That section attributes
+13 986 of the 14 163 to geometry because they "survive `--no-parallax`".
+`--no-parallax` also drops the stone HEIGHT MAPS, so `PomShell_Build` is never
+called and there is no shell at all — measured, that arm voids 13 992 px on its
+own, and it cannot attribute anything. The valid control is
+`--pom_shell_lid_probe` (lid offset forced to 0, every other path bit-identical):
+**10 px**. It does confirm the void is the moved vertices, by a different route.
+
+### Gates
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (`4ac809e5` / `b41894f9` / `166fa25a`) |
+| city `t=1961` | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact |
+| greets **lid** arm t=5743 depth, new flags OFF | `b2a1aa7f...` — byte-identical to a `6987ffa` worktree build |
+| greets **recess** arm t=5743 depth, new flags OFF | `26507444...` — byte-identical, same method |
+| bad flags | **0** across every run log |
+
+**A byte-nullity trap worth the space.** The first two attempts were NOT
+byte-null with the flag off: naming a temporary for the vertex delta breaks the
+`-ffp-contract=fast` multiply-add the compiler folds `Pos += vn/nl*off` into,
+and every vertex moved by an LSB — lid depth `b2a1aa7f` → `c748436b` at t=5743
+with `--pom_shell_weld=1`. The armed path is now a wholly separate branch and
+the original statements are textually untouched. If a "no-op" refactor of a
+vertex move ever fails a depth gate, look here first.
+
+**And a process one.** A concurrent session committing on this branch swept my
+uncommitted `DEMO/DisplaceRebuild.cpp` hunk into its own commit (`18a58ae`)
+without the declarations, leaving HEAD unable to compile for the ~30 minutes
+until I committed the rest.
