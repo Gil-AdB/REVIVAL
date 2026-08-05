@@ -329,17 +329,38 @@ assume the reverse.
 defaults to HDR (`Hdr_ActivateNoFog` fires because greets has no fog), so keeping it is parity,
 not extra.
 
-**Displacement (Phase 3).** Three arms, all fragment/tessellation-stage:
-1. **flat POM** — per-fragment height-field march in the fragment shader, no silhouette.
-2. **shell / prism with real silhouettes** — extruded prisms, per-fragment march with lateral-exit
-   discard and **depth write**. This is the arm the S1 campaign has been unable to make work on
-   the CPU; on the GPU `discard_fragment()` and `[[depth(any)]]` are first-class.
-3. **hardware tessellation** — displace real geometry. MEASURED: tessellation vertex functions
-   compile on this machine; max rate 16.
+**Displacement (Phase 3) — re-framed by the research verdict, which has now landed.**
 
-Which arms to build, and in what order, should be settled **after** reading the concurrent
-displacement-literature verdict (`docs/DISPLACEMENT_RESEARCH_II.md` — not present in the tree as
-of this writing).
+`docs/DISPLACEMENT_RESEARCH_II.md` §5 ranks **R5 — recess-only per-pixel displacement and *no
+silhouette program at all* — as the front-runner**, on measured grounds: greets is a closed room,
+only 0.4 % of 2,289 world-units of patch boundary is a true free edge, and an instrumented hunt
+for see-through at 3.3× amplitude across all 13 review poses found 0–24 px everywhere but one
+pose. **So "silhouette-correct per-pixel displacement" is probably NOT the prize** — this plan's
+first draft asserted it was, and that claim is withdrawn.
+
+What the GPU arm is now for, in priority order:
+
+1. **Settle H1 vs H2 — the discriminator §4 says has never been run.** The grazing "swim" is an
+   *unattributed* symptom: either the march is wrong (H1) or the motion is physically correct and
+   reads as sliding because it is painted on a flat surface (H2). The stated discriminator is to
+   take an arm that **moves real geometry** through the identical camera path and measure its slip
+   on the same surface-registered metric. **Hardware tessellation on the GPU is exactly that
+   instrument**, and it also gives a true-ray reference image to register against. This is the
+   single highest-value GPU displacement task and it is a *measurement*, not a feature.
+2. **Ground-truth the texture-filtering term.** `--texture_filter` defaults to 0, so the CPU
+   deferred kernel point-samples at texel granularity; one height texel covers ~15 screen pixels
+   at these poses, drawing the wall as ~4 px blocks that crawl under motion — present in flat POM
+   and `--no-parallax` alike. The GPU gets trilinear + aniso for free, so it can show what the same
+   wall looks like *with* correct filtering. The CPU path structurally cannot answer that question.
+3. **Cost R3 (Hirche's full prism) if the user ever wants it settled rather than argued.** R3
+   requires rastering all eight faces of each shelled quad's prism, letting each prism march its
+   own interior, discarding on exit, and letting the Z-buffer arbitrate overlaps. That is native on
+   a GPU (`discard_fragment()`, `[[depth(any)]]`, per-fragment depth arbitration) and is precisely
+   the mechanism the CPU's `--pom_shell_side_entry` can only approximate. Gated on R0/R1 first.
+4. **Flat POM** as the cheap baseline arm, for A/B against 1–3.
+
+MEASURED on this machine: tessellation vertex functions (`[[patch(quad,4)]]`) compile; max
+tessellation rate 16; `MTL4MeshRenderPipeline` is in the SDK if mesh shaders are ever wanted.
 
 ### What is explicitly NOT implemented, and why that's fine for a benchmark
 
@@ -516,7 +537,7 @@ Estimates are **ESTIMATE** unless a stage is marked as already measured.
 | **2. Deferred G-buffer + 7 omnis, no shadows** | MRT G-buffer, full-screen **PBR** lighting pass (GGX + split-sum env BRDF + multiscatter + SH ambient — the stack greets actually runs) | ~1.5–2 days | The lighting comparison without the shadow confound. **Highest value per day, because the frame is lighting-bound.** |
 | **3. Cube shadow maps** | 7 × 6 × 512² + 3 × 6 × 128², `sample_compare` + PCF | ~1.5–2 days | The full greets-frame comparison, and makes the PCF / lightmap-amortisation asymmetries concrete |
 | **4. HDR + ACES tonemap** | `rgba16float` target + tonemap pass | ~½ day | Parity with greets' default look; makes screenshots visually comparable |
-| **5. Displacement arms** | flat POM (~1 d), shell/prism with silhouettes + depth write (~2–3 d), hardware tessellation (~2 d) | ~5–6 days | **The strategic prize**: a visual ground truth for the S1 campaign, and a direct answer to whether silhouette-correct per-pixel displacement works, on hardware where a fragment shader can `discard` and write depth at full rate |
+| **5. Displacement arms** | hardware tessellation as the **H1/H2 discriminator** (~2 d), filtered-wall ground truth (~½ d, falls out of it), flat POM baseline (~1 d), Hirche full prism only if R0/R1 say so (~2–3 d) | ~3–6 days | **Settling the un-taken measurement** that the whole grazing complaint rests on, plus a filtered ground truth the CPU path cannot produce. NOT "does silhouette displacement work" — the research verdict says this scene has almost no silhouettes to get right |
 | **6. (optional) Snapshot output** | offscreen PPM/PNG matching our snapshot naming | ~½ day | Cross-renderer image diffs with existing tooling |
 
 **~3 days to the first meaningful lighting number. ~2 weeks to the strategic answer.**
@@ -604,7 +625,11 @@ endif()
 
 ## 8. Open questions to settle before Phase 3
 
-1. Which displacement arms, in what order — pending `docs/DISPLACEMENT_RESEARCH_II.md`.
+1. ~~Which displacement arms, in what order~~ — **RESOLVED** by `docs/DISPLACEMENT_RESEARCH_II.md`
+   §4–5; see §3's displacement block. The GPU arm's job is the H1/H2 discriminator and a filtered
+   ground truth, not a silhouette program. Note R0 and R1 are *no-code* steps and should precede
+   any GPU displacement work — if R1's shipped-POM configuration looks acceptable, most of the
+   question dissolves.
 2. Shadow resolution sweep: 512² (our static default) only, or also 1024²/2048² to show the GPU
    scaling where the CPU's is prohibitive?
 3. The 3 mech-parented omnis resolve through the hierarchy pass, which `Animate_Objects` already
