@@ -177,3 +177,169 @@ geometry*. It does not give a silhouette. A silhouette needs a fragment to exist
 where the base polygon has none, and that is geometry, not depth. Hirche 2004
 already wrote correct per-pixel z in 2004 (§2.5 below) and still needed eight
 rasterized triangles per base triangle to get the silhouette.
+
+---
+
+## 2. Per-question findings
+
+### 2.1 Q2 — what IS the standard grazing mitigation?
+
+Not offset limiting. The shipped stack is four separate mechanisms, none of which
+bounds lateral travel, plus one that removes the technique entirely.
+
+**(i) Raise the sample count as the surface goes edge-on.** This is the SI3D 2006
+contribution. Tatarchuk, sketch p18, verbatim [P-demo]:
+
+> "Dynamically adjust the sampling rate for ray tracing as a linear function of
+> angle between the geometric normal and the view direction ray… This ensures
+> that we take more samples when the surface is viewed at steep grazing angles,
+> where more samples are desired."
+
+In the shipped shader that is exactly one line:
+
+```hlsl
+int nNumSteps = (int)lerp( g_nMaxSamples, g_nMinSamples, dot( vViewWS, vNormalWS ) );
+```
+
+i.e. `n = n_min` head-on, `n = n_max` at grazing. Note what this fixes and what
+it does not: it fixes **undersampling** of a long ray. It does nothing about the
+ray's **length**. And our data says length is our problem, not sampling —
+`--parallax_pom=32/128/512` give identical slip, and the 512-step reference at
+cap 16 swims exactly as much as the shipping cone march (12.37 vs 12.64 texels)
+[M, §S1d-2e.1]. **We have already banked mitigation (i) and it is not our
+lever.**
+
+**(ii) Perspective / depth bias toward the horizon — tried and explicitly
+rejected by its own authors.** Tatarchuk 2004 (Brawley & Tatarchuk) applied it;
+2006 removed it [P-demo]:
+
+> "In the [Brawley04] approach we applied perspective bias to fix this artifact.
+> Unfortunately, that results in strong flattening of the surface details along
+> the horizon, which is undesirable."
+
+This is the same defect class as our hard cap and as offset limiting: bound the
+travel, lose the relief. Three independent sources (Welsh's limiter as reviewed
+by Tatarchuk, Brawley's bias as retracted by Tatarchuk, our own cap ladder)
+converge on it. **A travel bound has no good setting.** Our measured version:
+cap 2 keeps rays in the patch but gets grazing depth wrong by up to 0.945 world;
+cap 64 is correct and pushes 12.8 % of the wall into the flat clamp [M,
+§S1d-2e.3]. The user's independent read of a hard offset clamp — 24 texels = "no
+swim but no displacement", 48/64 = "artifacts in the polygons" — is the same
+finding by eye.
+
+**(iii) LOD: fade the technique out to plain normal mapping.** This is the
+mechanism that actually removes grazing cost in shipped work, and it is
+distance-driven, not angle-driven. Tatarchuk, **"Adaptive Level-of-Detail
+System"**, verbatim [P-demo]:
+
+> "Compute the current mip map level. For furthest LOD levels, render using
+> normal mapping (threshold level). As the surface approaches the viewer,
+> increase the sampling rate as a function of the current mip map level. In
+> transition region between the threshold LOD level, blend between the normal
+> mapping and the full parallax occlusion mapping… We specify an
+> artist-directable threshold level where the transition between the parallax
+> occlusion mapping and the normal mapping computations will occur."
+
+**This one does not help us, and it is worth saying why so nobody proposes it.**
+`--mips` defaults to 0 in this engine and `MiplevelClipper` forces `g_MipLevel =
+0`; measured from the G-buffer's own mip nibble, **every deferred pixel of every
+one of the 13 review poses is mip 0**, and over a 16-frame sweep 0 of 29 484 424
+stone pixel-pairs change mip [M, §S1d-2e.1]. A mip-driven LOD has no signal to
+read here. Worse, the poses the user reviews from are *close* grazing wall views
+— exactly where every shipped LOD scheme would keep POM at full rate. Shipped
+POM's grazing mitigation is largely "the grazing surfaces are far away". Ours are
+not.
+
+**(iv) Author the art around it.** Tatarchuk, **"Authoring Strategies"** and
+**"Authoring Art Considerations for POM"**, verbatim [P-demo]:
+
+> "Avoid drastic height changes… This relates back to limitation of 'stretching'
+> of texture coordinates. The more gradual the height change the less noticeable
+> this will be. If you have a height map that is causing texture stretching try
+> blurring it in the problematic areas."
+
+> "Can alias at extreme viewing angles. Stretching of texture coordinates. In
+> some cases requires smooth height maps or high resolution maps. Intersecting
+> geometry clips at original height, not at displaced height…"
+
+Our greets stone is a block wall with **sharp mortar cuts at a ~256-texel block
+pitch** — the opposite of "avoid drastic height changes". The relief the user
+wants (stones standing proud, visible gaps between blocks) is precisely the
+height-map content the shipped technique's own author tells you not to author.
+That is worth stating plainly: **we are asking POM to do the thing its authoring
+guide forbids.**
+
+**(v) Cone stepping / relaxed cones / max-mipmaps do NOT address grazing.** They
+guarantee the first hit is not skipped, i.e. they attack sampling (mitigation i)
+with fewer taps. Our own measurement agrees they are not the lever: cone-32
+against a 512-step reference at the same cap is p50 0.02 / p90 0.08 / p99 0.5
+texels — converged [M, §S1d-2e.1].
+
+**Sub-question: is the true ray used in production, or only inside closed
+volumes?** Both. §1.1's table settles it: it is used in production *in the open*,
+with a wrapping texture as the domain. The closed-volume family (Hirche, shell
+maps) uses it too, with the volume as the domain. What no source does is use it
+in a finite chart — **unknown** whether anyone tried and did not publish.
+
+### 2.2 Q3 — how do shipped implementations handle the chart / patch boundary?
+
+**They do not have one.** This is the answer, and it took reading the shaders
+rather than the prose to see it.
+
+**(a) A single tiling texture over the whole surface, WRAP addressing.** The
+Policarpo/Oliveira I3D 2005 fragment shader takes a scalar uniform `tile` and
+computes `dp = IN.texcoord * tile` — the height field is a repeating pattern
+scaled over the geometry, so a ray that walks past the pattern's edge wraps into
+the next instance and always samples something plausible [P-demo]. The paper
+advertises the *absence* of a chart budget as a feature: "contrary to
+high-dimensional representations of surface details, the low memory requirements
+of the proposed technique **do not restrict its use to tiled textures**" — i.e.
+tiling is the norm for the alternatives, and relief mapping is merely not
+*limited* to it. Every POM demo surface in the literature (brick, cobblestone,
+stone floor, the ToyShop sidewalk) is a tiling pattern.
+
+**(b) When you must use a tile SET, pad it — stated as an art requirement.**
+Tatarchuk, **"Authoring Art Considerations for POM"**, verbatim [P-demo]:
+
+> "**Tile sets require buffer region to eliminate seam artifacts.**"
+
+That is the only direct statement in the shipped literature on our exact problem,
+and it is one line in an art-pipeline slide. It is real but bounded: a buffer
+region covers a ray of bounded length. Ours travels 0.48 UV at grazing against a
+0.42 UV median patch [M, §S1d-1.1], i.e. a buffer would have to be wider than the
+patch. **The literature does not address a ray longer than the chart, and I found
+no source that does.**
+
+**(c) Discard on domain exit — the UE-community "silhouette" trick.** Test
+whether the parallaxed UV left [0,1] and kill the pixel (opacity 0 in UE4). This
+is the mechanism we implemented as `--pom_shell_domain`, and it is the mechanism
+that produces the user's black gashes: it is only correct if the polygon's UV
+domain coincides with the object's real boundary. On a single decorative quad it
+does. On a wall built of 67 patches over 51 authored planes [M, §S1d-1.1] it
+punches holes through solid wall.
+
+**(d) Closed volumes, where exit is meaningful.** Hirche 2004, verbatim from the
+paper [P-demo]:
+
+> "To avoid sampling outside of the prism, the exit point of the viewing ray has
+> to be determined."
+
+The prism *is* the domain. Exiting is a defined event with a defined answer, and
+the answer is the neighbouring prism's own fragment (§2.5).
+
+**(e) Per-triangle vs global tracing, and the thing nobody discusses.** I found
+**no source** in the POM/relief line that considers a ray crossing into a
+neighbouring triangle's texture space and continuing there. Hirche's tetrahedral
+formulation makes the question moot (the primitive bounds the ray); shell maps
+make it moot the other way (one global bijection). Our S1d-2c "angled
+continuation" — hand the ray to the neighbour's chart through a per-seam affine
+transform — appears to be **unattested in the literature**. Our own census
+measured what that would cost on greets: 71 distinct (fold, chart-scale,
+mirror) buckets, 27 distinct fold angles, and **41.8 % of angled segments
+mirrored**, so the transform is a full 2×3 affine including reflection [M,
+§S1d-1.8]. Nobody has published this because nobody put a marching ray in a chart
+this small.
+
+**The honest summary of Q3: our chart-boundary problem is not a solved problem we
+failed to find. It is a problem shipped practice avoided by construction — one
+wrapping chart, or one padded tile, or a closed volume.**
