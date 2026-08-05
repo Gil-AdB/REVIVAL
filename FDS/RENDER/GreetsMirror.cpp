@@ -195,6 +195,33 @@ inline bool isCloneMesh(Object *Obj) {
         && std::strncmp(Obj->Name, kPrefix, kPrefixLen) == 0;
 }
 
+// ── --greets_displace_flat_mirror: reflect the FLAT stone ────────────────────
+// A mirror clone is MAIN-VIEW geometry, so Face_MainOnly (which only the
+// offscreen passes honour) does not spare it the tessellated wall: measured at
+// greets t=5780 the clone costs the displaced arm 11.40 ms/frame against 3.31 ms
+// in the flat-POM arm, and pushes 42 870 clone faces while the direct view
+// pushes 28 598 displaced ones. With the flag on the clone sources rooms/floor
+// from the flat --greets_shadow_proxy mesh instead. Three coupled rules, and
+// every clone loop (base count, base fill, compound count, compound fill) must
+// apply the SAME three or the vert offsets stop agreeing:
+//   1. skip Face_MainOnly faces,
+//   2. include the Tri_OffscreenProxy mesh (normally excluded — it would
+//      DOUBLE the wall),
+//   3. skip a source mesh whose every face is skipped, VERTS AND ALL — else the
+//      clone carries orphan vertices of exactly the class §9d removed, and the
+//      transform-phase saving (the point of the flag) never materialises.
+inline bool mirrorFlatStone() {
+    return fds::FeatureFlags::greets_displace_flat_mirror();
+}
+// Rule 2. Off the flag, an offscreen proxy is never clone material.
+inline bool mirrorSkipProxyMesh(const TriMesh *T) {
+    return (T->Flags & Tri_OffscreenProxy) && !mirrorFlatStone();
+}
+// Rule 1.
+inline bool mirrorSkipFace(const Face &F) {
+    return mirrorFlatStone() && (F.Flags & Face_MainOnly);
+}
+
 // Local reflection helpers. Captured by lambdas that need them.
 inline Vector reflectPointAcross(const Vector &p, const Vector &N, float d) {
     const float k = 2.0f * (N.x*p.x + N.y*p.y + N.z*p.z + d);
@@ -480,18 +507,40 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     // 44 012-vert greets clone, and the active clone is 53 % of main-view
     // transformed verts. Removing them cannot move a pixel: no face pointed
     // at them.
+    //
+    // Tri_OffscreenProxy SOURCE MESHES ARE SKIPPED TOO (2026-08-06, same four
+    // loops). A proxy exists precisely because the real geometry it stands in
+    // for is main-camera-only (Face_MainOnly): greets' flat stone proxy under
+    // `--greets_displace --greets_shadow_proxy` substitutes ~226 flat faces for
+    // ~87 k displaced wall faces in every OFFSCREEN pass. A mirror clone is not
+    // an offscreen pass — it is main-view geometry — and the clone loop copies
+    // faces with `CF = OF`, so it was copying BOTH the displaced faces (whose
+    // Face_MainOnly is only honoured in offscreen passes) AND the flat proxy
+    // standing in for them: two coincident copies of every wall inside the
+    // reflection, Z-fighting. Measured at the t=5780 wall pose: main-view
+    // fPushed 74 962 -> 75 110 with the proxy on, i.e. 148 duplicate clone
+    // faces per frame. The proxy is never wanted here; the displaced original
+    // is already in the clone.
     DWord totalVerts = 0, totalFaces = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (isCloneMesh(Obj)) continue;
         TriMesh *T = (TriMesh*)Obj->Data;
         if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
-        totalVerts += T->VIndex;
+        if (mirrorSkipProxyMesh(T)) continue;                          // offscreen stand-in: cloning it DOUBLES the wall (see the count-loop comment)
+        // Rule 3 (--greets_displace_flat_mirror): count the faces FIRST and skip
+        // the mesh outright if none survive, so a fully-displaced Piramid chunk
+        // contributes no verts either. Textually mirrored in the fill loop.
+        DWord meshFaces = 0;
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             if (isMirrorSurface(T->Faces[fi], T)) continue;
             if (!T->Faces[fi].A) continue;
-            ++totalFaces;
+            if (mirrorSkipFace(T->Faces[fi])) continue;
+            ++meshFaces;
         }
+        if (mirrorFlatStone() && meshFaces == 0) continue;   // flag-gated so the count is bit-identical off the flag
+        totalVerts += T->VIndex;
+        totalFaces += meshFaces;
     }
     if (totalFaces == 0) {
         std::fprintf(stderr,
@@ -574,6 +623,19 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         if (isCloneMesh(Obj)) continue;  // skip prior mirror clones
         TriMesh *T = (TriMesh*)Obj->Data;
         if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
+        if (mirrorSkipProxyMesh(T)) continue;                          // offscreen stand-in: cloning it DOUBLES the wall (see the count-loop comment)
+        // Rule 3 — the count loop's mesh skip, textually mirrored. Must stay in
+        // lockstep: this loop consumes the capacity that loop reserved.
+        {
+            DWord meshFaces = 0;
+            for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                if (isMirrorSurface(T->Faces[fi], T)) continue;
+                if (!T->Faces[fi].A) continue;
+                if (mirrorSkipFace(T->Faces[fi])) continue;
+                ++meshFaces;
+            }
+            if (mirrorFlatStone() && meshFaces == 0) continue;   // flag-gated so the count is bit-identical off the flag
+        }
         const bool meshDyn = meshIsDynamic(Obj);
         const DWord vStart = vOfs;
         for (DWord vi = 0; vi < T->VIndex; ++vi) {
@@ -619,6 +681,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             Face &OF = T->Faces[fi];
             if (isMirrorSurface(OF, T)) continue;
             if (!OF.A || !OF.B || !OF.C) continue;
+            if (mirrorSkipFace(OF)) continue;   // rule 1: displaced detail, the flat proxy stands in
             // Only reflect faces IN FRONT of the mirror plane. A real
             // mirror reflects what's in front of it; faces on the plane
             // (the teleporter's coplanar emissive "screen emiter" glow)
@@ -1658,12 +1721,18 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 if (isCloneMesh(Obj)) continue;
                 TriMesh *T = (TriMesh*)Obj->Data;
                 if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
-                totalV += T->VIndex;
+                if (mirrorSkipProxyMesh(T)) continue;                  // offscreen stand-in: cloning it DOUBLES the wall (see the count-loop comment)
+                // Rule 3, compound form (textually mirrored in the fill loop).
+                DWord meshFaces = 0;
                 for (DWord fi = 0; fi < T->FIndex; ++fi) {
                     if (!T->Faces[fi].A) continue;
                     if (isAnyBaseWallMat(T->Faces[fi].Txtr)) continue;
-                    ++totalF;
+                    if (mirrorSkipFace(T->Faces[fi])) continue;
+                    ++meshFaces;
                 }
+                if (mirrorFlatStone() && meshFaces == 0) continue;   // flag-gated so the count is bit-identical off the flag
+                totalV += T->VIndex;
+                totalF += meshFaces;
             }
             if (totalF == 0) continue;
 
@@ -1726,6 +1795,18 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 if (isCloneMesh(Obj)) continue;
                 TriMesh *T = (TriMesh*)Obj->Data;
                 if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
+                if (mirrorSkipProxyMesh(T)) continue;                  // offscreen stand-in: cloning it DOUBLES the wall (see the count-loop comment)
+                // Rule 3 — the compound count loop's mesh skip, in lockstep.
+                {
+                    DWord meshFaces = 0;
+                    for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                        if (!T->Faces[fi].A) continue;
+                        if (isAnyBaseWallMat(T->Faces[fi].Txtr)) continue;
+                        if (mirrorSkipFace(T->Faces[fi])) continue;
+                        ++meshFaces;
+                    }
+                    if (mirrorFlatStone() && meshFaces == 0) continue;   // flag-gated so the count is bit-identical off the flag
+                }
                 const DWord vStart = vOfs;
                 for (DWord vi = 0; vi < T->VIndex; ++vi) {
                     MM->Verts[vOfs] = T->Verts[vi];
@@ -1751,6 +1832,7 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                     Face &OF = T->Faces[fi];
                     if (!OF.A || !OF.B || !OF.C) continue;
                     if (isAnyBaseWallMat(OF.Txtr)) continue;
+                    if (mirrorSkipFace(OF)) continue;   // rule 1: displaced detail, the flat proxy stands in
                     Face &CF = MM->Faces[fOfs];
                     CF = OF;
                     // Winding unchanged: two reflections preserve it.

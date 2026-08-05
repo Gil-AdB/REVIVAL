@@ -1064,6 +1064,54 @@ static void GreetsApplyInitDefaults()
 	FF::setDefault(FF::IntId::shadow_lightmap_res,      128);
 	FF::setDefault(FF::BoolId::shadow_lightmap_planar,  true);
 	FF::setDefault(FF::BoolId::shadow_skip_animated,    true);
+	// TESSELLATION ERGONOMICS (2026-08-06). --greets_displace alone paid a
+	// per-frame shadow re-raster (and an env/lightmap bake) over ~87 k displaced
+	// faces to produce relief that a PolyId cube map cannot resolve anyway. The
+	// S1 offscreen proxy substitutes the ~226 flat pre-displacement faces in
+	// every offscreen pass and is the single biggest free-ish win the arm has, so
+	// --greets_displace now turns it on for itself: ONE flag gives the good
+	// tessellated arm instead of a five-flag incantation.
+	// MEASURED (t=5780 wall bench, 1920x1080, 12 threads, iters=20, 4 interleaved
+	// rounds, min-of-arm, load 7-10): frame 67.95 -> 62.05 ms, of which BAKE
+	// 9.18 -> 3.45 (flat POM's own BAKE is 3.26 at the same pose).
+	// NOT LOOK-NEUTRAL, and not claimed to be: substituting flat casters changes
+	// shadow occlusion at wall/floor junctions. Colour diff over the 13 review
+	// poses (16 camera/t pairs, docs/greets_review_poses.txt): byte-identical at
+	// 5 of 16; elsewhere 1 282-110 668 px >4/255, worst t=6097 with 58 021 px
+	// >12/255 / 14 604 >32/255 / max 144, concentrated at the corner junction —
+	// a broad low-amplitude occlusion shift (mean |d| on changed px 1.0-4.3), no
+	// structural artifact. --no-greets_shadow_proxy restores the displaced
+	// casters (setDefault, not a force). Inert without --greets_displace, so the
+	// shipping flat-POM arm is untouched.
+	// The second companion, same reasoning and the same measured size: a mirror
+	// clone is MAIN-VIEW geometry, so Face_MainOnly never spares it the
+	// tessellated wall and the reflection re-transforms + re-rasterises all of
+	// it (measured 11.40 ms/frame of the displaced arm vs 3.31 ms of the flat
+	// arm; the clone pushed MORE displaced faces than the direct view). Sourcing
+	// it from the flat proxy is -5.91 ms and byte-IDENTICAL at both mirror review
+	// poses (t=6133, t=6293); at t=5743 it moves 2 990 px >12/255 (0.14 % of the
+	// frame, inside the mirror window) and the two frames are indistinguishable
+	// side by side. Needs the proxy, which the line above just defaulted on.
+	if (FF::greets_displace()) {
+		FF::setDefault(FF::BoolId::greets_shadow_proxy, true);
+		FF::setDefault(FF::BoolId::greets_displace_flat_mirror, true);
+		std::fprintf(stderr, "[STONE] --greets_displace defaults its two perf "
+			"companions ON: --greets_shadow_proxy=%d (offscreen passes rasterise "
+			"the flat stone, -5.9 ms, DOES move shadow occlusion at wall "
+			"junctions) and --greets_displace_flat_mirror=%d (reflections source "
+			"the flat stone, -5.9 ms, byte-identical at both mirror review "
+			"poses). Together 61.8 -> 55.9 ms at t=5780. Use --no-<flag> to "
+			"compare either one.\n",
+			FF::greets_shadow_proxy() ? 1 : 0,
+			FF::greets_displace_flat_mirror() ? 1 : 0);
+	}
+	// --greets_displace_flat_mirror sources the reflection's stone from the flat
+	// proxy; without a proxy there is nothing to source and the reflection would
+	// simply lose its walls. Say so rather than render a hole.
+	if (FF::greets_displace_flat_mirror() && !FF::greets_shadow_proxy())
+		std::fprintf(stderr, "[MIRROR] WARNING: --greets_displace_flat_mirror "
+			"without --greets_shadow_proxy — no flat stone exists to clone, so "
+			"the reflection will have NO walls. Enable the proxy.\n");
 }
 
 static void GreetsApplyRunDefaults()

@@ -717,3 +717,239 @@ which the plan warns against copying): a square pyramid's corner sits at angle
 (vs Shadows.cpp's 90°-pyramid `√2 / 0.57735 / √3`). The 4-plane test is used;
 these constants are recorded so the padded face is never conflated with 90°.
 
+
+---
+
+# ADDENDUM 2026-08-06 — TESSELLATION RE-MEASURED: +54.5 ms WAS WRONG BY 7×
+
+Status: **measured; two perf companions wired as `--greets_displace` defaults;
+one mirror-clone duplication bug fixed; all byte gates pass.** The tessellated
+arm (`--greets_displace`) was retired by the user on 2026-08-05 for cost — "we
+are not going to use it anyway, it's way too slow" — on the number this plan
+itself recorded: **86.6 k faces / 107.0 ms against 52.5 ms flags-off = +54.5 ms**
+at t=5780. That number was already stale when it was quoted, and two further
+landings have made it stale again. Re-measured from scratch on fog-wt tip:
+
+**`--greets_displace` now costs +7.3 ms/frame at the worst pose, and it is
+CHEAPER than the recess-shell arm at three of six review poses.**
+
+## A1 — why the retirement number was inflated, three times
+
+| # | landing | date | effect on the number |
+|---|---|---|---|
+| 1 | `9b6d70d` `--tile_bbox_cull` (default ON) | 2026-08-02 **15:05** | its own commit message measures the displaced arm **100.0 → 87.0 ms** and flags-off 47.5 → 47.0, i.e. the delta **−12.5 ms**. It landed **1 h 40 m AFTER** `120ae7e`, the edge-tessellation commit whose "107.0 ms" this plan quotes. The B5 face pre-reject that was declined on the B2 numbers had in fact shipped. |
+| 2 | `a1f89d4` `--xfrm_soa_inline` (default ON, bit-exact) | 2026-08-05 | −2.0 ms off the main-view front end at this exact pose. |
+| 3 | `799c808` faceless-mesh skip | 2026-08-06 | the retired Piramid parent was **84.3 % of the displaced arm's 6.83 M shadow verts/frame** (VISIBILITY_PLAN §9b) and 261 768 verts of every mirror clone. Shadow front end 23.07 → 10.67 core-ms; main-view transform −25.2 %. |
+
+None of the three is a tessellation change. The arm was retired on the cost of a
+bug plus two missing optimisations.
+
+## A2 — the measurement
+
+`--bench=scene@scene=greets,t=…,iters=12–20`, 1920×1080, 12 threads,
+`--xfrm_prof`, arms **interleaved round-robin within one script** and reported
+**min-of-arm** (the box carried load 7–25 all session from a concurrent agent;
+p50 and mean are unusable, min-of-N is the only load-robust statistic and even it
+should be read as an upper bound). Per-section numbers are the profiler's own
+per-frame minima. Load is stated with every table.
+
+`flat` = `--deferred` (the shipping arm — flat POM, no geometric relief).
+`recess` = the standing shell arm from S1D_CLOSED_SHELL_PLAN "Current standing arm".
+`tess` = `--deferred --greets_displace` (which now defaults its two companions on).
+
+### The headline, t=5780 (the historical bench pose), min-of-4, load 19–25
+
+| arm | frame | Δ vs flat | RNDR | BAKE | XFRM | SORT | main verts | fPushed | baked faces |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| flat POM | **48.54** | — | 44.94 | 2.67 | 0.409 | 0.062 | 49 783 | 7 549 | — |
+| tess, companions OFF | 61.77 | +13.23 | 53.46 | 3.35 | 3.524 | 0.606 | 434 668 | 74 962 | 87 256 |
+| **tess, as it now ships** | **55.86** | **+7.32** | 49.45 | 3.38 | 1.787 | 0.296 | 253 280 | 36 147 | 87 256 |
+| tess, dome path (`--no-greets_displace_edge`) | 55.64 | +7.10 | 49.46 | 3.32 | 1.896 | 0.297 | 225 496 | 37 070 | 42 924 |
+| tess, uniform L2 (`--greets_stone_subdiv=2`) | 52.56 | +4.02 | 48.16 | 3.18 | 0.657 | 0.104 | 75 271 | 12 731 | 10 268 |
+| tess, uniform L1 (`--greets_stone_subdiv=1`) | 50.01 | +1.47 | 46.04 | 3.06 | 0.483 | 0.071 | 55 153 | 8 640 | 6 522 |
+
+**+54.5 → +7.32 ms is a 7.4× reduction on the same pose, the same content and
+the same amplitude (amp 0.3, the reviewed look).** The bake is bit-identical to
+the S5 state (`rooms` verts 36500 / faces 68513, 30472 displaced
+[−0.131..+0.033], fold census 3818/57) — nothing about the tessellation changed.
+
+Note the fourth row: with the companions on, the **edge-aligned carve (87 k
+faces) costs the same as the dome path (43 k faces)** — 55.86 vs 55.64. The
+"+34.5 ms for the edge path" this plan recorded is gone; the correct-looking
+carve is now free relative to the wrong-looking one.
+
+### Per pose, min-of-5 (min-of-2 at t=5534), load 15–19
+
+| pose | what it is | flat | recess | tess | tess−flat | recess−flat | **tess−recess** |
+|---|---|--:|--:|--:|--:|--:|--:|
+| 5743 | wall fills the frame | 48.80 | 55.50 | 62.55 | +13.75 | +6.70 | +7.05 |
+| 5780 | wall + statues bench | 48.98 | 56.05 | 62.90 | +13.92 | +7.07 | +6.85 |
+| 5958b | grazing, near-parallel | 44.44 | 53.71 | 58.55 | +14.11 | +9.27 | +4.84 |
+| 6097 | corner close-up | 38.51 | 44.60 | 42.56 | +4.05 | +6.09 | **−2.04** |
+| 2845 | grazing close-up | 46.53 | 51.84 | 50.51 | +3.98 | +5.31 | **−1.33** |
+| 5534 | corridor, looking back | 46.04 | 52.63 | 48.47 | +2.43 | +6.59 | **−4.16** |
+
+Mean tess−flat over the six poses **+8.7 ms**, worst +14.1. These are with the
+companions OFF (they were taken before the defaults landed) — subtract ~5.9 ms
+at the wall poses for the shipping arm. **Tessellation is cheaper than the
+recess shell at half the review poses**, because the shell's cost is per-PIXEL
+(it scales with how much wall is on screen at how grazing an angle) while
+tessellation's is per-FACE and largely pose-independent.
+
+## A3 — where the remaining cost is, and the two companions
+
+Decomposition of the +13.23 ms (companions off) at t=5780: RNDR +8.51, XFRM
++3.12, SORT +0.54, BAKE +0.69. Two levers, both measured, both existing
+machinery:
+
+**(1) `--greets_shadow_proxy` — the offscreen bake. −5.9 ms.**
+The flag already existed (default 0, "a look call"). Re-measured on the
+post-`799c808` tree: frame 67.95 → 62.05, **BAKE 9.18 → 3.45** where flat POM's
+own BAKE at the same pose is 3.26 — the proxy removes essentially the whole
+displaced-caster bake. **Not look-neutral, and not claimed to be:** over the 16
+review camera/t pairs it is byte-identical at 5 and moves 1 282–110 668 px
+>4/255 elsewhere, worst t=6097 (58 021 px >12/255, 14 604 >32/255, max 144, mean
+|Δ| on changed px 1.0–4.3), concentrated at the corner junction where flat
+casters stop occluding. No structural artifact in the crops.
+
+**(2) `--greets_displace_flat_mirror` (NEW) — the mirror clone. −5.9 ms.**
+The finding that made it worth building: **`GreetsMirror` clones the scene as
+MAIN-VIEW geometry, and `Face_MainOnly` is only honoured in OFFSCREEN passes**,
+so the reflection re-transformed and re-rasterised the entire tessellated wall.
+Measured at t=5780 with `--no-greets_mirror` as the ablation:
+
+| arm | with mirror | no mirror | clone cost | of which |
+|---|--:|--:|--:|---|
+| tess + proxy | 62.90 | 51.50 | **11.40 ms** | RNDR 7.19 + XFRM 2.17 + SORT 0.34 |
+| flat POM | 48.98 | 45.67 | 3.31 ms | RNDR 2.99 + XFRM 0.21 + SORT 0.03 |
+
+The clone **pushed 42 870 faces while the direct view pushed 28 598** — the
+reflection drew more displaced wall than the camera did, because the clone is
+culled by the frustum and not by the mirror WINDOW (0.04–3.9 % of screen). This
+is §8d's "clone the flat proxy" proposal, which §9e correctly voided for the
+FLAT arm (nothing to trade there) and which is emphatically not void here.
+With the flag on: frame 61.77 → 55.86, main verts 434 668 → **253 280 (−41.7 %)**,
+fPushed 74 962 → **36 147 (−51.8 %)**, **XFRM 3.524 → 1.787 (−49.3 %)**, SORT
+0.606 → 0.296. Look cost: **byte-identical at both mirror review poses (t=6133,
+t=6293)**; at t=5743 2 990 px >12/255 (0.14 % of the frame, inside the mirror
+window) and the two frames are indistinguishable side by side. The reflected
+masonry keeps albedo + normal map + the POM march (§9e measured the march reads
+in the mirror: 96.7 % of its 32 674 px move without it) and loses only the
+geometric block relief.
+
+**Both are now `setDefault` under `--greets_displace`** (GreetsApplyInitDefaults,
+DEMO/GREETS.CPP), so ONE flag gives the affordable arm, and a `[STONE]` line
+names them and their look cost in every run's log. `--no-greets_shadow_proxy` /
+`--no-greets_displace_flat_mirror` still win. Both are inert without
+`--greets_displace`, so the shipping flat-POM arm is untouched — proven by the
+gates below.
+
+**BUG FIXED on the way (FDS/RENDER/GreetsMirror.cpp).** `--greets_shadow_proxy`
+alone put the wall in the reflection TWICE: the clone builders skip nothing on
+`Tri_OffscreenProxy`, so they copied both the displaced faces (whose
+`Face_MainOnly` offscreen tag does not apply to a main-view clone) and the flat
+proxy standing in for them — two coincident copies, Z-fighting. Measured
++148 clone faces pushed per frame at t=5780 (74 962 → 75 110); with the fix the
+count is 74 962 again. All four clone loops (base count/fill, compound
+count/fill) now share three helpers, `mirrorFlatStone` / `mirrorSkipProxyMesh` /
+`mirrorSkipFace`, and the mesh-level vert skip is flag-gated so the count is
+bit-identical off the flag.
+
+## A4 — the S2/S5 chunk LOD: ceiling MEASURED, and it is small. Not built.
+
+The plan's never-built S2 item (per-chunk screen-space-error LOD) was the
+assigned lever. Its prize is now bounded empirically rather than estimated,
+using the face-count ladder in the A2 table as a stand-in for "every chunk one
+level coarser":
+
+* RNDR delta from 6 522 faces (uniform L1) to 87 256 (edge) is 46.04 → 53.46 =
+  **7.42 ms for 80 734 faces = 92 ns/face threaded ≈ 0.60 µs/face core** at the
+  ~6.5× pool speedup. The B2 spike measured **2–2.8 µs/face serial** for the
+  same fixed cost. **The user's instinct is right and this is the number: the
+  per-face cost is 3.3–4.7× lower than the figure the campaign has been
+  reasoning with**, almost all of it `--tile_bbox_cull`.
+* Halving the faces (edge 87 k → dome 43 k) is worth **−6.13 ms with the
+  companions off**, but the companions have already taken the clone half of that
+  work away: with them on, edge (87 k) and dome (43 k) measure **55.86 vs 55.64
+  — 0.22 ms apart**. A LOD that halves the face count therefore buys **≈ 0.2–3 ms
+  at this pose**, against a bake-time-only ladder (the bake is 2–6 s, so
+  per-frame re-tessellation is out), 25–40 MB of resident levels, a per-frame
+  swap, and DMM's per-edge min-level rule to keep chunk boundaries watertight
+  when neighbours pick levels independently — the existing border-pin machinery
+  closes cracks for a FIXED level assignment only.
+* Verdict: **not built, deliberately.** Spending the session's remaining budget
+  on ≤3 ms with a crack risk and a relief-fidelity cost, while 11.8 ms of the
+  original 13.2 was sitting in two existing-machinery flags, would have been the
+  wrong trade. The ladder above is the evidence, and it is reproducible in three
+  bench runs if the priority changes.
+* What §9f already refutes for this arm: `--greets_shadow_proxy` is NOT
+  redundant here. §9e measured wall casters at 2.3 % of the post-fix shadow front
+  end **in the flat arm**, where the walls the bake rasterises are already the
+  ~226-face flat surface. Under `--greets_displace` they are ~87 k faces and the
+  proxy is worth 5.9 ms — the "that win is already banked" line is scoped to
+  flat POM.
+
+## A5 — the look, on current HEAD, at every review pose
+
+Rendered `--greets_displace` at all 16 camera/t pairs in
+`docs/greets_review_poses.txt` (13 review poses; 5958 has four). **It still
+looks right after everything that has landed** — the AO-map fix, PBR by
+default, the handedness fix `7bfbc87`, the groove-line fix, the faceless-mesh
+skip:
+
+* t=5743 (the 2026-08-04 "black gashes" primary repro): real block relief with
+  true silhouettes on the block edges, deep straight mortar, **no gashes, no
+  acne, no faceting**.
+* t=5958b (the 2026-08-05 grazing-smear repro): the pose where the recess shell
+  smears. Tessellation renders a crisp geometric step with a real silhouette;
+  the three-arm crop is unambiguous — flat POM shows a thin dark line, the
+  shell a smeared band, tessellation an actual edge. **Geometry cannot swim, so
+  the whole slip/cap ladder that dominates the shell campaign does not exist
+  here.**
+* t=2845 (the S5 zigzag repro): mortar joints straight, no sawtooth.
+* t=6133 / 6293 (mirror panels): the reflection is correct.
+* t=6097 (corner close-up): no sliver gap, no light bleed — S4c holding.
+
+**And the honest failure, re-verified today: §C4 reproduces.** Same method as
+S1_DISCREPANCY_INVENTORY §C4 (least-squares fit of 1/z over one authored wall
+plane, residual in world units), fresh `FDS_SNAPSHOT_ZDUMP` captures, zscale
+395.6364:
+
+| box | flat POM + `--pom_depth_write` | recess shell | tessellation |
+|---|--:|--:|--:|
+| t=6097 (1150,120)-(1750,520), 240 000 px | 0.0233 | 0.0110 | **0.0023** |
+| t=2845 (660,340)-(1260,740), 240 000 px | 0.0536 | 0.0524 | **0.0444** |
+
+0.0023 world is one zEnc code (0.00253). **At t=6097 the tessellation writes NO
+measurable relief in that 600×400 region** — §C4's finding, unchanged: the
+region is one tessellation triangle, and the carve lives only at the lattice.
+At t=2845 the same arm carries 83 % of the depth-writing per-pixel arm's span.
+The class is strongly pose- and quad-dependent, and it is tessellation's own
+error, not a yardstick.
+
+**PROVENANCE NOTE.** The `greets_displace_flat_mirror` line in
+`FDS/Base/FeatureFlags.def` was swept into a concurrent session's commit
+`897e6f5` ("viz: runtime debug-viz cycle (X / Shift+X) + whole-scene wireframe
+overlay") while this work was in flight — same worktree, broad `git add`. The
+commit title does not describe the flag it carries. Nothing is lost; the log is
+misleading. Same class of accident as the `3712f00` / `2c54ae9` note in
+S1D_CLOSED_SHELL_PLAN §S1d-2.
+
+## A6 — gates
+
+Taken with these changes AND a concurrent agent's uncommitted work in the same
+binary (the documented shared-tree situation), so read them as "this tree is
+byte-null on the shipping arms":
+
+| gate | result |
+|---|---|
+| city @t=1961 | `37e62845c4d30eefa321730c5bb7e0b8` **exact** |
+| fountain @t=2500 | `51fff7cd38767d619280afe0498a6f24` **exact** |
+| greets @t=1588 (pin recipe) | `06e1d4d1bf175f6de40707df094924c9` **exact** (the §9d pin) |
+| render_gate mirrortest / conetest / halotest | **3/3 PASS**, all == baseline |
+
+Not gated: t=6097 under `--greets_displace`, which OPTIMIZATION_BACKLOG records
+as run-to-run nondeterministic (6 runs, 6 hashes) while t=5780 is stable 6/6.
+**Not root-caused here** — it was not cheap to reach and nothing in this work
+touches it. It remains the one thing standing between the tessellated arm and
+full gate-worthiness.
