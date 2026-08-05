@@ -5,8 +5,16 @@
 # step is byte-clean iff every gate PASSes.
 #
 # Determinism note: these three scenes are stable run-to-run AND
-# threaded==serial. greets is NOT (timing-dependent background lightmap bake)
-# and city is unverified — do not add them without re-checking.
+# threaded==serial.
+# greets: the old "NOT deterministic (timing-dependent background lightmap
+#   bake)" note here was WRONG on both counts. It was never a bake and never a
+#   race — it was an 8-bit AO map read as dwords in the deferred kernel, fixed
+#   2026-08-05 (docs/SESSION_STATE.md). greets is now 0 flips in 128 runs and
+#   IS gate-worthy — but its pin depends on the user's UNCOMMITTED authoring
+#   files, so it is gated out-of-band via `tools/flip_rate.sh -n 24` against
+#   the pin in SESSION_STATE, not from this script.
+# city: verified stable (`tools/flip_rate.sh -s city`), pinned in SESSION_STATE;
+#   kept out of here only because of its FLD-keyed envmap cache rebuild.
 #
 # Usage:   tools/render_gate.sh            # run from repo root (DEMO in Runtime/)
 #          tools/render_gate.sh --update   # reprint current md5s (to re-baseline)

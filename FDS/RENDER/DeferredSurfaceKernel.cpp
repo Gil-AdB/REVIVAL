@@ -1880,12 +1880,36 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				if (aoInAlpha) {
 					aoRaw = texA * (1.0f/255.0f);        // free (albedo alpha)
 				} else {
+					// AO maps arrive from the importer as SINGLE-CHANNEL 8-BIT
+					// (MakeHeight8, like height/roughness/metallic), so they must
+					// be indexed as BYTES. Reading them as dwords put the fetch at
+					// byte offset 4×swizzledUV inside a 1-byte-per-texel
+					// allocation — measured 3,981,420 into a 1 MiB mip, i.e. 3.8 MB
+					// out of bounds — returning heap bytes that differ per process.
+					// That was the greets render-nondeterminism root cause: with
+					// ao_map_strength 2.0 the garbage drove `ao` to -2.22, the
+					// ambient term went negative and clamped to 0, and the
+					// --sh_ambient probe bake turned ~30 such pixels into
+					// frame-wide ambient drift. The mip bound is checked for the
+					// same reason every sibling map fetch checks it (Mipmap[]
+					// past numMipmaps is unowned). The `ao_from_diffuse` dev
+					// fallback samples the 32-bit albedo, so both widths stay
+					// live. Mirrors the transparent kernel's AO fetch.
 					const Texture *aoTex = Mat->AoMap ? Mat->AoMap : Mat->Txtr;
-					const dword *aoData = (const dword *)aoTex->Mipmap[miplevel];
-					const dword aoTexel = aoData ? aoData[swizzledUV] : 0xFFFFFFFFu;
-					aoRaw = (float(aoTexel & 0xFF)         * 0.114f
-					       + float((aoTexel >> 8)  & 0xFF)  * 0.587f
-					       + float((aoTexel >> 16) & 0xFF)  * 0.299f) * (1.0f/255.0f);
+					const byte *aoMip = (miplevel < aoTex->numMipmaps)
+						? reinterpret_cast<const byte *>(aoTex->Mipmap[miplevel])
+						: nullptr;
+					if (!aoMip) {
+						aoRaw = 1.0f;                      // no such level → unoccluded
+					} else if (aoTex->BPP == 8) {
+						aoRaw = float(aoMip[swizzledUV]) * (1.0f/255.0f);
+					} else {
+						const dword aoTexel =
+							reinterpret_cast<const dword *>(aoMip)[swizzledUV];
+						aoRaw = (float(aoTexel & 0xFF)         * 0.114f
+						       + float((aoTexel >> 8)  & 0xFF)  * 0.587f
+						       + float((aoTexel >> 16) & 0xFF)  * 0.299f) * (1.0f/255.0f);
+					}
 				}
 				if (!aoDirectG) {
 					// ambient-only (canonical): Global dial × per-material dial

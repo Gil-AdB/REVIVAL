@@ -1,5 +1,34 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> **2026-08-05 — GREETS RENDER NONDETERMINISM IS CLOSED. GREETS IS A GATE
+> SCENE AGAIN.** Root cause: the opaque deferred kernel read AO maps with the
+> WRONG TEXEL WIDTH. `Material::AoMap` arrives from the importer as
+> single-channel **8-bit** (`MakeHeight8`, same as height/roughness/metallic),
+> but `DeferredSurfaceKernel.cpp` fetched it as `dword` —
+> `((const dword*)mip)[swizzledUV]` — so every AO sample sat at byte offset
+> `4 × swizzledUV` inside a **1-byte-per-texel** allocation. **Measured** at a
+> diverging pixel: `swizzledUV = 995355` in a 1024² (1 MiB) mip → byte offset
+> **3,981,420**, i.e. **3.8 MB past the end**. The returned heap bytes differ
+> per process; with `ao_map_strength` 2.0 they drove `ao = 1 - 2·(1-aoRaw)`
+> down to **-2.22**, the ambient term went **negative**, and `lB<0 → 0` clamped
+> it — the long-hunted "diffuse flips 0 ↔ full while specular stays identical".
+> Every sibling map fetch (roughness, metallic, xpar-AO) already read bytes AND
+> bound-checked `miplevel < numMipmaps`; only this one did not. Fix mirrors the
+> transparent kernel's AO fetch. See the Known Issues entry for the full chain.
+> - **RESULT [M]:** greets gate recipe **0 flips in 128 sequential runs**, one
+>   hash `f5778c7b78a4d70655291363e4119c66` (95 % upper bound on the true rate
+>   **0.023**, ~1 in 43). Pre-fix the same recipe flipped **~0.85**. Also 0/16
+>   with `--env_refl` ON and 0/16 under `--vanilla` (forward path).
+> - **LOOK CHANGE [M]:** greets now shades with the REAL AO map instead of heap
+>   garbage — **26.3 % of the frame moves, mean |Δ| 12.4, max |Δ| 98** at the
+>   gate pose. Four materials carry separate AO maps (`momy-1`, `amudim`,
+>   `stairs`, `rooms`); `--greets-stone-tex` materials use `Mat_AoInAlpha`
+>   (albedo alpha) and were never affected. **This wants the user's eye** — it
+>   is a bug fix, not a tuning call, but the wall/pillar occlusion look changes.
+> - **Gates unchanged:** city `37e62845`, fountain `51fff7cd` byte-exact;
+>   render_gate 3/3. The bug only fires on materials with a separate 8-bit
+>   `AoMap`, which only greets ships.
+
 > **2026-08-05 — GREETS NOW SHIPS THE PBR STACK BY DEFAULT, and `--vanilla`
 > turns everything back off.** Two user-requested changes on fog-wt.
 >
@@ -62,9 +91,10 @@
 >
 > **Gates**: city `37e62845` and fountain `51fff7cd` byte-unchanged;
 > render_gate 3/3 (the preempt guard holds); chase byte-identical to the SAME
-> binary's pre-change run at all five poses + both cinematic poses. **The greets
-> pin could not be re-taken — greets is currently 100 % nondeterministic, before
-> and after this change. See the trap in the verification protocol.**
+> binary's pre-change run at all five poses + both cinematic poses. ~~The greets
+> pin could not be re-taken — greets is currently 100 % nondeterministic~~
+> **SUPERSEDED same day: the nondeterminism was the 8-bit-AO-map-read-as-dword
+> bug (see the top block); greets is re-pinned and gate-worthy again.**
 
 > **2026-08-05 — S1d-2 CLOSED SHELL (SIDE FACES) IS IN, all flags default OFF.**
 > Read `docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-2. Flags: `--pom_shell_side_faces`
@@ -212,7 +242,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | gate | recipe | pin |
 |---|---|---|
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
-| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **NO VALID PIN (2026-08-05).** Old value `de3e9a5fb3aa39e008ef41b83f2b8d1b` is stale twice over: greets now ships the PBR stack by default (see the top block) AND the recipe is currently 100 % nondeterministic — 9 runs, 9 distinct hashes, **before** any of that day's edits. Do not treat a greets mismatch as a regression until the nondeterminism is fixed; see the trap below. |
+| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-05: `f5778c7b78a4d70655291363e4119c66`** — taken over **128 sequential runs, 0 flips** (95 % UB on the flip rate 0.023) after the 8-bit-AO-map fix closed the nondeterminism. This supersedes both `de3e9a5fb3aa39e008ef41b83f2b8d1b` (pre-PBR-defaults) and the "NO VALID PIN" state. Includes the PBR scene defaults AND the user's uncommitted GREETS.FLD / momy textures / Piramid.lwo — a clean checkout hashes differently. Verify with `tools/flip_rate.sh -n 24` if a mismatch appears; a single differing run is now a real regression, not noise. |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
 | chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` (t1600 unchanged) |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (cone-tile sky-clip fix; 3-run stable, byte==cull-off): t800 `28e5a2a78d64ae98a1fcc4b739991be2` t1600 `1cbde501c26d231a4295632dfbebd34b` (t1600 unchanged) |
@@ -220,69 +250,49 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | wasm | `make wasm` | links |
 
 Traps:
-- **greets no longer flips ~1-in-12 — it is currently 100 % nondeterministic,
-  MEASURED 2026-08-05.** 9 runs of the exact gate recipe on an OTHERWISE
-  UNMODIFIED tree gave 9 distinct md5s, and the images are not close: two runs
-  differ on **22.7 %** of the 1920×1080 frame with mean |Δ| 28 and max Δ 212 on
-  the differing pixels (a second pair: 24.1 %, mean 53, max 223). That is not
-  the documented "subtle pano slivers" — something structural (background
-  lightmap bake / bake-vs-render ordering is the standing suspect) resolves
-  differently every run. Both measurements were taken with OTHER AGENTS' greets
-  renders running concurrently (load 4.3–19, one `./DEMO --snapshot=greets`
-  live), so widened race windows are the leading explanation, but the old
-  "majority over 3+ runs" rule is DEAD until someone re-measures on an idle
-  box: there is no majority to take. Until then greets cannot gate anything;
-  use city / fountain / render_gate, and judge greets by A/B crops.
-  Rate conclusions still need the binomial (24-run gates for race claims — see
-  memory `measurement-tool-traps`).
-  **First bisect result (3 runs each, 2026-08-05):** dropping the shadow /
-  lightmap bake from the recipe pulls it back into majority range —
-  `--no-shadow_lightmap` 2 unique / 3, `--no-shadows` 2/3,
-  `--no-shadow_lightmap --no-shadows --no-mirror_rtt --no-greets_mirror
-  --no-shard_deferred` 2/3, while `--no-mirror_rtt --no-greets_mirror` alone
-  stays 3 unique / 3. So the shadow-and-lightmap bake path is where to look
-  first; the mirror RTT is not the (only) culprit. This matches
-  tools/render_gate.sh's own comment ("greets is NOT [deterministic]
-  (timing-dependent background lightmap bake)") — it was never gate-worthy.
-  **SUPERSEDED, 2026-08-05 (det-hunt, N=48 per arm via
-  `tools/flip_rate.sh`): IT IS NOT A BAKE AND NOT A RACE.** The 3-run bisect
-  above does not survive N=48 — at a ~0.85 flip rate a 3-run arm has P≈0.32 of
-  showing 2-of-3, so every one of those arms was noise. Measured facts, all
-  reproducible with `tools/flip_rate.sh`:
-  - Z-buffer and the ENTIRE G-buffer (matID, normal, tangent, txtr,
-    shadowMatID, mirrorId) are **byte-identical across runs**; only colour
-    moves. Geometry, transform, sort and rasterizer coverage are innocent.
-  - Every bake OUTPUT is byte-identical across divergent runs: 76 static
-    shadow maps (depth / polyId / dynamic), 370 static-shadow lightmaps +
-    their coverage bits, all 117 omnis, every vertex colour/pos/normal, and
-    every source texture **hashed at its true `BPP/8` extent**.
-  - It survives `FDS_THREADS=1`, and it survives `--vanilla` (compile
-    defaults, FORWARD path) — so it is not flag-gated and not thread-order.
-  - It reproduces **within a single process**: rendering `t=1588` four times
-    in one run gives four different frames.
-  **TRAP for whoever picks this up: the in-process repeat is NOT a valid
-  determinism instrument for greets.** The greets code-screen texture is an
-  ITERATIVE SMEAR (`OldBuf → GridRendererT → ScaledBuf → OldBuf`), so it is a
-  function of how many times `Render()` has run, not of `t`. Repeating a
-  timestamp in one process legitimately changes it. Compare separate
-  processes.
+- **greets IS deterministic and IS gate-worthy — FIXED 2026-08-05 (det-hunt
+  round 3).** The whole "~1-in-12 flip", then "100 % nondeterministic", then
+  "not a bake and not a race" chain resolved to ONE defect: the opaque deferred
+  kernel read 8-bit AO maps as `dword`, indexing 4× past the mip allocation
+  (root-cause detail in Known Issues). **Post-fix: 0 flips in 128 sequential
+  runs of the gate recipe** (one hash, 95 % UB on the rate 0.023), 0/16 with
+  `--env_refl` on, 0/16 under `--vanilla`. Treat a greets mismatch as a real
+  regression again. Confirm with `tools/flip_rate.sh -n 24` before calling it.
+  The instrument stays: **`tools/flip_rate.sh`** — N sequential runs, distinct-
+  hash histogram, flip rate vs the modal hash, Wilson 95 % CI, zero-event upper
+  bound. A 3-run arm proves nothing at any nonzero rate; that is how rounds 1–2
+  lost a day to a "shadow/lightmap bake" bisect that was pure binomial noise
+  (at p≈0.85 a 3-run arm shows 2-of-3 with P≈0.32).
+  These instrument traps cost real time in rounds 1–3 and still apply:
+  **TRAP: the in-process repeat is NOT a valid determinism instrument for
+  greets.** The code-screen texture is an ITERATIVE SMEAR
+  (`OldBuf → GridRendererT → ScaledBuf → OldBuf`), so it is a function of how
+  many times `Render()` has run, not of `t`. Repeating a timestamp in one
+  process legitimately changes it. Compare separate processes.
   **TRAP: hash textures at `SizeX*SizeY*(BPP/8)`.** `Texture::BPP` is in BITS.
-  Hashing `SizeX*SizeY*BPP` over-reads 8× past the allocation and manufactures
-  a convincing "these 8 PBR maps mutate run-to-run" result. It cost an hour
-  here; it is the same over-read trap already recorded in
-  memory `measurement-tool-traps`.
+  Hashing `SizeX*SizeY*BPP` over-reads 8× and manufactures a convincing "these
+  8 PBR maps mutate run-to-run" result. Same over-read family as the bug that
+  turned out to BE the root cause — when a per-texel width is in play, check it
+  first, in both the instrument and the code under test.
   **TRAP: one greets frame runs `renderFrame` SEVEN+ times, at three
   resolutions.** Six 512×512 offscreen passes (shard reflection / mirror RTT)
   and six 32×32 `sh_ambient` probe cube faces run the SAME `renderFrame`
-  before the 1920×1080 main pass. Two consequences, both of which cost real
-  time in round 2:
+  before the 1920×1080 main pass. Consequences:
   (a) a stage-trace filter that caches "the main width" on its FIRST call
       captures 512, not 1920, and silently hides the main frame;
-  (b) hashing the GLOBAL `g_gbuffer` is WRONG for those passes — each shades
-      `ctx.gb`, while the global still points at the main frame's buffer, so
-      a nested pass reads as "G-buffer identical" no matter what it does.
-      Hash `ctx.gb` / `ctx.zpage16` inside `Render_DeferredLighting`.
+  (b) the 32² probe faces are the CHEAPEST place to reproduce a shading
+      divergence — 1024 pixels, ~2–8 of them differing, versus 2 M at 1080p.
+      Round 3's whole diagnosis ran there.
   Always print the pass resolution on every trace line.
+  **NOTE on `ctx.gb`:** round 2 recorded "hashing the global `g_gbuffer` is
+  wrong for nested passes". In fact `EngineGBuffer_Resize` installs ONE global
+  buffer and the offscreen passes address it at their own (smaller) stride, so
+  `ctx.gb == g_gbuffer` for the probe passes — the real requirement is to hash
+  only the first `xres*yres` entries of each plane, and to hash ALL ELEVEN
+  planes (normal, tangent, txtr, albedo, lightmapMF, lightmapST, shadowMatID,
+  faceId, mirrorId, mirrorMask, mirrorMaskZ), several of which are empty by
+  default. Shard/mirror bakes with their own `DeferredOverride::gb` are the
+  genuine exception.
 - **city cache**: `cache/city_envmap_cube.bin` is keyed on CITY.FLD bytes.
   After ANY CITY.FLD install, discard the first run (cache rebuild), then hash.
 - Greets pin includes the USER'S UNCOMMITTED files (GREETS.FLD/MAT, momy
@@ -500,13 +510,13 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   --deferred-quarter, --cone-fine-tiles. Parked deliberately
   ("finish the other threads first").
 
-- **Greets render nondeterminism — ONE ROOT CAUSE FOUND AND FIXED, A SECOND
-  STILL OPEN (2026-08-05, det-hunt).** The old "~1-in-12 flip / subtle pano
-  slivers / deterministic with bakes off" description is WRONG on every count;
-  see the Traps section for the measured replacement. Harness:
-  **`tools/flip_rate.sh`** — N sequential runs of a scene's gate recipe,
-  distinct-hash histogram, flip rate vs the modal hash, Wilson 95 % CI, and a
-  zero-event upper bound. Use it; a 3-run arm proves nothing at p≈0.85.
+- **Greets render nondeterminism — CLOSED (2026-08-05, det-hunt rounds 1–3).
+  TWO root causes, both proven, both fixed.** The old "~1-in-12 flip / subtle
+  pano slivers / deterministic with bakes off" description was wrong on every
+  count. Harness: **`tools/flip_rate.sh`** — N sequential runs of a scene's
+  gate recipe, distinct-hash histogram, flip rate vs the modal hash, Wilson
+  95 % CI, and a zero-event upper bound. Use it; a 3-run arm proves nothing at
+  p≈0.85 (that is how rounds 1–2 chased a bake/race that never existed).
   - **FIXED (proven, this commit): `GreetsGenerator::Init()` read
     uninitialized heap as the greets code-screen SMEAR SEED.** `OldBuf` /
     `ScaledBuf` / `CodeBuf` were `_aligned_malloc`'d and never zeroed, and
@@ -525,56 +535,59 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
     per-channel |Δ| **251 → 95**. So the whole-object black-vs-lit flips are
     gone; a smaller, low-amplitude residual remains. Landing it anyway: it is
     a proven read of uninitialized memory into rendered output.
-  - **OPEN — residual, now a FIVE-PIXEL micro-reproduction (2026-08-05, round
-    2). Still not proven, but this is the smallest it has ever been — attack
-    it here, not at 1920×1080.**
-    THE REPRO: the FIRST divergence anywhere in a greets frame is inside the
-    **`sh_ambient` probe bake's 32×32 cube-face renders** (`kSHFaceRes = 32`,
-    EnvBake.cpp), at the `Render_DeferredLighting` call. Per face only
-    **2–3 pixels of 1024** differ, ~30 px summed over the six faces. Those 9
-    SH coefficients then modulate ambient over the whole frame, which is why
-    a handful of probe pixels smears into coherent low-amplitude regions on
-    the `amudim` / `amudim::mirUV` pillars (matID 18/42) in the final image.
-    WHAT IS IDENTICAL at the diverging 32×32 call (all hash-verified across
-    separate processes): VPage, `g_hdrBuf`, **the pass's OWN G-buffer
-    (`ctx.gb`, all ten planes)**, `ctx.zpage16`, the per-tile light lists
-    **contents AND order**, the `ViewLightsSoA`, mirror presence, tile depth
-    bounds, and every Material scalar the kernel reads.
-    WHAT DIFFERS — per-pixel term dump at those pixels: `matID`, texel,
-    normal, `z` and the SPECULAR accumulator are identical; **only the
-    DIFFUSE accumulator `lB/lG/lR` moves, flipping between 0 and a full
-    value** (0 ↔ 46.25, 0 ↔ 15.30, 0 ↔ 4.93 — three distinct states over
-    three runs, so not merely bistable), and on several pixels `lG == lR`
-    exactly with `lB` unchanged. That is the old note's "dim state exactly
-    B=0, G==R" signature, finally localised: it is one omni's diffuse
-    contribution being included, partially included, or dropped.
-    RULED OUT at this micro-scale (probe-diff-px stays 22–35 in every arm,
-    3 runs each): `--no-shadows`, `--no-greets_omni_shadows`,
-    `--no-shadow_dynamic`, `--no-shadow_lightmap`, `--no-shadow_polyid`,
-    `--no-shadow_gbuffer_overlap --no-bake_tick_overlap`,
-    `--no-deferred_checkerboard`, `--no-deferred_vec --no-deferred_outer_vec`,
-    `--no-deferred_zcull`, the whole PBR stack, `--no-greets_mirror`,
-    `--no-mirror_bounce`, and `FDS_THREADS=1/2/4`. Also
-    `--vanilla --deferred --hdr --sh_ambient` still shows 35 px, so it is not
-    flag-gated at all.
-    NOT the amplifier: `--no-sh_ambient` does NOT reduce the final-frame
-    divergence (median differing pixels 6.07 % vs 4.62 % with it on, 4 runs
-    each) — the SH probe is where the mechanism is EASIEST TO SEE, not the
-    only place it fires.
-    NEXT PROBE: instrument the 8-lights-wide diffuse batch in
-    `Render_DeferredLighting_Tile` (DeferredSurfaceKernel.cpp ~2100–2150:
-    `kArr`/`mask`/`accB/G/R` then the horizontal reduction into `lB/lG/lR`)
-    and record PER LIGHT INDEX what each lane contributed at one of the
-    diverging probe pixels. The question to answer is a single one: is one
-    light dropped entirely, or do all lights scale? That splits "a per-pixel
-    gate flips" from "an input to the k/attenuation chain is garbage".
-  - Gates after the fix: city `37e62845`, fountain `51fff7cd` byte-exact;
-    mirrortest/conetest/halotest all PASS. Greets-only change.
-- Env-bake content varies run-to-run — status UNKNOWN after the above. It was
-  filed as "same root cause family"; that family is now known to include at
-  least one uninitialized-buffer read, but the env bake was NOT exercised by
-  this hunt (`--no-env_refl` is in the greets gate recipe and no env table was
-  ever built). Re-measure with `tools/flip_rate.sh` before assuming either way.
+  - **RESIDUAL — CLOSED, ROUND 3 (2026-08-05). ROOT CAUSE: the opaque
+    deferred kernel read 8-bit AO maps as `dword`.**
+    `Material::AoMap` comes out of the importer as SINGLE-CHANNEL 8-BIT
+    (`loadRoleMapCached` → `MakeHeight8`, same as height / roughness /
+    metallic). `DeferredSurfaceKernel.cpp`'s ambient block fetched it as
+    `((const dword*)aoTex->Mipmap[miplevel])[swizzledUV]`, so every AO sample
+    landed at byte offset `4 × swizzledUV` inside a 1-byte-per-texel
+    allocation, and it never bound-checked `miplevel < numMipmaps`. Every
+    sibling fetch — roughness (:1125), metallic (:2576), the whole transparent
+    kernel (:3156) — already read BYTES and checked the mip bound. This one
+    site did not.
+    **MEASURED per pixel, not inferred** (32² probe face 0, px (27,19),
+    matID 11): `aoBPP = 8`, mip 0 = 1024² = 1,048,576 bytes,
+    `swizzledUV = 995355` → dword read at byte **3,981,420..3,981,423**, i.e.
+    **3.8 MB past the end of the allocation**. Across four runs everything
+    else in the per-pixel record was byte-identical (matID, pmid, zEnc, x/y/z,
+    normal, mip, swizzledUV, per-light `intensity`/`k`/reject-stage for every
+    light in the tile) — only `aoRaw` moved: 0.489 / 0.615 / 0 / 0.051.
+    THE CHAIN: `ao = 1 - ao_map_strength(2.0) × Mat->AoStrength × (1 - aoRaw)`
+    → `aoRaw = 0` gives **ao = -2.22**, so the ambient seed went NEGATIVE
+    (32 → -71.04) and `if (lB < 0) lB = 0` clamped it to zero. That is exactly
+    round 2's "diffuse `lB/lG/lR` flips between 0 and a full value while
+    SPECULAR is byte-identical" — AO multiplies the ambient (diffuse) term and
+    never touches specular, which is why every light-loop hypothesis missed.
+    It also explains `lB == lG == lR` at the flipping pixels: greets' ambient
+    is grey (32/32/32), so the ambient seed is achromatic by construction.
+    Round 3's hypothesis (a) — a stale tail lane in the 8-wide light batch —
+    is **DEAD and should not be re-tried**: `zeroTileLightPadding`
+    (DeferredLightLists.cpp) explicitly zeroes count..paddedCount and stamps
+    `mirrorId = 0xffffffff` so padded lanes can never pass the mask, and the
+    per-light dump showed every lane's `intensity`/`k`/stage identical at the
+    diverging pixels.
+    **THE DISCRIMINATOR THAT CRACKED IT was one run of `--no-ao_map`**: 4/4
+    byte-identical frames and 0/1024 diverging probe pixels on all six faces,
+    before any code was written. Cheapest-discriminator-first, again.
+    **FIX (this commit):** read the mip as `byte*`, branch on `BPP == 8`, and
+    bound-check `miplevel < numMipmaps` (mirrors the transparent kernel). The
+    32-bit branch stays for the `ao_from_diffuse` dev fallback.
+    **POST-FIX [M]:** 0 flips in **128 sequential runs**, one hash
+    `f5778c7b78a4d70655291363e4119c66` (95 % UB 0.023); 0/16 with `--env_refl`;
+    0/16 under `--vanilla`. Probe faces 0/1024 differing over 6 runs.
+    **LOOK CHANGE [M]:** greets now shades with the real AO map — 26.3 % of
+    the gate frame moves, mean |Δ| 12.4, max 98. Four materials carry separate
+    AO maps (`momy-1`, `amudim`, `stairs`, `rooms`). Wants the user's eye.
+  - Gates after both fixes: city `37e62845`, fountain `51fff7cd` byte-exact;
+    mirrortest/conetest/halotest all PASS. Greets-only effect (no other scene
+    ships a separate 8-bit AoMap).
+- ~~Env-bake content varies run-to-run~~ **RESOLVED 2026-08-05 by the AO fix**:
+  the env panorama bakes render through the same opaque deferred kernel, so
+  they inherited the same out-of-bounds AO read. Measured after the fix: the
+  greets gate recipe with `--env_refl` ON is **0 flips in 16 runs**
+  (`33c73ac43520a8ff5be262a99fc61f98`). Re-measure with `tools/flip_rate.sh`
+  if it ever looks unstable again.
 - The user's GREETS.MAT `momy#2|*` lines are DROPPED at load until he
   re-splits + re-saves in the editor (split-bake landed 6c6c972 — re-save now
   bakes momy2 into the LWO as a real surface; accepted, he regenerates).
