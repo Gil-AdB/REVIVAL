@@ -276,10 +276,20 @@ Baseline at greets t=5780 `--greets_displace`, per-frame min: main-view
   where a wrong SortZ was harmless. Needs a per-mesh "indices stamped" invariant
   first.
 - **Per-chunk normal cones** (bulk-accept / bulk-reject a chunk's faces without
-  the per-face dot) — still unmeasured. Ceiling is bounded by the FACE bucket
-  (1.45 ms at t=5780, 0.40 at t=6097) and it cannot remove the SortZ/FList work
-  for accepted faces, so expect a few tenths of a ms. Rank below the two items
-  above.
+  the per-face dot) — ~~still unmeasured~~ **REFUTED BY MECHANISM 2026-08-06, do
+  not build.** A normal cone can only remove the backface term
+  `AP·F->N < F->NormProd`. Two facts kill it:
+  1. That term is the CHEAP half of the per-face cull. The 73 % figure above is
+     `--xfrm_ablate=8`, which runs `VisibilityFlagsAll()` **and** the dot; the
+     expense is the three random derefs into 140-byte `Vertex` structs for
+     `Flags`, while `F->N`/`F->NormProd` are Face-local and sequential. A cone
+     cannot answer the frustum test, so it leaves the expensive part in place.
+  2. It cannot help the SHADOW passes **at all** — `shadowNoBackface`
+     (`Transform.cpp`, `g_inShadowPass && !shadow_backface_cull()`) sits before
+     the dot in the `||` chain, so the dot never runs there. That is 60–80 % of
+     the front-end ms.
+  Its whole ceiling is the backface dot in MAIN + OFFSCREEN, inside a 0.18 ms
+  main-view FACE bucket.
 
 ## Perf (measured bottlenecks — from docs/PERF_STATE.md + the 15fps analysis)
 The greets frame is ~2.5–3× a "generic deferred" frame; the fat is shadowing,
