@@ -41,6 +41,14 @@
 #include "TailProf.h"     // phase-1 barrier instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "Base/VertexScratch.h"
+
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+#include <atomic>
+// Census-build only: core-us spent inside the phase-A per-map depth/polyId
+// clears, summed across workers. Measures what the old serial-on-tick-thread
+// clear loop cost, without depending on whole-phase wall-clock under load.
+static std::atomic<int64_t> g_shadowClearCoreUs{0};
+#endif
 #include "FRUSTRUM.H"
 #include "Threads.h"
 
@@ -379,6 +387,30 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		fds::CameraContext *const ctxPtr = J.ctx;
 		fds::FaceListContext *const facesPtr = J.faces;
 		fds::VertexScratch *const scratchPtr = J.scratch;
+				// Clear THIS light's depth/polyId planes here, on the
+				// worker, instead of serially on the tick thread while
+				// building the job list. The clear is per-map private
+				// (nothing else touches smPtr's planes until phase B,
+				// which is behind the shadowDone barrier), so moving it
+				// inside the phase-A task is order-equivalent and spreads
+				// ~res^2*3 bytes per enqueued map across the pool instead
+				// of paying it single-threaded. Buffer CONTENTS are
+				// identical either way.
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+				const auto tClr0 = clk::now();
+#endif
+				if (dynBakeForLambda) {
+					std::fill(smPtr->depth_dynamic.begin(),  smPtr->depth_dynamic.end(),  uint16_t(0));
+					std::fill(smPtr->polyId_dynamic.begin(), smPtr->polyId_dynamic.end(), uint8_t(0));
+				} else {
+					std::fill(smPtr->depth.begin(),  smPtr->depth.end(),  uint16_t(0));
+					std::fill(smPtr->polyId.begin(), smPtr->polyId.end(), uint8_t(0));
+				}
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+				g_shadowClearCoreUs.fetch_add(
+					int64_t(std::chrono::duration<double, std::micro>(clk::now() - tClr0).count()),
+					std::memory_order_relaxed);
+#endif
 				g_inShadowPass = true;
 				g_inDynamicShadowBake = dynBakeForLambda;
 				g_currentShadowOmni = smPtr->omni;
@@ -519,14 +551,9 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		lightCtx.zScale     = sm.zScale;
 		lightCtx.zScale256  = sm.zScale / 256.0f;
 
-		// Clear the buffer we're about to write into.
-		if (writeDynamicBuf) {
-			std::fill(sm.depth_dynamic.begin(),  sm.depth_dynamic.end(),  uint16_t(0));
-			std::fill(sm.polyId_dynamic.begin(), sm.polyId_dynamic.end(), uint8_t(0));
-		} else {
-			std::fill(sm.depth.begin(),  sm.depth.end(),  uint16_t(0));
-			std::fill(sm.polyId.begin(), sm.polyId.end(), uint8_t(0));
-		}
+		// Clear of the buffer we're about to write into now happens inside
+		// runPhaseAXform (on the worker that owns this light), not here on
+		// the tick thread — see the comment there.
 
 		// Size this light's FList to match the main-pass capacity. Polys
 		// is the worst case (every mesh face + every omni + every
@@ -546,6 +573,9 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		++xformsEnqueued;
 		sPhaseAJobs.push_back({ScPtr, smPtr, ctxPtr, facesPtr, scratchPtr});
 	}
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+	g_shadowClearCoreUs.store(0, std::memory_order_relaxed);
+#endif
 	// NOTE: sPhaseAJobs is thread_local — a [&] lambda does NOT capture
 	// thread_locals, it re-resolves them on the EXECUTING worker thread
 	// (empty vector there). Snapshot the caller's data() by value.
@@ -558,6 +588,21 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		renderns::shadowDone.acquire();
 	}
 	const auto tXformEnd = clk::now();
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+	{
+		size_t clrBytes = 0;
+		for (const auto &J : sPhaseAJobs)
+			clrBytes += size_t(J.sm->xres) * size_t(J.sm->yres) * 3;
+		std::fprintf(stderr,
+			"[SHADOW-CLEAR] mode=%s maps=%zu bytes=%.2f MB clearCore=%.3f ms phaseAwall=%.3f ms\n",
+			mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" :
+			(mode == ShadowBakeMode::DynamicOmnisPerFrame ? "DynOmnis" : "StaticOnce"),
+			sPhaseAJobs.size(), double(clrBytes) / (1024.0 * 1024.0),
+			double(g_shadowClearCoreUs.load(std::memory_order_relaxed)) / 1000.0,
+			std::chrono::duration<double, std::milli>(tXformEnd - tXformStart).count());
+		std::fflush(stderr);
+	}
+#endif
 	if (sProfShadow) {
 		sXformAcc[sProfMi] += std::chrono::duration<double, std::milli>(tXformEnd - tXformStart).count();
 		sLightCount[sProfMi] += xformsEnqueued;
