@@ -535,3 +535,123 @@ meeting a ceiling and columns that have no shell at all [M, §S1d-2e.5]. In
 Hirche's model that case cannot arise, because every triangle of the surface gets
 a prism. **Ours arises because we shell one material at a time.** The literature's
 answer is not a better weld: it is that the shell covers the whole surface.
+
+### 2.4 Q5 — the cheap-geometry path, re-costed
+
+The modern answer is that geometry became cheap. The question is whether any part
+of that transfers to a CPU software rasterizer, and whether the tessellation arm
+was retired on numbers that no longer hold.
+
+**What the modern techniques actually are.**
+
+- **REYES (Cook, Carpenter, Catmull, SIGGRAPH 1987)** — the canonical CPU answer,
+  read first-hand. Its dicing criterion, verbatim: micropolygons "are flat-shaded
+  quadrilaterals that are **approximately 1/2 pixel on a side**. Since half a
+  pixel is the Nyquist limit for an image, surface shading can be adequately
+  represented with a single color per micropolygon." And: "Dicing is done in eye
+  space, with no knowledge of screen space except for an **estimate of the
+  primitive's size on the screen**. This estimate is used to determine how finely
+  to dice… Primitives are diced so that micropolygons are approximately half a
+  pixel on a side in screen space." Grids share vertices between adjacent
+  micropolygons, which is how the crack problem is avoided *within* a primitive.
+- **Adaptive tessellation with no cracks (Cantlay, *DirectX 11 Terrain
+  Tessellation*, NVIDIA whitepaper, 2011)** — read first-hand, and the rule is
+  exactly the one our S2 crack machinery already implements: "For patches of
+  uniform size, a crack-free surface is achieved by computing tessellation factors
+  **purely as a function of quad patch edges**. Since edges are shared, each patch
+  arrives at a result that agrees with its neighbors' edges." It also records why
+  a single tessellation factor is never enough — "DirectX 11 limits tessellation
+  factors to the range 1 to 64. This is not nearly sufficient to represent the
+  range of scales required" — and falls back to Ulrich-style rings of
+  differently-sized patches. Our per-chunk ladder is that structure.
+- **Nanite (Karis, Stich, Schied, SIGGRAPH 2021 Advances)** — characterised from
+  secondary sources this round [P-claim, secondary]: a compute-shader software
+  rasterizer handles clusters whose triangles are under ~32 pixels, reportedly ~3×
+  the hardware rasterizer on small triangles, because fixed-function rasterizers
+  are parallel in *pixels* (2×2 quads) rather than in triangles and waste most of
+  that on sub-pixel geometry. LOD is a cluster-DAG selection by projected error.
+- **NVIDIA Displaced Micro-Mesh (2022)** — not obtained first-hand this round.
+  Characterised previously in `DISPLACEMENT_RESEARCH.md` §3.5 as base triangle +
+  per-triangle subdivision level + compressed µ-vertex displacements along
+  interpolated normals, with watertight edge rules between differing levels
+  [P-claim]. Note the shape: **displacement along the interpolated normal over a
+  barycentric subdivision is a prism parameterisation.** DMM is the shell family
+  with the volume made implicit and the samples baked. **Unknown** whether the
+  edge rule is stated as per-edge-min in the spec; our §3.6 already assumed so.
+
+**The transfer to a CPU rasterizer, quantified.** Nanite's finding is that
+software rasterization *wins* below ~32 px/triangle — but that is software raster
+on a GPU's thousands of lanes, and it says nothing about a 12-thread CPU's
+absolute cost. Our own measured per-face cost is the number that decides this:
+**~0.75–0.85 µs/face, threaded, whole-frame**, from the four measured points
+52.5 → 74 → 107 → 121 ms at 10 k → 43 k → 87 k → 103 k faces [M,
+`DISPLACEMENT_RESEARCH.md` §4-S2].
+
+Apply the REYES criterion to our worst pose and the answer is immediate. ~1.9 M
+wall pixels at half-pixel micropolygons is ~7.6 M micropolygons; at 0.8 µs/face
+that is **~6 seconds/frame** [E, arithmetic on the measured rate]. The
+micropolygon pipeline is five orders of magnitude out of reach and always will be
+on this machine. But the useful form of the question is the inverse one:
+
+| screen area per face | faces for a full-screen wall | added cost at 0.8 µs/face [E] |
+|---|---|---|
+| 0.5 px (REYES) | ~7 600 000 | ~6 000 ms |
+| 100 px (10×10 px triangles) | ~19 000 | **~15 ms** |
+| 400 px (20×20 px) | ~4 750 | **~4 ms** |
+| 1 600 px (40×40 px) | ~1 200 | ~1 ms |
+
+So the CPU's affordable geometric density for a full-screen wall is roughly
+**one face per 400–1 600 screen pixels**, i.e. 20–40 px triangles, for a
+single-digit-ms budget. Against that, the projected relief step at our poses is
+~84 px at z = 5 and ~10 px at z = 40 [E, §4-S2's model]. **Block-scale relief is
+inside a 20–40 px budget at typical distances; mortar-scale relief is not, at any
+distance.** That is a clean statement of the split, and the machinery to exploit
+it — the residual-height split (B4), which gives geometry the low band and the
+march the residual — already ships.
+
+**Now the re-costing the coordinator asked for, and the answer is "partly, and
+less than it looks".** The tessellation arm's measured delta was +54.5 ms at
+86.6 k faces (and +35.56 ms against recess-only at t=5780 [M, §10.7]), taken with
+two things wrong: the retired-mesh bug (`799c808` — an orphan faceless mesh was
+66–70 % of shadow-pass verts and 18–72 % of main-view verts) and no SoA transform.
+The honest arithmetic:
+
+- The +54.5 ms decomposed as RNDR + a per-frame shadow-bake re-raster (+~9 ms at
+  43 k faces) + XFRM (+~3 ms) [M].
+- **XFRM was ~3 ms of 54.5.** The SoA inline cut the whole main-view
+  `Transform_Objects` by 1.97 ms (7.93 → 5.96, −25 %) [M], and the retired-mesh
+  fix took the shadow front end 23.07 → 10.67 core-ms [M] — which at the pool's
+  speedup is ~1 ms of wall clock.
+- **So the two fixes retire single-digit-ms of a 35–55 ms delta, and none of it
+  from the two largest terms.** RNDR's per-face setup and the per-frame shadow
+  re-raster of displaced geometry are untouched by either fix. Full-scene
+  tessellation is **not** rehabilitated. I will not dress a ~2–4 ms improvement
+  up as a reprieve for a 35 ms cost.
+
+**What IS newly worth a look, and it is a different proposition.** The arm that
+was retired is *uniform full-scene* tessellation. Nothing in the campaign has ever
+measured **silhouette-only** tessellation, and the cost model says the target is
+concrete: at 0.8 µs/face a **+5 ms budget buys ~6 000 faces**, i.e. ~7 % of the
+full carve's 86.6 k. The question "can 7 % of the faces carry the silhouettes?"
+is answerable with instruments that already exist — `--pom_seam_census` already
+classifies every patch boundary and already reports screen-weighted coverage at
+the 13 review poses [M, §S1d-1.3], and greets' relevant population is small:
+72.9 % of the defect sits on convex ridges totalling 305.07 world of edge in
+`rooms` out of 2 289 world of boundary overall [M, §S1d-1.2]. A ring of
+tessellated faces along *only* the convex ridges, with the flat interior left to
+per-pixel POM, is the hybrid the literature has recommended since Tatarchuk's LOD
+slide — run in the opposite direction from hers (geometry where the eye checks the
+outline, shading everywhere else).
+
+Two honest caveats on that. First, it inherits the shadow-bake cost: the displaced
+faces are re-rastered into the shadow cubes every frame, and the shadow passes are
+340–790 core-ms across 33–36 calls [M, `VISIBILITY_PLAN.md` §8a] — a ridge ring
+would add to that, and it must be measured, not assumed. Second, the crack rule is
+non-negotiable (Cantlay's shared-edge-only factor, DMM's per-edge level), and our
+S2 machinery already implements it [M].
+
+**Also worth recording: UE5's own retirement of DX11 tessellation.** I did not
+obtain a primary Epic statement this round; the *fact* that UE5 dropped the DX11
+tessellation displacement path in favour of Nanite/virtual heightfield is widely
+reported but I am not citing a source I have not read. **Unknown, pending a
+primary citation.**
