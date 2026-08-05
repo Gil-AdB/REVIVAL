@@ -343,3 +343,195 @@ this small.
 **The honest summary of Q3: our chart-boundary problem is not a solved problem we
 failed to find. It is a problem shipped practice avoided by construction — one
 wrapping chart, or one padded tile, or a closed volume.**
+
+### 2.3 Q4 — the silhouette family, re-examined with our numbers in hand
+
+`DISPLACEMENT_RESEARCH.md` §3.3/§6 dismissed this family on one sentence: *"our
+flat quads reduce it to S1b at a fraction of the geometry and per-pixel cost —
+the shell of a flat quad is a box, the entry point is the rasterized fragment on
+the offset lid, and the tangent frame is constant per face."* **That claim is
+wrong, and reading the primary sources shows exactly where.** The verdict first,
+then the evidence.
+
+**The dismissal confuses "the machinery becomes cheap" with "the machinery
+becomes pointless".** On a flat quad the prism machinery becomes *trivial to
+compute and exactly correct* — which is an argument FOR it. What it does not
+become is *absent*, because a prism carries two things a lid-only box does not:
+
+1. **The side faces are the ray's exit domain, as geometry rather than as a UV
+   test.** Hirche 2004, verbatim: *"To avoid sampling outside of the prism, the
+   exit point of the viewing ray has to be determined."* Our substitute is a
+   UV bounding-box test against `F->U1..V3`, which fires at internal seams where
+   the surface demonstrably continues [M, `--pom_shell_domain` in
+   `FeatureFlags.def`; 583 922 of 800 513 unanswerable pixels sit at a convex
+   ridge, §S1d-1.3].
+2. **The side faces are RASTERIZED, so the neighbour's prism owns the pixel the
+   ray escaped from.** Hirche renders *eight* triangles per base triangle — "The
+   sides of the prism are quads and have to be split into two triangles, the
+   bottom and top of the prism remain unchanged resulting in eight triangles to
+   be rendered per base triangle" — back-face culled. A screen pixel is therefore
+   covered by a fragment from **every** prism whose volume projects there, each
+   marching its own interior, with the Z-buffer arbitrating. A ray leaving prism
+   A is discarded (*"In case no surface was hit the pixel is removed"*) and
+   prism B's own fragment answers it correctly, having entered through the shared
+   side quad.
+
+**That second mechanism is the one our implementation does not have, and it is
+the mechanism behind every defect in the campaign.** We raster the lid only, so
+where prism B's lid does not project there is no fragment for B at all, and A's
+discard has nothing behind it — a hole. Our `--pom_shell_side_entry` reconstructs
+the entry analytically (clip the ray against four leaning side planes, per-lane
+start height) and measured a genuine improvement — lid void 413 100 → 14 163 px
+over the 13 review poses [M, §S1d-2d] — but it is confined to *one patch's own*
+side planes. It cannot hand the pixel to the neighbouring patch, because the
+neighbour has no fragment there. **We built half of Hirche's prism and got half
+of the result.**
+
+#### Per-technique, against our five constraints
+
+**Hirche, Ehlert, Guthe, Doggett — *Hardware Accelerated Per-Pixel Displacement
+Mapping* (Graphics Interface 2004).** Read in full.
+- **(A) lateral bound:** the prism/tetrahedron volume. Absolute, geometric, no
+  cap and no offset limit. The tetrahedral variant interpolates entry and exit
+  texture coordinates at the rasterizer and marches *between them*, so the ray
+  cannot leave by construction: "the texture space coordinates of the entry and
+  exit point can be interpolated at the same time by the rasterization units."
+- **(B) chart boundary:** does not exist — the primitive *is* the chart. Exit is
+  a discard, answered by the neighbour's fragment.
+- **(C) silhouette:** demonstrated [P-demo], though the paper never uses the word
+  "silhouette" (0 occurrences). It falls out of "In case no surface was hit the
+  pixel is removed."
+- **(D) depth write:** required, and done, in 2004: "the resulting fragment has
+  to be shaded and written to the framebuffer with its correct z-value." Our
+  measured +0.1 ms makes this the cheapest of its five requirements [M].
+- **(E) precompute + memory:** ×3 tetrahedra or ×8 triangles per base face, plus
+  — for the tetrahedral variant — a **per-frame, view-dependent CPU
+  decomposition** via Projected Tetrahedra: "So far all the processing has to be
+  done on the driver side by the host computer's CPU." On a CPU renderer that is
+  a front-end cost, not a free one.
+- **The finding §6 missed.** Hirche *abandoned* the cheap single-pass prism
+  renderer for one reason, and it is a reason that **does not apply to us**:
+  > "The assumption that the prism faces are flat is a very strong restriction
+  > that makes the algorithm in this form generally unusable. In case the faces
+  > are not flat, a viewing ray may intersect the same face it originates from
+  > which will cause holes when rendering."
+
+  Our greets walls are flat axis-charted quads with a per-face constant tangent
+  frame [M, `rooms` per-plane world-per-UV constant to four decimals, §8.3 of the
+  inventory]. **The restriction that killed the cheap variant is satisfied
+  exactly by our content.** So the correct reading of "flat quads simplify the
+  machinery" is the opposite of §6's: flat quads let us run the variant Hirche
+  could not, at 8 rasterized triangles per quad and no per-frame CPU tetrahedral
+  decomposition.
+
+**Porumbescu, Budge, Feng, Joy — *Shell Maps* (SIGGRAPH 2005 / ACM TOG 24(3)).**
+Not read first-hand this round; characterised from the 2025 PDM survey
+[P-claim, secondary]: "Shell mapping constructs a bijective map between texture
+space and shell space — the region between two offset surfaces — where
+meso-geometry will be rendered locally. Rays are traced in shell space and
+transformed… Both techniques precompute the shell space prism as three
+tetrahedra."
+- **(A)** the shell volume. **(B)** one *global* bijection, so there is no chart
+  boundary anywhere — the opposite strategy to Hirche's per-primitive locality,
+  and the only member of the family that structurally answers our cross-chart
+  question. **(C)** yes. **(D)** yes. **(E)** offline tetrahedral shell
+  construction over the whole mesh; the bijection is the asset. For a 196-face
+  wall the construction is small; the cost is that the bijection must be built
+  and kept consistent, which on our angle-split mesh is precisely what is broken
+  (see the watertightness finding below).
+
+**Oliveira & Policarpo — per-vertex quadric silhouettes (UFRGS TR RP-351, 2005;
+ShaderX4), as described first-hand in Policarpo & Oliveira, I3D 2006.**
+Verbatim [P-demo]:
+> "Oliveira and Policarpo extended the technique to render silhouettes implied by
+> the relief data. For this, the attributes of each vertex of the polygonal model
+> are enhanced with two coefficients, a and b, representing a quadric surface
+> (z = ax² + by²) that locally approximates the object's geometry at the vertex.
+> Such coefficients are computed off-line using least-squares fitting and are
+> interpolated during rasterization."
+- **(A)** the quadric extends the marchable domain past the polygon; travel is
+  bounded by where the quadric leaves the slab. **(B)** not addressed. **(C)**
+  demonstrated — on a teapot and a sphere, with a wireframe overlay proving the
+  relief crosses the polygon outline [P-demo, their Fig. 3 and Fig. 9].
+  **(D)** yes. **(E)** two floats per vertex plus an offline least-squares fit —
+  by far the cheapest silhouette mechanism in the family.
+- **Verdict for us: structurally inert.** The silhouette comes from the object's
+  own **curvature**. On a flat wall the least-squares fit gives a = b = 0, the
+  quadric is the plane, and the mechanism produces nothing. This is the same
+  reason §5.1 rejected VDM's curvature bending, and it is correct — but note it
+  is a *different* reason from §6's, and only this one actually holds.
+
+**Policarpo & Oliveira — *Relief Mapping of Non-Height-Field Surface Details*
+(I3D 2006).** Read. Multi-layer (dual-depth) relief, so a ray can see the back
+surface through a hole. Its silhouettes are the quadric mechanism above, not a new
+one ("The silhouettes were rendered using the piecewise-quadric approximation
+described in [Oliveira and Policarpo 2005]"). Relevant to us only if we ever want
+non-height-field relief; we do not.
+
+**Dachsbacher & Tatarchuk — *Prism Parallax Occlusion Mapping with Accurate
+Silhouette Generation* (I3D 2007 poster).** Not obtained first-hand — the poster
+is two pages and I could not retrieve a readable copy this round. Characterised
+by the 2025 PDM survey [P-claim, secondary], and the characterisation is the
+strongest single statement in this document's favour:
+> "Prism parallax occlusion mapping enhances this with correct silhouettes by
+> intersecting view rays with extruded prisms split into three tetrahedra."
+> … "Among the previous direct sampling methods **only Prism Parallax Occlusion
+> mapping (PPOM) produces correct silhouettes** — and achieves this with offset
+> prisms — yet has difficulty with ambient occlusion in the raster pipeline."
+
+So a 2025 survey, looking back over the whole raster-compatible field, names
+**exactly one** technique that gets silhouettes right, and it is the prism. That
+is the family §6 non-recommended. Its documented weakness — AO in the raster
+pipeline — is one we should take seriously given how much our own look now leans
+on SSAO/GTAO reading the marched depth [M, §4-S1a: "the AO-debug field goes from
+a featureless gradient to crisp per-joint contact darkening"]. **Unknown** how
+severe that is for us; it is the first thing to measure if we build this.
+
+**Jeschke, Mantler, Wimmer — *Interactive Smooth and Curved Shell Mapping*
+(EGSR 2007).** Characterised from PDM [P-claim, secondary]: "Curved shell mapping
+removes discontinuities by modeling Coons patches within each prism at the cost of
+solving a cubic equation per ray step." A cubic solve per step is the wrong shape
+for an 8-wide arithmetic-bound row loop, and the discontinuities it removes are
+curvature discontinuities we do not have. **Not applicable.**
+
+**Projective Displacement Mapping (arXiv 2025) — the source that most directly
+vindicates the flat case.** Its contribution #1 is the *parallel offset prism*:
+the standard prism offsets each vertex along its own normal, so "offset triangles
+in standard prisms may not be parallel to the base triangle since the unit
+normals point in different directions… the projection of a ray in this volume to
+texture space is non-linear", and PDM introduces a correction factor
+`nf = Σ bary_i /(N_i · N_g)` to make the offset triangles parallel and the ray
+projection **linear** in texture space.
+**On a flat quad with a shared normal, N₀ = N₁ = N₂ = N_g, so nf ≡ 1 and the
+standard prism IS the parallel prism.** The ray is linear in texture space with
+no correction at all. A 2025 paper's headline contribution is something our
+content gives us for free. That is the precise sense in which flat quads
+"simplify the machinery" — and it is an argument for building it, not against.
+
+#### The precondition we are violating, and it is not in the march
+
+Hirche's mesh construction has a requirement that reads like housekeeping and is
+not: *"It has to be ensured that neighboring tetrahedral edges are aligned in a
+consistent way to avoid aliasing effects between adjacent triangles"*, achieved
+by a global vertex enumeration so both owners of a shared side quad split it the
+same way. Shell maps state the same requirement as a bijection. Both presuppose
+**a watertight offset surface**, which presupposes **shared vertex normals**.
+
+Our mesh does not have them. `MakeFacesIndependentByAngle` has split `rooms` so
+completely that it owns **588 verts over 196 faces — exactly 3 per face, nothing
+shared** — so the two copies of one corner move along two different normals and
+the offset surface tears open at every convex ridge. Measured: lid void against
+offset 0.02 / 0.06 / 0.18 / 0.36 world runs **19 416 / 58 665 / 198 131 /
+383 364 px — linear in the offset**, and with the lid offset forced to zero
+(`--pom_shell_lid_probe`, everything else identical) it is **10 px** [M,
+§S1d-2d, and the control corrected in §S1d-2e.5].
+
+**That is not a displacement defect. It is a mesh-topology defect that the shell
+family's own preconditions forbid, and we have been attacking it from the march
+side.** `--pom_shell_weld` exists precisely to restore the shared normal, and the
+measured weld ladder (1 → 14 163 px; 3 → 24 334; 4 → 51 012; 5 → 10 646;
+6 → 26 765) says the residue is a *shelled-to-UNSHELLED* junction — the wall
+meeting a ceiling and columns that have no shell at all [M, §S1d-2e.5]. In
+Hirche's model that case cannot arise, because every triangle of the surface gets
+a prism. **Ours arises because we shell one material at a time.** The literature's
+answer is not a better weld: it is that the shell covers the whole surface.
