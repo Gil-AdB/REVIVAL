@@ -953,3 +953,43 @@ as run-to-run nondeterministic (6 runs, 6 hashes) while t=5780 is stable 6/6.
 **Not root-caused here** — it was not cheap to reach and nothing in this work
 touches it. It remains the one thing standing between the tessellated arm and
 full gate-worthiness.
+
+## A7 — the choice, as a matrix (Phase C)
+
+Cost = frame ms at t=5780, min-of-arm, same script, same box. "Relief depth" =
+the §A5 1/z-residual span in world units at the two boxes (t=6097 / t=2845);
+0.0023 is one zEnc code, i.e. none.
+
+| | flat POM (ships) | recess shell | **tessellation** | lid shell |
+|---|---|---|---|---|
+| cost @t=5780 | **48.5** | 56.1 (+7.1) | **55.6–55.9 (+6.2–7.3)** | ≈ recess |
+| cost @grazing (5958b) | 44.4 | 53.7 (+9.3) | 58.6 (+14.1) | — |
+| cost @corner (6097) | 38.5 | 44.6 (+6.1) | **42.6 (+4.1)** | — |
+| cost @corridor (5534) | 46.0 | 52.6 (+6.6) | **48.5 (+2.4)** | — |
+| relief depth written | 0.0233 / 0.0536 *(only with `--pom_depth_write`, default OFF → 0.0023)* | 0.0110 / 0.0524 | **0.0023 / 0.0444** | — |
+| **true silhouettes** | no | **structurally impossible** (recess-only cannot protrude) | **YES** | claimed; see below |
+| swim / slip | offset-limited, mild | **p90 15.3 / p99 501 at cap 64**; clean only at cap 2–4, where reach ≈ flat POM | **none — geometry cannot swim** | worse |
+| offscreen consumers (shadow bake, env probes, mirror RTT, lightmap bake) | flat everywhere | flat everywhere (raster-side only; shadow cube vs flat = **0**) | **real geometry everywhere**, or the flat proxy by choice (shadow cube vs flat 5.32 %) | **18.77 % shadow-cube divergence**, 9 033 non-stone px >12/255 at p5743 |
+| see-through between blocks | no | **no** | **yes, and it is real geometry** — but greets is a closed room, so there is nothing behind a mortar valley to reveal (measured 0–23 px/pose even at 3.3× amp) | not demonstrated |
+| where its error lives | everywhere (no depth, no silhouette) | grazing smear + the clamp band | **only at the lattice**: whole quads carry zero relief (§C4) | void + offscreen |
+| gate status | pin `06e1d4d1` | byte-identical flags-off, 13 poses | **t=5780 stable 6/6; t=6097 NONDETERMINISTIC 6/6 distinct — open** | as recess |
+
+**The contrast that decides it.** Tessellation and the shell arms fail in
+*opposite* places. The shell is exact where it has pixels to march and wrong at
+grazing and at silhouettes; tessellation is exact wherever its lattice reaches
+and simply absent where it does not. Their costs are now the same order — and at
+three of six review poses tessellation is the cheaper one — so cost is no longer
+the discriminator it was assumed to be. What remains is a **fidelity** choice
+between "relief everywhere, approximate, flat-edged, and it swims at grazing"
+and "relief at block scale, exact, real edges, and some quads carry none".
+
+The two are also **composable and already wired that way**: under
+`--greets_displace` the POM input is swapped to the B4 residual, so geometry
+carries the block band and the march carries the sub-block band. That is the S2
+ladder the research doc shortlisted, minus the per-frame LOD — and §A4 measures
+the missing LOD as worth ≤3 ms.
+
+**Not measured here, stated as such:** the lid-shell column is copied from
+§S1d-2d (2026-08-05) and was not re-run; the flat-POM relief-depth row needed
+`--pom_depth_write`, which that arm does not ship with, so its shipping
+configuration writes 0.0023 like tessellation's worst box (§C5).
