@@ -42,6 +42,11 @@ meka::GBuffer *g_gbuffer                = nullptr;
 meka::GBuffer *g_gbufferTransparent     = nullptr;
 meka::GBuffer *g_gbufferTransparentBack = nullptr;
 namespace meka { float *g_pomDbgUV = nullptr; int g_pomDbgStride = 0; int g_pomDbgH = 0; }
+// --pom_path_viz: per-pixel MARCH PATH CODE plane (see FeatureFlags.def for the
+// bit layout). Armed by the snapshot driver for one tick, exactly like
+// g_pomDbgUV, and dumped beside the PPM. nullptr = nothing recorded.
+namespace meka { uint32_t *g_pomPathBuf = nullptr; }
+namespace meka { float *g_pomDbgUVGeo = nullptr; }
 uint16_t      *g_xparZ                  = nullptr;
 uint16_t      *g_xparZBack              = nullptr;
 int            g_xparZCount             = 0;

@@ -581,8 +581,27 @@ struct TileRasterizerCtx {
 	// world equivalent is pomShellUvAmp × world-per-UV = the per-triangle
 	// pomDepthWorldAmp, which the shell depth write reuses.
 	float pomShellUvAmp = 0.0f;
+	// MIRRORED-UV BITANGENT HANDEDNESS (Material::TbnHandedness). The engine's
+	// convention is B = TbnHandedness·(N×T) — see Base/Material.h and the five
+	// sites in DeferredSurfaceKernel.cpp plus LightmapBake.cpp that apply it.
+	// The march reconstructs its own tangent frame to get the tangent-space
+	// view direction, and until this field existed it used a FIXED-SIGN N×T,
+	// so on a face with a mirrored UV chart (negative UV determinant) it walked
+	// the height field in the OPPOSITE V direction from the true view ray.
+	// Harmless-looking on the offset-limited march (travel is sub-texel-ish),
+	// catastrophic on the --pom_shell true ray, whose travel is 1/(V·N) times
+	// larger: the landing runs away along -V and swims with view angle.
+	// greets deliberately manufactures such faces (GreetsFixBitangentHandedness
+	// splits every negative-determinant face of a normal-mapped material onto a
+	// TbnHandedness=-1 clone), and S1d-1 measured 41.8 % of charts mirrored.
+	// +1 on everything else, where the multiply below is exactly 1.0f.
+	float tbnHandedness = 1.0f;
 	// --pom_shell_cap: bound on 1/(V·N) in the true-ray march (grazing guard).
 	float pomShellCap = 8.0f;
+	// --pom_shell_cap_fade (default 0 = off): V·N below which the true ray is
+	// smoothly blended out in favour of the offset-limited ray. See the write
+	// site — this is the continuous alternative to the hard cap.
+	float pomShellCapFade = 0.0f;
 	// --pom_shell_domain: off = lid + marched depth but NO lateral-exit
 	// discard. The on/off pair IS the discard viz (the changed pixels are
 	// exactly the discarded ones) at zero hot-loop cost.
@@ -691,6 +710,11 @@ struct TileRasterizerCtx {
 	// the mipmap-via-subdivision sub-face boundaries — the diagonal-seam cause —
 	// read directly. Rides the same filtered-albedo path as pomViz.
 	bool pomMipViz = false;
+	// --pom_path_viz (DIAGNOSTIC, default 0): 0 = off (nothing recorded, no
+	// pixel touched), 1 = record the path code AND replace the albedo with a
+	// flat colour per (kind, action), 2 = record only (normal image, so a
+	// sweep can be both looked at and diffed for path flips).
+	int pomPathViz = 0;
 
 	// Height-map addressing for the parallax gathers, threaded SEPARATELY from
 	// the albedo mip (ctx.Txtr / ctx.miplevel). The height map shares the
@@ -715,6 +739,179 @@ struct TileRasterizerCtx {
 extern float *g_pomDbgUV;
 extern int    g_pomDbgStride;
 extern int    g_pomDbgH;
+
+// --pom_path_viz (DIAGNOSTIC, default OFF): per-pixel MARCH PATH CODE plane.
+// One uint32 per pixel, same stride/height as g_pomDbgUV (g_pomDbgStride /
+// g_pomDbgH), armed by the snapshot driver for one tick. The code says which
+// BRANCH of the march ran, WHY it terminated, and what the terminal action was
+// — so a sweep of frames can be diffed for PATH FLIPS (discrete class changes
+// between adjacent frames, which no continuous UV/color metric detects) and a
+// census can be computed offline. Written on the PRE-KILL coverage mask, so a
+// lane the shell discarded is still recorded; bit 31 is sticky across overdraw
+// so "a fragment here was killed, then something behind won the pixel" stays
+// visible after a farther face overwrites the code.
+extern uint32_t *g_pomPathBuf;
+
+// Companion to g_pomDbgUV: the GEOMETRIC (un-marched) UV at the same pixel,
+// 2 floats/pixel, same stride/height. Why it is needed: the landed UV alone
+// cannot separate "the camera moved" from "the march moved", but the geometric
+// UV IS a camera-free surface coordinate — so keying the parallax OFFSET
+// (landed - geometric) by it gives a per-surface-point time series, and the
+// swim is that series' frame-to-frame jerk. Armed with g_pomDbgUV.
+extern float *g_pomDbgUVGeo;
+
+// [3:0] which march ran and how it ended.
+enum PomPathKind : uint32_t {
+	kPomPathNone     = 0,   // buffer init: no fragment recorded here
+	kPomPathSingle   = 1,   // single shift only (no march configured)
+	kPomPathRowFar   = 2,   // LOD row-far: march skipped entirely
+	kPomPathNaiveHit = 3,
+	kPomPathNaiveNo  = 4,   // naive march ran the slab without crossing
+	kPomPathConeHit  = 5,
+	kPomPathConeUnres= 6,   // out of cone steps, ray STILL INSIDE the slab
+	kPomPathConeMiss = 7,   // ray exited the slab bottom without crossing
+	kPomPathRefHit   = 8,
+	kPomPathRefMiss  = 9,
+};
+// [7:4] what was finally done with the lane.
+enum PomPathAct : uint32_t {
+	kPomActKeep      = 0,
+	kPomActClampFlat = 1,   // geometric UV + entry depth (recess_edge=0 / lid_edge=1)
+	kPomActClampBox  = 2,   // marched height, UV clamped into the patch box (recess_edge=1)
+	kPomActSideLand  = 3,   // landed on the leaning side face (side_edge>=2)
+	kPomActDiscard   = 4,   // p_mask killed
+};
+// [11:8] why the lane failed the shell test (independent bits — several can
+// hold at once, and under a clamp policy the ACTION hides them).
+enum PomPathWhy : uint32_t {
+	kPomWhyNoCross   = 1u << 8,
+	kPomWhyDomain    = 1u << 9,
+	kPomWhyBaseClip  = 1u << 10,
+	kPomWhySideEntry = 1u << 11,
+};
+enum PomPathBits : uint32_t {
+	kPomBitExitUMin  = 1u << 12,
+	kPomBitExitUMax  = 1u << 13,
+	kPomBitExitVMin  = 1u << 14,
+	kPomBitExitVMax  = 1u << 15,
+	kPomBitSideEntry = 1u << 16,  // side-face entry moved the march start down
+	kPomBitFadePart  = 1u << 17,  // 0 < LOD fade < 1
+	kPomBitFadeFull  = 1u << 18,  // LOD fade == 1 (pure single shift)
+	kPomBitQuarter   = 1u << 19,  // quarter-res SHARED (odd) lane
+	kPomBitCap       = 1u << 20,  // --pom_shell_cap bound 1/(V·N) at this pixel
+	kPomBitMinStep   = 1u << 21,  // --pom_cone_min_step floor overrode a cone step
+	kPomBitMaxOfs    = 1u << 22,  // --parallax_max_offset clamped the result
+	kPomBitSideKill  = 1u << 23,  // per-class side-edge kill
+	kPomBitRecess    = 1u << 24,
+	// bit 25: this face's UV chart is MIRRORED (Material::TbnHandedness < 0).
+	// The lid arm is already identifiable as (shell && !recess), so this bit is
+	// worth more than a redundant lid flag: it splits the swim population by
+	// the exact thing the bitangent-sign bug keyed on.
+	kPomBitMirrored  = 1u << 25,
+	kPomBitShell     = 1u << 26,
+	kPomBitKilled    = 1u << 31,  // sticky across overdraw
+	// [30:27] STEPS TAKEN, as a bit-length bucket: 0 = none, b = the lane
+	// bracketed (or gave up) after between 2^(b-1) and 2^b - 1 steps. This is
+	// the "did the march run out of budget?" answer as a per-pixel map: a
+	// bucket saturating at the budget's own bucket, next to kind 6
+	// (cone UNRESOLVED), separates "ran out of steps" from "landed".
+	kPomStepsShift   = 27,
+	kPomStepsMask    = 0xFu << 27,
+};
+
+// MIRRORED-UV BITANGENT SIGN for the march (see TileRasterizerCtx::tbnHandedness).
+//
+// Two sources, because they disagree in this scene and the disagreement is
+// itself a finding:
+//   0 (default) = Material::TbnHandedness — the engine's existing convention,
+//       what DeferredSurfaceKernel/LightmapBake use, so the march agrees with
+//       the shading. It is maintained ONLY for normal-mapped materials
+//       (GreetsFixBitangentHandedness skips the rest) and only from the UV
+//       determinant of the first three vertices.
+//   1 = the face's OWN geometric handedness, sign((N × T_face) · B_face) with
+//       T_face/B_face solved from this face's positions and UVs. This is the
+//       quantity the march actually needs (it wants the true dP/dv direction),
+//       and it is independent of the material bookkeeping. Scaling T_face and
+//       B_face by 1/det is unnecessary: det<0 flips both, leaving the dot
+//       product's sign unchanged.
+// A degenerate UV chart (det ~ 0) has no defined handedness -> +1, the legacy
+// value, so it can never make things worse than before.
+inline float MekaleleTbnHandedness(const Face *F) {
+	if (fds::FeatureFlags::pom_tbn_face_sign() == 0 || !F || !F->A || !F->B || !F->C)
+		return F && F->Txtr ? F->Txtr->TbnHandedness : 1.0f;
+	const float du1 = F->U2 - F->U1, dv1 = F->V2 - F->V1;
+	const float du2 = F->U3 - F->U1, dv2 = F->V3 - F->V1;
+	const float det = du1 * dv2 - du2 * dv1;
+	if (!(std::fabs(det) > 1e-20f)) return 1.0f;
+	const Vector e1(F->B->Pos.x - F->A->Pos.x, F->B->Pos.y - F->A->Pos.y,
+	                F->B->Pos.z - F->A->Pos.z);
+	const Vector e2(F->C->Pos.x - F->A->Pos.x, F->C->Pos.y - F->A->Pos.y,
+	                F->C->Pos.z - F->A->Pos.z);
+	const float tx = e1.x * dv2 - e2.x * dv1;
+	const float ty = e1.y * dv2 - e2.y * dv1;
+	const float tz = e1.z * dv2 - e2.z * dv1;
+	const float bx = e2.x * du1 - e1.x * du2;
+	const float by = e2.y * du1 - e1.y * du2;
+	const float bz = e2.z * du1 - e1.z * du2;
+	const float cx = F->N.y * tz - F->N.z * ty;
+	const float cy = F->N.z * tx - F->N.x * tz;
+	const float cz = F->N.x * ty - F->N.y * tx;
+	return (cx * bx + cy * by + cz * bz) < 0.0f ? -1.0f : 1.0f;
+}
+
+// bit_length of a per-lane step count, for the [30:27] bucket.
+static inline Vec8i pom_path_steps_bucket(const Vec8i &steps) {
+	Vec8i b = Vec8i(0);
+	for (int k = 0; k < 14; ++k)
+		b += select(steps >= Vec8i(1 << k), Vec8i(1), Vec8i(0));
+	return b;
+}
+
+// Vec8fb (float compare mask) -> Vec8ib, the same reinterpret the shell kill
+// already uses on p_mask. Only the --pom_path_viz bookkeeping needs it.
+static inline Vec8ib pom_path_mask(const Vec8fb &m) {
+	return Vec8ib(_mm256_castps_si256(__m256(m)));
+}
+// bit where the mask holds, 0 elsewhere.
+static inline Vec8i pom_path_bit(const Vec8fb &m, uint32_t bit) {
+	return select(pom_path_mask(m), Vec8i(int32_t(bit)), Vec8i(0));
+}
+
+// --pom_path_viz=1 palette. The TERMINAL ACTION wins over the march kind when
+// it is not "keep", because a clamp/discard is what actually changes what the
+// pixel shows. Documented here and printed as a legend by the snapshot driver.
+//   ORANGE  clamped to the FLAT surface (recess_edge=0 / lid_edge=1)
+//   YELLOW  UV clamped into the patch box (recess_edge=1)
+//   MINT    landed on a leaning side face (side_edge>=2)
+//   RED     DISCARDED (the lane was killed; something behind wins the pixel)
+//   gray    single shift, no march configured
+//   navy    LOD row-far: the march was skipped for this whole row
+//   green   naive march hit           olive  naive march passed under the stone
+//   blue    cone march hit            MAGENTA cone march UNRESOLVED (out of steps,
+//                                             ray still in the slab -> NO SHIFT)
+//   dkred   cone march missed (walked out of the slab bottom)
+//   pale    reference march hit       purple reference march miss
+static inline uint32_t pom_path_color(uint32_t code) {
+	switch ((code >> 4) & 0xFu) {
+	case kPomActClampFlat: return 0xFFFF8000u;
+	case kPomActClampBox:  return 0xFFFFFF00u;
+	case kPomActSideLand:  return 0xFF00FF80u;
+	case kPomActDiscard:   return 0xFFFF0000u;
+	default: break;
+	}
+	switch (code & 0xFu) {
+	case kPomPathSingle:    return 0xFF404040u;
+	case kPomPathRowFar:    return 0xFF203070u;
+	case kPomPathNaiveHit:  return 0xFF30C030u;
+	case kPomPathNaiveNo:   return 0xFF808020u;
+	case kPomPathConeHit:   return 0xFF3070E0u;
+	case kPomPathConeUnres: return 0xFFFF00FFu;
+	case kPomPathConeMiss:  return 0xFF800000u;
+	case kPomPathRefHit:    return 0xFFC0C0FFu;
+	case kPomPathRefMiss:   return 0xFF600060u;
+	default:                return 0xFF000000u;
+	}
+}
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
 // the rasterizer further clamps tile_my/tile_My to [tileYMin, tileYMax]
@@ -1276,6 +1473,18 @@ struct TileRasterizer {
 					// (byte-identical); the march block below replaces it with the
 					// marched height field's own surface normal when the flag is on.
 					Vec8f pnX = p_nx, pnY = p_ny, pnZ = p_nz;
+					// --pom_path_viz (DIAGNOSTIC, default OFF): per-lane MARCH PATH
+					// CODE, assembled as the march decides things. Seeded to
+					// "single shift" — the class a pixel has when no march is
+					// configured — and to "no fragment" when there is no height
+					// map at all (this whole block is skipped then, so it never
+					// gets written and the plane keeps its init value).
+					// pathMask0 is the PRE-KILL coverage mask: the shell discard
+					// below removes lanes from p_mask, and those lanes are exactly
+					// the ones a path viz exists to show.
+					const bool pathViz = ctx.pomPathViz != 0;
+					Vec8i pathCode = Vec8i(int32_t(kPomPathSingle));
+					const Vec8ib pathMask0 = p_mask;
 					if (ctx.heightData && wantTangent) {
 						// Geometric (un-shifted) UV, kept for --parallax_max_offset:
 						// the clamp bounds |final - geometric| in texels below.
@@ -1309,7 +1518,14 @@ struct TileRasterizer {
 						Vec8f Nx = p_nx*nl, Ny = p_ny*nl, Nz = p_nz*nl;
 						Vec8f tl = approx_rsqrt(p_tx*p_tx + p_ty*p_ty + p_tz*p_tz);
 						Vec8f Tx = p_tx*tl, Ty = p_ty*tl, Tz = p_tz*tl;
-						Vec8f Bx = Ny*Tz - Nz*Ty, By = Nz*Tx - Nx*Tz, Bz = Nx*Ty - Ny*Tx;
+						// B = handedness·(N×T) — the engine-wide convention
+						// (Base/Material.h). Without the sign the march walks a
+						// mirrored-UV chart's V axis BACKWARDS; see ctx.tbnHandedness.
+						// hs is exactly ±1.0f, so the +1 case is bit-exact.
+						const Vec8f hs = Vec8f(ctx.tbnHandedness);
+						Vec8f Bx = (Ny*Tz - Nz*Ty) * hs,
+						      By = (Nz*Tx - Nx*Tz) * hs,
+						      Bz = (Nx*Ty - Ny*Tx) * hs;
 						// Tangent-space view xy (offset-limiting: no /Vz → stable at
 						// grazing). Centre at h=0.5 so mid-height = no shift.
 						Vec8f VtT = Vx*Tx + Vy*Ty + Vz*Tz;
@@ -1342,8 +1558,29 @@ struct TileRasterizer {
 						const Vec8f invVtNRaw = shell
 						    ? (Vec8f(1.0f) / max(VtN, Vec8f(1.0f / 64.0f)))
 						    : Vec8f(1.0f);
+						// --pom_shell_cap_fade (S1d-2f, default 0 = OFF, byte-identical):
+						// the PRINCIPLED version of the cap. The shell march travels the
+						// TRUE view ray, 1/(V·N) UV per unit height, which diverges at
+						// grazing; --pom_shell_cap is a hard clamp on that divergence and
+						// therefore a C0 kink in the ray direction as a function of
+						// incidence — the reach the silhouette needs and the runaway
+						// lateral travel the user sees as swim are the SAME term. This
+						// blends the true ray toward the OFFSET-LIMITED ray (1/(V·N) := 1,
+						// exactly what the non-shell march uses and what does NOT swim)
+						// as incidence approaches parallel:
+						//     w = smoothstep(0, fade, V·N),  1/(V·N)_eff = 1 + (capped−1)·w
+						// so head-on pixels are untouched (invVtNRaw == 1 there anyway),
+						// near-grazing pixels lose the divergence smoothly instead of at
+						// a clamp edge, and the cap still bounds whatever is left.
+						const Vec8f invVtNCap = min(invVtNRaw, Vec8f(ctx.pomShellCap));
 						const Vec8f invVtN = shell
-						    ? min(invVtNRaw, Vec8f(ctx.pomShellCap))
+						    ? (ctx.pomShellCapFade > 0.0f
+						       ? (Vec8f(1.0f) + (invVtNCap - Vec8f(1.0f))
+						          * [&]{ const Vec8f w = min(max(VtN
+						                     * Vec8f(1.0f / ctx.pomShellCapFade),
+						                     Vec8f(0.0f)), Vec8f(1.0f));
+						                 return w * w * (Vec8f(3.0f) - Vec8f(2.0f) * w); }())
+						       : invVtNCap)
 						    : Vec8f(1.0f);
 						const Vec8f rayScale = shell
 						    ? (Vec8f(ctx.pomShellUvAmp) * invVtN)
@@ -1410,6 +1647,28 @@ struct TileRasterizer {
 							// A miss keeps the lid start (the lane is killed below, and
 							// a NaN/negative start would poison the march's UV).
 							hStart = select(sideEntryMiss, hStart, min(hStart, hHi));
+						}
+						// --pom_path_viz: arm/geometry bits known before any march
+						// runs. The CAP bit is the grazing guard actually BITING at
+						// this pixel (the true ray wanted more lateral travel per
+						// unit height than --pom_shell_cap allows), which is the
+						// most pose-sensitive term in the shell parametrization.
+						if (pathViz) {
+							if (shell) {
+								pathCode |= Vec8i(int32_t(kPomBitShell
+								          | (ctx.pomRecess ? kPomBitRecess : 0u)));
+								pathCode |= pom_path_bit(
+								    invVtNRaw > Vec8f(ctx.pomShellCap), kPomBitCap);
+								pathCode |= pom_path_bit(hStart < hEnter, kPomBitSideEntry);
+							}
+							if (ctx.tbnHandedness < 0.0f)
+								pathCode |= Vec8i(int32_t(kPomBitMirrored));
+							// Quarter-res shares EVEN lane -> ODD neighbour.
+							if (ctx.pomQuarter > 0)
+								pathCode |= Vec8i(0, int32_t(kPomBitQuarter),
+								                  0, int32_t(kPomBitQuarter),
+								                  0, int32_t(kPomBitQuarter),
+								                  0, int32_t(kPomBitQuarter));
 						}
 						Vec8f hc  = (H - hEnter) * rayScale;
 						uf += VtT * hc;
@@ -1505,6 +1764,15 @@ struct TileRasterizer {
 							}
 							uf = hitU;
 							vf = hitV;
+							// --pom_path_viz: the reference has no "ran out of steps"
+							// class — it walks the WHOLE slab — so !found is an
+							// unambiguous MISS. That is exactly what makes it usable
+							// as the cross-path arbiter.
+							if (pathViz)
+								pathCode = (pathCode & Vec8i(int32_t(~0xF)))
+								         | select(pom_path_mask(found),
+								                  Vec8i(int32_t(kPomPathRefHit)),
+								                  Vec8i(int32_t(kPomPathRefMiss)));
 							if (pomZ)
 								pomHitH = select(found, hitH, hEnter);
 							// A uniform march over the WHOLE slab that never crossed has
@@ -1522,6 +1790,13 @@ struct TileRasterizer {
 							const float lod = ctx.pomLodDist;
 							const bool rowFar = lod > 0.0f &&
 								horizontal_and(p_z >= Vec8f(2.0f * lod));
+							// --pom_path_viz: a row-far row never marches at all — it
+							// keeps the single shift. Whole-row decision, so it is a
+							// hard class boundary in SCREEN space that moves with the
+							// camera.
+							if (pathViz && rowFar)
+								pathCode = (pathCode & Vec8i(int32_t(~0xF)))
+								         | Vec8i(int32_t(kPomPathRowFar));
 							if (!rowFar) {
 							const int   N   = ctx.pomSteps;
 							const Vec8f dU  = VtT * rayScale;
@@ -1560,6 +1835,12 @@ struct TileRasterizer {
 							Vec8f aboU = curU, aboV = curV, aboH = rayH;
 							Vec8f belU = curU, belV = curV, belH = rayH;
 							Vec8fb found = Vec8fb(false);
+							// --pom_path_viz only: did --pom_cone_min_step's floor
+							// actually override the cone's own step on this lane?
+							Vec8fb minStepFired = Vec8fb(false);
+							// --pom_path_viz only: steps consumed before this lane
+							// bracketed. Saturating at N means the budget ran out.
+							Vec8i stepsTaken = Vec8i(0);
 							// STEP-2 quarter-res offset field: with --parallax_pom_quarter,
 							// gather height+cone only on EVEN lanes and share to the odd
 							// neighbour -> ~half the gather traffic. The odd lane keeps its own
@@ -1593,6 +1874,9 @@ struct TileRasterizer {
 								// Lanes still searching: this above-sample is the new hi (above)
 								// bracket end for the refinement below.
 								const Vec8fb search = ~found;
+								if (pathViz)
+									stepsTaken += select(pom_path_mask(search),
+									                     Vec8i(1), Vec8i(0));
 								aboU = select(search, curU, aboU);
 								aboV = select(search, curV, aboV);
 								aboH = select(search, rayH, aboH);
@@ -1607,7 +1891,15 @@ struct TileRasterizer {
 								// over, so the floor only ever overrides a FROZEN (byte-0)
 								// cone and never steps deeper into the surface than the cone
 								// itself would have allowed. Off by default -> dt unchanged.
-								if (useMinStep) dt = max(dt, min(minStepH, gap));
+								if (useMinStep) {
+									// Named temp so --pom_path_viz can see whether the
+									// floor actually OVERRODE the cone's own step at
+									// this lane; the arithmetic is unchanged.
+									const Vec8f dtFloor = min(minStepH, gap);
+									if (pathViz)
+										minStepFired |= (dtFloor > dt) & search;
+									dt = max(dt, dtFloor);
+								}
 								dt = select(search, dt, Vec8f(0.0f));   // frozen once bracketed
 								curU -= dU * dt;
 								curV -= dV * dt;
@@ -1663,6 +1955,24 @@ struct TileRasterizer {
 							// holes wherever the bracket search is slow (grazing rays,
 							// which travel farthest). Unresolved lanes keep the entry UV
 							// (bel* never moved), i.e. they degrade to no-shift.
+							// --pom_path_viz: the THREE-WAY cone outcome, which is the
+							// distinction a prior agent found conflated once already.
+							// found          -> bracketed a crossing (HIT)
+							// !found, rayH>0 -> ran out of the step budget with the ray
+							//                  still inside the slab (UNRESOLVED: the
+							//                  lane silently degrades to NO SHIFT)
+							// !found, rayH<=0-> walked out of the slab bottom (MISS)
+							if (pathViz) {
+								pathCode = (pathCode & Vec8i(int32_t(~0xF)))
+								         | select(pom_path_mask(found),
+								                  Vec8i(int32_t(kPomPathConeHit)),
+								                  select(pom_path_mask(rayH > Vec8f(0.0f)),
+								                         Vec8i(int32_t(kPomPathConeUnres)),
+								                         Vec8i(int32_t(kPomPathConeMiss))));
+								pathCode |= pom_path_bit(minStepFired, kPomBitMinStep);
+								pathCode |= (pom_path_steps_bucket(stepsTaken)
+								             & Vec8i(0xF)) << kPomStepsShift;
+							}
 							if (shell)
 								pomCrossed = found | (rayH > Vec8f(0.0f));
 							// STEP-3 LOD blend: continuous fade cone->single-shift as view-Z
@@ -1677,6 +1987,16 @@ struct TileRasterizer {
 								// discarded (no relief left to make a silhouette out of).
 								if (shell)
 									pomCrossed |= (fade >= Vec8f(1.0f));
+								// --pom_path_viz: a lane fading between the march and
+								// the single shift is a CONTINUOUS blend of two paths;
+								// a lane at fade==1 has left the march entirely.
+								if (pathViz) {
+									pathCode |= pom_path_bit(fade >= Vec8f(1.0f),
+									                         kPomBitFadeFull);
+									pathCode |= pom_path_bit((fade > Vec8f(0.0f))
+									                       & (fade < Vec8f(1.0f)),
+									                         kPomBitFadePart);
+								}
 								uf = resU + (ssU - resU) * fade;
 								vf = resV + (ssV - resV) * fade;
 								// Depth fades in lockstep with the UV blend: pure
@@ -1699,6 +2019,13 @@ struct TileRasterizer {
 							const float lod = ctx.pomLodDist;
 							const bool rowFar = lod > 0.0f &&
 								horizontal_and(p_z >= Vec8f(2.0f * lod));
+							// --pom_path_viz: a row-far row never marches at all — it
+							// keeps the single shift. Whole-row decision, so it is a
+							// hard class boundary in SCREEN space that moves with the
+							// camera.
+							if (pathViz && rowFar)
+								pathCode = (pathCode & Vec8i(int32_t(~0xF)))
+								         | Vec8i(int32_t(kPomPathRowFar));
 							if (!rowFar) {
 							const int   N     = ctx.pomSpikeSteps;
 							const float invNf = 1.0f / float(N);
@@ -1717,6 +2044,7 @@ struct TileRasterizer {
 							const Vec8f stepH = hStart * Vec8f(invNf);
 							Vec8f foundU = curU, foundV = curV;
 							Vec8fb found = Vec8fb(false);
+							Vec8i stepsTaken = Vec8i(0);   // --pom_path_viz only
 							for (int s = 0; s < N; ++s) {
 								curU -= dU * stepH;
 								curV -= dV * stepH;
@@ -1731,6 +2059,9 @@ struct TileRasterizer {
 									mH[k] = float(ctx.heightData[mAd[k]]) * (1.0f / 255.0f);
 								Vec8f Hs; Hs.load_a(mH);
 								Vec8fb hit = Vec8fb(rayH <= Hs) & (~found);
+								if (pathViz)
+									stepsTaken += select(pom_path_mask(~found),
+									                     Vec8i(1), Vec8i(0));
 								foundU = select(hit, curU, foundU);
 								foundV = select(hit, curV, foundV);
 								// --pom_depth_write: the rayH at the first crossing
@@ -1746,6 +2077,17 @@ struct TileRasterizer {
 								// pomCrossed exactly as they stand.
 								if (ctx.pomEarlyOut && horizontal_and(found)) break;
 							}
+							// --pom_path_viz: the naive march is uniform over the whole
+							// slab, so like the reference it has no unresolved class —
+							// !found means it genuinely passed under the stone.
+							if (pathViz)
+								pathCode = (pathCode & Vec8i(int32_t(~0xF)))
+								         | select(pom_path_mask(found),
+								                  Vec8i(int32_t(kPomPathNaiveHit)),
+								                  Vec8i(int32_t(kPomPathNaiveNo)));
+							if (pathViz)
+								pathCode |= (pom_path_steps_bucket(stepsTaken)
+								             & Vec8i(0xF)) << kPomStepsShift;
 							if (lod > 0.0f) {
 								const Vec8f fade = min(max(
 									(p_z - Vec8f(lod)) * Vec8f(1.0f / lod),
@@ -1755,6 +2097,16 @@ struct TileRasterizer {
 								// discarded (no relief left to make a silhouette out of).
 								if (shell)
 									pomCrossed |= (fade >= Vec8f(1.0f));
+								// --pom_path_viz: a lane fading between the march and
+								// the single shift is a CONTINUOUS blend of two paths;
+								// a lane at fade==1 has left the march entirely.
+								if (pathViz) {
+									pathCode |= pom_path_bit(fade >= Vec8f(1.0f),
+									                         kPomBitFadeFull);
+									pathCode |= pom_path_bit((fade > Vec8f(0.0f))
+									                       & (fade < Vec8f(1.0f)),
+									                         kPomBitFadePart);
+								}
 								uf = foundU + (ssU - foundU) * fade;
 								vf = foundV + (ssV - foundV) * fade;
 								// Depth fades with the UV blend (flat at fade=1).
@@ -1783,6 +2135,8 @@ struct TileRasterizer {
 								maxT / max(len, Vec8f(1e-6f)), Vec8f(1.0f));
 							uf = ufGeo + (uf - ufGeo) * s;
 							vf = vfGeo + (vf - vfGeo) * s;
+							if (pathViz)
+								pathCode |= pom_path_bit(len > maxT, kPomBitMaxOfs);
 						}
 						// --pom_normal (S1e): hand the deferred kernel the HEIGHT FIELD'S
 						// OWN surface normal at the marched hit instead of the flat
@@ -1983,6 +2337,20 @@ struct TileRasterizer {
 							// than folded straight into `keep`. Flag off, the &= order
 							// and the value are exactly what they were.
 							Vec8fb domOK = Vec8fb(true), baseOK = Vec8fb(true);
+							// --pom_path_viz only: lanes the lid-edge policy CLAMPED
+							// (they are folded back into `keep` below, so without this
+							// they would be indistinguishable from a clean hit).
+							Vec8fb lidClamped = Vec8fb(false);
+							// --pom_path_viz: WHICH SIDE of its own box the march's
+							// landing left, recorded HERE because the clamp below
+							// overwrites uf/vf with the geometric UV — after it, every
+							// clamped lane looks like it never left.
+							if (pathViz) {
+								pathCode |= pom_path_bit(uf < Vec8f(ctx.shellUMin), kPomBitExitUMin);
+								pathCode |= pom_path_bit(uf > Vec8f(ctx.shellUMax), kPomBitExitUMax);
+								pathCode |= pom_path_bit(vf < Vec8f(ctx.shellVMin), kPomBitExitVMin);
+								pathCode |= pom_path_bit(vf > Vec8f(ctx.shellVMax), kPomBitExitVMax);
+							}
 							if (ctx.pomShellDomain) {
 								if (ctx.pomShellSideFaces)
 									domOK = inSibs(uf, vf,
@@ -2050,6 +2418,7 @@ struct TileRasterizer {
 								vf      = select(clampable, vfGeo, vf);
 								pomHitH = select(clampable, hEnter, pomHitH);
 								keep |= clampable;
+								if (pathViz) lidClamped = clampable;
 							}
 							// --pom_recess_only (P2-A): the kill is OPTIONAL here, and
 							// killing is the wrong default. Under the LID model a lane
@@ -2163,6 +2532,35 @@ struct TileRasterizer {
 								} else {
 									p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
 								}
+							// ── --pom_path_viz: WHY the shell test failed and WHAT was
+							// done about it. The reason bits are independent (several
+							// can hold at once) and survive the terminal action, which
+							// a clamp policy would otherwise hide completely — the
+							// whole point being that a clamp and a hit look the same
+							// in every continuous metric but are different SURFACES.
+							if (pathViz) {
+								pathCode |= pom_path_bit(~pomCrossed,   kPomWhyNoCross);
+								pathCode |= pom_path_bit(sideEntryMiss, kPomWhySideEntry);
+								pathCode |= pom_path_bit(~domOK,        kPomWhyDomain);
+								pathCode |= pom_path_bit(~baseOK,       kPomWhyBaseClip);
+								pathCode |= pom_path_bit(sideKill,      kPomBitSideKill);
+								Vec8i act = Vec8i(int32_t(kPomActKeep << 4));
+								if (ctx.pomRecess && ctx.pomRecessEdge != 2) {
+									const uint32_t a = (ctx.pomRecessEdge == 1)
+									    ? kPomActClampBox
+									    : (sideEdge >= 2 ? kPomActSideLand : kPomActClampFlat);
+									act = select(pom_path_mask(~keep),
+									             Vec8i(int32_t(a << 4)), act);
+									act = select(pom_path_mask(sideKill),
+									             Vec8i(int32_t(kPomActDiscard << 4)), act);
+								} else {
+									act = select(pom_path_mask(~keep),
+									             Vec8i(int32_t(kPomActDiscard << 4)), act);
+									act = select(pom_path_mask(lidClamped),
+									             Vec8i(int32_t(kPomActClampFlat << 4)), act);
+								}
+								pathCode |= act;
+							}
 						}
 						if (pomZ) {
 							// Shell depth uses the TRUE-ray form: the hit sits Δh·A below
@@ -2185,11 +2583,39 @@ struct TileRasterizer {
 								*(__m128i*)span.zbuffer, compress(zMarched),
 								compress(Vec8ui(p_mask)));
 						}
+						// --pom_path_viz: record the per-lane path code. Written on the
+						// PRE-KILL coverage mask (pathMask0) so a lane the shell
+						// discarded is recorded rather than silently absent — those
+						// lanes are the population the viz exists for. Bit 31 is
+						// STICKY: a farther face that later wins a discarded pixel
+						// overwrites the code but not the "something was killed here"
+						// fact. Tiles are owned by one thread, so the read-modify-write
+						// races nothing.
+						if (pathViz && g_pomPathBuf) {
+							alignas(32) int32_t pcA[8]; pathCode.store_a(pcA);
+							alignas(32) int32_t m0A[8]; Vec8i(pathMask0).store_a(m0A);
+							alignas(32) int32_t mkA[8]; Vec8i(p_mask).store_a(mkA);
+							const int pvBaseX = tile.x * TILE_SIZE;
+							const int pvPy = tile.y * TILE_SIZE + y;
+							if (pvPy < g_pomDbgH) for (int k = 0; k < 8; ++k) {
+								const int px = pvBaseX + k;
+								if (m0A[k] && px < g_pomDbgStride) {
+									uint32_t &dst = g_pomPathBuf[size_t(pvPy)
+									                * g_pomDbgStride + px];
+									uint32_t code = uint32_t(pcA[k])
+									              | (dst & uint32_t(kPomBitKilled));
+									if (!mkA[k]) code |= uint32_t(kPomBitKilled);
+									dst = code;
+								}
+							}
+						}
 						// Debug (FDS_DUMP_TXTR): record the finalized parallax UV for covered
 						// lanes so a headless A/B can diff the MARCH output directly.
 						if (g_pomDbgUV) {
 							alignas(32) float dbgU[8], dbgV[8];
 							uf.store_a(dbgU); vf.store_a(dbgV);
+							alignas(32) float dbgGU[8], dbgGV[8];
+							if (g_pomDbgUVGeo) { ufGeo.store_a(dbgGU); vfGeo.store_a(dbgGV); }
 							alignas(32) int32_t dbgM[8]; Vec8i(p_mask).store_a(dbgM);
 							const int dbgBaseX = tile.x * TILE_SIZE;
 							const int dbgPy = tile.y * TILE_SIZE + y;
@@ -2198,6 +2624,10 @@ struct TileRasterizer {
 								if (dbgM[k] && px < g_pomDbgStride) {
 									const size_t di = (size_t(dbgPy) * g_pomDbgStride + px) * 2;
 									g_pomDbgUV[di] = dbgU[k]; g_pomDbgUV[di + 1] = dbgV[k];
+									if (g_pomDbgUVGeo) {
+										g_pomDbgUVGeo[di] = dbgGU[k];
+										g_pomDbgUVGeo[di + 1] = dbgGV[k];
+									}
 								}
 							}
 						}
@@ -2283,6 +2713,17 @@ struct TileRasterizer {
 						if (polyVizColor) {
 							alignas(32) uint32_t t8[8];
 							for (int k = 0; k < 8; ++k) t8[k] = polyVizColor;
+							albedoCol.load_a(t8);
+						}
+						// --pom_path_viz=1: flat colour per (march kind, terminal
+						// action) — see pom_path_color(). Mode 2 records the code
+						// plane without touching the image, so the SAME sweep gives
+						// both a normal render and an offline flip map.
+						if (ctx.pomPathViz == 1) {
+							alignas(32) int32_t pcA[8]; pathCode.store_a(pcA);
+							alignas(32) uint32_t t8[8];
+							for (int k = 0; k < 8; ++k)
+								t8[k] = pom_path_color(uint32_t(pcA[k]));
 							albedoCol.load_a(t8);
 						}
 						if (ctx.pomMipViz) {
@@ -2940,7 +3381,9 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomDepthWrite = pomDepthWrite,
 		.pomShell = pomShellFace,
 		.pomShellUvAmp = pomShellFace ? PomShellFaceUvAmp(F) : 0.0f,
+		.tbnHandedness = meka::MekaleleTbnHandedness(F),
 		.pomShellCap = fds::FeatureFlags::pom_shell_cap(),
+		.pomShellCapFade = fds::FeatureFlags::pom_shell_cap_fade(),
 		.pomShellDomain = fds::FeatureFlags::pom_shell_domain(),
 		// --pom_recess_only forces the BASE CLIP off: that clip exists to remove
 		// LID overhang outside the authored footprint, and with the geometry
@@ -3012,6 +3455,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		                   pomShellSideTrue ? pomShellSideTrue[7] : -1.0f },
 		.pomViz = fds::FeatureFlags::pom_viz(),
 		.pomMipViz = fds::FeatureFlags::pom_mip_viz(),
+		.pomPathViz = fds::FeatureFlags::pom_path_viz(),
 		.heightLogW = heightLogW,
 		.heightLogH = heightLogH,
 		.heightUScale = heightUScale,

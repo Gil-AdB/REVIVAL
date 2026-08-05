@@ -22,6 +22,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <map>
+#include <array>
+#include <string>
 #include <set>
 #include <cstdio>
 #include <cstdlib>
@@ -572,11 +575,49 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // FDS_DUMP_TXTR: arm the per-pixel parallax-UV recorder for this tick so
         // the rasterizer records where the march landed each covered pixel.
         static std::vector<float> s_uvbuf;
+        static std::vector<float> s_uvgeobuf;
         if (std::getenv("FDS_DUMP_TXTR")) {
             s_uvbuf.assign(size_t(xres) * yres * 2, -1.0e9f);
             meka::g_pomDbgUV = s_uvbuf.data();
             meka::g_pomDbgStride = xres;
             meka::g_pomDbgH = yres;
+            // Companion GEOMETRIC-UV plane: the camera-free surface coordinate
+            // that lets a sweep key the parallax OFFSET by surface point instead
+            // of by screen pixel. Same arming so a run either has both or neither.
+            s_uvgeobuf.assign(size_t(xres) * yres * 2, -1.0e9f);
+            meka::g_pomDbgUVGeo = s_uvgeobuf.data();
+        }
+        // --pom_path_viz: arm the per-pixel MARCH PATH CODE plane for this tick.
+        static std::vector<uint32_t> s_pathbuf;
+        if (fds::FeatureFlags::pom_path_viz() != 0) {
+            s_pathbuf.assign(size_t(xres) * yres, 0u);
+            meka::g_pomPathBuf = s_pathbuf.data();
+            meka::g_pomDbgStride = xres;
+            meka::g_pomDbgH = yres;
+            static bool legendPrinted = false;
+            if (!legendPrinted) {
+                legendPrinted = true;
+                std::fprintf(stderr,
+                  "[POMPATH] per-pixel march path code, uint32[xres*yres], dumped as *_path.u32\n"
+                  "[POMPATH]  [3:0] KIND    1 single-shift (no march)   2 LOD row-far (march skipped)\n"
+                  "[POMPATH]                3 naive HIT   4 naive no-hit (passed under the stone)\n"
+                  "[POMPATH]                5 cone HIT    6 cone UNRESOLVED (out of steps, ray still\n"
+                  "[POMPATH]                              inside the slab -> lane degrades to NO SHIFT)\n"
+                  "[POMPATH]                7 cone MISS (exited the slab bottom)\n"
+                  "[POMPATH]                8 reference HIT   9 reference MISS\n"
+                  "[POMPATH]  [7:4] ACTION  0 keep  1 clamp-to-FLAT  2 clamp-into-BOX  3 land-on-SIDE\n"
+                  "[POMPATH]                4 DISCARD (lane killed; geometry behind wins the pixel)\n"
+                  "[POMPATH]  [11:8] WHY    8 no-cross  9 domain exit  10 base clip  11 side-entry miss\n"
+                  "[POMPATH]  [15:12] which own-box side the final UV left (uMin,uMax,vMin,vMax)\n"
+                  "[POMPATH]  16 side-face entry taken   17/18 LOD fade partial/full   19 quarter shared\n"
+                  "[POMPATH]  20 --pom_shell_cap BIT (1/(V.N) was clamped at this pixel)\n"
+                  "[POMPATH]  21 --pom_cone_min_step floor fired   22 --parallax_max_offset clamped\n"
+                  "[POMPATH]  23 side-edge kill  24 recess arm  25 lid arm  26 shell face\n"
+                  "[POMPATH]  31 STICKY: a fragment at this pixel was shell-killed\n"
+                  "[POMPATH]  mode 1 also recolours the albedo: ORANGE clamp-flat, YELLOW clamp-box,\n"
+                  "[POMPATH]  MINT side-land, RED discard, gray single, navy row-far, green naive-hit,\n"
+                  "[POMPATH]  olive naive-no-hit, blue cone-hit, MAGENTA cone-UNRESOLVED, dkred cone-miss\n");
+            }
         }
 
         bool more = driver->tick();
@@ -721,7 +762,63 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                 std::fclose(f);
                 std::fprintf(stderr, "[GREETSSNAP] uv -> %s\n", tp);
             }
+            if (meka::g_pomDbgUVGeo) {
+                std::snprintf(tp, sizeof(tp), "%s/greets_t%06d_uvgeo.bin",
+                              cfg.outDir.c_str(), ts);
+                if (FILE* f = std::fopen(tp, "wb")) {
+                    std::fwrite(meka::g_pomDbgUVGeo, sizeof(float),
+                                size_t(xres) * yres * 2, f);
+                    std::fclose(f);
+                    std::fprintf(stderr, "[GREETSSNAP] uvgeo -> %s\n", tp);
+                }
+                meka::g_pomDbgUVGeo = nullptr;
+            }
             meka::g_pomDbgUV = nullptr;
+        }
+        // --pom_path_viz: MIRRORED-UV CENSUS. The march's bitangent sign comes
+        // from Material::TbnHandedness, but that field is only maintained for
+        // NORMAL-MAPPED materials (GreetsFixBitangentHandedness skips the
+        // rest), while the geometrically correct sign is each FACE's own UV
+        // determinant. Print both so a disagreement is visible rather than
+        // assumed: "det<0 but mat=+1" faces are ones whose march still walks V
+        // backwards after the handedness fix.
+        if (fds::FeatureFlags::pom_path_viz() != 0) {
+            static bool censusDone = false;
+            if (!censusDone) {
+                censusDone = true;
+                std::map<std::string, std::array<long long, 4>> tab; // det<0/mat<0/agree/total
+                for (Object *Obj = CurScene ? CurScene->ObjectHead : nullptr; Obj; Obj = Obj->Next) {
+                    if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+                    TriMesh *T = (TriMesh*)Obj->Data;
+                    for (int32_t fi = 0; fi < T->FIndex; ++fi) {
+                        Face *F = &T->Faces[fi];
+                        if (!F->Txtr) continue;
+                        const float du1 = F->U2 - F->U1, dv1 = F->V2 - F->V1;
+                        const float du2 = F->U3 - F->U1, dv2 = F->V3 - F->V1;
+                        const bool detNeg = (du1 * dv2 - du2 * dv1) < 0.0f;
+                        const bool matNeg = F->Txtr->TbnHandedness < 0.0f;
+                        auto &r = tab[F->Txtr->Name ? F->Txtr->Name : "(unnamed)"];
+                        r[0] += detNeg; r[1] += matNeg; r[2] += (detNeg == matNeg); r[3] += 1;
+                    }
+                }
+                for (auto &kv : tab)
+                    std::fprintf(stderr, "[POMPATH-HAND] mat=%-28s faces=%lld detNeg=%lld "
+                                 "matNeg=%lld agree=%lld (%.1f%%)\n", kv.first.c_str(),
+                                 kv.second[3], kv.second[0], kv.second[1], kv.second[2],
+                                 100.0 * double(kv.second[2]) / double(kv.second[3] ? kv.second[3] : 1));
+            }
+        }
+        // --pom_path_viz: dump the per-pixel march path code plane.
+        if (meka::g_pomPathBuf) {
+            char pp[1024];
+            std::snprintf(pp, sizeof(pp), "%s/greets_t%06d_path.u32", cfg.outDir.c_str(), ts);
+            if (FILE* f = std::fopen(pp, "wb")) {
+                std::fwrite(meka::g_pomPathBuf, sizeof(uint32_t),
+                            size_t(xres) * yres, f);
+                std::fclose(f);
+                std::fprintf(stderr, "[GREETSSNAP] path -> %s\n", pp);
+            }
+            meka::g_pomPathBuf = nullptr;
         }
 
         // GBUF_PROBE="x1,y1,x2,y2": per-column-parity matID histogram over a
