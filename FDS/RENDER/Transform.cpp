@@ -1544,7 +1544,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 
 		// Per-pass clone redirection. With scratch non-null, all
 		// reads/writes of this TriMesh's per-vertex projection state
-		// (Vertex::PX, PY, RZ, TPos_AOS, TN, TTangent, UZ, VZ, Flags…)
+		// (Vertex::PX, PY, RZ, TPos_AOS, TN, TTangent, Flags…)
 		// land in scratch's clone instead of T's own Verts. Face
 		// pushes also use the clone's Face* (whose A/B/C point into
 		// the clone's Verts), so downstream code sees a coherent
@@ -1865,8 +1865,6 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 					Vtx->RZ = 1.0f;
 					Vtx->PX = -1.0f;
 					Vtx->PY = -1.0f;
-					Vtx->UZ = 0.0f;
-					Vtx->VZ = 0.0f;
 					Vtx->Flags |= Vtx_Visible;  // all 6 frustum-out bits set
 					if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 					continue;
@@ -1885,8 +1883,6 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				Vtx->RZ = 1.0f / vz;
 				Vtx->PX = Vtx->TPos_AOS.x * Vtx->RZ;
 				Vtx->PY = Vtx->TPos_AOS.y * Vtx->RZ;
-				Vtx->UZ = Vtx->U * Vtx->RZ;
-				Vtx->VZ = Vtx->V * Vtx->RZ;
 				if (Vtx->PX < 0.0f) Vtx->Flags |= Vtx_VisLeft;
 				if (Vtx->PX >= float(xr)) Vtx->Flags |= Vtx_VisRight;
 				if (Vtx->PY < 0.0f) Vtx->Flags |= Vtx_VisUp;
@@ -1918,7 +1914,6 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				if (outside) {
 					Vtx->TPos_AOS.x = 0.0f; Vtx->TPos_AOS.y = 0.0f; Vtx->TPos_AOS.z = 1.0f;
 					Vtx->RZ = 1.0f; Vtx->PX = -1.0f; Vtx->PY = -1.0f;
-					Vtx->UZ = 0.0f; Vtx->VZ = 0.0f;
 					Vtx->Flags |= Vtx_Visible;
 					if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 					continue;
@@ -1933,8 +1928,6 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				Vtx->RZ = 1.0f / vz;
 				Vtx->PX = Vtx->TPos_AOS.x * Vtx->RZ;
 				Vtx->PY = Vtx->TPos_AOS.y * Vtx->RZ;
-				Vtx->UZ = Vtx->U * Vtx->RZ;
-				Vtx->VZ = Vtx->V * Vtx->RZ;
 				if (Vtx->PX < 0.0f)        Vtx->Flags |= Vtx_VisLeft;
 				if (Vtx->PX >= float(xr))  Vtx->Flags |= Vtx_VisRight;
 				if (Vtx->PY < 0.0f)        Vtx->Flags |= Vtx_VisUp;
@@ -1943,6 +1936,26 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			}
 			goto AfterXForm;
 		}
+		// NOTE — none of the per-vertex loops below (nor the two world-space
+		// cull loops above) stores Vertex::UZ / VZ any more. Those stores were
+		// DEAD for every rasterized face: FrustumClipper::Render (FRUSTRUM.CPP,
+		// the `U/V/UZ/VZ stamped + perspective-projected in one block` at ~:910)
+		// copies A/B/C into its transient C_Verts and then UNCONDITIONALLY
+		// overwrites UZ/VZ from `F->U1..V3 * RZ`, and every rasterized mesh face
+		// reaches a filler through that entry (RenderInner.cpp 145/147/209/212/
+		// 214/316/318/320/394/402, Shadows.cpp:778, DeferredSurfaceKernel.cpp
+		// 3700/3701 are the only raster entries; clip-generated verts get UZ/VZ
+		// from FInterpolator / Near() / Far()). The other UZ/VZ readers do not
+		// see a mesh Vertex written here: `_2DClipper::clip` (FDS/Clipper.cpp)
+		// rasterizes f.A/B/C directly, but all its callers hand it locally-built
+		// quads that stamp their own UZ/VZ (DEMO/FOUNTAIN.CPP water + particle
+		// trails, DEMO/BlasterBolts.cpp; DEMO/FillerTest.cpp is dev-gated); the
+		// sprite path (RENDER.CPP:1209, A==B) reads PX/PY/RZ only; RADIO.CPP
+		// reuses UZ/VZ as its own ray-coordinate scratch and writes before it
+		// reads. Particle-trail verts still get UZ/VZ from calcVisibilityFlags,
+		// which is why that function keeps its stores.
+		// Removing them drops 2 loads (U,V at offsets 104..111), 2 muls and
+		// 2 stores (offsets 12..19) per vertex per pass.
 		//    Main vertex loop,in case no restrictions apply.
 		if (!(T->Flags&Tri_Phong))
 		{
@@ -1996,8 +2009,6 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 					Vtx->RZ = rz;
 					Vtx->PX = tposArr[0] * rz;
 					Vtx->PY = tposArr[1] * rz;
-					Vtx->UZ = Vtx->U * rz;
-					Vtx->VZ = Vtx->V * rz;
 				}
 				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
@@ -2048,8 +2059,6 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 					Vtx->RZ=xfrmRcpD(Vtx->TPos_AOS.z, rcpMode);
 					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
 					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
-					Vtx->UZ=Vtx->U*Vtx->RZ;
-					Vtx->VZ=Vtx->V*Vtx->RZ;
 					}
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
@@ -2104,8 +2113,6 @@ Regular:
 					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
 					//          Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
-					Vtx->UZ=Vtx->U*Vtx->RZ;
-					Vtx->VZ=Vtx->V*Vtx->RZ;
 					}
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
@@ -2147,8 +2154,6 @@ Regular:
 //				Vtx->REU=Vtx->EU*Vtx->RZ;
 //				Vtx->EV=128.0+95.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
 //				Vtx->REV=Vtx->EV*Vtx->RZ;
-				Vtx->UZ=Vtx->U*Vtx->RZ;
-				Vtx->VZ=Vtx->V*Vtx->RZ;
 				//if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
@@ -2173,8 +2178,6 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 				//        Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
 				//        Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
-				Vtx->UZ=Vtx->U*Vtx->RZ;
-				Vtx->VZ=Vtx->V*Vtx->RZ;
 				if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft; else Vtx->Flags=0;
 				if (Vtx->PX>=xr) Vtx->Flags+=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
@@ -2206,8 +2209,6 @@ ERegular:
 					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
 					//          Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
-					Vtx->UZ=Vtx->U*Vtx->RZ;
-					Vtx->VZ=Vtx->V*Vtx->RZ;
 //					Vtx->REU=Vtx->EU*Vtx->RZ;
 //					Vtx->REV=Vtx->EV*Vtx->RZ;
 					if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft;
