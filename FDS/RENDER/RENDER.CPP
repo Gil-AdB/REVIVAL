@@ -950,8 +950,24 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				rx0=std::max(0,rx0); ry0=std::max(0,ry0);
 				rx1=std::min(XRes,rx1); ry1=std::min(YRes,ry1);
 				if (rx1<=rx0 || ry1<=ry0) return;
-				const int ti0=std::min(rx0/tileSizeX,numTilesX-1), ti1=std::min((rx1-1)/tileSizeX,numTilesX-1);
-				const int tj0=std::min(ry0/tileSizeY,numTilesY-1), tj1=std::min((ry1-1)/tileSizeY,numTilesY-1);
+				// tileSizeX/Y round DOWN to a multiple of 8 (see the top of
+				// renderFrame), so they are ZERO whenever this frame is an
+				// OFFSCREEN target narrower than 43 px or shorter than 36 px —
+				// which the --sh_ambient probe is: SHAmbient_EnsureBaked renders
+				// six 32x32 cube faces through this very function. The tile loop
+				// copes with a zero size (tiles 0..N-2 come out empty and the LAST
+				// one absorbs the whole surface), but these two divisions do not:
+				// on wasm an integer divide by zero TRAPS, killing the frame
+				// ("RuntimeError: integer divide by zero" out of MainLoop_runner);
+				// on arm64 UDIV quietly yields 0, which sent the rect to tile 0 —
+				// the empty one — so the batch's transparent faces were dropped
+				// from the probe instead; on x86 IDIV raises #DE. Map the rect to
+				// the tile that actually covers the surface at that size, which is
+				// exactly what the tile loop above draws.
+				const int ti0 = tileSizeX ? std::min(rx0/tileSizeX,numTilesX-1)     : numTilesX-1;
+				const int ti1 = tileSizeX ? std::min((rx1-1)/tileSizeX,numTilesX-1) : numTilesX-1;
+				const int tj0 = tileSizeY ? std::min(ry0/tileSizeY,numTilesY-1)     : numTilesY-1;
+				const int tj1 = tileSizeY ? std::min((ry1-1)/tileSizeY,numTilesY-1) : numTilesY-1;
 				for (int j=tj0;j<=tj1;++j) for (int i=ti0;i<=ti1;++i) {
 					const int idx=j*numTilesX+i;
 					const int ix0=std::max(rx0,tileSizeX*i), iy0=std::max(ry0,tileSizeY*j);
