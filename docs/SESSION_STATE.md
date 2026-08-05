@@ -1,5 +1,79 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-06 — WHERE THE DISPLACEMENT CAMPAIGN ACTUALLY STANDS (read this first)
+>
+> **The per-pixel shell can produce protrusion the user likes ("fantastic when
+> it works") but not at a setting that is also stable.** That tension is the
+> campaign's central measured finding, and it is not a bug in one code path —
+> four rounds of hypotheses (cone march, `--pom_normal`, step exhaustion,
+> bitangent handedness) were each measured and each REFUTED as the cause.
+>
+> **The instrument that finally matched the user's eye: SLIP** — texels of
+> texture sliding per frame at a fixed point on the stone (`--pom_path_viz`
+> mode 2 + the `_uvgeo.bin` camera-free surface coordinate). Arms the user
+> calls clean measure p90 0.01–0.12; the arm he called "swimming like a shark"
+> measures **p90 15.3 / p99 501** — half a texture tile per frame. Every
+> earlier metric (jerk, frame-diff, error-vs-reference) disagreed with his eyes;
+> this one agrees.
+>
+> **Cap ladder** (recess arm, slip p99 / reach p90; clean floor 0.60):
+> cap2 0.82/28.6 · cap4 **1.44/53.8** · cap8 3.41/94.5 · cap16 11.4/184 ·
+> cap32 37/338 · cap64 **501**/109. Cap 64 has LESS reach than cap 32 — it
+> pushes 18.5 % of the wall into the flat clamp. Cap 4 sits at the clean floor
+> with ~14× the non-shell arm's reach.
+>
+> **Why the mechanism, not a bug:** our shell marches the TRUE view ray
+> (÷V·N, capped) where classic POM uses the OFFSET-LIMITED form. That was a
+> deliberate S1b choice ("grazing lateral travel is exactly what silhouettes
+> are made of"). Slip scales with the CAP and NOT with step count (32/128/512
+> identical). A hard offset clamp has no usable band (24 texels = no relief;
+> 48/64 = polygon artifacts). **Recess-only is clean (0 void, 0 offscreen
+> delta) but structurally cannot show a gap between blocks** — the user
+> confirmed by eye that cap 4 recess "just gives something equivalent to the
+> regular parallax".
+>
+> **OPEN, and it decides the campaign:** does the LID arm at cap 4/8 show real
+> see-through between blocks? If yes, protrusion is viable at a stable setting.
+> If no, the swim-free band and the see-through band do not overlap, and
+> recess-only is the shippable result with real geometry the only path to
+> silhouettes.
+>
+> **Also measured, do not re-litigate:** `--pom_cone_min_step=1` with only 32
+> march steps leaves 9.5k–52k px UNRESOLVED (no parallax shift at all, a hard
+> discontinuity clustered at steep block edges); `--parallax_pom=128` drives it
+> to 0, and removing the floor makes it 20× worse (209k px — a true per-texel
+> cone truncates to a zero step and the march stalls). The march was ALSO
+> missing `Material::TbnHandedness` (real bug, fixed `7bfbc87`) — but applying
+> it moved slip by nothing, and the per-face variant made the p99 tail WORSE,
+> which is evidence the per-face determinant test itself is wrong (it only
+> tests 3 verts, only on normal-mapped materials; scene-wide agreement is
+> **40.1 %** — 302 of 406 `rooms` faces are negative-determinant but sit on a
+> handedness=+1 material). That affects the DEFERRED KERNEL's normal mapping
+> too, independent of displacement. Queued in OPTIMIZATION_BACKLOG.
+>
+> **In flight at write time:** (a) mirrors reflecting the flat proxy while
+> still running the parallax march (user-approved; measured that the march DOES
+> read in the reflection — 96.3 % of mirror pixels change without it) + a
+> shadow-pass geometry decomposition; (b) `docs/DISPLACEMENT_RESEARCH_II.md` —
+> a literature re-read against these measurements, whose hinge question is
+> whether anyone ever SHIPPED silhouette-correct per-pixel displacement or
+> whether shipped POM simply had flat edges; (c) `docs/GPU_BENCHMARK_PLAN.md` —
+> a standalone GPU deferred path as a BENCHMARK and ground truth (user: "not as
+> a shipping backend"), gated out of the normal build.
+>
+> **Perf, measured this session:** XFRM main-view 7.9 ms at 958k verts, of
+> which the SoA dual-write was 2.40 ms — removed (`--xfrm_soa_inline`, default
+> ON, bit-exact, **−25 %**). The transform loop is CACHE-LINE-BOUND (`Vertex`
+> is pack(1) 140 B), NOT arithmetic-bound, which is why wider SIMD washed and
+> why an approximate reciprocal measured SLOWER. A BVH/hierarchy is refuted
+> with numbers (0.45 core-ms ceiling over ~9,150 mesh tests/frame). **The real
+> geometry elephant is the SHADOW passes: 33–36 calls/frame, 7.6M verts,
+> 340–790 core-ms**, vs main view's 0.96M / 4–7 ms.
+>
+> **Review poses live in `docs/greets_review_poses.txt`** — every camera the
+> user has reported a defect from. Use them; agents kept re-deriving them.
+> **F4/F3 scrub the scene clock** at `--scrub_speed`× (default 4).
+
 > **2026-08-05 — GREETS RENDER NONDETERMINISM IS CLOSED. GREETS IS A GATE
 > SCENE AGAIN.** Root cause: the opaque deferred kernel read AO maps with the
 > WRONG TEXEL WIDTH. `Material::AoMap` arrives from the importer as
