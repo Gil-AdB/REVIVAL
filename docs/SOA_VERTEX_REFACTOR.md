@@ -2,7 +2,149 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
-## MEASURED 2026-08-06 — the whole geometry front end is now ~1.5–3 % of a greets frame, and Phase 5's real ceiling is HALF what this doc claims. Read this before starting Phase 4/5.
+## MEASURED 2026-08-06 (b) — the mechanism, nailed with a controlled experiment: `sizeof(Vertex)` is the ONLY variable this loop responds to. Read this before Phase 5.
+
+Everything below this section reasons about the per-vertex loop being
+"cache-line-bound" from *ablations*, which are confounded (they change the
+arithmetic and the bytes together). This section changes one variable at a time
+and gets a clean answer. Two of this doc's own predictions are refuted by it.
+
+### Regime + instrument (all numbers in this section)
+
+`./DEMO --bench=scene@scene=greets,t=5780,iters=24 --deferred --greets_displace
+--xfrm_prof=24`, 1920×1080, `SDL_VIDEODRIVER=dummy`, per-frame **MIN** over 24
+frames, box shared with other agents (1-min load quoted per run, 11–17
+throughout). Main-view `Transform_Objects` sees **108 meshes / 253 280 verts
+(inside 70 607 / ahead 166 647 / regular 16 026) / 63 290 faces tested / 36 147
+pushed**.
+
+> **The 958 204-vert figure this doc is built on no longer exists.** `9d`'s
+> faceless-mesh cull plus the GREETS.CPP work on `fog-wt` took the displaced
+> main-view count to 253 280. `--greets_displace` is still the largest available
+> regime and is what everything here is measured in; the *ratios* below are the
+> transferable part, not the absolute ms.
+
+### 1. The dead `UZ`/`VZ` stores — deleted, and NEUTRAL (`fdc7a07`)
+
+`FrustumClipper::Render` overwrites `A/B/C->UZ/VZ` unconditionally at entry, so
+the transform's stores could never be read (full audit in the commit message and
+in the note above the vertex loops in `Transform.cpp`). Removing 10 sites / 19
+lines drops 2 loads, 2 muls and 2 stores per vertex per pass:
+
+| arm | VERT | FACE | TOTAL |
+|---|--:|--:|--:|
+| base | 1.186 / 1.176 | 0.612 / 0.592 | 1.834 / 1.805 |
+| deleted | 1.160 / 1.181 | 0.584 / 0.592 | 1.785 / 1.807 |
+
+**Neutral** (|ΔVERT| ≤ 0.026 ms against a ~0.05 ms spread). Landed anyway: it is
+byte-null at every gate, and it is what makes the untouched tail contiguous.
+
+### 2. Field REORDER — +2.6 % on VERT, and it REFUTES the face-loop theory
+
+`Vertex` regrouped (see the block comment in `FDS/Base/Vertex.h`) so that
+**PX, PY, Flags, TPos_AOS.z sit in 24 contiguous bytes at offset 0** and
+everything the per-vertex loop touches fits in **bytes 0..87**, with the
+transform-untouched 52 bytes (BGRA, UZ/VZ, EUZ/EVZ, U/V, EU/EV, i, OrigBary,
+ShellH) as a contiguous tail at 88..139. `FInterpolator` retuned to the new runs
+(2-wide PX/PY, UZ/VZ, EUZ/EVZ, TTangent.y/z; 4-wide TN.x..TTangent.x) — same
+`a + t*(b-a)` per lane, so bit-identical.
+
+| arm | VERT min | FACE min | TOTAL min |
+|---|--:|--:|--:|
+| base | 1.156 / 1.193 | 0.583 / 0.604 | 1.775 / 1.846 |
+| reordered | 1.135 / 1.155 | 0.588 / 0.606 | 1.763 / 1.835 |
+
+**VERT −2.6 % (min) / −2.9 % (p50), same sign in both interleaved pairs.
+FACE 0.**
+
+That FACE zero is the finding. The reorder cuts the *predicted* cache lines per
+random 3-vertex deref from ~2.88 to ~1.56 (−46 %) — the exact win the
+"§per-face visibility test = 73 % of FACE, read it from SoA instead" item in
+docs/OPTIMIZATION_BACKLOG.md is priced on — **and FACE did not move.** The three
+`F->A/B/C` derefs are already cache-resident (a face's vertex indices are
+spatially coherent, so the lines are still hot from the previous face). So:
+
+* **The per-face cost is NOT vertex line traffic.** Migrating `Flags`/`PX`/`PY`
+  to 4-byte-stride SoA arrays will not buy the FACE bucket back, and it does not
+  need the `A/B/C_idx`-trust invariant that item was blocked on. Repricing:
+  whatever the 73 % is, it is the branch chain + the per-face `F->Txtr->Flags`
+  chase + the Face stream, not the vertex reads.
+* By symmetry it also explains why the reorder gave VERT only 2.6 %: the
+  per-vertex walk is **sequential**, and at a 140-byte stride a 52-byte gap can
+  never skip a whole 64-byte line. The line-span arithmetic only ever applied to
+  random access, and the only random access here turned out to be cached.
+
+### 3. The controlled experiment: `-DFDS_VERTEX_PAD_BYTES=N`
+
+Dead tail padding inflates `sizeof(Vertex)` and changes **not one instruction**
+in any loop. Same tree (reordered), same scene, fresh build dir per arm,
+`pad=0` run first AND last as drift control:
+
+| `sizeof(Vertex)` | VERT min | ns/vert | vs 140 | FACE min |
+|---|--:|--:|--:|--:|
+| **140** (control ×2) | **1.118 / 1.123** | 4.41 | — | 0.575 / 0.579 |
+| 204 | 1.203 | 4.75 | **+7.6 %** | 0.617 |
+| 268 | **2.315** | 9.14 | **+107 %** | 0.724 |
+
+Drift between the two controls is 0.005 ms, so both steps are real. Per-vertex
+time is a **steep, super-linear function of the struct's stride**, with a cliff
+between 204 and 268 bytes (consistent with the hardware stride prefetcher giving
+up past ~256 B — past that every vertex is a demand miss and the loop doubles).
+
+### 4. Bandwidth: the loop is at a SINGLE-CORE streaming ceiling (~62–64 GB/s)
+
+Per vertex the reordered walk pulls the lines covering bytes 0..87 at a 140-byte
+stride (≈2.375 lines = 152 B), writes back the dirty lines covering 0..51
+(≈1.81 lines = 116 B) and stores 16 B into the SoA arrays ⇒ **~284 B/vert**.
+At 4.41 ns/vert that is **64.4 GB/s on ONE core** (main-view `Transform_Objects`
+runs on the tick thread — `RENDER.CPP:479/493` and each scene's own call site;
+`Shadows.cpp:422` is the only threaded caller).
+
+Two independent cross-checks from this doc's own 2026-08-05 numbers, at 958 204
+verts and the pre-reorder layout (touched span 4..123, i.e. effectively every
+line: 140 B read + 140 B written back + 16 B SoA):
+
+| loop | ms | bytes/vert | GB/s |
+|---|--:|--:|--:|
+| VERT (`--xfrm_soa_inline` on) | 4.41 | 296 | **64.3** |
+| `VertexFrame_DumpFromAoS` sweep — 4 loads, 4 stores, ZERO arithmetic | 2.40 | 156 | **62.3** |
+| VERT, this section, 253 280 verts | 1.118 | 284 | **64.4** |
+
+Three unrelated loops pinned at 62–64 GB/s is a ceiling, not a coincidence. It
+is the single explanation for every wash this campaign has recorded: Vec8f
+across 8 verts, the reciprocal estimate, the single-precision divide, dropping
+2 of 3 mat-vecs, and now the field reorder. **Nothing inside the loop can move a
+loop that is waiting on DRAM; only bytes/vertex and more cores can.**
+
+### 5. What follows, ranked
+
+1. **Shrink the mesh-side struct — the interleaved-output design in the
+   2026-08-06 (a) section below is CONFIRMED, and its ceiling is bigger than
+   that section claims.** Mesh-side inputs 140 → 68 B (clean, no write-back),
+   outputs to a separate 64 B/vert array (one full line, write-allocate
+   elidable): streamed traffic **~284 → ~132 B/vert**. Against the measured
+   slope in §3 that is worth on the order of **2× VERT**, not the −26 % / −45 %
+   this doc argues about. The reorder already parked the split line: bytes
+   88..139 are exactly the fields that do not belong on the transform's side.
+   Cost is unchanged and still the real blocker — it needs `Vertex` to split
+   into mesh storage vs the clipper's transient `C_Verts` type (every
+   `RasterFunc` takes `Vertex**`), i.e. the "Phase 6.3, 2–3 days" work.
+2. **NEW — parallelise the MAIN-VIEW `Transform_Objects`. Probably the cheapest
+   ms/effort left, and it is orthogonal to the layout.** The loop sits at one
+   core's streaming ceiling while 11 cores idle; the chip's aggregate bandwidth
+   is several times 64 GB/s, and the per-light shadow phase A already proves the
+   per-mesh work parallelises (`VertexScratch` clones + a per-pass
+   `FaceListContext`). The shared mutable state to solve is the FList append
+   (`Ins++`), the tile-bbox stamp into the `FListEntry`, and the radix sort that
+   follows — per-worker FList segments with a reserve-and-merge, in mesh order,
+   keeps the sort input deterministic. This has never been costed; it should be
+   before anyone starts (1).
+3. **Do NOT spend the migration's budget on the FACE bucket** — §2 measured that
+   win as zero.
+
+---
+
+## MEASURED 2026-08-06 (a) — the whole geometry front end is now ~1.5–3 % of a greets frame, and Phase 5's real ceiling is HALF what this doc claims. Read this before starting Phase 4/5.
 
 Two things changed since the 2026-08-05 section below, and both cut the prize:
 

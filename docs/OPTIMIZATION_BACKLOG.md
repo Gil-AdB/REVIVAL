@@ -214,6 +214,45 @@ items below stay PARKED.
 
 ## Geometry front-end (XFRM) — measured 2026-08-05, docs/SOA_VERTEX_REFACTOR.md
 
+> **RE-OPENED 2026-08-06 (b) with a CONTROLLED experiment — the mechanism is now
+> quantified, and two items below are REPRICED.** `-DFDS_VERTEX_PAD_BYTES=N`
+> adds dead tail padding to `Vertex`: not one instruction in any loop changes,
+> only `sizeof`. greets t=5780 `--greets_displace`, 253 280 verts, per-frame min
+> over 24, `pad=0` run first and last (drift 0.005 ms):
+> **sizeof 140 → VERT 1.118/1.123 ms; 204 → 1.203 (+7.6 %); 268 → 2.315
+> (+107 %).** Per-vertex time is a steep, super-linear function of the struct
+> stride, with a cliff past ~256 B (stride prefetcher gives up).
+> Bandwidth: ~284 B of streamed traffic per vertex at 4.41 ns = **64 GB/s on ONE
+> core**, and this doc's own 958 k-vert numbers land at 64.3 GB/s (VERT) and
+> 62.3 GB/s (the zero-arithmetic SoA sweep). Three unrelated loops at 62–64 GB/s
+> is a single-core streaming ceiling — the one explanation for every wash on
+> record (Vec8f, reciprocal estimate, single-precision divide, dropping 2 of 3
+> mat-vecs, and the new field reorder).
+> **Repricing:**
+> - **Phase 5 / the interleaved 64-byte output array is CONFIRMED and worth MORE
+>   than the −26 % below** — traffic ~284 → ~132 B/vert, i.e. on the order of
+>   **2× VERT** against the measured slope. Blocker unchanged: `Vertex` must
+>   split into mesh storage vs the clipper's transient type (every `RasterFunc`
+>   takes `Vertex**`).
+> - **"Read the per-face `Flags`/`PX`/`PY` from the SoA arrays" is REFUTED.** A
+>   field reorder that puts PX/PY/Flags/TPos_AOS.z in 24 contiguous bytes cuts
+>   the predicted lines per random 3-vertex deref 2.88 → 1.56 (−46 %) and moved
+>   FACE by **0.6 %** (0.583/0.604 → 0.588/0.606). The A/B/C derefs are already
+>   cache-resident. The 73 % is the branch chain + the per-face `F->Txtr->Flags`
+>   chase + the Face stream, not the vertex reads. No `A/B/C_idx` invariant
+>   needed, and no win there to collect.
+> - **NEW, uncosted, probably the cheapest ms/effort left: parallelise the
+>   MAIN-VIEW `Transform_Objects`.** It runs on the tick thread only
+>   (`RENDER.CPP:479/493` + each scene's call site; `Shadows.cpp:422` is the only
+>   threaded caller) and is pinned at one core's bandwidth ceiling while 11 cores
+>   idle. Per-light shadow phase A already proves the per-mesh work parallelises
+>   (`VertexScratch` + per-pass `FaceListContext`). Shared state to solve: the
+>   FList append (`Ins++`), the tile-bbox stamp into the `FListEntry`, and the
+>   radix sort — per-worker segments reserved in mesh order keep the sort input
+>   deterministic.
+> - **LANDED, byte-null, neutral:** the transform's `UZ`/`VZ` stores were dead
+>   (the clipper overwrites them at entry) — 10 sites deleted in `fdc7a07`.
+
 > **RE-MEASURED 2026-08-06 — THIS SECTION IS CLOSED AS A PERF TARGET.** With
 > tessellation retired and `9d`'s faceless-mesh cull landed, the WHOLE geometry
 > front end is **≈1.2–2.6 ms of a ~79 ms greets frame (1.5–3.3 %)**: main-view
