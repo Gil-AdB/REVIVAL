@@ -329,38 +329,88 @@ assume the reverse.
 defaults to HDR (`Hdr_ActivateNoFog` fires because greets has no fog), so keeping it is parity,
 not extra.
 
-**Displacement (Phase 3) — re-framed by the research verdict, which has now landed.**
+**Displacement (Phase 3).** Silhouette-correct displacement is an **OPEN question that the user
+believes is answered YES, on evidence he has seen**, and this plan treats it that way.
 
-`docs/DISPLACEMENT_RESEARCH_II.md` §5 ranks **R5 — recess-only per-pixel displacement and *no
-silhouette program at all* — as the front-runner**, on measured grounds: greets is a closed room,
-only 0.4 % of 2,289 world-units of patch boundary is a true free edge, and an instrumented hunt
-for see-through at 3.3× amplitude across all 13 review poses found 0–24 px everywhere but one
-pose. **So "silhouette-correct per-pixel displacement" is probably NOT the prize** — this plan's
-first draft asserted it was, and that claim is withdrawn.
+> An earlier revision of this section withdrew the "silhouette displacement is the prize" framing
+> in favour of `DISPLACEMENT_RESEARCH_II.md` §5's R5 ("recess-only, no silhouette program").
+> **That withdrawal is itself retracted.** The user rejected R5, and his grounds are empirical, not
+> aesthetic: the geometric **mesh-displacement (tessellation) arm already demonstrated the
+> protrusion look he wants**, and he has seen genuine see-through between stones and judged it
+> good. The method fails in *some* cases, and finding out why is the job — not concluding the
+> effect is unavailable.
+>
+> The "0–24 px see-through at 12 of 13 poses" figure that R5 rests on **does not measure what he
+> observes.** Its threshold requires a surface >3 world units behind the wall — a distant-background
+> criterion. What you actually see through a gap between stones is the adjacent wall or the mortar
+> bed, a small fraction of that distance away, which that instrument scores as no see-through. The
+> research agent has been asked to re-derive it. Until then treat the figure as not-yet-valid,
+> **not** as a negative result.
 
-What the GPU arm is now for, in priority order:
+GPU arms, in the priority order the green-light specifies:
 
-1. **Settle H1 vs H2 — the discriminator §4 says has never been run.** The grazing "swim" is an
-   *unattributed* symptom: either the march is wrong (H1) or the motion is physically correct and
-   reads as sliding because it is painted on a flat surface (H2). The stated discriminator is to
-   take an arm that **moves real geometry** through the identical camera path and measure its slip
-   on the same surface-registered metric. **Hardware tessellation on the GPU is exactly that
-   instrument**, and it also gives a true-ray reference image to register against. This is the
-   single highest-value GPU displacement task and it is a *measurement*, not a feature.
-2. **Ground-truth the texture-filtering term.** `--texture_filter` defaults to 0, so the CPU
-   deferred kernel point-samples at texel granularity; one height texel covers ~15 screen pixels
-   at these poses, drawing the wall as ~4 px blocks that crawl under motion — present in flat POM
-   and `--no-parallax` alike. The GPU gets trilinear + aniso for free, so it can show what the same
-   wall looks like *with* correct filtering. The CPU path structurally cannot answer that question.
-3. **Cost R3 (Hirche's full prism) if the user ever wants it settled rather than argued.** R3
-   requires rastering all eight faces of each shelled quad's prism, letting each prism march its
-   own interior, discarding on exit, and letting the Z-buffer arbitrate overlaps. That is native on
-   a GPU (`discard_fragment()`, `[[depth(any)]]`, per-fragment depth arbitration) and is precisely
-   the mechanism the CPU's `--pom_shell_side_entry` can only approximate. Gated on R0/R1 first.
-4. **Flat POM** as the cheap baseline arm, for A/B against 1–3.
+1. **Hardware tessellation — the instrument for the H1/H2 discriminator.** The grazing "swim" is an
+   *unattributed* symptom: either the march is wrong (H1), or the motion is physically correct and
+   reads as sliding because it is painted on a flat polygon (H2). `DISPLACEMENT_RESEARCH_II.md` §4
+   states the discriminator has never been run and that it requires an arm which **moves real
+   geometry** through the identical camera path, measured on the same surface-registered metric.
+   That is what hardware tessellation is, and the GPU is the only place we can build it cheaply.
+   **This is the single highest-value item in the GPU plan.** MEASURED: `[[patch(quad,4)]]`
+   tessellation vertex functions compile on this machine; max tessellation rate 16.
+2. **Prism / closed-shell arm.** The dismissal of this family was wrong. On **flat quads** the
+   prism collapses the expensive half (tetrahedralisation, rippling, Coons patches) while keeping
+   the cheap half that actually buys silhouettes: rasterise the extruded box, bound the ray to its
+   interior, discard on exit, let the Z-buffer arbitrate between overlapping prisms. Hirche's own
+   blocking restriction — **prism side faces must be planar** — is exactly satisfied by our flat
+   walls. Estimated ~1,800 faces against the tessellation carve's 86,600. All three mechanisms it
+   needs are native on a GPU (`discard_fragment()`, `[[depth(any)]]`, per-fragment depth
+   arbitration) and are precisely what the CPU's `--pom_shell_side_entry` can only approximate.
+   **A GPU implementation answers in days what has cost a week, and yields a visual ground truth to
+   port against.**
+3. **Correctly filtered wall as ground truth.** `--texture_filter` defaults to 0, so the CPU
+   deferred kernel point-samples at texel granularity; one height texel covers ~15 screen pixels at
+   these poses, drawing the wall as ~4 px blocks that crawl under motion — present in flat POM and
+   `--no-parallax` alike. **This may account for part of what is being called swim.** The GPU gets
+   trilinear + aniso for free, so it can show that same wall correctly filtered — something the CPU
+   path structurally cannot do.
+4. **Flat POM** as the cheap baseline arm, for A/B against 1-3.
 
-MEASURED on this machine: tessellation vertex functions (`[[patch(quad,4)]]`) compile; max
-tessellation rate 16; `MTL4MeshRenderPipeline` is in the SDK if mesh shaders are ever wanted.
+`MTL4MeshRenderPipeline` is in this SDK if mesh shaders are ever wanted.
+
+### 3.1 Fidelity note — the `rooms` / `rooms::mirUV` boundary, and why the GPU arm may not show it
+
+From the user's own `--poly_viz` capture: the CPU failures **cluster on the `rooms` /
+`rooms::mirUV` boundary**, where three things coincide — UV handedness flips, the material changes
+(the handedness split *clones* the material), and the patch domain ends (the shell's union-find
+groups per material).
+
+The GPU arm takes per-face UVs straight from FDS and **does not inherit the material split**, so it
+may simply not exhibit this failure. **If that is observed it is a strong result and must be stated
+explicitly**, because it localises the CPU defect to the handedness/material-clone split rather
+than to displacement itself. It also means the GPU arm is *not* automatically a like-for-like
+reproduction at that boundary — check it before concluding anything either way.
+
+### 3.2 The `--greets_stone_tex` gate — DECISION: replicate the override in GpuBench
+
+§2.6 established that `--greets_stone_tex` (default ON) replaces the `rooms` and `floor`
+albedo/height/normal/roughness with `Runtime/TEXTURES/greets_*` sidecars, DEMO-side, so the wall the
+user reviews is not the wall `LoadFLD` hands us. **No displacement arm may run on the authored
+wall.** Of the two options:
+
+**CHOSEN: replicate the override inside `GpuBench/SceneIngest.cpp`.** Reading
+`DEMO/GREETS.CPP:1508-1600` shows the mechanism is a *filename repoint performed before textures are
+loaded* — `M->Txtr->FileName = strdup(albedo); M->Txtr->BPP = 0;` — plus three sibling maps loaded
+onto `M->HeightMap` / `M->NormalMap` / `M->RoughnessMap`. Since GpuBench controls when
+`Load_Texture` runs, this is a per-material-name repoint of a handful of lines keyed on
+`Material::Name` (`"rooms"` -> `greets_wall*.png`, `"floor"` -> `greets_floor*.png`, floor
+`ParallaxScale` 0.25). Two details that must not be lost: the albedo is **RGBA with baked AO in
+alpha** (`Mat_AoInAlpha`), so the ingest must stop forcing alpha to 255 for these; and an
+*authored* `ParallaxScale` (!= the 1.0 default) wins over the code default, matching `GREETS.CPP`.
+
+**REJECTED: dump post-`Initialize_Greets` material state from DEMO.** It needs a dump path added to
+`DEMO/` (which this work is scoped out of), and it reintroduces exactly the stale-artifact hazard
+that got the scene-dump-tool option rejected in §2.2 — the dump would silently drift from
+`GREETS.CPP` the next time the override changes.
 
 ### What is explicitly NOT implemented, and why that's fine for a benchmark
 
@@ -537,7 +587,10 @@ Estimates are **ESTIMATE** unless a stage is marked as already measured.
 | **2. Deferred G-buffer + 7 omnis, no shadows** | MRT G-buffer, full-screen **PBR** lighting pass (GGX + split-sum env BRDF + multiscatter + SH ambient — the stack greets actually runs) | ~1.5–2 days | The lighting comparison without the shadow confound. **Highest value per day, because the frame is lighting-bound.** |
 | **3. Cube shadow maps** | 7 × 6 × 512² + 3 × 6 × 128², `sample_compare` + PCF | ~1.5–2 days | The full greets-frame comparison, and makes the PCF / lightmap-amortisation asymmetries concrete |
 | **4. HDR + ACES tonemap** | `rgba16float` target + tonemap pass | ~½ day | Parity with greets' default look; makes screenshots visually comparable |
-| **5. Displacement arms** | hardware tessellation as the **H1/H2 discriminator** (~2 d), filtered-wall ground truth (~½ d, falls out of it), flat POM baseline (~1 d), Hirche full prism only if R0/R1 say so (~2–3 d) | ~3–6 days | **Settling the un-taken measurement** that the whole grazing complaint rests on, plus a filtered ground truth the CPU path cannot produce. NOT "does silhouette displacement work" — the research verdict says this scene has almost no silhouettes to get right |
+| **5a. Hardware tessellation** | displace real geometry; run sweep-A and measure surface-registered slip | ~2 days | **The H1/H2 discriminator that has never been run** — the highest-value item in the plan. Also reproduces the protrusion look the user has already seen work. |
+| **5b. Filtered-wall ground truth** | falls out of 5a (trilinear + aniso are free) | ~½ day | Shows the same wall without the CPU's point-sampled ~4 px crawling texel blocks — may be part of "swim" |
+| **5c. Prism / closed-shell** | rasterise extruded boxes, bound the ray to the interior, discard on exit, Z-buffer arbitrates overlaps | ~2–3 days | **Answers in days what has cost a week**, and gives a visual ground truth for a CPU port. Flat quads satisfy Hirche's planar-side-face restriction exactly; ~1,800 faces vs the carve's 86,600 |
+| **5d. Flat POM baseline** | fragment-shader march, no silhouette | ~1 day | The cheap A/B arm against 5a/5c |
 | **6. (optional) Snapshot output** | offscreen PPM/PNG matching our snapshot naming | ~½ day | Cross-renderer image diffs with existing tooling |
 
 **~3 days to the first meaningful lighting number. ~2 weeks to the strategic answer.**
@@ -625,11 +678,10 @@ endif()
 
 ## 8. Open questions to settle before Phase 3
 
-1. ~~Which displacement arms, in what order~~ — **RESOLVED** by `docs/DISPLACEMENT_RESEARCH_II.md`
-   §4–5; see §3's displacement block. The GPU arm's job is the H1/H2 discriminator and a filtered
-   ground truth, not a silhouette program. Note R0 and R1 are *no-code* steps and should precede
-   any GPU displacement work — if R1's shipped-POM configuration looks acceptable, most of the
-   question dissolves.
+1. ~~Which displacement arms, in what order~~ — **SETTLED by the green-light**: deferred G-buffer +
+   PBR lighting + cube shadows first (report that number), then **tessellation before prism**, then
+   the filtered-wall ground truth and flat-POM baseline. See §3 and stages 5a–5d. The R5
+   "no silhouette program" recommendation is **rejected** — §3's blockquote records why.
 2. Shadow resolution sweep: 512² (our static default) only, or also 1024²/2048² to show the GPU
    scaling where the CPU's is prohibitive?
 3. The 3 mech-parented omnis resolve through the hierarchy pass, which `Animate_Objects` already
