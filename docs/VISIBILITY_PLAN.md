@@ -620,3 +620,210 @@ consumer becomes a loop: the RTT hide scope, `MirrorShatter`,
 documents. That is a real refactor with a pixel-risk surface across the mirror
 system, so it is specced here and left for a green-light rather than landed
 against a 2 ms estimate.
+
+---
+
+## 9. ADDENDUM 2026-08-06 — the per-MESH census, and the faceless mesh it found
+
+Status: **measured; one unconditional fix LANDED and byte-null at every gate;
+the two changes it was commissioned to justify are REFUTED by the same
+numbers.** Commissioned as "Phase 0" of an offscreen-geometry cut, on the
+premise from §8a that SHADOW is the geometry elephant (7.6 M verts/frame) and
+from §8d that 49 % of a mirror clone is the displaced Piramid. §8 measured
+those as *lumps*. This section decomposes them **by mesh and by material**,
+which is the granularity a "flatten the wall casters" decision actually turns
+on — and the decomposition says the lump is mostly not geometry at all.
+
+### 9a. The instrument — `--xfrm_pass_mesh_prof=N`
+
+Census build only (`cmake -S . -B build-census -G Ninja -DFDS_VIS_CENSUS=ON`),
+same compile-time gating and for the same reason as §8's instruments. It
+attributes every `Transform_Objects` mesh visit to (pass kind × TriMesh) via a
+**lock-free pointer-keyed table** — the shadow bakes transform on 12 workers
+and a mutex there would serialise them — and prints four tables at the same
+cadence as `--xfrm_pass_prof`:
+
+* `[XFRM-MESH]` — transformed verts per **authored object** (the
+  `Piramid.lwo:cNN` chunks and `momy.lwo::body` bins folded back together).
+* `[XFRM-TOP]` — the top individual meshes **with their face count**.
+* `[XFRM-MAT]` — per **material**, computed at dump time from each mesh's
+  `Face->Txtr` histogram and attributing that mesh's verts to its materials in
+  proportion to face count (so a chunk straddling `rooms`/`floor` is split, not
+  mis-assigned).
+* `[XFRM-ZERO]` — the line that mattered: the share of each pass owned by
+  meshes with `FIndex == 0`.
+
+### 9b. THE FINDING — two thirds of the shadow-pass geometry is a mesh with NO FACES
+
+`GREETS.CPP` ~2540 "retires" the original Piramid after the chunk split by
+zeroing its `FIndex` while **deliberately keeping its arrays alive** (a
+documented anti-UAF measure). Nothing else changed: the object stays on
+`ObjectHead`, its bsphere is still room-sized so the frustum cull can never
+reject it, it is not `Tri_NoShadowCast`, and `Transform_Objects` has **no
+`FIndex == 0` early-out**. So every pass that sees it runs the full per-vertex
+transform over its **16 596 verts** and then iterates a zero-length face loop.
+
+Measured, 1920×1080, `--bench=scene@scene=greets,iters=6`, census build, on
+fog-wt tip `ac1e2a7`, **10 review poses × the RECESS and LID shell arms**
+(`--parallax_pom=128`; NOT `--greets_displace`, which is retired):
+
+| arm (t=5743) | SHADOW verts/frame | of which FACELESS | MAIN | OFFSCREEN |
+|---|--:|--:|--:|--:|
+| recess shell | 540 706 | **365 112 (67.5 %)** | 25.1 % | 55.7 % |
+| lid shell | 539 870 | **365 112 (67.6 %)** | 25.1 % | 53.8 % |
+| flat POM (shipping, base tree) | 540 706 | **365 112 (67.5 %)** | 20.1 % | 48.2 % |
+| `--greets_displace` (retired, base tree) | 6 827 604 | **5 758 896 (84.3 %)** | 27.4 % | 52.3 % |
+
+Over all **20 runs (10 poses × 2 shell arms)** the faceless share is
+**SHADOW 66.3–69.5 %, OFFSCREEN 53.7–55.7 %, MAIN 18.7–72.3 %** (the MAIN
+extreme is t=5534, the corridor-looking-back pose, where the retired parent is
+**60.8 %** of everything the main camera transforms). It does not depend on the
+camera, because nothing culls it. The `--greets_displace` row is the important
+cross-check: §8a's headline "7.6 M shadow verts" was **~84 % this same mesh**,
+whose vert count grows with the tessellation it never draws.
+
+*Measurement note:* the 10-pose matrix was taken with the clone half of the fix
+(9d) already compiled in, so its MAIN/OFFSCREEN totals are the clone-fixed
+ones; SHADOW is unaffected either way (clones are `Tri_NoShadowCast`). The
+flat/`--greets_displace` rows are from the pristine base tree. Cross-check that
+`7bfbc87` did not move transform counts: SHADOW at t=5743 is 540 706 with
+365 112 faceless in **both** trees.
+
+### 9c. The same mesh is 37.7 % of every mirror clone — and it IS §8d's "49 % Piramid"
+
+`BuildMirrorImpl` skips a source mesh on `!T->Faces`, which the retired parent
+passes (its array is alive). Its verts are copied into the clone, mirrored,
+re-mirrored every frame by `UpdateMirror`, and transformed by every pass that
+sees the clone — while its zero-length face loop contributes **no clone face
+that could reference them**. A greets clone is 44 012 verts; **16 596 (37.7 %)
+are those orphans**. In the tessellated arm the parent carries 261 768 verts —
+**exactly the "261 768 (49 %) is the Piramid" figure §8d built its
+flat-proxy-cloning proposal on**. That 49 % was never displaced wall relief in
+the clone; it was orphan vertices. §8d's "look call for the user" is void:
+there is no look to trade.
+
+### 9d. The fix (LANDED, unconditional, byte-null)
+
+Two changes, both stating the same invariant:
+
+* `Transform.cpp` — `if (T->FIndex == 0) continue;` at the top of the mesh
+  loop. Everything this function produces is FList entries and every FList
+  entry comes from a Face. **Unconditional on purpose**: it is an invariant of
+  the loop, not a tunable, and §8 measured that a *never-taken* runtime branch
+  inside this `-ffp-contract=fast` function is itself not byte-null.
+* `GreetsMirror.cpp` — `|| T->FIndex == 0` on the clone COUNT and FILL loops
+  of both the simple and the compound mirror builder (kept in lockstep so the
+  `ClonedMeshRange` vStart offsets stay consistent).
+
+**Gates — HEAD vs FIX, same tree (fog-wt tip `ac1e2a7` + the instrument
+commit), same Runtime, both arms run back to back. 17 paired hashes, ZERO
+mismatches:**
+
+| gate | HEAD | FIX |
+|---|---|---|
+| city @t=1961, **cold** cache | `b2af24de` | `b2af24de` |
+| fountain @t=2500 | `51fff7cd` | `51fff7cd` |
+| greets @t=1588 (pin recipe) | `06e1d4d1` | `06e1d4d1` |
+| render_gate mirrortest/conetest/halotest | 3/3 PASS | 3/3 PASS |
+| greets review poses t=5534/5743/5814/5854/5963/6133/6293 × {flat, recess shell} | 14 hashes | **identical, all 14** |
+
+t=6133 and t=6293 are the mirror-panel poses, so the clone change is gated
+where it bites; t=5534/5814/5854 are the 2026-08-06 additions. (The greets pin
+moved `aed22c16` → `06e1d4d1` between the two trees — that is `7bfbc87`'s
+bitangent-handedness fix, not this change; both arms of each tree agree.)
+`--xfrm_prof` independently confirms structural nullity: `fTested 16607 /
+fPushed 7916` in **both** arms — not one face changed.
+
+**Perf, measured:**
+
+* Main-view `Transform_Objects` (serial frame time), `--xfrm_prof=20`, 5
+  interleaved rounds, min-of-arm: **0.567 → 0.424 ms (−0.143, −25.2 %)**; the
+  VERT stage alone 0.382 → 0.237 (−38 %). Main-view transformed verts
+  **82 639 → 49 447 (−40.2 %)** = the parent (16 596) plus its copy inside the
+  one active clone (16 596).
+* The census re-run **with the fix compiled in** (same instrument, same pose,
+  so this is measured, not arithmetic):
+
+  | pass | verts/frame | core-ms/frame | fPushed |
+  |---|--:|--:|--:|
+  | MAIN | 82 639 → **49 447** (−40.2 %) | 0.642 → **0.454** | 7 916 → 7 916 |
+  | SHADOW | 540 706 → **175 594** (−67.5 %) | 23.073 → **10.672** | 24 735.2 → 24 735.2 |
+  | OFFSCREEN | 309 740 → **118 886** (−61.6 %) | 2.123 → **1.175** | 7 837 → 7 837 |
+  | TOTAL front end | | 25.839 → **12.301** (−52.4 %) | |
+
+  The SHADOW mesh-cull rate rises 57.1 % → 77.5 % for free (the room-sized
+  bsphere that could never be rejected is simply gone), and the clone drops
+  44 012 → 27 416 verts. **`fPushed` is identical in every pass** — the whole
+  reduction is work that produced nothing. NB the removed shadow verts cost
+  ~34 ns each (12.4 core-ms / 365 112) versus the main view's 4.62 ns: the
+  retired parent is 2.26 MB of Vertex per visit × 22 visits/frame, i.e. cold
+  traffic, not cache-resident work. These ms are census-build core-ms summed
+  across workers, taken sequentially on a shared box — read the *ratios* as
+  solid (MAIN 0.642→0.454 here matches the clean build's 0.567→0.424 min) and
+  the absolute wall-clock effect as ~13.5 core-ms ÷ the pool ≈ 1 ms.
+* **Whole-frame delta is NOT resolvable on this box.** 12-thread bench: 6
+  interleaved rounds spanned 51–250 ms/iter under load 15–20, min-head 51.353
+  vs min-fix 51.134. `FDS_THREADS=1`: 5 rounds spanned 374–1507 ms/iter,
+  min-head 374.295 vs min-fix 374.583. Both deltas are inside the noise, which
+  is what §0 predicts — the frame is dominated by per-pixel deferred lighting
+  that no geometry change can touch.
+
+Cost of the removal elsewhere: the retired parent no longer gets a
+`BSphereScreenPos`, so the per-mesh debug-label overlay stops labelling a mesh
+that draws nothing. Nothing else read it.
+
+### 9e. What the census says about the two proposals it was asked to justify
+
+**"Mirrors should reflect the flat proxy (but still do the parallax)" —
+already true in the shipping and shell arms; nothing to build.** Tessellation
+is retired, so the `rooms`/`floor` geometry the clone copies IS the flat
+authored geometry (`rooms`: 588 verts / 196 faces; the `--greets_shadow_proxy`
+stand-in is ~226 faces of *the same* pre-displacement surface). `PomShell_Build`
+runs at GREETS.CPP:1836, **before** the mirrors are built at :2773, and the
+clone face is a `CF = OF` copy, so it inherits `PomShellGroup` and the same
+`Material*` — the march is armed on clone faces by exactly the same
+material-derived `ctx` (`Mekalele.h` :2907–2942 read only `F->Txtr` and
+`F->PomShellGroup`, with no clone exclusion). The perf that motivated the swap
+was the 49 % orphan block, which 9d removed at zero look cost. Sourcing the
+clone from the proxy on top of that would move **~1.8 k of 27 416** remaining
+clone verts and swap flat geometry for the same flat geometry.
+
+*Verified rather than assumed, and re-verified on current HEAD.* At t=1588
+(recess shell arm, `--parallax_pom=128` — 32 steps leaves pixels unresolved and
+would have measured an artifact) the mirror's own `gb.mirrorId` footprint —
+located by diffing a `--greets_mirror_debug_mask` render against the plain one
+— is x[698..835] y[0..244], **32 674 px (1.58 % of screen)**. Re-rendering that
+arm with `--no-parallax --parallax_pom=0` changes **31 583 of those 32 674 px
+(96.7 %), mean |Δ| 42.2, max 449** (pre-`7bfbc87`: 96.3 %, mean 40.8 — the
+handedness fix did not disturb it). The march runs inside the reflection and
+the relief reads there; crops confirm the mortar grooves are shaded in the
+mirrored masonry and flatten without it. So the user's "still do the parallax"
+requirement is **already met**, and there is no geometry swap left that would
+keep it.
+
+**"Flatten the wall casters for the shadow passes" — buys ~1–2 %, and the
+user's feared wall-look cost buys nothing back.** Per-material, t=5743,
+shipping arm: `rooms` + `rooms::mirUV` = **2 506 of 540 706 shadow verts
+(0.46 %)**; adding `floor*` and `siling` reaches ~4 000 (0.74 %). After 9d
+that is 4 000 of 175 594 = **2.3 %** of a pass whose whole front end is
+~7 core-ms. `--greets_shadow_proxy` was sized against ~81 k *displaced* faces;
+with tessellation retired **that win is already banked** — the walls the
+shadow bake rasterises are already the ~226-face flat surface the proxy would
+substitute.
+
+### 9f. What is actually left, ranked (post-9d, t=5743, shipping arm)
+
+SHADOW is 175 594 verts/frame over 29 calls. Ranked by share:
+
+| # | target | verts/frame | share | note |
+|---|---|--:|--:|---|
+| 1 | `Hull.lwo` (robot) | 82 800 | 47.2 % | 2 400 faces / 7 200 verts, transformed in ~11.5 of 29 shadow calls. LOD or per-light culling are the levers; both are look-neutral in a shadow map. |
+| 2 | `Piramid.lwo:cNN` chunks | 80 635 | 45.9 % | already chunked; §7b measured finer chunking a net LOSS. |
+| 3 | robot legs | 11 403 | 6.5 % | |
+| 4 | **wall casters (`rooms`/`floor`/`siling`)** | **~4 000** | **2.3 %** | **not worth flattening — see 9e.** |
+
+A separate item the census surfaced, **not** actioned here because it is a
+look call: mirror CLONES are hidden inside the mirror RTT scope but **not**
+inside the env/SH probe bakes — 110 030 of 309 740 OFFSCREEN verts/frame
+(35.5 %) pre-9d, ~68 540 post-9d, are clone meshes being transformed for
+probes. Whether a probe should see a reflection at all is the user's call.
