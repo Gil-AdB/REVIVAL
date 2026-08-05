@@ -127,6 +127,12 @@ static int translateScancode(SDL_Scancode sc)
 	case SDL_SCANCODE_ESCAPE:    return ScESC;
 	case SDL_SCANCODE_F1:        return ScF1;
 	case SDL_SCANCODE_F2:        return ScF2;
+	// F3/F4: the review scrub (REV.CPP TimerProc). Neither was translated
+	// before, so greets' Keyboard[ScF3] shadow-mode toggle was dead code
+	// under SDL — it moved to ScF6 (still untranslated, i.e. still dead) so
+	// F3 could take the scrub without silently resurrecting it.
+	case SDL_SCANCODE_F3:        return ScF3;
+	case SDL_SCANCODE_F4:        return ScF4;
 	case SDL_SCANCODE_F11:       return ScF11;
 	case SDL_SCANCODE_TAB:       return ScTab;
 	case SDL_SCANCODE_SPACE:     return ScSpace;

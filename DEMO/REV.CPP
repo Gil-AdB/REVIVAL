@@ -610,8 +610,11 @@ static char G_AppTitle[MAX_GSTRING];
 
 Uint32 TimerProc(Uint32 interval, void *param)
 {
-	// Review scrub: hold PgUp / PgDn to run the scene clock fast forward /
-	// backward at --scrub_speed x (default 4). The scene clock IS Timer —
+	// Review scrub: hold F4 / F3 to run the scene clock fast forward /
+	// backward at --scrub_speed x (default 4). NOT PgUp/PgDn or -/= : all four
+	// are Dynamic_Camera fly keys (MainLoop.cpp anyFreeCamKey; -/= translate to
+	// ScGrayMinus/ScGrayPlus), and the Mac laptop needs fn for PgUp/PgDn.
+	// F3/F4 were added to MainLoop's scancode table for this. The clock IS Timer —
 	// RENDER.CPP:1553 derives CurFrame from it linearly — so scaling it
 	// scales camera splines, object animation and scene progress together,
 	// which is exactly what reviewing a pose needs. Clamped at 1: t<0 makes
@@ -623,8 +626,8 @@ Uint32 TimerProc(Uint32 interval, void *param)
 	int32_t step = 1;
 	const int32_t mult = fds::FeatureFlags::scrub_speed();
 	if (mult > 1) {
-		if      (Keyboard[ScPgUp]) step =  mult;
-		else if (Keyboard[ScPgDn]) step = -mult;
+		if      (Keyboard[ScF4]) step =  mult;
+		else if (Keyboard[ScF3]) step = -mult;
 	}
 	if (step >= 0) {
 		Timer += step;

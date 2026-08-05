@@ -3285,7 +3285,7 @@ struct GreetsScene : SceneDriver {
 		// F3: toggle shadow technique (depth ↔ poly-ID). Runtime A/B.
 		{
 			static bool sF3Prev = false;
-			const bool f3Now = Keyboard[ScF3] != 0;
+			const bool f3Now = Keyboard[ScF6] != 0;   // was ScF3; F3 is the review scrub now (untranslated either way)
 			if (f3Now && !sF3Prev) {
 				const ShadowMode cur = g_shadowMode.load();
 				const ShadowMode next = (cur == ShadowMode::Depth)
