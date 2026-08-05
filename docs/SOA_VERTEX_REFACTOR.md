@@ -26,6 +26,7 @@ number to reason with; p50 is 5–10 % higher and tracks the load.
 | greets t=6097 `--greets_displace` | 6.04 | 0.01 | 3.45 | 2.14 | 0.40 | 887,573 | 52,570 | 16,551 |
 | greets t=5780 flat (no displace) | 0.68 | 0.00 | 0.36 | 0.14 | 0.16 | 82,975 | 16,719 | 7,549 |
 | city t=1961 (p50; 2 calls/frame) | 1.23 | 0.00 | 0.45 | 0.27 | 0.49 | 69,287 | 26,490 | 10,210 |
+| chase t=800 (single frame) | 0.57 | 0.01 | 0.15 | 0.06 | 0.40 | 30,548 | 54,950 | 25,829 |
 
 - **SETUP** = per-mesh matrix/bsphere/frustum work for meshes that survive to the vertex loop.
 - **VERT** = the Inside/Ahead/Regular per-vertex loops.
@@ -34,6 +35,11 @@ number to reason with; p50 is 5–10 % higher and tracks the load.
 - The flat row reproduces the June measurement; it is the same engine, a different regime.
 - city's MIN is meaningless (city makes two main-view-classified `Transform_Objects` calls per
   frame and one is nearly empty, so the min picks that one); its p50 is quoted instead.
+- chase has no `--bench=scene` driver (that harness only supports city and greets), so its row
+  is a single snapshot frame at `--xfrm_prof=1`, not a distribution. Its whole front-end is
+  0.35–0.64 ms across t=100..1600 and it is **FACE-dominated, not VERT-dominated** — ~1.8
+  faces per vertex (shared verts, ~50 k faces over ~25 k verts) inverts the greets profile.
+  Chase is not a front-end target; the SoA-inline win there is inside single-frame noise.
 
 ### The Phase-1 dual write is 30 % of the front-end
 
