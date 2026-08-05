@@ -14,6 +14,14 @@ The task was set in these words, and the whole document answers them:
 > these techniques were working on a gpu before they got good enough to just do
 > micro tessellation and rt."*
 
+> ## ▶ START AT §8.
+>
+> §8 is the answer to the question that matters — **why protrusion works on most
+> faces and fails on specific ones** — and it retracts §5's R5. Protrusion is
+> **not** in question: the tessellation arm proved the look and the user has seen
+> and liked see-through between stones. §§1–4 remain valid as the literature
+> record; §5's ranking is superseded by §8.5.
+
 **Evidence discipline.** **[M]** = measured in this repo, cited to the document
 that holds the number. **[P-claim]** = a source asserts it. **[P-demo]** = a
 source demonstrates it (figures, video, shipping evidence, perf on named
@@ -783,32 +791,44 @@ existing shared-edge crack rule.
 
 **R5 — the honest negative verdict, and it is the front-runner on the evidence.**
 
-> **Recess-only per-pixel displacement for the surface, in the shipped-POM domain
-> model (R1), and no silhouette program at all — because this scene cannot show
-> one.**
+> ## ⛔ R5 IS RETRACTED — 2026-08-06. See §8.
+>
+> **The evidence R5 rested on was a broken metric, and I re-measured it.** The
+> "see-through is 0–24 px" figure counted only pixels where a surface **more than
+> 3 world units** behind the wall wins — 17× the 0.18-world relief slab. That is a
+> detector for *distant background*, not for what a viewer calls see-through
+> between two proud stones (the adjacent wall, the floor, or the mortar bed, all
+> well inside 1 world unit). Re-measured with the threshold set at the slab
+> amplitude, the same lid arm at the same pose shows **57 270 px** of see-through,
+> not 23 — **2 490× the retracted figure** (§8.1). Protrusion produces the look;
+> the metric could not see it. The negative recommendation is withdrawn, and
+> §8 answers the question that actually matters: *why does it work on most faces
+> and fail on specific ones?*
+>
+> The struck-through argument is kept below for the record only. **Do not cite the
+> 0–24 px figure again.**
 
-The argument is not aesthetic, it is measured. §S1d-2d.6 went looking for
+~~**Recess-only per-pixel displacement for the surface, in the shipped-POM domain
+model (R1), and no silhouette program at all — because this scene cannot show
+one.**~~
+
+~~The argument is not aesthetic, it is measured. §S1d-2d.6 went looking for
 see-through in the mortar valleys with an instrument rather than by eye, at all 13
 review poses and at 3.3× the standing amplitude, and found **0–24 px at every pose
 except one**, where the 24 737 px turned out to be a residual geometry slit rather
 than relief. The reason given there is structural and I believe it: **greets is a
 closed room.** Behind every shelled wall is another wall at zero distance or
-nothing at all, so a stone standing proud has nothing to be seen past. On top of
+nothing at all, so a stone standing proud has nothing to be seen past.~~ On top of
 that, only **0.4 % of 2 289 world of patch boundary is a true free edge** [M
-§S1d-1.2] — the architecture is closed, so there are almost no silhouettes to get
-right in the first place.
+§S1d-1.2] — that remains true, and it means the silhouettes that matter here are
+*internal* ones between stones, not outline silhouettes against a background.
 
-So the entire protrusion program buys a look the scene is not able to display,
-while dragging 18.77 % shadow-cube divergence and a lid that tears on an
-angle-split mesh. Against that, recess-only is measured at **0 void, 0 offscreen
-delta, and within 0.01 ms of flat POM**, and with `--pom_normal` plus
+Still valid from the retracted argument: recess-only is measured at **0 void, 0
+offscreen delta, and within 0.01 ms of flat POM**, and with `--pom_normal` plus
 `--pom_horizon` it was ranked by eye as `tess ≈ recW18pn > recW18 > rec >> lid`
 [M §10.7]. What it gives up — "a groove that can only sink is not the same as a
-block that can rise" [M §10.7] — is real, and is the price.
-
-**If protrusion is still wanted after R0/R1, it should be wanted for a specific
-shot, and the right answer for a specific shot is real geometry there** (R4 scoped
-to those faces), not a general shell over a closed room.
+block that can rise" [M §10.7] — is exactly the thing the user wants back, so
+recess-only is the **fallback**, not the destination.
 
 **Explicitly do not build:** coplanar cross-chart continuation (31 px of 800 513,
 already shipping [M]); curved shell mapping (a cubic per step); quadric silhouettes
@@ -911,3 +931,373 @@ clamp population, §10.7 look + perf, §10.8 what recess-only cannot do) ·
 · `docs/VISIBILITY_PLAN.md` §8a (per-pass front-end census) ·
 `docs/greets_review_poses.txt` · commit `7bfbc87` (the surface-registered slip
 figures) · commit `799c808` (the retired-mesh fix).
+
+---
+
+# 8. THE DISCRIMINATOR — why protrusion works on most faces and fails on specific ones
+
+Added 2026-08-06 after a user correction. His words: *"we know Protrusion will give
+us visual gain since the mesh displacement did, and we had faces where we actually
+see through and it looks good. the method just doesn't work for some case, for some
+reason, that your research should find at last."*
+
+So the question is not "is the technique viable". It is **which property separates
+the faces that work from the faces that fail.** Everything below is measured on
+this machine today, with dummy SDL drivers, 1920×1080, on the current `fog-wt`
+binary.
+
+## 8.1 First, the metric that was driving the wrong conclusion
+
+`S1d-2d.6` concluded "see-through NOT demonstrable" from an instrument defined as
+*"pixels where a surface more than 3 world units BEHIND the wall wins"*. The relief
+slab under that arm is **0.18 world** (`--pom_shell_world_amp_set=0.18`). The
+threshold was therefore **17× the entire slab depth** — it can only fire when a
+*distant room* is visible through the wall, and it is blind to a stone occluding
+the mortar bed 0.02 world behind it, or the adjacent wall a fraction of a unit
+away. **It was a background detector, and it was reported as a see-through
+detector.**
+
+Re-derived properly. See-through = *the lid arm's winning surface is farther away
+than the flat arm's by more than the relief slab can account for.* Relief carving
+can push depth back by at most the slab, so anything beyond the slab is a genuinely
+different, farther surface. No face ids needed (they are not comparable across arms
+— inventory §2), depth alone suffices: `sep = (z16_flat − z16_lid)/zscale`, zscale
+395.64, both arms' depth non-zero.
+
+Arms: `flat` = flat POM; `lid` = the standing S1d-2d arm
+(`--pom_shell --pom_shell_weld=1 --pom_shell_side_faces=3 --pom_shell_lid_edge=1
+--no-pom_shell_base_clip --pom_shell_world_amp_set=0.18 --pom_normal`, cone-32,
+cap 16). `--face_id_dump` + `FDS_SNAPSHOT_ZDUMP=1`. Zero bad flags in all 6 run logs.
+
+| pose | both-wrote px | **sep > 0.18 (slab)** | > 0.25 | > 0.36 | > 0.54 | > 1.0 | > 3.0 *(the retracted metric)* |
+|---|---|---|---|---|---|---|---|
+| **p5743** | 2 073 447 | **57 270** | 30 711 | 9 930 | 1 762 | 592 | **23** |
+| p6097 | 2 073 600 | 0 | 0 | 0 | 0 | 0 | 0 |
+| p5963 | 2 064 900 | 53 793 | 42 211 | 28 983 | 25 115 | 24 818 | 24 818 |
+
+At the user's primary review pose the retracted metric saw **23 px**; the correct
+one sees **57 270 px**, with separation p50 0.258 / p90 0.412 / p99 1.014 / max
+17.37 world. The 3-world threshold captured **0.04 %** of the population.
+
+Reading it honestly, per pose:
+- **p5743 — real see-through.** 56 678 of the 57 270 px lie between 0.18 and 1.0
+  world of separation: the scale of an adjacent wall, the floor, or the mortar bed
+  behind a proud stone. Only 592 px exceed 1.0 world, so this is *not* the geometry
+  slit.
+- **p5963 — mostly the slit.** 24 818 px beyond 1.0 world, matching the 24 737 the
+  old metric found. That one really was the tear, and the old reading was right
+  *there* and wrong everywhere else.
+- **p6097 — genuinely none.** A corner pose looking *into* a concave fold; there is
+  nothing behind to reveal. The scene does have poses with no see-through; that was
+  never the same claim as "the scene cannot show it".
+
+**So the record is corrected: protrusion demonstrably produces see-through at the
+pose the user reviews from.** `S1d-2d.6`'s structural explanation ("greets is a
+closed room, a mortar valley has nothing to reveal") was an artifact of the
+threshold and is withdrawn.
+
+## 8.2 What the viable methods REQUIRE of the base mesh and the charts
+
+Quoted, so the requirements can be checked rather than paraphrased.
+
+**Hirche 2004 — a globally consistent vertex ENUMERATION shared by adjacent faces.**
+The diagonal split of each shared side quad must agree between both owners, and the
+paper achieves that by index comparison:
+> "It has to be ensured that neighboring tetrahedral edges are aligned in a
+> consistent way to avoid aliasing effects between adjacent triangles. This can be
+> achieved without knowledge of the connectivity in the tetrahedral mesh, by just
+> setting up an enumeration of the vertices in the mesh that allows for an index
+> comparison. **The enumeration can be obtained from the vertex indices as they are
+> usually given in an array.**"
+
+followed by the `IF(v0>v1) SWAP…` ordering that only means anything if adjacent
+faces *reference the same vertex indices*. **A mesh with three unique vertices per
+face cannot satisfy this at all** — every face's indices are private, so there is no
+comparison to make and no reason for two neighbours to split their shared quad the
+same way.
+
+**Hirche 2004 — extrusion along the VERTEX normal.**
+> "The algorithm iterates over all faces in the triangle mesh folding up a prism by
+> displacing every vertex of the base triangle along the vertex normal direction."
+
+If two coincident vertex copies carry different normals, the two prisms' shared side
+quad is not shared, and the shell has a gap of exactly the offset width.
+
+**Hirche 2004 — planar prism faces, for the cheap single-pass variant.**
+> "The assumption that the prism faces are flat is a very strong restriction that
+> makes the algorithm in this form generally unusable. In case the faces are not
+> flat, a viewing ray may intersect the same face it originates from which will
+> cause holes when rendering."
+
+**Shell maps 2005 — a bijection**, which presupposes a non-self-intersecting,
+watertight shell volume [P-claim, secondary].
+
+**PDM 2025 — a parallel offset prism** needs `N_i · N_g` per vertex; it is the
+identity exactly when the vertex normals equal the geometric normal, i.e. on a flat
+face with shared normals.
+
+**Consolidated, the base-mesh contract is:** (1) coincident positions share one
+vertex record, or at least one extrusion direction; (2) a consistent global vertex
+ordering so shared quads split identically; (3) manifold edges — every interior edge
+has exactly two owners; (4) the *whole* surface is shelled, so no prism abuts a
+non-prism; (5) for the cheap variant, planar faces. Charts additionally need (6) a
+domain the ray cannot outrun, or a defined hand-off.
+
+## 8.3 The measured partition of greets' actual mesh
+
+### Candidate 1 — TORN EXTRUSION. **This is the discriminator.**
+
+`--pom_shell_weld=1` census, run today on the lid arm:
+
+```
+[POM-SHELL-WELD] 'rooms': 155 distinct vertex POSITIONS, 153 carry 2+ copies;
+                 420 vertex uses redirected by >1 degree (worst 78.7 deg)
+[POM-SHELL-WELD] 'floor':  42 distinct vertex POSITIONS,  30 carry 2+ copies;
+                   0 vertex uses redirected by >1 degree (worst 0.0 deg)
+```
+
+`rooms` carries **588 vertex uses over 196 faces for only 155 geometric positions**
+— a 3.8× duplication — and **420 of those 588 uses (71.4 %) point somewhere other
+than the shared direction, by up to 78.7°.** Requirement (1) is violated on 71 % of
+the wall, and requirement (2) is unsatisfiable in principle.
+
+Bounds on the per-face partition that follow arithmetically: at most
+⌊168/3⌋ = **56 of 196 `rooms` faces are fully clean**, and at least ⌈420/3⌉ = **140
+have at least one torn vertex.**
+
+**`floor` violates none of it — worst spread 0.0°.** The floor is planar, so every
+copy of a position already shares the normal. That is the working/failing split in
+one line: **the floor satisfies Hirche's contract exactly and the walls violate it
+on most faces.**
+
+And the confirming experiment is already in the record: the weld is a **pure
+geometry change with the march untouched**, and it takes the lid arm's void from
+**413 100 → 14 163 px over the 13 review poses, −96.6 %** [M §S1d-2d]. Void is also
+measured **linear in the offset** (19 416 / 58 665 / 198 131 / 383 364 px at 0.02 /
+0.06 / 0.18 / 0.36 world) and **10 px with the offset forced to zero**
+(`--pom_shell_lid_probe`) — the signature of a torn extrusion and of nothing else.
+**96.6 % of the failure is the tear.**
+
+### Candidate 2 — MIRRORED CHARTS / HANDEDNESS. **Measured, and refuted as the cause.**
+
+Rendered today: the recess arm at p5743 with `--pom_recess_edge=2` (discard, which
+turns the failing population into countable void), material handedness vs per-face
+geometric handedness.
+
+| arm | void px | shared with the other arm | unique |
+|---|---|---|---|
+| `Material::TbnHandedness` (default) | **77 492** | 74 257 | 3 235 |
+| `--pom_tbn_face_sign=1` (per-face geometric) | **89 633** | 74 257 | 15 376 |
+
+**74 257 of 77 492 failures (95.8 %) occur under BOTH conventions**, and the
+"correct" per-face sign makes the failure **15.7 % worse**. Handedness cannot be the
+discriminator: the failing faces fail whichever way the bitangent points. This
+agrees with the independent finding in commit `7bfbc87` — applying the material sign
+moved slip by *nothing* (p50/p90/p99 0.05/15.28/500.61 before and after), and the
+per-face sign flipped 96.8 % of the swimming crop while moving slip p90 only
+15.28 → 13.82 and making the cap-8/16 tails **worse** (3.41 → 6.93, 11.37 → 27.12).
+
+Handedness is a real correctness bug with a measured non-effect on this defect.
+
+### Candidate 3 — THE MATERIAL SPLIT MANUFACTURING A PATCH CLIFF. **Refuted in code.**
+
+This was the leading hypothesis handed to me, and it is wrong for greets as built.
+The two halves that *are* true:
+
+- **The union-find IS per material.** `PomShell_Build`'s target test is an exact
+  name compare — `return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);`
+  (`DEMO/MeshOps.cpp:4158`) — and the function is called once per material name, so
+  two differently-named materials can never share a patch.
+- **The sibling-box union cannot bridge materials.** The boxes live on
+  `mat->PomShellSibBoxes` / `PomShellSibOfs` (`MeshOps.cpp:4831`), built inside a
+  call that only ever sees one material's faces.
+
+**But the split runs AFTER the build, so no cliff is ever created.**
+`PomShell_Build` is called at `DEMO/GREETS.CPP:1857`;
+`GreetsFixBitangentHandedness` at `DEMO/GREETS.CPP:2588`. At build time the walls
+are ONE material, the union-find sees all their faces, and the clone is a memberwise
+copy (`*c = *M`, `GREETS.CPP:1296`) that **inherits `PomShellSibBoxes`,
+`PomShellSibOfs` and `PomShellUvAmp` by value**, while every `Face` keeps the
+`PomShellGroup` it was already stamped with. `S1d-1.2` states this correctly.
+
+The engine also knows the hazard and defends against it. `DisplaceRebuild.cpp:316`,
+verbatim:
+> "PomShell_Build runs at init BEFORE the Piramid chunk split, the "::mirUV"
+> handedness split and the mirror clone build. Re-running it on the final scene
+> therefore has to put those three back the way they were for the duration of the
+> call, or it solves a different problem: … **"::mirUV" faces: 'floor' has no faces
+> left under its own name, so nothing is built for it at all.**"
+
+so the live-rebuild path folds every `::mirUV` face back onto its base material
+*before* rebuilding and restores the split afterwards (steps (b) and (d),
+`DisplaceRebuild.cpp:340` and `:384`).
+
+**So the artificial material boundary is not a domain boundary.** What the user's
+`--poly_viz` capture shows on that diagonal line is real, and two of the three
+coincident boundaries are real — the handedness flip and the underlying UV chart
+seam — but the patch domain is continuous across it. Given §8.3 candidate 2, the
+handedness flip is also not the cause. **The most likely explanation for that
+specific capture is that it predates commit `7bfbc87` (2026-08-05), which fixed the
+march ignoring `Material::TbnHandedness` entirely — before it, the march built a
+FIXED-SIGN N×T and therefore walked the height field *backwards along V* on every
+mirrored chart.** That is precisely a defect confined to the magenta region and
+seaming against the cyan one. **Unverified** — the discriminating render is §8.5 R0b.
+
+One thing candidate 3 *does* still bind: any future per-material shell or prism
+build must fold the clones first, exactly as `DisplaceRebuild` does, or it will
+create the cliff that does not currently exist. That belongs in the prism spec
+(§8.6), and it is a real trap.
+
+### Candidate 4 — CHART NARROWER THAN THE RAY. **Secondary, real, and face-weighted.**
+
+Computed today from `--pom_seam_census --pom_shell_patch_dump`, face-weighted, own
+box vs sibling-rescued, against a grazing travel of `uvAmp 0.03 × cap`:
+
+| material | faces | short side < travel @cap 16 (0.48 UV) | …**and no sibling to rescue it** | @cap 64 (1.92 UV) | …no sibling |
+|---|---|---|---|---|---|
+| `rooms` | 196 | 86 (**43.9 %**) | 80 (**40.8 %**) | 150 (76.5 %) | 130 (66.3 %) |
+| `floor` | 30 | 2 (6.7 %) | **0 (0 %)** | 30 (100 %) | **0 (0 %)** |
+
+The narrowest `rooms` patch is **0.082 UV** across — one sixth of a single grazing
+ray's travel — and the distribution has 36 of 196 faces at or below 0.206 UV.
+**Again the floor comes out clean at both caps (every floor patch has siblings) and
+the walls do not.** This is a genuine second discriminator, it is correlated with
+candidate 1, and it is what remains *after* the weld: the 14 163-px residue and the
+recess arm's 0.8–8.5 %-of-frame clamp band both live here.
+
+### Candidate 5 — SHELLED ABUTTING UNSHELLED. **Secondary, real.**
+
+Requirement (4). Measured: **424.06 world (30 %)** of `rooms`' 1 393.30 world of
+concave boundary has an **unshelled** neighbour — the ceiling `siling` (43 edges)
+and the `teleporter` [M §S1d-1.2, reproduced in today's run]. `--pom_shell_weld=5`
+(pin against unshelled neighbours only) takes the welded lid's void 14 163 → **10 646
+(−25 %)**, i.e. most of the post-weld residue is this [M §S1d-2e.5]. In Hirche's
+model this case cannot arise, because every triangle of the surface gets a prism.
+
+## 8.4 The ranking, and what each candidate predicts
+
+| rank | candidate | predicts | measured share of the failure |
+|---|---|---|---|
+| **1** | **Torn extrusion** — coincident verts, unshared normals | walls fail, floor works; failure ∝ offset | **96.6 %** (413 100 → 14 163 px on a pure geometry fix) |
+| 2 | Shelled↔unshelled junction | failures at wall/ceiling, wall/column | most of the 3.4 % residue (14 163 → 10 646) |
+| 3 | Chart narrower than the ray | 40.8 % of wall faces unrescued at cap 16; floor 0 % | the post-weld clamp band / smear |
+| 4 | Mirrored charts / handedness | — | **refuted**: 95.8 % of failures common to both conventions; "correct" sign 15.7 % worse |
+| 5 | Material split → patch cliff | — | **refuted in code**: split runs after the build; clone inherits the domains |
+
+**The partition matches the user's observation.** Faces whose coincident vertices
+happen to agree on a normal — the floor entirely, and at most 56 of 196 wall faces —
+extrude into a watertight prism and look right, including the see-through §8.1 now
+measures. Faces at a torn corner open a slit whose width is the offset, which reads
+exactly as *"the method just doesn't work for some case"*.
+
+## 8.5 Fix order — and it is (a) then (b), for the tear reason
+
+**Yes: fix the mesh first, then build the prism.** Building a prism on a mesh with
+three unshared vertices per face would reproduce every current failure inside a more
+expensive machine, because Hirche's requirements (1) and (2) are preconditions of the
+construction, not quality knobs.
+
+But the ordering argument is the **tear**, not the material split — the split is
+refuted (§8.3 candidate 3). Retiring `::mirUV` for a per-face handedness bit
+(already queued in `docs/OPTIMIZATION_BACKLOG.md`) remains worth doing for its own
+reasons (one less material, one less mirror-clone split, and it removes the fold-back
+trap the prism spec has to carry), but it is **not** on the critical path for this
+defect and must not be sold as the fix.
+
+- **R0a — no code.** Already done in §8.1: the see-through metric is corrected and
+  the negative recommendation withdrawn.
+- **R0b — one render, no code.** Re-render the user's `--poly_viz` arm on the current
+  binary and compare the magenta-region artifacts against his capture. If they are
+  substantially reduced, `7bfbc87`'s handedness fix already closed that specific
+  complaint and it should not be chased further. This is the cheapest open question
+  in the document.
+- **R1 — WELD, and make it the default for any lid arm.** `--pom_shell_weld=1` is
+  measured at −96.6 % of the void for a pure geometry change. It is the single
+  highest-value flag in the campaign and it is still default OFF. Combine with
+  `=5` (pin against unshelled) for the −25 % residue, or better, extend the shell to
+  `siling` and the columns so requirement (4) holds and nothing needs pinning.
+- **R2 — a real weld, not an averaged one.** Modes 1/3 move a welded corner along the
+  *mean* normal, which retracts every welded boundary laterally by
+  `off·(1−cos(half-fold))` and measurably opens more slit than it closes on the floor
+  (14 163 → 24 334 for mode 3) [M §S1d-2e.5]. Mode 4's true mitre is the correct
+  construction and measured worse (51 012) — that disagreement is unexplained and is
+  a real open bug, not a tuning choice. **It should be root-caused before the prism
+  is built on top of it**, because the prism needs exactly this: coincident corners
+  landing on one point with no retraction.
+- **R3 — then the prism** (§8.6).
+- **R4 — chart width, last.** After the weld, the residue is candidate 3/5. Either
+  widen the domain (the shipped-POM model, §1.1/§5-R1 — still the cheapest arm in the
+  document and still unrendered) or hand off across the seam (S1d-2c).
+
+## 8.6 Prism path — the mesh contract an implementation agent must satisfy
+
+The leading implementation candidate, sized: **8 triangles per shelled base triangle,
+back-face culled — ~1 800 faces for greets' 226 shelled quads, ≈ 2 % of the
+tessellation carve's measured 86 600** [E, assumes the measured 0.75–0.85 µs/face
+holds and side-face pixel coverage is small].
+
+Preconditions, each traceable to a quoted requirement in §8.2:
+
+1. **Weld first (req. 1).** Every coincident position must extrude along ONE
+   direction. `PomShell_WeldPrepare` + `--pom_shell_weld=3` already builds a
+   scene-wide position bucket before any material moves; the prism must consume that,
+   not per-vertex `Vertex::N`. **Blocked on R2**: the mean-normal weld retracts
+   boundaries and the mitre variant measures worse — resolve that first.
+2. **A consistent global vertex ordering (req. 2).** Hirche's `v0<v1<v2` swap needs
+   comparable indices across adjacent faces. On an angle-split mesh, derive the
+   ordering from the **quantized position key** (`qpos`, already in `MeshOps.cpp`)
+   rather than the vertex index, so both owners of a shared side quad split it
+   identically. This is the one place a naive port will silently produce cracks.
+3. **Shell the whole surface (req. 4).** `rooms`, `floor`, **and** `siling`, the
+   columns and the stairs — 30 % of the wall's concave boundary currently abuts
+   unshelled geometry. A prism next to a non-prism is a gap by construction.
+4. **Fold `::mirUV` before building (§8.3 candidate 3).** Follow
+   `DisplaceRebuild.cpp` steps (b)/(d) exactly: re-point clone faces to the base
+   material, build, restore. Otherwise the patch/prism grouping fragments at the
+   handedness line and `floor` gets no shell at all.
+5. **Hide mirror clones during the build** — `DisplaceRebuild.cpp:326` zeroes their
+   `FIndex`; without it `rooms` goes 67 → 113 patches and the domain changes for the
+   real walls too (measured 58 % of the frame).
+6. **Planar faces are already satisfied (req. 5)** — greets' walls are flat
+   axis-charted quads with per-face constant tangent frames, so the cheap
+   single-pass prism variant applies and no per-frame Projected-Tetrahedra CPU
+   decomposition is needed. This is the whole reason the path is affordable.
+7. **Depth write is required and already exists** — `--pom_depth_write`, measured
+   +0.1 ms.
+8. **Discard on prism exit is correct** and must stay a discard: the neighbouring
+   prism's own fragment answers the pixel, arbitrated by Z. Do **not** add a clamp;
+   that is what the lid-only arm needed and it is what produced the rust stripe.
+
+Gates it must pass, all pre-existing: void vs tessellation at all 13 review poses;
+the §8.1 see-through metric (slab-relative, **not** 3-world); offscreen shadow-cube
+and mirror deltas; error vs a converged reference of its own semantics; and the
+side-faces' measured **pixel** coverage, which is the one number in the cost estimate
+with nothing behind it.
+
+## 8.7 Reproduction
+
+All numbers in §8 come from these, run on `fog-wt` at `2bac9a4`, dummy SDL drivers,
+1920×1080, every run log grepped for `unknown flag` / `requires a value` (zero hits
+across all 10 runs):
+
+```sh
+# §8.3 candidate 1 + 4 — censuses (init-time only, no behaviour change)
+./DEMO --snapshot=greets@t=5743 --deferred --pom_shell --pom_recess_only \
+       --pom_seam_census --pom_shell_patch_dump
+./DEMO --snapshot=greets@t=5743 --deferred --pom_shell --pom_shell_weld=1 \
+       --pom_shell_patch_dump
+
+# §8.1 — see-through, flat vs lid, 3 poses, FDS_SNAPSHOT_ZDUMP=1 --face_id_dump
+#   lid arm: --pom_shell --pom_shell_weld=1 --pom_shell_side_faces=3
+#            --pom_shell_lid_edge=1 --no-pom_shell_base_clip
+#            --pom_shell_world_amp --pom_shell_world_amp_set=0.18 --pom_normal
+#            --parallax_pom_cone --parallax_pom=32 --pom_cone_exact=1
+#            --pom_cone_min_step=1 --pom_march_earlyout --pom_shell_cap=16
+#   sep = (z16_flat - z16_lid)/395.64 ; see-through = sep > 0.18 (the slab)
+
+# §8.3 candidate 2 — handedness, recess arm + --pom_recess_edge=2 (void = failure)
+#   A: default (Material::TbnHandedness)      B: --pom_tbn_face_sign=1
+```
+
+Scripts and dumps: session scratchpad `rq/` (`st.sh`, `census.out`, `weld.out`,
+`h_matsign/`, `h_facesign/`).
