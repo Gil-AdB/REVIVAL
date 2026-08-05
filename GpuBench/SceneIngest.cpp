@@ -313,6 +313,20 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 b.heightTexIndex = acquireTexture(M->HeightMap);
                 b.materialName = M->Name ? M->Name
                                : (M->Txtr && M->Txtr->FileName ? M->Txtr->FileName : "?");
+                // Shadow-caster filter, byte-for-byte the CPU bake's predicate
+                // (FDS/RENDER/Shadows.cpp:703-724, `looksEmissive` + `shouldSkip`).
+                auto looksEmissive = [](const char *n) -> bool {
+                    if (!n) return false;
+                    for (const char *p = n; *p; ++p) {
+                        if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
+                            (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
+                        if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
+                            (p[2]=='i'||p[2]=='I')) return true;
+                    }
+                    return false;
+                };
+                b.castsShadow = !((M->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
+                                  || looksEmissive(M->Name));
             }
 
             for (uint32_t fi : kv.second) {

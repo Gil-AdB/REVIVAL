@@ -322,7 +322,11 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
             td.width = td.height = NSUInteger(res);
             td.mipmapLevelCount = 1;
             td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-            td.storageMode = MTLStorageModePrivate;
+            // Private for measurement (Shared disables lossless compression); the
+            // --dump_cube diagnostic needs CPU-visible storage, and that run is
+            // never a timing run.
+            td.storageMode = (opt.dumpCube >= 0) ? MTLStorageModeShared
+                                                 : MTLStorageModePrivate;
             id<MTLTexture> c = [dev newTextureWithDescriptor:td];
             lightCube[i] = int(cubes.size());
             cubeNear[i] = 0.05f;
@@ -401,16 +405,39 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
     }
     std::fprintf(stderr, "[DEFERRED] LIGHT INVENTORY (%zu usable of %zu in scene):\n",
                  lights.size(), scene.lights.size());
-    for (size_t i = 0; i < lights.size(); ++i)
+    for (size_t i = 0; i < lights.size(); ++i) {
+        // Nearest-geometry probe. A shadow cube whose every face reads ~0.25 units
+        // means the omni is INSIDE something; that is a scene fact, not a bake bug,
+        // and it is far cheaper to establish here than from the baked depth.
+        float nearest = 1e30f;
+        const char *nearestMesh = "-", *nearestMat = "-";
+        long within = 0;
+        for (const auto &b : scene.batches) {
+            for (uint32_t v = b.firstVertex; v < b.firstVertex + b.vertexCount; ++v) {
+                const Vertex &V = scene.verts[v];
+                const float o[3] = {V.px, V.py, V.pz};
+                float w[3];
+                for (int c = 0; c < 3; ++c)
+                    w[c] = b.rot[c][0]*o[0] + b.rot[c][1]*o[1] + b.rot[c][2]*o[2] + b.pos[c];
+                const float dx = w[0]-lights[i].pos[0], dy = w[1]-lights[i].pos[1],
+                            dz = w[2]-lights[i].pos[2];
+                const float d = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (d < nearest) { nearest = d; nearestMesh = b.meshName.c_str();
+                                   nearestMat = b.materialName.c_str(); }
+                if (d < 1.0f) ++within;
+            }
+        }
         std::fprintf(stderr,
             "[DEFERRED]   [%zu] pos=(%7.2f,%6.2f,%8.2f) rgb=(%.3f,%.3f,%.3f) range=%5.1f "
-            "cube=%d %s\n",
+            "cube=%d %s  nearestGeom=%.3f (%s/%s) vertsWithin1u=%ld\n",
             i, lights[i].pos[0], lights[i].pos[1], lights[i].pos[2],
             lights[i].color[0], lights[i].color[1], lights[i].color[2],
             lights[i].range, lights[i].shadowIndex,
             lights[i].shadowIndex >= 0
                 ? (cubeIsMoving[size_t(lights[i].shadowIndex)] ? "(moving 128^2)" : "(static 512^2)")
-                : "(no shadow)");
+                : "(no shadow)",
+            nearest, nearestMesh, nearestMat, within);
+    }
     fu.numLights = uint32_t(lights.size());
     out.litLights = int(lights.size());
     if (lights.empty()) { std::fprintf(stderr, "[DEFERRED] no usable lights\n"); return false; }
@@ -444,6 +471,22 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         u.mapFlags[1] = (b.roughTexIndex >= 0) ? 1.0f : 0.0f;
         u.mapFlags[2] = b.aoInAlpha ? 1.0f : 0.0f;
         u.mapFlags[3] = b.parallaxScale;
+    }
+
+    {
+        int nCast = 0; long triCast = 0, triAll = 0;
+        std::string skipped;
+        for (const auto &b : scene.batches) {
+            triAll += b.vertexCount / 3;
+            if (b.castsShadow) { ++nCast; triCast += b.vertexCount / 3; }
+            else { if (!skipped.empty()) skipped += ", "; skipped += b.materialName; }
+        }
+        std::fprintf(stderr,
+            "[DEFERRED] shadow casters: %d of %zu batches, %ld of %ld tris "
+            "(CPU parity: Shadows.cpp skips Transparent/Additive/SkipZ + name "
+            "lamp|emi). NON-casters: %s\n",
+            nCast, scene.batches.size(), triCast, triAll,
+            skipped.empty() ? "(none)" : skipped.c_str());
     }
 
     // ---- per-pass GPU timestamps -----------------------------------------
@@ -484,6 +527,8 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         [enc setVertexBuffer:vb offset:0 atIndex:0];
         for (size_t i = 0; i < scene.batches.size(); ++i) {
             const Batch &b = scene.batches[i];
+            // Shadow pass: honour the same caster filter the CPU bake applies.
+            if (!gbuffer && !b.castsShadow) continue;
             [enc setVertexBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
             if (gbuffer) {
                 [enc setFragmentBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
@@ -571,6 +616,86 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         [cb commit];
         [cb waitUntilCompleted];
         out.staticBakeMs = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
+    }
+
+    // ---- --dump_cube: read the baked depth back and LOOK at it -------------
+    if (opt.dumpCube >= 0) {
+        if (opt.dumpCube >= int(lights.size())) {
+            std::fprintf(stderr, "[DUMPCUBE] light %d out of range (%zu lights)\n",
+                         opt.dumpCube, lights.size());
+        } else if (lights[size_t(opt.dumpCube)].shadowIndex < 0) {
+            std::fprintf(stderr, "[DUMPCUBE] light %d has no cube\n", opt.dumpCube);
+        } else {
+            const size_t ci = size_t(lights[size_t(opt.dumpCube)].shadowIndex);
+            id<MTLTexture> cube = cubes[ci];
+            const int res = int([cube width]);
+            const float sn = lights[size_t(opt.dumpCube)].shadowNear;
+            const float sf = lights[size_t(opt.dumpCube)].shadowFar;
+            const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+            static const char *fnames[6] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
+            std::vector<float> face(size_t(res) * size_t(res));
+            // 3x2 atlas: row 0 = +X -X +Y, row 1 = -Y +Z -Z
+            std::vector<uint8_t> atlas(size_t(res) * 3 * size_t(res) * 2 * 4, 0);
+            const size_t aw = size_t(res) * 3;
+            std::fprintf(stderr,
+                "[DUMPCUBE] light %d cube %zu res=%d near=%.4f far=%.4f "
+                "(dza=%.6f dzb=%.6f)\n",
+                opt.dumpCube, ci, res, sn, sf, dza, dzb);
+            for (int f = 0; f < 6; ++f) {
+                [cube getBytes:face.data()
+                   bytesPerRow:NSUInteger(res) * sizeof(float)
+                 bytesPerImage:face.size() * sizeof(float)
+                    fromRegion:MTLRegionMake2D(0, 0, NSUInteger(res), NSUInteger(res))
+                   mipmapLevel:0
+                         slice:NSUInteger(f)];
+                long nNan = 0, nCleared = 0, nValid = 0;
+                float mn = 1e30f, mx = -1e30f, dmn = 1e30f, dmx = -1e30f;
+                double dsum = 0.0;
+                for (float v : face) {
+                    if (!std::isfinite(v)) { ++nNan; continue; }
+                    if (v <= 0.0f) { ++nCleared; continue; }
+                    ++nValid;
+                    mn = std::min(mn, v); mx = std::max(mx, v);
+                    const float dist = dzb / (v - dza);
+                    dmn = std::min(dmn, dist); dmx = std::max(dmx, dist);
+                    dsum += dist;
+                }
+                std::fprintf(stderr,
+                    "[DUMPCUBE]   %s  valid=%7ld (%5.1f%%)  cleared=%7ld  nonfinite=%ld"
+                    "  storedZ[%.6f..%.6f]  dist[%.3f..%.3f] mean=%.3f\n",
+                    fnames[f], nValid, 100.0 * double(nValid) / double(face.size()),
+                    nCleared, nNan,
+                    nValid ? mn : 0.0f, nValid ? mx : 0.0f,
+                    nValid ? dmn : 0.0f, nValid ? dmx : 0.0f,
+                    nValid ? dsum / double(nValid) : 0.0);
+                // atlas tile: distance ramped over [near, far]; magenta = nonfinite,
+                // dark blue = cleared (nothing rendered into this texel)
+                const size_t tx = size_t(f % 3) * size_t(res);
+                const size_t ty = size_t(f / 3) * size_t(res);
+                for (int y = 0; y < res; ++y)
+                    for (int x = 0; x < res; ++x) {
+                        const float v = face[size_t(y) * size_t(res) + size_t(x)];
+                        uint8_t r, g, b;
+                        if (!std::isfinite(v)) { r = 255; g = 0; b = 255; }
+                        else if (v <= 0.0f)    { r = 10;  g = 15; b = 60; }
+                        else {
+                            const float dist = dzb / (v - dza);
+                            const float t = std::min(1.0f, std::max(0.0f,
+                                                (dist - sn) / (sf - sn)));
+                            const uint8_t g8 = uint8_t(255.0f * (1.0f - t));
+                            r = g8; g = g8; b = g8;
+                        }
+                        uint8_t *p = &atlas[((ty + size_t(y)) * aw + tx + size_t(x)) * 4];
+                        p[0] = b; p[1] = g; p[2] = r; p[3] = 255;   // BGRA, WritePPM order
+                    }
+            }
+            const std::string dp = opt.dumpCubePath.empty()
+                                 ? std::string("gpubench_cube.ppm") : opt.dumpCubePath;
+            if (WritePPM(dp, atlas.data(), int(aw), res * 2, aw * 4))
+                std::fprintf(stderr, "[DUMPCUBE] wrote %s (3x2 face atlas, "
+                                     "white=near black=far, magenta=nonfinite, "
+                                     "navy=cleared)\n", dp.c_str());
+        }
     }
 
     auto renderFrame = [&]() -> id<MTLCommandBuffer> {

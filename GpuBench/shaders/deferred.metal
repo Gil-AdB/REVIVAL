@@ -419,7 +419,11 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
 {
     const uint2 px = uint2(in.position.xy);
     const float zEnc = gDepth.read(px);
-    if (zEnc <= 0.0f) return float4(0, 0, 0, 1);
+    // NO G-BUFFER here (sky / beyond the far plane). Must NOT be black: mode 5
+    // uses black for "lit but fully shadowed", and conflating the two makes an
+    // uncovered pixel read as a shadow. Same rule that got white split out
+    // earlier -- never encode "no data" as a value the mode already means.
+    if (zEnc <= 0.0f) return float4(0.40f, 0.0f, 0.0f, 1);   // dark RED = no geometry
 
     const float Z = (u.dzb) / max(zEnc - u.dza, 1e-9f);
     const float X = (in.ndc.x - u.ox) * Z * u.invSx;
@@ -466,11 +470,14 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
                 + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
                 + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
                 + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
+            uint considered = 0;
             for (uint i = 0; i < u.numLights; ++i) {
+                if (u.vizLight >= 0 && int(i) != u.vizLight) continue;
+                ++considered;
                 const float r = L[i].range * u.lightRangeScale;
                 if (length(pw6 - L[i].pos) < r) ++hit;
             }
-            const float f = u.numLights ? float(hit) / float(u.numLights) : 0.0f;
+            const float f = considered ? float(hit) / float(considered) : 0.0f;
             // green = some light, red channel scales with fraction, black = none
             return float4(f, f > 0.0f ? 0.35f + 0.65f * f : 0.0f, 0.0f, 1.0f);
         }

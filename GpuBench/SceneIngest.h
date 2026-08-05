@@ -51,6 +51,15 @@ struct Batch {
     uint32_t glossiness = 0;
     float    parallaxScale = 1.0f;
     bool     aoInAlpha = false;   // albedo alpha holds baked AO (Mat_AoInAlpha)
+    // Does this material act as a solid shadow occluder? Reproduces the CPU
+    // bake's caster filter EXACTLY (FDS/RENDER/Shadows.cpp:713-724): skip
+    // Mat_Transparent | Mat_Additive | Mat_SkipZ, plus any material whose NAME
+    // contains "lamp" or "emi" (the FLD carries no emissive flag, so the engine
+    // infers it from the name). This is not an optimisation — every greets omni
+    // is authored INSIDE a `lamp light` fixture ~0.3 units across, so without the
+    // filter each light bakes the inside of its own housing and the whole room
+    // reads as shadowed.
+    bool     castsShadow = true;
     // Model matrix: FDS Matrix is float[3][3], ROW-major, applied as row-dot-v
     // (Animate_Objects has already folded IScale into the rows and resolved the
     // parent hierarchy into IPos). worldPos = rot * objPos + pos.

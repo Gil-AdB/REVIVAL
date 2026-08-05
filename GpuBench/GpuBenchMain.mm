@@ -120,6 +120,11 @@ const char *kUsage =
     "                    authored omni ranges are 3-20 units in a 60+ unit room, so the hard\n"
     "                    cutoff culls nearly every light for nearly every pixel. Scale up to\n"
     "                    measure the real per-light cost.\n"
+    "  --dump_cube=N     deferred only, DIAGNOSTIC: read light N's baked shadow cube back\n"
+    "                    to the CPU, print per-face stored-depth statistics (nonfinite /\n"
+    "                    cleared / min-max / decoded world distance) and write a 3x2 face\n"
+    "                    atlas PPM. Forces Shared storage on the cubes, so never a timing run.\n"
+    "  --dump_cube_out=PATH  where the atlas goes (default gpubench_cube.ppm)\n"
     "  --no-stone_tex    do NOT apply DEMO's greets_stone_tex wall/floor override. The\n"
     "                    render is then the AUTHORED FLD wall, not the reviewed surface.\n"
     "  --help\n";
@@ -165,6 +170,8 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--viz_light="))  dopt.vizLight = std::atoi(v);
         else if (const char *v = val("--shadow_res=")) dopt.staticShadowRes = std::atoi(v);
         else if (const char *v = val("--exposure=")) dopt.exposure = float(std::atof(v));
+        else if (const char *v = val("--dump_cube=")) dopt.dumpCube = std::atoi(v);
+        else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
         else if (a == "--no-stone_tex")             opt.stoneTex = false;
         else if (const char *v = val("--viz=")) {
             const std::string m(v);

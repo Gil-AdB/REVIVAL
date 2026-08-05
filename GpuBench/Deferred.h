@@ -37,6 +37,14 @@ struct DeferredOptions {
     // MEASUREMENT-ONLY. See the shader comment on lightRangeScale.
     float lightRangeScale = 1.0f;
     int   vizLight = -1;          // -1 = all lights; else isolate this index
+    // DIAGNOSTIC. Read the baked cube for this light back to the CPU and print
+    // the raw stored floats (per face: NaN/Inf count, cleared count, min/max, and
+    // the decoded world distance), then write a 3x2 face atlas PPM. This exists
+    // because "the tap returns shadowed everywhere" has many possible causes and
+    // exactly one of them is "there is nothing valid in the cube" -- which is
+    // cheap to settle by LOOKING instead of adjusting conventions.
+    int   dumpCube = -1;
+    std::string dumpCubePath;
     std::string outPath;
 };
 
