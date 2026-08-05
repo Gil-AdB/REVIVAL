@@ -27,5 +27,10 @@
 6097  18.4499683,5.16043377,-57.6482239,-0.824408829,-0.544822097,-0.153357133    # corner / light-bleed pose
 2845  -7.38721609,2.72471762,-50.8239441,0.817980111,-0.113630958,0.563911617     # grazing close-up (zigzag)
 
+# --- 2026-08-06 review: path-viz session (shell recess arm, cap sweep) ---
+5534  8.1065979,3.19413304,-39.0308495,-0.0432227664,-0.188236833,-0.981172085   # corridor, looking BACK — an area no earlier test set covered
+5814  11.5895805,3.20128727,-55.6406746,-0.478447258,-0.114726782,0.870589495    # worst measured unresolved/magenta: 52k px at cap64 x32
+5854  13.3876753,3.20487022,-56.7713051,-0.62756604,-0.103757285,0.771618664     # near-corner grazing, wide clamp-to-flat band
+
 # Campaign synthetic benches (keep, but they are NOT review poses):
 #   t=5780 wall+statues bench, t=4200 wide vista, t=1867/2145 look poses.
