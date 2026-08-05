@@ -511,8 +511,8 @@ Estimates are **ESTIMATE** unless a stage is marked as already measured.
 
 | Stage | Work | Effort | What it buys |
 |---|---|--:|---|
-| **0. Scaffolding** | `option(FDS_GPU_BENCH … OFF)` + new target; `.mm`; Metal device; runtime MSL compile; link `libFDS.a` | ~½ day, **largely de-risked already** (FDS standalone link and runtime MSL compile both MEASURED) | Proof the approach works at all |
-| **1. Phase 2 spike** | greets geometry via `LoadFLD`, albedo via `Load_Texture`, de-indexed triangles with per-face UVs, one review pose, GPU frame timing, offscreen preferred | ~1 day | **The first real number**: this exact geometry, textured, on the GPU. Answers the vertex/raster half of the question. |
+| **0. Scaffolding** | `option(FDS_GPU_BENCH … OFF)` + new target; `.mm`; Metal device; runtime MSL compile; link `libFDS.a` | **DONE** | Proof the approach works at all |
+| **1. Phase 2 spike** | greets geometry via `LoadFLD`, albedo via `Load_Texture`, de-indexed triangles with per-face UVs, one review pose, GPU frame timing, offscreen | **DONE** — result in §6.1 | **The first real number**: this exact geometry, textured, on the GPU |
 | **2. Deferred G-buffer + 7 omnis, no shadows** | MRT G-buffer, full-screen **PBR** lighting pass (GGX + split-sum env BRDF + multiscatter + SH ambient — the stack greets actually runs) | ~1.5–2 days | The lighting comparison without the shadow confound. **Highest value per day, because the frame is lighting-bound.** |
 | **3. Cube shadow maps** | 7 × 6 × 512² + 3 × 6 × 128², `sample_compare` + PCF | ~1.5–2 days | The full greets-frame comparison, and makes the PCF / lightmap-amortisation asymmetries concrete |
 | **4. HDR + ACES tonemap** | `rgba16float` target + tonemap pass | ~½ day | Parity with greets' default look; makes screenshots visually comparable |
@@ -520,6 +520,48 @@ Estimates are **ESTIMATE** unless a stage is marked as already measured.
 | **6. (optional) Snapshot output** | offscreen PPM/PNG matching our snapshot naming | ~½ day | Cross-renderer image diffs with existing tooling |
 
 **~3 days to the first meaningful lighting number. ~2 weeks to the strategic answer.**
+
+### 6.1 Phase 2 result (MEASURED, `GpuBench/`)
+
+Built and run. `cmake -S . -B build-gpu -G Ninja -DFDS_GPU_BENCH=ON`, then from `Runtime/`:
+`build-gpu/GpuBench/GpuBench` (offscreen, writes a PPM; it never opens a window).
+
+Primary review pose `t=5743` → `CurFrame` 1722.9, 1920×1080, MSAA 1×, median of 300 frames after
+60 warmup, timed with `GPUEndTime − GPUStartTime`:
+
+| Configuration | Median GPU ms | p5 / p95 |
+|---|--:|---|
+| Full scene — 35 draws, 8,952 tris, 11 textures, 100 % screen coverage | **0.0962** | 0.056 / 0.101 |
+| `--no-draw` — render-pass floor (clear + store the 1080p BGRA8 target) | **0.0176** | 0.017 / 0.019 |
+
+**Net scene work ≈ 0.079 ms**, i.e. ~4.5× the pass floor. The `--no-draw` arm exists so this is
+*reported* rather than assumed: at this triangle count it is a real question whether the number
+measures the scene or just the cost of beginning and ending a render pass, and it turns out to be
+the scene.
+
+Ingest, same run: `LoadFLD` + 11 `Load_Texture` decodes in **18.9 ms**, 7 meshes with faces,
+8,952 faces, 5,936 source verts → **26,856 de-indexed GPU verts**, 35 (mesh × material) draws,
+10 lights. Camera from FDS: `perspX` 1728.00, `perspY` 1296.00, FOV 58.11°, `cntrE` (959.5, 539.5).
+
+**Correctness check.** A `DEMO --snapshot=greets@t=5743` at the same `FDS_GREETS_CAM` pose was
+rendered headless and compared: **framing, wall/floor geometry and the mech pose align.** The
+visible differences are exactly the ones this plan predicts — DEMO has PBR shading, cube shadows,
+HDR/bloom, flare sprites, and the `greets_stone_tex` wall/floor albedo override applied DEMO-side.
+That last difference is the **empirical confirmation of §2.6**: the wall surface in the GPU render
+is the FLD's, not the one the user reviews.
+
+Two honest caveats on the 0.0962 ms:
+- **Backface culling is OFF** in the GPU arm (the engine's cull lives in `Transform_Objects` and
+  is not reproduced), so the GPU is doing *more* fragment work than it needs to, not less.
+- **There is no scene lighting.** The fragment shader applies one fixed camera-facing term as a
+  depth cue so the image is verifiable by eye. It is two FMAs and cannot move the number.
+
+**Do NOT quote a CPU comparison number yet.** The snapshot run above reported `TOTL 1122 ms` for
+its single frame, but that is one cold frame including first-frame costs, on a tree carrying other
+agents' uncommitted edits — it is not a steady-state measurement and comparing it to 0.0962 ms
+would be exactly the category error §5.3 warns about. The CPU side of the comparison needs
+`--bench=scene@scene=greets,…` with load recorded and the per-phase counters, under the §4
+condition set (mirrors/disco off).
 
 ### Risks
 
