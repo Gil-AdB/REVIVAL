@@ -2,6 +2,151 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-08-06 — the whole geometry front end is now ~1.5–3 % of a greets frame, and Phase 5's real ceiling is HALF what this doc claims. Read this before starting Phase 4/5.
+
+Two things changed since the 2026-08-05 section below, and both cut the prize:
+
+1. **The 7.92 ms premise is retired geometry.** That number is the main-view
+   `Transform_Objects` under `--greets_displace` at 958 k verts. Tessellation is
+   retired (docs/SESSION_STATE.md) and `799c808`/`9d`'s faceless-mesh cull landed.
+2. **`--shadow_prof`'s "xform" bucket was not all transform** — see §"the phase-A
+   clear" below.
+
+### The front end, measured in WALL time (1920×1080, greets t=5743, shipping arm)
+
+`./DEMO --bench=scene@scene=greets,t=5743,iters=24 --deferred --xfrm_prof=24
+--shadow_prof --shadow_bake_time`, `FDS_SHADOW_PROF_INTERVAL=8`, load 9.4–11.5,
+frame mean 78.9–109 ms depending on box load.
+
+| stage | wall ms/frame | instrument |
+|---|--:|---|
+| MAIN `Transform_Objects` | **0.449–0.468** (min) / 0.485–0.503 (p50) | `--xfrm_prof` |
+| — of which SETUP / VERT / SOA / FACE | 0.004 / 0.244–0.257 / 0.001 / 0.176–0.185 | " |
+| SHADOW phase A, DynOmnis bake (28 maps) | 0.55–1.44 | `[SHADOW-CLEAR]` census |
+| SHADOW phase A, DynMeshes bake (14 maps) | 0.19–0.63 | " |
+| OFFSCREEN (env / SH probes) | not re-measured; §9d put it at 1.18 **core**-ms | `--xfrm_pass_prof` |
+| **whole front end** | **≈1.2–2.6 ms of a ~79 ms frame = 1.5–3.3 %** | |
+
+Main-view verts are **49 447** (in 8 285 / ahead 41 057 / regular 105), fTested
+16 607, fPushed 7 916. The frame profiler independently rows XFRM at **0.5 %**.
+
+**So: the transform phase is no longer a big chunk of the budget.** Anything left
+inside it is worth at most a few tenths of a ms. That is the number any further
+work here has to be justified against.
+
+### The phase-A "clear" — LANDED, and it is why the shadow xform bucket looked big
+
+`Render_DeferredShadowMaps` cleared each light's `depth`/`polyId` planes with a
+serial `std::fill` on the tick thread, *inside* the window `--shadow_prof` reports
+as `xform=`. Census build (`-DFDS_SHADOW_CLEAR_CENSUS`), greets t=5743, 12 frames:
+
+| bake | maps | bytes cleared | clear core-ms | phase-A wall |
+|---|--:|--:|--:|--:|
+| DynMeshes | 14 | 10.50 MB | 0.19–0.40 | 0.19–0.63 |
+| DynOmnis | 28 | 2.72 MB | 0.02–0.11 | 0.55–1.44 |
+
+For the DynMeshes bake the clear was **most of the bucket** — in several frames the
+summed clear core-time now EXCEEDS the whole phase-A wall, which is only possible
+because it is spread across the pool. Fixed by clearing inside `runPhaseAXform`
+(the clear is per-map private; nothing reads a map's planes before phase B, which
+is behind the `shadowDone` barrier). Byte-null: greets t=1588 `06e1d4d1` (3/3 runs,
+HEAD == FIX), all 5 chase poses HEAD == FIX, fountain `51fff7cd` == pin,
+render_gate 3/3.
+
+### Consumer inventory of the per-frame AoS fields (the Phase 4/5 surface)
+
+`sizeof(Vertex)` **= 140** (verified, `pack(1)`), with these offsets:
+
+```
+0   BGRA/LB,LG,LR,LA   4      out
+4   PX                 4      out      24  Pos        12   IN
+8   PY                 4      out      48  N          12   IN
+12  UZ                 4      out      72  Tangent    12   IN
+16  VZ                 4      out      104 U,V         8   IN
+20  RZ                 4      out      112 EU,EV       8   IN
+36  TPos_AOS          12      out      124 i           4   IN
+60  TN                12      out      128 OrigBaryB/C 8   IN
+84  TTangent          12      out      136 ShellH      4   IN
+96  EUZ,EVZ            8      out
+120 Flags              4      out
+```
+
+**out = 72 bytes, IN = 68 bytes.** Phase 5's target is therefore
+`sizeof(Vertex) == 68` for MESH storage. (The per-vertex loop touches 104 of the
+140 bytes and they span offsets 4..123 — every cache line — which is why field
+REORDERING is worth ~0: with a 140-byte stride the 36 untouched bytes never form
+a whole line. Only shrinking helps.)
+
+Readers of the `out` fields, in the built tree (`FL.CPP` is **not** in
+CMakeLists — dead), split by which vertex they hold:
+
+* **Transient / clipper-owned vertices (NOT mesh storage) — no migration needed.**
+  `FrustumClipper::C_Verts[48]`, `Omni::V`, `Particle::V`. Everything in
+  `FILLERS/FILLERS.CPP` (86 PX / 91 PY / 54 RZ / 33 UZ / 33 VZ),
+  `FILLERS/TheOtherBarry.h`, `Mekalele.h`, `FILLERS/ShadowMap.cpp`,
+  `Clipper.cpp`, and the bulk of `FRUSTRUM/FRUSTRUM.CPP` reads these.
+  **Verified: every rasterized face reaches a filler through
+  `FrustumClipper::Render`** (`RenderInner.cpp` 145/147/209/212/214/316/318/320/
+  394/402 are the only raster entries) — so no rasterizer ever reads a mesh
+  Vertex's `out` fields.
+* **Reads `out` through a MESH vertex — this is the whole migration surface:**
+  | site | fields | note |
+  |---|---|---|
+  | `FRUSTRUM.CPP:904` `*A = *F->A` ×3 + `A->RZ` | all | the entry copy; becomes IN-copy + one `out` read |
+  | `Transform.cpp:2352` `F->VisibilityFlagsAll()` | Flags | 73 % of the FACE bucket |
+  | `Transform.cpp:2606+` tile-bbox stamp | PX, PY, TPos.z | deliberately pointer-based (wrong `A_idx` on the conetest quad) |
+  | `RenderInner.cpp:137,308` mirror centroid gate | PX, PY | |
+  | `RENDER.CPP:1202` | TPos.z | (1420–1422 already read `ff->PX[ai]` — the precedent) |
+  | `CAMERAS/CAMERAS.CPP:124–134` | TPos | plane/portal test |
+  | `DEMO/CITY.CPP` (75 TPos / 51 RZ / 23 PX / 23 PY) | all | `Reflected_Transform`, already dual-writes `frame` |
+  | `DEMO/CHASE.CPP:562–571` | Flags, TPos.z | its own face loop |
+  | `DEMO/FOUNTAIN.CPP` (68 TPos / 14 PX) | TPos, PX, PY | water / particle projection |
+  | `DEMO/Raytracer.cpp:93–103` | LR/LG/LB (the BGRA union) | |
+  | `MISC/PREPROC.CPP`, `RADIO/RADIO.CPP`, `DEMO/Snapshot.cpp`, `DEMO/FillerTest.cpp` | 1–4 refs each | diagnostics / legacy |
+  Migration vehicle stays the rename-first technique; `A_idx` trust is avoidable
+  entirely by deriving the index as `F->A - tVerts` (exact, no invariant needed).
+
+### CORRECTION: 13 SoA arrays is the WRONG output layout for this loop
+
+This doc plans the `out` fields as 13+ separate `VertexFrame` arrays. Against the
+measured mechanism (line-bound, not arithmetic-bound) that costs most of the win
+back, and the evidence is already in the 2026-08-05 section:
+
+* Today's inline store writes **4** streams (TPos_x/y/z + PY = 16 B/vert) and
+  that alone measured **+0.4 ms** of VERT at 958 k verts. Phase 5 needs all 13
+  (PX, PY, RZ, TPos×3, TN×3, TTangent×3, Flags ≈ 52 B/vert) — ~3× the streams
+  and ~3× the store bytes.
+* Net traffic: AoS walk 140 → 68 B/vert (−72) but SoA stores 16 → 52 B/vert
+  (+36) = **−26 %**, not the "~45 % of VERT" this doc claims. Plus 13 concurrent
+  write streams of DRAM page pressure.
+* The per-face loop wants 4 fields of the SAME vertex (Flags, PX, PY, TPos.z).
+  In 13-array SoA that is up to **4 cache lines per vertex**; interleaved it is 1.
+
+**Recommended layout instead: keep inputs AoS (68 B) and make the outputs a
+SECOND AoS array, one cache line per vertex.** `TPos×3 + TN×3 + TTangent×3 + PX
++ PY + RZ + Flags + BGRA = 56 B`, + `EUZ/EVZ` = **64 B exactly**. `UZ`/`VZ` do
+not need to be in it at all: `FRUSTRUM.CPP:905–920` **unconditionally overwrites**
+`A/B/C->UZ/VZ` from `F->U1..V3 * RZ` at clipper entry, so the transform's UZ/VZ
+stores are dead for every rasterized face (`EUZ/EVZ` are overwritten too, but only
+`if (F->Flags & Face_Reflective)` — those need care).
+
+Then the loop is **2 sequential streams**: read 68 B, write 64 B (a full aligned
+line, so the write-allocate read can be elided) versus today's ~280 B of
+read+write-back per cold vertex — a ~50 % traffic cut with 1 write stream instead
+of 13. The existing 13-array `VertexFrame` stays only for the few consumers that
+want ONE field across many vertices (`SortZ`, `IsFrontFacingInViewSpace`,
+`QuadAwareMaxViewZ`, `RENDER.CPP:1420`), or those move to the interleaved array too.
+
+### Recommendation
+
+Against a 1.2–2.6 ms front end, a ~50 % cut of the VERT portion is **~0.15–0.4 ms
+of a ~79 ms frame (0.2–0.5 %)** for a refactor touching ~11 files including two
+alternative transform pipelines (`Reflected_Transform` in CITY/CHASE, FOUNTAIN's
+water/particle projection) and the clipper entry. **Do not start it as a perf
+item.** If it is done, do it for the cleanliness/correctness reasons in this doc
+(one transform-writer contract instead of three) and use the interleaved 64-byte
+output layout, not 13 SoA arrays.
+
 ## MEASURED 2026-08-05 — the June verdict was measured in the WRONG REGIME. Read this first.
 
 The June entry below ("Phase 2 washes; the transform is only ~0.35 ms; STOP") is correct

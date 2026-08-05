@@ -200,6 +200,29 @@ items below stay PARKED.
   S2 already reclaimed), so a main-pass geometric LOD buys little beyond S2+S1.
 
 ## Geometry front-end (XFRM) — measured 2026-08-05, docs/SOA_VERTEX_REFACTOR.md
+
+> **RE-MEASURED 2026-08-06 — THIS SECTION IS CLOSED AS A PERF TARGET.** With
+> tessellation retired and `9d`'s faceless-mesh cull landed, the WHOLE geometry
+> front end is **≈1.2–2.6 ms of a ~79 ms greets frame (1.5–3.3 %)**: main-view
+> `Transform_Objects` **0.449–0.468 ms** min (SETUP 0.004 / VERT 0.244–0.257 /
+> SOA 0.001 / FACE 0.176–0.185) at 49 447 verts, SHADOW phase A 0.74–2.07 ms
+> wall across both bake calls, OFFSCREEN ~1.18 core-ms. The 7.92 ms baseline
+> quoted below is `--greets_displace`, which is retired geometry.
+> **One thing did land from this pass:** the per-light shadow depth/polyId
+> `std::fill` ran SERIALLY on the tick thread inside the window `--shadow_prof`
+> calls `xform=` — 10.50 MB / 0.19–0.40 core-ms per DynMeshes bake, i.e. MOST of
+> that bucket was memset, not transform. Now cleared on the owning phase-A
+> worker (byte-null at every gate). Census: `-DFDS_SHADOW_CLEAR_CENSUS`
+> → `[SHADOW-CLEAR]`.
+> **Phase 5's ceiling is also half what the doc claims** (−26 %, not −45 %, once
+> the 13 extra SoA write streams are counted) unless the outputs are laid out as
+> ONE interleaved 64-byte-per-vertex array instead of 13 SoA arrays — see the
+> 2026-08-06 section of docs/SOA_VERTEX_REFACTOR.md for the corrected design,
+> the verified `sizeof(Vertex)`=140 → 68 target, and the full consumer inventory
+> (the migration surface is 11 files, incl. `Reflected_Transform` and FOUNTAIN).
+> Prize for the whole refactor: ~0.15–0.4 ms (0.2–0.5 % of frame). Do it for
+> cleanliness if at all, not for perf.
+
 Instrument: `--xfrm_prof=N` + `--xfrm_ablate=<mask>` (both default OFF, byte-null).
 Baseline at greets t=5780 `--greets_displace`, per-frame min: main-view
 `Transform_Objects` 7.92 ms = VERT 4.01 + SOA 2.40 + FACE 1.45.
