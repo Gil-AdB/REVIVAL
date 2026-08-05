@@ -1317,6 +1317,23 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		T = (TriMesh *)(Obj->Data);
 		if (xp) xpTM = xpNow();   // per-mesh setup starts here
 
+		// FACELESS MESH SKIP. Everything Transform_Objects produces is FList
+		// entries, and every FList entry comes from a Face — so a mesh with
+		// FIndex == 0 cannot emit one, and its per-vertex transform output is
+		// written into arrays nothing will ever read. Not hypothetical: the
+		// greets Piramid chunk split "retires" the parent mesh by zeroing
+		// FIndex while deliberately keeping its arrays alive (GREETS.CPP
+		// ~2540), leaving 16 596 verts on the object list with nothing to
+		// draw. Measured at t=5743, 1920x1080, shell arm: that ONE mesh is
+		// 365 112 of 540 706 shadow-pass verts (67.5 %), 16 596 of 82 639
+		// main-view verts (20.1 %) and 149 364 of 309 740 offscreen verts
+		// (48.2 %) — every frame, purely to produce nothing. Unconditional
+		// rather than flag-gated on purpose: "no faces => no output" is an
+		// invariant of this loop, not a tunable, and a never-taken runtime
+		// branch inside this -ffp-contract=fast function is itself not
+		// byte-null (docs/VISIBILITY_PLAN.md 8).
+		if (T->FIndex == 0) continue;
+
 		// Non-shadow-casting meshes (Tri_NoShadowCast — e.g. the disco ball):
 		// excluded from every shadow occluder pass. _inShadowPass covers the
 		// static bake, the dynamic per-frame bake, and moving-omni cube re-bakes.

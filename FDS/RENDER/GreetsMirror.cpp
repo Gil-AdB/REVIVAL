@@ -468,12 +468,24 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     // Count total verts/faces (excluding mirror-surface faces — we
     // want a hole where the mirror is, not a mirror image of the
     // mirror itself).
+    //
+    // FACELESS SOURCE MESHES ARE SKIPPED (`T->FIndex == 0`, here and in the
+    // matching fill loop below, and in the compound-mirror pair). The clone's
+    // face loop is `for (fi < T->FIndex)`, so a faceless source contributes
+    // ZERO clone faces while its `T->VIndex` verts are still copied, mirrored,
+    // re-mirrored every frame by UpdateMirror and re-transformed by every pass
+    // that sees the clone. The greets Piramid chunk split retires the parent
+    // mesh exactly that way (FIndex=0, arrays kept alive, 16 596 verts), so
+    // every clone was carrying 16 596 orphan verts — measured 37.7 % of each
+    // 44 012-vert greets clone, and the active clone is 53 % of main-view
+    // transformed verts. Removing them cannot move a pixel: no face pointed
+    // at them.
     DWord totalVerts = 0, totalFaces = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (isCloneMesh(Obj)) continue;
         TriMesh *T = (TriMesh*)Obj->Data;
-        if (!T || !T->Verts || !T->Faces) continue;
+        if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
         totalVerts += T->VIndex;
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             if (isMirrorSurface(T->Faces[fi], T)) continue;
@@ -561,7 +573,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         if (Obj->Type != Obj_TriMesh) continue;
         if (isCloneMesh(Obj)) continue;  // skip prior mirror clones
         TriMesh *T = (TriMesh*)Obj->Data;
-        if (!T || !T->Verts || !T->Faces) continue;
+        if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
         const bool meshDyn = meshIsDynamic(Obj);
         const DWord vStart = vOfs;
         for (DWord vi = 0; vi < T->VIndex; ++vi) {
@@ -1645,7 +1657,7 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 if (Obj->Type != Obj_TriMesh) continue;
                 if (isCloneMesh(Obj)) continue;
                 TriMesh *T = (TriMesh*)Obj->Data;
-                if (!T || !T->Verts || !T->Faces) continue;
+                if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
                 totalV += T->VIndex;
                 for (DWord fi = 0; fi < T->FIndex; ++fi) {
                     if (!T->Faces[fi].A) continue;
@@ -1713,7 +1725,7 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 if (Obj->Type != Obj_TriMesh) continue;
                 if (isCloneMesh(Obj)) continue;
                 TriMesh *T = (TriMesh*)Obj->Data;
-                if (!T || !T->Verts || !T->Faces) continue;
+                if (!T || !T->Verts || !T->Faces || T->FIndex == 0) continue;  // faceless: no clone face can reference its verts
                 const DWord vStart = vOfs;
                 for (DWord vi = 0; vi < T->VIndex; ++vi) {
                     MM->Verts[vOfs] = T->Verts[vi];
