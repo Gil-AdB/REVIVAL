@@ -655,3 +655,259 @@ obtain a primary Epic statement this round; the *fact* that UE5 dropped the DX11
 tessellation displacement path in favour of Nanite/virtual heightfield is widely
 reported but I am not citing a source I have not read. **Unknown, pending a
 primary citation.**
+
+---
+
+## 3. Every candidate against OUR measured constraints
+
+Rows above the rule are arms we have built or can reach with existing flags; below
+it are the literature's options. "Lateral bound" is what stops the ray running
+away at grazing — the term our slip data says is decisive. Costs marked [E] state
+their assumption.
+
+| technique | chart-boundary behaviour | lateral-travel bound | silhouette | needs depth write | CPU / 8-wide SIMD shape | precompute + memory |
+|---|---|---|---|---|---|---|
+| **Flat POM (shipping default)** | none — the ray keeps its UV, offset-limited so it barely moves | `strength` (offset-limited) | no | no | ideal: fixed-count arithmetic march, +1.7–2 ms naive-8 [M] | none beyond the height map |
+| **Recess-only + clamp (standing arm)** | **clamp to flat** — 0.8–8.5 % of frame renders as flat wall [M §10.6] | hard cap; cap 16 is 21 % of the wall on a wrong ray [M] | no, structurally [M §10.8] | yes (+0.1 ms [M]) | same as flat POM; measured within 0.01 ms of it at t=5780 [M §10.7] | none |
+| **Recess-only + NO domain test + cap 64** — *the shipped-POM configuration, UNTESTED as a look arm* | **none — ray samples the tiling map past the boundary, exactly as shipped POM does everywhere** | none needed (cap 64 = uncapped, error sub-texel [M]) | no | yes | identical to the above; the domain test is *removed*, so cheaper | none |
+| **Lid + weld + side entry (best protrusion arm)** | leaning side planes as an exit test + analytic entry, within one patch | cap | **yes, geometrically** — nearer depth on 16 k–176 k px [M §S1d-2d.6] | yes | +4 divides, ~16 FMAs, 8 selects per covered shell px [M-stated] | lid extrude + weld at init |
+| **Offset-limited ray in a finite chart** | ray barely leaves, so no boundary problem | `strength` | no | optional | ideal | none |
+| — | | | | | | |
+| **Hirche '04 prism, flat-quad single-pass variant** | **the prism IS the domain; escaped pixels are owned by the NEIGHBOUR prism's fragment** | the prism volume — absolute, geometric | **yes** [P-demo] | **yes** (Hirche does it in 2004) | 8 tris/base tri; ~1 800 faces for our 226 shelled quads = **~2 % of the tessellation carve** [E] | extrude + consistent edge split; no maps |
+| **Hirche '04 tetrahedral variant** | tetrahedron; entry/exit UV interpolated by the rasterizer | the tetrahedron | yes [P-demo] | yes | **poor**: needs per-frame view-dependent Projected-Tetrahedra decomposition on the CPU [P] | ×3 tetrahedra/face |
+| **Shell maps '05** | **one global bijection — no chart boundary anywhere** | the shell volume | yes [P-claim] | yes | tetrahedral traversal; bijection lookup | offline shell + bijection over the whole mesh |
+| **Quadric silhouettes (Oliveira & Policarpo '05)** | not addressed | the quadric's exit from the slab | yes on **curved** surfaces [P-demo] | yes | 2 floats/vertex, trivial | offline least-squares fit |
+| **Prism POM (Dachsbacher & Tatarchuk '07)** | prism | prism | **yes — the only direct-sampling method a 2025 survey credits with correct silhouettes** [P-claim, secondary] | yes | prism + 3 tetrahedra; documented difficulty with **AO in the raster pipeline** | prism extrusion |
+| **Curved shell mapping (Jeschke '07)** | Coons patch per prism | prism | yes [P-claim] | yes | **bad**: a cubic solve per ray step | patch fit per prism |
+| **Cross-chart march continuation (our S1d-2c)** | **hand-off through a per-seam affine transform — unattested in the literature** | one hop suffices (p99 = 232 texels [M]) | no by itself | yes | bounded kernel cost; the work is the bake | 71 affine buckets, 41.8 % mirrored [M §S1d-1.8] |
+| **Silhouette-only tessellation** | n/a — real geometry | n/a | **yes, true** | no | +5 ms buys ~6 000 faces at 0.8 µs/face [E]; must also pay the shadow re-raster | per-chunk bake + shared-edge crack rule |
+| **Full-scene tessellation (retired)** | n/a | n/a | yes, true | no | **+35.6 ms vs recess-only at t=5780** [M §10.7] | 2–6 s init bake, ~80 k faces resident |
+
+Two entries in that table deserve to be read together: Hirche's flat-quad prism
+gets silhouettes for an estimated **~1 800 faces**, against the tessellation
+carve's measured **86 600**. That ~2 % ratio is the number `DISPLACEMENT_RESEARCH.md`
+§6 should have computed before non-recommending the family, and it is the single
+strongest technical argument in this document. The estimate assumes our measured
+0.75–0.85 µs/face holds at these counts and that the side faces' *pixel* coverage
+is small (they are seen edge-on almost everywhere) — **the pixel coverage is
+unmeasured and could change the verdict.**
+
+---
+
+## 4. The one measurement that would settle the swim, and it has not been taken
+
+Everything about the grazing complaint currently rests on comparing per-pixel arms
+to each other and to a per-pixel reference. At cap 64 the error *against the true
+ray* is zero **by construction** — cap 64 IS the reference [M, §S1d-2e.0] — yet the
+absolute surface-registered slip at cap 64 is p90 15.3 / p99 501 texels per frame
+[M, commit `7bfbc87`]. Those two facts are not in conflict: they say **the true
+ray's own landing point is genuinely hypersensitive to camera motion at grazing**,
+because the landed UV carries a factor 1/cos θ whose derivative in θ blows up
+faster still.
+
+So there are two candidate mechanisms for what the user is seeing, and they demand
+opposite responses:
+
+- **(H1) The march is wrong.** Then the fix is in the march or the ray.
+- **(H2) The motion is physically correct, and it reads as "swimming" because it
+  is painted onto a FLAT surface.** On real relief the fast-moving deep-valley
+  samples are broken up by the near blocks' own silhouettes and edges; on a flat
+  recess-only wall there is nothing to break them up, so the eye reads correct
+  parallax as sliding texture. [E — this is inference, not measurement.]
+
+**The discriminator is cheap and has never been run: take the tessellation arm
+through the identical sweep-A camera path and measure ITS slip on the same
+surface-registered metric.** The instrument exists (`--pom_path_viz`'s
+`*_uvgeo.bin` gives a camera-free surface coordinate; `--parallax_max_offset=1e-6`
+gives the geometric UV). Tessellation moves real geometry, so its "slip" must be
+computed from the depth/albedo registered on that coordinate rather than from a
+marched UV — a scripting job, not a code change.
+
+- If tessellation's slip at grazing is **comparable** to cap 64's, H2 holds: the
+  motion is physical, the march is exonerated, and the remaining work is
+  silhouettes and shading normals (`--pom_normal`), not the ray.
+- If tessellation's slip is **low**, H1 holds and the march is still wrong.
+
+Until that is measured, "the swim" is an unattributed symptom and any march change
+aimed at it is a guess. This is the cheapest-discriminator-first move and it should
+precede every other item below.
+
+One further term is already known to be in the frame and is *not* the march:
+`--texture_filter` defaults to 0, the deferred kernel point-samples at texel
+granularity, and one height texel covers ~15 screen pixels at these poses, so the
+wall is drawn as ~4 px texel blocks that crawl under camera motion — present in
+flat POM and in `--no-parallax` alike [M, §S1d-2e.4]. It was not shown to be what
+the user means, and is recorded rather than claimed.
+
+---
+
+## 5. Ranked recommendation, with the negative option stated as a real option
+
+**R0 — measure the tessellation arm's grazing slip (§4).** No code. Decides
+whether anything in the march needs to change at all. Do this first.
+
+**R1 — render the shipped-POM configuration and look at it.** No code:
+`--pom_recess_only --no-pom_shell_domain --pom_shell_cap=64`, all 13 review poses
+plus sweep A. This is configuration (a) from §1.1 — the exact domain model every
+shipped POM surface used — and the campaign has only ever run `--no-pom_shell_domain`
+as a differencing instrument [M §10.6]. Expected: zero void (recess-only rasters
+the authored polygon), no clamp band at all (the clamp is what we are removing),
+sub-texel error vs the true ray, and the only defect being the *wrong instance* of
+a tiling stone pattern past a patch boundary — the defect shipped POM has
+everywhere. It is also strictly *cheaper* than the standing arm, since a compare
+group per pixel disappears. **If this looks acceptable, most of S1d is unnecessary.**
+
+**R2 — fix the mesh, not the march.** The shell family's stated precondition is a
+watertight offset surface, i.e. shared vertex normals; `rooms` has exactly 3
+unshared verts per face and the lid void is measured **linear in the offset**
+[M §S1d-2d]. Either weld across *every* surface the shell touches — including
+`siling` and the columns, which currently have no shell and are where the residue
+lives [M §S1d-2e.5] — or stay in recess-only, where the precondition is vacuous
+because nothing moves. There is no third option that the literature supports.
+
+**R3 — if protrusion is wanted, build Hirche's prism properly, not another half of
+it.** Raster all eight faces of each shelled quad's prism (back-face culled), let
+every prism march its own interior, discard on exit, and let the Z-buffer arbitrate
+between overlapping prisms. That is what makes a neighbour's fragment answer the
+pixel our ray escaped from — the mechanism `--pom_shell_side_entry` approximates
+within one patch and cannot complete [M §S1d-2d]. Estimated ~1 800 faces for our
+226 shelled quads, ≈ 2 % of the tessellation carve's face count [E]. **Gate it on
+the side faces' measured pixel coverage first**, because that is the one term in
+the estimate with no number behind it. Requires R2.
+
+**R4 — silhouette-only tessellation, as R3's competitor.** +5 ms buys ~6 000 faces
+[E]; the target population is already localised by `--pom_seam_census` (72.9 % of
+the defect on convex ridges) [M]. Must be costed *including* the per-frame shadow
+re-raster, which the retired-mesh and SoA fixes did **not** touch. Uses the
+existing shared-edge crack rule.
+
+**R5 — the honest negative verdict, and it is the front-runner on the evidence.**
+
+> **Recess-only per-pixel displacement for the surface, in the shipped-POM domain
+> model (R1), and no silhouette program at all — because this scene cannot show
+> one.**
+
+The argument is not aesthetic, it is measured. §S1d-2d.6 went looking for
+see-through in the mortar valleys with an instrument rather than by eye, at all 13
+review poses and at 3.3× the standing amplitude, and found **0–24 px at every pose
+except one**, where the 24 737 px turned out to be a residual geometry slit rather
+than relief. The reason given there is structural and I believe it: **greets is a
+closed room.** Behind every shelled wall is another wall at zero distance or
+nothing at all, so a stone standing proud has nothing to be seen past. On top of
+that, only **0.4 % of 2 289 world of patch boundary is a true free edge** [M
+§S1d-1.2] — the architecture is closed, so there are almost no silhouettes to get
+right in the first place.
+
+So the entire protrusion program buys a look the scene is not able to display,
+while dragging 18.77 % shadow-cube divergence and a lid that tears on an
+angle-split mesh. Against that, recess-only is measured at **0 void, 0 offscreen
+delta, and within 0.01 ms of flat POM**, and with `--pom_normal` plus
+`--pom_horizon` it was ranked by eye as `tess ≈ recW18pn > recW18 > rec >> lid`
+[M §10.7]. What it gives up — "a groove that can only sink is not the same as a
+block that can rise" [M §10.7] — is real, and is the price.
+
+**If protrusion is still wanted after R0/R1, it should be wanted for a specific
+shot, and the right answer for a specific shot is real geometry there** (R4 scoped
+to those faces), not a general shell over a closed room.
+
+**Explicitly do not build:** coplanar cross-chart continuation (31 px of 800 513,
+already shipping [M]); curved shell mapping (a cubic per step); quadric silhouettes
+(a = b = 0 on a flat wall); a hard offset clamp as a quality knob — three
+independent sources plus our own ladder say a travel bound has no good setting
+(§2.1 (ii)).
+
+---
+
+## 6. What this contradicts in `docs/DISPLACEMENT_RESEARCH.md`
+
+That document's §6 non-recommended "Prism/tetrahedra rasterization (Hirche '04,
+shell maps as-shipped)" on the grounds that "our flat quads reduce it to S1b at a
+fraction of the geometry and per-pixel cost". **Two errors, and the second one
+cost the campaign months of the wrong work:**
+
+1. **It conflated cheap with pointless.** Flat quads make the prism *trivially
+   correct* (Hirche's abandoned single-pass variant becomes usable; PDM 2025's
+   parallel-offset correction becomes the identity). §2.3.
+2. **It missed the mechanism.** A prism's side faces are not just an exit test,
+   they are *rasterized geometry*, which is what gives the neighbouring prism a
+   fragment at the pixel your ray escaped from. Our lid-only shell has no such
+   fragment, and every hole, gash, smear and rust stripe in the campaign traces
+   back to that single missing thing. §2.3.
+
+It also implied that the offset-lid shell (S1b) was the flat-wall *special case* of
+the prism family. It is not: it is the prism family **with the side faces deleted**,
+which is the one part that was load-bearing.
+
+Two things in `DISPLACEMENT_RESEARCH.md` this round **confirms**: the VDM/GDM
+rejection (§5.1 — and the curvature argument is now backed by the verbatim quadric
+mechanism), and the sphere-tracing verdict (§5.2). And one thing it got right for
+the wrong reason: quadric silhouettes really are inert for us, but because a flat
+wall has no curvature, not because the machinery collapses.
+
+`docs/DISPLACEMENT_RESEARCH.md` §6 now carries a pointer to this file.
+
+---
+
+## 7. Sources
+
+Read first-hand this round (text extracted and quoted above):
+
+- N. Tatarchuk, *Practical Parallax Occlusion Mapping for Highly Detailed Surface
+  Rendering*, in *Advanced Real-Time Rendering in 3D Graphics and Games*, SIGGRAPH
+  2006 course. https://advances.realtimerendering.com/s2006/Tatarchuk-POM.pdf
+- N. Tatarchuk, *Practical Dynamic Parallax Occlusion Mapping*, SIGGRAPH 2005
+  sketch / I3D 2006 slide deck.
+  https://cgg.mff.cuni.cz/~pepca/lectures/pdf/Tatarchuk-ParallaxOcclusionMapping-Sketch-print.pdf
+- F. Policarpo, M. M. Oliveira, J. Comba, *Real-Time Relief Mapping on Arbitrary
+  Polygonal Surfaces*, I3D 2005 (appendix Cg shader: `ds = s.xy*depth/s.z`,
+  `dp = IN.texcoord*tile`, `RM_DEPTHCORRECT`).
+  https://www.inf.ufrgs.br/~oliveira/pubs_files/Policarpo_Oliveira_Comba_RTRM_I3D_2005.pdf
+- F. Policarpo, M. M. Oliveira, *Relief Mapping of Non-Height-Field Surface
+  Details*, I3D 2006 (the verbatim quadric-silhouette mechanism).
+  https://www.inf.ufrgs.br/~oliveira/pubs_files/Policarpo_Oliveira_RTM_multilayer_I3D2006.pdf
+- J. Hirche, A. Ehlert, S. Guthe, M. Doggett, *Hardware Accelerated Per-Pixel
+  Displacement Mapping*, Graphics Interface 2004.
+  http://download.hrz.tu-darmstadt.de/media/FB20/GCC/paper/Hirche-2004-GI.pdf
+- F. Policarpo, M. M. Oliveira, *Relaxed Cone Stepping for Relief Mapping*, GPU
+  Gems 3 ch. 18, 2007 (`ray_dir /= ray_dir.z`; the z-buffer update).
+  https://developer.nvidia.com/gpugems/gpugems3/part-iii-rendering/chapter-18-relaxed-cone-stepping-relief-mapping
+- R. L. Cook, L. Carpenter, E. Catmull, *The Reyes Image Rendering Architecture*,
+  SIGGRAPH 1987 (half-pixel micropolygons; eye-space dicing from a screen-size
+  estimate).
+- I. Cantlay, *DirectX 11 Terrain Tessellation*, NVIDIA whitepaper, 2011
+  (crack-free factors from shared patch edges only; the 1–64 factor limit).
+- *Projective Displacement Mapping for Ray Traced Editable Surfaces*, arXiv 2025
+  (the parallel-offset prism; the survey line naming PPOM as the only
+  direct-sampling method with correct silhouettes).
+  https://arxiv.org/pdf/2502.02011
+- Microsoft DirectX SDK `DetailTessellation11` POM shader (`fParallaxLength`;
+  `nNumSteps = lerp(g_nMaxSamples, g_nMinSamples, dot(V,N))`; no depth output; no
+  UV domain test).
+  https://github.com/tgjones/slimshader-cpp/blob/master/src/Shaders/Sdk/Direct3D11/DetailTessellation11/POM.hlsl
+- Epic Developer Community, *Can Parallax Occlusion Mapping break a silhouette?*
+  https://forums.unrealengine.com/t/can-parallax-occlusion-mapping-break-a-silhouette/399186
+
+Characterised from secondary sources this round, flagged as such in the text
+(**not** read first-hand — obtain before relying on any detail):
+S. Porumbescu et al., *Shell Maps*, SIGGRAPH 2005 · C. Dachsbacher, N. Tatarchuk,
+*Prism Parallax Occlusion Mapping with Accurate Silhouette Generation*, I3D 2007
+poster · S. Jeschke et al., *Interactive Smooth and Curved Shell Mapping*, EGSR
+2007 · B. Karis et al., *Nanite — A Deep Dive*, SIGGRAPH Advances 2021 · NVIDIA
+*Displaced Micro-Mesh*, 2022.
+
+Checked and found NOT to contain the expected material:
+M. Mittring, *Finding Next Gen — CryEngine 2*, SIGGRAPH 2007 course ch. 8 — read
+in full; contains **no mention of parallax or parallax occlusion mapping**. Whether
+Crysis shipped POM, and whether recessed or protruding, is **unknown** from this
+source.
+
+In-repo evidence, all measured on this machine:
+`docs/S1D_CLOSED_SHELL_PLAN.md` (§S1d-1 seam census, §S1d-2 side faces, §S1d-2d
+side entry, §S1d-2e the cap/swim attribution and the weld ladder) ·
+`docs/S1_DISCREPANCY_INVENTORY.md` (§9 grazing cap, §10 recess-only, §10.6 the
+clamp population, §10.7 look + perf, §10.8 what recess-only cannot do) ·
+`docs/DISPLACEMENT_RESEARCH.md` (§2 march economics, §4-S1a depth-write cost,
+§4-S2 the µs/face rate) · `docs/OPTIMIZATION_BACKLOG.md` (XFRM/SoA, BVH refutation)
+· `docs/VISIBILITY_PLAN.md` §8a (per-pass front-end census) ·
+`docs/greets_review_poses.txt` · commit `7bfbc87` (the surface-registered slip
+figures) · commit `799c808` (the retired-mesh fix).
