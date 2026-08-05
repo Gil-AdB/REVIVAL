@@ -177,6 +177,12 @@ inline float xfrmRcpF(float z, int mode) {
 }
 
 #if FDS_VIS_CENSUS
+#include <array>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <atomic>
+#include <Base/Material.h>
 // ── VISIBILITY CENSUS BUILD ONLY (-DFDS_VIS_CENSUS=1) ────────────────────
 // The per-PASS profiler and the mirror-clone split census below are RESEARCH
 // instruments (docs/VISIBILITY_PLAN.md §8). They are compile-time gated, not
@@ -233,6 +239,211 @@ void xpassDump(int frames) {
 		a.vertsSeen = 0; a.vertsXformed = 0; a.facesPushed = 0;
 	}
 	std::fprintf(stderr, "[XFRM-PASS]   %-11s %30.3f ms/frame\n", "TOTAL", totMs);
+}
+
+// ── Per-MESH / per-MATERIAL decomposition of the pass census
+//    (--xfrm_pass_mesh_prof=N, census build only) ───────────────────────────
+// xpassDump answers "which PASS dominates"; this answers "WHAT IS IN IT".
+// Needed because the 7.6 M shadow-pass verts were only ever measured as one
+// lump, and the decision "flatten the wall casters" depends entirely on the
+// walls' share of that lump. Attribution is per mesh (the granularity the
+// mesh cull works at) plus a proportional per-MATERIAL split computed at DUMP
+// time from each mesh's face->Txtr histogram, so the hot loops stay untouched
+// beyond two atomic adds.
+//
+// Lock-free open-addressed table keyed on the TriMesh pointer: shadow passes
+// run Transform_Objects on 12 workers, and a mutex there would serialise them.
+// Meshes are created once at scene init, so after the first frame every probe
+// is a single acquire-load.
+constexpr int XM_CAP = 8192;   // power of two
+struct XMeshSlot {
+	std::atomic<const void*> key{nullptr};
+	const TriMesh *mesh = nullptr;
+	const char    *name = nullptr;
+	std::atomic<int64_t> seen[XPK_NUM]{};
+	std::atomic<int64_t> seenV[XPK_NUM]{};
+	std::atomic<int64_t> xf[XPK_NUM]{};
+	std::atomic<int64_t> xfV[XPK_NUM]{};
+};
+XMeshSlot g_xm[XM_CAP];
+
+__attribute__((noinline))
+XMeshSlot *xmSlotFor(const TriMesh *T, const char *nm)
+{
+	size_t h = size_t(reinterpret_cast<uintptr_t>(T) >> 4) * size_t(0x9E3779B97F4A7C15ull);
+	h ^= h >> 29;
+	for (int i = 0; i < XM_CAP; ++i) {
+		XMeshSlot &s = g_xm[(h + size_t(i)) & (XM_CAP - 1)];
+		const void *k = s.key.load(std::memory_order_acquire);
+		if (k == (const void *)T) return &s;
+		if (k == nullptr) {
+			const void *expect = nullptr;
+			if (s.key.compare_exchange_strong(expect, (const void *)T,
+			                                  std::memory_order_acq_rel)) {
+				s.mesh = T; s.name = nm;
+				return &s;
+			}
+			if (s.key.load(std::memory_order_acquire) == (const void *)T) return &s;
+		}
+	}
+	return nullptr;
+}
+
+// Base name for grouping: "Piramid.lwo:c17" -> "Piramid.lwo", "momy.lwo::body"
+// -> "momy.lwo". The chunk / bin splits are an implementation detail of the
+// same authored object and the wall/statue question is asked at object level.
+void xmBaseName(const char *n, char *out, size_t cap)
+{
+	if (!n) { std::snprintf(out, cap, "?"); return; }
+	std::snprintf(out, cap, "%s", n);
+	char *c = std::strstr(out, "::");
+	if (c) { *c = 0; return; }
+	c = std::strchr(out, ':');
+	if (c) *c = 0;
+}
+
+struct XMAgg {
+	char     name[80] = {0};
+	int64_t  seen[XPK_NUM] = {0}, seenV[XPK_NUM] = {0};
+	int64_t  xf[XPK_NUM] = {0}, xfV[XPK_NUM] = {0};
+	int      meshes = 0;
+};
+
+void xmDump(int frames)
+{
+	const double f = double(frames > 0 ? frames : 1);
+	// ── group by base object name ──
+	std::vector<XMAgg> agg;
+	// ── material histogram, proportional attribution of a mesh's verts to
+	//    the materials its faces use (a chunk can straddle rooms/floor/etc.)
+	std::unordered_map<std::string, std::array<double, XPK_NUM>> matV, matVseen;
+	int64_t tot[XPK_NUM] = {0}, totSeen[XPK_NUM] = {0};
+
+	for (int i = 0; i < XM_CAP; ++i) {
+		XMeshSlot &s = g_xm[i];
+		if (s.key.load(std::memory_order_acquire) == nullptr) continue;
+		char bn[80]; xmBaseName(s.name, bn, sizeof(bn));
+		XMAgg *a = nullptr;
+		for (XMAgg &e : agg) if (!std::strcmp(e.name, bn)) { a = &e; break; }
+		if (!a) { agg.push_back(XMAgg{}); a = &agg.back();
+		          std::snprintf(a->name, sizeof(a->name), "%s", bn); }
+		++a->meshes;
+		for (int k = 0; k < XPK_NUM; ++k) {
+			const int64_t sv = s.seenV[k].load(), xv = s.xfV[k].load();
+			a->seen[k]  += s.seen[k].load();  a->seenV[k] += sv;
+			a->xf[k]    += s.xf[k].load();    a->xfV[k]   += xv;
+			tot[k] += xv; totSeen[k] += sv;
+		}
+		// material split for this mesh, by face count
+		const TriMesh *T = s.mesh;
+		if (T && T->Faces && T->FIndex) {
+			std::unordered_map<std::string, int> fc;
+			for (DWord fi = 0; fi < T->FIndex; ++fi) {
+				const Material *M = T->Faces[fi].Txtr;
+				fc[M && M->Name ? M->Name : "?"] += 1;
+			}
+			for (auto &kv : fc) {
+				const double frac = double(kv.second) / double(T->FIndex);
+				auto &row  = matV[kv.first];
+				auto &rowS = matVseen[kv.first];
+				for (int k = 0; k < XPK_NUM; ++k) {
+					row[k]  += frac * double(s.xfV[k].load());
+					rowS[k] += frac * double(s.seenV[k].load());
+				}
+			}
+		}
+	}
+
+	std::sort(agg.begin(), agg.end(), [](const XMAgg &a, const XMAgg &b) {
+		return a.xfV[XPK_SHADOW] > b.xfV[XPK_SHADOW];
+	});
+
+	std::fprintf(stderr,
+	    "[XFRM-MESH] per-frame TRANSFORMED verts by OBJECT over %d main frames "
+	    "(sorted by SHADOW). tot/frame: MAIN %.0f  RTT %.0f  SHADOW %.0f  OFFSCR %.0f\n",
+	    frames, tot[XPK_MAIN]/f, tot[XPK_MIRROR_RTT]/f, tot[XPK_SHADOW]/f, tot[XPK_OFFSCREEN]/f);
+	std::fprintf(stderr,
+	    "[XFRM-MESH] %-26s %5s | %10s %5s | %10s %5s | %10s | %10s\n",
+	    "object", "#mesh", "SHADOW-V", "%", "MAIN-V", "%", "OFFSCR-V", "RTT-V");
+	for (const XMAgg &a : agg) {
+		if (a.xfV[XPK_SHADOW] + a.xfV[XPK_MAIN] + a.xfV[XPK_OFFSCREEN] + a.xfV[XPK_MIRROR_RTT] == 0)
+			continue;
+		std::fprintf(stderr,
+		    "[XFRM-MESH] %-26s %5d | %10.0f %5.1f | %10.0f %5.1f | %10.0f | %10.0f\n",
+		    a.name, a.meshes,
+		    a.xfV[XPK_SHADOW]/f, tot[XPK_SHADOW] ? 100.0*double(a.xfV[XPK_SHADOW])/double(tot[XPK_SHADOW]) : 0.0,
+		    a.xfV[XPK_MAIN]/f,   tot[XPK_MAIN]   ? 100.0*double(a.xfV[XPK_MAIN])  /double(tot[XPK_MAIN])   : 0.0,
+		    a.xfV[XPK_OFFSCREEN]/f, a.xfV[XPK_MIRROR_RTT]/f);
+	}
+
+	// ── UNGROUPED top meshes, with each mesh's FACE count. The face column is
+	//    the point: Transform_Objects has no FIndex==0 early-out, so a mesh
+	//    that was "retired" by moving its faces elsewhere (the greets Piramid
+	//    chunk split zeroes the parent's FIndex but leaves its 16 596 verts on
+	//    the object list) still pays a full per-vertex transform in every pass
+	//    and emits nothing.
+	struct XMRow { const char *nm; DWord nf; DWord nv; int64_t sh, mn, off; };
+	std::vector<XMRow> raw;
+	int64_t zeroFaceSh = 0, zeroFaceMn = 0, zeroFaceOff = 0, zeroFaceRtt = 0;
+	for (int i = 0; i < XM_CAP; ++i) {
+		XMeshSlot &s = g_xm[i];
+		if (s.key.load(std::memory_order_acquire) == nullptr) continue;
+		const TriMesh *T = s.mesh;
+		raw.push_back({ s.name ? s.name : "?", T ? T->FIndex : 0, T ? T->VIndex : 0,
+		                s.xfV[XPK_SHADOW].load(), s.xfV[XPK_MAIN].load(),
+		                s.xfV[XPK_OFFSCREEN].load() });
+		if (T && T->FIndex == 0) {
+			zeroFaceSh  += s.xfV[XPK_SHADOW].load();
+			zeroFaceMn  += s.xfV[XPK_MAIN].load();
+			zeroFaceOff += s.xfV[XPK_OFFSCREEN].load();
+			zeroFaceRtt += s.xfV[XPK_MIRROR_RTT].load();
+		}
+	}
+	std::sort(raw.begin(), raw.end(), [](const XMRow &a, const XMRow &b) {
+		return (a.sh + a.mn + a.off) > (b.sh + b.mn + b.off);
+	});
+	std::fprintf(stderr, "[XFRM-TOP]  top individual meshes (verts/frame transformed)\n");
+	std::fprintf(stderr, "[XFRM-TOP]  %-28s %7s %7s | %10s | %10s | %10s\n",
+	             "mesh", "faces", "verts", "SHADOW-V", "MAIN-V", "OFFSCR-V");
+	for (size_t i = 0; i < raw.size() && i < 25; ++i) {
+		const XMRow &r = raw[i];
+		if (r.sh + r.mn + r.off == 0) break;
+		std::fprintf(stderr, "[XFRM-TOP]  %-28s %7u %7u | %10.0f | %10.0f | %10.0f\n",
+		             r.nm, unsigned(r.nf), unsigned(r.nv), r.sh/f, r.mn/f, r.off/f);
+	}
+	std::fprintf(stderr,
+	    "[XFRM-ZERO] FACELESS meshes (FIndex==0, transform emits nothing): "
+	    "SHADOW %.0f (%.1f%%)  MAIN %.0f (%.1f%%)  OFFSCR %.0f (%.1f%%)  RTT %.0f\n",
+	    zeroFaceSh/f,  tot[XPK_SHADOW]    ? 100.0*double(zeroFaceSh)/double(tot[XPK_SHADOW])       : 0.0,
+	    zeroFaceMn/f,  tot[XPK_MAIN]      ? 100.0*double(zeroFaceMn)/double(tot[XPK_MAIN])         : 0.0,
+	    zeroFaceOff/f, tot[XPK_OFFSCREEN] ? 100.0*double(zeroFaceOff)/double(tot[XPK_OFFSCREEN])   : 0.0,
+	    zeroFaceRtt/f);
+
+	std::vector<std::pair<std::string, std::array<double, XPK_NUM>>> mv(matV.begin(), matV.end());
+	std::sort(mv.begin(), mv.end(), [](const auto &a, const auto &b) {
+		return a.second[XPK_SHADOW] > b.second[XPK_SHADOW];
+	});
+	std::fprintf(stderr, "[XFRM-MAT]  per-frame TRANSFORMED verts by MATERIAL "
+	                     "(proportional face-count split within each mesh)\n");
+	std::fprintf(stderr, "[XFRM-MAT]  %-26s | %10s %5s | %10s %5s | %10s\n",
+	             "material", "SHADOW-V", "%", "MAIN-V", "%", "OFFSCR-V");
+	for (const auto &e : mv) {
+		if (e.second[XPK_SHADOW] + e.second[XPK_MAIN] + e.second[XPK_OFFSCREEN] < 1.0) continue;
+		std::fprintf(stderr,
+		    "[XFRM-MAT]  %-26s | %10.0f %5.1f | %10.0f %5.1f | %10.0f\n",
+		    e.first.c_str(),
+		    e.second[XPK_SHADOW]/f, tot[XPK_SHADOW] ? 100.0*e.second[XPK_SHADOW]/double(tot[XPK_SHADOW]) : 0.0,
+		    e.second[XPK_MAIN]/f,   tot[XPK_MAIN]   ? 100.0*e.second[XPK_MAIN]  /double(tot[XPK_MAIN])   : 0.0,
+		    e.second[XPK_OFFSCREEN]/f);
+	}
+
+	for (int i = 0; i < XM_CAP; ++i) {
+		XMeshSlot &s = g_xm[i];
+		if (s.key.load(std::memory_order_acquire) == nullptr) continue;
+		for (int k = 0; k < XPK_NUM; ++k) {
+			s.seen[k] = 0; s.seenV[k] = 0; s.xf[k] = 0; s.xfV[k] = 0;
+		}
+	}
 }
 
 // ── Mirror-clone split CEILING census (--mirror_cull_census=N) ───────────
@@ -1066,6 +1277,12 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	                   : (_inShadowPass ? XPK_SHADOW : XPK_OFFSCREEN));
 	const int64_t xpassT0 = xpass ? xpNow() : 0;
 	int64_t xpassMeshSeen = 0, xpassMeshX = 0, xpassVSeen = 0, xpassVX = 0;
+	// Per-mesh / per-material decomposition of the same census. `_xms` lives
+	// at FUNCTION scope for the same reason the xprof timers do: the mesh loop
+	// below contains Inside/Ahead/Regular gotos and must not jump over an
+	// initialisation.
+	const bool xmesh = xpass && (fds::FeatureFlags::xfrm_pass_mesh_prof() > 0);
+	XMeshSlot *_xms = nullptr;
 
 	// Mirror-clone split ceiling census (--mirror_cull_census). Main view only
 	// — the RTT bakes HIDE every clone mesh, so a clone is never in an
@@ -1126,6 +1343,14 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		}
 #if FDS_VIS_CENSUS
 		if (xpass) { ++xpassMeshSeen; xpassVSeen += T->VIndex; }
+		_xms = nullptr;
+		if (xmesh) {
+			_xms = xmSlotFor(T, Obj->Name);
+			if (_xms) {
+				_xms->seen[xpKind].fetch_add(1, std::memory_order_relaxed);
+				_xms->seenV[xpKind].fetch_add(T->VIndex, std::memory_order_relaxed);
+			}
+		}
 #endif
 
 		// Static-bake filter: skip meshes whose *position* animates
@@ -1537,6 +1762,10 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		}
 #if FDS_VIS_CENSUS
 		if (xpass) { ++xpassMeshX; xpassVX += T->VIndex; }
+		if (xmesh && _xms) {
+			_xms->xf[xpKind].fetch_add(1, std::memory_order_relaxed);
+			_xms->xfV[xpKind].fetch_add(T->VIndex, std::memory_order_relaxed);
+		}
 		if (_mcensus) mirrorCensusMesh(T, IM, OS, L2, cam, PX, PY, xr, yr);
 #endif
 		if (xp) {
@@ -2509,7 +2738,11 @@ AfterXForm:
 		a.facesPushed.fetch_add(faces.cPolys, std::memory_order_relaxed);
 		if (xpKind == XPK_MAIN) {
 			const int fr = g_xpassMainFrames.fetch_add(1, std::memory_order_relaxed) + 1;
-			if (fr >= _xpassN) { g_xpassMainFrames.store(0, std::memory_order_relaxed); xpassDump(fr); }
+			if (fr >= _xpassN) {
+				g_xpassMainFrames.store(0, std::memory_order_relaxed);
+				if (xmesh) xmDump(fr);   // before xpassDump: it zeroes its own rows
+				xpassDump(fr);
+			}
 		}
 	}
 #endif  // FDS_VIS_CENSUS
