@@ -57,6 +57,31 @@ ShellH) as a contiguous tail at 88..139. `FInterpolator` retuned to the new runs
 **VERT −2.6 % (min) / −2.9 % (p50), same sign in both interleaved pairs.
 FACE 0.**
 
+### 2b. Secondary arm — the SHIPPING/flat regime gains MORE, not less
+
+Both landed changes together (dead UZ/VZ + reorder) vs the tree before them,
+greets **t=5743, `--parallax_pom=128`** (the review-pose shipping recipe, NOT
+`--greets_displace`): 83 meshes / **49 447 verts** (in 8 285 / ahead 41 057 /
+regular 105) / 16 607 faces tested / 7 916 pushed — the same census
+docs/VISIBILITY_PLAN.md §9 reports. Per-frame min over 24, interleaved:
+
+| arm | VERT | FACE | TOTAL |
+|---|--:|--:|--:|
+| base | 0.241 / 0.232 | 0.171 / 0.167 | 0.441 / 0.417 |
+| HEAD | 0.227 / 0.225 | 0.165 / 0.166 | 0.411 / 0.412 |
+
+**VERT −4.4 %, FACE −2.1 %, TOTAL −4.1 %**, same sign in both pairs — and the
+second HEAD run was taken at load 29.98 against base's 12.18 and still won.
+
+Note the inversion versus the displaced arm (−2.6 % VERT there, −4.4 % here):
+at 49 447 verts over 83 meshes a mesh is ~596 verts ≈ 83 KB, which **fits L1**,
+so this regime is instruction-bound rather than DRAM-bound and the removed
+loads/muls/stores actually pay. At 253 280 verts over 108 meshes a mesh is
+~2 345 verts ≈ 328 KB and the loop is at the bandwidth ceiling in §4, where
+instruction count is free and only bytes matter. Two different regimes, two
+different binding constraints — which is exactly why a single "the transform is
+X % of frame" verdict has been misleading this campaign in both directions.
+
 That FACE zero is the finding. The reorder cuts the *predicted* cache lines per
 random 3-vertex deref from ~2.88 to ~1.56 (−46 %) — the exact win the
 "§per-face visibility test = 73 % of FACE, read it from SoA instead" item in
@@ -141,6 +166,59 @@ loop that is waiting on DRAM; only bytes/vertex and more cores can.**
    before anyone starts (1).
 3. **Do NOT spend the migration's budget on the FACE bucket** — §2 measured that
    win as zero.
+
+### 6. Lever 1 without the type split — the version to actually build
+
+The "2–3 days / Phase 6.3" cost estimate below exists because everyone assumed
+the traffic cut requires `sizeof(Vertex)` itself to shrink, which forces `Vertex`
+to split into mesh-storage vs the clipper's transient type, which forces every
+`RasterFunc(Face*, Vertex**, …)` and both clippers to change. **That assumption
+is wrong.** The traffic the loop pays is not `sizeof(Vertex)`; it is *the lines
+the per-vertex loop touches and dirties*. So:
+
+**Keep `Vertex` exactly as it is (140 B, one type, no filler or clipper
+signature changes). Just stop the transform from WRITING into it.**
+
+* Per mesh, add an interleaved output array, one 64-byte record per vertex:
+  `TPos×3, TN×3, TTangent×3, PX, PY, RZ, Flags, BGRA, EUZ, EVZ` = 64 B exactly
+  (the layout the 2026-08-06 (a) section derived; `UZ`/`VZ` are correctly absent
+  — `fdc7a07` proved they are clipper-owned).
+* The per-vertex loop then **reads** only `Pos`/`N`/`Tangent` — bytes 52..87 of
+  the reordered struct, a 36-byte span ⇒ ~1.56 lines ≈ 100 B — and **writes
+  nothing** into the mesh array, so the ~116 B/vert of dirty write-back
+  disappears. It writes one aligned 64-byte record instead (a full line ⇒ the
+  write-allocate read is elidable).
+* **Traffic: ~284 → ~164 B/vert (−42 %)** with `sizeof(Vertex)` untouched.
+  Against §3's slope that is the bulk of lever 1's prize, for a fraction of the
+  work.
+* Follow-on, if it measures: a compact per-mesh *transform input* array
+  (`Pos`/`N`/`Tangent`, 36 B/vert, contiguous) drops the read side to ~40–64 B
+  and takes traffic to ~104–128 B/vert (−55…−63 %). It duplicates 36 B/vert and
+  needs a re-sync wherever `Pos` changes (displacement, tessellation, water), so
+  land the cheap half first.
+
+The clipper entry keeps `*A = *F->A` for the INPUT fields (that memcpy is the
+access pattern — see "Naming" below) and then overwrites the out fields from the
+record. That is precisely the Phase 6.1/6.2 "override" this doc records as
+BLOCKED — and **both of its blockers now have clean answers**:
+
+* *"`F->A/B/C_idx` isn't trustworthy on every mesh"* — don't trust it. Store the
+  vertex-array base alongside the record array and derive `idx = F->A - base`.
+  Exact by construction, no per-mesh invariant, and it fixes the same hazard the
+  tile-bbox comment in `Transform.cpp` documents (the conetest quad).
+* *"stale frame after `Reflected_Transform`"* — that is now a hard requirement
+  rather than a latent trap: with the out fields no longer in the `Vertex`, every
+  alternative transform path (CITY/CHASE `Reflected_Transform`, FOUNTAIN's
+  water/particle projection) **must** write the record array, and the compiler
+  finds them if the field is renamed first (the rename-first technique below).
+  `VertexFrame_DumpFromAoS` already exists as the vehicle.
+
+Migration surface is the same 11 files inventoried below, but the *type* stays
+put, so no rasterizer, no `FInterpolator`, no `C_Verts`, no `_2DClipper`, and no
+hand-built sprite/water quad in DEMO has to change. Hottest new reader is
+`RenderInner`'s per-tile `A->Flags & B->Flags & C->Flags` — §2 measured those
+three derefs as cache-resident, so the extra indirection there should be cheap,
+but measure it rather than assume.
 
 ---
 
