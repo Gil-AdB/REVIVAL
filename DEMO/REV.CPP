@@ -609,10 +609,31 @@ static char G_WindowClassStr[MAX_GSTRING] = "Revival";
 static char G_AppTitle[MAX_GSTRING];
 
 Uint32 TimerProc(Uint32 interval, void *param)
-{ 
-    Timer++;
+{
+	// Review scrub: hold PgUp / PgDn to run the scene clock fast forward /
+	// backward at --scrub_speed x (default 4). The scene clock IS Timer —
+	// RENDER.CPP:1553 derives CurFrame from it linearly — so scaling it
+	// scales camera splines, object animation and scene progress together,
+	// which is exactly what reviewing a pose needs. Clamped at 1: t<0 makes
+	// CurFrame extrapolate below the scene's StartFrame.
+	// Runs on SDL's timer thread; the Keyboard byte array is written by the
+	// main thread's event pump — a torn read here just costs one tick at the
+	// wrong speed, which is what every other Keyboard consumer already
+	// accepts.
+	int32_t step = 1;
+	const int32_t mult = fds::FeatureFlags::scrub_speed();
+	if (mult > 1) {
+		if      (Keyboard[ScPgUp]) step =  mult;
+		else if (Keyboard[ScPgDn]) step = -mult;
+	}
+	if (step >= 0) {
+		Timer += step;
+	} else {
+		const int32_t nxt = Timer.load(std::memory_order_relaxed) + step;
+		Timer.store(nxt < 1 ? 1 : nxt, std::memory_order_relaxed);
+	}
 	return interval;
-} 
+}
 
 int TimerInit(int32_t Freq)
 {
