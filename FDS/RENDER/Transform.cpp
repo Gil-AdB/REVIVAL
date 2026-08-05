@@ -46,6 +46,8 @@
 // SoA Vertex refactor — Phase 1: per-mesh SoA companion of the AoS
 // transformed-vertex output fields. See docs/SOA_VERTEX_REFACTOR.md.
 #include "Base/VertexFrame.h"
+#include <chrono>
+#include <cstdint>
 // fds::g_offAxisFrustumCull — off-axis projection support for the
 // mirror RTT's offscreen Transform (see FrameState.h).
 #include "Base/FrameState.h"
@@ -95,6 +97,97 @@ extern thread_local Omni* g_currentShadowOmni;
 // (TriMesh::BakeCacheGen / BakeWsBSphereCtr / BakeIsDynamic); primed
 // serially before the parallel per-face tasks, read-only here.
 extern uint32_t g_shadowBakeGen;
+
+// ── XFRM front-end profiler (--xfrm_prof=N) ──────────────────────────────
+// Fine-grained breakdown of the MAIN-VIEW Transform_Objects call. Off by
+// default: `xp` is false, no clock is read, and every accumulate site is a
+// predictable not-taken branch. See FeatureFlags.def:xfrm_prof for what the
+// buckets mean. Tick-thread only (the main-view Transform_Objects is
+// single-threaded and the gate excludes every offscreen/threaded pass), so
+// plain scalars — no atomics.
+namespace {
+enum XProfSect { XP_TOTAL = 0, XP_SETUP, XP_VERT, XP_SOA, XP_FACE, XP_NUM };
+// Per-frame samples, not a running mean. The box this runs on is routinely
+// shared with other agents' renders (load average 20+ observed), and a mean
+// over a window is dominated by whichever frames got descheduled. Keeping the
+// per-frame values lets the dump report the MINIMUM (the least-contended
+// frame = the best estimator of the uncontended cost) alongside the median.
+constexpr int XP_MAXFRAMES = 256;
+struct XProfAcc {
+	int64_t cur[XP_NUM] = {};                 // frame in flight
+	int64_t s[XP_NUM][XP_MAXFRAMES] = {};     // per-frame samples
+	int64_t meshes = 0, verts = 0, facesTested = 0, facesPushed = 0;
+	int64_t vInside = 0, vAhead = 0, vRegular = 0;  // which per-vertex loop ran
+	int     frames = 0;
+};
+XProfAcc g_xprof;
+
+inline int64_t xpNow() {
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+	           std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Ablation bits — see FeatureFlags.def:xfrm_ablate.
+enum : int {
+	XAB_NO_TN     = 1,
+	XAB_NO_PROJ   = 2,
+	XAB_NO_SOA    = 4,
+	XAB_FACE_CULL = 8,
+	XAB_FACE_NOOP = 16,
+	XAB_NO_FACE   = 32,
+	XAB_NO_BBOX   = 64,
+};
+
+// --xfrm_rcp: the per-vertex 1/z used by the projection. Mode 0 reproduces
+// today's code EXACTLY (the Ahead/Regular loops write `1.0/z` — a DOUBLE
+// divide on a float, then a narrowing store; Inside writes `1.0f/z`).
+// Mode 1 makes every site a single-precision divide. Mode 2 uses the NEON
+// reciprocal estimate plus one Newton-Raphson step. Modes 1 and 2 CHANGE
+// PIXELS (1 changes only where double-rounding differs from direct float
+// rounding; 2 is a genuine approximation) - see the divergence numbers in
+// docs/SOA_VERTEX_REFACTOR.md before enabling either.
+inline float xfrmRcpApprox(float z) {
+	__m128 v = _mm_set_ss(z);
+	const float r = _mm_cvtss_f32(_mm_rcp_ss(v));
+	return r * (2.0f - z * r);   // one Newton step
+}
+// Sites that today divide in DOUBLE.
+inline float xfrmRcpD(float z, int mode) {
+	if (mode == 0) return float(1.0 / double(z));
+	if (mode == 1) return 1.0f / z;
+	return xfrmRcpApprox(z);
+}
+// Sites that today divide in FLOAT.
+inline float xfrmRcpF(float z, int mode) {
+	if (mode <= 1) return 1.0f / z;
+	return xfrmRcpApprox(z);
+}
+
+void xpDump(int interval) {
+	XProfAcc &a = g_xprof;
+	const int n = a.frames;
+	const double f = double(n);
+	double mn[XP_NUM], md[XP_NUM];
+	for (int k = 0; k < XP_NUM; ++k) {
+		std::sort(a.s[k], a.s[k] + n);
+		mn[k] = a.s[k][0] / 1e6;
+		md[k] = a.s[k][n / 2] / 1e6;
+	}
+	// OTHER is derived from the same frame's buckets, so recompute it as the
+	// min/median of the per-frame residual rather than differencing order
+	// statistics (which need not come from the same frame).
+	std::fprintf(stderr,
+	    "[XFRM-PROF] n=%d  min: TOTAL %7.3f | SETUP %6.3f VERT %6.3f SOA %6.3f FACE %6.3f  "
+	    "p50: TOTAL %7.3f | SETUP %6.3f VERT %6.3f SOA %6.3f FACE %6.3f  ms"
+	    "  | meshes %.0f verts %.0f (in %.0f ahead %.0f reg %.0f) fTested %.0f fPushed %.0f\n",
+	    n,
+	    mn[XP_TOTAL], mn[XP_SETUP], mn[XP_VERT], mn[XP_SOA], mn[XP_FACE],
+	    md[XP_TOTAL], md[XP_SETUP], md[XP_VERT], md[XP_SOA], md[XP_FACE],
+	    a.meshes / f, a.verts / f, a.vInside / f, a.vAhead / f, a.vRegular / f,
+	    a.facesTested / f, a.facesPushed / f);
+	a = XProfAcc{};
+}
+}  // namespace
 
 // Return true when the world-space sphere (center C, radius r) lies
 // fully outside the spot cone (apex P, normalized axis D, outer cosine
@@ -681,6 +774,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	Vector AP,S,U,OS,V,*W=(Vector *)(&M),*W2,*Scl;
 	float L1,L2,L3;
 	Vertex *Vtx,*VEnd;
+	uint32_t vfi;              // running vertex index for the inline SoA store
 	Face *F,*FEnd;
 	float PX=cam.fovX,PY=cam.fovY,Temp;
 	float dz;
@@ -692,6 +786,39 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 
 	float fzp = cam.farZ;
 
+	// XFRM front-end profiler / ablations (--xfrm_prof, --xfrm_ablate).
+	// MAIN-VIEW ONLY: every offscreen pass (shadow bake, mirror RTT, env probe)
+	// and every off-axis shard pass is excluded, so the accumulator needs no
+	// synchronisation and the numbers describe the frame the user is looking
+	// at. `xresOverride < 0` additionally excludes the resolution-overridden
+	// probe renders. Timer locals live at FUNCTION scope so the
+	// Inside/Ahead/Regular `goto`s never jump over an initialisation.
+	const int  _xprofN   = _mainView ? fds::FeatureFlags::xfrm_prof() : 0;
+	const int  _xablate  = _mainView ? fds::FeatureFlags::xfrm_ablate() : 0;
+	const bool xp        = (_xprofN > 0) && (xresOverride < 0);
+	const bool xab       = (_xablate != 0) && (xresOverride < 0);
+	const bool xabNoTN   = xab && (_xablate & XAB_NO_TN);
+	const bool xabNoProj = xab && (_xablate & XAB_NO_PROJ);
+	const bool xabNoSoa  = xab && (_xablate & XAB_NO_SOA);
+	const bool xabNoFace = xab && (_xablate & XAB_NO_FACE);
+	const int64_t xpT0   = xp ? xpNow() : 0;   // whole-call
+	int64_t xpTM = 0, xpTV = 0, xpTS = 0, xpTF = 0;
+
+	// SoA Phase 2a — INLINE SoA STORE (--xfrm_soa_inline).
+	// Phase 1 shipped the AoS->SoA dual write as a SEPARATE post-pass sweep
+	// (VertexFrame_DumpFromAoS at AfterXForm): a second walk over the mesh's
+	// whole Vertex array, re-reading 16 of the 136 bytes per vertex that the
+	// per-vertex loop had just written. Measured at greets t=5780 with
+	// --greets_displace that sweep is ~2.5 ms of a ~8.1 ms main-view
+	// Transform_Objects (docs/SOA_VERTEX_REFACTOR.md) — the mesh no longer
+	// fits in cache at 958 k verts/frame, so the sweep is a second pass over
+	// ~130 MB of cache lines. With this on, each per-vertex loop stores the
+	// same four values into the SoA arrays as it goes and the sweep is
+	// skipped. BIT-EXACT BY CONSTRUCTION: same values, same source, just
+	// stored one loop earlier — VertexFrame contents are identical.
+	const bool soaInline = fds::FeatureFlags::xfrm_soa_inline();
+	const int  rcpMode   = fds::FeatureFlags::xfrm_rcp();
+
 #if not(DEBUG_PARTICLES)
 	Object *Obj; 
 //	for (T=Sc->TriMeshHead;T;T=T->Next)
@@ -701,6 +828,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		if (Obj->Type != Obj_TriMesh) continue;
 		//if (stricmp(Obj->Name, "water.lwo")) continue;
 		T = (TriMesh *)(Obj->Data);
+		if (xp) xpTM = xpNow();   // per-mesh setup starts here
 
 		// Non-shadow-casting meshes (Tri_NoShadowCast — e.g. the disco ball):
 		// excluded from every shadow occluder pass. _inShadowPass covers the
@@ -922,6 +1050,26 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			tFaces = T->Faces;
 		}
 
+		// SoA Phase 2a: resolve the VertexFrame here (after the culls, before
+		// the per-vertex loops) so the loops can store straight into it. Same
+		// resolution the AfterXForm sweep does; when soaInline is off these
+		// stay null and the sweep runs exactly as before.
+		float *soaX = nullptr, *soaY = nullptr, *soaZ = nullptr, *soaPY = nullptr;
+		if (soaInline) {
+			VertexFrame *FI_ = nullptr;
+			if (scratch) {
+				FI_ = &scratch->cloneOf(T).frame;   // cloneOf already ensureSized it
+			} else {
+				if (!T->frame) T->frame = new VertexFrame();
+				T->frame->ensureSized(int(T->VIndex));
+				if (T->frame->capacity >= int(T->VIndex)) FI_ = T->frame;
+			}
+			if (FI_ && FI_->capacity >= int(T->VIndex)) {
+				soaX = FI_->TPos_x; soaY = FI_->TPos_y;
+				soaZ = FI_->TPos_z; soaPY = FI_->PY;
+			}
+		}
+
 		MatrixXMatrix(cam.view->Mat,T->RotMat,M);
 		Matrix_Copy(IM,M);
 		// Advanced Matrix...(watch this)
@@ -1114,6 +1262,13 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			++fds::g_chunkVisStats.meshesXformed;
 			fds::g_chunkVisStats.vertsXformed += T->VIndex;
 		}
+		if (xp) {
+			// Every mesh past this point runs a per-vertex loop + a face loop.
+			xpTV = xpNow();
+			g_xprof.cur[XP_SETUP] += xpTV - xpTM;
+			++g_xprof.meshes;
+			g_xprof.verts += T->VIndex;
+		}
 		VEnd=tVerts+T->VIndex;
 
 		/*    FEnd=T->Face+T->NumOfFaces;
@@ -1168,7 +1323,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			// pre-mul; we'll apply PX/PY/cntr scaling here, matching what
 			// M34 × Pos produces in the legacy path).
 			const float (*VM)[3] = cam.view->Mat;
-			for (Vtx = tVerts; Vtx < VEnd; Vtx++) {
+			for (Vtx = tVerts, vfi = 0; Vtx < VEnd; Vtx++, vfi++) {
 				const DWord vi = DWord(Vtx - tVerts);
 				const Vector &wp = T->worldVerts[vi];
 				const float wdx = wp.x - ckX;
@@ -1190,6 +1345,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 					Vtx->UZ = 0.0f;
 					Vtx->VZ = 0.0f;
 					Vtx->Flags |= Vtx_Visible;  // all 6 frustum-out bits set
+					if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 					continue;
 				}
 				// In-pyramid: full view xform + perspective scaling.
@@ -1212,6 +1368,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				if (Vtx->PX >= float(xr)) Vtx->Flags |= Vtx_VisRight;
 				if (Vtx->PY < 0.0f) Vtx->Flags |= Vtx_VisUp;
 				if (Vtx->PY >= float(yr)) Vtx->Flags |= Vtx_VisDown;
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
 			goto AfterXForm;
 		}
@@ -1227,7 +1384,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			const float ckX = fds::g_reflConeApex.x, ckY = fds::g_reflConeApex.y, ckZ = fds::g_reflConeApex.z;
 			const float cdX = fds::g_reflConeDir.x,  cdY = fds::g_reflConeDir.y,  cdZ = fds::g_reflConeDir.z;
 			const float (*VM)[3] = cam.view->Mat;
-			for (Vtx = tVerts; Vtx < VEnd; Vtx++) {
+			for (Vtx = tVerts, vfi = 0; Vtx < VEnd; Vtx++, vfi++) {
 				const DWord vi = DWord(Vtx - tVerts);
 				const Vector &wp = T->worldVerts[vi];
 				const float wdx = wp.x - ckX, wdy = wp.y - ckY, wdz = wp.z - ckZ;
@@ -1240,6 +1397,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 					Vtx->RZ = 1.0f; Vtx->PX = -1.0f; Vtx->PY = -1.0f;
 					Vtx->UZ = 0.0f; Vtx->VZ = 0.0f;
 					Vtx->Flags |= Vtx_Visible;
+					if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 					continue;
 				}
 				const float vx = VM[0][0]*wdx + VM[0][1]*wdy + VM[0][2]*wdz;
@@ -1258,6 +1416,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				if (Vtx->PX >= float(xr))  Vtx->Flags |= Vtx_VisRight;
 				if (Vtx->PY < 0.0f)        Vtx->Flags |= Vtx_VisUp;
 				if (Vtx->PY >= float(yr))  Vtx->Flags |= Vtx_VisDown;
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
 			goto AfterXForm;
 		}
@@ -1275,7 +1434,8 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			// staging block above the Inside/Ahead/Regular dispatch).
 			// Each broadcast-FMA collapses what was 3 scalar muls + 3
 			// scalar adds into one Vec4f op; the 4th lane is unused.
-			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
+			if (xp) g_xprof.vInside += VEnd - tVerts;
+			for (Vtx=tVerts,vfi=0;Vtx<VEnd;Vtx++,vfi++)
 			{
 				const float vpx = Vtx->Pos.x, vpy = Vtx->Pos.y, vpz = Vtx->Pos.z;
 				// Explicit mul_add chain so the compiler emits FMLA
@@ -1290,7 +1450,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				Vtx->TPos_AOS.x = tposArr[0];
 				Vtx->TPos_AOS.y = tposArr[1];
 				Vtx->TPos_AOS.z = tposArr[2];
-				if (!_inShadowPass) {
+				if (!_inShadowPass && !xabNoTN) {
 					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
 					Vec4f tn = im_col_x * Vec4f(nx);
 					tn       = mul_add(im_col_y, Vec4f(ny), tn);
@@ -1308,18 +1468,22 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				}
 
 				Vtx->Flags &= ~Vtx_Visible;
-				const float rz = 1.0f / tposArr[2];
-				Vtx->RZ = rz;
-				Vtx->PX = tposArr[0] * rz;
-				Vtx->PY = tposArr[1] * rz;
-				Vtx->UZ = Vtx->U * rz;
-				Vtx->VZ = Vtx->V * rz;
+				if (!xabNoProj) {
+					const float rz = xfrmRcpF(tposArr[2], rcpMode);
+					Vtx->RZ = rz;
+					Vtx->PX = tposArr[0] * rz;
+					Vtx->PY = tposArr[1] * rz;
+					Vtx->UZ = Vtx->U * rz;
+					Vtx->VZ = Vtx->V * rz;
+				}
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
-			
+
 			goto AfterXForm;
 			// This is in case 100% of trimesh AHEAD of camera. this saves some chks
 Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
-			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
+			if (xp) g_xprof.vAhead += VEnd - tVerts;
+			for (Vtx=tVerts,vfi=0;Vtx<VEnd;Vtx++,vfi++)
 			{
 				// SIMD matrix prefix (see Inside path for the column-major
 				// staging). Stores TPos_AOS via lane-extracts to avoid touching
@@ -1333,7 +1497,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->TPos_AOS.x = tposArr[0];
 				Vtx->TPos_AOS.y = tposArr[1];
 				Vtx->TPos_AOS.z = tposArr[2];
-				if (!_inShadowPass) {
+				if (!_inShadowPass && !xabNoTN) {
 					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
 					Vec4f tn = im_col_x * Vec4f(nx);
 					tn       = mul_add(im_col_y, Vec4f(ny), tn);
@@ -1357,11 +1521,13 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				// them (otherwise RZ would go negative and PX/PY would be
 				// flipped, producing ghost polygons at the cone edges).
 				if (Vtx->TPos_AOS.z > cam.nearZ) {
-					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					if (!xabNoProj) {
+					Vtx->RZ=xfrmRcpD(Vtx->TPos_AOS.z, rcpMode);
 					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
 					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
+					}
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
@@ -1370,11 +1536,13 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				} else {
 					Vtx->Flags|=Vtx_VisNear;
 				}
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			goto AfterXForm;
 Regular:
-			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
+			if (xp) g_xprof.vRegular += VEnd - tVerts;
+			for (Vtx=tVerts,vfi=0;Vtx<VEnd;Vtx++,vfi++)
 			{
 				// SIMD matrix prefix (see Inside path for the staging).
 				const float vpx = Vtx->Pos.x, vpy = Vtx->Pos.y, vpz = Vtx->Pos.z;
@@ -1386,7 +1554,7 @@ Regular:
 				Vtx->TPos_AOS.x = tposArr[0];
 				Vtx->TPos_AOS.y = tposArr[1];
 				Vtx->TPos_AOS.z = tposArr[2];
-				if (!_inShadowPass) {
+				if (!_inShadowPass && !xabNoTN) {
 					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
 					Vec4f tn = im_col_x * Vec4f(nx);
 					tn       = mul_add(im_col_y, Vec4f(ny), tn);
@@ -1407,13 +1575,15 @@ Regular:
 				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
 				if (Vtx->TPos_AOS.z>cam.nearZ)
 				{
-					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					if (!xabNoProj) {
+					Vtx->RZ=xfrmRcpD(Vtx->TPos_AOS.z, rcpMode);
 					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
 					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
 					//          Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
+					}
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
@@ -1421,6 +1591,7 @@ Regular:
 					if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags|=Vtx_VisNear;
 				//      printf("Regular shit!\n");
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
 		} else {
 			// instead of all of these complications, I've decided to
@@ -1436,7 +1607,7 @@ Regular:
 				else goto EAhead;
 			}
 			// Intel inside...this rulez,all object completely inside frustrum.
-			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts,vfi=0;Vtx<VEnd;Vtx++,vfi++)
 			{
 				MatrixXVector(M,&Vtx->Pos,&U);
 				Vector_Add(&U,&V,&Vtx->TPos_AOS);
@@ -1456,11 +1627,12 @@ Regular:
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
 				//if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
 			goto AfterXForm;
 			// This is in case 100% of trimesh AHEAD of camera. this saves some chks
 EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
-			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts,vfi=0;Vtx<VEnd;Vtx++,vfi++)
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
@@ -1485,12 +1657,13 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
 				if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
 				if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			
 			goto AfterXForm;
 ERegular:
-			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts,vfi=0;Vtx<VEnd;Vtx++,vfi++)
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
@@ -1505,7 +1678,7 @@ ERegular:
 				
 				if (Vtx->TPos_AOS.z>cam.nearZ)
 				{
-					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					Vtx->RZ=xfrmRcpD(Vtx->TPos_AOS.z, rcpMode);
 					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
 					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
@@ -1520,12 +1693,14 @@ ERegular:
 					if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
 					if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags=Vtx_VisNear;
-				
+				if (soaX) { soaX[vfi]=Vtx->TPos_AOS.x; soaY[vfi]=Vtx->TPos_AOS.y; soaZ[vfi]=Vtx->TPos_AOS.z; soaPY[vfi]=Vtx->PY; }
 				//      printf("Regular shit!\n");
 			}
 			
 		}
-AfterXForm:FEnd=tFaces+T->FIndex;
+AfterXForm:
+		if (xp) { xpTS = xpNow(); g_xprof.cur[XP_VERT] += xpTS - xpTV; }
+		FEnd=tFaces+T->FIndex;
 		// SoA refactor Phase 1+4: dual-write the transformed-vertex
 		// outputs into the per-mesh OR per-clone VertexFrame SoA
 		// arrays. Main pass writes T->frame; shadow per-light scratch
@@ -1536,7 +1711,11 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 		// reading from is cache-friendly (sequential reads at pack(1)
 		// stride). Eventually Transform's per-vert loops will write
 		// SoA directly and this sweep goes away.
-		{
+		// SoA Phase 2a: with --xfrm_soa_inline the per-vertex loops above have
+		// already stored TPos_x/y/z + PY, so this whole re-read sweep is dead
+		// work. `soaX == nullptr` means the frame couldn't be resolved/sized
+		// for this mesh — fall back to the sweep so the SoA never goes stale.
+		if (!(soaInline && soaX)) {
 			VertexFrame *F_ = nullptr;
 			if (scratch) {
 				// cloneOf already ensureSized'd clone.frame.
@@ -1548,7 +1727,9 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			}
 			if (F_) {
 				const uint32_t nv = T->VIndex;
-				VertexFrame_DumpFromAoS(F_, tVerts, nv);
+				// Ablation 4 skips only the COPY — the frame must still be
+				// allocated or F->frame stays null and SortZ null-derefs.
+				if (!xabNoSoa) VertexFrame_DumpFromAoS(F_, tVerts, nv);
 				// Verification gate — off by default; turn on with
 				// --soa-verify during migration to catch any future
 				// divergence between AoS and SoA paths bit-for-bit.
@@ -1567,6 +1748,22 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				}
 			}
 		}
+		// Same bit-for-bit audit for the INLINE path (--xfrm_soa_inline +
+		// --soa-verify): the stores happened one loop earlier, so this
+		// re-checks them against the AoS the sweep would have copied from.
+		if (soaInline && soaX && fds::FeatureFlags::soa_verify()) {
+			const uint32_t nv = T->VIndex;
+			for (uint32_t i = 0; i < nv; ++i) {
+				if (soaX[i]  != tVerts[i].TPos_AOS.x ||
+				    soaY[i]  != tVerts[i].TPos_AOS.y ||
+				    soaZ[i]  != tVerts[i].TPos_AOS.z ||
+				    soaPY[i] != tVerts[i].PY) {
+					std::fprintf(stderr, "[SOA-VERIFY] inline mismatch vert %u mesh %p\n", i, (void*)T);
+					std::abort();
+				}
+			}
+		}
+		if (xp) { xpTF = xpNow(); g_xprof.cur[XP_SOA] += xpTF - xpTS; }
 	// Runtime debug: hide specific nested-transparent objects (fountain's
 	// f_sphere outer and "f in shpere" inner). Toggled by J / K keys —
 	// useful for isolating which face contributes to a rendering bug.
@@ -1609,7 +1806,12 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 		if (v >  32767.0f) return  32767;
 		return int16_t(v);
 	};
+	// Ablation 32 (--xfrm_ablate=32): skip the per-face loop entirely.
+	if (!xabNoFace)
 	for (F=tFaces;F<FEnd;F++) {
+		// Ablation 16: pure loop + Face-pointer-walk overhead, nothing else.
+		if (xab && (_xablate & XAB_FACE_NOOP)) continue;
+		if (xp) ++g_xprof.facesTested;
 		// S1 offscreen proxy: the displaced stone detail (Face_MainOnly) is
 		// main-camera only. In any offscreen/bake pass the flat proxy mesh
 		// casts/reflects instead, so drop these faces here. Inert unless
@@ -1632,6 +1834,9 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			//||(1) // no backface culling
 			))
 		{
+			// Ablation 8: run the visibility + backface test, then bail —
+			// isolates the cull test from the accepted-face work below.
+			if (xab && (_xablate & XAB_FACE_CULL)) continue;
 			if (0 != (F->Flags & Face_Reflective)) {
 				// clobber U1, V1, etc. with the equilateral-whatever coordinates matching
 				// the direction from camera to the specific vertex, reflected on the face's plane
@@ -1862,6 +2067,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			// the Face* first since the radix sort dereffed back
 			// through it; the new FListEntry has sortKey inline).
 			fds::FListEntry* e = Ins++;
+			if (xp) ++g_xprof.facesPushed;
 			e->sortKey = F->SortZ.DW;
 			e->face    = F;
 			// S2 tile pre-reject bbox. Read the projected PX/PY straight off
@@ -1879,7 +2085,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			// 1px margin, int16-saturated); the clipper only SHRINKS coverage,
 			// so a box that misses the tile means zero output there → the
 			// reject is byte-identical to clipping.
-			if (tileBboxCull) {
+			if (tileBboxCull && !(xab && (_xablate & XAB_NO_BBOX))) {
 				const Vertex* va = F->A; const Vertex* vb = F->B; const Vertex* vc = F->C;
 				const float za = va->TPos_AOS.z, zb = vb->TPos_AOS.z, zc = vc->TPos_AOS.z;
 				if (za > bboxNearZ && zb > bboxNearZ && zc > bboxNearZ) {
@@ -1903,6 +2109,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			}
 		}
 	}  // close per-face loop body opened above
+		if (xp) g_xprof.cur[XP_FACE] += xpNow() - xpTF;
 	}
 	faces.cPolys = Ins-faces.fList;
 
@@ -2002,4 +2209,14 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 
 	faces.cAll = Ins-faces.fList;
 	faces.cPcls = faces.cAll-faces.cOmnies-faces.cPolys;
+
+	if (xp) {
+		g_xprof.cur[XP_TOTAL] = xpNow() - xpT0;
+		const int fi = g_xprof.frames;
+		if (fi < XP_MAXFRAMES) {
+			for (int k = 0; k < XP_NUM; ++k) { g_xprof.s[k][fi] = g_xprof.cur[k]; g_xprof.cur[k] = 0; }
+			++g_xprof.frames;
+		}
+		if (g_xprof.frames >= _xprofN || g_xprof.frames >= XP_MAXFRAMES) xpDump(g_xprof.frames);
+	}
 }

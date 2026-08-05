@@ -2,7 +2,157 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-08-05 — the June verdict was measured in the WRONG REGIME. Read this first.
+
+The June entry below ("Phase 2 washes; the transform is only ~0.35 ms; STOP") is correct
+**for the flat greets scene** and wrong as a general statement. It was taken at ~16 k verts,
+where the whole mesh is L2-resident. Under `--greets_displace` the main-view transform sees
+**958 k verts/frame** and the front-end costs **7.9 ms**, not 0.35.
+
+New instrument (default OFF, byte-null): **`--xfrm_prof=N`** — a per-frame breakdown of the
+MAIN-VIEW `Transform_Objects` call, printed to stderr every N frames as per-frame MIN and p50.
+Companion **`--xfrm_ablate=<bitmask>`** (diagnostic ablations, changes pixels; see
+FeatureFlags.def). Harness: `./DEMO --bench=scene@scene=greets,t=<T>,iters=24`.
+
+### The breakdown (1920×1080, this machine, per-frame MIN over 24 frames)
+
+Box was shared with two other agents' renders throughout; 1-min load average is quoted per
+run in the raw logs and ran 14–61. The MIN column is the least-contended frame — that is the
+number to reason with; p50 is 5–10 % higher and tracks the load.
+
+| scene / pose | TOTAL | SETUP | VERT | SOA | FACE | verts | facesTested | facesPushed |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| greets t=5780 `--greets_displace` | **7.92** | 0.01 | **4.01** | **2.40** | **1.45** | 958,204 | 144,982 | 74,962 |
+| greets t=6097 `--greets_displace` | 6.04 | 0.01 | 3.45 | 2.14 | 0.40 | 887,573 | 52,570 | 16,551 |
+| greets t=5780 flat (no displace) | 0.68 | 0.00 | 0.36 | 0.14 | 0.16 | 82,975 | 16,719 | 7,549 |
+| city t=1961 (p50; 2 calls/frame) | 1.23 | 0.00 | 0.45 | 0.27 | 0.49 | 69,287 | 26,490 | 10,210 |
+
+- **SETUP** = per-mesh matrix/bsphere/frustum work for meshes that survive to the vertex loop.
+- **VERT** = the Inside/Ahead/Regular per-vertex loops.
+- **SOA** = the Phase-1 `VertexFrame_DumpFromAoS` AoS→SoA post-pass sweep.
+- **FACE** = the per-face visibility + reflective + SortZ + FList push + tile-bbox stamp loop.
+- The flat row reproduces the June measurement; it is the same engine, a different regime.
+- city's MIN is meaningless (city makes two main-view-classified `Transform_Objects` calls per
+  frame and one is nearly empty, so the min picks that one); its p50 is quoted instead.
+
+### The Phase-1 dual write is 30 % of the front-end
+
+`VertexFrame_DumpFromAoS` is a SECOND full walk of the mesh's `Vertex` array that re-reads 16
+of the 136(140) bytes per vertex the transform loop had just written. Measured **2.40 ms at
+t=5780 / 2.14 ms at t=6097** — 30 % / 35 % of the whole main-view front-end, for zero
+arithmetic. Cross-checked by ablation (`--xfrm_ablate=4`, sweep off): TOTAL 6.035 → 3.990 at
+t=6097, i.e. −2.05 ms against a 2.14 ms bucket — the bucket is real, not a timer artifact.
+
+**Fix landed: `--xfrm_soa_inline` (Phase 2a, DEFAULT ON).** Each per-vertex loop stores
+TPos_x/y/z + PY into the SoA arrays as it goes; the sweep is skipped. **Bit-exact by
+construction** — same values, same source, stored one loop earlier.
+
+Measured, interleaved off/on/off/on inside one script, per-frame MIN over 24 frames:
+
+| pose | OFF (TOTAL / VERT / SOA) | ON (TOTAL / VERT / SOA) | ΔTOTAL |
+|---|--:|--:|--:|
+| greets t=5780 displaced | 7.94 / 4.03 / 2.39<br>7.92 / 3.98 / 2.38<br>7.87 / 4.00 / 2.37 | 5.98 / 4.41 / 0.00<br>5.94 / 4.41 / 0.00<br>5.83 / 4.31 / 0.00 | **−2.00 ms (−25 %)** |
+| greets t=6097 displaced | 6.41 / 3.61 / 2.23<br>6.36 / 3.60 / 2.28 | 4.35 / 3.90 / 0.00<br>4.50 / 4.04 / 0.00 | **−1.96 ms (−31 %)** |
+| greets t=5780 flat | 0.696 / 0.366 / 0.142 | 0.574 / 0.379 / 0.001 | −0.12 ms (−18 %) |
+| city t=1961 (p50) | 1.28 / 0.45 / 0.29<br>1.21 / 0.44 / 0.26 | 1.14 / 0.60 / 0.00<br>1.13 / 0.61 / 0.00 | −0.11 ms (−9 %) |
+
+The mechanism is visible in the split: SOA goes to zero and VERT rises by ~0.4 ms (the inline
+stores — 4 stores × 958 k verts ≈ 15 MB to four streams, i.e. store-throughput-limited and
+about as cheap as it can be). Net −2 ms.
+
+Byte evidence: city pin `37e62845` exact, fountain pin `51fff7cd` exact, greets t=1588 pin
+recipe off==on, chase 5-pose + cinematic 2-pose lists off==on (and t100/400/800/1200 match the
+committed pins), greets displaced t=5780 off==on over 6 runs, and `--soa-verify` (which
+compares the inline stores against the AoS the sweep would have copied, bit-for-bit) reports
+0 mismatches on greets/city/fountain/chase. `--no-xfrm_soa_inline` restores the sweep.
+
+### Rejected after measuring: a cheaper reciprocal (`--xfrm_rcp`, default 0)
+
+Since the projection's `1/z` is the only divide in the loop, both a single-precision divide
+(the Ahead/Regular loops write `1.0/z`, which promotes the float to DOUBLE) and a NEON
+reciprocal estimate + one Newton step were built and measured. greets t=5780 displaced,
+per-frame MIN, interleaved with a repeated control:
+
+| mode | VERT | TOTAL | pixels changed vs mode 0 | max abs Δ |
+|---|--:|--:|--:|--:|
+| 0 — today's arithmetic (control ×2) | 4.238 / 4.450 | 5.725 / 6.013 | — | — |
+| 1 — single-precision divide everywhere | 4.369 | 5.917 | **0 / 2,073,600** | 0 |
+| 2 — recip estimate + 1 Newton step | 4.731 | 6.257 | 697 / 2,073,600 (0.034 %) | 103/255 |
+| 2 — same, city t=1961 | — | — | 76 / 2,073,600 (0.004 %) | 141/255 |
+
+**Both are rejected on PERF, not on bytes.** Mode 2 is 0.3–0.5 ms SLOWER than the plain
+divide, and mode 1 is inside the control's own spread. Apple's FDIV is fast and fully
+pipelined, the estimate+Newton is three dependent ops plus scalar vector↔GPR moves, and the
+loop is waiting on the 140-byte `Vertex` stride either way — so there is no divide latency to
+hide. There is no perf/divergence trade to put to a reviewer here: the approximation costs
+0.034 % of the frame's pixels (max |Δ| ≈ 100–140, i.e. edge pixels flipping surface, not a
+shading nudge) and buys negative time. Kept in-tree behind the flag as the measured record.
+
+### Why widening the SIMD did not and will not help (the June wash, explained)
+
+`Vertex` is `pack(1)`, 140 bytes, and the fields the per-frame loop touches span offsets
+4..123 — i.e. **every cache line of the struct**. At 958 k verts that is ~134 MB of lines
+pulled per frame plus the write-back. Two measurements say the loop is line/bandwidth-bound,
+not arithmetic-bound:
+
+- `--xfrm_ablate=1` removes the TN **and** TTangent mat-vecs — 2 of the 3 per-vertex
+  matrix-vector products, 24 B of loads and 24 B of stores per vertex, 34 % of the struct.
+  VERT moves 4.009 → 3.661 ms: **−8.7 %**, not −34 %. The lines come in either way; only the
+  stores were saved.
+- `--xfrm_ablate=2` removes the whole projection block (1/z + PX/PY/UZ/VZ): 4.009 → 3.464 ms,
+  **−0.55 ms**.
+- The SoA sweep, which does *no* arithmetic at all — 4 loads + 4 stores per vertex — costs
+  60 % of what the entire transform loop costs.
+
+So the lever is **bytes touched per vertex**, not lanes per instruction. Ranked:
+1. ~~kill the redundant second pass~~ — DONE (`--xfrm_soa_inline`).
+2. **Phase 5 (shrink `Vertex`)** is now the real perf item, not just a cleanliness one:
+   moving the per-frame-written outputs out of the AoS struct cuts the stride the transform
+   walks. Its ceiling is proportional to the byte reduction, ~45 % of VERT at best.
+3. Phase 2 (Vec8f across 8 verts) remains a wash and should stay parked — an 8-vertex gather
+   out of a 140-byte stride buys nothing when the stride is the problem.
+
+### Where the 958 k verts come from (a bigger, separate lever)
+
+The displaced Piramid is 261,768 verts. The main view transforms 958,204. The greets mirror
+system clones the whole scene per mirror (`[MIRROR 'teleporter'] cloned 534,356 verts /
+90,890 faces`, and again for `P_TEXT.JPG#6`), and those clone meshes are ordinary scene
+meshes gated only by `HTrack_Visible`. **Most of the displaced front-end at t=5780 is
+mirror-clone geometry, not the wall the camera is looking at.** Culling/LOD-ing the clones is
+worth more than anything left inside `Transform_Objects`; it belongs to `GreetsMirror.cpp`,
+not to this refactor. See docs/OPTIMIZATION_BACKLOG.md.
+
+### The per-face loop
+
+At t=6097 (the pose where the ablation arms are internally consistent — at t=5780 the face
+ablations delete ~60 % of the frame's raster work and the cache state at Transform time is no
+longer comparable):
+
+| arm | FACE |
+|---|--:|
+| base (test + SortZ + FList push + tile bbox) | 0.395 |
+| `--xfrm_ablate=8` (visibility/backface test only, never push) | 0.322 |
+| `--xfrm_ablate=16` (loop + Face walk only) | 0.032 |
+
+**The visibility/backface TEST is ~73 % of the per-face cost**, the accepted-face work
+(SortZ + push + bbox for 16.5 k of 52.5 k faces) only ~0.07 ms. `Face::VisibilityFlagsAll()`
+is `A->Flags & B->Flags & C->Flags` — three pointer chases into 140-byte `Vertex` structs, and
+the tile-bbox stamp chases the same three again for PX/PY/TPos_z. Same mechanism as above:
+the cost is the AoS walk. Reading those from the SoA arrays instead (4-byte stride) is the
+obvious follow-up, but it needs `F->A/B/C_idx` to be trustworthy on every mesh — the
+tile-bbox comment in Transform.cpp records meshes where they are not (the conetest quad), and
+a wrong bbox DROPS a face where a wrong SortZ was harmless. Not attempted here.
+
+### Note: `--greets_displace` at t=6097 is NONDETERMINISTIC
+
+6 runs (3 flags-off, 3 flags-on) produced **6 distinct hashes** at t=6097 while t=5780 was
+byte-stable 6/6 in both arms. This is pre-existing (it reproduces with all new flags off) and
+unrelated to the SoA work, but it means **t=6097 cannot be used as a byte gate** and the
+"greets is deterministic again" claim in SESSION_STATE should be read as scoped to the
+non-displaced pin recipe.
+
 ## MEASURED 2026-06-19 — Phase 2 WASHES; the transform is only ~0.35 ms. STOP.
+## (correct for the FLAT scene only — superseded by the section above)
 
 Built the Vec8f-across-8-verts Inside loop (gated `--soa-wide-xform`, FMA association
 matched → byte-identical to the scalar path: flag-off == flag-on confirmed). **Result on

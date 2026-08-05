@@ -199,6 +199,46 @@ items below stay PARKED.
   displaced faces add little coverage — B2's ~2-2.8 µs/face is fixed cost, which
   S2 already reclaimed), so a main-pass geometric LOD buys little beyond S2+S1.
 
+## Geometry front-end (XFRM) — measured 2026-08-05, docs/SOA_VERTEX_REFACTOR.md
+Instrument: `--xfrm_prof=N` + `--xfrm_ablate=<mask>` (both default OFF, byte-null).
+Baseline at greets t=5780 `--greets_displace`, per-frame min: main-view
+`Transform_Objects` 7.92 ms = VERT 4.01 + SOA 2.40 + FACE 1.45.
+
+- **DONE — the Phase-1 AoS→SoA dual-write sweep, 2.40 ms.** `--xfrm_soa_inline`
+  (now default ON) moves the SoA store into the per-vertex loops. Measured
+  7.93 → 5.96 ms (−1.97, −25 %) at t=5780; bit-exact (city/fountain pins exact,
+  chase 7 poses + greets t=1588/t=5780 byte-identical, `--soa-verify` clean).
+- **The 958 k verts are mostly MIRROR CLONES, not the wall.** The displaced
+  Piramid is 261,768 verts; the main view transforms 958,204, because
+  `GreetsMirror` clones the whole scene per mirror (534,356 verts each for
+  'teleporter' and 'P_TEXT.JPG#6') as ordinary meshes gated only by
+  `HTrack_Visible`. **This is now the single biggest front-end lever** — bigger
+  than anything left inside `Transform_Objects` — and it lives in
+  `FDS/RENDER/GreetsMirror.cpp`: per-clone frustum/visible-panel culling, or a
+  decimated clone of the displaced stone (the reflection does not need
+  block-level relief). Not attempted; needs a look call on reflection fidelity.
+- **Phase 5 of the SoA refactor is a PERF item now, not just cleanliness.**
+  `Vertex` is pack(1) 140 B and the per-frame loop touches fields spanning
+  offsets 4..123 — every cache line. Ablating 2 of the 3 per-vertex mat-vecs
+  (34 % of the struct) buys only 8.7 % of VERT: the loop is line-bound, not
+  arithmetic-bound. Moving the per-frame-written outputs out of the AoS struct
+  shrinks the stride the transform walks; ceiling ~45 % of VERT. (Corollary:
+  Phase 2 / Vec8f stays parked — widening lanes cannot help a stride problem.)
+- **Per-face visibility test = ~73 % of the FACE bucket** (t=6097: 0.322 of
+  0.395 ms). `Face::VisibilityFlagsAll()` is `A->Flags & B->Flags & C->Flags` —
+  three chases into 140-byte `Vertex` structs; the tile-bbox stamp chases the
+  same three again. Reading `Flags`/`PX`/`PY` from the VertexFrame SoA arrays
+  (4-byte stride) is the obvious fix, BUT it requires `F->A/B/C_idx` to be
+  trustworthy on every mesh and the tile-bbox comment in Transform.cpp records
+  meshes where they are not (the conetest quad) — a wrong bbox DROPS a face
+  where a wrong SortZ was harmless. Needs a per-mesh "indices stamped" invariant
+  first.
+- **Per-chunk normal cones** (bulk-accept / bulk-reject a chunk's faces without
+  the per-face dot) — still unmeasured. Ceiling is bounded by the FACE bucket
+  (1.45 ms at t=5780, 0.40 at t=6097) and it cannot remove the SortZ/FList work
+  for accepted faces, so expect a few tenths of a ms. Rank below the two items
+  above.
+
 ## Perf (measured bottlenecks — from docs/PERF_STATE.md + the 15fps analysis)
 The greets frame is ~2.5–3× a "generic deferred" frame; the fat is shadowing,
 not shading. Biggest levers, in order:
@@ -233,6 +273,13 @@ not shading. Biggest levers, in order:
   measurement-tool-traps memory.
 - **Editor metallic-import OOM** — IN-PROGRESS (targeted per-surface re-bake +
   capped editor bake res). Same env-probe subsystem as the determinism issue.
+- **`--greets_displace` at t=6097 is run-to-run NONDETERMINISTIC** (measured
+  2026-08-05): 6 sequential runs → 6 distinct color-PPM hashes, with every new
+  flag OFF, while t=5780 in the same runs was byte-stable 6/6. So the "greets is
+  deterministic again" re-pin (f4e81e9) is scoped to the NON-displaced pin
+  recipe; the displaced path has its own defect at that pose. t=6097 cannot be
+  used as a byte gate until this is root-caused. Not investigated — found while
+  gating the XFRM work.
 
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,
