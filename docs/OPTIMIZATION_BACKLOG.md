@@ -300,6 +300,48 @@ not shading. Biggest levers, in order:
   used as a byte gate until this is root-caused. Not investigated — found while
   gating the XFRM work.
 
+## Architecture cleanup — retire the ::mirUV material split (QUEUED 2026-08-05)
+
+**What.** Replace the per-MATERIAL UV-handedness clone with a per-FACE
+handedness bit, and compute `B = handedness·(N×T)` from it everywhere.
+
+**Why now.** `GreetsFixBitangentHandedness` (DEMO/GREETS.CPP:1254) splits every
+face with a negative UV determinant onto a `<name>::mirUV` clone carrying
+`TbnHandedness = -1`, because the DEFERRED kernel is per-pixel and the G-buffer
+has no channel for handedness — a material clone was the only path available.
+Handedness is a property of a TRIANGLE's UV winding, and the determinant is
+already computed at the split site; it is simply thrown into a material clone
+instead of being stored. The split has caused real damage all session:
+
+- **The parallax march never applied it** — `Mekalele.h:1462` builds
+  `B = N×T` unconditionally while `DeferredSurfaceKernel.cpp` applies the sign
+  in 5 places and `LightmapBake.cpp:793` applies it. With 41.8% of greets charts
+  mirrored (S1d-1 census), the march walked the height field in the OPPOSITE V
+  direction on those faces — the user's "texture edge moving half the face"
+  swim. Found 2026-08-05 only because the user observed that deeper faces at
+  STEEPER grazing angles did NOT swim, which falsified the angle-based theory.
+- **`floor` has ZERO faces under its own name post-init** (they all moved to
+  `floor::mirUV`), which silently gave the floor no shell at all and cost an
+  agent hours.
+- **`::mirUV` clones ALIAS their base material's shell tables** — naive frees
+  are a use-after-free (hit during the editor rebuild work).
+- It inflates material counts through the seam census and amplitude audits.
+
+**Where.** Store the sign in the `Face_*` flag bits (a free bit, not a new
+field). Do NOT put it per-vertex: `Vertex` is pack(1) 140 B and the XFRM profile
+measured the transform loop CACHE-LINE-BOUND, so widening it costs ms. Stamp at
+the determinant computation in `GreetsFixBitangentHandedness`; consumers are
+`Mekalele.h` (march), `DeferredSurfaceKernel.cpp` (×5), `LightmapBake.cpp`.
+The deferred kernel needs the bit reaching per-pixel — that is the hard part and
+the reason the split exists; check whether a G-buffer bit is available or
+whether the material lookup can carry it without a clone.
+
+**Sequencing.** AFTER the immediate march fix (thread `Material::TbnHandedness`
+into the raster context) — that unblocks the swim and is small. This entry is
+the follow-up that fixes the CLASS rather than the instance.
+
+**Expected benefit.** Removes a whole defect class; no measured perf claim.
+
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,
 where in code, expected cost/benefit). Mark DONE with the commit + measured
