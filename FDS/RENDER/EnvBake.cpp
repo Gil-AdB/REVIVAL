@@ -1489,6 +1489,16 @@ void EnvDynamic_Overlay(Scene* sc) {
     }
 }
 
+// Availability probe for the runtime viz cycle (FDS/RENDER/VizCycle.cpp):
+// mirrors DrawViz's own early-outs, so the cycle never offers the pano viewer
+// when this run baked no panorama (--env_refl on is not sufficient).
+bool EnvReflectionViz_Available() {
+    if (!CurScene) return false;
+    auto it = g_envByScene.find(CurScene);
+    if (it == g_envByScene.end() || it->second.stores.empty()) return false;
+    return it->second.stores[0]->view.mip[0] != nullptr;
+}
+
 void EnvReflection_DrawViz(Scene* sc) {
     const int want = FeatureFlags::env_refl_viz();
     if (want <= 0 || !sc || !VPage || XRes <= 0 || YRes <= 0) return;

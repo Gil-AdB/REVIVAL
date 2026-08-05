@@ -566,6 +566,26 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
         ms);
 }
 
+// Availability probes for the runtime viz cycle (FDS/RENDER/VizCycle.cpp).
+// They mirror the two viz functions' OWN early-outs, deliberately: probing the
+// flag alone was wrong — with --shadow_lightmap on but no static lightmap baked,
+// --shadow_lightmap_viz=1 renders a byte-identical frame (measured), and the
+// cycle must not offer a mode that does nothing. Keep these in lockstep with
+// the guards below.
+bool LightmapViz_Available()
+{
+    if (!CurScene || !CurScene->staticLMTable) return false;
+    const meka::GBuffer *gb = g_gbuffer;
+    return gb && !gb->lightmapMF.empty() && !gb->lightmapST.empty();
+}
+
+bool NormalViz_Available()
+{
+    if (!CurScene) return false;
+    const meka::GBuffer *gb = g_gbuffer;
+    return gb && !gb->normal.empty() && !gb->txtr.empty();
+}
+
 void Render_LightmapViz(Scene *Sc)
 {
     const int mode = fds::FeatureFlags::shadow_lightmap_viz();

@@ -17,6 +17,12 @@ bool EngineGBuffer_HasNormalPlane();
 
 namespace fds {
 
+// Consumer-side availability probes, defined beside the viz functions whose
+// early-outs they mirror (FDS/RENDER/LightmapBake.cpp, FDS/RENDER/EnvBake.cpp).
+bool LightmapViz_Available();
+bool NormalViz_Available();
+bool EnvReflectionViz_Available();
+
 const char* g_vizLabel = nullptr;
 
 namespace {
@@ -26,17 +32,23 @@ using FF = FeatureFlags;
 // ── availability probes ───────────────────────────────────────────────────
 // "Would selecting this mode show anything in THIS run?" Evaluated once, at
 // the first key press — i.e. after scene init, so bake-time data is settled.
+//
+// Probing the FLAG alone proved insufficient and was caught by measurement:
+// with --shadow_lightmap on but nothing baked, --shadow_lightmap_viz=1 renders
+// a byte-identical frame. Where a consumer has its own early-outs, the probe is
+// that consumer's, defined next to it (LightmapBake.cpp / EnvBake.cpp) so the
+// two cannot drift.
 bool availAlways()   { return true; }
-bool availAlbedo()   { return EngineGBuffer_HasAlbedoPlane(); }
-bool availGbNormal() { return FF::deferred() && EngineGBuffer_HasNormalPlane(); }
+bool availAlbedo()   { return FF::deferred() && EngineGBuffer_HasAlbedoPlane(); }
+bool availGbNormal() { return FF::deferred() && NormalViz_Available(); }
 bool availDisp1()    { return DisplaceViz_HasData(); }
 bool availDisp2()    { return DisplaceViz_HasErrorData(); }
 bool availSeam()     { return PomSeamViz_HasData(); }
-bool availHorizon()  { return FF::pom_horizon(); }
-bool availShadowLm() { return FF::shadow_lightmap(); }
-bool availEnvRefl()  { return FF::env_refl(); }
-bool availAa()       { return FF::aa(); }
-bool availSsao()     { return FF::ssao(); }
+bool availHorizon()  { return FF::deferred() && FF::pom_horizon(); }
+bool availShadowLm() { return FF::deferred() && LightmapViz_Available(); }
+bool availEnvRefl()  { return EnvReflectionViz_Available(); }
+bool availAa()       { return FF::deferred() && FF::aa(); }
+bool availSsao()     { return FF::deferred() && FF::ssao(); }
 
 struct VizEntry {
     const char* label;      // on-screen + stderr name
@@ -107,12 +119,25 @@ constexpr int kNumEntries = int(sizeof(kEntries) / sizeof(kEntries[0]));
 std::vector<int> g_active;      // indices into kEntries, availability-filtered
 int  g_pos      = 0;            // 0 = off, else 1 + index into g_active
 bool g_built    = false;
+// True while WE hold texture_filter on for a needTexFilter entry. Without this
+// the companion leaked: cycling past --pom_viz left texture filtering on for the
+// rest of the session, silently changing every later render (measured — the
+// frame mean did not return to its pre-cycle value on reaching "off").
+bool g_forcedTexFilter = false;
 
 // Clear every viz this table can set, back to its compile-time default (0 for
 // all of them) AND clear the explicitly-set mark, so leaving the cycle hands
 // the flag back to defaults/param-scripts exactly like the console's unset.
+// Also drops a borrowed texture_filter. We only ever borrow it from 0 (see
+// apply), so restoring 0 + clearing the mark is an exact restore; a user who
+// launched with --texture_filter=N is never touched.
 void clearAll() {
     for (const VizEntry& e : kEntries) FF::unsetParam(e.flag);
+    if (g_forcedTexFilter) {
+        g_forcedTexFilter = false;
+        FF::setParamFromText("texture_filter", "0");
+        FF::clearSetMark("texture_filter");
+    }
 }
 
 void buildList() {
@@ -169,7 +194,8 @@ void apply() {
         // availability test), so flipping the flag live is safe; it does
         // change texture sampling to filtered, which is worth saying out loud.
         FF::setParamFromText("texture_filter", "1");
-        extra = "  [+ --texture_filter=1: this viz rides the filtered-albedo plane]";
+        g_forcedTexFilter = true;   // clearAll() gives it back on the next step
+        extra = "  [+ --texture_filter=1 while this mode is up: it rides the filtered-albedo plane]";
     }
     if (std::strcmp(e.flag, "ssao_debug") == 0 && FF::hdr())
         extra = "  [WARNING: --hdr tonemaps over it; relaunch with --no-hdr to see it]";
