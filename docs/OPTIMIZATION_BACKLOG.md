@@ -342,6 +342,37 @@ the follow-up that fixes the CLASS rather than the instance.
 
 **Expected benefit.** Removes a whole defect class; no measured perf claim.
 
+## Offscreen geometry — what is LEFT after the faceless-mesh skip (2026-08-06)
+
+Context: `docs/VISIBILITY_PLAN.md` §9. The faceless retired-Piramid skip
+(`799c808`) took SHADOW 540 706 → 175 594 verts/frame at t=5743 and is DONE.
+Ranked by share of what remains, measured with `--xfrm_pass_mesh_prof`:
+
+- **`Hull.lwo` (the robot) — 82 800 verts/frame, 47.2 % of the post-fix shadow
+  front end.** TODO. 2 400 faces / 7 200 verts, transformed in ~11.5 of 29
+  shadow calls per frame. Levers: a shadow-caster LOD, or tightening the
+  per-light mesh cull so fewer of the 29 calls keep it. Both are look-neutral
+  inside a shadow map (silhouette-only consumer), so this is a perf call, not a
+  look call — unlike the wall proxy below. **Measure before building:** the
+  whole SHADOW front end is ~10.7 core-ms/frame post-fix, so the ceiling here is
+  ~5 core-ms, i.e. sub-ms of wall clock at the pool's speedup.
+- **`Piramid.lwo:cNN` chunks — 80 635 verts/frame, 45.9 %.** PARKED. Already
+  chunked; VISIBILITY_PLAN §7b measured finer chunking a net LOSS.
+- **robot legs — 11 403 verts/frame, 6.5 %.** TODO-if-#1-pays (same lever).
+- **~~wall casters (flat proxy for `rooms`/`floor`/`siling`)~~ — PARKED, MEASURED
+  NOT WORTH IT.** `rooms` + `rooms::mirUV` are 2 506 of 540 706 shadow verts
+  (0.46 %); with `floor*` and `siling` ~4 000 (0.74 %), = 2.3 % post-fix.
+  `--greets_shadow_proxy` was sized against ~81 k **displaced** faces; with
+  tessellation retired the shadow bake already rasterises the ~226-face flat
+  surface the proxy would substitute, so that win is already banked. Do not
+  re-propose without a new measurement.
+
+**Separate LOOK call, not actioned:** mirror clones are hidden inside the
+mirror RTT scope but **not** inside the env/SH probe bakes — 110 030 of 309 740
+OFFSCREEN verts/frame pre-fix (~68 540 post-fix) are clone meshes transformed
+for probes. Whether a probe should see a reflection at all is the user's call;
+hiding them there is a one-line scope change worth ~68 k verts/frame.
+
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,
 where in code, expected cost/benefit). Mark DONE with the commit + measured
