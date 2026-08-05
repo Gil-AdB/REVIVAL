@@ -43,9 +43,14 @@ struct Batch {
     uint32_t firstVertex = 0;
     uint32_t vertexCount = 0;   // always a multiple of 3
     int      textureIndex = -1; // -1 = untextured, use baseColor
+    int      normalTexIndex = -1;
+    int      roughTexIndex = -1;
+    int      heightTexIndex = -1;
     float    baseColor[3] = {1, 1, 1};
     float    luminosity = 0.0f, diffuse = 1.0f, specular = 0.0f;
     uint32_t glossiness = 0;
+    float    parallaxScale = 1.0f;
+    bool     aoInAlpha = false;   // albedo alpha holds baked AO (Mat_AoInAlpha)
     // Model matrix: FDS Matrix is float[3][3], ROW-major, applied as row-dot-v
     // (Animate_Objects has already folded IScale into the rows and resolved the
     // parent hierarchy into IPos). worldPos = rot * objPos + pos.
@@ -84,6 +89,7 @@ struct Scene {
     std::vector<TextureImage> textures;
     std::vector<Light>        lights;
     Camera                    camera;
+    float                     ambient[3] = {0, 0, 0};   // Scene::Ambient, 0..255
 
     int      xres = 0, yres = 0;
     float    curFrame = 0.0f;
@@ -106,6 +112,11 @@ struct LoadOptions {
     // "px,py,pz,fx,fy,fz" as in FDS_GREETS_CAM. Empty = use the scripted camera.
     std::string camPose;
     bool        verbose = true;
+    // Replicate DEMO's --greets_stone_tex override (default ON there, so ON here).
+    // Without it the wall this renders is the AUTHORED FLD wall, not the surface
+    // the user actually reviews — see docs/GPU_BENCHMARK_PLAN.md §3.2. No
+    // displacement arm may run with this off.
+    bool        stoneTex = true;
 };
 
 // Returns false on failure. Never opens a window and never touches VPage/ZPage16

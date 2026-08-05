@@ -7,12 +7,15 @@
 #include <Base/TriMesh.h>
 #include <FLD/FLD_READ.H>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <unordered_map>
+#include <vector>
 
 namespace gpubench {
 namespace {
@@ -54,30 +57,97 @@ bool FiniteVec(const Vector &v) {
 }
 
 // Engine textures at this point are linear/row-major (Load_Texture, no
-// Generate_Mipmaps). BPP is 24 or 32. Expand to tightly packed RGBA8.
+// Generate_Mipmaps). Expand to tightly packed RGBA8.
 //
-// Channel order is detected rather than assumed: we compare the decoded mean
-// per byte-lane against the material's authored BaseCol, whose ordering we know
-// from Color's field order. If the two disagree we swap. The result is printed
-// so the assumption is visible in the log instead of buried.
-bool ExpandToRGBA(const ::Texture *tx, bool bgr, TextureImage &out) {
+// Byte order is NOT guessed. Both engine loaders produce B,G,R(,A):
+// LoadPNG (IMGCODE.CPP:1037) takes stb_image's RGBA and swaps lanes 0<->2, and
+// the 8/24-bit paths follow the same BGRA convention as VPage. So lane 0 is
+// blue and lane 2 is red for every format we touch here.
+//
+// ALPHA IS PRESERVED for 32-bit sources: the greets stone albedos carry a baked
+// AO map in alpha (Mat_AoInAlpha) and the deferred kernel reads occlusion from
+// it. Forcing alpha to 255 would silently discard that.
+bool ExpandToRGBA(const ::Texture *tx, TextureImage &out) {
     if (!tx || !tx->Data || tx->SizeX <= 0 || tx->SizeY <= 0) return false;
     const int cpp = int(tx->BPP) / 8;
-    if (cpp != 3 && cpp != 4) return false;
+    if (cpp != 1 && cpp != 3 && cpp != 4) return false;
     out.w = tx->SizeX;
     out.h = tx->SizeY;
     out.rgba.resize(size_t(out.w) * size_t(out.h) * 4);
     const uint8_t *src = tx->Data;
     for (size_t i = 0, n = size_t(out.w) * size_t(out.h); i < n; ++i) {
-        const uint8_t a = src[i * cpp + 0];
-        const uint8_t b = src[i * cpp + 1];
-        const uint8_t c = src[i * cpp + 2];
-        out.rgba[i * 4 + 0] = bgr ? c : a;
-        out.rgba[i * 4 + 1] = b;
-        out.rgba[i * 4 + 2] = bgr ? a : c;
-        out.rgba[i * 4 + 3] = 255;
+        if (cpp == 1) {   // single-channel (height / roughness) — replicate
+            const uint8_t g = src[i];
+            out.rgba[i * 4 + 0] = g;
+            out.rgba[i * 4 + 1] = g;
+            out.rgba[i * 4 + 2] = g;
+            out.rgba[i * 4 + 3] = 255;
+        } else {
+            out.rgba[i * 4 + 0] = src[i * cpp + 2];   // R  (source lane 2)
+            out.rgba[i * 4 + 1] = src[i * cpp + 1];   // G
+            out.rgba[i * 4 + 2] = src[i * cpp + 0];   // B  (source lane 0)
+            out.rgba[i * 4 + 3] = (cpp == 4) ? src[i * cpp + 3] : 255;
+        }
     }
     return true;
+}
+
+// Replicates DEMO's --greets_stone_tex override (DEMO/GREETS.CPP:1508-1600).
+//
+// The engine does this as a FILENAME REPOINT performed before Preprocess_Scene
+// loads any texture, so the sidecars go through the normal pipeline. We do the
+// same, except we never call Generate_Mipmaps (the GPU builds its own mips), so
+// the data stays linear and uploads directly.
+//
+// Deliberately NOT replicated: the Sobel normal-map bake fallback (we require an
+// authored greets_*_n.png, which exists), MakeHeight8 / MakeNormal16 packing
+// (memory tricks for the CPU kernel), the cone map, and the horizon map. Those
+// are CPU-side accelerations, not surface content.
+struct StoneOverride {
+    const char *matName;
+    const char *albedo, *height, *normal, *rough;
+    float parallaxScale;
+};
+constexpr StoneOverride kStoneOverrides[] = {
+    {"rooms", "TEXTURES/greets_wall.png",  "TEXTURES/greets_wall_h.png",
+              "TEXTURES/greets_wall_n.png", "TEXTURES/greets_wall_r.png", 1.00f},
+    // floor: offset-parallax swims on the grazing, densely-tiled floor, so
+    // GREETS.CPP dials it down to 0.25. Same number here.
+    {"floor", "TEXTURES/greets_floor.png", "TEXTURES/greets_floor_h.png",
+              "TEXTURES/greets_floor_n.png", "TEXTURES/greets_floor_r.png", 0.25f},
+};
+
+::Texture *MakeSidecar(const char *fileName) {
+    auto *tx = new ::Texture();
+    tx->FileName = strdup(fileName);
+    return tx;
+}
+
+// Returns the number of materials overridden.
+int ApplyStoneTex(Material *M, bool verbose) {
+    if (!M || !M->Name || !M->Txtr) return 0;
+    for (const auto &o : kStoneOverrides) {
+        if (std::strcmp(M->Name, o.matName) != 0) continue;
+        // the previous FileName is engine-owned; leaking it matches GREETS.CPP
+        M->Txtr->FileName = strdup(o.albedo);
+        M->Txtr->BPP = 0;                     // force (re)load
+        M->Txtr->Data = nullptr;
+        M->Flags |= Mat_AoInAlpha;            // albedo alpha = baked AO
+        // Honor an AUTHORED ParallaxScale (persisted by the editor into the LWO
+        // 'RVSF' sub-chunk); only stamp the code default when unauthored. Same
+        // guard as GREETS.CPP — stomping it unconditionally is the bug that made
+        // editor parallax edits silently do nothing.
+        if (M->ParallaxScale == 1.0f) M->ParallaxScale = o.parallaxScale;
+        if (!M->NormalMap)    M->NormalMap    = MakeSidecar(o.normal);
+        if (!M->RoughnessMap) M->RoughnessMap = MakeSidecar(o.rough);
+        if (!M->HeightMap)    M->HeightMap    = MakeSidecar(o.height);
+        if (verbose)
+            std::fprintf(stderr,
+                "[INGEST] stone-tex '%s' -> %s (+n/+r/+h), parallaxScale=%.2f, AO-in-alpha\n",
+                M->Name, o.albedo, M->ParallaxScale);
+        return 1;
+    }
+    return 0;
 }
 
 }  // namespace
@@ -163,9 +233,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
         }
         TextureImage img;
         img.fileName = tx->FileName ? tx->FileName : "(unnamed)";
-        // The engine's 8-bit surfaces are BGRA and its image loaders follow the
-        // same convention, so 24bpp texel bytes are B,G,R.
-        if (ExpandToRGBA(tx, /*bgr=*/true, img)) {
+        if (ExpandToRGBA(tx, img)) {
             idx = int(out.textures.size());
             out.textures.push_back(std::move(img));
             ++out.texturesLoaded;
@@ -175,6 +243,29 @@ bool Load(Scene &out, const LoadOptions &opt) {
         texIndex[tx] = idx;
         return idx;
     };
+
+    // ---- 4b. stone-tex override (BEFORE any texture is decoded) ------------
+    // docs/GPU_BENCHMARK_PLAN.md §3.2. Must run before acquireTexture touches
+    // anything, exactly as GREETS.CPP runs before Preprocess_Scene.
+    if (opt.stoneTex) {
+        std::vector<Material *> seenMats;
+        int overridden = 0;
+        for (TriMesh *T = sc.TriMeshHead; T; T = T->Next) {
+            if (!T->Faces) continue;
+            for (uint32_t f = 0; f < T->FIndex; ++f) {
+                Material *M = T->Faces[f].Txtr;
+                if (!M) continue;
+                if (std::find(seenMats.begin(), seenMats.end(), M) != seenMats.end()) continue;
+                seenMats.push_back(M);
+                overridden += ApplyStoneTex(M, opt.verbose);
+            }
+        }
+        if (opt.verbose && overridden == 0)
+            std::fprintf(stderr,
+                "[INGEST] WARNING: --greets_stone_tex requested but NO material named "
+                "'rooms' or 'floor' was found. The wall is the AUTHORED FLD wall, not the "
+                "reviewed surface — do NOT run a displacement arm on this.\n");
+    }
 
     // ---- 5. de-indexed geometry, grouped per (mesh x material) -------------
     for (Object *obj = sc.ObjectHead; obj; obj = obj->Next) {
@@ -214,8 +305,14 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 b.diffuse = M->Diffuse;
                 b.specular = M->Specular;
                 b.glossiness = M->Glossiness;
-                b.textureIndex = acquireTexture(M->Txtr);
-                if (M->Txtr && M->Txtr->FileName) b.materialName = M->Txtr->FileName;
+                b.parallaxScale = M->ParallaxScale;
+                b.aoInAlpha = (M->Flags & Mat_AoInAlpha) != 0;
+                b.textureIndex   = acquireTexture(M->Txtr);
+                b.normalTexIndex = acquireTexture(M->NormalMap);
+                b.roughTexIndex  = acquireTexture(M->RoughnessMap);
+                b.heightTexIndex = acquireTexture(M->HeightMap);
+                b.materialName = M->Name ? M->Name
+                               : (M->Txtr && M->Txtr->FileName ? M->Txtr->FileName : "?");
             }
 
             for (uint32_t fi : kv.second) {
@@ -246,7 +343,10 @@ bool Load(Scene &out, const LoadOptions &opt) {
         }
     }
 
-    // ---- 6. lights ---------------------------------------------------------
+    // ---- 6. lights + ambient ------------------------------------------------
+    out.ambient[0] = sc.Ambient.R;
+    out.ambient[1] = sc.Ambient.G;
+    out.ambient[2] = sc.Ambient.B;
     for (Omni *O = sc.OmniHead; O; O = O->Next) {
         Light L;
         L.parented = !FiniteVec(O->IPos);
