@@ -52,6 +52,19 @@
 // mirror RTT's offscreen Transform (see FrameState.h).
 #include "Base/FrameState.h"
 
+// Research instruments (--xfrm_pass_prof, --mirror_cull_census): compile-time
+// gated, see the FDS_VIS_CENSUS block further down for WHY a runtime flag is
+// not enough here. 0 = the shipping build, textually un-instrumented.
+#ifndef FDS_VIS_CENSUS
+#define FDS_VIS_CENSUS 0
+#endif
+#if FDS_VIS_CENSUS
+#include <atomic>
+// fds::MirrorCloneSubSpheres — the per-source-mesh sub-spheres of a mirror
+// clone, read ONLY by the --mirror_cull_census diagnostic below.
+#include "RENDER/GreetsMirror.h"
+#endif
+
 // Front-to-back face sort. Closer faces dispatch first so subsequent
 // farther faces fail Z and skip the rasterizer's per-pixel work — a
 // pure perf optimization. The original RENDER.CPP defined this at
@@ -162,6 +175,243 @@ inline float xfrmRcpF(float z, int mode) {
 	if (mode <= 1) return 1.0f / z;
 	return xfrmRcpApprox(z);
 }
+
+#if FDS_VIS_CENSUS
+// ── VISIBILITY CENSUS BUILD ONLY (-DFDS_VIS_CENSUS=1) ────────────────────
+// The per-PASS profiler and the mirror-clone split census below are RESEARCH
+// instruments (docs/VISIBILITY_PLAN.md §8). They are compile-time gated, not
+// just flag-gated, because this build is -O3 -flto -ffp-contract=fast and
+// MEASURED: merely carrying the (never-taken) branches inside
+// Transform_Objects changes which expressions the compiler contracts into
+// FMAs in the surrounding vertex/face work, moving real pixels with every
+// flag OFF — city cold-cache b2af24de -> 850be968 at 1920x1080. A diagnostic
+// must not cost pixels, and a runtime `if (0)` cannot promise that here. With
+// the macro undefined the preprocessor removes every line, so the shipping
+// Transform_Objects is TEXTUALLY identical to the un-instrumented one and
+// byte-nullity is guaranteed by construction rather than by measurement.
+// Measure with:  cmake -S . -B build-census -G Ninja -DFDS_VIS_CENSUS=ON
+// ── Per-PASS front-end census (--xfrm_pass_prof=N) ───────────────────────
+// xfrm_prof above is MAIN-VIEW only by construction (no synchronisation).
+// Greets runs many more Transform_Objects calls per frame — the mirror RTT
+// bakes, the shadow-cube faces, the env/SH probe faces — and the question
+// "where does the geometry front-end time actually go across the whole
+// frame" needs all of them attributed. This accumulator is therefore
+// atomic (shadow bakes + the mirror shard pass run Transform_Objects on
+// worker threads) and buckets by pass KIND. Diagnostic only: culls
+// nothing, and when the flag is 0 nothing is read or written.
+enum XPassKind { XPK_MAIN = 0, XPK_MIRROR_RTT, XPK_SHADOW, XPK_OFFSCREEN, XPK_NUM };
+const char *const kXPassName[XPK_NUM] = { "MAIN", "MIRROR-RTT", "SHADOW", "OFFSCREEN" };
+struct XPassAcc {
+	std::atomic<int64_t> ns{0};
+	std::atomic<int64_t> calls{0};
+	std::atomic<int64_t> meshesSeen{0}, meshesXformed{0};
+	std::atomic<int64_t> vertsSeen{0}, vertsXformed{0};
+	std::atomic<int64_t> facesPushed{0};
+};
+XPassAcc g_xpass[XPK_NUM];
+std::atomic<int> g_xpassMainFrames{0};
+
+void xpassDump(int frames) {
+	std::fprintf(stderr, "[XFRM-PASS] over %d main-view frames (per-frame averages)\n", frames);
+	const double f = double(frames > 0 ? frames : 1);
+	double totMs = 0.0;
+	for (int k = 0; k < XPK_NUM; ++k) {
+		XPassAcc &a = g_xpass[k];
+		const double ms = a.ns.load() / 1e6 / f;
+		totMs += ms;
+		std::fprintf(stderr,
+		    "[XFRM-PASS]   %-11s calls %6.2f  %8.3f ms  meshes %7.1f/%7.1f  "
+		    "verts %10.1f/%10.1f (cull %5.1f%%)  fPushed %9.1f\n",
+		    kXPassName[k], a.calls.load() / f, ms,
+		    a.meshesXformed.load() / f, a.meshesSeen.load() / f,
+		    a.vertsXformed.load() / f, a.vertsSeen.load() / f,
+		    a.vertsSeen.load() > 0
+		        ? 100.0 * double(a.vertsSeen.load() - a.vertsXformed.load()) / double(a.vertsSeen.load())
+		        : 0.0,
+		    a.facesPushed.load() / f);
+		a.ns = 0; a.calls = 0; a.meshesSeen = 0; a.meshesXformed = 0;
+		a.vertsSeen = 0; a.vertsXformed = 0; a.facesPushed = 0;
+	}
+	std::fprintf(stderr, "[XFRM-PASS]   %-11s %30.3f ms/frame\n", "TOTAL", totMs);
+}
+
+// ── Mirror-clone split CEILING census (--mirror_cull_census=N) ───────────
+// A greets mirror clone is ONE TriMesh holding the whole mirrored room, so
+// its single bsphere is room-sized and the mesh-level frustum cull can
+// never reject it (the disease the Piramid chunk split cured for the source
+// wall). This census answers, WITHOUT changing any geometry, "what would a
+// per-source-mesh split of the clone buy?": it runs the same sphere test the
+// mesh cull runs, once per clone sub-range, and reports the verts it would
+// have rejected. Main-view only, so plain scalars.
+struct MCensus {
+	int64_t frames = 0;
+	int64_t cloneMeshes = 0, cloneVerts = 0;
+	int64_t subTotal = 0, subCulled = 0;
+	int64_t subVertsTotal = 0, subVertsCulled = 0;
+	// Window arm: the clone can only paint inside its mirror's screen
+	// footprint, so a sub-sphere outside the WINDOW pyramid is dead
+	// weight even when the full-screen frustum keeps it.
+	int64_t winCulled = 0, winVertsCulled = 0;
+	int64_t winFrames = 0;          // frames where a usable window rect existed
+	double  winAreaFrac = 0.0;      // window px / screen px, summed over winFrames
+};
+MCensus g_mcensus;
+
+// Same math as the symmetric mesh-level test in Transform_Objects (depth
+// then left/right then up/down), factored so the census can run it per
+// sub-sphere. R2 is already L2-scaled (view-space radius²).
+inline bool censusSphereOutside(const Vector &S, float R2,
+                                float px, float py, float cex, float cey,
+                                float nearZ, float farZ)
+{
+	float dz = S.z - nearZ;
+	if (dz*dz > R2 && dz < 0.0f) return true;
+	dz = S.z - farZ;
+	if (dz*dz > R2 && dz > 0.0f) return true;
+	const float ax = std::fabs(S.x);
+	float L1 = px*ax - cex*S.z;
+	if (L1*L1 > R2*(px*px + cex*cex) && ax*px > S.z*cex) return true;
+	const float ay = std::fabs(S.y);
+	L1 = py*ay - cey*S.z;
+	if (L1*L1 > R2*(py*py + cey*cey) && ay*py > S.z*cey) return true;
+	return false;
+}
+
+// Generalized sphere-vs-viewport-rect reject. Setting the rect to the full
+// screen (0,0,XRes,YRes) reproduces the existing off-axis test at the mesh
+// cull above exactly; the census also calls it with the MIRROR WINDOW rect.
+// Outside-positive q = distance·‖n‖; reject iff q > 0 and q² > R²‖n‖².
+inline bool censusSphereOutsideRect(const Vector &S, float R2,
+                                    float px, float py, float cex, float cey,
+                                    float x0, float y0, float x1, float y1)
+{
+	float n, q;
+	n = cex - x0; q = -(px*S.x + n*S.z);                 // screen_x < x0
+	if (q > 0.0f && q*q > R2*(px*px + n*n)) return true;
+	n = cex - x1; q =  (px*S.x + n*S.z);                 // screen_x > x1
+	if (q > 0.0f && q*q > R2*(px*px + n*n)) return true;
+	n = cey - y0; q =  (py*S.y - n*S.z);                 // screen_y < y0
+	if (q > 0.0f && q*q > R2*(py*py + n*n)) return true;
+	n = cey - y1; q = -(py*S.y - n*S.z);                 // screen_y > y1
+	if (q > 0.0f && q*q > R2*(py*py + n*n)) return true;
+	return false;
+}
+
+// One mesh's contribution to the census. Deliberately NOINLINE and out of
+// line of Transform_Objects: this build is -O3 -flto -ffp-contract=fast, and
+// carrying the body inside the mesh loop measurably changed which expressions
+// the compiler contracted into FMAs in the SURROUNDING vertex/face work — 216
+// differing bytes (max |delta| 44) on the 1920x1080 city pin with the flag
+// OFF. A diagnostic must be byte-null off; keeping it behind a call boundary
+// restores that (city 37e62845 exact).
+__attribute__((noinline))
+void mirrorCensusMesh(const TriMesh *T, const Matrix &IM, const Vector &OS,
+                      float L2, const fds::CameraContext &cam,
+                      float px, float py, int xr, int yr)
+{
+	const std::vector<fds::MirrorCloneSubSphere> *subs =
+	    fds::MirrorCloneSubSpheres(T);
+	if (!subs || subs->empty()) return;
+	++g_mcensus.cloneMeshes;
+	g_mcensus.cloneVerts += T->VIndex;
+	// Screen rect of this mirror's WALL faces = the only region the clone can
+	// paint (Mekalele's per-pixel mirrorTag gate). Projected here from world
+	// through the SAME camera the mesh cull uses. Any wall vert at/behind the
+	// near plane makes the rect unusable -> fall back to the full screen (no
+	// window culling that frame), which keeps the census conservative.
+	float wx0 = 0.0f, wy0 = 0.0f;
+	float wx1 = float(xr), wy1 = float(yr);
+	bool winValid = false;
+	const std::vector<fds::MirrorCloneWall> *walls = fds::MirrorCloneWalls(T);
+	if (walls && !walls->empty()) {
+		float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+		bool ok = true;
+		for (const fds::MirrorCloneWall &w : *walls) {
+			if (!w.face || !w.mesh) { ok = false; break; }
+			const Vertex *vs[3] = { w.face->A, w.face->B, w.face->C };
+			for (int k = 0; k < 3 && ok; ++k) {
+				if (!vs[k]) { ok = false; break; }
+				Vector lp = vs[k]->Pos, wp, vp, rel;
+				MatrixXVector(w.mesh->RotMat, &lp, &wp);
+				wp.x += w.mesh->IPos.x; wp.y += w.mesh->IPos.y;
+				wp.z += w.mesh->IPos.z;
+				Vector_Sub(&wp, &cam.view->ISource, &rel);
+				MatrixXVector(cam.view->Mat, &rel, &vp);
+				if (vp.z <= cam.nearZ) { ok = false; break; }
+				const float sx = ( px*vp.x + cam.cntrEX*vp.z) / vp.z;
+				const float sy = (-py*vp.y + cam.cntrEY*vp.z) / vp.z;
+				bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
+				by0 = std::min(by0, sy); by1 = std::max(by1, sy);
+			}
+			if (!ok) break;
+		}
+		if (ok && bx1 > bx0 && by1 > by0) {
+			// Intersect with the screen: the window can extend past the frame
+			// edge, and clone geometry outside the screen is dead regardless.
+			wx0 = std::max(0.0f, bx0); wy0 = std::max(0.0f, by0);
+			wx1 = std::min(float(xr), bx1); wy1 = std::min(float(yr), by1);
+			winValid = (wx1 > wx0 && wy1 > wy0);
+		}
+	}
+	if (winValid) {
+		++g_mcensus.winFrames;
+		g_mcensus.winAreaFrac += double((wx1-wx0)*(wy1-wy0))
+		                       / double(std::max(1, xr) * std::max(1, yr));
+	}
+	for (const fds::MirrorCloneSubSphere &s : *subs) {
+		// View-space sub-centre: OS is the mesh bsphere centre in view space,
+		// so add the IM-rotated offset between them.
+		Vector off = { s.ctr.x - T->BSphereCtr.x,
+		               s.ctr.y - T->BSphereCtr.y,
+		               s.ctr.z - T->BSphereCtr.z };
+		Vector rot;
+		MatrixXVector(IM, &off, &rot);
+		const Vector Ss = { OS.x + rot.x, OS.y + rot.y, OS.z + rot.z };
+		++g_mcensus.subTotal;
+		g_mcensus.subVertsTotal += s.vCount;
+		const float R2s = L2 * s.radSq;
+		const bool outFrustum = censusSphereOutside(
+		    Ss, R2s, px, py, cam.cntrEX, cam.cntrEY, cam.nearZ, cam.farZ);
+		if (outFrustum) {
+			++g_mcensus.subCulled;
+			g_mcensus.subVertsCulled += s.vCount;
+		}
+		// Window arm: frustum reject OR outside the mirror's own screen rect
+		// (a superset of the frustum reject, since the rect is clamped to the
+		// screen). Depth still uses the camera's near/far.
+		if (winValid) {
+			const bool outWin = outFrustum
+			    || censusSphereOutsideRect(Ss, R2s, px, py,
+			            cam.cntrEX, cam.cntrEY, wx0, wy0, wx1, wy1);
+			if (outWin) {
+				++g_mcensus.winCulled;
+				g_mcensus.winVertsCulled += s.vCount;
+			}
+		}
+	}
+}
+
+void mcensusDump() {
+	MCensus &c = g_mcensus;
+	const double f = double(c.frames > 0 ? c.frames : 1);
+	std::fprintf(stderr,
+	    "[MIRROR-CULL-CENSUS] n=%lld  clone meshes %.2f/frame  clone verts %.0f/frame"
+	    "  | sub-spheres %.1f, frustum-culled %.1f (%.1f%%)"
+	    "  | sub verts %.0f, FRUSTUM-CULLABLE %.0f (%.1f%%)"
+	    "  | WINDOW-CULLABLE %.0f (%.1f%%) over %lld frames, window %.2f%% of screen\n",
+	    (long long)c.frames, c.cloneMeshes / f, c.cloneVerts / f,
+	    c.subTotal / f, c.subCulled / f,
+	    c.subTotal ? 100.0 * double(c.subCulled) / double(c.subTotal) : 0.0,
+	    c.subVertsTotal / f, c.subVertsCulled / f,
+	    c.subVertsTotal ? 100.0 * double(c.subVertsCulled) / double(c.subVertsTotal) : 0.0,
+	    c.winVertsCulled / f,
+	    c.subVertsTotal ? 100.0 * double(c.winVertsCulled) / double(c.subVertsTotal) : 0.0,
+	    (long long)c.winFrames,
+	    c.winFrames ? 100.0 * c.winAreaFrac / double(c.winFrames) : 0.0);
+	c = MCensus{};
+}
+
+#endif  // FDS_VIS_CENSUS
 
 void xpDump(int interval) {
 	XProfAcc &a = g_xprof;
@@ -804,6 +1054,26 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	const int64_t xpT0   = xp ? xpNow() : 0;   // whole-call
 	int64_t xpTM = 0, xpTV = 0, xpTS = 0, xpTF = 0;
 
+#if FDS_VIS_CENSUS
+	// Per-PASS census (--xfrm_pass_prof). Unlike xfrm_prof this runs in EVERY
+	// pass (mirror RTT, shadow cube faces, env/SH probe faces) so the whole
+	// frame's geometry front-end is attributed. Kind is derived from the same
+	// three pass predicates the culls key on.
+	const int  _xpassN = fds::FeatureFlags::xfrm_pass_prof();
+	const bool xpass   = (_xpassN > 0);
+	const int  xpKind  = _mainView ? XPK_MAIN
+	                   : (fds::g_offAxisFrustumCull ? XPK_MIRROR_RTT
+	                   : (_inShadowPass ? XPK_SHADOW : XPK_OFFSCREEN));
+	const int64_t xpassT0 = xpass ? xpNow() : 0;
+	int64_t xpassMeshSeen = 0, xpassMeshX = 0, xpassVSeen = 0, xpassVX = 0;
+
+	// Mirror-clone split ceiling census (--mirror_cull_census). Main view only
+	// — the RTT bakes HIDE every clone mesh, so a clone is never in an
+	// offscreen pass and the ceiling question is entirely a main-view one.
+	const int  _mcensusN = _mainView ? fds::FeatureFlags::mirror_cull_census() : 0;
+	const bool _mcensus  = (_mcensusN > 0) && (xresOverride < 0);
+#endif  // FDS_VIS_CENSUS
+
 	// SoA Phase 2a — INLINE SoA STORE (--xfrm_soa_inline).
 	// Phase 1 shipped the AoS->SoA dual write as a SEPARATE post-pass sweep
 	// (VertexFrame_DumpFromAoS at AfterXForm): a second walk over the mesh's
@@ -854,6 +1124,9 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			++fds::g_chunkVisStats.meshesSeen;
 			fds::g_chunkVisStats.vertsSeen += T->VIndex;
 		}
+#if FDS_VIS_CENSUS
+		if (xpass) { ++xpassMeshSeen; xpassVSeen += T->VIndex; }
+#endif
 
 		// Static-bake filter: skip meshes whose *position* animates
 		// (Pos spline has more than 1 key). Their t=0 silhouette would
@@ -1262,6 +1535,10 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			++fds::g_chunkVisStats.meshesXformed;
 			fds::g_chunkVisStats.vertsXformed += T->VIndex;
 		}
+#if FDS_VIS_CENSUS
+		if (xpass) { ++xpassMeshX; xpassVX += T->VIndex; }
+		if (_mcensus) mirrorCensusMesh(T, IM, OS, L2, cam, PX, PY, xr, yr);
+#endif
 		if (xp) {
 			// Every mesh past this point runs a per-vertex loop + a face loop.
 			xpTV = xpNow();
@@ -2209,6 +2486,33 @@ AfterXForm:
 
 	faces.cAll = Ins-faces.fList;
 	faces.cPcls = faces.cAll-faces.cOmnies-faces.cPolys;
+
+#if FDS_VIS_CENSUS
+	if (_mcensus) {
+		++g_mcensus.frames;
+		if (g_mcensus.frames >= _mcensusN) mcensusDump();
+	}
+
+	if (xpass) {
+		XPassAcc &a = g_xpass[xpKind];
+		a.ns.fetch_add(xpNow() - xpassT0, std::memory_order_relaxed);
+		a.calls.fetch_add(1, std::memory_order_relaxed);
+		a.meshesSeen.fetch_add(xpassMeshSeen, std::memory_order_relaxed);
+		a.meshesXformed.fetch_add(xpassMeshX, std::memory_order_relaxed);
+		a.vertsSeen.fetch_add(xpassVSeen, std::memory_order_relaxed);
+		a.vertsXformed.fetch_add(xpassVX, std::memory_order_relaxed);
+		// faces.cPolys is the poly FList length this call produced — the same
+		// number a per-face counter would accumulate, read once instead of
+		// incremented inside the hot face loop (an extra store there perturbs
+		// the -ffp-contract=fast codegen of the surrounding vertex/face work
+		// and measurably moved pixels: 216 bytes / 1920x1080 city, max 44).
+		a.facesPushed.fetch_add(faces.cPolys, std::memory_order_relaxed);
+		if (xpKind == XPK_MAIN) {
+			const int fr = g_xpassMainFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (fr >= _xpassN) { g_xpassMainFrames.store(0, std::memory_order_relaxed); xpassDump(fr); }
+		}
+	}
+#endif  // FDS_VIS_CENSUS
 
 	if (xp) {
 		g_xprof.cur[XP_TOTAL] = xpNow() - xpT0;

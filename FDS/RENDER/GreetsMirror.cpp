@@ -26,6 +26,7 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 
 #include <Base/FrameState.h>  // fds::g_mainCamera / g_mainFaces (RTT pass)
 
@@ -42,7 +43,138 @@ extern void Build_YOffs_Table(VESA_Surface *VS);
 // getAlignedBlock / getAlignedType come in via FDS_DECS.H above.
 
 namespace fds {
+
+// ── Mirror clone sub-spheres (see GreetsMirror.h) ────────────────────────
+// Keyed on the clone TriMesh* (stable; a MeshRange pointer would dangle
+// when the mirrors vector reallocates). Written at scene init (single
+// threaded) and refreshed for DYNAMIC ranges only inside UpdateMirror,
+// which runs on the tick thread before any pass reads it.
+static std::unordered_map<const TriMesh*, std::vector<MirrorCloneSubSphere>>
+    s_cloneSubSpheres;
+
+const std::vector<MirrorCloneSubSphere> *MirrorCloneSubSpheres(const TriMesh *T)
+{
+    if (s_cloneSubSpheres.empty() || !T) return nullptr;
+    auto it = s_cloneSubSpheres.find(T);
+    return it == s_cloneSubSpheres.end() ? nullptr : &it->second;
+}
+
+// Clone mesh -> its mirror's wall faces (the window). Refreshed for ACTIVE
+// mirrors each frame by UpdateAllMirrors; an inactive mirror's clone is
+// HTrack_Visible-cleared, so a stale entry can never be read.
+static std::unordered_map<const TriMesh*, std::vector<MirrorCloneWall>>
+    s_cloneWalls;
+
+const std::vector<MirrorCloneWall> *MirrorCloneWalls(const TriMesh *T)
+{
+    if (s_cloneWalls.empty() || !T) return nullptr;
+    auto it = s_cloneWalls.find(T);
+    return it == s_cloneWalls.end() ? nullptr : &it->second;
+}
+
 namespace {
+
+// Recompute one sub-range's tight sphere from the clone's CURRENT
+// (already re-mirrored) vertex positions. AABB centre + max radius —
+// the same construction the Piramid chunk split uses, so the census
+// measures what an actual split would deliver, not an optimistic bound.
+void recomputeSubSphere(const TriMesh *MM, MirrorCloneSubSphere &s)
+{
+    if (!MM || !MM->Verts || s.vCount == 0) return;
+    float mnx=1e30f, mny=1e30f, mnz=1e30f, mxx=-1e30f, mxy=-1e30f, mxz=-1e30f;
+    for (uint32_t i = 0; i < s.vCount; ++i) {
+        const Vector &p = MM->Verts[s.vStart + i].Pos;
+        mnx = std::min(mnx, p.x); mxx = std::max(mxx, p.x);
+        mny = std::min(mny, p.y); mxy = std::max(mxy, p.y);
+        mnz = std::min(mnz, p.z); mxz = std::max(mxz, p.z);
+    }
+    s.ctr = { (mnx+mxx)*0.5f, (mny+mxy)*0.5f, (mnz+mxz)*0.5f };
+    float r2 = 0.0f;
+    for (uint32_t i = 0; i < s.vCount; ++i) {
+        const Vector &p = MM->Verts[s.vStart + i].Pos;
+        const float dx = p.x - s.ctr.x, dy = p.y - s.ctr.y, dz = p.z - s.ctr.z;
+        r2 = std::max(r2, dx*dx + dy*dy + dz*dz);
+    }
+    s.radSq = r2;
+}
+
+// Build (or rebuild) the whole sub-sphere table for one clone.
+//
+// Two granularities, because they answer different questions:
+//  * PER-SOURCE-MESH (cell <= 0): the ranges UpdateMirror already tracks.
+//    This is what the cheapest possible split — emit one clone TriMesh per
+//    source mesh — would deliver. Its ceiling is capped by the fact that
+//    only the Piramid half of greets is chunked at source; the statues /
+//    robot / ceiling arrive as a handful of room-sized ranges.
+//  * SPATIAL CELLS (cell > 0): a near-cubic grid of `cell` world units over
+//    the WHOLE clone, ignoring source-mesh boundaries — the granularity a
+//    real spatial split of the clone would have. vStart is meaningless in
+//    this mode (a cell's verts are not contiguous); only vCount + the
+//    sphere are, which is all the census reads.
+void buildSubSpheres(const TriMesh *MM, const std::vector<ClonedMeshRange> &ranges,
+                     float cell)
+{
+    auto &v = s_cloneSubSpheres[MM];
+    v.clear();
+    if (cell <= 0.0f) {
+        v.reserve(ranges.size());
+        for (const auto &r : ranges) {
+            MirrorCloneSubSphere s;
+            s.vStart = r.vStart; s.vCount = r.vCount; s.dynamic = r.dynamic;
+            recomputeSubSphere(MM, s);
+            v.push_back(s);
+        }
+        return;
+    }
+    if (!MM || !MM->Verts || MM->VIndex == 0) return;
+    float mnx=1e30f, mny=1e30f, mnz=1e30f, mxx=-1e30f, mxy=-1e30f, mxz=-1e30f;
+    for (DWord i = 0; i < MM->VIndex; ++i) {
+        const Vector &p = MM->Verts[i].Pos;
+        mnx=std::min(mnx,p.x); mxx=std::max(mxx,p.x);
+        mny=std::min(mny,p.y); mxy=std::max(mxy,p.y);
+        mnz=std::min(mnz,p.z); mxz=std::max(mxz,p.z);
+    }
+    const int gx = std::max(1, int(std::ceil((mxx-mnx)/cell)));
+    const int gy = std::max(1, int(std::ceil((mxy-mny)/cell)));
+    const int gz = std::max(1, int(std::ceil((mxz-mnz)/cell)));
+    auto cellOf = [&](const Vector &p) {
+        const int ix = std::min(gx-1, std::max(0, int((p.x-mnx)/cell)));
+        const int iy = std::min(gy-1, std::max(0, int((p.y-mny)/cell)));
+        const int iz = std::min(gz-1, std::max(0, int((p.z-mnz)/cell)));
+        return (int64_t(iz)*gy + iy)*gx + ix;
+    };
+    struct Acc { Vector mn, mx; uint32_t n; };
+    std::unordered_map<int64_t, Acc> cells;
+    for (DWord i = 0; i < MM->VIndex; ++i) {
+        const Vector &p = MM->Verts[i].Pos;
+        auto it = cells.find(cellOf(p));
+        if (it == cells.end()) { cells.emplace(cellOf(p), Acc{p, p, 1}); continue; }
+        Acc &a = it->second;
+        a.mn.x=std::min(a.mn.x,p.x); a.mx.x=std::max(a.mx.x,p.x);
+        a.mn.y=std::min(a.mn.y,p.y); a.mx.y=std::max(a.mx.y,p.y);
+        a.mn.z=std::min(a.mn.z,p.z); a.mx.z=std::max(a.mx.z,p.z);
+        ++a.n;
+    }
+    std::unordered_map<int64_t, size_t> slot;
+    v.reserve(cells.size());
+    for (const auto &kv : cells) {
+        MirrorCloneSubSphere s;
+        s.vCount = kv.second.n;
+        s.ctr = { (kv.second.mn.x+kv.second.mx.x)*0.5f,
+                  (kv.second.mn.y+kv.second.mx.y)*0.5f,
+                  (kv.second.mn.z+kv.second.mx.z)*0.5f };
+        slot[kv.first] = v.size();
+        v.push_back(s);
+    }
+    // Second pass for the exact max-radius (same construction as the
+    // Piramid chunk split: AABB centre, radius = farthest vertex).
+    for (DWord i = 0; i < MM->VIndex; ++i) {
+        const Vector &p = MM->Verts[i].Pos;
+        MirrorCloneSubSphere &s = v[slot[cellOf(p)]];
+        const float dx=p.x-s.ctr.x, dy=p.y-s.ctr.y, dz=p.z-s.ctr.z;
+        s.radSq = std::max(s.radSq, dx*dx+dy*dy+dz*dz);
+    }
+}
 
 // A previous BuildMirror call leaves its clone mesh wired into
 // sc->ObjectHead with Obj->Name starting "__mirrorClone_". Any later
@@ -580,6 +712,15 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     MM->BSphereRad        = radSq;
     MM->BSphereRadius     = std::sqrt(radSq);
     MM->BSphereScreenPos  = {0.0f, 0.0f, 0.0f};
+
+    // Per-source-mesh tight spheres for --mirror_cull_census. The bsphere
+    // just stamped above is the ROOM — it can never be rejected by the
+    // mesh-level cull; these are what a split would give the cull instead.
+    // Gated: the build walks the clone's verts twice per mirror, and the
+    // per-frame dynamic refresh below keys off a NON-empty table, so with
+    // the census off nothing is built, nothing is looked up, nothing runs.
+    if (fds::FeatureFlags::mirror_cull_census() > 0)
+        buildSubSpheres(MM, m.meshRanges, fds::FeatureFlags::mirror_cull_census_cell());
 
     Compute_FaceVertexIndices(MM);
 
@@ -1777,6 +1918,22 @@ void UpdateMirror(Scene *sc, Mirror &m)
             }
         }
     }
+    // Sub-spheres of the ranges that just moved (--mirror_cull_census only;
+    // the map is empty and this is a single empty-container probe otherwise).
+    // Static ranges re-mirror to identical positions, so their spheres from
+    // BuildMirror stay exact — same reasoning as the `dynamic` skip above.
+    // (Skipped entirely in SPATIAL-CELL census mode: a cell's verts are not
+    // a contiguous range, so there is nothing to refresh in place. The cells
+    // are built once from the primed clone; only the robot moves and it is a
+    // small fraction of the clone, so the census stays representative.)
+    if (!s_cloneSubSpheres.empty()
+        && fds::FeatureFlags::mirror_cull_census_cell() <= 0.0f) {
+        auto it = s_cloneSubSpheres.find(m.cloneMesh);
+        if (it != s_cloneSubSpheres.end()) {
+            for (auto &s : it->second)
+                if (full || s.dynamic) recomputeSubSphere(m.cloneMesh, s);
+        }
+    }
     // Per-face: re-derive each clone face's normal from the source's
     // CURRENT world normal (srcMesh->RotMat moves every frame for the
     // robot), reflect it, and recompute NormProd against the already-
@@ -2073,6 +2230,20 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 c.mirrorOmni->ISize = act ? c.sourceOmni->ISize : 0.0f;
         }
         if (act) { UpdateMirror(sc, m); ++nActive; }
+        // --mirror_cull_census window ceiling: publish this mirror's wall
+        // faces against its clone. Gated on the census flag so the shipping
+        // path never touches the map (a few pointer copies for 4 mirrors
+        // even when it does).
+        if (fds::FeatureFlags::mirror_cull_census() > 0 && m.cloneMesh) {
+            auto &w = s_cloneWalls[m.cloneMesh];
+            w.clear();
+            if (act) {
+                w.reserve(m.wallFaces.size());
+                for (size_t i = 0; i < m.wallFaces.size(); ++i)
+                    w.push_back({ m.wallFaces[i],
+                                  i < m.wallFaceMeshes.size() ? m.wallFaceMeshes[i] : nullptr });
+            }
+        }
     }
     // Bounce cones: after mirror activity + clone updates, before the
     // render consumes light poses.

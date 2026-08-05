@@ -216,7 +216,26 @@ Baseline at greets t=5780 `--greets_displace`, per-frame min: main-view
   than anything left inside `Transform_Objects` — and it lives in
   `FDS/RENDER/GreetsMirror.cpp`: per-clone frustum/visible-panel culling, or a
   decimated clone of the displaced stone (the reflection does not need
-  block-level relief). Not attempted; needs a look call on reflection fidelity.
+  block-level relief). **CEILINGS MEASURED 2026-08-05** — see
+  `docs/VISIBILITY_PLAN.md` §8, instruments `--mirror_cull_census[_cell]` +
+  `--xfrm_pass_prof` (all default OFF). Exactly ONE clone is active at the wall
+  poses = 56 % of main-view transformed verts; mirror RTT passes DO NOT run
+  (`--mirror_rtt` defaults 0) and hide clones anyway, so this is purely a
+  main-view cost. A per-source-mesh split saturates at ~40 %; a SPATIAL split
+  of the clone at ~8 world units (103 sub-meshes) culls **63 % at wall poses /
+  89 % at a panel pose** — but only against the MIRROR WINDOW (0.04–3.9 % of
+  screen), not the frustum (2–20 %). Estimated ~2 ms off a 5.9 ms main-view
+  `Transform_Objects`. NOT built: a spatial split breaks `UpdateMirror`'s
+  contiguous-`ClonedMeshRange` invariant and every `m.cloneMesh` consumer
+  (RTT/shatter/editor/envbake) — see §8e. **Cheaper first move: 49 % of the
+  clone is the displaced Piramid; clone the S1 flat `stone_shadow_proxy`
+  instead (~226 faces vs 87,256).** Look call on reflection fidelity.
+- **A visibility HIERARCHY (BVH/octree) is REFUTED with numbers (§8c).** ~9,150
+  mesh-level tests/frame across ~40 passes, ~7,690 of them rejections, at a
+  measured ~55–61 ns per rejected sweep = **0.45 core-ms/frame** total prize,
+  ~90 % of it inside 12-way-threaded shadow passes. A hierarchy also cannot
+  reduce transformed verts at mesh-sized leaves, and finer leaves measured a net
+  LOSS (verts −3.3 %, XFRM +1.08 ms).
 - **Phase 5 of the SoA refactor is a PERF item now, not just cleanliness.**
   `Vertex` is pack(1) 140 B and the per-frame loop touches fields spanning
   offsets 4..123 — every cache line. Ablating 2 of the 3 per-vertex mat-vecs

@@ -64,6 +64,40 @@ struct ClonedMeshRange {
     bool     dynamic;
 };
 
+// One clone sub-range with its OWN tight bounding sphere, in clone
+// space (the clone mesh's transform is identity, so clone space ==
+// world space). A mirror clone is built as ONE TriMesh holding the
+// whole mirrored room, so its single bsphere is room-sized and the
+// mesh-level frustum cull can never reject it — the same disease the
+// greets Piramid chunk split cured for the source wall. These are the
+// spheres a per-source-mesh SPLIT of the clone would give each piece;
+// --mirror_cull_census measures, without changing any geometry, how
+// many of the clone's verts such a split would let the existing cull
+// reject. Populated at BuildMirror, refreshed for dynamic ranges by
+// UpdateMirror, keyed on the clone TriMesh (stable across the
+// mirrors-vector reallocations that would dangle a MeshRange pointer).
+struct MirrorCloneSubSphere {
+    uint32_t vStart = 0, vCount = 0;
+    Vector   ctr{};
+    float    radSq = 0.0f;
+    bool     dynamic = false;
+};
+
+// The sub-spheres for a mirror clone mesh, or nullptr for any mesh
+// that isn't one. Cheap hash lookup; only --mirror_cull_census calls it.
+const std::vector<MirrorCloneSubSphere> *MirrorCloneSubSpheres(const TriMesh *T);
+
+// One mirror WALL face (the mirror's screen window) plus the live mesh
+// that owns it, so a caller can transform its verts to world/view. The
+// clone can only paint pixels whose gb.mirrorId equals its own tag —
+// i.e. INSIDE this window — so clone geometry projecting outside it
+// contributes nothing at all, even though it sits inside the camera
+// frustum. --mirror_cull_census measures that (much tighter) ceiling
+// alongside the plain-frustum one. Registered per frame for ACTIVE
+// mirrors by UpdateAllMirrors, keyed on the clone TriMesh.
+struct MirrorCloneWall { const Face *face; const TriMesh *mesh; };
+const std::vector<MirrorCloneWall> *MirrorCloneWalls(const TriMesh *T);
+
 // Source/clone omni pair owned by a Mirror. Per-frame IPos / IDir
 // updates re-reflect the source's current pose; IRange gets clamped
 // to plane distance for soft compartmentalization.

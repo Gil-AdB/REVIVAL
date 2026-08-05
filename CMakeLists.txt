@@ -62,6 +62,19 @@ else()
     add_compile_definitions(FDS_DEV=0)
 endif()
 
+# Visibility research instruments (--xfrm_pass_prof, --mirror_cull_census;
+# docs/VISIBILITY_PLAN.md §8). COMPILE-TIME gated, not just flag-gated: this
+# build is -O3 -flto -ffp-contract=fast, and merely carrying the never-taken
+# branches inside Transform_Objects measurably changes which expressions the
+# compiler contracts into FMAs in the surrounding vertex/face work — the city
+# pin moved with every flag OFF. With this OFF the preprocessor removes them
+# and Transform_Objects is textually identical to the un-instrumented one.
+# Measure with:  cmake -S . -B build-census -G Ninja -DFDS_VIS_CENSUS=ON
+option(FDS_VIS_CENSUS "Compile the per-pass / mirror-clone visibility census instruments" OFF)
+if(FDS_VIS_CENSUS)
+    add_compile_definitions(FDS_VIS_CENSUS=1)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.
