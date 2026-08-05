@@ -651,6 +651,29 @@ struct TileRasterizerCtx {
 	// --pom_shell_base_clip approximates, done geometrically.
 	bool  pomShellSideFaces = false;
 	int   pomShellSideEdge = 0;
+	// --pom_shell_side_entry (S1d-2d): SIDE-FACE ENTRY. A lane whose lid entry
+	// point lies OUTSIDE the leaning side planes is no longer killed — its
+	// march START HEIGHT is moved DOWN its own view ray to the height at which
+	// the ray crosses INTO the shell through that side face, with the UV at
+	// that crossing. 0 = off: every ray enters at the lid, as before. Inert
+	// under --pom_recess_only (hEnter == shellH0, so the entry test is the
+	// plain box test the pixel passes by construction) and inert without a
+	// non-zero lean (the box side is vertical and does not narrow above h0).
+	int   pomShellSideEntry = 0;
+	// --pom_shell_side_faces=3: the leaning side plane bounds the shell only
+	// BELOW the authored plane. Above it the neighbour's own SHELL — not its
+	// authored plane — is what bounds this one, and with a welded (mitred) lid
+	// the two lids already meet at the ridge, so the correct side face there is
+	// the plain box. Without this the same lean NARROWS the shell above h0 and
+	// kills lid rays that have real material under them (measured: 67 816 px of
+	// pure black over the 13 review poses).
+	bool  shellSideNoNarrow = false;
+	// --pom_shell_lid_edge: 0 = every shell failure discards (the lid model as
+	// shipped). 1 = a LATERAL EXIT clamps to the flat surface instead, while a
+	// non-crossing ray, a side-entry miss and a base-clip overhang still
+	// discard — so the silhouette and the see-through survive and the internal
+	// seam holes do not.
+	int   pomShellLidEdge = 0;
 	float shellH0 = 0.5f;
 	float shellSideLean[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	uint8_t shellSideCls[4] = { 4, 4, 4, 4 };
@@ -1310,7 +1333,7 @@ struct TileRasterizer {
 						// (Material::PomShellUvAmp × world-per-UV), never from the live
 						// strength flag, so march and lid can't disagree.
 						const Vec8f hEnter = shell ? (p_shz * p_z) : Vec8f(0.5f);
-						const Vec8f hStart = shell ? hEnter : Vec8f(1.0f);
+						Vec8f hStart = shell ? hEnter : Vec8f(1.0f);
 						// UNCAPPED 1/(V·N): the geometry's true lateral travel per
 						// unit height, which --pom_shell_base_clip needs (the lid's
 						// screen overhang is pure geometry and knows nothing about
@@ -1325,6 +1348,69 @@ struct TileRasterizer {
 						const Vec8f rayScale = shell
 						    ? (Vec8f(ctx.pomShellUvAmp) * invVtN)
 						    : Vec8f(ctx.parallaxStrength);
+						// ── S1d-2d SIDE-FACE ENTRY (--pom_shell_side_entry) ──────
+						// The missing half of the closed shell. S1d-2a gave the slab
+						// four LEANING side planes and used them as an EXIT test; a
+						// lid ray that starts outside them was still KILLED, which is
+						// why adding side faces to the LID arm made it worse (void
+						// 413 100 → 468 868). Geometrically that ray does not miss the
+						// solid: at a convex ridge the side plane leans OUTWARD with
+						// depth, so a ray that is outside it at the lid crosses INTO
+						// the shell lower down, through the side face itself.
+						//
+						// Both the ray and every side plane are AFFINE in the slab
+						// height h, so the shell over this patch is a convex polyhedron
+						// in (u,v,h) and the ray/shell intersection is one slab clip:
+						//   side k requires  a_k + b_k·h ≤ 0
+						//   b_k > 0 → h ≤ −a_k/b_k (an upper bound on the entry height)
+						//   b_k < 0 → h ≥ −a_k/b_k (a lower bound: where it leaves)
+						// The march then starts at hHi (the lid when the ray was
+						// already inside, the side-face crossing when it was not) and
+						// the whole existing loop — including its per-lane stepH — runs
+						// unchanged from there. NOTHING serialises: hStart was already
+						// a Vec8f (hEnter is per-pixel interpolated), so a per-lane
+						// start height costs the clip itself and not one scalar branch.
+						// hHi < hLo (or hHi < 0) means the ray misses the closed shell
+						// entirely — a TRUE silhouette, and the lane is killed, which is
+						// exactly the see-through the lid model exists for.
+						//
+						// Cost: 4 divides + ~16 FMAs + 8 selects per covered pixel of a
+						// shell face, and only when the flag is on. Depth is untouched:
+						// the write is Δz = (hitH − hEnter)·A·Vz/(V·N), i.e. relative to
+						// the RASTERED surface, and side entry moves where the march
+						// begins, not where the fragment is — so the S1a convention and
+						// the Z seam across the side face stay exactly consistent.
+						Vec8fb sideEntryMiss = Vec8fb(false);
+						if (shell && ctx.pomShellSideEntry > 0) {
+							const Vec8f dU = VtT * rayScale, dV = VtB * rayScale;
+							const Vec8f H0 = Vec8f(ctx.shellH0);
+							const Vec8f eps = Vec8f(1e-9f);
+							Vec8f hHi = hEnter, hLo = Vec8f(0.0f);
+							Vec8fb empty = Vec8fb(false);
+							// upper side: g + d·(h−hEnter) ≤ bound + lean·(H0−h)
+							// lower side: g + d·(h−hEnter) ≥ bound − lean·(H0−h)
+							auto clip = [&](const Vec8f &g, const Vec8f &d,
+							                float bound, float lean, bool upper) {
+								const Vec8f bd = Vec8f(bound), ln = Vec8f(lean);
+								const Vec8f a = upper ? (g - d * hEnter - bd - ln * H0)
+								                      : (bd - ln * H0 - g + d * hEnter);
+								const Vec8f b = upper ? (d + ln) : (ln - d);
+								const Vec8f hs = -a / select(abs(b) > eps, b, eps);
+								hHi = select(b >  eps, min(hHi, hs), hHi);
+								hLo = select(b < -eps, max(hLo, hs), hLo);
+								// b ≈ 0: the constraint does not vary with h, so it is
+								// either satisfied everywhere or nowhere on this ray.
+								empty |= (abs(b) <= eps) & (a > Vec8f(0.0f));
+							};
+							clip(ufGeo, dU, ctx.shellUMin, ctx.shellSideLean[0], false);
+							clip(ufGeo, dU, ctx.shellUMax, ctx.shellSideLean[1], true);
+							clip(vfGeo, dV, ctx.shellVMin, ctx.shellSideLean[2], false);
+							clip(vfGeo, dV, ctx.shellVMax, ctx.shellSideLean[3], true);
+							sideEntryMiss = empty | (hHi < hLo) | (hHi < Vec8f(0.0f));
+							// A miss keeps the lid start (the lane is killed below, and
+							// a NaN/negative start would poison the march's UV).
+							hStart = select(sideEntryMiss, hStart, min(hStart, hHi));
+						}
 						Vec8f hc  = (H - hEnter) * rayScale;
 						uf += VtT * hc;
 						vf += VtB * hc;
@@ -1821,7 +1907,11 @@ struct TileRasterizer {
 						// Z is left untouched for killed lanes, which is what lets a
 						// FARTHER face rasterized later win them (front-to-back order).
 						if (shell) {
-							Vec8fb keep = pomCrossed;
+							// --pom_shell_side_entry: a ray that never enters the closed
+							// shell at ANY height has genuinely missed the solid — the
+							// TRUE silhouette. Killed here so the geometry behind wins,
+							// which is the see-through the lid model exists for.
+							Vec8fb keep = pomCrossed & ~sideEntryMiss;
 							// Inside the patch DOMAIN = inside its own UV box OR any
 							// sibling patch's (ctx.shellSibs, --pom_shell_merge_uv):
 							// the UNION of the boxes, never their bounding box.
@@ -1869,7 +1959,9 @@ struct TileRasterizer {
 							// and only for lanes that failed the plain box.
 							auto inSideFaces = [&](const Vec8f &u, const Vec8f &v,
 							                       const Vec8f &h) {
-							const Vec8f dh = Vec8f(ctx.shellH0) - h;
+							const Vec8f dh0 = Vec8f(ctx.shellH0) - h;
+							const Vec8f dh  = ctx.shellSideNoNarrow
+							                ? max(dh0, Vec8f(0.0f)) : dh0;
 							return (u >= Vec8f(ctx.shellUMin) - Vec8f(ctx.shellSideLean[0]) * dh)
 							     & (u <= Vec8f(ctx.shellUMax) + Vec8f(ctx.shellSideLean[1]) * dh)
 							     & (v >= Vec8f(ctx.shellVMin) - Vec8f(ctx.shellSideLean[2]) * dh)
@@ -1880,14 +1972,27 @@ struct TileRasterizer {
 							// them on the OWN box is replaced by the leaning side planes
 							// (the siblings are coplanar continuations and have no side
 							// face at all, so they keep their plain box).
+							// --pom_shell_side_entry REPLACES the entry-side half of this
+							// test: the ray no longer starts at the lid, so testing its
+							// LID point against the shell is meaningless (and killing on
+							// it is precisely the bug this stage removes). The exit-side
+							// test stays exactly as it was — entry and exit are two ends
+							// of the same segment and both are needed.
+							// --pom_shell_lid_edge needs the LATERAL-EXIT failure kept
+							// apart from every other kill, so it is tracked here rather
+							// than folded straight into `keep`. Flag off, the &= order
+							// and the value are exactly what they were.
+							Vec8fb domOK = Vec8fb(true), baseOK = Vec8fb(true);
 							if (ctx.pomShellDomain) {
 								if (ctx.pomShellSideFaces)
-									keep &= inSibs(uf, vf, ctx.pomShellBaseClip
+									domOK = inSibs(uf, vf,
+									        (ctx.pomShellBaseClip || ctx.pomShellSideEntry > 0)
 									        ? inSideFaces(uf, vf, pomHitH)
 									        : (inSideFaces(uf, vf, pomHitH)
 									         & inSideFaces(ufGeo, vfGeo, hEnter)));
 								else
-									keep &= inDomain(uf, vf);
+									domOK = inDomain(uf, vf);
+								keep &= domOK;
 							}
 							// --pom_shell_base_clip (the lid-overhang fix): the lid is
 							// a rigid outward translation of the patch, so at a patch
@@ -1912,7 +2017,39 @@ struct TileRasterizer {
 								const Vec8f s = Vec8f(ctx.pomShellUvAmp)
 								              * (ctx.pomShellBaseClipRaw ? invVtNRaw : invVtN)
 								              * (Vec8f(0.5f) - hEnter);
-								keep &= inDomain(ufGeo + VtT * s, vfGeo + VtB * s);
+								baseOK = inDomain(ufGeo + VtT * s, vfGeo + VtB * s);
+								keep &= baseOK;
+							}
+							// ── S1d-2d LID EDGE POLICY (--pom_shell_lid_edge) ────────
+							// Under the lid EVERY failure is a discard today, and the
+							// lateral-exit failure is by far the largest: measured with
+							// the weld and the side faces on, the exit kill alone owns
+							// ~152 k of the arm's void over the 13 review poses, i.e.
+							// the lid arm re-runs the very defect --pom_recess_edge=0
+							// removed from the recess arm (a hole punched through solid
+							// wall at an internal seam). It is kept a discard there only
+							// because the lid can cover screen the authored wall does
+							// not — and that population is ALREADY identified, by the
+							// base clip and by side-face entry's "never in the shell"
+							// test. So: clamp the lateral exit, keep every other kill.
+							//   !pomCrossed  — the ray went through the whole slab and
+							//                  hit nothing. DISCARD: that is the
+							//                  see-through in the mortar valleys and the
+							//                  entire reason the lid model exists.
+							//   sideEntryMiss — never inside the closed shell. DISCARD.
+							//   base clip     — genuine lid overhang. DISCARD.
+							//   lateral exit  — real wall under the pixel, the march
+							//                  simply could not follow the relief into a
+							//                  neighbour it cannot address. CLAMP to the
+							//                  flat surface (geometric UV, entry depth),
+							//                  exactly as --pom_recess_edge=0 does.
+							if (!ctx.pomRecess && ctx.pomShellLidEdge == 1) {
+								const Vec8fb clampable = (~domOK) & pomCrossed
+								                       & (~sideEntryMiss) & baseOK;
+								uf      = select(clampable, ufGeo, uf);
+								vf      = select(clampable, vfGeo, vf);
+								pomHitH = select(clampable, hEnter, pomHitH);
+								keep |= clampable;
 							}
 							// --pom_recess_only (P2-A): the kill is OPTIONAL here, and
 							// killing is the wrong default. Under the LID model a lane
@@ -2843,6 +2980,19 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// the top of the field), 0.5 under the lid (the slab straddles it).
 		.pomShellSideFaces = pomSideFaces,
 		.pomShellSideEdge = fds::FeatureFlags::pom_shell_side_edge(),
+		// S1d-2d SIDE-FACE ENTRY. Needs the leans (they are what NARROWS the
+		// shell above the authored plane and therefore what leaves a lid ray
+		// outside it), so it is armed only together with the side-face table.
+		// Mode 3 makes ENTRY provably inert (the domain at hEnter >= h0 is the
+		// plain box, which the pixel's own UV is inside by construction), so the
+		// two are ALTERNATIVES and stacking them would only re-introduce the
+		// affine clip's unclamped narrowing. Measured, not assumed: see the plan.
+		.pomShellSideEntry = (pomSideFaces
+		                      && fds::FeatureFlags::pom_shell_side_faces() != 3)
+		                     ? fds::FeatureFlags::pom_shell_side_entry() : 0,
+		.shellSideNoNarrow = pomSideFaces
+		                     && fds::FeatureFlags::pom_shell_side_faces() == 3,
+		.pomShellLidEdge = fds::FeatureFlags::pom_shell_lid_edge(),
 		.shellH0 = fds::FeatureFlags::pom_recess_only() ? 1.0f : 0.5f,
 		.shellSideLean = { pomSideFaces ? pomShellSideLean[0] : 0.0f,
 		                   pomSideFaces ? pomShellSideLean[1] : 0.0f,

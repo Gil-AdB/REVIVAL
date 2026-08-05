@@ -867,3 +867,426 @@ flight.**
   free-edge side for the policy; that is a *hypothesis about the cost*, not a
   measurement, and single-digit ms are not dismissible here. It must be benched
   against flat POM (the incumbent) before anyone discusses defaults.
+
+---
+
+# S1d-2d — SIDE-FACE ENTRY, and the measurement that reframes the lid arm
+
+Added 2026-08-05, branch `fog-wt`. Four new flags, **all default 0/OFF and all
+byte-null** (gates §S1d-2d.9): `--pom_shell_side_entry`, `--pom_shell_weld`,
+`--pom_shell_lid_edge`, plus mode **3** of the existing `--pom_shell_side_faces`.
+
+The task was: build the march-loop restructure (a per-lane start height) that
+S1d-2 identified as the reason side faces made the LID arm worse, and use it to
+restore protrusion. **The restructure is built and it works. It is not what was
+blocking protrusion.** The measurement below is the actual finding of the stage,
+and it is worth more than the restructure.
+
+## S1d-2d.0 CHEAPEST DISCRIMINATOR FIRST — where the lid arm's 413 100 px of void really comes from
+
+Before writing kernel code I decomposed the lid arm's void with flags that
+already existed. All numbers: 1080p, the 13 poses of `docs/greets_review_poses.txt`,
+dummy SDL drivers, void = `z == 0` from `FDS_SNAPSHOT_ZDUMP`.
+
+| arm (standing lid recipe, amp 0.18 world) | void, 13 poses |
+|---|---|
+| `lid` (as S1d-2 measured it) | **413 100** |
+| `lid --no-pom_shell_domain` | 406 940 |
+| `lid --no-pom_shell_base_clip` | 368 575 |
+| `lid` with **both** off | **228 411** |
+| the same **plus `--no-parallax`** (no march at all) | **198 704** (4 poses: 198 131) |
+| the same plus **`--pom_shell_lid_probe`** (lid offset forced to 0) | **0** |
+
+and against the offset itself, geometry only (4 poses):
+
+| lid offset (world) | 0.02 | 0.06 | 0.18 | 0.36 |
+|---|---|---|---|---|
+| void | 19 416 | 58 665 | 198 131 | 383 364 |
+
+**Linear in the offset, zero at offset zero, unchanged when the march is
+disabled entirely.** The lid arm's void is not the march, not the lateral-exit
+test and not the base clip: it is a **slit in the geometry whose width is the
+lid offset**. `--pom_shell_pin` does not help (0 px changed, and the census
+reports `0 pinned` — it keys on vertex SHARING inside one `TriMesh`, and greets'
+`rooms` owns 588 verts over 196 faces, exactly 3 per face, so nothing is ever
+shared).
+
+Look: `docs/img/s1d_entry/p5963_A_lidtear_lid_weld_flat.png`, left panel — the
+corridor wall at t=5963 is torn wide open and you see the next room through it.
+
+**This answers the task's second design question with a measurement rather than
+a guess: the lid does NOT raster the pixels a side entry would run on. There is
+no fragment there at all.**
+
+## S1d-2d.1 THE WELD (`--pom_shell_weld`, default 0)
+
+`PomShell_Build` moves each vertex along ITS OWN `Vertex::N`.
+`MakeFacesIndependentByAngle` has already split the mesh completely, so the two
+copies of a corner move along two different normals and the lid opens a wedge at
+every convex ridge. Measured on greets `rooms`: **155 distinct vertex POSITIONS
+carry the 588 vertex uses, 153 of them with 2+ copies, and 420 uses disagree with
+their position's mean normal by more than 1° — worst 78.7°.**
+
+The fix is what shell maps do: extrude along a normal SHARED by every copy of the
+position, so adjacent prisms keep a common side and the offset surface stays
+watertight — a mitred corner instead of a wedge. `Vertex::N` is untouched
+(shading unchanged); only the offset DIRECTION is welded. `Vertex::ShellH`
+already models the consequence and picks it up automatically: corner verts go
+71 → 438 and `ShellH` min 0.955 → 0.598, i.e. the march now enters at the true
+geometric height of the mitre.
+
+| arm | void, 13 poses |
+|---|---|
+| `lid` | 413 100 |
+| `lid --pom_shell_weld=1` | **214 650** |
+| `lid`, domain + base clip off | 228 411 |
+| the same **+ weld** | **14 163** (with the march disabled: 13 986) |
+
+`--pom_shell_weld=2` also PINS every position a non-target face shares (the
+wall/ceiling and wall/floor junctions the per-material weld cannot close). It
+halves the residue again (14 163 → 7 701) **but it is not usable**: on greets it
+pins 289 of 588 `rooms` verts and every one of `floor`'s 90, so the floor gets no
+shell at all (`[POM-SHELL] 'floor': nothing built`). Kept as the diagnostic that
+attributes the residue, not as an arm.
+
+## S1d-2d.2 SIDE-FACE ENTRY (`--pom_shell_side_entry`, default 0) — built, correct, and NOT the answer
+
+The restructure the task specified. Both the ray and all four leaning side planes
+are AFFINE in the slab height `h`, so the shell over a patch is a convex
+polyhedron in `(u,v,h)` and the ray/shell intersection is one slab clip: side `k`
+requires `a_k + b_k·h ≤ 0`; `b > 0` bounds the entry height from above, `b < 0`
+from below. The march then STARTS at that entry height with the UV at that
+crossing instead of at the lid, and a ray whose interval is EMPTY misses the
+closed shell entirely — a true silhouette, and the lane is killed.
+
+**Nothing serialises.** `hStart` was already a `Vec8f` (`hEnter` is the per-pixel
+interpolated `ShellH`), and every march's `curU = baseU + dU·(hStart − hEnter)`
+and `stepH = hStart·1/N` are already per-lane, so a per-lane start height costs
+the clip and not one scalar branch. No fallback path was needed. Cost: 4 divides
++ ~16 FMAs + 8 selects per covered shell pixel, only when the flag is on.
+
+**Depth is untouched by construction.** The S1a write is
+`Δz = (hitH − hEnter)·A·Vz/(V·N)` — relative to the RASTERED surface. Entry moves
+where the march BEGINS, not where the fragment is, so the convention and the Z
+continuity across the side face are exactly as before. No change was required.
+
+**Recess mode: inert, and provably so.** Under `--pom_recess_only`,
+`hEnter == h0 == 1`, so the entry test reduces to the plain UV-box test the
+pixel's own interpolated UV passes by construction. Measured: recess-only with
+`--pom_shell_weld=2 --pom_shell_side_entry=1 --pom_shell_lid_edge=1` is
+**byte-identical in depth to the plain recess arm at all 13 poses**.
+
+**What it buys on the lid arm, measured (all welded, base clip off):**
+
+| arm | void, 13 poses |
+|---|---|
+| weld + `side_faces=1` (S1d-2's narrowing side planes) | 269 408 (with base clip) |
+| weld + `side_faces=1` + **entry** | 151 103 |
+| weld + `side_faces=3` (no narrowing above `h0`) | 166 523 |
+| weld only | 169 516 |
+
+So entry does recover most of what mode-1 side faces cost the lid arm
+(269 408 → 151 103 in the comparable no-clip pair below), and it is the best of
+the three side-face variants. **But it is 10× away from the weld's own floor
+(14 163), because the thing it fixes was never the dominant term.**
+
+Worse, once the two remaining terms below are fixed, entry becomes a net LOSS:
+
+| arm (welded, base clip off, `--pom_shell_lid_edge=1`) | void, 13 poses |
+|---|---|
+| `side_faces=3` (no narrowing) | **14 163** |
+| `side_faces=1` (narrowing) | **14 163** |
+| no side faces at all | **14 163** |
+| `side_faces=1` + **entry** | **81 979** |
+
+Entry's own kill — "this ray is never inside the closed shell" — costs
+**67 816 px of pure black**, because mode 1's lean NARROWS the shell above the
+authored plane and rejects lid rays that have real material under them. Which is
+the next finding.
+
+## S1d-2d.3 `--pom_shell_side_faces=3` — the lean must not narrow the shell above the authored plane
+
+S1d-2a derived the side plane from the neighbour's AUTHORED plane. Under the LID
+that is too aggressive: above `h0` the neighbour's own SHELL bounds this one, not
+its authored surface, and **with the weld the two lids already MEET at the ridge**
+(that is what welding does). The correct side face above `h0` is therefore the
+plain box, and the lean applies only below it: `dh = max(0, h0 − h)`.
+
+Mode 3 makes the side faces PURELY ADDITIVE under the lid as well as under
+recess — they can rescue pixels the box killed and can never kill one it kept.
+It also makes ENTRY inert by construction (the domain at `hEnter ≥ h0` is the
+plain box the pixel is inside anyway), so the two are alternatives, not a stack,
+and the kernel forces entry off in mode 3.
+
+Under `--pom_recess_only`, `h0 = 1` and `h ≤ 1`, so `max(0, h0−h)` is a no-op:
+measured, `--pom_shell_side_faces=1` and `=3` are **byte-identical in depth at
+all 13 poses** in the recess arm. Mode 3 is a lid-arm correction only.
+
+## S1d-2d.4 `--pom_shell_lid_edge` — the lid arm needed the recess arm's clamp
+
+With the weld in and the narrowing removed, the last big term is the LATERAL-EXIT
+DISCARD. Measured on the welded arm with the base clip off: the exit kill alone
+owns **~152 000 px** of the remaining void. That is literally the defect
+`--pom_recess_edge=0` removed from the recess arm — a hole punched through solid
+wall at an INTERNAL seam where the wall demonstrably continues.
+
+The lid keeps it a discard only because the lid can cover screen the authored
+wall does not — and that population is already identified separately, by the base
+clip and by entry's "never in the shell" test. So the policy splits:
+
+| failure | action | why |
+|---|---|---|
+| ray marched the WHOLE slab, hit nothing | **DISCARD** | this is the see-through, the whole point of the lid model |
+| side-entry miss (never inside the shell) | **DISCARD** | true silhouette |
+| base-clip overhang | **DISCARD** | the lid covers screen the wall does not |
+| **lateral exit** | **CLAMP to flat** | real wall under the pixel; the march simply could not follow the relief into a neighbour it cannot address |
+
+## S1d-2d.5 THE ARM, AND EVERY GATE
+
+```
+--deferred --no-greets_displace --pom_shell \
+  --parallax_pom_cone --parallax_pom=32 --pom_cone_exact=1 --pom_cone_min_step=1 \
+  --pom_march_earlyout --pom_shell_cap=16 \
+  --pom_shell_world_amp --pom_shell_world_amp_set=0.18 --pom_normal \
+  --pom_shell_weld=1 --pom_shell_side_faces=3 --pom_shell_lid_edge=1 \
+  --no-pom_shell_base_clip
+```
+
+### Gate 1 — void vs tessellation, per pose
+
+| pose | tess | flat POM | recess (standing) | **lid (was)** | **lid (this arm)** |
+|---|---|---|---|---|---|
+| p5743 | 3 | 0 | 0 | 92 306 | **153** |
+| p5773 | 0 | 0 | 0 | 20 954 | **159** |
+| p5813 | 1 | 0 | 0 | 10 413 | **0** |
+| p5843 | 0 | 0 | 0 | 26 598 | **1** |
+| p5963 | 0 | 0 | 0 | 102 013 | **8 700** |
+| p6133 (mirror) | 4 | 0 | 0 | 14 285 | **3 509** |
+| p6293 (mirror) | 3 | 5 | 5 | 5 383 | **1 641** |
+| p5958a | 1 | 0 | 0 | 5 520 | **0** |
+| p5958b | 0 | 0 | 0 | 109 815 | **0** |
+| p5958c | 1 | 0 | 0 | 1 046 | **0** |
+| p5958d | 0 | 0 | 0 | 24 767 | **0** |
+| p6097 | 0 | 0 | 0 | 0 | **0** |
+| p2845 | 0 | 0 | 0 | 0 | **0** |
+| **all 13** | **13** | **5** | **5** | **413 100** | **14 163** |
+
+**−96.6 %.** It is not the recess arm's league (5) and I am not going to pretend
+it is: the residue is 13 986 of 14 163 geometric (it survives `--no-parallax`),
+i.e. the cross-material junction slit the per-material weld cannot close, and
+`--pom_shell_weld=2` shows it can be halved only by destroying the floor's shell.
+Nine of thirteen poses are at 0–159.
+
+### Gate 2 — clamp/fallback area, % of frame
+
+Pixels whose dumped march UV (`FDS_DUMP_TXTR`) differs between the arm and the
+same arm plus `--no-pom_shell_domain` — S1d-1's own instrument.
+
+| pose | p5743 | p5773 | p5813 | p5843 | p5963 | p6133 | p6293 | p5958a | p5958b | p5958c | p5958d | p6097 | p2845 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| fallback % of frame | 4.08 | 4.88 | 4.91 | 2.45 | 1.59 | 0.25 | 0.29 | 3.75 | 3.28 | 2.07 | 2.72 | 4.21 | 0.07 |
+
+716 141 px over the 13 poses = **2.66 % of pixels**, against the recess arm's
+809 415 (3.0 %). The population did not go away; under this arm it clamps
+instead of voiding.
+
+### Gate 3 — offscreen deltas. THIS ARM DOES NOT FIX THEM.
+
+Shadow cube, `--dump_shadowmap` from `build-dev` (`-DFDS_DEV=ON`, which does not
+overwrite `Runtime/DEMO`), t=5743, 76 cube faces, 13 533 184 depth texels:
+
+| pair | texels differing | >8/255 |
+|---|---|---|
+| `flat` vs **`rec`** | **0 (0.00 %)** | 0 |
+| `flat` vs `tess` | 720 250 (5.32 %) | 81 809 |
+| `flat` vs `lid` | 2 798 939 (20.68 %) | 39 526 |
+| `flat` vs **this arm** | 2 540 585 (**18.77 %**) | 36 509 |
+
+The two control rows reproduce the inventory's published figures (rec 0, tess
+720 250 / 5.32 %) to the digit, which is what makes the other two trustworthy.
+
+Final image on NON-STONE pixels only (`FDS_SNAPSHOT_GBUFDUMP` material plane;
+the wall's own shading excluded, so what is left came through an offscreen
+consumer or a Z-ownership change), colour max-channel delta vs `flat`:
+
+| pair | pose | non-stone px | >4/255 | >12/255 | >32/255 | worst surfaces |
+|---|---|---|---|---|---|---|
+| `flat`→`rec` | p5743 | 354 312 | 4 179 | **1 411** | 242 | cockpit`::mirUV` 1 150 |
+| `flat`→`tess` | p5743 | 354 312 | 3 862 | **1 035** | 101 | cockpit`::mirUV` 680 |
+| `flat`→`lid` | p5743 | 354 312 | 16 731 | **9 605** | 4 044 | `siling` 7 907 |
+| `flat`→**this arm** | p5743 | 354 312 | 15 720 | **9 033** | 4 346 | `siling` 5 730, `amudim` 1 512 |
+| `flat`→`rec` | p6133 (mirror) | 79 793 | 254 | **107** | 28 | cockpit`::mirUV` 91 |
+| `flat`→`lid` | p6133 | 79 793 | 4 330 | **3 495** | 2 856 | `siling` 1 939, robot legs 1 157 |
+| `flat`→**this arm** | p6133 | 79 793 | 5 069 | **4 243** | 3 567 | `siling` 2 674, legs 1 157 |
+| `flat`→`rec` | p6293 (mirror) | 39 070 | 487 | **144** | 19 | cockpit`::mirUV` 128 |
+| `flat`→**this arm** | p6293 | 39 070 | 2 332 | **1 550** | 828 | `siling` 810, legs 480 |
+
+**Stated plainly: moving vertices is the lid model's intrinsic cost and none of
+this stage's work removes it.** The weld reduces the shadow-cube contamination by
+9 % (20.68 → 18.77 %) and leaves the non-stone contamination essentially where it
+was (9 605 → 9 033 px >12/255 at p5743, and slightly WORSE at both mirror poses).
+Recess-only's 0 shadow texels remains the standard, and this arm does not meet
+it. Tessellation, at 5.32 %, is still 3.5× cleaner offscreen than any lid arm.
+
+### Gate 4 — error vs a converged reference of the same semantics
+
+Not run for this arm, and I am saying so rather than substituting something else.
+The converged reference (`--pom_ref_march`) shares the OPEN-boundary model
+(inventory class C7) — it clamps or discards at exactly the seams this stage
+changes — so it cannot arbitrate the change, and building a closed-shell
+reference is the same work as the arm. What I do have is the arm-vs-arm
+differencing above and the LOOK below.
+
+### Gate 5 — LOOK. What I actually see, before any number.
+
+`docs/img/s1d_entry/`.
+
+- **`p5963_A_lidtear_lid_weld_flat.png`** (`lid` | this arm | `flat`). The old lid
+  arm's corridor wall is **torn wide open** — you see the next room through it and
+  a black void beneath. This arm's wall is continuous, with one **thin dark slit**
+  (~40 px wide against the old ~320 px) where the wall meets the room behind. That
+  slit is the 8 700 px residue at this pose, and it is visible if you look for it.
+- **`p5743_B_ruststripe_rec_side1_e2_new_tess.png`** (`rec` | `rec+side_faces=1` |
+  `+side_edge=2` | this arm | `tess`). This is the answer to the rust-stripe
+  question and it is unambiguous: `rec+side_faces=1` shows the **saturated rust
+  vertical stripe** S1d-2 reported; `side_edge=2` makes it **wider and darker**;
+  **this arm has no stripe at all** and reads like `rec` and `tess`.
+- **`p5743_C_wall_flat_rec_new_tess.png`** — the review pose's right wall,
+  `flat` | `rec` | this arm | `tess`. No gash, no stripe; this arm sits between
+  `rec` and `tess`. `tess` still carries a bevelled ledge at the top-right that
+  no per-pixel arm reproduces.
+- **`p6097_D_corner_flat_rec_new_tess.png`** — the corner pose. This arm's block
+  edge carries a **ragged, relief-shaped shadow boundary** where `flat`'s is a
+  smooth polygon edge. Nearest to `tess` of the three, but not identical to it.
+- **`p5963_E/F_lidvoid_mask_before/after.png`** — the void mask (magenta) at
+  t=5963, before and after.
+
+## S1d-2d.6 PROTRUSION — restored as geometry, NOT demonstrable as see-through
+
+**Restored:** the lid arm is renderable again. Its void is 14 163 instead of
+413 100, the black gashes and the mirror bar are gone, and the arm reads clean
+next to `flat` and `tess` at every review pose. Stone genuinely stands proud —
+measured against flat POM's depth, this arm writes NEARER depth on 16 534 px at
+p5743, 42 237 at p5773, 47 466 at p5958b and 175 989 at p6097.
+
+**Not demonstrated:** see-through in the mortar valleys. I looked for it with an
+instrument rather than by eye — pixels where a surface more than 3 world units
+BEHIND the wall wins, which no relief depth write can produce:
+
+| pose | p5743 | p5773 | p5813 | p5843 | p5963 | p6133 | p6293 | p5958a-d | p6097 | p2845 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| see-through px | 23 | 17 | 0 | 1 | 24 737 | 0 | 0 | ≤2 | 0 | 0 |
+
+and p5963's 24 737 is the residual geometry slit, not relief. At 0.6 world
+amplitude (3.3× the standing arm, where the arm still holds: void 494 at p5743
+and 0 at p2845/p5958b/p6097) it is 503 px at p5743 and 0 elsewhere.
+
+**Why, and I believe this is structural rather than a tuning failure: greets is a
+closed room.** Behind every shelled wall is another wall at zero distance or
+nothing at all, so a mortar valley has nothing to reveal. See-through needs a
+relief silhouette against a background, and the 13 review poses do not contain
+one on a shelled surface. **So the strongest argument for the lid model is the
+one thing this scene cannot show me, and I am not going to manufacture a crop
+that suggests otherwise.**
+
+## S1d-2d.7 THE CONCAVE-FOLD HYPOTHESIS (does Z competition make S1d-3 unnecessary?)
+
+Tested against S1d-1's own per-pixel class maps, no new renders needed. For the
+recess arm's clamped population, the fraction that VOIDS under
+`--pom_recess_edge=2` is the fraction NO other fragment covers:
+
+| class | clamped px | void under a discard | covered by other geometry |
+|---|---|---|---|
+| COPLANAR | 31 | 31 (100 %) | 0 |
+| **ANGLED_IN (concave fold)** | **121 014** | **76 765 (63.4 %)** | 44 249 (36.6 %) |
+| ANGLED_OUT (convex ridge) | 583 922 | 154 268 (26.4 %) | 429 654 (73.6 %) |
+| TRUE BOUNDARY | 95 546 | 0 (0 %) | 95 546 (100 %) |
+
+**The hypothesis fails for the majority of concave folds in the RECESS arm:
+63.4 % of concave-fold pixels have no second fragment to win them on depth.** The
+mechanism is geometric — in recess mode the geometry is the authored wall, and at
+an inside corner two walls ABUT on screen rather than overlapping, so a pixel on
+A's polygon is simply not on B's. There is nothing to arbitrate.
+
+The hypothesis is *structurally* more plausible under the LID, where A's and B's
+lids do interpenetrate at a concave fold — but that is exactly the overlap the
+weld removes, and this arm reaches 14 163 void with the concave population
+CLAMPED (`--pom_shell_lid_edge=1`), not handed off. So on this scene the concave
+15.1 % is currently paid for by a clamp, not by a hole.
+
+On the falsification test for the rust stripe: `--pom_shell_side_edge=2` changes
+624 180 px over the 13 poses, of which **403 586 are ANGLED_OUT, 119 995
+ANGLED_IN and 95 546 TRUE BOUNDARY**. The extrapolation that makes the stripe can
+only happen where the lean is non-zero, and the bake gives a non-zero lean ONLY
+to ANGLED_OUT sides — at a concave-dominant side the lean is 0, so `side_edge=2`
+lands exactly ON the box boundary (the ray's last in-domain point), not past it.
+So the stripe is a convex-ridge artefact by construction, and the crop confirms
+it: `p5743_B` shows the stripe on the convex ridge and nowhere else.
+
+**Does the stripe survive entry?** Entry cannot touch it: entry is inert in the
+recess arm by construction. What removes it is the LID arm's clamp terminal
+action plus the halved reach — under the lid `h0 = 0.5`, so the shell extends at
+most `lean·0.5 = 0.030 UV` (31 texels at mip 0) past the ridge against the recess
+arm's `lean·1.0 = 0.060 UV` (61 texels). **So S1d-3's angled hand-off is still
+needed IF the recess arm keeps `--pom_shell_side_faces` on; it is not needed by
+the lid arm as configured here.** That is a real fork in the plan and the user
+should decide it, not me.
+
+## S1d-2d.8 PERF — measured under load, and I could not resolve it better
+
+Interleaved, `--bench=scene@scene=greets,t=5743,iters=30..40`, 1920×1080, dummy
+drivers. **The machine carried load average 5.3 → 15.5 from concurrent sessions
+throughout**, and the within-arm spread (59–74 ms over 10 rounds of the same
+recipe) is larger than any difference between arms.
+
+Least-contended round (load 5.3), min of 5, ms/frame:
+
+| flat POM | recess | lid | **this arm** | lid+side_faces=1+entry | tess |
+|---|---|---|---|---|---|
+| 56.2 | 59.1 | 60.0 | **60.1** | 60.3 | 94.9 |
+
+Min of 10 at load 12–13, lid vs this arm vs the entry arm: **59.09 / 59.64 /
+60.16**.
+
+So the marginal cost of `--pom_shell_weld` + `side_faces=3` + `lid_edge=1` over
+the plain lid arm is **≤ ~0.5 ms/frame** and of the entry arm **≤ ~1.1 ms**, as
+an UPPER BOUND from minimum-of-N under contention. I could not measure it to
+better than that, and I am not calling it small: at 60 ms/frame, 1 ms is 1.7 %
+and the whole shell family is already +4 ms over flat POM, which is the
+incumbent. The weld itself is init-time only. A clean bench on an idle machine is
+outstanding work.
+
+## S1d-2d.9 GATES — every new flag default OFF, flag-off byte-exact
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (mirrortest `4ac809e5`, conetest `b41894f9`, halotest `166fa25a`) |
+| city `t=1961` (`FDS_CITY_ENV_PIXEL=1`) | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact |
+| greets **recess** arm, 13 review poses, depth md5 | **byte-identical** to the pre-change binary |
+| greets **lid** arm, 13 review poses, depth md5 | **byte-identical** to the pre-change binary |
+| recess + `weld=2` + `side_entry=1` + `lid_edge=1`, 13 poses | **byte-identical** to plain recess (all three inert there) |
+| recess `side_faces=1` vs `=3`, 13 poses | **byte-identical** (mode 3 is a lid-only correction) |
+| wasm | `cmake --build build-wasm` links clean (82/82) |
+| bad flags | **0** across 578 snapshot run logs + the shadow-dump runs |
+
+Greets COLOUR remains unusable as a byte gate: the flags-off pair differs at
+13/13 poses, and the difference splits into two populations — max delta 1 (pure
+rounding) at 6 poses and max delta 187–241 at 7, i.e. the known lightmap-bake
+flip. Depth was stable and is what every byte claim above rests on.
+
+## S1d-2d.10 WHAT I DID NOT DO
+
+- **A converged reference of closed-shell semantics** (gate 4). See above.
+- **A clean perf bench.** The machine was loaded the whole session.
+- **Cross-material welding.** `--pom_shell_weld=2` pins instead, and pinning
+  destroys the floor's shell on greets. Welding `rooms` and `floor` offsets
+  together (a 45° bisector at the wall/floor line) is the untried option, and it
+  is what the last 14 163 px of void are waiting on.
+- **`--pom_shell_side_edge` under the lid.** The per-side TRUE-BOUNDARY table is
+  WRONG there: `PomShell_Build` runs once per material, so `floor`'s seam census
+  sees `rooms` ALREADY DISPLACED and mis-classifies 19 of its 24 sides as free
+  edges (`cop=5 in=19 out=0 true=0` under recess vs `cop=4 in=1 out=0 true=19`
+  under the lid). Harmless for side FACES (floor's leans are 0 either way) and
+  for `rooms` (it is built first), but `--pom_shell_side_edge=1` must not be used
+  with the lid until the topology snapshot is taken once for the whole scene.

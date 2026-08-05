@@ -4247,10 +4247,120 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			forced > 0.0f ? "--pom_shell_world_amp_set" : "derived per material",
 			(double)uvAmp, (double)wRef, exact, cenF.size());
 	}
+	// ── S1d-2d LID WELD (--pom_shell_weld, DEFAULT OFF) ────────────────────
+	// The lid offset moves every target vertex along ITS OWN Vertex::N. On
+	// greets that is not a shared normal: MakeFacesIndependentByAngle has split
+	// the mesh so completely that 'rooms' owns 588 verts over 196 faces —
+	// EXACTLY 3 per face, i.e. NOTHING is shared. Two copies of one corner
+	// therefore move along two different normals and the mesh TEARS OPEN at
+	// every convex ridge, by an amount proportional to the offset.
+	//
+	// Measured before this existed (13 review poses, void = z==0 px):
+	//   lid arm                                              413 100
+	//   lid, domain kill AND base clip both OFF              228 411
+	//   the same with --no-parallax (no march at all)        198 704
+	//   the same with --pom_shell_lid_probe (offset 0)             0
+	//   void vs offset 0.02 / 0.06 / 0.18 / 0.36 world (4 poses):
+	//        19 416 / 58 665 / 198 131 / 383 364 — LINEAR in the offset
+	// So the lid arm's void is not the march, not the domain test and not the
+	// base clip: it is a SLIT in the geometry whose width is the offset.
+	// Side-face ENTRY cannot reach it — there is no fragment there to enter.
+	//
+	// The fix is the one shell maps use: extrude along a normal SHARED by every
+	// copy of the position, so adjacent prisms keep a common side and the offset
+	// surface stays watertight (a mitred corner instead of a wedge). Vertex::N
+	// itself is untouched (shading unchanged); only the OFFSET DIRECTION is
+	// welded, and Vertex::ShellH already models the consequence — a corner
+	// vertex reaches only cos(half-fold) of the offset above its own face's
+	// plane, which is exactly the ndv term the stamp below already computes.
+	std::map<long long, std::array<double,4>> weldN;   // pos -> (nx,ny,nz,count)
+	// --pom_shell_weld=2: positions a NON-target face also uses. Those are the
+	// junctions the per-material weld cannot close — greets' wall meets an
+	// UNSHELLED ceiling and a separately-built floor, and the wall moving into
+	// the room while the neighbour stays put opens a slit exactly there
+	// (measured residue after the weld: 13 986 px of the 14 163, with the march
+	// disabled). Pinning them to zero offset is what --pom_shell_pin was for; it
+	// never fired because it keys on VERTEX SHARING inside one TriMesh and the
+	// angle-split mesh shares nothing (measured: 0 pinned on greets).
+	std::set<long long> weldPin;
+	const int  weldMode = fds::FeatureFlags::pom_shell_weld();
+	const bool weldLid = weldMode > 0 && !recessOnly
+	                     && !fds::FeatureFlags::pom_shell_lid_probe();
+	if (weldLid) {
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C) continue;
+				const Vertex *vv[3] = { F.A, F.B, F.C };
+				if (!isTarget(&F)) {
+					if (weldMode >= 2)
+						for (int k = 0; k < 3; ++k) weldPin.insert(qpos(vv[k]->Pos));
+					continue;
+				}
+				for (int k = 0; k < 3; ++k) {
+					const Vector &n = vv[k]->N;
+					const float l = std::sqrt(n.x*n.x + n.y*n.y + n.z*n.z);
+					if (!(l > 1e-6f)) continue;
+					auto &a = weldN[qpos(vv[k]->Pos)];
+					a[0] += n.x / l; a[1] += n.y / l; a[2] += n.z / l; a[3] += 1.0;
+				}
+			}
+		}
+		long long nShared = 0, nSpread = 0; double maxDeg = 0.0;
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+				const Vertex *vv[3] = { F.A, F.B, F.C };
+				for (int k = 0; k < 3; ++k) {
+					auto it = weldN.find(qpos(vv[k]->Pos));
+					if (it == weldN.end() || it->second[3] < 2.0) continue;
+					const auto &a = it->second;
+					const double wl = std::sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+					const Vector &n = vv[k]->N;
+					const double l = std::sqrt(double(n.x)*n.x + double(n.y)*n.y
+					                          + double(n.z)*n.z);
+					if (!(wl > 1e-9) || !(l > 1e-9)) continue;
+					const double d = (a[0]*n.x + a[1]*n.y + a[2]*n.z) / (wl * l);
+					const double deg = std::acos(std::min(1.0, std::max(-1.0, d)))
+					                 * 57.29577951308232;
+					if (deg > 1.0) { ++nSpread; if (deg > maxDeg) maxDeg = deg; }
+				}
+			}
+		}
+		for (const auto &kv : weldN) if (kv.second[3] >= 2.0) ++nShared;
+		long long nPinPos = 0;
+		for (const auto &k : weldPin) if (weldN.count(k)) ++nPinPos;
+		std::fprintf(stderr, "[POM-SHELL-WELD] '%s': %zu distinct vertex POSITIONS, "
+			"%lld carry 2+ copies; %lld vertex uses redirected by >1 degree (worst "
+			"%.1f deg); %lld positions PINNED because non-target geometry shares them. "
+			"The lid offset now follows the WELDED normal, so coincident copies land "
+			"on ONE point and the lid stays watertight.\n",
+			matName, weldN.size(), nShared, nSpread, maxDeg, nPinPos);
+	}
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
 		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
 		Vertex *const V = T->Verts;
 		auto vidx = [&](const Vertex *v) { return uint32_t(v - V); };
+		// --pom_shell_weld: the offset direction for this vertex — the mean of
+		// every target copy at its POSITION, normalized. Falls back to the
+		// vertex's own normal when the weld is off or the position is unique.
+		auto offDir = [&](uint32_t i) -> Vector {
+			if (weldLid) {
+				auto it = weldN.find(qpos(V[i].Pos));
+				if (it != weldN.end() && it->second[3] > 0.0) {
+					const auto &a = it->second;
+					const double l = std::sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+					if (l > 1e-9)
+						return Vector{ float(a[0]/l), float(a[1]/l), float(a[2]/l) };
+				}
+			}
+			const Vector &n = V[i].N;
+			const float l = std::sqrt(n.x*n.x + n.y*n.y + n.z*n.z);
+			return (l > 1e-6f) ? Vector{ n.x/l, n.y/l, n.z/l } : Vector{ 0.0f, 0.0f, 0.0f };
+		};
 		const uint32_t nV = uint32_t(T->VIndex);
 		std::vector<float>  wSum(nV, 0.0f);      // world-per-UV over incident target faces
 		std::vector<float>  ndSum(nV, 0.0f);     // N_v·N_face over the same
@@ -4297,10 +4407,11 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			if (w > wMax) wMax = w;
 			++nFaces;
 			for (int k = 0; k < 3; ++k) {
-				const Vector &vn = V[vi[k]].N;
-				const float nl = std::sqrt(vn.x*vn.x + vn.y*vn.y + vn.z*vn.z);
-				const float nd = (nl > 1e-6f)
-				    ? ((vn.x*F.N.x + vn.y*F.N.y + vn.z*F.N.z) / nl) : 0.0f;
+				// --pom_shell_weld: ndv must be measured against the direction the
+				// vertex ACTUALLY moves, or ShellH would claim a lid height the
+				// welded (mitred) corner never reaches.
+				const Vector vn = offDir(vi[k]);
+				const float nd = vn.x*F.N.x + vn.y*F.N.y + vn.z*F.N.z;
 				wSum[vi[k]]  += w;
 				ndSum[vi[k]] += nd;
 				cnt[vi[k]]   += 1;
@@ -4310,7 +4421,11 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		for (uint32_t i = 0; i < nV; ++i) {
 			if (cnt[i] == 0) continue;
 			if (pinCrossMaterial && nonTarget[i]) { ++nPinned; continue; }
-			const Vector &vn = V[i].N;
+			// --pom_shell_weld=2: position-keyed cross-material pin (see the weld
+			// build above). Leaves the vertex on the authored plane, ShellH 0.5,
+			// so the junction cannot be pulled apart by the offset.
+			if (!weldPin.empty() && weldPin.count(qpos(V[i].Pos))) { ++nPinned; continue; }
+			const Vector vn = offDir(i);            // already unit length
 			const float nl = std::sqrt(vn.x*vn.x + vn.y*vn.y + vn.z*vn.z);
 			if (nl < 1e-6f) { ++nPinned; continue; }
 			const float wv  = wSum[i]  / float(cnt[i]);
@@ -4923,7 +5038,7 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				cls4[si] = uint8_t(best);
 				++nSideCls[best];
 				float ln = 0.0f;
-				if (sideFaces >= 2) {
+				if (sideFaces == 2) {
 					ln = (sideLeanMin[si] < 1e29f) ? sideLeanMin[si] : 0.0f;
 				} else if (best == SC_ANGLED_OUT && sideLeanLen[si] > 0.0) {
 					ln = float(sideLeanSum[si] / sideLeanLen[si]);

@@ -96,6 +96,68 @@
 > **SUPERSEDED same day: the nondeterminism was the 8-bit-AO-map-read-as-dword
 > bug (see the top block); greets is re-pinned and gate-worthy again.**
 
+> **2026-08-05 — S1d-2d: THE LID ARM'S VOID WAS NEVER THE MARCH. It is the lid
+> offset TEARING THE MESH.** Read `docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-2d. Four
+> new flags, all default OFF and byte-null: `--pom_shell_weld`,
+> `--pom_shell_lid_edge`, `--pom_shell_side_entry`, and mode 3 of
+> `--pom_shell_side_faces`.
+> - **The discriminator, before any code.** Lid arm void 413 100 px over the 13
+>   review poses. With the domain kill AND the base clip both off: 228 411. With
+>   `--no-parallax` (no march at all): 198 704. With `--pom_shell_lid_probe`
+>   (offset forced to 0, everything else identical): **0**. Against the offset
+>   0.02/0.06/0.18/0.36 world: 19 416/58 665/198 131/383 364 — **LINEAR**. The
+>   void is a SLIT IN THE GEOMETRY whose width is the lid offset.
+> - **Cause:** `PomShell_Build` extrudes along each vertex's OWN normal, and
+>   `MakeFacesIndependentByAngle` leaves `rooms` with 588 verts over 196 faces —
+>   exactly 3 per face, nothing shared. 155 distinct POSITIONS carry them; 420
+>   uses disagree with their position's mean normal by >1°, worst 78.7°.
+> - **`--pom_shell_weld=1`** extrudes along the shared (welded) normal, as shell
+>   maps do — a mitred corner instead of a wedge. `Vertex::N` untouched, so
+>   shading is unchanged; `ShellH` picks up the mitre automatically (min
+>   0.955 → 0.598). Void 413 100 → 214 650, and 228 411 → **14 163** with the
+>   other two kills off.
+> - **`--pom_shell_lid_edge=1`** gives the lid arm the recess arm's CLAMP for a
+>   lateral exit only — a non-crossing ray, a side-entry miss and lid overhang
+>   still DISCARD, so the see-through survives. That was the other ~152 000 px.
+> - **`--pom_shell_side_faces=3`**: the lean must bound the shell only BELOW the
+>   authored plane (`dh = max(0, h0−h)`). Above it the neighbour's SHELL bounds
+>   this one, and with the weld the two lids already meet at the ridge. Modes 1/2
+>   narrow it instead and kill lid rays with real material under them —
+>   **67 816 px of pure black**. Byte-identical to mode 1 under recess-only.
+> - **`--pom_shell_side_entry=1`** — the restructure the task asked for IS BUILT
+>   and is correct: the ray and all four leaning side planes are affine in the
+>   slab height, so entry is one convex slab clip and the march starts at the
+>   side-face crossing. Nothing serialises (`hStart` was already a `Vec8f`).
+>   Depth needed no change (the S1a write is relative to the RASTERED surface).
+>   **It is not what was blocking protrusion**, and with mode 3 it is inert by
+>   construction — so the two are alternatives, not a stack.
+> - **RESULT.** Recommended lid arm = `--pom_shell_weld=1
+>   --pom_shell_side_faces=3 --pom_shell_lid_edge=1 --no-pom_shell_base_clip`:
+>   **void 413 100 → 14 163 (−96.6 %)**, nine of thirteen poses at 0–159, and the
+>   **rust stripe is gone** (crop `docs/img/s1d_entry/p5743_B_...`). Residue is
+>   13 986/14 163 GEOMETRIC — the cross-material wall/ceiling junction the
+>   per-material weld cannot close.
+> - **WHAT IT DOES NOT FIX: offscreen.** Shadow cube vs flat: rec 0, tess 5.32 %,
+>   lid 20.68 %, this arm 18.77 %. Non-stone colour >12/255 at p5743: rec 1 411,
+>   tess 1 035, lid 9 605, this arm 9 033, and slightly WORSE at both mirror
+>   poses. Moving vertices is the lid model's intrinsic cost.
+> - **SEE-THROUGH IN THE VALLEYS: still not demonstrated**, and I believe
+>   structurally so — greets is a closed room, so a mortar valley has nothing
+>   behind it to reveal. Measured: 0–23 px per pose of "a surface >3 world behind
+>   the wall wins", even at 3.3× amplitude.
+> - **Concave-fold Z-competition hypothesis: FAILS in the recess arm.** 63.4 % of
+>   ANGLED_IN clamped pixels (76 765 of 121 014) void under a discard — no second
+>   fragment exists, because at an inside corner two walls ABUT on screen rather
+>   than overlap.
+> - Gates: render_gate 3/3, city `37e62845`, fountain `51fff7cd`, greets recess
+>   AND lid arms depth byte-identical at all 13 poses with the flags off, wasm
+>   links, 0 bad flags in 578 run logs. Perf: marginal cost ≤ ~0.5 ms/frame as an
+>   upper bound from min-of-10 — the machine carried load average 5–15 all
+>   session and I could not resolve it better.
+> - **Trap recorded:** `--pom_shell_side_edge` must NOT be used with the lid.
+>   `PomShell_Build` runs once per material, so `floor`'s seam census sees
+>   `rooms` already displaced and mis-labels 19 of 24 sides as free edges.
+
 > **2026-08-05 — S1d-2 CLOSED SHELL (SIDE FACES) IS IN, all flags default OFF.**
 > Read `docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-2. Flags: `--pom_shell_side_faces`
 > (0/1/2) and `--pom_shell_side_edge` (0/1/2).
