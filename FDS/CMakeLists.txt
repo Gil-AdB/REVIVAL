@@ -138,6 +138,8 @@ set(RENDER
     RENDER/EnvBake.h
     RENDER/WorldAabb.cpp
     RENDER/WorldAabb.h
+    RENDER/VizCycle.cpp
+    RENDER/VizCycle.h
     RENDER/ChunkOcclusion.cpp
     RENDER/ChunkOcclusion.h
     RENDER/GENERAL.H

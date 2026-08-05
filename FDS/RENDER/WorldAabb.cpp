@@ -11,9 +11,12 @@
 #include <Base/Vector.h>
 #include <Base/FeatureFlags.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -467,7 +470,10 @@ void fillTriZ(const int px[3], const int py[3], const float pz[3],
 }  // namespace
 
 void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs) {
-    if (!FeatureFlags::displace_viz()) return;   // flag-off: record nothing
+    // --viz_arm records even with the viz flag off, so the runtime cycle (X key)
+    // can switch INTO --displace_viz mid-flight — the bake that fills this map
+    // ran at scene init, long before the key press.
+    if (!FeatureFlags::displace_viz() && !FeatureFlags::viz_arm()) return;
     if (M) g_dispMats.insert(M);
     const DispPosKey k = posKey(localPos);
     auto it = g_dispMag.find(k);
@@ -481,7 +487,12 @@ void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs
 // old 1/g_dispErrMax wash let a single worst edge cell flatten everything to
 // green). g_dispErrMax is kept only for the stderr summary line.
 void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, float signedErrFrac) {
-    if (FeatureFlags::displace_viz() != 2) return;   // mode 0/1: record nothing
+    // --viz_arm is accepted here too, but NOTE it does not actually arm mode 2:
+    // the CALLER (MeshOps DisplaceStoneSubdiv) wraps the whole error computation
+    // in `if (displace_viz() == 2)`, so with the flag off this function is never
+    // reached. Mode 2 therefore still needs --displace_viz=2 at STARTUP, and the
+    // runtime cycle drops it (DisplaceViz_HasErrorData) when the data is absent.
+    if (FeatureFlags::displace_viz() != 2 && !FeatureFlags::viz_arm()) return;
     if (M) g_dispMats.insert(M);
     g_dispErr[posKey(centroidLocal)] = signedErrFrac;
     const float a = std::fabs(signedErrFrac);
@@ -668,6 +679,210 @@ void PomSeamViz_DrawOverlay(Scene* sc) {
         if (ok[0] && ok[1])
             drawLineZ(sx[0], sy[0], vz[0], sx[1], sy[1], vz[1], seamColor(s.cls));
     }
+}
+
+// ── Arming probes (runtime viz cycle) ─────────────────────────────────────
+bool DisplaceViz_HasData()      { return !g_dispMag.empty(); }
+bool DisplaceViz_HasErrorData() { return !g_dispErr.empty(); }
+bool PomSeamViz_HasData()       { return !g_seamSegs.empty(); }
+
+// ── --wire_viz overlay: whole-scene triangle wireframe ────────────────────
+namespace {
+
+// Per-material hue, indexed by a hash of the Material POINTER. Same 12-entry
+// palette --poly_viz uses so the two vizzes read alike; the pointer hash (not
+// a matID) keeps this module free of the material-table dependency, and it is
+// stable for the whole run, which is all "which surface owns this face" needs.
+inline uint32_t wireMatColor(const Material* M, const TriMesh* T) {
+    static const uint32_t kMatHue[12] = {
+        0x00E04040u, 0x0040E040u, 0x004060E0u, 0x00E0E040u,
+        0x00E040E0u, 0x0040E0E0u, 0x00E09030u, 0x009040E0u,
+        0x0040A070u, 0x00B06060u, 0x006090B0u, 0x00C0C0C0u };
+    const uint32_t mh = uint32_t(uintptr_t(M) >> 4) * 2654435761u;
+    uint32_t c = kMatHue[mh % 12u];
+    // Per-MESH brightness step so a chunk boundary inside one material is
+    // visible (greets splits its stone into per-cell chunk meshes).
+    const uint32_t th = uint32_t(uintptr_t(T) >> 4) * 2246822519u;
+    const int sc = 88 + int((th >> 25) & 0x27);      // 88..127 of 128
+    uint32_t o = 0;
+    for (int ch = 0; ch < 3; ++ch) {
+        int v = int((c >> (8 * ch)) & 0xFFu) * sc / 128;
+        if (v > 255) v = 255;
+        o |= uint32_t(v) << (8 * ch);
+    }
+    return o;
+}
+
+// Draw ONE view-space segment: near-plane clip → project → 2D viewport clip →
+// perspective-correct subdivision → drawLineZ.
+//
+// Every step here is load-bearing, and the naive version (project both ends,
+// require both in front of the near plane, one drawLineZ) FAILED on exactly the
+// geometry this viz exists for. The greets corridor walls are a handful of very
+// large quads: viewed from inside the corridor BOTH endpoints of a wall edge are
+// behind the eye or far outside the viewport, so the naive draw skipped the wall
+// entirely — the first render of this overlay showed a wireframed statue in a
+// wall-less corridor. Hence:
+//   • near clip, so an edge with one endpoint behind the eye still draws;
+//   • Liang-Barsky viewport clip, so drawLineZ's 8192-step Bresenham guard is
+//     spent on visible pixels instead of walking in from far off-screen;
+//   • subdivision with 1/z (perspective-correct) endpoint depths, because
+//     drawLineZ interpolates z LINEARLY in screen space. Over a wall-length edge
+//     that overestimates z in the middle (true z is the harmonic interpolation),
+//     which reads as "farther" and lets the surface the edge lies on occlude it.
+//     ~48 px sub-segments keep the residual well inside the 1% pull-nearer bias.
+// Returns the number of sub-segments drawn (0 = fully clipped away).
+int drawSegZClipped(Vector a, Vector b, float nearZ, uint32_t col) {
+    if (a.z <= nearZ && b.z <= nearZ) return 0;
+    if (a.z <= nearZ) {
+        const float t = (nearZ - a.z) / (b.z - a.z);
+        a.x += (b.x - a.x) * t; a.y += (b.y - a.y) * t; a.z = nearZ;
+    } else if (b.z <= nearZ) {
+        const float t = (nearZ - b.z) / (a.z - b.z);
+        b.x += (a.x - b.x) * t; b.y += (a.y - b.y) * t; b.z = nearZ;
+    }
+    float x0 = CntrEX + FOVX * a.x / a.z, y0 = CntrEY - FOVY * a.y / a.z;
+    float x1 = CntrEX + FOVX * b.x / b.z, y1 = CntrEY - FOVY * b.y / b.z;
+    const float iz0 = 1.0f / a.z, iz1 = 1.0f / b.z;
+
+    float t0 = 0.0f, t1 = 1.0f;
+    const float dx = x1 - x0, dy = y1 - y0;
+    // Liang-Barsky: keep the sub-range of t where p*t <= q holds for all edges.
+    auto clip = [&](float p, float q) -> bool {
+        if (p == 0.0f) return q >= 0.0f;
+        const float r = q / p;
+        if (p < 0.0f) { if (r > t1) return false; if (r > t0) t0 = r; }
+        else          { if (r < t0) return false; if (r < t1) t1 = r; }
+        return true;
+    };
+    const float xmax = float(XRes) - 1.0f, ymax = float(YRes) - 1.0f;
+    if (!clip(-dx, x0))        return 0;   // x >= 0
+    if (!clip( dx, xmax - x0)) return 0;   // x <= xmax
+    if (!clip(-dy, y0))        return 0;   // y >= 0
+    if (!clip( dy, ymax - y0)) return 0;   // y <= ymax
+
+    const float cx0 = x0 + dx * t0, cy0 = y0 + dy * t0;
+    const float cx1 = x0 + dx * t1, cy1 = y0 + dy * t1;
+    const float len = std::max(std::fabs(cx1 - cx0), std::fabs(cy1 - cy0));
+    int nSeg = int(len / 48.0f) + 1;
+    if (nSeg > 48) nSeg = 48;
+    float px = cx0, py = cy0;
+    float pz = 1.0f / (iz0 + (iz1 - iz0) * t0);
+    for (int s = 1; s <= nSeg; ++s) {
+        const float ts = t0 + (t1 - t0) * (float(s) / float(nSeg));
+        const float qx = x0 + dx * ts, qy = y0 + dy * ts;
+        const float qz = 1.0f / (iz0 + (iz1 - iz0) * ts);
+        drawLineZ(int(px + 0.5f), int(py + 0.5f), pz,
+                  int(qx + 0.5f), int(qy + 0.5f), qz, col);
+        px = qx; py = qy; pz = qz;
+    }
+    return nSeg;
+}
+
+// Multiply the whole frame down so the wireframe is the brightest thing on
+// screen. Integer scale (k/256) — the modes that use it already replace the
+// image's role, so exactness doesn't matter; speed does (one pass over VPage).
+void wireDimFrame(float keep) {
+    if (keep >= 1.0f) return;
+    if (keep < 0.0f) keep = 0.0f;
+    const uint32_t k = uint32_t(keep * 256.0f + 0.5f);
+    dword* out = reinterpret_cast<dword*>(VPage);
+    const size_t n = size_t(XRes) * size_t(YRes);
+    if (k == 0) { std::memset(out, 0, n * sizeof(dword)); return; }
+    for (size_t i = 0; i < n; ++i) {
+        const dword d = out[i];
+        const uint32_t r = (((d >> 16) & 0xFFu) * k) >> 8;
+        const uint32_t g = (((d >>  8) & 0xFFu) * k) >> 8;
+        const uint32_t b = (( d        & 0xFFu) * k) >> 8;
+        out[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+    }
+}
+
+}  // namespace
+
+void WireViz_DrawOverlay(Scene* sc) {
+    const int mode = FeatureFlags::wire_viz();
+    if (mode <= 0) return;
+    if (!sc || !View || !VPage || XRes <= 0 || YRes <= 0) return;
+    if (g_offscreenViewDepth > 0) return;         // main view only
+
+    if (mode >= 2) wireDimFrame(FeatureFlags::wire_viz_dim());
+
+    const Frustum fr = Frustum_FromMainCamera(sc);
+    const Matrix& VM = View->Mat;
+    const Vector  P  = View->ISource;
+    const float   nearZ = sc->NZP > 0.01f ? sc->NZP : 0.01f;
+    const uint32_t kPlain = 0x00D8D8D8u;
+    // Mode 4 draws BACK-facing first and FRONT-facing second, so an edge shared
+    // by one of each ends up green: only edges that are back-facing on BOTH
+    // sides stay red, which is exactly the inverted-normal / open-shell signal.
+    const int passes = (mode == 4) ? 2 : 1;
+    long tris = 0, lines = 0;
+    static bool once = false;
+    const std::chrono::steady_clock::time_point t0 =
+        once ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now();
+
+    for (int pass = 0; pass < passes; ++pass) {
+      const bool wantBack = (mode == 4 && pass == 0);
+      for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh* T = (TriMesh*)Obj->Data;
+        if (!T || T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+        if (T->Flags & Tri_Invisible) continue;
+        // Cheap whole-mesh reject (the same conservative AABB test the cull
+        // uses). Meshes without a valid box are kept — never silently dropped.
+        if (T->WorldAabbValid) {
+            const float bmn[3] = { T->WorldAabbMin.x, T->WorldAabbMin.y, T->WorldAabbMin.z };
+            const float bmx[3] = { T->WorldAabbMax.x, T->WorldAabbMax.y, T->WorldAabbMax.z };
+            if (Frustum_CullsAabb(fr, bmn, bmx)) continue;
+        }
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            const Face& F = T->Faces[fi];
+            if (!F.A || !F.B || !F.C) continue;
+            Vertex* const corner[3] = { F.A, F.B, F.C };
+
+            Vector w[3];
+            float cog[3] = { 0, 0, 0 };
+            for (int k = 0; k < 3; ++k) {
+                MatrixXVector(T->RotMat, &corner[k]->Pos, &w[k]);
+                w[k].x += T->IPos.x; w[k].y += T->IPos.y; w[k].z += T->IPos.z;
+                cog[0] += w[k].x; cog[1] += w[k].y; cog[2] += w[k].z;
+            }
+            Vector wn; MatrixXVector(T->RotMat, &F.N, &wn);
+            const float vx = cog[0]/3.0f - P.x, vy = cog[1]/3.0f - P.y, vz = cog[2]/3.0f - P.z;
+            const bool back = (wn.x*vx + wn.y*vy + wn.z*vz > 0.0f);
+            if (mode == 4) { if (back != wantBack) continue; }
+            else if (back) continue;                       // modes 1-3: front only
+
+            // VIEW space (not screen): drawSegZClipped does the near clip, the
+            // projection and the viewport clip, so a wall quad whose corners are
+            // all behind the eye still draws its visible span.
+            Vector vs[3];
+            bool anyFront = false;
+            for (int k = 0; k < 3; ++k) {
+                Vector d = { w[k].x - P.x, w[k].y - P.y, w[k].z - P.z };
+                MatrixXVector(VM, &d, &vs[k]);
+                if (vs[k].z > nearZ) anyFront = true;
+            }
+            if (!anyFront) continue;
+            const uint32_t col = (mode == 3) ? wireMatColor(F.Txtr, T)
+                               : (mode == 4) ? (back ? 0x00FF3030u : 0x0030FF30u)
+                                             : kPlain;
+            ++tris;
+            static const int e3[3][2] = { {0,1}, {1,2}, {2,0} };
+            for (auto& e : e3)
+                lines += drawSegZClipped(vs[e[0]], vs[e[1]], nearZ, col);
+        }
+      }
+    }
+    // One-shot census so the cost is a number, not a feeling.
+    if (!once) { once = true;
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::fprintf(stderr, "[WIRE-VIZ] mode %d: %ld triangles / %ld line "
+            "sub-segments in %.1f ms this frame (depth-tested, %s)\n",
+            mode, tris, lines, ms,
+            mode >= 2 ? "over the dimmed frame" : "over the image"); }
 }
 
 }  // namespace fds

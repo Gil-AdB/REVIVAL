@@ -145,6 +145,28 @@ void DisplaceViz_DrawOverlay(Scene* sc);
 void PomSeamViz_Record(const Vector& aLocal, const Vector& bLocal, int cls);
 void PomSeamViz_DrawOverlay(Scene* sc);
 
+// ── Arming probes for the runtime viz cycle (VizCycle.cpp) ─────────────────
+// "Does this run actually have the data the viz needs?" The cycle drops any
+// mode whose data is absent instead of offering a mode that draws nothing —
+// the recorders below only run when their flag (or --viz_arm) was set at BAKE
+// time, which is long before a live key press.
+bool DisplaceViz_HasData();        // --displace_viz=1: per-vertex magnitudes
+bool DisplaceViz_HasErrorData();   // --displace_viz=2: per-triangle height error
+bool PomSeamViz_HasData();         // --pom_seam_viz: classified boundary edges
+
+// ── --wire_viz: whole-scene triangle wireframe ─────────────────────────────
+// Post-tonemap overlay over the MAIN view: every visible mesh triangle's three
+// edges, DEPTH-TESTED against the frame's opaque Z through the same drawLineZ
+// the displacement/seam overlays use (line z pulled 1% nearer so an edge on its
+// own surface wins the compare; a far wall behind a near one stays hidden).
+// Scene-wide, so it shows the tessellation state honestly: --greets_displace ON
+// puts the bake's added faces on screen as real edges, OFF shows the authored
+// quads. Modes (see the flag help): 1 = white over the image, 2 = white over the
+// dimmed image, 3 = per-material hue + per-mesh brightness, 4 = back-facing red /
+// front-facing green. No-op when wire_viz == 0; the caller gates on the flag so
+// the off path costs one load and a branch.
+void WireViz_DrawOverlay(Scene* sc);
+
 }  // namespace fds
 
 #endif  // FDS_RENDER_WORLD_AABB_H_INCLUDED

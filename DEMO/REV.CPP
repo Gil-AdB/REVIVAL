@@ -469,6 +469,7 @@ material global ID or ptr
 #include <Base/FeatureFlags.h>
 #include <RENDER/EnvCube.h>
 #include <RENDER/ChunkOcclusion.h>  // g_occlSnapshotInert: pin dumps keep the cull inert
+#include <RENDER/VizCycle.h>        // VizCycle_Step: the X / Shift+X debug-viz cycle
 #include <Base/TuneServer.h>
 #include "Config.h"
 #include "Threads.h"
@@ -1759,6 +1760,11 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_F1:        legacy = ScF1; break;
 				case SDL_SCANCODE_F2:        legacy = ScF2; break;
 				case SDL_SCANCODE_F3:        legacy = ScF3; break;
+				// F4 was missing here while F3 was present, so TimerProc's
+				// review scrub only ran BACKWARD in the native build (the
+				// wasm table in MainLoop.cpp had both). ScF4 has exactly one
+				// consumer (TimerProc), so adding it resurrects nothing else.
+				case SDL_SCANCODE_F4:        legacy = ScF4; break;
 				case SDL_SCANCODE_F9:        legacy = ScF9; break;
 				case SDL_SCANCODE_F11:       legacy = ScF11; break;
 				case SDL_SCANCODE_TAB:       legacy = ScTab; break;
@@ -1840,6 +1846,26 @@ int main(int argc, const char *argv[])
 					extern void ShadowMap_ViewCycleBack();
 					if (back) ShadowMap_ViewCycleBack();
 					else      ShadowMap_ViewCycle();
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_X) {
+					// DEBUG-VIZ CYCLE: X steps forward through every viz that
+					// can actually show something in this run, Shift+X steps
+					// back. FDS/RENDER/VizCycle.cpp prints the menu + the mode
+					// name, and paints the name bottom-left so a screenshot is
+					// self-identifying.
+					//
+					// Why X and not V (the obvious letter): V is already the
+					// shadow-map thumbnail cycle, ten lines up. X is the only
+					// key untranslated in BOTH scancode tables (here and
+					// MainLoop.cpp), absent from every Keyboard[] consumer in
+					// DEMO/ and FDS/, and outside anyFreeCamKey's fly set — and
+					// it sits next to Z/C so the left hand reaches it without
+					// leaving WASD while the right hand keeps steering.
+					// repeat==0: hold-to-repeat would spin the whole cycle.
+					if (event.key.repeat == 0) {
+						const Uint16 mod = event.key.keysym.mod;
+						const bool back = (mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+						fds::VizCycle_Step(back ? -1 : +1);
+					}
 				} else if (event.key.keysym.scancode == SDL_SCANCODE_B) {
 					// Cycle the shadow-map debug view's buffer mode:
 					// static → dynamic → combined (closest-by-depth).

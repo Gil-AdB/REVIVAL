@@ -29,6 +29,7 @@
 #include "DeferredCommon.h"   // DeferredLightingCtx (owned by renderFrame, threaded to all passes)
 #include "EnvBake.h"          // --env_refl: per-scene panorama bake + registry
 #include "OffscreenView.h"    // g_offscreenViewDepth (env_refl bake gate)
+#include "VizCycle.h"         // VizCycle_Overlay (--wire_viz + the X-key cycle)
 #include "TailProf.h"         // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
@@ -1354,6 +1355,18 @@ xpar_done: ;
 					vp[size_t(y) * XRes + x] = col;
 	}
 
+	// Runtime viz cycle slot (X / Shift+X — FDS/RENDER/VizCycle.cpp): the
+	// whole-scene --wire_viz wireframe plus the cycle's mode-name label.
+	// Same post-tonemap position and reasoning as MIRRORVIZ / the editor
+	// highlight above (anything drawn before Render_TonemapToVPage is
+	// overwritten), and MAIN VIEW ONLY: ForceForward is the sky-cube / city
+	// cube-map paint, g_offscreenViewDepth > 0 the mirror-RTT and env-probe
+	// passes. Returns immediately when no viz is active.
+	// CAVEAT: the fountain sets g_hdrDeferTonemap and tonemaps in its own tick,
+	// AFTER renderFrame — under --hdr this overlay is overwritten there. Use
+	// --no-hdr on the fountain.
+	if (path != RenderPath::ForceForward && fds::g_offscreenViewDepth == 0)
+		fds::VizCycle_Overlay(CurScene);
 
 
 #ifdef TRACE_OBJECTS

@@ -4,6 +4,7 @@
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
 #include <Base/Omni.h>
+#include <RENDER/VizCycle.h>   // VizCycle_Step: the X / Shift+X debug-viz cycle
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -201,6 +202,16 @@ static bool pumpEvents()
 		case SDL_KEYUP: {
 			int legacy = translateScancode(event.key.keysym.scancode);
 			if (legacy >= 0) Keyboard[legacy] = (event.type == SDL_KEYDOWN) ? 1 : 0;
+			// Debug-viz cycle, same binding as the native pump (REV.CPP):
+			// X = next viz, Shift+X = previous. X is deliberately NOT added to
+			// translateScancode — the cycle is driven from the event, not from
+			// a Keyboard[] poll, so it needs no legacy slot.
+			if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+			    event.key.keysym.scancode == SDL_SCANCODE_X) {
+				const bool back =
+				    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+				fds::VizCycle_Step(back ? -1 : +1);
+			}
 			if (event.type == SDL_KEYDOWN) g_userGesture.store(true);
 			break;
 		}

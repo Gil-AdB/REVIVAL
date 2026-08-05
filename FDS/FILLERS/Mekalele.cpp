@@ -60,6 +60,14 @@ int            g_xparZCount             = 0;
 uint16_t      *g_xparPeelFloor          = nullptr;
 thread_local bool g_xparPeelReverse     = false;
 
+// Storage probes for the runtime viz cycle (FDS/RENDER/VizCycle.cpp). The
+// planes below are sized only at framebuffer resize, so a viz that writes into
+// one can only be enabled live if the plane already exists — the cycle asks
+// here instead of offering a mode that draws nothing. Declared extern in
+// VizCycle.cpp to keep this template-heavy header out of that TU.
+bool EngineGBuffer_HasAlbedoPlane() { return !s_engineGBuffer.albedo.empty(); }
+bool EngineGBuffer_HasNormalPlane() { return !s_engineGBuffer.normal.empty(); }
+
 void EngineGBuffer_Resize(int X, int Y) {
     size_t numPixels = size_t(X) * size_t(Y);
     s_engineGBuffer.normal.assign(numPixels, 0);
@@ -100,7 +108,14 @@ void EngineGBuffer_Resize(int X, int Y) {
     // the plane allocated even with texture filtering off (which is the default
     // — without this the viz is a silent no-op, and this campaign has already
     // lost time to silently-defaulted renders).
-    if (fds::FeatureFlags::texture_filter() > 0 || fds::FeatureFlags::poly_viz()) {
+    // --viz_arm allocates it too: --pom_viz / --pom_mip_viz / --pom_path_viz /
+    // --poly_viz all write here, and the plane is only ever sized at resize —
+    // so without arming, switching into those modes at runtime (the X-key viz
+    // cycle, FDS/RENDER/VizCycle.cpp) would be a silent no-op. An allocated but
+    // unread plane changes no pixel: the deferred kernel's texFilterOn also
+    // requires texture_filter>0 || poly_viz.
+    if (fds::FeatureFlags::texture_filter() > 0 || fds::FeatureFlags::poly_viz()
+        || fds::FeatureFlags::viz_arm()) {
         s_engineGBuffer.albedo.assign(numPixels, 0);
     } else {
         s_engineGBuffer.albedo.clear();
