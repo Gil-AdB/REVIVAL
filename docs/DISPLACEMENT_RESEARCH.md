@@ -483,10 +483,35 @@ Split the idea:
 
 ## 6. Explicit non-recommendations
 
+> **⚠️ SUPERSEDED IN PART, 2026-08-06 — read `docs/DISPLACEMENT_RESEARCH_II.md`
+> §2.3 and §6 before acting on the prism bullet below.** The prism
+> non-recommendation was made without reading Hirche '04 in full, and it is
+> wrong on two counts. (1) It conflated "flat quads make the machinery cheap"
+> with "flat quads make the machinery pointless" — Hirche ABANDONED the cheap
+> single-pass prism renderer only because *"the assumption that the prism faces
+> are flat is a very strong restriction that makes the algorithm in this form
+> generally unusable"*, and our flat axis-charted quads satisfy that restriction
+> exactly. (2) It missed the load-bearing mechanism: a prism's side faces are
+> **rasterized geometry**, not merely an exit test, so a pixel one prism's ray
+> escapes from is owned by the NEIGHBOUR prism's own fragment (entered through
+> the shared side quad, arbitrated by Z). Our lid-only shell has no such
+> fragment, and every hole, gash, smear and rust stripe the campaign has fought
+> traces to that single missing thing. S1b is therefore **not** the prism
+> family's flat special case — it is the prism family with the side faces
+> deleted. Estimated cost of the full prism on our content: ~1 800 faces for the
+> 226 shelled quads, ≈ 2 % of the tessellation carve's measured 86 600 [E].
+> Also refuted by the same document: the assumption that shipped POM used
+> offset limiting. It did not — Policarpo I3D '05, GPU Gems 3 ch. 18 and the
+> DirectX SDK POM shader all travel the TRUE ray. Our deviation was running the
+> true ray in a finite UV chart, which no source does.
+>
+> Still valid below: the VDM/GDM, max-mip, TFDM/RMIP, naive-256 and
+> visibility-system bullets.
+
 - **VDM / GDM** — §5.1. Memory scaling + gather shape + solves a non-bottleneck.
-- **Prism/tetrahedra rasterization** (Hirche '04, shell maps as-shipped) — the
+- ~~**Prism/tetrahedra rasterization** (Hirche '04, shell maps as-shipped) — the
   general-surface machinery; our flat quads reduce it to S1b at a fraction of the
-  geometry and per-pixel cost.
+  geometry and per-pixel cost.~~ **RETRACTED — see the note above.**
 - **Max-mip / quadtree traversal as the march** — divergence-hostile to the
   8-wide row loop, and the engine's measured bottleneck is arithmetic, not tap
   count. Keep as the fallback bake if cone baking ever becomes the problem.
