@@ -154,14 +154,34 @@ Lights — **10 `Light_Omni`, 0 spots, 0 with `Omni_CastsShadow` set in the FLD*
 | 8–10 | NaN at this frame (mech-parented) | 0,128,255 | 0.500 | 2 |
 
 **That is where the "7 omnis" figure comes from** — 7 have finite world positions from the FLD;
-the other 3 are parented to the mech and only resolve once the hierarchy/driver pass runs.
+the other 3 are the `mech flare` lights, parented to `Hull.lwo` (VERIFIED in the FLD's parent
+records), so they only resolve once the hierarchy/driver pass runs.
 
-Materials — **26 material bindings over the faces, 11 distinct textures**, all 256×256 24 bpp:
-`PELLOW`, `P_TEXT`, `MARB4`, `PMETALL`, `PLIGHS`, `MARB1`, `PBRK34`, `PSILING`, `P_PAVE`,
-`MECH_HUL`, `MECH_COK`. Three material bindings are untextured (base colour only). Per-material
-`Luminosity` / `Diffuse` / `Specular` / `Glossiness` are populated and range widely
-(e.g. `MARB4` lum 0.36 dif 0.10 spec 0.05 gloss 48; `MECH_HUL` dif 1.0 spec 0.40 gloss 48;
+But note: **greets marks all 10 as shadow casters.** `GreetsApplyInitDefaults`
+(`GREETS.CPP:1046-1053`, VERIFIED by reading) sets `greets_omni_shadows = true`,
+`greets_omni_shadow_res = 512`, `greets_moving_omni_shadow_res = 128`, and
+`greets_omni_default_range = 30`. So the shipped scene bakes **7 static cube maps at 512² and 3
+moving cube maps at 128²**, not "7 × 256²". §3 and §4 use these numbers.
+
+Materials — **26 material bindings over the faces**. Two distinct texture mechanisms:
+
+- **19 materials use a single legacy diffuse JPG** named in the FLD. MEASURED via the standalone
+  loader: 11 distinct such textures, all 256×256 24 bpp — `PELLOW`, `P_TEXT`, `MARB4`, `PMETALL`,
+  `PLIGHS`, `MARB1`, `PBRK34`, `PSILING`, `P_PAVE`, `MECH_HUL`, `MECH_COK`. Three material
+  bindings are untextured (base colour only).
+- **7 materials carry a full PBR map-set** via the FLD's `RevMapMask` field
+  (`FDS/FLD/FLD_READ.H:73-82`), resolving to `Runtime/TEXTURES/PBR/<set>/`:
+  `momy-1`→`momy` (albedo/ao/height/metallic/normal/roughness), `momy-2`→`momy2`,
+  `amudim`→`amudim`, `stairs`→`stairs` (full set), `rooms`→`wall_stone3` (no metallic),
+  `screen emiter`→`screen_emiter`, `teleporter`→`teleporter` (height + normal only).
+
+Per-material `Luminosity` / `Diffuse` / `Specular` / `Glossiness` are populated and range widely
+(MEASURED: `MARB4` lum 0.36 dif 0.10 spec 0.05 gloss 48; `MECH_HUL` dif 1.0 spec 0.40 gloss 48;
 `PLIGHS` emitters lum 1.0–2.25).
+
+Parallax: only **`rooms`** has both a non-zero authored `ParallaxScale` (0.10) and a height map.
+`stairs` and `siling` have the field present but zero. `--parallax` and `--parallax_pom` both
+default ON, so `rooms` gets a real 8-step POM march with no flags passed.
 
 World extent of the room: X[−13.6 .. 49.4], Y[0 .. 18.5], Z[−75.9 .. 4.9]. Consistent with
 `GRAPHICS_PIPELINE.md` §5's "view-Z ≈ 5..80 units" warning — scale constants must be sized to
@@ -210,13 +230,28 @@ is mandatory**, and the wrap must happen in the sampler, not in the shader.
 Everything `Initialize_Greets` does lives in `DEMO/GREETS.CPP` and is **not** reachable from FDS:
 
 - `Piramid` material clustering into ~600 per-plane shadow groups
-- the `Piramid` spatial chunk split (`--greets-piramid-chunk-grid=8` → up to 512 sub-meshes; the
-  original is retired by zeroing `FIndex`)
+- the `Piramid` spatial chunk split (`--greets-piramid-chunk-grid=8` → ~50–150 non-empty cells in
+  practice; the original is retired by zeroing `FIndex`)
 - the `stone_shadow_proxy` mesh
-- the robot spotlight + 3 orbit spotlights (`makeSpotLight`, all `Omni_CastsShadow`)
-- mirrors (`GreetsMirror`), the disco ball, blaster bolts, the text wobbler
+- the robot spotlight + 4 orbit spotlights (`makeSpotLight`, all `Omni_CastsShadow`) — **but
+  `no_greets_spots` defaults to `true` for greets (`GREETS.CPP:1047`, VERIFIED), so these are OFF
+  in the default run.** Excluding them from the benchmark is therefore *parity*, not a
+  simplification.
+- 10 disco cone spotlights + 1 glow clone (`GreetsDisco.cpp`), 256² shadow maps,
+  `Omni_ForceVolCone`
+- a 12-slot mirror "bounce pool", plus mirror **omni clones** (each mirror clones every
+  not-yet-cloned omni across its plane) and mirror **mesh clones** (the whole non-wall scene as
+  one TriMesh per mirror)
+- the disco ball (procedural 10×14 UV sphere), glass shatter shards, blaster bolts, text wobbler
 - displacement shell rebuilds, PBR sidecar imports, `NZP=0.01` / `FZP=150`,
   `Ambient_Factor=0.25` / `Diffusive_Factor=1.0` / `Specular_Factor=1.0`
+- **`--greets_stone_tex` (default ON)** — `GREETS.CPP:1489-1591` **replaces** the `rooms` and
+  `floor` materials' albedo + height + normal + roughness with a *different* sidecar set loaded
+  by filename (`Runtime/TEXTURES/greets_wall{,_h,_n,_r}.png`,
+  `greets_floor{,_h,_n,_r}.png`), bypassing the `RevMapMask` PBR-set mechanism entirely, and
+  code-forces `floor`'s parallax to 0.25. **This is the sharpest instance of the caveat: the wall
+  surface the user actually reviews is not the wall surface `LoadFLD` hands me.** Any displacement
+  arm (Phase 3) must load these files explicitly — they are the subject of the whole S1 campaign.
 
 **This is the single most important caveat in the document**, because it defines what the
 benchmark actually compares. Handling, per item:
@@ -247,15 +282,48 @@ would be reproducing the *workaround*. So: reproduce what each field **means**.
 | `lightmapMF`/`lightmapST` (static shadow lightmaps) | **not implemented** | An amortisation of expensive CPU shadow taps. The GPU's whole point is that the tap is cheap. |
 | — | new: `rgba8unorm` material params (diffuse, specular, glossiness, flags) | The CPU kernel reads these from `Material*` via matID; the GPU writes them per pixel. |
 
-**Lights.** 7 omnis, point, intensity `L × ISize`, hard cutoff at `IRange` (with `rRange`
-reciprocal). Implement as **one full-screen lighting pass looping 7 lights** — structurally the
-closest analogue to our tiled kernel. Our CPU path additionally builds *per-tile* light lists
-(`DeferredLightLists.cpp`); at 7 lights a GPU tile/cluster pass is not worth writing, and this
-difference favours neither side meaningfully. Say so rather than silently omitting it.
+**Lights.** 7 static omnis (+3 mech-parented), point, intensity `L × ISize`, **hard radius cutoff
+at `IRange`** — *not* inverse-square; `rRange = 1/IRange`. Implement as **one full-screen lighting
+pass looping the lights** — structurally the closest analogue to our tiled kernel. Our CPU path
+additionally builds *per-tile* light lists (`DeferredLightLists.cpp`); at ~10 lights a GPU
+tile/cluster pass is not worth writing, and this difference favours neither side meaningfully.
+Say so rather than silently omitting it.
 
-**Cube shadow maps.** 7 lights × 6 faces × 256² (matching `--greets-omni-shadow-res` default),
-depth-only, as a `MTLTextureTypeCube` depth texture per light, sampled with hardware
-`sample_compare` + PCF. Optional 512² arm since our `--greets-omni-shadow-res` accepts it.
+**The shading model must be PBR, not Blinn-Phong.** VERIFIED in `GreetsApplyRunDefaults`
+(`GREETS.CPP:1107-1114`): greets sets `pbr`, `env_brdf_analytic`, `pbr_multiscatter`,
+`diffuse_energy`, and `sh_ambient` all `true`. So the CPU kernel greets actually runs is
+Cook-Torrance (GGX D + Smith-Schlick G + Schlick F), with the Karis split-sum analytic env BRDF,
+Fdez-Aguera multiscatter energy compensation, `(1−F)` diffuse energy weighting, and **L2 SH
+irradiance** in place of a flat ambient constant. All five are standard, well-documented GPU
+shading — so matching them is *less* work on the GPU than on the CPU, but the spec has to say so
+or the GPU arm would be measuring a cheaper shader. Also on by default: `hdr`, `hdr_linear`,
+`bloom` (`bloom_intensity` 2.0), `hdr_refl_gain` 4.0, `hdr_exposure = cine::kGreetsExposure`.
+
+**Checkerboard half-rate shading (`deferred_checkerboard = true`, VERIFIED `GREETS.CPP` run
+defaults).** The CPU lighting kernel shades **half the pixels** on greets by default. This is a
+first-order fairness item, not a footnote — see §5.3 item 11. Decide explicitly: either the GPU
+also shades checkerboard (faithful but odd), or the GPU runs full-rate and every ratio states
+that the CPU number is at half shading rate. **Recommendation: GPU full-rate, and report the CPU
+number both with and without `--no-deferred_checkerboard`** so the reader can see the dial.
+
+**Cube shadow maps.** **7 static lights × 6 faces × 512²** plus **3 moving lights × 6 faces ×
+128²** (VERIFIED defaults), depth-only, one `MTLTextureTypeCube` depth texture per light, sampled
+with hardware `sample_compare` + PCF.
+
+Two CPU-side shadow mechanisms are deliberately **not** reproduced, both being amortisations of an
+expensive CPU tap:
+- **PolyId comparison** (`FDS_SHADOW_POLYID_DEFAULT_ON=1`) — an identity test against a baked
+  material ID per texel, instead of a biased depth compare. It exists because a correct depth
+  compare with bias was too expensive/leaky on the CPU. The GPU's `sample_compare` is the
+  hardware primitive that makes the whole trick unnecessary.
+- **Static shadow lightmaps** (`shadow_lightmap = true`, `shadow_lightmap_res = 128`,
+  `shadow_lightmap_planar = true`) — a pre-baked per-face atlas of (texel, static-omni) → shadow
+  byte, so the kernel can *skip* the per-pixel cube tap on static surfaces lit by static omnis.
+  The GPU takes the tap.
+
+**Both omissions make the GPU do strictly more work per pixel than the CPU does**, which is the
+right direction for an honest comparison — but it must be stated, because a naive reader would
+assume the reverse.
 
 **HDR + tonemap.** `rgba16float` HDR target, exposure → ACES → 8-bit, one fragment pass. greets
 defaults to HDR (`Hdr_ActivateNoFog` fires because greets has no fog), so keeping it is parity,
@@ -277,12 +345,13 @@ of this writing).
 
 | Excluded | Why |
 |---|---|
-| **Mirrors / planar RTT** (`GreetsMirror.cpp`) | A whole-room mesh-clone + recursion system. It's a *scene-authoring* feature, not a renderer-cost question, and another agent owns that file. **Because it duplicates an entire room, the CPU baseline must also be captured with mirrors off, or the comparison is invalid.** |
-| **Volumetric cones / god-rays / froxel fog** | Ray-march passes whose cost is a *tuning dial* (`cone_strength`, `halo_strength`, froxel res). Including them makes the headline number a function of a knob. Excluded on both sides. |
-| **SSAO / GTAO** | Same argument — it has a whole downscale ladder (`--ssao_downscale 1\|2\|4`). Excluded on both sides. A GPU GTAO arm is a well-understood optional extension later. |
-| **Transparent depth-peel layers** | `PERF_STATE.md` records greets' xpar contribution as "small"; it doubles the G-buffer plumbing for little benchmark value. |
-| **Spotlights (robot + 3 orbit)** | Installed by `GREETS.CPP`, not the FLD, and each is a shadow caster — they'd change the light count on one side only. Excluded on both sides; the FLD's 7 omnis are the light set. |
-| **Sprites, particles, TBR, disco ball, blaster bolts, text wobbler** | Content, not renderer cost. |
+| **Mirrors / planar RTT** (`GreetsMirror.cpp`) | ≥3 mirrors, each cloning the entire non-wall scene as one TriMesh **and** cloning every omni across its plane, plus second-order `mirror_rtt` re-renders at density 1024 — all ON by default. It's a *scene-authoring* feature, not a renderer-cost question, and another agent owns that file. **Because it duplicates an entire room and multiplies the light count, the CPU baseline MUST also be captured with mirrors off, or the comparison is invalid.** |
+| **Volumetric cones / god-rays / froxel fog** | Ray-march passes whose cost is a *tuning dial*. The global `--draw_cones` is OFF, but the 10 disco spots force-enable beams per-light (`Omni_ForceVolCone`), and `cone_strength` ends up at the disco ball's 1.2 rather than the scene-init 2.0. A number that depends on that ordering is not a benchmark. Excluded on both sides (disco off). |
+| **SSAO / GTAO** | OFF in greets by default (VERIFIED: no `setDefault` for it anywhere in `GREETS.CPP`), and it has a whole downscale ladder. Excluding it is parity. A GPU GTAO arm is a well-understood optional extension later. |
+| **Transparent depth-peel layers** | `PERF_STATE.md` records greets' xpar contribution as "small", and `xpar_pbr` is deliberately left OFF; it doubles the G-buffer plumbing for little benchmark value. |
+| **Spotlights (robot + 4 orbit)** | Installed by `GREETS.CPP`, not the FLD — **and `no_greets_spots` defaults to `true`, so they are already off in the default run.** Excluding them is parity. |
+| **Disco (10 cone spots + glow clone + procedural ball)** | Adds 11 shadow-casting lights and a runtime-built mesh, and mutates `cone_strength` on first tick. Excluded on both sides. |
+| **Sprites, particles, TBR, glass shards, blaster bolts, text wobbler** | Content, not renderer cost. |
 | **Mod player, demo director, SDL event loop, resize coordination** | Irrelevant to a frame-cost question. |
 | **Mipmap-via-subdivision clipper** | **Cannot and must not be reimplemented** — it *is* the CPU's substitute for a texture unit. See §5, item 1: this is the single largest apples-to-oranges item and it gets its own treatment rather than being hidden. |
 
@@ -297,14 +366,17 @@ of this writing).
 | Secondary poses | `t=6097` (corner / light-bleed), `t=2845` (grazing close-up), `t=6133` (mirror panel), `t=5958` (grazing smear) — from `docs/greets_review_poses.txt` |
 | Camera construction | `Kick_Camera` + `CalcPersp` from FDS, same `XRes/YRes/AspectRatio` globals |
 | Clip planes | NZP 0.01, FZP 150 (`GREETS.CPP:1477-8`) |
-| Lights | the 7 FLD omnis, authored position / colour / `ISize` / `IRange` |
+| Lights | the 7 static FLD omnis (+3 mech-parented in later stages), authored position / colour / `ISize` / `IRange`, **hard radius cutoff** |
 | Global light factors | `Ambient_Factor` 0.25, `Diffusive_Factor` 1.0, `Specular_Factor` 1.0 |
+| Shading model | PBR: GGX + Smith-Schlick + Schlick F, Karis split-sum env BRDF, Fdez-Aguera multiscatter, `(1−F)` diffuse energy, L2 SH ambient |
 | Materials | per-material Luminosity / Diffuse / Specular / Glossiness from the FLD |
-| Textures | the 11 256² albedos, decoded by FDS's own `Load_Texture` |
-| Effects ON | deferred, HDR + ACES tonemap, cube shadows (stage 3+) |
-| Effects OFF (both sides) | mirrors, volumetrics, fog, SSAO, xpar peel, sprites, spotlights |
-| Shadows | 7 lights × 6 faces × 256² |
+| Textures | the 11 legacy 256² albedos, decoded by FDS's own `Load_Texture`. The 7 `RevMapMask` PBR sets and the `greets_stone_tex` wall/floor sidecars are stage-3+ work |
+| Effects ON | deferred, HDR (`hdr_linear`) + ACES tonemap, bloom 2.0, cube shadows (stage 3+) |
+| Effects OFF (both sides) | mirrors + `mirror_rtt`, disco, volumetrics, fog, SSAO, xpar peel, sprites, spotlights |
+| Shadows | 7 static × 6 faces × 512², 3 moving × 6 faces × 128². No PolyId trick, no static lightmap on the GPU side |
+| Shading rate | GPU full-rate; CPU reported **both** at its default `deferred_checkerboard` half-rate and at `--no-deferred_checkerboard` |
 | MSAA | **1× for the headline number.** 4× reported separately, labelled "what you'd ship" |
+| `--deferred` | **must be passed explicitly** — it is compile-default OFF (`FeatureFlags.h:13-14`), even though every tool in this repo passes it |
 
 ---
 
@@ -324,7 +396,15 @@ Use the per-phase counters:
   merely carrying its never-taken branches inside `Transform_Objects` moved pixels under
   `-ffp-contract=fast`.
 - `--xfrm_pass_mesh_prof` — per-mesh / per-material decomposition of the above.
-- `--bench=scene@iters=N,t=…,xres=…,yres=…` for the frame-level mean, **with load recorded**.
+- `--bench=scene@scene=greets,t=<timer>,iters=N[,tend=T][,xres=,yres=]` for the frame-level mean,
+  **with load recorded**. It runs `Initialize_Greets` + `Greets_JoinBakeThread` + one untimed
+  warm-up tick, then N timed ticks (pinned at `t`, or sweeping `t → tend`), and prints
+  `[BENCH] scene=greets t=… iters=… total=… mean=…` to stderr. Run from `Runtime/`.
+- The closest thing to a canonical greets invocation already in the tree is
+  `tools/flip_rate.sh:64-69`:
+  `--snapshot=greets@t=1588 --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl`.
+  Useful as the starting flag set for reference captures; strip the glass/xpar flags for the
+  benchmark condition set in §4.
 
 Every CPU number in the final report must carry: build config, exact flag set, `uptime` load
 average, iteration count, and whether it is *frame-ms* or *core-ms*.
@@ -391,6 +471,14 @@ then all-GPU, or the thermal state becomes a hidden variable.
    difference, rather than crippling it with `chunk-grid=0` to "match".
 10. **Machine load.** Recorded for every CPU number; this is precisely why per-phase counters are
     used instead of wall clock.
+11. **Shading rate.** `deferred_checkerboard` is ON for greets — **the CPU lighting kernel shades
+    half the pixels.** A GPU full-rate number compared against it understates the CPU by up to 2×
+    on the lighting stage. Report the CPU lighting stage both ways.
+12. **Shadow amortisations the GPU declines.** The CPU skips the per-pixel cube tap entirely on
+    static surfaces lit by static omnis (static shadow lightmaps, 128² planar atlas) and uses a
+    PolyId identity test rather than a depth compare. The GPU takes every tap with hardware
+    compare. **This asymmetry runs the opposite way from most of the others** — it makes the GPU
+    do more work — and must be stated, because a reader will assume the reverse.
 
 ### 5.4 The headline number, and why it's that one
 
@@ -406,9 +494,9 @@ Report a per-stage table, each row with its own ratio and its own caveat referen
 | Stage | GPU (median ms, p5/p95) | CPU (per-phase counter, frame-ms or core-ms, load stated) | Ratio | Caveats |
 |---|---|---|---|---|
 | Geometry front end / G-buffer fill | | | | §5.3 items 1, 8, 9 |
-| Shadow bake (7×6×256²) | | | | §5.3 items 3, 7 |
-| Deferred lighting | | | | §5.3 items 5, 6 |
-| Tonemap | | | | §5.3 item 4 |
+| Shadow bake (7×6×512² + 3×6×128²) | | | | §5.3 items 3, 7, 12 |
+| Deferred lighting (PBR, GGX) | | | | §5.3 items 5, 6, 11, 12 |
+| Tonemap + bloom | | | | §5.3 item 4 |
 | **Whole frame** | | | | all |
 
 **Anti-goals.** No single "GPU is N× faster" headline without the stage breakdown. No comparison
@@ -425,8 +513,8 @@ Estimates are **ESTIMATE** unless a stage is marked as already measured.
 |---|---|--:|---|
 | **0. Scaffolding** | `option(FDS_GPU_BENCH … OFF)` + new target; `.mm`; Metal device; runtime MSL compile; link `libFDS.a` | ~½ day, **largely de-risked already** (FDS standalone link and runtime MSL compile both MEASURED) | Proof the approach works at all |
 | **1. Phase 2 spike** | greets geometry via `LoadFLD`, albedo via `Load_Texture`, de-indexed triangles with per-face UVs, one review pose, GPU frame timing, offscreen preferred | ~1 day | **The first real number**: this exact geometry, textured, on the GPU. Answers the vertex/raster half of the question. |
-| **2. Deferred G-buffer + 7 omnis, no shadows** | MRT G-buffer, full-screen lighting pass | ~1–1.5 days | The lighting comparison without the shadow confound. **Highest value per day, because the frame is lighting-bound.** |
-| **3. Cube shadow maps** | 7 lights × 6 faces × 256², `sample_compare` + PCF | ~1.5–2 days | The full greets-frame comparison, and makes the PCF asymmetry concrete |
+| **2. Deferred G-buffer + 7 omnis, no shadows** | MRT G-buffer, full-screen **PBR** lighting pass (GGX + split-sum env BRDF + multiscatter + SH ambient — the stack greets actually runs) | ~1.5–2 days | The lighting comparison without the shadow confound. **Highest value per day, because the frame is lighting-bound.** |
+| **3. Cube shadow maps** | 7 × 6 × 512² + 3 × 6 × 128², `sample_compare` + PCF | ~1.5–2 days | The full greets-frame comparison, and makes the PCF / lightmap-amortisation asymmetries concrete |
 | **4. HDR + ACES tonemap** | `rgba16float` target + tonemap pass | ~½ day | Parity with greets' default look; makes screenshots visually comparable |
 | **5. Displacement arms** | flat POM (~1 d), shell/prism with silhouettes + depth write (~2–3 d), hardware tessellation (~2 d) | ~5–6 days | **The strategic prize**: a visual ground truth for the S1 campaign, and a direct answer to whether silhouette-correct per-pixel displacement works, on hardware where a fragment shader can `discard` and write depth at full rate |
 | **6. (optional) Snapshot output** | offscreen PPM/PNG matching our snapshot naming | ~½ day | Cross-renderer image diffs with existing tooling |
@@ -462,8 +550,11 @@ endif()
   for the window). It does **not** link `Modplayer` and does **not** compile any `DEMO/` source.
 - Shaders are `.metal` text files copied next to the binary, compiled at runtime.
 - Run from `Runtime/` like everything else (asset paths are CWD-relative).
-- Gate verification required after any CMake edit: `cmake --build build` unchanged, and
-  `tools/render_gate.sh` 3/3.
+- Gate verification required after any CMake edit: `cmake --build build` unchanged (baseline:
+  **94 `compile_commands.json` entries**, `ninja -n` clean), and `tools/render_gate.sh` 3/3.
+  Note that gate covers `mirrortest` / `conetest` / `halotest` — **not greets**, whose pin depends
+  on the user's uncommitted authoring files and is checked out-of-band via
+  `tools/flip_rate.sh -n 24`.
 - Offscreen rendering is the default. **A visible window is only opened on explicit request** —
   per the standing rule that visible runs are the user's to launch.
 
@@ -472,9 +563,14 @@ endif()
 ## 8. Open questions to settle before Phase 3
 
 1. Which displacement arms, in what order — pending `docs/DISPLACEMENT_RESEARCH_II.md`.
-2. Shadow resolution arm: 256² (our default) only, or also 512²/1024² to show the GPU's
+2. Shadow resolution sweep: 512² (our static default) only, or also 1024²/2048² to show the GPU
    scaling where the CPU's is prohibitive?
-3. Should the GPU path also render the 3 mech-parented omnis (needs the `GREETS.CPP` hierarchy
-   logic replicated), or stay at 7 and state it?
+3. The 3 mech-parented omnis resolve through the hierarchy pass, which `Animate_Objects` already
+   runs — so they should be free. Confirm at implementation time rather than assuming.
 4. Is a GPU **forward** arm worth ~½ day, to isolate "deferred vs forward" separately from
    "CPU vs GPU"?
+5. Checkerboard: does the GPU arm implement it for faithfulness, or stay full-rate and report the
+   CPU both ways (current recommendation)?
+6. Phase 3 must load the `greets_stone_tex` wall/floor sidecars directly (§2.6) — those, not the
+   `wall_stone3` PBR set, are the surfaces the S1 campaign is about. Confirm which files are live
+   by reading the `[GREETS] stone-tex …` line from a real run rather than from the source.
