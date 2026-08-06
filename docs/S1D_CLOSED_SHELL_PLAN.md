@@ -1554,3 +1554,277 @@ vertex move ever fails a depth gate, look here first.
 uncommitted `DEMO/DisplaceRebuild.cpp` hunk into its own commit (`18a58ae`)
 without the declarations, leaving HEAD unable to compile for the ~30 minutes
 until I committed the rest.
+
+---
+
+# S1d-2f — THE MITRE INVERSION, ROOT-CAUSED (and it is TANGENTIAL SLIDE)
+
+Added 2026-08-06, branch `fog-wt`. `S1d-2e.5` recorded that the geometrically
+CORRECT true mitre (`--pom_shell_weld=4`, 51 012 void px) measures much worse
+than the mean-normal approximation it was meant to replace (`=3`, 24 334) and
+than the per-material weld (`=1`, 14 163), and called the disagreement
+"unexplained … a real open bug". `DISPLACEMENT_RESEARCH_II` §8.5 R2 made
+resolving it a precondition of the prism. This section resolves it.
+
+**The answer: the mitre is exact on the component nothing needed and strictly
+worse on the component that opens the holes.** It is not a bug in the
+implementation. The construction is doing precisely what a mitre does, and a
+mitre is the wrong objective for this arm.
+
+## S1d-2f.0 THE MECHANISM, stated before the numbers
+
+At a fold of half-angle `T` between two incident planes, welding moves the
+shared corner along the bisector `m`. Decompose that move against ONE incident
+plane, normal `N`, `m·N = cos T`:
+
+| construction | move | NORMAL part (`d·N`) | TANGENTIAL part (`|d − (d·N)N|`) |
+|---|---|---|---|
+| mean normal (`weld=1/3/5`) | `off·m` | `off·cos T` | **`off·sin T`** |
+| true mitre (`weld=4/6`) | `off·m / cos T` | `off` | **`off·tan T`** |
+
+The mitre's guarantee is the middle column: every incident plane ends up offset
+by exactly `off`. The cost is the right column, and `tan T > sin T` for every
+`T`, so **the mitre is a strict increase in tangential slide, by exactly
+`1/cos T`** — up to the implementation's 3× clamp, which on greets' measured
+78.7° folds means a corner travelling `3 × 0.09 = 0.27` world.
+
+The normal part is worth nothing here. `Vertex::ShellH` already records the
+height each corner actually reached (`0.5 + 0.5·ndv`), so the march enters at
+the true geometric height whether the corner reached `off` or `off·cos T` —
+that is what ShellH is for, and `--pom_shell_weld`'s own flag help says so. The
+tangential part is pure damage: it slides a patch's BOUNDARY sideways inside
+its own plane, dragging every free edge away from whatever was meeting it.
+
+**The formula in `S1d-2e.5` and in RESEARCH_II §8.5 R2 —
+"retracts by `off·(1−cos(half-fold))`" — is wrong and is retracted.** The
+retraction is `off·sin T`. At the 45° folds that dominate greets that is
+`0.09 × 0.707 = 0.0636`, which is the `0.064 world` that section MEASURED;
+its own formula gives `0.0264`, 2.4× too small. The number was right, the
+formula was not.
+
+## S1d-2f.1 THE VOID IS GEOMETRY, NOT THE MARCH — measured first, because it
+## rules out every march-side hypothesis at once
+
+`--pom_path_viz=2` writes a per-pixel path code on the PRE-KILL coverage mask,
+so a fragment the march discarded is still recorded and code `0` means *no
+fragment was ever rasterised at this pixel*. Void (`z16 == 0`) split on that,
+16 review poses, standing lid arm, RelWithDebInfo build of `0846811` + this
+section's census flag:
+
+| extra void of … over `weld=1` | px | **NO FRAGMENT (geometry)** | fragment then killed |
+|---|---|---|---|
+| `weld=0` (no weld) | 220 897 | **216 233 (97.9 %)** | 4 664 |
+| `weld=3` | 13 009 | **12 950 (99.5 %)** | 59 (all `keep`, i.e. a farther face won) |
+| `weld=4` | 42 658 | **42 141 (98.8 %)** | 517 |
+| `weld=5` | 10 632 | **10 632 (100 %)** | 0 |
+
+Not one of the extra pixels is a domain exit, a base clip or a no-cross
+discard. **The weld modes differ in geometry only.** Every march-side
+explanation (ShellH, the entry height, the cap, the domain box, the side
+faces) is excluded by this table without needing a separate experiment.
+
+## S1d-2f.2 WHERE, AND ON WHICH FACES
+
+Void by pose, all 16 review poses, every mode re-measured on the current tree:
+
+| pose | `weld=0` | **`=1`** | `=3` | `=4` | **`=5`** | `=6` |
+|---|---|---|---|---|---|---|
+| p1 t5743 | 534 | 153 | 428 | 617 | 284 | 436 |
+| p2 t5773 | 189 | 159 | 368 | 364 | 241 | 206 |
+| p4 t5843 | 18 360 | 1 | 0 | 5 | 0 | 5 |
+| p5 t5963 | 96 747 | 8 700 | 10 812 | 14 363 | 4 585 | 170 |
+| **p6 t6133** (mirror) | 13 359 | 3 509 | 8 548 | **24 181** | 3 865 | 17 864 |
+| **p7 t6293** (mirror) | 4 592 | 1 641 | 4 178 | **11 482** | 1 671 | 8 084 |
+| p9 t5958 | 86 131 | 0 | 0 | 0 | 0 | 0 |
+| p11 t5958 | 8 489 | 0 | 0 | 0 | 0 | 0 |
+| p14 t5534 | 5 | 0 | 7 | 10 | 2 | 9 |
+| p16 t5854 | 4 196 | 0 | 0 | 0 | 0 | 0 |
+| others (6 poses) | 10 | 0 | 0 | 0 | 0 | 0 |
+| **TOTAL** | **232 612** | **14 163** | **24 341** | **51 022** | **10 648** | **26 774** |
+
+The 13-pose subset reproduces S1d-2e.5 to the digit (14 163 / 24 334 / 51 012 /
+10 646), so this is the same phenomenon, re-measured.
+
+**70 % of `weld=4`'s void is at the two MIRROR-PANEL poses**, and it is ONE
+crack. `--face_id_dump` at p6 t6133, resolving the faces immediately above and
+below every extra-void pixel:
+
+```
+material ABOVE the crack: rooms::mirUV 13 108 | floor::mirUV 6 135 | rooms 413
+material BELOW the crack: floor::mirUV 18 000 | rooms 82 | rooms::mirUV 76
+```
+
+a single line across the floor, 17 875 of the 21 881 extra pixels inside
+`y ∈ [820, 900]`. `weld=3` opens the SAME line, 5 093 px — narrower, in the
+same place, at the same faces.
+
+The three faces at the crack, pristine vs each mode (from `--face_id_dump`,
+`--pom_shell_lid_probe` for pristine):
+
+```
+Piramid.lwo:c0  floor::mirUV
+  pristine  A=(17.898,0.000,-49.374)  B=(17.898,0.000,-75.913)  C=(49.374,0.000,-75.913)
+  weld=1    A=(17.898,0.090,-49.374)  B=(17.898,0.090,-75.913)  C=(49.374,0.090,-75.913)   |d| 0.0900 / 0.0900 / 0.0900
+  weld=3    A=(17.958,0.060,-49.404)  B=(17.935,0.037,-75.839)  C=(49.337,0.073,-75.876)   |d| 0.0900 / 0.0906 / 0.0898
+  weld=4    A=(17.988,0.090,-49.419)  B=(17.988,0.090,-75.733)  C=(49.284,0.180,-75.823)   |d| 0.1350 / 0.2205 / 0.2205
+```
+
+`weld=1` is a **RIGID TRANSLATION** of the floor — every vertex `(0, +0.09, 0)`,
+the plane offset by exactly the slab half-depth and not moved one micron
+sideways. `weld=3` gives each position its own scene-wide mean direction, so the
+same three corners rise by 0.060 / 0.037 / 0.073 and slide 0.03–0.07 sideways.
+`weld=4` divides each of those by its own `cos T` and the far corner rises
+0.180 — twice the offset — while `B` slides **0.180 world in z**.
+
+Both faces above the crack meet `c0` at a **T-JUNCTION**: `c19`'s vertex
+`(17.898, 0, -62.952)` and `c50`'s `(17.898, 0, -58.014)` both lie in the
+INTERIOR of `c0`'s edge `A–B` (`x = 17.898`, `z ∈ [-49.374, -75.913]`), not at
+its corners. A T-junction is watertight under any offset that is AFFINE ALONG
+THE EDGE — a rigid translation is — and opens by the deviation of the middle
+vertex from the moved line as soon as it is not. Evaluated by hand at
+`c19`'s B: **`weld=1` gap 0.000, `weld=3` 0.041, `weld=4` 0.061 world.**
+
+## S1d-2f.3 THE PREDICTOR: `--pom_shell_slit_census`
+
+New diagnostic flag, default OFF, init-time print only, and deliberately
+implemented WHOLLY OUTSIDE `PomShell_Build` so that function's
+`-ffp-contract=fast` vertex move is textually untouched (the trap S1d-2e.5
+documents). It snapshots every vertex position before the first build and after
+the last one attributes, per COPY, the delta actually applied.
+
+The metric that ranks the modes is **(D) TANGENTIAL SLIDE against the vertex's
+own PRISTINE face plane** — `|d − (d·N)N|`, which is exactly 0 for a rigid
+offset and needs no neighbour and no shared vertex, so unlike a position-keyed
+census it also sees a boundary that merely ABUTS another surface:
+
+| mode | `floor` slide | `rooms` slide | all, mean | all, max | shelled-vs-shelled TEAR | **void, 16 poses** |
+|---|---|---|---|---|---|---|
+| 0 (no weld) | 0.0000 | 0.0030 | 0.0026 | 0.0374 | **13.02** | 232 612 |
+| **1** | **0.0000** | 0.0364 | 0.0316 | 0.0883 | 5.21 | **14 163** |
+| 3 | 0.0594 | 0.0418 | 0.0441 | 0.0885 | 0.00 | 24 341 |
+| 4 | 0.1050 | 0.0656 | 0.0708 | **0.2648** | 0.00 | 51 022 |
+| **5** | 0.0598 | 0.0419 | 0.0450 | 0.0885 | 0.00 | **10 648** |
+| 6 | 0.1055 | 0.0641 | 0.0712 | 0.2635 | 0.00 | 26 774 |
+
+Read it as `void ≈ TEAR + SLIDE + unshelled-junction gap`:
+
+- **mode 0 is the TEAR** (13.02 world of pairwise disagreement between the
+  copies at one position) and almost no slide — each vertex moves along its own
+  normal, which is tangential to nothing. That is the 232 612.
+- **the weld converts tear into slide.** Once the tear is gone the void tracks
+  the slide, and it tracks it *within each material*: `floor` 0.0000 / 0.0594 /
+  0.1050 and `rooms` 0.0364 / 0.0418 / 0.0656 for modes 1 / 3 / 5→ order
+  preserved in both.
+- **`weld=1`'s floor slide is EXACTLY ZERO** because a per-material weld on a
+  planar material is a rigid translation. That single property is why mode 1
+  beats mode 3 despite mode 3 closing the *entire* cross-material tear (5.21 →
+  0.00). Scene-wide welding is the operation that destroys it: the build log
+  goes from `'floor': … 0 corner verts (ShellH min 1.000)` to
+  `90 corner verts (ShellH min 0.621)` — every one of the floor's 90 vertex
+  uses becomes a welded corner, because all 42 of its positions are shared
+  with `rooms`.
+- **the mitre is a pure multiplier on the slide.** The cleanest pair is 5 vs 6:
+  identical pin set, identical topology, zero tear and zero unshelled gap in
+  both, the only difference being the `1/cos T` factor. Slide 0.0450 → 0.0712
+  (**×1.58**), T-junction gap area 79.9 → 161.0 (**×2.02**), void 10 648 →
+  26 774 (**×2.51**). The 3/4 pair says the same: slide ×1.61, |d| mean
+  0.0900 → 0.1323 (×1.47), void ×2.10.
+- **mode 5 wins because it removes a different term** — the gap against
+  UNSHELLED neighbours, `siling` and `teleporter`, which the census measures at
+  slide-area 95.2 world² for modes 1/3 and 0.0 for modes 5/6.
+
+## S1d-2f.4 VERDICT, and what it changes downstream
+
+**`--pom_shell_weld=4/6` should not be pursued and the "geometrically correct
+construction measures worse" open bug is closed.** The mitre optimises
+per-plane offset EXACTNESS. Nothing in this pipeline consumes that — ShellH
+already carries the height each corner reached — and it buys it by multiplying
+the one quantity that opens holes by `1/cos(half-fold)`. There is no tuning of
+the 3× clamp that rescues it: at the clamp the slide is 3× worse, and below the
+clamp it is still `tan/sin = 1/cos` worse than mode 3. The correct objective for
+a lid offset is **minimum tangential slide**, and on a planar patch the minimiser
+is the rigid translation `weld=1` already performs.
+
+Three consequences for `RESEARCH_II` §8.6:
+
+1. **Precondition 1 must not say "mitre".** It should say: one extrusion
+   DIRECTION per position (Hirche req. 1, still required so two prisms share
+   their side quad), chosen to minimise tangential slide — not one that puts
+   every incident plane at exactly `off`.
+2. **The mitre's problem largely disappears under a real prism, and that is an
+   argument FOR the prism.** The whole weld/mitre difficulty exists because the
+   lid-only shell has nothing to seal a fold with, so the two lids are required
+   to meet. A prism has a shared SIDE QUAD at every interior edge: two adjacent
+   prisms stay watertight while their lids move apart, because the side quad
+   follows the vertices. What survives is only the boundary against geometry
+   that is NOT a prism — §8.6 precondition 3 — plus T-junctions, which need
+   the edge split, not the weld, to be consistent.
+3. **T-junctions are a new precondition.** greets' floor carries at least two
+   (`c19`, `c50` on `c0`'s 26.5-world edge) and the census finds 140
+   (edge, T-vertex) pairs among the shelled faces alone. Hirche's manifold
+   requirement (3) already excludes them in principle; this is the first
+   measurement of how many greets actually has, and they are load-bearing —
+   they are where 70 % of `weld=4`'s void lives.
+
+## S1d-2f.5 THE WELD ITSELF — recommend DEFAULT ON for any lid arm
+
+Re-measured over the current 16 review poses, not the 13 the −96.6 % figure
+came from: **232 612 → 14 163 px, −93.9 %**, for a pure geometry change with
+the march untouched. It removes void ENTIRELY at five poses where the unwelded
+lid loses 4 196 – 96 747 px, and `=5` takes it to **10 648, −95.4 %**.
+
+LOOK, not the pixel count (`v/look_p9_t5958.png`, `v/look_p5_t5963.png`, crops
+of the void bbox, `weld=0 | =1 | =5` side by side):
+
+- **p9 t5958** — unwelded, a **full-height black gash** runs top to bottom of
+  the frame between two wall panels. Welded, the wall is continuous and the two
+  panels' stone reads across the join. This is the user's reported "black
+  gashes between wall panels", and the weld is what removes it.
+- **p5 t5963** — unwelded, a large black wedge takes the bottom-left of the
+  crop where the wall meets the floor, plus a torn strip up the wall's lower
+  edge. Welded, both are gone.
+- `=1` and `=5` are visually indistinguishable at these two poses; `=5`'s win is
+  concentrated at p5 (8 700 → 4 585) and costs nothing seen.
+
+`--pom_shell_weld` is still default 0. **Recommend 1 as the default and 5 as
+the standing arm's value**, on the grounds that (a) it is geometry, not a
+quality knob — the unwelded lid is a torn mesh, not a different rendering
+choice; (b) −93.9 % of the void with zero march change; (c) the failure it
+removes is the exact defect the user reported. Flipping a default is his call,
+so it is recorded here as a recommendation with the numbers attached rather
+than taken.
+
+## S1d-2f.6 GATES
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (`4ac809e5` / `b41894f9` / `166fa25a`) |
+| city `t=1961` | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact, 4/4 |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact, 3/3 |
+| greets pin | `f1297141611c484bac7cc10a8bdcf630` — byte-exact, 4/4 |
+| `--pom_shell_slit_census` default | 0; `PomShell_SlitSnapshot` returns before touching anything, `PomShell_SlitCensus` before reading anything |
+| `PomShell_Build` | not edited by this section — the census lives in two new functions and the FP-contract trap of S1d-2e.5 cannot recur |
+| bad flags | 0 across all 100+ run logs (`unknown flag` / `requires a value` grep) |
+
+## S1d-2f.7 REPRODUCTION
+
+```sh
+LID="--deferred --pom_shell --pom_shell_side_faces=3 --pom_shell_lid_edge=1 \
+ --no-pom_shell_base_clip --pom_shell_world_amp --pom_shell_world_amp_set=0.18 \
+ --pom_normal --parallax_pom_cone --parallax_pom=32 --pom_cone_exact=1 \
+ --pom_cone_min_step=1 --pom_march_earlyout --pom_shell_cap=16"
+
+# the census — no rendering needed, init-time print
+./DEMO --snapshot=greets@t=5743 $LID --pom_shell_weld=N --pom_shell_slit_census
+
+# void + cause split, per pose from docs/greets_review_poses.txt
+FDS_SNAPSHOT_ZDUMP=1 FDS_GREETS_CAM="<cam>" \
+  ./DEMO --snapshot=greets@t=<t> --out=<dir> $LID --pom_shell_weld=N --pom_path_viz=2
+#   void  = popcount(z16 == 0)
+#   cause = path.u32 == 0  ->  no fragment (geometry);  != 0 -> march, [7:4] = action
+
+# the faces at the crack
+FDS_GREETS_CAM="27.9341908,3.21640229,-59.6960106,-0.994124591,-0.0584560856,0.0910993442" \
+  ./DEMO --snapshot=greets@t=6133 --out=<dir> $LID --pom_shell_weld=N --face_id_dump
+#   pristine positions: the same run with --pom_shell_lid_probe
+```

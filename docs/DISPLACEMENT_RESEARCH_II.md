@@ -1216,14 +1216,28 @@ defect and must not be sold as the fix.
   highest-value flag in the campaign and it is still default OFF. Combine with
   `=5` (pin against unshelled) for the −25 % residue, or better, extend the shell to
   `siling` and the columns so requirement (4) holds and nothing needs pinning.
-- **R2 — a real weld, not an averaged one.** Modes 1/3 move a welded corner along the
-  *mean* normal, which retracts every welded boundary laterally by
-  `off·(1−cos(half-fold))` and measurably opens more slit than it closes on the floor
-  (14 163 → 24 334 for mode 3) [M §S1d-2e.5]. Mode 4's true mitre is the correct
-  construction and measured worse (51 012) — that disagreement is unexplained and is
-  a real open bug, not a tuning choice. **It should be root-caused before the prism
-  is built on top of it**, because the prism needs exactly this: coincident corners
-  landing on one point with no retraction.
+- **R2 — RESOLVED 2026-08-06, and the answer is "do not mitre" [M §S1d-2f].**
+  This item used to read "mode 4's true mitre is the correct construction and
+  measured worse — that disagreement is unexplained and is a real open bug". It
+  is explained, and the mitre is not the correct construction *for this
+  objective*. At a fold of half-angle `T` the mean-normal weld moves a corner
+  `off·cos T` along each incident plane's normal and `off·sin T` **tangentially**;
+  the mitre divides by `cos T`, making the normal part exactly `off` and the
+  tangential part `off·tan T`. Nothing consumes the normal exactness —
+  `Vertex::ShellH` already records the height each corner actually reached — and
+  the tangential part is what slides a patch's boundary sideways and opens the
+  holes. So the mitre pays `1/cos T` (3× at the clamp, 0.27 world on greets) for
+  nothing. Measured on the cleanest pair, `weld=5` vs `=6`, which differ ONLY by
+  the mitre: tangential slide 0.0450 → 0.0712 world (×1.58), void 10 648 → 26 774
+  (×2.51). **98–100 % of every mode's extra void is `--pom_path_viz` code 0 — no
+  fragment rasterised at all — so this is geometry and no march-side hypothesis
+  is involved.** The lateral-retraction formula quoted here previously,
+  `off·(1−cos(half-fold))`, is **wrong and retracted**; it is `off·sin T`, which
+  is the 0.064 world S1d-2e.5 measured (its number was right, its formula was
+  not). The correct objective for a lid offset is MINIMUM TANGENTIAL SLIDE, whose
+  minimiser on a planar patch is the rigid translation `--pom_shell_weld=1`
+  already performs — measured slide **exactly 0.0000** on `floor`, which is why
+  mode 1 beats mode 3 even though mode 3 closes the entire cross-material tear.
 - **R3 — then the prism** (§8.6).
 - **R4 — chart width, last.** After the weld, the residue is candidate 3/5. Either
   widen the domain (the shipped-POM model, §1.1/§5-R1 — still the cheapest arm in the
@@ -1238,11 +1252,19 @@ holds and side-face pixel coverage is small].
 
 Preconditions, each traceable to a quoted requirement in §8.2:
 
-1. **Weld first (req. 1).** Every coincident position must extrude along ONE
-   direction. `PomShell_WeldPrepare` + `--pom_shell_weld=3` already builds a
-   scene-wide position bucket before any material moves; the prism must consume that,
-   not per-vertex `Vertex::N`. **Blocked on R2**: the mean-normal weld retracts
-   boundaries and the mitre variant measures worse — resolve that first.
+1. **Weld first (req. 1) — but NOT with a mitre. Unblocked 2026-08-06 [M §S1d-2f].**
+   Every coincident position must extrude along ONE direction, so that two
+   adjacent prisms share their side quad; `PomShell_WeldPrepare` +
+   `--pom_shell_weld=3` already builds the scene-wide position bucket before any
+   material moves, and the prism must consume that, not per-vertex `Vertex::N`.
+   The direction must be chosen to **minimise TANGENTIAL SLIDE**, not to put every
+   incident plane at exactly `off` — `--pom_shell_weld=4/6`'s mitre does the
+   latter and multiplies the former by `1/cos(half-fold)`, measured at ×2.5 void.
+   Note also that the mitre's difficulty is *specific to the lid-only shell*, and
+   this is an argument FOR the prism: a fold's two lids are only required to meet
+   because the lid shell has nothing to seal the fold with. A prism has a shared
+   SIDE QUAD at every interior edge, so two adjacent prisms stay watertight while
+   their lids move apart.
 2. **A consistent global vertex ordering (req. 2).** Hirche's `v0<v1<v2` swap needs
    comparable indices across adjacent faces. On an angle-split mesh, derive the
    ordering from the **quantized position key** (`qpos`, already in `MeshOps.cpp`)
@@ -1258,6 +1280,17 @@ Preconditions, each traceable to a quoted requirement in §8.2:
 5. **Hide mirror clones during the build** — `DisplaceRebuild.cpp:326` zeroes their
    `FIndex`; without it `rooms` goes 67 → 113 patches and the domain changes for the
    real walls too (measured 58 % of the frame).
+5b. **T-JUNCTIONS — a precondition §8.2 did not name, added 2026-08-06
+   [M §S1d-2f].** greets' shelled surface carries vertices sitting in the
+   *interior* of a neighbouring face's edge — measured, **140 (edge, T-vertex)
+   pairs among the shelled faces alone**, including two on one 26.5-world floor
+   edge. A T-junction is watertight under any offset that is AFFINE ALONG THE
+   EDGE and opens otherwise, and it is where **70 % of `--pom_shell_weld=4`'s
+   void lives**. Hirche's manifold requirement (3) excludes them in principle;
+   in practice the prism must either split the edge (turning the T into a real
+   vertex) or the offset along every edge must stay affine. This is the second
+   place a naive port silently produces cracks.
+
 6. **Planar faces are already satisfied (req. 5)** — greets' walls are flat
    axis-charted quads with per-face constant tangent frames, so the cheap
    single-pass prism variant applies and no per-frame Projected-Tetrahedra CPU
