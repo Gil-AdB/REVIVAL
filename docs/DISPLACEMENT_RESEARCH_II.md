@@ -1245,6 +1245,30 @@ defect and must not be sold as the fix.
 
 ## 8.6 Prism path — the mesh contract an implementation agent must satisfy
 
+> **BUILT AND MEASURED 2026-08-06 — `--pom_prism`, default 0
+> [M §S1d-3].** 196 side quads = **392 faces** (the estimate below said ~1 800;
+> the boundary-only rule needs a fifth of that), void over the 16 review poses
+> **14 163 → 2 px**, against tessellation's **156** re-derived on the same 16.
+> +0.63 ms, march bit-identical (2 073 600 / 2 073 600 marched-UV px at p9),
+> all four shipping gates byte-exact. Corrections to the preconditions below,
+> from the build:
+> * **5b (T-junctions) needs no separate pass.** "Emit iff no partner shares
+>   the AUTHORED edge with the SAME delta at both endpoints" covers it: a
+>   T-junction has no partner sharing the edge *exactly*, so it is emitted.
+> * **Precondition 8 (pure discard) is measured WRONG for this construction.**
+>   `--pom_shell_lid_edge=0` still costs **164 055 px**, because the march's
+>   domain is each PATCH's UV BOX while the prism seals the shelled SURFACE's
+>   boundary — a ray leaving its box mid-wall has no neighbouring prism
+>   fragment to answer it. The clamp stays.
+> * **The full per-triangle prism (`--pom_prism=2`, 1 356 faces) buys nothing**
+>   over the boundary skirt: 3 px vs 2. Weld first, seal only the residue.
+> * **`--pom_shell_side_faces` is superseded** — with the real quads present,
+>   turning the analytic leaning planes off leaves the void at 2.
+> * **The prism does not fix the grazing smear** and does not move slip; it
+>   does make `--pom_shell_cap` a free parameter (void 2 at cap 2/4/8/16,
+>   where without the prism it is 14 163 at both cap 4 and cap 16).
+
+
 The leading implementation candidate, sized: **8 triangles per shelled base triangle,
 back-face culled — ~1 800 faces for greets' 226 shelled quads, ≈ 2 % of the
 tessellation carve's measured 86 600** [E, assumes the measured 0.75–0.85 µs/face

@@ -5901,7 +5901,10 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 				// and, under the weld, the boundary skirt). mode 2 = emit at EVERY
 				// edge, the literal Hirche prism, for the A/B.
 				if (mode < 2 && watertight) { ++nSkipMatched; continue; }
-				if (!sawPartner) ++nFreeEdge; else if (sawStatic) ++nStaticNb; else ++nTorn;
+				if (watertight)       ++nSkipMatched;      // mode 2 emits it anyway
+				else if (!sawPartner) ++nFreeEdge;
+				else if (sawStatic)   ++nStaticNb;
+				else                  ++nTorn;
 				// Outward direction: in the OWNER's plane, perpendicular to the
 				// edge, away from the third corner. The quad must face that way or
 				// the backface cull eats it.

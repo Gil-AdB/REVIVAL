@@ -1849,3 +1849,266 @@ FDS_GREETS_CAM="27.9341908,3.21640229,-59.6960106,-0.994124591,-0.0584560856,0.0
   ./DEMO --snapshot=greets@t=6133 --out=<dir> $LID --pom_shell_weld=N --face_id_dump
 #   pristine positions: the same run with --pom_shell_lid_probe
 ```
+
+---
+
+# S1d-3 — THE PRISM. Real side geometry, and it takes the lid arm's void to 2 px
+
+Added 2026-08-06, branch `fog-wt`, flag `--pom_prism` (default 0 = OFF).
+`S1d-2f.1` established the thing this stage acts on: **every void pixel the weld
+cannot reach is `--pom_path_viz` code 0 — no fragment was ever rasterised
+there.** It is missing geometry, and no march-side flag can answer it. Hirche
+2004's answer is a prism per base triangle, whose side quads are rasterised
+geometry rather than an exit test. This builds them.
+
+## S1d-3.0 THE CONSTRUCTION, and the one rule it runs on
+
+`PomShell_BuildPrism` (`DEMO/MeshOps.cpp`) emits a side quad at an edge iff
+
+> no partner face shares its AUTHORED endpoints with the SAME offset delta at
+> both of them.
+
+That single test covers all four cases §8.6 lists separately: a free edge has no
+partner; an unshelled neighbour has a zero delta; a T-junction has no partner
+sharing the edge EXACTLY (the T splits it), so it is emitted too — precondition
+5b falls out of the rule instead of needing its own pass; and a torn corner has
+a partner whose delta differs. Under the (default) weld the rule reduces to the
+BOUNDARY of the shelled surface, because interior edges already agree by
+construction; with the weld off it emits the literal per-triangle prism.
+
+The quad spans **lid (`Pos`) to base (`Pos − 2·delta`)**, so it passes exactly
+through the AUTHORED edge. That is why it seals against a static neighbour
+whatever the weld's tangential slide did — the slide moves both rings together
+and the segment still contains the authored point. `ShellH` runs 1 → 0 down the
+quad, so the march enters at the fragment's true slab height; `N`/`Tangent` are
+the PATCH's, so the tangent frame, the UV domain and the material — including
+its `::mirUV` handedness clone — are the neighbouring lid's. Built after the
+handedness split and before the mirror clone build, into ONE new `TriMesh`
+(`pom_prism_sides`, no "Piramid" in the name so the chunk split skips it).
+Nothing existing is reallocated, so every `Face→Vertex` pointer stays valid.
+
+greets, `--pom_prism=1`:
+
+```
+[POM-PRISM] mode=1: 226 shelled faces, 678 edges tested -> 196 side quads
+            (784 verts / 392 faces). Cause: 87 FREE edge (no partner),
+            43 partner does NOT move (unshelled / T-junction),
+            66 partner moves DIFFERENTLY (torn). Skipped: 482 already watertight
+```
+
+**392 faces. The tessellation carve is 86 600** — the prism is 0.45 % of it.
+`--pom_prism=2` (every edge, the literal Hirche set) is 678 quads / 1 356 faces.
+
+## S1d-3.1 VOID — the headline, 16 review poses
+
+`FDS_SNAPSHOT_ZDUMP=1`, `void = popcount(z16 == 0)`, dummy SDL drivers,
+1920×1080, standing lid arm (`weld=1` default, `side_faces=3`, `lid_edge=1`,
+`world_amp_set=0.18`, cone-32, `cap=16`).
+
+| arm | void, 16 poses |
+|---|--:|
+| lid (the standing arm) | 14 163 |
+| **lid + `--pom_prism=1`** | **2** |
+| lid + `--pom_prism=2` (full per-triangle prism) | 3 |
+| lid + `--pom_prism=1 --pom_shell_side_faces=0` | 2 |
+| lid + `--pom_prism=1 --pom_shell_lid_edge=0` (pure discard) | 164 055 |
+| **tessellation (`--greets_displace`)** | **156** |
+| flat POM | 7 |
+
+Per pose, lid → prism: p1 t5743 **153 → 0**, p2 t5773 159 → 2, p4 1 → 0,
+p5 t5963 **8 700 → 0**, p6 t6133 (mirror) **3 509 → 0**, p7 t6293 (mirror)
+**1 641 → 0**, every other pose 0 → 0.
+
+Three things this table says, in order of importance:
+
+1. **The prism beats tessellation on void by 78×** on the same 16 poses. The
+   "0–24 px" the campaign has been quoting for tessellation is a 13-pose figure:
+   re-derived on the current 16, tessellation is **156**, of which 142 sit at
+   **p14 t=5534** — the corridor-looking-back pose the earlier sets did not
+   cover. That is not a criticism of tessellation; it is the bar being measured
+   on the full set for the first time.
+2. **The full per-triangle prism buys nothing over the boundary skirt** (3 vs 2)
+   for 3.5× the faces. Weld first, then seal only what the weld cannot: the
+   ordering `S1d-2f.4` recommended is confirmed by measurement.
+3. **`--pom_shell_side_faces` is now dead weight.** The analytic leaning side
+   PLANES were S1d-2a's approximation of the side face. With the real quad
+   present, turning them off changes the void by nothing (2 → 2). The prism
+   replaces them.
+
+And one thing it does NOT say: `--pom_shell_lid_edge=0` — the pure discard
+§8.6 precondition 8 asks for — is **still catastrophic (164 055)**. The reason
+is a scope mismatch, and it is worth stating because it is the honest limit of
+this stage: the march's domain is each PATCH's UV BOX, while the prism seals the
+shelled SURFACE's boundary. A ray that leaves its patch's UV box mid-wall still
+has no neighbouring prism fragment to answer it. Closing that would mean a prism
+per patch-box side, not per surface boundary. The clamp stays.
+
+## S1d-3.2 IT DOES NOT TOUCH THE MARCH — proven, not asserted
+
+At p9 t=5958 (the grazing pose), `FDS_DUMP_TXTR` marched-UV dump plus the depth
+dump, lid vs lid+prism:
+
+```
+covered px 2 073 600
+marched UV bit-identical on covered px: 2 073 600 / 2 073 600
+depth identical px:                     2 073 600 / 2 073 600
+```
+
+**Every pixel of the frame, bit for bit.** So at this pose the prism adds
+nothing and removes nothing, and — the point of the exercise — **SLIP under the
+prism is exactly the lid arm's**, by construction rather than by a sweep. The
+prism is not a swim fix and must not be sold as one.
+
+Across the 16 poses the depth plane changes at 2 536 px (p1), 55 px (p9) and
+**0 px (p14)** — it is depth-ADDITIVE. The final colour also moves by exactly
+**±1 LSB over ~25 % of the frame at every pose** (p14: 397 513 px at ≤1, 26 px
+above 16/255, max 39). The lid arm is byte-exact run-to-run (3/3 at three
+poses), so that drift is real and caused by the extra mesh — a
+lighting/accumulation-ORDER effect, not a march change, and it is reported here
+rather than rounded away.
+
+## S1d-3.3 THE CAP IS NOW A FREE PARAMETER — the one lever the prism unlocks
+
+`--pom_shell_cap` bounds `1/(V·N)` in the true-ray march. It is simultaneously
+the silhouette's reach and the grazing smear's cause (`S1d-2e`), and the campaign
+has never been able to lower it because the silhouette was the only thing holding
+the boundary together. Measured today:
+
+| arm | cap 2 | cap 4 | cap 8 | cap 16 |
+|---|--:|--:|--:|--:|
+| lid | — | **14 163** | — | **14 163** |
+| lid + `--pom_prism=1` | **2** | **2** | **2** | **2** |
+
+**Without the prism the cap does not move the void at all** (14 163 at 4 and at
+16 — the void is geometry, exactly as S1d-2f.1 said). **With the prism the void
+is 2 at every cap from 2 to 16.** The cap is therefore decoupled from the void
+and can be tuned purely against the smear.
+
+LOOK at p9 t=5958, the smear repro, 800×600 crop, `flat | tess | prism cap16 |
+prism cap4` — `docs/img/s1d_3/graze_p9_t5958.png`. The mortar joint reads: flat
+a thin dark line, tessellation a crisp joint, prism cap16 a wide smeared brown
+band, prism cap4 a narrower and darker band. **The prism at cap 4 is visibly
+better than at cap 16 and still not tessellation.** The grazing step is not
+fixed by this stage.
+
+## S1d-3.4 GATES
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** (`4ac809e5` / `b41894f9` / `166fa25a`) |
+| city `t=1961` | `37e62845c4d30eefa321730c5bb7e0b8` — byte-exact 3/3 |
+| fountain `t=2500` | `51fff7cd38767d619280afe0498a6f24` — byte-exact 3/3 |
+| greets pin `t=1588` | `f1297141611c484bac7cc10a8bdcf630` — byte-exact 3/3 |
+| `--pom_prism` default | 0; `PomShell_PrismSnapshot` returns before touching anything, `PomShell_BuildPrism` is behind `pom_shell() && pom_prism()>0` |
+| `PomShell_Build` | not edited by this stage — the prism lives in two new functions, so S1d-2e.5's FP-contract trap cannot recur |
+| bad flags | 0 `unknown flag` / `requires a value` across every run log |
+
+### Gate 3 — OFFSCREEN. The prism inherits the lid's cost and adds ~nothing
+
+Shadow cube, `--dump_shadowmap` from `build-dev` (`-DFDS_DEV=ON`), t=5743,
+76 cube faces, 13 533 184 depth texels:
+
+| pair | texels differing | >8/255 |
+|---|--:|--:|
+| `flat` vs `rec` (recess-only) | **0 (0.00 %)** | 0 |
+| `flat` vs `tess` | 191 665 (**1.42 %**) | 191 550 |
+| `flat` vs `lid` | 2 540 585 (18.77 %) | 36 509 |
+| `flat` vs **`prism`** | 2 542 546 (**18.79 %**) | 37 647 |
+
+The `lid` and `rec` rows reproduce `S1d-2d.5`'s published figures to the digit,
+which is what makes the other two trustworthy. **The 392 side faces add 1 961
+texels (+0.08 pp).** The 18.77 % is the LID's — moving vertices — and the prism
+neither causes nor cures it. Recess-only's 0 remains the standard and
+**tessellation at 1.42 % is 13× cleaner offscreen than any lid arm.**
+
+### Gate — PERF
+
+`--bench=scene@scene=greets,t=5780,iters=20`, 4 interleaved rounds, min of arm,
+load 8–12 (shared box):
+
+| arm | ms | Δ flat | Δ lid |
+|---|--:|--:|--:|
+| flat | 49.55 | — | |
+| tessellation | 54.23 | +4.68 | |
+| lid | 55.54 | +6.00 | — |
+| **lid + prism** | **56.18** | +6.63 | **+0.63** |
+
+**The prism's own cost is +0.63 ms** — 392 faces and their pixels. At this pose
+**tessellation is 1.95 ms CHEAPER than the prism arm**; per `ENVDYN §A2` the
+ordering flips at the corner/corridor poses, where the shell's per-pixel cost
+falls and tessellation's per-face cost does not.
+
+## S1d-3.5 LOOK — the three defects the user named
+
+- **p5 t=5963** (`docs/img/s1d_3/gash_p5_t5963.png`, 220×340 crop, `lid | prism`)
+  — the lid arm's full-height black gash between the wall panels is replaced by
+  a real, shaded, textured strip: the side of the slab at the fold. This is the
+  single biggest void item (8 700 px) and it is geometry answering geometry.
+- **p6 t=6133 / p7 t=6293, the mirror panels**
+  (`docs/img/s1d_3/mirror_p6_t6133.png`, `lid | prism | tess`) — the lid arm
+  draws a black outline around the mirror rectangle (its left vertical edge and
+  the reflected floor's horizontal edge). Under the prism both are gone. That
+  ring was 5 150 of the lid arm's 14 163 px and it is NOT wall relief: it is the
+  mirror wall's own moved footprint against its clone.
+- **p9 t=5958, the grazing smear** — **unchanged.** See §S1d-3.3. The prism does
+  not touch the march and the marched UV is bit-identical.
+
+## S1d-3.6 VERDICT — does the prism beat tessellation?
+
+**On the defect it was built for, decisively. On the whole comparison, it is a
+split decision and the split is legible:**
+
+| axis | tessellation | lid + prism | winner |
+|---|---|---|---|
+| void, 16 review poses | 156 | **2** | **prism, 78×** |
+| the t=5743 gash / the panel gashes | absent | **absent** | tie |
+| the mirror-panel ring (p6/p7) | absent | **absent** | tie |
+| protrusion + see-through at the slab (p1 t5743) | 122 458 px | 58 999 px | tessellation, but they are different surfaces |
+| **grazing step at t=5958** | **crisp** | smeared | **tessellation** |
+| **offscreen shadow cube vs flat** | **1.42 %** | 18.79 % | **tessellation, 13×** |
+| cost at t=5780 | **54.23 ms** | 56.18 ms | **tessellation, −1.95 ms** |
+| cost at the corner/corridor poses (`ENVDYN §A2`) | cheaper than flat+7 | per-pixel, pose-dependent | pose-dependent |
+| faces added | 86 600 | **392** | **prism, 220×** |
+| slip / swim | none (geometry cannot swim) | the lid arm's, unchanged | **tessellation** |
+
+**The prism is the right answer to the question it was asked.** The user's
+complaint — "the lid protrusion looks fantastic when it actually works" — was
+about the cases where it did not work, and those cases were holes. The holes are
+gone: 14 163 → 2 px, for 392 faces and 0.63 ms, with the march untouched and
+every shipping gate byte-exact.
+
+**It does not, on its own, retire tessellation.** Tessellation still wins the
+grazing step, the offscreen consumers by 13×, and the frame at the wall bench
+pose. What the prism changes is the *shape of the remaining argument*: before
+today the lid arm had a structural hole class that no amount of tuning could
+close, and tessellation was the only arm without one. That is no longer true, and
+the two remaining gaps are both attacks on the MARCH, not on the geometry —
+and §S1d-3.3 shows the prism has already handed the campaign the lever
+(a free `--pom_shell_cap`) that the first of them needs.
+
+## S1d-3.7 REPRODUCTION
+
+```sh
+LID="--deferred --pom_shell --pom_shell_side_faces=3 --pom_shell_lid_edge=1 \
+ --no-pom_shell_base_clip --pom_shell_world_amp --pom_shell_world_amp_set=0.18 \
+ --pom_normal --parallax_pom_cone --parallax_pom=32 --pom_cone_exact=1 \
+ --pom_cone_min_step=1 --pom_march_earlyout --pom_shell_cap=16"
+
+# void, per pose from docs/greets_review_poses.txt
+FDS_SNAPSHOT_ZDUMP=1 FDS_GREETS_CAM="<cam>" \
+  ./DEMO --snapshot=greets@t=<t> --out=<dir> $LID --pom_prism=1
+#   void = popcount(z16 == 0)
+
+# the march-identity proof (p9 t=5958)
+FDS_DUMP_TXTR=1 FDS_SNAPSHOT_ZDUMP=1 FDS_GREETS_CAM="12.263032,2.64180589,\
+-55.9950409,0.0452918001,-0.0762010962,0.996063471" \
+  ./DEMO --snapshot=greets@t=5958 --out=<dir> $LID [--pom_prism=1]
+#   diff greets_t005958_uv.bin between the two runs
+
+# offscreen (dev build only — does not overwrite Runtime/DEMO)
+build-dev/DEMO/DEMO --snapshot=greets@t=5743 --dump_shadowmap $LID --pom_prism=1
+#   /tmp/shadowmap_*.pgm, 76 cube faces
+
+# perf
+./DEMO $LID --pom_prism=1 --bench=scene@scene=greets,t=5780,iters=20
+```
