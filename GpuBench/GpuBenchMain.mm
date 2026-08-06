@@ -125,6 +125,14 @@ const char *kUsage =
     "                    cleared / min-max / decoded world distance) and write a 3x2 face\n"
     "                    atlas PPM. Forces Shared storage on the cubes, so never a timing run.\n"
     "  --dump_cube_out=PATH  where the atlas goes (default gpubench_cube.ppm)\n"
+  "  --window          OPEN A REAL WINDOW: SDL2 + CAMetalLayer, the scene ANIMATED\n"
+    "                    through FDS's own Animate_Objects, free-fly camera and live\n"
+    "                    per-pass GPU ms overlaid. WASD+QE move, drag to look, SHIFT fast,\n"
+    "                    TAB free-fly/authored-spline, SPACE pause, [ ] scrub time, ESC quit.\n"
+    "                    Offscreen remains the default; nothing is displayed without this.\n"
+    "  --win=WxH         window size (default 1280x720)\n"
+    "  --spline          start on the authored camera spline instead of free-fly\n"
+    "  --time_scale=F    demo-timer centiseconds per real second (default 100 = real time)\n"
     "  --no-bloom / --bloom_intensity=F / --bloom_threshold=F   greets defaults are ON,\n"
     "                    intensity 2.0, threshold 200 (the CPU's linear 0-255 radiance scale)\n"
     "  --no-flares / --flare_gain=F   omni flare sprites (the DEMO reference's bright pools)\n"
@@ -147,6 +155,7 @@ int main(int argc, const char *argv[]) {
     std::string shaderDir;
     bool noDraw = false;
     std::string passMode = "albedo";
+    bool camExplicit = false;
     gpubench::DeferredOptions dopt;
 
     for (int i = 1; i < argc; ++i) {
@@ -160,7 +169,7 @@ int main(int argc, const char *argv[]) {
         if (a == "--help" || a == "-h") { std::fputs(kUsage, stdout); return 0; }
         else if (const char *v = val("--fld="))     { static std::string s; s = v; opt.fldPath = s.c_str(); }
         else if (const char *v = val("--t="))       opt.demoT = std::atoi(v);
-        else if (const char *v = val("--cam="))     opt.camPose = v;
+        else if (const char *v = val("--cam="))     { opt.camPose = v; camExplicit = true; }
         else if (const char *v = val("--xres="))    opt.xres = std::atoi(v);
         else if (const char *v = val("--yres="))    opt.yres = std::atoi(v);
         else if (const char *v = val("--warmup="))  warmup = std::atoi(v);
@@ -180,6 +189,11 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
         else if (a == "--no-stone_tex")             opt.stoneTex = false;
         else if (a == "--no-disco")                 opt.disco = false;
+        else if (a == "--window")                   dopt.interactive = true;
+        else if (const char *v = val("--win="))     { std::sscanf(v, "%dx%d", &dopt.winW, &dopt.winH); }
+        else if (const char *v = val("--time_scale=")) dopt.timeScale = float(std::atof(v));
+        else if (a == "--spline")                   dopt.freeFly = false;
+        else if (const char *v = val("--win_frames=")) dopt.winFrames = std::atoi(v);
         else if (a == "--no-bloom")                 dopt.bloom = false;
         else if (const char *v = val("--bloom_intensity=")) dopt.bloomIntensity = float(std::atof(v));
         else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
@@ -202,6 +216,12 @@ int main(int argc, const char *argv[]) {
         }
         else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }
     }
+
+    // --spline means "follow the AUTHORED camera spline". The default camPose is
+    // the review pose, which PINS the camera — the spline arm showed a frozen
+    // viewpoint until this was cleared. An explicit --cam still wins. Must happen
+    // BEFORE Load, which is what builds the first camera.
+    if (dopt.interactive && !dopt.freeFly && !camExplicit) opt.camPose.clear();
 
     // ---- scene ------------------------------------------------------------
     gpubench::Scene scene;
@@ -233,7 +253,9 @@ int main(int argc, const char *argv[]) {
         dopt.iters = iters;
         dopt.outPath = outPath;
         gpubench::DeferredResult res;
+        dopt.loadOpt = &opt;
         if (!gpubench::RunDeferred(scene, dopt, sp, res)) return 3;
+        if (dopt.interactive) return 0;
 
         std::fprintf(stderr,
             "\n[GPUBENCH] ===== DEFERRED RESULT =====\n"

@@ -172,4 +172,20 @@ struct LoadOptions {
 // CalcPersp reads.
 bool Load(Scene &out, const LoadOptions &opt);
 
+// Re-run the engine's animation at a new demo-timer value and refresh everything
+// that is per-frame: object model matrices, the scripted camera, and the whole
+// light list (the disco spots rotate). Vertices, textures and material constants
+// are frame-invariant and are NOT rebuilt -- Animate_Objects fills per-mesh
+// IPos/IScale/RotMat and does not deform vertices, so the mech animates as a
+// hierarchy of rigid TriMeshes. VertexHash() exists to keep that claim measured.
+bool Reanimate(Scene &out, const LoadOptions &opt, float demoT);
+uint64_t VertexHash(const Scene &s);
+
+// Build a view matrix with the ENGINE's Kick_Camera from an eye + forward
+// direction. Exposed so the interactive window's free-fly camera goes through
+// the same construction as every other camera in this arm, without pulling the
+// FDS headers (whose ::Vertex / ::Scene / ::Texture collide with ours) into the
+// Objective-C++ renderer.
+void BuildViewMatrix(const float eye[3], const float fwd[3], float outRot[3][3]);
+
 }  // namespace gpubench

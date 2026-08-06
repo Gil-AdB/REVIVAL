@@ -1,11 +1,15 @@
 #include "Deferred.h"
 
 #import <Foundation/Foundation.h>
+#import <QuartzCore/CAMetalLayer.h>
+#include <SDL.h>
+#include <SDL_metal.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 
 namespace gpubench {
 namespace {
@@ -98,6 +102,64 @@ constexpr CubeFace kCubeFaces[6] = {
     {{-1,  0,  0}, {0,  1,  0}, { 0,  0, -1}},   // -Z  sc=-x tc=-y
 };
 
+// ---- tiny 5x7 bitmap font for the HUD ---------------------------------
+// A HUD is required (live per-pass GPU ms), and there is no text stack in this
+// target. 5 columns x 7 rows, each column a bit mask with bit0 = top row.
+struct Glyph { char c; uint8_t col[5]; };
+static const Glyph kFont[] = {
+ {' ',{0x00,0x00,0x00,0x00,0x00}},{'!',{0x00,0x00,0x5F,0x00,0x00}},
+ {'.',{0x00,0x60,0x60,0x00,0x00}},{',',{0x00,0x50,0x30,0x00,0x00}},
+ {':',{0x00,0x36,0x36,0x00,0x00}},{'/',{0x20,0x10,0x08,0x04,0x02}},
+ {'-',{0x08,0x08,0x08,0x08,0x08}},{'+',{0x08,0x08,0x3E,0x08,0x08}},
+ {'=',{0x14,0x14,0x14,0x14,0x14}},{'%',{0x23,0x13,0x08,0x64,0x62}},
+ {'(',{0x00,0x1C,0x22,0x41,0x00}},{')',{0x00,0x41,0x22,0x1C,0x00}},
+ {'[',{0x00,0x7F,0x41,0x41,0x00}},{']',{0x00,0x41,0x41,0x7F,0x00}},
+ {'<',{0x08,0x14,0x22,0x41,0x00}},{'>',{0x41,0x22,0x14,0x08,0x00}},
+ {'0',{0x3E,0x51,0x49,0x45,0x3E}},{'1',{0x00,0x42,0x7F,0x40,0x00}},
+ {'2',{0x42,0x61,0x51,0x49,0x46}},{'3',{0x21,0x41,0x45,0x4B,0x31}},
+ {'4',{0x18,0x14,0x12,0x7F,0x10}},{'5',{0x27,0x45,0x45,0x45,0x39}},
+ {'6',{0x3C,0x4A,0x49,0x49,0x30}},{'7',{0x01,0x71,0x09,0x05,0x03}},
+ {'8',{0x36,0x49,0x49,0x49,0x36}},{'9',{0x06,0x49,0x49,0x29,0x1E}},
+ {'A',{0x7E,0x11,0x11,0x11,0x7E}},{'B',{0x7F,0x49,0x49,0x49,0x36}},
+ {'C',{0x3E,0x41,0x41,0x41,0x22}},{'D',{0x7F,0x41,0x41,0x22,0x1C}},
+ {'E',{0x7F,0x49,0x49,0x49,0x41}},{'F',{0x7F,0x09,0x09,0x09,0x01}},
+ {'G',{0x3E,0x41,0x49,0x49,0x7A}},{'H',{0x7F,0x08,0x08,0x08,0x7F}},
+ {'I',{0x00,0x41,0x7F,0x41,0x00}},{'J',{0x20,0x40,0x41,0x3F,0x01}},
+ {'K',{0x7F,0x08,0x14,0x22,0x41}},{'L',{0x7F,0x40,0x40,0x40,0x40}},
+ {'M',{0x7F,0x02,0x0C,0x02,0x7F}},{'N',{0x7F,0x04,0x08,0x10,0x7F}},
+ {'O',{0x3E,0x41,0x41,0x41,0x3E}},{'P',{0x7F,0x09,0x09,0x09,0x06}},
+ {'Q',{0x3E,0x41,0x51,0x21,0x5E}},{'R',{0x7F,0x09,0x19,0x29,0x46}},
+ {'S',{0x46,0x49,0x49,0x49,0x31}},{'T',{0x01,0x01,0x7F,0x01,0x01}},
+ {'U',{0x3F,0x40,0x40,0x40,0x3F}},{'V',{0x1F,0x20,0x40,0x20,0x1F}},
+ {'W',{0x3F,0x40,0x38,0x40,0x3F}},{'X',{0x63,0x14,0x08,0x14,0x63}},
+ {'Y',{0x07,0x08,0x70,0x08,0x07}},{'Z',{0x61,0x51,0x49,0x45,0x43}},
+};
+static const Glyph *FindGlyph(char c) {
+    if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
+    for (const auto &g : kFont) if (g.c == c) return &g;
+    return &kFont[0];
+}
+// Draw `s` into an RGBA8 buffer at (x0,y0), `sc` pixels per font pixel.
+static void HudText(uint8_t *buf, int bw, int bh, int x0, int y0, int sc,
+                    const char *s, uint8_t r, uint8_t g, uint8_t b) {
+    int x = x0;
+    for (const char *p = s; *p; ++p) {
+        const Glyph *gl = FindGlyph(*p);
+        for (int c = 0; c < 5; ++c)
+            for (int row = 0; row < 7; ++row) {
+                if (!((gl->col[c] >> row) & 1)) continue;
+                for (int dy = 0; dy < sc; ++dy)
+                    for (int dx = 0; dx < sc; ++dx) {
+                        const int px = x + c * sc + dx, py = y0 + row * sc + dy;
+                        if (px < 0 || py < 0 || px >= bw || py >= bh) continue;
+                        uint8_t *o = buf + (size_t(py) * size_t(bw) + size_t(px)) * 4;
+                        o[0] = r; o[1] = g; o[2] = b; o[3] = 255;
+                    }
+            }
+        x += 6 * sc;
+    }
+}
+
 double Percentile(std::vector<double> v, double p) {
     if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());
@@ -179,7 +241,7 @@ void ProjectSkyGradientToSH(const float zenith[3], const float nadir[3], float s
 
 }  // namespace
 
-bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
+bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                  const std::string &shaderPath, DeferredResult &out) {
 @autoreleasepool {
     NSError *err = nil;
@@ -472,12 +534,17 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
 
     // ---- uniforms ---------------------------------------------------------
     FrameUniforms fu{};
-    for (int c = 0; c < 3; ++c) {
-        fu.camRow0[c] = scene.camera.rot[0][c];
-        fu.camRow1[c] = scene.camera.rot[1][c];
-        fu.camRow2[c] = scene.camera.rot[2][c];
-        fu.camSrc[c] = scene.camera.src[c];
-    }
+    // Everything view-dependent lives in this lambda so the interactive window can
+    // re-run it every frame without duplicating the derivation.
+    auto refreshFrameUniforms = [&]() {
+        for (int c = 0; c < 3; ++c) {
+            fu.camRow0[c] = scene.camera.rot[0][c];
+            fu.camRow1[c] = scene.camera.rot[1][c];
+            fu.camRow2[c] = scene.camera.rot[2][c];
+            fu.camSrc[c] = scene.camera.src[c];
+        }
+    };
+    refreshFrameUniforms();
     fu.sx = 2.0f * scene.camera.perspX / float(W);
     fu.ox = 2.0f * scene.camera.cntrEX / float(W) - 1.0f;
     fu.sy = 2.0f * scene.camera.perspY / float(H);
@@ -573,6 +640,33 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
     id<MTLBuffer> lightBuf = [dev newBufferWithBytes:lights.data()
                                              length:lights.size() * sizeof(GpuLight)
                                             options:MTLResourceStorageModeShared];
+    // Per-frame light refresh for the interactive window: the mech omnis ride the
+    // hierarchy and the 10 disco spots rotate, so position/direction/intensity and
+    // the spot shadow basis all change every tick. Cube/map SLOT assignment does
+    // not -- Reanimate rebuilds scene.lights in the same order and length, so
+    // lightCube[] stays valid.
+    auto refreshLightBuffer = [&]() {
+        size_t k = 0;
+        for (size_t i = 0; i < scene.lights.size() && k < lights.size(); ++i) {
+            const Light &L = scene.lights[i];
+            if (!std::isfinite(L.pos[0]) || L.range <= 0.0f) continue;
+            GpuLight &g = lights[k++];
+            for (int c = 0; c < 3; ++c) {
+                g.pos[c] = L.pos[c];
+                const float c01 = L.color[c] / 255.0f;
+                g.color[c] = c01 * c01 * L.intensity;
+                g.dir[c] = L.dir[c];
+                g.sRow0[c] = L.shadowRot[0][c];
+                g.sRow1[c] = L.shadowRot[1][c];
+                g.sRow2[c] = L.shadowRot[2][c];
+            }
+            g.range = L.range;
+            g.invRange = 1.0f / L.range;
+            g.cosInner = L.cosInner;
+            g.cosOuter = L.cosOuter;
+            g.sRow0[3] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f);
+        }
+    };
 
     // Flare list. One draw per flaring omni (<= 10 here) rather than instancing:
     // each flare has its own generated texture, and 10 draws is not a cost worth
@@ -599,6 +693,7 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
                                           options:MTLResourceStorageModeShared];
 
     std::vector<BatchUniforms> bus(scene.batches.size());
+    auto refreshBatchUniforms = [&]() {
     for (size_t i = 0; i < scene.batches.size(); ++i) {
         const Batch &b = scene.batches[i];
         BatchUniforms &u = bus[i];
@@ -624,6 +719,8 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         u.mapFlags[2] = b.aoInAlpha ? 1.0f : 0.0f;
         u.mapFlags[3] = b.parallaxScale;
     }
+    };
+    refreshBatchUniforms();
 
     {
         int nCast = 0; long triCast = 0, triAll = 0;
@@ -1052,6 +1149,232 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         [cb commit];
         return cb;
     };
+
+    // ---- INTERACTIVE WINDOW ------------------------------------------------
+    if (opt.interactive) {
+        if (!opt.loadOpt) { std::fprintf(stderr, "[WINDOW] no LoadOptions\n"); return false; }
+        if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+            std::fprintf(stderr, "[WINDOW] SDL_Init: %s\n", SDL_GetError()); return false;
+        }
+        SDL_Window *win = SDL_CreateWindow("GpuBench — greets on the GPU",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, opt.winW, opt.winH,
+            SDL_WINDOW_METAL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
+        if (!win) { std::fprintf(stderr, "[WINDOW] CreateWindow: %s\n", SDL_GetError()); return false; }
+        SDL_MetalView view = SDL_Metal_CreateView(win);
+        CAMetalLayer *layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
+        layer.device = dev;
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.framebufferOnly = YES;
+
+        id<MTLRenderPipelineState> psoBlit = makeFsPso(@"fs_blit", MTLPixelFormatBGRA8Unorm);
+        id<MTLRenderPipelineState> psoHud;
+        {
+            MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+            p.vertexFunction = [lib newFunctionWithName:@"vs_fullscreen"];
+            p.fragmentFunction = [lib newFunctionWithName:@"fs_hud"];
+            p.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            p.colorAttachments[0].blendingEnabled = YES;
+            p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+            p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            NSError *e = nil;
+            psoHud = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+            if (!psoHud) { std::fprintf(stderr, "[WINDOW] hud pso: %s\n",
+                                        [[e localizedDescription] UTF8String]); return false; }
+        }
+        const int HUDW = 520, HUDH = 190;
+        MTLTextureDescriptor *htd =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                              width:HUDW height:HUDH mipmapped:NO];
+        htd.usage = MTLTextureUsageShaderRead;
+        htd.storageMode = MTLStorageModeShared;
+        id<MTLTexture> hudTex = [dev newTextureWithDescriptor:htd];
+        std::vector<uint8_t> hudBuf(size_t(HUDW) * HUDH * 4, 0);
+
+        // Free-fly state, seeded from the ingest camera so the window opens on the
+        // same pose the offscreen renders use.
+        float eye[3] = {scene.camera.src[0], scene.camera.src[1], scene.camera.src[2]};
+        // Derive yaw/pitch from the camera's forward row (Mat row 2 is forward).
+        float fwd[3] = {scene.camera.rot[2][0], scene.camera.rot[2][1], scene.camera.rot[2][2]};
+        float yaw = std::atan2(fwd[0], fwd[2]);
+        float pitch = std::asin(std::max(-1.0f, std::min(1.0f, fwd[1])));
+        bool  freeFly = opt.freeFly, paused = false, mouseLook = false, running = true;
+        float demoT = float(opt.loadOpt->demoT);
+        float speed = 12.0f;                 // world units / second
+        LoadOptions lo = *opt.loadOpt;
+
+        std::fprintf(stderr,
+            "[WINDOW] open %dx%d. WASD+QE move, mouse-drag look, SHIFT fast, "
+            "TAB free-fly/spline, SPACE pause, [ ] time scrub, ESC quit\n",
+            opt.winW, opt.winH);
+
+        uint64_t prevTick = SDL_GetPerformanceCounter();
+        const double freq = double(SDL_GetPerformanceFrequency());
+        double cpuAnimMs = 0, cpuUploadMs = 0, gpuFrameMs = 0;
+        double emaFps = 0;
+        int frameNo = 0;
+        uint64_t vhash0 = VertexHash(scene);
+        bool vertsEverChanged = false;
+
+        while (running) {
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) running = false;
+                else if (ev.type == SDL_KEYDOWN) {
+                    switch (ev.key.keysym.sym) {
+                        case SDLK_ESCAPE: running = false; break;
+                        case SDLK_TAB:    freeFly = !freeFly; break;
+                        case SDLK_SPACE:  paused = !paused; break;
+                        case SDLK_LEFTBRACKET:  demoT -= 100.0f; break;
+                        case SDLK_RIGHTBRACKET: demoT += 100.0f; break;
+                        default: break;
+                    }
+                } else if (ev.type == SDL_MOUSEBUTTONDOWN) mouseLook = true;
+                else if (ev.type == SDL_MOUSEBUTTONUP)   mouseLook = false;
+                else if (ev.type == SDL_MOUSEMOTION && mouseLook) {
+                    yaw   -= float(ev.motion.xrel) * 0.004f;
+                    pitch -= float(ev.motion.yrel) * 0.004f;
+                    pitch = std::max(-1.55f, std::min(1.55f, pitch));
+                    freeFly = true;
+                }
+            }
+            const uint64_t now = SDL_GetPerformanceCounter();
+            const float dt = float(double(now - prevTick) / freq);
+            prevTick = now;
+            emaFps = emaFps ? emaFps * 0.9 + (1.0 / std::max(dt, 1e-4f)) * 0.1
+                            : 1.0 / std::max(dt, 1e-4f);
+
+            if (!paused) demoT += opt.timeScale * dt;
+
+            // --- CPU-side per-frame work, timed separately from GPU pass time ---
+            const auto tAnim0 = std::chrono::steady_clock::now();
+            Reanimate(scene, lo, demoT);
+            const auto tAnim1 = std::chrono::steady_clock::now();
+            cpuAnimMs = std::chrono::duration<double, std::milli>(tAnim1 - tAnim0).count();
+
+            if (frameNo == 3 && VertexHash(scene) != vhash0) vertsEverChanged = true;
+
+            // Camera: free-fly, or the authored spline that Reanimate just moved.
+            if (freeFly) {
+                const uint8_t *k = SDL_GetKeyboardState(nullptr);
+                const float f[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch),
+                                    std::cos(yaw) * std::cos(pitch)};
+                const float r[3] = {f[2], 0.0f, -f[0]};
+                const float rl = std::sqrt(r[0]*r[0] + r[2]*r[2]);
+                const float rn[3] = {r[0]/std::max(rl,1e-5f), 0.0f, r[2]/std::max(rl,1e-5f)};
+                float v = speed * dt * ((k[SDL_SCANCODE_LSHIFT] || k[SDL_SCANCODE_RSHIFT]) ? 4.0f : 1.0f);
+                if (k[SDL_SCANCODE_W]) for (int c=0;c<3;++c) eye[c] += f[c]*v;
+                if (k[SDL_SCANCODE_S]) for (int c=0;c<3;++c) eye[c] -= f[c]*v;
+                if (k[SDL_SCANCODE_D]) for (int c=0;c<3;++c) eye[c] += rn[c]*v;
+                if (k[SDL_SCANCODE_A]) for (int c=0;c<3;++c) eye[c] -= rn[c]*v;
+                if (k[SDL_SCANCODE_E]) eye[1] += v;
+                if (k[SDL_SCANCODE_Q]) eye[1] -= v;
+                // Build the view with the ENGINE's Kick_Camera, same as everywhere else.
+                BuildViewMatrix(eye, f, scene.camera.rot);
+                for (int c = 0; c < 3; ++c) scene.camera.src[c] = eye[c];
+            } else {
+                for (int c=0;c<3;++c) eye[c] = scene.camera.src[c];
+                yaw = std::atan2(scene.camera.rot[2][0], scene.camera.rot[2][2]);
+                pitch = std::asin(std::max(-1.0f, std::min(1.0f, scene.camera.rot[2][1])));
+            }
+
+            // --- refresh the GPU-visible per-frame state ---
+            const auto tUp0 = std::chrono::steady_clock::now();
+            refreshFrameUniforms();
+            refreshBatchUniforms();
+            refreshLightBuffer();
+            std::memcpy([lightBuf contents], lights.data(), lights.size() * sizeof(GpuLight));
+            const auto tUp1 = std::chrono::steady_clock::now();
+            cpuUploadMs = std::chrono::duration<double, std::milli>(tUp1 - tUp0).count();
+
+            id<MTLCommandBuffer> cb = renderFrame();
+            [cb waitUntilCompleted];
+            gpuFrameMs = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
+            std::vector<double> perPass(kPasses, 0.0);
+            if (sampleBuf) {
+                NSData *d = [sampleBuf resolveCounterRange:NSMakeRange(0, NSUInteger(kPasses*2))];
+                if (d && [d length] >= sizeof(MTLCounterResultTimestamp) * kPasses * 2) {
+                    const auto *ts = static_cast<const MTLCounterResultTimestamp *>([d bytes]);
+                    for (int p = 0; p < kPasses; ++p) {
+                        const uint64_t a = ts[p*2].timestamp, b2 = ts[p*2+1].timestamp;
+                        if (a != MTLCounterErrorValue && b2 != MTLCounterErrorValue && b2 > a)
+                            perPass[p] = double(b2 - a) / 1e6;
+                    }
+                }
+            }
+
+            // --- HUD ---
+            std::fill(hudBuf.begin(), hudBuf.end(), uint8_t(0));
+            char line[160];
+            int ly = 4;
+            std::snprintf(line, sizeof line, "GPU FRAME %6.3F MS   %5.0F FPS", gpuFrameMs, emaFps);
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 255, 255); ly += 18;
+            static const char *pn[4] = {"SHADOW BAKE", "GBUFFER", "LIGHTING", "TONEMAP"};
+            for (int p = 0; p < kPasses; ++p) {
+                std::snprintf(line, sizeof line, "  %-12s %6.3F MS", pn[p], perPass[p]);
+                HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 170, 210, 255); ly += 15;
+            }
+            std::snprintf(line, sizeof line, "CPU ANIM %5.3F  UPLOAD %5.3F MS", cpuAnimMs, cpuUploadMs);
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 220, 140); ly += 18;
+            std::snprintf(line, sizeof line, "T=%6.0F FRAME %6.1F  %s%s",
+                          demoT, scene.curFrame, freeFly ? "FREE-FLY" : "SPLINE",
+                          paused ? " (PAUSED)" : "");
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 200, 255, 200); ly += 15;
+            std::snprintf(line, sizeof line, "%d LIGHTS  %zu DRAWS  VERTS %s",
+                          out.litLights, scene.batches.size(),
+                          vertsEverChanged ? "RE-UPLOADED" : "STATIC (NO RE-UPLOAD)");
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 190, 190, 190);
+            [hudTex replaceRegion:MTLRegionMake2D(0, 0, HUDW, HUDH) mipmapLevel:0
+                        withBytes:hudBuf.data() bytesPerRow:HUDW * 4];
+
+            // --- present ---
+            @autoreleasepool {
+                id<CAMetalDrawable> drawable = [layer nextDrawable];
+                if (drawable) {
+                    id<MTLCommandBuffer> pcb = [queue commandBuffer];
+                    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                    rp.colorAttachments[0].texture = drawable.texture;
+                    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> e = [pcb renderCommandEncoderWithDescriptor:rp];
+                    float ds[2] = {float(drawable.texture.width), float(drawable.texture.height)};
+                    [e setRenderPipelineState:psoBlit];
+                    [e setFragmentBytes:ds length:sizeof(ds) atIndex:1];
+                    [e setFragmentTexture:ldrTex atIndex:0];
+                    [e setFragmentSamplerState:bloomSamp atIndex:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    float hs[2] = {float(HUDW), float(HUDH)};
+                    [e setRenderPipelineState:psoHud];
+                    [e setFragmentBytes:hs length:sizeof(hs) atIndex:1];
+                    [e setFragmentTexture:hudTex atIndex:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    [e endEncoding];
+                    [pcb presentDrawable:drawable];
+                    [pcb commit];
+                }
+            }
+            // Periodic telemetry so the window's animation and per-pass costs are
+            // verifiable from a log, not only from the on-screen HUD.
+            if ((frameNo % 30) == 0)
+                std::fprintf(stderr,
+                    "[WINDOW] f=%4d t=%7.0f CurFrame=%7.1f cam=(%6.2f,%5.2f,%7.2f) %s | "
+                    "gpu %6.3f ms (bake %.3f gbuf %.3f light %.3f tone %.3f) | "
+                    "cpu anim %.3f upload %.3f | %.0f fps\n",
+                    frameNo, demoT, scene.curFrame,
+                    scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
+                    freeFly ? "free-fly" : "spline",
+                    gpuFrameMs, perPass[0], perPass[1], perPass[2], perPass[3],
+                    cpuAnimMs, cpuUploadMs, emaFps);
+            ++frameNo;
+            if (opt.winFrames > 0 && frameNo >= opt.winFrames) running = false;
+        }
+        std::fprintf(stderr, "[WINDOW] closed after %d frames. verts re-uploaded: %s\n",
+                     frameNo, vertsEverChanged ? "YES" : "NO (rigid-hierarchy animation)");
+        SDL_Metal_DestroyView(view);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return true;
+    }
 
     // ---- warmup + measure --------------------------------------------------
     std::fprintf(stderr, "[DEFERRED] warmup %d frames…\n", opt.warmup);

@@ -797,3 +797,31 @@ fragment float4 fs_bloom_add(FsQuadOut in [[stage_in]],
     const float2 uv = (in.position.xy) / b.srcSize;
     return float4(src.sample(samp, uv).rgb * b.intensity, 1.0f);
 }
+
+// ---------------------------------------------------------------------------
+// interactive window: blit + HUD overlay
+// ---------------------------------------------------------------------------
+
+// Copy the LDR frame to the drawable (which may be a different size than the
+// render target, e.g. on a Retina display), then the HUD is composited on top.
+fragment float4 fs_blit(FsQuadOut in [[stage_in]],
+                        constant float2 &dstSize [[buffer(1)]],
+                        texture2d<float> src [[texture(0)]],
+                        sampler samp [[sampler(0)]])
+{
+    return float4(src.sample(samp, in.position.xy / dstSize).rgb, 1.0f);
+}
+
+// HUD: an RGBA8 text bitmap rasterised on the CPU each frame, alpha-composited
+// over the drawable. Kept as a separate pass so it is trivially excludable from
+// any timing (it is drawn AFTER the timed command buffer's work in any case).
+fragment float4 fs_hud(FsQuadOut in [[stage_in]],
+                       constant float2 &hudSize [[buffer(1)]],
+                       texture2d<float> hud [[texture(0)]])
+{
+    const uint2 p = uint2(in.position.xy);
+    if (p.x >= uint(hudSize.x) || p.y >= uint(hudSize.y)) discard_fragment();
+    const float4 t = hud.read(p);
+    if (t.a <= 0.0f) discard_fragment();
+    return float4(t.rgb, t.a);
+}

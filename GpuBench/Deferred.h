@@ -10,6 +10,8 @@
 
 #include "SceneIngest.h"
 
+#include <cstdint>
+
 #include <string>
 #include <vector>
 
@@ -54,6 +56,21 @@ struct DeferredOptions {
     bool  bloom = true;
     float bloomThreshold = 200.0f / 255.0f;
     float bloomIntensity = 2.0f;
+    // INTERACTIVE WINDOW. Opens a real SDL2 window with a CAMetalLayer, animates
+    // the scene through FDS's own Animate_Objects, and overlays live per-pass GPU
+    // ms. Never enabled unless asked for -- offscreen stays the default so a
+    // measurement run never pops a window.
+    bool  interactive = false;
+    int   winW = 1280, winH = 720;
+    // Demo-timer rate in centiseconds per second. g_FrameTime is a 100 Hz clock
+    // (RENDER.CPP), so 100 is real time.
+    float timeScale = 100.0f;
+    bool  freeFly = true;              // else follow the authored camera spline
+    // Auto-close after N frames. 0 = run until ESC. Exists so the window path is
+    // testable without a human at the keyboard, and so a short visible run can be
+    // bounded rather than killed.
+    int   winFrames = 0;
+    const LoadOptions *loadOpt = nullptr;   // needed to Reanimate per frame
     int   dumpCube = -1;
     std::string dumpCubePath;
     std::string outPath;
@@ -77,7 +94,7 @@ struct DeferredResult {
 };
 
 // Returns false on hard failure. Renders offscreen; never opens a window.
-bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
+bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                  const std::string &shaderPath, DeferredResult &out);
 
 }  // namespace gpubench

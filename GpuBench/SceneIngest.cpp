@@ -28,12 +28,12 @@ namespace {
 // camera spline: t=5743 -> 1722.9, which sits just past key 16 (frame 1716,
 // source (8.54, 3.195, -51.82)) heading toward key 17 — and the review pose at
 // t=5743 is (9.076, 3.196, -52.93). Consistent.
-float DemoTimeToCurFrame(const ::Scene &sc, int demoT) {
+float DemoTimeToCurFrame(const ::Scene &sc, float demoT) {
     const float span = sc.EndFrame - sc.StartFrame;
     const float chPartTime = 500.0f + 100.0f * span / 30.0f;
     const float denom = chPartTime - 500.0f;
     if (denom <= 0.0f) return sc.StartFrame;
-    return sc.StartFrame + span * float(demoT) / denom;
+    return sc.StartFrame + span * demoT / denom;
 }
 
 // Publish XRes/YRes/CntrX/CntrY/CntrEX/CntrEY etc. CalcPersp reads CntrX and
@@ -152,211 +152,50 @@ int ApplyStoneTex(Material *M, bool verbose) {
 
 }  // namespace
 
-bool Load(Scene &out, const LoadOptions &opt) {
-    using clock = std::chrono::steady_clock;
-    const auto t0 = clock::now();
+// The loaded FDS scene, kept alive at file scope so Reanimate() can re-run
+// Animate_Objects on it every frame in the interactive window. TriMesh / Face /
+// Material pointers inside the flattened output alias into it.
+static ::Scene g_scene;
+static bool    g_loaded = false;
+static std::unordered_map<const ::Texture *, int> texIndex;
 
-    out.xres = opt.xres;
-    out.yres = opt.yres;
-    PublishResolution(opt.xres, opt.yres);
+// Refresh every per-frame quantity from the FDS scene at the CURRENT CurFrame:
+// per-batch model matrices, the scripted camera, and the whole light list
+// (including the disco, which rotates). Everything else -- vertices, textures,
+// material constants -- is frame-invariant, so it is built once by Load().
+//
+// VERTICES ARE NOT RE-EXTRACTED, and that is a property of the engine, not a
+// shortcut: Animate_Objects fills per-mesh IPos / IScale / RotMat from the
+// splines and the parent hierarchy. It does NOT deform vertices -- the mech
+// animates as a hierarchy of rigid TriMeshes (Hull, L_leg1, L_leg2, ...), each
+// with its own transform. VERIFIED by hashing the de-indexed vertex buffer at
+// two different frames (see --verify_static_verts). So the "re-upload only
+// meshes whose verts changed" requirement resolves to "none of them do", and the
+// per-frame GPU upload is 35 batch uniform blocks, not geometry.
+static void RefreshLights(Scene &out, const LoadOptions &opt, ::Scene &sc);
+static void RefreshCamera(Scene &out, const LoadOptions &opt, ::Scene &sc);
+static void RefreshBatchTransforms(Scene &out, ::Scene &sc);
 
-    // ---- 1. geometry + materials + lights + camera splines -----------------
-    static ::Scene sc;          // static: TriMesh/Face/Material pointers outlive us
-    std::memset(&sc, 0, sizeof(sc));
-    if (!LoadFLD(&sc, opt.fldPath)) {
-        std::fprintf(stderr, "[INGEST] LoadFLD failed: %s\n", opt.fldPath);
-        return false;
-    }
 
-    // ---- 2. pose ------------------------------------------------------------
-    out.curFrame = DemoTimeToCurFrame(sc, opt.demoT);
-    CurFrame = out.curFrame;
-    Animate_Objects(&sc, sc.CameraHead);
-
-    // ---- 3. camera ---------------------------------------------------------
-    // Built with FDS's OWN Kick_Camera + CalcPersp, so the view and projection
-    // are the engine's, not a re-derivation. Same code path DEMO's
-    // FDS_GREETS_CAM debug camera uses (GREETS.CPP ~2963).
-    if (sc.CameraHead) {
-        static ::Camera fc;
-        fc = *sc.CameraHead;
-        float fov = fc.IFOV;
-        if (fov < 1.0f && sc.CameraHead->FOV.NumKeys > 0)
-            fov = sc.CameraHead->FOV.Keys[0].Pos.x;
-        if (fov < 1.0f) fov = 75.0f;
-
-        float px, py, pz, fx, fy, fz;
-        if (!opt.camPose.empty() &&
-            std::sscanf(opt.camPose.c_str(), "%f,%f,%f,%f,%f,%f",
-                        &px, &py, &pz, &fx, &fy, &fz) == 6) {
-            fc.ISource = {px, py, pz};
-            Vector look = {px + fx, py + fy, pz + fz};
-            Kick_Camera(&fc.ISource, &look, 0.0f, fc.Mat);
-        }
-        fc.IFOV = fov;
-        CalcPersp(&fc);
-
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) out.camera.rot[r][c] = fc.Mat[r][c];
-        out.camera.src[0] = fc.ISource.x;
-        out.camera.src[1] = fc.ISource.y;
-        out.camera.src[2] = fc.ISource.z;
-        out.camera.perspX = fc.PerspX;
-        out.camera.perspY = fc.PerspY;
-        out.camera.fov = fov;
-    }
-    out.camera.cntrEX = CntrEX;
-    out.camera.cntrEY = CntrEY;
-    // greets pins these in Initialize_Greets (GREETS.CPP:1477-8); the FLD header
-    // carries 0, so take the scene values only when they are actually set.
-    out.camera.nearZ = (sc.NZP > 0.0f) ? sc.NZP : 0.01f;
-    out.camera.farZ  = (sc.FZP > 0.0f) ? sc.FZP : 150.0f;
-
-    // ---- 4. textures -------------------------------------------------------
-    // Decode ONCE per distinct ::Texture. Load_Texture only; Generate_Mipmaps is
-    // deliberately never called (see header).
-    std::unordered_map<const ::Texture *, int> texIndex;
+// Rebuild every per-frame light quantity. Called by Load() and by Reanimate().
+static void RefreshLights(Scene &out, const LoadOptions &opt, ::Scene &sc) {
+    out.lights.clear();
     auto acquireTexture = [&](::Texture *tx) -> int {
         if (!tx) return -1;
         auto it = texIndex.find(tx);
         if (it != texIndex.end()) return it->second;
-        int idx = -1;
-        if (!tx->Data) {
-            if (!Load_Texture(tx)) {
-                ++out.texturesMissing;
-                if (opt.verbose)
-                    std::fprintf(stderr, "[INGEST] texture MISSING: %s\n",
-                                 tx->FileName ? tx->FileName : "(unnamed)");
-                texIndex[tx] = -1;
-                return -1;
-            }
-        }
+        if (!tx->Data && !Load_Texture(tx)) { texIndex[tx] = -1; return -1; }
         TextureImage img;
-        img.fileName = tx->FileName ? tx->FileName : "(unnamed)";
+        img.fileName = tx->FileName ? tx->FileName : "(flare)";
+        int idx = -1;
         if (ExpandToRGBA(tx, img)) {
             idx = int(out.textures.size());
             out.textures.push_back(std::move(img));
             ++out.texturesLoaded;
-        } else {
-            ++out.texturesMissing;
         }
         texIndex[tx] = idx;
         return idx;
     };
-
-    // ---- 4b. stone-tex override (BEFORE any texture is decoded) ------------
-    // docs/GPU_BENCHMARK_PLAN.md §3.2. Must run before acquireTexture touches
-    // anything, exactly as GREETS.CPP runs before Preprocess_Scene.
-    if (opt.stoneTex) {
-        std::vector<Material *> seenMats;
-        int overridden = 0;
-        for (TriMesh *T = sc.TriMeshHead; T; T = T->Next) {
-            if (!T->Faces) continue;
-            for (uint32_t f = 0; f < T->FIndex; ++f) {
-                Material *M = T->Faces[f].Txtr;
-                if (!M) continue;
-                if (std::find(seenMats.begin(), seenMats.end(), M) != seenMats.end()) continue;
-                seenMats.push_back(M);
-                overridden += ApplyStoneTex(M, opt.verbose);
-            }
-        }
-        if (opt.verbose && overridden == 0)
-            std::fprintf(stderr,
-                "[INGEST] WARNING: --greets_stone_tex requested but NO material named "
-                "'rooms' or 'floor' was found. The wall is the AUTHORED FLD wall, not the "
-                "reviewed surface — do NOT run a displacement arm on this.\n");
-    }
-
-    // ---- 5. de-indexed geometry, grouped per (mesh x material) -------------
-    for (Object *obj = sc.ObjectHead; obj; obj = obj->Next) {
-        if (obj->Type != Obj_TriMesh || !obj->Data) continue;
-        TriMesh *T = static_cast<TriMesh *>(obj->Data);
-        if (!T->FIndex || !T->Faces || !T->Verts) continue;
-        if (!FiniteVec(T->IPos)) {
-            if (opt.verbose)
-                std::fprintf(stderr,
-                             "[INGEST] skip '%s': non-finite IPos at CurFrame %.1f\n",
-                             obj->Name ? obj->Name : "?", out.curFrame);
-            continue;
-        }
-
-        ++out.meshCount;
-        out.srcVertCount += T->VIndex;
-
-        // Group this mesh's faces by material so each batch is one draw.
-        std::map<Material *, std::vector<uint32_t>> byMat;
-        for (uint32_t f = 0; f < T->FIndex; ++f) byMat[T->Faces[f].Txtr].push_back(f);
-
-        for (auto &kv : byMat) {
-            Material *M = kv.first;
-            Batch b;
-            b.firstVertex = uint32_t(out.verts.size());
-            b.meshName = obj->Name ? obj->Name : "?";
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
-            b.pos[0] = T->IPos.x;
-            b.pos[1] = T->IPos.y;
-            b.pos[2] = T->IPos.z;
-            if (M) {
-                b.baseColor[0] = M->BaseCol.R / 255.0f;
-                b.baseColor[1] = M->BaseCol.G / 255.0f;
-                b.baseColor[2] = M->BaseCol.B / 255.0f;
-                b.luminosity = M->Luminosity;
-                b.diffuse = M->Diffuse;
-                b.specular = M->Specular;
-                b.glossiness = M->Glossiness;
-                b.parallaxScale = M->ParallaxScale;
-                b.aoInAlpha = (M->Flags & Mat_AoInAlpha) != 0;
-                b.textureIndex   = acquireTexture(M->Txtr);
-                b.normalTexIndex = acquireTexture(M->NormalMap);
-                b.roughTexIndex  = acquireTexture(M->RoughnessMap);
-                b.heightTexIndex = acquireTexture(M->HeightMap);
-                b.materialName = M->Name ? M->Name
-                               : (M->Txtr && M->Txtr->FileName ? M->Txtr->FileName : "?");
-                // Shadow-caster filter, byte-for-byte the CPU bake's predicate
-                // (FDS/RENDER/Shadows.cpp:703-724, `looksEmissive` + `shouldSkip`).
-                auto looksEmissive = [](const char *n) -> bool {
-                    if (!n) return false;
-                    for (const char *p = n; *p; ++p) {
-                        if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
-                            (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
-                        if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
-                            (p[2]=='i'||p[2]=='I')) return true;
-                    }
-                    return false;
-                };
-                b.castsShadow = !((M->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
-                                  || looksEmissive(M->Name));
-            }
-
-            for (uint32_t fi : kv.second) {
-                const Face &F = T->Faces[fi];
-                if (!F.A || !F.B || !F.C) continue;
-                const Vertex *const src[3] = {nullptr, nullptr, nullptr};
-                (void)src;
-                const ::Vertex *vp[3] = {F.A, F.B, F.C};
-                // Per-FACE UVs. NOT F.A->U / F.B->U / F.C->U — see header.
-                const float uu[3] = {F.U1, F.U2, F.U3};
-                const float vv[3] = {F.V1, F.V2, F.V3};
-                for (int k = 0; k < 3; ++k) {
-                    Vertex gv;
-                    gv.px = vp[k]->Pos.x;
-                    gv.py = vp[k]->Pos.y;
-                    gv.pz = vp[k]->Pos.z;
-                    gv.nx = vp[k]->N.x;
-                    gv.ny = vp[k]->N.y;
-                    gv.nz = vp[k]->N.z;
-                    gv.u = uu[k];
-                    gv.v = vv[k];
-                    out.verts.push_back(gv);
-                }
-                ++out.faceCount;
-            }
-            b.vertexCount = uint32_t(out.verts.size()) - b.firstVertex;
-            if (b.vertexCount) out.batches.push_back(std::move(b));
-        }
-    }
-
     // ---- 6. lights + ambient ------------------------------------------------
     // Flare sprite world scale. GREETS.CPP:3060 sets ImageSize = 0.25; the
     // default is 1000.0 (city scale), which would fill the screen here. The
@@ -557,6 +396,241 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 bp[0], bp[1], bp[2], how, kSpotCount, a);
     }
 
+}
+
+// Per-frame refresh of the model matrices. Animate_Objects has already run.
+static void RefreshBatchTransforms(Scene &out, ::Scene &sc) {
+    std::unordered_map<std::string, TriMesh *> byName;
+    for (Object *obj = sc.ObjectHead; obj; obj = obj->Next)
+        if (obj->Type == Obj_TriMesh && obj->Data && obj->Name)
+            byName[obj->Name] = (TriMesh *)obj->Data;
+    for (auto &b : out.batches) {
+        auto it = byName.find(b.meshName);
+        if (it == byName.end()) continue;
+        TriMesh *T = it->second;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
+        b.pos[0] = T->IPos.x; b.pos[1] = T->IPos.y; b.pos[2] = T->IPos.z;
+    }
+}
+
+
+// Rebuild the camera from the FDS scene at the current CurFrame. With an empty
+// camPose this follows the AUTHORED spline (Animate_Objects has already moved
+// sc.CameraHead); with a pose string it reproduces DEMO's FDS_GREETS_CAM path.
+static void RefreshCamera(Scene &out, const LoadOptions &opt, ::Scene &sc) {
+    // ---- 3. camera ---------------------------------------------------------
+    // Built with FDS's OWN Kick_Camera + CalcPersp, so the view and projection
+    // are the engine's, not a re-derivation. Same code path DEMO's
+    // FDS_GREETS_CAM debug camera uses (GREETS.CPP ~2963).
+    if (sc.CameraHead) {
+        static ::Camera fc;
+        fc = *sc.CameraHead;
+        float fov = fc.IFOV;
+        if (fov < 1.0f && sc.CameraHead->FOV.NumKeys > 0)
+            fov = sc.CameraHead->FOV.Keys[0].Pos.x;
+        if (fov < 1.0f) fov = 75.0f;
+
+        float px, py, pz, fx, fy, fz;
+        if (!opt.camPose.empty() &&
+            std::sscanf(opt.camPose.c_str(), "%f,%f,%f,%f,%f,%f",
+                        &px, &py, &pz, &fx, &fy, &fz) == 6) {
+            fc.ISource = {px, py, pz};
+            Vector look = {px + fx, py + fy, pz + fz};
+            Kick_Camera(&fc.ISource, &look, 0.0f, fc.Mat);
+        }
+        fc.IFOV = fov;
+        CalcPersp(&fc);
+
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) out.camera.rot[r][c] = fc.Mat[r][c];
+        out.camera.src[0] = fc.ISource.x;
+        out.camera.src[1] = fc.ISource.y;
+        out.camera.src[2] = fc.ISource.z;
+        out.camera.perspX = fc.PerspX;
+        out.camera.perspY = fc.PerspY;
+        out.camera.fov = fov;
+    }
+    out.camera.cntrEX = CntrEX;
+    out.camera.cntrEY = CntrEY;
+    // greets pins these in Initialize_Greets (GREETS.CPP:1477-8); the FLD header
+    // carries 0, so take the scene values only when they are actually set.
+    out.camera.nearZ = (sc.NZP > 0.0f) ? sc.NZP : 0.01f;
+    out.camera.farZ  = (sc.FZP > 0.0f) ? sc.FZP : 150.0f;
+
+}
+
+bool Load(Scene &out, const LoadOptions &opt) {
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+
+    out.xres = opt.xres;
+    out.yres = opt.yres;
+    PublishResolution(opt.xres, opt.yres);
+
+    // ---- 1. geometry + materials + lights + camera splines -----------------
+    ::Scene &sc = g_scene;
+    std::memset(&sc, 0, sizeof(sc));
+    if (!LoadFLD(&sc, opt.fldPath)) {
+        std::fprintf(stderr, "[INGEST] LoadFLD failed: %s\n", opt.fldPath);
+        return false;
+    }
+
+    // ---- 2. pose ------------------------------------------------------------
+    out.curFrame = DemoTimeToCurFrame(sc, opt.demoT);
+    CurFrame = out.curFrame;
+    Animate_Objects(&sc, sc.CameraHead);
+
+    RefreshCamera(out, opt, sc);
+
+    // ---- 4. textures -------------------------------------------------------
+    // Decode ONCE per distinct ::Texture. Load_Texture only; Generate_Mipmaps is
+    // deliberately never called (see header). File-static so the per-frame
+    // Reanimate path resolves an already-decoded flare texture to its existing
+    // index instead of decoding it again.
+    auto acquireTexture = [&](::Texture *tx) -> int {
+        if (!tx) return -1;
+        auto it = texIndex.find(tx);
+        if (it != texIndex.end()) return it->second;
+        int idx = -1;
+        if (!tx->Data) {
+            if (!Load_Texture(tx)) {
+                ++out.texturesMissing;
+                if (opt.verbose)
+                    std::fprintf(stderr, "[INGEST] texture MISSING: %s\n",
+                                 tx->FileName ? tx->FileName : "(unnamed)");
+                texIndex[tx] = -1;
+                return -1;
+            }
+        }
+        TextureImage img;
+        img.fileName = tx->FileName ? tx->FileName : "(unnamed)";
+        if (ExpandToRGBA(tx, img)) {
+            idx = int(out.textures.size());
+            out.textures.push_back(std::move(img));
+            ++out.texturesLoaded;
+        } else {
+            ++out.texturesMissing;
+        }
+        texIndex[tx] = idx;
+        return idx;
+    };
+
+    // ---- 4b. stone-tex override (BEFORE any texture is decoded) ------------
+    // docs/GPU_BENCHMARK_PLAN.md §3.2. Must run before acquireTexture touches
+    // anything, exactly as GREETS.CPP runs before Preprocess_Scene.
+    if (opt.stoneTex) {
+        std::vector<Material *> seenMats;
+        int overridden = 0;
+        for (TriMesh *T = sc.TriMeshHead; T; T = T->Next) {
+            if (!T->Faces) continue;
+            for (uint32_t f = 0; f < T->FIndex; ++f) {
+                Material *M = T->Faces[f].Txtr;
+                if (!M) continue;
+                if (std::find(seenMats.begin(), seenMats.end(), M) != seenMats.end()) continue;
+                seenMats.push_back(M);
+                overridden += ApplyStoneTex(M, opt.verbose);
+            }
+        }
+        if (opt.verbose && overridden == 0)
+            std::fprintf(stderr,
+                "[INGEST] WARNING: --greets_stone_tex requested but NO material named "
+                "'rooms' or 'floor' was found. The wall is the AUTHORED FLD wall, not the "
+                "reviewed surface — do NOT run a displacement arm on this.\n");
+    }
+
+    // ---- 5. de-indexed geometry, grouped per (mesh x material) -------------
+    for (Object *obj = sc.ObjectHead; obj; obj = obj->Next) {
+        if (obj->Type != Obj_TriMesh || !obj->Data) continue;
+        TriMesh *T = static_cast<TriMesh *>(obj->Data);
+        if (!T->FIndex || !T->Faces || !T->Verts) continue;
+        if (!FiniteVec(T->IPos)) {
+            if (opt.verbose)
+                std::fprintf(stderr,
+                             "[INGEST] skip '%s': non-finite IPos at CurFrame %.1f\n",
+                             obj->Name ? obj->Name : "?", out.curFrame);
+            continue;
+        }
+
+        ++out.meshCount;
+        out.srcVertCount += T->VIndex;
+
+        // Group this mesh's faces by material so each batch is one draw.
+        std::map<Material *, std::vector<uint32_t>> byMat;
+        for (uint32_t f = 0; f < T->FIndex; ++f) byMat[T->Faces[f].Txtr].push_back(f);
+
+        for (auto &kv : byMat) {
+            Material *M = kv.first;
+            Batch b;
+            b.firstVertex = uint32_t(out.verts.size());
+            b.meshName = obj->Name ? obj->Name : "?";
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
+            b.pos[0] = T->IPos.x;
+            b.pos[1] = T->IPos.y;
+            b.pos[2] = T->IPos.z;
+            if (M) {
+                b.baseColor[0] = M->BaseCol.R / 255.0f;
+                b.baseColor[1] = M->BaseCol.G / 255.0f;
+                b.baseColor[2] = M->BaseCol.B / 255.0f;
+                b.luminosity = M->Luminosity;
+                b.diffuse = M->Diffuse;
+                b.specular = M->Specular;
+                b.glossiness = M->Glossiness;
+                b.parallaxScale = M->ParallaxScale;
+                b.aoInAlpha = (M->Flags & Mat_AoInAlpha) != 0;
+                b.textureIndex   = acquireTexture(M->Txtr);
+                b.normalTexIndex = acquireTexture(M->NormalMap);
+                b.roughTexIndex  = acquireTexture(M->RoughnessMap);
+                b.heightTexIndex = acquireTexture(M->HeightMap);
+                b.materialName = M->Name ? M->Name
+                               : (M->Txtr && M->Txtr->FileName ? M->Txtr->FileName : "?");
+                // Shadow-caster filter, byte-for-byte the CPU bake's predicate
+                // (FDS/RENDER/Shadows.cpp:703-724, `looksEmissive` + `shouldSkip`).
+                auto looksEmissive = [](const char *n) -> bool {
+                    if (!n) return false;
+                    for (const char *p = n; *p; ++p) {
+                        if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
+                            (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
+                        if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
+                            (p[2]=='i'||p[2]=='I')) return true;
+                    }
+                    return false;
+                };
+                b.castsShadow = !((M->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
+                                  || looksEmissive(M->Name));
+            }
+
+            for (uint32_t fi : kv.second) {
+                const Face &F = T->Faces[fi];
+                if (!F.A || !F.B || !F.C) continue;
+                const Vertex *const src[3] = {nullptr, nullptr, nullptr};
+                (void)src;
+                const ::Vertex *vp[3] = {F.A, F.B, F.C};
+                // Per-FACE UVs. NOT F.A->U / F.B->U / F.C->U — see header.
+                const float uu[3] = {F.U1, F.U2, F.U3};
+                const float vv[3] = {F.V1, F.V2, F.V3};
+                for (int k = 0; k < 3; ++k) {
+                    Vertex gv;
+                    gv.px = vp[k]->Pos.x;
+                    gv.py = vp[k]->Pos.y;
+                    gv.pz = vp[k]->Pos.z;
+                    gv.nx = vp[k]->N.x;
+                    gv.ny = vp[k]->N.y;
+                    gv.nz = vp[k]->N.z;
+                    gv.u = uu[k];
+                    gv.v = vv[k];
+                    out.verts.push_back(gv);
+                }
+                ++out.faceCount;
+            }
+            b.vertexCount = uint32_t(out.verts.size()) - b.firstVertex;
+            if (b.vertexCount) out.batches.push_back(std::move(b));
+        }
+    }
+
+    RefreshLights(out, opt, sc);
+
     out.loadMs = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
 
     if (opt.verbose) {
@@ -585,7 +659,45 @@ bool Load(Scene &out, const LoadOptions &opt) {
             out.skyZenith[0], out.skyZenith[1], out.skyZenith[2],
             out.skyNadir[0], out.skyNadir[1], out.skyNadir[2]);
     }
-    return !out.verts.empty();
+    g_loaded = !out.verts.empty();
+    return g_loaded;
+}
+
+void BuildViewMatrix(const float eye[3], const float fwd[3], float outRot[3][3]) {
+    Vector src{eye[0], eye[1], eye[2]};
+    Vector look{eye[0] + fwd[0], eye[1] + fwd[1], eye[2] + fwd[2]};
+    Matrix M;
+    Kick_Camera(&src, &look, 0.0f, M);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) outRot[r][c] = M[r][c];
+}
+
+bool Reanimate(Scene &out, const LoadOptions &opt, float demoT) {
+    if (!g_loaded) return false;
+    ::Scene &sc = g_scene;
+    // Exactly how RENDER.CPP derives the engine frame: t = Timer/SceneTime, then
+    // CurFrame = lerp(StartFrame, EndFrame, t). DemoTimeToCurFrame is greets' own
+    // form of that (GREETS.CPP:3374).
+    out.curFrame = DemoTimeToCurFrame(sc, demoT);
+    CurFrame = out.curFrame;
+    Animate_Objects(&sc, sc.CameraHead);
+    RefreshBatchTransforms(out, sc);
+    LoadOptions o = opt;
+    o.demoT = int(demoT);
+    o.verbose = false;
+    RefreshLights(out, o, sc);
+    RefreshCamera(out, o, sc);
+    return true;
+}
+
+// Hash the de-indexed vertex buffer so the "do verts change under animation?"
+// claim is MEASURED rather than assumed.
+uint64_t VertexHash(const Scene &s) {
+    uint64_t h = 1469598103934665603ull;
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(s.verts.data());
+    const size_t n = s.verts.size() * sizeof(Vertex);
+    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
 }
 
 }  // namespace gpubench

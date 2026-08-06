@@ -50,12 +50,24 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE SIMDE_ENABLE_NATIVE_ALIASES)
 
 # find_library, not a raw "-framework X" link option: CMake de-duplicates and
 # reorders bare option lists and silently collapses the `-framework NAME` pairs.
+# SDL2 for the INTERACTIVE window only (--window). Chosen over raw AppKit/Cocoa
+# because: it is already a dependency of DEMO and installed here (2.32.10), it
+# ships SDL_metal.h so a CAMetalLayer is three calls rather than an
+# NSApplication + NSWindow + delegate, and it gives keyboard/mouse capture that
+# works identically to the rest of the project. Cost: one extra link dependency
+# on a target that otherwise links only Metal/Foundation/QuartzCore. The
+# offscreen benchmark path never touches it.
+find_package(SDL2 REQUIRED)
+
 find_library(GPUBENCH_FOUNDATION Foundation REQUIRED)
 find_library(GPUBENCH_METAL      Metal      REQUIRED)
 find_library(GPUBENCH_QUARTZCORE QuartzCore REQUIRED)
 
+target_include_directories(${PROJECT_NAME} PRIVATE ${SDL2_INCLUDE_DIRS})
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
     FDS
+    ${SDL2_LIBRARIES}
     ${GPUBENCH_FOUNDATION}
     ${GPUBENCH_METAL}
     ${GPUBENCH_QUARTZCORE})
