@@ -2922,8 +2922,17 @@ static void Transform_Objects_Sharded(Scene *Sc, fds::CameraContext &cam,
 	const int64_t t0   = xp ? xpNow() : 0;
 
 	ThreadPool &tp = ThreadPool::instance();
-	int W = (nShards < 0) ? int(tp.size()) : nShards;
-	if (W > int(tp.size()) + 1) W = int(tp.size()) + 1;   // +1: this thread runs one
+	// BLOCK COUNT, not worker count. These are decoupled on purpose: blocks
+	// are work-STOLEN off a shared cursor, so oversubscribing the pool is how
+	// the phase stays balanced. It has to be oversubscribed, because the cost
+	// model below can only see VIndex/FIndex — it cannot see which meshes the
+	// frustum + occlusion culls will throw away, and that is most of them
+	// (471 TriMesh objects on the greets object list, 108 survive to a vertex
+	// loop). With one block per worker and a static assignment, whichever
+	// blocks happen to hold the survivors decide the phase: measured
+	// WORK 0.508 ms against an LPT bound of 0.227 at greets t=5780.
+	const int nWorkers = int(tp.size()) + 1;   // + this thread
+	int W = (nShards < 0) ? nWorkers * 2 : nShards;
 	if (W < 1) W = 1;
 
 	// ── PLAN ────────────────────────────────────────────────────────────
@@ -3024,14 +3033,21 @@ static void Transform_Objects_Sharded(Scene *Sc, fds::CameraContext &cam,
 	const int64_t tPlan = xp ? xpNow() : 0;
 
 	// ── WORK ────────────────────────────────────────────────────────────
-	// Shard 0 runs on this thread; the rest go to the pool. One enqueue per
-	// shard (not per mesh) — the enqueue itself is the expensive part of a
-	// pool round-trip and this phase is only ~0.4–1.7 ms of serial work.
+	// WORK-STEALING over the blocks: one enqueue per WORKER (not per block),
+	// each pulling block indices off a shared cursor; this thread pulls from
+	// the same cursor rather than idling in the drain. Which worker executes
+	// which block is therefore scheduling-dependent — and it does not matter,
+	// because a block's OUTPUT POSITION was fixed by the reservation above.
+	// That separation (execution order free, output order pinned) is the whole
+	// design; it is also what lets the block count be tuned for balance
+	// without touching determinism.
 	{
-		auto remaining = std::make_shared<std::atomic<int>>(nBlocks - 1);
-		for (int b = 1; b < nBlocks; ++b) {
-			XfrmShard *sp = &shards[b];
-			tp.enqueue([Sc, &cam, &faces, sp, remaining]() {
+		XfrmShard *const sbase = shards.data();
+		auto cursor    = std::make_shared<std::atomic<int>>(0);
+		const int nTasks = std::min(int(tp.size()), nBlocks);
+		auto remaining = std::make_shared<std::atomic<int>>(nTasks);
+		for (int k = 0; k < nTasks; ++k) {
+			tp.enqueue([Sc, &cam, &faces, sbase, nBlocks, cursor, remaining]() {
 				// Main-view context on the worker: every pass predicate this
 				// function keys on is thread_local, and a pool worker that
 				// last ran a shadow / mirror-shard task must not leak that
@@ -3044,20 +3060,24 @@ static void Transform_Objects_Sharded(Scene *Sc, fds::CameraContext &cam,
 				g_currentShadowOmni = nullptr;
 				g_currentShadowMap  = nullptr;
 				fds::g_offAxisFrustumCull = false;
-				g_xfrmShard = sp;
-				Transform_Objects(Sc, cam, faces);
-				g_xfrmShard = nullptr;
+				int i;
+				while ((i = cursor->fetch_add(1, std::memory_order_relaxed)) < nBlocks) {
+					g_xfrmShard = sbase + i;
+					Transform_Objects(Sc, cam, faces);
+					g_xfrmShard = nullptr;
+				}
 				remaining->fetch_sub(1, std::memory_order_release);
 			});
 		}
-		if (nBlocks > 0) {
-			g_xfrmShard = &shards[0];
+		int i;
+		while ((i = cursor->fetch_add(1, std::memory_order_relaxed)) < nBlocks) {
+			g_xfrmShard = sbase + i;
 			Transform_Objects(Sc, cam, faces);
 			g_xfrmShard = nullptr;
 		}
 		// Spin-then-yield drain. The tick thread has nothing else to do and
-		// the shards are sub-millisecond, so a condvar round-trip would cost
-		// more than the wait itself.
+		// the blocks are tens of microseconds each, so a condvar round-trip
+		// would cost more than the wait itself.
 		while (remaining->load(std::memory_order_acquire) > 0) {
 			std::this_thread::yield();
 		}
