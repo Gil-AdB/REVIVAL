@@ -117,6 +117,16 @@ struct Mirror {
     TriMesh    *cloneMesh = nullptr;
     Material   *wallMatClone = nullptr;
     std::vector<ClonedMeshRange> meshRanges;
+    // Per CLONE vertex (parallel to cloneMesh->Verts): the index of the
+    // SOURCE vertex it was mirrored from. The clone only carries vertices
+    // some surviving clone face references, so the mapping is a COMPACTION
+    // of the source array, not the identity — clone vertex
+    // `r.vStart + k` comes from `r.sourceMesh->Verts[cloneSrcVert[r.vStart + k]]`.
+    // Every per-frame source→clone refresh MUST go through this (UpdateMirror's
+    // Pos/N/Tangent/colour re-mirror; DisplaceRebuild's Vertex::ShellH copy),
+    // or the reflection re-mirrors the wrong vertices. Empty for compound
+    // (depth-1) clones, which have no meshRanges and are never refreshed.
+    std::vector<uint32_t>        cloneSrcVert;
     std::vector<ClonedOmniRef>   omniClones;
     // Per clone face (parallel to cloneMesh->Faces): the source face +
     // its owning mesh. UpdateMirror re-derives each clone face's world

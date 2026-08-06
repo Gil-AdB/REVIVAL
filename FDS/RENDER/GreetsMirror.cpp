@@ -460,6 +460,9 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     m.wallMaterialName = label ? label : "";
     m.plane = FindMirrorPlaneImpl(sc, isWall, label);
     if (!m.plane.valid) return m;
+    // Read once: BuildMirror runs at scene init and the vertex fill below is
+    // the only consumer.
+    const bool tightBSphere = fds::FeatureFlags::mirror_clone_tight_bsphere();
     if (s_nextMirrorId == 0) {
         std::fprintf(stderr, "[MIRROR '%s'] all 255 mirror ids in use — skipping\n",
                      label);
@@ -521,6 +524,34 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     // fPushed 74 962 -> 75 110 with the proxy on, i.e. 148 duplicate clone
     // faces per frame. The proxy is never wanted here; the displaced original
     // is already in the clone.
+    // THE predicate: does this source face become a clone face? Defined ONCE
+    // and consumed by both the count loop (to size the vertex array) and the
+    // fill loop (which caches it per face). The count/fill lockstep this file
+    // keeps warning about cannot drift when there is only one copy of the test.
+    auto cloneFaceLive = [&](const Face &OF, TriMesh *T) -> bool {
+        if (isMirrorSurface(OF, T)) return false;
+        if (!OF.A || !OF.B || !OF.C) return false;
+        if (mirrorSkipFace(OF)) return false;   // rule 1: displaced detail, the flat proxy stands in
+        // Only reflect faces IN FRONT of the mirror plane. A real mirror
+        // reflects what's in front of it; faces on the plane (the
+        // teleporter's coplanar emissive "screen emiter" glow) or behind it
+        // (the room behind the wall) produce a degenerate/wrong reflection
+        // that lands on top of the mirror panel. The coplanar yellow emitter
+        // clone was the flat yellow wash filling the greets teleporter.
+        auto worldPos = [&](const Vertex *v) {
+            Vector lp = v->Pos, wp;
+            MatrixXVector(T->RotMat, &lp, &wp);
+            wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+            return wp;
+        };
+        const Vector a = worldPos(OF.A), b = worldPos(OF.B), c = worldPos(OF.C);
+        const float cx = (a.x+b.x+c.x)/3.0f;
+        const float cy = (a.y+b.y+c.y)/3.0f;
+        const float cz = (a.z+b.z+c.z)/3.0f;
+        const float sd = N.x*cx + N.y*cy + N.z*cz + d;
+        return sd > 0.05f;   // on/behind the plane → no reflection
+    };
+
     DWord totalVerts = 0, totalFaces = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
@@ -539,8 +570,29 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             ++meshFaces;
         }
         if (mirrorFlatStone() && meshFaces == 0) continue;   // flag-gated so the count is bit-identical off the flag
-        totalVerts += T->VIndex;
+        // FACE count deliberately stays the loose one above (no plane-side
+        // test): `totalFaces == 0` is an early-out that returns WITHOUT
+        // reclaiming the mirror id, while the `fOfs == 0` early-out below does
+        // reclaim it — so tightening this count could move which mirrors get
+        // which id, and gb.mirrorId is a rendered value. Over-allocating faces
+        // is what HEAD does; FIndex is shrunk to fOfs after the fill.
         totalFaces += meshFaces;
+        // VERTEX count is EXACT: the clone carries only vertices a surviving
+        // clone face references, so sizing this at T->VIndex would leave the
+        // tail allocated and never written — 133 MB across the four greets
+        // mirrors under --greets_displace, where 90 % of each pre-compaction
+        // clone was orphans. No early-out reads it.
+        {
+            std::vector<uint8_t> used(size_t(T->VIndex), 0);
+            for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                const Face &OF = T->Faces[fi];
+                if (!cloneFaceLive(OF, T)) continue;
+                used[size_t(OF.A - T->Verts)] = 1;
+                used[size_t(OF.B - T->Verts)] = 1;
+                used[size_t(OF.C - T->Verts)] = 1;
+            }
+            for (DWord vi = 0; vi < T->VIndex; ++vi) totalVerts += used[vi];
+        }
     }
     if (totalFaces == 0) {
         std::fprintf(stderr,
@@ -637,14 +689,77 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             if (mirrorFlatStone() && meshFaces == 0) continue;   // flag-gated so the count is bit-identical off the flag
         }
         const bool meshDyn = meshIsDynamic(Obj);
+        // ── ORPHAN-FREE CLONE VERTICES ───────────────────────────────────
+        // Decide which faces survive FIRST, then clone only the vertices a
+        // surviving clone face actually references.
+        //
+        // The vertex fill used to copy EVERY vertex of every surviving source
+        // mesh, while the face fill drops faces four ways (isMirrorSurface, a
+        // null corner, --greets_displace_flat_mirror's Face_MainOnly skip, and
+        // the "in FRONT of the plane" side test). Nothing fed those rejections
+        // back into the vertex selection, so the clone carried vertices no
+        // clone face could ever reference — the exact class
+        // docs/VISIBILITY_PLAN.md 9d removed at MESH granularity, one level
+        // down at VERTEX granularity, and it dominated the clone: measured at
+        // greets t=5743 (--mirror_cull_census build, [MIRROR-ORPHAN]),
+        // 245 890 of 272 751 clone verts (90.2 %) under --greets_displace with
+        // its default --greets_displace_flat_mirror ON (the flag drops the
+        // displaced FACES 90 890 -> 9 198 but left every displaced VERTEX in
+        // the clone, so its stated transform-phase saving never materialised),
+        // and 93.0 % of mirror 'P_TEXT.JPG#11' in the shipping flat arm, whose
+        // 642 surviving faces reference 1 926 of 27 416 cloned vertices.
+        // Orphans are transformed by every pass that sees the clone and
+        // re-mirrored by UpdateMirror, and produce nothing: a vertex reaches a
+        // pixel only through a Face.
+        //
+        // faceLive[] caches the SHARED cloneFaceLive predicate (defined once
+        // above the count loop) so the face loop below need not re-derive it.
+        std::vector<uint8_t> faceLive(size_t(T->FIndex), 0);
+        for (DWord fi = 0; fi < T->FIndex; ++fi)
+            faceLive[fi] = cloneFaceLive(T->Faces[fi], T) ? 1 : 0;
+        // cloneOfSrc[srcVert] = clone-local offset, or kUnref for an orphan.
+        constexpr uint32_t kUnref = 0xFFFFFFFFu;
+        std::vector<uint32_t> cloneOfSrc(size_t(T->VIndex), kUnref);
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            if (!faceLive[fi]) continue;
+            const Face &OF = T->Faces[fi];
+            cloneOfSrc[size_t(OF.A - T->Verts)] = 0;
+            cloneOfSrc[size_t(OF.B - T->Verts)] = 0;
+            cloneOfSrc[size_t(OF.C - T->Verts)] = 0;
+        }
         const DWord vStart = vOfs;
         for (DWord vi = 0; vi < T->VIndex; ++vi) {
-            MM->Verts[vOfs] = T->Verts[vi];
             Vector localP = T->Verts[vi].Pos;
             Vector worldP;
             MatrixXVector(T->RotMat, &localP, &worldP);
             worldP.x += T->IPos.x; worldP.y += T->IPos.y; worldP.z += T->IPos.z;
             const Vector mirroredP = reflectPointAcross(worldP, N, d);
+            // --mirror_clone_tight_bsphere: which vertices the clone's bounding
+            // sphere spans.
+            //   OFF (default): EVERY source vertex, orphan or not — bit-identical
+            //     to the pre-compaction build, so the mesh cull's Tri_Inside /
+            //     Tri_Ahead classification (and with it the clipped-vs-unclipped
+            //     vertex path, and with it every pixel) cannot move.
+            //   ON: only the vertices the clone actually keeps, which is the
+            //     CORRECT sphere — the clone cannot draw a vertex it does not
+            //     carry. This is what makes a clone cullable at all: mirror
+            //     'P_TEXT.JPG#11' keeps 1 926 of 27 416 vertices in one corner of
+            //     the room, yet its sphere today spans the whole mirrored room and
+            //     no camera can reject it. Correct, not merely conservative — a
+            //     clone it culls has no vertex in the frustum — but it CHANGES CULL
+            //     OUTCOMES, so it is gated and measured rather than smuggled in.
+            if (!tightBSphere || cloneOfSrc[vi] != kUnref) {
+                bbMin.x = std::min(bbMin.x, mirroredP.x);
+                bbMin.y = std::min(bbMin.y, mirroredP.y);
+                bbMin.z = std::min(bbMin.z, mirroredP.z);
+                bbMax.x = std::max(bbMax.x, mirroredP.x);
+                bbMax.y = std::max(bbMax.y, mirroredP.y);
+                bbMax.z = std::max(bbMax.z, mirroredP.z);
+            }
+            if (cloneOfSrc[vi] == kUnref) continue;   // orphan: no clone face reaches it
+            cloneOfSrc[vi] = vOfs - vStart;           // clone-local offset for the face remap
+            m.cloneSrcVert.push_back(vi);             // and the reverse map UpdateMirror needs
+            MM->Verts[vOfs] = T->Verts[vi];
             MM->Verts[vOfs].Pos = mirroredP;
             // Directions go through the FULL composed RotMat — the
             // engine's own convention (Transform.cpp: IM = ViewMat ×
@@ -669,45 +784,16 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             Vector worldT;
             MatrixXVector(T->RotMat, &localT, &worldT);
             MM->Verts[vOfs].Tangent = reflectDirAcross(worldT, N);
-            bbMin.x = std::min(bbMin.x, mirroredP.x);
-            bbMin.y = std::min(bbMin.y, mirroredP.y);
-            bbMin.z = std::min(bbMin.z, mirroredP.z);
-            bbMax.x = std::max(bbMax.x, mirroredP.x);
-            bbMax.y = std::max(bbMax.y, mirroredP.y);
-            bbMax.z = std::max(bbMax.z, mirroredP.z);
             ++vOfs;
         }
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            if (!faceLive[fi]) continue;   // the four rejects, decided once above
             Face &OF = T->Faces[fi];
-            if (isMirrorSurface(OF, T)) continue;
-            if (!OF.A || !OF.B || !OF.C) continue;
-            if (mirrorSkipFace(OF)) continue;   // rule 1: displaced detail, the flat proxy stands in
-            // Only reflect faces IN FRONT of the mirror plane. A real
-            // mirror reflects what's in front of it; faces on the plane
-            // (the teleporter's coplanar emissive "screen emiter" glow)
-            // or behind it (the room behind the wall) produce a
-            // degenerate/wrong reflection that lands on top of the
-            // mirror panel. The coplanar yellow emitter clone was the
-            // flat yellow wash filling the greets teleporter.
-            {
-                auto worldPos = [&](const Vertex *v) {
-                    Vector lp = v->Pos, wp;
-                    MatrixXVector(T->RotMat, &lp, &wp);
-                    wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
-                    return wp;
-                };
-                const Vector a = worldPos(OF.A), b = worldPos(OF.B), c = worldPos(OF.C);
-                const float cx = (a.x+b.x+c.x)/3.0f;
-                const float cy = (a.y+b.y+c.y)/3.0f;
-                const float cz = (a.z+b.z+c.z)/3.0f;
-                const float sd = N.x*cx + N.y*cy + N.z*cz + d;
-                if (sd <= 0.05f) continue;  // on/behind the plane → no reflection
-            }
             Face &CF = MM->Faces[fOfs];
             CF = OF;
-            CF.A = MM->Verts + vStart + (OF.A - T->Verts);
-            CF.B = MM->Verts + vStart + (OF.C - T->Verts);  // swap
-            CF.C = MM->Verts + vStart + (OF.B - T->Verts);  // swap
+            CF.A = MM->Verts + vStart + cloneOfSrc[size_t(OF.A - T->Verts)];
+            CF.B = MM->Verts + vStart + cloneOfSrc[size_t(OF.C - T->Verts)];  // swap
+            CF.C = MM->Verts + vStart + cloneOfSrc[size_t(OF.B - T->Verts)];  // swap
             std::swap(CF.U2, CF.U3);
             std::swap(CF.V2, CF.V3);
             std::swap(CF.EU2, CF.EU3);
@@ -742,7 +828,11 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             CF.ownerMirrorId = m.id;
             ++fOfs;
         }
-        m.meshRanges.push_back({T, vStart, T->VIndex, meshDyn});
+        // vCount is now the LIVE (compacted) count, not T->VIndex — the source
+        // index of clone vertex vStart+k lives in m.cloneSrcVert[vStart+k].
+        // A mesh whose every face was rejected contributes nothing at all.
+        if (vOfs > vStart)
+            m.meshRanges.push_back({T, vStart, vOfs - vStart, meshDyn});
     }
     // Nothing in FRONT of the plane survived the per-face side test
     // (wall faces away from the room, or sits at its far edge). A
@@ -774,6 +864,36 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     // shrink FIndex to what we actually wrote — otherwise the tail
     // slots are uninitialised garbage that the rasterizer would draw.
     MM->FIndex = fOfs;
+    // Same for the verts: the count loop reserves the conservative
+    // sum-of-T->VIndex (it cannot run the plane-side test, which needs the
+    // per-face centroid), and the fill writes only the referenced ones. The
+    // tail is over-allocated, never written and never read — every consumer
+    // bounds on VIndex.
+    MM->VIndex = vOfs;
+
+#if FDS_VIS_CENSUS
+    // ORPHAN-CLONE-VERTEX census — the acceptance check for the compaction
+    // above. Must now report 0 orphans; anything else means a face survived
+    // whose vertices were not marked.
+    {
+        std::vector<uint8_t> used(size_t(MM->VIndex), 0);
+        for (DWord fi = 0; fi < MM->FIndex; ++fi) {
+            const Face &CF = MM->Faces[fi];
+            if (CF.A) used[size_t(CF.A - MM->Verts)] = 1;
+            if (CF.B) used[size_t(CF.B - MM->Verts)] = 1;
+            if (CF.C) used[size_t(CF.C - MM->Verts)] = 1;
+        }
+        DWord live = 0;
+        for (DWord i = 0; i < MM->VIndex; ++i) live += used[i];
+        std::fprintf(stderr,
+            "[MIRROR-ORPHAN '%s'] clone verts %u, referenced by a clone face %u, "
+            "ORPHAN %u (%.1f%%)  [faces %u]\n",
+            label, unsigned(MM->VIndex), unsigned(live),
+            unsigned(MM->VIndex - live),
+            100.0 * double(MM->VIndex - live) / double(std::max<DWord>(1, MM->VIndex)),
+            unsigned(MM->FIndex));
+    }
+#endif
 
     // Loose bsphere from the mirrored bbox.
     Vector ctr = { (bbMin.x + bbMax.x) * 0.5f,
@@ -1975,7 +2095,13 @@ void UpdateMirror(Scene *sc, Mirror &m)
         if (!full && !r.dynamic) continue;
         TriMesh *T = r.sourceMesh;
         if (!T || !T->Verts) continue;
-        const DWord n = std::min<DWord>(r.vCount, T->VIndex);
+        // r.vCount is the COMPACTED clone count; the source index of clone
+        // vertex r.vStart+vi is m.cloneSrcVert[r.vStart+vi] (the clone carries
+        // only vertices a surviving clone face references). Clamping against
+        // T->VIndex as this loop used to do would be wrong now — the counts are
+        // unrelated — so bound on the index array instead.
+        if (m.cloneSrcVert.size() < size_t(r.vStart) + size_t(r.vCount)) continue;
+        const DWord n = r.vCount;
         // Forward-shaded meshes (Tri_Noshading) own their per-vertex
         // colour: the disco ball rewrites LR/LG/LB every tick (the
         // shimmer glint). Re-mirroring only Pos/N/Tangent left the clone
@@ -1987,7 +2113,9 @@ void UpdateMirror(Scene *sc, Mirror &m)
         // colour, so they're skipped to avoid needless writes.
         const bool copyColour = (T->Flags & Tri_Noshading) != 0;
         for (DWord vi = 0; vi < n; ++vi) {
-            Vector localP = T->Verts[vi].Pos;
+            const uint32_t svi = m.cloneSrcVert[size_t(r.vStart) + vi];
+            if (svi >= T->VIndex) continue;
+            Vector localP = T->Verts[svi].Pos;
             Vector worldP;
             MatrixXVector(T->RotMat, &localP, &worldP);
             worldP.x += T->IPos.x; worldP.y += T->IPos.y; worldP.z += T->IPos.z;
@@ -1997,17 +2125,17 @@ void UpdateMirror(Scene *sc, Mirror &m)
             // stays correct in the mirror. (See the init-fill comment
             // for why NOT UnscaledRotMat, and for the B = N × T
             // handedness caveat.)
-            Vector localN = T->Verts[vi].N;
+            Vector localN = T->Verts[svi].N;
             Vector worldN;
             MatrixXVector(T->RotMat, &localN, &worldN);
             m.cloneMesh->Verts[r.vStart + vi].N = reflectDirAcross(worldN, N);
-            Vector localT = T->Verts[vi].Tangent;
+            Vector localT = T->Verts[svi].Tangent;
             Vector worldT;
             MatrixXVector(T->RotMat, &localT, &worldT);
             m.cloneMesh->Verts[r.vStart + vi].Tangent = reflectDirAcross(worldT, N);
             if (copyColour) {
                 Vertex       &cv = m.cloneMesh->Verts[r.vStart + vi];
-                const Vertex &sv = T->Verts[vi];
+                const Vertex &sv = T->Verts[svi];
                 cv.LR = sv.LR; cv.LG = sv.LG; cv.LB = sv.LB;
             }
         }

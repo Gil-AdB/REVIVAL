@@ -419,9 +419,17 @@ bool DisplaceRebuild_Apply()
 				for (const fds::ClonedMeshRange &r : m.meshRanges) {
 					const TriMesh *T = r.sourceMesh;
 					if (!T || !T->Verts) continue;
-					const uint32_t n = std::min<uint32_t>(r.vCount, uint32_t(T->VIndex));
-					for (uint32_t vi = 0; vi < n; ++vi)
-						m.cloneMesh->Verts[r.vStart + vi].ShellH = T->Verts[vi].ShellH;
+					// The clone carries only vertices a surviving clone face
+					// references, so source->clone is a COMPACTION, not the
+					// identity: go through Mirror::cloneSrcVert exactly as
+					// UpdateMirror does. Reading T->Verts[vi] here would copy
+					// the wrong entry's ShellH into every compacted range.
+					if (m.cloneSrcVert.size() < size_t(r.vStart) + size_t(r.vCount)) continue;
+					for (uint32_t vi = 0; vi < r.vCount; ++vi) {
+						const uint32_t svi = m.cloneSrcVert[size_t(r.vStart) + vi];
+						if (svi >= uint32_t(T->VIndex)) continue;
+						m.cloneMesh->Verts[r.vStart + vi].ShellH = T->Verts[svi].ShellH;
+					}
 				}
 				const size_t nf = std::min<size_t>(size_t(m.cloneMesh->FIndex),
 				                                   m.cloneFaceSrc.size());
