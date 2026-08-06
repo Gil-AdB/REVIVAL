@@ -404,9 +404,16 @@ Authoring/chase/CHASE.FLD are sacred/uncommitted).
 authoring sources, captured 2026-07-28 before slice 1.2; any lwsread source
 change MUST leave these unchanged for sources without the new keyword/sub-chunk):**
 
+The greets row has been re-baselined twice since 2026-07-28, both times because
+an AUTHORING SOURCE changed (which is a legitimate reason to move it; an
+`lwsread` source change is not): `3ed7a253` → `1af2ba90f5fa0bb50a1adb3e7dd2fd00`
+(commit `0846811`, the user's `Piramid.lwo` edits) → `62c68fc9…` (2026-08-06,
+`LightRange` moved into `JENINPYR-new-2.LWS`; FLD delta is exactly the ten Range
+floats, size unchanged, and greets renders byte-identical at its pin).
+
 | scene | variant | md5 |
 |---|---|---|
-| greets | lwsread | `3ed7a253803c868178ceb0c66c79a233` |
+| greets | lwsread | `62c68fc990476a648eeb2812b1ef50a4` (2026-08-06) |
 | chase | lwsread_legacy | `a5e7beb3886065fe314482e44c6b5fec` |
 | fountain | lwsread_legacy | `a0fbf4c75062ed1455c19ba0702f9f8f` |
 | city | lwsread_legacy | `31eedf549d45af5695b22aa8466c18f5` |

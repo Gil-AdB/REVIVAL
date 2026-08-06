@@ -537,8 +537,11 @@ inline float pow2(float x) {return x*x;}
 // first Animate_Objects — even when the FLD carries a perfectly good authored
 // Range envelope. Scene init code that tests `IRange == 0` in that window is
 // therefore testing "Animate_Objects has not run yet", NOT "the content has no
-// authored range". DEMO/GREETS.CPP's greets_omni_default_range patch sits in
-// exactly that window; see the note in FDS/FLD/FLD_CONV.CPP.
+// authored range". DEMO/GREETS.CPP's greets_omni_default_range patch used to
+// sit in exactly that window and misread it that way; it was removed on
+// 2026-08-06 and greets' ranges are authored in the LWS instead. See the note
+// in FDS/FLD/FLD_CONV.CPP. Nothing tests IRange in that window any more —
+// keep it that way.
 //
 // Content census (all shipping FLDs, 2026-08-06): 145 lights across
 // greets/city/chase/fountain/crash/pbrtest. ZERO have Pos.NumKeys > 1 and ZERO

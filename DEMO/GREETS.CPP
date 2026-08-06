@@ -186,11 +186,24 @@ static int32_t CHPartTime = 20.0f*100;
 static void SceneCorrections()
 {
 	// a crazy hack used to adjust omnilights in code.
-	float OmniRangeMult[] = 
-	//	ent1  ent2  ctr1  ctr2  crd1  hal1  hal2  rbtl  rbtr  rbth
-		{2.0,  2.0,  2.0, 2.0,  2.0,  1.7,  1.7,  2.0,  2.0,  2.0};
-//		{0.9,  0.9,  0.3,  0.3,  0.4,  2.0,  2.0,  0.5,  0.5,  0.5};
-//		{0.01,  0.01,  0.01,  0.01,  0.01,  1.0,  1.0,  0.01,  0.01,  0.01};
+	//
+	// Light RANGE is no longer adjusted here — it is AUTHORED, in
+	// Authoring/greets/JENINPYR-new-2.LWS ("LightRange <f>" per AddLight
+	// block) → tools/lwsread → the FLD Range envelope → Omni::Range →
+	// Omni::IRange, evaluated per frame by Animate_Objects
+	// (FDS/RENDER/Transform.cpp). Two code-side patches used to sit on top
+	// of that and both are gone:
+	//   * this function's `OmniRangeMult[] = {2,2,2,2,2,1.7,1.7,2,2,2}`
+	//     (Spline_Scale on O->Range), and
+	//   * Initialize_Greets' `greets_omni_default_range` patch, which ran
+	//     before the first Animate_Objects, saw IRange == 0 (which means
+	//     "spline not evaluated yet", NOT "no authored range" — see
+	//     FDS/FLD/FLD_CONV.CPP) and overwrote BOTH IRange and Range.Keys[0]
+	//     with a flat 30, silently discarding the multipliers above AND the
+	//     authored envelope.
+	// The LWS now carries the final rendered value (30 on all ten), so the
+	// authoring file says what actually renders and per-light tuning is an
+	// authoring act. Verified byte-identical at the greets pin.
 	float OmniSizeMult[] =
 	//	ent1  ent2  ctr1  ctr2  crd1  hal1  hal2  rbtl  rbtr  rbth
 		{1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.5,  1.5,  1.5};
@@ -222,8 +235,8 @@ static void SceneCorrections()
 			O->Flags &=~Omni_Flare;
 		Spline_Scale(&O->Size, OmniSizeMult[index]);
 
-		// adjust range
-		Spline_Scale(&O->Range, OmniRangeMult[index]);
+		// (range: authored in the LWS — see the note at the top of this
+		// function. Nothing to do here.)
 		index++;
 	}
 
@@ -1051,7 +1064,10 @@ static void GreetsApplyInitDefaults()
 	// is visually adequate for lights that near-always sit close to their
 	// caster and saves ~1 ms of bake (measured 2026-07-01).
 	FF::setDefault(FF::IntId::greets_moving_omni_shadow_res, 128);
-	FF::setDefault(FF::FloatId::greets_omni_default_range, 30.0f);
+	// greets_omni_default_range stays at its .def default of 0 (inert).
+	// Omni ranges are authored in Authoring/greets/JENINPYR-new-2.LWS; the
+	// flag is a hard override for tuning only. It used to default to 30
+	// here and unconditionally flattened all ten authored ranges.
 	FF::setDefault(FF::BoolId::shard_deferred,          true);
 	FF::setDefault(FF::IntId::greets_shard_res,         64);
 	// Lightmap bake atlas params (LightmapBake_Static reads these). NOT
@@ -2650,29 +2666,32 @@ void Initialize_Greets()
 	// The bake itself spawns its own thread and parallelizes with the
 	// remaining scene playback.
 	{
-		// FLD-loaded omnis in greets all ship with IRange=0 (the FLD
-		// Range envelope is optional; FLD_CONV.CPP defaults it to a
-		// 1-key spline at 0). That kills surface lighting (range2=0 →
-		// rejects every pixel), halo bounds, and shadow FZP. Patch to
-		// the flag-controlled default so they actually contribute.
-		const float omniDefRange = fds::FeatureFlags::greets_omni_default_range();
-		if (omniDefRange > 0.0f) {
-			int patched = 0;
+		// Omni range is AUTHORED (LWS "LightRange" → FLD Range envelope →
+		// Omni::Range, evaluated per frame by Animate_Objects). Nothing
+		// patches it by default any more — see the note in
+		// SceneCorrections() for the two patches that used to.
+		//
+		// greets_omni_default_range survives only as an explicit tuning
+		// dial, default 0 = inert. When > 0 it FORCES every Light_Omni's
+		// range to that value: it rewrites the spline keys, because
+		// writing IRange alone would be undone by the very next
+		// Animate_Objects. Note this hits every Light_Omni present at
+		// this point, which includes the disco-ball lights built just
+		// above, not only the ten from the FLD.
+		const float omniForceRange = fds::FeatureFlags::greets_omni_default_range();
+		if (omniForceRange > 0.0f) {
+			int forced = 0;
 			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
 				if (O->Type != Light_Omni) continue;
-				if (O->IRange > 0.0f) continue;
-				O->IRange = omniDefRange;
-				O->rRange = 1.0f / omniDefRange;
-				if (O->Range.NumKeys >= 1 && O->Range.Keys) {
-					O->Range.Keys[0].Pos.x = omniDefRange;
-				}
-				++patched;
+				O->IRange = omniForceRange;
+				O->rRange = 1.0f / omniForceRange;
+				for (mword k = 0; k < O->Range.NumKeys && O->Range.Keys; ++k)
+					O->Range.Keys[k].Pos.x = omniForceRange;
+				++forced;
 			}
-			if (patched > 0) {
-				std::fprintf(stderr,
-				    "[GREETS] patched IRange=%g on %d FLD omnis (had 0)\n",
-				    omniDefRange, patched);
-			}
+			std::fprintf(stderr,
+			    "[GREETS] --greets_omni_default_range: forced IRange=%g on %d omnis "
+			    "(overriding the authored LWS ranges)\n", omniForceRange, forced);
 		}
 
 		// Animate_Objects fills in every FLD omni's IPos / IDir from

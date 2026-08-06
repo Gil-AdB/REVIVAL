@@ -516,7 +516,9 @@ Omni *ConvertOmni(FldLight *Src)
 	//
 	// Measured 2026-08-06 — every shipping scene DOES author ranges, and none
 	// animates them (all single-key):
-	//   greets   10 omnis, Range 3 / 3 / 10 / 10 / 7 / 20 / 20 / 2 / 2 / 2
+	//   greets   10 omnis, Range 30 on all ten (was 3/3/10/10/7/20/20/2/2/2
+	//            until the ranges were moved into the authoring source — see
+	//            the greets note below)
 	//   city     76 lights, Range 800..7000 (one light has no envelope)
 	//   chase    41 lights, Range 30000..5e6 (32 have ANIMATED INTENSITY,
 	//            which Animate_Objects handles via the Size spline — ranges
@@ -527,15 +529,22 @@ Omni *ConvertOmni(FldLight *Src)
 	// omission is currently unobservable) whereas Pos keys are — worth knowing
 	// if Scene_Scale ever stops being 1.
 	//
-	// greets caveat: DEMO/GREETS.CPP's greets_omni_default_range patch runs
-	// BEFORE the first Animate_Objects, sees IRange == 0 for all 10 omnis, and
-	// overwrites BOTH IRange AND Range.Keys[0].Pos.x with the flag value
-	// (30 via setDefault). The authored 3/10/7/20/2 above are therefore
-	// discarded before anything reads them — verified in a headless run:
-	// "[GREETS] patched IRange=30 on 10 FLD omnis (had 0)". That is a
-	// deliberate hand-tuned look value, not a fallback; the flag's own
-	// description ("the FLD format omits the envelope") is inaccurate — the
-	// envelopes are present.
+	// greets history (fixed 2026-08-06): greets used to run the authored range
+	// through TWO code-side patches, and the rendered value was neither the
+	// authored number nor either patch alone.
+	//   1. SceneCorrections() scaled every omni's Range spline by
+	//      {2, 2, 2, 2, 2, 1.7, 1.7, 2, 2, 2}  ("a crazy hack used to adjust
+	//      omnilights in code").
+	//   2. Initialize_Greets' greets_omni_default_range patch then ran BEFORE
+	//      the first Animate_Objects, saw IRange == 0 on all ten — which means
+	//      "the spline has not been evaluated yet", NOT "no authored range" —
+	//      and overwrote BOTH IRange AND Range.Keys[0].Pos.x with a flat 30,
+	//      silently discarding step 1 AND the envelope.
+	// Both are gone. The LWS now authors the final rendered value (30 on all
+	// ten) and nothing rewrites it, so this spline is the single source of
+	// truth. Proven by construction: the flat-30 LWS with both patches removed
+	// renders byte-identical to the pre-change greets pin
+	// (f1297141611c484bac7cc10a8bdcf630, 3/3 runs).
 	if (Src->Range)
 	{
 		OL->Range.NumKeys = Src->Range->Keys;
