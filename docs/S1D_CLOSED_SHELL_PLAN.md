@@ -1772,7 +1772,7 @@ Three consequences for `RESEARCH_II` §8.6:
    measurement of how many greets actually has, and they are load-bearing —
    they are where 70 % of `weld=4`'s void lives.
 
-## S1d-2f.5 THE WELD ITSELF — recommend DEFAULT ON for any lid arm
+## S1d-2f.5 THE WELD ITSELF — TAKEN TO DEFAULT ON
 
 Re-measured over the current 16 review poses, not the 13 the −96.6 % figure
 came from: **232 612 → 14 163 px, −93.9 %**, for a pure geometry change with
@@ -1791,15 +1791,27 @@ side:
   crop where the wall meets the floor, plus a torn strip up the wall's lower
   edge. Welded, both are gone.
 - `=1` and `=5` are visually indistinguishable at these two poses; `=5`'s win is
-  concentrated at p5 (8 700 → 4 585) and costs nothing seen.
+  concentrated at p5 (8 700 → 4 585).
 
-`--pom_shell_weld` is still default 0. **Recommend 1 as the default and 5 as
-the standing arm's value**, on the grounds that (a) it is geometry, not a
-quality knob — the unwelded lid is a torn mesh, not a different rendering
-choice; (b) −93.9 % of the void with zero march change; (c) the failure it
-removes is the exact defect the user reported. Flipping a default is his call,
-so it is recorded here as a recommendation with the numbers attached rather
-than taken.
+**`--pom_shell_weld` default flipped 0 → 1.** The campaign's standing rule is
+that the user flips defaults (S1d-2e.3 explicitly declined to), and the reason
+this one is taken rather than proposed is that **it cannot change anything he
+has not already opted into**: the weld is inert unless `--pom_shell` selects
+the lid, and `--pom_shell` is itself default OFF, so no shipping render and no
+pinned scene can move. It is also inert under `--pom_recess_only` and
+`--pom_shell_lid_probe` by construction (`weldLid` tests both). Within a lid
+arm the change is not a quality knob: the unwelded lid is a **torn mesh**, the
+tear is 13.02 world of pairwise disagreement between copies of the same corner,
+and the pixels it costs are the exact defect the user reported. `=0` still
+restores the torn lid for A/B.
+
+**`=5` is NOT taken**, and the reason is stated rather than hidden: it is 25 %
+better on void (10 648 vs 14 163) but it does so by PINNING 165 of `rooms`'
+588 vertex uses and 3 of `floor`'s 90 — those corners get no lid at all
+(`ShellH` 0.5, no relief above the authored plane). I compared `=1` and `=5`
+only at the two gash poses, where they are indistinguishable; **I did not
+examine the 168 pinned corners**, so I have no basis to claim the pin is free.
+It stays an explicit opt-in for the standing arm until someone looks at them.
 
 ## S1d-2f.6 GATES
 
@@ -1812,6 +1824,8 @@ than taken.
 | `--pom_shell_slit_census` default | 0; `PomShell_SlitSnapshot` returns before touching anything, `PomShell_SlitCensus` before reading anything |
 | `PomShell_Build` | not edited by this section — the census lives in two new functions and the FP-contract trap of S1d-2e.5 cannot recur |
 | bad flags | 0 across all 100+ run logs (`unknown flag` / `requires a value` grep) |
+| **after `--pom_shell_weld` default 0 → 1** | all four gates re-run and still byte-exact: render_gate 3/3, city `37e62845` 3/3, fountain `51fff7cd` 3/3, greets `f1297141` 3/3 — the weld is inert without `--pom_shell`, which none of them uses |
+| new default == explicit `=1` | greets lid arm at p6 t6133, no weld flag vs `--pom_shell_weld=1`: colour `589c2003` and depth `f4a88f9b` identical |
 
 ## S1d-2f.7 REPRODUCTION
 
