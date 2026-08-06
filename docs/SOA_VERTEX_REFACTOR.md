@@ -64,6 +64,17 @@ agents (per-run 1-min load 14–23).
 | `--greets_displace` t=5780 | **1.546** | **0.449** (PLAN 0.006 / WORK 0.411 / COMPACT 0.026 / EPI 0.004) | **−1.10 ms, 3.4×** |
 | shipping t=5743 | **0.423** | **0.261** (PLAN 0.005 / WORK 0.246 / COMPACT 0.006 / EPI 0.003) | **−0.16 ms, 1.6×** |
 
+**The load did not bias this**, which is worth stating because the box was
+shared throughout. An orphaned process of the harness's own making (an
+interactive `--scene-mirrortest` launched without `FDS_MIRRORTEST_MULTI_DUMP`
+under a dummy driver, so nothing could ever press ESC) sat at ~3.5 cores
+through every row above. Re-measured after killing it, on a genuinely quiet
+box (1-min load 5.5–11), min-of-arm over 2 interleaved reps: displaced
+**1.490 → 0.461** (3.2×), shipping **0.421 → 0.269** (1.6×). The parallel arm
+is unchanged to within run-to-run spread — if anything marginally slower on the
+quiet box — so the per-frame **min over 24** absorbed the background load, as
+intended. Prefer these figures; the difference from the table above is noise.
+
 Block-count sweep (same binary, min-of-arm over 2 reps, `WORK` only):
 
 | blocks | 1 | 12 | 24 | 26 | 52 | 104 |
