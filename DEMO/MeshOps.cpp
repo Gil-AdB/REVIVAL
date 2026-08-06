@@ -5758,6 +5758,310 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	return uvAmp;
 }
 
+// ── S1d-3 PRISM SIDE GEOMETRY (--pom_prism, default 0 = OFF) ────────────────
+// See MeshOps.h for the contract. Everything here is additive: it never touches
+// an existing vertex, face or material, so with the flag off not one byte of the
+// pipeline changes and with it on the ONLY difference is extra faces in a new
+// TriMesh.
+namespace {
+struct PomPrismState {
+	bool armed = false;
+	std::vector<std::pair<Vertex *, Vector>> pre;      // vertex -> pristine position
+	std::map<long long, std::array<float, 3>> delta;   // qpos(LID pos) -> delta applied
+};
+PomPrismState g_pomPrism;
+}  // namespace
+
+void PomShell_PrismSnapshot(Scene *Sc) {
+	g_pomPrism.armed = false;
+	g_pomPrism.pre.clear();
+	g_pomPrism.delta.clear();
+	if (!Sc || fds::FeatureFlags::pom_prism() <= 0) return;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->VIndex == 0 || !T->Verts) continue;
+		for (int32_t i = 0; i < T->VIndex; ++i)
+			g_pomPrism.pre.emplace_back(&T->Verts[i], T->Verts[i].Pos);
+	}
+	g_pomPrism.armed = true;
+}
+
+void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
+	if (!g_pomPrism.armed || !Sc || !matNames || numMats <= 0) return;
+	const int mode = fds::FeatureFlags::pom_prism();
+	if (mode <= 0) { g_pomPrism.pre.clear(); g_pomPrism.armed = false; return; }
+	// (1) The delta each LID position received. Keyed by the MOVED position so it
+	// survives any wholesale Vertex copy between the build and this call.
+	long long nMovedUses = 0;
+	for (const auto &pv : g_pomPrism.pre) {
+		const Vector &p0 = pv.second, &p1 = pv.first->Pos;
+		const float dx = p1.x - p0.x, dy = p1.y - p0.y, dz = p1.z - p0.z;
+		if (dx == 0.0f && dy == 0.0f && dz == 0.0f) continue;
+		g_pomPrism.delta[PomWeldQPos(p1)] = { dx, dy, dz };
+		++nMovedUses;
+	}
+	g_pomPrism.pre.clear();
+	g_pomPrism.armed = false;
+	if (g_pomPrism.delta.empty()) {
+		std::fprintf(stderr, "[POM-PRISM] no vertex moved — nothing to close\n");
+		return;
+	}
+	// A face is shelled if its material is one of the shelled names or a
+	// "<name>::mirUV" handedness clone of one (this runs AFTER that split so the
+	// clone carries the correct TbnHandedness for the side quads to inherit).
+	auto baseName = [](const char *n) -> std::string {
+		if (!n) return std::string();
+		const char *p = std::strstr(n, "::mirUV");
+		return p ? std::string(n, size_t(p - n)) : std::string(n);
+	};
+	auto shelled = [&](const Face *F) {
+		if (!F || !F->Txtr || !F->Txtr->Name) return false;
+		const std::string b = baseName(F->Txtr->Name);
+		for (int k = 0; k < numMats; ++k)
+			if (matNames[k] && b == matNames[k]) return true;
+		return false;
+	};
+	auto deltaOf = [&](const Vertex *v) -> Vector {
+		auto it = g_pomPrism.delta.find(PomWeldQPos(v->Pos));
+		if (it == g_pomPrism.delta.end()) return Vector{ 0.0f, 0.0f, 0.0f };
+		return Vector{ it->second[0], it->second[1], it->second[2] };
+	};
+	auto preOf = [&](const Vertex *v) -> Vector {
+		const Vector d = deltaOf(v);
+		return Vector{ v->Pos.x - d.x, v->Pos.y - d.y, v->Pos.z - d.z };
+	};
+	// (2) Edge table over EVERY face in the scene, keyed by AUTHORED endpoints.
+	// A record carries the delta this owner applied at each endpoint, which is
+	// what decides whether the two owners' extrusions still meet.
+	struct EdgeRec { const Face *F; bool shelled; float da[3], db[3]; };
+	std::map<std::pair<long long, long long>, std::vector<EdgeRec>> emap;
+	long long nShelledFaces = 0;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || F.A == F.B) continue;
+			const bool sh = shelled(&F);
+			if (sh) ++nShelledFaces;
+			const Vertex *vv[3] = { F.A, F.B, F.C };
+			for (int e = 0; e < 3; ++e) {
+				const Vertex *va = vv[e], *vb = vv[(e + 1) % 3];
+				long long ka = PomWeldQPos(preOf(va)), kb = PomWeldQPos(preOf(vb));
+				const Vector da = deltaOf(va), db = deltaOf(vb);
+				EdgeRec r{ &F, sh, { da.x, da.y, da.z }, { db.x, db.y, db.z } };
+				if (ka > kb) { std::swap(ka, kb); std::swap(r.da[0], r.db[0]);
+				               std::swap(r.da[1], r.db[1]); std::swap(r.da[2], r.db[2]); }
+				emap[{ ka, kb }].push_back(r);
+			}
+		}
+	}
+	// (3) Emit. One quad (2 triangles) per edge that is not already watertight.
+	struct QV { Vector pos; Vector n; Vector tan; float u, v, shellH; };
+	std::vector<QV> qv;
+	struct QF { uint32_t i[3]; const Face *owner; };
+	std::vector<QF> qf;
+	long long nEdgesTested = 0, nEmitted = 0, nSkipMatched = 0, nSkipFlat = 0;
+	long long nFreeEdge = 0, nStaticNb = 0, nTorn = 0;
+	TriMesh *xform = nullptr;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || F.A == F.B || !shelled(&F)) continue;
+			Vertex *vv[3] = { F.A, F.B, F.C };
+			const float fu[3] = { F.U1, F.U2, F.U3 };
+			const float fv[3] = { F.V1, F.V2, F.V3 };
+			for (int e = 0; e < 3; ++e) {
+				Vertex *va = vv[e], *vb = vv[(e + 1) % 3];
+				const Vector da = deltaOf(va), db = deltaOf(vb);
+				const Vector pa = { va->Pos.x - da.x, va->Pos.y - da.y, va->Pos.z - da.z };
+				const Vector pb = { vb->Pos.x - db.x, vb->Pos.y - db.y, vb->Pos.z - db.z };
+				// A side quad of zero height carries nothing (both ends pinned).
+				const float dl = std::max(std::sqrt(da.x*da.x + da.y*da.y + da.z*da.z),
+				                          std::sqrt(db.x*db.x + db.y*db.y + db.z*db.z));
+				++nEdgesTested;
+				if (dl < 1e-6f) { ++nSkipFlat; continue; }
+				long long ka = PomWeldQPos(pa), kb = PomWeldQPos(pb);
+				Vector qa = da, qb = db;
+				if (ka > kb) { std::swap(ka, kb); std::swap(qa, qb); }
+				auto it = emap.find({ ka, kb });
+				bool watertight = false, sawPartner = false, sawStatic = false;
+				if (it != emap.end()) {
+					for (const EdgeRec &r : it->second) {
+						if (r.F == &F) continue;
+						sawPartner = true;
+						if (!r.shelled) { sawStatic = true; continue; }
+						const float ea = std::fabs(r.da[0]-qa.x) + std::fabs(r.da[1]-qa.y)
+						               + std::fabs(r.da[2]-qa.z);
+						const float eb = std::fabs(r.db[0]-qb.x) + std::fabs(r.db[1]-qb.y)
+						               + std::fabs(r.db[2]-qb.z);
+						if (ea < 1e-6f && eb < 1e-6f) { watertight = true; break; }
+					}
+				}
+				// mode 1 = seal only what is not already watertight (the default
+				// and, under the weld, the boundary skirt). mode 2 = emit at EVERY
+				// edge, the literal Hirche prism, for the A/B.
+				if (mode < 2 && watertight) { ++nSkipMatched; continue; }
+				if (!sawPartner) ++nFreeEdge; else if (sawStatic) ++nStaticNb; else ++nTorn;
+				// Outward direction: in the OWNER's plane, perpendicular to the
+				// edge, away from the third corner. The quad must face that way or
+				// the backface cull eats it.
+				const Vertex *vc = vv[(e + 2) % 3];
+				Vector ed = { pb.x - pa.x, pb.y - pa.y, pb.z - pa.z };
+				const float el = std::sqrt(ed.x*ed.x + ed.y*ed.y + ed.z*ed.z);
+				if (el < 1e-6f) continue;
+				ed.x /= el; ed.y /= el; ed.z /= el;
+				const Vector mid = { 0.5f*(pa.x+pb.x), 0.5f*(pa.y+pb.y), 0.5f*(pa.z+pb.z) };
+				Vector inw = { vc->Pos.x - mid.x, vc->Pos.y - mid.y, vc->Pos.z - mid.z };
+				const float pr = inw.x*ed.x + inw.y*ed.y + inw.z*ed.z;
+				inw.x -= ed.x*pr; inw.y -= ed.y*pr; inw.z -= ed.z*pr;
+				const float il = std::sqrt(inw.x*inw.x + inw.y*inw.y + inw.z*inw.z);
+				if (il < 1e-6f) continue;
+				const Vector out = { -inw.x/il, -inw.y/il, -inw.z/il };
+				if (!xform) xform = T;
+				// Lid ring (the moved positions) and base ring (pre - delta), so
+				// the quad straddles the AUTHORED edge exactly.
+				const Vector Ta = va->Pos, Tb = vb->Pos;
+				const Vector Ba = { pa.x - da.x, pa.y - da.y, pa.z - da.z };
+				const Vector Bb = { pb.x - db.x, pb.y - db.y, pb.z - db.z };
+				// UV: constant down the quad (the side face is a cut through the
+				// slab, so the chart really is degenerate there) plus a 1e-4 UV
+				// nudge along the patch's own inward axis, whose SIGN is chosen to
+				// match the owner's UV determinant. That keeps the chart
+				// non-degenerate and lets the existing ::mirUV handedness split
+				// classify the side quad the same way it classified its owner.
+				const float du1 = F.U2 - F.U1, dv1 = F.V2 - F.V1;
+				const float du2 = F.U3 - F.U1, dv2 = F.V3 - F.V1;
+				const float detOwn = du1*dv2 - du2*dv1;
+				const int   ia = e, ib = (e + 1) % 3;
+				const float uA = fu[ia], vA = fv[ia], uB = fu[ib], vB = fv[ib];
+				// A nudge perpendicular to the edge in UV, magnitude 1e-4.
+				float nu = -(vB - vA), nv = (uB - uA);
+				const float nl2 = std::sqrt(nu*nu + nv*nv);
+				if (nl2 > 1e-12f) { nu /= nl2; nv /= nl2; } else { nu = 1.0f; nv = 0.0f; }
+				// Sign so the quad's own (edge, nudge) determinant matches the
+				// owner's chart handedness.
+				const float detQuad = (uB - uA) * nv - (vB - vA) * nu;
+				const float sgn = ((detQuad >= 0.0f) == (detOwn >= 0.0f)) ? 1.0f : -1.0f;
+				const float kNudge = 1e-4f * sgn;
+				const uint32_t base = uint32_t(qv.size());
+				const float hA = va->ShellH, hB = vb->ShellH;
+				qv.push_back({ Ta, va->N, va->Tangent, uA, vA, hA });
+				qv.push_back({ Tb, vb->N, vb->Tangent, uB, vB, hB });
+				qv.push_back({ Bb, vb->N, vb->Tangent, uB + kNudge*nu, vB + kNudge*nv, 1.0f - hB });
+				qv.push_back({ Ba, va->N, va->Tangent, uA + kNudge*nu, vA + kNudge*nv, 1.0f - hA });
+				// Wind so the geometric normal points OUT.
+				const float e1x = Tb.x-Ta.x, e1y = Tb.y-Ta.y, e1z = Tb.z-Ta.z;
+				const float e2x = Bb.x-Ta.x, e2y = Bb.y-Ta.y, e2z = Bb.z-Ta.z;
+				const float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z,
+				            gz = e1x*e2y - e1y*e2x;
+				const bool flip = (gx*out.x + gy*out.y + gz*out.z) < 0.0f;
+				if (!flip) {
+					qf.push_back({ { base+0, base+1, base+2 }, &F });
+					qf.push_back({ { base+0, base+2, base+3 }, &F });
+				} else {
+					qf.push_back({ { base+0, base+2, base+1 }, &F });
+					qf.push_back({ { base+0, base+3, base+2 }, &F });
+				}
+				++nEmitted;
+			}
+		}
+	}
+	if (qf.empty() || !xform) {
+		std::fprintf(stderr, "[POM-PRISM] mode=%d: %lld shelled faces, %lld edges "
+			"tested, NOTHING emitted (%lld already watertight, %lld unmoved)\n",
+			mode, nShelledFaces, nEdgesTested, nSkipMatched, nSkipFlat);
+		return;
+	}
+	// (4) One new TriMesh in the owner's object space, spliced into the scene the
+	// same way the S1 shadow proxy is. Nothing existing is reallocated, so every
+	// Face->Vertex pointer in the scene stays valid.
+	Object *ownerObj = nullptr;
+	for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next)
+		if (Obj->Type == Obj_TriMesh && Obj->Data == (void *)xform) { ownerObj = Obj; break; }
+	if (!ownerObj) {
+		std::fprintf(stderr, "[POM-PRISM] owner object not found — no side geometry\n");
+		return;
+	}
+	TriMesh *sk = new TriMesh();
+	sk->VIndex = uint32_t(qv.size());
+	sk->FIndex = uint32_t(qf.size());
+	sk->Verts = new Vertex[qv.size()];
+	sk->Faces = new Face[qf.size()];
+	float xmn=1e30f, xmx=-1e30f, ymn=1e30f, ymx=-1e30f, zmn=1e30f, zmx=-1e30f;
+	for (size_t i = 0; i < qv.size(); ++i) {
+		Vertex &V = sk->Verts[i];
+		V = Vertex();
+		V.Pos = qv[i].pos;
+		V.N = qv[i].n;
+		V.Tangent = qv[i].tan;
+		V.U = qv[i].u; V.V = qv[i].v;
+		V.ShellH = qv[i].shellH;
+		xmn = std::min(xmn, V.Pos.x); xmx = std::max(xmx, V.Pos.x);
+		ymn = std::min(ymn, V.Pos.y); ymx = std::max(ymx, V.Pos.y);
+		zmn = std::min(zmn, V.Pos.z); zmx = std::max(zmx, V.Pos.z);
+	}
+	for (size_t i = 0; i < qf.size(); ++i) {
+		Face &D = sk->Faces[i];
+		D = *qf[i].owner;                     // material, flags, filler, shadow id
+		D.A = &sk->Verts[qf[i].i[0]];
+		D.B = &sk->Verts[qf[i].i[1]];
+		D.C = &sk->Verts[qf[i].i[2]];
+		D.A_idx = qf[i].i[0]; D.B_idx = qf[i].i[1]; D.C_idx = qf[i].i[2];
+		D.ParentTri = sk;
+		D.MeshFaceIdx = uint16_t(i);
+		D.U1 = sk->Verts[qf[i].i[0]].U; D.V1 = sk->Verts[qf[i].i[0]].V;
+		D.U2 = sk->Verts[qf[i].i[1]].U; D.V2 = sk->Verts[qf[i].i[1]].V;
+		D.U3 = sk->Verts[qf[i].i[2]].U; D.V3 = sk->Verts[qf[i].i[2]].V;
+		const Vector &A = D.A->Pos, &B = D.B->Pos, &C = D.C->Pos;
+		const float e1x = B.x-A.x, e1y = B.y-A.y, e1z = B.z-A.z;
+		const float e2x = C.x-A.x, e2y = C.y-A.y, e2z = C.z-A.z;
+		float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z, gz = e1x*e2y - e1y*e2x;
+		const float gl = std::sqrt(gx*gx + gy*gy + gz*gz);
+		if (gl > 1e-9f) { gx /= gl; gy /= gl; gz /= gl; }
+		D.N.x = gx; D.N.y = gy; D.N.z = gz;
+		D.NormProd = -(gx*A.x + gy*A.y + gz*A.z);
+	}
+	sk->BSphereCtr = { 0.5f*(xmn+xmx), 0.5f*(ymn+ymx), 0.5f*(zmn+zmx) };
+	float r2 = 0.0f;
+	for (size_t i = 0; i < qv.size(); ++i) {
+		const float dx = sk->Verts[i].Pos.x - sk->BSphereCtr.x;
+		const float dy = sk->Verts[i].Pos.y - sk->BSphereCtr.y;
+		const float dz = sk->Verts[i].Pos.z - sk->BSphereCtr.z;
+		r2 = std::max(r2, dx*dx + dy*dy + dz*dz);
+	}
+	sk->BSphereRadius = std::sqrt(r2); sk->BSphereRad = r2;
+	sk->IPos = xform->IPos; sk->IScale = xform->IScale; sk->IRot = xform->IRot;
+	Matrix_Copy(sk->RotMat, xform->RotMat);
+	Matrix_Copy(sk->UnscaledRotMat, xform->UnscaledRotMat);
+	sk->Flags = (xform->Flags & ~Tri_Stationary) | Tri_Possessed;
+	Object *skObj = new Object();
+	skObj->Type = Obj_TriMesh;
+	skObj->Data = sk;
+	skObj->Pos = new Vector(*ownerObj->Pos);
+	struct MatrixHolder { Matrix m; };
+	MatrixHolder *holder = new MatrixHolder();
+	skObj->Rot = &holder->m;
+	Matrix_Copy(*skObj->Rot, *ownerObj->Rot);
+	skObj->Pivot = ownerObj->Pivot;
+	skObj->Parent = ownerObj->Parent;
+	skObj->ParentID = ownerObj->ParentID;
+	skObj->Name = strdup("pom_prism_sides");   // no "Piramid" -> chunking skips it
+	skObj->Next = ownerObj->Next;
+	skObj->Prev = ownerObj;
+	if (ownerObj->Next) ownerObj->Next->Prev = skObj;
+	ownerObj->Next = skObj;
+	sk->Next = Sc->TriMeshHead; sk->Prev = nullptr;
+	if (Sc->TriMeshHead) Sc->TriMeshHead->Prev = sk;
+	Sc->TriMeshHead = sk;
+	std::fprintf(stderr,
+		"[POM-PRISM] mode=%d: %lld shelled faces, %lld edges tested -> %lld side "
+		"quads (%u verts / %u faces). Cause: %lld FREE edge (no partner), %lld "
+		"partner does NOT move (unshelled / T-junction), %lld partner moves "
+		"DIFFERENTLY (torn). Skipped: %lld already watertight, %lld unmoved.\n",
+		mode, nShelledFaces, nEdgesTested, nEmitted, sk->VIndex, sk->FIndex,
+		nFreeEdge, nStaticNb, nTorn, nSkipMatched, nSkipFlat);
+}
+
 Texture *MakeResidualHeight(Texture *height, int lowMip) {
 	if (!height || height->BPP != 8 || !height->Mipmap[0] || height->numMipmaps == 0)
 		return nullptr;

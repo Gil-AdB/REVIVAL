@@ -381,6 +381,38 @@ void PomShell_WeldReset();
 void PomShell_SlitSnapshot(Scene *Sc);
 void PomShell_SlitCensus(Scene *Sc, const char *const *matNames, int numMats);
 
+// S1d-3 PRISM / CLOSED-SHELL SIDE GEOMETRY (--pom_prism, default 0 = OFF).
+// The lid shell moves the shelled surface OUT by half the relief slab. Wherever
+// the surface it moves away from does NOT move with it — an unshelled ceiling,
+// a column, a free edge, a T-junction, or (with the weld off) a torn corner —
+// a slit of exactly the offset width opens, and that slit is 100 % of the void
+// the weld cannot reach (docs/S1D_CLOSED_SHELL_PLAN.md §S1d-2f.1: every extra
+// void pixel is --pom_path_viz code 0, i.e. NO FRAGMENT was ever rasterised).
+//
+// Hirche 2004's answer is a PRISM per base triangle: the extruded surface keeps
+// a real SIDE QUAD at every edge, so the shell stays watertight while the lids
+// move. This builds exactly those side quads, as real geometry in a new TriMesh,
+// and only where they are load-bearing:
+//   an edge gets a side quad iff no partner face shares its AUTHORED endpoints
+//   with the SAME offset delta at both of them.
+// Under the (default) weld that reduces to the boundary of the shelled surface —
+// the skirt — because interior edges already agree by construction. With the
+// weld off it emits the full Hirche side set, which is the A/B that tests
+// whether the prism replaces the weld or only completes it.
+//
+// The quad spans lid (Pos) to base (Pos - 2*delta), so it passes exactly through
+// the AUTHORED edge and therefore seals against static neighbours whatever the
+// weld's tangential slide did. ShellH runs 1 -> 0 down it, so the march enters
+// at the true slab height of the fragment; N/Tangent are the PATCH's, so the
+// march's tangent frame and the UV domain are the neighbouring lid's.
+//
+// Call PomShell_PrismSnapshot BEFORE the first PomShell_Build (it records the
+// pristine positions) and PomShell_BuildPrism after the last one, BEFORE the
+// ::mirUV handedness split and the mirror clone build so both pick the new
+// faces up. Both are no-ops with --pom_prism 0.
+void PomShell_PrismSnapshot(Scene *Sc);
+void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats);
+
 // B4 residual height map: full-res height minus the bilinear-upsampled lowMip
 // band (per mip, clamped, same 8-bit tiled+mip layout) — the POM input for a
 // displaced material, so geometry + parallax don't double-count the relief.

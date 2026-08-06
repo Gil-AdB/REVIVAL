@@ -1891,6 +1891,12 @@ void Initialize_Greets()
 			// received without instrumenting PomShell_Build itself. No-op and
 			// byte-null with the flag off.
 			PomShell_SlitSnapshot(GreetSc);
+			// ── S1d-3 PRISM (--pom_prism, default 0 = OFF) ── BEGIN
+			// Same pre-build snapshot, kept separately because the prism's
+			// consumer runs much later (after the ::mirUV split) while the slit
+			// census consumes and frees its own immediately below.
+			PomShell_PrismSnapshot(GreetSc);
+			// ── S1d-3 PRISM ── END
 		}
 		for (const char *nm : { "rooms", "floor" }) {
 			Material *M = nullptr;
@@ -2635,6 +2641,18 @@ void Initialize_Greets()
 	// Split mirrored-UV faces onto handedness clones (after all robot/face
 	// retargeting, before the matID rebuild so the clones get IDs).
 	GreetsFixBitangentHandedness(GreetSc);
+	// ── S1d-3 PRISM (--pom_prism, default 0 = OFF) ── BEGIN
+	// Here, and not next to PomShell_Build, for two reasons: the ::mirUV split
+	// above has just assigned each shelled face its final handedness material,
+	// which the side quads copy verbatim; and the mirror clone build below has
+	// not run yet, so the new faces are cloned into the mirrors like any other.
+	// The chunk split above has already run, but its chunks all carry Piramid's
+	// transform, so one side mesh in that space is exact.
+	if (fds::FeatureFlags::pom_shell() && fds::FeatureFlags::pom_prism() > 0) {
+		static const char *kPrismMats[2] = { "rooms", "floor" };
+		PomShell_BuildPrism(GreetSc, kPrismMats, 2);
+	}
+	// ── S1d-3 PRISM ── END
 	Scene_RebuildMatTable(GreetSc);
 	std::fprintf(stderr, "[ROBOT-MAT] total clones: %d\n", totalClones);
 	std::fflush(stderr);
