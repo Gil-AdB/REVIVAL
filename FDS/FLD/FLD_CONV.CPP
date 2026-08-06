@@ -506,6 +506,36 @@ Omni *ConvertOmni(FldLight *Src)
 		K->Bias=E->Bias;
 	}
 
+	// Range envelope (FLD light flag bit 16 = Light_Range). NOTE for anyone
+	// reading Omni::IRange later: this fills the SPLINE only. `OL->IRange`
+	// itself stays 0 (the Omni was memset above) until the first
+	// Animate_Objects evaluates the spline — Reset_XForm, the only other code
+	// that ever set IRange from Keys[0], is dead (see FDS/MISC/PREPROC.CPP).
+	// So "IRange == 0 at scene init" means "not animated yet", NOT "the
+	// content authored no range".
+	//
+	// Measured 2026-08-06 — every shipping scene DOES author ranges, and none
+	// animates them (all single-key):
+	//   greets   10 omnis, Range 3 / 3 / 10 / 10 / 7 / 20 / 20 / 2 / 2 / 2
+	//   city     76 lights, Range 800..7000 (one light has no envelope)
+	//   chase    41 lights, Range 30000..5e6 (32 have ANIMATED INTENSITY,
+	//            which Animate_Objects handles via the Size spline — ranges
+	//            themselves are static)
+	//   fountain 14 lights, Range 50..100 (one has no envelope)
+	//   crash     1 light, no Range envelope
+	// Range is NOT multiplied by Scene_Scale here (Scene_Scale is 1.0, so the
+	// omission is currently unobservable) whereas Pos keys are — worth knowing
+	// if Scene_Scale ever stops being 1.
+	//
+	// greets caveat: DEMO/GREETS.CPP's greets_omni_default_range patch runs
+	// BEFORE the first Animate_Objects, sees IRange == 0 for all 10 omnis, and
+	// overwrites BOTH IRange AND Range.Keys[0].Pos.x with the flag value
+	// (30 via setDefault). The authored 3/10/7/20/2 above are therefore
+	// discarded before anything reads them — verified in a headless run:
+	// "[GREETS] patched IRange=30 on 10 FLD omnis (had 0)". That is a
+	// deliberate hand-tuned look value, not a fallback; the flag's own
+	// description ("the FLD format omits the envelope") is inaccurate — the
+	// envelopes are present.
 	if (Src->Range)
 	{
 		OL->Range.NumKeys = Src->Range->Keys;

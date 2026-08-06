@@ -683,6 +683,62 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 						// thereafter. Bounded LRU is overkill — scenes
 						// have O(50) distinct materials; a flat 256-entry
 						// hash-keyed-by-pointer is plenty.
+						// ---- Why this is still a NAME match [measured 2026-08-06] ----
+						// The obvious fix is "use the authored cast/receive shadow
+						// flags instead". They were checked. They do not work, for two
+						// independent reasons:
+						//
+						// 1. LWS ShadowOptions / ShadowType carry NO signal. Across all
+						//    six authoring scenes -- 316 object blocks, 145 lights
+						//    (greets/city/chase/fountain/crash/pbrtest) -- ShadowOptions
+						//    is 7 on EVERY object and ShadowType is 1 on EVERY light.
+						//    Zero variance: those are just LightWave's defaults
+						//    (self|cast|receive all on) written out by the exporter.
+						//    tools/lwsread does not parse either field, and parsing them
+						//    would buy nothing. They are also the WRONG GRANULARITY --
+						//    ShadowOptions is per-OBJECT, and greets' entire room
+						//    (walls, floor, lamps, screens) is ONE object, Piramid.lwo.
+						//    It cannot express "this surface".
+						//
+						// 2. Surf_Luminous IS authored per-surface and IS already here
+						//    (FLD_MAT.CPP copies the LWOB SURF FLAG word into
+						//    Material::TFlags, so `m->TFlags & Surf_Luminous` is
+						//    readable right now, no parser needed) -- but it is NOT
+						//    equivalent to this predicate. Greets disagreements:
+						//      name-hit but NOT Luminous: 'lamp',
+						//        'screen emiter fance', 'screen emiter'
+						//      Luminous but name MISSES: 'screen2', 'sh', 'screen 3',
+						//        'screen 4', 'teleporter', 'linght'   (of these,
+						//        screen2/3/4 are already skipped via Mat_Transparent)
+						//
+						// The load-bearing case is 'lamp' -- the OPAQUE lamp HOUSING
+						// (Transparency 0, not Luminous, so neither the flag mask below
+						// nor Surf_Luminous would skip it). Greets omnis 0-6 sit INSIDE
+						// their own fixtures: measured from GREETS.FLD, each of those
+						// omnis has 504-639 'lamp' vertices within 0.8 units, spread
+						// over all 8 octants around it (nearest vertex 0.33-0.38). If
+						// 'lamp' cast shadows, every one of those lights would bake the
+						// interior of its own housing and the room would read fully
+						// occluded. The 'lamp light' glass around them (240 verts, also
+						// 8/8 octants) is ALREADY skipped by Mat_Transparent below
+						// (Transparency 50) -- so the name rule is redundant for the
+						// glass and essential for the housing.
+						//
+						// Conclusion: substituting Surf_Luminous would BREAK greets.
+						// The right replacement is an explicit authored per-surface bit,
+						// and the project already has the mechanism: add castsShadow /
+						// receivesShadow to the RVSF payload (Surf_RevExt = 0x8000 in
+						// LWREAD.H plus a new RevExtMask bit; wire through
+						// FLD_READ.CPP ReadMaterial, FLD_MAT.CPP, and tools/lwsread
+						// FLDSAVE.CPP) so the EDITOR can mark emitters and fixtures
+						// directly. Then prefer the authored bit here and keep this
+						// name match as the fallback for unflagged content. NOT built
+						// -- no content carries such a bit today, and a speculative
+						// parser for empty fields is worse than an honest heuristic.
+						//
+						// NOTE FOR GpuBench: GpuBench/ reproduces this predicate
+						// byte-for-byte as Batch::castsShadow. Any change here must be
+						// mirrored there or the two arms diverge.
 						struct MatShadowCache {
 							// Pack (material pointer | skip-bit) into ONE atomic
 							// so the pointer-match and the skip flag are read/
