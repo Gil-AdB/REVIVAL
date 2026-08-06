@@ -4152,6 +4152,317 @@ void PomShell_WeldPrepare(Scene *Sc, const char *const *matNames, int numMats) {
 		numMats, g_pomWeld.dir.size(), nMulti, nCross, g_pomWeld.pinUnshelled.size());
 }
 
+// ── R2 GEOMETRIC SLIT CENSUS (--pom_shell_slit_census, default OFF) ─────────
+// See MeshOps.h. Lives outside PomShell_Build on purpose.
+namespace {
+struct PomSlitSnap {
+	bool armed = false;
+	std::vector<std::pair<Vertex *, Vector>> pre;   // vertex -> position before the build
+};
+PomSlitSnap g_pomSlit;
+}  // namespace
+
+void PomShell_SlitSnapshot(Scene *Sc) {
+	g_pomSlit.armed = false;
+	g_pomSlit.pre.clear();
+	if (!Sc || !fds::FeatureFlags::pom_shell_slit_census()) return;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->VIndex == 0 || !T->Verts) continue;
+		for (int32_t i = 0; i < T->VIndex; ++i)
+			g_pomSlit.pre.emplace_back(&T->Verts[i], T->Verts[i].Pos);
+	}
+	g_pomSlit.armed = true;
+}
+
+void PomShell_SlitCensus(Scene *Sc, const char *const *matNames, int numMats) {
+	if (!g_pomSlit.armed || !Sc) { g_pomSlit.pre.clear(); g_pomSlit.armed = false; return; }
+	auto shelled = [&](const Face *F) {
+		if (!F || !F->Txtr || !F->Txtr->Name) return false;
+		for (int k = 0; k < numMats; ++k)
+			if (matNames[k] && !std::strcmp(F->Txtr->Name, matNames[k])) return true;
+		return false;
+	};
+	// position (PRE-build) -> every delta applied to a copy sitting there
+	std::map<long long, std::vector<std::array<double, 3>>> deltas;
+	std::map<long long, Vector> prePos;
+	for (const auto &pv : g_pomSlit.pre) {
+		const Vector &p0 = pv.second, &p1 = pv.first->Pos;
+		const double dx = double(p1.x) - p0.x, dy = double(p1.y) - p0.y,
+		             dz = double(p1.z) - p0.z;
+		if (dx == 0.0 && dy == 0.0 && dz == 0.0) continue;      // unmoved
+		const long long k = PomWeldQPos(p0);
+		deltas[k].push_back({ dx, dy, dz });
+		prePos[k] = p0;
+	}
+	// ── (A) TEAR BETWEEN SHELLED COPIES: max pairwise |d_a - d_b| per position.
+	long long nTornPos = 0; double tearMax = 0.0, tearSum = 0.0;
+	for (const auto &kv : deltas) {
+		double worst = 0.0;
+		for (size_t a = 0; a + 1 < kv.second.size(); ++a)
+			for (size_t b = a + 1; b < kv.second.size(); ++b) {
+				const double ex = kv.second[a][0] - kv.second[b][0];
+				const double ey = kv.second[a][1] - kv.second[b][1];
+				const double ez = kv.second[a][2] - kv.second[b][2];
+				worst = std::max(worst, std::sqrt(ex*ex + ey*ey + ez*ez));
+			}
+		if (worst > 1e-6) { ++nTornPos; tearSum += worst; tearMax = std::max(tearMax, worst); }
+	}
+	// ── (B) LIFT OFF AN UNSHELLED NEIGHBOUR. For every UNSHELLED face (which
+	// never moves), any corner whose position a shelled vertex also used has
+	// lifted |d.N| off that face's plane. Edge-weighted so the number is an
+	// AREA, comparable across modes, and directly the slit the void metric sees.
+	// The gap has TWO components and only the second one moves with the mitre:
+	//   lift  = |d.N_u|              — the corner rising OFF the neighbour's plane
+	//   slide = |d - (d.N_u)N_u|     — the corner sliding ALONG it, which drags
+	//                                  this surface's boundary away from wherever
+	//                                  the neighbour's boundary still is.
+	// The mitre divides the move by cos(half-fold), so at a fold of half-angle T
+	// lift goes off*cos(T) -> off and slide goes off*sin(T) -> off*tan(T).
+	long long nUnshPos = 0, nUnshPairs = 0;
+	double liftMax = 0.0, liftSum = 0.0, slitArea = 0.0, totalMove = 0.0;
+	double slideMax = 0.0, slideSum = 0.0, slideArea = 0.0;
+	std::set<long long> unshTouched;
+	struct NbGap { double lift = 0.0, slide = 0.0, liftArea = 0.0, slideArea = 0.0; long long n = 0; };
+	std::map<std::string, NbGap> byNb;      // unshelled material -> its gap
+	auto gapAt = [&](const Vector &p, const Vector &N, double *slide) -> double {
+		auto it = deltas.find(PomWeldQPos(p));
+		*slide = 0.0;
+		if (it == deltas.end()) return -1.0;
+		double worst = -1.0;
+		for (const auto &d : it->second) {
+			const double dn = d[0]*N.x + d[1]*N.y + d[2]*N.z;
+			const double m2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
+			if (std::fabs(dn) > worst) {
+				worst = std::fabs(dn);
+				*slide = std::sqrt(std::max(0.0, m2 - dn*dn));
+			}
+		}
+		return worst;
+	};
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || shelled(&F)) continue;
+			const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(unnamed)";
+			const Vertex *vv[3] = { F.A, F.B, F.C };
+			for (int e = 0; e < 3; ++e) {
+				const Vector &pa = vv[e]->Pos, &pb = vv[(e + 1) % 3]->Pos;
+				double sa = 0.0, sb = 0.0;
+				const double la = gapAt(pa, F.N, &sa), lb = gapAt(pb, F.N, &sb);
+				if (la < 0.0 && lb < 0.0) continue;
+				const double ga = std::max(0.0, la), gb = std::max(0.0, lb);
+				const double ex = double(pb.x) - pa.x, ey = double(pb.y) - pa.y,
+				             ez = double(pb.z) - pa.z;
+				const double len = std::sqrt(ex*ex + ey*ey + ez*ez);
+				slitArea  += 0.5 * (ga + gb) * len;
+				slideArea += 0.5 * (sa + sb) * len;
+				auto &g = byNb[nm];
+				g.liftArea += 0.5 * (ga + gb) * len;
+				g.slideArea += 0.5 * (sa + sb) * len;
+				++nUnshPairs;
+			}
+			for (int k = 0; k < 3; ++k) {
+				double sl = 0.0;
+				const double l = gapAt(vv[k]->Pos, F.N, &sl);
+				if (l < 0.0) continue;
+				auto &g = byNb[nm];
+				g.lift = std::max(g.lift, l); g.slide = std::max(g.slide, sl); ++g.n;
+				const long long key = PomWeldQPos(vv[k]->Pos);
+				if (unshTouched.insert(key).second) {
+					++nUnshPos; liftSum += l; liftMax = std::max(liftMax, l);
+					slideSum += sl; slideMax = std::max(slideMax, sl);
+				}
+			}
+		}
+	}
+	double moveMax = 0.0;
+	for (const auto &kv : deltas)
+		for (const auto &d : kv.second) {
+			const double m = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+			totalMove += m; moveMax = std::max(moveMax, m);
+		}
+	long long nCopies = 0;
+	for (const auto &kv : deltas) nCopies += (long long)kv.second.size();
+	std::fprintf(stderr,
+		"[POM-SLIT] mode=%d  moved %lld copies over %zu positions; |d| mean %.4f "
+		"max %.4f world\n"
+		"[POM-SLIT]   (A) shelled-vs-shelled TEAR: %lld positions torn, sum %.4f, "
+		"max %.4f world\n"
+		"[POM-SLIT]   (B) gap against an UNSHELLED neighbour, %lld positions over "
+		"%lld edge-uses:\n"
+		"[POM-SLIT]         LIFT  (off its plane)   mean %.4f max %.4f, AREA %.5f world^2\n"
+		"[POM-SLIT]         SLIDE (along its plane) mean %.4f max %.4f, AREA %.5f world^2\n",
+		fds::FeatureFlags::pom_shell_weld(), nCopies, deltas.size(),
+		nCopies ? totalMove / double(nCopies) : 0.0, moveMax,
+		nTornPos, tearSum, tearMax,
+		nUnshPos, nUnshPairs,
+		nUnshPos ? liftSum / double(nUnshPos) : 0.0, liftMax, slitArea,
+		nUnshPos ? slideSum / double(nUnshPos) : 0.0, slideMax, slideArea);
+	for (const auto &kv : byNb)
+		std::fprintf(stderr, "[POM-SLIT]      vs unshelled '%s': %lld corner-uses, "
+			"lift max %.4f (area %.5f), SLIDE max %.4f (area %.5f)\n",
+			kv.first.c_str(), kv.second.n, kv.second.lift, kv.second.liftArea,
+			kv.second.slide, kv.second.slideArea);
+	// ── (C) T-JUNCTIONS. greets' walls and floor carry vertices that sit in the
+	// INTERIOR of a neighbouring face's edge. A T-junction is watertight under a
+	// RIGID translation of the surface, and more generally under any offset that
+	// is AFFINE ALONG THE EDGE, because the T-vertex stays on the interpolated
+	// edge. A per-position offset DIRECTION is neither: the T-vertex and the
+	// edge's two endpoints move by three unrelated vectors and the junction opens
+	// by the amount the middle one deviates from the line. That is the term the
+	// weld modes actually differ on — 1 offsets the planar floor rigidly, 3 gives
+	// every position its own mean, 4 multiplies each of those by 1/cos.
+	// PER COPY. At a wall/floor corner the two copies carry DIFFERENT deltas
+	// under weld=1 (no memo), so a position-keyed lookup would charge the floor
+	// with the wall's motion and report a crack where the floor is rigid.
+	std::map<const Vertex *, Vector> preOf;
+	for (const auto &pv : g_pomSlit.pre) preOf.emplace(pv.first, pv.second);
+	std::vector<std::pair<Vector, std::array<double,3>>> cand;  // shelled copies
+	{
+		std::set<const Vertex *> seen;
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !shelled(&F)) continue;
+				for (const Vertex *v : { F.A, F.B, F.C }) {
+					if (!seen.insert(v).second) continue;
+					auto it = preOf.find(v);
+					if (it == preOf.end()) continue;
+					cand.emplace_back(it->second, std::array<double,3>{
+						double(v->Pos.x) - it->second.x,
+						double(v->Pos.y) - it->second.y,
+						double(v->Pos.z) - it->second.z });
+				}
+			}
+		}
+	}
+	// ── (D) TANGENTIAL SLIDE relative to the offsetting surface's OWN plane.
+	// This is the term that decides everything, and unlike (B)/(C) it needs no
+	// neighbour and no shared vertex, so it also sees a boundary that merely
+	// ABUTS another surface geometrically. Decompose each vertex's delta against
+	// its own PRISTINE face plane: the normal part is the offset the shell wants,
+	// the tangential part slides the patch's BOUNDARY sideways within the plane
+	// and is pure damage — it drags every free edge away from whatever was
+	// meeting it. A per-material rigid offset (weld=1 on the planar floor) has
+	// tangential == 0 exactly; a per-position mean direction does not; and the
+	// mitre multiplies it by 1/cos(half-fold): off*sin(T) -> off*tan(T).
+	long long nTan = 0; double tanSum = 0.0, tanMax = 0.0, nrmSum = 0.0;
+	std::map<std::string, std::array<double,3>> tanByMat;   // mat -> (sum, max, n)
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || !shelled(&F)) continue;
+			auto ia = preOf.find(F.A), ib = preOf.find(F.B), ic = preOf.find(F.C);
+			if (ia == preOf.end() || ib == preOf.end() || ic == preOf.end()) continue;
+			const Vector &pa = ia->second, &pb = ib->second, &pc = ic->second;
+			const double ux = double(pb.x)-pa.x, uy = double(pb.y)-pa.y, uz = double(pb.z)-pa.z;
+			const double vx = double(pc.x)-pa.x, vy = double(pc.y)-pa.y, vz = double(pc.z)-pa.z;
+			double nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
+			const double nl = std::sqrt(nx*nx + ny*ny + nz*nz);
+			if (!(nl > 1e-12)) continue;
+			nx /= nl; ny /= nl; nz /= nl;
+			const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(unnamed)";
+			// PER COPY, not per position: at a wall/floor corner the two copies
+			// carry different deltas under weld=1 (no memo), and it is THIS
+			// face's copy whose slide moves THIS face's boundary.
+			const Vertex *cv[3] = { F.A, F.B, F.C };
+			const Vector *cp[3] = { &pa, &pb, &pc };
+			for (int k = 0; k < 3; ++k) {
+				const double d[3] = { double(cv[k]->Pos.x) - cp[k]->x,
+				                      double(cv[k]->Pos.y) - cp[k]->y,
+				                      double(cv[k]->Pos.z) - cp[k]->z };
+				if (d[0] == 0.0 && d[1] == 0.0 && d[2] == 0.0) continue;
+				const double dn = d[0]*nx + d[1]*ny + d[2]*nz;
+				const double m2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
+				const double tg = std::sqrt(std::max(0.0, m2 - dn*dn));
+				++nTan; tanSum += tg; nrmSum += std::fabs(dn);
+				tanMax = std::max(tanMax, tg);
+				auto &e = tanByMat[nm];
+				e[0] += tg; e[1] = std::max(e[1], tg); e[2] += 1.0;
+			}
+		}
+	}
+	std::fprintf(stderr,
+		"[POM-SLIT]   (D) TANGENTIAL SLIDE vs the vertex's OWN pristine face plane "
+		"(0 for a rigid offset): %lld corner-uses, mean %.4f max %.4f world "
+		"(normal part mean %.4f)\n",
+		nTan, nTan ? tanSum / double(nTan) : 0.0, tanMax,
+		nTan ? nrmSum / double(nTan) : 0.0);
+	for (const auto &kv : tanByMat)
+		std::fprintf(stderr, "[POM-SLIT]       '%s': %.0f corner-uses, slide mean "
+			"%.4f max %.4f world\n", kv.first.c_str(), kv.second[2],
+			kv.second[2] > 0 ? kv.second[0] / kv.second[2] : 0.0, kv.second[1]);
+	long long nT = 0; double tMax = 0.0, tArea = 0.0, tSum = 0.0;
+	long long nT1 = 0, nT2 = 0;
+	double t1Max = 0.0, t1Area = 0.0, t1Sum = 0.0;
+	double t2Max = 0.0, t2Area = 0.0, t2Sum = 0.0;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C) continue;
+			const Vertex *vv[3] = { F.A, F.B, F.C };
+			for (int e = 0; e < 3; ++e) {
+				// PRE-build endpoints: current position minus the delta applied.
+				const Vertex *va = vv[e], *vb = vv[(e + 1) % 3];
+				auto ia = preOf.find(va), ib = preOf.find(vb);
+				if (ia == preOf.end() || ib == preOf.end()) continue;
+				const Vector *pa = &ia->second, *pb = &ib->second;
+				// PER COPY, for the same reason as (D).
+				const double da[3] = { double(va->Pos.x) - pa->x,
+				                       double(va->Pos.y) - pa->y,
+				                       double(va->Pos.z) - pa->z };
+				const double db[3] = { double(vb->Pos.x) - pb->x,
+				                       double(vb->Pos.y) - pb->y,
+				                       double(vb->Pos.z) - pb->z };
+				const double ex = double(pb->x) - pa->x, ey = double(pb->y) - pa->y,
+				             ez = double(pb->z) - pa->z;
+				const double L2 = ex*ex + ey*ey + ez*ez;
+				if (L2 < 1e-12) continue;
+				const double L = std::sqrt(L2);
+				for (const auto &c : cand) {
+					const double px = double(c.first.x) - pa->x,
+					             py = double(c.first.y) - pa->y,
+					             pz = double(c.first.z) - pa->z;
+					const double t = (px*ex + py*ey + pz*ez) / L2;
+					if (t <= 1e-4 || t >= 1.0 - 1e-4) continue;
+					const double rx = px - t*ex, ry = py - t*ey, rz = pz - t*ez;
+					if (rx*rx + ry*ry + rz*rz > 1e-6) continue;      // not on the edge
+					// gap after the move: T-vertex vs the moved edge at the same t
+					const double gx = c.second[0] - (da[0] + t*(db[0] - da[0]));
+					const double gy = c.second[1] - (da[1] + t*(db[1] - da[1]));
+					const double gz = c.second[2] - (da[2] + t*(db[2] - da[2]));
+					const double g = std::sqrt(gx*gx + gy*gy + gz*gz);
+					++nT; tSum += g; tMax = std::max(tMax, g); tArea += g * L;
+					// Split: an ALL-SHELLED T-junction (both edge endpoints moved)
+					// tests only whether the offset is AFFINE ALONG THE EDGE — it
+					// is exactly 0 for a rigid translation. A mixed one is the
+					// shelled-vs-unshelled gap already counted in (B).
+					const bool moved = (da[0] || da[1] || da[2])
+					                && (db[0] || db[1] || db[2]);
+					if (moved) { ++nT1; t1Sum += g; t1Max = std::max(t1Max, g); t1Area += g * L; }
+					else       { ++nT2; t2Sum += g; t2Max = std::max(t2Max, g); t2Area += g * L; }
+				}
+			}
+		}
+	}
+	std::fprintf(stderr,
+		"[POM-SLIT]   (C) T-JUNCTIONS: %lld (edge,T-vertex) pairs, gap mean %.4f "
+		"max %.4f world, AREA %.5f world^2\n"
+		"[POM-SLIT]       C1 ALL-SHELLED (affine-along-edge test; 0 for a RIGID "
+		"offset): %lld pairs, mean %.4f max %.4f, AREA %.5f\n"
+		"[POM-SLIT]       C2 shelled T-vertex on a STATIC edge: %lld pairs, mean "
+		"%.4f max %.4f, AREA %.5f\n",
+		nT, nT ? tSum / double(nT) : 0.0, tMax, tArea,
+		nT1, nT1 ? t1Sum / double(nT1) : 0.0, t1Max, t1Area,
+		nT2, nT2 ? t2Sum / double(nT2) : 0.0, t2Max, t2Area);
+	g_pomSlit.pre.clear();
+	g_pomSlit.armed = false;
+}
+
 float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
                      bool pinCrossMaterial) {
 	if (!Sc || !matName || uvAmp <= 0.0f) return 0.0f;

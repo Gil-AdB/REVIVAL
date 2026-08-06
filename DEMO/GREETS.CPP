@@ -1863,13 +1863,18 @@ void Initialize_Greets()
 		// the pristine mesh ONCE here, across every material about to be
 		// shelled, so both sides of a junction extrude along one direction and
 		// land on one point. No-op (and byte-null) below --pom_shell_weld=3.
+		const char *weldMats[2] = { nullptr, nullptr }; int nWeldMats = 0;
 		{
-			const char *weldMats[2]; int nWeldMats = 0;
 			for (const char *nm : { "rooms", "floor" })
 				for (Material *m = MatLib; m; m = m->Next)
 					if (m->RelScene == GreetSc && m->Name && !std::strcmp(m->Name, nm)
 					    && m->HeightMap) { weldMats[nWeldMats++] = nm; break; }
 			PomShell_WeldPrepare(GreetSc, weldMats, nWeldMats);
+			// R2: --pom_shell_slit_census. Pre-build position snapshot, so the
+			// census below can attribute the delta each POSITION actually
+			// received without instrumenting PomShell_Build itself. No-op and
+			// byte-null with the flag off.
+			PomShell_SlitSnapshot(GreetSc);
 		}
 		for (const char *nm : { "rooms", "floor" }) {
 			Material *M = nullptr;
@@ -1884,6 +1889,7 @@ void Initialize_Greets()
 			PomShell_Build(GreetSc, nm,
 			               fds::FeatureFlags::parallax_strength() * M->ParallaxScale, pin);
 		}
+		PomShell_SlitCensus(GreetSc, weldMats, nWeldMats);
 		PomShell_WeldReset();
 	}
 

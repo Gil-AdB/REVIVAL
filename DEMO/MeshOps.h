@@ -365,6 +365,22 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 void PomShell_WeldPrepare(Scene *Sc, const char *const *matNames, int numMats);
 void PomShell_WeldReset();
 
+// R2 MITRE ROOT-CAUSE — GEOMETRIC SLIT CENSUS (--pom_shell_slit_census, OFF).
+// Purely observational and entirely OUTSIDE PomShell_Build, so that function's
+// -ffp-contract=fast vertex move is textually untouched and the flag is
+// byte-null by construction. Snapshot every vertex position BEFORE the first
+// build, then after the last one attribute, per POSITION, the delta the shell
+// actually applied and score it against the two surfaces it can tear from:
+//   • an UNSHELLED incident face (nothing on the other side moves) — the gap is
+//     |d.N_unshelled|, the distance the corner lifted OFF that neighbour;
+//   • another SHELLED copy of the same position — the gap is |d_a - d_b|, which
+//     the cross-material memo is supposed to drive to exactly zero.
+// Reports both as counts, extremes and an EDGE-LENGTH-WEIGHTED AREA, which is
+// the geometric predictor the rendered void count should track. No behaviour
+// change; the snapshot is freed by PomShell_SlitCensus.
+void PomShell_SlitSnapshot(Scene *Sc);
+void PomShell_SlitCensus(Scene *Sc, const char *const *matNames, int numMats);
+
 // B4 residual height map: full-res height minus the bilinear-upsampled lowMip
 // band (per mip, clamped, same 8-bit tiled+mip layout) — the POM input for a
 // displaced material, so geometry + parallax don't double-count the relief.
