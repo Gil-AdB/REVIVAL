@@ -1658,6 +1658,12 @@ a single line across the floor, 17 875 of the 21 881 extra pixels inside
 `y ∈ [820, 900]`. `weld=3` opens the SAME line, 5 093 px — narrower, in the
 same place, at the same faces.
 
+**LOOK: `docs/img/s1d_2f/mitre_crack_p6_t6133.png`** — the same 600×180 crop of
+that floor line at `weld=1 | =3 | =4`. Mode 1: no crack. Mode 3: a thin black
+line the width of the room. Mode 4: the same line, several times thicker. That
+is the whole finding in one picture, and the widths are `off·sin T` and
+`off·tan T`.
+
 The three faces at the crack, pristine vs each mode (from `--face_id_dump`,
 `--pom_shell_lid_probe` for pristine):
 
@@ -1773,8 +1779,9 @@ came from: **232 612 → 14 163 px, −93.9 %**, for a pure geometry change with
 the march untouched. It removes void ENTIRELY at five poses where the unwelded
 lid loses 4 196 – 96 747 px, and `=5` takes it to **10 648, −95.4 %**.
 
-LOOK, not the pixel count (`v/look_p9_t5958.png`, `v/look_p5_t5963.png`, crops
-of the void bbox, `weld=0 | =1 | =5` side by side):
+LOOK, not the pixel count — `docs/img/s1d_2f/weld_gash_p9_t5958.png` and
+`weld_gash_p5_t5963.png`, crops of the void bbox, `weld=0 | =1 | =5` side by
+side:
 
 - **p9 t5958** — unwelded, a **full-height black gash** runs top to bottom of
   the frame between two wall panels. Welded, the wall is continuous and the two
