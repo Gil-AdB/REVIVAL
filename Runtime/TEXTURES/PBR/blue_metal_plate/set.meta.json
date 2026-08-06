@@ -1,0 +1,12 @@
+{
+ "normalScale": 1,
+ "displacementScale": 0.01,
+ "metalness": 0,
+ "specular": 1,
+ "specularIor": 1.5,
+ "source": {
+  "dir": "/Users/gil-ad/work/materials/polyhaven/blue_metal_plate_1k/textures",
+  "mtlx": "blue_metal_plate_1k.mtlx"
+ },
+ "colorspaceNote": "mtlx declares albedo srgb_texture + data maps linear; the engine loads bytes uniformly and treats albedo as gamma-encoded (HDR-linear path decodes gamma-2.0), data maps linear \u2014 consistent, approximate vs true sRGB"
+}

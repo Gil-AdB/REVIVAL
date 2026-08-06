@@ -318,3 +318,8 @@ DEMO.exe
 /build-wasm/
 Authoring/*/.backups/
 Runtime/SCENES/.backups/
+
+# Agent/session scratch and alternate build trees (2026-08-06)
+.claude/
+build-*/
+Runtime/*.ppm
