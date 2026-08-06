@@ -637,10 +637,130 @@ would be exactly the category error §5.3 warns about. The CPU side of the compa
 `--bench=scene@scene=greets,…` with load recorded and the per-phase counters, under the §4
 condition set (mirrors/disco off).
 
-### 6.2 Phase 3 stage 1 — deferred arm built, SHADOWS NOW CORRECT, timings still RETRACTED
+### 6.2a THE DIRECT-LIGHTING BUG — why the comparison table is NOT in this document yet
+
+**Read this before §6.2.** The user said he was "still not seeing actual lights per pixel work". He
+was right, and the arm had **two** independent defects in the direct term. One is fixed; the second
+is diagnosed but **not** fixed, and until it is, no timing from the lighting pass means anything —
+a pass that computes an almost-black result is not a comparison point in either direction.
+
+All figures below: t=5743 primary review pose, `FDS_GREETS_CAM=
+"9.07557869,3.19592357,-52.9277191,-0.20672597,-0.140846997,0.968207836"`, 1920×1080, Rec.601 luma
+over the whole frame, load 3.9–4.2, macOS arm64 M2 Max.
+
+#### Defect 1 — the omni RANGE PATCH. FIXED (commit `dd21682`).
+
+`Initialize_Greets` (`GREETS.CPP:2652-2673`) rewrites every `Light_Omni` whose `IRange` is 0 to
+`greets_omni_default_range` = **30**. It runs *before* its own `Animate_Objects`, so the FLD's Range
+envelope has not been evaluated yet, `IRange` is 0 for **all ten** omnis, and all ten are patched. It
+overwrites `Range.Keys[0]` too, which is what makes 30 survive the spline evaluation that follows.
+DEMO says so itself: `[GREETS] patched IRange=30 on 10 FLD omnis (had 0)` — read out of a real run
+log, not inferred.
+
+GpuBench ran `Animate_Objects` first and ingested the **authored** ranges — 3, 3, 10, 10, 7, 20, 20,
+2, 2, 2 — against the CPU's uniform 30. **The three mech omnis ran at 2.0 against the CPU's 30: 15×
+the radius, 225× the area**, in a room 60+ units across.
+
+The fix replicates the patch *mechanism* (not the constant 30) between `LoadFLD` and
+`Animate_Objects`, exactly where greets' own patch sits, so it stays correct for multi-key Range
+splines. `--no-range_patch` / `--omni_range=F` for A/B.
+
+| term (`--viz=…`) | before (authored ranges) | after (parity) |
+|---|--:|--:|
+| **direct** | mean **0.17**, median **0**, >8/255 **0.40 %** | mean **25.68**, median **17**, >8/255 **89.44 %** |
+| ambient | mean 34.08, median 31 | mean 34.08, median 31 — unchanged, as it must be |
+| emissive | mean 64.07, median 77 | mean 64.07, median 77 — unchanged |
+| `--viz=lights` in-range coverage | **15.95 %** | **100.00 %** |
+
+**This retracts a documented "scene property".** §6.2's "the scene genuinely has very little direct
+omni light at t=5743 — only 15.95 % of covered pixels have even one light in range … that is a
+property of the *scene*, not a bug" was **the bug's own symptom**. The buggy arm reproduces 15.95 %
+exactly; with the patch it is 100.00 %. Likewise "greets does NOT patch these omnis' ranges" was
+exactly backwards. Both are struck in §6.2.
+
+Ruled out by reading the CPU kernel rather than assuming: the **attenuation shape already matched**
+(`DeferredSurfaceKernel.cpp:3230-3258` is `falloff = 1 − dist·rRange`, hard cutoff at range,
+`k = NoL·falloff·Material::Diffuse` — the shape the shader already had), so the range was the whole
+of defect 1.
+
+#### Defect 2 — the shadow tap zeroes ~95 % of the direct term. DIAGNOSED, NOT FIXED.
+
+Measured by ablating direct light on **both** arms and differencing the composited frames — the same
+knob on each side, so it is a two-sided measurement rather than a GPU-only self-report. CPU:
+`--prof_no_lights` (skip the omni loop). GPU: `--light_range_scale=0` (every light out of range).
+Matched tier on both: PBR + cube shadows + HDR + bloom + ACES, mirrors/disco/POM/lightmap off,
+full-rate.
+
+| arm | full frame | direct ablated | **what direct contributes** |
+|---|--:|--:|--:|
+| **CPU** (DEMO, pinned `0846811`) | mean 115.04, med 119 | mean 93.64, med 95 | **+21.40 mean, +24 med** |
+| **GPU**, shadows ON | mean 95.22, med 98 | mean 94.66, med 97 | **+0.56 mean, +1 med** |
+| **GPU**, `--no-shadows` | mean **105.37**, med 107 | mean 94.66, med 97 | **+10.71 mean, +10 med** |
+
+Two things fall out, and the second is the more important:
+
+1. **The ambient + emissive base is already right.** GPU 94.66 against CPU 93.64 — within ~1 %. The
+   *entire* remaining tone gap is the direct term, not the SH-ambient gap that had been assumed to
+   explain the whole ~20 % under-read.
+2. **Turning shadows off recovers 19× of the direct contribution** (+0.56 → +10.71). The cube tap is
+   over-occluding almost everything. It is still 2× short of the CPU's +21.40 even then, so a third
+   factor remains, but the tap is the dominant one.
+
+**And the diagnostic was lying, which is why this survived a whole round of "shadows now correct".**
+`--viz=direct` is **byte-identical with and without `--no-shadows`** (mean 25.68, median 17, >8/255
+89.44 % in both). Its own comment claims "10 = direct only (all omnis + spots, **with shadows**)",
+but mode 10 never applies the shadow factor. So the per-term viz reported a healthy direct term
+while the composited direct term was being zeroed — the same "the instrument shows a value where
+there is no data" trap §6.2 already records twice, in a third costume. **Fix the viz first**, then
+the tap: a diagnostic that cannot fail its own test cannot settle anything.
+
+Prime suspect for the tap, untested: defect 1 changed every light's range from 2–20 to 30, and the
+bake's far plane is derived from the range. §6.2's bug #4 is precisely this failure mode
+(`--light_range_scale` not scaling the baked cube's far plane put every surface outside the frustum
+it was baked in and read as occluded). The bake and the tap must be re-checked *at the patched
+range*, with `--dump_cube` read back as before — that is the method that settled the housing bug and
+it should settle this one.
+
+#### Consequence for the deliverable
+
+The matched-workload CPU-vs-GPU table is **deliberately not published here.** A full tiered dataset
+was collected (9 CPU tiers × 2 poses × 2–3 reps with per-pass TailProf decomposition, and a 9-config
+GPU stage-differencing ladder × 2 poses × 3 reps, interleaved, min-of-arm). The **CPU half remains
+valid** and is preserved — it was taken against a pinned `DEMO` binary from `0846811`, and the CPU
+was never affected by either defect. The **GPU half is withheld**: its lighting pass is currently
+computing a direct term that is ~38× too weak in the composite, and both its cost and its shape will
+change when the tap is fixed. Publishing a ratio against it would be exactly the category error §5.3
+exists to prevent.
+
+Two findings from that dataset are safe to record now because they do not depend on the GPU arm:
+
+- **The CPU's cube-shadow tap is the single largest cost in the greets frame.** Adding cube shadows
+  to the matched base tier moves the CPU's deferred lighting wave from **31.20 → 59.42 ms**
+  (+28.2 ms elapsed) at 1920×1080 full-rate. `PERF_STATE.md`'s "~9 ms saved by
+  `shadow_polyid_no_pcf`" is the PCF component of that same tap.
+- **The static shadow lightmap does not pay for itself at these poses.** t=5743: lighting wave
+  59.42 ms without it, **62.80 ms with it**. t=2000: 72.14 vs 70.26. It is a wash to slightly
+  negative — worth re-examining, since §3 describes it as an amortisation that lets the CPU *skip*
+  taps.
+
+**Method note, and it is the same one this document already learned twice:** the run that mattered
+was not another convention adjustment, it was ablating the *same* quantity on *both* arms and
+comparing composited frames. And the reason the bug survived so long is that the one diagnostic
+built to see it silently ignored the term that was breaking it.
+
+---
+
+### 6.2 Phase 3 stage 1 — deferred arm built, shadow CASTER FILTER correct, timings RETRACTED
+
+> **Superseded in part by §6.2a.** This section's conclusion that "shadows are now correct" was
+> established against the **caster filter** (lamps no longer self-occlude) and that part stands. It
+> does **not** cover the over-occlusion defect 6.2a documents, which was invisible here because the
+> per-light acceptance table below was computed on the buggy authored ranges *and* through a viz mode
+> that ignores the shadow factor.
 
 The deferred path (G-buffer -> cube shadow bake -> PBR lighting -> ACES tonemap) is implemented and
-runs. Its shadows were wrong through the first two rounds; **they are now correct** (evidence below)
+runs. Its shadows were wrong through the first two rounds; **the caster filter is now correct**
+(evidence below)
 and the cause turned out to be a missing shadow-caster filter, not a broken tap. **Every timing
 figure produced before that fix is retracted** and no replacement has been measured yet — a shadow
 tap whose reference trivially fails is cheaper *and* differently shaped than a correct one, so the
@@ -721,6 +841,12 @@ are `lamp`, `lamp light`, `screen2`, `screen 3`, `screen 4`, `screen emiter{, fa
 **Acceptance, MEASURED** (t=5743, 1920×1080, `--viz=shadow`, three-state encoding). Of the 15.95 %
 of covered pixels that have any light in range:
 
+> **These per-light percentages were taken on the pre-§6.2a arm, i.e. at the AUTHORED omni ranges,
+> and the 15.95 % denominator is the bug's symptom, not a scene property.** The *conclusion* they
+> support — that the cube tap works and the caster filter is right — still stands, because it was
+> settled by reading the baked cubes directly. The *numbers* in this table are superseded: with the
+> range patch every light reaches far more pixels, so re-derive them before quoting them.
+
 | arm | unshadowed | shadowed | partial | in-range px |
 |---|--:|--:|--:|--:|
 | all lights | **85.20 %** | 14.11 % | 0.69 % | 330,674 |
@@ -753,14 +879,16 @@ the data over any amount of convention arithmetic.
 
 - **The walls ARE in the shadow draw list.** (At the time: all 35 batches. Now 27 of 35 — the
   `lamp` / `screen*` non-casters are excluded, matching `Shadows.cpp`. The walls still cast.)
-- **greets does NOT patch these omnis' ranges.** `GREETS.CPP:2652` applies
-  `greets_omni_default_range = 30` only to omnis whose `IRange` is **0**; all ten are authored
-  non-zero (3, 3, 10, 10, 7, 20, 20, 2, 2, 2).
-- **The scene genuinely has very little direct omni light at t=5743.** MEASURED with
-  `--viz=lights`: only **15.95 %** of covered pixels have even one light in range, because the
-  authored ranges are 3-20 units in a room spanning X[-13.6..49.4], Z[-75.9..4.9]. That is a
-  property of the *scene*, not a bug — and it means the corridor is lit mainly by lights this arm
-  **does not have yet** (see the inventory below).
+- ~~**greets does NOT patch these omnis' ranges.**~~ **RETRACTED — this was exactly backwards, and
+  it was the direct-lighting bug.** See §6.2a. `GREETS.CPP:2652` patches omnis whose `IRange` is
+  **0**, and it runs *before* `Animate_Objects`, so `IRange` is 0 for **all ten** and all ten are
+  patched to 30. DEMO prints `[GREETS] patched IRange=30 on 10 FLD omnis (had 0)` — verified in a
+  real run log. The 3,3,10,10,7,20,20,2,2,2 figures are the *authored* spline values, which the CPU
+  never uses.
+- ~~**The scene genuinely has very little direct omni light at t=5743** (only 15.95 % of covered
+  pixels have a light in range) — a property of the *scene*, not a bug.~~ **RETRACTED. It was a
+  bug, and this figure was its symptom.** The buggy arm reproduces 15.95 % exactly; with the range
+  patch applied it is **100.00 %**. See §6.2a.
 
 #### Light inventory — what this arm has, and what it is missing
 
@@ -802,9 +930,24 @@ the DEMO reference, not guessed):
    not matched. Our mid-tones are visibly paler and less contrasty than the reference, whose walls
    read cooler and whose floor reads warmer.
 3. The warm pool at the corridor's far end.
-4. Mirror **omni clones** (each mirror clones every omni across its plane).
-5. Volumetric cones; the procedural **code screen** (the black rectangle — CPU-generated by the
-   greets generator, so `LoadFLD` cannot produce it).
+4. **The MIRROR — and it is a missing PASS, not a missing texture.** *(Label corrected 2026-08-06.
+   Successive revisions of this document, including this one, called the black rectangle at the far
+   end of the corridor "the procedural code screen, CPU-generated by the greets generator, so
+   `LoadFLD` cannot produce it". **That was wrong.** It is the mirror.)* Filling it needs an RTT
+   pass that renders the reflected scene into a texture — `FDS/RENDER/GreetsMirror.cpp`'s
+   `BuildMirror` / `UpdateMirror`, the off-axis projection, and the mirror clone geometry. That is a
+   substantially larger gap than a skipped procedural texture, and the comparison table must list it
+   as such: a reader told "a procedural texture is missing" would assume it is cosmetic.
+   **The mirror omni clones are absent for the same reason** — they belong to that pass, so the two
+   share one cause rather than being two independent gaps.
+5. **The code screen is a SEPARATE question, and it is not the black rectangle.** The screen
+   materials do exist in this arm's batch list — `screen2`, `screen 3`, `screen 4` all ingest with
+   `Luminosity = 1.000, Diffuse = 1.00` (MEASURED, `[INGEST] emissive material …`), plus
+   `screen emiter{, fance, green}`; all eight are the shadow non-casters. So they render, as
+   emissive surfaces carrying their FLD texture. What `LoadFLD` cannot produce is the *animated*
+   content `GreetsGenerator` writes into them per frame. Reported separately from the mirror, and
+   not counted as the black rectangle.
+6. Volumetric cones.
 
 The robot spot + 4 orbit spots remain **correctly** absent: `no_greets_spots` defaults `true`.
 
