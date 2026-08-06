@@ -1,5 +1,47 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-06 — THE MITRE INVERSION IS ROOT-CAUSED; THE WELD IS NOW DEFAULT ON
+>
+> **`--pom_shell_weld` default 0 → 1** (commit `140b6a0`). Inert unless
+> `--pom_shell` selects the lid, and `--pom_shell` is itself default OFF, so no
+> shipping render moves — proven, all four gates re-run after the flip and still
+> byte-exact. Within a lid arm the unwelded mesh is TORN: **232 612 → 14 163
+> void px over the 16 review poses (−93.9 %)**, and the pixels it removes are a
+> **full-height black gash between wall panels** at p9 t5958 plus the wall/floor
+> wedge at p5 t5963 — the defect the user reported.
+> `docs/img/s1d_2f/weld_gash_*.png`.
+>
+> **The open bug "the true mitre is geometrically correct and measures worse" is
+> CLOSED, and the answer is: it optimises the wrong component.** At a fold of
+> half-angle `T` the mean-normal weld moves a corner `off·cos T` along each
+> incident plane's normal and `off·sin T` **tangentially**; the mitre divides by
+> `cos T`, making the normal part exactly `off` and the tangential part
+> `off·tan T`. Nothing consumes the normal exactness — `Vertex::ShellH` already
+> records the height each corner reached — and the tangential part is what
+> slides a patch's BOUNDARY sideways and opens the holes. Cleanest measurement,
+> `weld=5` vs `=6` (identical pin set, differing only by the mitre): tangential
+> slide 0.0450 → 0.0712 world (×1.58), **void 10 648 → 26 774 (×2.51)**.
+> **98–100 % of every mode's extra void carries `--pom_path_viz` code 0 — no
+> fragment rasterised at all — so it is geometry and no march-side hypothesis is
+> involved.** Do NOT use `--pom_shell_weld=4` or `=6`.
+>
+> **The formula `off·(1−cos(half-fold))` in S1d-2e.5 and RESEARCH_II §8.5 R2 is
+> retracted** — it is `off·sin T`, which is the 0.064 world S1d-2e.5 measured.
+> The number was right; the formula was not.
+>
+> **Two things this changes for the prism (RESEARCH_II §8.6):** precondition 1
+> must say "weld, but NOT with a mitre — minimise tangential slide", and there
+> is a new precondition **5b, T-JUNCTIONS**: greets carries 140 (edge,T-vertex)
+> pairs among the shelled faces alone and they own **70 % of `weld=4`'s void**.
+> The mitre's whole difficulty is also specific to the LID-ONLY shell and is an
+> argument FOR the prism — adjacent prisms share a side quad, so they stay
+> watertight while their lids move apart.
+>
+> New diagnostic `--pom_shell_slit_census` (default OFF, init-time print, lives
+> wholly outside `PomShell_Build`). Full write-up:
+> **`docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-2f** (commits `2839c29`, `f2933f7`,
+> `dc2e231`, `140b6a0`).
+
 > ## 2026-08-06 — GEOMETRIC TESSELLATION IS BACK ON THE TABLE: +7.3 ms, NOT +54.5
 >
 > **`--greets_displace` was retired on a number that was wrong by 7.4×.** It is
