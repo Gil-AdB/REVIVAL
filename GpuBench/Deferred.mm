@@ -492,8 +492,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             // Private for measurement (Shared disables lossless compression); the
             // --dump_cube diagnostic needs CPU-visible storage, and that run is
             // never a timing run.
-            td.storageMode = (opt.dumpCube >= 0) ? MTLStorageModeShared
-                                                 : MTLStorageModePrivate;
+            td.storageMode = (opt.dumpCube >= 0 || opt.probe) ? MTLStorageModeShared
+                                                              : MTLStorageModePrivate;
             id<MTLTexture> c = [dev newTextureWithDescriptor:td];
             lightCube[i] = int(cubes.size());
             cubeNear[i] = 0.05f;
@@ -959,6 +959,27 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                     nValid ? mn : 0.0f, nValid ? mx : 0.0f,
                     nValid ? dmn : 0.0f, nValid ? dmx : 0.0f,
                     nValid ? dsum / double(nValid) : 0.0);
+                // 8x8 grid of DECODED WORLD DISTANCE across the face. min/max
+                // alone hid the thing that mattered here: a face can be 100%
+                // valid, span 0.5..30 units, and still be a near wall over most
+                // of its solid angle. The grid shows WHERE the occluder is.
+                // Row 0 is texel row 0 = the +up edge (Metal's origin is
+                // upper-left), column 0 the -right edge.
+                for (int gy = 0; gy < 8; ++gy) {
+                    std::string line;
+                    char cell[16];
+                    for (int gx = 0; gx < 8; ++gx) {
+                        const int sx = (2 * gx + 1) * res / 16;
+                        const int sy = (2 * gy + 1) * res / 16;
+                        const float v = face[size_t(sy) * size_t(res) + size_t(sx)];
+                        if (!std::isfinite(v))   std::snprintf(cell, sizeof cell, "  nan ");
+                        else if (v <= 0.0f)      std::snprintf(cell, sizeof cell, "  --- ");
+                        else std::snprintf(cell, sizeof cell, "%6.2f", dzb / (v - dza));
+                        line += cell;
+                    }
+                    std::fprintf(stderr, "[DUMPCUBE]     %s|%s\n",
+                                 gy == 0 ? fnames[f] : "  ", line.c_str());
+                }
                 // atlas tile: distance ramped over [near, far]; magenta = nonfinite,
                 // dark blue = cleared (nothing rendered into this texel)
                 const size_t tx = size_t(f % 3) * size_t(res);
@@ -986,6 +1007,206 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 std::fprintf(stderr, "[DUMPCUBE] wrote %s (3x2 face atlas, "
                                      "white=near black=far, magenta=nonfinite, "
                                      "navy=cleared)\n", dp.c_str());
+        }
+    }
+
+    // ---- --probe_px: why is THIS pixel not lit by light N ------------------
+    // Builds the pixel's camera ray from the same fu.sx/ox/sy/oy the vertex
+    // shader projects with, ray-casts ALL geometry for the visible surface and
+    // its geometric normal, then replays the lighting pass's own per-light gate
+    // and names the test that failed.
+    if (opt.probePx) {
+        const int PX = opt.probePxXY[0], PY = opt.probePxXY[1];
+        const float ndcx = 2.0f * (float(PX) + 0.5f) / float(W) - 1.0f;
+        const float ndcy = 1.0f - 2.0f * (float(PY) + 0.5f) / float(H);
+        const float vd[3] = {(ndcx - fu.ox) * fu.invSx, (ndcy - fu.oy) * fu.invSy, 1.0f};
+        float rd[3];
+        for (int c = 0; c < 3; ++c)
+            rd[c] = scene.camera.rot[0][c] * vd[0] + scene.camera.rot[1][c] * vd[1]
+                  + scene.camera.rot[2][c] * vd[2];
+        const float rl = std::sqrt(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
+        for (int c = 0; c < 3; ++c) rd[c] /= rl;
+        const float ro[3] = {scene.camera.src[0], scene.camera.src[1], scene.camera.src[2]};
+        float bestT = 1e30f, bestN[3] = {0,0,0};
+        std::string bm = "-", bmat = "-";
+        for (const auto &b : scene.batches) {
+            for (uint32_t v = b.firstVertex; v + 2 < b.firstVertex + b.vertexCount; v += 3) {
+                float w[3][3];
+                for (int k = 0; k < 3; ++k) {
+                    const Vertex &V = scene.verts[v + uint32_t(k)];
+                    const float ob[3] = {V.px, V.py, V.pz};
+                    for (int c = 0; c < 3; ++c)
+                        w[k][c] = b.rot[c][0]*ob[0] + b.rot[c][1]*ob[1]
+                                + b.rot[c][2]*ob[2] + b.pos[c];
+                }
+                float e1[3], e2[3], pv[3], tv[3], qv[3];
+                for (int c = 0; c < 3; ++c) {
+                    e1[c] = w[1][c]-w[0][c]; e2[c] = w[2][c]-w[0][c]; tv[c] = ro[c]-w[0][c];
+                }
+                pv[0]=rd[1]*e2[2]-rd[2]*e2[1]; pv[1]=rd[2]*e2[0]-rd[0]*e2[2]; pv[2]=rd[0]*e2[1]-rd[1]*e2[0];
+                const float det = e1[0]*pv[0]+e1[1]*pv[1]+e1[2]*pv[2];
+                if (std::fabs(det) < 1e-12f) continue;
+                const float inv = 1.0f/det;
+                const float uu = (tv[0]*pv[0]+tv[1]*pv[1]+tv[2]*pv[2])*inv;
+                if (uu < 0.0f || uu > 1.0f) continue;
+                qv[0]=tv[1]*e1[2]-tv[2]*e1[1]; qv[1]=tv[2]*e1[0]-tv[0]*e1[2]; qv[2]=tv[0]*e1[1]-tv[1]*e1[0];
+                const float vv = (rd[0]*qv[0]+rd[1]*qv[1]+rd[2]*qv[2])*inv;
+                if (vv < 0.0f || uu+vv > 1.0f) continue;
+                const float t = (e2[0]*qv[0]+e2[1]*qv[1]+e2[2]*qv[2])*inv;
+                if (t > 1e-4f && t < bestT) {
+                    bestT = t; bm = b.meshName; bmat = b.materialName;
+                    // FDS winding: Compute_Face_Normals (PREPROC.CPP:29) does
+                    // Cross_Product(V, U) with U=B-A, V=C-A, i.e. N = e2 x e1 —
+                    // the NEGATION of the usual e1 x e2. Getting this backwards
+                    // made every room surface look outward-facing and sent this
+                    // investigation down a blind alley for a round.
+                    bestN[0]=e2[1]*e1[2]-e2[2]*e1[1];
+                    bestN[1]=e2[2]*e1[0]-e2[0]*e1[2];
+                    bestN[2]=e2[0]*e1[1]-e2[1]*e1[0];
+                    const float nl = std::sqrt(bestN[0]*bestN[0]+bestN[1]*bestN[1]+bestN[2]*bestN[2]);
+                    if (nl > 0.0f) for (int c=0;c<3;++c) bestN[c]/=nl;
+                }
+            }
+        }
+        if (bestT > 1e29f) {
+            std::fprintf(stderr, "[PROBEPX] px(%d,%d): camera ray hits nothing\n", PX, PY);
+        } else {
+            const float hp[3] = {ro[0]+rd[0]*bestT, ro[1]+rd[1]*bestT, ro[2]+rd[2]*bestT};
+            std::fprintf(stderr,
+                "[PROBEPX] px(%d,%d) -> %s/%s at (%.3f,%.3f,%.3f) dist=%.3f "
+                "geoNormal=(%.3f,%.3f,%.3f)\n",
+                PX, PY, bm.c_str(), bmat.c_str(), hp[0], hp[1], hp[2], bestT,
+                bestN[0], bestN[1], bestN[2]);
+            for (size_t li = 0; li < lights.size(); ++li) {
+                float toL[3] = {lights[li].pos[0]-hp[0], lights[li].pos[1]-hp[1],
+                                lights[li].pos[2]-hp[2]};
+                const float d = std::sqrt(toL[0]*toL[0]+toL[1]*toL[1]+toL[2]*toL[2]);
+                if (d <= 1e-6f) continue;
+                const float rr = lights[li].range * opt.lightRangeScale;
+                // Two-sided NoL: the sign only tells which face of the polygon
+                // the light is on, and the loader does not carry a consistent
+                // winding for every authored surface.
+                const float NoLs = (toL[0]*bestN[0]+toL[1]*bestN[1]+toL[2]*bestN[2])/d;
+                const float atten = std::max(0.0f, 1.0f - d * (lights[li].invRange
+                                                               / opt.lightRangeScale));
+                const char *verdict = (d >= rr) ? "OUT OF RANGE"
+                                    : (NoLs <= 0.0f ? "BACKFACING (NoL<=0)" : "reaches");
+                std::fprintf(stderr,
+                    "[PROBEPX]   light %2zu %-11s d=%7.3f range=%5.1f NoL=%+.3f atten=%.3f "
+                    "col=(%.2f,%.2f,%.2f)\n",
+                    li, verdict, d, rr, NoLs, atten,
+                    lights[li].color[0], lights[li].color[1], lights[li].color[2]);
+            }
+        }
+    }
+
+    // ---- --probe: ground truth vs the tap, for ONE world point -------------
+    // (a) ray-cast the SAME casting triangles the bake rasterised, name the
+    //     nearest hit's mesh/material; (b) replicate the shader's cube tap on
+    //     the host from the read-back cube. Agreement means the cube is honest
+    //     and any occlusion is geometry; disagreement localises the bug to the
+    //     tap's conventions. Requires --dump_cube (Shared storage on the cubes).
+    if (opt.probe) {
+        const float P[3] = {opt.probePoint[0], opt.probePoint[1], opt.probePoint[2]};
+        std::fprintf(stderr, "[PROBE] world point (%.3f, %.3f, %.3f)\n", P[0], P[1], P[2]);
+        // Moller-Trumbore against every CASTING triangle, in world space.
+        auto castRay = [&](const float o[3], const float d[3], float maxT,
+                           float &hitT, std::string &mesh, std::string &mat) {
+            hitT = maxT; mesh = "-"; mat = "-";
+            for (const auto &b : scene.batches) {
+                if (!b.castsShadow) continue;
+                for (uint32_t v = b.firstVertex; v + 2 < b.firstVertex + b.vertexCount; v += 3) {
+                    float w[3][3];
+                    for (int k = 0; k < 3; ++k) {
+                        const Vertex &V = scene.verts[v + uint32_t(k)];
+                        const float ob[3] = {V.px, V.py, V.pz};
+                        for (int c = 0; c < 3; ++c)
+                            w[k][c] = b.rot[c][0]*ob[0] + b.rot[c][1]*ob[1]
+                                    + b.rot[c][2]*ob[2] + b.pos[c];
+                    }
+                    float e1[3], e2[3], pv[3], tv[3], qv[3];
+                    for (int c = 0; c < 3; ++c) {
+                        e1[c] = w[1][c] - w[0][c];
+                        e2[c] = w[2][c] - w[0][c];
+                        tv[c] = o[c] - w[0][c];
+                    }
+                    pv[0] = d[1]*e2[2] - d[2]*e2[1];
+                    pv[1] = d[2]*e2[0] - d[0]*e2[2];
+                    pv[2] = d[0]*e2[1] - d[1]*e2[0];
+                    const float det = e1[0]*pv[0] + e1[1]*pv[1] + e1[2]*pv[2];
+                    if (std::fabs(det) < 1e-12f) continue;   // two-sided, as the bake is
+                    const float inv = 1.0f / det;
+                    const float u = (tv[0]*pv[0] + tv[1]*pv[1] + tv[2]*pv[2]) * inv;
+                    if (u < 0.0f || u > 1.0f) continue;
+                    qv[0] = tv[1]*e1[2] - tv[2]*e1[1];
+                    qv[1] = tv[2]*e1[0] - tv[0]*e1[2];
+                    qv[2] = tv[0]*e1[1] - tv[1]*e1[0];
+                    const float vv = (d[0]*qv[0] + d[1]*qv[1] + d[2]*qv[2]) * inv;
+                    if (vv < 0.0f || u + vv > 1.0f) continue;
+                    const float t = (e2[0]*qv[0] + e2[1]*qv[1] + e2[2]*qv[2]) * inv;
+                    if (t > 1e-4f && t < hitT) {
+                        hitT = t; mesh = b.meshName; mat = b.materialName;
+                    }
+                }
+            }
+        };
+        std::vector<float> faceBuf;
+        for (size_t li = 0; li < lights.size(); ++li) {
+            if (lights[li].isSpot || lights[li].shadowIndex < 0) continue;
+            const float L0[3] = {lights[li].pos[0], lights[li].pos[1], lights[li].pos[2]};
+            float dw[3] = {P[0]-L0[0], P[1]-L0[1], P[2]-L0[2]};
+            const float dist = std::sqrt(dw[0]*dw[0] + dw[1]*dw[1] + dw[2]*dw[2]);
+            if (dist <= 1e-5f) continue;
+            const float dir[3] = {dw[0]/dist, dw[1]/dist, dw[2]/dist};
+            float hitT; std::string hm, hmat;
+            castRay(L0, dir, dist * 0.999f, hitT, hm, hmat);
+            const bool geomBlocked = hitT < dist * 0.999f;
+            // Host replica of the shader tap.
+            const float ax = std::fabs(dw[0]), ay = std::fabs(dw[1]), az = std::fabs(dw[2]);
+            const float major = std::max(ax, std::max(ay, az));
+            int face; float sc, tc;
+            if (ax >= ay && ax >= az) { face = dw[0] > 0 ? 0 : 1;
+                                        sc = dw[0] > 0 ? -dw[2] : dw[2]; tc = -dw[1]; }
+            else if (ay >= az)        { face = dw[1] > 0 ? 2 : 3;
+                                        sc = dw[0]; tc = dw[1] > 0 ? dw[2] : -dw[2]; }
+            else                      { face = dw[2] > 0 ? 4 : 5;
+                                        sc = dw[2] > 0 ? dw[0] : -dw[0]; tc = -dw[1]; }
+            const float sn = lights[li].shadowNear, sf = lights[li].shadowFar;
+            const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+            const size_t ci = size_t(lights[li].shadowIndex);
+            id<MTLTexture> cube = cubes[ci];
+            const int res = int([cube width]);
+            const char *storageNote = "";
+            float stored = 0.0f, storedDist = -1.0f;
+            int tx = -1, ty = -1;
+            if ([cube storageMode] == MTLStorageModeShared) {
+                faceBuf.assign(size_t(res) * size_t(res), 0.0f);
+                [cube getBytes:faceBuf.data()
+                   bytesPerRow:NSUInteger(res) * sizeof(float)
+                 bytesPerImage:faceBuf.size() * sizeof(float)
+                    fromRegion:MTLRegionMake2D(0, 0, NSUInteger(res), NSUInteger(res))
+                   mipmapLevel:0 slice:NSUInteger(face)];
+                const float u = 0.5f * (sc / major + 1.0f);
+                const float v = 0.5f * (tc / major + 1.0f);
+                tx = std::min(res - 1, std::max(0, int(u * float(res))));
+                ty = std::min(res - 1, std::max(0, int(v * float(res))));
+                stored = faceBuf[size_t(ty) * size_t(res) + size_t(tx)];
+                storedDist = (stored > dza + 1e-9f) ? dzb / (stored - dza) : 1e9f;
+            } else {
+                storageNote = " (cube is Private — pass --dump_cube=N for the readback)";
+            }
+            const float ref = dza + dzb / std::max(major, 1e-5f);
+            std::fprintf(stderr,
+                "[PROBE]  light %2zu  dist=%7.3f major=%7.3f  RAYCAST: %s"
+                "  t=%7.3f (%s/%s)\n",
+                li, dist, major, geomBlocked ? "BLOCKED" : "clear  ",
+                hitT, hm.c_str(), hmat.c_str());
+            std::fprintf(stderr,
+                "[PROBE]            CUBE face=%d texel=(%d,%d) stored=%.8f"
+                "  storedDist=%8.3f  ref=%.8f  tap says %s%s\n",
+                face, tx, ty, stored, storedDist, ref,
+                (storedDist < 0.0f) ? "?"
+                    : ((ref + 0.0004f > stored) ? "LIT" : "SHADOWED"), storageNote);
         }
     }
 

@@ -114,8 +114,21 @@ const char *kUsage =
     "                    pass costs from DIFFERENCES of whole-frame totals across stages.\n"
     "  --shadow_res=N    deferred only: static-omni cube face res (default 512, as greets)\n"
     "  --exposure=F      deferred only: tonemap exposure (default 1.0)\n"
-    "  --viz=MODE        deferred only: albedo|normal|ao|depth|gloss|shadow|lights —\n"
-    "                    per-stage verification output instead of the lit frame\n"
+    "  --viz=MODE        deferred only, per-stage verification instead of the lit frame:\n"
+    "                    albedo|normal|ao|depth|gloss|shadow|lights|shadowraw|\n"
+    "                    ambient|emissive|direct|direct_noshadow|worldpos.\n"
+    "                    worldpos decodes as x=R/255*80-20, y=G/255*25, z=B/255*100-80,\n"
+    "                    so a pixel can be turned into a world point for --probe.\n"
+    "                    Every mode shares the LIT FRAME's own kernels, so a mode cannot\n"
+    "                    show a different quantity from the one the frame applies, and no\n"
+    "                    mode encodes 'no data' as a legitimate value: dark RED = no\n"
+    "                    G-buffer, MAGENTA = asked for something that does not exist\n"
+    "                    (unmapped mode, --viz_light out of range, shadowraw on a light\n"
+    "                    with no cube). 'direct' honours --no-shadows; 'direct_noshadow'\n"
+    "                    forces the shadow factor to 1, so direct minus direct_noshadow\n"
+    "                    is exactly what the cube tap removes.\n"
+    "  --viz_light=N     restrict shadow/lights/shadowraw to ONE light (shadowraw REQUIRES\n"
+    "                    it — it used to silently report light 0)\n"
     "  --light_range_scale=F   deferred only, MEASUREMENT ONLY (changes pixels). greets'\n"
     "                    authored omni ranges are 3-20 units in a 60+ unit room, so the hard\n"
     "                    cutoff culls nearly every light for nearly every pixel. Scale up to\n"
@@ -125,6 +138,13 @@ const char *kUsage =
     "                    cleared / min-max / decoded world distance) and write a 3x2 face\n"
     "                    atlas PPM. Forces Shared storage on the cubes, so never a timing run.\n"
     "  --dump_cube_out=PATH  where the atlas goes (default gpubench_cube.ppm)\n"
+    "  --probe=x,y,z     GROUND TRUTH for one world point: ray-cast the same casting\n"
+    "                    triangles the bake rasterised (naming the nearest hit's mesh +\n"
+    "                    material) AND replicate the shader's cube tap on the host, side\n"
+    "                    by side. Combine with --dump_cube=N so the cubes are readable.\n"
+    "  --probe_px=X,Y    same for a SCREEN PIXEL: ray-cast what the camera sees there and\n"
+    "                    replay the lighting pass's per-light gate on it, naming the test\n"
+    "                    that failed (out of range / backfacing / reaches).\n"
   "  --window          OPEN A REAL WINDOW: SDL2 + CAMetalLayer, the scene ANIMATED\n"
     "                    through FDS's own Animate_Objects, free-fly camera and live\n"
     "                    per-pass GPU ms overlaid. WASD+QE move, drag to look, SHIFT fast,\n"
@@ -193,6 +213,16 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--exposure=")) dopt.exposure = float(std::atof(v));
         else if (const char *v = val("--dump_cube=")) dopt.dumpCube = std::atoi(v);
         else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
+        else if (const char *v = val("--probe_px=")) {
+            if (std::sscanf(v, "%d,%d", &dopt.probePxXY[0], &dopt.probePxXY[1]) == 2)
+                dopt.probePx = true;
+            else { std::fprintf(stderr, "--probe_px wants X,Y\n"); return 2; }
+        }
+        else if (const char *v = val("--probe=")) {
+            if (std::sscanf(v, "%f,%f,%f", &dopt.probePoint[0], &dopt.probePoint[1],
+                            &dopt.probePoint[2]) == 3) dopt.probe = true;
+            else { std::fprintf(stderr, "--probe wants x,y,z\n"); return 2; }
+        }
         else if (a == "--no-stone_tex")             opt.stoneTex = false;
         else if (a == "--no-range_patch")           opt.omniDefaultRange = 0.0f;
         else if (const char *v = val("--omni_range=")) opt.omniDefaultRange = float(std::atof(v));
@@ -220,6 +250,8 @@ int main(int argc, const char *argv[]) {
             else if (m == "ambient")  dopt.viz = 8;
             else if (m == "emissive") dopt.viz = 9;
             else if (m == "direct")   dopt.viz = 10;
+            else if (m == "direct_noshadow") dopt.viz = 11;
+            else if (m == "worldpos") dopt.viz = 12;
             else { std::fprintf(stderr, "unknown --viz mode: %s\n", v); return 2; }
         }
         else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }

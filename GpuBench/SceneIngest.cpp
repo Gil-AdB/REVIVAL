@@ -513,6 +513,29 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 opt.omniDefaultRange, patched);
     }
 
+    // ---- 1c. RUN THE ENGINE'S OWN MESH PREPROCESSING ------------------------
+    // LoadFLD does NOT compute normals. It fills Vertex::Pos and the Face
+    // topology and stops; Face::N, Vertex::N, Vertex::Tangent, Face::NormProd
+    // and the bounding spheres are all produced later, by Scene_Computations
+    // (FDS/MISC/PREPROC.CPP:632), which DEMO reaches through Preprocess_Scene.
+    //
+    // WITHOUT THIS CALL EVERY Vertex::N IS ZERO, so the G-buffer stored the
+    // oct-decode of (0,0) -- a constant (0,0,1) view normal -- on every surface
+    // in the scene. MEASURED before the fix: --viz=normal returned rgb
+    // (128,128,255) at BOTH a side wall and the floor, two surfaces at right
+    // angles. The consequence was not "flat shading": N·L degenerated into the
+    // sign of the light's view-space Z, so a light BEHIND the surface down the
+    // corridor lit it and a light three units in FRONT of it did not. The three
+    // mech omnis -- which dominate the CPU's direct term at t=5743 -- reached
+    // 15,381 of 2,073,600 pixels (0.74 %).
+    //
+    // Calling the engine's own function rather than re-deriving normals here is
+    // the same principle the rest of this ingest follows: the input is the same
+    // bytes through the same code. It also fills Vertex::Tangent via
+    // Compute_Vertex_Tangents, so the derivative-based TBN in fs_gbuffer could
+    // now be replaced by the engine's basis (not done here; separate change).
+    Scene_Computations(&sc);
+
     // ---- 2. pose ------------------------------------------------------------
     out.curFrame = DemoTimeToCurFrame(sc, opt.demoT);
     CurFrame = out.curFrame;

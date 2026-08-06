@@ -263,6 +263,240 @@ static inline float3 SH_Irradiance(constant float4 *sh, float3 n) {
     return max(r, 0.0f);
 }
 
+// ---------------------------------------------------------------------------
+// SHARED shading kernels. fs_lighting and fs_viz MUST both call these.
+//
+// WHY THIS EXISTS AT ALL: --viz=direct (mode 10) used to carry its own copy of
+// the light loop, and that copy never applied the shadow factor even though its
+// comment claimed "with shadows". It was therefore byte-identical with and
+// without --no-shadows, and a whole round of shadow debugging was steered by a
+// diagnostic that could not fail its own test. That is the THIRD instrument in
+// this arm that reported a value where it had no data (the other two:
+// --viz=shadow returning white for both "unshadowed" and "no light in range";
+// mode 5 returning black for both "fully shadowed" and "no G-buffer").
+//
+// The structural fix is not "add the missing line" — it is to make it impossible
+// for a viz mode to compute a DIFFERENT quantity from the one the frame uses.
+// One decode, one shadow tap, one direct sum, one ambient term, called from both
+// entry points.
+// ---------------------------------------------------------------------------
+
+struct Surface {
+    float3 P;            // view-space position
+    float3 pw;           // world-space position
+    float3 N;            // view-space shading normal
+    float3 V;            // view-space view vector
+    float  NoV;
+    float3 baseColor;    // LINEAR albedo (gamma texel squared — see below)
+    float  ao;
+    float  rawAlpha;     // the G-buffer alpha as stored, for the AO viz
+    float  diffuseK, specK, rough, a, lum;
+    float3 f0, FssEss, Fms;
+    float  Ems;
+};
+
+static inline Surface DecodeSurface(constant FrameUniforms &u,
+                                    float4 alb, float2 ne, float4 par, float3 P)
+{
+    Surface S;
+    S.P = P;
+    // VIEW -> WORLD. vs_gbuffer builds view space as
+    //     P = Mat * (world - camSrc),   Mat's ROWS being (right, up, forward),
+    // so the inverse is world = camSrc + Mat^T * P, and
+    //     (Mat^T * P) = P.x*row0 + P.y*row1 + P.z*row2
+    // — a combination of the ROWS AS VECTORS.
+    //
+    // THIS WAS THE DIRECT-LIGHTING BUG (plan §6.2b). The previous code gathered
+    // the matrix's COLUMNS, i.e. it computed Mat*P — the FORWARD transform a
+    // second time — under a comment asserting it was the transpose. The result
+    // is a rotated world position, so every cube-shadow direction, every spot
+    // cone test and the SH ambient's world normal were evaluated along the wrong
+    // ray. MEASURED at the primary pose: a screen-centre pixel reconstructed
+    // 4.8 units from the eye along (0.217, 0.129, 0.973) — the view matrix's
+    // third COLUMN — where the camera's forward is (-0.207, -0.141, 0.968).
+    // Same magnitude, X and Y mirrored: the signature of the wrong gather.
+    S.pw = u.camSrc + u.camRow0 * P.x + u.camRow1 * P.y + u.camRow2 * P.z;
+    S.N = oct_decode(ne);
+    S.V = normalize(-P);
+    S.NoV = saturate(dot(S.N, S.V));
+
+    // ALBEDO IS SQUARED HERE, and that is parity, not a guess. Under
+    // --hdr_linear the CPU kernel "square[s] the (normalized) albedo and let[s]
+    // light enter at power 1" (DeferredSurfaceKernel.cpp:1374-1381), then
+    // re-encodes with sqrt on the way out — which is exactly what fs_tonemap
+    // does. The G-buffer stores the raw GAMMA texel (as the CPU's does), so the
+    // square belongs at the point of use.
+    S.baseColor = alb.rgb * alb.rgb;
+    S.ao        = alb.a;
+    S.rawAlpha  = alb.a;
+    S.diffuseK  = par.x * u.diffuseFactor;
+    S.specK     = par.y * u.specularFactor;
+    S.rough     = clamp(1.0f - par.z, 0.045f, 1.0f);
+    S.a         = S.rough * S.rough;
+    S.lum       = par.w * 4.0f;
+
+    // Dielectric F0. The scene has no metallic map bound in this arm, so F0 is
+    // the standard 4% and specK scales it — matching how the CPU kernel uses
+    // Material::Specular.
+    S.f0 = float3(0.04f) * max(S.specK, 0.0f) * 4.0f;
+
+    const float2 ab = EnvBRDF_AB(S.NoV, S.rough);
+    // Fdez-Aguera energy compensation, built from the SAME A,B terms.
+    S.FssEss = S.f0 * ab.x + ab.y;
+    const float Ess = ab.x + ab.y;
+    S.Ems = 1.0f - Ess;
+    const float3 Favg = S.f0 + (1.0f - S.f0) / 21.0f;
+    S.Fms = S.FssEss * Favg / max(1.0f - S.Ems * Favg, 1e-5f);
+    return S;
+}
+
+// The ONE shadow tap. Both the lit frame and --viz=shadow call this, with the
+// same bias, so the viz can never report a different occlusion than the frame
+// applies. Returns 1 when the light is unoccluded, 0 when fully occluded.
+static inline float ShadowFactor(constant GpuLight &Li, float3 pw, float NoL,
+                                 array<depthcube<float>, 16> shadowCubes,
+                                 array<depth2d<float>,   16> spotMaps,
+                                 sampler shadowSamp)
+{
+    if (Li.shadowIndex < 0) return 1.0f;
+    const float sn = Li.shadowNear, sf = Li.shadowFar;
+    const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+    // slope-scaled bias in reversed-Z (bigger value == nearer)
+    const float bias = mix(0.0025f, 0.0004f, NoL);
+    if (Li.isSpot != 0) {
+        // Single perspective depth map, as Shadows.cpp bakes for a spot
+        // (cubeFace < 0 => one map, not six faces).
+        const float3 rel = pw - Li.pos;
+        const float3 vp = rowmul(Li.sRow0.xyz, Li.sRow1.xyz, Li.sRow2.xyz, rel);
+        if (vp.z <= sn) return 1.0f;
+        const float ref = dza + dzb / vp.z;
+        // Same 1/tan(halfFov) the bake's vertex shader applied. NDC -> uv,
+        // y flipped for Metal's upper-left texture origin.
+        const float2 ndc = vp.xy * Li.sRow0.w / vp.z;
+        const float2 uv = float2(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y);
+        return spotMaps[Li.shadowIndex].sample_compare(shadowSamp, uv, ref + bias);
+    }
+    // World-space direction from light to the shaded point. The GPU takes this
+    // tap unconditionally; the CPU is allowed to skip it on static surfaces via
+    // the static-shadow lightmap (plan §5.3 item 12).
+    const float3 dirW = pw - Li.pos;
+    // Same reversed-Z encoding the bake wrote, evaluated on the MAJOR axis
+    // distance (which is what the 90-degree face's w equals).
+    const float major = max(max(abs(dirW.x), abs(dirW.y)), abs(dirW.z));
+    const float ref = dza + dzb / max(major, 1e-5f);
+    return shadowCubes[Li.shadowIndex].sample_compare(shadowSamp,
+                                                      normalize(dirW), ref + bias);
+}
+
+// Per-light early-out shared by the lighting pass, --viz=direct, --viz=shadow
+// and --viz=lights, so all four agree on what "this light reaches this pixel"
+// means. Returns false when the light does not light the pixel at all.
+// `atten` and `NoL` come back only when it returns true.
+static inline bool LightReaches(constant FrameUniforms &u, constant GpuLight &Li,
+                                thread const Surface &S, bool needNoL,
+                                thread float &NoL, thread float &atten,
+                                thread float3 &Ldir)
+{
+    // light position into view space
+    const float3 lRel = Li.pos - u.camSrc;
+    const float3 lPos = rowmul(u.camRow0, u.camRow1, u.camRow2, lRel);
+    const float3 toL = lPos - S.P;
+    const float d2 = dot(toL, toL);
+    const float range = Li.range * u.lightRangeScale;
+    if (d2 >= range * range) return false;          // HARD cutoff, as the CPU does
+    const float d = sqrt(d2);
+    Ldir = toL / max(d, 1e-6f);
+    NoL = saturate(dot(S.N, Ldir));
+    if (needNoL && NoL <= 0.0f) return false;
+    // Linear falloff to the hard edge — the engine's attenuation shape.
+    atten = saturate(1.0f - d * (Li.invRange / u.lightRangeScale));
+    // SPOT cone. Identical shape to the CPU kernel
+    // (DeferredSurfaceKernel.cpp:3247-3254): cosTheta measured between the spot
+    // axis and the light->surface direction, HARD cutoff at cosOuter, then a
+    // smoothstep t*t*(3-2t) from cosOuter up to cosInner.
+    if (Li.isSpot != 0) {
+        const float cosTheta = dot(Li.dir, normalize(S.pw - Li.pos));
+        if (cosTheta <= Li.cosOuter) return false;
+        if (cosTheta < Li.cosInner) {
+            const float tt = (cosTheta - Li.cosOuter)
+                           / max(Li.cosInner - Li.cosOuter, 1e-6f);
+            atten *= tt * tt * (3.0f - 2.0f * tt);
+        }
+    }
+    return true;
+}
+
+// The direct term. `applyShadow` exists ONLY so the caller can ask for the
+// unshadowed term explicitly; it is never defaulted, so a caller cannot forget
+// the shadow factor the way mode 10 did. `wantSpec` splits diffuse from
+// specular for attribution.
+static inline float3 DirectRadiance(constant FrameUniforms &u,
+                                    constant GpuLight *L,
+                                    thread const Surface &S,
+                                    bool applyShadow, bool wantSpec,
+                                    int onlyLight,
+                                    array<depthcube<float>, 16> shadowCubes,
+                                    array<depth2d<float>,   16> spotMaps,
+                                    sampler shadowSamp)
+{
+    float3 radiance = 0.0f;
+    for (uint i = 0; i < u.numLights; ++i) {
+        // onlyLight >= 0 restricts the sum to ONE light, so --viz=direct can
+        // attribute the term per light instead of only in aggregate.
+        if (onlyLight >= 0 && int(i) != onlyLight) continue;
+        float NoL, atten; float3 Ldir;
+        if (!LightReaches(u, L[i], S, /*needNoL=*/true, NoL, atten, Ldir)) continue;
+
+        const float shadow = applyShadow
+            ? ShadowFactor(L[i], S.pw, NoL, shadowCubes, spotMaps, shadowSamp)
+            : 1.0f;
+
+        const float3 H = normalize(Ldir + S.V);
+        const float NoH = saturate(dot(S.N, H));
+        const float VoH = saturate(dot(S.V, H));
+
+        const float3 F = F_Schlick(S.f0, VoH);
+        const float3 spec = wantSpec
+            ? F * (D_GGX(NoH, S.a) * V_SmithSchlick(S.NoV, NoL, S.a))
+            : float3(0.0f);
+        // (1-F) diffuse energy weighting (--diffuse_energy), using the same
+        // per-pixel Fresnel the specular term produced.
+        //
+        // NO Lambert 1/pi. That is deliberate and it is PARITY, not a slip: the
+        // CPU kernel's direct diffuse is
+        //     intensity = NoL * atten * Material::Diffuse;  lR += intensity*colR
+        // (DeferredSurfaceKernel.cpp:3245-3258, and the --pbr path at 2568 only
+        // adds the (1-F) factor). Its only 1/pi terms are inside the GGX D
+        // (lines 402/442/2431), which is standard. Dividing here made every
+        // direct light pi times dimmer than the reference image — measured: the
+        // 11 disco lights moved the frame by at most 2/255 even from 5 units away.
+        const float3 diff = S.baseColor * S.diffuseK * (1.0f - F);
+
+        radiance += (diff + spec) * L[i].color * (NoL * atten * shadow);
+    }
+    return radiance;
+}
+
+// Ambient: L2 SH irradiance x AO, plus the multiscatter env term. AO multiplies
+// the AMBIENT only — direct light keeps its own shadows. --viz=ambient calls
+// this same function, so it cannot drift from the frame's ambient (it used to
+// omit the multiscatter half and therefore under-reported it).
+static inline float3 AmbientRadiance(constant FrameUniforms &u,
+                                     constant float4 *sh,
+                                     thread const Surface &S)
+{
+    // The SH coefficients are projected from the FLD's authored WORLD-space
+    // zenith/nadir backdrop gradient, so the normal has to go back to world
+    // before evaluation. Same view->world inverse as DecodeSurface: a
+    // combination of the view matrix's ROWS. This carried the same wrong
+    // column gather, so the ambient was being looked up along a rotated normal —
+    // it survived unnoticed because the gradient is smooth and the magnitude
+    // came out about right.
+    const float3 Nw = normalize(u.camRow0 * S.N.x + u.camRow1 * S.N.y + u.camRow2 * S.N.z);
+    const float3 irr = SH_Irradiance(sh, Nw) * u.ambientFactor;
+    return S.baseColor * irr * S.ao + (S.FssEss + S.Fms * S.Ems) * irr * S.ao;
+}
+
 fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
                             constant FrameUniforms &u   [[buffer(1)]],
                             constant GpuLight      *L   [[buffer(2)]],
@@ -283,161 +517,15 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
     const float Z = (u.dzb) / max(zEnc - u.dza, 1e-9f);
     const float X = (in.ndc.x - u.ox * 1.0f) * Z * u.invSx;
     const float Y = (in.ndc.y - u.oy * 1.0f) * Z * u.invSy;
-    const float3 P = float3(X, Y, Z);
 
-    const float4 alb = gAlbedo.read(px);
-    const float2 ne  = gNormal.read(px).xy;
-    const float4 par = gParams.read(px);
-    const float3 N = oct_decode(ne);
-    const float3 V = normalize(-P);
-    const float NoV = saturate(dot(N, V));
+    const Surface S = DecodeSurface(u, gAlbedo.read(px), gNormal.read(px).xy,
+                                    gParams.read(px), float3(X, Y, Z));
 
-    // ALBEDO IS SQUARED HERE, and that is parity, not a guess. Under
-    // --hdr_linear the CPU kernel "square[s] the (normalized) albedo and let[s]
-    // light enter at power 1" (DeferredSurfaceKernel.cpp:1374-1381), then
-    // re-encodes with sqrt on the way out — which is exactly what fs_tonemap
-    // does. The G-buffer stores the raw GAMMA texel (as the CPU's does), so the
-    // square belongs at the point of use.
-    // MEASURED before this: the left wall read p50 168 against the DEMO
-    // reference's 125, and the floor 148 against 66 — the whole frame was
-    // washed out because a gamma value was being used as linear radiance.
-    const float3 baseColor = alb.rgb * alb.rgb;
-    const float  ao        = alb.a;
-    const float  diffuseK  = par.x * u.diffuseFactor;
-    const float  specK     = par.y * u.specularFactor;
-    const float  rough     = clamp(1.0f - par.z, 0.045f, 1.0f);
-    const float  a         = rough * rough;
-    const float  lum       = par.w * 4.0f;
-
-    // Dielectric F0. The scene has no metallic map bound in this arm, so F0 is
-    // the standard 4% and specK scales it — matching how the CPU kernel uses
-    // Material::Specular.
-    const float3 f0 = float3(0.04f) * max(specK, 0.0f) * 4.0f;
-
-    const float2 ab = EnvBRDF_AB(NoV, rough);
-    // Fdez-Aguera energy compensation, built from the SAME A,B terms.
-    const float3 FssEss = f0 * ab.x + ab.y;
-    const float  Ess = ab.x + ab.y;
-    const float  Ems = 1.0f - Ess;
-    const float3 Favg = f0 + (1.0f - f0) / 21.0f;
-    const float3 Fms = FssEss * Favg / max(1.0f - Ems * Favg, 1e-5f);
-
-    float3 radiance = 0.0f;
-
-    for (uint i = 0; i < u.numLights; ++i) {
-        const float3 lPosW = L[i].pos;
-        // light position into view space
-        const float3 lRel = lPosW - u.camSrc;
-        const float3 lPos = rowmul(u.camRow0, u.camRow1, u.camRow2, lRel);
-        const float3 toL = lPos - P;
-        const float d2 = dot(toL, toL);
-        const float range = L[i].range * u.lightRangeScale;
-        if (d2 >= range * range) continue;          // HARD cutoff, as the CPU does
-        const float d = sqrt(d2);
-        const float3 Ldir = toL / max(d, 1e-6f);
-        const float NoL = saturate(dot(N, Ldir));
-        if (NoL <= 0.0f) continue;
-
-        // Linear falloff to the hard edge — the engine's attenuation shape.
-        float atten = saturate(1.0f - d * (L[i].invRange / u.lightRangeScale));
-
-        // World position of the shaded point — needed by both the spot cone and
-        // every shadow tap. The view matrix is orthonormal, so its transpose is
-        // its inverse; hence the column gather.
-        const float3 pw = u.camSrc
-                        + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
-                        + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
-                        + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
-
-        // SPOT cone. Identical shape to the CPU kernel
-        // (DeferredSurfaceKernel.cpp:3247-3254): cosTheta measured between the
-        // spot axis and the light->surface direction, HARD cutoff at cosOuter,
-        // then a smoothstep t*t*(3-2t) from cosOuter up to cosInner.
-        if (L[i].isSpot != 0) {
-            const float3 toP = pw - lPosW;
-            const float cosTheta = dot(L[i].dir, normalize(toP));
-            if (cosTheta <= L[i].cosOuter) continue;
-            if (cosTheta < L[i].cosInner) {
-                const float tt = (cosTheta - L[i].cosOuter)
-                               / max(L[i].cosInner - L[i].cosOuter, 1e-6f);
-                atten *= tt * tt * (3.0f - 2.0f * tt);
-            }
-        }
-
-        float shadow = 1.0f;
-        if (u.shadowsOn != 0 && L[i].isSpot != 0 && L[i].shadowIndex >= 0) {
-            // Single perspective depth map, as Shadows.cpp bakes for a spot
-            // (cubeFace < 0 => one map, not six faces).
-            const float3 rel = pw - lPosW;
-            const float3 vp = rowmul(L[i].sRow0.xyz, L[i].sRow1.xyz, L[i].sRow2.xyz, rel);
-            if (vp.z > L[i].shadowNear) {
-                const float sn = L[i].shadowNear, sf = L[i].shadowFar;
-                const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
-                const float ref = dza + dzb / vp.z;
-                // Same 1/tan(halfFov) the bake's vertex shader applied. NDC -> uv,
-                // y flipped for Metal's upper-left texture origin.
-                const float ps = L[i].sRow0.w;
-                const float2 ndc = vp.xy * ps / vp.z;
-                const float2 uv = float2(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y);
-                const float bias = mix(0.0025f, 0.0004f, NoL);
-                shadow = spotMaps[L[i].shadowIndex].sample_compare(shadowSamp, uv,
-                                                                  ref + bias);
-            }
-        } else if (u.shadowsOn != 0 && L[i].shadowIndex >= 0) {
-            // World-space direction from light to the shaded point. The GPU takes
-            // this tap unconditionally; the CPU is allowed to skip it on static
-            // surfaces via the static-shadow lightmap (plan §5.3 item 12).
-            const float3 dirW = pw - lPosW;
-            const float sn = L[i].shadowNear, sf = L[i].shadowFar;
-            // Same reversed-Z encoding the bake wrote, evaluated on the MAJOR
-            // axis distance (which is what the 90-degree face's w equals).
-            const float major = max(max(abs(dirW.x), abs(dirW.y)), abs(dirW.z));
-            const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
-            const float ref = dza + dzb / max(major, 1e-5f);
-            // slope-scaled bias in reversed-Z (bigger value == nearer)
-            const float bias = mix(0.0025f, 0.0004f, NoL);
-            shadow = shadowCubes[L[i].shadowIndex].sample_compare(
-                shadowSamp, normalize(dirW), ref + bias);
-        }
-
-        const float3 H = normalize(Ldir + V);
-        const float NoH = saturate(dot(N, H));
-        const float VoH = saturate(dot(V, H));
-
-        const float3 F = F_Schlick(f0, VoH);
-        const float  Dv = D_GGX(NoH, a) * V_SmithSchlick(NoV, NoL, a);
-        const float3 spec = F * Dv;
-        // (1-F) diffuse energy weighting (--diffuse_energy), using the same
-        // per-pixel Fresnel the specular term produced.
-        //
-        // NO Lambert 1/pi. That is deliberate and it is PARITY, not a slip: the
-        // CPU kernel's direct diffuse is
-        //     intensity = NoL * atten * Material::Diffuse;  lR += intensity*colR
-        // (DeferredSurfaceKernel.cpp:3245-3258, and the --pbr path at 2568 only
-        // adds the (1-F) factor). Its only 1/pi terms are inside the GGX D
-        // (lines 402/442/2431), which is standard. Dividing here made every
-        // direct light pi times dimmer than the reference image — measured: the
-        // 11 disco lights moved the frame by at most 2/255 even from 5 units away.
-        const float3 diff = baseColor * diffuseK * (1.0f - F);
-
-        radiance += (diff + spec) * L[i].color * (NoL * atten * shadow);
-    }
-
-    // Ambient: L2 SH irradiance x AO, plus the multiscatter env term. AO
-    // multiplies the AMBIENT only — direct light keeps its own shadows.
-    //
-    // The SH coefficients are projected from the FLD's authored WORLD-space
-    // zenith/nadir backdrop gradient, so the normal has to go back to world
-    // before evaluation. The view matrix is orthonormal, so its transpose is its
-    // inverse — hence the column gather.
-    const float3 Nw = normalize(float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * N.x
-                              + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * N.y
-                              + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * N.z);
-    const float3 irr = SH_Irradiance(sh, Nw) * u.ambientFactor;
-    radiance += baseColor * irr * ao;
-    radiance += (FssEss + Fms * Ems) * irr * ao;
-    // Emissive
-    radiance += baseColor * lum;
+    float3 radiance = DirectRadiance(u, L, S, /*applyShadow=*/u.shadowsOn != 0,
+                                     /*wantSpec=*/true, /*onlyLight=*/-1,
+                                     shadowCubes, spotMaps, shadowSamp);
+    radiance += AmbientRadiance(u, sh, S);
+    radiance += S.baseColor * S.lum;   // emissive
 
     return float4(radiance, 1.0f);
 }
@@ -466,7 +554,28 @@ fragment float4 fs_tonemap(FsQuadOut in [[stage_in]],
 // ---------------------------------------------------------------------------
 // debug visualisations — a ground-truth instrument needs per-stage verification,
 // not just a final image. --viz=<mode> selects.
+//
+// TWO RULES, both learned the hard way in this arm (plan §6.2 / §6.2a):
+//
+//  R1. NEVER encode "no data" as a legitimate value. Three separate bugs here
+//      were prolonged by exactly that: --viz=shadow returning WHITE for both
+//      "unshadowed" and "no light in range"; mode 5 returning BLACK for both
+//      "fully shadowed" and "no G-buffer"; mode 7 returning pure BLUE for "this
+//      light has no cube" while blue is also one of its data channels.
+//      Reserved out-of-band colours below: dark RED = no G-buffer,
+//      MAGENTA = the mode was asked for something that does not exist.
+//
+//  R2. A mode's output MUST depend on the thing it claims to visualise. Mode 10
+//      claimed "direct, with shadows" and was byte-identical with and without
+//      --no-shadows, because it carried a private copy of the light loop that
+//      omitted the shadow factor. Every mode below now calls the SAME shared
+//      kernels the lit frame calls (DecodeSurface / LightReaches / ShadowFactor
+//      / DirectRadiance / AmbientRadiance), so it cannot silently diverge again.
 // ---------------------------------------------------------------------------
+
+// Out-of-band markers. Kept distinct from every mode's data range.
+constant float4 kVizNoGeometry = float4(0.40f, 0.0f,  0.0f,  1.0f);  // dark red
+constant float4 kVizNoSuchThing = float4(1.0f,  0.0f,  1.0f,  1.0f); // magenta
 
 fragment float4 fs_viz(FsQuadOut in [[stage_in]],
                        constant FrameUniforms &u [[buffer(1)]],
@@ -482,27 +591,49 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
                        sampler rawSamp    [[sampler(2)]],
                        constant uint &mode [[buffer(4)]])
 {
+    // R1: a mode selector the shader does not implement must be VISIBLE, not
+    // silently aliased onto whatever falls through. Before this, --viz=<any
+    // unmapped number> rendered mode 5 and looked like a real answer.
+    if (mode > 12) return kVizNoSuchThing;
+    // R1: an out-of-range --viz_light must be visible too. It used to read as
+    // "no light in range" (mode 5 dark blue / mode 6 black) — a data value.
+    if (u.vizLight >= 0 && uint(u.vizLight) >= u.numLights) return kVizNoSuchThing;
+
     const uint2 px = uint2(in.position.xy);
     const float zEnc = gDepth.read(px);
-    // NO G-BUFFER here (sky / beyond the far plane). Must NOT be black: mode 5
-    // uses black for "lit but fully shadowed", and conflating the two makes an
-    // uncovered pixel read as a shadow. Same rule that got white split out
-    // earlier -- never encode "no data" as a value the mode already means.
-    if (zEnc <= 0.0f) return float4(0.40f, 0.0f, 0.0f, 1);   // dark RED = no geometry
+    if (zEnc <= 0.0f) return kVizNoGeometry;
 
     const float Z = (u.dzb) / max(zEnc - u.dza, 1e-9f);
     const float X = (in.ndc.x - u.ox) * Z * u.invSx;
     const float Y = (in.ndc.y - u.oy) * Z * u.invSy;
-    const float3 P = float3(X, Y, Z);
     const float4 alb = gAlbedo.read(px);
-    const float3 N = oct_decode(gNormal.read(px).xy);
     const float4 par = gParams.read(px);
+    const Surface S = DecodeSurface(u, alb, gNormal.read(px).xy, par,
+                                    float3(X, Y, Z));
 
     switch (mode) {
         case 0: return float4(alb.rgb, 1);   // albedo — stored GAMMA, show as-is
-        case 1: return float4(N * 0.5f + 0.5f, 1);                  // view normal
-        case 2: return float4(float3(alb.a), 1);                    // baked AO
+        case 1: return float4(S.N * 0.5f + 0.5f, 1);                // view normal
+        case 2: {
+            // BAKED AO. R1: alpha is forced to exactly 1.0 by fs_gbuffer for every
+            // material WITHOUT Mat_AoInAlpha, so a plain greyscale image showed
+            // "no AO map" and "AO map says fully open" as the same white. Graded
+            // AO renders grey; the no-data case renders CYAN.
+            if (alb.a >= 1.0f) return float4(0.0f, 0.9f, 0.9f, 1);
+            return float4(float3(alb.a), 1);
+        }
         case 3: return float4(float3((Z - u.nearZ) / (u.farZ - u.nearZ)), 1);
+        case 12:
+            // RECONSTRUCTED WORLD POSITION — the quantity every shadow question
+            // in this arm turns out to be about, and the one there was no way to
+            // read directly. Fixed decode so a pixel can be turned back into a
+            // world point and fed to --probe:
+            //   x = R/255*80 - 20 ,  y = G/255*25 ,  z = B/255*100 - 80
+            // (greets spans X[-13.6..49.4] Y[0..18.5] Z[-75.9..4.9], so the
+            // ranges bracket the room with headroom and no clipping.)
+            return float4(saturate((S.pw.x + 20.0f) / 80.0f),
+                          saturate(S.pw.y / 25.0f),
+                          saturate((S.pw.z + 80.0f) / 100.0f), 1);
         case 4: return float4(float3(par.z), 1);                    // glossiness
         case 7: {
             // DIAGNOSTIC: is the baked cube depth in the space the tap assumes?
@@ -510,143 +641,92 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
             // the actual distance along the major axis. If the face mapping and
             // depth encoding agree, storedDist <= actualDist everywhere, with
             // equality on surfaces directly visible from the light. Encoded as
-            // R = actualDist/40, G = storedDist/40, B = 0. Reading numbers beats
-            // reasoning about conventions.
-            const int li = max(u.vizLight, 0);
-            if (li >= int(u.numLights) || L[li].shadowIndex < 0) return float4(0,0,1,1);
-            const float3 pw7 = u.camSrc
-                + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
-                + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
-                + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
-            const float3 dirW = pw7 - L[li].pos;
+            // R = actualDist/40, G = storedDist/40, B = storedDist/2.
+            //
+            // R1/R2: this used to `max(vizLight,0)` — i.e. silently report light 0
+            // when no light was selected, under a name that promised "the" light —
+            // and returned pure BLUE for "no cube", which collides with its own B
+            // channel. Both fixed: an explicit --viz_light is now REQUIRED, and
+            // the two no-data cases are magenta.
+            if (u.vizLight < 0) return kVizNoSuchThing;   // needs --viz_light=N
+            const int li = u.vizLight;
+            if (L[li].shadowIndex < 0 || L[li].isSpot != 0) return kVizNoSuchThing;
+            const float3 dirW = S.pw - L[li].pos;
             const float sn = L[li].shadowNear, sf = L[li].shadowFar;
             const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
             const float major = max(max(abs(dirW.x), abs(dirW.y)), abs(dirW.z));
             const float stored = shadowCubes[L[li].shadowIndex].sample(rawSamp, normalize(dirW));
             const float storedDist = (stored > dza + 1e-9f) ? dzb / (stored - dza) : 1e9f;
-            // R = actualDist/40, G = storedDist/40, B = storedDist/2 (fine scale,
-            // to resolve whether the light is EMBEDDED in geometry)
             return float4(saturate(major / 40.0f), saturate(storedDist / 40.0f),
                           saturate(storedDist * 0.5f), 1);
         }
-        case 8: case 9: case 10: {
-            // PER-TERM decomposition of the lighting equation, tonemapped the
-            // same way the real output is, so a patch can be compared directly
-            // against a DEMO reference patch and the over-bright term NAMED
-            // rather than guessed at.
-            //   8 = ambient only (SH irradiance x AO, incl. the multiscatter env)
-            //   9 = emissive only (Material::Luminosity)
-            //  10 = direct only (all omnis + spots, with shadows)
-            const float3 Nw8 = normalize(
-                  float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * N.x
-                + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * N.y
-                + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * N.z);
-            const float3 irr8 = SH_Irradiance(sh, Nw8) * u.ambientFactor;
+        case 8: case 9: case 10: case 11: {
+            // PER-TERM decomposition of the lighting equation, tonemapped exactly
+            // the way the real output is, so a patch can be compared straight
+            // against a DEMO reference patch and the offending term NAMED.
+            //   8  = ambient only   (SH irradiance x AO, INCLUDING the
+            //        multiscatter env term — it used to omit that half and so
+            //        reported a smaller ambient than the frame actually applies)
+            //   9  = emissive only  (Material::Luminosity)
+            //   10 = direct only, WITH shadows and specular — i.e. exactly the
+            //        quantity the CPU's --prof_no_lights ablates, so the two-sided
+            //        difference measurement compares like with like. Honours
+            //        --no-shadows, which is the test it previously could not fail.
+            //   11 = direct only, shadow factor FORCED to 1. Mode 10 minus mode 11
+            //        is what the cube tap removes, in one pair of runs.
             float3 c8 = 0.0f;
-            const float3 bc8 = alb.rgb * alb.rgb;      // same squaring as fs_lighting
-            if (mode == 8) c8 = bc8 * irr8 * alb.a;
-            else if (mode == 9) c8 = bc8 * (par.w * 4.0f);
-            else {
-                // The direct sum, without re-deriving the BRDF: reuse a Lambert
-                // stand-in is NOT good enough for attribution, so evaluate the
-                // same diffuse+atten the lighting pass does, minus specular.
-                const float3 V8 = normalize(-P);
-                (void)V8;
-                for (uint i = 0; i < u.numLights; ++i) {
-                    const float3 lRel8 = L[i].pos - u.camSrc;
-                    const float3 lPos8 = rowmul(u.camRow0, u.camRow1, u.camRow2, lRel8);
-                    const float3 toL8 = lPos8 - P;
-                    const float d28 = dot(toL8, toL8);
-                    const float r8 = L[i].range * u.lightRangeScale;
-                    if (d28 >= r8 * r8) continue;
-                    const float dd8 = sqrt(d28);
-                    const float NoL8 = saturate(dot(N, toL8 / max(dd8, 1e-6f)));
-                    if (NoL8 <= 0.0f) continue;
-                    float at8 = saturate(1.0f - dd8 * (L[i].invRange / u.lightRangeScale));
-                    if (L[i].isSpot != 0) {
-                        const float3 pwx = u.camSrc
-                            + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
-                            + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
-                            + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
-                        const float ct8 = dot(L[i].dir, normalize(pwx - L[i].pos));
-                        if (ct8 <= L[i].cosOuter) continue;
-                        if (ct8 < L[i].cosInner) {
-                            const float tt8 = (ct8 - L[i].cosOuter)
-                                            / max(L[i].cosInner - L[i].cosOuter, 1e-6f);
-                            at8 *= tt8 * tt8 * (3.0f - 2.0f * tt8);
-                        }
-                    }
-                    c8 += bc8 * par.x * L[i].color * (NoL8 * at8);
-                }
-            }
+            if      (mode == 8)  c8 = AmbientRadiance(u, sh, S);
+            else if (mode == 9)  c8 = S.baseColor * S.lum;
+            else                 c8 = DirectRadiance(u, L, S,
+                                        /*applyShadow=*/(mode == 10) && (u.shadowsOn != 0),
+                                        /*wantSpec=*/true, /*onlyLight=*/u.vizLight,
+                                        shadowCubes, spotMaps, shadowSamp);
             c8 = saturate((c8 * (2.51f * c8 + 0.03f)) / (c8 * (2.43f * c8 + 0.59f) + 0.14f));
             return float4(sqrt(c8), 1);
         }
-        case 6: {   // lights reaching this pixel, normalised by the light count
-            uint hit = 0;
-            const float3 pw6 = u.camSrc
-                + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
-                + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
-                + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
-            uint considered = 0;
+        case 6: {
+            // Lights that actually LIGHT this pixel, as a fraction of those
+            // considered. R2: this used its own range/cone test; it now calls
+            // LightReaches, the same predicate the lighting pass uses, so
+            // "in range" here means what it means there — including the NoL>0
+            // gate, which a range-only test wrongly counted as lit.
+            uint hit = 0, considered = 0;
             for (uint i = 0; i < u.numLights; ++i) {
                 if (u.vizLight >= 0 && int(i) != u.vizLight) continue;
                 ++considered;
-                const float r = L[i].range * u.lightRangeScale;
-                const float3 dw = pw6 - L[i].pos;
-                if (length(dw) >= r) continue;
-                if (L[i].isSpot != 0 &&
-                    dot(L[i].dir, normalize(dw)) <= L[i].cosOuter) continue;
-                ++hit;
+                float NoL, atten; float3 Ldir;
+                if (LightReaches(u, L[i], S, /*needNoL=*/true, NoL, atten, Ldir)) ++hit;
             }
-            const float f = considered ? float(hit) / float(considered) : 0.0f;
-            // green = some light, red channel scales with fraction, black = none
+            if (considered == 0) return kVizNoSuchThing;   // R1
+            const float f = float(hit) / float(considered);
+            // green = some light, red scales with the fraction, BLACK = none in range
             return float4(f, f > 0.0f ? 0.35f + 0.65f * f : 0.0f, 0.0f, 1.0f);
         }
         default: break;
     }
 
-    // mode 5: shadow state, THREE distinct colours. The previous encoding
-    // returned white both for "lit and unshadowed" and for "no light in range",
-    // which made a scene whose lights are mostly out of range look like a broken
-    // shadow test. Never conflate "no data" with "the value is 1".
-    //   dark blue  = NO shadow-casting light within range of this pixel
+    // mode 5: shadow state, THREE distinct colours.
+    //   dark blue  = NO shadow-casting light lights this pixel (out of range,
+    //                backfacing, or outside a spot cone) — NOT a shadow
     //   white      = lit, fully unshadowed
     //   black      = lit, fully shadowed
     //   grey       = partial (PCF edge / several lights disagreeing)
+    //
+    // R2: this used a FIXED 0.0015 bias and no NoL gate, while the lighting pass
+    // used mix(0.0025,0.0004,NoL) and skipped NoL<=0 lights. So the picture could
+    // show occlusion the frame never applied, and vice versa. It now calls
+    // LightReaches + ShadowFactor — literally the frame's own tap.
     float acc = 0.0f;
     uint n = 0;
-    const float3 pw = u.camSrc
-                    + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
-                    + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
-                    + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
     for (uint i = 0; i < u.numLights; ++i) {
         if (u.vizLight >= 0 && int(i) != u.vizLight) continue;
         if (L[i].shadowIndex < 0) continue;
-        const float3 dirW = pw - L[i].pos;
-        if (length(dirW) >= L[i].range * u.lightRangeScale) continue;
-        const float sn = L[i].shadowNear, sf = L[i].shadowFar;
-        const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
-        if (L[i].isSpot != 0) {
-            // Outside the cone is NOT "in range" for a spot — counting it would
-            // report the whole 38-unit sphere as unlit and drown the 7-degree beam.
-            if (dot(L[i].dir, normalize(dirW)) <= L[i].cosOuter) continue;
-            const float3 vp = rowmul(L[i].sRow0.xyz, L[i].sRow1.xyz, L[i].sRow2.xyz, dirW);
-            if (vp.z <= sn) continue;
-            const float ref = dza + dzb / vp.z;
-            const float2 ndc = vp.xy * L[i].sRow0.w / vp.z;
-            const float2 uv = float2(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y);
-            acc += spotMaps[L[i].shadowIndex].sample_compare(shadowSamp, uv, ref + 0.0015f);
-            ++n;
-            continue;
-        }
-        const float major = max(max(abs(dirW.x), abs(dirW.y)), abs(dirW.z));
-        const float ref = dza + dzb / max(major, 1e-5f);
-        acc += shadowCubes[L[i].shadowIndex].sample_compare(
-            shadowSamp, normalize(dirW), ref + 0.0015f);
+        float NoL, atten; float3 Ldir;
+        if (!LightReaches(u, L[i], S, /*needNoL=*/true, NoL, atten, Ldir)) continue;
+        acc += ShadowFactor(L[i], S.pw, NoL, shadowCubes, spotMaps, shadowSamp);
         ++n;
     }
-    if (n == 0) return float4(0.05f, 0.10f, 0.35f, 1);   // no light in range
+    if (n == 0) return float4(0.05f, 0.10f, 0.35f, 1);   // no light reaches here
     return float4(float3(acc / float(n)), 1);
 }
 

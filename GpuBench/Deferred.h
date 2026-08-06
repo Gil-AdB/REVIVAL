@@ -73,6 +73,25 @@ struct DeferredOptions {
     const LoadOptions *loadOpt = nullptr;   // needed to Reanimate per frame
     int   dumpCube = -1;
     std::string dumpCubePath;
+    // GROUND-TRUTH PROBE. For one WORLD point, print for every cube light:
+    //   (a) the true nearest shadow-casting triangle between light and point,
+    //       found by ray-casting the SAME triangles the bake rasterised, with
+    //       the mesh + material NAME — no convention arithmetic involved;
+    //   (b) a host-side replica of the shader's tap (face pick, uv, stored
+    //       depth, decoded distance, ref, bias, pass/fail).
+    // If (a) and (b) disagree, the bug is the tap's conventions. If they agree,
+    // the cube is telling the truth and the occlusion is geometry. Written
+    // because two rounds of this investigation were spent inferring geometry
+    // from an 8x8 grid of decoded depths.
+    bool  probe = false;
+    float probePoint[3] = {0, 0, 0};
+    // Same idea keyed on a SCREEN PIXEL: build that pixel's camera ray from the
+    // very constants the vertex shader uses, ray-cast ALL geometry, and then
+    // replay the lighting pass's own per-light gate on the hit — distance vs
+    // range, NoL, attenuation, and the cube tap — printing which test failed.
+    // "This pixel is not lit by light N" had no answerable form before this.
+    bool  probePx = false;
+    int   probePxXY[2] = {0, 0};
     std::string outPath;
 };
 
