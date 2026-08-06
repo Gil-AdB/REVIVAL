@@ -241,15 +241,32 @@ items below stay PARKED.
 >   cache-resident. The 73 % is the branch chain + the per-face `F->Txtr->Flags`
 >   chase + the Face stream, not the vertex reads. No `A/B/C_idx` invariant
 >   needed, and no win there to collect.
-> - **NEW, uncosted, probably the cheapest ms/effort left: parallelise the
->   MAIN-VIEW `Transform_Objects`.** It runs on the tick thread only
->   (`RENDER.CPP:479/493` + each scene's call site; `Shadows.cpp:422` is the only
->   threaded caller) and is pinned at one core's bandwidth ceiling while 11 cores
->   idle. Per-light shadow phase A already proves the per-mesh work parallelises
->   (`VertexScratch` + per-pass `FaceListContext`). Shared state to solve: the
->   FList append (`Ins++`), the tile-bbox stamp into the `FListEntry`, and the
->   radix sort — per-worker segments reserved in mesh order keep the sort input
->   deterministic.
+> - **DONE 2026-08-06 — `--xfrm_par`, DEFAULT ON.** The main-view
+>   `Transform_Objects` now runs on the pool: the object list is cut into
+>   contiguous mesh-index BLOCKS (2 per worker) that are work-stolen off a shared
+>   cursor, each appending into an FList segment **reserved in mesh order** (the
+>   prefix sum of per-mesh `FIndex`), then compacted in block order — so
+>   execution order is free while output order is pinned, and the result is
+>   bit-identical to serial whatever order the workers finish in. Measured,
+>   1920x1080, per-frame min over 24, min-of-arm over 3 interleaved reps, load
+>   14-23: **displaced t=5780 1.546 -> 0.449 ms (-1.10, 3.4x); shipping t=5743
+>   0.423 -> 0.261 (-0.16, 1.6x)**. Machinery overhead measured with 1 block
+>   (inline, no dispatch): 10-35 us. Gates: render_gate 3/3 in both arms, city
+>   `37e62845` and fountain `51fff7cd` PIN EXACT, chase 5-pose + cinematic and
+>   greets t=1588 / t=5780 off==on, and **24 sequential runs of the greets pin
+>   recipe with the parallel path on = 1 hash, 0 flips**.
+>   **It also corrected the premise it was proposed on.** "The chip's aggregate
+>   bandwidth is several times 64 GB/s" is FALSE for this access pattern: the
+>   displaced arm streams 53.7 MB in 0.411 ms = **~131 GB/s, ~2x the single-core
+>   figure**, and finer blocks do not move it — so that arm is now bandwidth-
+>   bound at the SOCKET. The shipping arm is bound by something else entirely:
+>   one mirror clone is 55 % of its main-view verts AND 55 % of its faces, so it
+>   sits at the per-mesh LPT bound (predicted 0.221, measured 0.246). Full
+>   working in docs/SOA_VERTEX_REFACTOR.md 2026-08-06 (c).
+>   **Consequence for what is left:** more threads cannot help the displaced arm
+>   (bytes/vertex can — Phase 5 / the interleaved 64-byte output array is now the
+>   ONLY lever on it), and the shipping arm's lever is shrinking that mirror
+>   clone (docs/VISIBILITY_PLAN.md 8e), which would help the serial path too.
 > - **LANDED, byte-null, neutral:** the transform's `UZ`/`VZ` stores were dead
 >   (the clipper overwrites them at entry) — 10 sites deleted in `fdc7a07`.
 

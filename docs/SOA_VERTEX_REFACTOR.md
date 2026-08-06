@@ -2,6 +2,169 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-08-06 (c) — the main-view transform is PARALLEL now (`--xfrm_par`, default ON). Two arms, two DIFFERENT limits, both measured.
+
+Item 2 of §5 below ("parallelise the MAIN-VIEW `Transform_Objects`… this has
+never been costed") is built, measured, byte-gated and on by default. It should
+have been done before any of the layout work: it is orthogonal to the layout and
+it collects **−1.10 ms of a 1.55 ms phase** in the displaced arm.
+
+### The ceiling, costed BEFORE building anything — and it is not `total / 12`
+
+A mesh is the indivisible unit of this loop: its face loop reads its own
+transformed vertices, so a mesh cannot be split across workers without a
+barrier. The parallel critical path is therefore the **largest single mesh**.
+That falls straight out of the existing `--xfrm_pass_mesh_prof` census, no new
+code — and greets' geometry is dominated by one mirror clone:
+
+| arm (greets, 1920×1080) | main-view verts | largest mesh | share of verts | its faces / tested | share |
+|---|--:|--:|--:|--:|--:|
+| `--greets_displace` t=5780 | 188 941 | `__mirrorClone_teleporter` 26 861 | 14.2 % | 9 198 / 63 290 | 14.5 % |
+| shipping t=5743 | 49 401 | `__mirrorClone_teleporter` 27 370 | **55.4 %** | 9 198 / 16 607 | **55.4 %** |
+
+Against the serial per-bucket split that gives an LPT bound of
+`max(largest-mesh cost, total / nWorkers)`:
+
+| arm | serial TOTAL | VERT | FACE | LPT bound | measured `WORK` |
+|---|--:|--:|--:|--:|--:|
+| displaced | 1.546 | 0.883 | 0.622 | 0.142·0.98 + 0.145·0.71 = **0.240** | 0.411 |
+| shipping | 0.423 | 0.227 | 0.172 | 0.554·(0.227 + 0.172) = **0.221** | 0.246 |
+
+**Read those two rows carefully — they are limited by different things, and both
+are at their own mechanism:**
+
+* **Shipping is at the per-mesh LPT bound** (0.246 measured vs 0.221 predicted,
+  +11 %). One mirror clone is 55 % of the arm's main-view verts *and* 55 % of
+  its faces, so eleven workers finish and wait on one. Nothing short of
+  splitting that mesh moves this arm further.
+* **Displaced is at an AGGREGATE-BANDWIDTH bound, not the LPT bound** (0.411
+  measured against a 0.240 LPT bound). 188 941 verts × ~284 B = 53.7 MB of
+  streamed traffic in 0.411 ms is **~131 GB/s** — about **2×** the 64 GB/s
+  single-core ceiling §4 measures, not 12×. Confirmed by elimination: raising
+  the block count from 12 to 24/26/52/104 (finer work-stealing, i.e. better
+  balance) moves `WORK` 0.49 → 0.41 and then flattens, so the residual is not
+  imbalance.
+
+**That is the important architectural consequence of this whole exercise:** the
+loop was bandwidth-bound on one core, and after parallelising it is
+bandwidth-bound on the socket. So the ONLY remaining lever that can move the
+displaced arm is **bytes per vertex** — lever 1 in §5 / §6 below (the
+interleaved 64-byte output array, ~284 → ~164 B/vert). More threads cannot;
+more SIMD never could.
+
+### Measured
+
+`--xfrm_par=N`: `-1` (default) = 2 blocks per worker, `0` = the old serial path,
+`N>0` = exactly N blocks. Per-frame **min over 24 frames**, min-of-arm over 3
+interleaved reps, 1920×1080, `SDL_VIDEODRIVER=dummy`, box shared with 3 other
+agents (per-run 1-min load 14–23).
+
+| arm | serial (`par=0`) | default (`par=-1`, 26 blocks) | delta |
+|---|--:|--:|--:|
+| `--greets_displace` t=5780 | **1.546** | **0.449** (PLAN 0.006 / WORK 0.411 / COMPACT 0.026 / EPI 0.004) | **−1.10 ms, 3.4×** |
+| shipping t=5743 | **0.423** | **0.261** (PLAN 0.005 / WORK 0.246 / COMPACT 0.006 / EPI 0.003) | **−0.16 ms, 1.6×** |
+
+Block-count sweep (same binary, min-of-arm over 2 reps, `WORK` only):
+
+| blocks | 1 | 12 | 24 | 26 | 52 | 104 |
+|---|--:|--:|--:|--:|--:|--:|
+| displaced | 1.630 | 0.491 | 0.433 | 0.411 | 0.423 | 0.430 |
+| shipping | 0.425 | 0.225 | 0.246 | 0.246 | 0.252 | 0.238 |
+
+Three things to read off these:
+
+1. **The `blocks=1` control is the honest overhead number.** Its `WORK` equals
+   the serial `TOTAL` to within noise in both arms, so the entire machinery
+   (mesh-sequence counter, segment reservation, compaction, epilogue re-entry)
+   costs `PLAN + COMPACT + EPI` ≈ **10–35 µs**. The dispatch round-trip that
+   Threads.h's "~12 µs per enqueue" comment implies did NOT materialise — the
+   enqueues and the drain live inside `WORK`, and `WORK` lands on the predicted
+   bound.
+2. **`COMPACT` is 5–26 µs**: the price of determinism is ~2–6 % of the phase.
+   36 147 × 16 B of `memmove`.
+3. **Block count must exceed worker count.** The cost model can only see
+   `VIndex`/`FIndex`; it cannot see which meshes the frustum + occlusion culls
+   will discard, and most are discarded (greets: 471 TriMesh objects on the
+   object list, **108** reach a vertex loop). One block per worker with a static
+   assignment left ~15 % on the table (`WORK` 0.508 vs 0.411).
+
+### DETERMINISM: reserved segments, not a bump allocator
+
+The one thing that would make this useless is an FList whose ORDER depends on
+which worker finished first — a different image run to run, which destroys every
+byte gate in the project and is not a trade anyone can evaluate by eye. So:
+
+* Each block appends into a segment of the shared FList **reserved in MESH
+  ORDER** — the prefix sum of per-mesh `FIndex`, an exact upper bound on what a
+  block can push (a mesh cannot emit more FList entries than it has faces).
+* `COMPACT` then slides the runs down **in block order**. Destination never
+  exceeds source and blocks are walked in increasing order, so it is a safe
+  in-place compaction and the surviving order is exactly the serial insertion
+  order.
+* **Execution order is free; output position is pinned.** That separation is why
+  blocks can be work-stolen off a shared cursor (and why the block count can be
+  tuned for balance) without touching determinism.
+* Cheapest way to see the property hold: **the block COUNT does not move the
+  image.** `par=0 / 5 / 7 / 8 / 12 / 24 / 52 / 104` all hash the same.
+
+Shared mutable state, enumerated and handled:
+
+| thing | how |
+|---|---|
+| the FList append cursor (`Ins++`) | per-block reserved segment (above) |
+| the tile-bbox stamp (`--tile_bbox_cull`) | written into the block's own `FListEntry` |
+| the radix sort | consumes the compacted, mesh-ordered list — unchanged |
+| per-vertex / per-face writes | into the mesh's own `Vertex`/`Face` arrays; blocks are disjoint mesh sets |
+| `T->frame` lazy `new VertexFrame()` | per-mesh, and a mesh belongs to exactly one block |
+| `T->BSphereScreenPos` | same — one owner per mesh |
+| `g_inShadowPass`, `g_inDynamicShadowBake`, `g_currentShadowOmni`, `g_currentShadowMap`, `g_offAxisFrustumCull` | all `thread_local`; the worker task sets the main-view values explicitly, so a pool thread that last ran a shadow or mirror-shard task cannot leak state in |
+| `g_chunkVisStats`, `g_xprof`, the `FDS_VIS_CENSUS` accumulators | plain counters — suppressed inside blocks; the driver has its own `[XFRM-PAR]` dump under `--xfrm_prof` instead |
+| the omni + particle epilogue | mutates `Omni::V` / `Particle::V` in place and is not per-mesh work — runs exactly once, after COMPACT, in its own re-entry |
+| two Objects sharing one TriMesh | would be a genuine race (the serial path merely gets an order-dependent answer). Audited once per `Scene` pointer; the driver shouts on stderr and falls back to 1 block. No scene in the demo trips it. |
+| `FInterpolator` | not touched by `Transform_Objects` (clipper-side) |
+
+The mesh-loop block test is an **unconditional counter + compare** (serial takes
+`lo=0, hi=INT_MAX`), deliberately not a flag-predicated branch — a never-taken
+`if (flag)` inside this `-ffp-contract=fast` function is not byte-null
+(docs/VISIBILITY_PLAN.md 8a: 216 bytes on city, max |Δ| 44). The driver's own
+timers live in the cold driver function for the same reason.
+
+**Gates**, run twice (once on the static-assignment build, once on the shipped
+work-stealing default-ON build); every OFF-vs-ON pair identical, dummy drivers,
+1-min load 11–30:
+
+* render_gate **3/3 PASS in BOTH arms** — mirrortest `4ac809e5`, conetest
+  `b41894f9`, halotest `166fa25a`.
+* city **`37e62845` PIN EXACT** off and on (env cache warmed once, held fixed
+  across arms; on-arm run twice, same hash).
+* fountain **`51fff7cd` PIN EXACT** off and on.
+* greets t=1588 off == on (`f1297141`). This differs from the SESSION_STATE pin
+  `f5778c7b` — it moved *identically in both arms*, which is the concurrent
+  greets overlay work, not this change.
+* chase 5-pose: t100/t400/t800/t1200 EXACT to their pins; t1600 differs from the
+  pin in BOTH arms (`c8c93b88` vs `7265d785`) — the documented pre-existing
+  effect of the uncommitted CHASE.FLD/.lwo. chase cinematic: same shape.
+* greets t=5780 `--greets_displace`: one hash across every block count tried.
+* **Nondeterminism gate: 24 sequential runs of the greets pin recipe with the
+  parallel path on → 1 distinct hash, 0 flips** (`tools/flip_rate.sh -n 24`;
+  95 % upper bound on the flip rate 0.117), and that hash equals the flag-OFF
+  hash.
+
+### What is LEFT, and what it would cost
+
+* **Displaced arm: nothing more from threads.** It is at ~131 GB/s aggregate.
+  The lever is bytes/vertex — §6's interleaved 64-byte output array
+  (~284 → ~164 B/vert) should now move it roughly proportionally, and it is the
+  only thing that can.
+* **Shipping arm: the lever is the dominant mesh.** 55 % of its work is one
+  mirror clone. Either split a mesh's vertex loop across workers (needs a
+  vertex-phase/face-phase barrier, because a face reads vertices from ranges
+  other workers own — a real refactor of the function), or shrink the clone: the
+  mirror-clone spatial split already tracked in docs/VISIBILITY_PLAN.md §8e
+  would cut the critical path here AND improve the serial arm.
+
+---
+
 ## MEASURED 2026-08-06 (b) — the mechanism, nailed with a controlled experiment: `sizeof(Vertex)` is the ONLY variable this loop responds to. Read this before Phase 5.
 
 Everything below this section reasons about the per-vertex loop being
@@ -154,16 +317,16 @@ loop that is waiting on DRAM; only bytes/vertex and more cores can.**
    Cost is unchanged and still the real blocker — it needs `Vertex` to split
    into mesh storage vs the clipper's transient `C_Verts` type (every
    `RasterFunc` takes `Vertex**`), i.e. the "Phase 6.3, 2–3 days" work.
-2. **NEW — parallelise the MAIN-VIEW `Transform_Objects`. Probably the cheapest
-   ms/effort left, and it is orthogonal to the layout.** The loop sits at one
-   core's streaming ceiling while 11 cores idle; the chip's aggregate bandwidth
-   is several times 64 GB/s, and the per-light shadow phase A already proves the
-   per-mesh work parallelises (`VertexScratch` clones + a per-pass
-   `FaceListContext`). The shared mutable state to solve is the FList append
-   (`Ins++`), the tile-bbox stamp into the `FListEntry`, and the radix sort that
-   follows — per-worker FList segments with a reserve-and-merge, in mesh order,
-   keeps the sort input deterministic. This has never been costed; it should be
-   before anyone starts (1).
+2. ~~**NEW — parallelise the MAIN-VIEW `Transform_Objects`.**~~ **DONE
+   2026-08-06 — `--xfrm_par`, default ON. See the 2026-08-06 (c) section at the
+   top of this file.** Displaced 1.546 → 0.449 ms (3.4×), shipping 0.423 →
+   0.261 (1.6×); byte-identical on every gate, 24/24 one hash. Two corrections
+   this delivered to the reasoning below:
+   * "the chip's aggregate bandwidth is several times 64 GB/s" — **measured at
+     ~131 GB/s for THIS access pattern, i.e. ~2×, not 12×.** The displaced arm
+     is now bandwidth-bound at the socket instead of at one core.
+   * That makes item 1 (bytes/vertex) the **only** remaining lever on the
+     displaced arm, and raises its priority rather than lowering it.
 3. **Do NOT spend the migration's budget on the FACE bucket** — §2 measured that
    win as zero.
 
