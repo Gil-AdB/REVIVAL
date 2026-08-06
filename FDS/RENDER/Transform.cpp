@@ -100,6 +100,9 @@
 #include "Base/FaceListContext.h"
 #include "Base/VertexScratch.h"
 #include "FILLERS/ShadowMap.h"
+#include "Threads.h"     // --xfrm_par: mesh-sharded main-view transform
+#include <thread>
+#include <cstring>
 
 // Defined in Shadows.cpp; the shadow orchestrator sets this to the
 // current shadow light before calling Transform_Objects, so the per-mesh
@@ -1111,6 +1114,44 @@ namespace fds { extern int  g_offscreenViewDepth;   // >0 inside a mirror RTT /
                 bool EnvBake_LegacyMeshExcluded(TriMesh* T);
                 bool EnvBake_IsMirrorCloneObj(const Object* O); }
 
+// ── --xfrm_par: mesh-sharded main-view Transform_Objects ─────────────────
+// The whole reason this exists: the per-vertex loop is pinned at ONE core's
+// streaming ceiling (~64 GB/s measured, docs/SOA_VERTEX_REFACTOR.md
+// 2026-08-06 (b)) and the main-view call runs on the tick thread only, so 11
+// cores idle through it. Per-mesh work is already independent — the only
+// shared mutable state in the mesh loop is the FList append cursor, which is
+// why the shard carries its own PRE-RESERVED segment instead of bumping a
+// shared cursor: FList order then depends on MESH ORDER, not on which worker
+// finishes first, and the radix sort's input is bit-identical to serial.
+//
+//   kind == Meshes  : process mesh sequence indices [lo, hi), append starting
+//                     at fList + insOff, record how many were pushed in
+//                     `out`, and RETURN before the omni/particle epilogue.
+//   kind == Epilogue: process NO meshes (lo == hi == 0), append the omni
+//                     flares + particles starting at fList + insOff (which
+//                     the driver sets to the compacted poly count) and set
+//                     cAll / cOmnies / cPcls exactly as the serial path does.
+//                     cPolys is set by the driver, not here.
+//
+// Serial callers (and every shadow / mirror-RTT / env-probe re-entry) see
+// g_xfrmShard == nullptr and take lo=0 / hi=INT_MAX / insOff=0, i.e. the
+// original code path with an unconditional counter+compare in the mesh-loop
+// preamble. Deliberately NOT a flag-predicated branch: a never-taken
+// `if (flag)` inside this -ffp-contract=fast function is not byte-null
+// (docs/VISIBILITY_PLAN.md 8a — 216 bytes on city, max |delta| 44).
+namespace {
+struct XfrmShard {
+	int      lo   = 0;         // first mesh sequence index (inclusive)
+	int      hi   = 0;         // last  mesh sequence index (exclusive); 0 => epilogue-only
+	int32_t  insOff = 0;       // FList slot this shard starts appending at
+	int32_t  out  = 0;         // [out] entries this shard actually pushed
+};
+thread_local const XfrmShard *g_xfrmShard = nullptr;
+}  // namespace
+
+static void Transform_Objects_Sharded(Scene *Sc, fds::CameraContext &cam,
+                                     fds::FaceListContext &faces, int nShards);
+
 // xresOverride / yresOverride: when >= 0, use these instead of the
 // global XRes / YRes for vertex visibility flags + face-level
 // VisibilityFlagsAll() culling. Lets a caller (e.g. the shadow-map
@@ -1141,8 +1182,33 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// sets g_offAxisFrustumCull; offscreen bakes set _offscreenPass). Cached once
 	// so the per-mesh hot loop pays a register read, not a flag/TLS lookup.
 	const bool _mainView   = !_offscreenPass && !fds::g_offAxisFrustumCull;
+	// --xfrm_par: the MAIN-VIEW call is the one that runs on the tick thread
+	// alone. Hand it to the sharded driver (which re-enters this function once
+	// per shard with g_xfrmShard set, plus once for the omni/particle
+	// epilogue) and return. Excluded: every pass that is ALREADY parallel or
+	// already re-entrant (shadow bakes, mirror RTT, env/SH probes — they run
+	// on pool workers and would nest dispatches), resolution-overridden probe
+	// renders, and scratch (clone) passes.
+	const XfrmShard *const _shard = g_xfrmShard;
+	if (!_shard && _mainView && !scratch && xresOverride < 0 && yresOverride < 0) {
+		const int _parN = fds::FeatureFlags::xfrm_par();
+		if (_parN != 0) {
+			Transform_Objects_Sharded(Sc, cam, faces, _parN);
+			return;
+		}
+	}
+	// Shard window + FList append base. nullptr (serial / shadow / offscreen)
+	// => [0, INT_MAX) at offset 0, i.e. every mesh, appending from slot 0.
+	const int     _shardLo    = _shard ? _shard->lo     : 0;
+	const int     _shardHi    = _shard ? _shard->hi     : INT_MAX;
+	const int32_t _shardInsOff= _shard ? _shard->insOff : 0;
+	int           _mseq       = 0;   // running mesh sequence index
 	const bool _occlCull   = _mainView && fds::g_chunkOcclActive;
-	const bool _visStats   = _mainView && fds::g_visStatsActive;
+	// g_chunkVisStats is a plain (non-atomic) counter block, so the shards
+	// must not touch it — the sharded driver re-runs the stats serially is NOT
+	// worth it for a debug counter; --vis_stats simply reports nothing under
+	// --xfrm_par. Same reasoning for --xfrm_prof / --xfrm_pass_prof below.
+	const bool _visStats   = _mainView && fds::g_visStatsActive && !_shard;
 	const bool coneCull = g_inShadowPass
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
@@ -1241,7 +1307,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	float dz;
 	int32_t *pdz = (int32_t *)(&dz);
 	int32_t I;
-	fds::FListEntry *Ins = faces.fList;
+	fds::FListEntry *Ins = faces.fList + _shardInsOff;
 	float *f = (float *)(&M);
 	float *fv;
 
@@ -1254,7 +1320,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// at. `xresOverride < 0` additionally excludes the resolution-overridden
 	// probe renders. Timer locals live at FUNCTION scope so the
 	// Inside/Ahead/Regular `goto`s never jump over an initialisation.
-	const int  _xprofN   = _mainView ? fds::FeatureFlags::xfrm_prof() : 0;
+	const int  _xprofN   = (_mainView && !_shard) ? fds::FeatureFlags::xfrm_prof() : 0;
 	const int  _xablate  = _mainView ? fds::FeatureFlags::xfrm_ablate() : 0;
 	const bool xp        = (_xprofN > 0) && (xresOverride < 0);
 	const bool xab       = (_xablate != 0) && (xresOverride < 0);
@@ -1270,7 +1336,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// pass (mirror RTT, shadow cube faces, env/SH probe faces) so the whole
 	// frame's geometry front-end is attributed. Kind is derived from the same
 	// three pass predicates the culls key on.
-	const int  _xpassN = fds::FeatureFlags::xfrm_pass_prof();
+	const int  _xpassN = _shard ? 0 : fds::FeatureFlags::xfrm_pass_prof();
 	const bool xpass   = (_xpassN > 0);
 	const int  xpKind  = _mainView ? XPK_MAIN
 	                   : (fds::g_offAxisFrustumCull ? XPK_MIRROR_RTT
@@ -1287,7 +1353,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// Mirror-clone split ceiling census (--mirror_cull_census). Main view only
 	// — the RTT bakes HIDE every clone mesh, so a clone is never in an
 	// offscreen pass and the ceiling question is entirely a main-view one.
-	const int  _mcensusN = _mainView ? fds::FeatureFlags::mirror_cull_census() : 0;
+	const int  _mcensusN = (_mainView && !_shard) ? fds::FeatureFlags::mirror_cull_census() : 0;
 	const bool _mcensus  = (_mcensusN > 0) && (xresOverride < 0);
 #endif  // FDS_VIS_CENSUS
 
@@ -1314,6 +1380,17 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		
 		if (Obj->Type != Obj_TriMesh) continue;
 		//if (stricmp(Obj->Name, "water.lwo")) continue;
+		// --xfrm_par shard window. The sequence index counts TriMesh objects in
+		// OBJECT-LIST order and is incremented before any cull, so the same
+		// mesh gets the same index in every shard and in the serial path — that
+		// is what makes the FList segment reservation (computed by the driver
+		// from the identical walk) line up with what each shard actually
+		// appends. Serial: [0, INT_MAX), so this is one add + two compares per
+		// mesh, always taken.
+		{
+			const int _ms = _mseq++;
+			if (_ms < _shardLo || _ms >= _shardHi) continue;
+		}
 		T = (TriMesh *)(Obj->Data);
 		if (xp) xpTM = xpNow();   // per-mesh setup starts here
 
@@ -2635,7 +2712,20 @@ AfterXForm:
 	}  // close per-face loop body opened above
 		if (xp) g_xprof.cur[XP_FACE] += xpNow() - xpTF;
 	}
+	// --xfrm_par: a MESH shard reports how much of its reserved segment it
+	// filled and stops here — the omni/particle epilogue is not per-mesh work
+	// and runs once, in the EPILOGUE shard, after the driver has compacted the
+	// poly segments and set cPolys. hi == 0 marks that epilogue shard (it
+	// matched no mesh above), and it must NOT clobber cPolys.
+	if (_shard) {
+		if (_shard->hi > 0) {
+			const_cast<XfrmShard *>(_shard)->out =
+				int32_t(Ins - (faces.fList + _shardInsOff));
+			return;
+		}
+	} else {
 	faces.cPolys = Ins-faces.fList;
+	}
 
 	// Shadow pass (scratch != nullptr) skips omnis: this loop mutates
 	// O->V.TPos_AOS / RZ / PX / PY in place on the source Omni (no clone
@@ -2773,5 +2863,222 @@ AfterXForm:
 			++g_xprof.frames;
 		}
 		if (g_xprof.frames >= _xprofN || g_xprof.frames >= XP_MAXFRAMES) xpDump(g_xprof.frames);
+	}
+}
+
+// ─── --xfrm_par driver: mesh-sharded main-view Transform_Objects ──────────
+// Runs on the tick thread. Four phases, all timed under --xfrm_prof=N (the
+// timers live HERE, in a cold function, never inside Transform_Objects'
+// -ffp-contract=fast body):
+//
+//   PLAN     one walk of the object list -> per-mesh FIndex (an exact UPPER
+//            BOUND on what that mesh can push) + a cost estimate, prefix
+//            sums, and a partition into W contiguous mesh-index blocks.
+//   WORK     dispatch W-1 shards to the pool, run shard 0 on this thread,
+//            drain. Each shard appends into its own reserved FList segment.
+//   COMPACT  close the gaps between segments, in BLOCK ORDER. This is the
+//            step that makes the result deterministic: the surviving entries
+//            end up in exactly the order a serial walk would have produced,
+//            whatever order the shards finished in.
+//   EPILOGUE one more re-entry with an epilogue-only shard for the omni
+//            flares + particles (not per-mesh work; mutates Omni::V and
+//            Particle::V in place, so it must run exactly once).
+namespace {
+struct XParAcc {
+	static constexpr int MAXF = 4096;
+	int frames = 0;
+	int64_t cur[5] = {0,0,0,0,0};      // PLAN, WORK, COMPACT, EPILOGUE, TOTAL
+	int64_t s[5][MAXF];
+	int64_t shards = 0, meshes = 0, reserved = 0, pushed = 0;
+	int64_t idleSum = 0;               // sum over frames of (WORK - maxShard)
+};
+XParAcc g_xpar;
+void xparDump(int n) {
+	XParAcc &a = g_xpar;
+	const double f = double(n);
+	double mn[5], md[5];
+	for (int k = 0; k < 5; ++k) {
+		std::sort(a.s[k], a.s[k] + n);
+		mn[k] = a.s[k][0] / 1e6;
+		md[k] = a.s[k][n / 2] / 1e6;
+	}
+	std::fprintf(stderr,
+	    "[XFRM-PAR] n=%d shards=%.0f  min: TOTAL %7.3f | PLAN %6.3f WORK %6.3f "
+	    "COMPACT %6.3f EPI %6.3f   p50: TOTAL %7.3f | PLAN %6.3f WORK %6.3f "
+	    "COMPACT %6.3f EPI %6.3f ms  | meshes %.0f reserved %.0f pushed %.0f\n",
+	    n, a.shards / f,
+	    mn[4], mn[0], mn[1], mn[2], mn[3],
+	    md[4], md[0], md[1], md[2], md[3],
+	    a.meshes / f, a.reserved / f, a.pushed / f);
+	a = XParAcc{};
+}
+}  // namespace
+
+static void Transform_Objects_Sharded(Scene *Sc, fds::CameraContext &cam,
+                                     fds::FaceListContext &faces, int nShards)
+{
+	const int  _xprofN = fds::FeatureFlags::xfrm_prof();
+	const bool xp      = _xprofN > 0;
+	const int64_t t0   = xp ? xpNow() : 0;
+
+	ThreadPool &tp = ThreadPool::instance();
+	int W = (nShards < 0) ? int(tp.size()) : nShards;
+	if (W > int(tp.size()) + 1) W = int(tp.size()) + 1;   // +1: this thread runs one
+	if (W < 1) W = 1;
+
+	// ── PLAN ────────────────────────────────────────────────────────────
+	// Same walk, same order, same sequence numbering as the mesh loop's
+	// `_mseq` — that identity is what makes the reservation line up.
+	struct MeshPlan { int32_t nf; int64_t cost; };
+	static std::vector<MeshPlan> plan;      // tick-thread only
+	static std::vector<int>      blkLo, blkHi;
+	static std::vector<XfrmShard> shards;
+	plan.clear();
+	int64_t totCost = 0;
+	int64_t totFaces = 0;
+	for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh) continue;
+		const TriMesh *T = (const TriMesh *)(Obj->Data);
+		const int32_t nf = T ? int32_t(T->FIndex) : 0;
+		const int32_t nv = T ? int32_t(T->VIndex) : 0;
+		// Cost weights from the measured per-item rates at greets t=5780
+		// --greets_displace (--xfrm_prof: VERT 1.125 ms / 253 280 verts =
+		// 4.44 ns, FACE 0.575 ms / 63 290 faces = 9.09 ns) -> face ~= 2 verts.
+		const int64_t c = int64_t(nv) + 2 * int64_t(nf);
+		plan.push_back({ nf, c });
+		totFaces += nf;
+		totCost  += c;
+	}
+	const int nMesh = int(plan.size());
+	if (W > nMesh) W = (nMesh > 0) ? nMesh : 1;
+
+	// FList capacity. The serial path only ever needs the SURVIVING faces,
+	// but the reservation needs the per-mesh upper bounds, so a scene whose
+	// FList was sized to something tighter than sum(FIndex) has to grow once.
+	// (FList_Allocate / SceneDriver::setupFaceLists already size it to
+	// sum(FIndex) + omnis + particles, so this is normally a no-op.)
+	int32_t nOmni = 0;
+	for (Omni *O = Sc->OmniHead; O; O = O->Next) { (void)O; ++nOmni; }
+	const size_t need = size_t(totFaces) + size_t(nOmni)
+	                  + size_t(Sc->NumOfParticles) * 2 + 16;
+	if (faces.fStorage.size() < need) faces.resize(need);
+
+	// Contiguous blocks, balanced on the cost estimate. Contiguous (not
+	// strided, not work-stolen) because a block's FList segment is then ONE
+	// run in mesh order, so COMPACT is W memmoves rather than a per-mesh
+	// gather — and the output order is block order, trivially = mesh order.
+	blkLo.clear(); blkHi.clear();
+	shards.clear();
+	{
+		int64_t acc = 0, insOff = 0;
+		int b = 0, lo = 0;
+		for (int i = 0; i < nMesh; ++i) {
+			acc += plan[i].cost;
+			const bool last = (i == nMesh - 1);
+			// Close the block once its accumulated cost crosses this block's
+			// share of the total, but never emit more than W blocks.
+			const bool closeIt = last
+			    || (b + 1 < W && acc * W >= totCost * int64_t(b + 1));
+			if (closeIt) {
+				blkLo.push_back(lo);
+				blkHi.push_back(i + 1);
+				XfrmShard s;
+				s.lo = lo; s.hi = i + 1; s.insOff = int32_t(insOff); s.out = 0;
+				shards.push_back(s);
+				for (int k = lo; k <= i; ++k) insOff += plan[k].nf;
+				lo = i + 1;
+				++b;
+			}
+		}
+	}
+	const int nBlocks = int(shards.size());
+	const int64_t tPlan = xp ? xpNow() : 0;
+
+	// ── WORK ────────────────────────────────────────────────────────────
+	// Shard 0 runs on this thread; the rest go to the pool. One enqueue per
+	// shard (not per mesh) — the enqueue itself is the expensive part of a
+	// pool round-trip and this phase is only ~0.4–1.7 ms of serial work.
+	{
+		auto remaining = std::make_shared<std::atomic<int>>(nBlocks - 1);
+		for (int b = 1; b < nBlocks; ++b) {
+			XfrmShard *sp = &shards[b];
+			tp.enqueue([Sc, &cam, &faces, sp, remaining]() {
+				// Main-view context on the worker: every pass predicate this
+				// function keys on is thread_local, and a pool worker that
+				// last ran a shadow / mirror-shard task must not leak that
+				// state into a main-view shard.
+				extern thread_local bool g_inShadowPass;
+				extern thread_local bool g_inDynamicShadowBake;
+				extern thread_local ShadowMap *g_currentShadowMap;
+				g_inShadowPass = false;
+				g_inDynamicShadowBake = false;
+				g_currentShadowOmni = nullptr;
+				g_currentShadowMap  = nullptr;
+				fds::g_offAxisFrustumCull = false;
+				g_xfrmShard = sp;
+				Transform_Objects(Sc, cam, faces);
+				g_xfrmShard = nullptr;
+				remaining->fetch_sub(1, std::memory_order_release);
+			});
+		}
+		if (nBlocks > 0) {
+			g_xfrmShard = &shards[0];
+			Transform_Objects(Sc, cam, faces);
+			g_xfrmShard = nullptr;
+		}
+		// Spin-then-yield drain. The tick thread has nothing else to do and
+		// the shards are sub-millisecond, so a condvar round-trip would cost
+		// more than the wait itself.
+		while (remaining->load(std::memory_order_acquire) > 0) {
+			std::this_thread::yield();
+		}
+	}
+	const int64_t tWork = xp ? xpNow() : 0;
+
+	// ── COMPACT ─────────────────────────────────────────────────────────
+	// Each shard filled the FRONT of its reserved segment. Slide the runs
+	// down in block order; destination never exceeds source, and blocks are
+	// processed in increasing order, so this is a safe in-place compaction
+	// and the resulting order is exactly the serial insertion order.
+	int32_t outN = 0;
+	for (int b = 0; b < nBlocks; ++b) {
+		const int32_t src = shards[b].insOff;
+		const int32_t cnt = shards[b].out;
+		if (cnt > 0 && outN != src) {
+			std::memmove(faces.fList + outN, faces.fList + src,
+			             size_t(cnt) * sizeof(fds::FListEntry));
+		}
+		outN += cnt;
+	}
+	faces.cPolys = outN;
+	const int64_t tComp = xp ? xpNow() : 0;
+
+	// ── EPILOGUE ────────────────────────────────────────────────────────
+	{
+		XfrmShard epi;
+		epi.lo = 0; epi.hi = 0; epi.insOff = outN; epi.out = 0;
+		g_xfrmShard = &epi;
+		Transform_Objects(Sc, cam, faces);
+		g_xfrmShard = nullptr;
+	}
+
+	if (xp) {
+		XParAcc &a = g_xpar;
+		const int64_t t4 = xpNow();
+		a.cur[0] = tPlan - t0;
+		a.cur[1] = tWork - tPlan;
+		a.cur[2] = tComp - tWork;
+		a.cur[3] = t4 - tComp;
+		a.cur[4] = t4 - t0;
+		const int fi = a.frames;
+		if (fi < XParAcc::MAXF) {
+			for (int k = 0; k < 5; ++k) { a.s[k][fi] = a.cur[k]; a.cur[k] = 0; }
+			++a.frames;
+		}
+		a.shards += nBlocks;
+		a.meshes += nMesh;
+		a.reserved += totFaces;
+		a.pushed += outN;
+		if (a.frames >= _xprofN || a.frames >= XParAcc::MAXF) xparDump(a.frames);
 	}
 }
