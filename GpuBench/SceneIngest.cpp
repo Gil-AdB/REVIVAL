@@ -476,6 +476,43 @@ bool Load(Scene &out, const LoadOptions &opt) {
         return false;
     }
 
+    // ---- 1b. the greets omni RANGE PATCH ------------------------------------
+    // Initialize_Greets (GREETS.CPP:2652-2673) rewrites every Light_Omni whose
+    // IRange is 0 to greets_omni_default_range (30). It runs BEFORE its own
+    // Animate_Objects, and at that point the FLD's Range envelope has not been
+    // evaluated yet, so IRange is 0 for ALL TEN omnis and all ten are patched --
+    // DEMO prints "[GREETS] patched IRange=30 on 10 FLD omnis (had 0)", verified
+    // in a real run log. It overwrites Range.Keys[0] too, which is what makes the
+    // value survive the spline evaluation Animate_Objects performs next.
+    //
+    // This block must therefore sit BETWEEN LoadFLD and Animate_Objects, exactly
+    // where greets' own patch sits. Replicating the MECHANISM rather than
+    // hard-coding 30 keeps it correct for multi-key Range splines.
+    //
+    // WITHOUT this the arm ran the AUTHORED ranges (3,3,10,10,7,20,20,2,2,2)
+    // against the CPU's uniform 30 -- the three mech omnis at 2.0 against 30 is
+    // 15x the radius, 225x the area. MEASURED consequence: the direct lighting
+    // term was median 0 across the frame, with only 0.5% of pixels above 8/255,
+    // so the image was ambient + emissive + flares and the "15.95% of pixels have
+    // a light in range" census was itself an artefact of this bug.
+    if (opt.omniDefaultRange > 0.0f) {
+        int patched = 0;
+        for (::Omni *O = sc.OmniHead; O; O = O->Next) {
+            if (O->Type != Light_Omni) continue;
+            if (O->IRange > 0.0f) continue;
+            O->IRange = opt.omniDefaultRange;
+            O->rRange = 1.0f / opt.omniDefaultRange;
+            if (O->Range.NumKeys >= 1 && O->Range.Keys)
+                O->Range.Keys[0].Pos.x = opt.omniDefaultRange;
+            ++patched;
+        }
+        if (opt.verbose)
+            std::fprintf(stderr,
+                "[INGEST] greets range patch: IRange=%g on %d FLD omnis (had 0) "
+                "-- parity with GREETS.CPP:2652\n",
+                opt.omniDefaultRange, patched);
+    }
+
     // ---- 2. pose ------------------------------------------------------------
     out.curFrame = DemoTimeToCurFrame(sc, opt.demoT);
     CurFrame = out.curFrame;

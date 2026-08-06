@@ -165,6 +165,16 @@ struct LoadOptions {
     // the user actually reviews — see docs/GPU_BENCHMARK_PLAN.md §3.2. No
     // displacement arm may run with this off.
     bool        stoneTex = true;
+    // Replicate Initialize_Greets' omni RANGE PATCH (GREETS.CPP:2652-2673).
+    // greets rewrites every FLD omni whose IRange is 0 to
+    // greets_omni_default_range (30) -- and because it runs BEFORE
+    // Animate_Objects, IRange is 0 for ALL TEN, so all ten end up at 30. It also
+    // overwrites Range.Keys[0], which is what makes the change survive the
+    // spline evaluation Animate_Objects then performs.
+    // WITHOUT this the arm ingests the AUTHORED ranges (3,3,10,10,7,20,20,2,2,2)
+    // and every light is far too short-range -- MEASURED as the cause of a direct
+    // term that was median 0 over the frame. Reproducing it is PARITY.
+    float       omniDefaultRange = 30.0f;   // 0 disables the patch
 };
 
 // Returns false on failure. Never opens a window and never touches VPage/ZPage16

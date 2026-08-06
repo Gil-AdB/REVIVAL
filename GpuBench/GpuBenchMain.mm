@@ -141,6 +141,12 @@ const char *kUsage =
     "                    turning them off makes the arm dimmer than the shipped scene.\n"
     "  --no-stone_tex    do NOT apply DEMO's greets_stone_tex wall/floor override. The\n"
     "                    render is then the AUTHORED FLD wall, not the reviewed surface.\n"
+    "  --no-range_patch / --omni_range=F   greets rewrites EVERY FLD omni's IRange to\n"
+    "                    greets_omni_default_range (30) in Initialize_Greets, before\n"
+    "                    Animate_Objects — so all ten run at 30, not at the authored\n"
+    "                    3,3,10,10,7,20,20,2,2,2. Replicating that is PARITY and it is ON\n"
+    "                    by default; --no-range_patch restores the authored ranges, which\n"
+    "                    MEASURABLY empties the frame of direct light (median 0).\n"
     "  --help\n";
 
 }  // namespace
@@ -188,6 +194,8 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--dump_cube=")) dopt.dumpCube = std::atoi(v);
         else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
         else if (a == "--no-stone_tex")             opt.stoneTex = false;
+        else if (a == "--no-range_patch")           opt.omniDefaultRange = 0.0f;
+        else if (const char *v = val("--omni_range=")) opt.omniDefaultRange = float(std::atof(v));
         else if (a == "--no-disco")                 opt.disco = false;
         else if (a == "--window")                   dopt.interactive = true;
         else if (const char *v = val("--win="))     { std::sscanf(v, "%dx%d", &dopt.winW, &dopt.winH); }
