@@ -748,6 +748,55 @@ was not another convention adjustment, it was ablating the *same* quantity on *b
 comparing composited frames. And the reason the bug survived so long is that the one diagnostic
 built to see it silently ignored the term that was breaking it.
 
+#### The CPU half of the dataset — recorded so it does not have to be re-measured
+
+Pinned `DEMO` from `0846811` (binary snapshotted before the run so a concurrent agent's edits could
+not shift it mid-campaign), 1920×1080, `--bench=scene@scene=greets,…,iters=125`, `--deferred
+--profiler=1`, `FDS_TAIL_PROF=1`. **min-of-arm over 2–3 interleaved reps**, machine load 4–12
+(a Spotlight reindex burst to 24–56 was caught by the load stamp and discarded by min-of-arm).
+`f_min` is min frame-ms over 125 iters; the per-pass columns are TailProf **means** over the second
+60-frame window (the first carries the cold frame), so they are a different statistic from `f_min`
+and must not be summed against it.
+
+Tiers, cumulative. All exclude mirrors + mirror RTT, disco, volumetric cones — and **`--no-parallax`,
+because the GPU G-buffer does no POM march at all** (verified by reading `fs_gbuffer`; the CPU's
+8-step march is priced separately by the `Cpom` row). `A/B` are non-PBR ("basic lights"), `C` adds
+the full PBR stack + HDR + bloom + ACES, `D` is the untouched shipping default.
+
+| tier | what it is | t=5743 `f_min` | lighting wave | G-buf wave | bake wall / core-ms |
+|---|---|--:|--:|--:|--:|
+| `A` | base + basic lights, **full-rate** | **31.49** | 31.20 | 2.70 | — |
+| `Acb` | same, CPU's default checkerboard half-rate | **20.67** | 15.79 | 2.61 | — |
+| `B` | `A` + cube shadows | **54.81** | 59.42 | 2.88 | 1.14 / 8.19 (effPar 7.2) |
+| `Blm` | `B` + static shadow lightmap | 54.43 | 62.80 | 3.02 | 1.46 / 11.50 |
+| `C` | `B` + full PBR + HDR + bloom + ACES, full-rate | **63.34** | 60.98 | 2.77 | 1.43 / 11.64 |
+| `Ccb` | `C` at half-rate | 40.58 | 30.66 | 2.64 | 1.48 / 11.71 |
+| `Clmcb` | `C` + lightmap + half-rate | 41.45 | 30.93 | 2.63 | 1.49 / 11.66 |
+| `Cpom` | `C` + the POM march restored | 67.38 | 62.65 | **5.80** | 1.41 / 11.30 |
+| `D` | full shipping stack (mirrors, disco, POM, lightmap, half-rate) | 48.31 | 31.71 | 6.92 | 1.24 / 9.16 |
+
+At t=2000 (disco glow covering 68.4 % of frame, authored spline camera on both arms): `A` 35.25,
+`Acb` 23.24, `B` 67.07, `Blm` 69.55, `C` 79.41, `Ccb` 70.45, `Clmcb` 57.62, `Cpom` 91.90, `D` 80.50.
+The pose is materially heavier for the CPU — tier `B`'s lighting wave is 72.14 ms against 59.42 at
+t=5743 — which is why a table built on t=5743 alone would understate the light workload.
+
+What this half already establishes, independent of the GPU arm:
+
+- **The cube-shadow tap is the largest single cost in the frame**: `A`→`B` moves the lighting wave
+  **31.20 → 59.42 ms**, +28.2 ms elapsed, at full rate.
+- **Checkerboard is worth almost exactly 2×** on the lighting wave (31.20→15.79, 60.98→30.66) —
+  so any GPU full-rate comparison against a CPU default number must say which it used.
+- **The static shadow lightmap does not pay for itself here** (59.42 without vs 62.80 with at
+  t=5743; 72.14 vs 70.26 at t=2000) — a wash to slightly negative, though §3 describes it as an
+  amortisation that lets the CPU skip taps.
+- **The POM march costs ~4 ms of frame, and it lands in the G-buffer/raster pass, not the kernel**
+  (G-buffer wave 2.77 → 5.80 ms) — it is gated in `Mekalele.h:3171`.
+- **The geometry front end is not the problem**: `Tick-Xfrm` is 0.093–0.101 ms/frame at t=5743.
+  The frame is deferred-lighting-bound, exactly as §5.4 predicted.
+- **`bakeWall` vs `bakeBusy` is the elapsed-vs-core-ms conversion, measured rather than assumed**:
+  1.43 ms elapsed against 11.64 core-ms at effective parallelism 7.6–8.1. §5.3 item 7's category
+  error is a factor of ~8 here.
+
 ---
 
 ### 6.2 Phase 3 stage 1 — deferred arm built, shadow CASTER FILTER correct, timings RETRACTED
