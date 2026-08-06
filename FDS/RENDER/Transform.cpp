@@ -2930,9 +2930,12 @@ static void Transform_Objects_Sharded(Scene *Sc, fds::CameraContext &cam,
 	// Same walk, same order, same sequence numbering as the mesh loop's
 	// `_mseq` — that identity is what makes the reservation line up.
 	struct MeshPlan { int32_t nf; int64_t cost; };
-	static std::vector<MeshPlan> plan;      // tick-thread only
-	static std::vector<int>      blkLo, blkHi;
-	static std::vector<XfrmShard> shards;
+	// thread_local, not plain static: the driver only ever runs on the tick
+	// thread today, but a second concurrent main-view caller would otherwise
+	// scribble on another's shard array while its workers hold pointers into it.
+	static thread_local std::vector<MeshPlan>  plan;
+	static thread_local std::vector<int>       blkLo, blkHi;
+	static thread_local std::vector<XfrmShard> shards;
 	plan.clear();
 	int64_t totCost = 0;
 	int64_t totFaces = 0;
@@ -2951,6 +2954,32 @@ static void Transform_Objects_Sharded(Scene *Sc, fds::CameraContext &cam,
 	}
 	const int nMesh = int(plan.size());
 	if (W > nMesh) W = (nMesh > 0) ? nMesh : 1;
+
+	// One-shot AUDIT (once per Scene pointer, one compare per frame after
+	// that): the whole safety argument for sharding by mesh is that no two
+	// Objects share a TriMesh — otherwise two shards would write the same
+	// Vertex/Face arrays concurrently. The serial path merely gets an
+	// order-dependent result in that case; the sharded path gets a race.
+	// Shout loudly rather than silently corrupt if a scene ever does it.
+	{
+		static thread_local const Scene *sAudited = nullptr;
+		if (Sc != sAudited) {
+			sAudited = Sc;
+			std::vector<const void *> seen;
+			seen.reserve(size_t(nMesh));
+			for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next)
+				if (Obj->Type == Obj_TriMesh) seen.push_back(Obj->Data);
+			std::sort(seen.begin(), seen.end());
+			const size_t dups = size_t(seen.end() - std::unique(seen.begin(), seen.end()));
+			if (dups) {
+				std::fprintf(stderr,
+				    "[XFRM-PAR] WARNING: %zu TriMesh instance(s) appear on the "
+				    "object list more than once — mesh sharding would race on "
+				    "their Vertex/Face arrays. Falling back to 1 shard.\n", dups);
+				W = 1;
+			}
+		}
+	}
 
 	// FList capacity. The serial path only ever needs the SURVIVING faces,
 	// but the reservation needs the per-mesh upper bounds, so a scene whose
