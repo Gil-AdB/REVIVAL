@@ -1,6 +1,7 @@
 #include "WorldAabb.h"
 #include "EnvCube.h"          // EnvCube_Basis, kEnvCubePad
 #include "OffscreenView.h"    // g_offscreenViewDepth
+#include "VizLegend.h"        // WireViz_Legend / DisplaceViz_Legend / PomSeamViz_Legend
 
 #include <Base/FDS_VARS.H>    // View, FOVX/FOVY, CntrEX/CntrEY, XRes/YRes, VPage
 #include <Base/Scene.h>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -391,6 +393,13 @@ float g_dispMax = 0.0f;                                          // for normaliz
 std::unordered_map<DispPosKey, float, DispPosHash> g_dispErr;
 float g_dispErrMax = 0.0f;                                       // max |err| for normalization
 
+// --displace_viz=2 fill rule: error is an absolute fraction of the map's
+// relief, and cells under this threshold get NO fill (the wireframe alone reads
+// them) so the eye is drawn only to where geometry FAILS the map. At namespace
+// scope because DisplaceViz_Legend quotes it — a legend that re-typed "15%"
+// would be a second source of truth for the same rule.
+constexpr float kDispMatchThresh = 0.15f;
+
 inline uint32_t f2bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 inline DispPosKey posKey(const Vector& p) { return { f2bits(p.x), f2bits(p.y), f2bits(p.z) }; }
 
@@ -518,11 +527,12 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
     const float   nearZ  = sc->NZP > 0.01f ? sc->NZP : 0.01f;
     const float   invMax = g_dispMax    > 1e-9f ? (1.0f / g_dispMax)    : 0.0f;
     // --displace_viz=2 fill rule: error is an absolute fraction of the map's
-    // relief. Matched cells (|frac| < kMatchThresh) get NO fill — the wireframe
-    // alone reads them, so the eye is drawn only to where geometry FAILS the
-    // map. Above the threshold the fill fades in (fainter → stronger) and tints
-    // RED (under-carries) / BLUE (over).
-    const float kMatchThresh = 0.15f;   // <15% of block relief missing = "matched"
+    // relief. Matched cells (|frac| < kDispMatchThresh) get NO fill — the
+    // wireframe alone reads them, so the eye is drawn only to where geometry
+    // FAILS the map. Above the threshold the fill fades in (fainter → stronger)
+    // and tints RED (under-carries) / BLUE (over). The threshold lives at
+    // namespace scope so the on-screen legend quotes this exact number.
+    const float kMatchThresh = kDispMatchThresh;
     if (mode == 2) {
         static bool once = false;
         if (!once) { once = true;
@@ -693,13 +703,20 @@ namespace {
 // palette --poly_viz uses so the two vizzes read alike; the pointer hash (not
 // a matID) keeps this module free of the material-table dependency, and it is
 // stable for the whole run, which is all "which surface owns this face" needs.
+// At namespace scope (was a function-local static) so WireViz_Legend can put
+// the real chips on screen instead of restating the palette in prose.
+const uint32_t kWireMatHue[12] = {
+    0x00E04040u, 0x0040E040u, 0x004060E0u, 0x00E0E040u,
+    0x00E040E0u, 0x0040E0E0u, 0x00E09030u, 0x009040E0u,
+    0x0040A070u, 0x00B06060u, 0x006090B0u, 0x00C0C0C0u };
+// Edge colours the overlay picks; named so the legend cannot drift from them.
+constexpr uint32_t kWirePlainCol = 0x00D8D8D8u;
+constexpr uint32_t kWireBackCol  = 0x00FF3030u;
+constexpr uint32_t kWireFrontCol = 0x0030FF30u;
+
 inline uint32_t wireMatColor(const Material* M, const TriMesh* T) {
-    static const uint32_t kMatHue[12] = {
-        0x00E04040u, 0x0040E040u, 0x004060E0u, 0x00E0E040u,
-        0x00E040E0u, 0x0040E0E0u, 0x00E09030u, 0x009040E0u,
-        0x0040A070u, 0x00B06060u, 0x006090B0u, 0x00C0C0C0u };
     const uint32_t mh = uint32_t(uintptr_t(M) >> 4) * 2654435761u;
-    uint32_t c = kMatHue[mh % 12u];
+    uint32_t c = kWireMatHue[mh % 12u];
     // Per-MESH brightness step so a chunk boundary inside one material is
     // visible (greets splits its stone into per-cell chunk meshes).
     const uint32_t th = uint32_t(uintptr_t(T) >> 4) * 2246822519u;
@@ -812,7 +829,6 @@ void WireViz_DrawOverlay(Scene* sc) {
     const Matrix& VM = View->Mat;
     const Vector  P  = View->ISource;
     const float   nearZ = sc->NZP > 0.01f ? sc->NZP : 0.01f;
-    const uint32_t kPlain = 0x00D8D8D8u;
     // Mode 4 draws BACK-facing first and FRONT-facing second, so an edge shared
     // by one of each ends up green: only edges that are back-facing on BOTH
     // sides stay red, which is exactly the inverted-normal / open-shell signal.
@@ -866,8 +882,8 @@ void WireViz_DrawOverlay(Scene* sc) {
             }
             if (!anyFront) continue;
             const uint32_t col = (mode == 3) ? wireMatColor(F.Txtr, T)
-                               : (mode == 4) ? (back ? 0x00FF3030u : 0x0030FF30u)
-                                             : kPlain;
+                               : (mode == 4) ? (back ? kWireBackCol : kWireFrontCol)
+                                             : kWirePlainCol;
             ++tris;
             static const int e3[3][2] = { {0,1}, {1,2}, {2,0} };
             for (auto& e : e3)
@@ -883,6 +899,104 @@ void WireViz_DrawOverlay(Scene* sc) {
             "sub-segments in %.1f ms this frame (depth-tested, %s)\n",
             mode, tris, lines, ms,
             mode >= 2 ? "over the dimmed frame" : "over the image"); }
+}
+
+// ── On-screen legends for this file's three vizzes (VizLegend.h) ───────────
+// Defined HERE rather than in VizLegend.cpp on purpose: every swatch below is
+// produced by the SAME call the overlay makes (wireMatColor's palette,
+// rampColor, divergeColor, seamColor) and every number is read from the SAME
+// constant or the SAME measurement the overlay used (--wire_viz_dim,
+// kDispMatchThresh, the bake's g_dispMax / g_dispErrMax). A legend kept
+// anywhere else would be a second source of truth for what the picture means,
+// and would eventually disagree with it.
+namespace {
+// Append one row; `sw` may be null for a text-only row. Returns the new count.
+int legendRow(VizLegendRow* rows, int n, int maxRows,
+              const uint32_t* sw, int nsw, const char* fmt, ...) {
+    if (n >= maxRows) return n;
+    VizLegendRow& r = rows[n];
+    if (nsw < 0) nsw = 0; else if (nsw > 8) nsw = 8;
+    r.nsw = nsw;
+    for (int i = 0; i < nsw; ++i) r.sw[i] = sw[i] & 0x00FFFFFFu;
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(r.text, sizeof r.text, fmt, ap);
+    va_end(ap);
+    return n + 1;
+}
+}  // namespace
+
+int WireViz_Legend(VizLegendRow* rows, int maxRows) {
+    const int mode = FeatureFlags::wire_viz();
+    if (mode <= 0) return 0;
+    const double dimPct = 100.0 * double(FeatureFlags::wire_viz_dim());
+    int n = 0;
+    switch (mode) {
+    case 1:
+        n = legendRow(rows, n, maxRows, &kWirePlainCol, 1,
+            "every visible triangle edge, DEPTH-TESTED: a far wall's edges stay hidden");
+        break;
+    case 2:
+        n = legendRow(rows, n, maxRows, &kWirePlainCol, 1,
+            "triangle edges over the scene dimmed to %.0f%% (--wire_viz_dim)", dimPct);
+        break;
+    case 3:
+        // Put the real chips on screen: "same hue = same material" is then
+        // checkable against the frame instead of taken on trust.
+        n = legendRow(rows, n, maxRows, kWireMatHue, 8,
+            "hue = MATERIAL (12-hue palette, first 8 shown)");
+        n = legendRow(rows, n, maxRows, nullptr, 0,
+            "brightness step = per-MESH chunk: a chunk seam inside one material shows");
+        break;
+    case 4:
+        n = legendRow(rows, n, maxRows, &kWireFrontCol, 1,
+            "FRONT-facing. Drawn last, so an edge shared with a back face reads green.");
+        n = legendRow(rows, n, maxRows, &kWireBackCol, 1,
+            "back-facing on BOTH sides = INVERTED NORMAL / open shell. That is the read.");
+        break;
+    default: break;
+    }
+    return n;
+}
+
+int DisplaceViz_Legend(VizLegendRow* rows, int maxRows) {
+    const int mode = FeatureFlags::displace_viz();
+    if (mode <= 0) return 0;
+    int n = 0;
+    if (mode == 2) {
+        const uint32_t ends[2] = { divergeColor(1.0f), divergeColor(-1.0f) };
+        n = legendRow(rows, n, maxRows, nullptr, 0,
+            "fill = signed height error (truth - carried), as a fraction of the map's relief");
+        n = legendRow(rows, n, maxRows, ends, 2,
+            "RED = geometry UNDER-carries (raise greets_displace_cpb) / BLUE = over-carries");
+        n = legendRow(rows, n, maxRows, nullptr, 0,
+            "NO fill = matched, |err| < %.0f%%; opacity grows with |err|; worst here %.2f",
+            (double)(kDispMatchThresh * 100.0f), (double)g_dispErrMax);
+    } else {
+        const uint32_t ramp[3] = { rampColor(0.0f), rampColor(0.5f), rampColor(1.0f) };
+        n = legendRow(rows, n, maxRows, ramp, 3,
+            "edge tint = per-vertex displacement, 0 (pinned border / flat) -> the bake's max");
+        n = legendRow(rows, n, maxRows, nullptr, 0,
+            "max push this bake = %.3f world units (measured; it normalises the ramp)",
+            (double)g_dispMax);
+    }
+    return n;
+}
+
+int PomSeamViz_Legend(VizLegendRow* rows, int maxRows) {
+    if (FeatureFlags::pom_seam_viz() <= 0) return 0;
+    static const char* const kText[4] = {
+        "COPLANAR continuation - the surface carries on; a hole here is wrong",
+        "ANGLED-IN (concave fold) - the ray should enter the neighbour's shell",
+        "ANGLED-OUT (convex fold) - exiting here IS a true silhouette",
+        "TRUE boundary - nothing continues; this is where side faces belong",
+    };
+    int n = 0;
+    for (int cls = 0; cls < 4; ++cls) {
+        const uint32_t c = seamColor(cls);
+        n = legendRow(rows, n, maxRows, &c, 1, "%s", kText[cls]);
+    }
+    return n;
 }
 
 }  // namespace fds

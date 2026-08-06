@@ -1,11 +1,13 @@
 #include "VizCycle.h"
 #include "WorldAabb.h"        // WireViz_DrawOverlay + the arming probes
+#include "VizLegend.h"        // VizLegend_Build: the per-mode colour key
 
-#include <Base/FDS_VARS.H>    // VPage, XRes/YRes, g_fontScale
+#include <Base/FDS_VARS.H>    // VPage, XRes/YRes, g_fontScale, Active_Font
 #include <Base/FDS_DECS.H>    // OutTextXY
 #include <Base/FeatureFlags.h>
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -217,10 +219,143 @@ void VizCycle_Step(int dir) {
     apply();
 }
 
+namespace {
+
+// ── legend painting ───────────────────────────────────────────────────────
+// The rows come from VizLegend_Build (which derives them from the renderer's
+// own palettes/constants); everything here is just where to put them.
+// Nothing in this block runs unless a viz is active, so it is byte-null with
+// the flags off — and it lives in the post/overlay path, not in a filler.
+
+int fontScale() { return g_fontScale > 0 ? g_fontScale : 1; }
+int glyphH()    { return (Active_Font && Active_Font->Y > 0 ? Active_Font->Y : 8) * fontScale(); }
+
+// Width OutTextXY will actually consume — same per-glyph advance it uses
+// ((Len+2)*scale), so the backing panel matches the text instead of guessing.
+int textWidth(const char* s) {
+    const int fs = fontScale();
+    const Font* F = Active_Font;
+    if (!F || !F->Len) return int(std::strlen(s)) * 8 * fs;
+    int w = 0;
+    for (const unsigned char* p = (const unsigned char*)s; *p; ++p)
+        w += (int(F->Len[*p & 0x7F]) + 2) * fs;
+    return w;
+}
+
+// Multiply a rect down so white text and saturated chips read over a bright
+// frame. Integer scale, one pass, clipped — the legend is a few hundred rows
+// of pixels at most.
+void dimRect(int x0, int y0, int x1, int y1, uint32_t keep256) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > XRes) x1 = XRes;
+    if (y1 > YRes) y1 = YRes;
+    dword* out = reinterpret_cast<dword*>(VPage);
+    for (int y = y0; y < y1; ++y) {
+        dword* row = out + size_t(y) * size_t(XRes);
+        for (int x = x0; x < x1; ++x) {
+            const dword d = row[x];
+            const uint32_t r = (((d >> 16) & 0xFFu) * keep256) >> 8;
+            const uint32_t g = (((d >>  8) & 0xFFu) * keep256) >> 8;
+            const uint32_t b = (( d        & 0xFFu) * keep256) >> 8;
+            row[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+void fillRect(int x0, int y0, int x1, int y1, uint32_t rgb) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > XRes) x1 = XRes;
+    if (y1 > YRes) y1 = YRes;
+    dword* out = reinterpret_cast<dword*>(VPage);
+    const dword c = 0xFF000000u | (rgb & 0x00FFFFFFu);
+    for (int y = y0; y < y1; ++y) {
+        dword* row = out + size_t(y) * size_t(XRes);
+        for (int x = x0; x < x1; ++x) row[x] = c;
+    }
+}
+
+// Paint the legend as rows stacked UPWARD from `bottomY` (the mode-name line
+// when there is one, otherwise the bottom margin). Bottom-left, because the
+// resolution readout owns the top-left corner (SDL2.cpp) and the profiler runs
+// down that same column; the block is clamped to the lower half so the two can
+// never meet, and the tail is dropped rather than allowed to climb.
+void drawLegend(const VizLegendRow* rows, int n, int bottomY) {
+    const int fs = fontScale();
+    const int gh = glyphH();
+    // Line pitch: the bitmap font's own height plus air. The 14*fs floor is
+    // there because the AFT glyph box (Font::Y) is 8 px at scale 1 while the
+    // inked glyphs nearly fill it — pitch = box + 3 rendered as overlapping
+    // lines on the first render of this legend.
+    const int pitch = std::max(gh + 5 * fs, 14 * fs);
+    const int x0 = 6 * fs;
+    const int chip = gh;                   // square-ish chip, one text line tall
+    const int chipGap = 3 * fs;
+
+    // Clamp to the lower half: above that sits the profiler's column and the
+    // resolution readout, and a legend is never worth colliding with those.
+    int maxFit = (bottomY - YRes / 2) / pitch;
+    if (maxFit < 1) maxFit = 1;
+    const int hidden = (n > maxFit) ? (n - maxFit + 1) : 0;   // last slot spent on the note
+    const int nDraw  = hidden ? maxFit : n;
+    const int bottom = bottomY - 3 * fs;                      // air above the mode name
+    const int top    = bottom - nDraw * pitch;
+
+    // Backing panel sized to the widest row (chips + text), so it hugs the
+    // legend instead of banding the whole screen width.
+    int wMax = 0;
+    for (int i = 0; i < nDraw; ++i) {
+        const int sw = rows[i].nsw * (chip + chipGap);
+        const int w  = sw + textWidth(rows[i].text);
+        if (w > wMax) wMax = w;
+    }
+    dimRect(x0 - 4 * fs, top - 3 * fs, x0 + wMax + 5 * fs, bottom + 2 * fs, 70);
+
+    for (int i = 0; i < nDraw; ++i) {
+        const int y = top + i * pitch;
+        int x = x0;
+        const bool noteRow = hidden && (i == nDraw - 1);
+        if (!noteRow) {
+            for (int s = 0; s < rows[i].nsw; ++s) {
+                fillRect(x, y + fs, x + chip - fs, y + chip, rows[i].sw[s]);
+                x += chip + chipGap;
+            }
+            OutTextXY(VPage, x, y, rows[i].text, 255);
+        } else {
+            char note[64];
+            std::snprintf(note, sizeof note,
+                          "(+%d more - full legend on stderr)", hidden);
+            OutTextXY(VPage, x, y, note, 255);
+        }
+    }
+}
+
+// Dump the whole legend to stderr the first time a given selection is up. Free,
+// never truncated, and copy-pasteable into notes next to a crop.
+void dumpLegendOnce(const VizLegendRow* rows, int n, int sig) {
+    static int last = -1;
+    if (sig == last) return;
+    last = sig;
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].nsw == 0) {
+            std::fprintf(stderr, "[VIZ-LEGEND]           %s\n", rows[i].text);
+            continue;
+        }
+        char chips[8 * 9 + 1];
+        int p = 0;
+        for (int s = 0; s < rows[i].nsw && p < int(sizeof chips) - 9; ++s)
+            p += std::snprintf(chips + p, sizeof chips - p, "%06X ",
+                               unsigned(rows[i].sw[s] & 0x00FFFFFFu));
+        std::fprintf(stderr, "[VIZ-LEGEND] %-9s %s\n", chips, rows[i].text);
+    }
+}
+
+}  // namespace
+
 void VizCycle_Overlay(Scene* sc) {
     const int wire = FF::wire_viz();
     const char* label = g_vizLabel;
-    if (wire <= 0 && !label) return;                     // nothing active
 
     if (wire > 0) WireViz_DrawOverlay(sc);
 
@@ -233,12 +368,31 @@ void VizCycle_Overlay(Scene* sc) {
                                              "WIRE facing (back=red)" };
         label = kWireNames[wire > 4 ? 4 : wire];
     }
-    if (label && VPage && XRes > 0 && YRes > 0) {
+    if (!VPage || XRes <= 0 || YRes <= 0) return;
+    int labelY = YRes - 20 * g_fontScale;
+    if (labelY < 0) labelY = 0;
+    if (label) {
         char line[96];
         std::snprintf(line, sizeof line, "VIZ: %s  [X/Shift+X]", label);
-        int y = YRes - 20 * g_fontScale;
-        if (y < 0) y = 0;
-        OutTextXY(VPage, 6 * g_fontScale, y, line, 255);
+        OutTextXY(VPage, 6 * g_fontScale, labelY, line, 255);
+    }
+
+    // ── the legend for whatever viz is active (CLI-set or cycled) ─────────
+    // Unlike the mode NAME above this is not gated on g_vizLabel: a viz set
+    // from the command line is exactly the case that needs the colour key,
+    // and no gate recipe in docs/SESSION_STATE.md passes a viz flag, so no
+    // pin is at risk. --no-viz_legend turns it off.
+    if (FF::viz_legend()) {
+        VizLegendRow rows[kVizLegendMaxRows];
+        int sig = 0;
+        const int n = VizLegend_Build(rows, kVizLegendMaxRows, &sig);
+        if (n > 0) {
+            // With a mode name on screen the legend stacks above it; without
+            // one (a viz set purely from the CLI) it takes that line too.
+            const int bottomY = label ? labelY : (YRes - 4 * g_fontScale);
+            drawLegend(rows, n, bottomY);
+            dumpLegendOnce(rows, n, sig);
+        }
     }
 }
 

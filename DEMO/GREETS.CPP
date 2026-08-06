@@ -3953,7 +3953,13 @@ struct GreetsScene : SceneDriver {
 		// Updates every frame so the value follows whatever's under the
 		// crosshair as the camera moves. Suppressed in shadow-viz mode
 		// where M overwrites the framebuffer.
-		if (g_gbuffer && !sShadowMapView) {
+		// BEHIND --mat_probe SINCE 2026-08-06, default OFF. It is genuinely
+		// the way a material gets named from a screenshot, but it was
+		// unconditional, so it also sat in the bottom-left of every capture
+		// this campaign took. FDS_GREETS_FACEFIND implies it — that env var
+		// drives the face census nested below and is the same investigation.
+		if ((fds::FeatureFlags::mat_probe() || std::getenv("FDS_GREETS_FACEFIND"))
+		    && g_gbuffer && !sShadowMapView) {
 			const int cx = XRes / 2;
 			const int cy = YRes / 2;
 			const size_t ci = size_t(cy) * size_t(XRes) + size_t(cx);

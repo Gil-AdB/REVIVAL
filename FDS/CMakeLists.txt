@@ -140,6 +140,8 @@ set(RENDER
     RENDER/WorldAabb.h
     RENDER/VizCycle.cpp
     RENDER/VizCycle.h
+    RENDER/VizLegend.cpp
+    RENDER/VizLegend.h
     RENDER/ChunkOcclusion.cpp
     RENDER/ChunkOcclusion.h
     RENDER/GENERAL.H
