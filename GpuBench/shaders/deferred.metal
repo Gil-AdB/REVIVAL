@@ -58,9 +58,15 @@ struct GpuLight {
     float3 color;          // linear, already scaled by ISize
     float  range;          // HARD cutoff (Omni::IRange) — not inverse-square
     float  invRange;
-    int    shadowIndex;    // -1 = no cube map
+    int    shadowIndex;    // -1 = none; cube slot for omnis, 2D slot for spots
     float  shadowNear, shadowFar;
-    float  pad;
+    int    isSpot;         // Light_SpotLight (the 10 GreetsDisco cone spots)
+    float  cosInner;       // Omni::HotSpot
+    float  cosOuter;       // Omni::FallOff
+    float3 dir;            // Omni::IDir, world
+    // Spot shadow projection: Kick_Camera's view rows, with sRow0.w carrying
+    // 1/tan(halfFov) (the same scale the bake's vertex shader applied).
+    float4 sRow0, sRow1, sRow2;
 };
 
 struct VertexIn {
@@ -179,6 +185,9 @@ struct ShadowUniforms {
     float3 row0, row1, row2;   // face view rows (right, up, forward)
     float3 lightPos;
     float  dza, dzb;           // reversed-Z over [shadowNear, shadowFar]
+    // 1/tan(halfFov). A cube face is 90 degrees so this is 1.0 and the xy pass
+    // straight through; a disco cone spot is ~15.4 degrees total, so it is ~7.4.
+    float  projScale;
 };
 
 vertex float4 vs_shadow(VertexIn in [[stage_in]],
@@ -188,8 +197,8 @@ vertex float4 vs_shadow(VertexIn in [[stage_in]],
     const float3 wp  = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, in.pos) + b.objPos;
     const float3 rel = wp - s.lightPos;
     const float3 vp  = rowmul(s.row0, s.row1, s.row2, rel);
-    // 90-degree FOV, square target: clip.xy are just the view xy.
-    return float4(vp.x, vp.y, s.dza * vp.z + s.dzb, vp.z);
+    return float4(vp.x * s.projScale, vp.y * s.projScale,
+                  s.dza * vp.z + s.dzb, vp.z);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +272,7 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
                             texture2d<float>  gParams   [[texture(2)]],
                             depth2d<float>    gDepth    [[texture(3)]],
                             array<depthcube<float>, 16> shadowCubes [[texture(4)]],
+                            array<depth2d<float>,   16> spotMaps    [[texture(20)]],
                             sampler           shadowSamp [[sampler(1)]])
 {
     const uint2 px = uint2(in.position.xy);
@@ -320,19 +330,55 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
         if (NoL <= 0.0f) continue;
 
         // Linear falloff to the hard edge — the engine's attenuation shape.
-        const float atten = saturate(1.0f - d * (L[i].invRange / u.lightRangeScale));
+        float atten = saturate(1.0f - d * (L[i].invRange / u.lightRangeScale));
+
+        // World position of the shaded point — needed by both the spot cone and
+        // every shadow tap. The view matrix is orthonormal, so its transpose is
+        // its inverse; hence the column gather.
+        const float3 pw = u.camSrc
+                        + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
+                        + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
+                        + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
+
+        // SPOT cone. Identical shape to the CPU kernel
+        // (DeferredSurfaceKernel.cpp:3247-3254): cosTheta measured between the
+        // spot axis and the light->surface direction, HARD cutoff at cosOuter,
+        // then a smoothstep t*t*(3-2t) from cosOuter up to cosInner.
+        if (L[i].isSpot != 0) {
+            const float3 toP = pw - lPosW;
+            const float cosTheta = dot(L[i].dir, normalize(toP));
+            if (cosTheta <= L[i].cosOuter) continue;
+            if (cosTheta < L[i].cosInner) {
+                const float tt = (cosTheta - L[i].cosOuter)
+                               / max(L[i].cosInner - L[i].cosOuter, 1e-6f);
+                atten *= tt * tt * (3.0f - 2.0f * tt);
+            }
+        }
 
         float shadow = 1.0f;
-        if (u.shadowsOn != 0 && L[i].shadowIndex >= 0) {
+        if (u.shadowsOn != 0 && L[i].isSpot != 0 && L[i].shadowIndex >= 0) {
+            // Single perspective depth map, as Shadows.cpp bakes for a spot
+            // (cubeFace < 0 => one map, not six faces).
+            const float3 rel = pw - lPosW;
+            const float3 vp = rowmul(L[i].sRow0.xyz, L[i].sRow1.xyz, L[i].sRow2.xyz, rel);
+            if (vp.z > L[i].shadowNear) {
+                const float sn = L[i].shadowNear, sf = L[i].shadowFar;
+                const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+                const float ref = dza + dzb / vp.z;
+                // Same 1/tan(halfFov) the bake's vertex shader applied. NDC -> uv,
+                // y flipped for Metal's upper-left texture origin.
+                const float ps = L[i].sRow0.w;
+                const float2 ndc = vp.xy * ps / vp.z;
+                const float2 uv = float2(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y);
+                const float bias = mix(0.0025f, 0.0004f, NoL);
+                shadow = spotMaps[L[i].shadowIndex].sample_compare(shadowSamp, uv,
+                                                                  ref + bias);
+            }
+        } else if (u.shadowsOn != 0 && L[i].shadowIndex >= 0) {
             // World-space direction from light to the shaded point. The GPU takes
             // this tap unconditionally; the CPU is allowed to skip it on static
             // surfaces via the static-shadow lightmap (plan §5.3 item 12).
-            const float3 pw = u.camSrc
-                            + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
-                            + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
-                            + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
             const float3 dirW = pw - lPosW;
-            const float distL = length(dirW);
             const float sn = L[i].shadowNear, sf = L[i].shadowFar;
             // Same reversed-Z encoding the bake wrote, evaluated on the MAJOR
             // axis distance (which is what the 90-degree face's w equals).
@@ -343,7 +389,6 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
             const float bias = mix(0.0025f, 0.0004f, NoL);
             shadow = shadowCubes[L[i].shadowIndex].sample_compare(
                 shadowSamp, normalize(dirW), ref + bias);
-            (void)distL;
         }
 
         const float3 H = normalize(Ldir + V);
@@ -355,7 +400,16 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
         const float3 spec = F * Dv;
         // (1-F) diffuse energy weighting (--diffuse_energy), using the same
         // per-pixel Fresnel the specular term produced.
-        const float3 diff = baseColor * diffuseK * (1.0f - F) * (1.0f / 3.14159265f);
+        //
+        // NO Lambert 1/pi. That is deliberate and it is PARITY, not a slip: the
+        // CPU kernel's direct diffuse is
+        //     intensity = NoL * atten * Material::Diffuse;  lR += intensity*colR
+        // (DeferredSurfaceKernel.cpp:3245-3258, and the --pbr path at 2568 only
+        // adds the (1-F) factor). Its only 1/pi terms are inside the GGX D
+        // (lines 402/442/2431), which is standard. Dividing here made every
+        // direct light pi times dimmer than the reference image — measured: the
+        // 11 disco lights moved the frame by at most 2/255 even from 5 units away.
+        const float3 diff = baseColor * diffuseK * (1.0f - F);
 
         radiance += (diff + spec) * L[i].color * (NoL * atten * shadow);
     }
@@ -413,6 +467,7 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
                        texture2d<float> gParams  [[texture(2)]],
                        depth2d<float>   gDepth   [[texture(3)]],
                        array<depthcube<float>, 16> shadowCubes [[texture(4)]],
+                       array<depth2d<float>,   16> spotMaps    [[texture(20)]],
                        sampler shadowSamp [[sampler(1)]],
                        sampler rawSamp    [[sampler(2)]],
                        constant uint &mode [[buffer(4)]])
@@ -475,7 +530,11 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
                 if (u.vizLight >= 0 && int(i) != u.vizLight) continue;
                 ++considered;
                 const float r = L[i].range * u.lightRangeScale;
-                if (length(pw6 - L[i].pos) < r) ++hit;
+                const float3 dw = pw6 - L[i].pos;
+                if (length(dw) >= r) continue;
+                if (L[i].isSpot != 0 &&
+                    dot(L[i].dir, normalize(dw)) <= L[i].cosOuter) continue;
+                ++hit;
             }
             const float f = considered ? float(hit) / float(considered) : 0.0f;
             // green = some light, red channel scales with fraction, black = none
@@ -504,8 +563,21 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
         const float3 dirW = pw - L[i].pos;
         if (length(dirW) >= L[i].range * u.lightRangeScale) continue;
         const float sn = L[i].shadowNear, sf = L[i].shadowFar;
-        const float major = max(max(abs(dirW.x), abs(dirW.y)), abs(dirW.z));
         const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+        if (L[i].isSpot != 0) {
+            // Outside the cone is NOT "in range" for a spot — counting it would
+            // report the whole 38-unit sphere as unlit and drown the 7-degree beam.
+            if (dot(L[i].dir, normalize(dirW)) <= L[i].cosOuter) continue;
+            const float3 vp = rowmul(L[i].sRow0.xyz, L[i].sRow1.xyz, L[i].sRow2.xyz, dirW);
+            if (vp.z <= sn) continue;
+            const float ref = dza + dzb / vp.z;
+            const float2 ndc = vp.xy * L[i].sRow0.w / vp.z;
+            const float2 uv = float2(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y);
+            acc += spotMaps[L[i].shadowIndex].sample_compare(shadowSamp, uv, ref + 0.0015f);
+            ++n;
+            continue;
+        }
+        const float major = max(max(abs(dirW.x), abs(dirW.y)), abs(dirW.z));
         const float ref = dza + dzb / max(major, 1e-5f);
         acc += shadowCubes[L[i].shadowIndex].sample_compare(
             shadowSamp, normalize(dirW), ref + 0.0015f);
@@ -513,4 +585,69 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
     }
     if (n == 0) return float4(0.05f, 0.10f, 0.35f, 1);   // no light in range
     return float4(float3(acc / float(n)), 1);
+}
+
+// ---------------------------------------------------------------------------
+// omni flare sprites
+// ---------------------------------------------------------------------------
+//
+// These are the bright pools in the DEMO reference — NOT omni surface lighting.
+// Reproduced from FDS/FILLERS/FILLERS.CPP's The_MMX_Scalar + Spriter:
+//
+//   Size     = ImageSize * (1/z) * perspX * FlareSize     (FlareSize = ISize*FlareScale)
+//   edgeLen  = 2*Size,  and Spriter treats its width/height argument as the
+//              HALF-extent (x1 = x - width), so the sprite spans +/- 2*Size px.
+//   colour   = the FLARE TEXTURE's rgb, unmodulated (Col = 0xFFFFFF; greets has
+//              no fog, so the fog tint never applies).
+//   blend    = ADDITIVE, and under --hdr it adds into the float radiance buffer
+//              rather than the 8-bit saturating store (Spriter<Res,true,true>).
+//   z test   = per pixel, against the sprite's SINGLE centre depth: it draws only
+//              where it is NEARER than the stored geometry.
+//
+// Not reproduced: the mirror-mask footprint test (no mirrors in this arm) and
+// Omni_Rand's +/-10% size jitter (greets' omnis are not Omni_Rand).
+
+struct FlareUniforms {
+    float4 centerPx;     // .xy screen px, .z view z, .w half-extent in px
+    float4 gain;         // .x intensity multiplier, .zw = target resolution
+};
+
+struct FlareOut {
+    float4 position [[position]];
+    float2 uv;
+    float  refZ;         // sprite depth in the G-buffer's reversed-Z encoding
+};
+
+vertex FlareOut vs_flare(uint vid [[vertex_id]],
+                         constant FrameUniforms &u [[buffer(1)]],
+                         constant FlareUniforms &f [[buffer(2)]])
+{
+    // two triangles, CCW, unit quad
+    const float2 c[6] = {float2(-1,-1), float2(1,-1), float2(-1,1),
+                         float2(1,-1),  float2(1,1),  float2(-1,1)};
+    const float2 o = c[vid];
+    const float2 px = f.centerPx.xy + o * f.centerPx.w;
+    FlareOut out;
+    // px -> NDC. Metal's viewport origin is upper-left, so y flips.
+    out.position = float4(2.0f * px.x / f.gain.z - 1.0f,
+                          1.0f - 2.0f * px.y / f.gain.w,
+                          0.0f, 1.0f);
+    out.uv = o * 0.5f + 0.5f;
+    out.refZ = u.dza + u.dzb / max(f.centerPx.z, 1e-4f);
+    return out;
+}
+
+fragment float4 fs_flare(FlareOut in [[stage_in]],
+                         constant FrameUniforms &u [[buffer(1)]],
+                         constant FlareUniforms &f [[buffer(2)]],
+                         texture2d<float> flareTex [[texture(0)]],
+                         depth2d<float>   gDepth   [[texture(1)]],
+                         sampler samp [[sampler(0)]])
+{
+    const float zEnc = gDepth.read(uint2(in.position.xy));
+    // Reversed-Z: bigger == nearer. The sprite draws only where it is in FRONT of
+    // the stored geometry, which is Spriter's `if (Z <= ZPage16[..]) skip`.
+    if (zEnc > 0.0f && in.refZ <= zEnc) discard_fragment();
+    const float3 c = flareTex.sample(samp, in.uv).rgb;
+    return float4(c * f.gain.x, 1.0f);
 }

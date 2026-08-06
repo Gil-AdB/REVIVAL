@@ -43,6 +43,11 @@ struct DeferredOptions {
     // because "the tap returns shadowed everywhere" has many possible causes and
     // exactly one of them is "there is nothing valid in the cube" -- which is
     // cheap to settle by LOOKING instead of adjusting conventions.
+    // Omni flare sprites. ON: they are what the DEMO reference's bright pools
+    // actually are (additive 256^2 procedural sprites, FILLERS.CPP), not omni
+    // surface lighting. flareGain is a DIAL, default 1.0 = the CPU's own scale.
+    bool  flares = true;
+    float flareGain = 1.0f;
     int   dumpCube = -1;
     std::string dumpCubePath;
     std::string outPath;

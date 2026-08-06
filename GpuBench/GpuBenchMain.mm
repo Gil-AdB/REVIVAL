@@ -125,6 +125,9 @@ const char *kUsage =
     "                    cleared / min-max / decoded world distance) and write a 3x2 face\n"
     "                    atlas PPM. Forces Shared storage on the cubes, so never a timing run.\n"
     "  --dump_cube_out=PATH  where the atlas goes (default gpubench_cube.ppm)\n"
+    "  --no-disco        do NOT synthesise GreetsDisco.cpp's 10 cone spotlights + glow\n"
+    "                    omni. greets_disco defaults ON in DEMO, so these are PARITY --\n"
+    "                    turning them off makes the arm dimmer than the shipped scene.\n"
     "  --no-stone_tex    do NOT apply DEMO's greets_stone_tex wall/floor override. The\n"
     "                    render is then the AUTHORED FLD wall, not the reviewed surface.\n"
     "  --help\n";
@@ -173,6 +176,7 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--dump_cube=")) dopt.dumpCube = std::atoi(v);
         else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
         else if (a == "--no-stone_tex")             opt.stoneTex = false;
+        else if (a == "--no-disco")                 opt.disco = false;
         else if (const char *v = val("--viz=")) {
             const std::string m(v);
             if      (m == "albedo") dopt.viz = 0;

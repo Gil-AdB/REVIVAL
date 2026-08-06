@@ -81,6 +81,31 @@ struct Light {
     float intensity = 0.0f;       // Omni::ISize
     float range = 0.0f;           // Omni::IRange — HARD cutoff, not inverse-square
     bool  parented = false;       // mech-attached (position was NaN pre-hierarchy)
+    // Light_Omni vs Light_SpotLight. Spots come from GreetsDisco.cpp, which is
+    // ON by default in greets (greets_disco defaults 1) — so they are PARITY, not
+    // an addition. A spot bakes ONE perspective depth map, not a 6-face cube
+    // (FDS/RENDER/Shadows.cpp treats Light_SpotLight as a single-map entry).
+    bool  isSpot = false;
+    float dir[3] = {0, 0, -1};    // Omni::IDir, world, normalised
+    float cosInner = 1.0f;        // Omni::HotSpot = cos(hotInnerDeg)
+    float cosOuter = 1.0f;        // Omni::FallOff = cos(fallOuterDeg)
+    int   shadowRes = 0;          // Omni::shadowMapRes (0 = use the class default)
+    bool  castsShadow = true;
+    // SPOT shadow camera, built by FDS's own Kick_Camera exactly as
+    // FDS/RENDER/Shadows.cpp:470-491 does it — look from IPos toward IPos+IDir,
+    // world-up Y, with the same tiny X nudge for a perfectly vertical IDir, and
+    // fovHalf = acos(max(0.01, cosOuter)) * 1.10 (the engine's 10% pad so
+    // silhouettes near the cone edge get a few pixels of context).
+    float shadowRot[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+    float shadowTanHalfFov = 1.0f;
+    // Flare sprite (Omni::F). Under --hdr the flare adds into the float radiance
+    // buffer (FILLERS.CPP Spriter<Res,true,true>), additively, with the colour
+    // taken from the FLARE TEXTURE — not from the light colour. Half-size in
+    // pixels = ImageSize * flareSize * perspX / viewZ, and greets sets
+    // ImageSize = 0.25 (GREETS.CPP:3060).
+    int   flareTexIndex = -1;
+    float flareSize = 0.0f;       // Omni::ISize * (FlareScale ?: 1)
+    const char *origin = "fld";   // fld | disco-spot | disco-glow — for the report
 };
 
 struct Camera {
@@ -107,6 +132,10 @@ struct Scene {
 
     int      xres = 0, yres = 0;
     float    curFrame = 0.0f;
+    // FDS global ImageSize at ingest time (greets sets 0.25) — the flare
+    // sprite's world scale. Carried so the GPU flare pass uses the scene's
+    // number rather than a constant of its own.
+    float    imageSize = 1.0f;
     // Census, for the report.
     uint32_t meshCount = 0;
     uint32_t faceCount = 0;
@@ -126,6 +155,11 @@ struct LoadOptions {
     // "px,py,pz,fx,fy,fz" as in FDS_GREETS_CAM. Empty = use the scripted camera.
     std::string camPose;
     bool        verbose = true;
+    // Replicate GreetsDisco.cpp's 10 rotating cone spotlights + glow omni clone.
+    // greets_disco defaults to 1 in FeatureFlags.def, so these are part of the
+    // DEFAULT greets run — reproducing them is parity. ON here for the same
+    // reason stoneTex is.
+    bool        disco = true;
     // Replicate DEMO's --greets_stone_tex override (default ON there, so ON here).
     // Without it the wall this renders is the AUTHORED FLD wall, not the surface
     // the user actually reviews — see docs/GPU_BENCHMARK_PLAN.md §3.2. No

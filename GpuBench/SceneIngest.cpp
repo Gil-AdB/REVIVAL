@@ -358,6 +358,13 @@ bool Load(Scene &out, const LoadOptions &opt) {
     }
 
     // ---- 6. lights + ambient ------------------------------------------------
+    // Flare sprite world scale. GREETS.CPP:3060 sets ImageSize = 0.25; the
+    // default is 1000.0 (city scale), which would fill the screen here. The
+    // blitter's half-extent in pixels is 2 * ImageSize * perspX * flareSize / z
+    // (FILLERS.CPP: Size = ImageSize*RZ*PerspX*FlareSize, edgeLen = 2*Size, and
+    // Spriter treats its width argument as the HALF-extent).
+    ImageSize = 0.25f;
+    out.imageSize = ImageSize;
     out.ambient[0] = sc.Ambient.R;
     out.ambient[1] = sc.Ambient.G;
     out.ambient[2] = sc.Ambient.B;
@@ -375,6 +382,20 @@ bool Load(Scene &out, const LoadOptions &opt) {
     for (Object *o = sc.ObjectHead; o; o = o->Next)
         if (o->Type == Obj_Omni && o->Parent && o->Data) parentedOmnis.push_back(o->Data);
 
+    // Spot shadow camera via the ENGINE's Kick_Camera, same call Shadows.cpp makes.
+    auto fillSpotShadowCam = [](Light &L) {
+        Vector idir{L.dir[0], L.dir[1], L.dir[2]};
+        if (std::fabs(idir.x) < 1e-4f && std::fabs(idir.z) < 1e-4f) idir.x = 0.01f;
+        Vector src{L.pos[0], L.pos[1], L.pos[2]};
+        Vector targ{src.x + idir.x, src.y + idir.y, src.z + idir.z};
+        Matrix M;
+        Kick_Camera(&src, &targ, 0.0f, M);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) L.shadowRot[r][c] = M[r][c];
+        const float cosOuter = std::max(0.01f, L.cosOuter);
+        L.shadowTanHalfFov = std::tan(std::acos(cosOuter) * 1.10f);
+    };
+
     for (Omni *O = sc.OmniHead; O; O = O->Next) {
         Light L;
         L.parented = std::find(parentedOmnis.begin(), parentedOmnis.end(),
@@ -383,7 +404,157 @@ bool Load(Scene &out, const LoadOptions &opt) {
         L.color[0] = O->L.R;  L.color[1] = O->L.G;  L.color[2] = O->L.B;
         L.intensity = O->ISize;
         L.range = O->IRange;
+        L.isSpot = (O->Type == Light_SpotLight);
+        L.dir[0] = O->IDir.x; L.dir[1] = O->IDir.y; L.dir[2] = O->IDir.z;
+        L.cosInner = O->HotSpot;
+        L.cosOuter = O->FallOff;
+        L.shadowRes = O->shadowMapRes;
+        L.castsShadow = true;
+        // Flare sprite. The flare MATERIAL is not created by LoadFLD — it comes
+        // from Init_Flares (FDS/MISC/PREPROC.CPP:778-809), which runs inside
+        // Preprocess_Scene and which GpuBench does not call. So reproduce its
+        // body: one procedural 256^2 flare per DISTINCT omni colour, built by the
+        // engine's own Generate_RGBFlare, shared between omnis of equal colour.
+        // (MatLib insertion is skipped — we own the lifetime and never enumerate
+        // MatLib.) Spots are excluded: FLD_CONV gives them a no-op Filler and
+        // PREPROC skips them, because "a headlight is a beam, not a glow quad".
+        if (!L.isSpot && !O->F.Txtr) {
+            Omni *O2 = sc.OmniHead;
+            for (; O2 != O; O2 = O2->Next)
+                if (O2->L.R == O->L.R && O2->L.G == O->L.G && O2->L.B == O->L.B) break;
+            if (O2 == O) {
+                O->F.Txtr = Generate_RGBFlare((unsigned char)O->L.R,
+                                              (unsigned char)O->L.G,
+                                              (unsigned char)O->L.B);
+                if (O->F.Txtr) O->F.Txtr->RelScene = &sc;
+            } else {
+                O->F.Txtr = O2->F.Txtr;
+            }
+        }
+        if (!L.isSpot && O->F.Txtr && O->F.Txtr->Txtr) {
+            L.flareTexIndex = acquireTexture(O->F.Txtr->Txtr);
+            L.flareSize = O->ISize * (O->FlareScale > 0.0f ? O->FlareScale : 1.0f);
+        }
+        if (L.isSpot) fillSpotShadowCam(L);
         out.lights.push_back(L);
+    }
+
+    // ---- 6b. GreetsDisco.cpp: 10 rotating cone spots + the glow omni clone ---
+    // greets_disco defaults to 1, so these ship in the DEFAULT greets run and
+    // reproducing them is PARITY. Every constant below is read out of
+    // DEMO/GreetsDisco.cpp, not chosen here.
+    if (opt.disco) {
+        constexpr int   kSpotCount      = 10;
+        constexpr float kRadius         = 0.6f;
+        constexpr float kSpinRadPerTick = 0.008f;
+        constexpr float kBobAmp         = 0.12f;
+        constexpr float kBobRadPerTick  = 0.012f;
+        constexpr float kPI             = 3.14159265f;
+        static const float kTilts[4]    = {-1.05f, -0.65f, -0.40f, -0.18f};
+
+        // Placement, in GreetsDisco's own priority order:
+        //   1. an authored `DiscoBall` null's FIRST Pos keyframe
+        //   2. else derived above the central `screen2` panel
+        // (its option 3 pin and the FDS_DISCO_POS override are not reproduced;
+        // the FLD carries a DiscoBall object, so path 1 is what fires.)
+        float ballPos[3] = {0, 0, 0};
+        const char *how = "none";
+        for (Object *Obj = sc.ObjectHead; Obj; Obj = Obj->Next) {
+            if (!Obj->Name || std::strcmp(Obj->Name, "DiscoBall") != 0) continue;
+            if (Obj->Type == Obj_TriMesh && Obj->Data) {
+                TriMesh *T = (TriMesh *)Obj->Data;
+                if (T->Pos.NumKeys > 0 && T->Pos.Keys) {
+                    ballPos[0] = T->Pos.Keys[0].Pos.x;
+                    ballPos[1] = T->Pos.Keys[0].Pos.y;
+                    ballPos[2] = T->Pos.Keys[0].Pos.z;
+                    how = "authored DiscoBall null";
+                }
+            }
+            break;
+        }
+        if (!std::strcmp(how, "none")) {
+            double sx = 0, sy = 0, sz = 0; float topY = -1e30f; long n = 0;
+            for (Object *Obj = sc.ObjectHead; Obj; Obj = Obj->Next) {
+                if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+                TriMesh *T = (TriMesh *)Obj->Data;
+                if (!T->Faces) continue;
+                for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                    const Face &F = T->Faces[fi];
+                    if (!F.Txtr || !F.Txtr->Name ||
+                        std::strcmp(F.Txtr->Name, "screen2") != 0) continue;
+                    const ::Vertex *vtx[3] = {F.A, F.B, F.C};
+                    for (int k = 0; k < 3; ++k) {
+                        if (!vtx[k]) continue;
+                        Vector lp = vtx[k]->Pos, wp;
+                        MatrixXVector(T->RotMat, &lp, &wp);
+                        wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+                        sx += wp.x; sy += wp.y; sz += wp.z;
+                        if (wp.y > topY) topY = wp.y;
+                        ++n;
+                    }
+                }
+            }
+            if (n) {
+                ballPos[0] = float(sx / double(n));
+                ballPos[1] = topY;
+                ballPos[2] = float(sz / double(n));
+                how = "derived above screen2";
+            }
+        }
+
+        // UpdateDiscoBall(sc, t) is called with g_FrameTime — the pause-aware
+        // scene clock in centiseconds, i.e. the SAME number our --t is.
+        const float t = float(opt.demoT);
+        const float a = t * kSpinRadPerTick;
+        const float cs = std::cos(a), sn = std::sin(a);
+        float bp[3] = {ballPos[0], ballPos[1] + kBobAmp * std::sinf(t * kBobRadPerTick),
+                       ballPos[2]};
+
+        for (int i = 0; i < kSpotCount; ++i) {
+            const float az = 2.0f * kPI * float(i) / float(kSpotCount);
+            const float tilt = kTilts[i & 3];
+            const float b[3] = {std::cos(tilt) * std::cos(az),
+                                std::sin(tilt),
+                                std::cos(tilt) * std::sin(az)};
+            // Y-axis spin, exactly UpdateDiscoBall's expression.
+            const float d[3] = {cs * b[0] + sn * b[2], b[1], -sn * b[0] + cs * b[2]};
+            const float off = kRadius + 0.08f;   // origin OUTSIDE the ball surface
+            Light L;
+            L.pos[0] = bp[0] + d[0] * off;
+            L.pos[1] = bp[1] + d[1] * off;
+            L.pos[2] = bp[2] + d[2] * off;
+            L.color[0] = 215.0f; L.color[1] = 235.0f; L.color[2] = 255.0f;
+            L.intensity = 6.0f;
+            L.range = 38.0f;
+            L.isSpot = true;
+            L.dir[0] = d[0]; L.dir[1] = d[1]; L.dir[2] = d[2];
+            L.cosInner = std::cos(2.6f * 3.14159f / 180.0f);
+            L.cosOuter = std::cos(7.0f * 3.14159f / 180.0f);
+            L.shadowRes = 256;
+            L.castsShadow = true;
+            L.parented = true;              // rotates -> re-baked every frame
+            L.origin = "disco-spot";
+            fillSpotShadowCam(L);
+            out.lights.push_back(L);
+        }
+        // The glow: a cloned omni at the ball centre. Its flare Filler is a NO-OP
+        // in GreetsDisco ("the visible flare burst read as noise on the ball"), so
+        // it gets no flareTexIndex here either.
+        {
+            Light L;
+            L.pos[0] = bp[0]; L.pos[1] = bp[1]; L.pos[2] = bp[2];
+            L.color[0] = 210.0f; L.color[1] = 225.0f; L.color[2] = 255.0f;
+            L.intensity = 0.55f + 0.12f * std::sinf(t * 0.05f);
+            L.range = 6.0f;
+            L.castsShadow = false;          // Omni_CastsShadow cleared on the clone
+            L.origin = "disco-glow";
+            out.lights.push_back(L);
+        }
+        if (opt.verbose)
+            std::fprintf(stderr,
+                "[INGEST] disco: ball (%.2f,%.2f,%.2f) via %s; %d cone spots "
+                "(2.6/7.0 deg, range 38, 256^2 maps, spin %.3f rad) + 1 glow omni\n",
+                bp[0], bp[1], bp[2], how, kSpotCount, a);
     }
 
     out.loadMs = std::chrono::duration<double, std::milli>(clock::now() - t0).count();

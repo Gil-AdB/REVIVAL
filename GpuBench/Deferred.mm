@@ -37,17 +37,30 @@ struct GpuLight {
     float pos[4];
     float color[4];
     float range, invRange;
-    int32_t shadowIndex;
-    float shadowNear, shadowFar, pad0, pad1, pad2;
+    int32_t shadowIndex;      // cube slot for omnis, 2D-map slot for spots
+    float shadowNear, shadowFar;
+    int32_t isSpot;
+    float cosInner, cosOuter;
+    float dir[4];             // world, normalised (Omni::IDir)
+    // Spot shadow projection: view rows from Kick_Camera + tan(halfFov).
+    float sRow0[4], sRow1[4], sRow2[4];
 };
 
 struct ShadowUniforms {
     float row0[4], row1[4], row2[4];
     float lightPos[4];
-    float dza, dzb, pad0, pad1;
+    float dza, dzb;
+    // 1/tan(halfFov) for a spot's narrow frustum; 1.0 for a 90-degree cube face.
+    float projScale, pad1;
+};
+
+struct FlareUniforms {
+    float centerPx[4];   // .xy screen px, .z view z, .w half-extent px
+    float gain[4];       // .x gain, .zw target resolution
 };
 
 constexpr int kMaxShadowCubes = 16;
+constexpr int kMaxSpotMaps    = 16;
 
 // Metal cube-face convention, slice order +X,-X,+Y,-Y,+Z,-Z. Rows are
 // (right, up, forward) so the shadow vertex shader's rowmul yields
@@ -218,6 +231,26 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
                              [fn UTF8String], [[e localizedDescription] UTF8String]);
         return s;
     };
+    // Flare sprites: ADDITIVE into the HDR target, matching the CPU's
+    // Spriter<Res,true,true> which adds into the float radiance buffer.
+    id<MTLRenderPipelineState> psoFlare;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = [lib newFunctionWithName:@"vs_flare"];
+        p.fragmentFunction = [lib newFunctionWithName:@"fs_flare"];
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoFlare = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoFlare) { std::fprintf(stderr, "[DEFERRED] flare pso: %s\n",
+                                      [[e localizedDescription] UTF8String]); return false; }
+    }
     id<MTLRenderPipelineState> psoLight   = makeFsPso(@"fs_lighting", MTLPixelFormatRGBA16Float);
     id<MTLRenderPipelineState> psoTonemap = makeFsPso(@"fs_tonemap",  MTLPixelFormatBGRA8Unorm);
     id<MTLRenderPipelineState> psoViz     = makeFsPso(@"fs_viz",      MTLPixelFormatBGRA8Unorm);
@@ -301,9 +334,14 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
     id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> stageTex = mkTarget(MTLPixelFormatBGRA8Unorm, MTLStorageModeShared);
 
-    // ---- shadow cubes -----------------------------------------------------
+    // ---- shadow cubes (omnis) + single maps (spots) -----------------------
+    // A Light_SpotLight bakes ONE perspective depth map, not six cube faces —
+    // FDS/RENDER/Shadows.cpp treats `cubeFace < 0` as the spot path. Matching
+    // that matters for cost as well as correctness: 10 disco spots as cubes would
+    // be 60 extra faces per frame instead of 10.
     std::vector<id<MTLTexture>> cubes;
     std::vector<bool> cubeIsMoving;
+    std::vector<id<MTLTexture>> spots;
     std::vector<int> lightCube(scene.lights.size(), -1);
     std::vector<float> cubeNear(scene.lights.size(), 0.05f);
     std::vector<float> cubeFar(scene.lights.size(), 1.0f);
@@ -311,6 +349,25 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         for (size_t i = 0; i < scene.lights.size(); ++i) {
             const Light &L = scene.lights[i];
             if (!std::isfinite(L.pos[0]) || L.range <= 0.0f) continue;
+            if (!L.castsShadow) continue;
+            if (L.isSpot) {
+                if (int(spots.size()) >= kMaxSpotMaps) continue;
+                const int res = L.shadowRes > 0 ? L.shadowRes : 256;
+                MTLTextureDescriptor *td =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                      width:NSUInteger(res)
+                                                                     height:NSUInteger(res)
+                                                                  mipmapped:NO];
+                td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModePrivate;
+                lightCube[i] = int(spots.size());
+                cubeNear[i] = 0.05f;
+                cubeFar[i] = L.range * opt.lightRangeScale;
+                spots.push_back([dev newTextureWithDescriptor:td]);
+                out.shadowFaces += 1;
+                out.shadowTexels += long(res) * res;
+                continue;
+            }
             if (int(cubes.size()) >= kMaxShadowCubes) break;
             // greets flags every FLD omni as a caster; static ones bake at
             // greets_omni_shadow_res (512), mech-parented "moving" ones at
@@ -355,6 +412,15 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         td.storageMode = MTLStorageModePrivate;
         dummyCube = [dev newTextureWithDescriptor:td];
     }
+    id<MTLTexture> dummy2D;
+    {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                              width:1 height:1 mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModePrivate;
+        dummy2D = [dev newTextureWithDescriptor:td];
+    }
 
     // ---- uniforms ---------------------------------------------------------
     FrameUniforms fu{};
@@ -384,6 +450,7 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
     fu.vizLight = opt.vizLight;
 
     std::vector<GpuLight> lights;
+    std::vector<const char *> lightOrigin;
     for (size_t i = 0; i < scene.lights.size(); ++i) {
         const Light &L = scene.lights[i];
         if (!std::isfinite(L.pos[0]) || L.range <= 0.0f) continue;
@@ -401,7 +468,20 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         g.shadowIndex = lightCube[i];
         g.shadowNear = cubeNear[i];
         g.shadowFar = cubeFar[i];
+        g.isSpot = L.isSpot ? 1 : 0;
+        g.cosInner = L.cosInner;
+        g.cosOuter = L.cosOuter;
+        for (int c = 0; c < 3; ++c) g.dir[c] = L.dir[c];
+        for (int c = 0; c < 3; ++c) {
+            g.sRow0[c] = L.shadowRot[0][c];
+            g.sRow1[c] = L.shadowRot[1][c];
+            g.sRow2[c] = L.shadowRot[2][c];
+        }
+        // sRow0.w carries 1/tan(halfFov) — the same projection scale the bake's
+        // vertex shader applies, so the tap cannot drift from the bake.
+        g.sRow0[3] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f);
         lights.push_back(g);
+        lightOrigin.push_back(L.origin ? L.origin : "?");
     }
     std::fprintf(stderr, "[DEFERRED] LIGHT INVENTORY (%zu usable of %zu in scene):\n",
                  lights.size(), scene.lights.size());
@@ -428,14 +508,15 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
             }
         }
         std::fprintf(stderr,
-            "[DEFERRED]   [%zu] pos=(%7.2f,%6.2f,%8.2f) rgb=(%.3f,%.3f,%.3f) range=%5.1f "
-            "cube=%d %s  nearestGeom=%.3f (%s/%s) vertsWithin1u=%ld\n",
-            i, lights[i].pos[0], lights[i].pos[1], lights[i].pos[2],
+            "[DEFERRED]   [%zu] %-10s pos=(%7.2f,%6.2f,%8.2f) rgb=(%.3f,%.3f,%.3f) "
+            "range=%5.1f slot=%d %s  nearestGeom=%.3f (%s/%s) vertsWithin1u=%ld\n",
+            i, lightOrigin[i], lights[i].pos[0], lights[i].pos[1], lights[i].pos[2],
             lights[i].color[0], lights[i].color[1], lights[i].color[2],
             lights[i].range, lights[i].shadowIndex,
-            lights[i].shadowIndex >= 0
-                ? (cubeIsMoving[size_t(lights[i].shadowIndex)] ? "(moving 128^2)" : "(static 512^2)")
-                : "(no shadow)",
+            lights[i].shadowIndex < 0 ? "(no shadow)"
+              : (lights[i].isSpot ? "(spot 2D map)"
+                 : (cubeIsMoving[size_t(lights[i].shadowIndex)] ? "(moving 128^2)"
+                                                                : "(static 512^2)")),
             nearest, nearestMesh, nearestMat, within);
     }
     fu.numLights = uint32_t(lights.size());
@@ -444,6 +525,25 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
     id<MTLBuffer> lightBuf = [dev newBufferWithBytes:lights.data()
                                              length:lights.size() * sizeof(GpuLight)
                                             options:MTLResourceStorageModeShared];
+
+    // Flare list. One draw per flaring omni (<= 10 here) rather than instancing:
+    // each flare has its own generated texture, and 10 draws is not a cost worth
+    // an argument-buffer for.
+    struct FlareInst { float wpos[3]; float worldHalf; int tex; };
+    std::vector<FlareInst> flares;
+    for (const auto &L : scene.lights) {
+        if (L.flareTexIndex < 0 || L.flareSize <= 0.0f) continue;
+        if (!std::isfinite(L.pos[0])) continue;
+        FlareInst fi{};
+        for (int c = 0; c < 3; ++c) fi.wpos[c] = L.pos[c];
+        // Half-extent in px = 2 * ImageSize * perspX * flareSize / z; fold the
+        // z-independent part here, divide by view z at draw time.
+        fi.worldHalf = 2.0f * scene.imageSize * scene.camera.perspX * L.flareSize;
+        fi.tex = L.flareTexIndex;
+        flares.push_back(fi);
+    }
+    std::fprintf(stderr, "[DEFERRED] flare sprites: %zu (ImageSize=%.3f, additive into HDR)\n",
+                 flares.size(), scene.imageSize);
 
     float sh[9][4];
     ProjectSkyGradientToSH(scene.skyZenith, scene.skyNadir, sh);
@@ -566,7 +666,7 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
             // find the light owning this cube
             size_t li = 0;
             for (size_t k = 0; k < lights.size(); ++k)
-                if (lights[k].shadowIndex == int(ci)) { li = k; break; }
+                if (!lights[k].isSpot && lights[k].shadowIndex == int(ci)) { li = k; break; }
             const float sn = lights[li].shadowNear, sf = lights[li].shadowFar;
             for (int f = 0; f < 6; ++f) {
                 MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -602,6 +702,7 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
                 }
                 su.dza = -sn / (sf - sn);
                 su.dzb = sn * sf / (sf - sn);
+                su.projScale = 1.0f;          // 90-degree cube face
                 [enc setVertexBytes:&su length:sizeof(su) atIndex:1];
                 drawScene(enc, /*gbuffer=*/false);
                 [enc endEncoding];
@@ -609,10 +710,48 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         }
     };
 
+    // Spot maps: ONE perspective depth map each, re-baked EVERY FRAME because the
+    // disco spots rotate (GreetsDisco's UpdateDiscoBall rewrites IPos/IDir per
+    // tick, and Shadows.cpp re-bakes them on the DynamicOmnisPerFrame path). The
+    // 10% FOV pad and the Kick_Camera basis both come from the ingest, which built
+    // them with the engine's own call — so bake and tap cannot drift apart.
+    auto bakeSpotMaps = [&](id<MTLCommandBuffer> cb) {
+        for (size_t si = 0; si < spots.size(); ++si) {
+            size_t li = SIZE_MAX;
+            for (size_t k = 0; k < lights.size(); ++k)
+                if (lights[k].isSpot && lights[k].shadowIndex == int(si)) { li = k; break; }
+            if (li == SIZE_MAX) continue;
+            const float sn = lights[li].shadowNear, sf = lights[li].shadowFar;
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.depthAttachment.texture = spots[si];
+            rp.depthAttachment.loadAction = MTLLoadActionClear;
+            rp.depthAttachment.storeAction = MTLStoreActionStore;
+            rp.depthAttachment.clearDepth = 0.0;
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:psoShadow];
+            [enc setDepthStencilState:dss];
+            [enc setCullMode:MTLCullModeNone];
+            ShadowUniforms su{};
+            for (int c = 0; c < 3; ++c) {
+                su.row0[c] = lights[li].sRow0[c];
+                su.row1[c] = lights[li].sRow1[c];
+                su.row2[c] = lights[li].sRow2[c];
+                su.lightPos[c] = lights[li].pos[c];
+            }
+            su.dza = -sn / (sf - sn);
+            su.dzb = sn * sf / (sf - sn);
+            su.projScale = lights[li].sRow0[3];
+            [enc setVertexBytes:&su length:sizeof(su) atIndex:1];
+            drawScene(enc, /*gbuffer=*/false);
+            [enc endEncoding];
+        }
+    };
+
     // One-time STATIC bake, outside the timed loop, as greets caches it.
     {
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         bakeCubes(cb, /*movingOnly=*/false, /*timed=*/false);
+        bakeSpotMaps(cb);
         [cb commit];
         [cb waitUntilCompleted];
         out.staticBakeMs = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
@@ -623,8 +762,11 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         if (opt.dumpCube >= int(lights.size())) {
             std::fprintf(stderr, "[DUMPCUBE] light %d out of range (%zu lights)\n",
                          opt.dumpCube, lights.size());
-        } else if (lights[size_t(opt.dumpCube)].shadowIndex < 0) {
-            std::fprintf(stderr, "[DUMPCUBE] light %d has no cube\n", opt.dumpCube);
+        } else if (lights[size_t(opt.dumpCube)].shadowIndex < 0
+                   || lights[size_t(opt.dumpCube)].isSpot) {
+            std::fprintf(stderr, "[DUMPCUBE] light %d has no CUBE (spot=%d, slot=%d)\n",
+                         opt.dumpCube, lights[size_t(opt.dumpCube)].isSpot,
+                         lights[size_t(opt.dumpCube)].shadowIndex);
         } else {
             const size_t ci = size_t(lights[size_t(opt.dumpCube)].shadowIndex);
             id<MTLTexture> cube = cubes[ci];
@@ -702,7 +844,10 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         id<MTLCommandBuffer> cb = [queue commandBuffer];
 
         // --- pass 0: per-frame DYNAMIC shadow bake (moving omnis only) ---
-        if (opt.shadows) bakeCubes(cb, /*movingOnly=*/!opt.rebakeAll, /*timed=*/true);
+        if (opt.shadows) {
+            bakeCubes(cb, /*movingOnly=*/!opt.rebakeAll, /*timed=*/true);
+            bakeSpotMaps(cb);
+        }
 
         // --- pass 1: G-buffer ---
         {
@@ -751,6 +896,9 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
             for (int i = 0; i < kMaxShadowCubes; ++i)
                 [enc setFragmentTexture:(i < int(cubes.size()) ? cubes[size_t(i)] : dummyCube)
                                 atIndex:NSUInteger(4 + i)];
+            for (int i = 0; i < kMaxSpotMaps; ++i)
+                [enc setFragmentTexture:(i < int(spots.size()) ? spots[size_t(i)] : dummy2D)
+                                atIndex:NSUInteger(20 + i)];
             [enc setFragmentSamplerState:shadowSamp atIndex:1];
             [enc setFragmentSamplerState:rawSamp atIndex:2];
             if (viz) {
@@ -758,6 +906,46 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
                 [enc setFragmentBytes:&m length:sizeof(m) atIndex:4];
             }
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+        }
+
+        // --- pass 2b: flare sprites, additive into the HDR target ---
+        if (!viz && opt.stages >= 2 && opt.flares && !flares.empty()) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = hdrTex;
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:psoFlare];
+            [enc setVertexBytes:&fu length:sizeof(fu) atIndex:1];
+            [enc setFragmentBytes:&fu length:sizeof(fu) atIndex:1];
+            [enc setFragmentSamplerState:samp atIndex:0];
+            [enc setFragmentTexture:gDepth atIndex:1];
+            for (const auto &fi : flares) {
+                // Project the omni exactly as Transform.cpp's flare pass does:
+                // view transform, then PX = cntrEX + x*PerspX/z, PY = cntrEY - y*PerspY/z.
+                float rel[3];
+                for (int c = 0; c < 3; ++c) rel[c] = fi.wpos[c] - scene.camera.src[c];
+                float vz = 0, vx = 0, vy = 0;
+                for (int c = 0; c < 3; ++c) {
+                    vx += scene.camera.rot[0][c] * rel[c];
+                    vy += scene.camera.rot[1][c] * rel[c];
+                    vz += scene.camera.rot[2][c] * rel[c];
+                }
+                if (!(vz > scene.camera.nearZ && vz < scene.camera.farZ)) continue;
+                FlareUniforms fun{};
+                fun.centerPx[0] = scene.camera.cntrEX + vx * scene.camera.perspX / vz;
+                fun.centerPx[1] = scene.camera.cntrEY - vy * scene.camera.perspY / vz;
+                fun.centerPx[2] = vz;
+                fun.centerPx[3] = fi.worldHalf / vz;
+                fun.gain[0] = opt.flareGain;
+                fun.gain[2] = float(W);
+                fun.gain[3] = float(H);
+                [enc setVertexBytes:&fun length:sizeof(fun) atIndex:2];
+                [enc setFragmentBytes:&fun length:sizeof(fun) atIndex:2];
+                [enc setFragmentTexture:texes[size_t(fi.tex)] atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            }
             [enc endEncoding];
         }
 
