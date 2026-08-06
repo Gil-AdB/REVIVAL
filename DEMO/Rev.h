@@ -27,6 +27,19 @@ extern std::atomic<bool> g_shouldQuit;
 // "skip" doesn't accidentally exit the program.
 extern std::atomic<bool> g_skipScene;
 
+// SHIFT held, as of the last key event. Written by both SDL event pumps
+// (REV.CPP native, MainLoop.cpp wasm) from SDL_Keysym::mod; SDL updates its
+// modifier state BEFORE it fills keysym.mod, so the shift key's own KEYDOWN
+// already reads as held and its own KEYUP already reads as released.
+// Read by SceneDriver::tickSceneTimer as the FAST arm of the F1/F2 scene-clock
+// scrub (step x --scrub_speed while held).
+// Deliberately NOT a Keyboard[] slot: ScLShift/ScRShift are defined in
+// FDS_DEFS.H but have no consumers, and Keypressed() (FDS/ISR/ISR.CPP) scans
+// the WHOLE array — routing shift through Keyboard[] would make "any key held"
+// true whenever shift is down, which the legacy P-key timefreeze in
+// RENDER.CPP busy-waits on.
+extern std::atomic<bool> g_shiftHeld;
+
 // Runtime mip-level debug knobs (toggled via N / Shift+N in REV.CPP).
 //   g_forceMipLevel: -1 = auto (rasterizer-chosen), 0..7 = override.
 //     When >= 0, every per-pixel kernel uses this value instead of the

@@ -558,6 +558,7 @@ int32_t g_hiDPI;
 // See Rev.h for semantics.
 std::atomic<bool> g_shouldQuit{false};
 std::atomic<bool> g_skipScene{false};
+std::atomic<bool> g_shiftHeld{false};
 // g_forceMipLevel / g_vizMipLevel are defined in FDS/RENDER/DeferredLighting.cpp
 // (so the FDS library doesn't have an unresolved symbol from DEMO/).
 // Declared in Rev.h.
@@ -611,31 +612,17 @@ static char G_AppTitle[MAX_GSTRING];
 
 Uint32 TimerProc(Uint32 interval, void *param)
 {
-	// Review scrub: hold F4 / F3 to run the scene clock fast forward /
-	// backward at --scrub_speed x (default 4). NOT PgUp/PgDn or -/= : all four
-	// are Dynamic_Camera fly keys (MainLoop.cpp anyFreeCamKey; -/= translate to
-	// ScGrayMinus/ScGrayPlus), and the Mac laptop needs fn for PgUp/PgDn.
-	// F3/F4 were added to MainLoop's scancode table for this. The clock IS Timer —
-	// RENDER.CPP:1553 derives CurFrame from it linearly — so scaling it
-	// scales camera splines, object animation and scene progress together,
-	// which is exactly what reviewing a pose needs. Clamped at 1: t<0 makes
-	// CurFrame extrapolate below the scene's StartFrame.
-	// Runs on SDL's timer thread; the Keyboard byte array is written by the
-	// main thread's event pump — a torn read here just costs one tick at the
-	// wrong speed, which is what every other Keyboard consumer already
-	// accepts.
-	int32_t step = 1;
-	const int32_t mult = fds::FeatureFlags::scrub_speed();
-	if (mult > 1) {
-		if      (Keyboard[ScF4]) step =  mult;
-		else if (Keyboard[ScF3]) step = -mult;
-	}
-	if (step >= 0) {
-		Timer += step;
-	} else {
-		const int32_t nxt = Timer.load(std::memory_order_relaxed) + step;
-		Timer.store(nxt < 1 ? 1 : nxt, std::memory_order_relaxed);
-	}
+	// One free-running tick. NOTHING ELSE BELONGS HERE.
+	//
+	// A review scrub used to live in this callback (hold F4/F3, step Timer by
+	// --scrub_speed) and it NEVER WORKED. The scene driver owns the clock:
+	// SceneDriver::tickSceneTimer computes the scene time it wants and then
+	// does `if (pauseMode || scrubbed) Timer = sceneT`, re-pinning the atomic
+	// from the wall clock every single frame — so every increment this callback
+	// made was overwritten before anything read it. Removed 2026-08-06.
+	// The scrub that does work is F1/F2 (rewind / fast-forward) in
+	// tickSceneTimer, with SHIFT as the --scrub_speed multiplier.
+	Timer++;
 	return interval;
 }
 
@@ -1759,12 +1746,13 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_BACKSPACE: legacy = ScBackSpace; break;
 				case SDL_SCANCODE_F1:        legacy = ScF1; break;
 				case SDL_SCANCODE_F2:        legacy = ScF2; break;
+				// F3 = the greets shadow-technique toggle (depth <-> poly-ID),
+				// back on F3 as of 2026-08-06: it had been parked on the
+				// untranslated ScF6 to make room for the TimerProc review
+				// scrub, and that scrub is gone (see TimerProc). F4 is
+				// deliberately NOT translated — it was added for that scrub
+				// and now has no consumer, so it stays a free key.
 				case SDL_SCANCODE_F3:        legacy = ScF3; break;
-				// F4 was missing here while F3 was present, so TimerProc's
-				// review scrub only ran BACKWARD in the native build (the
-				// wasm table in MainLoop.cpp had both). ScF4 has exactly one
-				// consumer (TimerProc), so adding it resurrects nothing else.
-				case SDL_SCANCODE_F4:        legacy = ScF4; break;
 				case SDL_SCANCODE_F9:        legacy = ScF9; break;
 				case SDL_SCANCODE_F11:       legacy = ScF11; break;
 				case SDL_SCANCODE_TAB:       legacy = ScTab; break;
@@ -1813,6 +1801,13 @@ int main(int argc, const char *argv[])
 			if (legacy >= 0) {
 				Keyboard[legacy] = (event.type == SDL_KEYDOWN) ? 1 : 0;
 			}
+			// SHIFT state for the demo thread (Rev.h g_shiftHeld): the FAST arm
+			// of SceneDriver's F1/F2 scene-clock scrub. Taken from keysym.mod on
+			// EVERY key event, including the shift key's own down/up, because
+			// SDL folds the modifier into its state before filling mod.
+			g_shiftHeld.store(
+			    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0,
+			    std::memory_order_relaxed);
 			// New key conventions (see CLAUDE.md / commit message):
 			//   ESC       = exit demo immediately (whole program)
 			//   Backspace = skip to next scene

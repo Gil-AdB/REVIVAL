@@ -128,12 +128,12 @@ static int translateScancode(SDL_Scancode sc)
 	case SDL_SCANCODE_ESCAPE:    return ScESC;
 	case SDL_SCANCODE_F1:        return ScF1;
 	case SDL_SCANCODE_F2:        return ScF2;
-	// F3/F4: the review scrub (REV.CPP TimerProc). Neither was translated
-	// before, so greets' Keyboard[ScF3] shadow-mode toggle was dead code
-	// under SDL — it moved to ScF6 (still untranslated, i.e. still dead) so
-	// F3 could take the scrub without silently resurrecting it.
+	// F3 = greets' shadow-technique toggle (depth <-> poly-ID). It was dead
+	// code under SDL until this table gained the entry; the F4 entry that came
+	// in with it belonged to REV.CPP's TimerProc review scrub, which was
+	// removed 2026-08-06 (it fought SceneDriver for ownership of Timer and
+	// lost), so F4 is untranslated again and free.
 	case SDL_SCANCODE_F3:        return ScF3;
-	case SDL_SCANCODE_F4:        return ScF4;
 	case SDL_SCANCODE_F11:       return ScF11;
 	case SDL_SCANCODE_TAB:       return ScTab;
 	case SDL_SCANCODE_SPACE:     return ScSpace;
@@ -202,6 +202,12 @@ static bool pumpEvents()
 		case SDL_KEYUP: {
 			int legacy = translateScancode(event.key.keysym.scancode);
 			if (legacy >= 0) Keyboard[legacy] = (event.type == SDL_KEYDOWN) ? 1 : 0;
+			// SHIFT state for the demo thread (Rev.h g_shiftHeld) — the FAST
+			// arm of SceneDriver's F1/F2 scene-clock scrub. Same store as the
+			// native pump (REV.CPP).
+			g_shiftHeld.store(
+			    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0,
+			    std::memory_order_relaxed);
 			// Debug-viz cycle, same binding as the native pump (REV.CPP):
 			// X = next viz, Shift+X = previous. X is deliberately NOT added to
 			// translateScancode — the cycle is driven from the event, not from

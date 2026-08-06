@@ -1,5 +1,6 @@
 #include "SceneTick.h"
 #include <Base/ParamScript.h>
+#include <Base/FeatureFlags.h>   // scrub_speed (the Shift multiplier on F1/F2)
 
 #include "Rev.h"
 
@@ -90,7 +91,21 @@ int32_t SceneDriver::tickSceneTimer(int32_t &TTrd, bool &pauseMode)
     // Fast forward / rewind: 8× the frame delta in play; in pause dTime is
     // ~0 so fall back to a small per-tick step so F1/F2 still scrubs while
     // paused (fine enough to step single anim frames).
-    const int32_t scrubStep = pauseMode ? 10 : int32_t(dTime * 8.0f);
+    int32_t scrubStep = pauseMode ? 10 : int32_t(dTime * 8.0f);
+    // SHIFT = the FAST arm, --scrub_speed × the base step (default 4). One knob,
+    // two speeds: unmodified F1/F2 keeps exactly the rate it always had, so
+    // nothing that relied on it changes. This is where a scrub HAS to live —
+    // the earlier F3/F4 scrub inside REV.CPP's SDL timer callback incremented
+    // Timer and the `Timer = sceneT` re-pin below silently clobbered it every
+    // frame, which is why it appeared to do nothing (removed 2026-08-06).
+    if (g_shiftHeld.load(std::memory_order_relaxed)) {
+        const int32_t mult = fds::FeatureFlags::scrub_speed();
+        if (mult > 1) scrubStep *= mult;
+    }
+    // A scrub that steps 0 still sets `scrubbed`, which pins Timer — i.e. the
+    // key would FREEZE the clock instead of moving it. dTime is in whole 10 ms
+    // Timer ticks, so above ~100 fps it rounds to 0 and F1/F2 did exactly that.
+    if (scrubStep < 1) scrubStep = 1;
     bool scrubbed = false;
     if (Keyboard[ScF2]) { sceneT += scrubStep; scrubbed = true; }
     if (Keyboard[ScF1]) { sceneT = (scrubStep > sceneT) ? 0 : sceneT - scrubStep; scrubbed = true; }

@@ -3333,7 +3333,14 @@ struct GreetsScene : SceneDriver {
 		// F3: toggle shadow technique (depth ↔ poly-ID). Runtime A/B.
 		{
 			static bool sF3Prev = false;
-			const bool f3Now = Keyboard[ScF6] != 0;   // was ScF3; F3 is the review scrub now (untranslated either way)
+			// Back on F3 (2026-08-06). It was parked on the untranslated ScF6
+			// to free F3 for REV.CPP's TimerProc review scrub; that scrub is
+			// gone (it fought SceneDriver for Timer and lost), so F3 is free
+			// and this toggle is reachable again — in wasm too, now that
+			// MainLoop's table translates F3. Feedback is the [SHADOW-MODE]
+			// stderr line below; the old "Shadow: %s [F3]" screen overlay was
+			// deleted, so nothing advertises a key that does not work.
+			const bool f3Now = Keyboard[ScF3] != 0;
 			if (f3Now && !sF3Prev) {
 				const ShadowMode cur = g_shadowMode.load();
 				const ShadowMode next = (cur == ShadowMode::Depth)
@@ -3929,22 +3936,14 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
 
-		// Persistent render-mode indicator (top-right). Always visible
-		// outside shadow-viz mode so the active F3 mode is obvious.
-		if (!sShadowMapView) {
-			const bool inPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
-			snprintf(MSGStr, sizeof(MSGStr), "Shadow: %s [F3]",
-				inPolyId ? "PolyId" : "Depth");
-			// Right-justify against the right edge — variable string
-			// length (PolyId vs Depth) shouldn't shift the indicator.
-			// One line below the resolution overlay drawn in V_Flip
-			// (SDL2.cpp:48) at y≈4*scale with ~16*scale glyph height.
-			const int kCharPx = 10;  // approx per-glyph width at 1x, scales with g_fontScale
-			const int textPx = int(strlen(MSGStr)) * kCharPx * g_fontScale;
-			int xJustified = XRes - textPx - 8 * g_fontScale;
-			if (xJustified < 0) xJustified = 0;
-			OutTextXY(VPage, xJustified, 5 + 20 * g_fontScale, MSGStr, 255);
-		}
+		// RETIRED 2026-08-06: the persistent "Shadow: Depth|PolyId [F3]"
+		// indicator that used to sit top-right. It was on screen in EVERY
+		// greets capture to report a technique nobody switches mid-review, and
+		// its "[F3]" had gone stale twice over (F3 briefly became a review
+		// scrub, and the toggle it named had been moved to an untranslated
+		// ScF6, so the overlay advertised a control that did nothing). The
+		// toggle is back on F3 a few hundred lines up and prints
+		// [SHADOW-MODE] to stderr when it fires — that is the feedback now.
 
 		//draw_cones(sShadowMapView);
 
