@@ -683,7 +683,7 @@ Ruled out by reading the CPU kernel rather than assuming: the **attenuation shap
 `k = NoL·falloff·Material::Diffuse` — the shape the shader already had), so the range was the whole
 of defect 1.
 
-#### Defect 2 — the shadow tap zeroes ~95 % of the direct term. DIAGNOSED, NOT FIXED.
+#### Defect 2 — the shadow tap zeroes ~95 % of the direct term. DIAGNOSED here, **RESOLVED in §6.2b** (commit `dd4bb92`) — and it was NOT the tap.
 
 Measured by ablating direct light on **both** arms and differencing the composited frames — the same
 knob on each side, so it is a two-sided measurement rather than a GPU-only self-report. CPU:
@@ -720,6 +720,157 @@ bake's far plane is derived from the range. §6.2's bug #4 is precisely this fai
 it was baked in and read as occluded). The bake and the tap must be re-checked *at the patched
 range*, with `--dump_cube` read back as before — that is the method that settled the housing bug and
 it should settle this one.
+
+### 6.2b Defect 2 — RESOLVED. It was TWO bugs, and neither was the cube tap.
+
+**Prime suspect ruled out first, by reading the data.** §6.2a nominated the bake's far
+plane at the patched range 30 (bug #4's failure mode). `--dump_cube` says no: every face of
+every static cube is **100 % valid, 0 non-finite, 0 cleared**, and the decoded distances are
+the room's real dimensions to two decimals — light 3's `-Y` face reads exactly **4.73**
+(the floor, at light y 4.73 → y 0.000) and its `-X` face **26.679** (the left wall, at
+13.10 − 26.68 = −13.58, against the FLD's X min −13.6). Its `+X` face is a uniform 0.477 and
+that same plane reappears on all four side faces following an exact `0.477 / (sc/ma)` law.
+The bake, the face convention and the reversed-Z encode/decode were all already right.
+
+#### Step 1 — the instrument, before the bug. THREE more no-data faults found.
+
+`--viz=direct` was byte-identical with and without `--no-shadows` because mode 10 carried a
+**private copy of the light loop** that never applied the shadow factor. The structural fix
+is not "add the missing line": `fs_viz` and `fs_lighting` now call the same
+`DecodeSurface` / `LightReaches` / `ShadowFactor` / `DirectRadiance` / `AmbientRadiance`, so
+a mode cannot compute a different quantity from the one the frame applies.
+
+Modes corrected in the audit:
+
+| mode | fault | fix |
+|---|---|---|
+| 2 `ao` | `fs_gbuffer` forces alpha to exactly 1 for every material without `Mat_AoInAlpha`, so **"no AO map" and "AO says fully open" were the same white** | graded AO stays grey; the no-data case is **cyan** |
+| 5 `shadow` | fixed 0.0015 bias and **no NoL gate**, while the frame used `mix(0.0025,0.0004,NoL)` and skipped `NoL<=0` lights — it could show occlusion the frame never applied, and vice versa | calls the frame's own `LightReaches` + `ShadowFactor` |
+| 6 `lights` | its own range/cone test, not the frame's; an out-of-range `--viz_light` read as "no light in range" (black), a legitimate value | calls `LightReaches`; bad selection is **magenta** |
+| 7 `shadowraw` | `max(vizLight,0)` **silently reported light 0** when none was selected; returned pure **BLUE** for "no cube" while blue is one of its own data channels | `--viz_light` required; both no-data cases magenta |
+| 8 `ambient` | omitted the multiscatter env term the frame adds, so it **under-reported the frame's own ambient** | shares `AmbientRadiance` |
+| 10 `direct` | never applied the shadow factor despite claiming "with shadows" | shares `DirectRadiance`, honours `--no-shadows` |
+| (any unmapped `--viz`) | **silently fell through to mode 5** and looked like a real answer | magenta |
+
+Added: `--viz=direct_noshadow` (mode 11 — `direct` minus `direct_noshadow` is exactly what
+the tap removes, in one pair of runs), `--viz=worldpos` (mode 12, fixed decode so a pixel can
+be turned back into a world point), and `--viz_light` now applies to the direct decomposition
+so the term is attributable per light.
+
+Two **ground-truth** instruments, both host-side, both because two rounds here were spent
+inferring geometry from decoded depths instead of asking the geometry:
+
+- `--probe=x,y,z` — ray-cast the *same casting triangles the bake rasterised*, naming the
+  nearest hit's mesh and material, **and** replay the shader's cube tap on the host, side by
+  side. Agreement ⇒ the cube is honest; disagreement ⇒ the tap's conventions are wrong.
+- `--probe_px=X,Y` — same for a screen pixel: build its camera ray from the constants the
+  vertex shader projects with, ray-cast all geometry, then replay the lighting pass's
+  per-light gate and **name the test that failed** (out of range / backfacing / reaches).
+
+`--dump_cube` now also prints an **8×8 grid of decoded world distance per face**. Min/max
+alone hid the thing that mattered: a face can be 100 % valid, span 0.5–30 units, and still be
+a near wall over most of its solid angle.
+
+> One trap this section fell into itself, recorded so it is not repeated: the first version of
+> `--probe_px` computed the triangle normal as `e1×e2`. FDS's `Compute_Face_Normals`
+> (`PREPROC.CPP:29`) uses `Cross_Product(V,U)` with `U=B−A, V=C−A`, i.e. **`e2×e1`** — the
+> negation. The probe therefore reported every room surface as outward-facing and sent a whole
+> round chasing an inverted-normal hypothesis. A ground-truth instrument needs its own ground
+> truth checked: the floor must come out `(0,+1,0)`.
+
+#### Step 2 — bug A: `LoadFLD` does not compute normals, so **every G-buffer normal was (0,0,1)**
+
+`Face::N`, `Vertex::N`, `Vertex::Tangent` and `Face::NormProd` are produced by
+`Scene_Computations` (`FDS/MISC/PREPROC.CPP:632`), which `DEMO` reaches through
+`Preprocess_Scene` and this ingest **never called**. Every `Vertex::N` was zero, so the
+G-buffer stored `oct_decode(0,0)` — a constant `(0,0,1)` view normal on every surface.
+
+MEASURED before the fix: `--viz=normal` returned **rgb (128,128,255) at both a side wall and
+the floor**, two surfaces at right angles.
+
+The consequence was not "flat shading". `N·L` degenerated into the **sign of the light's
+view-space Z**, so a light *behind* a surface down the corridor lit it while a light three
+units *in front* did not. The three mech omnis — which `--probe_px` shows dominate this pose
+(`NoL` 0.58–1.00, `atten` 0.88–0.91 on both the near wall and the floor) — reached **15,381
+of 2,073,600 pixels (0.74 %)**, and tripling `--light_range_scale` did not change that number
+by one pixel, which is what proved the gate was `NoL`, not range.
+
+Fixed by calling the engine's own `Scene_Computations` between `LoadFLD` and
+`Animate_Objects` — the same "same bytes through the same code" principle as the rest of the
+ingest. After: wall `(+1.000,+0.075,+0.035)`, floor `(+0.004,+0.992,−0.106)`, ceiling
+`(+0.027,−0.969,+0.255)`.
+
+**This also invalidates §2.4's implicit assumption** that `LoadFLD` hands over a
+render-ready mesh. It hands over positions, topology and UVs; normals, tangents, plane
+products and bounding spheres are a separate call.
+
+#### Step 2 — bug B: the view→world inverse was **transposed the wrong way**
+
+The reconstruction gathered the view matrix's **columns**, i.e. computed `Mat·P` — the
+forward transform, a second time — under a comment asserting it was the transpose. `vs_gbuffer`
+builds view space as `P = Mat·(world − camSrc)` with `Mat`'s **rows** being (right, up,
+forward), so the inverse is `world = camSrc + P.x·row0 + P.y·row1 + P.z·row2`.
+
+MEASURED: a screen-centre pixel reconstructed 4.81 units from the eye along
+**(0.217, 0.129, 0.973)** — the matrix's third *column* — where the camera's forward is
+**(−0.207, −0.141, 0.968)**. Same magnitude, X and Y mirrored: the signature of the wrong
+gather. Every **cube-shadow direction**, every **spot cone test** and the **SH ambient's world
+normal** were therefore evaluated along a rotated ray. That is why the tap read a nearly
+constant ~2.8 units of stored depth across the whole frame while the host replica of the same
+tap, on the same cube, agreed with the ray-cast on all ten lights.
+
+After the fix, a bottom-edge pixel reconstructs to **y = 0.000 exactly** — the floor.
+
+#### Result, measured two-sided at t=5743
+
+Same knob on each arm (CPU `--prof_no_lights`, GPU `--light_range_scale=0`), same tier
+(PBR + cube shadows + HDR + bloom + ACES; mirrors, disco, POM, lightmap off; full rate),
+1920×1080, Rec.601 luma over the whole frame. CPU arm is the pinned `DEMO` from `0846811`.
+
+| arm | full | direct ablated | **direct contributes** | shadows off | **what the tap removes** |
+|---|--:|--:|--:|--:|--:|
+| **CPU** (DEMO) | 115.07 | 93.50 | **+21.57** | 132.11 | 17.04 = **44.1 %** |
+| **GPU** before | 95.22 | 94.66 | **+0.56** | 105.37 | 10.15 = **94.8 %** |
+| **GPU** after | 106.25 | 94.82 | **+11.43** | 117.70 | 11.45 = **50.0 %** |
+
+The tap's removal fraction now agrees with the CPU's (50.0 % vs 44.1 %) and the direct term
+is **20× closer** to it. `--viz=shadow` shows the mech silhouette cast on both walls and the
+floor with per-light penumbra bands; the lit frame has per-pixel light pools with falloff and
+the same blue-near / warm-far structure as the DEMO reference's own direct-only difference
+image.
+
+Per light at this pose (`--viz=direct[_noshadow] --viz_light=N`, mean tonemapped luma over
+the frame; "reaches" = pixels passing the frame's own range + `NoL` + cone gate):
+
+| light | direct, shadowed | direct, unshadowed | tap removes | reaches px | unshadowed % |
+|--:|--:|--:|--:|--:|--:|
+| 0 | 1.333 | 1.750 | 23.8 % | 102,297 | 69.1 |
+| 1 | 0.999 | 2.001 | 50.0 % | 96,294 | 39.8 |
+| 2 | 1.085 | 1.103 | 1.7 % | 278,841 | 94.2 |
+| 3 | 6.546 | 7.928 | 17.4 % | 1,447,284 | 73.2 |
+| 4 | 0.000 | 13.502 | **100 %** | 898,194 | 0.0 |
+| 5 | 0.029 | 1.411 | 98.0 % | 868,668 | 1.2 |
+| 6 | 0.000 | 0.000 | — | 0 | — |
+| 7 | 4.358 | 10.260 | 57.5 % | 1,779,039 | 32.1 |
+| 8 | 3.627 | 10.032 | 63.8 % | 1,758,228 | 26.1 |
+| 9 | 11.453 | 12.267 | 6.6 % | 1,795,017 | 93.5 |
+
+**Light 4's 100 % is CORRECT, and that is established by ground truth rather than assumed**:
+`--probe=4.38,0,-30.95` ray-casts light 4 → surface and reports `BLOCKED t=2.530
+(Piramid.lwo/rooms)` against a 26.30-unit separation, and the host replica of the cube tap
+reads `storedDist 1.961` at the same texel the shader samples. Light 4 sits at x = −11.89 —
+in a different corridor, behind a wall. Light 5 (98 %) is the same situation.
+
+#### What is still open, stated as a residual and not explained away
+
+The GPU's **unshadowed** direct term is +22.88 against the CPU's +38.61 — a factor of 1.69
+that has **nothing to do with the shadow tap** (it is measured with the tap off on both
+arms). The ambient+emissive base is matched to within 1.4 % (GPU 94.82 vs CPU 93.50), so the
+whole residual is still direct. Candidates not yet discriminated: the CPU's PolyId identity
+test being more permissive than a depth compare at material boundaries (worth ~6 points of
+the *shadowed* difference, not the unshadowed one), the specular model's magnitude, and the
+tonemap's compressive response at slightly different bases. **Not diagnosed — do not quote a
+cause for it.**
 
 #### Consequence for the deliverable
 
