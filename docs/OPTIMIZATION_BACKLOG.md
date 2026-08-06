@@ -473,13 +473,14 @@ verts/frame (−45.1 %), shipping-arm mirror-panel poses 54 272 → 28 782
 (−47.0 %, XFRM 0.304 → 0.189 ms), byte-identical at 21 gates in both arms.
 Ranked leftovers:
 
-- **`--mirror_clone_tight_bsphere` → default ON.** TODO. Landed default-OFF in
-  `964bf1d` and already measured byte-identical at all 21 gates in both arms.
-  It is the *correct* sphere (a clone cannot draw a vertex it does not carry),
-  and it is what makes a clone rejectable at all — mirror `P_TEXT.JPG#11`
-  keeps 1 926 vertices in one corner yet spans the whole mirrored room. Needs
-  a wider pose sweep before flipping, because it changes cull outcomes and
-  with them the `Tri_Inside`/`Tri_Ahead` clipped-vs-unclipped vertex path.
+- **~~`--mirror_clone_tight_bsphere` → default ON~~ — PARKED, MEASURED ZERO
+  WIN.** Landed default-OFF in `964bf1d`. It is the *correct* sphere (a clone
+  cannot draw a vertex it does not carry) and it measured byte-identical at all
+  21 gates in both arms — but byte-identical **because it culls nothing**:
+  main-view transformed verts are the same with it ON and OFF at all six
+  (arm × pose) pairs measured. Even the correct tight sphere over a whole
+  compacted clone is 0.0 % frustum-cullable at every pose. Keep the flag for
+  whoever revisits a split; do not flip it.
 - **Bound the OPAQUE clone raster by the mirror window.** TODO, and the
   remaining half of the user's original question. The TRANSPARENT path already
   does exactly this (`RENDER.CPP` ~936–990: a clone batch's bound is its
@@ -488,12 +489,14 @@ Ranked leftovers:
   rejects them per pixel. RNDR was 7.19 of the clone's 11.40 ms in the
   pre-`1a91ed5` displaced arm. Needs no clone split. NOT measured post-`964bf1d`.
 - **~~Spatial split of the clone (VISIBILITY_PLAN §8e)~~ — DE-SCOPED, MEASURED
-  NOT WORTH IT.** Post-compaction the clone is ~27 k verts in both arms and
-  main-view `Transform_Objects` is 0.19–0.44 ms total, so §8b's "~2 ms" is
-  void. Worse, at the wall pose spatial cells now cull **less** than a
-  per-source-mesh split (25.6 % vs 37.4 %) — the margin they used to hold was
-  the orphan block, twice removed (`799c808`, `964bf1d`). Do not re-propose
-  without a new measurement.
+  NOT WORTH IT.** Post-compaction the clone is ~27 k verts at the wall pose and
+  **1 926** at the mirror-panel poses, against a 0.19–0.44 ms main-view pass, so
+  §8b's "~2 ms" is void. Re-measured ceiling: at the panel poses a cell = 8
+  split culls 98–100 % **of 1 926 verts** (~0.01 ms); at the wall pose the best
+  granularity is per-source-mesh at 10 260 verts (~0.05 ms) and the spatial
+  cells §8e specced are the *worse* of the two there (25.7 %). The margin cells
+  used to hold was the orphan block, twice removed (`799c808`, `964bf1d`). Do
+  not re-propose without a new measurement.
 
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,

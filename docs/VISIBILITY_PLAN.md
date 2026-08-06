@@ -987,12 +987,22 @@ it does not carry, so a clone this rejects had no vertex in the frustum.
 Measured effect on the sphere at t=5743, shipping arm: `P_TEXT.JPG#11`'s z
 extent 81.0 → 26.6 world units, `P_TEXT.JPG#13`'s 80.8 → 66.3.
 
-It is **default OFF** anyway, because it changes cull outcomes and with them
-the `Tri_Inside` / `Tri_Ahead` classification that selects the
-clipped-vs-unclipped vertex path — the kind of thing this campaign has learned
-not to assume is null. **It measured byte-identical at all 21 gates in both
-arms regardless**, and it is a candidate for unconditional-ON on a further
-pose sweep.
+It is **default OFF**, and after measuring it the honest reason is not the
+one anticipated. It changes cull outcomes and therefore the `Tri_Inside` /
+`Tri_Ahead` classification that selects the clipped-vs-unclipped vertex path,
+so it was expected to need a divergence budget — but it measured
+**byte-identical at all 21 gates in both arms**, *because it culls nothing*:
+main-view transformed verts are identical with it ON and OFF at every one of
+the six (arm × pose) pairs measured (flat t=5743/6133/6293, displaced t=5743;
+28 782 / 54 786 / 299 449 either way). The reason is 10e's table: even the
+correct tight sphere over an entire compacted clone spans more than a cell,
+and the whole-clone sphere is **0.0 % frustum-cullable at every pose measured**
+whether it is loose or tight. **So: keep it OFF. It is a correctness fix with
+no measured win** — worth having on the shelf for whoever revisits a split,
+not worth flipping.
+
+*Do not read the byte-identity as evidence that a tighter sphere is safe in
+general; here it is evidence that it did nothing.*
 
 ### 10e. Verdict on §8e's spatial clone split — DE-SCOPED, with the numbers
 
@@ -1013,11 +1023,34 @@ magnitude smaller than the one §8b costed:
   spatial at the wall pose** — the split is the *worse* of the two granularities
   exactly where it was supposed to pay.
 
-**Recommendation: do not build the spatial split.** If more is wanted from the
-clone, the ranked leftovers are (a) turn `--mirror_clone_tight_bsphere` on by
-default after a wider pose sweep, and (b) bound the OPAQUE clone raster by the
-mirror window the way the TRANSPARENT path already does (RENDER.CPP ~936–990):
-opaque clone faces are still rasterised over their full projection and
-rejected per pixel, and RNDR was measured at 7.19 of the clone's 11.40 ms in
-the pre-`1a91ed5` displaced arm — that is the remaining un-attacked half of
-the original question, and it needs no clone split at all.
+**The ceiling RE-MEASURED on the compacted clone** — this is what a split
+would actually be chasing now (same instrument, `--mirror_cull_census`):
+
+| arm | pose | clone verts | cell | sub-spheres | frustum-cullable | window-cullable |
+|---|---|--:|---|--:|--:|--:|
+| flat | t=5743 | 27 370 | per-mesh | 8 | 0.0 % | **37.5 %** (10 260 v) |
+| flat | t=5743 | 27 370 | 8 | 60 | 0.1 % | 25.7 % (7 028 v) |
+| flat | t=5743 | 27 370 | 2 | 223 | 0.6 % | 41.7 % (11 414 v) |
+| flat | t=6133 / t=6293 | **1 926** | per-mesh | 1 | 0.0 % | 0.0 % |
+| flat | t=6133 / t=6293 | 1 926 | 8 | 22 | 98.1 % | 99.8 % (**1 923 v**) |
+| displ | t=5743 | 26 861 | per-mesh | 9 | 0.0 % | 38.2 % (10 260 v) |
+| displ | t=5743 | 26 861 | 8 | 60 | 0.1 % | 25.1 % (6 751 v) |
+| displ | t=6133 / t=6293 | **1 893** | 8 | 22 | 99.0 % | 99.9 % (**1 891 v**) |
+
+At the mirror-PANEL poses a split would cull 98–100 % — **of 1 926 vertices**,
+i.e. ~1 890 verts ≈ 0.01 ms. At the wall pose the best granularity is
+per-source-mesh at 10 260 verts ≈ 0.05 ms of a 0.44 ms pass, and the spatial
+cells §8e specced are the *worse* of the two there. The whole-clone sphere is
+**0.0 % frustum-cullable at every pose in both arms**, loose or tight — which
+is the user's observation, confirmed exactly, and now worth almost nothing.
+
+**Recommendation: do not build the spatial split, and do not flip
+`--mirror_clone_tight_bsphere` on** (10d: it culls nothing measurable). The one
+leftover with real size behind it is to **bound the OPAQUE clone raster by the
+mirror window the way the TRANSPARENT path already does** (RENDER.CPP
+~936–990: a clone batch's bound is its mirror's stamped `gb.mirrorId` window,
+not the clone geometry's projection). Opaque clone faces are still rasterised
+over their full projection and rejected per pixel, and RNDR was 7.19 of the
+clone's 11.40 ms in the pre-`1a91ed5` displaced arm — the un-attacked half of
+the original question, needing no clone split at all. NOT re-measured after
+`964bf1d`; measure before building.
