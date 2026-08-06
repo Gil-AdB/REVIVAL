@@ -827,3 +827,197 @@ look call: mirror CLONES are hidden inside the mirror RTT scope but **not**
 inside the env/SH probe bakes — 110 030 of 309 740 OFFSCREEN verts/frame
 (35.5 %) pre-9d, ~68 540 post-9d, are clone meshes being transformed for
 probes. Whether a probe should see a reflection at all is the user's call.
+
+---
+
+## 10. ADDENDUM 2026-08-06 (later) — the mirror WINDOW cull, and the orphan CLONE VERTICES the re-measurement found
+
+Status: **one unconditional fix LANDED and byte-identical at 21 gates in both
+arms (`964bf1d`); one further correctness fix landed behind a default-OFF flag
+and measured byte-identical too; the SPATIAL CLONE SPLIT §8e specced is
+REFUTED for the shipping arm by the same numbers and de-scoped.** Commissioned
+from the user's question — *"a clone is culled by the frustum and never by the
+mirror window — can we improve something here?"* — with §8b's measured ceiling
+(63 % at wall poses, 89 % at panel poses, cell = 8) and its ~2 ms estimate as
+the brief.
+
+**Step 1 re-measured that ceiling on current HEAD and it had moved, because
+§8b's headline was mostly orphan vertices — and so, it turned out, was most of
+what remained.**
+
+### 10a. What §8b's ceiling was actually made of
+
+§8b measured the clone at **534 356 verts** and found cell = 8 spatial cells
+window-cullable at **62.9 %** at t=5743 while per-source-mesh saturated at
+30.3 %. §9c then established that **261 768 of those 534 356 (49 %) were the
+retired faceless Piramid parent**, and `799c808` removed them. Re-running the
+same instrument at t=5743 on the post-9d clone:
+
+| arm | clone verts | cell | sub-spheres | frustum-cullable | window-cullable |
+|---|--:|---|--:|--:|--:|
+| shipping flat | 27 416 | per-source-mesh | 8 | 0.0 % | **37.4 %** |
+| shipping flat | 27 416 | 8 | 60 | 0.1 % | **25.6 %** |
+| shipping flat | 27 416 | 2 | 223 | 0.6 % | 41.6 % |
+| `--greets_displace` | 272 751 | per-source-mesh | 9 | 0.0 % | 3.8 % |
+| `--greets_displace` | 272 751 | 8 | 103 | 1.6 % | **61.6 %** |
+| `--greets_displace` | 272 751 | 2 | 1 735 | 7.1 % | 77.8 % |
+
+At the mirror-PANEL poses the spatial cells still win big (t=6133 shipping:
+per-mesh 39.5 % → cell 8 **93.7 %**, of which the plain frustum already gets
+89.2 %; t=6293 the same). But **at the wall pose the spatial split now culls
+LESS than a per-source-mesh split** (25.6 % vs 37.4 %), which inverts §8b's
+central claim. The mechanism is §9c's: the margin spatial cells held over
+per-source-mesh was the room-spanning orphan block, and that block is gone.
+Window sizes are unchanged (0.04–0.80 % of screen at these poses), and at
+t=5534 (the corridor-looking-back pose) **no mirror is active at all**, so the
+clone costs nothing there and no cull can help.
+
+### 10b. THE FINDING — 90 % of a clone's vertices are referenced by no clone face
+
+The clone's VERTEX fill copied **every** vertex of every surviving source
+mesh. Its FACE fill drops faces **four** ways: `isMirrorSurface`, a null
+corner, `--greets_displace_flat_mirror`'s `Face_MainOnly` skip, and the *"in
+FRONT of the mirror plane"* side test. Nothing fed those rejections back into
+the vertex selection. Measured with a new compile-time-gated `[MIRROR-ORPHAN]`
+line, greets t=5743:
+
+| arm | mirror | clone verts | referenced by a clone face | ORPHAN |
+|---|---|--:|--:|--:|
+| `--greets_displace` | teleporter | 272 751 | 26 861 | **245 890 (90.2 %)** |
+| `--greets_displace` | P_TEXT.JPG#5 | 272 751 | 26 765 | 245 986 (90.2 %) |
+| `--greets_displace` | P_TEXT.JPG#11 | 272 751 | 1 893 | 270 858 (99.3 %) |
+| `--greets_displace` | P_TEXT.JPG#13 | 272 751 | 24 476 | 248 275 (91.0 %) |
+| shipping flat | teleporter | 27 416 | 27 370 | 46 (0.2 %) |
+| shipping flat | P_TEXT.JPG#5 | 27 416 | 27 274 | 142 (0.5 %) |
+| shipping flat | **P_TEXT.JPG#11** | 27 416 | **1 926** | **25 490 (93.0 %)** |
+| shipping flat | P_TEXT.JPG#13 | 27 416 | 24 922 | 2 494 (9.1 %) |
+
+This is the class §9d removed at MESH granularity (`FIndex == 0`), one level
+down at VERTEX granularity — and it is **most of the clone**.
+
+Two separate causes, worth keeping apart:
+
+1. **The displaced arm's 90 % is `--greets_displace_flat_mirror` doing half
+   its job.** The flag's Rule 3 skips a source mesh only when *every* one of
+   its faces is rejected, and greets merges the room into meshes that also
+   carry non-`Face_MainOnly` faces — so the flag dropped the displaced FACES
+   (90 890 → 9 198 per clone, verified) while leaving every displaced VERTEX
+   in the clone. Its documented *"so the saving lands in the transform phase,
+   not only in RNDR"* was therefore **not happening**. With
+   `--no-greets_displace_flat_mirror` the same clone is 272 588 verts / 90 890
+   faces and only 0.1 % orphan — i.e. the orphans are exactly the vertices the
+   flag orphaned.
+2. **The shipping arm's 93 % on mirror `P_TEXT.JPG#11` is the plane-side
+   test.** That mirror keeps 642 of ~9 200 faces (the rest are behind its
+   plane), so 1 926 of 27 416 vertices are reachable. This one is
+   arm-independent and has been there since the mirror system was built.
+
+### 10c. The fix (LANDED `964bf1d`, unconditional, byte-identical at 21 gates)
+
+Clone only the vertices a surviving clone face references. Deliberately **not**
+§8e's spatial split:
+
+* ONE shared `cloneFaceLive()` predicate decides face survival; the count loop
+  sizes the vertex array EXACTLY with it and the fill loop caches it. The
+  count/fill lockstep this file keeps warning about cannot drift when there is
+  one copy of the test. The FACE count stays the loose one on purpose —
+  `totalFaces == 0` returns *without* reclaiming the mirror id while
+  `fOfs == 0` reclaims it, and `gb.mirrorId` is a rendered value.
+* `Mirror::cloneSrcVert` maps clone vertex → source vertex. source→clone is a
+  COMPACTION, not the identity, so every per-frame refresh goes through it:
+  `UpdateMirror`'s Pos/N/Tangent/colour re-mirror and `DisplaceRebuild`'s
+  `Vertex::ShellH` copy (18a58ae's fix — the one site outside GreetsMirror.cpp
+  that assumed the identity).
+* **`ClonedMeshRange` stays CONTIGUOUS on the clone side**, which is why none
+  of §8e's hazards apply: the census sub-spheres, `cloneFaceSrc`, the RTT hide
+  scope, `MirrorShatter`, `MaterialEditor` and `EnvBake` are untouched, and
+  there is still exactly one `m.cloneMesh` per mirror.
+
+**Front-end effect, t=5743, exact counts (`--xfrm_pass_mesh_prof`, census
+build, both arms):**
+
+| arm | pass | HEAD | FIX | delta |
+|---|---|--:|--:|--:|
+| `--greets_displace` | MAIN | 545 339 | 299 449 | **−245 890 (−45.1 %)** |
+| `--greets_displace` | OFFSCREEN | 3 086 425 | 2 407 892 | **−678 533 (−22.0 %)** |
+| `--greets_displace` | SHADOW | 5 857 441 | 5 857 441 | 0 |
+| shipping flat | MAIN | 54 832 | 54 786 | −46 |
+| shipping flat | OFFSCREEN | 219 614 | 200 464 | −19 150 (−8.7 %) |
+| shipping flat | SHADOW | 460 071 | 460 071 | 0 |
+
+SHADOW is unchanged **by construction** — clones are `Tri_NoShadowCast`. The
+active clone's share of the greets main view stays 50 % in the flat arm (its
+teleporter clone was only 0.2 % orphan) and falls **50 % → 9 %** in the
+displaced one. HEAD's clone share of OFFSCREEN, 68 540 verts/frame, reproduces
+§9f's figure exactly; the fix takes it to 49 390.
+
+**Serial main-view `Transform_Objects`** (`--xfrm_prof`, interleaved
+HEAD/FIX/FIX+tight rounds, min-of-arm, load 24–40 on a shared box — read the
+ratios as solid and the absolutes as indicative). **In the shipping arm the win
+is at the MIRROR-PANEL review poses, not the wall pose**, because that is where
+the 93 %-orphan mirror `P_TEXT.JPG#11` is the active clone:
+
+| pose | arm | main verts HEAD → FIX | XFRM ms HEAD → FIX | VERT stage | fPushed |
+|---|---|--:|--:|--:|--:|
+| t=5743 | `--greets_displace` | 545 339 → **299 449 (−45.1 %)** | 3.686 → **2.691 (−27.0 %)** | 2.527 → **1.410 (−44.2 %)** | 34 754 → 34 754 |
+| t=6133 (panel) | shipping flat | 54 272 → **28 782 (−47.0 %)** | 0.304 → **0.189 (−37.8 %)** | 0.234 → 0.121 | 2 227 → 2 227 |
+| t=6293 (panel) | shipping flat | 54 272 → **28 782 (−47.0 %)** | 0.305 → **0.200 (−34.4 %)** | 0.235 → 0.123 | 2 038 → 2 038 |
+| t=5743 (wall) | shipping flat | 54 832 → 54 786 (−46) | 0.409 → 0.442 | 0.232 → 0.252 | 7 930 → 7 930 |
+
+n = 5 rounds per arm for the flat rows, 3–4 for the displaced pair (the sweep
+was cut short at load 33–37; the 27 % effect is an order of magnitude above the
+round-to-round spread).
+
+`fPushed` is identical at every pose in every arm — **not one face changed**,
+which is the structural statement that the removed work produced nothing. The
+t=5743 row is a null-change pose where the measured 0.033 ms is load noise on
+a shared box, not a regression signal; it is reported rather than dropped.
+
+### 10d. `--mirror_clone_tight_bsphere` — the cull the user actually asked about
+
+With the clone compacted, its bounding sphere is stale by construction: it is
+still stamped from the bbox of **every source vertex the builder walked**.
+Mirror `P_TEXT.JPG#11` keeps 1 926 vertices in one corner of the room yet its
+sphere spans the whole mirrored room, so **no camera pose can reject it** —
+that is the mechanism behind "a clone is culled by the frustum and never by
+the mirror window". Tightening the sphere to the KEPT vertices is the
+*correct* sphere, not merely a conservative one: a clone cannot draw a vertex
+it does not carry, so a clone this rejects had no vertex in the frustum.
+
+Measured effect on the sphere at t=5743, shipping arm: `P_TEXT.JPG#11`'s z
+extent 81.0 → 26.6 world units, `P_TEXT.JPG#13`'s 80.8 → 66.3.
+
+It is **default OFF** anyway, because it changes cull outcomes and with them
+the `Tri_Inside` / `Tri_Ahead` classification that selects the
+clipped-vs-unclipped vertex path — the kind of thing this campaign has learned
+not to assume is null. **It measured byte-identical at all 21 gates in both
+arms regardless**, and it is a candidate for unconditional-ON on a further
+pose sweep.
+
+### 10e. Verdict on §8e's spatial clone split — DE-SCOPED, with the numbers
+
+After 10c the clone is ~27 k verts in **both** arms (26 861 displaced / 27 370
+flat at t=5743), so the split is now sized against a target an order of
+magnitude smaller than the one §8b costed:
+
+* Main-view `Transform_Objects` in the shipping arm is **0.19–0.44 ms total**.
+  §8b's "~2 ms off a 5.9 ms pass" was computed against a 534 356-vert clone
+  that was 49 % retired-Piramid orphans and 45 % more orphans on top; the
+  arithmetic does not survive either removal.
+* The split's own cost is unchanged and is the expensive part: a per-clone-
+  vertex source index, per-chunk `cloneFaceSrc`, and every `m.cloneMesh`
+  consumer becoming a loop (RTT hide scope, `MirrorShatter`,
+  `DisplaceRebuild`, `MaterialEditor`, `EnvBake`, `MainLoop`), with the
+  `Tri_Possessed` / per-chunk Pos+Rot allocation hazards GREETS.CPP documents.
+* And the ceiling it would chase is now **37.4 % per-source-mesh vs 25.6 %
+  spatial at the wall pose** — the split is the *worse* of the two granularities
+  exactly where it was supposed to pay.
+
+**Recommendation: do not build the spatial split.** If more is wanted from the
+clone, the ranked leftovers are (a) turn `--mirror_clone_tight_bsphere` on by
+default after a wider pose sweep, and (b) bound the OPAQUE clone raster by the
+mirror window the way the TRANSPARENT path already does (RENDER.CPP ~936–990):
+opaque clone faces are still rasterised over their full projection and
+rejected per pixel, and RNDR was measured at 7.19 of the clone's 11.40 ms in
+the pre-`1a91ed5` displaced arm — that is the remaining un-attacked half of
+the original question, and it needs no clone split at all.

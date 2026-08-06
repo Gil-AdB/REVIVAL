@@ -821,6 +821,88 @@ MEASURED: with the `1/π`, all 11 disco lights together moved the t=2000 frame b
 Removed, and documented in the shader as parity rather than physics — the reference for this
 comparison is the CPU image, and the CPU's Lambert is not normalised.
 
+#### Tone: the frame was washed out because the albedo was never linearised
+
+Diagnosed by DECOMPOSITION, not by eye. `--viz=ambient|emissive|direct` (new) tonemap each term
+on its own so a patch can be compared straight against a DEMO reference patch and the offending
+term **named**. That said *emissive* — and emissive alone (left wall p50 149.5) already exceeded
+the reference's **total** (124.9), which ruled out the ambient source that had been assumed at
+fault.
+
+Cause, read out of the engine: under `--hdr_linear` the CPU kernel "square[s] the (normalized)
+albedo and let[s] light enter at power 1", storing the result re-encoded with `sqrt`
+(`DeferredSurfaceKernel.cpp:1374-1381`) — which is exactly what this arm's tonemap already does on
+the way out. GpuBench stored the raw **gamma** texel and used it as linear radiance.
+
+MEASURED, median luma of identical patches against a DEMO render at t=5743:
+
+| patch | DEMO reference | before | after |
+|---|--:|--:|--:|
+| left wall | 124.9 | 168.2 | **102.0** |
+| floor | 66.1 | 148.4 | **76.0** |
+| whole frame | 121.4 | 163.7 | **97.3** |
+
+From ~+35 % over the reference to ~−20 % under, with the floor near exact.
+
+**Two suspected tone gaps are now STRUCK OFF rather than left as suspicions:** `hdr_exposure` needs
+no work (`cine::kGreetsExposure` is **1.0**, `SceneTick.h:237`, already this arm's default), and
+`hdr_refl_gain` 4.0 only affects `Mat_HdrEmissive` *forward* surfaces (the disco ball mesh), which
+this arm does not have.
+
+**The one ambient gap that remains** and explains the residual under-read: the CPU's `--sh_ambient`
+coefficients come from a real 32² **env-probe bake at the room centre** (`EnvBake.cpp:1652+`,
+`SHAmbient_EnsureBaked`) — actual room bounce — while this arm projects the FLD's zenith/nadir
+**backdrop** gradient. `Scene::Ambient` is (0,0,0) here, so there is no cheap authored fallback; a
+real probe bake is the fix and it is not a small one.
+
+#### The direct diffuse deliberately has NO Lambert 1/π — do not "fix" it
+
+The CPU's direct term is `intensity = NoL·atten·Material::Diffuse; lR += intensity·colR`
+(`DeferredSurfaceKernel.cpp:3245-3258`), and its only `1/π` factors are inside the GGX **D**. That
+is a long-standing engine convention, not a bug in the CPU. **This arm reproduces it on purpose**,
+because the reference for this comparison is the CPU image. Normalising it would be physically
+tidier and would put the two renderers π apart. The shader says so at the site.
+
+#### Bloom
+
+Implemented to match `Hdr.cpp`'s `Render_BloomPass` exactly — soft-knee bright pass
+(`(lum−thresh)/lum` weighting, not a hard cut) into a DS=4 box downsample, separable 5-tap
+`[1 4 6 4 1]/16` run **twice**, bilinear upsample × intensity added **before** the tonemap. greets
+sets `bloom` ON with `bloom_intensity` 2.0 (`GREETS.CPP:1168-9`); threshold 200 on the CPU's linear
+0–255 scale, /255 for this arm's 0..1 buffer. Not reproduced: `HdrClamp` on the add-back (f16
+carries the range) and the shared bright-pass cache (anamorphic / lens-ghost are off).
+
+#### Interactive window (`--window`)
+
+A real SDL2 window with a `CAMetalLayer`, the scene **animated** through FDS's own
+`Animate_Objects`, free-fly **and** the authored camera spline, and live per-pass GPU ms overlaid.
+Offscreen remains the default — nothing is displayed without the flag.
+
+- **Time.** `--time_scale` centiseconds per real second (100 = real time), mapped to `CurFrame` by
+  greets' own formula, the same one `RENDER.CPP` derives (`t = Timer/SceneTime`,
+  `CurFrame = lerp(StartFrame, EndFrame, t)`).
+- **Per frame:** `Reanimate()` re-runs `Animate_Objects`, then refreshes object model matrices, the
+  scripted camera, and the **whole light list** — the mech omnis ride the hierarchy and the 10
+  disco spots rotate, so their positions, directions and spot shadow bases all change.
+- **Vertices are never re-uploaded, and that is a property of the engine, not a shortcut.**
+  `Animate_Objects` fills per-mesh `IPos`/`IScale`/`RotMat`; it does **not** deform vertices — the
+  mech animates as a hierarchy of rigid TriMeshes. `VertexHash()` keeps that claim measured rather
+  than asserted, and the HUD reports which it observed. So "re-upload only meshes whose verts
+  changed" resolves to "none of them do"; the per-frame upload is 35 batch uniform blocks.
+- **CPU-side per-frame work is timed separately** from GPU pass time (animation vs upload), which
+  is the split the comparison table needs.
+- SDL2 over raw Cocoa: already a dependency of DEMO and installed (2.32.10), ships `SDL_metal.h`
+  so the layer is three calls instead of an `NSApplication`+delegate, and gives keyboard/mouse
+  capture for free. Cost: one extra link dependency on a target that otherwise links only
+  Metal/Foundation/QuartzCore; the offscreen path never touches it.
+
+#### Build note — shader staging
+
+Staging the `.metal` files is now its own target with them as `DEPENDS`, not a `POST_BUILD` on the
+executable. `POST_BUILD` only fires when GpuBench relinks, so editing a shader alone left a **stale**
+copy next to the binary and the runtime compiled the old source, reporting errors at line numbers
+that no longer existed.
+
 #### Other known gaps in this arm
 
 - **Tone is not matched to DEMO** (`hdr_exposure` = `cine::kGreetsExposure` not looked up,

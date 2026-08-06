@@ -453,10 +453,47 @@ Ranked by share of what remains, measured with `--xfrm_pass_mesh_prof`:
   re-propose without a new measurement.
 
 **Separate LOOK call, not actioned:** mirror clones are hidden inside the
-mirror RTT scope but **not** inside the env/SH probe bakes — 110 030 of 309 740
-OFFSCREEN verts/frame pre-fix (~68 540 post-fix) are clone meshes transformed
-for probes. Whether a probe should see a reflection at all is the user's call;
-hiding them there is a one-line scope change worth ~68 k verts/frame.
+mirror RTT scope but **not** inside the env/SH probe bakes. Re-measured
+2026-08-06 after the orphan-clone-vertex compaction (`964bf1d`,
+VISIBILITY_PLAN §10): at t=5743 the four clones are **49 390 of 200 464
+OFFSCREEN verts/frame (24.6 %)** in the shipping arm (was 68 540 of 219 614 =
+31.2 % before the compaction) and **48 804 of 2 407 892 (2.0 %)** under
+`--greets_displace`. Whether a probe should see a reflection at all is the
+user's call; the machinery already exists — `g_envBakeSkipMirrorClones` /
+`EnvBake_IsMirrorCloneObj` at `Transform.cpp:1481` structurally excludes
+clones from probe bakes, but it is gated on **`--env_bake_fix`, which defaults
+0**, so today's shipping probes DO see the reflections. Turning that on is the
+switch; the saving is the 49 390 verts/frame above.
+
+## Mirror clone — what is left after the orphan compaction (2026-08-06)
+
+Context: `docs/VISIBILITY_PLAN.md` §10. `964bf1d` clones only the vertices a
+surviving clone face references: displaced-arm MAIN 545 339 → 299 449
+verts/frame (−45.1 %), shipping-arm mirror-panel poses 54 272 → 28 782
+(−47.0 %, XFRM 0.304 → 0.189 ms), byte-identical at 21 gates in both arms.
+Ranked leftovers:
+
+- **`--mirror_clone_tight_bsphere` → default ON.** TODO. Landed default-OFF in
+  `964bf1d` and already measured byte-identical at all 21 gates in both arms.
+  It is the *correct* sphere (a clone cannot draw a vertex it does not carry),
+  and it is what makes a clone rejectable at all — mirror `P_TEXT.JPG#11`
+  keeps 1 926 vertices in one corner yet spans the whole mirrored room. Needs
+  a wider pose sweep before flipping, because it changes cull outcomes and
+  with them the `Tri_Inside`/`Tri_Ahead` clipped-vs-unclipped vertex path.
+- **Bound the OPAQUE clone raster by the mirror window.** TODO, and the
+  remaining half of the user's original question. The TRANSPARENT path already
+  does exactly this (`RENDER.CPP` ~936–990: a clone batch's bound is its
+  mirror's stamped `gb.mirrorId` window, not the clone geometry's projection);
+  the opaque path rasterises clone faces over their full projection and
+  rejects them per pixel. RNDR was 7.19 of the clone's 11.40 ms in the
+  pre-`1a91ed5` displaced arm. Needs no clone split. NOT measured post-`964bf1d`.
+- **~~Spatial split of the clone (VISIBILITY_PLAN §8e)~~ — DE-SCOPED, MEASURED
+  NOT WORTH IT.** Post-compaction the clone is ~27 k verts in both arms and
+  main-view `Transform_Objects` is 0.19–0.44 ms total, so §8b's "~2 ms" is
+  void. Worse, at the wall pose spatial cells now cull **less** than a
+  per-source-mesh split (25.6 % vs 37.4 %) — the margin they used to hold was
+  the orphan block, twice removed (`799c808`, `964bf1d`). Do not re-propose
+  without a new measurement.
 
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,
