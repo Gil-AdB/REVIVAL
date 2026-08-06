@@ -573,6 +573,17 @@ bool Load(Scene &out, const LoadOptions &opt) {
             out.camera.src[0], out.camera.src[1], out.camera.src[2],
             out.camera.fov, out.camera.perspX, out.camera.perspY,
             out.camera.cntrEX, out.camera.cntrEY, out.camera.nearZ, out.camera.farZ);
+        for (const auto &b : out.batches)
+            if (b.luminosity != 0.0f)
+                std::fprintf(stderr,
+                    "[INGEST] emissive material '%s' (%s): Luminosity=%.3f Diffuse=%.2f\n",
+                    b.materialName.c_str(), b.meshName.c_str(), b.luminosity, b.diffuse);
+        std::fprintf(stderr,
+            "[INGEST] ambient: Scene::Ambient=(%.1f,%.1f,%.1f)  SkyZenith=(%.1f,%.1f,%.1f)  "
+            "SkyNadir=(%.1f,%.1f,%.1f)\n",
+            out.ambient[0], out.ambient[1], out.ambient[2],
+            out.skyZenith[0], out.skyZenith[1], out.skyZenith[2],
+            out.skyNadir[0], out.skyNadir[1], out.skyNadir[2]);
     }
     return !out.verts.empty();
 }

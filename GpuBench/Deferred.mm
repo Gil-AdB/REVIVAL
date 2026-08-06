@@ -54,6 +54,14 @@ struct ShadowUniforms {
     float projScale, pad1;
 };
 
+struct BloomUniforms {
+    float srcSize[2];
+    float dstSize[2];
+    float threshold;
+    float intensity;
+    float pad[2];
+};
+
 struct FlareUniforms {
     float centerPx[4];   // .xy screen px, .z view z, .w half-extent px
     float gain[4];       // .x gain, .zw target resolution
@@ -251,6 +259,25 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
         if (!psoFlare) { std::fprintf(stderr, "[DEFERRED] flare pso: %s\n",
                                       [[e localizedDescription] UTF8String]); return false; }
     }
+    id<MTLRenderPipelineState> psoBloomBright = makeFsPso(@"fs_bloom_bright", MTLPixelFormatRGBA16Float);
+    id<MTLRenderPipelineState> psoBloomBlur   = makeFsPso(@"fs_bloom_blur",   MTLPixelFormatRGBA16Float);
+    id<MTLRenderPipelineState> psoBloomAdd;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = [lib newFunctionWithName:@"vs_fullscreen"];
+        p.fragmentFunction = [lib newFunctionWithName:@"fs_bloom_add"];
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoBloomAdd = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoBloomAdd) { std::fprintf(stderr, "[DEFERRED] bloom-add pso: %s\n",
+                                         [[e localizedDescription] UTF8String]); return false; }
+    }
     id<MTLRenderPipelineState> psoLight   = makeFsPso(@"fs_lighting", MTLPixelFormatRGBA16Float);
     id<MTLRenderPipelineState> psoTonemap = makeFsPso(@"fs_tonemap",  MTLPixelFormatBGRA8Unorm);
     id<MTLRenderPipelineState> psoViz     = makeFsPso(@"fs_viz",      MTLPixelFormatBGRA8Unorm);
@@ -281,6 +308,14 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
     rawd.minFilter = MTLSamplerMinMagFilterNearest;
     rawd.magFilter = MTLSamplerMinMagFilterNearest;
     id<MTLSamplerState> rawSamp = [dev newSamplerStateWithDescriptor:rawd];
+    // Bilinear + clamp-to-edge for the bloom upsample (Hdr.cpp clamps its
+    // bilinear fetch to the buffer edge the same way).
+    MTLSamplerDescriptor *bsd = [MTLSamplerDescriptor new];
+    bsd.minFilter = MTLSamplerMinMagFilterLinear;
+    bsd.magFilter = MTLSamplerMinMagFilterLinear;
+    bsd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    bsd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> bloomSamp = [dev newSamplerStateWithDescriptor:bsd];
 
     // ---- buffers / textures ----------------------------------------------
     id<MTLCommandQueue> queue = [dev newCommandQueue];
@@ -333,6 +368,19 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
     id<MTLTexture> hdrTex  = mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate);
     id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> stageTex = mkTarget(MTLPixelFormatBGRA8Unorm, MTLStorageModeShared);
+    // Quarter-res bloom ping-pong (DS=4, exactly Hdr.cpp's constant).
+    const int BW = (W + 3) / 4, BH = (H + 3) / 4;
+    auto mkBloom = [&]() -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                              width:NSUInteger(BW)
+                                                             height:NSUInteger(BH)
+                                                          mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    id<MTLTexture> bloomA = mkBloom(), bloomB = mkBloom();
 
     // ---- shadow cubes (omnis) + single maps (spots) -----------------------
     // A Light_SpotLight bakes ONE perspective depth map, not six cube faces —
@@ -559,8 +607,12 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
             u.rotRow1[c] = b.rot[1][c];
             u.rotRow2[c] = b.rot[2][c];
             u.objPos[c] = b.pos[c];
-            // authored base colour is 0..1 sRGB-ish; square to linear
-            u.baseColor[c] = b.baseColor[c] * b.baseColor[c];
+            // NOT squared here. The G-buffer carries a GAMMA value for both the
+            // textured and untextured cases, and fs_lighting does the single
+            // --hdr_linear squaring at the point of use. Squaring here as well
+            // made untextured surfaces a different colour space from textured
+            // ones.
+            u.baseColor[c] = b.baseColor[c];
         }
         u.baseColor[3] = (b.textureIndex >= 0) ? 1.0f : 0.0f;
         u.matParams[0] = b.diffuse;
@@ -947,6 +999,39 @@ bool RunDeferred(const Scene &scene, const DeferredOptions &opt,
                 [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
             }
             [enc endEncoding];
+        }
+
+        // --- pass 2c: bloom (bright-pass -> 4 blur taps -> additive upsample) ---
+        if (!viz && opt.stages >= 3 && opt.bloom && opt.bloomIntensity > 0.0f) {
+            BloomUniforms bu{};
+            bu.srcSize[0] = float(W); bu.srcSize[1] = float(H);
+            bu.dstSize[0] = float(BW); bu.dstSize[1] = float(BH);
+            bu.threshold = opt.bloomThreshold;
+            bu.intensity = opt.bloomIntensity;
+            auto fsPass = [&](id<MTLRenderPipelineState> pso, id<MTLTexture> dst,
+                              id<MTLTexture> srcTex, const float dir[2], bool additive) {
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = dst;
+                rp.colorAttachments[0].loadAction =
+                    additive ? MTLLoadActionLoad : MTLLoadActionDontCare;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                [e setRenderPipelineState:pso];
+                [e setFragmentBytes:&bu length:sizeof(bu) atIndex:1];
+                if (dir) [e setFragmentBytes:dir length:sizeof(float) * 2 atIndex:2];
+                [e setFragmentTexture:srcTex atIndex:0];
+                [e setFragmentSamplerState:bloomSamp atIndex:0];
+                [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [e endEncoding];
+            };
+            static const float kH[2] = {1.0f, 0.0f}, kV[2] = {0.0f, 1.0f};
+            fsPass(psoBloomBright, bloomA, hdrTex, nullptr, false);
+            // TWO full separable passes, as Hdr.cpp does (`for pass < 2`).
+            for (int pass = 0; pass < 2; ++pass) {
+                fsPass(psoBloomBlur, bloomB, bloomA, kH, false);
+                fsPass(psoBloomBlur, bloomA, bloomB, kV, false);
+            }
+            fsPass(psoBloomAdd, hdrTex, bloomA, nullptr, true);
         }
 
         // --- pass 3: tonemap ---

@@ -292,7 +292,16 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
     const float3 V = normalize(-P);
     const float NoV = saturate(dot(N, V));
 
-    const float3 baseColor = alb.rgb;
+    // ALBEDO IS SQUARED HERE, and that is parity, not a guess. Under
+    // --hdr_linear the CPU kernel "square[s] the (normalized) albedo and let[s]
+    // light enter at power 1" (DeferredSurfaceKernel.cpp:1374-1381), then
+    // re-encodes with sqrt on the way out — which is exactly what fs_tonemap
+    // does. The G-buffer stores the raw GAMMA texel (as the CPU's does), so the
+    // square belongs at the point of use.
+    // MEASURED before this: the left wall read p50 168 against the DEMO
+    // reference's 125, and the floor 148 against 66 — the whole frame was
+    // washed out because a gamma value was being used as linear radiance.
+    const float3 baseColor = alb.rgb * alb.rgb;
     const float  ao        = alb.a;
     const float  diffuseK  = par.x * u.diffuseFactor;
     const float  specK     = par.y * u.specularFactor;
@@ -462,6 +471,7 @@ fragment float4 fs_tonemap(FsQuadOut in [[stage_in]],
 fragment float4 fs_viz(FsQuadOut in [[stage_in]],
                        constant FrameUniforms &u [[buffer(1)]],
                        constant GpuLight      *L [[buffer(2)]],
+                       constant float4        *sh [[buffer(3)]],
                        texture2d<float> gAlbedo  [[texture(0)]],
                        texture2d<float> gNormal  [[texture(1)]],
                        texture2d<float> gParams  [[texture(2)]],
@@ -489,7 +499,7 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
     const float4 par = gParams.read(px);
 
     switch (mode) {
-        case 0: return float4(sqrt(alb.rgb), 1);                    // albedo
+        case 0: return float4(alb.rgb, 1);   // albedo — stored GAMMA, show as-is
         case 1: return float4(N * 0.5f + 0.5f, 1);                  // view normal
         case 2: return float4(float3(alb.a), 1);                    // baked AO
         case 3: return float4(float3((Z - u.nearZ) / (u.farZ - u.nearZ)), 1);
@@ -518,6 +528,59 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
             // to resolve whether the light is EMBEDDED in geometry)
             return float4(saturate(major / 40.0f), saturate(storedDist / 40.0f),
                           saturate(storedDist * 0.5f), 1);
+        }
+        case 8: case 9: case 10: {
+            // PER-TERM decomposition of the lighting equation, tonemapped the
+            // same way the real output is, so a patch can be compared directly
+            // against a DEMO reference patch and the over-bright term NAMED
+            // rather than guessed at.
+            //   8 = ambient only (SH irradiance x AO, incl. the multiscatter env)
+            //   9 = emissive only (Material::Luminosity)
+            //  10 = direct only (all omnis + spots, with shadows)
+            const float3 Nw8 = normalize(
+                  float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * N.x
+                + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * N.y
+                + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * N.z);
+            const float3 irr8 = SH_Irradiance(sh, Nw8) * u.ambientFactor;
+            float3 c8 = 0.0f;
+            const float3 bc8 = alb.rgb * alb.rgb;      // same squaring as fs_lighting
+            if (mode == 8) c8 = bc8 * irr8 * alb.a;
+            else if (mode == 9) c8 = bc8 * (par.w * 4.0f);
+            else {
+                // The direct sum, without re-deriving the BRDF: reuse a Lambert
+                // stand-in is NOT good enough for attribution, so evaluate the
+                // same diffuse+atten the lighting pass does, minus specular.
+                const float3 V8 = normalize(-P);
+                (void)V8;
+                for (uint i = 0; i < u.numLights; ++i) {
+                    const float3 lRel8 = L[i].pos - u.camSrc;
+                    const float3 lPos8 = rowmul(u.camRow0, u.camRow1, u.camRow2, lRel8);
+                    const float3 toL8 = lPos8 - P;
+                    const float d28 = dot(toL8, toL8);
+                    const float r8 = L[i].range * u.lightRangeScale;
+                    if (d28 >= r8 * r8) continue;
+                    const float dd8 = sqrt(d28);
+                    const float NoL8 = saturate(dot(N, toL8 / max(dd8, 1e-6f)));
+                    if (NoL8 <= 0.0f) continue;
+                    float at8 = saturate(1.0f - dd8 * (L[i].invRange / u.lightRangeScale));
+                    if (L[i].isSpot != 0) {
+                        const float3 pwx = u.camSrc
+                            + float3(u.camRow0.x, u.camRow1.x, u.camRow2.x) * P.x
+                            + float3(u.camRow0.y, u.camRow1.y, u.camRow2.y) * P.y
+                            + float3(u.camRow0.z, u.camRow1.z, u.camRow2.z) * P.z;
+                        const float ct8 = dot(L[i].dir, normalize(pwx - L[i].pos));
+                        if (ct8 <= L[i].cosOuter) continue;
+                        if (ct8 < L[i].cosInner) {
+                            const float tt8 = (ct8 - L[i].cosOuter)
+                                            / max(L[i].cosInner - L[i].cosOuter, 1e-6f);
+                            at8 *= tt8 * tt8 * (3.0f - 2.0f * tt8);
+                        }
+                    }
+                    c8 += bc8 * par.x * L[i].color * (NoL8 * at8);
+                }
+            }
+            c8 = saturate((c8 * (2.51f * c8 + 0.03f)) / (c8 * (2.43f * c8 + 0.59f) + 0.14f));
+            return float4(sqrt(c8), 1);
         }
         case 6: {   // lights reaching this pixel, normalised by the light count
             uint hit = 0;
@@ -650,4 +713,87 @@ fragment float4 fs_flare(FlareOut in [[stage_in]],
     if (zEnc > 0.0f && in.refZ <= zEnc) discard_fragment();
     const float3 c = flareTex.sample(samp, in.uv).rgb;
     return float4(c * f.gain.x, 1.0f);
+}
+
+// ---------------------------------------------------------------------------
+// bloom — the SAME construction as FDS/RENDER/Hdr.cpp's Render_BloomPass
+// ---------------------------------------------------------------------------
+//
+// greets turns this on by default with bloom_intensity 2.0 (GREETS.CPP:1168-9),
+// so it is parity. Shape, from Hdr.cpp:
+//   1. bright pass + DS=4 box downsample. Per source texel lum = max(R,G,B);
+//      contribute only if lum > threshold, weighted by (lum-threshold)/lum (a
+//      SOFT knee, not a hard cut), then /16 for the 4x4 box.
+//   2. separable 5-tap gaussian [1 4 6 4 1]/16, run TWICE (H,V,H,V) at
+//      quarter-res, edge-clamped.
+//   3. bilinear upsample, x intensity, ADDED into the HDR buffer BEFORE the
+//      tonemap so the glow rolls off through ACES with everything else.
+//
+// The threshold is in the CPU's linear-radiance 0-255 scale (default 200, i.e.
+// 255 = reference white); this arm's HDR buffer is 0..1, so the host divides by
+// 255 before handing it over. Not reproduced: HdrClamp on the add-back (f16
+// carries the range) and the shared bright-pass cache (anamorphic/lens-ghost are
+// off here, so there is nothing to share it with).
+
+struct BloomUniforms {
+    float2 srcSize;      // full-res dimensions
+    float2 dstSize;      // quarter-res dimensions
+    float  threshold;    // already scaled into this buffer's units
+    float  intensity;
+    float2 pad;
+};
+
+fragment float4 fs_bloom_bright(FsQuadOut in [[stage_in]],
+                                constant BloomUniforms &b [[buffer(1)]],
+                                texture2d<float> src [[texture(0)]])
+{
+    const uint2 d = uint2(in.position.xy);
+    float3 acc = 0.0f;
+    for (uint dy = 0; dy < 4; ++dy) {
+        const uint sy = d.y * 4 + dy;
+        if (sy >= uint(b.srcSize.y)) break;
+        for (uint dx = 0; dx < 4; ++dx) {
+            const uint sx = d.x * 4 + dx;
+            if (sx >= uint(b.srcSize.x)) break;
+            const float3 c = src.read(uint2(sx, sy)).rgb;
+            const float lum = max(c.r, max(c.g, c.b));
+            if (lum > b.threshold) acc += c * ((lum - b.threshold) / lum);
+        }
+    }
+    return float4(acc * (1.0f / 16.0f), 1.0f);
+}
+
+// One separable gaussian tap set; `dir` picks horizontal (1,0) or vertical (0,1).
+fragment float4 fs_bloom_blur(FsQuadOut in [[stage_in]],
+                              constant BloomUniforms &b [[buffer(1)]],
+                              constant float2 &dir [[buffer(2)]],
+                              texture2d<float> src [[texture(0)]])
+{
+    const int2 p = int2(in.position.xy);
+    const int2 hi = int2(b.dstSize) - 1;
+    const int2 d = int2(dir);
+    const float gwc = 6.0f/16.0f, gw1 = 4.0f/16.0f, gw2 = 1.0f/16.0f;
+    const int2 m2 = clamp(p - 2*d, int2(0), hi);
+    const int2 m1 = clamp(p - 1*d, int2(0), hi);
+    const int2 p1 = clamp(p + 1*d, int2(0), hi);
+    const int2 p2 = clamp(p + 2*d, int2(0), hi);
+    const float3 o = src.read(uint2(m2)).rgb * gw2
+                   + src.read(uint2(m1)).rgb * gw1
+                   + src.read(uint2(p )).rgb * gwc
+                   + src.read(uint2(p1)).rgb * gw1
+                   + src.read(uint2(p2)).rgb * gw2;
+    return float4(o, 1.0f);
+}
+
+// Bilinear upsample + intensity, ADDITIVE into the HDR target (blend state does
+// the add, matching the CPU's `row[c] += bloom*intensity`).
+fragment float4 fs_bloom_add(FsQuadOut in [[stage_in]],
+                             constant BloomUniforms &b [[buffer(1)]],
+                             texture2d<float> src [[texture(0)]],
+                             sampler samp [[sampler(0)]])
+{
+    // Same sample point the CPU derives: fx = (x+0.5)/DS - 0.5 in DST texels,
+    // which is (x+0.5)/srcSize in normalised coords.
+    const float2 uv = (in.position.xy) / b.srcSize;
+    return float4(src.sample(samp, uv).rgb * b.intensity, 1.0f);
 }

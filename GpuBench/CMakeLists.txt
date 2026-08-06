@@ -21,11 +21,24 @@ add_executable(${PROJECT_NAME}
 # This machine has Command Line Tools only, so there is no offline `metal`
 # compiler; shaders are compiled at RUNTIME from source (measured working). They
 # are therefore data, not build inputs — copy them next to the binary.
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+#
+# The copy is its OWN target with the .metal files as DEPENDS, not a POST_BUILD
+# on GpuBench. POST_BUILD only fires when the executable relinks, so editing a
+# shader alone left a STALE copy staged next to the binary — the runtime then
+# compiled the old source and reported errors against line numbers that no longer
+# existed. Cost a confusing detour; this makes an edited shader always restage.
+file(GLOB GPUBENCH_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.metal")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/.shaders.stamp"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
             "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
+    COMMAND ${CMAKE_COMMAND} -E touch "${CMAKE_CURRENT_BINARY_DIR}/.shaders.stamp"
+    DEPENDS ${GPUBENCH_SHADERS}
     COMMENT "Staging GpuBench Metal shader sources")
+add_custom_target(GpuBenchShaders ALL
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/.shaders.stamp")
+add_dependencies(GpuBenchShaders ${PROJECT_NAME})
 
 # Compile the .mm as Objective-C++ without enabling the OBJCXX language
 # project-wide (which would perturb the default configure).

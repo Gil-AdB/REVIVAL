@@ -48,6 +48,12 @@ struct DeferredOptions {
     // surface lighting. flareGain is a DIAL, default 1.0 = the CPU's own scale.
     bool  flares = true;
     float flareGain = 1.0f;
+    // Bloom. greets sets bloom ON with bloom_intensity 2.0 (GREETS.CPP:1168-9)
+    // and the global bloom_threshold default is 200 in the CPU's linear 0-255
+    // radiance scale — divided by 255 on the way into this arm's 0..1 buffer.
+    bool  bloom = true;
+    float bloomThreshold = 200.0f / 255.0f;
+    float bloomIntensity = 2.0f;
     int   dumpCube = -1;
     std::string dumpCubePath;
     std::string outPath;

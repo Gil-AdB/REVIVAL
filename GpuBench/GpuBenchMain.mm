@@ -125,6 +125,9 @@ const char *kUsage =
     "                    cleared / min-max / decoded world distance) and write a 3x2 face\n"
     "                    atlas PPM. Forces Shared storage on the cubes, so never a timing run.\n"
     "  --dump_cube_out=PATH  where the atlas goes (default gpubench_cube.ppm)\n"
+    "  --no-bloom / --bloom_intensity=F / --bloom_threshold=F   greets defaults are ON,\n"
+    "                    intensity 2.0, threshold 200 (the CPU's linear 0-255 radiance scale)\n"
+    "  --no-flares / --flare_gain=F   omni flare sprites (the DEMO reference's bright pools)\n"
     "  --no-disco        do NOT synthesise GreetsDisco.cpp's 10 cone spotlights + glow\n"
     "                    omni. greets_disco defaults ON in DEMO, so these are PARITY --\n"
     "                    turning them off makes the arm dimmer than the shipped scene.\n"
@@ -177,6 +180,11 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
         else if (a == "--no-stone_tex")             opt.stoneTex = false;
         else if (a == "--no-disco")                 opt.disco = false;
+        else if (a == "--no-bloom")                 dopt.bloom = false;
+        else if (const char *v = val("--bloom_intensity=")) dopt.bloomIntensity = float(std::atof(v));
+        else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
+        else if (a == "--no-flares")                dopt.flares = false;
+        else if (const char *v = val("--flare_gain=")) dopt.flareGain = float(std::atof(v));
         else if (const char *v = val("--viz=")) {
             const std::string m(v);
             if      (m == "albedo") dopt.viz = 0;
@@ -187,6 +195,9 @@ int main(int argc, const char *argv[]) {
             else if (m == "shadow") dopt.viz = 5;
             else if (m == "lights") dopt.viz = 6;
             else if (m == "shadowraw") dopt.viz = 7;
+            else if (m == "ambient")  dopt.viz = 8;
+            else if (m == "emissive") dopt.viz = 9;
+            else if (m == "direct")   dopt.viz = 10;
             else { std::fprintf(stderr, "unknown --viz mode: %s\n", v); return 2; }
         }
         else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }
