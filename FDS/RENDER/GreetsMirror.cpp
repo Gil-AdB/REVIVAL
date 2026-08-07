@@ -215,7 +215,18 @@ inline bool mirrorFlatStone() {
 }
 // Rule 2. Off the flag, an offscreen proxy is never clone material.
 inline bool mirrorSkipProxyMesh(const TriMesh *T) {
-    return (T->Flags & Tri_OffscreenProxy) && !mirrorFlatStone();
+    if ((T->Flags & Tri_OffscreenProxy) && !mirrorFlatStone()) return true;
+    // S1d-4: the prism skirt (flat '::prismside' quads, --pom_prism_flat) is
+    // MAIN-VIEW patch geometry. Inside a mirror its clones composite through
+    // the FORWARD path, where the late-built mesh has no lighting data
+    // (renders black), and at the mirror's grazing angle the mirrored quads
+    // occlude the mirrored walls — measured at t=5963: 91 398 black px with
+    // the skirt cloned vs 776 without. Excluding it reproduces the mirror
+    // look of the marching-quad arm exactly (those quads self-discarded to
+    // invisibility inside mirrors anyway).
+    if (T->FIndex > 0 && T->Faces && T->Faces[0].Txtr && T->Faces[0].Txtr->Name
+        && std::strstr(T->Faces[0].Txtr->Name, "::prismside")) return true;
+    return false;
 }
 // Rule 1.
 inline bool mirrorSkipFace(const Face &F) {

@@ -693,6 +693,11 @@ struct TileRasterizerCtx {
 	// discard — so the silhouette and the see-through survive and the internal
 	// seam holes do not.
 	int   pomShellLidEdge = 0;
+	// lid_edge=3: max UV distance (L-inf) OUTSIDE the patch box a crossed hit
+	// may land and still be KEPT. Fold hits overshoot by a fraction of a block;
+	// the destructive grazing wraps overshoot by many blocks and write marched
+	// Z deep enough (up to amp*cap) that the wall Z-loses to the room behind.
+	float pomShellKeepUV = 0.0f;
 	float shellH0 = 0.5f;
 	float shellSideLean[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	uint8_t shellSideCls[4] = { 4, 4, 4, 4 };
@@ -2411,13 +2416,54 @@ struct TileRasterizer {
 							//                  neighbour it cannot address. CLAMP to the
 							//                  flat surface (geometric UV, entry depth),
 							//                  exactly as --pom_recess_edge=0 does.
-							if (!ctx.pomRecess && ctx.pomShellLidEdge == 1) {
-								const Vec8fb clampable = (~domOK) & pomCrossed
-								                       & (~sideEntryMiss) & baseOK;
+							if (!ctx.pomRecess && ctx.pomShellLidEdge >= 1) {
+								// lid_edge=2 (S1d-4): drop the pomCrossed requirement.
+								// At an INTERNAL fold both lids' grazing rays exit the
+								// chart laterally WITHOUT crossing (the stone they'd hit
+								// lives in the neighbour's chart), so mode 1 discards
+								// both and the fold renders as the union of two kill
+								// bands — the corridor-fold slits at t=5518. The
+								// see-through populations are untouched by the wider
+								// clamp: silhouette crenellation is BASE-CLIP discards
+								// (lid overhang, baseOK=false) and mortar-valley
+								// see-through is IN-DOMAIN no-cross (domOK=true) —
+								// neither is a lateral exit.
+								// lid_edge=3 (S1d-4): a CROSSED hit SURVIVES, even past
+								// the domain box or the base footprint. Path-code census
+								// at the t=5518 fold: all 2 078 slit px were coneHit +
+								// DISCARD(baseclip[+domain]) — the march FOUND stone (the
+								// texture wrapping past the chart edge, visually the
+								// neighbour panel's continuation at a gentle fold) and
+								// the base clip threw the hit away. The see-through
+								// discards both come from lanes that never crossed
+								// (crenellation = overhang no-cross, mortar valley =
+								// in-domain no-cross), so keeping crossed hits cannot
+								// paint over them.
+								Vec8fb keepHit = Vec8fb(false);
+								if (ctx.pomShellLidEdge >= 3) {
+									// Overshoot gate: keep only hits landing within
+									// pomShellKeepUV (L-inf, UV) of the patch box. A fold
+									// hit lands a fraction of a block outside; a grazing
+									// wrap lands blocks away and its marched Z (up to
+									// amp*cap deep) makes the wall Z-lose to the geometry
+									// BEHIND it — measured at t=5963, the wall vanished.
+									const Vec8f z8 = Vec8f(0.0f);
+									const Vec8f ovU = max(max(Vec8f(ctx.shellUMin) - uf,
+									                          uf - Vec8f(ctx.shellUMax)), z8);
+									const Vec8f ovV = max(max(Vec8f(ctx.shellVMin) - vf,
+									                          vf - Vec8f(ctx.shellVMax)), z8);
+									keepHit = pomCrossed & (~sideEntryMiss)
+									        & (max(ovU, ovV) <= Vec8f(ctx.pomShellKeepUV));
+								}
+								Vec8fb clampable = (~domOK)
+								                 & (~sideEntryMiss) & baseOK
+								                 & ~keepHit;
+								if (ctx.pomShellLidEdge == 1)
+									clampable &= pomCrossed;
 								uf      = select(clampable, ufGeo, uf);
 								vf      = select(clampable, vfGeo, vf);
 								pomHitH = select(clampable, hEnter, pomHitH);
-								keep |= clampable;
+								keep |= clampable | keepHit;   // keepHit: marched uv/h stay
 								if (pathViz) lidClamped = clampable;
 							}
 							// --pom_recess_only (P2-A): the kill is OPTIONAL here, and
@@ -3436,6 +3482,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.shellSideNoNarrow = pomSideFaces
 		                     && fds::FeatureFlags::pom_shell_side_faces() == 3,
 		.pomShellLidEdge = fds::FeatureFlags::pom_shell_lid_edge(),
+		.pomShellKeepUV = fds::FeatureFlags::pom_shell_keep_uv(),
 		.shellH0 = fds::FeatureFlags::pom_recess_only() ? 1.0f : 0.5f,
 		.shellSideLean = { pomSideFaces ? pomShellSideLean[0] : 0.0f,
 		                   pomSideFaces ? pomShellSideLean[1] : 0.0f,

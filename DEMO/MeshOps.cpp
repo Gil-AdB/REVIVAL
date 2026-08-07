@@ -5860,7 +5860,31 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 	struct QF { uint32_t i[3]; const Face *owner; };
 	std::vector<QF> qf;
 	long long nEdgesTested = 0, nEmitted = 0, nSkipMatched = 0, nSkipFlat = 0;
-	long long nFreeEdge = 0, nStaticNb = 0, nTorn = 0;
+	long long nFreeEdge = 0, nStaticNb = 0, nTorn = 0, nFreeSkipped = 0;
+	// --pom_prism_flat (S1d-4): the quads seal the wall geometrically, but under
+	// the march they render as VOID — a side quad's UV chart is constant along
+	// the extrusion, so its fragments march a height field that never changes
+	// under the ray and the no-cross discard is a certainty. Flat mode puts the
+	// quads on a HeightMap-less material clone (no march, plain textured path)
+	// and gives them their TRUE outward normal — the march parametrisation was
+	// the only consumer that wanted the lid's.
+	const bool flatQuads = fds::FeatureFlags::pom_prism_flat();
+	std::map<Material*, Material*> flatMat;   // owner mat -> ::prismside clone
+	auto flatOf = [&](Material *M) -> Material* {
+		auto it = flatMat.find(M);
+		if (it != flatMat.end()) return it->second;
+		Material *c = new Material;
+		*c = *M;                        // share Txtr / AO / gloss; keep TbnHandedness
+		c->HeightMap = nullptr;         // march gate (parallax() && HeightMap) never fires
+		c->NormalMap = nullptr;         // degenerate 1e-4 chart: tangent-space samples
+		                                // would be a stretched 1-texel stripe
+		char nm[96];
+		std::snprintf(nm, sizeof nm, "%s::prismside", M->Name ? M->Name : "mat");
+		c->Name = strdup(nm);
+		Material *tail = MatLib; while (tail->Next) tail = tail->Next;
+		c->Prev = tail; c->Next = nullptr; tail->Next = c;
+		return flatMat.emplace(M, c).first->second;
+	};
 	TriMesh *xform = nullptr;
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
 		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
@@ -5905,6 +5929,18 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 				else if (!sawPartner) ++nFreeEdge;
 				else if (sawStatic)   ++nStaticNb;
 				else                  ++nTorn;
+				// --pom_prism_free=0 (S1d-4): a FREE edge is a TRUE BOUNDARY — the
+				// wall genuinely ends, and the see-through past the last block's
+				// silhouette is the lid's no-cross discard revealing what is
+				// behind. A marching quad was invisible there by accident (its
+				// constant-UV march always discarded); a FLAT quad would be a
+				// solid curtain over the see-through. Emit nothing: open by
+				// design, not by discard.
+				if (flatQuads && !watertight && !sawPartner
+				    && fds::FeatureFlags::pom_prism_free() == 0) {
+					++nFreeSkipped;
+					continue;
+				}
 				// Outward direction: in the OWNER's plane, perpendicular to the
 				// edge, away from the third corner. The quad must face that way or
 				// the backface cull eats it.
@@ -5948,10 +5984,14 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 				const float kNudge = 1e-4f * sgn;
 				const uint32_t base = uint32_t(qv.size());
 				const float hA = va->ShellH, hB = vb->ShellH;
-				qv.push_back({ Ta, va->N, va->Tangent, uA, vA, hA });
-				qv.push_back({ Tb, vb->N, vb->Tangent, uB, vB, hB });
-				qv.push_back({ Bb, vb->N, vb->Tangent, uB + kNudge*nu, vB + kNudge*nv, 1.0f - hB });
-				qv.push_back({ Ba, va->N, va->Tangent, uA + kNudge*nu, vA + kNudge*nv, 1.0f - hA });
+				// Flat quads carry their TRUE outward normal (the march wanted
+				// the lid's N to parametrise the ray; flat quads don't march).
+				const Vector snA = flatQuads ? out : va->N;
+				const Vector snB = flatQuads ? out : vb->N;
+				qv.push_back({ Ta, snA, va->Tangent, uA, vA, hA });
+				qv.push_back({ Tb, snB, vb->Tangent, uB, vB, hB });
+				qv.push_back({ Bb, snB, vb->Tangent, uB + kNudge*nu, vB + kNudge*nv, 1.0f - hB });
+				qv.push_back({ Ba, snA, va->Tangent, uA + kNudge*nu, vA + kNudge*nv, 1.0f - hA });
 				// Wind so the geometric normal points OUT.
 				const float e1x = Tb.x-Ta.x, e1y = Tb.y-Ta.y, e1z = Tb.z-Ta.z;
 				const float e2x = Bb.x-Ta.x, e2y = Bb.y-Ta.y, e2z = Bb.z-Ta.z;
@@ -6006,6 +6046,8 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 	for (size_t i = 0; i < qf.size(); ++i) {
 		Face &D = sk->Faces[i];
 		D = *qf[i].owner;                     // material, flags, filler, shadow id
+		if (flatQuads && D.Txtr)
+			D.Txtr = flatOf(D.Txtr);          // ::prismside clone — no march, no nmap
 		D.A = &sk->Verts[qf[i].i[0]];
 		D.B = &sk->Verts[qf[i].i[1]];
 		D.C = &sk->Verts[qf[i].i[2]];
@@ -6057,12 +6099,14 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 	if (Sc->TriMeshHead) Sc->TriMeshHead->Prev = sk;
 	Sc->TriMeshHead = sk;
 	std::fprintf(stderr,
-		"[POM-PRISM] mode=%d: %lld shelled faces, %lld edges tested -> %lld side "
-		"quads (%u verts / %u faces). Cause: %lld FREE edge (no partner), %lld "
-		"partner does NOT move (unshelled / T-junction), %lld partner moves "
-		"DIFFERENTLY (torn). Skipped: %lld already watertight, %lld unmoved.\n",
-		mode, nShelledFaces, nEdgesTested, nEmitted, sk->VIndex, sk->FIndex,
-		nFreeEdge, nStaticNb, nTorn, nSkipMatched, nSkipFlat);
+		"[POM-PRISM] mode=%d%s: %lld shelled faces, %lld edges tested -> %lld side "
+		"quads (%u verts / %u faces). Cause: %lld FREE edge (no partner, %lld left "
+		"OPEN for see-through), %lld partner does NOT move (unshelled / T-junction), "
+		"%lld partner moves DIFFERENTLY (torn). Skipped: %lld already watertight, "
+		"%lld unmoved. %zu ::prismside material clone(s).\n",
+		mode, flatQuads ? " (flat)" : "", nShelledFaces, nEdgesTested, nEmitted,
+		sk->VIndex, sk->FIndex, nFreeEdge, nFreeSkipped, nStaticNb, nTorn,
+		nSkipMatched, nSkipFlat, flatMat.size());
 }
 
 Texture *MakeResidualHeight(Texture *height, int lowMip) {
