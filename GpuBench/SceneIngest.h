@@ -59,6 +59,17 @@ struct Vertex {
 // transparent-wallMatClone machinery produces (the clone/omni-clone/mirrorId
 // apparatus is the CPU's way of lighting the reflected world; a reflection
 // render of the real world from the mirrored camera is the same integral).
+// One baked environment probe: a cube of the LIT scene rendered from `pos`,
+// used by EnvSpecComposeScalar's GPU counterpart. `material` is the surface it
+// was baked FOR, which the bake self-excludes so a metal does not reflect
+// itself (the CPU's g_envBakeSkipMats, face-level, matching on the name with
+// any '::mirUV' suffix stripped).
+struct EnvProbe {
+    float       pos[3] = {0, 0, 0};
+    std::string material;
+    int         users = 0;      // materials aliasing this probe
+};
+
 struct MirrorInfo {
     float       n[3] = {0, 0, 0};
     float       d = 0.0f;
@@ -80,6 +91,17 @@ struct Batch {
     int      heightTexIndex = -1;
     int      aoTexIndex = -1;      // Material::AoMap (RVSM 'ao' role)
     int      metalTexIndex = -1;   // Material::MetallicMap (RVSM 'metallic')
+    // ENVIRONMENT REFLECTION. 1-based index into Scene::envProbes, 0 = this
+    // material reflects nothing. Assignment replicates
+    // EnvReflection_FramePrep's rule (EnvBake.cpp:1050): a material qualifies
+    // when Reflection > 0 OR it has a MetallicMap, the probe sits at the
+    // world CENTROID of that material's faces, and a material whose centroid
+    // is within 4 world units of an existing probe ALIASES it instead of
+    // getting its own.
+    int      envProbe = 0;
+    // Material::Reflection. F0 = max(Reflection*0.01, 0.04), then lerped
+    // toward 0.98 by metalness — DeferredSurfaceKernel.cpp:1252-1260.
+    float    reflection = 0.0f;
     // Material::AoStrength (editor 'aoStrength'), multiplied by the global
     // --ao_map_strength (default 2.0) at the point of use, as the CPU does.
     float    aoStrength = 1.0f;
@@ -166,6 +188,11 @@ struct Scene {
     std::vector<TextureImage> textures;
     std::vector<Light>        lights;
     std::vector<MirrorInfo>   mirrors;
+    std::vector<EnvProbe>     envProbes;
+    // Scene AABB, world. The parallax proxy the env lookup corrects against —
+    // the CPU's EnvPanoLinear::boxMin/boxMax slab test.
+    float                     aabbMin[3] = {0, 0, 0};
+    float                     aabbMax[3] = {0, 0, 0};
     Camera                    camera;
     float                     ambient[3] = {0, 0, 0};    // Scene::Ambient, 0..255
     // Authored backdrop gradient (Scene::SkyZenith / SkyNadir, 0..255). Projected
@@ -222,6 +249,11 @@ struct LoadOptions {
     // scene's centre of mass instead. --no-mirror_face restores the raw
     // engine plane, so the change is priceable.
     bool        mirrorFacing = true;
+    // Bake environment probes for reflective/metallic materials. greets gets
+    // --env_refl for free on the CPU (the metallic import setDefaults it,
+    // MaterialImport.cpp:418), so ON is PARITY.
+    bool        envRefl = true;
+    int         envRes = 128;   // cube FACE resolution
     // Replicate DEMO's --greets_stone_tex override (default ON there, so ON here).
     // Without it the wall this renders is the AUTHORED FLD wall, not the surface
     // the user actually reviews — see docs/GPU_BENCHMARK_PLAN.md §3.2. No

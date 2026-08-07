@@ -53,7 +53,10 @@ struct FrameUniforms {
     float pad2[2];              // align clipPlane to 16 (MSL float4 rule)
     float clipPlane[4];         // xyz = N, w = d; all-zero N = disabled
     uint32_t mirrorCount;
-    float pad3[3];
+    float envReflGain;
+    float pad3[2];
+    float aabbMin[4], aabbMax[4];
+    float envProbePos[8][4];
 };
 
 struct ConeUniforms {
@@ -67,6 +70,7 @@ struct BatchUniforms {
     float matParams[4];
     float mapFlags[4];
     float misc[4];              // .x = mirror panel index (1-based)
+    float misc2[4];             // .x = env probe index (1-based), .y = Reflection
 };
 
 struct GpuLight {
@@ -312,7 +316,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     gpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     gpd.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
     gpd.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    gpd.colorAttachments[3].pixelFormat = MTLPixelFormatRG8Uint;  // mirror id, metalness
+    gpd.colorAttachments[3].pixelFormat = MTLPixelFormatRGBA8Uint;  // mirror id, metalness, env probe, F0
     gpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     id<MTLRenderPipelineState> psoGBuf = [dev newRenderPipelineStateWithDescriptor:gpd error:&err];
     if (!psoGBuf) { std::fprintf(stderr, "[DEFERRED] gbuffer pso: %s\n", [[err localizedDescription] UTF8String]); return false; }
@@ -446,6 +450,16 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     rawd.minFilter = MTLSamplerMinMagFilterNearest;
     rawd.magFilter = MTLSamplerMinMagFilterNearest;
     id<MTLSamplerState> rawSamp = [dev newSamplerStateWithDescriptor:rawd];
+    // Env probe cube: trilinear, because roughness selects a MIP and the CPU
+    // lerps between levels too (nearest-level select speckled on noisy
+    // roughness maps, DeferredSurfaceKernel.cpp:1094-1110).
+    MTLSamplerDescriptor *envd = [MTLSamplerDescriptor new];
+    envd.minFilter = MTLSamplerMinMagFilterLinear;
+    envd.magFilter = MTLSamplerMinMagFilterLinear;
+    envd.mipFilter = MTLSamplerMipFilterLinear;
+    envd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    envd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> envSamp = [dev newSamplerStateWithDescriptor:envd];
     // Bilinear + clamp-to-edge for the bloom upsample (Hdr.cpp clamps its
     // bilinear fetch to the buffer edge the same way).
     MTLSamplerDescriptor *bsd = [MTLSamplerDescriptor new];
@@ -502,7 +516,9 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLTexture> gAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> gNormal = mkTarget(MTLPixelFormatRG16Snorm,   MTLStorageModePrivate);
     id<MTLTexture> gParams = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
-    id<MTLTexture> gMirror = mkTarget(MTLPixelFormatRG8Uint,     MTLStorageModePrivate);
+    // RGBA8Uint, not RG8Uint: .x mirror panel id, .y metalness*255, and since
+    // the env-reflection work .z the 1-based ENV PROBE index and .w F0*255.
+    id<MTLTexture> gMirror = mkTarget(MTLPixelFormatRGBA8Uint,   MTLStorageModePrivate);
     id<MTLTexture> gDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
     id<MTLTexture> hdrTex  = mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate);
     id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
@@ -527,9 +543,59 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         mAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
         mNormal = mkTarget(MTLPixelFormatRG16Snorm,    MTLStorageModePrivate);
         mParams = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
-        mMirror = mkTarget(MTLPixelFormatRG8Uint,      MTLStorageModePrivate);
+        mMirror = mkTarget(MTLPixelFormatRGBA8Uint,    MTLStorageModePrivate);
         mDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
     }
+    // ---- ENVIRONMENT PROBE CUBES -------------------------------------------
+    // One mipmapped HDR texturecube per probe, baked ONCE from the lit scene
+    // through this arm's own G-buffer + lighting pipeline. See the DECISION
+    // comment in SceneIngest.cpp: the probes are GPU-baked rather than pulled
+    // from the CPU's EnvReflection_Table, because the CPU bakes its probes with
+    // the software deferred rasterizer and importing that would put the CPU
+    // renderer inside the GPU cost being measured.
+    constexpr int kMaxEnvProbes = 8;
+    const int envRes = (opt.loadOpt && opt.loadOpt->envRes > 0) ? opt.loadOpt->envRes : 128;
+    const int nProbes = std::min<int>(int(scene.envProbes.size()), kMaxEnvProbes);
+    std::vector<id<MTLTexture>> envCubes;
+    id<MTLTexture> eAlbedo = nil, eNormal = nil, eParams = nil, eMirror = nil,
+                   eDepth = nil, eHdr = nil;
+    auto mkSquare = [&](MTLPixelFormat fmt, int res) -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                              width:NSUInteger(res)
+                                                             height:NSUInteger(res)
+                                                          mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    if (nProbes > 0) {
+        for (int i = 0; i < nProbes; ++i) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor
+                textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                size:NSUInteger(envRes)
+                                           mipmapped:YES];
+            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            td.storageMode = MTLStorageModePrivate;
+            envCubes.push_back([dev newTextureWithDescriptor:td]);
+        }
+        eAlbedo = mkSquare(MTLPixelFormatRGBA8Unorm,   envRes);
+        eNormal = mkSquare(MTLPixelFormatRG16Snorm,    envRes);
+        eParams = mkSquare(MTLPixelFormatRGBA8Unorm,   envRes);
+        eMirror = mkSquare(MTLPixelFormatRGBA8Uint,    envRes);
+        eDepth  = mkSquare(MTLPixelFormatDepth32Float, envRes);
+        eHdr    = mkSquare(MTLPixelFormatRGBA16Float,  envRes);
+    }
+    id<MTLTexture> dummyEnvCube;
+    {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor
+            textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                            size:1 mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        dummyEnvCube = [dev newTextureWithDescriptor:td];
+    }
+
     id<MTLTexture> dummyRefl;
     {
         MTLTextureDescriptor *td =
@@ -672,6 +738,14 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     fu.specularFactor = 1.0f;
     fu.lightRangeScale = opt.lightRangeScale;
     fu.vizLight = opt.vizLight;
+    // env_refl_gain, FeatureFlags.def:142, default 1.0.
+    fu.envReflGain = 1.0f;
+    for (int c = 0; c < 3; ++c) {
+        fu.aabbMin[c] = scene.aabbMin[c];
+        fu.aabbMax[c] = scene.aabbMax[c];
+    }
+    for (size_t i = 0; i < scene.envProbes.size() && i < 8; ++i)
+        for (int c = 0; c < 3; ++c) fu.envProbePos[i][c] = scene.envProbes[i].pos[c];
 
     // ---- volumetric cone constants (DeferredVolumetric.cpp:1797-1802) -------
     //   density = cone_strength * 1e-3, and under --hdr (which greets runs)
@@ -896,6 +970,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // Material::AoStrength, applied as ao' = 1 - k*(1-ao) on the AMBIENT
         // only (DeferredSurfaceKernel.cpp:1871-1878 + FeatureFlags.def:137).
         u.misc[3] = 2.0f * b.aoStrength;
+        u.misc2[0] = float(b.envProbe);
+        u.misc2[1] = b.reflection;
     }
     };
     refreshBatchUniforms();
@@ -979,10 +1055,22 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     float curFar = 0.0f;
     long shadowBatchesDrawn = 0, shadowBatchesCulled = 0;
 
+    // ENV PROBE SELF-EXCLUSION. While baking probe P, every batch whose
+    // material IS the surface P was baked for is skipped — the CPU's
+    // g_envBakeSkipMats, which is FACE-level and matches on the material name
+    // with any '::mirUV' suffix stripped (EnvBake.cpp:243-252). Without it a
+    // metal bakes the inside of itself and reflects a black shell.
+    // Empty = no exclusion (every pass other than a probe bake).
+    std::string envSkipMat;
+    auto baseMatName = [](const std::string &n) {
+        const size_t k = n.rfind("::mirUV");
+        return (k != std::string::npos) ? n.substr(0, k) : n;
+    };
     auto drawScene = [&](id<MTLRenderCommandEncoder> enc, bool gbuffer) {
         [enc setVertexBuffer:vb offset:0 atIndex:0];
         for (size_t i = 0; i < scene.batches.size(); ++i) {
             const Batch &b = scene.batches[i];
+            if (!envSkipMat.empty() && baseMatName(b.materialName) == envSkipMat) continue;
             // Shadow pass: honour the same caster filter the CPU bake applies.
             if (!gbuffer && !b.castsShadow) continue;
             if (!gbuffer && opt.shadowCull && curFace && curLightPos) {
@@ -1503,6 +1591,98 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         [enc endEncoding];
     };
 
+    // ---- ENVIRONMENT PROBE BAKE --------------------------------------------
+    // Six 90-degree faces per probe, each rendered through the SAME G-buffer +
+    // lighting pipeline the frame uses — so what a metal reflects is the lit
+    // world, with this arm's shadows and lights in it, not a constant and not
+    // a sky gradient. Baked ONCE (greets' probes are static; the CPU caches
+    // them the same way and re-bakes only on invalidation), and deliberately
+    // NOT included in the per-frame timings for the same reason the static
+    // shadow cubes are not.
+    //
+    // Face bases are kCubeFaces, the same table the shadow cubes use and the
+    // same one Metal's texturecube sampler expects, so a direction sampled in
+    // the lighting pass lands on the texel this bake wrote. That equivalence
+    // was already established (and its 'up = -tc' sign already paid for) by
+    // the shadow work; reusing it is why this needs no new convention.
+    auto bakeEnvProbes = [&]() {
+        if (nProbes <= 0) return 0.0;
+        const auto t0 = std::chrono::steady_clock::now();
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        for (int p = 0; p < nProbes; ++p) {
+            // Self-exclusion: the surface this probe belongs to is not in it.
+            envSkipMat = baseMatName(scene.envProbes[size_t(p)].material);
+            for (int f = 0; f < 6; ++f) {
+                FrameUniforms fe = fu;
+                for (int c = 0; c < 3; ++c) {
+                    fe.camRow0[c] = kCubeFaces[f].right[c];
+                    fe.camRow1[c] = kCubeFaces[f].up[c];
+                    fe.camRow2[c] = kCubeFaces[f].fwd[c];
+                    fe.camSrc[c]  = scene.envProbes[size_t(p)].pos[c];
+                }
+                // A 90-degree square face: perspX = perspY = res/2 and the
+                // principal point at the centre, so sx = sy = 1 and ox = oy = 0.
+                fe.sx = 1.0f; fe.ox = 0.0f;
+                fe.sy = 1.0f; fe.oy = 0.0f;
+                fe.invSx = 1.0f; fe.invSy = 1.0f;
+                fe.mirrorCount = 0;                 // a probe carries no mirror composite
+                for (int c = 0; c < 4; ++c) fe.clipPlane[c] = 0.0f;
+                encodeGBuffer(cb, fe, eAlbedo, eNormal, eParams, eMirror, eDepth, nil);
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = eHdr;
+                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+                [enc setRenderPipelineState:psoLight];
+                [enc setFragmentBytes:&fe length:sizeof(fe) atIndex:1];
+                [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+                [enc setFragmentBuffer:shBuf offset:0 atIndex:3];
+                [enc setFragmentTexture:eAlbedo atIndex:0];
+                [enc setFragmentTexture:eNormal atIndex:1];
+                [enc setFragmentTexture:eParams atIndex:2];
+                [enc setFragmentTexture:eDepth  atIndex:3];
+                for (int s = 0; s < kMaxShadowCubes; ++s)
+                    [enc setFragmentTexture:(s < int(cubes.size()) ? cubes[size_t(s)] : dummyCube)
+                                    atIndex:NSUInteger(4 + s)];
+                for (int s = 0; s < kMaxSpotMaps; ++s)
+                    [enc setFragmentTexture:(s < int(spots.size()) ? spots[size_t(s)] : dummy2D)
+                                    atIndex:NSUInteger(20 + s)];
+                [enc setFragmentTexture:eMirror atIndex:36];
+                for (int s = 0; s < 4; ++s)
+                    [enc setFragmentTexture:dummyRefl atIndex:NSUInteger(37 + s)];
+                // NO ENV CUBES inside a probe bake: one bounce only. Feeding the
+                // probes back in would make the bake order-dependent and let a
+                // pair of facing metals amplify each other, which the CPU's
+                // single-pass FramePrep also does not do.
+                for (int s = 0; s < kMaxEnvProbes; ++s)
+                    [enc setFragmentTexture:dummyEnvCube atIndex:NSUInteger(41 + s)];
+                [enc setFragmentSamplerState:shadowSamp atIndex:1];
+                [enc setFragmentSamplerState:rawSamp atIndex:2];
+                [enc setFragmentSamplerState:envSamp atIndex:3];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [enc endEncoding];
+                id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+                [bl copyFromTexture:eHdr sourceSlice:0 sourceLevel:0
+                        sourceOrigin:MTLOriginMake(0, 0, 0)
+                          sourceSize:MTLSizeMake(NSUInteger(envRes), NSUInteger(envRes), 1)
+                           toTexture:envCubes[size_t(p)] destinationSlice:NSUInteger(f)
+                    destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [bl endEncoding];
+            }
+        }
+        envSkipMat.clear();
+        {   // roughness -> mip needs the chain
+            id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+            for (int p = 0; p < nProbes; ++p) [bl generateMipmapsForTexture:envCubes[size_t(p)]];
+            [bl endEncoding];
+        }
+        [cb commit];
+        [cb waitUntilCompleted];
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t0).count();
+    };
+
     // Flare sprites, additive into `dst`, projected with camera `camRot/camSrc`
     // taken from a FrameUniforms. `clip` skips lights at/behind a mirror plane
     // (their reflections would otherwise hang in front of it).
@@ -1638,8 +1818,12 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 [enc setFragmentTexture:mMirror atIndex:36];
                 for (int s = 0; s < 4; ++s)
                     [enc setFragmentTexture:dummyRefl atIndex:NSUInteger(37 + s)];
+                for (int s = 0; s < kMaxEnvProbes; ++s)
+                    [enc setFragmentTexture:(s < nProbes ? envCubes[size_t(s)] : dummyEnvCube)
+                                    atIndex:NSUInteger(41 + s)];
                 [enc setFragmentSamplerState:shadowSamp atIndex:1];
                 [enc setFragmentSamplerState:rawSamp atIndex:2];
+                [enc setFragmentSamplerState:envSamp atIndex:3];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                 [enc endEncoding];
             }
@@ -1719,8 +1903,12 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                                         : "INACTIVE (camera behind the plane; black bound)");
                 }
             }
+            for (int i = 0; i < kMaxEnvProbes; ++i)
+                [enc setFragmentTexture:(i < nProbes ? envCubes[size_t(i)] : dummyEnvCube)
+                                atIndex:NSUInteger(41 + i)];
             [enc setFragmentSamplerState:shadowSamp atIndex:1];
             [enc setFragmentSamplerState:rawSamp atIndex:2];
+            [enc setFragmentSamplerState:envSamp atIndex:3];
             if (viz) {
                 uint32_t m = uint32_t(opt.viz);
                 [enc setFragmentBytes:&m length:sizeof(m) atIndex:4];
@@ -1808,6 +1996,21 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         [cb commit];
         return cb;
     };
+
+    // ---- one-time ENV PROBE BAKE -------------------------------------------
+    // After the static shadow bake (so the probes contain shadowed light) and
+    // before anything timed. Reported, not folded into the frame cost.
+    if (nProbes > 0) {
+        const double ms = bakeEnvProbes();
+        std::fprintf(stderr,
+            "[ENVREFL] baked %d probe cube(s), %d faces at %d^2 + mips, ONCE: %.2f ms\n",
+            nProbes, nProbes * 6, envRes, ms);
+        for (int i = 0; i < nProbes; ++i)
+            std::fprintf(stderr, "[ENVREFL]   probe %d '%s' at (%.1f %.1f %.1f), %d material(s)\n",
+                         i + 1, scene.envProbes[size_t(i)].material.c_str(),
+                         scene.envProbes[size_t(i)].pos[0], scene.envProbes[size_t(i)].pos[1],
+                         scene.envProbes[size_t(i)].pos[2], scene.envProbes[size_t(i)].users);
+    }
 
     // ---- --anim_probe: the window's per-frame refresh, OFFSCREEN ------------
     // Written because "mech omnis are staying in place" was reported from a

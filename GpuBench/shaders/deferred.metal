@@ -51,6 +51,13 @@ struct FrameUniforms {
     // Number of live reflection textures in the MAIN lighting pass (0 inside a
     // reflection pass — no second bounce, stated in the plan).
     uint   mirrorCount;
+    // Environment reflection. envReflGain is FeatureFlags env_refl_gain (1.0);
+    // the AABB is the scene bound the parallax correction uses; envProbePos
+    // carries each probe's bake point, needed to re-aim the lookup after the
+    // parallax hit is found.
+    float  envReflGain;
+    float4 aabbMin, aabbMax;
+    float4 envProbePos[8];
 };
 
 struct BatchUniforms {
@@ -62,6 +69,9 @@ struct BatchUniforms {
     // .x mirror panel index (1-based; 0 = none), .y hasAoMap, .z hasMetalMap,
     // .w AO strength (--ao_map_strength x Material::AoStrength)
     float4 misc;
+    // .x env probe index (1-based; 0 = this material reflects nothing),
+    // .y Material::Reflection, .z/.w spare
+    float4 misc2;
 };
 
 struct GpuLight {
@@ -130,8 +140,13 @@ struct GBufOut {
     float4 albedo [[color(0)]];
     float2 normal [[color(1)]];   // oct-packed VIEW-space shading normal
     float4 params [[color(2)]];   // diffuse, specular, lobe rough, luminosity/4
-    // .x mirror panel id (1-based; 0 = none), .y metalness x 255
-    uint2  mirror [[color(3)]];
+    // .x mirror panel id (1-based; 0 = none), .y metalness x 255,
+    // .z ENV PROBE index (1-based; 0 = none), .w F0 x 255.
+    // F0 is resolved HERE rather than in the lighting pass because it needs the
+    // per-material Reflection AND the per-texel metalness, and the G-buffer is
+    // where the two meet: F0 = max(Reflection*0.01, 0.04) then lerped toward
+    // 0.98 by metalness — DeferredSurfaceKernel.cpp:1252-1260.
+    uint4  mirror [[color(3)]];
 };
 
 vertex GBufVertexOut vs_gbuffer(VertexIn in [[stage_in]],
@@ -236,7 +251,10 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
     o.normal = oct_encode(n);
     o.params = float4(b.matParams.x, spec, b.matParams.z,
                       saturate(b.matParams.w * 0.25f));
-    o.mirror = uint2(uint(b.misc.x + 0.5f), uint(saturate(metal) * 255.0f + 0.5f));
+    float f0 = max(b.misc2.y * 0.01f, 0.04f);
+    f0 = f0 + (0.98f - f0) * saturate(metal);
+    o.mirror = uint4(uint(b.misc.x + 0.5f), uint(saturate(metal) * 255.0f + 0.5f),
+                     uint(b.misc2.x + 0.5f), uint(saturate(f0) * 255.0f + 0.5f));
     return o;
 }
 
@@ -573,6 +591,98 @@ static inline float3 AmbientRadiance(constant FrameUniforms &u,
     return S.baseColor * S.diffuseK * (1.0f - S.metal) * irr * S.ao;
 }
 
+
+// ---------------------------------------------------------------------------
+// ENVIRONMENT SPECULAR — the port of EnvSpecComposeScalar
+// (FDS/RENDER/DeferredSurfaceKernel.cpp:847). This is what gives greets'
+// polished metal something to reflect; without it the conductors render matte
+// and uniformly dark with the hue merely correct, which is the defect the
+// t=2000 pair was showing.
+//
+// Term for term, in the CPU's own order:
+//   1. reflection vector, VIEW space, off the viewer-side normal;
+//   2. PARALLAX correction against the scene AABB (the "local cubemap" slab
+//      exit-t), so a reflection is looked up toward where the ray actually
+//      leaves the room rather than as if the probe were at infinity;
+//   3. roughness -> mip, rough = sqrt(2/(gloss+2)) unless a roughness map
+//      overrides, TRILINEAR between levels;
+//   4. Karis Mobile-SIGGRAPH-2014 split-sum env BRDF (greets runs
+//      --env_brdf_analytic) and Fdez-Aguera 2019 multiscatter energy
+//      compensation (greets runs --pbr_multiscatter). Both were previously
+//      DELETED from this shader with the note that they only run inside
+//      EnvSpecComposeScalar "a pano path this arm does not implement" — that
+//      is now false, and this is the path.
+//   5. metal tint: t = 1 - metal + metal*albedo, so a conductor's reflection
+//      takes its colour from the albedo and a dielectric's does not.
+//
+// The result is ADDED INTO THE SPECULAR ACCUMULATOR, exactly as the CPU adds
+// it into sB/sG/sR — it is not a replacement for the direct highlight.
+static inline float3 EnvSpecular(constant FrameUniforms &u,
+                                 thread const Surface &S,
+                                 float f0, uint probe,
+                                 float3 aabbMin, float3 aabbMax,
+                                 array<texturecube<float>, 8> envCubes,
+                                 sampler envSamp,
+                                 thread float &fresOut)
+{
+    fresOut = 0.0f;
+    if (probe == 0u || probe > 8u) return 0.0f;
+
+    // Viewer-side normal, then reflect in VIEW space and rotate to world. Same
+    // shape as the CPU: d is the incident direction (eye -> surface), so
+    // rv = d - 2(d.N)N. S.V is surface -> eye, hence the negation.
+    const float3 d = -S.V;
+    float3 N = S.N;
+    if (dot(d, N) > 0.0f) N = -N;
+    const float3 rvV = d - 2.0f * dot(d, N) * N;
+    float3 R = normalize(u.camRow0 * rvV.x + u.camRow1 * rvV.y + u.camRow2 * rvV.z);
+
+    // Parallax: slab exit-t of S.pw + t*R against the scene AABB, per-axis far
+    // plane, t = min over axes. Then look up toward the hit point from the
+    // probe's own position rather than from the shaded point.
+    const float3 bake = float3(u.envProbePos[probe - 1u].xyz);
+    {
+        const float3 inv = 1.0f / float3(abs(R.x) < 1e-6f ? 1e-6f : R.x,
+                                         abs(R.y) < 1e-6f ? 1e-6f : R.y,
+                                         abs(R.z) < 1e-6f ? 1e-6f : R.z);
+        const float3 tA = (aabbMax - S.pw) * inv;
+        const float3 tB = (aabbMin - S.pw) * inv;
+        const float3 tFar = max(tA, tB);
+        const float t = min(min(tFar.x, tFar.y), tFar.z);
+        if (t > 0.0f && t < 1e30f) R = normalize(S.pw + t * R - bake);
+    }
+
+    // Roughness -> mip, trilinear. par.z is already the CPU's
+    // rough = sqrt(2/(gloss+2)) mapping (see DecodeSurface).
+    const float rough = clamp(S.rough, 0.0f, 1.0f);
+    const float nMips = float(envCubes[probe - 1u].get_num_mip_levels());
+    const float lvl = clamp(rough * max(nMips - 1.0f, 0.0f), 0.0f, max(nMips - 1.0f, 0.0f));
+    const float3 ec = envCubes[probe - 1u].sample(envSamp, R, level(lvl)).rgb;
+
+    // Karis split-sum analytic env BRDF.
+    const float ndv = saturate(dot(S.N, S.V));
+    const float rx = -1.0f * rough + 1.0f;
+    const float ry = -0.0275f * rough + 0.0425f;
+    const float rz = -0.572f * rough + 1.04f;
+    const float rw =  0.022f * rough + -0.04f;
+    const float a004 = min(rx * rx, exp2(-9.28f * ndv)) * rx + ry;
+    const float A = -1.04f * a004 + rz;
+    const float B =  1.04f * a004 + rw;
+    float envBrdf = f0 * A + B;
+    float ek = envBrdf;
+    // Fdez-Aguera multiscatter energy compensation.
+    const float Ess = A + B;
+    const float Favg = f0 + (1.0f - f0) / 21.0f;
+    const float Fms = Favg * Ess / max(1.0f - Favg * (1.0f - Ess), 1e-4f);
+    ek *= 1.0f + Fms * (1.0f - Ess) / max(Ess, 1e-4f);
+    ek *= u.envReflGain;
+    fresOut = envBrdf;
+
+    // Metal tint.
+    const float3 tint = mix(float3(1.0f), S.baseColor, S.metal);
+    return ec * ek * tint;
+}
+
 fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
                             constant FrameUniforms &u   [[buffer(1)]],
                             constant GpuLight      *L   [[buffer(2)]],
@@ -585,7 +695,9 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
                             array<depth2d<float>,   16> spotMaps    [[texture(20)]],
                             texture2d<uint>   gMirror   [[texture(36)]],
                             array<texture2d<float>, 4> reflTex [[texture(37)]],
-                            sampler           shadowSamp [[sampler(1)]])
+                            array<texturecube<float>, 8> envCubes [[texture(41)]],
+                            sampler           shadowSamp [[sampler(1)]],
+                            sampler           envSamp    [[sampler(3)]])
 {
     const uint2 px = uint2(in.position.xy);
     const float zEnc = gDepth.read(px);
@@ -596,7 +708,7 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
     const float X = (in.ndc.x - u.ox * 1.0f) * Z * u.invSx;
     const float Y = (in.ndc.y - u.oy * 1.0f) * Z * u.invSy;
 
-    const uint2 mirEnc = gMirror.read(px).xy;
+    const uint4 mirEnc = gMirror.read(px);
     const Surface S = DecodeSurface(u, gAlbedo.read(px), gNormal.read(px).xy,
                                     gParams.read(px), float3(X, Y, Z),
                                     float(mirEnc.y) * (1.0f / 255.0f));
@@ -604,6 +716,16 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
     float3 radiance = DirectRadiance(u, L, S, /*applyShadow=*/u.shadowsOn != 0,
                                      /*wantSpec=*/true, /*onlyLight=*/-1,
                                      shadowCubes, spotMaps, shadowSamp);
+    // Environment specular, into the SAME accumulator the direct highlight
+    // uses. Material::SpecMul scales the whole specular on the CPU after this
+    // add; this arm folds SpecMul into par.y at the G-buffer, so the specK
+    // factor is already carried by the direct term and the env term takes the
+    // material's own reflectance through F0 instead.
+    {
+        float fres = 0.0f;
+        radiance += EnvSpecular(u, S, float(mirEnc.w) * (1.0f / 255.0f), mirEnc.z,
+                                u.aabbMin.xyz, u.aabbMax.xyz, envCubes, envSamp, fres);
+    }
     radiance += AmbientRadiance(u, sh, S);
     radiance += S.baseColor * S.lum;   // emissive
 

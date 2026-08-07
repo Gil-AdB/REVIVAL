@@ -1151,6 +1151,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 b.diffuse = M->Diffuse;
                 b.specular = M->Specular;
                 b.glossiness = M->Glossiness;
+                b.reflection = M->Reflection;
                 b.parallaxScale = M->ParallaxScale;
                 b.aoInAlpha = (M->Flags & Mat_AoInAlpha) != 0;
                 b.textureIndex   = acquireTexture(M->Txtr);
@@ -1276,6 +1277,104 @@ bool Load(Scene &out, const LoadOptions &opt) {
     //   tagged batches > 0 -> the geometry exists and the question moves to the
     //                        runtime side (active flag / reflection content),
     //                        which the deferred arm's own [MIRRORPROBE] answers.
+    // ---- ENVIRONMENT PROBES -------------------------------------------------
+    // The GPU counterpart of EnvReflection_FramePrep (EnvBake.cpp:1050), and
+    // the reason greets' polished metal has something to reflect at all.
+    //
+    // DECISION, stated because either answer was acceptable: the probes are
+    // BAKED ON THE GPU, not ingested from the CPU's EnvReflection_Table. The
+    // CPU bakes them by rendering six faces through its own DEFERRED SOFTWARE
+    // RASTERIZER — pulling that in would put the software renderer inside the
+    // thing this arm exists to measure, and would make the "GPU frame cost"
+    // number include CPU rasterisation. The GPU already has the exact
+    // machinery: the mirror pass renders the lit scene from an arbitrary
+    // camera into an HDR target, which is what a cube face is.
+    //
+    // What is REPLICATED from the CPU: the qualification rule (Reflection > 0
+    // or a MetallicMap), the probe position (the world centroid of that
+    // material's faces), the 4-unit dedup/aliasing, the self-exclusion of the
+    // baked material (name-matched with '::mirUV' stripped), and the scene-AABB
+    // parallax proxy.
+    // What DIFFERS, and is stated rather than hidden: the CPU stores six
+    // 1.25-PADDED faces at 102.68 degrees and fetches them with its own
+    // face-major bilinear; this arm uses a hardware texturecube with plain
+    // 90-degree faces and lets the sampler handle the seams.
+    {
+        for (int c = 0; c < 3; ++c) { out.aabbMin[c] = 1e30f; out.aabbMax[c] = -1e30f; }
+        for (const auto &b : out.batches) {
+            for (uint32_t v = b.firstVertex; v < b.firstVertex + b.vertexCount; ++v) {
+                const Vertex &V = out.verts[v];
+                const float o[3] = {V.px, V.py, V.pz};
+                for (int c = 0; c < 3; ++c) {
+                    const float w = b.rot[c][0]*o[0] + b.rot[c][1]*o[1] + b.rot[c][2]*o[2] + b.pos[c];
+                    out.aabbMin[c] = std::min(out.aabbMin[c], w);
+                    out.aabbMax[c] = std::max(out.aabbMax[c], w);
+                }
+            }
+        }
+    }
+    if (opt.envRefl) {
+        // Per-material face centroid, in world space.
+        struct Acc { double x = 0, y = 0, z = 0; long n = 0; float refl = 0; bool metal = false; };
+        std::map<std::string, Acc> acc;
+        for (const auto &b : out.batches) {
+            const bool qualifies = (b.reflection > 0.0f) || (b.metalTexIndex >= 0);
+            if (!qualifies || b.materialName.empty()) continue;
+            Acc &a = acc[b.materialName];
+            a.refl = std::max(a.refl, b.reflection);
+            a.metal = a.metal || (b.metalTexIndex >= 0);
+            for (uint32_t v = b.firstVertex; v < b.firstVertex + b.vertexCount; ++v) {
+                const Vertex &V = out.verts[v];
+                const float o[3] = {V.px, V.py, V.pz};
+                for (int c = 0; c < 3; ++c) {
+                    const float w = b.rot[c][0]*o[0] + b.rot[c][1]*o[1] + b.rot[c][2]*o[2] + b.pos[c];
+                    if (c == 0) a.x += w; else if (c == 1) a.y += w; else a.z += w;
+                }
+                ++a.n;
+            }
+        }
+        std::map<std::string, int> matProbe;
+        for (const auto &kv : acc) {
+            if (kv.second.n == 0) continue;
+            const float p[3] = {float(kv.second.x / double(kv.second.n)),
+                                float(kv.second.y / double(kv.second.n)),
+                                float(kv.second.z / double(kv.second.n))};
+            // 4-unit dedup, EnvBake.cpp:1116-1121.
+            int found = -1;
+            for (size_t i = 0; i < out.envProbes.size(); ++i) {
+                const float dx = p[0] - out.envProbes[i].pos[0];
+                const float dy = p[1] - out.envProbes[i].pos[1];
+                const float dz = p[2] - out.envProbes[i].pos[2];
+                if (dx*dx + dy*dy + dz*dz < 4.0f * 4.0f) { found = int(i); break; }
+            }
+            if (found < 0) {
+                EnvProbe ep;
+                for (int c = 0; c < 3; ++c) ep.pos[c] = p[c];
+                ep.material = kv.first;
+                out.envProbes.push_back(ep);
+                found = int(out.envProbes.size()) - 1;
+            }
+            ++out.envProbes[size_t(found)].users;
+            matProbe[kv.first] = found + 1;
+            if (opt.verbose)
+                std::fprintf(stderr,
+                    "[ENVREFL] '%s' (Reflection=%.2f%s) -> probe %d at its centroid "
+                    "(%.1f %.1f %.1f)%s\n",
+                    kv.first.c_str(), kv.second.refl, kv.second.metal ? ", metallic map" : "",
+                    found + 1, p[0], p[1], p[2],
+                    out.envProbes[size_t(found)].users > 1 ? "  [ALIASED, within 4 units]" : "");
+        }
+        for (auto &b : out.batches) {
+            auto it = matProbe.find(b.materialName);
+            if (it != matProbe.end()) b.envProbe = it->second;
+        }
+        std::fprintf(stderr, "[ENVREFL] %zu probe(s), %d^2 cube faces, scene AABB "
+                             "(%.1f %.1f %.1f)..(%.1f %.1f %.1f)\n",
+                     out.envProbes.size(), opt.envRes,
+                     out.aabbMin[0], out.aabbMin[1], out.aabbMin[2],
+                     out.aabbMax[0], out.aabbMax[1], out.aabbMax[2]);
+    }
+
     // Plane CLUSTERS per mirror material. FindMirrorPlaneByMatName returns ONE
     // plane and drops the rest as "outliers", so a material whose faces live on
     // several planes gets one panel tagged and the others silently left as
