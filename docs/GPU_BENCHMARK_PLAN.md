@@ -950,6 +950,262 @@ What this half already establishes, independent of the GPU arm:
 
 ---
 
+### 6.2c THE COMPARISON TABLE — matched workload, both halves measured
+
+**This is the deliverable §6.2a withheld.** The GPU half was withheld because its
+direct term was ~38x too weak; §6.2b fixed the tap and the 2026-08-07 round closed the
+remaining 1.69x (see §6.2d). Both halves below were re-measured on **2026-08-07**, so
+this table is not a splice of an old CPU run against a new GPU one.
+
+#### Conditions (identical on both arms)
+
+1920x1080, MSAA 1x, **full shading rate on both**, pose `t=5743` at the primary review
+camera (`FDS_GREETS_CAM="9.07557869,3.19592357,-52.9277191,-0.20672597,-0.140846997,0.968207836"`)
+and `t=2000` on the **authored spline camera** on both arms. Tier = §6.2a's `C`:
+PBR (GGX + Smith-Schlick + Schlick F) + cube shadows + HDR/`hdr_linear` + bloom 2.0 +
+ACES, with **mirrors, mirror-RTT, disco, volumetric cones, POM and the static shadow
+lightmap OFF on both sides**, and `--no-deferred_checkerboard` so the CPU shades at full
+rate like the GPU. CPU flags:
+`--deferred --profiler=1 --no-greets_mirror --no-mirror_rtt --no-greets_disco
+--no-parallax --no-shadow_lightmap --no-deferred_checkerboard`; GPU flags:
+`--no-mirror --no-disco --stages=N [--no-shadows]`.
+
+**CPU arm**: `DEMO` built from `eaabe29` in a clean worktree and snapshotted to
+`Runtime/DEMO-pin` before the run, so a concurrent agent's commits in `FDS/`/`DEMO/`
+could not shift it mid-campaign. `--bench=scene@scene=greets,t=...,iters=125`.
+**GPU arm**: `build-gpu/GpuBench/GpuBench`, median of 100-150 frames after 40-50 warmup,
+**min-of-arm across 7 interleaved reps** at t=5743 and 3 at t=2000.
+
+**Load was recorded for every number** and is the reason for min-of-arm: another agent
+was running `./DEMO` at ~38 % CPU for part of the session. GPU reps span load 4.7-18,
+CPU runs load 3.9-11.6. At the high end the run-to-run spread on a sub-millisecond GPU
+stage reached +/-0.4 ms — larger than several of the stages being separated — which is
+exactly the hazard the method note in §6.2 records. The first t=5743 set came out
+**non-monotone** (`stages=3` measuring faster than `stages=2`, which is impossible);
+four further reps at lower load restored monotonicity, and only the monotone set is
+quoted.
+
+#### GPU decomposition by whole-frame STAGE DIFFERENCING
+
+Per the standing method note, pass costs are **differences of clean whole-frame
+`GPUEndTime - GPUStartTime` intervals**, not per-encoder timestamps — on Apple GPUs a
+pass's vertex stage can begin before the previous pass's fragment stage retires, so the
+per-encoder numbers overlap and sum to more than the frame. They are reported separately
+below as upper bounds.
+
+| GPU stage (matched tier) | t=5743 ms | t=2000 ms | how |
+|---|--:|--:|---|
+| G-buffer fill (incl. vertex front end) | **0.9114** | **0.8833** | `--stages=1 --no-shadows` |
+| + deferred PBR lighting, 10 omnis | **0.2673** | **0.3940** | `stages=2` minus `stages=1` |
+| + tonemap + bloom + flare sprites | **0.1404** | **0.0933** | `stages=3` minus `stages=2` |
+| + cube shadows (bake + per-pixel tap) | **0.0251** | **0.0290** | shadows on minus off |
+| **WHOLE FRAME** | **1.3442** | **1.3996** | min-of-arm whole-frame total |
+
+#### The table
+
+Both columns are **elapsed milliseconds**, min-of-arm, same machine, same day. The CPU
+column's `f_min` is min frame-ms over 125 iterations; its per-section figures are the
+profiler's own `min_ms` for that section, so they are the same statistic.
+
+| Stage | GPU (ms) | CPU (ms, elapsed) | Ratio | Caveats |
+|---|--:|--:|--:|---|
+| **t=5743** | | | | |
+| Geometry front end / G-buffer fill | 0.9114 | `XFRM` 0.095 + `RNDR` raster share | — | §5.3 items 1, 8, 9 — not separable on either side in the same way; see note |
+| Deferred lighting (PBR, GGX, 10 omnis) | 0.2673 | — (inside `RNDR`) | — | §5.3 items 5, 6, 11, 12 |
+| Raster + lighting + tonemap combined | **1.3191** | **`RNDR` 64.017** | **48.5x** | the like-for-like row: both are "everything except the shadow bake" |
+| Shadow bake (7x6x512² cached + 3x6x128²/frame) | **0.0251** (upper bound 0.483) | **`BAKE` 2.992** | **119x** (or 6.2x at the upper bound) | §5.3 items 3, 7, 12 — see the band note |
+| **Whole frame** | **1.3442** | **67.61** | **50.3x** | all |
+| **t=2000** (disco pose) | | | | |
+| Raster + lighting + tonemap combined | 1.3706 | `RNDR` 77.837 | 56.8x | |
+| Shadow bake | 0.0290 (upper bound ~0.48) | `BAKE` 3.756 | 129x | |
+| **Whole frame** | **1.3996** | **82.10** | **58.7x** | all |
+
+**The shadow row is a BAND, not a number, and that is the honest form.** Whole-frame
+differencing says the bake plus every per-pixel cube tap extends the GPU frame by only
+0.025 ms; the per-encoder counter for the same work reads 0.483 ms. Both are real
+measurements of different things — the bake's encoders occupy 0.48 ms of GPU time but
+overlap almost entirely with the rest of the frame, so the *elapsed* cost is near zero.
+The CPU cannot overlap this way. Quoting only the 119x would overstate it; quoting only
+6.2x would understate the thing the user actually experiences, which is frame time.
+
+**The front-end row is deliberately left unratioed.** The CPU's `XFRM` (0.095 ms) is a
+separable software pass; the GPU's equivalent work happens in the vertex stage *inside*
+the G-buffer number and cannot be split out without a synthetic arm. Reporting a ratio
+here would be inventing a decomposition neither side has. What can be said: at 0.095 ms
+`XFRM` is **0.14 % of the CPU frame**, so the front end is not where the CPU loses —
+consistent with §5.4's prediction that the frame is deferred-lighting-bound.
+
+#### CPU-side per-frame cost on the GPU arm (the split the table needs)
+
+MEASURED headless (`--cpu_prof=200`, no window — visible runs are the user's to launch),
+t=5743: **animation 0.0719 ms** (`Reanimate` = the engine's own `Animate_Objects` plus
+the light / camera / batch-transform refresh), **upload 0.0004 ms** (37 batch uniform
+blocks + 21 lights, then the memcpy). Neither is included in any GPU number above — the
+timed loop renders a pinned pose and pays neither.
+
+Worth stating plainly: the GPU arm's 0.0719 ms "animation" is **larger** than the CPU
+arm's `ANIM` section (0.012 ms), because `Reanimate` rebuilds the entire light list,
+camera and per-batch transforms every call while the CPU's `ANIM` counter covers
+`Animate_Objects` alone. It is not evidence of a slower CPU path on the GPU arm; it is a
+different bracket around a different amount of work.
+
+#### Workload honesty — what changed to make this table fair
+
+§6.2's "other known gaps" listed two ways this arm did **more** work than the CPU,
+biasing every ratio in the CPU's favour. Both are now fixed and priced:
+
+- **Backface culling** in the main view, matching `Transform_Objects` (Transform.cpp:2434).
+  Which Metal mode is correct was measured, not reasoned: FDS's `Compute_Face_Normals`
+  uses `Cross_Product(V,U)` (= `e2 x e1`, the negation of the usual convention), so the
+  engine's visible faces are Metal's **front** faces. `CullBack` drops the room
+  (whole-frame luma 115.68 -> 63.19); `CullFront` keeps it. Culling changes 10,864 px
+  (0.524 %) against the unculled frame.
+- **Per-cube-face frustum culling** in the shadow bake, the analogue of the CPU's
+  per-pass mesh cull: **477 of 832 shadow batch draws per frame rejected, 57.3 %**.
+
+**Not** added, and that is parity rather than an omission: backface culling in the
+*shadow* pass. `shadow_backface_cull` defaults to 0 (FeatureFlags.def:55) because
+single-sided walls still occlude, so the CPU bakes two-sided and this arm now matches
+deliberately.
+
+The asymmetries §5.3 lists that remain unfixed and run **against** the GPU (it does more
+work): no PolyId identity test, no static shadow lightmap, every cube tap taken. And the
+one that runs for it: hardware trilinear + 8x aniso where the CPU point-samples.
+
+#### Validation that §6.2a's CPU half is still usable
+
+Today's tier-`C` `f_min` is **67.61 ms** (t=5743) and **82.10 ms** (t=2000) against
+§6.2a's pinned-`0846811` figures of **63.34** and **79.41** — within **6.7 %** and
+**3.4 %**. So §6.2a's CPU dataset has not gone stale and its other tiers (checkerboard,
+lightmap, POM) can still be read against this table without re-measurement.
+
+---
+
+### 6.2d The 1.69x unshadowed-direct residual — ROOT-CAUSED and closed to 1.13x
+
+§6.2b left this open and explicitly refused to name a cause. Three mechanisms, each read
+out of the CPU kernel and isolated by measurement:
+
+1. **The light colour was being SQUARED.** The CPU treats the authored 0-255 colour as
+   linear radiance at power 1 — the view-light list is `colR = O->L.R * O->ISize`
+   (`DeferredSurfaceKernel.cpp:5551-5553`) and the `--hdr_linear` composite is
+   `rl = (albedo/255)^2 * l + s` (ibid. 2618-2631): the **albedo** is linearised, the
+   light is not. Squaring halved every 128-valued channel — precisely the mech omnis'
+   green.
+2. **The ambient carried an invented env term.** `(FssEss + Fms*Ems) * irr` was being
+   added on every pixel. The CPU's Karis split-sum + Fdez-Aguera machinery lives inside
+   `EnvSpecComposeScalar` and fires only for materials with `Reflection > 0` or a
+   metallic map, under `--env_refl`. Under the old (wrong) roughness mapping it happened
+   to evaluate near zero; correcting the roughness blew it up to **+24 mean luma**
+   (ambient term 34 -> 59 at t=5743). The CPU's `--sh_ambient` path is
+   `l = Luminosity*255 + Diffuse*E(n)` (ibid. 1741-1760) — a pure irradiance skylight.
+3. **`SceneCorrections`' `OmniSizeMult` survived commit `00f7820`.** That commit deleted
+   both *Range* patches, but the *Size* table is still applied unconditionally
+   (`GREETS.CPP:207-236`): the three mech omnis run at `ISize x 1.5`. Isolated per-pixel,
+   the CPU's mech-omni linear excess was ~1.5-1.6x while the yellow FLD omnis agreed
+   within 8 % — exactly this table. Replicated through the engine's own `Spline_Scale`.
+
+Same two-sided measurement as §6.2b (CPU `--prof_no_lights`, GPU `--light_range_scale=0`),
+t=5743, matched tier:
+
+| arm | base (ablated) | direct, shadowed | direct, UNSHADOWED |
+|---|--:|--:|--:|
+| **CPU** | 93.34 | +21.46 | **+38.50** |
+| **GPU** before | 92.60 | +15.53 | +28.59 — **1.35x** |
+| **GPU** after | 97.60 | +18.70 | **+34.03 — 1.13x** |
+
+Also corrected to CPU-exact semantics in the same round, each read out of the kernel:
+the GGX lobe roughness is `sqrt(2/(gloss+2))` clamped `[0.04, 1]` (was `1 - gloss/128`,
+giving roughness 0.625 where the CPU runs 0.2 at `Glossiness` 48); the roughness map
+attenuates specular **magnitude** (`specMul = 1 - texel`), never the lobe; the direct
+specular Fresnel is the CPU's fixed dielectric `0.04 + 0.96(1-VoH)^5` scaled by
+`Material::Specular`; and the `(1-F)` diffuse factor is **gone**, because
+`--diffuse_energy` scales only the LDR `fdB` combine (ibid. 2568-2571) and never the
+`hdr_linear` accumulator the HDR frame is actually built from.
+
+**Remaining, stated:** the unshadowed direct terms agree to **12 %** in aggregate. The
+known ambient-source gap — this arm projects the FLD's authored zenith/nadir backdrop
+gradient into SH, while the CPU bakes a real 32² env probe at the room centre — is
+unfixed and is where the residual concentrates (see the ceiling row below).
+
+---
+
+### 6.2e Look parity at the two review poses — the pairs, with the diff
+
+Full shipping stack on **both** arms (mirrors, disco, flares, bloom, ACES on; the GPU
+adds its own mirror reflection pass). DEMO reference rendered headless with
+`SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ... --snapshot=greets@t=N --deferred`.
+
+| file | what |
+|---|---|
+| `scratchpad/pairs/t5743_cpu.png` / `t5743_gpu.png` | primary review pose, full frames |
+| `scratchpad/pairs/t5743_sbs.png` | the two stacked (CPU top, GPU bottom) |
+| `scratchpad/pairs/t5743_diff.png` | signed luma difference, 4x amplified — **red = GPU brighter, blue = GPU darker, grey = agreement** |
+| `scratchpad/pairs/t2000_cpu.png` / `t2000_gpu.png` / `t2000_sbs.png` / `t2000_diff.png` | the disco pose, same set |
+
+(`scratchpad` = the session scratch directory; the PPM originals sit beside each PNG.)
+
+**t=5743, measured over all 2,073,600 px:**
+
+| metric | value |
+|---|--:|
+| signed mean dY (GPU - CPU) | **+0.19 / 255** |
+| mean absolute dY | 13.10 |
+| px differing > 2/255 | 77.5 % |
+| px differing > 8/255 | 45.1 % |
+| px differing > 32/255 | 9.3 % |
+
+The **signed** mean is +0.19/255 — the two frames have essentially the same exposure and
+tone. The absolute difference is therefore almost entirely **zero-mean**, i.e. structure
+rather than bias. Blurring both frames before differencing removes about a third of it
+(mean |dY| 13.10 -> 10.36 at 3x3 -> 8.71 at 7x7), which locates that third as
+**high-frequency disagreement**: the CPU point-samples at the mip `MiplevelClipper`
+chose, the GPU runs hardware trilinear + 8x aniso. It is concentrated on the densely
+tiled floor and ceiling, exactly where a mip-selection difference would show, and the
+GPU is the ground truth there.
+
+The ~8.7/255 that survives blurring is real structure, and it is regional:
+
+| region | signed dY | mean abs dY |
+|---|--:|--:|
+| ceiling (y < 170) | **+7.28** | 14.59 |
+| upper wall (y 170-430) | -3.36 | 10.77 |
+| mid (y 430-700) | -2.88 | 13.04 |
+| floor (y > 700) | +1.71 | 14.00 |
+| left wall (x < 420) | **-0.96** | **6.94** |
+| right wall (x > 1500) | -4.07 | 10.23 |
+
+The **ceiling is the worst region at +7.28**, and it is the predicted signature of the
+one ambient gap named above: a downward-facing surface draws its irradiance from the
+nadir half of the authored gradient, which the projection over-weights relative to the
+CPU's real room-centre probe bake. The **left wall agrees to -0.96 signed with 6.94 mean
+absolute** — and that 6.94 is mostly the filtering speckle, so on a plain lit wall the
+two renderers now substantially agree.
+
+**t=2000 (disco pose): signed mean dY = -15.32, mean abs 32.23.** This pose is NOT at
+parity and the number says so. Two named causes, both structural rather than tonal:
+
+1. **The metal has no environment to reflect.** The `amudim` columns dominate this
+   frame. The CPU's conductors take their colour from a baked equirect panorama
+   (`EnvSpecComposeScalar`; greets gets `--env_refl` for free because the RVSM metallic
+   imports `setDefault` it). This arm has no panorama, so its metal is uniformly darker
+   with the hue correct — measured on the left column: GPU `(84,68,48)` vs reference
+   `(96,77,53)`.
+2. **The code screen shows authored content, not generated content.** The reference's
+   screens carry the per-frame text `GreetsGenerator` writes into the texture; this arm
+   shows the authored `P_TEXT` image ("Flood Greetings"). Additionally the CPU renders
+   those panels through its **transparent** kernel and this arm draws them opaque — the
+   plan excludes the transparent depth-peel layers on both sides, so that part is a
+   stated scope boundary, not a defect.
+
+Before the metallic maps were ingested this frame's columns rendered **bright orange**:
+GPU `(111,69,41)` against the reference's `(96,77,53)`, a warm-cast error of **+27** on
+`R-B` that is now **-7**. Whole-frame mean |dY| moved 29.86 -> 32.23 across that change
+— *worse in aggregate luma while clearly better in colour* — and both numbers are given
+because either alone misrepresents the change.
+
+---
+
 ### 6.2 Phase 3 stage 1 — deferred arm built, shadow CASTER FILTER correct, timings RETRACTED
 
 > **Superseded in part by §6.2a.** This section's conclusion that "shadows are now correct" was
@@ -1123,6 +1379,14 @@ the right core size.
 **Still missing, in order of how much they cost the LOOK** (each identified by comparison with
 the DEMO reference, not guessed):
 
+> **STATUS 2026-08-07:** items 1-4 below are RESOLVED or reclassified — see §6.2c/§6.2e.
+> Bloom and exposure were already implemented and are confirmed matched (whole-frame
+> signed tone difference at t=5743 is **+0.19/255**). The MIRROR is implemented as a real
+> reflection pass (§6.2c). The warm pool at the corridor's far end was the **RVSM PBR map
+> sets never being applied** — 0 of the reference's 32 — which also made the `amudim`
+> columns render bright orange; fixed. What remains is the env-reflection panorama for
+> metals and the generated code-screen content, both named in §6.2e.
+
 1. **Bloom** (`bloom_intensity` 2.0, ON by default). The reference's bursts are noticeably larger
    and softer than ours, and its shoulder lamps carry a glow ours renders as flat dots. That is
    bloom, not a flare-sizing error — our burst *cores* are the same size.
@@ -1251,11 +1515,16 @@ that no longer existed.
 - **Tone is not matched to DEMO** (`hdr_exposure` = `cine::kGreetsExposure` not looked up,
   `hdr_refl_gain` 4.0 and bloom absent). Does not affect cost, but the image is not a visual ground
   truth yet.
-- Tangent basis is derived from screen-space derivatives, not FDS's `Compute_Vertex_Tangents`
-  (unreachable from the loader). Relevant to §3.1 — this arm does not inherit the
-  handedness/material-clone split.
-- **Backface culling off**; **no frustum culling anywhere**, including the shadow bake, where the
-  CPU culls per cube face. Both make the GPU do more work than the CPU, not less.
+- ~~Tangent basis is derived from screen-space derivatives~~ **FIXED 2026-08-07**: the
+  engine's own per-corner normals and tangents are ingested, replicating
+  `MakeFacesIndependentByAngle(30)` + `Compute_Vertex_Tangents` + the authored SMAN
+  overrides, and the `::mirUV` handedness split rides the vertex as a sign
+  (`B = h*(N x T)`) since a de-indexed buffer needs no material clones.
+- ~~**Backface culling off**; **no frustum culling anywhere**, including the shadow bake, where the
+  CPU culls per cube face.~~ **FIXED 2026-08-07** — main-view backface culling (winding
+  measured, not assumed) and per-cube-face frustum culling in the bake, which rejects
+  **57.3 %** of shadow batch draws. Shadow-pass backface culling is deliberately still off,
+  because `shadow_backface_cull` defaults to 0 on the CPU. See §6.2c.
 
 #### Method note that survives, and should be reused
 
