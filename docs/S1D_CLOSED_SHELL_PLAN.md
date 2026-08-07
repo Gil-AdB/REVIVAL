@@ -2112,3 +2112,323 @@ build-dev/DEMO/DEMO --snapshot=greets@t=5743 --dump_shadowmap $LID --pom_prism=1
 # perf
 ./DEMO $LID --pom_prism=1 --bench=scene@scene=greets,t=5780,iters=20
 ```
+
+---
+
+# S1d-4 — ATTACK THE MARCH: the prism-enabled cap sweep, and the two gaps re-scoped
+
+Added 2026-08-07, branch `fog-wt`, HEAD `677733f`. No code change in this stage —
+every number below is a flag setting or a measurement. Box load 3.6–6.9
+throughout (my own renders); every render `SDL_VIDEODRIVER=dummy`, 1920×1080,
+sequential, 0 `unknown flag` across every run log.
+
+## S1d-4.0 THE INSTRUMENT, AND ITS CALIBRATION AGAINST THE PUBLISHED LADDER
+
+SLIP = texels of texture sliding per frame at a FIXED SURFACE POINT. Per frame
+the renderer dumps the marched UV (`_uv.bin`) and the camera-free geometric UV
+(`_uvgeo.bin`); `offset = uv − uvgeo` is the parallax displacement AT a surface
+point, keyed on the geometric UV (1 texel cells) so the SAME surface point is
+compared across frames with no camera math. REACH = `|offset|`. Sweep A is
+p9→p10 at t=5958, 16 frames, 0.040 world/frame lateral dolly, one `./DEMO` per
+frame. Scripts in the session scratchpad (`sweepA.sh`, `slip.py`).
+
+**Calibration, because a new script's numbers are worthless until it reproduces
+a published one.** Recess arm, same flags as `S1d-2e`:
+
+| quantity | published | mine |
+|---|--:|--:|
+| clean floor (flat POM) slip p99 | 0.60 | **0.57** |
+| clean floor slip p90 | 0.01–0.12 | **0.094** |
+| recess cap 2 reach p90 | 28.6 | **28.65** |
+| recess cap 4 reach p90 | 53.8 | **52.98** |
+| recess cap 16 reach p90 | 184 | **190.29** |
+| recess cap 64 slip p90 | 15.3 | **15.234** |
+
+Reach reproduces within 2 % and the clean floor lands on the published value.
+The mid-cap slip **p99** runs ~2× the published figure, so **p99s below are on my
+scale only** and must not be mixed with `S1d-2e`'s; p90 and reach are directly
+comparable.
+
+## S1d-4.1 THE PRISM-ENABLED CAP LADDER — the headline
+
+Lid+prism arm (`S1d-3.7`'s `$LID` + `--pom_prism=1`), sweep A. At this pose the
+prism is provably inert (`S1d-3.2`: marched UV bit-identical on all 2 073 600 px),
+so this is the LID arm's ladder with the hole cost removed.
+
+| arm | slip p50 | slip p90 | slip p99 | reach p90 (tx) | zero-offset | reach/slip (p90) |
+|---|--:|--:|--:|--:|--:|--:|
+| flat POM (floor) | 0.007 | **0.094** | 0.57 | 10.3 | 0.01 % | 109 |
+| cap 2 | 0.044 | **0.254** | 0.98 | 28.7 | 0.51 % | **113** |
+| cap 4 | 0.096 | **0.891** | 2.70 | 50.9 | 1.24 % | 57 |
+| cap 8 | 0.136 | **2.530** | 7.99 | 94.4 | 2.44 % | 37 |
+| **cap 16 (standing)** | 0.213 | **6.246** | 28.47 | 181.6 | 5.09 % | 29 |
+| cap 32 | 0.218 | **12.386** | 75.93 | 327.5 | 12.65 % | 26 |
+| cap 64 | 0.122 | **16.652** | 385.29 | 135.1 | 24.91 % | 8.1 |
+
+**Slip grows ≈ cap^1.55 while reach grows ≈ cap^0.9, so reach-per-slip is
+monotonically best at the LOWEST cap and there is no knee anywhere on the
+ladder.** The prism freed the knob; the knob turns out to have no good position —
+it only slides you along a smooth curve. That is the single most important
+result of this stage and it is a negative one.
+
+## S1d-4.2 WHAT THE CAP ACTUALLY BUYS — relief depth, banded at the slab
+
+Marched-UV reach is texture parallax, not the thing the eye calls relief. This
+measures DEPTH against the flat arm, MASKED to the stone (the flat arm's
+`_uvgeo` validity) and BANDED, because `--pom_shell_cap` also bounds the shell
+DEPTH WRITE at `amp*cap` and lumping that in would score an artefact as reach.
+Unmasked/unbanded is the retired ">3 world units" background-detector trap
+wearing a different threshold — my first cut made exactly that mistake and had
+to be thrown away.
+
+**t=5958 (the grazing pose), stone = 2 072 458 px:**
+
+| arm | in slab | RECESS 0.18–0.5 behind | PROUD 0.18–0.5 front | **RUNAWAY >0.5** |
+|---|--:|--:|--:|--:|
+| tessellation | 97.2 % | 52 326 | 0 | **6 150 (0.30 %)** |
+| cap 2 | 84.6 % | **0** | 292 751 | 26 370 (1.27 %) |
+| cap 4 | 92.1 % | 31 096 | 107 320 | 25 884 (1.25 %) |
+| cap 8 | 83.9 % | 296 280 | 1 771 | 34 662 (1.67 %) |
+| **cap 16** | 73.1 % | 207 561 | 2 329 | **348 332 (16.81 %)** |
+| cap 32 | 72.9 % | 164 419 | 25 943 | **370 251 (17.87 %)** |
+| cap 64 | 72.9 % | 164 380 | 210 912 | 185 340 (8.94 %) |
+
+Two findings, both new:
+
+1. **`--pom_shell_cap=2` renders ZERO recessed pixels at the grazing pose.** It
+   is a flat wall translated 0.09 world out. So the bottom of the slip ladder is
+   not a usable setting — it buys its cleanliness by having no relief at all.
+2. **At the standing cap 16, 16.81 % of the stone writes depth more than 0.5
+   world from the flat wall, on a slab that is 0.18 world deep** (p1 = −2.363
+   world, i.e. 13× the slab). This is the `|dz| ≤ amp*cap` bound doing exactly
+   what the flag says it does, and it has not been reported before. Tessellation
+   is 0.30 %. It is a MAIN-VIEW depth defect (shadow passes rasterise geometry,
+   so it does not reach the 18.79 % cube figure) and it will be read by any
+   depth-consuming post.
+
+**t=5743**, for contrast: the ordering inverts — runaway falls 9.16 % (cap 2) →
+0.91 % (cap 16), and the arm is PROUD-dominated (271 094 px at cap 16) where
+tessellation is purely RECESSED (109 764 px, 0 proud). The two arms express
+relief by opposite conventions, which is why comparing their recess counts alone
+is unfair, and it is pose-dependent which cap is closest to tessellation.
+
+## S1d-4.3 THE THREE MECHANISM CANDIDATES — all three refuted
+
+**(a) The angle-dependent FADE re-evaluated WITH the prism — still loses.**
+`--pom_shell_cap_fade` blends the true ray toward the offset-limited ray as
+incidence approaches parallel. The earlier verdict was taken when clamped pixels
+were holes; that objection is gone, so it was re-run. At MATCHED REACH:
+
+| reach p90 | hard cap | slip p90 | fade | slip p90 | hard cap wins by |
+|--:|---|--:|---|--:|--:|
+| ~28 | cap 2 | **0.254** | cap16 fade 0.5 (27.1) | 1.000 | 3.9× |
+| ~42 | ≈cap 3 | ~0.6 | cap16 fade 0.3 (41.7) | 2.195 | ~3.7× |
+| ~59 | ≈cap 5 | ~1.3 | cap16 fade 0.2 (58.7) | 3.849 | ~3.0× |
+| ~93 | cap 8 | **2.530** | cap16 fade 0.1 (93.3) | 10.377 | 4.1× |
+
+**The fade loses to the hard cap by 3–4× on slip at matched reach even with the
+prism on.** It does what it was built to do — zero-offset falls to 0.25–0.49 %
+against the hard cap's 5.09 % — but that was only valuable while clamped pixels
+were holes, and the prism already solved that. `cap32_fade0.3` and
+`cap64_fade0.3` are indistinguishable from `cap16_fade0.3` (slip 5.90 / 5.54 /
+5.95), i.e. the fade dominates and makes the cap irrelevant. Not recommended.
+
+**(b) Height-field LOW-PASS — refuted, and it was my own leading hypothesis.**
+The reasoning was that tessellation cannot swim partly because its relief only
+exists at the subdivision lattice, i.e. it is inherently low-passed, and that
+Tatarchuk's own authoring guide says to blur a height map that stretches. At
+cap 16, pinning the height+cone mip:
+
+| `--pom_height_mip` | slip p99 | reach p90 |
+|---|--:|--:|
+| 0 | 28.47 | 181.64 |
+| 1 | 27.51 | 181.93 |
+| 2 | 27.28 | 182.59 |
+| 3 | 27.16 | 183.41 |
+
+**An 8× linear blur of the height field moves slip by 4.6 % and reach by
+nothing.** All four levels are distinct (the values move monotonically and
+mip 2 ≠ mip 3), so the treatment applied. Slip is not caused by the height
+field's high frequencies.
+
+**(c) Discrete CLASS FLIPS in the clamp/fallback band — refuted.**
+`--pom_path_viz=2` across sweep A, classes registered on the surface, steps
+bucket excluded:
+
+| arm | any flip | kind | action | cap bit |
+|---|--:|--:|--:|--:|
+| cap 16 | 1.779 % | **0.076 %** | **0.059 %** | 1.682 % |
+| cap 4 | 0.935 % | **0.009 %** | **0.020 %** | 0.909 % |
+
+**The march's terminal action changes class on 0.06 % of surface points per frame
+at cap 16.** Essentially all of the "flips" are the `kPomBitCap` bookkeeping bit
+toggling as `1/(V·N)` crosses the cap, which changes no appearance by itself.
+There is no hidden discrete flicker.
+
+**And the slip tail is NOT quantised.** If the excursion were the first-hit
+hopping from one stone block to the next it would land on multiples of the
+~256-texel block pitch. The tail of `|slip| > 8` at cap 16 decays smoothly —
+294 229 in [0,16), 139 897 in [16,32), 29 826 in [32,48), 6 288, 4 996, 4 770 —
+with no mode anywhere near 256. **Slip is a continuous excursion of a long ray,
+exactly as `S1d-2e.1` concluded, and not a block-hop.**
+
+## S1d-4.4 GAP 2 — the crisp step is a SEPARATE defect, and it is SHADING
+
+`S1d-3.6` records tessellation rendering a crisp geometric step at t=5958 where
+the march smears. Asked whether that is the same defect as the smear: **it is
+not, and the cap is not its lever.**
+
+First, the feature was mis-located. At the VERTICAL mortar joint (x≈730) the
+march is not measurably worse than tessellation:
+
+| arm | joint FWHM px | contrast | max slope | joint-crop \|dz/dx\| p99.9 |
+|---|--:|--:|--:|--:|
+| flat | 36 | 66.1 | 11.39 | 0.0051 |
+| tessellation | 61 | 61.0 | 4.85 | 0.1062 |
+| cap 4…64 | 47–65 | 49.3 | 4.13–5.38 | **0.1744** |
+
+The march writes a LARGER depth step at the joint than tessellation. It is not
+short of depth contrast.
+
+The step he means is at the frame's top and bottom — the wall at its most
+edge-on — found by differencing the two arms per 60×60 tile rather than by
+guessing. There tessellation renders a **lit ledge with a dark shadowed strip
+under it**; every march arm renders a faint smudge. In that region:
+
+```
+                  |dz/dx| p99.9   clamped-to-flat   |offset| p50 / p90
+tessellation           0.0101           5.9 %            0 / 0
+cap 4,8,16,32,64       0.0101           0.0 %         25.1 / 38.4   (identical)
+```
+
+**The march there is NOT clamped, marches 25 texels, and writes the SAME depth
+gradient as tessellation — and caps 4 through 64 are identical, so the cap does
+not bind at all.** What tessellation has and the per-pixel arm does not is
+shading off real relief: true geometric normals plus relief SELF-SHADOWING (the
+lit top and the dark side). `--pom_horizon` is the per-pixel arm's only
+self-shadow term and it is OFF in the standing recipe. **Gap 2 is a shading gap,
+not a march gap; one fix does not serve both.**
+
+## S1d-4.5 A CONFOUND IN EVERY LID-vs-TESSELLATION COMPARISON
+
+`--greets_displace_amp` defaults to **0.3 world** (`FeatureFlags.def:429`) while
+the shell arm is pinned at `--pom_shell_world_amp_set=0.18`. **Every lid-vs-tess
+comparison in this document and its predecessors compared a 0.18-world slab
+against a 0.30-world carve — 1.67× different relief depth.** That affects the
+see-through counts, the crisp-step comparison and the offscreen divergence
+figure. It does not change §S1d-4.1 (a cap ladder against itself) or §S1d-4.3
+(arm against arm at one amplitude), but every row with a `tessellation` cell in
+it needs re-running at matched amplitude before it is quoted again.
+
+## S1d-4.6 REPRODUCTION
+
+```sh
+# slip / reach ladder (scratchpad scripts)
+sweepA.sh <outdir> $LID --pom_prism=1 --pom_shell_cap=<C>   # 16 frames, t=5958
+slip.py   <outdir> "<label>"        # SLIP_HIST=1 adds the tail histogram
+
+# relief depth, banded, masked to the stone
+seethru.py <flatdir-with-uvgeo> <armdir> "<label>"
+
+# path-class flips
+sweepA.sh <outdir> $LID --pom_prism=1 --pom_shell_cap=16 --pom_path_viz=2
+pathflip.py <outdir> "<label>"
+
+# the wall's most edge-on band, where gap 2 lives
+#   crop x820-1240 y900-1080 at t=5958 cam p10
+```
+
+---
+
+# S1d-5 — WRONG NORMALS: the prism side quads are shaded with the LID's normal
+
+Added 2026-08-07. User verdict on the lid+prism arm, on screen, verbatim:
+*"B has gaps and it has definitly wrong normals. but it looks good and does the
+work - including seeing behind relief (where it should)"* — and, localising it,
+*"I think the normals issue is related to winding - it has discontiuity on
+polygon edges that are two flat connected polys creating a quad."*
+
+## S1d-5.1 THE TRIAGE — M1/M2/M3 are all CLEAN at the poses tested
+
+Three vizzes, one render each, on the lid+prism arm at t=5743 and t=5958.
+**`--no-hdr` is mandatory**: `GREETS.CPP:1177` forces `hdr` on for greets and the
+viz stomps `outR/G/B`, which the HDR path discards — the first attempt at this
+silently rendered an ordinary tonemapped wall and looked like "the viz does not
+apply to the stone". `--viz_*` are `FDS_DEV`-gated, so this needs `build-dev`
+(which does not overwrite `Runtime/DEMO`).
+
+Also required: `--no-pom_normal`. `--pom_normal` perturbs the G-BUFFER normal in
+the rasterizer, so `--viz_geonormal` still carries it and the "pre-normal-map"
+reading is not pre-anything until `--pom_normal` is off.
+
+| candidate | instrument | result at t=5743 |
+|---|---|---|
+| **M1** vertex-normal interpolation crease | `--viz_geonormal --no-pom_normal --wire_viz=2` | **CLEAN** — the wall is ONE solid colour, the quad's triangle diagonal is visible in the wire overlay, no kink across it |
+| **M2** per-triangle tangent on the non-affine trapezoid chart | `--viz_tangent --no-pom_normal --wire_viz=2` | **CLEAN** — one solid colour, no break on the same diagonal |
+| **M3** handedness split cutting through a quad | `--viz_matid --wire_viz=2` | **NOT CUTTING** — the whole wall panel is ONE material id across the diagonal; the split exists scene-wide (`[GREETS-TBN] split 2479 mirrored-UV faces onto 19 handedness clones`) but does not divide this quad |
+
+So the diagonal-kink he described is **not reproduced at either pose I triaged**,
+and I do not have a mechanism for it yet. That is a gap in this report, not a
+refutation of what he saw — he was scrubbing a continuous fly, and I sampled two
+static poses. **The next move on that defect is his pose, not another A/B.**
+
+## S1d-5.2 WHAT IS CERTAIN — the prism side quads, in code and on screen
+
+`DEMO/MeshOps.cpp:5951-5954`, `PomShell_BuildPrism`:
+
+```cpp
+qv.push_back({ Ta, va->N, va->Tangent, uA, vA, hA });
+qv.push_back({ Tb, vb->N, vb->Tangent, uB, vB, hB });
+qv.push_back({ Bb, vb->N, vb->Tangent, uB + kNudge*nu, vB + kNudge*nv, 1.0f - hB });
+qv.push_back({ Ba, va->N, va->Tangent, uA + kNudge*nu, vA + kNudge*nv, 1.0f - hA });
+```
+
+Every one of the four side-quad vertices takes **`va->N` / `vb->N` — the LID
+vertex's normal**. The quad is the SIDE of the relief slab, geometrically
+perpendicular to the lid. Its true outward direction is already computed 29
+lines earlier (`const Vector out = {…}`, line 5922) and is used **only to pick
+the winding**, never as a shading normal.
+
+Confirmed on screen at p5 t=5963 (where the prism strip is largest — it replaced
+the 8 700 px gash), by differencing `--pom_prism=1` against `--pom_prism=0` under
+`--viz_geonormal` to isolate exactly the 33 441 prism-owned pixels:
+
+- **prism OFF**: three distinct normal regions — the left wall (teal), the right
+  wall (orange), and a narrow band of background/junk showing through the slit.
+- **prism ON**: the slit is gone and the strip is **pure teal — bit-for-bit the
+  left wall's normal.** There is no distinct normal for the side face at all.
+
+So the strip that seals the gash is lit as though it were a continuation of the
+wall it came from. **This is a certain, arm-B-specific defect, it is the new
+geometry from `S1d-3` (`e144205`), and it is by construction rather than by
+accident.**
+
+## S1d-5.3 THE DESIGN TENSION THE FIX HAS TO RESOLVE
+
+`Vertex::N` on a prism side has two consumers that want different values:
+
+- the **deferred kernel's shading normal** wants the side's own `out`;
+- the **march** wants the LID's `N`, because `VtN = V·N` parametrises a ray that
+  is supposed to continue the neighbouring lid's relief, in the lid's tangent
+  frame and UV domain (which is why `S1d-3.0` chose the lid's basis in the first
+  place — it is not an oversight, it is a documented trade).
+
+So this is not a one-line sign fix. The options are (i) give the side its true
+normal and accept that the march on a side fragment is degenerate anyway — its
+UV is constant down the quad apart from a 1e-4 nudge, so it is carrying almost
+no relief; (ii) keep the lid basis for the march and route a separate shading
+normal for side faces; (iii) suppress the march on side quads entirely and shade
+them as plain textured sides. **(i) is the cheapest and is the one I would
+measure first.** Not implemented in this stage.
+
+## S1d-5.4 TWO ORDERING FACTS, CONFIRMED
+
+- `GreetsFixBitangentHandedness` runs at `GREETS.CPP:2643`, **after**
+  `PomShell_Build` (:1911) but **before** `PomShell_BuildPrism` (:2653). Lid
+  faces therefore get the handedness split and **prism sides are created after
+  it, so they never see it** — they inherit whichever clone their owner landed
+  on.
+- A side quad is perpendicular to its owner, so its own UV determinant sign has
+  no reason to match the owner's. Inheriting the owner's `TbnHandedness` is
+  right only by luck. Both facts are consistent with `S1d-5.2` and neither has
+  been measured for its pixel cost yet.
