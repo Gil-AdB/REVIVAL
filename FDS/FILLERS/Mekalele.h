@@ -698,6 +698,23 @@ struct TileRasterizerCtx {
 	// the destructive grazing wraps overshoot by many blocks and write marched
 	// Z deep enough (up to amp*cap) that the wall Z-loses to the room behind.
 	float pomShellKeepUV = 0.0f;
+	// --pom_prism_march (S1d-5): PRISM-CLIPPED MARCH. Set per face when the
+	// flag is on and the face is a shell face (lid OR prism side quad — both
+	// march the same field in the owner's chart). Arms PER-LANE SIGNED
+	// 1/(V·N): a prism side-quad fragment can be seen from behind the owner
+	// lid's plane (V·N < 0, the doorway-curtain case), where the ray ASCENDS
+	// through the slab — the descent-only parametrization walks the wrong ray
+	// there. With the sign carried, rayScale/dU/dV point along the TRUE ray
+	// for both signs, the loop's height step direction is dh = -sign(V·N)
+	// (folded into the shared step as dt·hDir), the ascent cone step is
+	// c·gap/(dlen − c) (dlen ≤ c ⇒ the ray outruns every cone ⇒ exits through
+	// the lid = MISS), and an ascent lane's miss is rayH ≥ 1 (out the TOP)
+	// instead of rayH ≤ 0. Mode ≥ 2 additionally forces the PRISM EXIT
+	// semantics at ctx build: every shell failure discards (base clip,
+	// lid-edge clamps, keep_uv, side faces and side entry all forced off) —
+	// the neighbouring prism's fragment answers the pixel, arbitrated by Z.
+	// false = every expression below is the legacy one, byte-identical.
+	bool  pomPrismMarch = false;
 	float shellH0 = 0.5f;
 	float shellSideLean[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	uint8_t shellSideCls[4] = { 4, 4, 4, 4 };
@@ -1560,8 +1577,25 @@ struct TileRasterizer {
 						// screen overhang is pure geometry and knows nothing about
 						// the march's grazing cap; capping it would under-clip
 						// exactly where the overhang is worst).
+						// --pom_prism_march (S1d-5): per-lane ray-height DIRECTION.
+						// +1 = the ray descends through the slab (V·N > 0, every lid
+						// fragment), −1 = it ascends (V·N < 0 — a prism side quad seen
+						// from behind the owner lid's plane; the descent-only
+						// parametrization walks the wrong ray there). Folded into the
+						// march as dt·hDir at the write sites; flag off keeps every
+						// legacy expression verbatim.
+						const bool prismMarch = shell && ctx.pomPrismMarch;
+						const Vec8fb rayUp = prismMarch
+						    ? Vec8fb(VtN < Vec8f(0.0f)) : Vec8fb(false);
+						const Vec8f hDir = select(rayUp, Vec8f(-1.0f), Vec8f(1.0f));
 						const Vec8f invVtNRaw = shell
-						    ? (Vec8f(1.0f) / max(VtN, Vec8f(1.0f / 64.0f)))
+						    ? (prismMarch
+						       // SIGNED: magnitude clamped exactly as before, sign =
+						       // sign(V·N), so rayScale and the depth write's
+						       // Δz = Δh·A·Vz/(V·N) follow the true ray on ascending
+						       // lanes too. V·N ≥ 0 lanes are bit-identical (×+1.0f).
+						       ? hDir / max(abs(VtN), Vec8f(1.0f / 64.0f))
+						       : Vec8f(1.0f) / max(VtN, Vec8f(1.0f / 64.0f)))
 						    : Vec8f(1.0f);
 						// --pom_shell_cap_fade (S1d-2f, default 0 = OFF, byte-identical):
 						// the PRINCIPLED version of the cap. The shell march travels the
@@ -1577,9 +1611,11 @@ struct TileRasterizer {
 						// so head-on pixels are untouched (invVtNRaw == 1 there anyway),
 						// near-grazing pixels lose the divergence smoothly instead of at
 						// a clamp edge, and the cap still bounds whatever is left.
-						const Vec8f invVtNCap = min(invVtNRaw, Vec8f(ctx.pomShellCap));
+						const Vec8f invVtNCap = prismMarch
+						    ? hDir * min(abs(invVtNRaw), Vec8f(ctx.pomShellCap))
+						    : min(invVtNRaw, Vec8f(ctx.pomShellCap));
 						const Vec8f invVtN = shell
-						    ? (ctx.pomShellCapFade > 0.0f
+						    ? (!prismMarch && ctx.pomShellCapFade > 0.0f
 						       ? (Vec8f(1.0f) + (invVtNCap - Vec8f(1.0f))
 						          * [&]{ const Vec8f w = min(max(VtN
 						                     * Vec8f(1.0f / ctx.pomShellCapFade),
@@ -1663,7 +1699,8 @@ struct TileRasterizer {
 								pathCode |= Vec8i(int32_t(kPomBitShell
 								          | (ctx.pomRecess ? kPomBitRecess : 0u)));
 								pathCode |= pom_path_bit(
-								    invVtNRaw > Vec8f(ctx.pomShellCap), kPomBitCap);
+								    (prismMarch ? abs(invVtNRaw) : invVtNRaw)
+								        > Vec8f(ctx.pomShellCap), kPomBitCap);
 								pathCode |= pom_path_bit(hStart < hEnter, kPomBitSideEntry);
 							}
 							if (ctx.tbnHandedness < 0.0f)
@@ -1891,6 +1928,19 @@ struct TileRasterizer {
 								// exact divide (no rcp approx - parallax hard rule). c=0 near a tall
 								// feature -> dt=0 (blocked); dlen=0 (perp view) -> dt=gap.
 								Vec8f dt = cratio * gap / (cratio + dlen + Vec8f(1e-6f));
+								// --pom_prism_march ASCENT lanes (rayUp): the ray rises
+								// through the slab, so it meets the cone from below — the
+								// safe advance is c·gap/(dlen − c). dlen ≤ c means the ray
+								// climbs faster than any cone opens and can never cross
+								// again: jump straight past the lid (rayH ≥ 1 ⇒ MISS at the
+								// loop exit). Descent lanes keep dt verbatim.
+								if (prismMarch) {
+									const Vec8f denUp = dlen - cratio;
+									const Vec8f dtUp  = select(denUp > Vec8f(1e-6f),
+									                           cratio * gap / max(denUp, Vec8f(1e-6f)),
+									                           max(Vec8f(1.001f) - rayH, Vec8f(0.0f)));
+									dt = select(rayUp, dtUp, dt);
+								}
 								// --pom_cone_min_step: floor the step at one minimum lateral
 								// advance, but never further than the gap the ray is standing
 								// over, so the floor only ever overrides a FROZEN (byte-0)
@@ -1906,9 +1956,13 @@ struct TileRasterizer {
 									dt = max(dt, dtFloor);
 								}
 								dt = select(search, dt, Vec8f(0.0f));   // frozen once bracketed
-								curU -= dU * dt;
-								curV -= dV * dt;
-								rayH -= dt;
+								// --pom_prism_march: Δh = −dt·hDir (ascent rises), and the
+								// lateral advance dU·Δh keeps the ray equation exact because
+								// dU already carries the SIGNED 1/(V·N). Flag off: dt, verbatim.
+								const Vec8f dtS = prismMarch ? dt * hDir : dt;
+								curU -= dU * dtS;
+								curV -= dV * dtS;
+								rayH -= dtS;
 								// --pom_march_earlyout, BYTE-EXACT: with every lane bracketed,
 								// each remaining iteration computes hitNow = false, search =
 								// false and dt = 0, so it leaves every bracket variable and
@@ -1979,7 +2033,13 @@ struct TileRasterizer {
 								             & Vec8i(0xF)) << kPomStepsShift;
 							}
 							if (shell)
-								pomCrossed = found | (rayH > Vec8f(0.0f));
+								pomCrossed = found | (prismMarch
+								    // Ascent lanes leave the slab through the LID: still
+								    // inside (rayH < 1) = unresolved (kept, entry UV);
+								    // rayH ≥ 1 = walked out the top = MISS ⇒ discard.
+								    ? ((rayUp & (rayH < Vec8f(1.0f)))
+								       | (~rayUp & (rayH > Vec8f(0.0f))))
+								    : Vec8fb(rayH > Vec8f(0.0f)));
 							// STEP-3 LOD blend: continuous fade cone->single-shift as view-Z
 							// grows from lodDist (full cone) to 2x lodDist (pure single-shift).
 							// lod==0 -> full cone everywhere (fade=0).
@@ -3372,6 +3432,21 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		pomShellSideTrue = F->Txtr->PomShellSideTrue + 8 * (F->PomShellGroup - 1);
 	const bool pomSideFaces = fds::FeatureFlags::pom_shell_side_faces() > 0
 	                          && pomShellSideLean != nullptr;
+	// --pom_prism_march (S1d-5): mode >= 1 arms the per-lane signed-1/(V·N)
+	// march (prism side quads can be seen from behind the owner lid's plane).
+	// Mode >= 2 is THE PRISM EXIT: 'ray left the domain' becomes a defined
+	// event — clipped to the prism, DISCARD on exit, the neighbouring prism's
+	// own fragment answers the pixel. That SUPERSEDES the whole S1d-2/4 exit
+	// flag family INSIDE this arm (base clip, lid-edge clamps, keep_uv, side
+	// planes, side entry), all forced off below so the arm is one flag.
+	// The signed-1/(V·N) handling arms ONLY on the prism SIDE QUADS —
+	// applied to lid faces it discards real wall at grazing (an
+	// interpolated V·N dipping below 0 flips a lid lane to ascent, which
+	// exits through the lid and discards; measured 200k void px).
+	const bool prismMarchOn = pomShellFace && F->PomPrismSide
+	                          && fds::FeatureFlags::pom_prism_march() > 0;
+	const bool prismExit = pomShellFace
+	                       && fds::FeatureFlags::pom_prism_march() >= 2;
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -3446,7 +3521,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// the two are an A/B, not a stack, and the side faces' ENTRY term is
 		// applied only when this clip is OFF (see the domain test).
 		.pomShellBaseClip = fds::FeatureFlags::pom_shell_base_clip()
-		                    && !fds::FeatureFlags::pom_recess_only(),
+		                    && !fds::FeatureFlags::pom_recess_only()
+		                    && !prismExit,
 		.pomNormal = fds::FeatureFlags::pom_normal() && (heightData != nullptr)
 		             && marchArmed,
 		.pomNormalStrength = fds::FeatureFlags::pom_normal_strength(),
@@ -3467,7 +3543,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// S1d-2a closed shell. shellH0 = the slab height of the AUTHORED plane:
 		// 1 under --pom_recess_only (the geometry was not moved, so the plane is
 		// the top of the field), 0.5 under the lid (the slab straddles it).
-		.pomShellSideFaces = pomSideFaces,
+		.pomShellSideFaces = pomSideFaces && !prismExit,
 		.pomShellSideEdge = fds::FeatureFlags::pom_shell_side_edge(),
 		// S1d-2d SIDE-FACE ENTRY. Needs the leans (they are what NARROWS the
 		// shell above the authored plane and therefore what leaves a lid ray
@@ -3476,13 +3552,14 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// plain box, which the pixel's own UV is inside by construction), so the
 		// two are ALTERNATIVES and stacking them would only re-introduce the
 		// affine clip's unclamped narrowing. Measured, not assumed: see the plan.
-		.pomShellSideEntry = (pomSideFaces
+		.pomShellSideEntry = (pomSideFaces && !prismExit
 		                      && fds::FeatureFlags::pom_shell_side_faces() != 3)
 		                     ? fds::FeatureFlags::pom_shell_side_entry() : 0,
-		.shellSideNoNarrow = pomSideFaces
+		.shellSideNoNarrow = pomSideFaces && !prismExit
 		                     && fds::FeatureFlags::pom_shell_side_faces() == 3,
-		.pomShellLidEdge = fds::FeatureFlags::pom_shell_lid_edge(),
+		.pomShellLidEdge = prismExit ? 0 : fds::FeatureFlags::pom_shell_lid_edge(),
 		.pomShellKeepUV = fds::FeatureFlags::pom_shell_keep_uv(),
+		.pomPrismMarch = prismMarchOn,
 		.shellH0 = fds::FeatureFlags::pom_recess_only() ? 1.0f : 0.5f,
 		.shellSideLean = { pomSideFaces ? pomShellSideLean[0] : 0.0f,
 		                   pomSideFaces ? pomShellSideLean[1] : 0.0f,

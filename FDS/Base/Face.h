@@ -96,6 +96,16 @@ struct Face
 	// wide, so per-quad domains discarded mid-wall everywhere. 0 = ungrouped
 	// (the rasterizer falls back to this face's own U1..V3 box).
 	uint16_t         PomShellGroup = 0;
+	// S1d-5 PRISM-CLIPPED MARCH (--pom_prism_march): this face is a PRISM
+	// SIDE QUAD (PomShell_BuildPrism wall geometry), not a lid face. Only
+	// side-quad fragments arm the rasterizer's per-lane SIGNED 1/(V·N)
+	// (they can be seen from behind the owner lid's plane, where the ray
+	// ASCENDS through the slab); lid fragments keep the legacy descending
+	// clamp — at grazing their interpolated V·N dips below 0 on real wall
+	// pixels and the ascent semantics there discard half the wall
+	// (measured: 200k void px over the review poses when applied to lids).
+	// false everywhere unless BuildPrism stamped it, so shipping is inert.
+	bool             PomPrismSide = false;
 	// Planar-mirror identity (DEMO/GreetsMirror.cpp). Per Mirror, a unique
 	// 1..255 id assigned at scene init. Two distinct roles depending on
 	// the face's purpose in the mirror system:

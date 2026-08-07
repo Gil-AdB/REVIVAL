@@ -5832,7 +5832,13 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 	// (2) Edge table over EVERY face in the scene, keyed by AUTHORED endpoints.
 	// A record carries the delta this owner applied at each endpoint, which is
 	// what decides whether the two owners' extrusions still meet.
-	struct EdgeRec { const Face *F; bool shelled; float da[3], db[3]; };
+	struct EdgeRec { const Face *F; bool shelled; float da[3], db[3];
+	                 // --pom_prism_march>=2 chart-continuity inputs: the owner's
+	                 // face normal and its authored UVs at the (sorted) endpoints.
+	                 // A partner that moves identically but reads a DIFFERENT
+	                 // chart (fold, ::mirUV clone, UV jump) is sealed geometry yet
+	                 // still a march exit, so its wall must exist.
+	                 float fn[3]; float uva[2], uvb[2]; };
 	std::map<std::pair<long long, long long>, std::vector<EdgeRec>> emap;
 	long long nShelledFaces = 0;
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
@@ -5843,13 +5849,18 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 			const bool sh = shelled(&F);
 			if (sh) ++nShelledFaces;
 			const Vertex *vv[3] = { F.A, F.B, F.C };
+			const float eu[3] = { F.U1, F.U2, F.U3 };
+			const float ev[3] = { F.V1, F.V2, F.V3 };
 			for (int e = 0; e < 3; ++e) {
 				const Vertex *va = vv[e], *vb = vv[(e + 1) % 3];
 				long long ka = PomWeldQPos(preOf(va)), kb = PomWeldQPos(preOf(vb));
 				const Vector da = deltaOf(va), db = deltaOf(vb);
-				EdgeRec r{ &F, sh, { da.x, da.y, da.z }, { db.x, db.y, db.z } };
+				EdgeRec r{ &F, sh, { da.x, da.y, da.z }, { db.x, db.y, db.z },
+				           { F.N.x, F.N.y, F.N.z },
+				           { eu[e], ev[e] }, { eu[(e + 1) % 3], ev[(e + 1) % 3] } };
 				if (ka > kb) { std::swap(ka, kb); std::swap(r.da[0], r.db[0]);
-				               std::swap(r.da[1], r.db[1]); std::swap(r.da[2], r.db[2]); }
+				               std::swap(r.da[1], r.db[1]); std::swap(r.da[2], r.db[2]);
+				               std::swap(r.uva[0], r.uvb[0]); std::swap(r.uva[1], r.uvb[1]); }
 				emap[{ ka, kb }].push_back(r);
 			}
 		}
@@ -5868,7 +5879,37 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 	// quads on a HeightMap-less material clone (no march, plain textured path)
 	// and gives them their TRUE outward normal — the march parametrisation was
 	// the only consumer that wanted the lid's.
-	const bool flatQuads = fds::FeatureFlags::pom_prism_flat();
+	// --pom_prism_march (S1d-5): the quads are MARCHING ENTRY GEOMETRY -- owner
+	// material (HeightMap intact), owner lid N/Tangent (the march parametrises
+	// the ray in the owner's chart), inward UV nudge. Overrides --pom_prism_flat
+	// (flat scenery cannot answer a continuing ray).
+	const int  marchMode = fds::FeatureFlags::pom_prism_march();
+	const bool flatQuads = fds::FeatureFlags::pom_prism_flat() && marchMode <= 0;
+	// --pom_prism_march>=2: authored-position index of every shelled vertex, for
+	// the T-JUNCTION SPLIT (the welded delta + ShellH at an interior point of a
+	// partner's longer edge) and the 8.6/5b affinity census. Keyed on the PRE
+	// position via PomWeldQPos -- the same key both owners of a shared wall use,
+	// which is what makes the split consistent across them (8.6 req 2).
+	struct TPt { Vector pre; Vector d; float h; };
+	std::vector<TPt> tpts;
+	if (marchMode >= 2) {
+		std::set<long long> seenT;
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				const Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || F.A == F.B || !shelled(&F)) continue;
+				const Vertex *vv[3] = { F.A, F.B, F.C };
+				for (int k = 0; k < 3; ++k) {
+					const Vector pre = preOf(vv[k]);
+					if (!seenT.insert(PomWeldQPos(pre)).second) continue;
+					tpts.push_back({ pre, deltaOf(vv[k]), vv[k]->ShellH });
+				}
+			}
+		}
+	}
+	long long nTsplitEdges = 0, nTsplitPts = 0, nTnonAffine = 0, nChartTear = 0;
+	double affErrMax = 0.0;
 	std::map<Material*, Material*> flatMat;   // owner mat -> ::prismside clone
 	auto flatOf = [&](Material *M) -> Material* {
 		auto it = flatMat.find(M);
@@ -5909,7 +5950,13 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 				if (ka > kb) { std::swap(ka, kb); std::swap(qa, qb); }
 				auto it = emap.find({ ka, kb });
 				bool watertight = false, sawPartner = false, sawStatic = false;
+				bool geomSealed = false;   // --pom_prism_march>=2: sealed but chart-torn
+				const float uA = fu[e], vA = fv[e];
+				const float uB = fu[(e + 1) % 3], vB = fv[(e + 1) % 3];
 				if (it != emap.end()) {
+					// Owner's endpoint UVs in the SORTED frame, for the chart test.
+					float oa0 = uA, oa1 = vA, ob0 = uB, ob1 = vB;
+					if (PomWeldQPos(pa) > PomWeldQPos(pb)) { std::swap(oa0, ob0); std::swap(oa1, ob1); }
 					for (const EdgeRec &r : it->second) {
 						if (r.F == &F) continue;
 						sawPartner = true;
@@ -5918,7 +5965,23 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 						               + std::fabs(r.da[2]-qa.z);
 						const float eb = std::fabs(r.db[0]-qb.x) + std::fabs(r.db[1]-qb.y)
 						               + std::fabs(r.db[2]-qb.z);
-						if (ea < 1e-6f && eb < 1e-6f) { watertight = true; break; }
+						if (ea < 1e-6f && eb < 1e-6f) {
+							// --pom_prism_march>=2: geometric agreement seals the GEOMETRY,
+							// but a marching ray still EXITS through this edge unless the
+							// partner continues the OWNER'S CHART: same material (a ::mirUV
+							// clone is a different chart over the same texels), coplanar,
+							// equal UVs at both endpoints. A welded FOLD and a handedness
+							// tear both fail this and keep their wall -- the neighbouring
+							// prism's ENTRY fragment, which only exists if it rasterises.
+							if (marchMode >= 2) {
+								const bool cont = (r.F->Txtr == F.Txtr)
+								    && (r.fn[0]*F.N.x + r.fn[1]*F.N.y + r.fn[2]*F.N.z > 0.9999f)
+								    && std::fabs(r.uva[0]-oa0) < 1e-3f && std::fabs(r.uva[1]-oa1) < 1e-3f
+								    && std::fabs(r.uvb[0]-ob0) < 1e-3f && std::fabs(r.uvb[1]-ob1) < 1e-3f;
+								if (!cont) { geomSealed = true; continue; }
+							}
+							watertight = true; break;
+						}
 					}
 				}
 				// mode 1 = seal only what is not already watertight (the default
@@ -5927,6 +5990,7 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 				if (mode < 2 && watertight) { ++nSkipMatched; continue; }
 				if (watertight)       ++nSkipMatched;      // mode 2 emits it anyway
 				else if (!sawPartner) ++nFreeEdge;
+				else if (geomSealed)  ++nChartTear;
 				else if (sawStatic)   ++nStaticNb;
 				else                  ++nTorn;
 				// --pom_prism_free=0 (S1d-4): a FREE edge is a TRUE BOUNDARY — the
@@ -5957,11 +6021,6 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 				if (il < 1e-6f) continue;
 				const Vector out = { -inw.x/il, -inw.y/il, -inw.z/il };
 				if (!xform) xform = T;
-				// Lid ring (the moved positions) and base ring (pre - delta), so
-				// the quad straddles the AUTHORED edge exactly.
-				const Vector Ta = va->Pos, Tb = vb->Pos;
-				const Vector Ba = { pa.x - da.x, pa.y - da.y, pa.z - da.z };
-				const Vector Bb = { pb.x - db.x, pb.y - db.y, pb.z - db.z };
 				// UV: constant down the quad (the side face is a cut through the
 				// slab, so the chart really is degenerate there) plus a 1e-4 UV
 				// nudge along the patch's own inward axis, whose SIGN is chosen to
@@ -5971,39 +6030,110 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 				const float du1 = F.U2 - F.U1, dv1 = F.V2 - F.V1;
 				const float du2 = F.U3 - F.U1, dv2 = F.V3 - F.V1;
 				const float detOwn = du1*dv2 - du2*dv1;
-				const int   ia = e, ib = (e + 1) % 3;
-				const float uA = fu[ia], vA = fv[ia], uB = fu[ib], vB = fv[ib];
 				// A nudge perpendicular to the edge in UV, magnitude 1e-4.
 				float nu = -(vB - vA), nv = (uB - uA);
 				const float nl2 = std::sqrt(nu*nu + nv*nv);
 				if (nl2 > 1e-12f) { nu /= nl2; nv /= nl2; } else { nu = 1.0f; nv = 0.0f; }
-				// Sign so the quad's own (edge, nudge) determinant matches the
-				// owner's chart handedness.
+				// Sign: legacy matches the owner's chart handedness (the quads were
+				// meant to classify like their owner under the ::mirUV split).
+				// --pom_prism_march points the nudge INTO the owner's triangle
+				// instead: the march tests its landing against the patch box, and a
+				// hit AT the entry (an in-stone side fragment) must land in-domain --
+				// the handedness-matched sign can point outside and turn every such
+				// hit into a lateral exit. Handedness is irrelevant to the march
+				// itself (its frame is the MATERIAL's TbnHandedness, not the quad's
+				// UV determinant).
 				const float detQuad = (uB - uA) * nv - (vB - vA) * nu;
-				const float sgn = ((detQuad >= 0.0f) == (detOwn >= 0.0f)) ? 1.0f : -1.0f;
+				float sgn = ((detQuad >= 0.0f) == (detOwn >= 0.0f)) ? 1.0f : -1.0f;
+				if (marchMode > 0) {
+					const float duC = fu[(e + 2) % 3] - 0.5f * (uA + uB);
+					const float dvC = fv[(e + 2) % 3] - 0.5f * (vA + vB);
+					sgn = (nu * duC + nv * dvC >= 0.0f) ? 1.0f : -1.0f;
+				}
 				const float kNudge = 1e-4f * sgn;
-				const uint32_t base = uint32_t(qv.size());
-				const float hA = va->ShellH, hB = vb->ShellH;
-				// Flat quads carry their TRUE outward normal (the march wanted
-				// the lid's N to parametrise the ray; flat quads don't march).
-				const Vector snA = flatQuads ? out : va->N;
-				const Vector snB = flatQuads ? out : vb->N;
-				qv.push_back({ Ta, snA, va->Tangent, uA, vA, hA });
-				qv.push_back({ Tb, snB, vb->Tangent, uB, vB, hB });
-				qv.push_back({ Bb, snB, vb->Tangent, uB + kNudge*nu, vB + kNudge*nv, 1.0f - hB });
-				qv.push_back({ Ba, snA, va->Tangent, uA + kNudge*nu, vA + kNudge*nv, 1.0f - hA });
-				// Wind so the geometric normal points OUT.
-				const float e1x = Tb.x-Ta.x, e1y = Tb.y-Ta.y, e1z = Tb.z-Ta.z;
-				const float e2x = Bb.x-Ta.x, e2y = Bb.y-Ta.y, e2z = Bb.z-Ta.z;
-				const float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z,
-				            gz = e1x*e2y - e1y*e2x;
-				const bool flip = (gx*out.x + gy*out.y + gz*out.z) < 0.0f;
-				if (!flip) {
-					qf.push_back({ { base+0, base+1, base+2 }, &F });
-					qf.push_back({ { base+0, base+2, base+3 }, &F });
-				} else {
-					qf.push_back({ { base+0, base+2, base+1 }, &F });
-					qf.push_back({ { base+0, base+3, base+2 }, &F });
+				// --pom_prism_march>=2: T-JUNCTION SPLIT. A T-vertex is a shelled
+				// position in the INTERIOR of this edge; the offset along an edge is
+				// watertight iff AFFINE (RESEARCH_II 8.6/5b), and the weld fixes one
+				// direction per POSITION, not per edge -- so the long side's wall
+				// must bend at the T exactly where the two short sides' walls meet
+				// it. Split there with the WELDED delta at the split point; both
+				// owners key on PomWeldQPos, so the sub-quads coincide by
+				// construction. The census counts how non-affine the T offsets were
+				// (the residual LID sliver above a non-affine T is NOT closed here).
+				// SegPt carries the EXACT emit values so the no-split path stays
+				// byte-identical to the pre-split code: the endpoints use the
+				// vertex's own Pos / N / UV verbatim (recomputing them as
+				// (pos-d)+d or lerp(...,1) drifts in float and moved the arm).
+				struct SegPt { float sp; Vector top, bot, n; float u, v, h; };
+				std::vector<SegPt> seg;
+				seg.push_back({ 0.0f, va->Pos,
+					{ pa.x - da.x, pa.y - da.y, pa.z - da.z },
+					va->N, uA, vA, va->ShellH });
+				seg.push_back({ 1.0f, vb->Pos,
+					{ pb.x - db.x, pb.y - db.y, pb.z - db.z },
+					vb->N, uB, vB, vb->ShellH });
+				if (marchMode >= 2 && !tpts.empty()) {
+					for (const TPt &tp : tpts) {
+						const Vector w = { tp.pre.x - pa.x, tp.pre.y - pa.y, tp.pre.z - pa.z };
+						const float sp = (w.x*ed.x + w.y*ed.y + w.z*ed.z) / el;
+						if (sp < 1e-3f || sp > 1.0f - 1e-3f) continue;
+						const float qx = pa.x + ed.x*el*sp, qy = pa.y + ed.y*el*sp, qz = pa.z + ed.z*el*sp;
+						const float ox = tp.pre.x-qx, oy = tp.pre.y-qy, oz = tp.pre.z-qz;
+						if (ox*ox + oy*oy + oz*oz > 4e-8f) continue;   // > 2e-4 world off-line
+						// 8.6/5b affinity census: the welded delta vs the edge's own lerp.
+						const float lx = da.x + (db.x-da.x)*sp - tp.d.x;
+						const float ly = da.y + (db.y-da.y)*sp - tp.d.y;
+						const float lz = da.z + (db.z-da.z)*sp - tp.d.z;
+						const double err = std::sqrt(double(lx)*lx + double(ly)*ly + double(lz)*lz);
+						if (err > affErrMax) affErrMax = err;
+						if (err > 1e-4) ++nTnonAffine;
+						++nTsplitPts;
+						Vector nm = { va->N.x + (vb->N.x - va->N.x)*sp,
+						              va->N.y + (vb->N.y - va->N.y)*sp,
+						              va->N.z + (vb->N.z - va->N.z)*sp };
+						const float nl3 = std::sqrt(nm.x*nm.x + nm.y*nm.y + nm.z*nm.z);
+						if (nl3 > 1e-6f) { nm.x /= nl3; nm.y /= nl3; nm.z /= nl3; }
+						seg.push_back({ sp,
+						    { tp.pre.x + tp.d.x, tp.pre.y + tp.d.y, tp.pre.z + tp.d.z },
+						    { tp.pre.x - tp.d.x, tp.pre.y - tp.d.y, tp.pre.z - tp.d.z },
+						    nm, uA + (uB - uA)*sp, vA + (vB - vA)*sp, tp.h });
+					}
+					if (seg.size() > 2) {
+						++nTsplitEdges;
+						std::sort(seg.begin(), seg.end(),
+						          [](const SegPt &x, const SegPt &y) { return x.sp < y.sp; });
+					}
+				}
+				// Lid ring (the moved positions) and base ring (pre - delta), so the
+				// quad straddles the AUTHORED edge exactly. One quad per sub-segment
+				// (exactly one when no T split applies).
+				for (size_t sq = 0; sq + 1 < seg.size(); ++sq) {
+					const SegPt &A = seg[sq], &B = seg[sq + 1];
+					const Vector &Ta = A.top, &Tb = B.top, &Ba = A.bot, &Bb = B.bot;
+					const float suA = A.u, svA = A.v, suB = B.u, svB = B.v;
+					const float hA = A.h, hB = B.h;
+					const uint32_t base = uint32_t(qv.size());
+					// Flat quads carry their TRUE outward normal (the march wanted
+					// the lid's N to parametrise the ray; flat quads don't march).
+					const Vector snA = flatQuads ? out : A.n;
+					const Vector snB = flatQuads ? out : B.n;
+					qv.push_back({ Ta, snA, va->Tangent, suA, svA, hA });
+					qv.push_back({ Tb, snB, vb->Tangent, suB, svB, hB });
+					qv.push_back({ Bb, snB, vb->Tangent, suB + kNudge*nu, svB + kNudge*nv, 1.0f - hB });
+					qv.push_back({ Ba, snA, va->Tangent, suA + kNudge*nu, svA + kNudge*nv, 1.0f - hA });
+					// Wind so the geometric normal points OUT.
+					const float e1x = Tb.x-Ta.x, e1y = Tb.y-Ta.y, e1z = Tb.z-Ta.z;
+					const float e2x = Bb.x-Ta.x, e2y = Bb.y-Ta.y, e2z = Bb.z-Ta.z;
+					const float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z,
+					            gz = e1x*e2y - e1y*e2x;
+					const bool flip = (gx*out.x + gy*out.y + gz*out.z) < 0.0f;
+					if (!flip) {
+						qf.push_back({ { base+0, base+1, base+2 }, &F });
+						qf.push_back({ { base+0, base+2, base+3 }, &F });
+					} else {
+						qf.push_back({ { base+0, base+2, base+1 }, &F });
+						qf.push_back({ { base+0, base+3, base+2 }, &F });
+					}
 				}
 				++nEmitted;
 			}
@@ -6054,6 +6184,9 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 		D.A_idx = qf[i].i[0]; D.B_idx = qf[i].i[1]; D.C_idx = qf[i].i[2];
 		D.ParentTri = sk;
 		D.MeshFaceIdx = uint16_t(i);
+		// --pom_prism_march: side quads (and only they) arm the rasterizer's
+		// per-lane signed-1/(V·N) march (Face.h PomPrismSide).
+		D.PomPrismSide = (marchMode > 0);
 		D.U1 = sk->Verts[qf[i].i[0]].U; D.V1 = sk->Verts[qf[i].i[0]].V;
 		D.U2 = sk->Verts[qf[i].i[1]].U; D.V2 = sk->Verts[qf[i].i[1]].V;
 		D.U3 = sk->Verts[qf[i].i[2]].U; D.V3 = sk->Verts[qf[i].i[2]].V;
@@ -6107,6 +6240,14 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 		mode, flatQuads ? " (flat)" : "", nShelledFaces, nEdgesTested, nEmitted,
 		sk->VIndex, sk->FIndex, nFreeEdge, nFreeSkipped, nStaticNb, nTorn,
 		nSkipMatched, nSkipFlat, flatMat.size());
+	if (marchMode > 0)
+		std::fprintf(stderr,
+			"[POM-PRISM-MARCH] mode=%d: quads MARCH (owner material, inward nudge); "
+			"%lld CHART-TEAR edges emitted that the geometric rule calls watertight "
+			"(welded folds / ::mirUV / UV jumps); T-split: %lld edges split at %lld "
+			"interior T-points, %lld NON-AFFINE (>1e-4 world, max %.5f) -- the "
+			"8.6/5b census\n",
+			marchMode, nChartTear, nTsplitEdges, nTsplitPts, nTnonAffine, affErrMax);
 }
 
 Texture *MakeResidualHeight(Texture *height, int lowMip) {
