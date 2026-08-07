@@ -161,12 +161,12 @@ const char *kUsage =
     "                    turning them off makes the arm dimmer than the shipped scene.\n"
     "  --no-stone_tex    do NOT apply DEMO's greets_stone_tex wall/floor override. The\n"
     "                    render is then the AUTHORED FLD wall, not the reviewed surface.\n"
-    "  --no-range_patch / --omni_range=F   greets rewrites EVERY FLD omni's IRange to\n"
-    "                    greets_omni_default_range (30) in Initialize_Greets, before\n"
-    "                    Animate_Objects — so all ten run at 30, not at the authored\n"
-    "                    3,3,10,10,7,20,20,2,2,2. Replicating that is PARITY and it is ON\n"
-    "                    by default; --no-range_patch restores the authored ranges, which\n"
-    "                    MEASURABLY empties the frame of direct light (median 0).\n"
+    "  --omni_range=F    force EVERY omni's range to F (rewriting the Range spline\n"
+    "                    keys, matching DEMO's greets_omni_default_range dial). Default\n"
+    "                    0 = the AUTHORED envelope — since commit 00f7820 the LWS/FLD\n"
+    "                    authors LightRange 30 on all ten omnis and DEMO carries no\n"
+    "                    runtime patch, so no-patch IS parity. (--no-range_patch is\n"
+    "                    accepted and now a no-op.)\n"
     "  --help\n";
 
 }  // namespace
@@ -236,6 +236,7 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--bloom_intensity=")) dopt.bloomIntensity = float(std::atof(v));
         else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
         else if (a == "--no-flares")                dopt.flares = false;
+        else if (a == "--no-nmap")                  dopt.nmap = false;
         else if (const char *v = val("--flare_gain=")) dopt.flareGain = float(std::atof(v));
         else if (const char *v = val("--viz=")) {
             const std::string m(v);

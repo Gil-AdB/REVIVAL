@@ -28,14 +28,25 @@
 
 namespace gpubench {
 
-// 32 bytes, interleaved. Positions/normals are OBJECT space; the model matrix
-// travels separately per batch so the GPU does the full model->view->clip
-// transform (rather than us pre-baking world space on the CPU, which would
-// quietly move work off the side under test).
+// 48 bytes, interleaved. Positions/normals/tangents are OBJECT space; the
+// model matrix travels separately per batch so the GPU does the full
+// model->view->clip transform (rather than us pre-baking world space on the
+// CPU, which would quietly move work off the side under test).
+//
+// tx..tz + th: the ENGINE's shading tangent frame, not a screen-space
+// reconstruction. Normals and tangents are the per-corner values DEMO's
+// MakeFacesIndependentByAngle(30 deg) + Compute_Vertex_Tangents produce
+// (crease-preserving smoothing, Lengyel tangent from the per-FACE UVs,
+// Gram-Schmidt vs the corner normal), and th is the per-face UV-winding
+// handedness sign: B = th * (N x T), exactly the deferred kernel's
+// Mat->TbnHandedness convention. The CPU realises the handedness as a
+// ::mirUV material clone because its kernel reads per-material state; this
+// arm's buffer is de-indexed per face, so the sign rides the vertex instead.
 struct Vertex {
     float px, py, pz;
     float nx, ny, nz;
     float u, v;
+    float tx, ty, tz, th;
 };
 
 // One draw per (mesh x material) run of triangles.
@@ -165,16 +176,17 @@ struct LoadOptions {
     // the user actually reviews — see docs/GPU_BENCHMARK_PLAN.md §3.2. No
     // displacement arm may run with this off.
     bool        stoneTex = true;
-    // Replicate Initialize_Greets' omni RANGE PATCH (GREETS.CPP:2652-2673).
-    // greets rewrites every FLD omni whose IRange is 0 to
-    // greets_omni_default_range (30) -- and because it runs BEFORE
-    // Animate_Objects, IRange is 0 for ALL TEN, so all ten end up at 30. It also
-    // overwrites Range.Keys[0], which is what makes the change survive the
-    // spline evaluation Animate_Objects then performs.
-    // WITHOUT this the arm ingests the AUTHORED ranges (3,3,10,10,7,20,20,2,2,2)
-    // and every light is far too short-range -- MEASURED as the cause of a direct
-    // term that was median 0 over the frame. Reproducing it is PARITY.
-    float       omniDefaultRange = 30.0f;   // 0 disables the patch
+    // Omni range FORCE-OVERRIDE, matching what survives of the greets range
+    // patch after commit 00f7820 ("author omni light ranges in the LWS, delete
+    // both runtime patches"): the LWS/FLD now authors LightRange 30 on all ten
+    // omnis and DEMO's greets_omni_default_range is a default-0 (inert) tuning
+    // dial that, when set, rewrites every omni's Range spline keys. Same here:
+    // 0 (default) = the authored envelope flows through Animate_Objects
+    // untouched; > 0 = rewrite every Range key to this value.
+    // (An earlier revision replicated the pre-00f7820 IRange==0 patch with a
+    // default of 30 — correct then, but it would now stomp future authored
+    // per-light ranges with a flat 30.)
+    float       omniDefaultRange = 0.0f;    // 0 = authored ranges (parity)
 };
 
 // Returns false on failure. Never opens a window and never touches VPage/ZPage16

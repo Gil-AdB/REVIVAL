@@ -269,6 +269,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     vd.attributes[0].format = MTLVertexFormatFloat3; vd.attributes[0].offset = 0;  vd.attributes[0].bufferIndex = 0;
     vd.attributes[1].format = MTLVertexFormatFloat3; vd.attributes[1].offset = 12; vd.attributes[1].bufferIndex = 0;
     vd.attributes[2].format = MTLVertexFormatFloat2; vd.attributes[2].offset = 24; vd.attributes[2].bufferIndex = 0;
+    // Engine tangent (xyz) + UV-winding handedness sign (w) — see SceneIngest.h.
+    vd.attributes[3].format = MTLVertexFormatFloat4; vd.attributes[3].offset = 32; vd.attributes[3].bufferIndex = 0;
     vd.layouts[0].stride = sizeof(Vertex);
 
     MTLRenderPipelineDescriptor *gpd = [MTLRenderPipelineDescriptor new];
@@ -572,11 +574,17 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         GpuLight g{};
         for (int c = 0; c < 3; ++c) {
             g.pos[c] = L.pos[c];
-            // Linearise the COLOUR only, then apply ISize as the linear intensity
-            // it is. Squaring (colour x ISize) together also squared the
-            // intensity, making every ISize=0.5 omni 4x too dim.
+            // NOT squared. The CPU treats the authored 0..255 light colour as
+            // LINEAR radiance at power 1: the view-light list is
+            // `colR = O->L.R * O->ISize` (DeferredSurfaceKernel.cpp:5551-5553)
+            // and the --hdr_linear composite is `rl = (albedo/255)^2 * l + s`
+            // (ibid. 2618-2631) — the albedo is linearised, the light is not.
+            // Squaring here halved every 128-valued channel (the mech omnis'
+            // G) against the CPU. Independent confirmation of the convention:
+            // the SH ambient projects the UNSQUARED sky gradient and matched
+            // the CPU base within 1.4%.
             const float c01 = L.color[c] / 255.0f;
-            g.color[c] = c01 * c01 * L.intensity;
+            g.color[c] = c01 * L.intensity;
         }
         g.range = L.range;
         g.invRange = 1.0f / L.range;
@@ -653,8 +661,9 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             GpuLight &g = lights[k++];
             for (int c = 0; c < 3; ++c) {
                 g.pos[c] = L.pos[c];
+                // Not squared — see the comment on the initial fill above.
                 const float c01 = L.color[c] / 255.0f;
-                g.color[c] = c01 * c01 * L.intensity;
+                g.color[c] = c01 * L.intensity;
                 g.dir[c] = L.dir[c];
                 g.sRow0[c] = L.shadowRot[0][c];
                 g.sRow1[c] = L.shadowRot[1][c];
@@ -712,9 +721,21 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         u.baseColor[3] = (b.textureIndex >= 0) ? 1.0f : 0.0f;
         u.matParams[0] = b.diffuse;
         u.matParams[1] = b.specular;
-        u.matParams[2] = std::min(1.0f, float(b.glossiness) / 128.0f);
+        // GGX lobe roughness, the CPU's exact mapping
+        // (DeferredSurfaceKernel.cpp:1790-1809): gloss 0 means "authored
+        // specular without a Phong exponent" and falls back to 32; then
+        // rough = sqrt(2/(gloss+2)), clamped [0.04, 1]. The previous
+        // 1 - gloss/128 mapping gave Glossiness=48 a rough of 0.625 where
+        // the CPU runs 0.2 — a much wider, dimmer lobe.
+        {
+            const float gloss = b.glossiness > 0 ? float(b.glossiness) : 32.0f;
+            float rough = std::sqrt(2.0f / (gloss + 2.0f));
+            if (rough < 0.04f) rough = 0.04f;
+            if (rough > 1.0f)  rough = 1.0f;
+            u.matParams[2] = rough;
+        }
         u.matParams[3] = b.luminosity;
-        u.mapFlags[0] = (b.normalTexIndex >= 0) ? 1.0f : 0.0f;
+        u.mapFlags[0] = (opt.nmap && b.normalTexIndex >= 0) ? 1.0f : 0.0f;
         u.mapFlags[1] = (b.roughTexIndex >= 0) ? 1.0f : 0.0f;
         u.mapFlags[2] = b.aoInAlpha ? 1.0f : 0.0f;
         u.mapFlags[3] = b.parallaxScale;

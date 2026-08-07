@@ -70,9 +70,13 @@ struct GpuLight {
 };
 
 struct VertexIn {
-    float3 pos    [[attribute(0)]];
-    float3 normal [[attribute(1)]];
-    float2 uv     [[attribute(2)]];
+    float3 pos     [[attribute(0)]];
+    float3 normal  [[attribute(1)]];
+    float2 uv      [[attribute(2)]];
+    // The ENGINE's per-corner tangent (object space) + the per-face UV-winding
+    // handedness sign in w: B = w * (N x T), the deferred kernel's
+    // Mat->TbnHandedness convention (DeferredSurfaceKernel.cpp:1711-1719).
+    float4 tangent [[attribute(3)]];
 };
 
 static inline float3 rowmul(float3 r0, float3 r1, float3 r2, float3 v) {
@@ -106,6 +110,7 @@ struct GBufVertexOut {
     float2 uv;
     float3 viewNormal;
     float3 viewPos;
+    float4 viewTangent;   // xyz view-space engine tangent, w handedness sign
 };
 
 struct GBufOut {
@@ -130,6 +135,9 @@ vertex GBufVertexOut vs_gbuffer(VertexIn in [[stage_in]],
     o.uv = in.uv;
     const float3 wn = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, in.normal);
     o.viewNormal = rowmul(u.camRow0, u.camRow1, u.camRow2, wn);
+    const float3 wt = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, in.tangent.xyz);
+    o.viewTangent = float4(rowmul(u.camRow0, u.camRow1, u.camRow2, wt),
+                           in.tangent.w);
     o.viewPos = vp;
     return o;
 }
@@ -149,30 +157,43 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
 
     float3 n = normalize(in.viewNormal);
     if (b.mapFlags.x > 0.5f) {
-        // TBN derived from screen-space derivatives. FDS computes per-vertex
-        // tangents in DEMO/MISC/PREPROC.CPP (Compute_Vertex_Tangents), which is
-        // not reachable from the loader, so we reconstruct instead. Noted in the
-        // report: this is a different tangent basis, not the engine's.
-        const float3 dpx = dfdx(in.viewPos), dpy = dfdy(in.viewPos);
-        const float2 dux = dfdx(in.uv),      duy = dfdy(in.uv);
-        const float det = dux.x * duy.y - duy.x * dux.y;
-        if (abs(det) > 1e-12f) {
-            const float3 t = normalize((duy.y * dpx - dux.y * dpy) / det);
-            const float3 bt = normalize(cross(n, t));
-            float3 tn = normalTex.sample(samp, in.uv).xyz * 2.0f - 1.0f;
-            n = normalize(tn.x * t + tn.y * bt + tn.z * n);
+        // The ENGINE's tangent frame, term for term the deferred kernel's
+        // normal-map path (DeferredSurfaceKernel.cpp:1680-1727): per-vertex
+        // tangent (Compute_Vertex_Tangents, ingested), re-orthogonalized
+        // against the interpolated N; Mikkelsen axis fallback when degenerate;
+        // B = handedness * (N x T) — the sign is the per-face UV-winding
+        // handedness the CPU realises as the ::mirUV material clones
+        // (Material::TbnHandedness). The previous screen-space-derivative TBN
+        // inverted the V-axis relief detail on every mirrored-UV chart.
+        float3 t = in.viewTangent.xyz;
+        t -= n * dot(n, t);
+        const float tLen2 = dot(t, t);
+        if (tLen2 > 1e-12f) {
+            t *= rsqrt(tLen2);
+        } else {
+            const float3 ref = (abs(n.y) < 0.9f) ? float3(0, 1, 0)
+                                                 : float3(1, 0, 0);
+            t = normalize(cross(ref, n));
         }
+        const float3 bt = cross(n, t) * in.viewTangent.w;
+        float3 tn = normalTex.sample(samp, in.uv).xyz * 2.0f - 1.0f;
+        n = normalize(tn.x * t + tn.y * bt + tn.z * n);
     }
 
-    // Glossiness -> perceptual roughness. The CPU kernel carries Blinn
-    // glossiness; a roughness MAP overrides it per pixel when present.
-    float gloss = b.matParams.z;
-    if (b.mapFlags.y > 0.5f) gloss = 1.0f - roughTex.sample(samp, in.uv).r;
+    // Roughness map semantics, the CPU's exactly
+    // (DeferredSurfaceKernel.cpp:2525-2539 + FeatureFlags.def:169): the map
+    // attenuates SPECULAR MAGNITUDE — specMul = max(0, 1 - strength*texel),
+    // strength default 1.0 — it does NOT widen the GGX lobe. The lobe
+    // roughness is per-material, host-derived from Glossiness
+    // (rough = sqrt(2/(gloss+2))), and rides matParams.z unchanged.
+    float spec = b.matParams.y;
+    if (b.mapFlags.y > 0.5f)
+        spec *= max(0.0f, 1.0f - roughTex.sample(samp, in.uv).r);
 
     GBufOut o;
     o.albedo = float4(alb.rgb, ao);
     o.normal = oct_encode(n);
-    o.params = float4(b.matParams.x, b.matParams.y, gloss,
+    o.params = float4(b.matParams.x, spec, b.matParams.z,
                       saturate(b.matParams.w * 0.25f));
     return o;
 }
@@ -232,21 +253,12 @@ static inline float V_SmithSchlick(float NoV, float NoL, float a) {
     const float gl = NoL * (1.0f - k) + k;
     return 0.25f / max(gv * gl, 1e-7f);
 }
-static inline float3 F_Schlick(float3 f0, float VoH) {
-    const float f = pow(1.0f - VoH, 5.0f);
-    return f0 + (1.0f - f0) * f;
-}
-
-// Karis split-sum ANALYTIC env BRDF (--env_brdf_analytic). Returns the (A,B)
-// pair the multiscatter term below is built from, so the two ship together
-// exactly as they do on the CPU (pbr_multiscatter is a no-op without this).
-static inline float2 EnvBRDF_AB(float NoV, float rough) {
-    const float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
-    const float4 c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
-    const float4 r = rough * c0 + c1;
-    const float a004 = min(r.x * r.x, exp2(-9.28f * NoV)) * r.x + r.y;
-    return float2(-1.04f, 1.04f) * a004 + r.zw;
-}
+// (The Karis split-sum env BRDF + Fdez-Aguera multiscatter helpers that used
+// to live here are deliberately GONE: on the CPU they run only inside
+// EnvSpecComposeScalar, which needs --env_refl AND a material with
+// Reflection > 0 / a metallic map — a pano path this arm does not implement.
+// Applying them as a whole-frame sky term was over-lighting, measured at
+// +24 mean luma once the roughness mapping was corrected.)
 
 // L2 spherical-harmonic irradiance, 9 coefficients per channel. This is the
 // --sh_ambient path; a flat constant would be cheaper AND a different shader, so
@@ -291,8 +303,6 @@ struct Surface {
     float  ao;
     float  rawAlpha;     // the G-buffer alpha as stored, for the AO viz
     float  diffuseK, specK, rough, a, lum;
-    float3 f0, FssEss, Fms;
-    float  Ems;
 };
 
 static inline Surface DecodeSurface(constant FrameUniforms &u,
@@ -331,22 +341,15 @@ static inline Surface DecodeSurface(constant FrameUniforms &u,
     S.rawAlpha  = alb.a;
     S.diffuseK  = par.x * u.diffuseFactor;
     S.specK     = par.y * u.specularFactor;
-    S.rough     = clamp(1.0f - par.z, 0.045f, 1.0f);
+    // par.z IS the GGX lobe roughness now (host: sqrt(2/(gloss+2)), the CPU's
+    // own mapping at DeferredSurfaceKernel.cpp:1806-1809). par.y already
+    // carries the roughness map's magnitude attenuation.
+    S.rough     = clamp(par.z, 0.04f, 1.0f);
     S.a         = S.rough * S.rough;
     S.lum       = par.w * 4.0f;
-
-    // Dielectric F0. The scene has no metallic map bound in this arm, so F0 is
-    // the standard 4% and specK scales it — matching how the CPU kernel uses
-    // Material::Specular.
-    S.f0 = float3(0.04f) * max(S.specK, 0.0f) * 4.0f;
-
-    const float2 ab = EnvBRDF_AB(S.NoV, S.rough);
-    // Fdez-Aguera energy compensation, built from the SAME A,B terms.
-    S.FssEss = S.f0 * ab.x + ab.y;
-    const float Ess = ab.x + ab.y;
-    S.Ems = 1.0f - Ess;
-    const float3 Favg = S.f0 + (1.0f - S.f0) / 21.0f;
-    S.Fms = S.FssEss * Favg / max(1.0f - S.Ems * Favg, 1e-5f);
+    // No F0 / env-BRDF / multiscatter precompute: the direct spec uses the
+    // CPU's fixed dielectric F = 0.04 + 0.96*(1-VoH)^5 scaled by Specular, and
+    // the ambient is a pure irradiance skylight (see AmbientRadiance).
     return S;
 }
 
@@ -455,32 +458,52 @@ static inline float3 DirectRadiance(constant FrameUniforms &u,
         const float NoH = saturate(dot(S.N, H));
         const float VoH = saturate(dot(S.V, H));
 
-        const float3 F = F_Schlick(S.f0, VoH);
-        const float3 spec = wantSpec
-            ? F * (D_GGX(NoH, S.a) * V_SmithSchlick(S.NoV, NoL, S.a))
-            : float3(0.0f);
-        // (1-F) diffuse energy weighting (--diffuse_energy), using the same
-        // per-pixel Fresnel the specular term produced.
-        //
-        // NO Lambert 1/pi. That is deliberate and it is PARITY, not a slip: the
-        // CPU kernel's direct diffuse is
+        // Specular, term for term the CPU's scalar Cook-Torrance
+        // (DeferredSurfaceKernel.cpp:2424-2452):
+        //   spec = D * Gv * Gl * F / (4*NoV),  F = 0.04 + 0.96*(1-VoH)^5,
+        //   accumulated as spec * Material::Specular * falloff * shadow
+        // — note the CPU's spec term has NO NoL factor (the NoL is inside Gl's
+        // shape) and F0 is the fixed dielectric 0.04, with Material::Specular
+        // scaling the WHOLE lobe. D_GGX/V_SmithSchlick here equal the CPU's
+        // D*Gv*Gl/(4*NoV) divided by NoL, so spec*NoL below reproduces it.
+        const float om  = 1.0f - VoH;
+        const float om2 = om * om;
+        const float Fd  = 0.04f + 0.96f * (om2 * om2 * om);
+        const float spec1 = wantSpec
+            ? Fd * S.specK * D_GGX(NoH, S.a)
+                * V_SmithSchlick(max(S.NoV, 1e-3f), NoL, S.a)
+            : 0.0f;
+        // Diffuse: NO Lambert 1/pi and NO (1-F) energy factor — both PARITY,
+        // not slips. The CPU's direct diffuse is
         //     intensity = NoL * atten * Material::Diffuse;  lR += intensity*colR
-        // (DeferredSurfaceKernel.cpp:3245-3258, and the --pbr path at 2568 only
-        // adds the (1-F) factor). Its only 1/pi terms are inside the GGX D
-        // (lines 402/442/2431), which is standard. Dividing here made every
-        // direct light pi times dimmer than the reference image — measured: the
-        // 11 disco lights moved the frame by at most 2/255 even from 5 units away.
-        const float3 diff = S.baseColor * S.diffuseK * (1.0f - F);
+        // (DeferredSurfaceKernel.cpp:2391-2397), its only 1/pi lives inside the
+        // GGX D, and the --diffuse_energy (1-F) factor scales only the LDR
+        // combine `fdB` (ibid. 2568-2571) — the --hdr_linear HDR write uses the
+        // raw accumulator `lB` (ibid. 2618-2631), which (1-F) never touches. An
+        // earlier revision applied (1-F) per light here; that made every direct
+        // light a few percent dimmer than the reference and, worse, tinted it by
+        // the per-light Fresnel the CPU never computes.
+        const float3 diff = S.baseColor * S.diffuseK;
 
-        radiance += (diff + spec) * L[i].color * (NoL * atten * shadow);
+        radiance += (diff + float3(spec1)) * L[i].color * (NoL * atten * shadow);
     }
     return radiance;
 }
 
-// Ambient: L2 SH irradiance x AO, plus the multiscatter env term. AO multiplies
-// the AMBIENT only — direct light keeps its own shadows. --viz=ambient calls
-// this same function, so it cannot drift from the frame's ambient (it used to
-// omit the multiscatter half and therefore under-reported it).
+// Ambient: L2 SH irradiance x Material::Diffuse x AO. AO multiplies the
+// AMBIENT only — direct light keeps its own shadows. --viz=ambient calls this
+// same function, so it cannot drift from the frame's ambient.
+//
+// NO env-BRDF / multiscatter term here — that is PARITY, and it is measured.
+// The CPU's --sh_ambient path is `l = Luminosity*255 + Diffuse*E(n)`
+// (DeferredSurfaceKernel.cpp:1741-1760): a pure irradiance skylight. The CPU's
+// Karis/Fdez-Aguera machinery lives in EnvSpecComposeScalar, which fires only
+// for materials with Reflection > 0 or a metallic map AND --env_refl — an
+// equirect pano this arm does not implement. An earlier revision added an
+// (FssEss + Fms*Ems)*irr sky term for every pixel; under the old (wrong)
+// roughness mapping it happened to evaluate near zero, and the CPU-parity
+// roughness change blew it up to +24 mean luma over the whole ablated frame
+// (ambient term 34 -> 59 at t=5743). The CPU has no such term, so it is gone.
 static inline float3 AmbientRadiance(constant FrameUniforms &u,
                                      constant float4 *sh,
                                      thread const Surface &S)
@@ -494,7 +517,7 @@ static inline float3 AmbientRadiance(constant FrameUniforms &u,
     // came out about right.
     const float3 Nw = normalize(u.camRow0 * S.N.x + u.camRow1 * S.N.y + u.camRow2 * S.N.z);
     const float3 irr = SH_Irradiance(sh, Nw) * u.ambientFactor;
-    return S.baseColor * irr * S.ao + (S.FssEss + S.Fms * S.Ems) * irr * S.ao;
+    return S.baseColor * S.diffuseK * irr * S.ao;
 }
 
 fragment float4 fs_lighting(FsQuadOut in [[stage_in]],

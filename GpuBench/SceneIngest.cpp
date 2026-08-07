@@ -3,9 +3,11 @@
 #include <Base/FDS_DEFS.H>
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
+#include <Base/FeatureFlags.h>
 #include <Base/Scene.h>
 #include <Base/TriMesh.h>
 #include <FLD/FLD_READ.H>
+#include <FLD/LWREAD.H>   // Surf_Smoothing (Material::TFlags bit)
 
 #include <algorithm>
 #include <chrono>
@@ -121,6 +123,197 @@ constexpr StoneOverride kStoneOverrides[] = {
     auto *tx = new ::Texture();
     tx->FileName = strdup(fileName);
     return tx;
+}
+
+// ---------------------------------------------------------------------------
+// DEMO-side geometry fixups the shipped greets applies BEFORE its meshes ever
+// render, replicated here because they live in DEMO/ (unreachable from a
+// target that links FDS only) yet change what the user actually reviews.
+// ---------------------------------------------------------------------------
+
+// GreetsRetileFloor (DEMO/GREETS.CPP:1276-1307), verbatim math. Gated on
+// stone-tex exactly as DEMO gates it on greets_stone_tex; the scale/warp
+// constants come from the same FeatureFlags (defaults 1.5 / 0.06 — ACTIVE in
+// the default run, so without this the floor tiles 1.5x too densely and
+// carries no de-tile warp).
+float DetileU(float wx, float wz, float amp) {
+    const float f = 0.017f;
+    return amp * (std::sin(wx*f + wz*f*0.7f) + 0.5f*std::sin(wx*f*1.9f - wz*f*1.3f));
+}
+float DetileV(float wx, float wz, float amp) {
+    const float f = 0.012f;
+    return amp * (std::cos(wz*f + wx*f*0.6f) + 0.5f*std::cos(wz*f*1.7f - wx*f*1.1f));
+}
+void ReplicateRetileFloor(::Scene &sc, bool verbose) {
+    const float scale = fds::FeatureFlags::greets_floor_uv_scale();
+    const float amp   = fds::FeatureFlags::greets_floor_detile();
+    if (scale == 1.0f && amp == 0.0f) return;
+    const float invScale = scale > 0.0f ? 1.0f / scale : 1.0f;
+    int touched = 0;
+    for (TriMesh *T = sc.TriMeshHead; T; T = T->Next) {
+        if (!T->Faces) continue;
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            Face &F = T->Faces[fi];
+            if (!F.Txtr || !F.Txtr->Name || std::strcmp(F.Txtr->Name, "floor")) continue;
+            if (!F.A || !F.B || !F.C) continue;
+            ::Vertex *vs[3] = {F.A, F.B, F.C};
+            float *uu[3] = {&F.U1, &F.U2, &F.U3};
+            float *vv[3] = {&F.V1, &F.V2, &F.V3};
+            for (int k = 0; k < 3; ++k) {
+                Vector lp = vs[k]->Pos, wp;
+                MatrixXVector(T->RotMat, &lp, &wp);
+                wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+                *uu[k] = (*uu[k] - 0.5f) * invScale + 0.5f + DetileU(wp.x, wp.z, amp);
+                *vv[k] = (*vv[k] - 0.5f) * invScale + 0.5f + DetileV(wp.x, wp.z, amp);
+            }
+            ++touched;
+        }
+    }
+    if (verbose)
+        std::fprintf(stderr,
+            "[INGEST] floor retile: scale=%.2f detile=%.3f (%d faces) -- "
+            "parity with GreetsRetileFloor\n", scale, amp, touched);
+}
+
+// Per-surface authored smoothing-angle override, the registry
+// MeshOps_SeedAuthoredSmoothAngles fills (DEMO/GREETS.CPP:1723-1728): a
+// surface flagged Surf_Smoothing whose authored SMAN differs from greets'
+// 89.5-degree global default by more than 0.05 degrees smooths at ITS angle,
+// restricted to its own faces. Returns true + the angle when the override
+// applies.
+bool SurfaceSmoothOverride(const Material *M, float &angleDegOut) {
+    if (!M || !M->Name) return false;
+    if (!(M->TFlags & Surf_Smoothing)) return false;
+    const float deg = M->MaxSmoothingAngle * (180.0f / float(M_PI));
+    if (std::fabs(deg - 89.5f) <= 0.05f) return false;
+    angleDegOut = deg;
+    return true;
+}
+
+bool MatIsMomy(const Material *M) {
+    return M && M->Name &&
+           (!std::strcmp(M->Name, "momy-1") || !std::strcmp(M->Name, "momy-2"));
+}
+
+// Does DEMO's MakeFacesIndependentByAngle process this mesh at all? It skips
+// meshes with no crease at the 30-degree global threshold and no override
+// surface (DEMO/MeshOps.cpp:1308-1328) — skipped meshes keep the shared
+// smooth Vertex::N / Vertex::Tangent from Scene_Computations.
+bool MeshGetsIndependentFaces(TriMesh *T, float cosThr,
+                              const std::unordered_map<const ::Vertex *,
+                                                       std::vector<const Face *>> &incident) {
+    for (const auto &kv : incident) {
+        const auto &fs = kv.second;
+        for (size_t i = 0; i < fs.size(); ++i)
+            for (size_t j = i + 1; j < fs.size(); ++j) {
+                const float d = fs[i]->N.x * fs[j]->N.x + fs[i]->N.y * fs[j]->N.y
+                              + fs[i]->N.z * fs[j]->N.z;
+                if (d < cosThr) return true;
+            }
+    }
+    for (DWord fi = 0; fi < T->FIndex; ++fi) {
+        float a;
+        if (SurfaceSmoothOverride(T->Faces[fi].Txtr, a)) return true;
+    }
+    return false;
+}
+
+float TriArea(const Vector &a, const Vector &b, const Vector &c) {
+    const float e1x = b.x-a.x, e1y = b.y-a.y, e1z = b.z-a.z;
+    const float e2x = c.x-a.x, e2y = c.y-a.y, e2z = c.z-a.z;
+    const float cx = e1y*e2z - e1z*e2y;
+    const float cy = e1z*e2x - e1x*e2z;
+    const float cz = e1x*e2y - e1y*e2x;
+    return 0.5f * std::sqrt(cx*cx + cy*cy + cz*cz);
+}
+
+// The corner-normal rule of DEMO/MeshOps.cpp:171-224 (computeSmoothedNormal),
+// term for term: (1) per-surface override — same base surface, angle-gated
+// against THIS face's normal; (2) momy — every incident momy face, NO angle
+// gate (the true shared normal that keeps the lathe seamless); (3) the global
+// 30-degree architectural crease gate. Area-weighted, face-normal fallback.
+Vector CornerNormal(const ::Vertex *origVtx, const Face *F, float cosSmoothing,
+                    const std::unordered_map<const ::Vertex *,
+                                             std::vector<const Face *>> &incident) {
+    float ovAngle = 0.0f;
+    const bool perSurf = SurfaceSmoothOverride(F->Txtr, ovAngle);
+    const float cosPerSurf = perSurf
+        ? std::cos(ovAngle * float(M_PI) / 180.0f) : 0.0f;
+    const bool momy = !perSurf && MatIsMomy(F->Txtr);
+    auto it = incident.find(origVtx);
+    if (it == incident.end()) return F->N;
+    Vector acc{0, 0, 0};
+    for (const Face *adj : it->second) {
+        if (perSurf) {
+            if (!adj->Txtr || !adj->Txtr->Name || !F->Txtr->Name ||
+                std::strcmp(adj->Txtr->Name, F->Txtr->Name)) continue;
+            const float d = F->N.x*adj->N.x + F->N.y*adj->N.y + F->N.z*adj->N.z;
+            if (d < cosPerSurf) continue;
+        } else if (momy) {
+            if (!MatIsMomy(adj->Txtr)) continue;
+        } else {
+            const float d = F->N.x*adj->N.x + F->N.y*adj->N.y + F->N.z*adj->N.z;
+            if (d < cosSmoothing) continue;
+        }
+        const float w = TriArea(adj->A->Pos, adj->B->Pos, adj->C->Pos);
+        acc.x += adj->N.x * w; acc.y += adj->N.y * w; acc.z += adj->N.z * w;
+    }
+    const float len = std::sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
+    if (len < 1e-6f) return F->N;
+    acc.x /= len; acc.y /= len; acc.z /= len;
+    return acc;
+}
+
+// The face's own Lengyel tangent from the per-FACE UVs, with
+// Compute_Vertex_Tangents' degenerate-UV fallback to the per-vertex UVs
+// (FDS/MISC/PREPROC.CPP:396-460). Returns false when both are degenerate.
+bool FaceTangent(const Face *F, Vector &out) {
+    const Vector &p0 = F->A->Pos, &p1 = F->B->Pos, &p2 = F->C->Pos;
+    const float e1x = p1.x-p0.x, e1y = p1.y-p0.y, e1z = p1.z-p0.z;
+    const float e2x = p2.x-p0.x, e2y = p2.y-p0.y, e2z = p2.z-p0.z;
+    float du1 = F->U2 - F->U1, dv1 = F->V2 - F->V1;
+    float du2 = F->U3 - F->U1, dv2 = F->V3 - F->V1;
+    if (std::fabs(du1*dv2 - du2*dv1) < 1e-8f) {
+        const float vdu1 = F->B->U - F->A->U, vdv1 = F->B->V - F->A->V;
+        const float vdu2 = F->C->U - F->A->U, vdv2 = F->C->V - F->A->V;
+        if (std::fabs(vdu1*vdv2 - vdu2*vdv1) >= 1e-8f) {
+            du1 = vdu1; dv1 = vdv1; du2 = vdu2; dv2 = vdv2;
+        }
+    }
+    const float denom = du1*dv2 - du2*dv1;
+    if (std::fabs(denom) < 1e-8f) return false;
+    const float r = 1.0f / denom;
+    out.x = (e1x*dv2 - e2x*dv1) * r;
+    out.y = (e1y*dv2 - e2y*dv1) * r;
+    out.z = (e1z*dv2 - e2z*dv1) * r;
+    return true;
+}
+
+// Gram-Schmidt `t` against unit `n`, with Compute_Vertex_Tangents' fallback
+// (N x reference-axis) when degenerate.
+Vector OrthonormalTangent(Vector t, const Vector &n, bool haveT) {
+    if (haveT) {
+        const float d = t.x*n.x + t.y*n.y + t.z*n.z;
+        t.x -= d*n.x; t.y -= d*n.y; t.z -= d*n.z;
+        const float len = std::sqrt(t.x*t.x + t.y*t.y + t.z*t.z);
+        if (len > 1e-6f) { t.x /= len; t.y /= len; t.z /= len; return t; }
+    }
+    const Vector ref = (std::fabs(n.y) < 0.9f) ? Vector{0, 1, 0} : Vector{1, 0, 0};
+    Vector f{n.y*ref.z - n.z*ref.y, n.z*ref.x - n.x*ref.z, n.x*ref.y - n.y*ref.x};
+    const float len = std::sqrt(f.x*f.x + f.y*f.y + f.z*f.z);
+    if (len > 1e-6f) { f.x /= len; f.y /= len; f.z /= len; }
+    return f;
+}
+
+// Per-face UV-winding handedness — the predicate of DEMO's
+// GreetsFixBitangentHandedness (GREETS.CPP:1318-1351): negative per-face UV
+// determinant => the bitangent must flip (B = -(N x T)). The CPU realises
+// this as a ::mirUV material clone with TbnHandedness=-1; here it is a
+// per-vertex sign.
+float FaceHandedness(const Face &F) {
+    const float du1 = F.U2 - F.U1, dv1 = F.V2 - F.V1;
+    const float du2 = F.U3 - F.U1, dv2 = F.V3 - F.V1;
+    return (du1*dv2 - du2*dv1 >= 0.0f) ? 1.0f : -1.0f;
 }
 
 // Returns the number of materials overridden.
@@ -426,13 +619,20 @@ static void RefreshCamera(Scene &out, const LoadOptions &opt, ::Scene &sc) {
     if (sc.CameraHead) {
         static ::Camera fc;
         fc = *sc.CameraHead;
-        float fov = fc.IFOV;
+        // FOV convention, matching DEMO exactly (GREETS.CPP:3063-3066 +
+        // Snapshot.cpp:508-567): the FDS_GREETS_CAM debug camera copies the
+        // scripted camera AT INIT, when IFOV is still 0, so it resolves to the
+        // FOV spline's FIRST KEY (75-degree fallback) and Animate_Objects then
+        // skips it (View == &FC). The AUTHORED spline camera keeps the animated
+        // IFOV. So: posed arm -> Keys[0]; spline arm -> IFOV at CurFrame.
+        const bool posed = !opt.camPose.empty();
+        float fov = posed ? 0.0f : fc.IFOV;
         if (fov < 1.0f && sc.CameraHead->FOV.NumKeys > 0)
             fov = sc.CameraHead->FOV.Keys[0].Pos.x;
         if (fov < 1.0f) fov = 75.0f;
 
         float px, py, pz, fx, fy, fz;
-        if (!opt.camPose.empty() &&
+        if (posed &&
             std::sscanf(opt.camPose.c_str(), "%f,%f,%f,%f,%f,%f",
                         &px, &py, &pz, &fx, &fy, &fz) == 6) {
             fc.ISource = {px, py, pz};
@@ -476,42 +676,61 @@ bool Load(Scene &out, const LoadOptions &opt) {
         return false;
     }
 
-    // ---- 1b. the greets omni RANGE PATCH ------------------------------------
-    // Initialize_Greets (GREETS.CPP:2652-2673) rewrites every Light_Omni whose
-    // IRange is 0 to greets_omni_default_range (30). It runs BEFORE its own
-    // Animate_Objects, and at that point the FLD's Range envelope has not been
-    // evaluated yet, so IRange is 0 for ALL TEN omnis and all ten are patched --
-    // DEMO prints "[GREETS] patched IRange=30 on 10 FLD omnis (had 0)", verified
-    // in a real run log. It overwrites Range.Keys[0] too, which is what makes the
-    // value survive the spline evaluation Animate_Objects performs next.
-    //
-    // This block must therefore sit BETWEEN LoadFLD and Animate_Objects, exactly
-    // where greets' own patch sits. Replicating the MECHANISM rather than
-    // hard-coding 30 keeps it correct for multi-key Range splines.
-    //
-    // WITHOUT this the arm ran the AUTHORED ranges (3,3,10,10,7,20,20,2,2,2)
-    // against the CPU's uniform 30 -- the three mech omnis at 2.0 against 30 is
-    // 15x the radius, 225x the area. MEASURED consequence: the direct lighting
-    // term was median 0 across the frame, with only 0.5% of pixels above 8/255,
-    // so the image was ambient + emissive + flares and the "15.95% of pixels have
-    // a light in range" census was itself an artefact of this bug.
+    // ---- 1b. omni range FORCE-OVERRIDE (default off) ------------------------
+    // History matters here. Pre-00f7820, Initialize_Greets rewrote every omni
+    // whose IRange was 0 (= all ten, since Animate_Objects hadn't run) to a
+    // flat 30, and this ingest replicated that patch as parity. Commit 00f7820
+    // then authored LightRange 30 into the LWS itself, regenerated the FLD, and
+    // DELETED both runtime patches — so parity is now the AUTHORED envelope,
+    // evaluated by Animate_Objects like any other spline, with no patch at all.
+    // What survives in DEMO is greets_omni_default_range as a default-0 tuning
+    // dial that force-rewrites every Range spline key (GREETS.CPP:2692-2711,
+    // "rewriting the spline keys, since writing IRange alone is undone by the
+    // next Animate_Objects"). --omni_range=F reproduces that dial.
     if (opt.omniDefaultRange > 0.0f) {
-        int patched = 0;
+        int forced = 0;
         for (::Omni *O = sc.OmniHead; O; O = O->Next) {
             if (O->Type != Light_Omni) continue;
-            if (O->IRange > 0.0f) continue;
             O->IRange = opt.omniDefaultRange;
             O->rRange = 1.0f / opt.omniDefaultRange;
-            if (O->Range.NumKeys >= 1 && O->Range.Keys)
-                O->Range.Keys[0].Pos.x = opt.omniDefaultRange;
-            ++patched;
+            for (int k = 0; k < O->Range.NumKeys && O->Range.Keys; ++k)
+                O->Range.Keys[k].Pos.x = opt.omniDefaultRange;
+            ++forced;
         }
         if (opt.verbose)
             std::fprintf(stderr,
-                "[INGEST] greets range patch: IRange=%g on %d FLD omnis (had 0) "
-                "-- parity with GREETS.CPP:2652\n",
-                opt.omniDefaultRange, patched);
+                "[INGEST] --omni_range: forced IRange=%g on %d omnis "
+                "(rewriting spline keys, as GREETS.CPP:2692 does)\n",
+                opt.omniDefaultRange, forced);
     }
+
+    // ---- 1b1. SceneCorrections' omni SIZE multipliers -----------------------
+    // Commit 00f7820 deleted both RANGE patches, but SceneCorrections
+    // (DEMO/GREETS.CPP:186-241, called unconditionally at :1531) still scales
+    // the omni SIZE splines: OmniSizeMult = {1,1,1,1,1,1,1, 1.5,1.5,1.5} — the
+    // three mech omnis run at ISize 0.75, not the authored 0.5. MEASURED as
+    // the last big chunk of the unshadowed-direct residual: with everything
+    // else matched, the per-pixel linear excess of the CPU's direct term was
+    // isolated to the mech omnis at a factor ~1.5-1.6 while the yellow FLD
+    // omnis agreed within 8% — exactly this table. Same engine call
+    // (Spline_Scale), same order (before Animate_Objects evaluates ISize).
+    {
+        static const float kOmniSizeMult[10] =
+            {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.5f, 1.5f, 1.5f};
+        int idx = 0;
+        for (::Omni *O = sc.OmniHead; O && idx < 10; O = O->Next, ++idx)
+            Spline_Scale(&O->Size, kOmniSizeMult[idx]);
+        // (OmniDisable / OmniPointFlare are all zero; Omni_Stationary only
+        // affects the CPU's shadow-cache classification, which this arm
+        // derives from the FLD parent chain to the same static/moving split.)
+    }
+
+    // ---- 1b2. floor UV retile (DEMO-side geometry fixup, default-active) ----
+    // DEMO order is Preprocess -> GreetsRetileFloor -> MakeFacesIndependent
+    // (which recomputes normals+tangents from the retiled per-face UVs). Here
+    // the retile runs BEFORE Scene_Computations so every downstream tangent
+    // sees the final UVs; positions are untouched so normals cannot differ.
+    if (opt.stoneTex) ReplicateRetileFloor(sc, opt.verbose);
 
     // ---- 1c. RUN THE ENGINE'S OWN MESH PREPROCESSING ------------------------
     // LoadFLD does NOT compute normals. It fills Vertex::Pos and the Face
@@ -615,6 +834,26 @@ bool Load(Scene &out, const LoadOptions &opt) {
         ++out.meshCount;
         out.srcVertCount += T->VIndex;
 
+        // Crease-preserving per-corner normals + tangents, replicating what
+        // DEMO's unconditional MakeFacesIndependentByAngle(GreetSc, 30.0f)
+        // (GREETS.CPP:1842) does to every mesh that has a >30-degree crease or
+        // an authored per-surface smoothing angle. Meshes it would skip keep
+        // Scene_Computations' shared smooth Vertex::N / Vertex::Tangent —
+        // both paths are reproduced, decided by the same test. Without this
+        // every crease (wall<->wall corners, lamp fixtures, the mech's hull)
+        // rendered over-smoothed relative to the reference, shifting NoL on
+        // exactly the surfaces the direct term is being compared on.
+        std::unordered_map<const ::Vertex *, std::vector<const Face *>> incident;
+        incident.reserve(size_t(T->FIndex) * 3);
+        for (uint32_t f = 0; f < T->FIndex; ++f) {
+            const Face &F = T->Faces[f];
+            if (F.A) incident[F.A].push_back(&F);
+            if (F.B) incident[F.B].push_back(&F);
+            if (F.C) incident[F.C].push_back(&F);
+        }
+        const float cos30 = std::cos(30.0f * float(M_PI) / 180.0f);
+        const bool independent = MeshGetsIndependentFaces(T, cos30, incident);
+
         // Group this mesh's faces by material so each batch is one draw.
         std::map<Material *, std::vector<uint32_t>> byMat;
         for (uint32_t f = 0; f < T->FIndex; ++f) byMat[T->Faces[f].Txtr].push_back(f);
@@ -664,20 +903,34 @@ bool Load(Scene &out, const LoadOptions &opt) {
             for (uint32_t fi : kv.second) {
                 const Face &F = T->Faces[fi];
                 if (!F.A || !F.B || !F.C) continue;
-                const Vertex *const src[3] = {nullptr, nullptr, nullptr};
-                (void)src;
                 const ::Vertex *vp[3] = {F.A, F.B, F.C};
                 // Per-FACE UVs. NOT F.A->U / F.B->U / F.C->U — see header.
                 const float uu[3] = {F.U1, F.U2, F.U3};
                 const float vv[3] = {F.V1, F.V2, F.V3};
+                const float hand = FaceHandedness(F);
+                Vector faceTan{0, 0, 0};
+                const bool haveFaceTan = independent && FaceTangent(&F, faceTan);
                 for (int k = 0; k < 3; ++k) {
                     Vertex gv;
                     gv.px = vp[k]->Pos.x;
                     gv.py = vp[k]->Pos.y;
                     gv.pz = vp[k]->Pos.z;
-                    gv.nx = vp[k]->N.x;
-                    gv.ny = vp[k]->N.y;
-                    gv.nz = vp[k]->N.z;
+                    Vector n, t;
+                    if (independent) {
+                        // Per-corner crease-preserving normal, then the FACE's
+                        // own tangent orthonormalized against it — exactly the
+                        // post-MakeFacesIndependent state, where each cloned
+                        // vertex has ONE incident face so Compute_Vertex_
+                        // Tangents' accumulation collapses to the face tangent.
+                        n = CornerNormal(vp[k], &F, cos30, incident);
+                        t = OrthonormalTangent(faceTan, n, haveFaceTan);
+                    } else {
+                        n = vp[k]->N;
+                        t = vp[k]->Tangent;   // engine's shared smooth tangent
+                    }
+                    gv.nx = n.x; gv.ny = n.y; gv.nz = n.z;
+                    gv.tx = t.x; gv.ty = t.y; gv.tz = t.z;
+                    gv.th = hand;
                     gv.u = uu[k];
                     gv.v = vv[k];
                     out.verts.push_back(gv);

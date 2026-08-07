@@ -50,6 +50,10 @@ struct DeferredOptions {
     // surface lighting. flareGain is a DIAL, default 1.0 = the CPU's own scale.
     bool  flares = true;
     float flareGain = 1.0f;
+    // Parity dial with the CPU's --no-nmap (FeatureFlags no_nmap): skip the
+    // normal-map perturbation in the G-buffer so both arms can be compared on
+    // geometric normals alone. Diagnostic — the shipped look keeps it true.
+    bool  nmap = true;
     // Bloom. greets sets bloom ON with bloom_intensity 2.0 (GREETS.CPP:1168-9)
     // and the global bloom_threshold default is 200 in the CPU's linear 0-255
     // radiance scale — divided by 255 on the way into this arm's 0..1 buffer.
