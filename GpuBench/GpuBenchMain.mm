@@ -257,6 +257,11 @@ int main(int argc, const char *argv[]) {
         else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }
     }
 
+    // --window implies the deferred arm: interactive is only wired there, and a
+    // bare `--window` under the default albedo pass silently rendered offscreen
+    // and exited — the "doesn't open a window" report.
+    if (dopt.interactive) passMode = "deferred";
+
     // --spline means "follow the AUTHORED camera spline". The default camPose is
     // the review pose, which PINS the camera — the spline arm showed a frozen
     // viewpoint until this was cleared. An explicit --cam still wins. Must happen
