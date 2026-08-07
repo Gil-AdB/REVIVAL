@@ -727,11 +727,14 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	// longer of the two texel-space axis vectors. Isotropic faces are
 	// unaffected (both metrics reduce to log2(s)); anisotropic faces get
 	// blurrier by log2(sqrt(aspect)).
-	// Computed LAZILY — the Txtr_Nomip exit below needs no LOD at all, and this
-	// costs a divide plus a fastLog2 on a path that runs for every textured face
-	// in the frame (~56k in greets at 1080p).
-	auto BaseLod = [&]() -> float {
-		if (mipAniso && fabs(detS) > 1e-12f) {
+	// Max-axis LOD. Returns <0 as "not applicable" so the caller falls back to
+	// the legacy area expression VERBATIM — including its original float/double
+	// typing, which is load-bearing: _C below positions the subdivision CUT
+	// LINES, and those move geometry even when the mip LEVEL is forced to 0, so
+	// re-associating this arithmetic is NOT byte-null on the mips-off path.
+	// Computed lazily; the Txtr_Nomip exit needs no LOD at all.
+	auto AnisoLod = [&]() -> float {
+		if (fabs(detS) > 1e-12f) {
 			const float rdet = 1.0f / detS;
 			const float ux = nUx * rdet * Tx->SizeX, vx = nVx * rdet * Tx->SizeY;
 			const float uy = nUy * rdet * Tx->SizeX, vy = nVy * rdet * Tx->SizeY;
@@ -740,7 +743,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 			const float mx2 = lx2 > ly2 ? lx2 : ly2;
 			if (mx2 > 1e-20f) return 0.5f * fastLog2(mx2);
 		}
-		return 0.5f * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea));
+		return -1.0f;
 	};
 
 #ifdef ENABLE_PIXELCOUNT
@@ -763,7 +766,11 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 			g_MipLevel = 0;
 			meka::g_tlsMipFrac = 0.0f;
 		} else {
-			const float mipF = BaseLod() + mipBias;
+			const float anis = mipAniso ? AnisoLod() : -1.0f;
+			const float mipF = (anis >= 0.0f
+			                    ? anis
+			                    : 0.5f * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)))
+			                   + mipBias;
 			int32_t mip = int32_t(mipF);
 			// Hysteresis: ±1-level transitions must clear the boundary
 			// (integer crossings of mipF) by the margin, else hold.
@@ -797,7 +804,12 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		q += fastLog2(C_Prim[i]->RZ);
 	}
 	
-	float _C = BaseLod() + invTable[C_numVerts] * q + mipBias;
+	const float anisC = mipAniso ? AnisoLod() : -1.0f;
+	// NOTE the `0.5 *` here is DOUBLE in the legacy path and must stay double.
+	float _C = (anisC >= 0.0f
+	            ? double(anisC)
+	            : 0.5 * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)))
+	           + invTable[C_numVerts] * q + mipBias;
 
 	// calculate range of 1/z values along polygon
 	float mrz = 1E+38, Mrz = 0;

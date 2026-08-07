@@ -1,5 +1,46 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-08 — MIP SELECTION IS ON BY DEFAULT; ALL SCENE PINS MOVED
+>
+> **`--mips` default 0 → 1** (user decision). Mip selection had been force-disabled
+> since the legacy `NO_MIPMAPS` define: `MiplevelClipper` computed a level and then
+> every exit path threw it away. That pinned LEVEL 0 for the albedo **and for the
+> normal / roughness / metal / AO chains**, which the deferred kernel indexes by the
+> same miplevel — five map sets whose levels 1..N were built, paid for in memory, and
+> never read. The flag's old justification ("1998 textures are magnified so mips
+> barely engage") argued from NEAR surfaces to justify disabling selection on DISTANT
+> ones, and predated the sidecar PBR sets; it is retracted.
+>
+> **Measured** (greets t=2993, 1080p, `--deferred --texture_filter=1`, new `--mip_stats`
+> histogram): OFF = 100 % of draws and 100 % of covered area at level 0. ON = 7.6 % of
+> draws / 83.3 % of AREA at level 0, remainder across levels 1-8, **48.8 % of DRAWS at
+> level 6**. Branches: 56 115 faces entered, 55 679 face-uniform, **436 (0.78 %) took the
+> subdivision path** — rare, but it owns the large near faces.
+>
+> **Perf is NEUTRAL**: min-of-arm over 5 interleaved 20-iter rounds, greets t=2993 RNDR
+> 39.855 ms off vs 39.965 ms on. No measurable texture-cache win, no measurable cost.
+> The machine was loaded by concurrent agents (individual rounds 39.8-91.4 ms), so only
+> the min is meaningful and nothing under ~0.2 ms is resolvable here.
+>
+> **ALL SCENE PINS MOVED** (city, fountain, greets, chase ×2) and are re-derived in the
+> table below, each with a `--no-mips --no-mip_fix` control proving the move is the
+> flip's and not some other drift. `tools/render_gate.sh` baselines did NOT move.
+> **Two pre-existing drifts surfaced and are NOT mine: chase t1600 (both default and
+> cinematic arms) no longer matches its 2026-07-30 pin even with mips off.**
+>
+> **`--mip_fix` default 0 → 1** — the split branch's depth ramp coefficient (K=1, not 2;
+> texel area per pixel goes as z², independently re-derived). Its earlier "MEASURABLY
+> BROKEN" verdict was a **zsh word-splitting artifact** (a `'--mips --mip_fix'` shell
+> variable arrived as one argv token and was silently ignored); `--strict_flags` now
+> makes that class of error fatal. **Correction: `--mip_fix` is NOT inert when `--mips`
+> is off** — the mips gate zeroes the mip LEVEL but not the SUBDIVISION, and this flag
+> moves the cut lines, so it changes geometry either way.
+>
+> New: **`--mip_stats`** (per-level draw/area histogram at exit, changes no pixel) and
+> **`--mip_aniso`** (max-axis LOD instead of the geometric mean — default OFF, awaiting
+> the user's eyes). Crops: `docs/img/mipsel/`. Full write-up in the commit message.
+
+
 > ## 2026-08-06 — THE MITRE INVERSION IS ROOT-CAUSED; THE WELD IS NOW DEFAULT ON
 >
 > **`--pom_shell_weld` default 0 → 1** (commit `140b6a0`). Inert unless
@@ -481,12 +522,12 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 
 | gate | recipe | pin |
 |---|---|---|
-| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
-| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-06: `f1297141611c484bac7cc10a8bdcf630`** (3/3 identical runs). Two intended overlay removals moved it in sequence, both pure screen text: `f5778c7b` → `06e1d4d1` (earlier work) → `ae358a6a` (the "Shadow: Depth\|PolyId [F3]" indicator deleted, commit `6b5556d`) → `f1297141` (the always-on centre-pixel `[MAT@…]` material probe moved behind `--mat_probe`, default off, commit `35ec295`; re-running that arm WITH `--mat_probe` reproduces `ae358a6a` byte-exact, which is what proves nothing else moved). Prior pin, for the record: **`f5778c7b78a4d70655291363e4119c66`** — taken over **128 sequential runs, 0 flips** (95 % UB on the flip rate 0.023) after the 8-bit-AO-map fix closed the nondeterminism. This supersedes both `de3e9a5fb3aa39e008ef41b83f2b8d1b` (pre-PBR-defaults) and the "NO VALID PIN" state. Includes the PBR scene defaults AND the user's uncommitted GREETS.FLD / momy textures / Piramid.lwo — a clean checkout hashes differently. Verify with `tools/flip_rate.sh -n 24` if a mismatch appears; a single differing run is now a real regression, not noise. |
-| fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` (t1600 unchanged) |
-| chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (cone-tile sky-clip fix; 3-run stable, byte==cull-off): t800 `28e5a2a78d64ae98a1fcc4b739991be2` t1600 `1cbde501c26d231a4295632dfbebd34b` (t1600 unchanged) |
-| gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
+| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix`, which is what attributes the move wholly to the mip-selection flip. Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
+| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-08 (`--mips` default 0→1): `adfba8ba3a1971a7c9cac0da689581b1`** (stable 2/2). Prior pin `f1297141611c484bac7cc10a8bdcf630` reproduces EXACTLY under `--no-mips --no-mip_fix` — note BOTH flags are required, because `--mip_fix` moves the subdivision cut lines and the `--mips` gate zeroes only the mip LEVEL, not the geometry. Superseded pin history follows: **RE-PINNED 2026-08-06: `f1297141611c484bac7cc10a8bdcf630`** (3/3 identical runs). Two intended overlay removals moved it in sequence, both pure screen text: `f5778c7b` → `06e1d4d1` (earlier work) → `ae358a6a` (the "Shadow: Depth\|PolyId [F3]" indicator deleted, commit `6b5556d`) → `f1297141` (the always-on centre-pixel `[MAT@…]` material probe moved behind `--mat_probe`, default off, commit `35ec295`; re-running that arm WITH `--mat_probe` reproduces `ae358a6a` byte-exact, which is what proves nothing else moved). Prior pin, for the record: **`f5778c7b78a4d70655291363e4119c66`** — taken over **128 sequential runs, 0 flips** (95 % UB on the flip rate 0.023) after the 8-bit-AO-map fix closed the nondeterminism. This supersedes both `de3e9a5fb3aa39e008ef41b83f2b8d1b` (pre-PBR-defaults) and the "NO VALID PIN" state. Includes the PBR scene defaults AND the user's uncommitted GREETS.FLD / momy textures / Piramid.lwo — a clean checkout hashes differently. Verify with `tools/flip_rate.sh -n 24` if a mismatch appears; a single differing run is now a real regression, not noise. |
+| fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | **RE-PINNED 2026-08-08 (`--mips` default 0→1): `8db68ccb59416e9a44037e9f387b7bd9`** (stable 2/2). Prior pin `51fff7cd38767d619280afe0498a6f24` reproduces EXACTLY under `--no-mips --no-mip_fix`. Divergence: 266 063 px changed (12.83 %), mean \|d\| 9.27 on changed, 53 238 px >12/255, max 254. |
+| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>**RE-PINNED 2026-08-08 (`--mips` default 0→1):** t100 `76e7cf68714666bda278f094be4f2c72` t400 `d458e82bf4514c4ff2850468aab5743c` t800 `c145c7a5861fba81d56746f7c10764ee` t1200 `31aa52039f9b228fa6307c12e14811eb` t1600 `1544b0e775900b099ac9e38d42fd750d`.<br>Control under `--no-mips --no-mip_fix` reproduces the 2026-07-30 pins EXACTLY for t100/t400/t800/t1200 — **but t1600 gives `c8c93b886dd31fcc01363c806d7626de`, NOT the recorded `7265d7855bdaae74e39f3c21d4f7e612`. chase t1600 had ALREADY drifted before the mip work; cause unidentified, needs its own bisect.** Prior (2026-07-30): t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` |
+| chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (cone-tile sky-clip fix; 3-run stable, byte==cull-off): **RE-PINNED 2026-08-08 (`--mips` default 0→1):** t800 `857d899d48ca55a6ae67f03e30b9bf02` t1600 `567e61532fb075b6e590b53a26cea2b6`.<br>Control under `--no-mips --no-mip_fix`: t800 `28e5a2a78d64ae98a1fcc4b739991be2` matches the 2026-07-30 pin, **t1600 gives `debdb1f435a14949b2e05be0bb53b1e7`, NOT the recorded `1cbde501c26d231a4295632dfbebd34b` — same pre-existing t1600 drift as the default arm.** |
+| gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS — **baselines UNCHANGED by the 2026-08-08 mips flip** (mirrortest `4ac809e5…`, conetest `b41894f9…`, halotest `166fa25a…` all byte-identical with mips on and off; those test scenes carry no minified textured geometry). |
 | wasm | `make wasm` | links |
 
 Traps:

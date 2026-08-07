@@ -4817,6 +4817,7 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		};
 		const uint32_t nV = uint32_t(T->VIndex);
 		std::vector<float>  wSum(nV, 0.0f);      // world-per-UV over incident target faces
+		const bool entryFlat = fds::FeatureFlags::pom_shell_entry_flat();
 		std::vector<float>  ndSum(nV, 0.0f);     // N_v·N_face over the same
 		std::vector<int>    cnt(nV, 0);
 		std::vector<char>   nonTarget(nV, 0);
@@ -4957,7 +4958,9 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				V[i].Pos.y += dy;
 				V[i].Pos.z += dz;
 				if (census) offVert[i] = offApplied;
-				V[i].ShellH = recessOnly ? 1.0f : (0.5f + 0.5f * ndvEff);
+				// S1d-7 --pom_shell_entry_flat: drop the corner correction (the
+				// causal A/B for the quad-diagonal crease; see the flag doc).
+				V[i].ShellH = recessOnly ? 1.0f : (entryFlat ? 1.0f : (0.5f + 0.5f * ndvEff));
 				if (V[i].ShellH < hMinStamp) hMinStamp = V[i].ShellH;
 				if (ndvEff < 0.99f) ++nCorner;
 				if (offApplied < offMin) offMin = offApplied;
@@ -4974,7 +4977,7 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			// --pom_recess_only: the vertex was not moved, so it lies EXACTLY on
 			// every incident face's plane, and under the recess convention that
 			// plane is the top of the field -- h = 1, with no corner correction.
-			V[i].ShellH = recessOnly ? 1.0f : (0.5f + 0.5f * ndv);
+			V[i].ShellH = recessOnly ? 1.0f : (entryFlat ? 1.0f : (0.5f + 0.5f * ndv));
 			if (V[i].ShellH < hMinStamp) hMinStamp = V[i].ShellH;
 			if (ndv < 0.99f) ++nCorner;
 			if (off < offMin) offMin = off;

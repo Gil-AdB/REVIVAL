@@ -3057,3 +3057,53 @@ through `eval`) hands DEMO ONE argv token, which it reports as
 runs at DEFAULTS. Build every arm as a real array and expand it `"${ARM[@]}"`,
 and assert `grep -c "unknown flag"` on every log. One round of this campaign's
 evidence images was voided by exactly this.
+
+---
+
+# S1d-7 — THE QUAD-DIAGONAL CREASE: the entry-height kink is NOT the whole cause
+
+Added 2026-08-08. Handed over root-caused by the interactive-repro agent
+(`--repro`, `docs/INTERACTIVE_REPRO.md`): plain parallax has no crease, minimal
+`--pom_shell` has it; `--wire_viz=1` shows the block is ONE QUAD, TWO TRIANGLES
+and the crease lies EXACTLY on the triangulation diagonal; the proposed
+mechanism was that `DEMO/MeshOps.cpp`'s per-vertex `ShellH = 0.5 + 0.5·ndv`
+(the corner correction), transported as a per-vertex interpolant and used as
+the march's ENTRY HEIGHT, is only C1 across the shared diagonal when
+`h1 + h3 == h2 + h4`.
+
+**Measured, and the mechanism is only PARTIAL.** `--pom_shell_entry_flat`
+(S1d-7, default 0, byte-null) stamps `ShellH = 1` on every moved lid vertex,
+removing the `ndv` dependence entirely — so if the crease is the entry-height
+kink it must vanish. Rendered at **t=2993 on the authored camera**
+(`FDS_GREETS_CAM` unset), 1920×1080, arm `--deferred --pom_shell
+--pom_shell_world_amp --pom_shell_world_amp_set=0.18 --parallax_pom_cone
+--parallax_pom=32 --pom_cone_exact=1 --pom_cone_min_step=1 --texture_filter=1`:
+
+| arm | diagonal crease |
+|---|---|
+| plain POM, no shell | **absent** (confirms the repro agent's necessity result) |
+| `--pom_shell` | **present**, sharp, exactly on the diagonal |
+| `--pom_shell --pom_shell_entry_flat` | **STILL PRESENT**, attenuated but not gone |
+
+The flag changes 1 052 463 px at this pose, so it is emphatically live and
+`ndv < 1` is *widespread*, not a rare-corner effect — yet the crease survives it.
+
+**The stronger candidate the A/B points at, not yet confirmed:** the vertices
+still move by `off` along their SMOOTHED normals whatever `ShellH` is stamped,
+so on an authored-flat quad whose four corners carry different `ndv` **the LID
+QUAD IS NON-PLANAR**. `PomShell_Build`'s re-planing loop then re-derives `F.N`
+and `F.NormProd` **per triangle** from that triangle's own three moved vertices,
+so the two halves of one quad get genuinely DIFFERENT plane equations — and
+every per-face quantity the march derives from the plane (the march frame, the
+depth write's `Vz/(V·N)`, the tangent frame) steps across the diagonal. That
+explains why removing the entry-height kink attenuates the crease without
+removing it: `entry_flat` fixes one of two per-triangle discontinuities.
+
+**Next step, unverified:** confirm by measuring the angle between the two
+triangles' re-derived normals per target quad (a bake-time census) and
+correlating it with where the crease is visible; then decide whether the lid
+should be made PLANAR per authored quad (project the corner offsets onto the
+authored plane's normal, losing the mitre) or whether the march should read the
+AUTHORED plane rather than the re-derived lid plane. The latter is also what
+§S1d-6.4 wants for the silhouette — both defects are about what the shell hands
+the march at a face's boundary, so look for one fix before building two.
