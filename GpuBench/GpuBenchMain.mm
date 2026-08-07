@@ -239,6 +239,9 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
         else if (a == "--no-flares")                dopt.flares = false;
         else if (a == "--no-nmap")                  dopt.nmap = false;
+        else if (const char *v = val("--cpu_prof=")) dopt.cpuProf = std::atoi(v);
+        else if (a == "--no-cull")                  dopt.cull = false;
+        else if (a == "--no-shadow_cull")           dopt.shadowCull = false;
         else if (const char *v = val("--flare_gain=")) dopt.flareGain = float(std::atof(v));
         else if (const char *v = val("--viz=")) {
             const std::string m(v);

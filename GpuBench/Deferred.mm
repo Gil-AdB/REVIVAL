@@ -842,12 +842,48 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     };
 
     // ---- one frame --------------------------------------------------------
+    // Per-cube-FACE frustum cull for the shadow bake. `fc` is the face basis
+    // (right, up, forward) and `lp` the light position; a batch survives if its
+    // world bounding sphere intersects the 90-degree square frustum out to
+    // `far`. This is the analogue of the CPU's per-pass mesh cull — without it
+    // the GPU rasterises all 27 casting batches into all 6 faces of every cube
+    // while the CPU culls per face, and the shadow rows of the comparison table
+    // would be measuring different workloads.
+    auto sphereInCubeFace = [](const Batch &b, const float lp[3],
+                               const CubeFace &fc, float farD) -> bool {
+        const float d[3] = {b.bsCtr[0]-lp[0], b.bsCtr[1]-lp[1], b.bsCtr[2]-lp[2]};
+        const float z = d[0]*fc.fwd[0] + d[1]*fc.fwd[1] + d[2]*fc.fwd[2];
+        if (z < -b.bsRad || z > farD + b.bsRad) return false;
+        // 90-degree frustum: the side planes are (fwd +/- right)/sqrt2 and
+        // (fwd +/- up)/sqrt2, all through the light.
+        const float x = d[0]*fc.right[0] + d[1]*fc.right[1] + d[2]*fc.right[2];
+        const float y = d[0]*fc.up[0]    + d[1]*fc.up[1]    + d[2]*fc.up[2];
+        const float k = 0.70710678f, r = b.bsRad;
+        if ((z - x) * k < -r) return false;
+        if ((z + x) * k < -r) return false;
+        if ((z - y) * k < -r) return false;
+        if ((z + y) * k < -r) return false;
+        return true;
+    };
+    // Shadow-pass cull state, set per face by bakeCubes before drawScene.
+    const CubeFace *curFace = nullptr;
+    const float *curLightPos = nullptr;
+    float curFar = 0.0f;
+    long shadowBatchesDrawn = 0, shadowBatchesCulled = 0;
+
     auto drawScene = [&](id<MTLRenderCommandEncoder> enc, bool gbuffer) {
         [enc setVertexBuffer:vb offset:0 atIndex:0];
         for (size_t i = 0; i < scene.batches.size(); ++i) {
             const Batch &b = scene.batches[i];
             // Shadow pass: honour the same caster filter the CPU bake applies.
             if (!gbuffer && !b.castsShadow) continue;
+            if (!gbuffer && opt.shadowCull && curFace && curLightPos) {
+                if (!sphereInCubeFace(b, curLightPos, *curFace, curFar)) {
+                    ++shadowBatchesCulled;
+                    continue;
+                }
+                ++shadowBatchesDrawn;
+            }
             [enc setVertexBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
             if (gbuffer) {
                 [enc setFragmentBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
@@ -927,7 +963,11 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 su.dzb = sn * sf / (sf - sn);
                 su.projScale = 1.0f;          // 90-degree cube face
                 [enc setVertexBytes:&su length:sizeof(su) atIndex:1];
+                curFace = &kCubeFaces[f];
+                curLightPos = lights[li].pos;
+                curFar = sf;
                 drawScene(enc, /*gbuffer=*/false);
+                curFace = nullptr; curLightPos = nullptr;
                 [enc endEncoding];
             }
         }
@@ -1322,7 +1362,15 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         [enc setRenderPipelineState:psoGBuf];
         [enc setDepthStencilState:dss];
-        [enc setCullMode:MTLCullModeNone];
+        // BACKFACE CULL, matching Transform_Objects' own test
+        // (Transform.cpp:2434). WHICH mode is correct was MEASURED, not
+        // reasoned: FDS's Compute_Face_Normals builds the plane normal as
+        // Cross_Product(V,U) with U=B-A, V=C-A — i.e. e2 x e1, the NEGATION of
+        // the usual convention — so the engine's visible faces are the ones
+        // Metal calls FRONT-facing under its default clockwise winding.
+        // Rendering both: CullBack drops the whole room (whole-frame luma
+        // 115.68 -> 63.19), CullFront is pixel-identical to CullNone.
+        [enc setCullMode:opt.cull ? MTLCullModeFront : MTLCullModeNone];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentSamplerState:samp atIndex:0];
@@ -1822,6 +1870,45 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         return true;
     }
 
+    // ---- CPU-side per-frame cost, HEADLESS ---------------------------------
+    // The comparison table needs the CPU work a real-time frame would pay
+    // alongside the GPU passes, split the way the interactive path splits it:
+    // ANIMATION (Reanimate = the engine's own Animate_Objects + the light /
+    // camera / transform refresh) vs UPLOAD (rebuilding the batch uniform
+    // blocks and the light buffer, then the memcpy). Measured here rather than
+    // quoted from a --window run, because a visible window is the user's to
+    // launch. The offscreen benchmark itself renders a PINNED pose and pays
+    // NEITHER — so these are reported separately and never folded into the
+    // GPU frame time.
+    if (opt.cpuProf > 0 && opt.loadOpt) {
+        using clk = std::chrono::steady_clock;
+        LoadOptions lo = *opt.loadOpt;
+        lo.verbose = false;
+        double animMs = 0, upMs = 0;
+        float t = float(opt.loadOpt->demoT);
+        for (int i = 0; i < opt.cpuProf; ++i) {
+            t += 1.0f;                       // a real tick, so splines re-evaluate
+            const auto a0 = clk::now();
+            Reanimate(scene, lo, t);
+            const auto a1 = clk::now();
+            refreshFrameUniforms();
+            refreshBatchUniforms();
+            refreshLightBuffer();
+            std::memcpy([lightBuf contents], lights.data(),
+                        lights.size() * sizeof(GpuLight));
+            const auto a2 = clk::now();
+            animMs += std::chrono::duration<double, std::milli>(a1 - a0).count();
+            upMs   += std::chrono::duration<double, std::milli>(a2 - a1).count();
+        }
+        std::fprintf(stderr,
+            "[DEFERRED] CPU per-frame (headless, %d iters): animation %.4f ms "
+            "(Animate_Objects + light/camera/transform refresh), upload %.4f ms "
+            "(%zu batch uniform blocks + %zu lights). NOT included in the GPU "
+            "frame time -- the timed loop renders a pinned pose.\n",
+            opt.cpuProf, animMs / opt.cpuProf, upMs / opt.cpuProf,
+            scene.batches.size(), lights.size());
+    }
+
     // ---- warmup + measure --------------------------------------------------
     std::fprintf(stderr, "[DEFERRED] warmup %d frames…\n", opt.warmup);
     for (int i = 0; i < opt.warmup; ++i) { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
@@ -1849,6 +1936,22 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     }
 
     if (frameMs.empty()) { std::fprintf(stderr, "[DEFERRED] no GPU timestamps\n"); return false; }
+    // Workload census: what the culls actually removed, per frame, so the
+    // comparison table's shadow row can state the batch count it measured
+    // rather than the batch count that exists.
+    if (opt.iters > 0) {
+        const double perFrame = double(opt.iters);
+        std::fprintf(stderr,
+            "[DEFERRED] culling: main-view backface %s; shadow per-cube-face frustum %s "
+            "-- shadow batch draws %.1f/frame, culled %.1f/frame (%.1f%% rejected)\n",
+            opt.cull ? "ON" : "OFF", opt.shadowCull ? "ON" : "OFF",
+            double(shadowBatchesDrawn) / perFrame,
+            double(shadowBatchesCulled) / perFrame,
+            (shadowBatchesDrawn + shadowBatchesCulled)
+                ? 100.0 * double(shadowBatchesCulled)
+                        / double(shadowBatchesDrawn + shadowBatchesCulled)
+                : 0.0);
+    }
     out.frame = {"frame", Percentile(frameMs, 0.5), Percentile(frameMs, 0.05), Percentile(frameMs, 0.95)};
     for (int p = 0; p < kPasses; ++p) {
         if (passMs[p].empty()) continue;

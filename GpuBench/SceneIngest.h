@@ -102,6 +102,12 @@ struct Batch {
     // parent hierarchy into IPos). worldPos = rot * objPos + pos.
     float    rot[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
     float    pos[3] = {0, 0, 0};
+    // WORLD-space bounding sphere of this batch's triangles, refreshed with the
+    // model matrix. Used only by the shadow bake's per-cube-face frustum cull —
+    // the analogue of the CPU's per-pass mesh cull, which is what makes the
+    // shadow workloads comparable.
+    float    bsCtr[3] = {0, 0, 0};
+    float    bsRad = 0.0f;
     std::string meshName;
     std::string materialName;
 };

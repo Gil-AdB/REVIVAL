@@ -54,6 +54,21 @@ struct DeferredOptions {
     // normal-map perturbation in the G-buffer so both arms can be compared on
     // geometric normals alone. Diagnostic — the shipped look keeps it true.
     bool  nmap = true;
+    // WORKLOAD PARITY (docs/GPU_BENCHMARK_PLAN.md §6.2 "other known gaps").
+    // cull: BACKFACE-cull the main G-buffer pass, as Transform_Objects does
+    //   (Transform.cpp:2434). The shadow bake deliberately does NOT cull —
+    //   shadow_backface_cull defaults 0 because single-sided walls must still
+    //   occlude — so matching that is parity, not an omission.
+    // shadowCull: per-cube-FACE frustum cull of shadow batches, the analogue
+    //   of the CPU's per-pass mesh cull. Both default ON so the comparison
+    //   table is not measuring work the CPU never does; --no-cull /
+    //   --no-shadow_cull price them.
+    bool  cull = true;
+    bool  shadowCull = true;
+    // Headless CPU-side per-frame profile (animation vs upload), N iters.
+    // 0 = off. Exists so the comparison table can carry the CPU-side split
+    // WITHOUT a --window run (visible runs are the user's to launch).
+    int   cpuProf = 0;
     // Bloom. greets sets bloom ON with bloom_intensity 2.0 (GREETS.CPP:1168-9)
     // and the global bloom_threshold default is 200 in the CPU's linear 0-255
     // radiance scale — divided by 255 on the way into this arm's 0..1 buffer.

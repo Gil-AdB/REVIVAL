@@ -672,7 +672,36 @@ static void RefreshLights(Scene &out, const LoadOptions &opt, ::Scene &sc) {
 
 }
 
+// World-space bounding sphere over a batch's own vertices, under its current
+// model matrix. Centroid + max radius (not the minimal sphere — the CPU's
+// Compute_BSphere is the same cheap construction, and a slightly loose sphere
+// only ever culls LESS, never wrongly).
+void ComputeBatchSphere(Scene &out, Batch &b) {
+    if (!b.vertexCount) return;
+    double cx = 0, cy = 0, cz = 0;
+    auto toWorld = [&](const Vertex &V, float w[3]) {
+        const float o[3] = {V.px, V.py, V.pz};
+        for (int c = 0; c < 3; ++c)
+            w[c] = b.rot[c][0]*o[0] + b.rot[c][1]*o[1] + b.rot[c][2]*o[2] + b.pos[c];
+    };
+    for (uint32_t v = b.firstVertex; v < b.firstVertex + b.vertexCount; ++v) {
+        float w[3]; toWorld(out.verts[v], w);
+        cx += w[0]; cy += w[1]; cz += w[2];
+    }
+    const double n = double(b.vertexCount);
+    b.bsCtr[0] = float(cx / n); b.bsCtr[1] = float(cy / n); b.bsCtr[2] = float(cz / n);
+    float r2 = 0.0f;
+    for (uint32_t v = b.firstVertex; v < b.firstVertex + b.vertexCount; ++v) {
+        float w[3]; toWorld(out.verts[v], w);
+        const float dx = w[0]-b.bsCtr[0], dy = w[1]-b.bsCtr[1], dz = w[2]-b.bsCtr[2];
+        r2 = std::max(r2, dx*dx + dy*dy + dz*dz);
+    }
+    b.bsRad = std::sqrt(r2);
+}
+
 // Per-frame refresh of the model matrices. Animate_Objects has already run.
+void ComputeBatchSphere(Scene &out, Batch &b);
+
 static void RefreshBatchTransforms(Scene &out, ::Scene &sc) {
     std::unordered_map<std::string, TriMesh *> byName;
     for (Object *obj = sc.ObjectHead; obj; obj = obj->Next)
@@ -685,6 +714,7 @@ static void RefreshBatchTransforms(Scene &out, ::Scene &sc) {
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
         b.pos[0] = T->IPos.x; b.pos[1] = T->IPos.y; b.pos[2] = T->IPos.z;
+        ComputeBatchSphere(out, b);   // the sphere rides the model matrix
     }
 }
 
@@ -1098,7 +1128,10 @@ bool Load(Scene &out, const LoadOptions &opt) {
                     int((uint32_t(out.verts.size()) - b.firstVertex) / 3);
             }
             b.vertexCount = uint32_t(out.verts.size()) - b.firstVertex;
-            if (b.vertexCount) out.batches.push_back(std::move(b));
+            if (b.vertexCount) {
+                ComputeBatchSphere(out, b);
+                out.batches.push_back(std::move(b));
+            }
         }
     }
 
