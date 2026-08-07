@@ -715,6 +715,16 @@ struct TileRasterizerCtx {
 	// the neighbouring prism's fragment answers the pixel, arbitrated by Z.
 	// false = every expression below is the legacy one, byte-identical.
 	bool  pomPrismMarch = false;
+	// --pom_prism_march>=2 on ANY shell face (lid or side): the PRISM EXIT.
+	// Every march failure discards — except a crossed hit whose ONLY exit
+	// sides are COPLANAR-classified (shellSideCls 0): the neighbouring patch
+	// is the SAME PLANE, the interface sheet is edge-on from every front
+	// view (no rasterizable geometry can answer the crossing — measured at
+	// t=2980: the seam slit stays 3.4k void px even with walls at every
+	// edge, two-sided, never-discarding), and the height field is the same
+	// tiling texture in the same plane, so the crossed hit IS the
+	// continuation the papers get from a globally continuous chart.
+	bool  pomPrismExit = false;
 	float shellH0 = 0.5f;
 	float shellSideLean[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	uint8_t shellSideCls[4] = { 4, 4, 4, 4 };
@@ -1702,6 +1712,11 @@ struct TileRasterizer {
 								    (prismMarch ? abs(invVtNRaw) : invVtNRaw)
 								        > Vec8f(ctx.pomShellCap), kPomBitCap);
 								pathCode |= pom_path_bit(hStart < hEnter, kPomBitSideEntry);
+								// --pom_prism_march: reuse the side-entry bit (that flag is
+								// superseded in this arm, the bit is otherwise unreachable) to
+								// mark PRISM SIDE-QUAD fragments, so a void census can say
+								// whether the last killed fragment was a wall or a lid.
+								if (prismMarch) pathCode |= Vec8i(int32_t(kPomBitSideEntry));
 							}
 							if (ctx.tbnHandedness < 0.0f)
 								pathCode |= Vec8i(int32_t(kPomBitMirrored));
@@ -2525,6 +2540,30 @@ struct TileRasterizer {
 								pomHitH = select(clampable, hEnter, pomHitH);
 								keep |= clampable | keepHit;   // keepHit: marched uv/h stay
 								if (pathViz) lidClamped = clampable;
+							}
+							// ── S1d-5 PRISM EXIT (--pom_prism_march>=2): every failure
+							// discards — the neighbouring prism's fragment answers, arbitrated
+							// by Z — EXCEPT a crossed hit whose exit sides are all COPLANAR
+							// (shellSideCls 0). A coplanar seam is a chart tear our per-patch
+							// boxes manufacture: the papers' architecture has no such boundary
+							// (one continuous chart), and no rasterizable interface can answer
+							// it in a face rasterizer — the sheet between two coplanar prisms
+							// contains the view ray at every front-on pose (measured t=2980:
+							// the seam slit stays ~3.4k void even with walls at every edge,
+							// two-sided, never-discarding). The field is the same tiling
+							// texture in the same plane, so the crossed hit IS the
+							// continuation. Fold/true/unattributed exits keep the discard.
+							if (!ctx.pomRecess && ctx.pomPrismExit && ctx.pomShellDomain) {
+								const Vec8fb ex0 = uf < Vec8f(ctx.shellUMin);
+								const Vec8fb ex1 = uf > Vec8f(ctx.shellUMax);
+								const Vec8fb ex2 = vf < Vec8f(ctx.shellVMin);
+								const Vec8fb ex3 = vf > Vec8f(ctx.shellVMax);
+								Vec8fb copl = Vec8fb(false), noncop = Vec8fb(false);
+								if (ctx.shellSideCls[0] == 0) copl |= ex0; else noncop |= ex0;
+								if (ctx.shellSideCls[1] == 0) copl |= ex1; else noncop |= ex1;
+								if (ctx.shellSideCls[2] == 0) copl |= ex2; else noncop |= ex2;
+								if (ctx.shellSideCls[3] == 0) copl |= ex3; else noncop |= ex3;
+								keep |= pomCrossed & (~sideEntryMiss) & copl & ~noncop;
 							}
 							// --pom_recess_only (P2-A): the kill is OPTIONAL here, and
 							// killing is the wrong default. Under the LID model a lane
@@ -3445,8 +3484,17 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// exits through the lid and discards; measured 200k void px).
 	const bool prismMarchOn = pomShellFace && F->PomPrismSide
 	                          && fds::FeatureFlags::pom_prism_march() > 0;
+	// Mode 2 adds the full interface GEOMETRY (chart-tear walls, T-split,
+	// two-sided folds) while the exit policy stays with the existing flags
+	// — measured as the production candidate. Mode 3 is the PAPER-PURE
+	// reference: every exit forced to a discard. Measured (19 review
+	// poses, weld=3): pure discard leaves 12.3k void px because a face
+	// rasterizer cannot produce the answering fragment at coplanar chart
+	// tears (interface edge-on from every front view) or concave welded
+	// folds (both walls back-facing) — Hirche's fragment-per-crossed-prism
+	// comes from projected-tetrahedra SOLID rasterization, not faces.
 	const bool prismExit = pomShellFace
-	                       && fds::FeatureFlags::pom_prism_march() >= 2;
+	                       && fds::FeatureFlags::pom_prism_march() >= 3;
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -3560,15 +3608,19 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomShellLidEdge = prismExit ? 0 : fds::FeatureFlags::pom_shell_lid_edge(),
 		.pomShellKeepUV = fds::FeatureFlags::pom_shell_keep_uv(),
 		.pomPrismMarch = prismMarchOn,
+		.pomPrismExit = prismExit,
 		.shellH0 = fds::FeatureFlags::pom_recess_only() ? 1.0f : 0.5f,
 		.shellSideLean = { pomSideFaces ? pomShellSideLean[0] : 0.0f,
 		                   pomSideFaces ? pomShellSideLean[1] : 0.0f,
 		                   pomSideFaces ? pomShellSideLean[2] : 0.0f,
 		                   pomSideFaces ? pomShellSideLean[3] : 0.0f },
-		.shellSideCls = { uint8_t(pomSideFaces ? pomShellSideCls[0] : 4),
-		                  uint8_t(pomSideFaces ? pomShellSideCls[1] : 4),
-		                  uint8_t(pomSideFaces ? pomShellSideCls[2] : 4),
-		                  uint8_t(pomSideFaces ? pomShellSideCls[3] : 4) },
+		// --pom_prism_march>=2 reads the CLASS table too (its coplanar-exit
+		// keep keys on it) even though the side-face planes themselves are
+		// forced off in that arm.
+		.shellSideCls = { uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[0] : 4),
+		                  uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[1] : 4),
+		                  uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[2] : 4),
+		                  uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[3] : 4) },
 		.shellSideTrue = { pomShellSideTrue ? pomShellSideTrue[0] :  1.0f,
 		                   pomShellSideTrue ? pomShellSideTrue[1] : -1.0f,
 		                   pomShellSideTrue ? pomShellSideTrue[2] :  1.0f,

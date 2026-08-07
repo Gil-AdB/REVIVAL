@@ -6134,6 +6134,29 @@ void PomShell_BuildPrism(Scene *Sc, const char *const *matNames, int numMats) {
 						qf.push_back({ { base+0, base+2, base+1 }, &F });
 						qf.push_back({ { base+0, base+3, base+2 }, &F });
 					}
+					// --pom_prism_march>=2, INTERFACE walls only (a partner exists):
+					// emit the REVERSED winding too. At a CONCAVE fold both owners'
+					// walls face INTO the solid, so backface culling guarantees a ray
+					// crossing the (welded, shared) bisector sheet has NO answering
+					// fragment from any exterior viewpoint -- measured: the t=2980
+					// fold slit stays 3 588 void px even with --pom_prism=2 walls at
+					// every edge. Hirche rasterises prism SILHOUETTES (projected
+					// tetrahedra), where every crossed prism yields its fragment; a
+					// face rasterizer only sees front faces. The reversed copy is the
+					// neighbour-chart continuation entry: whichever owner's chart the
+					// ray is entering answers (hit at/behind the interface), the
+					// other copy's march exits its box immediately and discards.
+					// Free edges stay one-sided: their flipped copy would face into
+					// the solid at a TRUE boundary and has nothing to answer.
+					if (marchMode >= 2 && sawPartner) {
+						if (!flip) {
+							qf.push_back({ { base+0, base+2, base+1 }, &F });
+							qf.push_back({ { base+0, base+3, base+2 }, &F });
+						} else {
+							qf.push_back({ { base+0, base+1, base+2 }, &F });
+							qf.push_back({ { base+0, base+2, base+3 }, &F });
+						}
+					}
 				}
 				++nEmitted;
 			}
