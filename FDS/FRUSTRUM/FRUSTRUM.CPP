@@ -635,6 +635,13 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	// point-sampled fillers.
 	const float mipBias = fds::FeatureFlags::mip_bias();
 	const float mipHyst = fds::FeatureFlags::mip_hysteresis();
+	// --mip_fix: the split branch's depth ramp is level(rz) = _C - K*log2(rz).
+	// K=2 is the historical value and it is WRONG — texel area per pixel goes as
+	// z^2, so 0.5*log2(...) gives K=1 (see the flag doc). With K=2 the split
+	// branch disagrees with the small-face branch by log2(z) at the same depth,
+	// so a face popping across the 2%-screen-area threshold jumps 1-6 levels.
+	const bool  mipFix = fds::FeatureFlags::mip_fix();
+	const float mipK   = mipFix ? 1.0f : 2.0f;
 
 	Texture *Tx = F->Txtr->Txtr;
 	int32_t L = Tx->numMipmaps-1; // maximal level	
@@ -724,11 +731,14 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	
 	// calculate mipmapping level range
 	// assuming rounding state = ceil
-	float ml = _C - 2 * fastLog2(Mrz);
-	float Ml = _C - 2 * fastLog2(mrz);
+	float ml = _C - mipK * fastLog2(Mrz);
+	float Ml = _C - mipK * fastLog2(mrz);
 
-	int32_t iml = Fist(ml-0.99999);
-	int32_t iMl = Fist(Ml-0.99999);
+	// --mip_fix: match the SMALL-FACE branch's rounding (truncate, so level L is
+	// active for the metric in [L, L+1)) instead of Fist(x-0.99999), which lands
+	// one level sharper and contradicts the trilinear fraction computed below.
+	int32_t iml = mipFix ? int32_t(ml) : int32_t(Fist(ml-0.99999));
+	int32_t iMl = mipFix ? int32_t(Ml) : int32_t(Fist(Ml-0.99999));
 
 	if (iml < 0) iml = 0;
 	if (iml > L) iml = L;
@@ -758,6 +768,9 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		// Trilinear fraction toward mip+1. Level L is active for the
 		// continuous metric ml ∈ (L, L+1] (see the hysteresis comment
 		// above), so frac = ml - L. Clamped to [0,1] in the filler.
+		// With --mip_fix's truncation this is exactly the [0,1) fraction the
+		// filler wants; under the legacy rounding it can exceed 1 (the filler
+		// clamps). Same expression either way, so the legacy path is untouched.
 		meka::g_tlsMipFrac = ml - float(g_MipLevel);
 #ifdef COUNT_POLYS
 		FDS_STATS_INC_POLYS_S();
@@ -788,9 +801,14 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	numSectionVerts = 0;
 
 	static const float h_log_2 = 0.5 * log(2.0);
-	static const float limrz_mult = 1.0 / sqrt(2.0);
+	// Crossover 1/z for each integer level, solved from the SAME ramp the range
+	// used: level = _C - K*log2(rz)  =>  rz = 2^((_C - level)/K). K=2 gives the
+	// legacy 0.5 exponent and successive cuts dividing by sqrt2; --mip_fix's K=1
+	// gives exponent 1 and successive cuts halving. Solving the cut lines from a
+	// different K than the range would put them at the wrong depths.
+	const float limrz_mult = mipFix ? 0.5f : float(1.0 / sqrt(2.0));
 	//float limrz = exp(h_log_2*(_C - iml));
-	float limrz = fastPow2(0.5*(_C - iml));
+	float limrz = fastPow2((mipFix ? 1.0f : 0.5f)*(_C - iml));
 
 	for(limit = iml+1;limit <= iMl; limit++)
 	{
