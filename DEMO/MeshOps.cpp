@@ -4529,9 +4529,16 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	// side planes are derived from), so it arms the capture too — without the
 	// per-edge printing, which stays behind --pom_seam_census.
 	const int  sideFaces  = fds::FeatureFlags::pom_shell_side_faces();
+	// S1d-6 --pom_shell_lid_true_edge consumes the per-side TRUE-BOUNDARY
+	// sub-interval table (and ONLY that table — not the leaning side planes,
+	// which are a separate and measurably worse experiment). It therefore arms
+	// the same boundary-classification capture --pom_shell_side_faces does,
+	// without arming the side planes themselves; `sideTable` is that union.
+	const int  lidTrueEdge = fds::FeatureFlags::pom_shell_lid_true_edge();
+	const bool sideTable  = sideFaces > 0 || lidTrueEdge > 0;
 	const bool seamCensus = fds::FeatureFlags::pom_seam_census()
 	                     || fds::FeatureFlags::pom_seam_viz() > 0
-	                     || sideFaces > 0;
+	                     || sideTable;
 	std::vector<SeamFace> seamAll;
 	std::map<SeamEdgeKey, std::vector<int>> seamEdges;
 	struct CensusFace { float wu, wv, w, area; };
@@ -5357,7 +5364,7 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				// ── S1d-2a: attribute this segment to a BOX SIDE, and derive that
 				// side's LEAN (--pom_shell_side_faces). See the sideLen/sideLean
 				// declarations above for the geometry this implements.
-				if (sideFaces > 0 && fa.chartOk) {
+				if (sideTable && fa.chartOk) {
 					const float *bx = dom + 4 * (g - 1);
 					const float um = 0.5f * (uA + uB), vm = 0.5f * (vA + vB);
 					const float dS[4] = { um - bx[0], bx[1] - um, vm - bx[2], bx[3] - vm };
@@ -5534,7 +5541,12 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		// (what closes the shell). Mode 1 takes the dominant class's lean,
 		// mode 2 the MINIMUM over every segment on the side, which zeroes any
 		// side that mixes a convex ridge with a free edge or a fold.
-		if (sideFaces > 0) {
+		// S1d-6: --pom_shell_lid_true_edge publishes ONLY the TRUE-BOUNDARY
+		// sub-interval table below. The CLASS and LEAN tables stay behind
+		// --pom_shell_side_faces, so arming the true-edge policy cannot switch
+		// on the leaning side planes (`pomSideFaces` in the rasterizer gates on
+		// PomShellSideLean being non-null as well as on the flag).
+		if (sideTable) {
 			std::vector<uint8_t> cls4(size_t(nGroups) * 4, uint8_t(SC_N));
 			std::vector<float>   lean4(size_t(nGroups) * 4, 0.0f);
 			long long nSideCls[SC_N + 1] = {0,0,0,0,0};
@@ -5555,10 +5567,16 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				lean4[si] = ln;
 				if (ln > 0.0f) { ++nLeaning; leanLo = std::min(leanLo, ln); leanHi = std::max(leanHi, ln); }
 			}
+			// The CLASS table is what --pom_shell_lid_true_edge=2 keys its convex
+			// ridges on, so it publishes under either flag; the LEAN table stays
+			// behind --pom_shell_side_faces, and `pomSideFaces` in the rasterizer
+			// gates on the LEAN pointer, so the side planes cannot switch on here.
 			mat->PomShellSideCls  = new uint8_t[cls4.size()];
 			std::memcpy(mat->PomShellSideCls, cls4.data(), cls4.size());
-			mat->PomShellSideLean = new float[lean4.size()];
-			std::memcpy(mat->PomShellSideLean, lean4.data(), lean4.size() * sizeof(float));
+			if (sideFaces > 0) {
+				mat->PomShellSideLean = new float[lean4.size()];
+				std::memcpy(mat->PomShellSideLean, lean4.data(), lean4.size() * sizeof(float));
+			}
 			std::vector<float> tru(cls4.size() * 2, 0.0f);
 			int nTrueSpan = 0;
 			for (size_t si = 0; si < cls4.size(); ++si) {

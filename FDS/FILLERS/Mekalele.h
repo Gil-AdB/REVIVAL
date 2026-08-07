@@ -698,6 +698,27 @@ struct TileRasterizerCtx {
 	// the destructive grazing wraps overshoot by many blocks and write marched
 	// Z deep enough (up to amp*cap) that the wall Z-loses to the room behind.
 	float pomShellKeepUV = 0.0f;
+	// S1d-6 --pom_shell_keep_uv_overhang: the same gate, applied ONLY to lanes
+	// the BASE CLIP rejected (the lid-overhang band, i.e. screen the AUTHORED
+	// wall does not cover). <0 = one global gate, byte-identical. 0 = out there
+	// a crossed hit survives only if it landed INSIDE the patch's own box —
+	// only where a block of THIS wall genuinely stands proud — which is what
+	// makes the silhouette crenellate instead of ending on the lid's straight
+	// edge. In-footprint lanes keep pomShellKeepUV, so the fold rescue stands.
+	float pomShellKeepUvOverhang = -1.0f;
+	// S1d-6 --pom_shell_lid_true_edge: 1 = a lane whose marched hit landed
+	// OUTSIDE the patch box across a box side's TRUE-BOUNDARY sub-interval
+	// (shellSideTrue) is FORCED TO DISCARD under the LID — removed from
+	// lid_edge=3's crossed-hit keep AND from the lateral-exit clamp. At a free
+	// edge the wall GENUINELY ENDS, so the stone the march found out there is
+	// the height map TILING PAST the chart, and keeping it nails a straight
+	// curtain over the silhouette: measured at t=5877 the near wall's left
+	// silhouette is straighter than the FLAT wall's (residual std 0.35 px vs
+	// flat 0.46, tessellation@0.18 2.43) and sits 28 px outside the authored
+	// footprint. Fold / coplanar / convex exits keep their clamp and their
+	// keep — the wall really does continue there. 0 = the S1d-4 policy,
+	// byte-identical.
+	int   pomShellLidTrueEdge = 0;
 	// --pom_prism_march (S1d-5): PRISM-CLIPPED MARCH. Set per face when the
 	// flag is on and the face is a shell face (lid OR prism side quad — both
 	// march the same field in the owner's chart). Arms PER-LANE SIGNED
@@ -2423,6 +2444,10 @@ struct TileRasterizer {
 							// (they are folded back into `keep` below, so without this
 							// they would be indistinguishable from a clean hit).
 							Vec8fb lidClamped = Vec8fb(false);
+							// S1d-6 --pom_shell_lid_true_edge: lanes whose landed UV left the
+							// patch across a side's TRUE-BOUNDARY sub-interval. Declared out
+							// here so --pom_path_viz can stamp them below.
+							Vec8fb trueExit = Vec8fb(false);
 							// --pom_path_viz: WHICH SIDE of its own box the march's
 							// landing left, recorded HERE because the clamp below
 							// overwrites uf/vf with the geometric UV — after it, every
@@ -2516,6 +2541,46 @@ struct TileRasterizer {
 								// (crenellation = overhang no-cross, mortar valley =
 								// in-domain no-cross), so keeping crossed hits cannot
 								// paint over them.
+								// ── S1d-6 TRUE-BOUNDARY EXIT (--pom_shell_lid_true_edge) ──
+								// Which side the landed UV left through is already known
+								// from the four comparisons the domain test just made, and
+								// each side's TRUE-BOUNDARY sub-interval is a bake-time
+								// constant, so a side with no free edge on it costs nothing
+								// (the branch is scalar and folds away). A free edge is a
+								// MINORITY of the box side it lands on — measured on greets,
+								// 9.875 of 1847.73 world of the 'rooms' boundary is TRUE, yet
+								// it owns 11.9 % of the pixels the march cannot answer — so
+								// this keys on the SUB-INTERVAL, never on the side's dominant
+								// class. Where it fires the wall genuinely ends: the stone the
+								// march found past the box is the height map tiling into empty
+								// space, and both the keep and the clamp would paint it over
+								// the background. Forcing the discard is what lets the blocks
+								// break the silhouette one at a time.
+								if (ctx.pomShellLidTrueEdge) {
+									// The flag is a BITMASK over the boundary classes whose exit forces the
+									// discard, because WHICH class owns a given silhouette is a measured
+									// fact per scene, not a thing to assume: bit0 = the TRUE-BOUNDARY
+									// SUB-INTERVAL (precise, and the only one that is not a dominant-class
+									// lookup), bit1 = class TRUE, bit2 = class CONVEX/angled-out, bit3 =
+									// class CONCAVE/fold, bit4 = class COPLANAR, bit5 = class unattributed.
+									const int m = ctx.pomShellLidTrueEdge;
+									const Vec8fb o[4] = { uf < Vec8f(ctx.shellUMin),
+									                      uf > Vec8f(ctx.shellUMax),
+									                      vf < Vec8f(ctx.shellVMin),
+									                      vf > Vec8f(ctx.shellVMax) };
+									for (int k = 0; k < 4; ++k) {
+										const int c = ctx.shellSideCls[k];
+										const int bit = (c == 3) ? 2 : (c == 2) ? 4 : (c == 1) ? 8
+										              : (c == 0) ? 16 : 32;
+										if (m & bit) { trueExit |= o[k]; continue; }
+										if (!(m & 1)) continue;
+										const float lo = ctx.shellSideTrue[2*k];
+										const float hi = ctx.shellSideTrue[2*k+1];
+										if (!(lo <= hi)) continue;   // no free edge on this side
+										const Vec8f along = (k < 2) ? vf : uf;
+										trueExit |= o[k] & (along >= Vec8f(lo)) & (along <= Vec8f(hi));
+									}
+								}
 								Vec8fb keepHit = Vec8fb(false);
 								if (ctx.pomShellLidEdge >= 3) {
 									// Overshoot gate: keep only hits landing within
@@ -2529,18 +2594,42 @@ struct TileRasterizer {
 									                          uf - Vec8f(ctx.shellUMax)), z8);
 									const Vec8f ovV = max(max(Vec8f(ctx.shellVMin) - vf,
 									                          vf - Vec8f(ctx.shellVMax)), z8);
+									// S1d-6: lid-overhang lanes (baseOK false) get their OWN overshoot
+									// gate. At 0 only an IN-BOX crossed hit survives out there — a block
+									// of this wall genuinely standing proud — and everything else
+									// discards, which is the silhouette see-through.
+									// The overhang classification is only trustworthy where the view ray
+									// is not GRAZING: the base clip walks the ray to the authored plane
+									// with 1/(V.N), and once that is cap-bound the crossing lands a world
+									// unit or more along the surface, where the affine-patch model has
+									// stopped describing the authored geometry and the 'overhang' band is
+									// most of the wall rather than a border strip. MEASURED: applying the
+									// tight gate to cap-bound lanes too costs 152 662 void over the 19
+									// review poses (60 668 of them at t=5743 alone) — it erases grazing
+									// walls. Cap-bound lanes therefore keep the global gate.
+									const Vec8fb capBound = invVtNRaw > Vec8f(ctx.pomShellCap);
+									const Vec8f gate = (ctx.pomShellKeepUvOverhang >= 0.0f)
+									    ? select(baseOK | capBound, Vec8f(ctx.pomShellKeepUV),
+									                    Vec8f(ctx.pomShellKeepUvOverhang))
+									    : Vec8f(ctx.pomShellKeepUV);
 									keepHit = pomCrossed & (~sideEntryMiss)
-									        & (max(ovU, ovV) <= Vec8f(ctx.pomShellKeepUV));
+									        & (max(ovU, ovV) <= gate)
+									        & (~trueExit);
 								}
 								Vec8fb clampable = (~domOK)
 								                 & (~sideEntryMiss) & baseOK
-								                 & ~keepHit;
+								                 & ~keepHit & ~trueExit;
 								if (ctx.pomShellLidEdge == 1)
 									clampable &= pomCrossed;
 								uf      = select(clampable, ufGeo, uf);
 								vf      = select(clampable, vfGeo, vf);
 								pomHitH = select(clampable, hEnter, pomHitH);
 								keep |= clampable | keepHit;   // keepHit: marched uv/h stay
+									// S1d-6: the free-edge exit is a discard whatever else
+									// held — stated here rather than left to ride on
+									// domOK, so the policy also holds with the domain test
+									// itself off (--no-pom_shell_domain).
+									keep &= ~trueExit;
 								if (pathViz) lidClamped = clampable;
 							}
 							// ── S1d-5 PRISM EXIT (--pom_prism_march>=3): every failure
@@ -2690,7 +2779,7 @@ struct TileRasterizer {
 								pathCode |= pom_path_bit(sideEntryMiss, kPomWhySideEntry);
 								pathCode |= pom_path_bit(~domOK,        kPomWhyDomain);
 								pathCode |= pom_path_bit(~baseOK,       kPomWhyBaseClip);
-								pathCode |= pom_path_bit(sideKill,      kPomBitSideKill);
+								pathCode |= pom_path_bit(sideKill | trueExit, kPomBitSideKill);
 								Vec8i act = Vec8i(int32_t(kPomActKeep << 4));
 								if (ctx.pomRecess && ctx.pomRecessEdge != 2) {
 									const uint32_t a = (ctx.pomRecessEdge == 1)
@@ -3456,20 +3545,36 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// position-coincidence topology --pom_seam_census builds; null when the
 	// shell was built with the flag off, which is what keeps the flag
 	// byte-null rather than merely inert.
+	// S1d-6: the CLASS and the LEAN tables are published INDEPENDENTLY now
+	// (--pom_shell_lid_true_edge>=2 wants the classes without the side planes),
+	// so each pointer stands on its own. --pom_shell_side_faces still gates on
+	// the LEAN pointer via `pomSideFaces`, so its behaviour is unchanged.
 	const uint8_t *pomShellSideCls  = nullptr;
 	const float   *pomShellSideLean = nullptr;
-	if (pomShellFace && F->PomShellGroup != 0 && F->Txtr->PomShellSideCls
-	    && F->Txtr->PomShellSideLean
+	if (pomShellFace && F->PomShellGroup != 0
 	    && F->PomShellGroup <= F->Txtr->PomShellDomainCount) {
-		pomShellSideCls  = F->Txtr->PomShellSideCls  + 4 * (F->PomShellGroup - 1);
-		pomShellSideLean = F->Txtr->PomShellSideLean + 4 * (F->PomShellGroup - 1);
+		if (F->Txtr->PomShellSideCls)
+			pomShellSideCls  = F->Txtr->PomShellSideCls  + 4 * (F->PomShellGroup - 1);
+		if (F->Txtr->PomShellSideLean)
+			pomShellSideLean = F->Txtr->PomShellSideLean + 4 * (F->PomShellGroup - 1);
 	}
 	// S1d-2b: the free-edge sub-intervals, read only when the per-class edge
 	// policy is armed (they are what it keys on).
+	// S1d-6 --pom_shell_lid_true_edge reads the SAME table under the LID, where
+	// the per-class edge policy never ran (its sideKill lives inside the
+	// --pom_recess_only branch), so the read is armed by either flag and no
+	// longer requires the side-face LEANS to have been baked.
+	const bool lidTrueEdgeOn = fds::FeatureFlags::pom_shell_lid_true_edge() > 0
+	                           && !fds::FeatureFlags::pom_recess_only();
+	const int  lidTrueEdgeMode = lidTrueEdgeOn
+	                             ? fds::FeatureFlags::pom_shell_lid_true_edge() : 0;
 	const float *pomShellSideTrue = nullptr;
-	if (pomShellSideLean && F->Txtr->PomShellSideTrue
-	    && fds::FeatureFlags::pom_shell_side_edge() > 0
-	    && fds::FeatureFlags::pom_shell_side_faces() > 0)
+	if (pomShellFace && F->PomShellGroup != 0 && F->Txtr->PomShellSideTrue
+	    && F->PomShellGroup <= F->Txtr->PomShellDomainCount
+	    && ((pomShellSideLean
+	         && fds::FeatureFlags::pom_shell_side_edge() > 0
+	         && fds::FeatureFlags::pom_shell_side_faces() > 0)
+	        || lidTrueEdgeOn))
 		pomShellSideTrue = F->Txtr->PomShellSideTrue + 8 * (F->PomShellGroup - 1);
 	const bool pomSideFaces = fds::FeatureFlags::pom_shell_side_faces() > 0
 	                          && pomShellSideLean != nullptr;
@@ -3497,6 +3602,13 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// comes from projected-tetrahedra SOLID rasterization, not faces.
 	const bool prismExit = pomShellFace
 	                       && fds::FeatureFlags::pom_prism_march() >= 3;
+	// S1d-6: the per-side CLASS table is read by --pom_shell_side_faces (its
+	// leans) and by --pom_shell_lid_true_edge>=2 (its convex-ridge kill), and
+	// by --pom_prism_march>=3 (its coplanar-exit keep). Off in all three the
+	// ctx keeps the 'unattributed' 4s it defaults to, so the arm is byte-null.
+	const bool clsOn = pomShellSideCls != nullptr
+	                  && (pomSideFaces || prismExit || lidTrueEdgeMode > 1);
+
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -3609,6 +3721,11 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		                     && fds::FeatureFlags::pom_shell_side_faces() == 3,
 		.pomShellLidEdge = prismExit ? 0 : fds::FeatureFlags::pom_shell_lid_edge(),
 		.pomShellKeepUV = fds::FeatureFlags::pom_shell_keep_uv(),
+		.pomShellKeepUvOverhang = fds::FeatureFlags::pom_shell_keep_uv_overhang(),
+		// S1d-6: forced off under the prism exit, which already discards on
+		// every exit and needs no per-side policy.
+		.pomShellLidTrueEdge = (lidTrueEdgeOn && !prismExit && pomShellSideTrue)
+		                       ? lidTrueEdgeMode : 0,
 		.pomPrismMarch = prismMarchOn,
 		.pomPrismExit = prismExit,
 		.shellH0 = fds::FeatureFlags::pom_recess_only() ? 1.0f : 0.5f,
@@ -3619,10 +3736,12 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// --pom_prism_march>=2 reads the CLASS table too (its coplanar-exit
 		// keep keys on it) even though the side-face planes themselves are
 		// forced off in that arm.
-		.shellSideCls = { uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[0] : 4),
-		                  uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[1] : 4),
-		                  uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[2] : 4),
-		                  uint8_t((pomSideFaces || (prismExit && pomShellSideCls)) ? pomShellSideCls[3] : 4) },
+		// S1d-6 --pom_shell_lid_true_edge>=2 reads the CLASS table as well (its
+		// convex-ridge kill keys on it), so `clsOn` widens the same guard.
+		.shellSideCls = { uint8_t(clsOn ? pomShellSideCls[0] : 4),
+		                  uint8_t(clsOn ? pomShellSideCls[1] : 4),
+		                  uint8_t(clsOn ? pomShellSideCls[2] : 4),
+		                  uint8_t(clsOn ? pomShellSideCls[3] : 4) },
 		.shellSideTrue = { pomShellSideTrue ? pomShellSideTrue[0] :  1.0f,
 		                   pomShellSideTrue ? pomShellSideTrue[1] : -1.0f,
 		                   pomShellSideTrue ? pomShellSideTrue[2] :  1.0f,

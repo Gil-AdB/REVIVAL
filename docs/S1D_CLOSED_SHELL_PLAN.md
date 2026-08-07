@@ -2865,3 +2865,195 @@ Gates, all re-run at this commit and byte-exact: `tools/render_gate.sh` 3/3
 (`4ac809e5` / `b41894f9` / `166fa25a`), city `37e62845c4d30eefa321730c5bb7e0b8`,
 fountain `51fff7cd38767d619280afe0498a6f24`, greets pin
 `f1297141611c484bac7cc10a8bdcf630`.
+
+---
+
+# S1d-6 — THE SILHOUETTE IS A STRAIGHT LINE: the defect every census was blind to
+
+Added 2026-08-08. User report: at t=5877 the shell arm's near-wall LEFT
+SILHOUETTE is *"no see-through the wall edge — compare with the same pose with
+tessellation."* Reproduced in `--snapshot`, root-caused, and **not yet fixed**:
+four candidate rules were built and measured, all four are recorded below with
+their numbers, and none is shippable. Read §S1d-6.5 before trying a fifth.
+
+## S1d-6.1 WHY EVERY CENSUS MISSED IT — the methodological finding
+
+**The void/black metric family cannot see this defect, structurally.** `void` is
+`popcount(z16==0)`, `black` is `popcount(max(r,g,b)==0)`. Silhouette
+see-through — background visible BETWEEN protruding blocks at a wall's screen
+edge — is *lit background at a plausible depth*: neither zero-z nor black. A
+perfectly straight wall edge scores flawless on both.
+
+**And the one claim that did name this pose compared the wrong pair.** §S1d-5b.1
+records "p5877 5→1, wall-top crenellation PIXEL-IDENTICAL to the mode-1
+reference (see-through preserved)". That was shell mode 2 against shell mode 1 —
+**two arms carrying the same defect**. It was never compared against
+TESSELLATION, which is what the user's eye compares against. The same sentence
+appears in `--pom_shell_lid_edge`'s own flag doc ("measured at t=5877 the
+crenellated silhouette survives"); it is now measured false.
+
+`tools/greets_silhouette.py` is the instrument that is not blind to it. The
+authored wall edge is a straight 3D segment, so it projects to a straight screen
+line; the metric traces the first NEAR pixel per row off the `z16` dump and
+reports the residual about a Theil-Sen fit. **Validated on the three arms whose
+answer is known by eye** (t=5877, cam
+`15.5497618,3.4823668,-59.5607719,-0.524191499,-0.0974417627,0.846008122`,
+**1920×1080** — `rev.cfg` unchanged; band y 250..860, x 880..1120, thresh 62000):
+
+| arm | med x | off vs flat | **std** | p95 | rng | area | tv−net |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| flat, no displacement | 978.0 | 0.0 | **0.46** | 1.00 | 1 | 188 | 0 |
+| tessellation @0.18 | 983.0 | +5.0 | **2.43** | 5.00 | 17 | 1045 | 42 |
+| tessellation @0.30 | 985.0 | +7.0 | **4.00** | 8.27 | 27 | 1696 | 66 |
+| **shell, the §S1d-5b.10 arm** | **950.0** | **−28.0** | **0.35** | 1.00 | 1 | 85 | 0 |
+
+Flat and tessellation separate 5.3× on `std`. **The shell arm scores BELOW flat
+— it is straighter than the undisplaced wall — and sits 28 px OUTSIDE the
+authored footprint.** Tessellation's silhouette only ever cuts INWARD (+5) because
+the bake pins its patch-border verts to zero displacement; the shell's runs
+outward, and straight.
+
+## S1d-6.2 ROOT CAUSE — measured, from the path-viz plane
+
+`--pom_path_viz=2` over the 28-px overhang band (17 080 px sampled, dev build,
+`--no-hdr`):
+
+| arm | dominant code | n |
+|---|---|--:|
+| the §S1d-5b.10 arm | `coneHit / action=KEEP / why=domain / exit=uMin` | 10 719 |
+| + `--pom_shell_base_clip` | `coneHit / action=KEEP / why=domain+baseClip / exit=uMin` | 10 715 |
+| + `--pom_shell_keep_uv=0` | `coneHit / action=DISCARD / why=domain+baseClip` | 1 450 |
+
+The chain, each link measured:
+
+1. `PomShell_Build` offsets every lid vertex by `worldAmp/2` along N, so at a
+   patch border **the lid covers screen the authored plane never did** — here
+   **+20 307 px** of near-wall coverage vs flat. The silhouette offset is
+   **exactly linear in amplitude: −14 / −28 / −56 px at
+   `--pom_shell_world_amp_set` 0.09 / 0.18 / 0.36.**
+2. Rays entering that band march inward, leave the UV box through `uMin`, and
+   find stone in the **height map tiling past the wall's end**.
+3. `--pom_shell_lid_edge=3`'s `keepHit` keeps every one of them. Its gate tests
+   only `pomCrossed` and the `--pom_shell_keep_uv` overshoot — **it never asks
+   whether the pixel is over authored wall at all** (`keepHit` does not read
+   `baseOK`, by construction).
+
+**The wall does not end at a straight line because the blocks end there. It ends
+at a straight line because the LID does, and nothing kills the overhang.**
+
+Two corollaries, both measured and both correcting the record:
+
+- **`--pom_shell_base_clip` alone does NOT fix it.** Silhouette byte-identical
+  with the clip on (std 0.35, offset −28) — `keepHit` overrides `baseOK`.
+- **At `--pom_shell_lid_edge=3` the base clip is a NO-OP on the 19 review
+  poses: 10 void / 73 black with it ON *or* OFF, same binary.** That retires
+  §S1d-5b.10's "`--no-pom_shell_base_clip` is load-bearing: +43 black without
+  it". It is not load-bearing in this arm; it is inert.
+
+## S1d-6.3 THE FOUR CANDIDATE FIXES, ALL MEASURED, NONE SHIPPABLE
+
+Both flags below default to OFF and byte-null; all four shipping gates are
+byte-exact (`render_gate` 3/3 `4ac809e5`/`b41894f9`/`166fa25a`, city
+`37e62845`, fountain `51fff7cd`). Baseline for the arm: **10 void / 73 black**
+over the 19 poses, reproducing §S1d-5b.10 exactly.
+
+| candidate | t=5877 std | t=5877 void/black | **19 poses void/black** |
+|---|--:|--:|--:|
+| the arm (the defect) | 0.35 | 1/1 | **10 / 73** |
+| `--pom_shell_base_clip` restored | 0.35 | 1/1 | 10 / 73 (inert) |
+| `--pom_shell_lid_true_edge=1\|2` (free edges) | 0.35 | 1/1 | — (never fires, see below) |
+| `--pom_shell_lid_true_edge=4` (convex ridges) | **5.02** | 1/1 | **127 043 / 125 643** |
+| `--pom_shell_base_clip --pom_shell_keep_uv_overhang=0` | **2.26** | 549/380 | **152 662 / 146 984** |
+| ...+ cap-bound lanes exempted | 2.26 | 549/380 | **151 733 / 146 644** |
+
+**`--pom_shell_lid_true_edge`** brings S1d-2b's per-class terminal action to the
+LID (its `sideKill` lives inside the `--pom_recess_only` branch and the lid path
+never ran it). It is a bitmask over the exited box side's boundary class. The
+class that owns this silhouette is measured to be **CONVEX (angled-out)**, not
+free: **only 2 of 268 'rooms' box sides carry a TRUE-BOUNDARY sub-interval at
+all**, because the greets walls are authored as CLOSED BOXES and this silhouette
+is an outside CORNER. Killing the convex exit restores the crenellation exactly
+(std 0.35 → 5.02, and it is *not* `lid_edge=0` — 281 305 px apart) **but costs
+127 k void over the 19 poses**: most convex ridges in greets are not silhouettes,
+their partner wall is FRONT-facing and the shell legitimately continues past the
+ridge. That is precisely the black gash §S1d-2b predicted.
+
+**`--pom_shell_keep_uv_overhang`** is a second `keep_uv` used only for
+base-clip-rejected lanes, so an overhang pixel keeps its hit only if the hit
+landed INSIDE the patch's own box — a genuine block of *this* wall standing
+proud. **At t=5877 this is the best silhouette any arm produces: std 2.26 /
+p95 5.00 / area 1142 against tessellation@0.18's 2.43 / 5.00 / 1045 at MATCHED
+world amplitude (0.18 both sides).** But over the 19 poses it costs 152 k void,
+concentrated at the GRAZING poses (t=5743 60 668, the t=5958 family ~32 000,
+t=5843 18 127, t=5854 14 087): the base clip walks the ray to the authored plane
+with `1/(V·N)`, and once that is far along the surface the "overhang band" is
+most of the wall rather than a border strip — the failure
+`--pom_shell_base_clip_raw` already documents. **Exempting cap-bound lanes was
+tried and does not separate them (152 662 → 151 733), so grazing-ness measured by
+the cap is NOT the discriminator.**
+
+## S1d-6.4 WHAT THE FIX HAS TO DISCRIMINATE
+
+Both failures are the same shape: a rule that is correct at the t=5877 silhouette
+fires on a much larger population that is *not* a silhouette. The two populations
+to separate are
+
+- **wall ends here** — the ray has left the solid, background must win, discard;
+- **wall continues here** — a coplanar seam, a fold, or a convex ridge whose
+  partner is front-facing; keep or clamp, a discard is a gash.
+
+Neither the box side's baked CLASS nor the base clip's boolean is that
+discriminator. The two untried candidates, neither verified:
+
+1. **Bake the ridge partner's NORMAL per box side** and test it against the view
+   at ctx-build time. A convex ridge is a silhouette exactly when its partner is
+   BACKFACING; that is view-dependent, is one dot product per face per side, and
+   is the quantity the class lookup is standing in for.
+2. **Gate on the base clip's OVERSHOOT DISTANCE, not its boolean** — kill only
+   lanes whose base-plane crossing lands just outside the box (a genuine border
+   strip, ~the projected `worldAmp/2`) and keep the ones that land far outside
+   (the grazing wraps). The quantity is already computed inside the base clip.
+
+## S1d-6.5 STANDING LESSON
+
+**A see-through claim measured against another arm of the same family is not
+measured.** Every "see-through preserved" / "crenellation survives" line in the
+S1d-4 and S1d-5 record that used a shell arm as its reference is
+reference-relative and unproven; §S1d-6.6 lists them. Tessellation, or the flat
+wall, or a metric that reads the silhouette directly, is the only admissible
+reference — and the comparison must be at MATCHED WORLD AMPLITUDE.
+
+## S1d-6.6 RE-AUDIT — which see-through conclusions are reference-relative
+
+| claim | reference used | status |
+|---|---|---|
+| §S1d-5b.1 / stage 2 commit: "p5877 wall-top crenellation PIXEL-IDENTICAL to the mode-1 reference (see-through preserved)" | shell mode 1 | **REFUTED.** Both arms have std 0.35 vs flat 0.46. Identical because both are broken. |
+| `--pom_shell_lid_edge` flag doc: "measured at t=5877 the crenellated silhouette survives" | shell arm | **REFUTED**, same measurement. |
+| `--pom_shell_lid_edge` doc: "silhouette crenellation is BASE-CLIP discards (lid overhang, baseOK=false) ... keeping crossed hits cannot paint over them" | none — asserted | **REFUTED.** The overhang lanes DO cross (10 719 of 17 080 are `coneHit`), so `keepHit` paints over exactly them. |
+| §S1d-5b.10: "`--no-pom_shell_base_clip` is load-bearing: +43 black without it" | shell arm, different binary | **NOT REPRODUCED.** 10/73 with the clip ON or OFF, 19 poses, same binary. |
+| `--pom_prism_free` doc: "the see-through past the last block's silhouette ... user-confirmed correct at t=5877" | user eye, older arm | **STALE** for the current arm: `--pom_prism=0` is byte-identical at this silhouette (std 0.35), so side quads are not what covers it. |
+| §S1d-5b.1: "the doorway curtain reads as marched stone continuous with the wall relief" (t=5963) | flat-quad shell arm | **UNPROVEN** — never compared to tessellation. Not re-measured here. |
+| §S1d-1: "all 95 546 true-boundary px void ZERO under a discard" | void metric | **SOUND but narrow** — it is a void claim, and void cannot see silhouette see-through. It does not license the free-edge rule at t=5877, where only 2 of 268 sides are free. |
+
+## S1d-6.7 REPRODUCTION
+
+```sh
+# the metric (validated on flat / tessellation / shell, §S1d-6.1)
+FDS_SNAPSHOT_ZDUMP=1 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+FDS_GREETS_CAM="15.5497618,3.4823668,-59.5607719,-0.524191499,-0.0974417627,0.846008122" \
+  ./DEMO --snapshot=greets@t=5877 --out=DIR <arm flags>
+tools/greets_silhouette.py DIR_flat DIR_tess DIR_arm     # flat FIRST (the `off` datum)
+tools/greets_silhouette.py --hist DIR_flat               # pick --thresh at a new pose
+```
+
+Tessellation at MATCHED amplitude is `--deferred --greets_displace
+--greets_displace_amp=0.18 --texture_filter=1`; flat is `--deferred
+--texture_filter=1`.
+
+**Scripting warning, learned the hard way this session:** zsh does not
+word-split an unquoted parameter expansion, so passing an arm as `$ARM` (or
+through `eval`) hands DEMO ONE argv token, which it reports as
+`[FLAGS] unknown flag '...'` and ignores — a whole render batch then silently
+runs at DEFAULTS. Build every arm as a real array and expand it `"${ARM[@]}"`,
+and assert `grep -c "unknown flag"` on every log. One round of this campaign's
+evidence images was voided by exactly this.
