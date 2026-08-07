@@ -146,10 +146,19 @@ const char *kUsage =
     "                    replay the lighting pass's per-light gate on it, naming the test\n"
     "                    that failed (out of range / backfacing / reaches).\n"
   "  --window          OPEN A REAL WINDOW: SDL2 + CAMetalLayer, the scene ANIMATED\n"
-    "                    through FDS's own Animate_Objects, free-fly camera and live\n"
-    "                    per-pass GPU ms overlaid. WASD+QE move, drag to look, SHIFT fast,\n"
-    "                    TAB free-fly/authored-spline, SPACE pause, [ ] scrub time, ESC quit.\n"
+    "                    through FDS's own Animate_Objects, and the camera driven by\n"
+    "                    FDS's own Dynamic_Camera -- the DisplaceTest / TAB-camera\n"
+    "                    control set, not a scheme invented here. Live per-pass GPU ms\n"
+    "                    overlaid. The full keymap is printed on startup and on F1:\n"
+    "                      W / S,Z fwd,back   A,End / D,PgDn strafe   Q,gray+ / E,gray- up,down\n"
+    "                      arrows look (yaw/pitch)   Home / PgUp roll   mouse-drag look\n"
+    "                      , . translation speed dial     K L rotation speed dial\n"
+    "                      G dump pose   TAB free-fly/authored-spline   SPACE pause\n"
+    "                      [ ] scrub time   ESC or Backspace quit\n"
     "                    Offscreen remains the default; nothing is displayed without this.\n"
+    "  --cam_track=T0:T1:STEP   OFFSCREEN evidence that the scripted camera INTERPOLATES:\n"
+    "                    re-animate at each demo-t and print the pose in DEMO's own [CAM]\n"
+    "                    format, plus the Source spline's keyframes. No device, no render.\n"
     "  --win=WxH         window size (default 1280x720)\n"
     "  --spline          start on the authored camera spline instead of free-fly\n"
     "  --time_scale=F    demo-timer centiseconds per real second (default 100 = real time)\n"
@@ -182,6 +191,8 @@ int main(int argc, const char *argv[]) {
     bool noDraw = false;
     std::string passMode = "albedo";
     bool camExplicit = false;
+    bool doCamTrack = false;
+    float camTrack[3] = {0, 0, 0};
     gpubench::DeferredOptions dopt;
 
     for (int i = 1; i < argc; ++i) {
@@ -229,6 +240,11 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-disco")                 opt.disco = false;
         else if (a == "--no-mirror")                opt.mirrors = false;
         else if (a == "--no-revmaps")               opt.revMaps = false;
+        else if (const char *v = val("--cam_track=")) {
+            if (std::sscanf(v, "%f:%f:%f", &camTrack[0], &camTrack[1], &camTrack[2]) == 3)
+                doCamTrack = true;
+            else { std::fprintf(stderr, "--cam_track wants T0:T1:STEP\n"); return 2; }
+        }
         else if (a == "--window")                   dopt.interactive = true;
         else if (const char *v = val("--win="))     { std::sscanf(v, "%dx%d", &dopt.winW, &dopt.winH); }
         else if (const char *v = val("--time_scale=")) dopt.timeScale = float(std::atof(v));
@@ -277,6 +293,12 @@ int main(int argc, const char *argv[]) {
     // ---- scene ------------------------------------------------------------
     gpubench::Scene scene;
     if (!gpubench::Load(scene, opt)) Die("scene ingest failed", nil);
+
+    // --cam_track: a pure CPU-side diagnostic, no device, no render, no window.
+    if (doCamTrack) {
+        gpubench::CameraTrack(scene, opt, camTrack[0], camTrack[1], camTrack[2]);
+        return 0;
+    }
 
     // ---- device -----------------------------------------------------------
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();

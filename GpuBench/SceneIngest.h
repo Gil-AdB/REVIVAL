@@ -253,4 +253,54 @@ uint64_t VertexHash(const Scene &s);
 // Objective-C++ renderer.
 void BuildViewMatrix(const float eye[3], const float fwd[3], float outRot[3][3]);
 
+// ---------------------------------------------------------------------------
+// The interactive FREE CAMERA is the ENGINE's own.
+//
+// FDS/CAMERAS/CAMERAS.CPP's Dynamic_Camera() is the house free-cam — the one
+// DEMO/DisplaceTest.cpp drives and the one every scene's TAB-camera uses. It is
+// in FDS, so this arm CALLS it rather than reimplementing a WASD scheme: same
+// velocity/angular-velocity integration, same exponential damping and hard stop,
+// same world-yaw / camera-local-pitch decomposition (a plain Euler compose
+// reverses yaw past 90 degrees of pitch — the reason the split exists), same
+// `, . K L` speed dials, same per-scene speed calibration sqrt(FZP)/180.
+//
+// FreeCamInput is a pass-through for KEY STATE only. The mapping of these fields
+// onto FDS scancodes lives next to the call, and the mapping of scancodes onto
+// motion is CAMERAS.CPP's — not re-derived here.
+struct FreeCamInput {
+    bool fwd = false, back = false;          // W        | S, Z
+    bool left = false, right = false;        // A, End   | D, PgDn
+    bool up = false, down = false;           // Q, KP+   | E, KP-
+    bool yawLeft = false, yawRight = false;  // Left     | Right
+    bool pitchUp = false, pitchDown = false; // Up       | Down
+    bool rollLeft = false, rollRight = false;// Home     | PgUp
+    bool slower = false, faster = false;     // ,        | .      (translation dial)
+    bool rotSlower = false, rotFaster = false;// K       | L      (rotation dial)
+};
+
+// Calibrate FDS's free camera for this scene (Calibrate_FreeCamera_ForScene,
+// which sets Vel_Speed = sqrt(FZP)/180 and resets both dials) and seed it from
+// the camera currently in `s`, so the window opens where the offscreen renders do.
+void FreeCamInit(const Scene &s);
+// One step of Dynamic_Camera(). `dtSeconds` is real time; it becomes the
+// engine's `dTime` through DisplaceTest's own formula (Timer is a 100 Hz tick
+// clock and dTime = 0.25 * elapsed ticks), so the feel matches the demo's.
+// Writes the result into s.camera through the engine's CalcPersp.
+void FreeCamStep(Scene &s, const FreeCamInput &in, float dtSeconds);
+// Mouse-look. NOT a house control — Dynamic_Camera reads no mouse at all — so
+// this is a stated GpuBench ADDITION, implemented with the same world-yaw /
+// local-pitch decomposition rather than an Euler compose.
+void FreeCamMouseLook(Scene &s, float dYaw, float dPitch);
+// Copy the scene camera into FC, so leaving spline mode does not teleport.
+void FreeCamSyncFromScene(const Scene &s);
+// The `G` key: print the pose under the camera, in DisplaceTest's own
+// [DTEST-POSE] form AND as this arm's --cam= string.
+void FreeCamDumpPose(const Scene &s);
+
+// OFFSCREEN evidence for "the scripted camera interpolates". Re-animates the
+// scene at each demo-t in [t0, t1] step `step` and prints the resulting camera
+// in the SAME format DEMO's snapshot [CAM] line uses, so the two can be diffed
+// without opening a window. Prints nothing else and renders nothing.
+void CameraTrack(Scene &s, const LoadOptions &opt, float t0, float t1, float step);
+
 }  // namespace gpubench

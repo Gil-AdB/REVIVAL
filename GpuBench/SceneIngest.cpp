@@ -20,6 +20,16 @@
 #include <unordered_map>
 #include <vector>
 
+// A DOCUMENTED GAP, not a workaround. FDS_VARS.H DECLARES `dTime` (the free
+// camera's per-frame integration step) but nothing in the FDS static library
+// DEFINES it — the definition is DEMO/REV.CPP:567. Dynamic_Camera() therefore
+// does not link from an FDS-only target without its owner supplying the
+// storage, which is what this line does. It is a GpuBench-side definition; no
+// engine file is touched. Anything else that reads `dTime` in this process is
+// reading the value FreeCamStep last wrote, which is correct — GpuBench has
+// exactly one camera integrator.
+float dTime = 0.0f;
+
 namespace gpubench {
 namespace {
 
@@ -1176,6 +1186,143 @@ void BuildViewMatrix(const float eye[3], const float fwd[3], float outRot[3][3])
     Kick_Camera(&src, &look, 0.0f, M);
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) outRot[r][c] = M[r][c];
+}
+
+// ---------------------------------------------------------------------------
+// Free camera — a thin bridge onto FDS's own Dynamic_Camera(). See SceneIngest.h.
+// ---------------------------------------------------------------------------
+
+static void PublishFreeCam(Scene &s) {
+    CalcPersp(&FC);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) s.camera.rot[r][c] = FC.Mat[r][c];
+    s.camera.src[0] = FC.ISource.x;
+    s.camera.src[1] = FC.ISource.y;
+    s.camera.src[2] = FC.ISource.z;
+    s.camera.perspX = FC.PerspX;
+    s.camera.perspY = FC.PerspY;
+    s.camera.fov = FC.IFOV;
+}
+
+void FreeCamSyncFromScene(const Scene &s) {
+    FC.ISource = {s.camera.src[0], s.camera.src[1], s.camera.src[2]};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) FC.Mat[r][c] = s.camera.rot[r][c];
+    if (s.camera.fov > 1.0f) FC.IFOV = s.camera.fov;
+    CalcPersp(&FC);
+}
+
+void FreeCamInit(const Scene &s) {
+    // The engine's per-scene speed calibration: Vel_Speed = sqrt(FZP)/180 and
+    // both `, .` / `K L` dials reset. Passing nullptr for the camera because we
+    // seed FC from the INGEST camera below (which may be a --cam= review pose,
+    // not the scene camera).
+    Calibrate_FreeCamera_ForScene(g_scene.FZP > 0.0f ? g_scene.FZP : s.camera.farZ,
+                                  nullptr);
+    FreeCamSyncFromScene(s);
+    // Dynamic_Camera integrates the engine's FV/FT velocity globals. This
+    // process never ran another scene through them, so they are still the
+    // zero-initialised statics; nothing to reset, and they are not declared in
+    // FDS_VARS.H, so reaching for them would mean an extern this arm has no
+    // business writing.
+}
+
+void FreeCamStep(Scene &s, const FreeCamInput &in, float dtSeconds) {
+    // DisplaceTest.cpp:1183 — dTime = (Timer - TTrd) * 0.25, with Timer a 100 Hz
+    // tick clock. So one real second is 100 ticks is dTime 25.
+    dTime = dtSeconds * 100.0f * 0.25f;
+    if (dTime > 2.0f) dTime = 2.0f;     // a hitch must not launch the camera
+    // Key state -> the engine's Keyboard[]. Every alias here is CAMERAS.CPP's
+    // (Dynamic_Camera:705-757), including the legacy Z-for-backward binding.
+    std::memset(const_cast<char *>(Keyboard), 0, sizeof(Keyboard));
+    auto set = [](int sc, bool v) { if (v) const_cast<char *>(Keyboard)[sc] = 1; };
+    set(ScW,     in.fwd);
+    set(ScS,     in.back);       set(ScZ,      in.back);
+    set(ScA,     in.left);       set(ScEnd,    in.left);
+    set(ScD,     in.right);      set(ScPgDn,   in.right);
+    set(ScQ,     in.up);         set(ScGrayPlus,  in.up);
+    set(ScE,     in.down);       set(ScGrayMinus, in.down);
+    set(ScLeft,  in.yawLeft);    set(ScRight,  in.yawRight);
+    set(ScUp,    in.pitchUp);    set(ScDown,   in.pitchDown);
+    set(ScHome,  in.rollLeft);   set(ScPgUp,   in.rollRight);
+    set(ScComma, in.slower);     set(ScPeriod, in.faster);
+    set(ScK,     in.rotSlower);  set(ScL,      in.rotFaster);
+    Dynamic_Camera();
+    std::memset(const_cast<char *>(Keyboard), 0, sizeof(Keyboard));
+    PublishFreeCam(s);
+}
+
+void FreeCamMouseLook(Scene &s, float dYaw, float dPitch) {
+    if (dYaw == 0.0f && dPitch == 0.0f) return;
+    // Yaw in the WORLD frame, on each row's (x,z) — Dynamic_Camera:809-830.
+    if (dYaw != 0.0f) {
+        const float c = std::cos(dYaw), sn = std::sin(dYaw);
+        for (int r = 0; r < 3; ++r) {
+            const float x = FC.Mat[r][0], z = FC.Mat[r][2];
+            FC.Mat[r][0] =  c * x + sn * z;
+            FC.Mat[r][2] = -sn * x + c * z;
+        }
+    }
+    // Pitch stays camera-LOCAL, same call Dynamic_Camera makes.
+    if (dPitch != 0.0f) Matrix_Rotation(FC.Mat, dPitch, 0.0f, 0.0f);
+    PublishFreeCam(s);
+}
+
+void FreeCamDumpPose(const Scene &s) {
+    const float *e = s.camera.src;
+    const float fx = s.camera.rot[2][0], fy = s.camera.rot[2][1], fz = s.camera.rot[2][2];
+    // DisplaceTest.cpp:1189-1202's own line, so a pose captured here pastes into
+    // the same headless Pose{} table.
+    std::fprintf(stderr,
+        "[DTEST-POSE] { Vector(%.2ff,%.2ff,%.2ff), Vector(%.2ff,%.2ff,%.2ff), "
+        "%.1ff, \"probe\" },\n",
+        e[0], e[1], e[2], e[0] + fx * 10.0f, e[1] + fy * 10.0f, e[2] + fz * 10.0f,
+        s.camera.fov);
+    // And the form THIS arm and FDS_GREETS_CAM take.
+    std::fprintf(stderr, "[GPUBENCH-POSE] --cam=\"%.8g,%.8g,%.8g,%.8g,%.8g,%.8g\"\n",
+                 e[0], e[1], e[2], fx, fy, fz);
+}
+
+void CameraTrack(Scene &s, const LoadOptions &opt, float t0, float t1, float step) {
+    LoadOptions o = opt;
+    // The scripted camera, never a pinned pose — this is the spline being asked
+    // to prove it moves.
+    o.camPose.clear();
+    o.verbose = false;
+    if (step <= 0.0f) step = 1.0f;
+    std::fprintf(stderr,
+        "[CAMTRACK] the AUTHORED spline, evaluated by the engine's own\n"
+        "[CAMTRACK]   Animate_Objects -> Spline_Calc_3D(Source/Target) +\n"
+        "[CAMTRACK]   Spline_Calc_1D(Roll/FOV) -> Kick_Camera -> CalcPersp.\n"
+        "[CAMTRACK]   Format matches DEMO/Snapshot.cpp's [CAM] line.\n");
+    for (float t = t0; t <= t1 + 1e-3f; t += step) {
+        Reanimate(s, o, t);
+        std::fprintf(stderr,
+            "[CAM] t=%d pos=(%.0f, %.0f, %.0f)  fwd=(%.3f, %.3f, %.3f)  IFOV=%.1f"
+            "  CurFrame=%.2f\n",
+            int(t), s.camera.src[0], s.camera.src[1], s.camera.src[2],
+            s.camera.rot[2][0], s.camera.rot[2][1], s.camera.rot[2][2],
+            s.camera.fov, s.curFrame);
+        // FULL precision, in the exact form FDS_GREETS_CAM / --cam= take. This
+        // is what makes "does the CPU's own spline put the camera here?"
+        // answerable: force the CPU to this pose and diff it against the CPU's
+        // unforced frame. A 3-decimal direction is ~1 px of angular error at
+        // 1920 wide, which is enough to fail a byte comparison on its own.
+        std::fprintf(stderr, "[CAMSTR] t=%d --cam=\"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\"\n",
+                     int(t), s.camera.src[0], s.camera.src[1], s.camera.src[2],
+                     s.camera.rot[2][0], s.camera.rot[2][1], s.camera.rot[2][2]);
+    }
+    // The KEYFRAMES the spline is interpolating BETWEEN, so "it interpolates"
+    // can be checked against "it snaps": a snapping camera reproduces only these.
+    if (g_scene.CameraHead) {
+        const Spline &S = g_scene.CameraHead->Source;
+        std::fprintf(stderr, "[CAMTRACK] Source spline: %d keys, frames",
+                     int(S.NumKeys));
+        for (int i = 0; i < S.NumKeys; ++i)
+            std::fprintf(stderr, " %.0f", S.Keys[i].Frame);
+        std::fprintf(stderr, "  (FOV spline: %d keys)\n",
+                     int(g_scene.CameraHead->FOV.NumKeys));
+    }
 }
 
 bool Reanimate(Scene &out, const LoadOptions &opt, float demoT) {

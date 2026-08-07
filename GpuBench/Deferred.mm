@@ -14,6 +14,29 @@
 namespace gpubench {
 namespace {
 
+// The interactive keymap, printed on startup and mirrored in the HUD.
+//
+// The MOVE/LOOK half is not invented here: it is FDS/CAMERAS/CAMERAS.CPP's
+// Dynamic_Camera(), the house free-cam that DEMO/DisplaceTest.cpp drives and
+// every scene's TAB-camera uses, called directly (SceneIngest FreeCam*). The
+// aliases (End/PgDn, gray +/-, the legacy Z-for-back) are its own.
+// Mouse-look and the four view keys below it are GpuBench ADDITIONS — the
+// house cam reads no mouse and has no notion of a spline toggle.
+const char *kKeymap =
+    "[KEYS] move   W / S,Z          forward / back        (engine Dynamic_Camera)\n"
+    "[KEYS]        A,End / D,PgDn   strafe left / right\n"
+    "[KEYS]        Q,gray+ / E,gray-  up / down\n"
+    "[KEYS] look   arrows            Left,Right = yaw   Up,Down = pitch\n"
+    "[KEYS]        Home / PgUp       roll left / right\n"
+    "[KEYS]        mouse-drag        look (GpuBench addition; the house cam has none)\n"
+    "[KEYS] speed  , / .             translation dial slower / faster (x1.1 per frame held)\n"
+    "[KEYS]        K / L             rotation dial slower / faster\n"
+    "[KEYS] pose   G                 dump the pose ([DTEST-POSE] + a --cam= string)\n"
+    "[KEYS] view   TAB               free-fly <-> the AUTHORED camera spline\n"
+    "[KEYS]        SPACE             pause the demo timer (the camera still moves)\n"
+    "[KEYS]        [ / ]             scrub the demo timer -/+ 100\n"
+    "[KEYS]        ESC, Backspace    quit\n";
+
 // --- MSL-matching layouts (float3 is 16-byte aligned in MSL) ----------------
 
 struct FrameUniforms {
@@ -1685,22 +1708,31 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         id<MTLTexture> hudTex = [dev newTextureWithDescriptor:htd];
         std::vector<uint8_t> hudBuf(size_t(HUDW) * HUDH * 4, 0);
 
-        // Free-fly state, seeded from the ingest camera so the window opens on the
-        // same pose the offscreen renders use.
-        float eye[3] = {scene.camera.src[0], scene.camera.src[1], scene.camera.src[2]};
-        // Derive yaw/pitch from the camera's forward row (Mat row 2 is forward).
-        float fwd[3] = {scene.camera.rot[2][0], scene.camera.rot[2][1], scene.camera.rot[2][2]};
-        float yaw = std::atan2(fwd[0], fwd[2]);
-        float pitch = std::asin(std::max(-1.0f, std::min(1.0f, fwd[1])));
+        // Free-fly is FDS's OWN Dynamic_Camera (see SceneIngest.h) — seeded from
+        // the ingest camera so the window opens on the same pose the offscreen
+        // renders use, and calibrated for this scene's depth range.
+        FreeCamInit(scene);
         bool  freeFly = opt.freeFly, paused = false, mouseLook = false, running = true;
         float demoT = float(opt.loadOpt->demoT);
-        float speed = 12.0f;                 // world units / second
         LoadOptions lo = *opt.loadOpt;
+        // THE CAMERA-INTERPOLATION FIX. `lo` drives Reanimate's RefreshCamera
+        // every frame, and with a non-empty camPose RefreshCamera PINS the
+        // camera to that review pose and takes FOV from FOV.Keys[0]. The
+        // interactive arm cleared camPose only when --spline was passed at
+        // STARTUP, so in a default `--window` run TAB into "SPLINE" showed a
+        // frozen viewpoint — Animate_Objects was evaluating the authored spline
+        // into sc.CameraHead correctly, and RefreshCamera was then overwriting
+        // it. Clearing it here means the scripted camera is ALWAYS the engine's
+        // per-frame spline evaluation (Spline_Calc_3D Source/Target +
+        // Spline_Calc_1D Roll/FOV -> Kick_Camera -> CalcPersp), while free-fly
+        // still starts from the review pose because FC was seeded above.
+        lo.camPose.clear();
 
         std::fprintf(stderr,
-            "[WINDOW] open %dx%d. WASD+QE move, mouse-drag look, SHIFT fast, "
-            "TAB free-fly/spline, SPACE pause, [ ] time scrub, ESC quit\n",
-            opt.winW, opt.winH);
+            "[WINDOW] open %dx%d — camera is FDS's own Dynamic_Camera (the\n"
+            "[WINDOW]   DisplaceTest / TAB-camera control set), spline is the\n"
+            "[WINDOW]   engine's per-frame Spline_Calc evaluation.\n"
+            "%s", opt.winW, opt.winH, kKeymap);
 
         uint64_t prevTick = SDL_GetPerformanceCounter();
         const double freq = double(SDL_GetPerformanceFrequency());
@@ -1716,20 +1748,29 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 if (ev.type == SDL_QUIT) running = false;
                 else if (ev.type == SDL_KEYDOWN) {
                     switch (ev.key.keysym.sym) {
-                        case SDLK_ESCAPE: running = false; break;
-                        case SDLK_TAB:    freeFly = !freeFly; break;
+                        // ESC and Backspace both quit, as DisplaceTest's loop does.
+                        case SDLK_ESCAPE: case SDLK_BACKSPACE: running = false; break;
+                        case SDLK_TAB:
+                            // Leaving spline mode must not teleport: FC is kept in
+                            // sync with the scripted camera below, so free-fly
+                            // resumes exactly where the spline had the eye.
+                            freeFly = !freeFly; break;
                         case SDLK_SPACE:  paused = !paused; break;
                         case SDLK_LEFTBRACKET:  demoT -= 100.0f; break;
                         case SDLK_RIGHTBRACKET: demoT += 100.0f; break;
+                        // G, rising edge only — DisplaceTest's pose dump.
+                        case SDLK_g: FreeCamDumpPose(scene); break;
+                        case SDLK_F1: std::fputs(kKeymap, stderr); break;
                         default: break;
                     }
                 } else if (ev.type == SDL_MOUSEBUTTONDOWN) mouseLook = true;
                 else if (ev.type == SDL_MOUSEBUTTONUP)   mouseLook = false;
                 else if (ev.type == SDL_MOUSEMOTION && mouseLook) {
-                    yaw   -= float(ev.motion.xrel) * 0.004f;
-                    pitch -= float(ev.motion.yrel) * 0.004f;
-                    pitch = std::max(-1.55f, std::min(1.55f, pitch));
-                    freeFly = true;
+                    // A GpuBench addition, but through the same world-yaw /
+                    // camera-local-pitch decomposition Dynamic_Camera uses.
+                    if (!freeFly) { FreeCamSyncFromScene(scene); freeFly = true; }
+                    FreeCamMouseLook(scene, -float(ev.motion.xrel) * 0.004f,
+                                            -float(ev.motion.yrel) * 0.004f);
                 }
             }
             const uint64_t now = SDL_GetPerformanceCounter();
@@ -1748,28 +1789,33 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
 
             if (frameNo == 3 && VertexHash(scene) != vhash0) vertsEverChanged = true;
 
-            // Camera: free-fly, or the authored spline that Reanimate just moved.
+            // Camera. SPLINE = whatever Reanimate's Animate_Objects just
+            // evaluated (the engine's Kochanek-Bartels Source/Target/Roll/FOV
+            // splines through Kick_Camera + CalcPersp). FREE-FLY = the engine's
+            // Dynamic_Camera, driven by the house key set.
             if (freeFly) {
                 const uint8_t *k = SDL_GetKeyboardState(nullptr);
-                const float f[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch),
-                                    std::cos(yaw) * std::cos(pitch)};
-                const float r[3] = {f[2], 0.0f, -f[0]};
-                const float rl = std::sqrt(r[0]*r[0] + r[2]*r[2]);
-                const float rn[3] = {r[0]/std::max(rl,1e-5f), 0.0f, r[2]/std::max(rl,1e-5f)};
-                float v = speed * dt * ((k[SDL_SCANCODE_LSHIFT] || k[SDL_SCANCODE_RSHIFT]) ? 4.0f : 1.0f);
-                if (k[SDL_SCANCODE_W]) for (int c=0;c<3;++c) eye[c] += f[c]*v;
-                if (k[SDL_SCANCODE_S]) for (int c=0;c<3;++c) eye[c] -= f[c]*v;
-                if (k[SDL_SCANCODE_D]) for (int c=0;c<3;++c) eye[c] += rn[c]*v;
-                if (k[SDL_SCANCODE_A]) for (int c=0;c<3;++c) eye[c] -= rn[c]*v;
-                if (k[SDL_SCANCODE_E]) eye[1] += v;
-                if (k[SDL_SCANCODE_Q]) eye[1] -= v;
-                // Build the view with the ENGINE's Kick_Camera, same as everywhere else.
-                BuildViewMatrix(eye, f, scene.camera.rot);
-                for (int c = 0; c < 3; ++c) scene.camera.src[c] = eye[c];
+                FreeCamInput in;
+                in.fwd       = k[SDL_SCANCODE_W];
+                in.back      = k[SDL_SCANCODE_S] || k[SDL_SCANCODE_Z];
+                in.left      = k[SDL_SCANCODE_A] || k[SDL_SCANCODE_END];
+                in.right     = k[SDL_SCANCODE_D] || k[SDL_SCANCODE_PAGEDOWN];
+                in.up        = k[SDL_SCANCODE_Q] || k[SDL_SCANCODE_KP_PLUS];
+                in.down      = k[SDL_SCANCODE_E] || k[SDL_SCANCODE_KP_MINUS];
+                in.yawLeft   = k[SDL_SCANCODE_LEFT];
+                in.yawRight  = k[SDL_SCANCODE_RIGHT];
+                in.pitchUp   = k[SDL_SCANCODE_UP];
+                in.pitchDown = k[SDL_SCANCODE_DOWN];
+                in.rollLeft  = k[SDL_SCANCODE_HOME];
+                in.rollRight = k[SDL_SCANCODE_PAGEUP];
+                in.slower    = k[SDL_SCANCODE_COMMA];
+                in.faster    = k[SDL_SCANCODE_PERIOD];
+                in.rotSlower = k[SDL_SCANCODE_K];
+                in.rotFaster = k[SDL_SCANCODE_L];
+                FreeCamStep(scene, in, dt);
             } else {
-                for (int c=0;c<3;++c) eye[c] = scene.camera.src[c];
-                yaw = std::atan2(scene.camera.rot[2][0], scene.camera.rot[2][2]);
-                pitch = std::asin(std::max(-1.0f, std::min(1.0f, scene.camera.rot[2][1])));
+                // Keep FC under the scripted camera so TAB does not teleport.
+                FreeCamSyncFromScene(scene);
             }
 
             // --- refresh the GPU-visible per-frame state ---
@@ -1817,7 +1863,16 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             std::snprintf(line, sizeof line, "%d LIGHTS  %zu DRAWS  VERTS %s",
                           out.litLights, scene.batches.size(),
                           vertsEverChanged ? "RE-UPLOADED" : "STATIC (NO RE-UPLOAD)");
-            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 190, 190, 190);
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 190, 190, 190); ly += 18;
+            // The keymap belongs on screen, not only in the startup log — the
+            // report that "I don't get the complete set of keys" was made at the
+            // window, where the log had already scrolled.
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                    "W/S,Z FWD/BACK  A,END/D,PGDN STRAFE  Q/E UP/DOWN", 150, 150, 150); ly += 11;
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                    "ARROWS LOOK  HOME/PGUP ROLL  DRAG LOOK  , . SPEED  K L TURN", 150, 150, 150); ly += 11;
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                    "TAB SPLINE  SPACE PAUSE  [ ] TIME  G POSE  F1 KEYS  ESC QUIT", 150, 150, 150);
             [hudTex replaceRegion:MTLRegionMake2D(0, 0, HUDW, HUDH) mipmapLevel:0
                         withBytes:hudBuf.data() bytesPerRow:HUDW * 4];
 
