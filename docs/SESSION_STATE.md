@@ -36,6 +36,46 @@
 > is off** — the mips gate zeroes the mip LEVEL but not the SUBDIVISION, and this flag
 > moves the cut lines, so it changes geometry either way.
 >
+> **D3 (SHADING_CONTRACT) — the normal-map LOD fade after the flip: MEASURED, NO
+> ACTION NEEDED.** The concern was that 48.8 % of draws sit at mip 6, so the flip
+> pushes half the frame into the faded/flattened regime in one step. **That is true in
+> DRAW count and false in SCREEN AREA — which is the number that matters, and the two
+> differ by ~70x here.** Fade is `1-(mip-start+1)*step` with start=2, step=0.33, so
+> full bump at mip 0-1, 0.67/0.34/0.01 at mip 2/3/4, fully FLAT from mip 5 up.
+> Area-weighted, at six poses (`--mip_stats`):
+>
+> | pose | full bump | partial | FLAT | bump retained |
+> |---|---|---|---|---|
+> | greets t=2993 | 88.2 % | 9.1 % | **2.7 %** | 91.4 % |
+> | greets t=4200 vista | 85.8 % | 11.0 % | **3.2 %** | 89.7 % |
+> | greets t=5958 grazing | 85.9 % | 10.7 % | **3.4 %** | 89.3 % |
+> | greets t=5743 review | 85.6 % | 11.2 % | **3.2 %** | 89.6 % |
+> | city t=1961 (gate) | 80.3 % | 18.9 % | **0.8 %** | 90.2 % |
+> | fountain t=2500 (gate) | 89.7 % | 10.3 % | **0.0 %** | 95.1 % |
+>
+> The 48.8 % of draws at mip 6 cover **0.7 % of screen area**. Direct check — disabling
+> the fade ENTIRELY (`--nmap_lod_fade_start=16`): greets t=4200 changes **0.35 % of
+> pixels** (77 px >12/255), city t=1961 changes **ZERO pixels**. Worst-region crop
+> `docs/img/mipsel/t4200_nmap_fade_on_vs_off.png` is visually indistinguishable
+> (mean \|d\| 0.16). **No "wall goes geometrically flat at distance" is occurring at a
+> visible scale, so the threshold does NOT need retuning.**
+>
+> **Fade vs Toksvig/LEAN — settled by that same measurement: implement NEITHER.** The
+> fade is a crude stand-in for proper normal-map mip filtering, and Toksvig would be a
+> refinement of it. But the fade's total footprint post-flip is ≤0.35 % of pixels and
+> 0 % at the city gate, so roughness coupling would be buying a correction to a term
+> that barely fires. Revisit only if content changes push real area past mip 4.
+>
+> **GPU-PARITY WARNING: the GPU arm has NO normal-map fade at all.** After this flip
+> the CPU flattens bump on ~3 % of greets' screen area that the GPU still perturbs, so
+> CPU-vs-GPU pairs at distant surfaces now diverge BY CONSTRUCTION. Neither renderer is
+> wrong. Do not chase it as a GPU bug.
+>
+> **Unrelated pre-existing hazard (D6), flagged so it is not misattributed to mips:**
+> the CPU's AO is unclamped and can go negative at `ao_strength=2.0`, subtracting
+> direct light. If a new artifact appears near AO'd geometry after the flip, check that
+> first — the flip changes which AO texels are sampled but did not create the bug.
+>
 > **Two corrections to my own earlier claims, both measured:**
 > 1. `--mip_fix` is **not** inert with `--mips` off (above). The mips gate zeroes the
 >    mip LEVEL, not the SUBDIVISION.
