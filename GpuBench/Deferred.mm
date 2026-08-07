@@ -1574,7 +1574,9 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // stated in the plan).
         bool mirrorActive[kMaxMirrors] = {};
         int firstActive = -1, lastActive = -1;
-        if (nMirrors > 0 && opt.viz < 0) {
+        // --viz=mirror (13) NEEDS the reflection passes to run; every other
+        // viz mode deliberately skips them.
+        if (nMirrors > 0 && (opt.viz < 0 || opt.viz == 13)) {
             for (int i = 0; i < nMirrors; ++i) {
                 const auto &m = scene.mirrors[size_t(i)];
                 const float sd = m.n[0]*scene.camera.src[0] + m.n[1]*scene.camera.src[1]
@@ -1704,6 +1706,19 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 [enc setFragmentTexture:((i < nMirrors && mirrorActive[i])
                                              ? reflHdr[size_t(i)] : dummyRefl)
                                 atIndex:NSUInteger(37 + i)];
+            if (opt.viz == 13) {
+                std::fprintf(stderr, "[MIRRORPROBE] panels=%d\n", nMirrors);
+                for (int i = 0; i < nMirrors; ++i) {
+                    const auto &m = scene.mirrors[size_t(i)];
+                    const float sd = m.n[0]*scene.camera.src[0] + m.n[1]*scene.camera.src[1]
+                                   + m.n[2]*scene.camera.src[2] + m.d;
+                    std::fprintf(stderr,
+                        "[MIRRORPROBE]   %d '%s' N=(%.2f,%.2f,%.2f) d=%.2f  camSignedDist=%+.2f  %s\n",
+                        i + 1, m.material.c_str(), m.n[0], m.n[1], m.n[2], m.d, sd,
+                        mirrorActive[i] ? "ACTIVE (reflection rendered + bound)"
+                                        : "INACTIVE (camera behind the plane; black bound)");
+                }
+            }
             [enc setFragmentSamplerState:shadowSamp atIndex:1];
             [enc setFragmentSamplerState:rawSamp atIndex:2];
             if (viz) {

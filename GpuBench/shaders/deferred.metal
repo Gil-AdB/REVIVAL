@@ -910,12 +910,14 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
                        array<depth2d<float>,   16> spotMaps    [[texture(20)]],
                        sampler shadowSamp [[sampler(1)]],
                        sampler rawSamp    [[sampler(2)]],
+                       texture2d<uint>  gMirror  [[texture(36)]],
+                       array<texture2d<float>, 4> reflTex [[texture(37)]],
                        constant uint &mode [[buffer(4)]])
 {
     // R1: a mode selector the shader does not implement must be VISIBLE, not
     // silently aliased onto whatever falls through. Before this, --viz=<any
     // unmapped number> rendered mode 5 and looked like a real answer.
-    if (mode > 12) return kVizNoSuchThing;
+    if (mode > 13) return kVizNoSuchThing;
     // R1: an out-of-range --viz_light must be visible too. It used to read as
     // "no light in range" (mode 5 dark blue / mode 6 black) — a data value.
     if (u.vizLight >= 0 && uint(u.vizLight) >= u.numLights) return kVizNoSuchThing;
@@ -923,6 +925,26 @@ fragment float4 fs_viz(FsQuadOut in [[stage_in]],
     const uint2 px = uint2(in.position.xy);
     const float zEnc = gDepth.read(px);
     if (zEnc <= 0.0f) return kVizNoGeometry;
+
+    // mode 13: MIRROR PANELS — which pixels carry a panel id, and whether the
+    // reflection bound for that panel actually has radiance in it. Written to
+    // settle "the rtt mirrors are just not there" into one of: no panel pixels
+    // on screen (nothing to composite), panel pixels but a black reflection
+    // (the pass did not run or produced nothing), or panel pixels with a live
+    // reflection (the composite works and the complaint is about content).
+    //   BLACK      = a pixel with no panel id
+    //   RED   = 60*id  -> panel id 1,2,3 readable as 60,120,180
+    //   GREEN        = the bound reflection's luma at this pixel, x255
+    //   BLUE  = 255  -> that reflection texture is non-black here
+    if (mode == 13u) {
+        const uint mid = gMirror.read(px).x;
+        if (mid == 0u) return float4(0.0f, 0.0f, 0.0f, 1.0f);
+        float3 r = 0.0f;
+        if (mid <= 4u) r = reflTex[mid - 1u].read(px).rgb;
+        const float ly = dot(r, float3(0.299f, 0.587f, 0.114f));
+        return float4(float(mid) * (60.0f / 255.0f), saturate(ly),
+                      ly > 0.0f ? 1.0f : 0.0f, 1.0f);
+    }
 
     const float Z = (u.dzb) / max(zEnc - u.dza, 1e-9f);
     const float X = (in.ndc.x - u.ox) * Z * u.invSx;

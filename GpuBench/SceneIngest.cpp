@@ -965,13 +965,105 @@ bool Load(Scene &out, const LoadOptions &opt) {
             mi.n[0] = mp.N.x; mi.n[1] = mp.N.y; mi.n[2] = mp.N.z;
             mi.d = mp.d;
             mi.material = mname;
+            const char *how = "engine FindMirrorPlaneByMatName";
+
+            // FACING DISAMBIGUATION — the fix for "the rtt mirrors are just not
+            // there" (reported 2026-08-08). MEASURED cause: 'screen 3' and
+            // 'screen 4' are not flat panels, they are closed BOXES — six
+            // 2-face clusters each, which is why the engine's fitter reported
+            // "2 of 12 faces, 10 outliers". The fitter returns ONE of those six
+            // faces, and for 'screen 4' it returned the box's -X face at
+            // x=-8.76, which points AWAY from the corridor. The camera is then
+            // permanently on the back side of the mirror plane, so
+            // mirrorActive (signed distance > 0) is false at every pose — it
+            // measured -8.15 at t=2000 and -36.70 at t=6133 — and the panel
+            // reflected nothing, ever, while its tagged triangles faced out of
+            // the room and reached ZERO screen pixels.
+            //
+            // A mirror faces INTO the room, so pick the box face whose outward
+            // normal points toward the scene's own centre of mass. That rule
+            // re-derives the already-correct 'teleporter' choice rather than
+            // changing it, which is the check that it is a rule and not a
+            // special case. It is a GpuBench-side disambiguation of an
+            // ambiguity the engine's fitter does not resolve, NOT a claim about
+            // what the CPU picks; --no-mirror_face keeps the raw engine plane.
+            if (opt.mirrorFacing) {
+                // WHICH SIDE IS THE ROOM? An earlier revision of this rule used
+                // the scene's centre of mass, and it was UNSTABLE: 'screen 4' is
+                // a 1.3-unit box sitting roughly 45 degrees from the room centre,
+                // so its +X and +Z faces scored within a rounding error of each
+                // other and the pick FLIPPED between poses as the animated
+                // geometry nudged the centroid. Sample the AUTHORED CAMERA PATH
+                // instead — a mirror is a mirror because the camera passes in
+                // front of it, so the camera spline is the actual definition,
+                // and it does not move with the scene's animation.
+                std::vector<Vector> camPath;
+                if (sc.CameraHead && sc.CameraHead->Source.NumKeys > 0) {
+                    const Spline &S = sc.CameraHead->Source;
+                    const float f0 = S.Keys[0].Frame, f1 = S.Keys[S.NumKeys - 1].Frame;
+                    const float saveFrame = CurFrame;
+                    for (int i = 0; i <= 64; ++i) {
+                        Vector p;
+                        Spline_Calc_3D(const_cast<Spline *>(&S),
+                                       f0 + (f1 - f0) * float(i) / 64.0f, &p);
+                        if (std::isfinite(p.x)) camPath.push_back(p);
+                    }
+                    CurFrame = saveFrame;
+                }
+                if (!camPath.empty()) {
+                    struct C { Vector n; float d; int f; Vector c; };
+                    std::vector<C> cl;
+                    for (Object *o2 = sc.ObjectHead; o2; o2 = o2->Next) {
+                        if (o2->Type != Obj_TriMesh || !o2->Data) continue;
+                        TriMesh *T2 = static_cast<TriMesh *>(o2->Data);
+                        for (uint32_t f = 0; f < T2->FIndex; ++f) {
+                            const Face &F = T2->Faces[f];
+                            if (!F.Txtr || !F.Txtr->Name || !F.A) continue;
+                            if (std::strcmp(F.Txtr->Name, mname)) continue;
+                            Vector n; MatrixXVector(T2->RotMat, const_cast<Vector *>(&F.N), &n);
+                            Vector lp = F.A->Pos, wp; MatrixXVector(T2->RotMat, &lp, &wp);
+                            wp.x += T2->IPos.x; wp.y += T2->IPos.y; wp.z += T2->IPos.z;
+                            const float d = -(wp.x*n.x + wp.y*n.y + wp.z*n.z);
+                            bool m2 = false;
+                            for (auto &c : cl) {
+                                if (n.x*c.n.x + n.y*c.n.y + n.z*c.n.z < 0.866f) continue;
+                                if (std::fabs(d - c.d) > 0.6f) continue;
+                                ++c.f; c.c.x += wp.x; c.c.y += wp.y; c.c.z += wp.z; m2 = true; break;
+                            }
+                            if (!m2) cl.push_back({n, d, 1, wp});
+                        }
+                    }
+                    // Score = how much of the camera path stands in FRONT of this
+                    // face, weighted by how far in front. An integer count alone
+                    // ties as easily as the centroid did.
+                    const C *best = nullptr; float bestScore = 0.0f;
+                    for (const auto &c : cl) {
+                        float score = 0.0f;
+                        for (const Vector &p : camPath) {
+                            const float sd = p.x * c.n.x + p.y * c.n.y + p.z * c.n.z + c.d;
+                            if (sd > 0.0f) score += sd;
+                        }
+                        if (score > bestScore) { bestScore = score; best = &c; }
+                    }
+                    if (best) {
+                        // best->d is ALREADY in the engine's N.P + d = 0 form.
+                        const bool changed =
+                            (best->n.x * mi.n[0] + best->n.y * mi.n[1] + best->n.z * mi.n[2] < 0.866f) ||
+                            std::fabs(best->d - mi.d) > 0.6f;
+                        mi.n[0] = best->n.x; mi.n[1] = best->n.y; mi.n[2] = best->n.z;
+                        mi.d = best->d;
+                        if (changed) how = "GpuBench room-facing pick (engine plane faced OUT)";
+                    }
+                }
+            }
             out.mirrors.push_back(mi);
             if (opt.verbose)
                 std::fprintf(stderr,
                     "[INGEST] mirror %zu '%s': plane N=(%.3f,%.3f,%.3f) d=%.3f "
-                    "(%d wall faces in fit, centroid %.2f,%.2f,%.2f)\n",
-                    out.mirrors.size(), mname, mp.N.x, mp.N.y, mp.N.z, mp.d,
-                    mp.faceCount, mp.centroid.x, mp.centroid.y, mp.centroid.z);
+                    "(engine fit used %d of the material's faces, centroid %.2f,%.2f,%.2f) "
+                    "via %s\n",
+                    out.mirrors.size(), mname, mi.n[0], mi.n[1], mi.n[2], mi.d,
+                    mp.faceCount, mp.centroid.x, mp.centroid.y, mp.centroid.z, how);
         }
     }
     // Face -> mirror panel membership test, used to key the batch split.
@@ -1175,6 +1267,66 @@ bool Load(Scene &out, const LoadOptions &opt) {
             out.skyZenith[0], out.skyZenith[1], out.skyZenith[2],
             out.skyNadir[0], out.skyNadir[1], out.skyNadir[2]);
     }
+    // ---- mirror panel TALLY -------------------------------------------------
+    // Reported 2026-08-08: "the rtt mirrors are just not there". That has three
+    // possible meanings and they need different fixes, so the tally names which:
+    //   0 tagged batches  -> the panel was found but NO FACE passed the
+    //                        membership test, so nothing in the frame can ever
+    //                        composite its reflection (built, never drawn);
+    //   tagged batches > 0 -> the geometry exists and the question moves to the
+    //                        runtime side (active flag / reflection content),
+    //                        which the deferred arm's own [MIRRORPROBE] answers.
+    // Plane CLUSTERS per mirror material. FindMirrorPlaneByMatName returns ONE
+    // plane and drops the rest as "outliers", so a material whose faces live on
+    // several planes gets one panel tagged and the others silently left as
+    // ordinary geometry. Printing the clusters is what turns "the mirror is not
+    // there" into "the mirror the camera is looking at is cluster 2, and only
+    // cluster 1 was tagged".
+    for (size_t mi = 0; mi < out.mirrors.size(); ++mi) {
+        struct Clus { float n[3]; float d; int faces; float cx, cy, cz; };
+        std::vector<Clus> cl;
+        for (Object *obj = sc.ObjectHead; obj; obj = obj->Next) {
+            if (obj->Type != Obj_TriMesh || !obj->Data) continue;
+            TriMesh *T = static_cast<TriMesh *>(obj->Data);
+            if (!T->FIndex || !T->Faces) continue;
+            for (uint32_t f = 0; f < T->FIndex; ++f) {
+                const Face &F = T->Faces[f];
+                if (!F.Txtr || !F.Txtr->Name || !F.A) continue;
+                if (std::strcmp(F.Txtr->Name, out.mirrors[mi].material.c_str())) continue;
+                Vector n; MatrixXVector(T->RotMat, const_cast<Vector *>(&F.N), &n);
+                Vector lp = F.A->Pos, wp; MatrixXVector(T->RotMat, &lp, &wp);
+                wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+                const float d = -(wp.x*n.x + wp.y*n.y + wp.z*n.z);
+                bool merged = false;
+                for (auto &c : cl) {
+                    if (n.x*c.n[0] + n.y*c.n[1] + n.z*c.n[2] < 0.866f) continue;
+                    if (std::fabs(d - c.d) > 0.6f) continue;
+                    ++c.faces; c.cx += wp.x; c.cy += wp.y; c.cz += wp.z; merged = true; break;
+                }
+                if (!merged) cl.push_back({{n.x, n.y, n.z}, d, 1, wp.x, wp.y, wp.z});
+            }
+        }
+        for (const auto &c : cl) {
+            const bool isTagged =
+                (c.n[0]*out.mirrors[mi].n[0] + c.n[1]*out.mirrors[mi].n[1] +
+                 c.n[2]*out.mirrors[mi].n[2] >= 0.866f) &&
+                std::fabs(c.d - out.mirrors[mi].d) < 0.6f;
+            std::fprintf(stderr,
+                "[INGEST]   '%s' face cluster: N=(%.2f,%.2f,%.2f) planeD=%.2f  %d face(s)  "
+                "centroid (%.2f,%.2f,%.2f)  %s\n",
+                out.mirrors[mi].material.c_str(), c.n[0], c.n[1], c.n[2], c.d, c.faces,
+                c.cx / float(c.faces), c.cy / float(c.faces), c.cz / float(c.faces),
+                isTagged ? "<= TAGGED as the mirror plane" : "-- NOT A MIRROR (plain geometry)");
+        }
+        int batches = 0; long tris = 0;
+        for (const auto &b : out.batches)
+            if (b.mirrorIndex == int(mi) + 1) { ++batches; tris += b.vertexCount / 3; }
+        std::fprintf(stderr,
+            "[INGEST] mirror %zu '%s': %d panel batch(es), %ld tri(s) tagged%s\n",
+            mi + 1, out.mirrors[mi].material.c_str(), batches, tris,
+            batches == 0 ? "   <-- NOTHING COMPOSITES THIS PANEL" : "");
+    }
+
     g_loaded = !out.verts.empty();
     return g_loaded;
 }

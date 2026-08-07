@@ -214,6 +214,14 @@ struct LoadOptions {
     // greets_mirror defaults ON in DEMO, so ON here is parity; --no-mirror
     // renders the panels as plain emissive geometry (the pre-mirror look).
     bool        mirrors = true;
+    // Disambiguate WHICH face of a mirror material is the mirror. greets'
+    // 'screen 3'/'screen 4' are closed boxes, and the engine's plane fitter
+    // returns one of the six faces with no facing rule — for 'screen 4' it
+    // returned the face pointing OUT of the corridor, which left the panel
+    // permanently inactive. Pick the face whose normal points toward the
+    // scene's centre of mass instead. --no-mirror_face restores the raw
+    // engine plane, so the change is priceable.
+    bool        mirrorFacing = true;
     // Replicate DEMO's --greets_stone_tex override (default ON there, so ON here).
     // Without it the wall this renders is the AUTHORED FLD wall, not the surface
     // the user actually reviews — see docs/GPU_BENCHMARK_PLAN.md §3.2. No

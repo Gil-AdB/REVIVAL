@@ -116,7 +116,7 @@ const char *kUsage =
     "  --exposure=F      deferred only: tonemap exposure (default 1.0)\n"
     "  --viz=MODE        deferred only, per-stage verification instead of the lit frame:\n"
     "                    albedo|normal|ao|depth|gloss|shadow|lights|shadowraw|\n"
-    "                    ambient|emissive|direct|direct_noshadow|worldpos.\n"
+    "                    ambient|emissive|direct|direct_noshadow|worldpos|mirror.\n"
     "                    worldpos decodes as x=R/255*80-20, y=G/255*25, z=B/255*100-80,\n"
     "                    so a pixel can be turned into a world point for --probe.\n"
     "                    Every mode shares the LIT FRAME's own kernels, so a mode cannot\n"
@@ -250,6 +250,7 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--omni_range=")) opt.omniDefaultRange = float(std::atof(v));
         else if (a == "--no-disco")                 opt.disco = false;
         else if (a == "--no-mirror")                opt.mirrors = false;
+        else if (a == "--no-mirror_face")           opt.mirrorFacing = false;
         else if (a == "--no-revmaps")               opt.revMaps = false;
         else if (const char *v = val("--cam_track=")) {
             if (std::sscanf(v, "%f:%f:%f", &camTrack[0], &camTrack[1], &camTrack[2]) == 3)
@@ -292,6 +293,7 @@ int main(int argc, const char *argv[]) {
             else if (m == "direct")   dopt.viz = 10;
             else if (m == "direct_noshadow") dopt.viz = 11;
             else if (m == "worldpos") dopt.viz = 12;
+            else if (m == "mirror")   dopt.viz = 13;
             else { std::fprintf(stderr, "unknown --viz mode: %s\n", v); return 2; }
         }
         else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }
