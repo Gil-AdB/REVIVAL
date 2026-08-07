@@ -36,6 +36,28 @@
 > is off** — the mips gate zeroes the mip LEVEL but not the SUBDIVISION, and this flag
 > moves the cut lines, so it changes geometry either way.
 >
+> **Two corrections to my own earlier claims, both measured:**
+> 1. `--mip_fix` is **not** inert with `--mips` off (above). The mips gate zeroes the
+>    mip LEVEL, not the SUBDIVISION.
+> 2. The first cut's lazy-`BaseLod` refactor was **not byte-null**: `_C` was
+>    `0.5 * fastLog2(...)` in **double** and the lambda made it float. `_C` positions
+>    the subdivision cut lines, so re-associating that arithmetic moves geometry even
+>    when the level is forced to 0. Fixed by restoring the legacy expression verbatim
+>    on the non-aniso path — **the `0.5 *` there must stay double.**
+>
+> **Trilinear**: `--texture_filter=2` stops silently degrading to bilinear now that
+> `mipFrac` is no longer force-zeroed — 53 888 px (2.60 %) differ at greets t=4200.
+> **`mip_bias` 0.5 + truncation = round-to-nearest**, which is correct for point and
+> bilinear but WRONG for trilinear: it offsets the inter-level blend by half a level.
+> `--mip_bias=0` is the correct pairing with `--texture_filter=2` (derived, not yet
+> visually validated).
+>
+> **Process hazard, recorded because it bit this work twice:** the `--mips` flip and
+> then the whole re-pin changeset were both swept into OTHER agents' commits
+> (`99c09e7`, `daeb147`) because `FeatureFlags.def` and the git index are shared. A
+> commit titled "S1d-6: the shell's silhouette" is what actually flipped a default
+> that moved every scene pin.
+>
 > New: **`--mip_stats`** (per-level draw/area histogram at exit, changes no pixel) and
 > **`--mip_aniso`** (max-axis LOD instead of the geometric mean — default OFF, awaiting
 > the user's eyes). Crops: `docs/img/mipsel/`. Full write-up in the commit message.
