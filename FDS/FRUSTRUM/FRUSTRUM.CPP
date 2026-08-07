@@ -591,6 +591,35 @@ void FrustumClipper::Down()
 
 // CorrectCWOrder moved to header (FRUSTRUM.H) as inline member.
 
+// --mip_stats bookkeeping. `level` is the level ACTUALLY handed to the filler
+// (i.e. after the --mips gate), `pix` the covered screen area in pixels — the
+// caller passes 0.5*|signed fan sum| since the fan sum carries no 0.5 factor.
+static inline void MipStat_Record(int32_t level, double pix)
+{
+#if FDS_RENDER_STATS_ENABLED
+	if (level < 0)  level = 0;
+	if (level > 15) level = 15;
+	fds::PerThreadRenderStats& st = fds::stats_tls();
+	st.mipLevelFaces[level]++;
+	st.mipLevelPix[level] += pix;
+#else
+	(void)level; (void)pix;
+#endif
+}
+
+// Signed fan-sum area of a clipper polygon, *2 (same convention as pixArea in
+// MiplevelClipper: no 0.5 factor). Used for the split path's sub-sections,
+// whose area is not otherwise computed.
+static inline float MipStat_Area2(Vertex **P, mword n)
+{
+	float a = 0.0f;
+	const Vertex *A = P[0];
+	for (mword i = 2; i < n; i++)
+		a += (P[i]->PX - A->PX) * (P[i-1]->PY - A->PY)
+		   - (P[i-1]->PX - A->PX) * (P[i]->PY - A->PY);
+	return a;
+}
+
 void FrustumClipper::YSort(Vertex **Prim, Vertex **Scnd, mword nVerts)
 {
 	// Find vertex with minimal y-value.
@@ -642,6 +671,12 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	// so a face popping across the 2%-screen-area threshold jumps 1-6 levels.
 	const bool  mipFix = fds::FeatureFlags::mip_fix();
 	const float mipK   = mipFix ? 1.0f : 2.0f;
+	// --mip_stats: per-level draw/area histogram. Everything below is inside
+	// `if (mipStats)`, so a normal run pays one bool load per face.
+	const bool  mipStats = fds::FeatureFlags::mip_stats();
+	if (mipStats) fds::RenderStats_MipReportAtExit();
+	// --mip_aniso: max-axis LOD instead of the geometric-mean area ratio.
+	const bool  mipAniso = fds::FeatureFlags::mip_aniso();
 
 	Texture *Tx = F->Txtr->Txtr;
 	int32_t L = Tx->numMipmaps-1; // maximal level	
@@ -651,6 +686,16 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 
 	Vertex *A = C_Prim[0], *B, *C;
 	mword i, j;
+	// --mip_aniso: area-weighted UV->screen Jacobian, accumulated in the same
+	// fan sweep. For fan triangle (A,B,C) with screen edges e1=B-A, e2=C-A and
+	// texture edges t1, t2, the affine map's derivatives are
+	//   d{u,v}/d{x,y} = (numerator) / det,  det = e1x*e2y - e1y*e2x
+	// and the numerators below are exactly those, PRE-division. Summing
+	// numerators and dets separately over the fan yields the area-weighted mean
+	// derivative for the whole (possibly clipped, n-gon) polygon — which is what
+	// the area metric already implicitly uses, so this is an apples-to-apples
+	// upgrade rather than a different sampling point.
+	float nUx = 0.0f, nUy = 0.0f, nVx = 0.0f, nVy = 0.0f, detS = 0.0f;
 	for(i=2; i<C_numVerts; i++)
 	{
 		B = C_Prim[i-1];
@@ -658,7 +703,45 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	
 		pixArea += (C->PX - A->PX) * (B->PY - A->PY) - (B->PX - A->PX) * (C->PY - A->PY);
 		texArea += (C->U  - A->U ) * (B->V  - A->V ) - (B->U  - A->U ) * (C->V  - A->V );
+
+		if (mipAniso) {
+			const float e1x = B->PX - A->PX, e1y = B->PY - A->PY;
+			const float e2x = C->PX - A->PX, e2y = C->PY - A->PY;
+			const float t1u = B->U  - A->U , t1v = B->V  - A->V ;
+			const float t2u = C->U  - A->U , t2v = C->V  - A->V ;
+			detS += e1x*e2y - e1y*e2x;
+			nUx  += t1u*e2y - t2u*e1y;
+			nUy  += t2u*e1x - t1u*e2x;
+			nVx  += t1v*e2y - t2v*e1y;
+			nVy  += t2v*e1x - t1v*e2x;
+		}
 	}
+
+	// The continuous LOD for this polygon, in log2(texels per screen pixel).
+	// GEOMETRIC MEAN (legacy): 0.5*log2(texelArea/pixelArea) — the sqrt of the
+	// product of the two axis densities. At grazing incidence one axis is
+	// compressed far harder than the other (greets' corridor walls run ~16:1),
+	// and the geometric mean then sits ~log2(sqrt(16)) = 2 levels SHARPER than
+	// the compressed axis needs, which is exactly the regime that aliases.
+	// MAX AXIS (--mip_aniso, what GPUs do without aniso filtering): take the
+	// longer of the two texel-space axis vectors. Isotropic faces are
+	// unaffected (both metrics reduce to log2(s)); anisotropic faces get
+	// blurrier by log2(sqrt(aspect)).
+	// Computed LAZILY — the Txtr_Nomip exit below needs no LOD at all, and this
+	// costs a divide plus a fastLog2 on a path that runs for every textured face
+	// in the frame (~56k in greets at 1080p).
+	auto BaseLod = [&]() -> float {
+		if (mipAniso && fabs(detS) > 1e-12f) {
+			const float rdet = 1.0f / detS;
+			const float ux = nUx * rdet * Tx->SizeX, vx = nVx * rdet * Tx->SizeY;
+			const float uy = nUy * rdet * Tx->SizeX, vy = nVy * rdet * Tx->SizeY;
+			const float lx2 = ux*ux + vx*vx;   // texels^2 per screen-x step
+			const float ly2 = uy*uy + vy*vy;   // texels^2 per screen-y step
+			const float mx2 = lx2 > ly2 ? lx2 : ly2;
+			if (mx2 > 1e-20f) return 0.5f * fastLog2(mx2);
+		}
+		return 0.5f * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea));
+	};
 
 #ifdef ENABLE_PIXELCOUNT
 	FDS_STATS_ADD_PIXELS_S(0.5f * fabs(pixArea));
@@ -667,6 +750,12 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	//if (!Keyboard[ScY])
 	static const float MinSize = XRes*YRes * 0.02; // update if XRes and/or YRes changes...
 
+	if (mipStats) {
+		if (pixArea < 0.0f)              FDS_STATS_INC_S(mipNegArea);
+		if (fabs(pixArea) >= MinSize)    FDS_STATS_INC_S(mipBigFace);
+		if (Tx->Flags & Txtr_Nomip)      FDS_STATS_INC_S(mipNomip);
+	}
+
 	if ((Tx->Flags & Txtr_Nomip) ||  pixArea < MinSize)
 	{
 		FDS_STATS_INC_S(mipFastUniform);
@@ -674,7 +763,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 			g_MipLevel = 0;
 			meka::g_tlsMipFrac = 0.0f;
 		} else {
-			const float mipF = 0.5f * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)) + mipBias;
+			const float mipF = BaseLod() + mipBias;
 			int32_t mip = int32_t(mipF);
 			// Hysteresis: ±1-level transitions must clear the boundary
 			// (integer crossings of mipF) by the margin, else hold.
@@ -696,6 +785,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		FDS_STATS_INC_POLYS_S();
 #endif
 		if (!fds::FeatureFlags::mips()) { g_MipLevel = 0; meka::g_tlsMipFrac = 0.0f; }  // was NO_MIPMAPS
+		if (mipStats) MipStat_Record(g_MipLevel, 0.5 * fabs(pixArea));
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
@@ -707,7 +797,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		q += fastLog2(C_Prim[i]->RZ);
 	}
 	
-	float _C = 0.5 * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)) + invTable[C_numVerts] * q + mipBias;
+	float _C = BaseLod() + invTable[C_numVerts] * q + mipBias;
 
 	// calculate range of 1/z values along polygon
 	float mrz = 1E+38, Mrz = 0;
@@ -776,6 +866,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		FDS_STATS_INC_POLYS_S();
 #endif
 		if (!fds::FeatureFlags::mips()) { g_MipLevel = 0; meka::g_tlsMipFrac = 0.0f; }  // was NO_MIPMAPS
+		if (mipStats) MipStat_Record(g_MipLevel, 0.5 * fabs(pixArea));
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
@@ -862,6 +953,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		FDS_STATS_INC_POLYS_S();
 #endif
 		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
+		if (mipStats) MipStat_Record(g_MipLevel, 0.5 * fabs(MipStat_Area2(C_Tetr, numSectionVerts)));
 		filler(F, C_Tetr, numSectionVerts, g_MipLevel, rt, cam);
 
 		// prepare new section - add last two intersection points
@@ -882,6 +974,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		FDS_STATS_INC_POLYS_S();
 #endif
 		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
+		if (mipStats) MipStat_Record(g_MipLevel, 0.5 * fabs(pixArea));
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
@@ -897,6 +990,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	FDS_STATS_INC_POLYS_S();
 #endif
 	if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
+	if (mipStats) MipStat_Record(g_MipLevel, 0.5 * fabs(MipStat_Area2(C_Tetr, numSectionVerts)));
 	filler(F, C_Tetr, numSectionVerts, g_MipLevel, rt, cam);
 }
 
