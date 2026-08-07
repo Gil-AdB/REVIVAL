@@ -156,6 +156,12 @@ const char *kUsage =
     "                      G dump pose   TAB free-fly/authored-spline   SPACE pause\n"
     "                      [ ] scrub time   ESC or Backspace quit\n"
     "                    Offscreen remains the default; nothing is displayed without this.\n"
+    "  --anim_probe=T0,T1   OFFSCREEN regression probe for the WINDOW's per-frame refresh:\n"
+    "                    runs Reanimate + the frame/batch/light refreshes at both t and\n"
+    "                    prints the GPU-FACING arrays (GpuLight, BatchUniforms, flare\n"
+    "                    instances). A value that does not change between the two t is a\n"
+    "                    stale per-frame upload -- which is how the frozen mech omnis and\n"
+    "                    their frozen flare sprites were found.\n"
     "  --cam_track=T0:T1:STEP   OFFSCREEN evidence that the scripted camera INTERPOLATES:\n"
     "                    re-animate at each demo-t and print the pose in DEMO's own [CAM]\n"
     "                    format, plus the Source spline's keyframes. No device, no render.\n"
@@ -165,6 +171,11 @@ const char *kUsage =
     "  --no-bloom / --bloom_intensity=F / --bloom_threshold=F   greets defaults are ON,\n"
     "                    intensity 2.0, threshold 200 (the CPU's linear 0-255 radiance scale)\n"
     "  --no-flares / --flare_gain=F   omni flare sprites (the DEMO reference's bright pools)\n"
+    "  --no-cones / --cone_strength=F   VOLUMETRIC SPOT CONES -- the disco beams in the\n"
+    "                    air, the screen-space analytic integral of\n"
+    "                    DeferredVolumetric.cpp with ONE shadow-map tap per segment.\n"
+    "                    greets' cone_strength is 1.2 (GreetsDisco.cpp), not the global\n"
+    "                    0.05, so ON at 1.2 is PARITY.\n"
     "  --no-disco        do NOT synthesise GreetsDisco.cpp's 10 cone spotlights + glow\n"
     "                    omni. greets_disco defaults ON in DEMO, so these are PARITY --\n"
     "                    turning them off makes the arm dimmer than the shipped scene.\n"
@@ -254,6 +265,13 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--bloom_intensity=")) dopt.bloomIntensity = float(std::atof(v));
         else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
         else if (a == "--no-flares")                dopt.flares = false;
+        else if (a == "--no-cones")                 dopt.cones = false;
+        else if (const char *v = val("--anim_probe=")) {
+            if (std::sscanf(v, "%d,%d", &dopt.animProbeT[0], &dopt.animProbeT[1]) == 2)
+                dopt.animProbe = true;
+            else { std::fprintf(stderr, "--anim_probe wants T0,T1\n"); return 2; }
+        }
+        else if (const char *v = val("--cone_strength=")) dopt.coneStrength = float(std::atof(v));
         else if (a == "--no-nmap")                  dopt.nmap = false;
         else if (const char *v = val("--cpu_prof=")) dopt.cpuProf = std::atoi(v);
         else if (a == "--no-cull")                  dopt.cull = false;

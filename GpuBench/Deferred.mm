@@ -56,6 +56,10 @@ struct FrameUniforms {
     float pad3[3];
 };
 
+struct ConeUniforms {
+    float density, nSamples, fadeFloor, pad;
+};
+
 struct BatchUniforms {
     float rotRow0[4], rotRow1[4], rotRow2[4];
     float objPos[4];
@@ -321,10 +325,32 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLRenderPipelineState> psoShadow = [dev newRenderPipelineStateWithDescriptor:spd error:&err];
     if (!psoShadow) { std::fprintf(stderr, "[DEFERRED] shadow pso: %s\n", [[err localizedDescription] UTF8String]); return false; }
 
+    // A MISSING MSL ENTRY POINT MUST BE FATAL, and this is not defensive
+    // programming — it cost a full debugging round. `cmake --build --target
+    // GpuBench` does NOT build the separate GpuBenchShaders staging target, so
+    // the binary can run against a STALE .metal that lacks a newly added
+    // function. `newFunctionWithName:` then returns nil, and Metal accepts a
+    // pipeline with a nil fragmentFunction as VALID (it is how depth-only
+    // pipelines are built). The result is a perfectly healthy pipeline that
+    // writes nothing, and a new pass that measures as "changed 0 pixels" with
+    // no error anywhere. Fail here instead.
+    auto fn_ = [&](NSString *n) -> id<MTLFunction> {
+        id<MTLFunction> f = [lib newFunctionWithName:n];
+        if (!f) {
+            std::fprintf(stderr,
+                "[DEFERRED] FATAL: shader entry point '%s' not found in the compiled\n"
+                "[DEFERRED]   library. The staged .metal is almost certainly STALE —\n"
+                "[DEFERRED]   build the GpuBenchShaders target too (plain `cmake --build\n"
+                "[DEFERRED]   <dir>` does it; `--target GpuBench` does NOT).\n",
+                [n UTF8String]);
+            std::exit(4);
+        }
+        return f;
+    };
     auto makeFsPso = [&](NSString *fn, MTLPixelFormat fmt) -> id<MTLRenderPipelineState> {
         MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
-        p.vertexFunction = [lib newFunctionWithName:@"vs_fullscreen"];
-        p.fragmentFunction = [lib newFunctionWithName:fn];
+        p.vertexFunction = fn_(@"vs_fullscreen");
+        p.fragmentFunction = fn_(fn);
         p.colorAttachments[0].pixelFormat = fmt;
         NSError *e = nil;
         id<MTLRenderPipelineState> s = [dev newRenderPipelineStateWithDescriptor:p error:&e];
@@ -337,8 +363,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLRenderPipelineState> psoFlare;
     {
         MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
-        p.vertexFunction = [lib newFunctionWithName:@"vs_flare"];
-        p.fragmentFunction = [lib newFunctionWithName:@"fs_flare"];
+        p.vertexFunction = fn_(@"vs_flare");
+        p.fragmentFunction = fn_(@"fs_flare");
         p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
         p.colorAttachments[0].blendingEnabled = YES;
         p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
@@ -352,13 +378,32 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         if (!psoFlare) { std::fprintf(stderr, "[DEFERRED] flare pso: %s\n",
                                       [[e localizedDescription] UTF8String]); return false; }
     }
+    // Volumetric cones: ADDITIVE into the HDR target before bloom, which is
+    // where the CPU composites them (VolCompositeAdd into g_hdrBuf, unclamped).
+    id<MTLRenderPipelineState> psoCones;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_fullscreen");
+        p.fragmentFunction = fn_(@"fs_cones");
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoCones = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoCones) { std::fprintf(stderr, "[DEFERRED] cone pso: %s\n",
+                                      [[e localizedDescription] UTF8String]); return false; }
+    }
     id<MTLRenderPipelineState> psoBloomBright = makeFsPso(@"fs_bloom_bright", MTLPixelFormatRGBA16Float);
     id<MTLRenderPipelineState> psoBloomBlur   = makeFsPso(@"fs_bloom_blur",   MTLPixelFormatRGBA16Float);
     id<MTLRenderPipelineState> psoBloomAdd;
     {
         MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
-        p.vertexFunction = [lib newFunctionWithName:@"vs_fullscreen"];
-        p.fragmentFunction = [lib newFunctionWithName:@"fs_bloom_add"];
+        p.vertexFunction = fn_(@"vs_fullscreen");
+        p.fragmentFunction = fn_(@"fs_bloom_add");
         p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
         p.colorAttachments[0].blendingEnabled = YES;
         p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
@@ -627,6 +672,26 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     fu.specularFactor = 1.0f;
     fu.lightRangeScale = opt.lightRangeScale;
     fu.vizLight = opt.vizLight;
+
+    // ---- volumetric cone constants (DeferredVolumetric.cpp:1797-1802) -------
+    //   density = cone_strength * 1e-3, and under --hdr (which greets runs)
+    //   with --no-hdr_cone_softknee (the default) it is scaled by
+    //   hdr_glow_scale. greets' cone_strength is 1.2 from GreetsDisco.cpp,
+    //   NOT the global 0.05 default.
+    // The light colour needs no conversion: the CPU's cone adds
+    // w * (O->L.rgb * ISize) into a 0..255 HDR buffer, this arm's GpuLight
+    // colour is (O->L.rgb/255 * ISize) into a 0..1 HDR buffer, so the same
+    // `density` lands the same relative brightness.
+    ConeUniforms coneU{};
+    coneU.density   = opt.coneStrength * 0.001f * opt.hdrGlowScale;
+    coneU.nSamples  = float(opt.volNSamples);
+    // The CPU's fade window floor is "12 z-buffer quanta" — a z16 staircase
+    // remedy. This arm's depth is float, so carry a small absolute floor in
+    // the same world-unit ballpark (12 * FZP*1.1/0xFF00) instead of pretending
+    // to a quantum that does not exist here.
+    coneU.fadeFloor = 12.0f * (scene.camera.farZ * 1.1f) / 65280.0f;
+    int nSpotLights = 0;
+    for (const auto &l : scene.lights) if (l.isSpot) ++nSpotLights;
     // clipPlane stays all-zero (disabled) for the main view; the reflection
     // passes carry their own FrameUniforms copy with the mirror plane set.
     fu.mirrorCount = uint32_t(nMirrors);
@@ -713,6 +778,39 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLBuffer> lightBuf = [dev newBufferWithBytes:lights.data()
                                              length:lights.size() * sizeof(GpuLight)
                                             options:MTLResourceStorageModeShared];
+    // Flare list. One draw per flaring omni (<= 10 here) rather than instancing:
+    // each flare has its own generated texture, and 10 draws is not a cost worth
+    // an argument-buffer for.
+    struct FlareInst { float wpos[3]; float worldHalf; int tex; };
+    std::vector<FlareInst> flares;
+    // THE FROZEN-MECH-OMNI BUG (reported 2026-08-08: "mech omnis are staying in
+    // place"). This list used to be built ONCE here, outside the frame loop, and
+    // nothing rewrote it — so the flare SPRITES stayed at their load-time world
+    // positions forever while everything else animated. That is exactly what a
+    // viewer sees as "the mech omnis don't move": §6.2b established that the
+    // reference's bright blue-white pools ARE the flare sprites, not omni
+    // surface lighting, so a frozen sprite list freezes the visible light even
+    // though the GpuLight buffer underneath was being refreshed correctly every
+    // frame. Rebuilding it per frame is now part of refreshLightBuffer's
+    // contract rather than a separate step someone can forget again.
+    auto rebuildFlares = [&]() {
+        flares.clear();
+        for (const auto &L : scene.lights) {
+            if (L.flareTexIndex < 0 || L.flareSize <= 0.0f) continue;
+            if (!std::isfinite(L.pos[0])) continue;
+            FlareInst fi{};
+            for (int c = 0; c < 3; ++c) fi.wpos[c] = L.pos[c];
+            // Half-extent in px = 2 * ImageSize * perspX * flareSize / z; fold
+            // the z-independent part here, divide by view z at draw time.
+            // perspX is re-read each rebuild because the authored FOV spline can
+            // change it (greets' has one key, but a posed arm's does not have to).
+            fi.worldHalf = 2.0f * scene.imageSize * scene.camera.perspX * L.flareSize;
+            fi.tex = L.flareTexIndex;
+            flares.push_back(fi);
+        }
+    };
+    rebuildFlares();
+
     // Per-frame light refresh for the interactive window: the mech omnis ride the
     // hierarchy and the 10 disco spots rotate, so position/direction/intensity and
     // the spot shadow basis all change every tick. Cube/map SLOT assignment does
@@ -740,26 +838,13 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             g.cosOuter = L.cosOuter;
             g.sRow0[3] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f);
         }
+        // The flare sprite list rides the SAME per-frame refresh, so a light
+        // that moves cannot leave its visible burst behind. See rebuildFlares.
+        rebuildFlares();
     };
-
-    // Flare list. One draw per flaring omni (<= 10 here) rather than instancing:
-    // each flare has its own generated texture, and 10 draws is not a cost worth
-    // an argument-buffer for.
-    struct FlareInst { float wpos[3]; float worldHalf; int tex; };
-    std::vector<FlareInst> flares;
-    for (const auto &L : scene.lights) {
-        if (L.flareTexIndex < 0 || L.flareSize <= 0.0f) continue;
-        if (!std::isfinite(L.pos[0])) continue;
-        FlareInst fi{};
-        for (int c = 0; c < 3; ++c) fi.wpos[c] = L.pos[c];
-        // Half-extent in px = 2 * ImageSize * perspX * flareSize / z; fold the
-        // z-independent part here, divide by view z at draw time.
-        fi.worldHalf = 2.0f * scene.imageSize * scene.camera.perspX * L.flareSize;
-        fi.tex = L.flareTexIndex;
-        flares.push_back(fi);
-    }
     std::fprintf(stderr, "[DEFERRED] flare sprites: %zu (ImageSize=%.3f, additive into HDR)\n",
                  flares.size(), scene.imageSize);
+
 
     float sh[9][4];
     ProjectSkyGradientToSH(scene.skyZenith, scene.skyNadir, sh);
@@ -1362,11 +1447,14 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     // One deferred G-buffer fill into an arbitrary target set with an
     // arbitrary camera (FrameUniforms). Shared by the main view and the
     // per-mirror reflection views.
+    // `mirroredBasis` = this pass's view matrix has determinant -1 (a reflection).
+    // See the cull-mode comment below: it MUST invert the cull sense.
     auto encodeGBuffer = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
                              id<MTLTexture> tAlb, id<MTLTexture> tNrm,
                              id<MTLTexture> tPar, id<MTLTexture> tMir,
                              id<MTLTexture> tDep,
-                             void (^counterHook)(MTLRenderPassDescriptor *)) {
+                             void (^counterHook)(MTLRenderPassDescriptor *),
+                             bool mirroredBasis = false) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = tAlb;
         rp.colorAttachments[1].texture = tNrm;
@@ -1393,7 +1481,21 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // Metal calls FRONT-facing under its default clockwise winding.
         // Rendering both: CullBack drops the whole room (whole-frame luma
         // 115.68 -> 63.19), CullFront is pixel-identical to CullNone.
-        [enc setCullMode:opt.cull ? MTLCullModeFront : MTLCullModeNone];
+        //
+        // THE MIRROR BUG (reported 2026-08-08: "the gpu main mirror is missing
+        // most of the reflected geometry"). A reflection view matrix has
+        // determinant -1, so every triangle's SCREEN-SPACE WINDING reverses.
+        // CullFront — measured correct for the main camera — therefore rejects
+        // in a mirror exactly the geometry it keeps in the main view. This pass
+        // predates culling: the reflection code still carries the comment
+        // "det -1, so a left-handed basis; harmless while raster culling is
+        // off", and culling was turned ON in 69bf0f0 without revisiting it. A
+        // stale invariant, not a new mistake — and the reason the mirror lost
+        // most of its content while still rendering something (the panels'
+        // own emissive and whatever happened to face the other way).
+        [enc setCullMode:opt.cull ? (mirroredBasis ? MTLCullModeBack
+                                                   : MTLCullModeFront)
+                                  : MTLCullModeNone];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentSamplerState:samp atIndex:0];
@@ -1508,7 +1610,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                     rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
                 };
             }
-            encodeGBuffer(cb, fum, mAlbedo, mNormal, mParams, mMirror, mDepth, hook);
+            encodeGBuffer(cb, fum, mAlbedo, mNormal, mParams, mMirror, mDepth, hook,
+                          /*mirroredBasis=*/true);
             {   // reflection lighting into reflHdr[i]
                 MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
                 rp.colorAttachments[0].texture = reflHdr[size_t(i)];
@@ -1615,6 +1718,30 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         if (!viz && opt.stages >= 2)
             encodeFlares(cb, fu, hdrTex, gDepth, nullptr);
 
+        // --- pass 2b2: VOLUMETRIC SPOT CONES, additive into HDR ---
+        // RENDER.CPP:1231-1240 order: after the opaque/TBR draws, BEFORE
+        // DoF/bright/bloom/tonemap. So the shafts feed the bloom, as they do on
+        // the CPU — putting this after bloom would render visibly harder beams.
+        if (!viz && opt.stages >= 2 && opt.cones && coneU.density > 0.0f &&
+            nSpotLights > 0) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = hdrTex;
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:psoCones];
+            [enc setFragmentBytes:&fu length:sizeof(fu) atIndex:1];
+            [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+            [enc setFragmentBytes:&coneU length:sizeof(coneU) atIndex:4];
+            [enc setFragmentTexture:gDepth atIndex:3];
+            for (int i = 0; i < kMaxSpotMaps; ++i)
+                [enc setFragmentTexture:(i < int(spots.size()) ? spots[size_t(i)] : dummy2D)
+                                atIndex:NSUInteger(20 + i)];
+            [enc setFragmentSamplerState:shadowSamp atIndex:1];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+        }
+
         // --- pass 2c: bloom (bright-pass -> 4 blur taps -> additive upsample) ---
         if (!viz && opt.stages >= 3 && opt.bloom && opt.bloomIntensity > 0.0f) {
             BloomUniforms bu{};
@@ -1667,6 +1794,56 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         return cb;
     };
 
+    // ---- --anim_probe: the window's per-frame refresh, OFFSCREEN ------------
+    // Written because "mech omnis are staying in place" was reported from a
+    // window run and could not be reproduced offscreen: setting the pose AT LOAD
+    // moves everything, so the load path was innocent and the defect lived in
+    // the per-frame path — which nothing headless exercised.
+    //
+    // This runs the EXACT sequence the window loop runs (Reanimate, then
+    // refreshFrameUniforms / refreshBatchUniforms / refreshLightBuffer) and
+    // prints the GPU-FACING structures afterwards, not scene.* — the whole bug
+    // class here is "the CPU-side list updated but the thing the shader reads
+    // did not", and reading scene.* would have reported success.
+    if (opt.animProbe) {
+        LoadOptions lo = opt.loadOpt ? *opt.loadOpt : LoadOptions{};
+        lo.camPose.clear();          // same as the window: follow the spline
+        lo.verbose = false;
+        std::fprintf(stderr,
+            "[ANIMPROBE] the window's per-frame refresh, run offscreen. Values are read\n"
+            "[ANIMPROBE]   from the GPU-facing arrays (GpuLight / BatchUniforms / flare\n"
+            "[ANIMPROBE]   instances) AFTER the refresh, so a stale upload shows up here.\n");
+        for (float t : {float(opt.animProbeT[0]), float(opt.animProbeT[1])}) {
+            Reanimate(scene, lo, t);
+            refreshFrameUniforms();
+            refreshBatchUniforms();
+            refreshLightBuffer();
+            std::fprintf(stderr, "[ANIMPROBE] t=%.0f  cam=(%.2f,%.2f,%.2f)\n",
+                         t, fu.camSrc[0], fu.camSrc[1], fu.camSrc[2]);
+            for (size_t i = 0; i < lights.size(); ++i) {
+                if (lightOrigin[i] == std::string("fld") && i < 7) continue;
+                std::fprintf(stderr, "[ANIMPROBE]   light[%zu] %-10s pos=(%7.2f,%6.2f,%8.2f)\n",
+                             i, lightOrigin[i], lights[i].pos[0], lights[i].pos[1],
+                             lights[i].pos[2]);
+                if (i >= 12 && i < 20) { i = 19; }   // the ten spots are enough at three
+            }
+            for (size_t i = 0; i < flares.size(); ++i)
+                std::fprintf(stderr, "[ANIMPROBE]   flare[%zu] wpos=(%7.2f,%6.2f,%8.2f) half=%.3f\n",
+                             i, flares[i].wpos[0], flares[i].wpos[1], flares[i].wpos[2],
+                             flares[i].worldHalf);
+            // A mech batch: the geometry half of the same question.
+            for (size_t i = 0; i < scene.batches.size(); ++i) {
+                if (scene.batches[i].meshName.find("mech") == std::string::npos &&
+                    scene.batches[i].meshName.find("Mech") == std::string::npos) continue;
+                std::fprintf(stderr, "[ANIMPROBE]   batch[%zu] '%s' objPos=(%7.2f,%6.2f,%8.2f)\n",
+                             i, scene.batches[i].meshName.c_str(),
+                             bus[i].objPos[0], bus[i].objPos[1], bus[i].objPos[2]);
+                break;
+            }
+        }
+        return true;
+    }
+
     // ---- INTERACTIVE WINDOW ------------------------------------------------
     if (opt.interactive) {
         if (!opt.loadOpt) { std::fprintf(stderr, "[WINDOW] no LoadOptions\n"); return false; }
@@ -1687,8 +1864,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         id<MTLRenderPipelineState> psoHud;
         {
             MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
-            p.vertexFunction = [lib newFunctionWithName:@"vs_fullscreen"];
-            p.fragmentFunction = [lib newFunctionWithName:@"fs_hud"];
+            p.vertexFunction = fn_(@"vs_fullscreen");
+            p.fragmentFunction = fn_(@"fs_hud");
             p.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
             p.colorAttachments[0].blendingEnabled = YES;
             p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;

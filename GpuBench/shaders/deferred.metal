@@ -626,6 +626,232 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
 }
 
 // ---------------------------------------------------------------------------
+// VOLUMETRIC SPOT CONES — the disco beams in the air.
+//
+// Port of FDS/RENDER/DeferredVolumetric.cpp's Render_VolumetricCones_Tile, the
+// `segPath` branch (narrowCone: cosOuter > 0.985, which the disco's 7-degree
+// beams satisfy at cos 7 = 0.9925). It is a SCREEN-SPACE analytic integral
+// along the view ray, NOT cone geometry — the CPU draws no cone mesh either.
+// Additive into the HDR buffer BEFORE bloom and tonemap, which is where
+// RENDER.CPP:1231-1240 puts it (after the opaque/TBR draws, before
+// DoF/bright/bloom/tonemap), so the shafts feed the bloom as they do on the CPU.
+//
+// The distance attenuation is integrated EXACTLY, in closed form: the CPU's
+// integrand is the inverse-square kernel 1/(rr^2 d(z)^2 + 0.05) written as
+// 1/(alpha z^2 + beta z + gamma), whose antiderivative is
+// (2/sqrt(disc)) * atan((2 alpha z + beta)/sqrt(disc)). Each of 8 segments gets
+// its own exact sub-integral, weighted by the cone smoothstep, the surface fade
+// and ONE SHADOW TAP at the segment midpoint. The per-SEGMENT (not per-chord)
+// tap is the CPU's own fix for beams shining through walls, and it is why the
+// disco's 256^2 per-spot maps have to exist for this pass and not only for
+// surface lighting.
+//
+// Deliberate deviations from the CPU, all stated:
+//  - atan difference taken directly instead of through the
+//    atan(u)-atan(v) = atan((u-v)/(1+uv)) identity. That identity exists on the
+//    CPU to condition an _mm256_rsqrt_ps + one Newton step; Metal's atan needs
+//    no such help.
+//  - no tile binning / spot_cone_cull. The GPU evaluates every spot for every
+//    pixel and lets the quadratic reject — MORE work than the CPU does, in
+//    keeping with the rest of this arm.
+//  - turbulence (cone_turbulence) and the stochastic ray-march fallback
+//    (--no-vol_cone_analytic) are not ported; both default OFF.
+//  - the surface-fade window's "12 z-buffer quanta" floor is a z16 staircase
+//    remedy. This arm has a float depth buffer, so the floor is carried as a
+//    small absolute constant rather than derived from a quantum that does not
+//    exist here.
+// ---------------------------------------------------------------------------
+
+struct ConeUniforms {
+    // cone_strength * 1e-3, already scaled by hdr_glow_scale (HDR path).
+    float  density;
+    float  nSamples;      // vol_n_samples — the brightness calibration, N x mean
+    float  fadeFloor;     // absolute floor on the surface-fade window
+    float  pad;
+};
+
+// One spot-map tap at a world point. Same map, same projection and the same
+// reversed-Z encoding as ShadowFactor's spot branch; the bias is the CPU's
+// constant-ish in-air bias rather than the surface path's slope-scaled one,
+// because an in-air sample has no surface normal to scale by.
+static inline float ConeShadowAt(constant GpuLight &Li, float3 pw,
+                                 array<depth2d<float>, 16> spotMaps,
+                                 sampler shadowSamp)
+{
+    if (Li.shadowIndex < 0) return 1.0f;
+    const float sn = Li.shadowNear, sf = Li.shadowFar;
+    const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+    const float3 rel = pw - Li.pos;
+    const float3 vp = rowmul(Li.sRow0.xyz, Li.sRow1.xyz, Li.sRow2.xyz, rel);
+    if (vp.z <= sn) return 1.0f;
+    const float ref = dza + dzb / vp.z;
+    const float2 ndc = vp.xy * Li.sRow0.w / vp.z;
+    if (any(abs(ndc) > 1.0f)) return 1.0f;   // outside the map = unoccluded
+    const float2 uv = float2(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y);
+    return spotMaps[Li.shadowIndex].sample_compare(shadowSamp, uv, ref + 0.0015f);
+}
+
+fragment float4 fs_cones(FsQuadOut in [[stage_in]],
+                         constant FrameUniforms &u   [[buffer(1)]],
+                         constant GpuLight      *L   [[buffer(2)]],
+                         constant ConeUniforms  &cu  [[buffer(4)]],
+                         depth2d<float>    gDepth    [[texture(3)]],
+                         array<depth2d<float>,   16> spotMaps [[texture(20)]],
+                         sampler           shadowSamp [[sampler(1)]])
+{
+    const uint2 px = uint2(in.position.xy);
+    // The view ray at this pixel, unnormalised, with z = 1 — exactly the CPU's
+    // V = (X, Y, 1) with X = (px - CntrEX) * invFOVX.
+    const float3 V = float3((in.ndc.x - u.ox) * u.invSx,
+                            (in.ndc.y - u.oy) * u.invSy, 1.0f);
+
+    // Where the ray stops: the nearest surface, or the far plane for sky
+    // pixels (the CPU uses its fog cutoff FZP there — greets' FZP is the far
+    // plane, so this is the same number).
+    const float zEnc = gDepth.read(px);
+    const float zMax = (zEnc > 0.0f) ? (u.dzb / max(zEnc - u.dza, 1e-9f)) : u.farZ;
+    const float zMin = 0.05f;
+    if (zMax <= zMin) return float4(0.0f);
+
+    const float uV = dot(V, V);
+    float3 acc = 0.0f;
+
+    for (uint i = 0; i < u.numLights; ++i) {
+        constant GpuLight &Li = L[i];
+        if (Li.isSpot == 0) continue;
+
+        // Apex and axis into view space (the axis is a direction: rotate only).
+        const float3 P = rowmul(u.camRow0, u.camRow1, u.camRow2, Li.pos - u.camSrc);
+        const float3 D = rowmul(u.camRow0, u.camRow1, u.camRow2, Li.dir);
+
+        const float cosO = Li.cosOuter, cosI = Li.cosInner;
+        const float c2 = cosO * cosO;
+        const float range = Li.range * u.lightRangeScale;
+        const float r2 = range * range;
+
+        const float DV = dot(D, V), VP = dot(V, P), PP = dot(P, P), DP = dot(D, P);
+
+        // Range sphere first — it bounds every other interval.
+        const float sphereDisc = VP * VP - uV * (PP - r2);
+        if (sphereDisc < 0.0f) continue;
+        const float sphereSq = sqrt(sphereDisc);
+        const float invUV = 1.0f / uV;
+        const float zSphLo = (VP - sphereSq) * invUV;
+        const float zSphHi = (VP + sphereSq) * invUV;
+
+        // Ray vs infinite cone: (D.(Q-P))^2 >= c^2 |Q-P|^2 with Q = z V gives a
+        // quadratic in z. a < 0 => the roots bracket the inside; a > 0 => a
+        // half-space selection by sign(D.V); a ~ 0 => degenerate, reject.
+        const float a  = DV * DV - c2 * uV;
+        const float b  = 2.0f * (c2 * VP - DV * DP);
+        const float cq = DP * DP - c2 * PP;
+        float zLo, zHi;
+        if (a < -1e-8f) {
+            const float disc = b * b - 4.0f * a * cq;
+            if (disc < 0.0f) continue;
+            const float sq = sqrt(disc), inv2a = 1.0f / (2.0f * a);
+            const float r1 = (-b - sq) * inv2a, r2_ = (-b + sq) * inv2a;
+            zLo = min(r1, r2_); zHi = max(r1, r2_);
+        } else if (a > 1e-8f) {
+            const float disc = b * b - 4.0f * a * cq;
+            if (disc < 0.0f) { zLo = zMin; zHi = zMax; }
+            else {
+                const float sq = sqrt(disc), inv2a = 1.0f / (2.0f * a);
+                const float ra = (-b - sq) * inv2a, rb = (-b + sq) * inv2a;
+                const float r1Q = min(ra, rb), r2Q = max(ra, rb);
+                if      (DV >  1e-6f) { zLo = max(r2Q, zMin); zHi = zMax; }
+                else if (DV < -1e-6f) { zLo = zMin; zHi = min(r1Q, zMax); }
+                else continue;
+                if (zHi <= zLo) continue;
+            }
+        } else continue;
+
+        zLo = max(zLo, zSphLo);
+        zHi = min(zHi, zSphHi);
+        zLo = max(zLo, zMin);
+        if (zHi <= zLo) continue;
+        if (zLo >= zMax) continue;
+        // Clamp AT the surface. Without this the analytic path integrates the
+        // chord behind the floor and leans on the midpoint fade to approximate
+        // the cut, which is the CPU's 'grazing-angle fur on beams' bug.
+        zHi = min(zHi, zMax);
+        // Forward half of the cone only (the mirror nappe is not a beam).
+        if (abs(DV) > 1e-6f) {
+            const float zPlane = DP / DV;
+            if (DV > 0.0f) zLo = max(zLo, zPlane); else zHi = min(zHi, zPlane);
+            if (zHi <= zLo) continue;
+        }
+
+        // Exact distance-attenuation integral: 1/(alpha z^2 + beta z + gamma).
+        const float rr = 1.0f / max(range, 1e-6f);
+        const float rr2 = rr * rr;
+        const float alpha = rr2 * uV;
+        const float beta  = -2.0f * rr2 * VP;
+        const float gamma = rr2 * PP + 0.05f;
+        const float disc  = 4.0f * alpha * gamma - beta * beta;
+        if (disc <= 1e-20f) continue;         // the CPU's degenerate reject
+        const float invD = rsqrt(disc);
+
+        // 8 segments, each an exact sub-integral weighted by cone x fade x shadow.
+        constexpr int SEG = 8;
+        const float segDz = (zHi - zLo) / float(SEG);
+        // nSamp = 16 for a narrow cone, which is what the CPU's fade window
+        // derives its step from.
+        const float fadeW = max((zHi - zLo) * (1.0f / 16.0f), cu.fadeFloor);
+        const float invDz = 1.0f / fadeW;
+        const float invCIO = 1.0f / max(cosI - cosO, 1e-6f);
+
+        float sum = 0.0f;
+        float uPrev = (2.0f * alpha * zLo + beta) * invD;
+        float aPrev = atan(uPrev);
+        for (int seg = 1; seg <= SEG; ++seg) {
+            const float zk = zLo + float(seg) * segDz;
+            const float ak = atan((2.0f * alpha * zk + beta) * invD);
+            const float zm = zLo + (float(seg) - 0.5f) * segDz;
+
+            // cone smoothstep at the segment midpoint
+            const float3 W = zm * V - P;
+            const float cosT = dot(D, W) * rsqrt(max(dot(W, W), 1e-12f));
+            float cone;
+            if (cosT >= cosI) cone = 1.0f;
+            else {
+                const float t = saturate((cosT - cosO) * invCIO);
+                cone = t * t * (3.0f - 2.0f * t);
+            }
+            if (cone > 0.0f) {
+                const float sfade = saturate((zMax - zm) * invDz);
+                // ONE shadow tap per segment. This is the whole reason the disco
+                // beams are occluded by the columns instead of shining through.
+                const float3 Q = zm * V;
+                const float3 pw = u.camSrc + u.camRow0 * Q.x + u.camRow1 * Q.y
+                                           + u.camRow2 * Q.z;
+                const float sh = (u.shadowsOn != 0)
+                    ? ConeShadowAt(Li, pw, spotMaps, shadowSamp) : 1.0f;
+                sum += (ak - aPrev) * cone * sfade * sh;
+            }
+            aPrev = ak;
+        }
+        const float integral = 2.0f * invD * sum;
+
+        // Midpoint near-edge softness: the ray-march multiplies the integrand by
+        // (1 - rr d)^2, so the analytic path reintroduces it once at the chord
+        // midpoint or the halo would end at a hard sphere boundary.
+        const float zMid = 0.5f * (zLo + zHi);
+        const float3 Wm = zMid * V - P;
+        const float distM = length(Wm);
+        float soft = max(0.0f, 1.0f - rr * distM);
+        soft *= soft;
+
+        // "N x mean" — the same brightness calibration cone_strength is tuned
+        // against on the ray-march path. coneAtten/surfaceFade at the midpoint
+        // are 1 here: the segmented path already folded them in per segment.
+        const float vAcc = (integral / max(zHi - zLo, 1e-6f)) * cu.nSamples * soft;
+        acc += (vAcc * cu.density) * Li.color;
+    }
+    return float4(max(acc, 0.0f), 0.0f);
+}
+
+// ---------------------------------------------------------------------------
 // tonemap
 // ---------------------------------------------------------------------------
 

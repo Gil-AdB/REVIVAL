@@ -75,12 +75,28 @@ struct DeferredOptions {
     bool  bloom = true;
     float bloomThreshold = 200.0f / 255.0f;
     float bloomIntensity = 2.0f;
+    // VOLUMETRIC SPOT CONES — the disco beams in the air. PARITY: greets turns
+    // them on per-light (GreetsDisco.cpp sets Omni_ForceVolCone on all ten
+    // spots, which bypasses the scene-wide draw_cones default of 0) and raises
+    // cone_strength from the global 0.05 to 1.2, because 0.05 is city-scale and
+    // invisible over greets' ~10-unit beams. Under --hdr the CPU scales the
+    // density by hdr_glow_scale (0.25), which this arm reproduces.
+    bool  cones = true;
+    float coneStrength = 1.2f;      // GreetsDisco.cpp:434-441
+    float hdrGlowScale = 0.25f;     // FeatureFlags.def:337
+    int   volNSamples = 4;          // FeatureFlags.def:256 — the N in "N x mean"
     // INTERACTIVE WINDOW. Opens a real SDL2 window with a CAMetalLayer, animates
     // the scene through FDS's own Animate_Objects, and overlays live per-pass GPU
     // ms. Never enabled unless asked for -- offscreen stays the default so a
     // measurement run never pops a window.
     bool  interactive = false;
     int   winW = 1280, winH = 720;
+    // OFFSCREEN regression probe for the window's PER-FRAME refresh path. Runs
+    // Reanimate + the three refresh lambdas at two demo-t values and prints the
+    // GPU-FACING arrays, so "the CPU list updated but the upload did not" is
+    // measurable without a window. See the block in Deferred.mm.
+    bool  animProbe = false;
+    int   animProbeT[2] = {5743, 5877};
     // Demo-timer rate in centiseconds per second. g_FrameTime is a 100 Hz clock
     // (RENDER.CPP), so 100 is real time.
     float timeScale = 100.0f;
