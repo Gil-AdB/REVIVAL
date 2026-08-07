@@ -78,6 +78,11 @@ struct Batch {
     int      normalTexIndex = -1;
     int      roughTexIndex = -1;
     int      heightTexIndex = -1;
+    int      aoTexIndex = -1;      // Material::AoMap (RVSM 'ao' role)
+    int      metalTexIndex = -1;   // Material::MetallicMap (RVSM 'metallic')
+    // Material::AoStrength (editor 'aoStrength'), multiplied by the global
+    // --ao_map_strength (default 2.0) at the point of use, as the CPU does.
+    float    aoStrength = 1.0f;
     float    baseColor[3] = {1, 1, 1};
     float    luminosity = 0.0f, diffuse = 1.0f, specular = 0.0f;
     uint32_t glossiness = 0;
@@ -193,6 +198,11 @@ struct LoadOptions {
     // DEFAULT greets run — reproducing them is parity. ON here for the same
     // reason stoneTex is.
     bool        disco = true;
+    // Apply the LWO/FLD-authored PBR map SETS (Surf_RevMaps / RVSM). DEMO does
+    // this at scene init via MaterialImport_ApplyRevMaps; the registry it reads
+    // is FDS-side, so this arm replays it. ON = parity (the reference applies
+    // 32 maps). --no-revmaps renders every surface from its legacy FLD JPG.
+    bool        revMaps = true;
     // Identify the greets mirror panels (teleporter / screen 3 / screen 4) so
     // the deferred arm can render + composite first-order reflections.
     // greets_mirror defaults ON in DEMO, so ON here is parity; --no-mirror

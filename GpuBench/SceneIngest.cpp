@@ -317,6 +317,86 @@ float FaceHandedness(const Face &F) {
     return (du1*dv2 - du2*dv1 >= 0.0f) ? 1.0f : -1.0f;
 }
 
+// Replicates MaterialImport_ApplyRevMaps (DEMO/MaterialImport.cpp:639-679) —
+// the LWO/FLD-authored PBR map SETS. LoadFLD does not apply these: FLD_MAT.CPP
+// only RECORDS one RevMapAssignment per Surf_RevMaps material into a
+// process-global registry, and DEMO reads it back at scene init. The registry
+// accessors (FldRevMapCount / FldRevMapAt, FLD/FLD_READ.H:227-229) are
+// FDS-side, so this arm can replay the same assignment without an engine edit.
+//
+// MEASURED consequence of NOT doing it: the reference applies 32 maps
+// ("[MAT-REVMAP] greets: 32 LWO/FLD-authored map(s) applied", read from a real
+// run log) and this arm applied ZERO — so every RVSM surface rendered from its
+// legacy FLD JPG with no normal/roughness/metallic. The visible symptom at
+// t=2000 was the 'amudim' columns reading BRIGHT ORANGE where the reference has
+// dark metal: their metallic map kills diffuse on the CPU, and with no map at
+// all the GPU showed raw albedo.
+//
+// Role order is DEMO's (albedo first — it is the slot the others are compared
+// against; then alphabetical) and LAST WINS, so a surface carrying both the
+// stone-tex override and an RVSM set ends up with the RVSM maps, exactly as in
+// DEMO where ApplyRevMaps runs after the stone-tex repoint.
+//
+// Deliberately NOT replicated: the resample of aux maps to the albedo's
+// dimensions. That exists because the CPU kernel addresses every aux map with
+// the ALBEDO's swizzled texel index, so a differently-sized map would read
+// scrambled. This arm samples each map by UV, so mismatched sizes are correct
+// as-is — and skipping the resample keeps the authored texels. Same class of
+// meaning-preserving substitution as never calling Generate_Mipmaps.
+int ApplyRevMaps(::Scene &sc, bool verbose) {
+    static const char *const kRoles[] = {"albedo", "ao", "height",
+                                         "metallic", "normal", "roughness"};
+    auto exists = [](const std::string &p) {
+        if (FILE *f = std::fopen(p.c_str(), "rb")) { std::fclose(f); return true; }
+        return false;
+    };
+    int applied = 0;
+    const int n = FldRevMapCount();
+    for (int i = 0; i < n; ++i) {
+        const RevMapAssignment *e = FldRevMapAt(i);
+        if (!e || e->scene != &sc || !e->matName || !e->set || !*e->set) continue;
+        const std::string dir = std::string("TEXTURES/PBR/") + e->set;
+        // Every material drawing this surface (exact name; this arm has no
+        // ::mirUV clones — the handedness split rides the vertex instead).
+        std::vector<Material *> mats;
+        for (Material *M = MatLib; M; M = M->Next)
+            if (M->RelScene == &sc && M->Name && !std::strcmp(M->Name, e->matName))
+                mats.push_back(M);
+        if (mats.empty()) continue;
+        for (const char *role : kRoles) {
+            const std::string path = dir + "/" + role + ".png";
+            if (!exists(path)) continue;
+            ::Texture *t = MakeSidecar(path.c_str());
+            for (Material *M : mats) {
+                if      (!std::strcmp(role, "albedo"))    { M->Txtr = t; M->Flags &= ~(DWord)Mat_AoInAlpha; }
+                else if (!std::strcmp(role, "normal"))    M->NormalMap    = t;
+                else if (!std::strcmp(role, "height"))    M->HeightMap    = t;
+                else if (!std::strcmp(role, "roughness")) {
+                    M->RoughnessMap = t;
+                    // Dielectric specular seed, MaterialImport.cpp:266-281:
+                    // only when the author left Specular at 0. Glossiness is
+                    // seeded from the map's MEAN roughness there; the mean
+                    // needs the decoded pixels, which are not loaded yet at
+                    // this point, so the gloss half is left to the authored
+                    // value and the divergence is stated rather than faked.
+                    if (M->Specular <= 0.0f) M->Specular = 0.08f;
+                }
+                else if (!std::strcmp(role, "ao"))        M->AoMap        = t;
+                else if (!std::strcmp(role, "metallic"))  M->MetallicMap  = t;
+            }
+            ++applied;
+            if (verbose)
+                std::fprintf(stderr, "[INGEST] revmap '%s' <- %s %s (%zu material(s))\n",
+                             e->matName, role, path.c_str(), mats.size());
+        }
+    }
+    if (verbose)
+        std::fprintf(stderr, "[INGEST] revmap: %d LWO/FLD-authored map(s) applied "
+                     "from %d registry entr(ies) -- parity with "
+                     "MaterialImport_ApplyRevMaps\n", applied, n);
+    return applied;
+}
+
 // Returns the number of materials overridden.
 int ApplyStoneTex(Material *M, bool verbose) {
     if (!M || !M->Name || !M->Txtr) return 0;
@@ -819,6 +899,9 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 "reviewed surface — do NOT run a displacement arm on this.\n");
     }
 
+    // ---- 4b2. RVSM authored PBR map sets (AFTER stone-tex, as DEMO does) ----
+    if (opt.revMaps) ApplyRevMaps(sc, opt.verbose);
+
     // ---- 4c. mirror panel planes --------------------------------------------
     // The greets first-order mirror set, by the SAME explicit designation
     // Initialize_Greets uses (GREETS.CPP:2880-2897): 'teleporter' by material
@@ -942,6 +1025,9 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 b.normalTexIndex = acquireTexture(M->NormalMap);
                 b.roughTexIndex  = acquireTexture(M->RoughnessMap);
                 b.heightTexIndex = acquireTexture(M->HeightMap);
+                b.aoTexIndex     = acquireTexture(M->AoMap);
+                b.metalTexIndex  = acquireTexture(M->MetallicMap);
+                b.aoStrength     = M->AoStrength;
                 b.materialName = M->Name ? M->Name
                                : (M->Txtr && M->Txtr->FileName ? M->Txtr->FileName : "?");
                 // Shadow-caster filter, byte-for-byte the CPU bake's predicate

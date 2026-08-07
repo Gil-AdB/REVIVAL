@@ -285,7 +285,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     gpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     gpd.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
     gpd.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    gpd.colorAttachments[3].pixelFormat = MTLPixelFormatR8Uint;   // mirror id
+    gpd.colorAttachments[3].pixelFormat = MTLPixelFormatRG8Uint;  // mirror id, metalness
     gpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     id<MTLRenderPipelineState> psoGBuf = [dev newRenderPipelineStateWithDescriptor:gpd error:&err];
     if (!psoGBuf) { std::fprintf(stderr, "[DEFERRED] gbuffer pso: %s\n", [[err localizedDescription] UTF8String]); return false; }
@@ -434,7 +434,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLTexture> gAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> gNormal = mkTarget(MTLPixelFormatRG16Snorm,   MTLStorageModePrivate);
     id<MTLTexture> gParams = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
-    id<MTLTexture> gMirror = mkTarget(MTLPixelFormatR8Uint,      MTLStorageModePrivate);
+    id<MTLTexture> gMirror = mkTarget(MTLPixelFormatRG8Uint,     MTLStorageModePrivate);
     id<MTLTexture> gDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
     id<MTLTexture> hdrTex  = mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate);
     id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
@@ -459,7 +459,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         mAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
         mNormal = mkTarget(MTLPixelFormatRG16Snorm,    MTLStorageModePrivate);
         mParams = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
-        mMirror = mkTarget(MTLPixelFormatR8Uint,       MTLStorageModePrivate);
+        mMirror = mkTarget(MTLPixelFormatRG8Uint,      MTLStorageModePrivate);
         mDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
     }
     id<MTLTexture> dummyRefl;
@@ -782,6 +782,12 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         u.mapFlags[2] = b.aoInAlpha ? 1.0f : 0.0f;
         u.mapFlags[3] = b.parallaxScale;
         u.misc[0] = float(b.mirrorIndex);
+        u.misc[1] = (b.aoTexIndex >= 0) ? 1.0f : 0.0f;
+        u.misc[2] = (b.metalTexIndex >= 0) ? 1.0f : 0.0f;
+        // AO strength, the CPU's product: --ao_map_strength (2.0) x
+        // Material::AoStrength, applied as ao' = 1 - k*(1-ao) on the AMBIENT
+        // only (DeferredSurfaceKernel.cpp:1871-1878 + FeatureFlags.def:137).
+        u.misc[3] = 2.0f * b.aoStrength;
     }
     };
     refreshBatchUniforms();
@@ -848,9 +854,13 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 id<MTLTexture> a = (b.textureIndex   >= 0) ? texes[size_t(b.textureIndex)]   : texes[0];
                 id<MTLTexture> n = (b.normalTexIndex >= 0) ? texes[size_t(b.normalTexIndex)] : texes[0];
                 id<MTLTexture> r = (b.roughTexIndex  >= 0) ? texes[size_t(b.roughTexIndex)]  : texes[0];
+                id<MTLTexture> ao = (b.aoTexIndex    >= 0) ? texes[size_t(b.aoTexIndex)]     : texes[0];
+                id<MTLTexture> mt = (b.metalTexIndex >= 0) ? texes[size_t(b.metalTexIndex)]  : texes[0];
                 [enc setFragmentTexture:a atIndex:0];
                 [enc setFragmentTexture:n atIndex:1];
                 [enc setFragmentTexture:r atIndex:2];
+                [enc setFragmentTexture:ao atIndex:3];
+                [enc setFragmentTexture:mt atIndex:4];
             }
             [enc drawPrimitives:MTLPrimitiveTypeTriangle
                     vertexStart:NSUInteger(b.firstVertex)

@@ -59,7 +59,9 @@ struct BatchUniforms {
     float4 baseColor;      // .rgb authored base colour, .w = has-albedo flag
     float4 matParams;      // diffuse, specular, lobe roughness, luminosity
     float4 mapFlags;       // hasNormal, hasRough, aoInAlpha, parallaxScale
-    float4 misc;           // .x = mirror panel index (1-based; 0 = none)
+    // .x mirror panel index (1-based; 0 = none), .y hasAoMap, .z hasMetalMap,
+    // .w AO strength (--ao_map_strength x Material::AoStrength)
+    float4 misc;
 };
 
 struct GpuLight {
@@ -124,10 +126,12 @@ struct GBufVertexOut {
 };
 
 struct GBufOut {
-    float4 albedo [[color(0)]];   // rgb albedo, a = baked AO (Mat_AoInAlpha) else 1
+    // rgb albedo, a = AO already reduced by the strength dial (see fs_gbuffer)
+    float4 albedo [[color(0)]];
     float2 normal [[color(1)]];   // oct-packed VIEW-space shading normal
     float4 params [[color(2)]];   // diffuse, specular, lobe rough, luminosity/4
-    uint   mirror [[color(3)]];   // mirror panel id (1-based; 0 = none)
+    // .x mirror panel id (1-based; 0 = none), .y metalness x 255
+    uint2  mirror [[color(3)]];
 };
 
 vertex GBufVertexOut vs_gbuffer(VertexIn in [[stage_in]],
@@ -160,6 +164,8 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
                             texture2d<float> albedoTex [[texture(0)]],
                             texture2d<float> normalTex [[texture(1)]],
                             texture2d<float> roughTex  [[texture(2)]],
+                            texture2d<float> aoTex     [[texture(3)]],
+                            texture2d<float> metalTex  [[texture(4)]],
                             sampler samp [[sampler(0)]])
 {
     // Reflection pass: clip everything at/behind the mirror plane — the same
@@ -171,9 +177,19 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
 
     float4 alb = float4(b.baseColor.rgb, 1.0f);
     if (b.baseColor.w > 0.5f) alb = albedoTex.sample(samp, in.uv);
-    // AO lives in the albedo's alpha only when the material says so; otherwise
-    // alpha is either cutout or meaningless, so force 1.
-    const float ao = (b.mapFlags.z > 0.5f) ? alb.a : 1.0f;
+    // AO, in the CPU's priority order (DeferredSurfaceKernel.cpp:1848-1918):
+    //   1. Mat_AoInAlpha — baked into the albedo's alpha (free);
+    //   2. Material::AoMap — a separate map (the RVSM 'ao' role);
+    //   3. neither -> fully open.
+    // Then the STRENGTH dial, which the CPU applies as
+    //   ao' = 1 - ao_map_strength * Material::AoStrength * (1 - ao)
+    // with ao_map_strength defaulting to 2.0 — i.e. occlusion is EXAGGERATED
+    // 2x by default. Folding it here (rather than at the point of use) keeps
+    // the G-buffer's alpha meaning "the occlusion the frame will apply".
+    float aoRaw = 1.0f;
+    if      (b.mapFlags.z > 0.5f) aoRaw = alb.a;
+    else if (b.misc.y     > 0.5f) aoRaw = aoTex.sample(samp, in.uv).r;
+    const float ao = saturate(1.0f - b.misc.w * (1.0f - aoRaw));
 
     float3 n = normalize(in.viewNormal);
     if (b.mapFlags.x > 0.5f) {
@@ -210,12 +226,17 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
     if (b.mapFlags.y > 0.5f)
         spec *= max(0.0f, 1.0f - roughTex.sample(samp, in.uv).r);
 
+    // Metalness (--metal_map, default ON). The CPU kills diffuse on metal
+    // pixels and tints the highlight by the albedo
+    // (DeferredSurfaceKernel.cpp:2512-2545).
+    const float metal = (b.misc.z > 0.5f) ? metalTex.sample(samp, in.uv).r : 0.0f;
+
     GBufOut o;
     o.albedo = float4(alb.rgb, ao);
     o.normal = oct_encode(n);
     o.params = float4(b.matParams.x, spec, b.matParams.z,
                       saturate(b.matParams.w * 0.25f));
-    o.mirror = uint(b.misc.x + 0.5f);
+    o.mirror = uint2(uint(b.misc.x + 0.5f), uint(saturate(metal) * 255.0f + 0.5f));
     return o;
 }
 
@@ -324,10 +345,12 @@ struct Surface {
     float  ao;
     float  rawAlpha;     // the G-buffer alpha as stored, for the AO viz
     float  diffuseK, specK, rough, a, lum;
+    float  metal;        // MetallicMap: kills diffuse, tints the highlight
 };
 
 static inline Surface DecodeSurface(constant FrameUniforms &u,
-                                    float4 alb, float2 ne, float4 par, float3 P)
+                                    float4 alb, float2 ne, float4 par, float3 P,
+                                    float metal = 0.0f)
 {
     Surface S;
     S.P = P;
@@ -368,6 +391,7 @@ static inline Surface DecodeSurface(constant FrameUniforms &u,
     S.rough     = clamp(par.z, 0.04f, 1.0f);
     S.a         = S.rough * S.rough;
     S.lum       = par.w * 4.0f;
+    S.metal     = metal;
     // No F0 / env-BRDF / multiscatter precompute: the direct spec uses the
     // CPU's fixed dielectric F = 0.04 + 0.96*(1-VoH)^5 scaled by Specular, and
     // the ambient is a pure irradiance skylight (see AmbientRadiance).
@@ -504,9 +528,16 @@ static inline float3 DirectRadiance(constant FrameUniforms &u,
         // earlier revision applied (1-F) per light here; that made every direct
         // light a few percent dimmer than the reference and, worse, tinted it by
         // the per-light Fresnel the CPU never computes.
-        const float3 diff = S.baseColor * S.diffuseK;
+        // Metalness (--metal_map, default ON): a conductor has no diffuse, and
+        // its highlight is tinted by the albedo instead of staying light-
+        // coloured (DeferredSurfaceKernel.cpp:2512-2545). The CPU's remaining
+        // metal behaviour — the albedo BECOMING an env reflection — needs the
+        // baked equirect pano this arm does not have, so metal here reads
+        // darker than the reference. Stated, not hidden.
+        const float3 diff = S.baseColor * S.diffuseK * (1.0f - S.metal);
+        const float3 specTint = mix(float3(1.0f), S.baseColor, S.metal);
 
-        radiance += (diff + float3(spec1)) * L[i].color * (NoL * atten * shadow);
+        radiance += (diff + spec1 * specTint) * L[i].color * (NoL * atten * shadow);
     }
     return radiance;
 }
@@ -538,7 +569,8 @@ static inline float3 AmbientRadiance(constant FrameUniforms &u,
     // came out about right.
     const float3 Nw = normalize(u.camRow0 * S.N.x + u.camRow1 * S.N.y + u.camRow2 * S.N.z);
     const float3 irr = SH_Irradiance(sh, Nw) * u.ambientFactor;
-    return S.baseColor * S.diffuseK * irr * S.ao;
+    // (1 - metal): a conductor has no diffuse ambient either.
+    return S.baseColor * S.diffuseK * (1.0f - S.metal) * irr * S.ao;
 }
 
 fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
@@ -564,8 +596,10 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
     const float X = (in.ndc.x - u.ox * 1.0f) * Z * u.invSx;
     const float Y = (in.ndc.y - u.oy * 1.0f) * Z * u.invSy;
 
+    const uint2 mirEnc = gMirror.read(px).xy;
     const Surface S = DecodeSurface(u, gAlbedo.read(px), gNormal.read(px).xy,
-                                    gParams.read(px), float3(X, Y, Z));
+                                    gParams.read(px), float3(X, Y, Z),
+                                    float(mirEnc.y) * (1.0f / 255.0f));
 
     float3 radiance = DirectRadiance(u, L, S, /*applyShadow=*/u.shadowsOn != 0,
                                      /*wantSpec=*/true, /*onlyLight=*/-1,
@@ -583,7 +617,7 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
     // (rows reflected, position mirrored, same projection), so the composite
     // is a same-pixel read, no reprojection.
     if (u.mirrorCount > 0u) {
-        const uint mid = gMirror.read(px).x;
+        const uint mid = mirEnc.x;
         if (mid > 0u && mid <= u.mirrorCount)
             radiance += reflTex[mid - 1u].read(px).rgb * 0.5f;
     }

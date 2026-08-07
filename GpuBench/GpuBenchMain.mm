@@ -228,6 +228,7 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--omni_range=")) opt.omniDefaultRange = float(std::atof(v));
         else if (a == "--no-disco")                 opt.disco = false;
         else if (a == "--no-mirror")                opt.mirrors = false;
+        else if (a == "--no-revmaps")               opt.revMaps = false;
         else if (a == "--window")                   dopt.interactive = true;
         else if (const char *v = val("--win="))     { std::sscanf(v, "%dx%d", &dopt.winW, &dopt.winH); }
         else if (const char *v = val("--time_scale=")) dopt.timeScale = float(std::atof(v));
