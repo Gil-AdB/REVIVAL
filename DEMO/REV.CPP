@@ -462,6 +462,7 @@ material global ID or ptr
 #include "ImageCompression.h"
 #include "PhotonTracer.h"
 #include "Snapshot.h"
+#include "ReproHarness.h"
 #include "MaterialImport.h"
 #include "Resize.h"
 #include <float.h>
@@ -1291,7 +1292,7 @@ int main(int argc, const char *argv[])
 {
 	ChdirToAssetRoot(argc > 0 ? argv[0] : "");
 
-	// Headless modes (--snapshot / --bench) must never pop an SDL window,
+	// Headless modes (--snapshot / --bench / --repro) must never pop an SDL window,
 	// steal desktop focus, or play music when run in the background (the byte
 	// gate, perf benches, agents). Detect them up front so we can (a) force
 	// SDL's built-in dummy video+audio drivers BEFORE any SDL_Init and (b)
@@ -1299,13 +1300,16 @@ int main(int argc, const char *argv[])
 	// touches SDL anyway, but the raster/scene/flip bench opens a real window —
 	// dummy makes it offscreen. Interactive runs (no --snapshot/--bench) are
 	// untouched and still open a real window with audio. We match the
-	// --snapshot / --bench *prefix*, which is a superset of the --snapshot= /
-	// --bench= forms the arg parsers accept, so every headless invocation is
-	// covered.
+	// --snapshot / --bench / --repro *prefix*, which is a superset of the
+	// --snapshot= / --bench= / --repro= forms the arg parsers accept, so every
+	// headless invocation is covered. --repro drives the REAL interactive main
+	// path (see ReproHarness.h), so it is the one headless mode that would
+	// otherwise happily open a window — it MUST be in this list.
 	bool headless = false;
 	for (int i = 1; i < argc; ++i) {
 		if (argv[i] && (std::strncmp(argv[i], "--snapshot", 10) == 0 ||
-		                std::strncmp(argv[i], "--bench",    7) == 0)) {
+		                std::strncmp(argv[i], "--bench",    7) == 0 ||
+		                std::strncmp(argv[i], "--repro",    7) == 0)) {
 			headless = true;
 			break;
 		}
@@ -1367,9 +1371,21 @@ int main(int argc, const char *argv[])
 "  ./DEMO                                   run the demo interactively\n"
 "  ./DEMO --snapshot=<scene>[@t=T1,T2,...] [--out=DIR]\n"
 "  ./DEMO --bench=<kind>[@iters=N,seed=N,...]\n"
+"  ./DEMO --repro=<scene>@t=T1,T2,... [--out=DIR]\n"
 "  ./DEMO [--<flag> | --no-<flag> | --<flag>=VALUE]...\n"
 "  ./DEMO --help | -h                       this message\n"
 "  ./DEMO --print-completion[=bash|zsh]     emit shell completion script\n"
+"\n"
+"REPRO (headless INTERACTIVE harness — no SDL window; use when --snapshot\n"
+"       CANNOT reproduce a defect the user sees in his live run)\n"
+"  --repro=greets@t=2993 --out=DIR\n"
+"      Runs the REAL scene driver through the REAL per-frame path, scrubbing\n"
+"      to t the way F1/F2 does, so defects that need accumulated per-frame\n"
+"      state appear. --snapshot renders ONE cold tick with the fine scene\n"
+"      clock and the chunk-occlusion cull pinned, and is blind to those by\n"
+"      construction. Honours FDS_GREETS_CAM. Tunables: --repro_from (the\n"
+"      history-depth bisection dial), --repro_settle, --repro_seq,\n"
+"      --repro_play, --repro_max_frames. See docs/INTERACTIVE_REPRO.md.\n"
 "\n"
 "SNAPSHOT SCENES (headless deterministic PPM dump, no SDL window)\n"
 "  city           City scene driver at specified Timer values\n"
@@ -1460,6 +1476,19 @@ int main(int argc, const char *argv[])
 	}
 
 	fds::TuneServer_Start();
+
+	// --repro: headless INTERACTIVE repro harness. Runs the REAL scene driver
+	// through the REAL per-frame path for as many frames as it takes to scrub to
+	// the requested scene time, so defects that need accumulated per-frame state
+	// (which --snapshot's single cold tick cannot express) actually appear. It
+	// is checked BEFORE --snapshot so neither of the two pins below — the fine
+	// scene clock and the chunk-occlusion inertness — is applied to it: those
+	// pins are precisely what makes a snapshot blind. See ReproHarness.h and
+	// docs/INTERACTIVE_REPRO.md.
+	ReproConfig repro;
+	if (ParseReproArgs(argc, argv, repro)) {
+		return RunRepro(repro, g_demoXRes, g_demoYRes);
+	}
 
 	SnapshotConfig snap;
 	if (ParseSnapshotArgs(argc, argv, snap)) {

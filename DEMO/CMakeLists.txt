@@ -57,6 +57,8 @@ set(DEMO_SOURCES
     PhotonTracer.h
     Raytracer.cpp
     Raytracer.h
+    ReproHarness.cpp
+    ReproHarness.h
     Resize.cpp
     Resize.h
     REV.CPP
