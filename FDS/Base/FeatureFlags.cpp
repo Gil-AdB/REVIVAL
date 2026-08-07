@@ -147,6 +147,13 @@ bool ownedByOtherParser(const char *name) {
 
 bool applyOneToken(State &s, const char *arg);   // fwd (flags-file recursion)
 
+// True only while parseArgs walks argv. --strict_flags kills the run on an
+// unknown token there and NOWHERE else: a flags-file line, FDS_BAKED_ARGS, a
+// SCRIPTS/*.params entry and the live tune console all reach applyOneToken too,
+// and aborting a running demo over a stale script line would be worse than the
+// typo. Not thread-safe by design — argv parsing is single-threaded at startup.
+bool g_inArgvParse = false;
+
 // ── --vanilla / FDS_VANILLA=1 ───────────────────────────────────────────
 // A true BARE BASELINE: every flag back to its compile-time default AND
 // marked explicitly-set. The set marks are the whole point — without them
@@ -338,8 +345,27 @@ bool applyOneToken(State &s, const char *arg) {
     // aren't bound yet when this runs from the state() init lambda for
     // FDS_BAKED_ARGS).
     static const int kWarnIdx = findBoolByCliName("warn_unknown_flags");
-    if (kWarnIdx >= 0 && s.boolVals[kWarnIdx] && !ownedByOtherParser(name)) {
+    const bool foreign = ownedByOtherParser(name);
+    if (kWarnIdx >= 0 && s.boolVals[kWarnIdx] && !foreign) {
         std::fprintf(stderr, "[FLAGS] unknown flag '%s' (ignored)\n", arg);
+    }
+    // --strict_flags (default ON): an unknown ARGV token kills the run. An
+    // ignored flag renders a plausible image that answers a DIFFERENT question,
+    // and that silent false negative has cost this project days — most often via
+    // zsh, which does NOT word-split unquoted expansions, so `./DEMO $ARM` hands
+    // the whole flag string over as ONE token and every flag is dropped. Argv
+    // only: a flags-file line, FDS_BAKED_ARGS, a .params entry or a live tune
+    // edit still merely warns, because killing a running demo over a stale
+    // script line is worse than the typo it reports.
+    static const int kStrictIdx = findBoolByCliName("strict_flags");
+    if (g_inArgvParse && !foreign && kStrictIdx >= 0 && s.boolVals[kStrictIdx]) {
+        std::fprintf(stderr,
+            "[FLAGS] FATAL: unknown flag '%s'.\n"
+            "        If this looks like a whole command line in one token, the shell\n"
+            "        did not split it: zsh does not word-split unquoted expansions.\n"
+            "        Pass flags as separate argv words, or use --no-strict_flags.\n",
+            arg);
+        std::exit(2);
     }
     return false;
 }
@@ -433,9 +459,11 @@ FeatureFlags::ParamRef FeatureFlags::findParam(const char *name) {
 bool FeatureFlags::parseArgs(int argc, const char *const *argv) {
     State &s = state();
     bool helpRequested = false;
+    g_inArgvParse = true;
     for (int i = 1; i < argc; ++i) {
         if (applyOneToken(s, argv[i])) helpRequested = true;
     }
+    g_inArgvParse = false;
     if (helpRequested) {
         printHelp(stderr);
         return false;
