@@ -1206,6 +1206,177 @@ because either alone misrepresents the change.
 
 ---
 
+### 6.2f Parity pass — reflections, the disco cones, the camera, and three window defects
+
+Driven by a review of a `--window` run. Everything below is measured against a CPU
+reference rendered **on the day** — the archived `pairs/t2000_cpu.ppm` has drifted by
+mean|dY| **0.242** under two concurrent engine agents, so it is no longer a valid
+baseline and was not used.
+
+#### The t=2000 ledger (Rec.601 luma, all 2,073,600 px, authored spline camera both arms)
+
+| configuration | signed dY (GPU-CPU) | mean abs dY |
+|---|--:|--:|
+| baseline at `cb5ed94` | -15.591 | 32.508 |
+| + mirror cull-sense fix | -14.576 | 31.618 |
+| + volumetric disco cones | -8.917 | 27.197 |
+| **+ environment reflection** | **-6.344** | **24.929** |
+
+(§6.2e quoted -15.32 / 32.23 for the baseline against the *archived* reference; the
+-15.591 / 32.508 above is the same render against today's, and the 0.27 gap is the
+engine drift, not a change in this arm.)
+
+Pairs: `scratchpad/pairs/t2000_cpu_today.png`, `t2000_gpu_new.png`, `t2000_sbs_new.png`
+(CPU top / GPU bottom), `t2000_diff_new.png` (signed luma, 4x, red = GPU brighter).
+
+#### "Does it compute the disco and not render it, or not compute it at all?" — BOTH, split
+
+Asked directly, so answered directly. The arm **computed and rendered the spot
+LIGHTING** all along and **never computed the CONES at all**.
+
+- Spots, rendered: 10 disco spots ingest as `Light_SpotLight` with the cone angles, each
+  with its **own 256^2 perspective depth map re-baked every frame**, tapped per pixel.
+  MEASURED at t=2000: `--no-disco` changes **21.7 %** of the frame (signed +1.77, peak
+  +178). The maps are real occluders, not stubs: across the ten spots, 27,511 reached
+  pixels read fully lit and **79,249 fully shadowed** — spot 17 alone contributes 60,131
+  shadowed px. Three spots read fully lit and two fully shadowed under the same code
+  path, which is what rules out a wholesale tap failure.
+- Cones, absent: there was **no cone code anywhere** in `Deferred.mm` or
+  `deferred.metal`. Now ported from `DeferredVolumetric.cpp`'s `segPath`: screen-space
+  analytic integral along the view ray, the inverse-square kernel integrated exactly in
+  closed form per segment, 8 segments, cone smoothstep x surface fade x **one shadow tap
+  per segment** (the CPU's own fix for beams through walls), additive into HDR *before*
+  bloom as `RENDER.CPP:1231-1240` orders it. greets' `cone_strength` is **1.2**
+  (`GreetsDisco.cpp:434-441`), not the global 0.05, and `--hdr` carries
+  `hdr_glow_scale` 0.25. Worth **+5.66 signed over 29.4 %** of the frame at t=2000.
+
+#### Environment reflection — DECISION and result
+
+The probes are **baked on the GPU**, not ingested from `EnvReflection_Table`: the CPU
+bakes its probes through its own deferred *software rasterizer*, and importing that would
+put the CPU renderer inside the cost this arm exists to measure. Replicated from
+`EnvReflection_FramePrep`: qualification (`Reflection > 0` or a `MetallicMap`), the
+per-material world face centroid as the probe point, the **4.0-unit dedup**, face-level
+self-exclusion with `::mirUV` stripped, and the scene-AABB parallax proxy. Probe set
+MEASURED as `amudim, cockpit, momy-1, momy-2, screen emiter, stairs` — 6 probes, 36
+faces at 128^2 + mips, baked **once** in 21.23 ms (reported separately, like the static
+shadow cubes).
+
+Per pixel this is `EnvSpecComposeScalar` term for term, including the Karis split-sum env
+BRDF and Fdez-Aguera multiscatter that a previous revision **deleted** from this shader
+with the note that they only run inside a "pano path this arm does not implement". That
+note is now obsolete. Effect: mean|dY| 27.197 -> 24.929, and it moves the right pixels —
+the five 64x64 blocks that gain most are the metals that sat furthest below the
+reference (one at (384,0): CPU (93,94,83), GPU (46,45,41) -> (66,65,55)).
+
+Deviation, stated: the CPU stores six **1.25-padded** faces at 102.68 degrees with its own
+face-major bilinear; this arm uses a hardware `texturecube` with plain 90-degree faces.
+
+#### Three defects reported from the window
+
+1. **The main mirror was missing most of its reflected geometry** — a STALE INVARIANT. A
+   reflection view matrix has determinant -1, so screen-space winding reverses; the
+   reflection G-buffer pass still used `CullModeFront`, which is measured-correct for the
+   main camera and therefore exactly wrong in a mirror. The pass still carried the comment
+   "det -1 ... harmless while raster culling is off" — culling was enabled in `69bf0f0`
+   without revisiting it. +1.02 signed over 1.6 % of the frame, peak +163.
+2. **The RTT mirrors were "just not there"** — two causes, and the panels are **built**
+   (teleporter 4 tris, 'screen 3' 2, 'screen 4' 2), so "unbuilt" is ruled out.
+   *Fixed:* 'screen 3'/'screen 4' are closed **boxes** (six 2-face clusters each — hence
+   the engine fitter's "2 of 12 faces, 10 outliers"), and the fitter returned 'screen 4's
+   face pointing **out of the corridor**. The camera therefore sat permanently behind the
+   mirror plane — signed distance **-8.15** at t=2000, **-36.70** at t=6133, **-42.19** at
+   t=6293 — so the panel could never reflect. Disambiguated by sampling the **authored
+   camera spline** and taking the face with the most camera path in front of it; the rule
+   leaves 'teleporter' on the plane the engine already chose, which is the check that it
+   is a rule and not a fit to one panel. (A first attempt scored against the scene's
+   centre of mass and was UNSTABLE — 'screen 4' sits ~45 degrees from it and the pick
+   flipped between poses.)
+   *Open, not guessed at:* even with correct planes, panels 2 and 3 reach **zero screen
+   pixels** at t=2000/6133/6293, so the frame numbers are unchanged. 'screen 3' is at
+   x=48.9, ~15 units beyond the corridor's right wall — off-stage, a scene fact. 'screen
+   4' is a 1.3-unit box at (-7.47, 2.47, -56.10) that should subtend ~60 px from t=6133
+   and does not; occlusion vs a winding rejection is unsettled.
+   Also unexplained: 'teleporter' reaches 32,831 px at t=2000 but **0 px at t=6133 and
+   t=6293** — the two poses `docs/greets_review_poses.txt` labels "mirror panel".
+3. **"Mech omnis are staying in place"** — the light buffer was **not** the problem.
+   MEASURED with the new `--anim_probe`: `GpuLight[7..9]` refresh correctly per frame
+   (9.26,2.06,-49.99 at t=5743 -> 10.53,2.06,-53.78 at t=5877). The **flare sprite
+   instance list** was built once outside the frame loop and never rewritten. Since
+   §6.2b established the reference's bright pools *are* the flare sprites rather than omni
+   surface lighting, a frozen sprite list reads exactly as "the omnis don't move".
+
+#### The camera — controls and interpolation
+
+**Controls.** The window's free-fly was an invented WASD scheme. It now calls
+`FDS/CAMERAS/CAMERAS.CPP`'s `Dynamic_Camera()` **directly** — the same integrator
+`DEMO/DisplaceTest.cpp` drives — so the damping, the world-yaw / camera-local-pitch split
+and the speed dials are the engine's. Keymap, printed on startup, on `F1`, and in the HUD:
+
+| keys | action |
+|---|---|
+| `W` / `S`,`Z` | forward / back |
+| `A`,`End` / `D`,`PgDn` | strafe left / right |
+| `Q`,gray`+` / `E`,gray`-` | up / down |
+| arrows | yaw (Left/Right), pitch (Up/Down) |
+| `Home` / `PgUp` | roll |
+| mouse-drag | look — a GpuBench **addition**; the house cam reads no mouse |
+| `,` / `.` | translation speed dial |
+| `K` / `L` | rotation speed dial |
+| `G` | dump pose (`[DTEST-POSE]` + a `--cam=` string) |
+| `TAB` | free-fly <-> authored spline |
+| `SPACE` / `[` `]` / `ESC`,`Backspace` | pause / scrub time / quit |
+
+Note `Q`/`E` were **inverted** against the house convention before this.
+
+**Interpolation — the report was right, and the cause was not the evaluator.**
+`Animate_Objects` was evaluating the authored spline correctly all along;
+`RefreshCamera` then **overwrote it**, because the interactive path cleared
+`LoadOptions::camPose` only when `--spline` was passed at startup. A default `--window`
+run therefore pinned the camera to the t=5743 review pose and `TAB` into "SPLINE" showed
+a frozen viewpoint. The interactive `LoadOptions` copy now always clears it.
+
+**Verdict, with the evidence.** The GPU arm's scripted camera **is** the demo's. Force the
+CPU demo to the pose the GPU arm's spline produces at t=2000 (`FDS_GREETS_CAM`, 9
+significant digits) and diff against the CPU's own unforced frame: **mean|dY| 0.0037/255,
+546 px of 2,073,600 differing by more than 2/255 (0.026 %)** — the rounding of the pose
+string, not a different camera. New `--cam_track=T0:T1:STEP` prints the pose per demo-t
+offscreen in DEMO's own `[CAM]` format; it shows the eye moving continuously at CurFrame
+570..630, between `Source` keys 420 and 720, so the spline is interpolated and not snapped.
+
+#### New offscreen instruments (offscreen remains the default; no window is ever opened)
+
+- `--anim_probe=T0,T1` — runs the **window's** per-frame refresh sequence and prints the
+  GPU-FACING arrays at both t. This bug class was invisible to every existing headless
+  test, because setting the pose AT LOAD exercises a different path.
+- `--viz=mirror` — per-pixel panel id plus the radiance of the reflection bound for it,
+  with a `[MIRRORPROBE]` line per panel (plane, camera signed distance, active state).
+- `--cam_track=T0:T1:STEP`, `--no-cones`, `--cone_strength=F`, `--no-mirror_face`.
+
+#### Two traps, recorded so the next agent does not pay for them
+
+- `cmake --build <dir> --target GpuBench` does **not** build the separate
+  `GpuBenchShaders` staging target, so the binary can run against a **stale** `.metal`.
+  `newFunctionWithName:` then returns nil, **and Metal accepts a pipeline with a nil
+  fragment function as VALID** (that is how depth-only pipelines are built). The result is
+  a healthy pipeline that writes nothing and a brand-new pass measuring as "0 pixels
+  changed" with no error anywhere. A missing MSL entry point is now **fatal**.
+- `FDS_VARS.H` declares `dTime` but only `DEMO/REV.CPP` **defines** it, so
+  `Dynamic_Camera()` does not link from an FDS-only target unless the caller supplies the
+  storage. GpuBench defines it; no engine file was touched.
+
+#### What is still open at t=2000
+
+The dominant remaining residual is the **code screen**, and it is now the largest single
+structural difference in the pair: the CPU renders those panels through its **transparent**
+kernel carrying the per-frame text `GreetsGenerator` writes, while this arm draws the
+authored `P_TEXT` image **opaque** — a large black rectangle where the reference has
+translucent generated glyphs. The plan excludes transparent depth-peel layers on both
+sides, so this is a stated scope boundary rather than a defect, but it should be named as
+the reason the number does not go lower.
+
+---
+
 ### 6.2 Phase 3 stage 1 — deferred arm built, shadow CASTER FILTER correct, timings RETRACTED
 
 > **Superseded in part by §6.2a.** This section's conclusion that "shadows are now correct" was
