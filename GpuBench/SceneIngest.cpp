@@ -8,6 +8,7 @@
 #include <Base/TriMesh.h>
 #include <FLD/FLD_READ.H>
 #include <FLD/LWREAD.H>   // Surf_Smoothing (Material::TFlags bit)
+#include <RENDER/GreetsMirror.h>   // FindMirrorPlaneByMatName (engine's own)
 
 #include <algorithm>
 #include <chrono>
@@ -818,6 +819,60 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 "reviewed surface — do NOT run a displacement arm on this.\n");
     }
 
+    // ---- 4c. mirror panel planes --------------------------------------------
+    // The greets first-order mirror set, by the SAME explicit designation
+    // Initialize_Greets uses (GREETS.CPP:2880-2897): 'teleporter' by material
+    // name plus the two P_TEXT screens authored as mirrors ('screen 3',
+    // 'screen 4'; 'screen2' deliberately not). Planes come from the ENGINE's
+    // own FindMirrorPlaneByMatName (outlier faces >30 degrees off the majority
+    // normal are dropped from the fit). Panel faces — the thin screen box's
+    // FRONT face — are selected below in the batching loop: world normal
+    // within 30 degrees of the plane normal AND centroid on the plane; the
+    // box's back face fails the angle gate (opposite normal), the caps both.
+    if (opt.mirrors) {
+        static const char *kMirrorMats[] = {"teleporter", "screen 3", "screen 4"};
+        for (const char *mname : kMirrorMats) {
+            fds::MirrorPlane mp = fds::FindMirrorPlaneByMatName(&sc, mname);
+            if (!mp.valid) {
+                if (opt.verbose)
+                    std::fprintf(stderr, "[INGEST] mirror '%s': no plane (skipped)\n", mname);
+                continue;
+            }
+            MirrorInfo mi;
+            mi.n[0] = mp.N.x; mi.n[1] = mp.N.y; mi.n[2] = mp.N.z;
+            mi.d = mp.d;
+            mi.material = mname;
+            out.mirrors.push_back(mi);
+            if (opt.verbose)
+                std::fprintf(stderr,
+                    "[INGEST] mirror %zu '%s': plane N=(%.3f,%.3f,%.3f) d=%.3f "
+                    "(%d wall faces in fit, centroid %.2f,%.2f,%.2f)\n",
+                    out.mirrors.size(), mname, mp.N.x, mp.N.y, mp.N.z, mp.d,
+                    mp.faceCount, mp.centroid.x, mp.centroid.y, mp.centroid.z);
+        }
+    }
+    // Face -> mirror panel membership test, used to key the batch split.
+    auto faceMirrorIndex = [&](const TriMesh *T, const Face &F) -> int {
+        if (out.mirrors.empty() || !F.Txtr || !F.Txtr->Name || !F.A) return 0;
+        for (size_t mi = 0; mi < out.mirrors.size(); ++mi) {
+            const MirrorInfo &m = out.mirrors[mi];
+            if (std::strcmp(F.Txtr->Name, m.material.c_str())) continue;
+            // world face normal (mesh transform is rigid at load)
+            Vector n;
+            MatrixXVector(const_cast<TriMesh *>(T)->RotMat,
+                          const_cast<Vector *>(&F.N), &n);
+            const float ndot = n.x*m.n[0] + n.y*m.n[1] + n.z*m.n[2];
+            if (ndot < 0.866f) return 0;          // back face / caps
+            Vector lp = F.A->Pos, wp;
+            MatrixXVector(const_cast<TriMesh *>(T)->RotMat, &lp, &wp);
+            wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+            const float sd = wp.x*m.n[0] + wp.y*m.n[1] + wp.z*m.n[2] + m.d;
+            if (std::fabs(sd) > 0.6f) return 0;   // not on the panel plane
+            return int(mi) + 1;
+        }
+        return 0;
+    };
+
     // ---- 5. de-indexed geometry, grouped per (mesh x material) -------------
     for (Object *obj = sc.ObjectHead; obj; obj = obj->Next) {
         if (obj->Type != Obj_TriMesh || !obj->Data) continue;
@@ -854,13 +909,18 @@ bool Load(Scene &out, const LoadOptions &opt) {
         const float cos30 = std::cos(30.0f * float(M_PI) / 180.0f);
         const bool independent = MeshGetsIndependentFaces(T, cos30, incident);
 
-        // Group this mesh's faces by material so each batch is one draw.
-        std::map<Material *, std::vector<uint32_t>> byMat;
-        for (uint32_t f = 0; f < T->FIndex; ++f) byMat[T->Faces[f].Txtr].push_back(f);
+        // Group this mesh's faces by (material, mirror-panel membership) so
+        // each batch is one draw and a mirror panel's front faces get their
+        // own batch (they composite the reflection).
+        std::map<std::pair<Material *, int>, std::vector<uint32_t>> byMat;
+        for (uint32_t f = 0; f < T->FIndex; ++f)
+            byMat[{T->Faces[f].Txtr, faceMirrorIndex(T, T->Faces[f])}].push_back(f);
 
         for (auto &kv : byMat) {
-            Material *M = kv.first;
+            Material *M = kv.first.first;
+            const int mirrorIdx = kv.first.second;
             Batch b;
+            b.mirrorIndex = mirrorIdx;
             b.firstVertex = uint32_t(out.verts.size());
             b.meshName = obj->Name ? obj->Name : "?";
             for (int r = 0; r < 3; ++r)
@@ -936,6 +996,20 @@ bool Load(Scene &out, const LoadOptions &opt) {
                     out.verts.push_back(gv);
                 }
                 ++out.faceCount;
+            }
+            // Mirror panel: parity with the CPU's wallMatClone retarget — the
+            // panel neither diffuses nor speculates; its lit value is the
+            // emissive text (Luminosity) plus the composited reflection/2.
+            if (mirrorIdx > 0) {
+                b.diffuse = 0.0f;
+                b.specular = 0.0f;
+                // The CPU retargets panel faces to a Mat_Transparent clone,
+                // which the shadow bake skips — so the panel casts nothing.
+                // (The screens were already non-casters via the name filter;
+                // this matters for the teleporter, whose base material casts.)
+                b.castsShadow = false;
+                out.mirrors[size_t(mirrorIdx) - 1].panelFaces +=
+                    int((uint32_t(out.verts.size()) - b.firstVertex) / 3);
             }
             b.vertexCount = uint32_t(out.verts.size()) - b.firstVertex;
             if (b.vertexCount) out.batches.push_back(std::move(b));

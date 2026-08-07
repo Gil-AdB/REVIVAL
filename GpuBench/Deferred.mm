@@ -27,6 +27,10 @@ struct FrameUniforms {
     float ambientFactor, diffuseFactor, specularFactor;
     float lightRangeScale;
     int32_t vizLight;
+    float pad2[2];              // align clipPlane to 16 (MSL float4 rule)
+    float clipPlane[4];         // xyz = N, w = d; all-zero N = disabled
+    uint32_t mirrorCount;
+    float pad3[3];
 };
 
 struct BatchUniforms {
@@ -35,6 +39,7 @@ struct BatchUniforms {
     float baseColor[4];
     float matParams[4];
     float mapFlags[4];
+    float misc[4];              // .x = mirror panel index (1-based)
 };
 
 struct GpuLight {
@@ -280,6 +285,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     gpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     gpd.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
     gpd.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    gpd.colorAttachments[3].pixelFormat = MTLPixelFormatR8Uint;   // mirror id
     gpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     id<MTLRenderPipelineState> psoGBuf = [dev newRenderPipelineStateWithDescriptor:gpd error:&err];
     if (!psoGBuf) { std::fprintf(stderr, "[DEFERRED] gbuffer pso: %s\n", [[err localizedDescription] UTF8String]); return false; }
@@ -428,10 +434,43 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLTexture> gAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> gNormal = mkTarget(MTLPixelFormatRG16Snorm,   MTLStorageModePrivate);
     id<MTLTexture> gParams = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
+    id<MTLTexture> gMirror = mkTarget(MTLPixelFormatR8Uint,      MTLStorageModePrivate);
     id<MTLTexture> gDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
     id<MTLTexture> hdrTex  = mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate);
     id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> stageTex = mkTarget(MTLPixelFormatBGRA8Unorm, MTLStorageModeShared);
+
+    // ---- mirror reflection targets -----------------------------------------
+    // One full-res lit HDR reflection per active mirror panel (greets has 3),
+    // rendered through the SAME deferred pipeline from the plane-reflected
+    // camera, plus one shared reflection G-buffer set reused sequentially
+    // (Metal's hazard tracking orders the encoders). Full resolution because
+    // the composite is a same-pixel read — a reflected point on the mirror
+    // plane projects to the SAME pixel in both views — and because the CPU
+    // renders its first-order clones at main resolution too.
+    constexpr int kMaxMirrors = 4;
+    const int nMirrors = std::min<int>(int(scene.mirrors.size()), kMaxMirrors);
+    std::vector<id<MTLTexture>> reflHdr;
+    id<MTLTexture> mAlbedo = nil, mNormal = nil, mParams = nil, mMirror = nil,
+                   mDepth = nil;
+    if (nMirrors > 0) {
+        for (int i = 0; i < nMirrors; ++i)
+            reflHdr.push_back(mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate));
+        mAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
+        mNormal = mkTarget(MTLPixelFormatRG16Snorm,    MTLStorageModePrivate);
+        mParams = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
+        mMirror = mkTarget(MTLPixelFormatR8Uint,       MTLStorageModePrivate);
+        mDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
+    }
+    id<MTLTexture> dummyRefl;
+    {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                              width:1 height:1 mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModePrivate;
+        dummyRefl = [dev newTextureWithDescriptor:td];
+    }
     // Quarter-res bloom ping-pong (DS=4, exactly Hdr.cpp's constant).
     const int BW = (W + 3) / 4, BH = (H + 3) / 4;
     auto mkBloom = [&]() -> id<MTLTexture> {
@@ -565,6 +604,9 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     fu.specularFactor = 1.0f;
     fu.lightRangeScale = opt.lightRangeScale;
     fu.vizLight = opt.vizLight;
+    // clipPlane stays all-zero (disabled) for the main view; the reflection
+    // passes carry their own FrameUniforms copy with the mirror plane set.
+    fu.mirrorCount = uint32_t(nMirrors);
 
     std::vector<GpuLight> lights;
     std::vector<const char *> lightOrigin;
@@ -739,6 +781,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         u.mapFlags[1] = (b.roughTexIndex >= 0) ? 1.0f : 0.0f;
         u.mapFlags[2] = b.aoInAlpha ? 1.0f : 0.0f;
         u.mapFlags[3] = b.parallaxScale;
+        u.misc[0] = float(b.mirrorIndex);
     }
     };
     refreshBatchUniforms();
@@ -770,7 +813,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     const bool haveStageCounters =
         tsSet && [dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary];
 
-    const int kPasses = 4;               // shadow, gbuffer, lighting, tonemap
+    const int kPasses = 5;               // shadow, gbuffer, lighting, tonemap, mirror
     id<MTLCounterSampleBuffer> sampleBuf = nil;
     if (haveStageCounters) {
         MTLCounterSampleBufferDescriptor *d = [MTLCounterSampleBufferDescriptor new];
@@ -922,6 +965,18 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         bakeCubes(cb, /*movingOnly=*/false, /*timed=*/false);
         bakeSpotMaps(cb);
+        // Clear the 1x1 dummy reflection to black: it is bound for INACTIVE
+        // mirrors (camera behind the plane), whose panels then composite +0
+        // instead of stale or undefined texels.
+        {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = dummyRefl;
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            [e endEncoding];
+        }
         [cb commit];
         [cb waitUntilCompleted];
         out.staticBakeMs = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
@@ -1231,6 +1286,88 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         }
     }
 
+    // One deferred G-buffer fill into an arbitrary target set with an
+    // arbitrary camera (FrameUniforms). Shared by the main view and the
+    // per-mirror reflection views.
+    auto encodeGBuffer = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                             id<MTLTexture> tAlb, id<MTLTexture> tNrm,
+                             id<MTLTexture> tPar, id<MTLTexture> tMir,
+                             id<MTLTexture> tDep,
+                             void (^counterHook)(MTLRenderPassDescriptor *)) {
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = tAlb;
+        rp.colorAttachments[1].texture = tNrm;
+        rp.colorAttachments[2].texture = tPar;
+        rp.colorAttachments[3].texture = tMir;
+        for (int i = 0; i < 4; ++i) {
+            rp.colorAttachments[i].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[i].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        }
+        rp.depthAttachment.texture = tDep;
+        rp.depthAttachment.loadAction = MTLLoadActionClear;
+        rp.depthAttachment.storeAction = MTLStoreActionStore;
+        rp.depthAttachment.clearDepth = 0.0;
+        if (counterHook) counterHook(rp);
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoGBuf];
+        [enc setDepthStencilState:dss];
+        [enc setCullMode:MTLCullModeNone];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        drawScene(enc, /*gbuffer=*/true);
+        [enc endEncoding];
+    };
+
+    // Flare sprites, additive into `dst`, projected with camera `camRot/camSrc`
+    // taken from a FrameUniforms. `clip` skips lights at/behind a mirror plane
+    // (their reflections would otherwise hang in front of it).
+    auto encodeFlares = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                            id<MTLTexture> dst, id<MTLTexture> depthTex,
+                            const float *clip4) {
+        if (!opt.flares || flares.empty()) return;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoFlare];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        [enc setFragmentTexture:depthTex atIndex:1];
+        for (const auto &fi : flares) {
+            if (clip4) {
+                const float sd = fi.wpos[0]*clip4[0] + fi.wpos[1]*clip4[1]
+                               + fi.wpos[2]*clip4[2] + clip4[3];
+                if (sd < 0.05f) continue;
+            }
+            float rel[3];
+            for (int c = 0; c < 3; ++c) rel[c] = fi.wpos[c] - u.camSrc[c];
+            float vx = 0, vy = 0, vz = 0;
+            for (int c = 0; c < 3; ++c) {
+                vx += u.camRow0[c] * rel[c];
+                vy += u.camRow1[c] * rel[c];
+                vz += u.camRow2[c] * rel[c];
+            }
+            if (!(vz > scene.camera.nearZ && vz < scene.camera.farZ)) continue;
+            FlareUniforms fun{};
+            fun.centerPx[0] = scene.camera.cntrEX + vx * scene.camera.perspX / vz;
+            fun.centerPx[1] = scene.camera.cntrEY - vy * scene.camera.perspY / vz;
+            fun.centerPx[2] = vz;
+            fun.centerPx[3] = fi.worldHalf / vz;
+            fun.gain[0] = opt.flareGain;
+            fun.gain[2] = float(W);
+            fun.gain[3] = float(H);
+            [enc setVertexBytes:&fun length:sizeof(fun) atIndex:2];
+            [enc setFragmentBytes:&fun length:sizeof(fun) atIndex:2];
+            [enc setFragmentTexture:texes[size_t(fi.tex)] atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        }
+        [enc endEncoding];
+    };
+
     auto renderFrame = [&]() -> id<MTLCommandBuffer> {
         id<MTLCommandBuffer> cb = [queue commandBuffer];
 
@@ -1240,31 +1377,117 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             bakeSpotMaps(cb);
         }
 
-        // --- pass 1: G-buffer ---
-        {
-            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-            rp.colorAttachments[0].texture = gAlbedo;
-            rp.colorAttachments[1].texture = gNormal;
-            rp.colorAttachments[2].texture = gParams;
-            for (int i = 0; i < 3; ++i) {
-                rp.colorAttachments[i].loadAction = MTLLoadActionClear;
-                rp.colorAttachments[i].storeAction = MTLStoreActionStore;
-                rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        // --- pass 0b: mirror REFLECTION views (pass index 4 in the counters) ---
+        // Per visible mirror: reflect the camera across the panel plane
+        // (position mirrored, each view row reflected — det -1, so a
+        // left-handed basis; harmless while raster culling is off), render
+        // the real scene through the same G-buffer + lighting pipeline with
+        // an oblique clip at the plane, and light it with the same lights and
+        // the same world-space shadow cubes. This is radiometrically the
+        // CPU's clone+cloned-omni machinery: what you see through the panel
+        // is the lit world reflected. No second bounce: another mirror's
+        // panel inside a reflection shows its emissive text, not a further
+        // reflection (the CPU's --mirror_rtt order-2 slots are out of scope,
+        // stated in the plan).
+        bool mirrorActive[kMaxMirrors] = {};
+        int firstActive = -1, lastActive = -1;
+        if (nMirrors > 0 && opt.viz < 0) {
+            for (int i = 0; i < nMirrors; ++i) {
+                const auto &m = scene.mirrors[size_t(i)];
+                const float sd = m.n[0]*scene.camera.src[0] + m.n[1]*scene.camera.src[1]
+                               + m.n[2]*scene.camera.src[2] + m.d;
+                mirrorActive[i] = sd > 0.01f;
+                if (mirrorActive[i]) { if (firstActive < 0) firstActive = i; lastActive = i; }
             }
-            rp.depthAttachment.texture = gDepth;
-            rp.depthAttachment.loadAction = MTLLoadActionClear;
-            rp.depthAttachment.storeAction = MTLStoreActionStore;
-            rp.depthAttachment.clearDepth = 0.0;
-            attachCounters(rp, 1);
-            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-            [enc setRenderPipelineState:psoGBuf];
-            [enc setDepthStencilState:dss];
-            [enc setCullMode:MTLCullModeNone];
-            [enc setVertexBytes:&fu length:sizeof(fu) atIndex:1];
-            [enc setFragmentSamplerState:samp atIndex:0];
-            drawScene(enc, /*gbuffer=*/true);
-            [enc endEncoding];
         }
+        for (int i = 0; i < nMirrors; ++i) {
+            if (!mirrorActive[i]) continue;
+            const auto &m = scene.mirrors[size_t(i)];
+            FrameUniforms fum = fu;
+            const float N[3] = {m.n[0], m.n[1], m.n[2]};
+            const float sdC = N[0]*fu.camSrc[0] + N[1]*fu.camSrc[1] + N[2]*fu.camSrc[2] + m.d;
+            for (int c = 0; c < 3; ++c) fum.camSrc[c] = fu.camSrc[c] - 2.0f * sdC * N[c];
+            float *rows[3] = {fum.camRow0, fum.camRow1, fum.camRow2};
+            const float *src[3] = {fu.camRow0, fu.camRow1, fu.camRow2};
+            for (int r = 0; r < 3; ++r) {
+                const float d = src[r][0]*N[0] + src[r][1]*N[1] + src[r][2]*N[2];
+                for (int c = 0; c < 3; ++c) rows[r][c] = src[r][c] - 2.0f * d * N[c];
+            }
+            for (int c = 0; c < 3; ++c) fum.clipPlane[c] = N[c];
+            fum.clipPlane[3] = m.d;
+            fum.mirrorCount = 0;   // no recursion
+            const bool first = (i == firstActive), last = (i == lastActive);
+            void (^hook)(MTLRenderPassDescriptor *) = nil;
+            if (sampleBuf && first) {
+                hook = ^(MTLRenderPassDescriptor *rp) {
+                    rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                    rp.sampleBufferAttachments[0].startOfVertexSampleIndex = 8;
+                    rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = MTLCounterDontSample;
+                    rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                    rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                };
+            }
+            encodeGBuffer(cb, fum, mAlbedo, mNormal, mParams, mMirror, mDepth, hook);
+            {   // reflection lighting into reflHdr[i]
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = reflHdr[size_t(i)];
+                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+                [enc setRenderPipelineState:psoLight];
+                [enc setFragmentBytes:&fum length:sizeof(fum) atIndex:1];
+                [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+                [enc setFragmentBuffer:shBuf offset:0 atIndex:3];
+                [enc setFragmentTexture:mAlbedo atIndex:0];
+                [enc setFragmentTexture:mNormal atIndex:1];
+                [enc setFragmentTexture:mParams atIndex:2];
+                [enc setFragmentTexture:mDepth atIndex:3];
+                for (int s = 0; s < kMaxShadowCubes; ++s)
+                    [enc setFragmentTexture:(s < int(cubes.size()) ? cubes[size_t(s)] : dummyCube)
+                                    atIndex:NSUInteger(4 + s)];
+                for (int s = 0; s < kMaxSpotMaps; ++s)
+                    [enc setFragmentTexture:(s < int(spots.size()) ? spots[size_t(s)] : dummy2D)
+                                    atIndex:NSUInteger(20 + s)];
+                [enc setFragmentTexture:mMirror atIndex:36];
+                for (int s = 0; s < 4; ++s)
+                    [enc setFragmentTexture:dummyRefl atIndex:NSUInteger(37 + s)];
+                [enc setFragmentSamplerState:shadowSamp atIndex:1];
+                [enc setFragmentSamplerState:rawSamp atIndex:2];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [enc endEncoding];
+            }
+            // flare sprites inside the reflection (the CPU draws clone flares
+            // in its mirrors); lights behind the plane are clipped.
+            {
+                const float clip4[4] = {N[0], N[1], N[2], m.d};
+                encodeFlares(cb, fum, reflHdr[size_t(i)], mDepth, clip4);
+            }
+            if (sampleBuf && last) {
+                // close the mirror-pass counter interval with an empty encoder
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = reflHdr[size_t(i)];
+                rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                rp.sampleBufferAttachments[0].startOfVertexSampleIndex = MTLCounterDontSample;
+                rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = 9;
+                rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                [e endEncoding];
+            }
+        }
+
+        // --- pass 1: G-buffer ---
+        encodeGBuffer(cb, fu, gAlbedo, gNormal, gParams, gMirror, gDepth,
+                      sampleBuf ? ^(MTLRenderPassDescriptor *rp) {
+                          rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                          rp.sampleBufferAttachments[0].startOfVertexSampleIndex = 2;
+                          rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = 3;
+                          rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                          rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                      } : (void (^)(MTLRenderPassDescriptor *))nil);
 
         // --- pass 2: PBR lighting (or a debug viz) ---
         const bool viz = opt.viz >= 0;
@@ -1290,6 +1513,13 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             for (int i = 0; i < kMaxSpotMaps; ++i)
                 [enc setFragmentTexture:(i < int(spots.size()) ? spots[size_t(i)] : dummy2D)
                                 atIndex:NSUInteger(20 + i)];
+            [enc setFragmentTexture:gMirror atIndex:36];
+            // Reflection slots: the live render for ACTIVE mirrors, cleared
+            // black for inactive ones (their panels then show emissive only).
+            for (int i = 0; i < 4; ++i)
+                [enc setFragmentTexture:((i < nMirrors && mirrorActive[i])
+                                             ? reflHdr[size_t(i)] : dummyRefl)
+                                atIndex:NSUInteger(37 + i)];
             [enc setFragmentSamplerState:shadowSamp atIndex:1];
             [enc setFragmentSamplerState:rawSamp atIndex:2];
             if (viz) {
@@ -1301,44 +1531,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         }
 
         // --- pass 2b: flare sprites, additive into the HDR target ---
-        if (!viz && opt.stages >= 2 && opt.flares && !flares.empty()) {
-            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-            rp.colorAttachments[0].texture = hdrTex;
-            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
-            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-            [enc setRenderPipelineState:psoFlare];
-            [enc setVertexBytes:&fu length:sizeof(fu) atIndex:1];
-            [enc setFragmentBytes:&fu length:sizeof(fu) atIndex:1];
-            [enc setFragmentSamplerState:samp atIndex:0];
-            [enc setFragmentTexture:gDepth atIndex:1];
-            for (const auto &fi : flares) {
-                // Project the omni exactly as Transform.cpp's flare pass does:
-                // view transform, then PX = cntrEX + x*PerspX/z, PY = cntrEY - y*PerspY/z.
-                float rel[3];
-                for (int c = 0; c < 3; ++c) rel[c] = fi.wpos[c] - scene.camera.src[c];
-                float vz = 0, vx = 0, vy = 0;
-                for (int c = 0; c < 3; ++c) {
-                    vx += scene.camera.rot[0][c] * rel[c];
-                    vy += scene.camera.rot[1][c] * rel[c];
-                    vz += scene.camera.rot[2][c] * rel[c];
-                }
-                if (!(vz > scene.camera.nearZ && vz < scene.camera.farZ)) continue;
-                FlareUniforms fun{};
-                fun.centerPx[0] = scene.camera.cntrEX + vx * scene.camera.perspX / vz;
-                fun.centerPx[1] = scene.camera.cntrEY - vy * scene.camera.perspY / vz;
-                fun.centerPx[2] = vz;
-                fun.centerPx[3] = fi.worldHalf / vz;
-                fun.gain[0] = opt.flareGain;
-                fun.gain[2] = float(W);
-                fun.gain[3] = float(H);
-                [enc setVertexBytes:&fun length:sizeof(fun) atIndex:2];
-                [enc setFragmentBytes:&fun length:sizeof(fun) atIndex:2];
-                [enc setFragmentTexture:texes[size_t(fi.tex)] atIndex:0];
-                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-            }
-            [enc endEncoding];
-        }
+        if (!viz && opt.stages >= 2)
+            encodeFlares(cb, fu, hdrTex, gDepth, nullptr);
 
         // --- pass 2c: bloom (bright-pass -> 4 blur taps -> additive upsample) ---
         if (!viz && opt.stages >= 3 && opt.bloom && opt.bloomIntensity > 0.0f) {
@@ -1551,7 +1745,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             int ly = 4;
             std::snprintf(line, sizeof line, "GPU FRAME %6.3F MS   %5.0F FPS", gpuFrameMs, emaFps);
             HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 255, 255); ly += 18;
-            static const char *pn[4] = {"SHADOW BAKE", "GBUFFER", "LIGHTING", "TONEMAP"};
+            static const char *pn[5] = {"SHADOW BAKE", "GBUFFER", "LIGHTING", "TONEMAP", "MIRROR"};
             for (int p = 0; p < kPasses; ++p) {
                 std::snprintf(line, sizeof line, "  %-12s %6.3F MS", pn[p], perPass[p]);
                 HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 170, 210, 255); ly += 15;
@@ -1622,7 +1816,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     std::fprintf(stderr, "[DEFERRED] warmup %d frames…\n", opt.warmup);
     for (int i = 0; i < opt.warmup; ++i) { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
 
-    const char *passNames[kPasses] = {"shadow-bake", "gbuffer", "lighting", "tonemap"};
+    const char *passNames[kPasses] = {"shadow-bake", "gbuffer", "lighting", "tonemap", "mirror"};
     std::vector<double> frameMs;
     std::vector<std::vector<double>> passMs(kPasses);
 

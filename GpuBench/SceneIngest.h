@@ -49,11 +49,32 @@ struct Vertex {
     float tx, ty, tz, th;
 };
 
+// One planar mirror panel, greets' first-order set: 'teleporter' (opaque
+// silver back wall), 'screen 3' (big end display), 'screen 4' — the explicit
+// kMirrorMats/kMirrorScreenMats designation of DEMO/GREETS.CPP:2880-2897.
+// Plane found by the ENGINE's own FindMirrorPlaneByMatName (world space,
+// N·P + d = 0, N face-side outward). The GPU arm renders the reflected scene
+// from the plane-reflected camera and composites panel pixels as
+// emissive + reflection/2 — radiometrically what the CPU's clone-geometry +
+// transparent-wallMatClone machinery produces (the clone/omni-clone/mirrorId
+// apparatus is the CPU's way of lighting the reflected world; a reflection
+// render of the real world from the mirrored camera is the same integral).
+struct MirrorInfo {
+    float       n[3] = {0, 0, 0};
+    float       d = 0.0f;
+    std::string material;
+    int         panelFaces = 0;
+};
+
 // One draw per (mesh x material) run of triangles.
 struct Batch {
     uint32_t firstVertex = 0;
     uint32_t vertexCount = 0;   // always a multiple of 3
     int      textureIndex = -1; // -1 = untextured, use baseColor
+    // 1-based index into Scene::mirrors when this batch IS a mirror panel's
+    // front faces (they composite the reflection; Diffuse/Specular forced 0,
+    // parity with the CPU's wallMatClone). 0 = ordinary geometry.
+    int      mirrorIndex = 0;
     int      normalTexIndex = -1;
     int      roughTexIndex = -1;
     int      heightTexIndex = -1;
@@ -133,6 +154,7 @@ struct Scene {
     std::vector<Batch>        batches;
     std::vector<TextureImage> textures;
     std::vector<Light>        lights;
+    std::vector<MirrorInfo>   mirrors;
     Camera                    camera;
     float                     ambient[3] = {0, 0, 0};    // Scene::Ambient, 0..255
     // Authored backdrop gradient (Scene::SkyZenith / SkyNadir, 0..255). Projected
@@ -171,6 +193,11 @@ struct LoadOptions {
     // DEFAULT greets run — reproducing them is parity. ON here for the same
     // reason stoneTex is.
     bool        disco = true;
+    // Identify the greets mirror panels (teleporter / screen 3 / screen 4) so
+    // the deferred arm can render + composite first-order reflections.
+    // greets_mirror defaults ON in DEMO, so ON here is parity; --no-mirror
+    // renders the panels as plain emissive geometry (the pre-mirror look).
+    bool        mirrors = true;
     // Replicate DEMO's --greets_stone_tex override (default ON there, so ON here).
     // Without it the wall this renders is the AUTHORED FLD wall, not the surface
     // the user actually reviews — see docs/GPU_BENCHMARK_PLAN.md §3.2. No

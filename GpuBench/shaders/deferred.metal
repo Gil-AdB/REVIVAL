@@ -43,14 +43,23 @@ struct FrameUniforms {
     // three mech-flare omnis sit inside the mech) shadow everything and drag the
     // mean down, which reads as "the shadow tap is broken" when it is not.
     int    vizLight;
+    // Oblique clip for the mirror REFLECTION pass: fragments with
+    // dot(world, clipPlane.xyz) + clipPlane.w < 0.05 are discarded, exactly the
+    // sd > 0.05 face gate the CPU's BuildMirror clone applies. Disabled when
+    // xyz == 0 (the main pass).
+    float4 clipPlane;
+    // Number of live reflection textures in the MAIN lighting pass (0 inside a
+    // reflection pass — no second bounce, stated in the plan).
+    uint   mirrorCount;
 };
 
 struct BatchUniforms {
     float3 rotRow0, rotRow1, rotRow2;
     float3 objPos;
     float4 baseColor;      // .rgb authored base colour, .w = has-albedo flag
-    float4 matParams;      // diffuse, specular, glossiness(0..1), luminosity
+    float4 matParams;      // diffuse, specular, lobe roughness, luminosity
     float4 mapFlags;       // hasNormal, hasRough, aoInAlpha, parallaxScale
+    float4 misc;           // .x = mirror panel index (1-based; 0 = none)
 };
 
 struct GpuLight {
@@ -111,12 +120,14 @@ struct GBufVertexOut {
     float3 viewNormal;
     float3 viewPos;
     float4 viewTangent;   // xyz view-space engine tangent, w handedness sign
+    float3 worldPos;      // for the reflection pass's oblique clip
 };
 
 struct GBufOut {
     float4 albedo [[color(0)]];   // rgb albedo, a = baked AO (Mat_AoInAlpha) else 1
     float2 normal [[color(1)]];   // oct-packed VIEW-space shading normal
-    float4 params [[color(2)]];   // diffuse, specular, glossiness, luminosity/4
+    float4 params [[color(2)]];   // diffuse, specular, lobe rough, luminosity/4
+    uint   mirror [[color(3)]];   // mirror panel id (1-based; 0 = none)
 };
 
 vertex GBufVertexOut vs_gbuffer(VertexIn in [[stage_in]],
@@ -139,16 +150,25 @@ vertex GBufVertexOut vs_gbuffer(VertexIn in [[stage_in]],
     o.viewTangent = float4(rowmul(u.camRow0, u.camRow1, u.camRow2, wt),
                            in.tangent.w);
     o.viewPos = vp;
+    o.worldPos = wp;
     return o;
 }
 
 fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
+                            constant FrameUniforms &u [[buffer(1)]],
                             constant BatchUniforms &b [[buffer(2)]],
                             texture2d<float> albedoTex [[texture(0)]],
                             texture2d<float> normalTex [[texture(1)]],
                             texture2d<float> roughTex  [[texture(2)]],
                             sampler samp [[sampler(0)]])
 {
+    // Reflection pass: clip everything at/behind the mirror plane — the same
+    // sd > 0.05 gate BuildMirror's clone applies, and what keeps the panel
+    // itself (sd == 0) out of its own reflection.
+    if (dot(u.clipPlane.xyz, u.clipPlane.xyz) > 0.0f &&
+        dot(in.worldPos, u.clipPlane.xyz) + u.clipPlane.w < 0.05f)
+        discard_fragment();
+
     float4 alb = float4(b.baseColor.rgb, 1.0f);
     if (b.baseColor.w > 0.5f) alb = albedoTex.sample(samp, in.uv);
     // AO lives in the albedo's alpha only when the material says so; otherwise
@@ -195,6 +215,7 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
     o.normal = oct_encode(n);
     o.params = float4(b.matParams.x, spec, b.matParams.z,
                       saturate(b.matParams.w * 0.25f));
+    o.mirror = uint(b.misc.x + 0.5f);
     return o;
 }
 
@@ -530,6 +551,8 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
                             depth2d<float>    gDepth    [[texture(3)]],
                             array<depthcube<float>, 16> shadowCubes [[texture(4)]],
                             array<depth2d<float>,   16> spotMaps    [[texture(20)]],
+                            texture2d<uint>   gMirror   [[texture(36)]],
+                            array<texture2d<float>, 4> reflTex [[texture(37)]],
                             sampler           shadowSamp [[sampler(1)]])
 {
     const uint2 px = uint2(in.position.xy);
@@ -549,6 +572,21 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
                                      shadowCubes, spotMaps, shadowSamp);
     radiance += AmbientRadiance(u, sh, S);
     radiance += S.baseColor * S.lum;   // emissive
+
+    // Mirror panel composite: panel radiance = emissive text + reflection/2 —
+    // the CPU's half-silvered glass formula (the wallMatClone is transparent
+    // with Diffuse 0, and the deferred xpar blend is lit_texel + behind/2;
+    // for the teleporter Luminosity is 0 so the panel is the pure half
+    // reflection). The panel's OWN batch already carries Diffuse=Specular=0,
+    // so the terms above contribute only the emissive. A reflected world
+    // point on the plane projects to the SAME pixel in the reflection render
+    // (rows reflected, position mirrored, same projection), so the composite
+    // is a same-pixel read, no reprojection.
+    if (u.mirrorCount > 0u) {
+        const uint mid = gMirror.read(px).x;
+        if (mid > 0u && mid <= u.mirrorCount)
+            radiance += reflTex[mid - 1u].read(px).rgb * 0.5f;
+    }
 
     return float4(radiance, 1.0f);
 }
