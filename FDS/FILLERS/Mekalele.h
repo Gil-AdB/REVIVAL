@@ -715,8 +715,10 @@ struct TileRasterizerCtx {
 	// the neighbouring prism's fragment answers the pixel, arbitrated by Z.
 	// false = every expression below is the legacy one, byte-identical.
 	bool  pomPrismMarch = false;
-	// --pom_prism_march>=2 on ANY shell face (lid or side): the PRISM EXIT.
-	// Every march failure discards — except a crossed hit whose ONLY exit
+	// --pom_prism_march>=3 on ANY shell face (lid or side): the PRISM EXIT.
+	// Mode 2 (the production candidate) does NOT set this — it keeps the
+	// existing exit flags; see prismExit's derivation below, which gates on
+	// >=3. Every march failure discards — except a crossed hit whose ONLY exit
 	// sides are COPLANAR-classified (shellSideCls 0): the neighbouring patch
 	// is the SAME PLANE, the interface sheet is edge-on from every front
 	// view (no rasterizable geometry can answer the crossing — measured at
@@ -2541,7 +2543,7 @@ struct TileRasterizer {
 								keep |= clampable | keepHit;   // keepHit: marched uv/h stay
 								if (pathViz) lidClamped = clampable;
 							}
-							// ── S1d-5 PRISM EXIT (--pom_prism_march>=2): every failure
+							// ── S1d-5 PRISM EXIT (--pom_prism_march>=3): every failure
 							// discards — the neighbouring prism's fragment answers, arbitrated
 							// by Z — EXCEPT a crossed hit whose exit sides are all COPLANAR
 							// (shellSideCls 0). A coplanar seam is a chart tear our per-patch

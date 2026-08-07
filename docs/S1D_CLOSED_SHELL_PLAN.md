@@ -2432,3 +2432,436 @@ measure first.** Not implemented in this stage.
   no reason to match the owner's. Inheriting the owner's `TbnHandedness` is
   right only by luck. Both facts are consistent with `S1d-5.2` and neither has
   been measured for its pixel cost yet.
+
+---
+
+# S1d-5b — THE PRISM-CLIPPED MARCH (`--pom_prism_march`), built and measured
+
+Added 2026-08-07, commits `eabb28e` (stage 1) + `de29caa` (stage 2). The user's
+mandate: replace the per-patch UV-box march domain with a PRISM-CLIPPED march
+per the literature (Hirche 2004, Shell Maps) — the ray bounded to the prism,
+marched entry→exit, DISCARDED on exit, the neighbouring prism's own fragment
+answering the pixel. This section records what of that survived contact with a
+front-face rasterizer, all of it measured.
+
+**Metric note.** All void/black numbers below are MY OWN baseline re-renders on
+one binary: void = `popcount(z16==0)`, black = `popcount(max(r,g,b)==0)`, over
+the **19-pose set** = the 16 lines of `docs/greets_review_poses.txt` + t=2980 +
+t=5518 + t=5877 (the S1d-4 mandate extras). The c5bf8ec per-pose figures (14 /
+1+9 / 15) came from dumps that no longer exist and do not reproduce from the
+stored PPMs; the flat-quad arm re-measured on this metric is the 106 682 row
+below, and every comparison in this section is same-binary, same-metric.
+
+## S1d-5b.0 The mode ladder
+
+`--pom_prism_march` (default 0, byte-null; needs `--pom_shell --pom_prism`,
+cone march). **Mode 1 is the recommendation** — stage 2 named mode 2 the
+production candidate, and §S1d-5b.7 overturned that on measurement; modes 2 and
+3 remain in the tree as measured references.
+
+- **1 — SIDE-QUAD ENTRY MARCHING. ← the arm to fly (§S1d-5b.10).** The prism quads march the owner's height
+  field from their own interpolated (u,v,h) (`Vertex::ShellH` already runs
+  lid→base down the quad). Three mechanisms, each necessary:
+  (a) per-lane SIGNED `1/(V·N)` on side quads ONLY (`Face::PomPrismSide`) — a
+  side fragment can be seen from behind the owner lid's plane (V·N < 0, the
+  t=5963 doorway curtain) where the ray ASCENDS; ascent cone step is
+  `c·gap/(dlen−c)`, `dlen≤c` ⇒ exits the lid ⇒ MISS; ascent miss is `rayH≥1`.
+  Applied to LID faces this discards 200k px over the 19 poses (grazing lanes
+  whose interpolated V·N dips ≤0 flip to ascent and exit) — the side-only gate
+  is load-bearing.
+  (b) the 1e-4 UV nudge points INTO the owner's triangle (the legacy
+  handedness-matched sign can point outside and turn every in-stone
+  hit-at-entry into a lateral exit).
+  (c) owner material + owner lid N/Tangent (march frame = owner chart); under
+  `--pom_normal` a HIT shades with the marched field's own normal — which
+  retires §S1d-5.2's wrong-normals defect for every crossing ray.
+- **2 — FULL INTERFACE GEOMETRY** (stage 2's candidate, SUPERSEDED by mode 1 —
+  §S1d-5b.7: it ties on the 19 poses, loses 2× on the authored timeline, and
+  costs +4.38 ms for 4.09× the side faces), exit policy
+  unchanged (lid_edge etc. still apply):
+  * CHART-TEAR walls: watertight now also requires the partner to CONTINUE THE
+    OWNER'S CHART (same material — `::mirUV` clone = tear — coplanar, equal
+    endpoint UVs). Welded folds get their interface walls back (+228 @ weld=1).
+  * T-JUNCTION SPLIT (§8.6 5b): emitted walls split at interior T-vertices
+    with the WELDED delta, keyed on `PomWeldQPos` both sides. Census: 17 edges
+    / 40 T-points, 30–40 NON-AFFINE, max 0.127 world — the affinity is
+    measurably violated, the split is load-bearing.
+  * TWO-SIDED interface walls (partnered edges only): at a concave welded fold
+    both owners' walls face INTO the solid and cull away; the reversed copy is
+    the neighbour-chart continuation entry, the wrong-chart copy self-discards.
+    Free edges stay one-sided (see-through by design).
+- **3 — THE PAPER-PURE EXIT** (reference): every failure discards; base clip /
+  lid-edge clamps / keep_uv / side planes / side entry forced off; plus a
+  coplanar-exit keep (crossed hit whose exit side is `shellSideCls==0`).
+
+## S1d-5b.1 THE HEADLINE TABLE — 19 poses, void / black
+
+| arm (cap=16, amp=0.18, prism=1) | void | black |
+|---|--:|--:|
+| S1d-4 shipping arm (flat quads, weld=0, lid_edge=3) | 106 682 | 106 743 |
+| marching quads, flat=0 (same flags) | 20 | 84 |
+| mode 1, weld=0 (stage 1) | 20 | 85 |
+| mode 3, weld=0 (paper-pure) | 17 871 | 13 646 |
+| mode 3, weld=1 | 20 210 | 17 179 |
+| mode 3, weld=3 | 12 317 | 9 878 |
+| mode 2, weld=1, lid_edge=3 (the stage-2 candidate) | 10 | 84 |
+| mode 2, weld=3, lid_edge=3 | 476 | 531 |
+| **mode 1, weld=1, lid_edge=3 — THE ARM TO FLY** (§S1d-5b.7) | **10** | **84** |
+| flat, no displacement at all — the crack FLOOR | 21 | 148 |
+
+**The last two rows were added 2026-08-07 and they change the conclusion.** This
+table cannot separate mode 1 + weld=1 from mode 2 — they tie at 10 / 84 — and it
+is bounded below by an engine crack floor of 21 that a flat scene already has.
+The arms are told apart by the AUTHORED-CAMERA TIMELINE (§S1d-5b.5) and by PERF
+(§S1d-5b.6), and on both mode 1 wins. Do not pick an arm off this table alone.
+
+Two rows deserve their own sentence:
+
+1. **The S1d-4 flat quads were costing 106k px of Z-coverage at three poses
+   c5bf8ec never measured**: p5963 91 030 (the OPEN defect), and the two
+   MIRROR poses p6133 11 507 / p6293 4 104. All three are 0 under every
+   marching arm — the t=5963 forward-sentinel void (stage 4 of the mandate)
+   is RESOLVED BY ARCHITECTURE: the flat quads are gone, so is the defect,
+   0 void / 0 black at the pose, no GreetsMirror work needed.
+2. **The paper-pure exit loses by three orders of magnitude** (12 317 vs 10),
+   and §S1d-5b.2 is the mechanism, measured.
+
+Candidate vs the S1d-4 acceptance poses: p5518 11→7, p2980 0→0, p5958b 0→0,
+p2845/p6097 0→0, p5534 4→0, p5877 5→1 with the wall-top crenellation
+PIXEL-IDENTICAL to the mode-1 reference (see-through preserved) and the
+near-wall corner rendering a relieved marched jamb instead of a razor cut.
+LOOK at t=5963: the doorway curtain is marched stone continuous with the wall
+relief (stage-1 goal; scratch `st1_curtain_5963.png`) — the flat quads showed
+a stretched texel band, flat=0 erased the jamb to a see-through sliver.
+Weld re-derived for this architecture: **weld=1**. weld=3 regresses (476 —
+new slits at p5743/5773 where wall/floor junction verts move differently);
+weld=0 tears (222 torn edges vs 66; non-affine T max 0.127 vs 0.100).
+Candidate byte-stable 3/3 at t=5743; every shipping gate byte-exact and the
+S1d-4 arm with the flag unset byte-MATCHES the pre-S1d-5 binary.
+
+## S1d-5b.2 WHERE THE ARCHITECTURE FIGHTS THE ENGINE — the finding
+
+**"Discard on exit, the neighbour answers" requires a fragment per crossed
+prism. A front-face rasterizer cannot produce one for the seam classes that
+dominate greets' void.** Proof by exhaustion at t=2980 (the corner pose, a
+3 588-px full-height seam slit, exits U−/U+ into each other):
+
+| experiment | void |
+|---|--:|
+| mode 3, walls only where the geometric rule emits | 3 588 |
+| + `--pom_prism=2` (walls at EVERY edge) | 3 588 |
+| + two-sided walls | 3 538 |
+| + walls NEVER domain-discard (temp build) | 3 362 |
+
+Walls everywhere, facing both ways, never discarding — the slit stays,
+because the interface sheet between two COPLANAR prisms contains the view ray
+at every front-on pose: its projected area is a razor sliver (the S1d-4 keep
+arm renders the same seam as a seamless continuous wall — the crossed hits ARE
+correct there). Hirche gets his fragment-per-crossed-prism from
+projected-tetrahedra SOLID rasterization (the prism's projected silhouette
+covers the pixel whenever the ray crosses the volume); Shell Maps never have
+the boundary at all (one continuous chart). Our per-patch boxes manufacture
+boundaries neither paper has, and the only continuation available at them is
+the MARCH's own crossed hit — i.e. exactly what `--pom_shell_lid_edge=3` +
+`--pom_shell_keep_uv=0.125` keep, bounded to half a block. The path census
+agrees: the mode-3 void is 94 % `coneHit + DISCARD(domain)` with the kill
+sticky bit set — the march FOUND the stone and the policy threw it away, at
+pixels where no answering geometry can exist.
+
+The per-side-class coplanar keep built into mode 3 does not rescue it
+(2980: 3 538 unchanged) — `shellSideCls` is the DOMINANT class per patch-box
+side, and the offending seams sit on sides whose dominant class is angled;
+S1d-2b hit the same coarseness on free edges.
+
+So the honest composition is: **prism walls as marching ENTRY geometry +
+bounded march continuation at the rasterizer-unanswerable seams.** The exact
+flags to fly are §S1d-5b.8, which is shorter than the arm measured here —
+two of its flags turned out to be measurably droppable.
+
+## S1d-5b.3 STAGE 3 (coverage) — the residual, attributed
+
+**§8.6 req 4 ("shell `siling`, the columns and the stairs — 30 % of the wall's
+concave boundary abuts unshelled geometry") is measured to buy ZERO here, and
+was NOT done.** The attribution, not the magnitude, is the argument.
+
+The candidate's entire 19-pose residual is 10 void px: 7 @ p5518, 2 @ p5773,
+1 @ p5877. Each one was attributed three ways (`--face_id_dump` +
+`--pom_path_viz=2`, scripts `attrib.py` / `attrib_black.py`):
+
+1. **Neighbourhood.** All 10 are ISOLATED SINGLE PIXELS whose ENTIRE 8-neighbour
+   ring is ONE shelled material — `floor::mirUV` ×6, `rooms` ×3, `rooms::mirUV`
+   ×1. Not one touches `siling`, `teleporter`, a column or a stair. Not one even
+   touches a material BOUNDARY. Shelling the unshelled 30 % cannot reach a single
+   one of them.
+2. **Path code.** All 10 read `path == 0` — **no fragment was ever rasterized
+   there**. They are rasterizer sliver cracks between two abutting triangles
+   interior to one chart, not march discards and not chart-boundary gaps. No exit
+   policy, weld setting or interface wall can address a pixel no triangle covered.
+3. **Against the floor.** A FLAT arm (`--deferred` alone, no displacement of any
+   kind) shows **21** such holes at the same 19 poses. The candidate's 10 is
+   BELOW the undisplaced scene's own crack rate, so the metric has bottomed out
+   against the engine, not against the shell.
+
+The BLACK residual (84) decomposes just as cleanly: 10 void-black + **74
+shaded-black, every one of them owned by `Piramid.lwo`'s `sss` material** —
+unshelled, unrelated to the stone, and present in the flat arm too (flat shows
+62 of them at p5958a where the candidate shows 60). Flat's total black over the
+19 poses is **148** against the candidate's **84**.
+
+**But the 19 poses were not enough to close coverage — see §S1d-5b.5.** They are
+hand-picked defect repros; a census on the DEMO's OWN authored camera finds two
+t-ranges they never sample where mode 2 leaves ~110 and ~205 void px/frame. That
+residual is also not the unshelled 30 % (it is `rooms::mirUV`), and chasing it
+is what overturned the mode-2 candidate in §S1d-5b.7.
+
+## S1d-5b.4 MATCHED AMPLITUDE — the §S1d-4.5 confound, discharged
+
+§S1d-4.5 flagged that every lid-vs-tessellation cell in this campaign compared a
+0.18-world slab against `--greets_displace_amp`'s 0.30-world carve. Re-run at ONE
+amplitude, 19 poses, same binary, void / black:
+
+| arm | void | black |
+|---|--:|--:|
+| flat (`--deferred` alone, no displacement) | 21 | 148 |
+| tessellation @ **0.30** (the confounded number) | **271** | **444** |
+| tessellation @ **0.18** (matched to the shell) | **20** | **192** |
+| shell, mode 2 @ 0.18 | 10 | 84 |
+| shell, mode 1 + weld=1 @ 0.18 (§S1d-5b.7) | 10 | 84 |
+
+**The confound was worth 13.6× on the tessellation arm** (271 → 20 void going
+from 0.30 to 0.18). Every historical cell that ran tess at its default was
+flattering the shell by an order of magnitude. At matched amplitude the shell
+still wins — **10 vs 20 void, 84 vs 192 black** — but by **2×, not 27×**. That is
+the number to quote from now on; the old one is retired.
+
+Note also that flat (no displacement at all) scores 21 / 148. The tessellation
+bake at matched amplitude is therefore roughly AT the undisplaced scene's own
+crack floor on void, and worse than it on black.
+
+## S1d-5b.5 WHAT THE 19 REVIEW POSES DO NOT COVER
+
+`docs/greets_review_poses.txt` is a list of poses **defects were reported at**.
+That makes it a biased sample by construction: it can only find defects where
+someone already looked. Every entry sits at t≈2845–6293, sixteen of nineteen at
+t≥5518.
+
+**Instrument (new, `st3_timeline.py`).** Walk the greets timeline on the DEMO's
+OWN AUTHORED CAMERA — `FDS_GREETS_CAM` explicitly UNSET — every 100 ticks from
+t=200 to t=6400 (63 samples), scoring the same void/black. This is the camera the
+user actually flies, so a defect CLASS the review list misses shows up as a
+t-range with residual.
+
+It found two, and neither is sampled by any review pose:
+
+| band | flat | flat+POM | S1d-4 | mode 2 | **mode 1 + weld=1** |
+|---|--:|--:|--:|--:|--:|
+| t=900…2400 (6 samples) | 0–3 | 0–3 | 386–2585 | **101–129** | **0** |
+| t=3500…4000 (6 samples) | 0–1 | 0 | 8079–8126 | **198–217** | **0–1** |
+
+Two things follow, both measured:
+
+1. **Flat POM is identical to flat** — the void in these bands is entirely the
+   SHELL's, not POM's.
+2. **Mode 2 improves S1d-4 enormously here** (t=3500: 8079 → 217, 37×) **and
+   still leaves ~110–205 px/frame that the undisplaced scene does not have.**
+   The 19-pose census reports 10 because it has no sample in either range.
+
+Attribution of the band residual (`--face_id_dump` + `--pom_path_viz=2` at
+t=1500/3500/3800, 531 void px): **99 % of the neighbour ring is `rooms::mirUV`** —
+the handedness-mirrored wall clone — and `siling` contributes 6 of 794 samples
+(0.75 %). So §8.6 req 4 is refuted here too. The pixels are ~98 % `path == 0`
+(no fragment rasterized) and form a coherent thin seam ~115 rows tall, ~2 px per
+row, not scattered pinholes.
+
+**Standing lesson: a pose-list census cannot certify coverage.** Run the
+authored-camera timeline before claiming a coverage stage is closed.
+
+## S1d-5b.6 PERF at t=5743 — and the 5 ms is not where it looked
+
+`--bench=scene@scene=greets,t=5743,iters=20`, 5 interleaved rounds, min-of-arm
+(the only load-robust statistic; load averaged 7–11 from a concurrent agent, so
+read every row as an upper bound). Both statistics recorded per run.
+
+| arm | bench min ms | Δ flat | profiler min ms | Δ flat |
+|---|--:|--:|--:|--:|
+| flat | 49.54 | — | 48.05 | — |
+| + POM | 55.57 | +6.03 | 53.04 | +4.99 |
+| + tessellation @0.18 | 56.66 | +7.11 | 54.61 | +6.56 |
+| + tessellation @0.30 | 56.34 | +6.80 | 54.71 | +6.66 |
+| S1d-4 | 56.69 | +7.15 | 55.05 | +7.00 |
+| **mode 1 + weld=1** | **56.98** | **+7.44** | — | — |
+| mode 2 (the ex-candidate) | 61.86 | +12.32 | 59.68 | +11.63 |
+
+**My flat reproduces the 49.25 the previous stage reported; its tess figure of
+73.99 does NOT reproduce — I measure 56.66 at matched amplitude and 56.34 at
+0.30, a 17 ms gap I cannot account for.** That triple appears nowhere in the
+repo, so it cannot be traced. Treat the row above as the live one.
+
+On this harness **mode 2 costs 5.2 ms MORE than the tessellation carve it was
+meant to replace.** That inverts the campaign's cost argument and is not a
+rounding error, so it was decomposed rather than described.
+
+**Mechanism bench** (same recipe, 5 rounds, arms differing one flag at a time;
+`faces` is the `pom_prism_sides` mesh's face count from the run's own log):
+
+| arm | min ms | side faces | Δ prev | Δ S1d-4 |
+|---|--:|--:|--:|--:|
+| S1d-4 (flat quads, weld=0) | 56.76 | 530 | — | — |
+| flat quads, weld=1 | 57.16 | 218 | +0.39 | +0.39 |
+| **mode 1 — quads MARCH** | 56.98 | 392 | **−0.18** | +0.22 |
+| **mode 2 — + interface geometry** | 61.36 | **1602** | **+4.38** | +4.60 |
+
+**Turning the side quads into marchers is FREE (−0.18 ms, inside noise). The
+entire cost is mode 2's added interface geometry — 392 → 1602 faces, 4.09× —
+from the 228 chart-tear walls, the two-sided reversed copies and the T-splits.**
+
+## S1d-5b.7 THE VERDICT REVERSAL — mode 1 + weld=1 dominates mode 2
+
+§S1d-5b.6 forced the one combination stage 2 never ran. Its ladder varied MODE
+and WELD together (`mode 1 weld=0`, `mode 2 weld=1`, `mode 3 weld=0/1/3`) and so
+never measured **mode 1 with weld=1** — the cheap corner of the grid.
+
+| arm | 19 poses void/black | authored timeline, 63 steps | t=5743 ms |
+|---|--:|--:|--:|
+| flat | 21 / 148 | 5 332 | 49.54 |
+| S1d-4 | 106 682 / 106 743 | — | 56.69 |
+| mode 2 (ex-candidate) | 10 / 84 | **7 271** | 61.86 |
+| **mode 1 + weld=1** | **10 / 84** | **3 575** | **56.98** |
+
+**Mode 1 + weld=1 ties mode 2 on the 19 poses, beats it 2.0× on the authored
+timeline (and comes in BELOW the undisplaced flat arm's 5 332), and costs
+4.88 ms less.** Step by step across all 63 samples there is **no t where mode 2
+beats mode 1 by more than 20 px**, and none where mode 1 is worse than flat by
+more than 20 px.
+
+So mode 2's interface geometry is not merely expensive — **it is the source of
+the band residual it was built to remove.** The chart-tear walls, the two-sided
+copies and the T-splits add 1 210 faces of `rooms::mirUV` interface sheet, and
+that sheet is what leaves the ~115-row seam at t=3500–4000.
+
+This does NOT retract §S1d-5b.2's architecture finding, which stands unchanged:
+the paper-pure exit (mode 3) is still unimplementable in a front-face rasterizer,
+and the bounded march continuation (`lid_edge=3` + `keep_uv`) is still what
+answers the coplanar seams. What is retracted is the claim that mode 2's extra
+GEOMETRY is needed on top of it. It is not; it is a net negative.
+
+**`--pom_prism_march=2` and `=3` stay in the tree as measured references.** Mode
+2 is no longer the recommendation.
+
+## S1d-5b.8 THE GRAZING SMEAR — S1d-5 does not touch it
+
+Sweep A (t=5958, p9→p10, 16 frames, `FDS_DUMP_TXTR=1`), `slip.py`, against the
+§S1d-4.1 published ladder. Slip p90 is the comparable column.
+
+| arm | slip p50 | **slip p90** | slip p99 | reach p90 | published p90 |
+|---|--:|--:|--:|--:|--:|
+| flat POM | 0.007 | **0.094** | 0.57 | 10.28 | 0.094 |
+| mode 1, cap 4 | 0.097 | **0.891** | 2.69 | 51.13 | 0.891 |
+| mode 1, cap 16 | 0.239 | **6.271** | 29.47 | 182.50 | 6.246 |
+| mode 2, cap 16 | 0.235 | **6.375** | 29.28 | 182.36 | 6.246 |
+| mode 2, cap 4 | 0.097 | **0.891** | 2.69 | 51.10 | 0.891 |
+| S1d-4, cap 16 | 0.252 | **6.658** | 30.43 | 185.35 | 6.246 |
+
+**Stated plainly: S1d-5 DOES NOT MOVE THE SMEAR, in either mode.** flat and cap 4
+reproduce the published ladder to three decimals (0.094, 0.891); cap 16 lands at
+6.271 / 6.375 against 6.246, inside the spread of my own S1d-4 re-measure (6.658).
+
+This is the expected result, not a failure. The smear is produced by the
+cap-bounded `1/(V·N)` reach on the LID march. S1d-5 changes what happens at PRISM
+BOUNDARIES — entry geometry and exit policy — and touches neither the lid march
+nor the cap. **The grazing smear remains open and is untouched by this stage.**
+
+## S1d-5b.9 CAP SENSITIVITY — the cap is free for coverage
+
+S1d-3 found the prism made `--pom_shell_cap` a free parameter. Confirmed for
+this arm, 19 poses:
+
+| cap | 2 | 4 | 8 | 16 |
+|---|--:|--:|--:|--:|
+| mode 2 void / black | 10 / 83 | 10 / 84 | 10 / 84 | 10 / 84 |
+| mode 1 + weld=1 void / black | — | **10 / 84** | — | **10 / 84** |
+
+**Void is exactly 10 at every cap. `--pom_shell_cap=16` is NOT load-bearing** —
+the user can fly cap 4 at zero coverage cost. What the cap buys is REACH and what
+it costs is SLIP (§S1d-5b.8): cap 4 → reach p90 51, slip p90 0.891; cap 16 →
+reach p90 182 (3.6×), slip p90 6.27 (7.0×). Per §S1d-4.1 there is no knee on that
+curve, so the choice is a look judgement, not an optimum. Cap 4 is recommended
+because it is what the user flies and it is 7× quieter in motion.
+
+## S1d-5b.10 THE ARM TO FLY
+
+```sh
+cd Runtime && ./DEMO \
+  --deferred --pom_shell --pom_prism=1 --pom_prism_march=1 \
+  --pom_shell_lid_edge=3 --no-pom_shell_base_clip \
+  --pom_shell_world_amp --pom_shell_world_amp_set=0.18 \
+  --pom_normal --parallax_pom_cone --parallax_pom=32 \
+  --pom_cone_exact=1 --pom_cone_min_step=1 --pom_march_earlyout \
+  --pom_shell_cap=4 --texture_filter=1
+```
+
+Measured: **19 poses 10 void / 73 black; authored-camera bands t=900–2400 and
+t=3500–4000 both 0 void; 56.98 ms at t=5743** (+7.44 vs flat, +0.29 vs S1d-4,
++0.32 vs tessellation at matched amplitude).
+
+**What was dropped, and why — each measured, not assumed:**
+
+| dropped | reason |
+|---|---|
+| `--pom_shell_side_faces=3` | **inert.** Removing it is BYTE-IDENTICAL at t=5743/5963/2980. Confirms §8.6's "superseded". |
+| `--pom_shell_weld=1` | already the DEFAULT (`FeatureFlags.def:204`). Byte-identical when omitted. |
+| `--no-greets_displace` | already the default (`greets_displace` = 0). |
+| `--pom_prism_march=2` → `=1` | §S1d-5b.7: mode 1 ties on poses, wins 2× on the timeline, costs 4.88 ms less. |
+
+**What was KEPT because dropping it measurably hurt:**
+
+- `--no-pom_shell_base_clip` is **load-bearing**: restoring the default adds
+  **+43 black** on mode 1 (and +26 on mode 2, concentrated at the grazing poses
+  p5958b/c). Keep it off.
+- `--texture_filter=1` is a LOOK flag, orthogonal to coverage: void unchanged at
+  10, black 84 → 73 on the poses. **The black metric is not comparable across a
+  texture-filter change** — `flat --texture_filter=1` alone moves t=1500 black
+  from 2 501 to 3 260, i.e. the shift is 100 % the filter. Drop the flag if you
+  want black numbers comparable to the rest of this document.
+
+**The one knob to try:** `--pom_shell_cap=16` for 3.6× deeper relief at 7×
+the grazing smear. Coverage is identical (§S1d-5b.9).
+
+Interactive: F1/F2 scrub (Shift = fast), F9 dumps a pose.
+
+**Where to look, in priority order** — the two bands no review pose covers and
+where mode 2 failed, so they are the least-eyeballed stretches of the scene:
+**t≈900–2400** and **t≈3500–4000**, both on the authored camera. Then the
+review poses themselves. The residual that remains is (a) 10 single-pixel
+rasterizer cracks, below the flat arm's own 21, and (b) the grazing smear, which
+this stage does not touch.
+
+## S1d-5b.11 REPRODUCTION
+
+Scripts in the session scratchpad (they are not in `tools/`):
+
+```sh
+# 19-pose battery + score  (void = popcount(z16==0), black = popcount(max rgb==0))
+s1d5_poses.py <root> <armname> -- <flags...>      # needs FDS_SNAPSHOT_ZDUMP, sets it
+s1d5_score.py <root> <arm> [<arm>...]
+
+# THE AUTHORED-CAMERA TIMELINE CENSUS (S1d-5b.5) — unsets FDS_GREETS_CAM
+st3_timeline.py <root> <arm> <t0> <t1> <step> -- <flags...>
+
+# residual attribution: needs --face_id_dump (+ --pom_path_viz=2 for path codes)
+attrib.py       <posedir>...    # void px -> neighbour ring material, SHELLED or not
+attrib_black.py <posedir>...    # splits void-black from shaded-black, names the owner
+
+# perf: interleaved, min-of-arm, records bench mean AND profiler min
+st3_bench.sh                    # the S1d-5b.6 ladder
+st3_mech.sh                     # the mechanism decomposition (faces vs marching)
+
+# slip / reach (grazing smear)
+sweepA.sh <ABSOLUTE outdir> <flags...>   # 16 frames t=5958; RELATIVE paths land in Runtime/
+slip.py   <outdir> "<label>"
+```
+
+Gates, all re-run at this commit and byte-exact: `tools/render_gate.sh` 3/3
+(`4ac809e5` / `b41894f9` / `166fa25a`), city `37e62845c4d30eefa321730c5bb7e0b8`,
+fountain `51fff7cd38767d619280afe0498a6f24`, greets pin
+`f1297141611c484bac7cc10a8bdcf630`.
