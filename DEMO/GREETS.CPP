@@ -1945,44 +1945,25 @@ void Initialize_Greets()
 	// deleted, so the browser editor's LWO write-back is authoritative — a
 	// saved specular no longer gets stomped at the next scene load. The name
 	// lists remain only to pick which surfaces get a Sobel-baked normal map.
-	for (Material *M = MatLib; M; M = M->Next) {
-		if (M->RelScene != GreetSc || !M->Name) continue;
-		const char *n = M->Name;
-		// 'hull' and 'cockpit' were REMOVED from this list 2026-08-09
-		// (docs/SHADING_CONTRACT.md §11, row E8). MECH_HUL.JPG /
-		// MECH_COK.JPG are CAMOUFLAGE PAINT, not surface relief, so
-		// Sobelling their luminance turned dark-green blotches into
-		// geometric dents: measured at hull pixel (767,723) the shipped
-		// frame read Y 131.2 against 45.0 with the map neutralised and
-		// 41.0 on the standalone Metal arm. If the mech ever WANTS relief
-		// it comes through the authoring pipeline (an authored
-		// TEXTURES/PBR/<set>/normal.png reached by the LWO 'RVSM'
-		// sub-chunk, the same route 'rooms'/'stairs'/'amudim' take) —
-		// never from a substring match on the material name.
-		const bool isShiny = strstr(n, "stairs") || strstr(n, "amudim") ||
-		                     strstr(n, "floor")  || strstr(n, "marb")   ||
-		                     strstr(n, "MARB");
-		// Wall / ceiling surfaces — the FLD names them 'rooms' (the
-		// big brick wall texture in the back of the greets scene) and
-		// 'siling' (the ceiling that uses the same brick atlas). They show
-		// enough surface detail in the diffuse to benefit from a Sobel-baked
-		// tangent-space map.
-		const bool isWall = !strcmp(n, "rooms") || !strcmp(n, "siling");
-		// Tangent-space normal maps work on any face orientation —
-		// the perturbation lives in the surface's own tangent plane
-		// and the lighting kernel multiplies by per-pixel TBN to bring
-		// it into view space. Apply to every shiny material + the
-		// wall/ceiling materials.
-		if ((isShiny || isWall) && M->Txtr && !M->NormalMap) {
-			M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f);
-			if (M->NormalMap) {
-				std::fprintf(stderr, "[GREETS] baked tangent-space normal map for '%s'\n", n);
-			}
-		}
-		// NOTE: the Mat_Refractive opt-in marking that used to live here moved
-		// to the code-default glass block above (see the comment there); the
-		// per-material 'refractive' authored value rides the LWO RVSF sub-chunk.
-	}
+	// THE SOBEL NORMAL-MAP NAME GATE IS GONE (2026-08-09, user's call:
+	// "fuck the string match - it was a temp measure anyway - remove").
+	//
+	// It used to bake a tangent-space normal map FROM THE DIFFUSE for any
+	// material whose NAME matched a substring list, which is a guess dressed
+	// as authoring: it turned the mech's camouflage PAINT into geometric
+	// dents (docs/SHADING_CONTRACT.md §11 row E8 — hull pixel (767,723) read
+	// Y 131.2 shipped against 45.0 without it and 41.0 on the Metal arm).
+	//
+	// By the end it only reached 'siling'; every other name on the list was
+	// already served by a real map through the stone-tex or RVSM path and
+	// skipped by the `!M->NormalMap` guard. So nothing here is load-bearing.
+	//
+	// A surface that WANTS relief now gets it the one honest way: an authored
+	// TEXTURES/PBR/<set>/normal.png reached by the LWO 'RVSM' sub-chunk, which
+	// MaterialImport_ApplyRevMaps (DEMO/MaterialImport.cpp) loads with no code
+	// change — the same route 'rooms', 'stairs' and 'amudim' already take.
+	// BakeNormalMapFromDiffuse itself is kept: the editor still offers it as
+	// an explicit per-surface action, which is authoring, not inference.
 
 	gg->Init();
 

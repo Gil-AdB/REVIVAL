@@ -281,7 +281,7 @@ void DemoBoot(ModplayerHandle modHandle)
 		// native-only (reads native FS paths); the browser PBR upload replaces it.
 		static const char *def[] = {
 			"--shadows", "--greets-omni-shadows", "--greets-omni-default-range=30",
-			"--greets-omni-shadow-res=256", "--shadow-skip-animated", "--greets-spots",
+			"--greets-omni-shadow-res=256", "--shadow-skip-animated",
 			"--shadow-dynamic", "--shadow-lightmap-planar", "--shadow-lightmap-res=64",
 			"--shadow-lightmap", "--cone-strength=2", "--bloom", "--disco-bloom=0",
 			"--shard-deferred", "--greets-shard-fall-speed=0.8", "--greets-shard-randomness=0.8",
