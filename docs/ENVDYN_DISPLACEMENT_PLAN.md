@@ -117,6 +117,129 @@ marks — today it is structurally absent from every probe.
   reflected, no seams at probe face edges — padding covers straddle),
   determinism of snapshot poses.
 
+## Workstream A5 — SCREEN-PRIORITY SCHEDULING (BUILT, MEASURED, default OFF)
+
+> "for the cpu dynamic bake — we should prioritize reflections that are
+> visible on screen, so we get a higher rate of updates, instead of the
+> jumpy ones today."
+
+"Jumpy" is a complaint about **time**, so this is measured in time.
+`--env_dyn_stats=N` prints, every N overlay frames, a per-probe row: frames
+that WANTED an update, frames that got one, mean/p50/p95/max interval, the
+worst run of consecutive frames where the owner was **on screen** and wanted
+an update and did not get one, and an FNV hash of the store's whole mip
+chain. stderr only.
+
+**Two of those columns exist because the obvious metrics lie.** `max interval`
+is **censored**: a probe that goes off screen and never returns inside the
+window never closes its interval, so on a 400-frame window the legacy path's
+max interval reads 1–3 frames and on a 700-frame one it reads 200+. The
+headline is therefore the **POP** — how stale a probe's content is at the
+instant its owner comes back on screen.
+
+### What was wrong with the legacy scheduler
+
+1. the round-robin cursor advances by `processed + 1` over **all** stores,
+   including the non-flagged ones, so a probe's interval is not its share of
+   the budget and the phase drifts;
+2. an off-screen owner is skipped **outright** — unbounded staleness, and the
+   mech jumps to its current position the frame the camera turns onto the
+   surface;
+3. the budget is whole probes, so a probe filling half the screen and one
+   filling 8 px are equal.
+
+### The design — four tiers, not one blended score
+
+The first cut *was* one blended `screenArea × ageing` score and it failed on
+both axes: **8.779 ms/frame** (3.6× the legacy cost, because off-screen probes
+ate the budget whenever it had slack) and a 24-frame visible stall on the
+smallest probe. Tiers, highest first:
+
+| tier | who | ordered by |
+|---|---|---|
+| 0 | never overlaid | — (must run once) |
+| 1 | **visible** and waiting ≥ `env_dyn_max_stall` (3) | wait — the worst-case bound |
+| 2 | **visible** | `screenArea × wait` — proportional share |
+| 3 | **off-screen** and waiting ≥ `env_dyn_offscreen_period` (30) | wait — bounded staleness |
+
+Off-screen and younger than the period is **not a candidate at all**;
+refreshing it just because the budget had slack is pure cost for nothing
+visible. Probes are taken whole (a half-updated cube would show the mech at
+two positions across its own faces). `env_dynamic_budget` (2 probes/frame)
+still binds alongside `env_dyn_face_budget` (6), which is what keeps the cost
+envelope equal to the legacy path's.
+
+Screen area is the owner **faces'** world AABB projected through the main
+camera — 8 corner transforms, the projection `--draw_aabbs` already uses. No
+new pass was added; that was checked first, as the brief asked.
+
+### MEASURED — greets sweep `t=500..7000`, 700 frames, five flagged probes
+
+`SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./DEMO --deferred --env_dynamic --env_dyn_sched=S --env_dyn_stats=700 --bench=scene@scene=greets,t=500,tend=7000,iters=700`
+
+| | sched=0 (legacy) | sched=1 |
+|---|--:|--:|
+| overlay cost | **2.298 ms/frame** | **2.615 ms/frame** (+0.317, +13.8 %) |
+| probe updates | 416 | 500 |
+| faces rendered | 1142 | 1285 |
+
+**POP** (frames stale when the owner re-enters view):
+
+| probe | legacy mean / MAX | sched=1 mean / MAX |
+|---|--:|--:|
+| momy-2 | 156.7 / 200 | 15.0 / 20 |
+| stairs | 108.0 / 201 | 20.5 / 28 |
+| screen emiter | 183.5 / 205 | 23.0 / 26 |
+| momy-1 | 155.7 / 228 | 15.2 / 26 |
+| stairs::mirUV | 108.0 / 201 | 17.2 / 21 |
+| **worst** | **228** | **28** (8.1×) |
+| **mean of all pops** | 142.3 | 18.2 (7.8×) |
+
+**Worst visible stall is UNCHANGED at 2 frames** (per probe 0/1/1/2/2 →
+1/1/2/2/2). The average improved without the worst case regressing, which is
+the bar this had to clear.
+
+### Both guards priced by their own control run
+
+- `--env_dyn_max_stall=999` (tier 1 off, pure proportional share):
+  `screen emiter` worst visible stall **2 → 33 frames**.
+- `--env_dyn_offscreen_period=0` (tier 3 off): POP MAX back to **268**, cost
+  2.341 ms — so tier 3 is exactly what buys the pop fix and exactly what the
+  +0.317 ms is spent on.
+- `--env_dyn_offscreen_period=15`: POP MAX 26 (vs 28) for 2.994 ms. The extra
+  0.38 ms buys 2 frames, so 30 is the default.
+
+### Companion: touched-faces-only mip refilter
+
+`overlayComposite` refilters only the faces it composited. Faces are filtered
+independently by construction (the 1.25 padding ring means a 2×2 box at a face
+edge already averages valid neighbour content), so level *k* of face *f*
+depends only on level *k−1* of face *f*. **Proved bit-identical, not argued**:
+over a 400-frame sweep with 346 probe updates and 931 faces, all five store
+hashes match the whole-cube version exactly. Worth 3.372 → 3.076 ms/frame.
+It does **not** make the refilter the dominant cost — at 2.7 faces/update the
+face **render** is, which is why the budget is a face budget.
+
+### The worst case, stated
+
+The `env_dyn_max_stall` bound holds for a visible probe **only while the budget
+can absorb the visible set**. greets has 5 flagged probes and a 2-probe/frame
+budget, so 5 simultaneously-visible probes cannot all be refreshed inside 3
+frames and the measured worst visible stall is 2–3, not 0. A scene with more
+flagged probes than `2 × max_stall` will stall past the bound; the guard
+degrades to round-robin among the starved, it does not collapse. Off-screen
+staleness is bounded by the period only in the same sense — tier 3 competes
+for the same budget, which is why the measured POP MAX is 28 against a period
+of 30 and can exceed it under load.
+
+### Validation
+
+`--env_dynamic` is default OFF, so the shipping frame cannot move; proved
+anyway. With `--env_dynamic` **ON** and the new dials at their defaults,
+greets `t=2000` and `t=5743` are md5-identical to the parent binary
+(`78ce16aa`, `918da893`). Flag-off: `render_gate` 3/3, greets pin `6780642b`,
+fountain pin `8db68ccb`.
+
 ## Workstream B — stone displacement (greets walls/floor)
 
 Goal: real silhouettes + true self-shadowing for the block-scale relief;

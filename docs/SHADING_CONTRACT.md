@@ -213,11 +213,23 @@ un-normalised term. GpuBench once carried the `1/π` and it was removed on measu
 
 | # | quantity | CPU | GPU | verdict |
 |---|---|---|---|---|
-| E1 | when it applies | `envP = (env_refl && (Mat->Reflection > 0 || metallicMap)) ? envTab[matID] : nullptr` (`:1864-1867`) — **per material**, and only if a pano was baked for it | not implemented; the Karis/Fdez-Aguera helpers were **deliberately deleted** from the shader (`:298-303`) after being applied to every pixel | **SCOPE**, correctly — and this is the fixed §6.2d bug 2. Applying them unconditionally cost **+24 mean luma** (MEASURED) |
-| E2 | split-sum | Karis "Mobile" polynomial `envBrdf = f0·A + B`; `ek = envBrdf · env_refl_gain` (`:1257-1274`) | — | **SCOPE** |
-| E3 | env lobe roughness | the **roughness map texel** if present, else `sqrt(2/(gloss+2))` (`:1096-1102`) — so on the CPU the map *does* drive the env lobe even though it only scales magnitude in the direct term | — | **SCOPE**, but worth recording: S13's "never widens the lobe" is true of the *direct* term only |
-| E4 | multiscatter | Fdez-Aguera `1 + Fms(1−Ess)/Ess`, scaling **`ek` only**, leaving the `(1−F)` handed to `--diffuse_energy` at single-scatter (`:1288-1293`) | — | **SCOPE** |
-| E5 | parallax / cv-pull / SSR / live-water | `:1001-1244` | — | **SCOPE** (city features; greets uses the plain cube/equirect path) |
+> **§2.10 is superseded in part.** The "not implemented in this arm" verdicts below were
+> written before §6.2f: GpuBench now **bakes its own six-face probes on the GPU** (its own
+> rasterizer, so the CPU renderer stays out of the cost being measured) and runs
+> `EnvSpecComposeScalar` term for term, including the split-sum and multiscatter helpers
+> the shader had deleted. E1/E2/E4 are therefore **AGREE**, not SCOPE. The one that
+> matters is the new **E0** row, and it is the largest CPU-side error found so far.
+
+| # | quantity | CPU | GPU | verdict |
+|---|---|---|---|---|
+| **E0** | **probe CONTENT encoding** | the face store is the bake render's 8-bit **VPage**, i.e. the LDR combine `texel*light/256 + spec` — **gamma** albedo at power 1 (`EnvBake.cpp` `renderSixFaces`, `DeferredSurfaceKernel.cpp:2509`) — and `EnvSpecComposeScalar` adds it **straight into the linear `sB`** the `--hdr_linear` frame is built from (`:2649`) | the probe faces are the lighting pass's own **RGBA16Float linear radiance**, added into the same linear accumulator | **DIVERGE — the CPU is wrong, and it is the whole conductor gap.** MEASURED (§6.2k): same probe, same 256², same units, CPU faces mean luma 42.53 vs 23.32 — **1.82x**, against a 1.66x disagreement on the lit conductor mask. Mechanism: a reflection is brighter than the thing it reflects by ≈`255/albedo`. Same failure class as D1 and F1 — a term written for the pre-`hdr_linear` gamma composite and never converted. Fix implemented behind `--env_bake_linear`, **default OFF**: probe content then agrees to 2.8 % and the conductor ratio falls 1.657 → 1.121 |
+| E1 | when it applies | `envP = (env_refl && (Mat->Reflection > 0 || metallicMap)) ? envTab[matID] : nullptr` (`:1864-1867`) — **per material**, and only if a pano was baked for it | same qualification, replicated in the ingest (`SceneIngest.cpp:1474-1503`), 6 probes on greets | **AGREE** since §6.2f. (The earlier "SCOPE" was correct at the time and is the fixed §6.2d bug 2 — applying the helpers *unconditionally* cost **+24 mean luma**, MEASURED) |
+| E2 | split-sum | Karis "Mobile" polynomial `envBrdf = f0·A + B`; `ek = envBrdf · env_refl_gain` (`:1257-1274`) | identical polynomial (`deferred.metal:718-728`) | **AGREE** |
+| E2b | env **F0** | `f0 = max(Reflection/100, 0.04)`, then `f0 + (0.98-f0)·metalM` (`:1253-1255`) | identical, folded in the G-buffer and quantized to 8 bits through `gMirror.w` (`deferred.metal:291-294`) | **AGREE** modulo 1/255 requantization |
+| E3 | env lobe roughness | the **roughness map texel** if present, else `sqrt(2/(gloss+2))` (`:1096-1102`) — so on the CPU the map *does* drive the env lobe even though it only scales magnitude in the direct term | always the gloss-derived `S.rough`; the roughness map is folded into `par.y` (magnitude) and never reaches the env mip select (`deferred.metal:714-716`) | **DIVERGE (unpriced).** A candidate for the 1.12x residual §6.2k leaves open. Also worth recording: S13's "never widens the lobe" is true of the *direct* term only |
+| E3b | **store geometry** | six **1.25-padded** faces at 102.68°, face-major **bilinear** in software, 4-level box-downsample mip chain | plain 90° hardware `texturecube`, hardware trilinear, `generateMipmaps` | **DIVERGE (unpriced)** — the other candidate for the 1.12x residual |
+| E4 | multiscatter | Fdez-Aguera `1 + Fms(1−Ess)/Ess`, scaling **`ek` only**, leaving the `(1−F)` handed to `--diffuse_energy` at single-scatter (`:1288-1293`) | identical (`deferred.metal:730-734`) | **AGREE** since §6.2f |
+| E5 | parallax / cv-pull / SSR / live-water | `:1001-1244` | scene-AABB slab-exit parallax only (`deferred.metal:698-708`); no cv-pull / SSR / live-water | **SCOPE** for the city-only features; the AABB parallax proxy **AGREE**s |
 
 ### 2.11 Shadows
 

@@ -2044,6 +2044,90 @@ sprite-in-front-of-glass differs, and pricing it needs a real dump.
 
 ---
 
+### 6.2k The conductor gap closed: it was PROBE CONTENT, and the CPU bakes it in GAMMA
+
+§6.2g settled D1 (the conductor diffuse kill) and it shipped as `--hdr_metal_kill=2`
+(commit `4d5caba`, default ON). That left the conductors as a **single number**: with
+`--no-env_refl` a conductor now renders at exactly **0.00 luma**, so 100 % of its
+appearance is the environment-reflection term, and the two arms disagreed on it by
+**1.66x** (CPU 102.29 vs 61.72 mean Rec.601 luma over the 73,954-px conductor mask at
+greets `t=2000`, `FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0"`; the user measured
+1.78x on his own mask). The mask is the `--hdr_metal_kill=0` vs `=2` change set — only
+pixels a metalness change can move.
+
+Four hypotheses were already dead before this round and are recorded so nobody re-runs
+them: the probe **placement** agrees to 0.2 world units (CPU `screen emiter` centroid
+(47.1, 3.0, −62.7), GPU (47.3, 3.0, −62.8)); the CPU is **already on cube faces**
+(`env_cube` defaults ON, `--no-env_cube` moves 19.71 % of the frame — the "baked NxN
+pano" log line was internal naming and has now been fixed to say which storage it
+baked, because it cost two investigations a wrong hypothesis); `--env_bake_fix` changes
+**0 px**; `--hdr_refl_gain` is inert at 1.0 / 2.0 / 4.0.
+
+#### The split: content, not composition — and it was cheap
+
+Both arms now have a per-probe **face census** in the same units: FDS prints
+`[ENVBAKE-FACE]` under `FDS_ENVBAKE_DUMP=1` (per-probe, `/tmp/envbake_<material>.ppm`;
+the pre-existing dump wrote ONE fixed path, so with six probes the survivor was whichever
+baked last), and GpuBench prints the same census under **`--dump_env_cube`**, reading its
+RGBA16Float cubes back and scaling ×255 onto the CPU's 0–255 radiance scale.
+
+`screen emiter`, both arms at 256², mean face luma:
+
+| face | +X | −X | +Y | −Y | +Z | −Z | mean |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| **CPU** | 46.41 | 53.95 | 44.70 | 27.74 | 40.92 | 41.46 | **42.53** |
+| **GPU** | 26.33 | 30.71 | 29.74 | 13.86 | 20.02 | 19.26 | **23.32** |
+| ratio | 1.76 | 1.76 | 1.50 | 2.00 | 2.04 | 2.15 | **1.82** |
+
+**1.82x on the content against 1.66x on the lit frame.** The probe *is* the gap. The
+Karis split-sum + Fdez-Aguera composition is term-for-term identical in the two sources
+(including the metal F0 pull `f0 + (0.98−f0)·metal`, which the GPU does apply, at
+`deferred.metal:292`), and the fix below bounds composition's whole contribution at
+≤1.12x.
+
+#### Root cause — and it is the CPU
+
+A probe face is `memcpy`'d from the bake render's 8-bit **VPage**, and VPage is the LDR
+combine `texel*light/256 + spec` (`DeferredSurfaceKernel.cpp:2509`) — the **gamma** albedo
+at power 1. The shipped `--hdr_linear` frame is `albedo²*light + spec` (`:2649`), and
+`EnvSpecComposeScalar` adds the probe texel **straight into that linear accumulator**
+(`sB += ecB*ek*tB`). So a reflection is brighter than the thing it reflects by ≈`255/albedo`;
+at greets' mid-tone that is 1.88x. This is the same failure class as D1 and the `(1-F)`
+asymmetry: **a term written for the pre-`hdr_linear` gamma composite that was never
+converted when the composite went linear.**
+
+#### The fix — specified, implemented, DEFAULT OFF
+
+`--env_bake_linear` (`FeatureFlags.def`, default 0, byte-null) captures the kernel's own
+linear `g_hdrBuf` radiance for each probe face — the bake's nested `renderFrame` already
+sizes `g_hdrBuf` to the face res, so this is the kernel's real output, not a
+re-derivation — and stores it clamped into the same 8-bit face store, so **no consumer
+changes**. Precision cost: the store becomes 8-bit LINEAR (it was gamma-ish), which bands
+the darks; the precision-correct form stores `sqrt(radiance/255)*255` and squares at
+fetch, which needs the `EnvSpecComposeScalar` edit and therefore the contended file.
+
+| | CPU default | CPU `--env_bake_linear` | GPU |
+|---|--:|--:|--:|
+| probe faces, mean luma | 42.53 | **22.67** | 23.32 |
+| conductor mask, mean luma | 102.29 | **69.21** | 61.72 |
+| ratio vs GPU | **1.657x** | **1.121x** | — |
+| whole frame, mean luma | 101.43 | 86.17 | 82.80 |
+
+Probe content that was 82 % apart agrees to **2.8 %**.
+
+**VERDICT: the GPU is physically correct and the CPU's probe is a bug** — by the CPU's
+own standard, exactly as with D1: the frame it feeds is linear and the probe it feeds it
+from is not. Left OFF because it changes the shipping look of every reflective surface;
+`--hdr_metal_kill` is the precedent (added default OFF, flipped by the user after review).
+
+**The 1.12x residual is NOT re-explained.** Candidates, unpriced: the CPU's **padded
+102.68° faces + face-major bilinear** vs the GPU's plain 90° hardware `texturecube`; the
+CPU's env lobe roughness taken from the **roughness map texel** where the GPU uses the
+gloss-derived value (contract **E3**); 8-bit LINEAR quantization in the store; and the
+0.2-unit centroid gap.
+
+---
+
 ### 6.2 Phase 3 stage 1 — deferred arm built, shadow CASTER FILTER correct, timings RETRACTED
 
 > **Superseded in part by §6.2a.** This section's conclusion that "shadows are now correct" was
