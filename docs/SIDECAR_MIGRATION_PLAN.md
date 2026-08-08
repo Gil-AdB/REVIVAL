@@ -381,8 +381,8 @@ HEADLESS only, dummy SDL drivers, from `Runtime/`.
 | gate | recipe | pin | what it proves |
 |---|---|---|---|
 | render_gate | `tools/render_gate.sh` | mirror `4ac809e5f5323076de1a6d5ef2fb9e92`, cone `b41894f969d1f89dd2d7d794f160e286`, halo `166fa25a846668cc9b2d4dae2d800a7b` | deferred kernel / mirror / cones / fog unmoved by any engine FLD-reader or converter change |
-| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<d> --deferred` (discard 1st run — cache keyed on CITY.FLD) | `37e62845c4d30eefa321730c5bb7e0b8` | CITY.FLD regen is byte-identical; converter change inert |
-| fountain | `./DEMO --snapshot=fountain@t=2500 --out=<d> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` | FOUNTAIN.FLD (legacy converter) unmoved; glass path inert |
+| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<d> --deferred` (discard 1st run — cache keyed on CITY.FLD) | **STALE — pre-mip-flip.** Current: `e1221676372e0bba6f65343f6d85b8e7`. `37e62845c4d30eefa321730c5bb7e0b8` now only reproduces under `--no-mips --no-mip_fix`. **AND the pin is conditional on `Runtime/cache/city_envmap_cube.bin`** — a cold-baked cube gives `5476be8c…` legitimately. Take the live value + the cube caveat from `docs/SESSION_STATE.md`. | CITY.FLD regen is byte-identical; converter change inert |
+| fountain | `./DEMO --snapshot=fountain@t=2500 --out=<d> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | **STALE — pre-mip-flip.** Current: `8db68ccb59416e9a44037e9f387b7bd9`; `51fff7cd38767d619280afe0498a6f24` reproduces only under `--no-mips --no-mip_fix`. | FOUNTAIN.FLD (legacy converter) unmoved; glass path inert |
 | greets | pin recipe in SESSION_STATE (`FDS_GREETS_CAM=... --snapshot=greets@t=1588 ... --no-env_refl`) | **UNRELIABLE in this tree — see §6 deviation** | (spot-check the hash FAMILY is unchanged; not a byte-gate here) |
 | chase | — | **DO NOT RUN.** Chase pins are stale + another agent owns chase now. |
 

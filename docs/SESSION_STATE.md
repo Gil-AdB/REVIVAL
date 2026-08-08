@@ -25,12 +25,92 @@
 >   **`--pom_shell_lid_planar`** (new, default 0, byte-null) removes the crease at
 >   zero measured cost on void/black, the silhouette and perf. It does **not** fix
 >   the silhouette — two defects, two fixes.
-> - **NOT MINE, FLAGGED: the city pin does not reproduce, stably (2/2)** —
->   `5476be8c` vs the recorded `e1221676`, and the `--no-mips --no-mip_fix` control
->   also fails (`b88ecb7b` vs `37e62845`), so the mip flip is not the cause; the
->   `--hdr_metal_kill` re-pin records that city did not move for that either.
->   A real drift with no owner, most likely the env-reflection work (this recipe
->   IS the env-pixel gate).
+> - ~~**NOT MINE, FLAGGED: the city pin does not reproduce, stably (2/2)**~~ —
+>   **RESOLVED 2026-08-08, and it was never a code drift.** See
+>   "the city pin is a function of `cache/city_envmap_cube.bin`" below. Short
+>   version: HEAD reproduces **both** recorded pins byte-exactly
+>   (`e1221676` default, `37e62845` under the control) when the env cube on disk
+>   is the pre-flip bake. The `5476be8c` / `b88ecb7b` pair came from a **fresh
+>   worktree with a cold cache**, which re-bakes the cube under the new
+>   `--mips` / `--mip_fix` defaults. No unowned commit; nothing to bisect.
+
+> ## 2026-08-08 — THE CITY PIN IS A FUNCTION OF `cache/city_envmap_cube.bin` (the "unowned drift", resolved)
+>
+> **There is no unowned commit. There was nothing to bisect.** The reported city
+> drift is a **stale-cache artifact**, and the reasoning that exonerated the mip
+> flip ("both halves moved, so it cannot be the flip") was wrong for a specific,
+> reproducible reason recorded below.
+>
+> **Root cause.** `ComputeCityPanoramaCacheKey` (`DEMO/CityPanoramaCache.cpp:49`)
+> keys the 426 MiB cube cache on **CITY.FLD's bytes + the four dims + the format
+> salt + the building names** — and on **nothing else**. The bake itself
+> (`bakeBuildingCubeFaces`) runs the ordinary software rasterizer, so its output
+> depends on the whole shading path *and on FeatureFlags*. **`--mips` and
+> `--mip_fix` change the baked cube**, and the key cannot see them. The filename
+> is fixed (`cache/city_envmap_cube.bin`), so a differing bake **overwrites** the
+> old one rather than landing beside it.
+>
+> **Measured, the full 2×2** (HEAD `787361a`, clean worktree, dummy drivers). Rows
+> = which cube is on disk, columns = the flags the *frame* renders under:
+>
+> | cube on disk | frame `--no-mips --no-mip_fix` | frame default (mips ON) |
+> |---|---|---|
+> | **pre-flip bake** (`d1d67f0f…`, what the user's `Runtime/cache/` holds, dated Aug 6 03:40) | `37e62845` ✅ **the recorded prior pin** | `e1221676` ✅ **the recorded current pin** |
+> | **cold/current bake** (`63978a18…`, mips ON) | `b88ecb7b` ← the "control failure" | `5476be8c` ← the "drift" |
+>
+> Every cell is 2/2 stable. **HEAD is byte-faithful to both published pins**; the
+> two anomalous hashes are simply the bottom row.
+>
+> **Why the control could not exonerate the flip.** `--no-mips --no-mip_fix`
+> only changes the *frame*. It cannot un-bake a cube that is already on disk,
+> because the key ignores flags — so in a fresh worktree the control arm hits the
+> mips-ON cube the *preceding default run just wrote* and measures the hybrid
+> cell (mips-ON bake + mips-OFF frame), which matches neither pin. That hybrid is
+> exactly `b88ecb7b`. **A `--no-mips` control arm on city is only valid against a
+> cube baked with mips off** — delete the cube first, or the arm is meaningless.
+>
+> **Proof the bake, and only the bake, moved:** cold-baking at HEAD with
+> `--no-mips --no-mip_fix` reproduces the user's Aug-6 cube **byte-for-byte**
+> (`d1d67f0f84fb4af3713e15a64a1b827b`, all 446 694 000 bytes). So across every
+> commit from Aug 6 03:40 to HEAD, **no change altered the city env bake** other
+> than the mip defaults. Both flags contribute (`--no-mips` alone → `1775b64c…`,
+> `--no-mip_fix` alone → `88fec906…`; neither alone is either reference), which
+> matches the known split: `--mips` zeroes the LEVEL, `--mip_fix` moves the
+> subdivision cut lines.
+>
+> **Verdict: the new bake is CORRECT, not a regression** — it is the direct,
+> intended consequence of the user's own `--mips` default flip finally reaching
+> the env-cube bake, which the stale cache had been masking. It is also tiny:
+> pinned vs cold-bake frame is 164 536 px changed (7.94 %) but **max channel Δ
+> 6/255**, mean Δ-sum 1.63/765 — and the delta is confined to the **glass panes**
+> (zero on the adjacent non-reflective wall), which is the expected signature
+> since the cube feeds only the env-specular compose. Before/after/|Δ|×32 crop:
+> `docs/img/mipsel/city_t1961_envbake_crop.png`. **Not re-pinned yet — the look
+> change wants the user's eye first** (see the pin-table row).
+>
+> **TWO LIVE HAZARDS, both unowned:**
+> 1. **The user's `Runtime/` is serving a pre-flip env cube.** His demo renders
+>    city reflections baked under the *old* mip defaults, and will keep doing so
+>    forever — the key will never invalidate on its own. To adopt the flip
+>    properly: `rm Runtime/cache/city_envmap_cube.bin` and re-run.
+> 2. **Any run in `Runtime/` by a binary whose bake differs silently overwrites
+>    that cube**, permanently moving the main-tree city pin with no commit and no
+>    trace. This is a live footgun for every agent.
+>
+> **The fix** (not applied — `DEMO/CITY.CPP` / `DEMO/CityPanoramaCache.cpp` were
+> not mine to change this run): fold the bake-affecting FeatureFlags into the
+> key, e.g. mix `mips`/`mip_fix` (and any future bake-affecting flag) into
+> `cubeSalt` at the `ComputeCityPanoramaCacheKey` call site in
+> `DEMO/CITY.CPP:2581`, **and** put the key in the *filename* the way
+> `pom_cone_exact_%016llx.bin` / `pom_horizon_%016llx.bin` already do
+> (`DEMO/MeshOps.cpp:775,959`) so variants coexist instead of clobbering. Note
+> those two POM caches do **not** have this hole — `ConeExactCacheKey` hashes the
+> actual input texels plus every parameter, so it is a real content key.
+>
+> **Stale analysis this corrects:** the `--mips` re-pin's recorded divergence for
+> city ("133 854 px, mean |d| 7.04, max 192, building facades") measured only the
+> **frame** half of the flip, because the bake half was masked by the cache. The
+> bake half is the additional, much subtler 164 536 px / max 6 above.
 
 > ## 2026-08-08 — MIP SELECTION IS ON BY DEFAULT; ALL SCENE PINS MOVED
 >
@@ -616,7 +696,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 
 | gate | recipe | pin |
 |---|---|---|
-| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix`, which is what attributes the move wholly to the mip-selection flip. Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
+| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **⚠ THIS PIN IS CONDITIONAL ON THE ENV CUBE ON DISK — check `md5 Runtime/cache/city_envmap_cube.bin` BEFORE calling a mismatch a regression.** The cache key ignores FeatureFlags, so the cube is a hidden input the recipe does not state (full analysis + 2×2 matrix in the dated note above). `d1d67f0f84fb4af3713e15a64a1b827b` = pre-flip bake → the pins below hold. `63978a18ed31837348598014716f9932` = cold/current bake (mips ON) → **`5476be8c43864c761b94e2dd83f86aa8`** default and **`b88ecb7bbd0340145e35a80bc7a82f6b`** under the control; both are correct-for-that-cube, NOT drift. A **fresh worktree always cold-bakes**, so it lands in the second column unless you copy the cube in. Also: `DEMO` chdirs to its OWN directory (`ChdirToAssetRoot`, `DEMO/REV.CPP:503`) — launching a worktree binary from the main `Runtime/` does **not** render the main tree's assets or its cube. **Pending decision:** adopting the flip properly means `rm Runtime/cache/city_envmap_cube.bin` and re-pinning to `5476be8c…`; held for the user's eye on `docs/img/mipsel/city_t1961_envbake_crop.png` (max Δ 6/255, glass only). — **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2, pre-flip cube). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix` **on the pre-flip cube** (on a cold-baked cube that control arm is invalid — it measures a mips-ON bake under a mips-OFF frame). Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-08 (`--hdr_metal_kill` default 0→2, the conductor diffuse kill): `6780642b30430efa4fd2f87810b2dfdb`** (stable 2/2). city `e1221676…` and fountain `8db68ccb…` did NOT move — neither scene has a metallic-mapped material, so the fix is greets-only. Prior pin `adfba8ba3a1971a7c9cac0da689581b1` reproduces under `--hdr_metal_kill=0`. Preceding that: **RE-PINNED 2026-08-08 (`--mips` default 0→1): `adfba8ba3a1971a7c9cac0da689581b1`** (stable 2/2). Prior pin `f1297141611c484bac7cc10a8bdcf630` reproduces EXACTLY under `--no-mips --no-mip_fix` — note BOTH flags are required, because `--mip_fix` moves the subdivision cut lines and the `--mips` gate zeroes only the mip LEVEL, not the geometry. Superseded pin history follows: **RE-PINNED 2026-08-06: `f1297141611c484bac7cc10a8bdcf630`** (3/3 identical runs). Two intended overlay removals moved it in sequence, both pure screen text: `f5778c7b` → `06e1d4d1` (earlier work) → `ae358a6a` (the "Shadow: Depth\|PolyId [F3]" indicator deleted, commit `6b5556d`) → `f1297141` (the always-on centre-pixel `[MAT@…]` material probe moved behind `--mat_probe`, default off, commit `35ec295`; re-running that arm WITH `--mat_probe` reproduces `ae358a6a` byte-exact, which is what proves nothing else moved). Prior pin, for the record: **`f5778c7b78a4d70655291363e4119c66`** — taken over **128 sequential runs, 0 flips** (95 % UB on the flip rate 0.023) after the 8-bit-AO-map fix closed the nondeterminism. This supersedes both `de3e9a5fb3aa39e008ef41b83f2b8d1b` (pre-PBR-defaults) and the "NO VALID PIN" state. Includes the PBR scene defaults AND the user's uncommitted GREETS.FLD / momy textures / Piramid.lwo — a clean checkout hashes differently. Verify with `tools/flip_rate.sh -n 24` if a mismatch appears; a single differing run is now a real regression, not noise. |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | **RE-PINNED 2026-08-08 (`--mips` default 0→1): `8db68ccb59416e9a44037e9f387b7bd9`** (stable 2/2). Prior pin `51fff7cd38767d619280afe0498a6f24` reproduces EXACTLY under `--no-mips --no-mip_fix`. Divergence: 266 063 px changed (12.83 %), mean \|d\| 9.27 on changed, 53 238 px >12/255, max 254. |
 | chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>**RE-PINNED 2026-08-08 (`--mips` default 0→1):** t100 `76e7cf68714666bda278f094be4f2c72` t400 `d458e82bf4514c4ff2850468aab5743c` t800 `c145c7a5861fba81d56746f7c10764ee` t1200 `31aa52039f9b228fa6307c12e14811eb` t1600 `1544b0e775900b099ac9e38d42fd750d`.<br>Control under `--no-mips --no-mip_fix` reproduces the 2026-07-30 pins EXACTLY for t100/t400/t800/t1200 — **but t1600 gives `c8c93b886dd31fcc01363c806d7626de`, NOT the recorded `7265d7855bdaae74e39f3c21d4f7e612`. chase t1600 had ALREADY drifted before the mip work; cause unidentified, needs its own bisect.** Prior (2026-07-30): t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` |
@@ -625,6 +705,20 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | wasm | `make wasm` | links |
 
 Traps:
+- **`DEMO` ignores your shell's CWD.** `ChdirToAssetRoot` (`DEMO/REV.CPP:503`)
+  chdirs to the *binary's own* directory (first of `<bindir>`,
+  `<bindir>/../Runtime`, `<bindir>/../../Runtime` holding a `rev.cfg`). The build
+  copies the binary to `<tree>/Runtime/DEMO`, so **a worktree build always
+  renders the worktree's assets and writes the worktree's `cache/`**, no matter
+  where you `cd` first. `cd Runtime && /path/to/worktree/Runtime/DEMO` does NOT
+  do what it reads like. To gate against the user's uncommitted authoring
+  assets you must put the binary in a directory whose asset root *is* that tree.
+- **The city env cube is a hidden input to the city pin, and it is not keyed on
+  flags.** A cold cache re-bakes it and the pin legitimately moves; a run whose
+  bake differs silently *overwrites* `Runtime/cache/city_envmap_cube.bin` and
+  moves the main-tree pin with no commit. Always `md5` the cube before calling a
+  city mismatch a regression. This cost one full "unowned drift" bisect on
+  2026-08-08 — see the dated note at the top.
 - **greets IS deterministic and IS gate-worthy — FIXED 2026-08-05 (det-hunt
   round 3).** The whole "~1-in-12 flip", then "100 % nondeterministic", then
   "not a bake and not a race" chain resolved to ONE defect: the opaque deferred
