@@ -196,6 +196,40 @@ int VizLegend_Build(VizLegendRow* rows, int maxRows, int* sigOut) {
 			n = addRow(rows, n, maxRows, nullptr, 0,
 			    "WARNING --hdr tonemaps over this; relaunch with --no-hdr");
 		sig = (12 << 8) | 1;
+	} else if (FF::env_map_viz() > 0) {
+		// The ENV-MAP INSPECTOR. The header block the painter draws under the
+		// image already names the probe, its bake point, its res and its mip
+		// chain (that is data, and it belongs next to the picture); what the
+		// legend owes is the CONVENTIONS the picture is drawn in — the face
+		// cell order, what the flat grey areas are, and the keys.
+		const uint32_t voidGrey = 0x00202020u;
+		switch (FF::env_map_viz()) {
+		case 2:
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "MIP CHAIN, level 0 leftmost, each level HALF the previous - the");
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "size step IS the lobe the roughness select walks down (--env_mip_chain)");
+			break;
+		case 3:
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "LEFT green frame = this build's probe; RIGHT orange = GpuBench's");
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "gpuenv_*.ppm for the same material (sqrt-encoded linear: compare");
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "STRUCTURE and which face holds what, not absolute brightness)");
+			break;
+		default:
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "the probe's OWN texels, mip 0. Cell order is FDS_ENVBAKE_DUMP's:");
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "top row +X -X +Y, bottom row -Y +Z -Z - each cell is labelled");
+			break;
+		}
+		n = addRow(rows, n, maxRows, &voidGrey, 1,
+		    "the bake's VOID colour: a direction with NO geometry, not dark geometry");
+		n = addRow(rows, n, maxRows, nullptr, 0,
+		    "F / Shift+F = next / previous probe. A magenta empty panel = NO DATA.");
+		sig = (14 << 8) | FF::env_map_viz();
 	} else if (FF::env_refl_viz() > 0) {
 		n = addRow(rows, n, maxRows, nullptr, 0,
 		    "top-right inset = baked env panorama #%d (1-based; past the count clamps)",

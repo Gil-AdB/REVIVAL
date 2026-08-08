@@ -5,6 +5,7 @@
 #include <Base/FeatureFlags.h>
 #include <Base/Omni.h>
 #include <RENDER/VizCycle.h>   // VizCycle_Step: the X / Shift+X debug-viz cycle
+#include <RENDER/EnvBake.h>    // EnvMap_StepProbe: F / Shift+F probe paging
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -217,6 +218,15 @@ static bool pumpEvents()
 				const bool back =
 				    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
 				fds::VizCycle_Step(back ? -1 : +1);
+			}
+			// ENV-MAP INSPECTOR probe paging, same binding as the native pump:
+			// F = next probe, Shift+F = previous. Like X, F is deliberately
+			// absent from translateScancode.
+			if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+			    event.key.keysym.scancode == SDL_SCANCODE_F) {
+				const bool back =
+				    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+				fds::EnvMap_StepProbe(back ? -1 : +1);
 			}
 			if (event.type == SDL_KEYDOWN) g_userGesture.store(true);
 			break;

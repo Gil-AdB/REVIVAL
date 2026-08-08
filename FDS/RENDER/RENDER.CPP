@@ -1350,6 +1350,12 @@ xpar_done: ;
 	// Env-reflection pano viewer (--env_refl_viz=N): blit the Nth baked
 	// panorama over the frame's top-right corner. Same post-tonemap slot.
 	fds::EnvReflection_DrawViz(CurScene);
+	// ENV-MAP INSPECTOR (--env_map_viz, X-cycle + F/Shift+F): the selected
+	// probe's six cube faces / mip chain / CPU-vs-GPU pair, labelled and
+	// named. Same post-tonemap slot and the same offscreen guard — it must
+	// not be able to paint itself into a probe. Off by default; the painter
+	// early-outs on one integer compare, so a shipping frame is untouched.
+	fds::EnvMap_DrawViz(CurScene);
 	// Editor map-inspector overlay (a surface's albedo/normal/height/… map
 	// blitted top-center — rev::Editor_SetMapViz). Same post-tonemap slot.
 	if (g_editorDrawMapViz) g_editorDrawMapViz();

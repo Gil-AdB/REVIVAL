@@ -30,6 +30,12 @@
 #include <string>
 #include <vector>
 
+// The env-map inspector's --env_map_viz=3 lists GpuBench's dumped probe
+// atlases. POSIX dirent, present on macOS and in the emscripten sysroot (the
+// wasm build finds an empty /tmp and the mode simply reports none — no
+// native-only call, so `make wasm` keeps building).
+#include <dirent.h>
+
 // Build_YOffs_Table is commented out in FDS_DECS.H; declared extern wherever
 // an offscreen surface is shaped (see DEMO/GreetsMirror.cpp).
 extern void Build_YOffs_Table(VESA_Surface *VS);
@@ -1981,6 +1987,662 @@ bool EnvReflectionViz_Available() {
     auto it = g_envByScene.find(CurScene);
     if (it == g_envByScene.end() || it->second.stores.empty()) return false;
     return it->second.stores[0]->view.mip[0] != nullptr;
+}
+
+// ═══ THE ENV-MAP INSPECTOR (--env_map_viz) ════════════════════════════════
+// Everything below is a READER of the stores above. It never bakes, never
+// touches a store's bytes, and writes only VPage — so the frame the user is
+// flying is exactly the frame he would have had, plus an overlay.
+namespace {
+
+// Face CELL order of the 3x2 atlas. Identical to renderCubeFacesMajor's
+// FDS_ENVBAKE_DUMP grid, to dumpCubeStoreCensus's per-material atlas and to
+// GpuBench --dump_env_cube's — so "the face with the mech in it" names the
+// same cell on screen, in a CPU PPM and in a GPU PPM. Do not reorder.
+const char* const kFaceLabel[6] = { "+X", "-X", "+Y", "-Y", "+Z", "-Z" };
+
+// Probe count the LAST drawn frame saw, published by the render thread for the
+// SDL event thread's F-key stepper. The stepper must not walk g_envByScene
+// itself: FramePrep can push_back into it on the render thread, and a
+// std::vector growing under a concurrent size() read is a real race, not a
+// tolerable one. An aligned int is the same latitude every other
+// Keyboard-driven toggle here already takes (see the note in VizCycle.h).
+int g_envMapProbeCount = 0;
+
+int emFontScale() { return g_fontScale > 0 ? g_fontScale : 1; }
+int emGlyphH()    { return (Active_Font && Active_Font->Y > 0 ? Active_Font->Y : 8) * emFontScale(); }
+int emPitch()     { const int g = emGlyphH(), f = emFontScale();
+                    return g + 5 * f > 14 * f ? g + 5 * f : 14 * f; }
+
+void emFill(int x0, int y0, int x1, int y1, uint32_t rgb) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > XRes) x1 = XRes;
+    if (y1 > YRes) y1 = YRes;
+    dword* out = reinterpret_cast<dword*>(VPage);
+    const dword c = 0xFF000000u | (rgb & 0x00FFFFFFu);
+    for (int y = y0; y < y1; ++y) {
+        dword* row = out + size_t(y) * size_t(XRes);
+        for (int x = x0; x < x1; ++x) row[x] = c;
+    }
+}
+
+// Multiply a rect down so white text reads over a bright frame — the same
+// trick (and the same keep/256 scale) VizCycle's legend panel uses.
+void emDim(int x0, int y0, int x1, int y1, uint32_t keep256) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > XRes) x1 = XRes;
+    if (y1 > YRes) y1 = YRes;
+    dword* out = reinterpret_cast<dword*>(VPage);
+    for (int y = y0; y < y1; ++y) {
+        dword* row = out + size_t(y) * size_t(XRes);
+        for (int x = x0; x < x1; ++x) {
+            const dword d = row[x];
+            const uint32_t r = (((d >> 16) & 0xFFu) * keep256) >> 8;
+            const uint32_t g = (((d >>  8) & 0xFFu) * keep256) >> 8;
+            const uint32_t b = (( d        & 0xFFu) * keep256) >> 8;
+            row[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+void emFrame(int x0, int y0, int w, int h, uint32_t rgb) {
+    emFill(x0 - 1, y0 - 1, x0 + w + 1, y0,         rgb);
+    emFill(x0 - 1, y0 + h, x0 + w + 1, y0 + h + 1, rgb);
+    emFill(x0 - 1, y0,     x0,         y0 + h,     rgb);
+    emFill(x0 + w, y0,     x0 + w + 1, y0 + h,     rgb);
+}
+
+// ── one source image, cube or equirect, behind a single accessor ──────────
+// The whole point of routing both through this is that the CUBE case is the
+// normal one (env_cube defaults ON) but the legacy equirect store still
+// exists, and drawing an equirect image as if it were a 3x2 cube atlas would
+// produce a confident, wrong picture. So the layout question is asked once,
+// here, and every painter below just reads w()/h()/at().
+struct AtlasSrc {
+    const uint32_t* px = nullptr;
+    int  fr = 0;           // cube: per-face res
+    int  W = 0, H = 0;     // equirect: image dims
+    bool cube = false;
+    bool valid() const { return px && (cube ? fr > 0 : (W > 0 && H > 0)); }
+    int  w() const { return cube ? fr * 3 : W; }
+    int  h() const { return cube ? fr * 2 : H; }
+    uint32_t at(int x, int y) const {
+        if (!cube) return px[size_t(y) * size_t(W) + size_t(x)];
+        const int f = (y / fr) * 3 + (x / fr);
+        return px[size_t(f) * size_t(fr) * size_t(fr)
+                  + size_t(y % fr) * size_t(fr) + size_t(x % fr)];
+    }
+};
+
+AtlasSrc srcForLevel(const EnvPanoLinear& v, int level) {
+    AtlasSrc s;
+    if (level < 0 || level >= v.numMips || !v.mip[level]) return s;
+    s.px = v.mip[level];
+    s.cube = v.isCube;
+    if (v.isCube) s.fr = v.W >> level;
+    else { s.W = v.W >> level; s.H = v.H >> level; }
+    return s;
+}
+
+// Integer-only scaling, both ways: > 0 magnifies by `scale`, < 0 minifies by
+// -scale. Nearest neighbour on purpose — a resampled probe is a picture of a
+// filter, and the question this viewer answers ("what is actually IN this
+// texel") needs the texels themselves.
+int emFitScale(int sw, int sh, int maxW, int maxH) {
+    if (sw <= 0 || sh <= 0 || maxW <= 0 || maxH <= 0) return 1;
+    if (sw <= maxW && sh <= maxH) {
+        int up = 1;
+        while (up < 8 && sw * (up + 1) <= maxW && sh * (up + 1) <= maxH) ++up;
+        return up;
+    }
+    int down = 2;
+    while (down < 64 && ((sw + down - 1) / down > maxW ||
+                         (sh + down - 1) / down > maxH)) ++down;
+    return -down;
+}
+
+void emScaledDims(const AtlasSrc& s, int scale, int& dw, int& dh) {
+    if (scale >= 1) { dw = s.w() * scale; dh = s.h() * scale; }
+    else            { const int d = -scale;
+                      dw = (s.w() + d - 1) / d; dh = (s.h() + d - 1) / d; }
+}
+
+void emBlit(const AtlasSrc& s, int x0, int y0, int scale) {
+    int dw, dh; emScaledDims(s, scale, dw, dh);
+    dword* out = reinterpret_cast<dword*>(VPage);
+    const int up = scale >= 1 ? scale : 1;
+    const int dn = scale >= 1 ? 1 : -scale;
+    const int sw = s.w(), sh = s.h();
+    for (int y = 0; y < dh; ++y) {
+        const int oy = y0 + y;
+        if (oy < 0 || oy >= YRes) continue;
+        int sy = (y / up) * dn;
+        if (sy >= sh) sy = sh - 1;
+        dword* row = out + size_t(oy) * size_t(XRes);
+        for (int x = 0; x < dw; ++x) {
+            const int ox = x0 + x;
+            if (ox < 0 || ox >= XRes) continue;
+            int sx = (x / up) * dn;
+            if (sx >= sw) sx = sw - 1;
+            row[ox] = s.at(sx, sy) | 0xFF000000u;
+        }
+    }
+}
+
+// Cell grid lines + the +X/-X/... label in every cell. Requirement, not
+// decoration: a probe investigation this week turned on WHICH face held the
+// mech, and an unlabelled 3x2 grid cannot answer that.
+void emLabelCubeCells(int x0, int y0, int cellW, int cellH) {
+    const int fs = emFontScale();
+    for (int r = 0; r < 2; ++r)
+        for (int c = 0; c < 3; ++c) {
+            const int cx = x0 + c * cellW, cy = y0 + r * cellH;
+            emFill(cx, cy, cx + cellW, cy + 1, 0x00303030u);          // cell top
+            emFill(cx, cy, cx + 1, cy + cellH, 0x00303030u);          // cell left
+            const int lw = 3 * 8 * fs, lh = emGlyphH() + 2 * fs;
+            emDim(cx + 1, cy + 1, cx + 1 + lw, cy + 1 + lh, 40);
+            OutTextXY(VPage, cx + 3 * fs, cy + 2 * fs, kFaceLabel[r * 3 + c], 255);
+        }
+}
+
+// ── GpuBench --dump_env_cube atlases (mode 3) ─────────────────────────────
+// GpuBench writes <dir>/gpuenv_<material>.ppm: a P6 3x2 FACE ATLAS in the SAME
+// cell order as ours, sqrt-encoded (Deferred.mm ~:2950) because the GPU store
+// is linear RGBA16F. Reading it back here turns the CPU-vs-GPU probe-content
+// comparison — the one docs/SHADING_CONTRACT.md §11 row E6 had to script — into
+// a keypress. Nothing else in FDS depends on this; if the file is absent the
+// mode says so.
+const char kGpuEnvDir[]    = "/tmp";
+const char kGpuEnvPrefix[] = "gpuenv_";
+
+std::string emSafeName(const char* n) {
+    std::string s = (n && *n) ? n : "unnamed";
+    for (char& c : s) if (!std::isalnum((unsigned char)c)) c = '_';
+    return s;
+}
+
+struct PpmImage {
+    std::vector<uint32_t> px;
+    int W = 0, H = 0;
+    bool ok() const { return W > 0 && H > 0 && px.size() == size_t(W) * size_t(H); }
+};
+
+bool emReadPpmP6(const char* path, PpmImage& out) {
+    FILE* fp = std::fopen(path, "rb");
+    if (!fp) return false;
+    auto tok = [&](long& v) -> bool {          // whitespace + '#' comments
+        int c;
+        for (;;) {
+            do { c = std::fgetc(fp); } while (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+            if (c == '#') { while (c != '\n' && c != EOF) c = std::fgetc(fp); continue; }
+            break;
+        }
+        if (c < '0' || c > '9') return false;
+        v = 0;
+        while (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); c = std::fgetc(fp); }
+        return true;
+    };
+    char magic[2] = {};
+    if (std::fread(magic, 1, 2, fp) != 2 || magic[0] != 'P' || magic[1] != '6') {
+        std::fclose(fp); return false;
+    }
+    long W = 0, H = 0, maxv = 0;
+    if (!tok(W) || !tok(H) || !tok(maxv) || W <= 0 || H <= 0 || maxv != 255 ||
+        W > 16384 || H > 16384) { std::fclose(fp); return false; }
+    std::vector<unsigned char> raw(size_t(W) * size_t(H) * 3);
+    const bool full = std::fread(raw.data(), 1, raw.size(), fp) == raw.size();
+    std::fclose(fp);
+    if (!full) return false;
+    out.W = int(W); out.H = int(H);
+    out.px.resize(size_t(W) * size_t(H));
+    for (size_t i = 0; i < out.px.size(); ++i)
+        out.px[i] = 0xFF000000u | (uint32_t(raw[i * 3 + 0]) << 16)
+                                | (uint32_t(raw[i * 3 + 1]) << 8)
+                                |  uint32_t(raw[i * 3 + 2]);
+    return true;
+}
+
+// Every gpuenv_*.ppm stem currently on disk. Cheap (one readdir), and the
+// result is what mode 3 prints when it cannot match — "no GPU atlas" is only
+// useful next to "here is what there IS".
+std::vector<std::string> emGpuAtlasStems() {
+    std::vector<std::string> v;
+    if (DIR* d = ::opendir(kGpuEnvDir)) {
+        while (struct dirent* e = ::readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.size() <= sizeof(kGpuEnvPrefix) - 1 + 4) continue;
+            if (n.compare(0, sizeof(kGpuEnvPrefix) - 1, kGpuEnvPrefix) != 0) continue;
+            if (n.compare(n.size() - 4, 4, ".ppm") != 0) continue;
+            v.push_back(n.substr(sizeof(kGpuEnvPrefix) - 1,
+                                 n.size() - (sizeof(kGpuEnvPrefix) - 1) - 4));
+        }
+        ::closedir(d);
+    }
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
+// The two arms do NOT agree on probe names: the CPU store is owned by e.g.
+// `Hull.lwo::cockpit_upper::mirUV` while GpuBench names the same probe
+// `cockpit` (measured — docs/SHADING_CONTRACT.md §11.2 prints both). So: exact
+// mangled name, then the last `::` segment, then any stem that is a substring
+// of the CPU name. Returns "" when nothing matches — and mode 3 then SAYS
+// nothing matched rather than showing an unrelated probe.
+std::string emMatchGpuStem(const char* cpuName, const std::vector<std::string>& stems) {
+    if (stems.empty()) return std::string();
+    const std::string full = emSafeName(cpuName);
+    for (const std::string& s : stems) if (s == full) return s;
+    std::string tail = cpuName ? cpuName : "";
+    const size_t sep = tail.rfind("::");
+    if (sep != std::string::npos) tail = tail.substr(sep + 2);
+    const std::string tailSafe = emSafeName(tail.c_str());
+    for (const std::string& s : stems) if (s == tailSafe) return s;
+    std::string best;
+    for (const std::string& s : stems)
+        if (s.size() >= 3 && full.find(s) != std::string::npos && s.size() > best.size())
+            best = s;
+    return best;
+}
+
+// ── the probe's identity ─────────────────────────────────────────────────
+// Requirement 2: name what he is looking at. Materials come from the byMat
+// map (an n:1 mapping — ::mirUV clones and co-located panels share a store),
+// the bake point and dims from the store's own recorded view, so nothing here
+// can drift from what the kernel actually samples.
+struct ProbeIdent {
+    const EnvPanoStore* S = nullptr;
+    const char* primary = "(no material mapped)";
+    int   nMats = 0;
+    char  matList[160] = {};
+};
+
+bool emProbeIdent(const SceneEnv& env, int idx, ProbeIdent& out) {
+    if (idx < 0 || idx >= int(env.stores.size())) return false;
+    out.S = env.stores[size_t(idx)].get();
+    if (!out.S) return false;
+    size_t p = 0;
+    for (const auto& kv : env.byMat) {
+        if (kv.second != idx) continue;
+        const char* nm = (kv.first && kv.first->Name) ? kv.first->Name : "?";
+        ++out.nMats;
+        if (p + 2 < sizeof out.matList)
+            p += size_t(std::snprintf(out.matList + p, sizeof out.matList - p,
+                                      "%s%s", p ? ", " : "", nm));
+        if (p >= sizeof out.matList) { p = sizeof out.matList - 1; break; }
+    }
+    // Primary name: the material the store was BAKED from when there is one
+    // (bakeStore records it for the res-upgrade path), else the first mapped.
+    if (out.S->bakedSkipMat && out.S->bakedSkipMat->Name)
+        out.primary = out.S->bakedSkipMat->Name;
+    else
+        for (const auto& kv : env.byMat)
+            if (kv.second == idx && kv.first && kv.first->Name) {
+                out.primary = kv.first->Name; break;
+            }
+    return true;
+}
+
+// Mip chain as text: "4 levels (256/128/64/32)". The chain DEPTH is what
+// --env_mip_chain exists to argue about (SHADING_CONTRACT §11 row E7: the same
+// roughness picks a 3x wider lobe on the GPU purely because its chain is
+// deeper), so the viewer states the real depth AND the virtual one the
+// roughness select is actually dividing by.
+void emChainText(const EnvPanoLinear& v, char* buf, size_t n) {
+    size_t p = size_t(std::snprintf(buf, n, "mips %d (", v.numMips));
+    for (int k = 0; k < v.numMips && p + 8 < n; ++k)
+        p += size_t(std::snprintf(buf + p, n - p, "%s%d", k ? "/" : "",
+                                  v.isCube ? (v.W >> k) : (v.W >> k)));
+    const int virt = FeatureFlags::env_mip_chain();
+    if (p + 4 < n) {
+        if (virt >= 2)
+            std::snprintf(buf + p, n - p, ")  select divides by N=%d (--env_mip_chain)", virt);
+        else
+            std::snprintf(buf + p, n - p, ")  select divides by N=%d (the real depth)", v.numMips);
+    }
+}
+
+// Width OutTextXY will actually consume — its own per-glyph advance
+// ((Len+2)*scale), not an 8px guess. Same computation as VizCycle's legend
+// panel, and for the same reason: a backing panel sized by guess either bands
+// the screen or lets the tail of the line run out over the frame unreadable
+// (which is exactly what the first cut of this viewer did to its mode-3 note).
+int emTextWidth(const char* s) {
+    const int fs = emFontScale();
+    const Font* F = Active_Font;
+    if (!F || !F->Len) return int(std::strlen(s)) * 8 * fs;
+    int w = 0;
+    for (const unsigned char* p = (const unsigned char*)s; *p; ++p)
+        w += (int(F->Len[*p & 0x7F]) + 2) * fs;
+    return w;
+}
+
+// Text line with a dim backing sized to the TEXT, left-aligned at x, truncated
+// (with an ellipsis) to whatever room is left before the right edge. Returns
+// the next y.
+int emTextLine(int x, int y, int /*wMax*/, const char* s) {
+    const int fs = emFontScale();
+    const int room = XRes - x - 4 * fs;      // the frame edge, nothing tighter:
+                                             // truncating to the image panel's
+                                             // width would drop real data to
+                                             // keep a rectangle tidy.
+    char buf[288];
+    std::snprintf(buf, sizeof buf, "%s", s);
+    for (size_t n = std::strlen(buf); n > 3 && emTextWidth(buf) > room; ) {
+        buf[--n] = 0;
+        if (n > 3) { buf[n - 1] = '.'; buf[n - 2] = '.'; buf[n - 3] = '.'; }
+    }
+    const int w = emTextWidth(buf);
+    emDim(x - 3 * fs, y - 1, x + w + 3 * fs, y + emGlyphH() + 2, 60);
+    OutTextXY(VPage, x, y, buf, 255);
+    return y + emPitch();
+}
+
+// The whole header block. Drawn UNDER the image so it never pushes the image
+// off the top, and left-aligned with the image so the two read as one panel.
+void emDrawHeader(int x, int y, int wMax, int idx, int count,
+                  const ProbeIdent& id, const EnvPanoLinear& v, int mode,
+                  const char* extraLine) {
+    char line[256];
+    std::snprintf(line, sizeof line, "ENV PROBE %d/%d  '%s'   [X = mode, F / Shift+F = probe]",
+                  idx + 1, count, id.primary);
+    y = emTextLine(x, y, wMax, line);
+
+    char chain[128]; emChainText(v, chain, sizeof chain);
+    if (v.isCube)
+        std::snprintf(line, sizeof line, "CUBE  6 faces %d^2 (padded, pad %.2f)  %s",
+                      v.W, double(kEnvCubePad), chain);
+    else
+        std::snprintf(line, sizeof line, "EQUIRECT PANORAMA %dx%d (legacy --no-env_cube path)  %s",
+                      v.W, v.H, chain);
+    y = emTextLine(x, y, wMax, line);
+
+    std::snprintf(line, sizeof line, "bake point (%.2f %.2f %.2f)   parallax %s   %s",
+                  double(v.bakeX), double(v.bakeY), double(v.bakeZ),
+                  v.noParallax ? "OFF (direction-only)" : "ON (AABB proxy)",
+                  id.S->imported ? "IMPORTED faces (RegisterCubeFaces)" : "baked here");
+    y = emTextLine(x, y, wMax, line);
+
+    const bool live = id.S->envDynamic && FeatureFlags::env_dynamic();
+    std::snprintf(line, sizeof line, "%s   %d material(s): %s",
+                  live ? (id.S->everOverlaid
+                            ? "LIVE - refreshed by --env_dynamic"
+                            : "LIVE-flagged - --env_dynamic has not refreshed it YET")
+                       : (id.S->envDynamic
+                            ? "STATIC (envDynamic flagged, but --env_dynamic is off)"
+                            : "STATIC capture"),
+                  id.nMats, id.matList[0] ? id.matList : "(none)");
+    y = emTextLine(x, y, wMax, line);
+
+    if (extraLine && *extraLine) y = emTextLine(x, y, wMax, extraLine);
+    (void)mode;
+}
+
+// A probe with no pixel data gets an EMPTY FRAMED PANEL that says so. This
+// project has been bitten three separate times by a diagnostic that rendered
+// "no data" as a legitimate-looking value; a black 3x2 grid would be the
+// fourth. Nothing is blitted here at all — there is nothing to blit.
+void emDrawNoData(int x0, int y0, int w, int h, const char* why) {
+    emDim(x0, y0, x0 + w, y0 + h, 30);
+    emFrame(x0, y0, w, h, 0x00FF00FFu);
+    const int fs = emFontScale();
+    OutTextXY(VPage, x0 + 8 * fs, y0 + h / 2 - emGlyphH(), "NO PIXEL DATA", 255);
+    OutTextXY(VPage, x0 + 8 * fs, y0 + h / 2 + 2 * fs, why, 255);
+}
+
+}  // namespace
+
+bool EnvMapViz_Available() {
+    if (!CurScene) return false;
+    auto it = g_envByScene.find(CurScene);
+    if (it == g_envByScene.end()) return false;
+    for (const auto& s : it->second.stores)
+        if (s && s->view.mip[0]) return true;
+    return false;
+}
+
+bool EnvMapGpuViz_Available() {
+    if (!EnvMapViz_Available()) return false;
+    return !emGpuAtlasStems().empty();
+}
+
+void EnvMap_StepProbe(int dir) {
+    const int n = g_envMapProbeCount;
+    if (n <= 0) {
+        std::fprintf(stderr, "[ENVMAP] no env probes in this scene (nothing to page "
+                     "through). Needs --env_refl and a reflective surface.\n");
+        return;
+    }
+    const int cur = FeatureFlags::env_map_probe();
+    const int cur0 = cur > 0 ? ((cur - 1) % n) : 0;
+    const int nxt0 = ((cur0 + (dir >= 0 ? 1 : -1)) % n + n) % n;
+    char v[16];
+    std::snprintf(v, sizeof v, "%d", nxt0 + 1);
+    FeatureFlags::setParamFromText("env_map_probe", v);
+    if (FeatureFlags::env_map_viz() <= 0)
+        std::fprintf(stderr, "[ENVMAP] probe %d/%d selected, but the inspector is OFF "
+                     "— press X to cycle to 'ENV probe faces' (needs --viz_arm on a "
+                     "dev build), or pass --env_map_viz=1.\n", nxt0 + 1, n);
+}
+
+void EnvMap_DrawViz(Scene* sc) {
+    if (!sc || !VPage || XRes <= 0 || YRes <= 0) return;
+    // Never inside an offscreen render. Same reason EnvReflection_DrawViz has
+    // this guard: the env bake runs a full renderFrame per cube face, and an
+    // overlay drawn there gets BAKED INTO the probe being viewed.
+    if (g_offscreenViewDepth > 0) return;
+
+    auto it = g_envByScene.find(sc);
+    const int count = (it == g_envByScene.end()) ? 0 : int(it->second.stores.size());
+    g_envMapProbeCount = count;          // publish for the F-key stepper
+
+    const int mode = FeatureFlags::env_map_viz();
+    if (mode <= 0) return;               // ← the byte-null early-out
+
+    const int fs = emFontScale();
+    const int pitch = emPitch();
+    if (count <= 0) {
+        // NOT a silent return. The viz CYCLE drops the mode when there are no
+        // probes (EnvMapViz_Available), but --env_map_viz=1 straight off the
+        // command line under --no-env_refl reaches here, and an instrument that
+        // answers "nothing" by drawing nothing is the exact failure this tree
+        // has been bitten by three times. Say it, on screen.
+        const int w = XRes / 2, h = 6 * pitch;
+        const int x = (XRes - w) / 2, y = 8 * fs;
+        emDrawNoData(x, y, w, h, "no env probe exists in this scene");
+        char why[192];
+        std::snprintf(why, sizeof why,
+            "--env_refl is %s. A probe needs a surface with Reflection > 0 or a "
+            "metalness map.", FeatureFlags::env_refl() ? "ON" : "OFF");
+        emTextLine(x, y + h + pitch, w, why);
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::fprintf(stderr, "[ENVMAP] --env_map_viz=%d but this scene has NO env "
+                         "probes (env_refl=%d). Nothing to inspect.\n",
+                         mode, (int)FeatureFlags::env_refl());
+        }
+        return;
+    }
+
+    const SceneEnv& env = it->second;
+    const int want = FeatureFlags::env_map_probe();
+    const int idx  = want > 0 ? ((want - 1) % count) : 0;
+
+    ProbeIdent id;
+    if (!emProbeIdent(env, idx, id)) return;
+    const EnvPanoLinear& v = id.S->view;
+
+    const int headerLines = 5;
+    const int margin = 8 * fs;
+    // Vertical budget: the frame minus a top margin, the header block under
+    // the image, and the bottom strip the viz legend + mode name own
+    // (VizCycle draws those up from YRes - 20*g_fontScale).
+    const int maxW = XRes - 2 * margin;
+    const int maxH = YRes - margin - headerLines * pitch - 26 * fs;
+
+    // ── report the selection once, on stderr, in full ────────────────────
+    // Printed from the RENDER thread (where reading the store is safe), not
+    // from the key handler.
+    {
+        static const Scene* lastScene = nullptr;
+        static int lastIdx = -1, lastMode = -1;
+        if (idx != lastIdx || mode != lastMode || sc != lastScene) {
+            lastIdx = idx; lastMode = mode; lastScene = sc;
+            char chain[128]; emChainText(v, chain, sizeof chain);
+            std::fprintf(stderr,
+                "[ENVMAP] probe %d/%d '%s' — %s, %s, bake (%.2f %.2f %.2f), "
+                "parallax %s, %s, %d material(s): %s%s\n",
+                idx + 1, count, id.primary,
+                v.isCube ? "padded CUBE" : "equirect PANORAMA",
+                chain, double(v.bakeX), double(v.bakeY), double(v.bakeZ),
+                v.noParallax ? "off" : "on",
+                (id.S->envDynamic && FeatureFlags::env_dynamic()) ? "LIVE (--env_dynamic)"
+                                                                  : "static",
+                id.nMats, id.matList[0] ? id.matList : "(none)",
+                v.mip[0] ? "" : "  *** NO PIXEL DATA ***");
+        }
+    }
+
+    // ── mode 2: THE MIP CHAIN ────────────────────────────────────────────
+    if (mode == 2) {
+        // Levels left-to-right at NATIVE RELATIVE size. The halving IS the
+        // information: --env_mip_chain exists because the chain's depth (and
+        // therefore how far a given roughness walks down it) is the mechanism
+        // behind "the GPU melts the ribs into a mirror sweep".
+        int srcW = 0, srcH = 0, nLv = 0;
+        for (int k = 0; k < v.numMips; ++k) {
+            const AtlasSrc s = srcForLevel(v, k);
+            if (!s.valid()) break;
+            srcW += s.w() + 4; if (s.h() > srcH) srcH = s.h();
+            ++nLv;
+        }
+        if (nLv == 0) {
+            const int w = maxW / 2, h = maxH / 3;
+            const int x0 = (XRes - w) / 2, y0 = margin;
+            emDrawNoData(x0, y0, w, h, "this probe has no baked levels");
+            emDrawHeader(x0, y0 + h + pitch, w, idx, count, id, v, mode, nullptr);
+            return;
+        }
+        const int scale = emFitScale(srcW, srcH, maxW, maxH);
+        int x = (XRes - (scale >= 1 ? srcW * scale : (srcW - 1) / (-scale) + 1)) / 2;
+        if (x < margin) x = margin;
+        const int y0 = margin + pitch;   // room for the per-level label above
+        int bottom = y0;
+        const int xStart = x;
+        for (int k = 0; k < nLv; ++k) {
+            const AtlasSrc s = srcForLevel(v, k);
+            int dw, dh; emScaledDims(s, scale, dw, dh);
+            emBlit(s, x, y0, scale);
+            emFrame(x, y0, dw, dh, 0x0000C0FFu);
+            if (s.cube) emLabelCubeCells(x, y0, dw / 3, dh / 2);
+            char lab[64];
+            std::snprintf(lab, sizeof lab, "L%d  %d%s", k, s.cube ? s.fr : s.W,
+                          s.cube ? "^2 x6" : "");
+            emDim(x, y0 - pitch, x + dw, y0 - 1, 60);
+            OutTextXY(VPage, x + 2 * fs, y0 - pitch + fs, lab, 255);
+            if (y0 + dh > bottom) bottom = y0 + dh;
+            x += dw + (scale >= 1 ? 4 * scale : 4);
+        }
+        char extra[192];
+        std::snprintf(extra, sizeof extra,
+            "level select: lvlF = roughness * (N-1); a mirror reads L0, roughness 1 reads L%d",
+            v.numMips - 1);
+        emDrawHeader(xStart, bottom + pitch, maxW, idx, count, id, v, mode, extra);
+        return;
+    }
+
+    // ── modes 1 and 3: THE SIX FACES ─────────────────────────────────────
+    const AtlasSrc s0 = srcForLevel(v, 0);
+    const bool wantGpu = (mode == 3);
+
+    // Mode 3 pairs our atlas with GpuBench's for the same material.
+    PpmImage gpu;
+    std::string gpuStem;
+    std::vector<std::string> stems;
+    if (wantGpu) {
+        stems = emGpuAtlasStems();
+        gpuStem = emMatchGpuStem(id.primary, stems);
+        if (!gpuStem.empty()) {
+            const std::string p = std::string(kGpuEnvDir) + "/" + kGpuEnvPrefix
+                                + gpuStem + ".ppm";
+            if (!emReadPpmP6(p.c_str(), gpu)) gpu = PpmImage();
+        }
+    }
+
+    if (!s0.valid()) {
+        const int w = maxW / 2, h = maxH / 2;
+        const int x0 = (XRes - w) / 2, y0 = margin;
+        emDrawNoData(x0, y0, w, h,
+                     "store exists but mip[0] is null - not baked yet, or the bake failed");
+        emDrawHeader(x0, y0 + h + pitch, w, idx, count, id, v, mode, nullptr);
+        return;
+    }
+
+    // Two panels side by side in mode 3, one otherwise. Both panels are drawn
+    // at the SAME displayed size so the eye compares content, not scale.
+    const int panels = (wantGpu ? 2 : 1);
+    const int gapX   = 10 * fs;
+    const int panelMaxW = (maxW - (panels - 1) * gapX) / panels;
+    const int scale  = emFitScale(s0.w(), s0.h(), panelMaxW, maxH - pitch);
+    int dw, dh; emScaledDims(s0, scale, dw, dh);
+    const int totalW = panels * dw + (panels - 1) * gapX;
+    int x0 = (XRes - totalW) / 2; if (x0 < margin) x0 = margin;
+    const int y0 = margin + pitch;
+
+    emBlit(s0, x0, y0, scale);
+    emFrame(x0, y0, dw, dh, 0x0000FF00u);
+    if (s0.cube) emLabelCubeCells(x0, y0, dw / 3, dh / 2);
+    {
+        char lab[96];
+        std::snprintf(lab, sizeof lab, "CPU  %s  mip 0",
+                      s0.cube ? "3x2 cube atlas (+X -X +Y / -Y +Z -Z)"
+                              : "equirect panorama");
+        emDim(x0, y0 - pitch, x0 + dw, y0 - 1, 60);
+        OutTextXY(VPage, x0 + 2 * fs, y0 - pitch + fs, lab, 255);
+    }
+
+    char extra[224] = {};
+    if (wantGpu) {
+        const int gx = x0 + dw + gapX;
+        if (gpu.ok()) {
+            AtlasSrc gs;
+            // GpuBench's atlas is a flat 3x2 image; treat it as a cube atlas
+            // when its aspect says so, so the SAME cell labels apply.
+            if (gpu.W == gpu.H * 3 / 2 && (gpu.W % 3) == 0) {
+                gs.px = gpu.px.data(); gs.cube = true; gs.fr = gpu.W / 3;
+            } else {
+                gs.px = gpu.px.data(); gs.W = gpu.W; gs.H = gpu.H;
+            }
+            const int gscale = emFitScale(gs.w(), gs.h(), dw, dh);
+            int gdw, gdh; emScaledDims(gs, gscale, gdw, gdh);
+            emBlit(gs, gx, y0, gscale);
+            emFrame(gx, y0, gdw, gdh, 0x00FF8000u);
+            if (gs.cube) emLabelCubeCells(gx, y0, gdw / 3, gdh / 2);
+            char lab[96];
+            std::snprintf(lab, sizeof lab, "GPU  gpuenv_%s.ppm  %dx%d  (sqrt-encoded)",
+                          gpuStem.c_str(), gpu.W, gpu.H);
+            emDim(gx, y0 - pitch, gx + gdw, y0 - 1, 60);
+            OutTextXY(VPage, gx + 2 * fs, y0 - pitch + fs, lab, 255);
+            std::snprintf(extra, sizeof extra,
+                "CPU faces are 8-bit LDR bake texels; the GPU atlas is linear RGBA16F "
+                "sqrt-encoded: compare STRUCTURE, not absolute brightness");
+        } else {
+            emDrawNoData(gx, y0, dw, dh,
+                         gpuStem.empty() ? "no gpuenv_*.ppm matches this material"
+                                         : "gpuenv atlas present but unreadable");
+            std::string have;
+            for (size_t i = 0; i < stems.size() && have.size() < 90; ++i)
+                have += (i ? ", " : "") + stems[i];
+            std::snprintf(extra, sizeof extra,
+                "GPU atlases in /tmp: %s   (make them: GpuBench --dump_env_cube)",
+                have.empty() ? "NONE" : have.c_str());
+        }
+    }
+
+    emDrawHeader(x0, y0 + dh + pitch, totalW, idx, count, id, v, mode,
+                 extra[0] ? extra : nullptr);
 }
 
 void EnvReflection_DrawViz(Scene* sc) {

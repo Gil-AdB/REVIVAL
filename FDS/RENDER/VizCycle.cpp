@@ -24,6 +24,8 @@ namespace fds {
 bool LightmapViz_Available();
 bool NormalViz_Available();
 bool EnvReflectionViz_Available();
+bool EnvMapViz_Available();
+bool EnvMapGpuViz_Available();
 
 const char* g_vizLabel = nullptr;
 
@@ -49,6 +51,8 @@ bool availSeam()     { return PomSeamViz_HasData(); }
 bool availHorizon()  { return FF::deferred() && FF::pom_horizon(); }
 bool availShadowLm() { return FF::deferred() && LightmapViz_Available(); }
 bool availEnvRefl()  { return EnvReflectionViz_Available(); }
+bool availEnvMap()   { return EnvMapViz_Available(); }
+bool availEnvMapGpu(){ return EnvMapGpuViz_Available(); }
 bool availAa()       { return FF::deferred() && FF::aa(); }
 bool availSsao()     { return FF::deferred() && FF::ssao(); }
 
@@ -115,6 +119,22 @@ const VizEntry kEntries[] = {
       "needs --ssao (and --no-hdr, or the tonemap overwrites it)" },
     { "ENV pano #1",             "env_refl_viz",        1, availEnvRefl,  false,
       "needs --env_refl (the panorama bake) at STARTUP" },
+    // ── the ENV-MAP INSPECTOR ────────────────────────────────────────────
+    // Unlike "ENV pano #1" (probe #1 only, thumbnail, unlabelled) these page
+    // through EVERY baked probe with F / Shift+F and name what is on screen.
+    // Both entries write the same flag, so stepping X between them keeps the
+    // selected probe — env_map_probe is deliberately NOT in this table and so
+    // is never cleared by clearAll().
+    { "ENV probe faces (3x2)",   "env_map_viz",         1, availEnvMap,   false,
+      "no env probe with pixel data in this run - needs --env_refl (on by "
+      "default) plus a surface that qualifies (Reflection > 0 or a metalness "
+      "map); probes bake during the scene's first frames" },
+    { "ENV probe mip chain",     "env_map_viz",         2, availEnvMap,   false,
+      "no env probe with pixel data in this run - see 'ENV probe faces'" },
+    { "ENV probe CPU|GPU",       "env_map_viz",         3, availEnvMapGpu,false,
+      "no GpuBench atlas on disk - produce one with "
+      "`../build-gpu/GpuBench/GpuBench --fld=SCENES/GREETS.FLD --pass=deferred "
+      "--dump_env_cube`, which writes /tmp/gpuenv_<material>.ppm" },
 };
 constexpr int kNumEntries = int(sizeof(kEntries) / sizeof(kEntries[0]));
 

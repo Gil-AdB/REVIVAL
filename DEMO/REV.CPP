@@ -472,6 +472,7 @@ material global ID or ptr
 #include <RENDER/EnvCube.h>
 #include <RENDER/ChunkOcclusion.h>  // g_occlSnapshotInert: pin dumps keep the cull inert
 #include <RENDER/VizCycle.h>        // VizCycle_Step: the X / Shift+X debug-viz cycle
+#include <RENDER/EnvBake.h>         // EnvMap_StepProbe: F / Shift+F env-probe paging
 #include <Base/TuneServer.h>
 #include "Config.h"
 #include "Threads.h"
@@ -1939,6 +1940,27 @@ int main(int argc, const char *argv[])
 						const Uint16 mod = event.key.keysym.mod;
 						const bool back = (mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
 						fds::VizCycle_Step(back ? -1 : +1);
+					}
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_F) {
+					// ENV-MAP INSPECTOR probe paging: F = next probe,
+					// Shift+F = previous, both wrapping. X selects the
+					// inspector MODE (faces / mip chain / CPU|GPU) through
+					// the ordinary viz cycle; this key only moves WHICH probe
+					// is on screen, because greets bakes ~6 and city registers
+					// 71 and a viewer that can only show one is not a viewer.
+					//
+					// Why F: it is the one letter that is neither translated
+					// into Keyboard[] by the switch above (so no scene poll
+					// site can see it) nor handled in this chain, in EITHER
+					// event pump (here and DEMO/MainLoop.cpp) — checked
+					// against both scancode tables and every Keyboard[Sc*]
+					// consumer in DEMO/ and FDS/. It also sits under the left
+					// index finger on WASD, next to X.
+					// repeat == 0: hold-to-repeat would spin 71 city probes.
+					if (event.key.repeat == 0) {
+						const Uint16 mod = event.key.keysym.mod;
+						const bool back = (mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+						fds::EnvMap_StepProbe(back ? -1 : +1);
 					}
 				} else if (event.key.keysym.scancode == SDL_SCANCODE_B) {
 					// Cycle the shadow-map debug view's buffer mode:

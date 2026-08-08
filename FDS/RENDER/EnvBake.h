@@ -155,6 +155,39 @@ void EnvReflection_InvalidateSurface(Scene* sc, const Material* M);
 // N beyond the store count clamps to the last one; 0 = off (no-op).
 void EnvReflection_DrawViz(Scene* sc);
 
+// ── THE ENV-MAP INSPECTOR (--env_map_viz) ─────────────────────────────────
+// A LOOK-AT-THE-PROBES viewer for the interactive window. Until this existed
+// the only way to see a baked probe was FDS_ENVBAKE_DUMP writing PPMs to /tmp:
+// offline, one file per material, and you had to know it was there. It cost a
+// whole investigation's worth of time (docs/SHADING_CONTRACT.md §11, which
+// argues from probe dumps throughout) to build the instrument mid-flight.
+//
+// It is a VIEWER: it reads the stores EnvReflection_FramePrep already built,
+// re-bakes nothing, perturbs no frame state, and paints VPage in the same
+// post-tonemap overlay slot as EnvReflection_DrawViz. Default off, so it is
+// byte-null on a shipping frame by construction (one integer compare).
+//
+// Modes are --env_map_viz (1 faces / 2 mip chain / 3 CPU|GPU); the probe is
+// --env_map_probe, paged live with F / Shift+F. Both are ordinary FeatureFlags
+// so the X-key viz cycle offers the modes like every other viz.
+void EnvMap_DrawViz(Scene* sc);
+
+// F / Shift+F from the SDL event pump: step --env_map_probe by `dir`, wrapping
+// on the probe count the last drawn frame published. Writes the flag through
+// FeatureFlags::setParamFromText — same path as the cycle and the console —
+// and prints nothing itself; the render thread reports the new probe's
+// identity when it draws it, which is also where the store is safe to read.
+void EnvMap_StepProbe(int dir);
+
+// Availability probe for the viz cycle, defined beside the painter whose
+// early-outs it mirrors (the VizCycle.cpp convention). True when the CURRENT
+// scene has at least one probe store WITH pixel data.
+bool EnvMapViz_Available();
+
+// True when at least one GpuBench --dump_env_cube atlas is present on disk for
+// the current scene's probes — the availability probe for --env_map_viz=3.
+bool EnvMapGpuViz_Available();
+
 // Number of baked panorama stores for the scene (viewer paging bound).
 int EnvReflection_Count(Scene* sc);
 
