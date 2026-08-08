@@ -1318,11 +1318,17 @@ int main(int argc, const char *argv[])
 	if (WantChdirToAssetRoot(argc, argv)) {
 		ChdirToAssetRoot(argc > 0 ? argv[0] : "");
 	} else {
+		// The report is inside the same guard as ChdirToAssetRoot itself:
+		// <unistd.h> (and so getcwd) is only included for native builds, and
+		// on emscripten the chdir is a no-op anyway — assets are preloaded at
+		// "/", so there is no launch CWD worth naming.
+#ifndef __EMSCRIPTEN__
 		char cwd[4096] = {0};
 		if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
 		std::fprintf(stderr,
 			"[CHDIR] asset-root chdir SKIPPED (--no-chdir_assets); assets resolve "
 			"from the launch CWD: %s\n", cwd[0] ? cwd : "(unknown)");
+#endif
 	}
 
 	// Headless modes (--snapshot / --bench / --repro) must never pop an SDL window,
