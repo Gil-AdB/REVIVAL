@@ -232,6 +232,18 @@ struct Material
     //     pixels the march cannot answer, so it is always a minority of whatever
     //     box side it lands on and the dominant-class lookup never fires.
     float               * PomShellSideTrue       = nullptr;
+    //   PomShellSidePartner — S1d-9: the CONVEX RIDGE PARTNER's normal for that
+    //     side, 7 floats: (nT, nB, nN) then the along-side sub-interval the side
+    //     is convex over, then the sub-interval it is NOT convex over (which is
+    //     subtracted). Expressed in the owning face's own TANGENT FRAME
+    //     (nT, nB, nN) so the kernel can test it against the per-pixel view
+    //     direction (VtT, VtB, VtN) with no camera and no matrix:
+    //     N_b·V < 0 ⇔ the partner is BACKFACING ⇔ that convex ridge really is
+    //     a silhouette at this pixel. All-zero = no coherent convex partner on
+    //     this side, and the dot is then exactly 0, which never trips < 0 — an
+    //     unknown side falls back to KEEP, the side that cannot punch a gash.
+    //     Read only by --pom_shell_lid_true_edge bit6 (64).
+    float               * PomShellSidePartner    = nullptr;
     // Applied albedo tint (per-channel multipliers, 1 = untinted). The tint
     // mutates the shared Texture pixels; these echo the last applied values
     // for the editor UI + sidecar round-trip (see MaterialImport tintR/G/B).

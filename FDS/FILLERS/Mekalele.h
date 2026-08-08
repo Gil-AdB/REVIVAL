@@ -756,6 +756,30 @@ struct TileRasterizerCtx {
 	// from shellSideCls because a free edge is typically a small MINORITY of the
 	// box side it lands on, so a dominant-class lookup never fires on it.
 	float shellSideTrue[8] = { 1,-1, 1,-1, 1,-1, 1,-1 };
+	// S1d-9 --pom_shell_sil_slack: extra UV allowance added to the partner
+	// half-space test below, ALREADY multiplied by the patch's UV amplitude.
+	// 0 = the exact test; raising it trades silhouette crenellation for
+	// coverage, and that trade is the measured S1d-9 curve.
+	float pomShellSilSlack = 0.0f;
+	// S1d-9: per box side, 8 floats: the CONVEX PARTNER's normal in THIS
+	// face's tangent frame (nT, nB, nN), then the ALONG-SIDE sub-interval
+	// (cLo, cHi) over which that side is convex at all (lo > hi = none, which is
+	// the default and disables the side), then (nLo, nHi) — the stretch of the
+	// same side that is NOT convex, which is SUBTRACTED, because a box side is
+	// attributed by nearest-side and takes a dominant class, so one side
+	// routinely mixes a real outside corner with a coplanar continuation.
+	// --pom_shell_lid_true_edge bit6 (64) discards a lid exit ONLY where the
+	// exit lands inside (cLo,cHi), OUTSIDE (nLo,nHi),
+	// AND the partner is BACKFACING for the pixel
+	// (nT·VtT + nB·VtB + nN·VtN < 0) — i.e. only where the wall genuinely ENDS.
+	// Both halves are load-bearing and MEASURED: on the dominant CLASS alone the
+	// backfacing test still blanks the grazing near wall at t=5743 (62 187 void,
+	// and flat + tessellation both cover every one of those pixels at the same
+	// depth), because the ray left the patch's BOX there, not the solid.
+	// All-zero normal gives a dot of exactly 0, which never trips < 0: unknown
+	// ⇒ KEEP, the side that cannot punch a gash.
+	float shellSidePart[32] = { 0,0,0,1,-1,1,-1,0, 0,0,0,1,-1,1,-1,0,
+	                           0,0,0,1,-1,1,-1,0, 0,0,0,1,-1,1,-1,0 };
 	// --pom_viz: replace the albedo with the height field sampled at the FINAL
 	// (post-march) UV, grayscale — the parallax result made directly visible
 	// (block domes, mortar cuts, march terracing/banding). Debug only; rides
@@ -2572,6 +2596,51 @@ struct TileRasterizer {
 										const int c = ctx.shellSideCls[k];
 										const int bit = (c == 3) ? 2 : (c == 2) ? 4 : (c == 1) ? 8
 										              : (c == 0) ? 16 : 32;
+										// ── S1d-9 bit6 (64): CONVEX RIDGE, PARTNER BACKFACING ──────
+										// The whole point of §S1d-6.4. bit2 (4) kills EVERY convex exit
+										// and costs 127 043 void over the 19 poses, because most convex
+										// ridges in greets are not silhouettes at all — the partner wall
+										// still faces the eye and the solid continues round the corner.
+										// The quantity that separates the two is one dot product: the
+										// partner's normal against the view. It is baked per side in this
+										// face's own tangent frame (PomShellSidePartner) exactly so it can
+										// be tested here against the (VtT, VtB, VtN) the march already has
+										// — no camera, no world space, and it therefore stays correct in
+										// the mirror, env-probe and shadow passes, which run other cameras.
+										// An all-zero entry (no coherent convex partner) gives a dot of 0,
+										// which never trips < 0: unknown falls back to KEEP.
+										if (m & 64) {
+											const float nT = ctx.shellSidePart[5*k + 0];
+											const float nB = ctx.shellSidePart[5*k + 1];
+											const float nN = ctx.shellSidePart[5*k + 2];
+											const float cl = ctx.shellSidePart[8*k + 3];
+											const float ch = ctx.shellSidePart[8*k + 4];
+											const float xl = ctx.shellSidePart[8*k + 5];
+											const float xh = ctx.shellSidePart[8*k + 6];
+											const float ln = ctx.shellSidePart[8*k + 7];
+											if ((nT != 0.0f || nB != 0.0f || nN != 0.0f) && cl <= ch) {
+												const Vec8f along = (k < 2) ? vf : uf;
+												Vec8fb win = (along >= Vec8f(cl)) & (along <= Vec8f(ch));
+												if (xl <= xh)
+													win &= ~((along >= Vec8f(xl)) & (along <= Vec8f(xh)));
+												// Did the HIT leave the SOLID, or is it still inside the
+												// partner's half-space? At a convex ridge the partner's
+												// plane is the side face, so below the authored plane the
+												// material reaches ln*(h0-h) past the ridge line. Assuming
+												// any exit left the solid is MEASURED WRONG: it blanks the
+												// grazing near wall at t=5743 (62 186 px that flat AND
+												// tessellation both cover at the same depth).
+												const Vec8f ovk = (k == 0) ? (Vec8f(ctx.shellUMin) - uf)
+												                : (k == 1) ? (uf - Vec8f(ctx.shellUMax))
+												                : (k == 2) ? (Vec8f(ctx.shellVMin) - vf)
+												                           : (vf - Vec8f(ctx.shellVMax));
+												win &= ovk > Vec8f(ln) * (Vec8f(ctx.shellH0) - pomHitH)
+												             + Vec8f(ctx.pomShellSilSlack);
+												trueExit |= o[k] & win
+												          & ((Vec8f(nT) * VtT + Vec8f(nB) * VtB
+												              + Vec8f(nN) * VtN) < Vec8f(0.0f));
+											}
+										}
 										if (m & bit) { trueExit |= o[k]; continue; }
 										if (!(m & 1)) continue;
 										const float lo = ctx.shellSideTrue[2*k];
@@ -3576,6 +3645,14 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	         && fds::FeatureFlags::pom_shell_side_faces() > 0)
 	        || lidTrueEdgeOn))
 		pomShellSideTrue = F->Txtr->PomShellSideTrue + 8 * (F->PomShellGroup - 1);
+	// S1d-9: the per-side CONVEX PARTNER normal, read ONLY by
+	// --pom_shell_lid_true_edge bit6 (64). Gated on the bit rather than on the
+	// flag as a whole so every other value of the bitmask stays byte-identical.
+	const float *pomShellSidePart = nullptr;
+	if (pomShellFace && F->PomShellGroup != 0 && F->Txtr->PomShellSidePartner
+	    && F->PomShellGroup <= F->Txtr->PomShellDomainCount
+	    && (lidTrueEdgeMode & 64))
+		pomShellSidePart = F->Txtr->PomShellSidePartner + 32 * (F->PomShellGroup - 1);
 	const bool pomSideFaces = fds::FeatureFlags::pom_shell_side_faces() > 0
 	                          && pomShellSideLean != nullptr;
 	// --pom_prism_march (S1d-5): mode >= 1 arms the per-lane signed-1/(V·N)
@@ -3750,6 +3827,40 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		                   pomShellSideTrue ? pomShellSideTrue[5] : -1.0f,
 		                   pomShellSideTrue ? pomShellSideTrue[6] :  1.0f,
 		                   pomShellSideTrue ? pomShellSideTrue[7] : -1.0f },
+		.pomShellSilSlack = fds::FeatureFlags::pom_shell_sil_slack()
+		                    * (pomShellSidePart ? PomShellFaceUvAmp(F) : 0.0f),
+		.shellSidePart = { pomShellSidePart ? pomShellSidePart[0] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[1] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[2] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[3] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[4] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[5] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[6] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[7] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[8] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[9] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[10] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[11] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[12] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[13] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[14] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[15] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[16] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[17] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[18] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[19] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[20] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[21] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[22] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[23] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[24] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[25] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[26] : 0.0f,
+		                   pomShellSidePart ? pomShellSidePart[27] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[28] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[29] : 1.0f,
+		                   pomShellSidePart ? pomShellSidePart[30] : -1.0f,
+		                   pomShellSidePart ? pomShellSidePart[31] : 0.0f },
 		.pomViz = fds::FeatureFlags::pom_viz(),
 		.pomMipViz = fds::FeatureFlags::pom_mip_viz(),
 		.pomPathViz = fds::FeatureFlags::pom_path_viz(),

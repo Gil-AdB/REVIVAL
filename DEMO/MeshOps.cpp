@@ -5350,6 +5350,46 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		// S1d-2b: the along-side UV span over which each side is a FREE EDGE.
 		std::vector<float>  sideTrueLo(size_t(nGroups) * 4,  1e30f);
 		std::vector<float>  sideTrueHi(size_t(nGroups) * 4, -1e30f);
+		// ── S1d-9 THE CONVEX PARTNER'S NORMAL (§S1d-6.4 candidate 1) ────
+		// A convex ridge is a silhouette EXACTLY WHEN ITS PARTNER IS BACKFACING:
+		// if the neighbour wall still faces the eye the solid genuinely continues
+		// round the corner and a discard there is the 127 k-void gash
+		// --pom_shell_lid_true_edge=4 measured. The test is VIEW-DEPENDENT, so the
+		// CLASS table cannot carry it -- the class is the view-independent stand-in
+		// §S1d-6.4 named as the reason every class-keyed rule fires on the wrong
+		// population.
+		//
+		// The partner normal is baked in THIS face's own TANGENT FRAME (T,B,N),
+		// never in world space, so the kernel needs no camera and no matrix: it
+		// already computes V in that frame as (VtT,VtB,VtN), and V points TOWARD
+		// the eye, so
+		//     N_b·V = nT·VtT + nB·VtB + nN·VtN  <  0   ⇔  partner backfacing.
+		// Self-check the code relies on: with N_b = N_a this collapses to
+		// (0,0,1)·(VtT,VtB,VtN) = VtN < 0, i.e. 'this face is itself backfacing',
+		// which is the right answer by inspection.
+		//
+		// T is Compute_Vertex_Tangents' tangent (dP/du, Gram-Schmidt'd against N)
+		// and B is the kernel's TbnHandedness·(N×T), which is exactly the +v
+		// direction -- so B is derived here from dP/dv and there is no handedness
+		// flag to get wrong.
+		// ...and the ALONG-SIDE SUB-INTERVAL over which that side is convex at all.
+		// The dominant-class lookup is not good enough here and that is MEASURED, not
+		// assumed: keyed on the dominant class the backfacing test still blanks the
+		// grazing near wall at t=5743 (62 187 void), and on every one of those pixels
+		// the FLAT and TESSELLATION arms render a near fragment at the same depth --
+		// the wall is really there and the ray left the patch's BOX, not the solid.
+		std::vector<std::array<double,3>> sidePartN(size_t(nGroups) * 4, {0.0,0.0,0.0});
+		std::vector<double> sidePartLen(size_t(nGroups) * 4, 0.0);
+		std::vector<float>  sideCvxLo(size_t(nGroups) * 4,  1e30f);
+		std::vector<float>  sideCvxHi(size_t(nGroups) * 4, -1e30f);
+		// ...and the span the side is NOT convex over, subtracted from the above.
+		// A box side is attributed by NEAREST-SIDE and takes a DOMINANT class, so one
+		// side routinely mixes a real outside corner with a coplanar continuation or
+		// a fold; the convex hull alone then covers the whole side and the kill fires
+		// on the continuation too. Only the stretch that is convex AND NOT ALSO
+		// something else is safe to call a silhouette.
+		std::vector<float>  sideNcxLo(size_t(nGroups) * 4,  1e30f);
+		std::vector<float>  sideNcxHi(size_t(nGroups) * 4, -1e30f);
 		double sideOffLen = 0.0, sideAllLen = 0.0;   // boundary NOT near any box side
 		const float leanCapUv = fds::FeatureFlags::pom_shell_cap();
 		double maxCoplanarUvErr = 0.0;
@@ -5512,9 +5552,43 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 							lean = std::min(lean, ampU * leanCapUv);
 						}
 					}
+					// S1d-9: this convex segment's PARTNER NORMAL, in fa's own tangent frame.
+					// Length-weighted so a side that mixes several partners averages them and
+					// the publish step below can measure how coherent that average is.
+					if (cls == SC_ANGLED_OUT && nbIdx >= 0) {
+						const SeamFace &fb = seamAll[nbIdx];
+						const float nu = fa.N.x*fa.dPdu.x + fa.N.y*fa.dPdu.y + fa.N.z*fa.dPdu.z;
+						Vector Tt = { fa.dPdu.x - fa.N.x*nu, fa.dPdu.y - fa.N.y*nu, fa.dPdu.z - fa.N.z*nu };
+						const float tl = std::sqrt(Tt.x*Tt.x + Tt.y*Tt.y + Tt.z*Tt.z);
+						const float nv = fa.N.x*fa.dPdv.x + fa.N.y*fa.dPdv.y + fa.N.z*fa.dPdv.z;
+						Vector Bt = { fa.dPdv.x - fa.N.x*nv, fa.dPdv.y - fa.N.y*nv, fa.dPdv.z - fa.N.z*nv };
+						if (tl > 1e-9f) {
+							Tt.x /= tl; Tt.y /= tl; Tt.z /= tl;
+							const float bt = Bt.x*Tt.x + Bt.y*Tt.y + Bt.z*Tt.z;
+							Bt.x -= Tt.x*bt; Bt.y -= Tt.y*bt; Bt.z -= Tt.z*bt;
+							const float bl = std::sqrt(Bt.x*Bt.x + Bt.y*Bt.y + Bt.z*Bt.z);
+							if (bl > 1e-9f) {
+								Bt.x /= bl; Bt.y /= bl; Bt.z /= bl;
+								sidePartN[si][0] += double(fb.N.x*Tt.x + fb.N.y*Tt.y + fb.N.z*Tt.z) * slen;
+								sidePartN[si][1] += double(fb.N.x*Bt.x + fb.N.y*Bt.y + fb.N.z*Bt.z) * slen;
+								sidePartN[si][2] += double(bestDot) * slen;
+								sidePartLen[si] += slen;
+								const float c0 = (k < 2) ? vA : uA;
+								const float c1 = (k < 2) ? vB : uB;
+								sideCvxLo[si] = std::min(sideCvxLo[si], std::min(c0, c1));
+								sideCvxHi[si] = std::max(sideCvxHi[si], std::max(c0, c1));
+							}
+						}
+					}
 					if (lean > 0.0f) { sideLeanSum[si] += double(lean) * slen;
 					                   sideLeanLen[si] += slen; }
 					sideLeanMin[si] = std::min(sideLeanMin[si], lean);
+					if (cls != SC_ANGLED_OUT) {
+						const float n0 = (k < 2) ? vA : uA;
+						const float n1 = (k < 2) ? vB : uB;
+						sideNcxLo[si] = std::min(sideNcxLo[si], std::min(n0, n1));
+						sideNcxHi[si] = std::max(sideNcxHi[si], std::max(n0, n1));
+					}
 					if (cls == SC_TRUE) {
 						const float a0 = (k < 2) ? vA : uA;
 						const float a1 = (k < 2) ? vB : uB;
@@ -5688,6 +5762,51 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			if (sideFaces > 0) {
 				mat->PomShellSideLean = new float[lean4.size()];
 				std::memcpy(mat->PomShellSideLean, lean4.data(), lean4.size() * sizeof(float));
+			}
+			// ── S1d-9 PUBLISH THE CONVEX PARTNER NORMAL (per patch, per side) ──
+			// Three floats per side: the length-weighted mean partner normal in the
+			// face's tangent frame, renormalised. COHERENCE = |sum| / sum(len) says how
+			// much the partners along one side agreed; a side that mixes two partners at
+			// right angles averages to nonsense, so below kCoh the entry is ZEROED and
+			// the kernel's dot is then exactly 0, which never trips the < 0 test -- i.e.
+			// an incoherent side falls back to KEEP, the side that cannot gash.
+			{
+				std::vector<float> prt(cls4.size() * 8, 0.0f);
+				const double kCoh = 0.90;
+				int nPart = 0, nIncoh = 0; double cohLo = 2.0, cohSum = 0.0;
+				for (size_t si = 0; si < cls4.size(); ++si) {
+					if (sidePartLen[si] <= 0.0) continue;
+					const double x = sidePartN[si][0], y = sidePartN[si][1], z = sidePartN[si][2];
+					const double L = std::sqrt(x*x + y*y + z*z);
+					const double coh = L / sidePartLen[si];
+					cohSum += coh; cohLo = std::min(cohLo, coh);
+					if (L < 1e-12 || coh < kCoh) { ++nIncoh; continue; }
+					if (!(sideCvxLo[si] <= sideCvxHi[si])) { ++nIncoh; continue; }
+					prt[8*si+0] = float(x / L); prt[8*si+1] = float(y / L); prt[8*si+2] = float(z / L);
+					prt[8*si+3] = sideCvxLo[si]; prt[8*si+4] = sideCvxHi[si];
+					prt[8*si+5] = (sideNcxLo[si] <= sideNcxHi[si]) ? sideNcxLo[si] :  1.0f;
+					prt[8*si+6] = (sideNcxLo[si] <= sideNcxHi[si]) ? sideNcxHi[si] : -1.0f;
+					// The partner's OUTWARD LEAN, in UV per unit slab height. At a convex
+					// ridge the partner's plane IS the side face and the solid is the
+					// INTERSECTION of the two half-spaces, so BELOW the authored plane the
+					// material reaches lean*(h0-h) PAST the ridge line. The kernel uses it
+					// to ask the exact question -- did the HIT leave the solid, or is it
+					// still inside the partner? -- instead of assuming any exit did.
+					// Published here rather than read from PomShellSideLean because that
+					// table only exists under --pom_shell_side_faces, which this arm does
+					// not run (measured INERT for it, S1d-5b.10).
+					prt[8*si+7] = (sideLeanLen[si] > 0.0)
+					            ? float(sideLeanSum[si] / sideLeanLen[si]) : 0.0f;
+					++nPart;
+				}
+				mat->PomShellSidePartner = new float[prt.size()];
+				std::memcpy(mat->PomShellSidePartner, prt.data(), prt.size() * sizeof(float));
+				std::fprintf(stderr, "[POM-SIL] '%s' %d of %zu sides carry a COHERENT convex "
+					"partner normal (%d dropped as incoherent, coherence min %.4f mean %.4f); "
+					"--pom_shell_lid_true_edge bit6 (64) discards a lid exit through such a "
+					"side ONLY where that partner is BACKFACING for the pixel\n",
+					matName, nPart, cls4.size(), nIncoh, (double)(cohLo <= 1.5 ? cohLo : 0.0),
+					(double)((nPart + nIncoh) ? cohSum / double(nPart + nIncoh) : 0.0));
 			}
 			std::vector<float> tru(cls4.size() * 2, 0.0f);
 			int nTrueSpan = 0;

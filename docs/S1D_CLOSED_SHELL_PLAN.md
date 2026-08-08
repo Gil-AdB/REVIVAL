@@ -3426,3 +3426,269 @@ runs outside `PomShell_Build`); and the `--hdr_metal_kill` re-pin explicitly
 records that city did **not** move for it. So something else between the
 2026-08-08 city re-pin and `97b13fd` moved it — the env-reflection work is the
 obvious suspect, since this recipe is the env-pixel gate. Flagged, not chased.
+
+---
+
+# S1d-9 — THE SILHOUETTE: the partner-normal discriminator works, and the residual is ONE PANEL AT ONE POSE
+
+Added 2026-08-08. Developed and measured on `01a81a9`, then REBASED onto
+`569fdb0` (current `fog-wt`) and every gate re-run on the rebased build — byte-null,
+`render_gate` 3/3, all three pins and the silhouette table all identical either
+side of the rebase. Measured on a private worktree build
+(`/Users/gil-ad/work/rev-s1d9`) run with `cwd = the MAIN tree's Runtime/` and the
+new `--no-chdir_assets` (`980ca51`), so the user's uncommitted authoring assets
+are the input and four concurrent agents' in-flight edits cannot contaminate a
+figure. **Controls first, before any new number:** that binary reproduces the
+§S1d-6.1 silhouette table byte-for-byte (flat `0.46` / tess@0.18 `2.43` / the arm
+`0.35` at offset `−28`), the arm's **10 void / 52 black** over the 19 poses AND
+its per-pose residual (7 @ t=5518, 2 @ t=5773, 1 @ t=5877), and the three shipping
+pins (greets `6780642b`, fountain `8db68ccb`, city `5476be8c`) plus `render_gate`
+3/3.
+
+## S1d-9.0 WHICH DISCRIMINATOR — §S1d-6.4 candidate 1, plus the exact form of candidate 2
+
+**Candidate 1 (bake the ridge partner's NORMAL and test it against the view) is
+built and it works.** The implementation detail that makes it cheap and
+pass-safe: the partner normal is baked **in the owning face's own TANGENT FRAME**
+`(nT, nB, nN)`, never in world space. The march already computes the view
+direction in that frame as `(VtT, VtB, VtN)` and **V points toward the eye**, so
+
+```
+    N_b · V  =  nT·VtT + nB·VtB + nN·VtN  <  0     ⇔   the partner is BACKFACING
+```
+
+is one dot product per side per pixel, needs **no camera position and no matrix**,
+and is therefore automatically correct in the mirror, env-probe and shadow passes,
+which run other cameras. **Self-check the code relies on:** substitute
+`N_b = N_a` and the expression collapses to `VtN < 0` — "this face is itself
+backfacing" — which is the right answer by inspection.
+
+That alone is **not enough, and the way it fails is the finding**. Keyed on the
+box side's dominant CLASS it still blanks the grazing near-right wall at t=5743
+(62 187 px), and on **every one of those pixels the FLAT arm and the
+TESSELLATION arm both render a near fragment at the same depth** (median `z16`
+64 051 / 64 033 against the arm's 64 052; zero of the 62 187 are background in
+either reference). So the ray had not left the solid — it had left the patch's
+UV **box**. Two refinements were tried and measured:
+
+- **restrict to the side's CONVEX SUB-INTERVAL** (the bit0 trick, applied to the
+  convex class): **62 187 → 62 186.** The exit lands on a genuinely convex
+  stretch. No help.
+- **subtract the stretch of the same side that is NOT convex** (a side is
+  attributed by nearest-side and takes a dominant class, so one side routinely
+  mixes an outside corner with a coplanar continuation): also **no help** on this
+  population, though it is kept because it is free and correct.
+
+**What did work is candidate 2 in its exact geometric form.** §S1d-6.4 asked for
+"the base clip's OVERSHOOT DISTANCE rather than its boolean". The right quantity
+is not the base clip's overshoot at all — it is the **partner's own half-space,
+evaluated at the marched HIT**. At a convex ridge the partner's plane *is* the
+side face and the solid is the INTERSECTION of the two half-spaces, so below the
+authored plane the material really does reach `lean·(h0 − h)` past the ridge
+line (this is S1d-2a's `sideLean`, re-published here independently of
+`--pom_shell_side_faces`, which this arm does not run). The rule is therefore
+
+```
+    discard  ⇔  exit through side k
+                AND the exit lands on k's convex-only sub-interval
+                AND N_b · V < 0            (that ridge is a silhouette from here)
+                AND overshoot > lean·(h0 − hitH)   (the HIT left the solid)
+```
+
+Adding the last conjunct moved the silhouette from **std 5.02 → 2.76** (i.e. from
+over-crenellated to tessellation-like) and t=5743 from 62 187 → 60 386.
+
+## S1d-9.1 THE SILHOUETTE at t=5877, MATCHED WORLD AMPLITUDE 0.18 on both arms
+
+`tools/greets_silhouette.py`, 1920×1080, flat passed first as the `off` datum,
+`rev.cfg` untouched:
+
+| arm | med | off | **std** | p95 | rng | area | tv-net |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| flat, no displacement | 978.0 | 0.0 | 0.46 | 1.00 | 1 | 188 | 0 |
+| **tessellation @0.18 (the reference)** | 983.0 | **+5.0** | **2.43** | **5.00** | 17 | 1045 | 42 |
+| the §S1d-5b.10 arm (the defect) | 950.0 | −28.0 | **0.35** | 1.00 | 1 | 85 | 0 |
+| **+ `--pom_shell_lid_true_edge=64`** | 972.0 | **−6.0** | **2.76** | **7.00** | 14 | 1272 | 50 |
+
+**The defect is fixed on the measure that was built to see it**: the arm was
+STRAIGHTER THAN FLAT (0.35 vs 0.46) and 28 px outside the authored footprint;
+it is now 2.76 against tessellation's 2.43, with the overhang cut from 28 px to
+6. It is also better than §S1d-6.3's best-ever candidate
+(`--pom_shell_keep_uv_overhang=0`, std 2.26) on cost by 2.5× — see §S1d-9.2.
+
+`docs/img/s1d_9/t5877_silhouette_tess_arm_bit64.png` is the 3× crop
+(tessellation | the arm | bit6), and by eye the third panel steps per block with
+background between the blocks exactly as the first does, where the second is a
+razor-straight cut. **This is the first see-through claim in this campaign
+measured against TESSELLATION rather than against another shell arm** (§S1d-6.5).
+
+## S1d-9.2 THE COST — 19 poses, and it is ONE PANEL AT ONE POSE
+
+Same binary, same pose list, mips ON (the default).
+
+| arm | 19-pose void / black | where the void is |
+|---|--:|---|
+| the §S1d-5b.10 arm (baseline) | **10 / 52** | 7 @ t=5518, 2 @ t=5773, 1 @ t=5877 |
+| `--pom_shell_lid_true_edge=4` (class CONVEX, §S1d-6.3) | **127 049 / 125 624** | t=5743 62 498, t=5958 family 32 378, t=5843 16 607, t=5854 12 869 |
+| `=64`, class-keyed only (S1d-9 first cut) | 64 865 / 63 476 | t=5743 62 187, then 1 733 / 645 / 289 |
+| **`=64`, the shipping form (partner half-space)** | **60 724 / 60 790** | **t=5743 60 386**, t=5773 328, everything else at baseline |
+
+`=4` reproduces §S1d-6.3's published 127 043 to within 6 px on a binary four
+commits newer, so the comparison is same-metric.
+
+**The residual is one wall panel at one pose.** Every other gash `=4` produced is
+gone — t=5843 16 607 → **0**, t=5854 12 869 → **0**, the t=5958 grazing family
+32 378 → **1**, t=6133 1 733 → **0**, t=6293 289 → **0**. That is the
+partner-backfacing test doing exactly the job §S1d-6.4 specified: those convex
+ridges have FRONT-facing partners and the shell legitimately continues past them.
+
+t=5743 is a ~230 px vertical band on the near-right wall (x 1620..1851, full
+height), and it is a **gash, not a silhouette** — see
+`docs/img/s1d_9/t5743_residual_gash.png` (the arm | bit6 | tessellation).
+
+## S1d-9.3 A CORRECTION TO THE RECORD: the base clip's boolean is measurably WRONG at grazing
+
+Measured while hunting the t=5743 population, with `--pom_shell_base_clip` ON and
+`--pom_path_viz=2`:
+
+- of the 62 187 px, **59 874 have `baseOK == false`** — the base clip says the
+  AUTHORED wall does not cover them;
+- **all 62 187 are covered by the flat arm and by tessellation, at the same
+  depth.**
+
+So `--pom_shell_base_clip` produces ~60 k false positives at ONE grazing pose.
+That is the mechanism behind §S1d-6.3's `--pom_shell_keep_uv_overhang=0` costing
+60 668 void at exactly this pose, and it retires the base clip's boolean as a
+discriminator for anything. The two populations are also **indistinguishable in
+every bit the path plane records**: t=5877's overhang band and t=5743's grazing
+wrap are both `coneHit / KEEP / why=domain(+baseClip) / exit=u{Min,Max}`, both
+with the `--pom_shell_cap` bit CLEAR, and their lateral travel
+`|uv − uvgeo|` distributions overlap almost exactly (median 0.0212 vs 0.0273 UV,
+p90 0.0315 vs 0.0394). Nothing in the recorded path family separates them.
+
+## S1d-9.4 THE TRADE CURVE — `--pom_shell_sil_slack`, and there is no free point on it
+
+`--pom_shell_sil_slack` (new, default 0, byte-null, inert without bit6) widens the
+partner half-space by that many patch UV-amplitudes. 0 = the exact test.
+
+| slack | t=5877 std | p95 | offset | t=5743 void |
+|--:|--:|--:|--:|--:|
+| **0** (exact) | **2.76** | 7.00 | −6 | **60 386** |
+| 0.25 | 1.31 | 3.00 | −9 | 54 912 |
+| 0.5 | 1.32 | 3.55 | −17 | 36 762 |
+| 1 | 0.69 | 1.00 | −28 | 5 287 |
+| **2 and above** | **0.35** | 1.00 | −28 | **0** |
+
+(tessellation @0.18 = **2.43**; flat = **0.46**; the unfixed arm = **0.35**.)
+
+**The knee is on the wrong side.** The crenellation is gone (std 0.69, barely
+above flat's 0.46) before the coverage is bought back, and at the first slack
+that clears t=5743 the silhouette is bit-for-bit the original defect. **On this
+knob the tension is irreducible, and it is stated as such rather than tuned
+around.** The two useful points are:
+
+- **slack 0** — the silhouette the user asked for, at the cost of one panel at
+  t=5743;
+- **bit6 off** (the default) — today's arm, silhouette unfixed, 10/52.
+
+## S1d-9.5 GATES AND PERF
+
+Everything defaults OFF and is **byte-null**: `--pom_shell_lid_true_edge` stays 0,
+so `Material::PomShellSidePartner` is never even allocated (the bake arms on
+`sideTable`, i.e. on `--pom_shell_side_faces` or `--pom_shell_lid_true_edge`), the
+ctx keeps its inert `(0,0,0, 1,−1, 1,−1, 0)` per side and the `m & 64` branch
+never runs. Proven, not asserted: the full §S1d-5b.10 arm at t=5877 is
+**md5-identical** to the pre-change binary's output
+(`1c0d96e2d3a016fa6286bb77083301cf`), and:
+
+| gate | result |
+|---|---|
+| `tools/render_gate.sh` | **3/3 PASS** — `4ac809e5` / `b41894f9` / `166fa25a` |
+| greets pin | **`6780642b30430efa4fd2f87810b2dfdb`** ✓ |
+| fountain pin | **`8db68ccb59416e9a44037e9f387b7bd9`** ✓ |
+| city pin | **`5476be8c43864c761b94e2dd83f86aa8`** ✓ (the cold-bake cube column, per `SESSION_STATE`) |
+
+**PERF, `--bench=scene@scene=greets,t=5743,iters=20`, interleaved, min-of-arm,
+profiler `frame_ms min`.** This machine was carrying four other agents while the
+batch ran, so the ABSOLUTE numbers sit ~1.3–1.5 ms above §S1d-8.4's and only the
+ORDERING and the DELTAS are quoted:
+
+| arm | fmin min, batch A (6 rounds) | batch B (8 rounds) | §S1d-8.4 (quiet machine) |
+|---|--:|--:|--:|
+| flat | 50.09 | — | 49.32 |
+| tessellation @0.18 | 55.58 | — | 54.77 |
+| the §S1d-5b.10 arm | 57.29 | 57.93 | 55.81 |
+| **the arm + bit6** | **57.45** | **57.05** | — |
+
+**bit6's cost is NOT RESOLVED by this measurement and is not claimed to be
+free.** The two batches disagree on the SIGN (+0.16 ms in A, −0.88 ms in B, load
+average 10.7–13.6 throughout), so all that is established is |Δ| ≲ 0.9 ms at this
+load — an order above §S1d-8.4's 0.09–0.25 ms floor on a quiet machine. What the
+arithmetic predicts, unmeasured: three FMAs, two compares and a select per
+exiting lane on sides that carry a partner, inside a branch that is scalar and
+folds away on the other sides. A quiet-machine re-run is owed before any number
+is quoted. **§S1d-8.4's standing result is unchanged and still applies: the shell
+arm is +1.04 ms MORE expensive than tessellation at matched amplitude** (+1.71
+in batch A here), so bit6 does not change the strategic picture — it makes the
+shell's silhouette competitive with tessellation's without making its cost
+competitive.
+
+## S1d-9.6 WHAT IS STILL OPEN, AND THE CHEAPEST NEXT MOVE
+
+The t=5743 panel is the whole residual. What is known about it, measured:
+
+- the exit is through the patch's **uMax** side, after only **0.027 UV** of
+  lateral travel — the killed pixels' own geometric UV sits a median **0.0163 UV**
+  from that edge, i.e. it is a thin UV strip at the patch boundary that grazing
+  blows up to 230 screen px;
+- the side is convex over that whole stretch, its partner is backfacing, and the
+  hit is outside the partner's half-space — so **every test in the rule agrees**,
+  and the wall continues anyway;
+- the `rooms` patches there are **parallel walls 0.235 world apart**
+  (`--pom_shell_patch_dump`: `d = −17.691 / −17.926 / −18.151` on the same
+  `N = (1,0,0)`), so the boundary is a STEP, and the shell's own lid offset
+  (0.09) is smaller than the step.
+
+**The cheapest next move is therefore not another exit rule.** It is to ask why a
+0.235-world step between two parallel wall panels classifies as a convex ridge
+with a backfacing partner — the candidates are the perpendicular reveal of the
+step being chosen as the partner (`consider()` takes the LOWEST class index, and
+a parallel neighbour whose `|Δd| > 1e-3` cannot be COPLANAR so it never wins),
+and the patch grouping splitting one visual wall across the step. A per-patch
+dump of the baked `(nT, nB, nN, cLo, cHi, nLo, nHi, lean)` beside
+`[POM-SHELL-PATCH]`'s plane and box would settle it in one run; it is not built.
+
+The other standing option, untried and larger, is to stop making the overhang at
+all: **taper the lid to zero across a border ring of vertices at convex ridges**,
+which is exactly what the tessellation bake does (it pins patch-border verts to
+zero displacement, which is why its silhouette cuts INWARD at +5 and never
+outward). That is a `PomShell_Build` geometry change, not an exit rule, and it
+would remove the population instead of classifying it.
+
+## S1d-9.7 REPRODUCTION
+
+```sh
+# the arm, plus the fix
+ARM=( --deferred --pom_shell --pom_prism=1 --pom_prism_march=1
+      --pom_shell_lid_edge=3 --no-pom_shell_base_clip
+      --pom_shell_world_amp --pom_shell_world_amp_set=0.18
+      --pom_normal --parallax_pom_cone --parallax_pom=32
+      --pom_cone_exact=1 --pom_cone_min_step=1 --pom_march_earlyout
+      --pom_shell_cap=4 --texture_filter=1 )
+FDS_SNAPSHOT_ZDUMP=1 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+FDS_GREETS_CAM="15.5497618,3.4823668,-59.5607719,-0.524191499,-0.0974417627,0.846008122" \
+  ./DEMO --snapshot=greets@t=5877 --out=DIR "${ARM[@]}" --pom_shell_lid_true_edge=64
+tools/greets_silhouette.py DIR_flat DIR_tess DIR_arm DIR_bit64   # flat FIRST
+
+# the bake census (init-time, changes no pixel)
+./DEMO --snapshot=greets@t=5877 "${ARM[@]}" --pom_shell_lid_true_edge=64 2>&1 | grep POM-SIL
+#   [POM-SIL] 'rooms' 52 of 268 sides carry a COHERENT convex partner normal
+#             (1 dropped as incoherent, coherence min 0.3749 mean 0.9882)
+#   [POM-SIL] 'floor'  0 of  24  — floor has no convex ridge at all, the internal control
+```
+
+**The zsh trap, again** (§S1d-6.7): `set -- $spec` does NOT word-split in zsh
+either, and it silently cost one measurement in this session — `--snapshot=greets@t=`
+with an empty value is a KNOWN flag, so `--strict_flags` does not catch it and the
+run quietly renders the default pose set. Assert on the output filenames, not just
+on `grep -c "unknown flag"`.
