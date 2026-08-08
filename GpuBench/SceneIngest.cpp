@@ -1277,6 +1277,52 @@ bool Load(Scene &out, const LoadOptions &opt) {
         return 0;
     };
 
+    // Is this object ANIMATED for the purposes of a static bake? Verbatim port
+    // of the CPU's `isDynamicForBake` lambda (FDS/RENDER/Transform.cpp:1466-1507),
+    // thresholds included: Pos-spline extent > 0.1 world units, or a Rotate
+    // spline whose quaternion extent > 0.01, tested on the object AND EVERY
+    // ANCESTOR (a parent's motion drives the child's IPos). The eps values exist
+    // because FLD authors no-op 2-key envelopes on static meshes.
+    //
+    // Used ONLY by --env_bake_skip_animated, which replicates the CPU's
+    // exclusion of moving meshes from env probes. Nothing else reads it, so the
+    // default path is unchanged.
+    auto isDynamicForBake = [](Object *obj) -> bool {
+        constexpr float kPosExtentEps = 0.1f;
+        constexpr float kRotExtentEps = 0.01f;
+        for (Object *o = obj; o; o = o->Parent) {
+            if (o->Type != Obj_TriMesh || !o->Data) continue;
+            TriMesh *tm = static_cast<TriMesh *>(o->Data);
+            if (tm->Pos.NumKeys > 1 && tm->Pos.Keys) {
+                const auto &k0 = tm->Pos.Keys[0].Pos;
+                float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
+                for (DWord i = 1; i < tm->Pos.NumKeys; ++i) {
+                    const auto &k = tm->Pos.Keys[i].Pos;
+                    xmin = std::min(xmin, k.x); xmax = std::max(xmax, k.x);
+                    ymin = std::min(ymin, k.y); ymax = std::max(ymax, k.y);
+                    zmin = std::min(zmin, k.z); zmax = std::max(zmax, k.z);
+                }
+                if ((xmax-xmin) > kPosExtentEps || (ymax-ymin) > kPosExtentEps ||
+                    (zmax-zmin) > kPosExtentEps) return true;
+            }
+            if (tm->Rotate.NumKeys > 1 && tm->Rotate.Keys) {
+                const auto &q0 = tm->Rotate.Keys[0].Pos;
+                float xmin=q0.x, xmax=q0.x, ymin=q0.y, ymax=q0.y;
+                float zmin=q0.z, zmax=q0.z, wmin=q0.W, wmax=q0.W;
+                for (DWord i = 1; i < tm->Rotate.NumKeys; ++i) {
+                    const auto &q = tm->Rotate.Keys[i].Pos;
+                    xmin = std::min(xmin, q.x); xmax = std::max(xmax, q.x);
+                    ymin = std::min(ymin, q.y); ymax = std::max(ymax, q.y);
+                    zmin = std::min(zmin, q.z); zmax = std::max(zmax, q.z);
+                    wmin = std::min(wmin, q.W); wmax = std::max(wmax, q.W);
+                }
+                if ((xmax-xmin) > kRotExtentEps || (ymax-ymin) > kRotExtentEps ||
+                    (zmax-zmin) > kRotExtentEps || (wmax-wmin) > kRotExtentEps) return true;
+            }
+        }
+        return false;
+    };
+
     // ---- 5. de-indexed geometry, grouped per (mesh x material) -------------
     for (Object *obj = sc.ObjectHead; obj; obj = obj->Next) {
         if (obj->Type != Obj_TriMesh || !obj->Data) continue;
@@ -1316,6 +1362,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
         }
         const float cos30 = std::cos(30.0f * float(M_PI) / 180.0f);
         const bool independent = MeshGetsIndependentFaces(T, cos30, incident);
+        const bool objAnimated = isDynamicForBake(obj);
 
         // Group this mesh's faces by (material, mirror-panel membership) so
         // each batch is one draw and a mirror panel's front faces get their
@@ -1333,6 +1380,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
             b.meshName = obj->Name ? obj->Name : "?";
             b.meshId   = int(out.meshCount) - 1;   // per-OBJECT, see the header
             b.srcMesh  = T;                        // OBJECT IDENTITY, see the header
+            b.animForBake = objAnimated;
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
             b.pos[0] = T->IPos.x;

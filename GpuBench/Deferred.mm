@@ -1227,6 +1227,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     // metal bakes the inside of itself and reflects a black shell.
     // Empty = no exclusion (every pass other than a probe bake).
     std::string envSkipMat;
+    // True only for the duration of bakeEnvProbes (see --env_bake_skip_animated).
+    bool envBaking = false;
     auto baseMatName = [](const std::string &n) {
         const size_t k = n.rfind("::mirUV");
         return (k != std::string::npos) ? n.substr(0, k) : n;
@@ -1254,6 +1256,11 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         for (size_t i = 0; i < scene.batches.size(); ++i) {
             const Batch &b = scene.batches[i];
             if (!envSkipMat.empty() && baseMatName(b.materialName) == envSkipMat) continue;
+            // --env_bake_skip_animated: the CPU's whole-mesh exclusion of
+            // MOVING geometry from every env probe (Deferred.h, envSkipAnimated).
+            // `envBaking` is only true inside bakeEnvProbes, so this cannot
+            // touch the main view.
+            if (envBaking && opt.envSkipAnimated && b.animForBake) continue;
             // TRANSPARENT + ADDITIVE surfaces are NOT in the opaque G-buffer.
             // That is the CPU's own routing, not a simplification:
             // RenderInner.cpp:294-296 `if (Mat_Transparent) continue;` in
@@ -2125,6 +2132,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         if (nProbes <= 0) return 0.0;
         const auto t0 = std::chrono::steady_clock::now();
         id<MTLCommandBuffer> cb = [queue commandBuffer];
+        envBaking = true;
         for (int p = 0; p < nProbes; ++p) {
             // Self-exclusion: the surface this probe belongs to is not in it.
             envSkipMat = baseMatName(scene.envProbes[size_t(p)].material);
@@ -2188,6 +2196,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             }
         }
         envSkipMat.clear();
+        envBaking = false;
         {   // roughness -> mip needs the chain
             id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
             for (int p = 0; p < nProbes; ++p) [bl generateMipmapsForTexture:envCubes[size_t(p)]];

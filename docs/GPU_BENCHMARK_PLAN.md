@@ -2856,6 +2856,43 @@ still **UNPRICED**, because no dial isolates it.
 
 ---
 
+### 6.2r THE MECH — the discrepancy explained, and `--env_bake_skip_animated`
+
+User report, flying greets: *"the mech's metallic look differs, especially the specular highlights"*,
+then *"the mech in the gpu looks much better … I'm just trying to understand the discrepancy."*
+**Full write-up: `docs/SHADING_CONTRACT.md` §11** (per-material inputs, per-pixel walkthrough,
+face-by-face probe census, all commands). Summary of what belongs to THIS arm:
+
+**The two hypotheses that were on the table are both dead, MEASURED.**
+(a) *"the GPU qualifies on a metalness map where the CPU demands `Reflection > 0`"* — the two gates are
+identical (`SceneIngest.cpp:1671` vs `EnvBake.cpp:1218`) and **no mech material carries an RVSM map of
+any kind**; the RVSM registry's seven entries are `momy-1/-2`, `amudim`, `screen emiter`, `stairs`,
+`rooms`, `teleporter`. `hull`/`canons` reflect on **neither** arm: `--no-env_refl` on the GPU changes
+33,478 px and every one of them is on the canopy.
+(b) *E3, the roughness map driving the CPU's env lobe* — inert here **by absence**, the mech has no
+roughness map. §6.2l's "+0.03, dead" on the projector was not the reason; this is.
+
+**What this arm actually does differently**, both now flagged:
+
+| row | this arm | CPU | priced |
+|---|---|---|---|
+| **E6** | draws **every** batch into every probe | excludes every ANIMATED mesh (`EnvBake.cpp:311` → `Transform.cpp:1274` → `:1559`), which on greets is the whole mech — 6 distinct meshes | **`--env_bake_skip_animated`** (NEW, default OFF): 5,268 px, mean \|Δ\| 24.94, max 126; probe face means 47.91 → 52.22 |
+| **E7** | `mipmapped:YES` + `generateMipmaps` → 8 levels at 128² | `kMaxMips = 4`, fixed | `--env_res` sweep: canopy high-pass RMS 9.97 (128²) → 11.02 (256²) → **12.45** (512²) vs the CPU's **13.20** — at matched effective res the two agree to **6 %** |
+
+`--env_bake_skip_animated` is MEASUREMENT ONLY and **default OFF**; the default render is verified
+byte-identical (`/tmp/gpu_probe.ppm` md5 `d3a8301a22495c80dfdd5c3f8509f771` before and after), so no
+pin moves. `Batch::animForBake` is a verbatim port of the CPU's `isDynamicForBake`
+(`Transform.cpp:1466`), thresholds and ancestor walk included.
+
+**And two things that belong to the CPU, listed so the comparison is not read as a GPU deficit:**
+E8, a normal map Sobelled out of the **camouflage albedo** for every material named `*hull*`/`*cockpit*`
+(`GREETS.CPP:1967`) — `--nmap_strength=0` moves 311,080 px and takes the hull-highlight pixel
+(767,723) from 131.2 to 45.0 against the GPU's 41.0; and E0, whose 2.09× probe-content ratio at this
+probe is the canopy's pale-blue cast.
+
+Images (absolute): `/tmp/mech_explain_strip.png`, `/tmp/canopy_explain_strip.png`,
+`/tmp/atlas_cpu_big.png`, `/tmp/atlas_gpu_big.png`.
+
 ### 6.2o The conductor's TINT (S-d), `--env_bake_linear` split in two, and the projector's shadow ROOT-CAUSED
 
 Full write-up with every table: **`docs/SHADING_CONTRACT.md` §9 and §10.** Summary, and the three

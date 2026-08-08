@@ -226,9 +226,12 @@ un-normalised term. GpuBench once carried the `1/π` and it was removed on measu
 | E1 | when it applies | `envP = (env_refl && (Mat->Reflection > 0 || metallicMap)) ? envTab[matID] : nullptr` (`:1864-1867`) — **per material**, and only if a pano was baked for it | same qualification, replicated in the ingest (`SceneIngest.cpp:1474-1503`), 6 probes on greets | **AGREE** since §6.2f. (The earlier "SCOPE" was correct at the time and is the fixed §6.2d bug 2 — applying the helpers *unconditionally* cost **+24 mean luma**, MEASURED) |
 | E2 | split-sum | Karis "Mobile" polynomial `envBrdf = f0·A + B`; `ek = envBrdf · env_refl_gain` (`:1257-1274`) | identical polynomial (`deferred.metal:718-728`) | **AGREE** |
 | E2b | env **F0** | `f0 = max(Reflection/100, 0.04)`, then `f0 + (0.98-f0)·metalM` (`:1253-1255`) | identical, folded in the G-buffer and quantized to 8 bits through `gMirror.w` (`deferred.metal:291-294`) | **AGREE** modulo 1/255 requantization |
-| E3 | env lobe roughness | the **roughness map texel** if present, else `sqrt(2/(gloss+2))` (`:1096-1102`) — so on the CPU the map *does* drive the env lobe even though it only scales magnitude in the direct term | always the gloss-derived `S.rough`; the roughness map is folded into `par.y` (magnitude) and never reaches the env mip select (`deferred.metal:714-716`) | **DIVERGE (unpriced).** A candidate for the 1.12x residual §6.2k leaves open. Also worth recording: S13's "never widens the lobe" is true of the *direct* term only |
-| E3b | **store geometry** | six **1.25-padded** faces at 102.68°, face-major **bilinear** in software, 4-level box-downsample mip chain | plain 90° hardware `texturecube`, hardware trilinear, `generateMipmaps` | **DIVERGE (unpriced)** — the other candidate for the 1.12x residual |
+| E3 | env lobe roughness | the **roughness map texel** if present, else `sqrt(2/(gloss+2))` (`:1096-1102`) — so on the CPU the map *does* drive the env lobe even though it only scales magnitude in the direct term | always the gloss-derived `S.rough`; the roughness map is folded into `par.y` (magnitude) and never reaches the env mip select (`deferred.metal:714-716`) | **DIVERGE, and INERT ON THE MECH** — no mech material has a roughness map at all (§11.1), so E3 cannot be the mech's discrepancy. Still a candidate for the 1.12x residual §6.2k leaves open. Also worth recording: S13's "never widens the lobe" is true of the *direct* term only |
+| E3b | **store geometry** | six **1.25-padded** faces at 102.68°, face-major **bilinear** in software, 4-level box-downsample mip chain | plain 90° hardware `texturecube`, hardware trilinear, `generateMipmaps` | **DIVERGE — the mip-chain DEPTH half is now priced, see E7 and §11.** The padding/face-geometry half remains unpriced |
 | E4 | multiscatter | Fdez-Aguera `1 + Fms(1−Ess)/Ess`, scaling **`ek` only**, leaving the `(1−F)` handed to `--diffuse_energy` at single-scatter (`:1288-1293`) | identical (`deferred.metal:730-734`) | **AGREE** since §6.2f |
+| E6 | animated meshes in the probe | **EXCLUDED** — `EnvBake.cpp:311` sets `g_envBakeSkipDynamic`, `Transform.cpp:1274` folds it into `inStaticBake`, `:1559` skips the mesh. On greets that is the **whole mech** — 6 distinct meshes in the `[STATIC-BAKE-SKIP-MESH]` log | **INCLUDED** — no such rule; only the probe's own material is skipped | **DIVERGE — priced in §11.** `--env_bake_skip_animated` (GpuBench, default OFF): 5,268 px, mean \|Δ\| 24.94 |
+| E7 | env mip-chain DEPTH | `EnvPanoLinear::kMaxMips = 4` (`EnvBake.h:63`), fixed, whatever the face res | `mipmapped:YES` + `generateMipmaps` → the FULL chain (8 levels at 128²) | **DIVERGE — priced in §11.** The select formula is identical but the divisor is not: `cockpit`'s `rough = 0.174` lands at ≈178² effective on the CPU and ≈55² on the GPU, a **3× wider lobe**. This is the dominant half of E3b |
+| E8 | Sobel-from-diffuse normal map | `GREETS.CPP:1967` bakes one for every material named `*hull*` / `*cockpit*` (+ stairs/amudim/floor/marb, rooms/siling) that lacks one — on greets: `cockpit`, `hull not smooth`, `hull`, `siling` | none — `SceneIngest.cpp:1409` takes only RVSM/sidecar normals | **DIVERGE — priced in §11.** `--nmap_strength=0`: 311,080 px; 3.3 % of hull pixels > 10 luma, max 162.7. This is the **specular-highlight** difference the user reported |
 | E5 | parallax / cv-pull / SSR / live-water | `:1001-1244` | scene-AABB slab-exit parallax only (`deferred.metal:698-708`); no cv-pull / SSR / live-water | **SCOPE** for the city-only features; the AABB parallax proxy **AGREE**s |
 
 ### 2.11 Shadows
@@ -1060,3 +1063,270 @@ never wrote any. Image: `docs/img/metal/projector_noncaster_depth.png` (top row 
 bake-affecting flags. `--env_metal_tint_linear`, `--sh_bake_linear` and `--shadow_noncaster_depth` all
 change what the city bake renders and are **not** in that list, so running city with any of them on
 would hit a cache baked without them. Inert at the defaults; that file is not mine to edit.
+
+---
+
+## 11. THE MECH — why the two arms disagree on `cockpit` / `hull` / `canons`
+
+Raised by the user flying greets: *"the mech's metallic look differs, especially the specular
+highlights"*, and later *"the mech in the gpu looks much better … I'm just trying to understand the
+discrepancy."* This section is the **explanation**, not a recommendation. Every number below is
+MEASURED at his own pose unless labelled otherwise. Nothing in `FDS/` or `DEMO/` was changed.
+
+The pose, used verbatim by every command in this section:
+
+```
+cd Runtime
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy FDS_GREETS_CAM="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" FDS_GREETS_FOV=58.1092072 ./DEMO --snapshot=greets@t=4871 --out=/tmp/m_cpu_base --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ../build-gpu/GpuBench/GpuBench --fld=SCENES/GREETS.FLD --t=4871 --cam="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" --pass=deferred --xres=1920 --yres=1080 --out=/tmp/gpu_probe.ppm --iters=1 --warmup=0
+```
+
+### 11.1 The inputs, per material — what each arm READS
+
+Sources: CPU `[MAT-TABLE]` (`--dump_mats`), CPU `[ENVDBG]` (`ENVDBG=1`, `EnvBake.cpp:1261`), CPU
+`[MAT-IMPORT]` / `[GREETS] baked tangent-space normal map` lines, GPU `[ENVREFL]` census
+(`SceneIngest.cpp:1711`) and `[INGEST] revmap` lines (`SceneIngest.cpp:420`).
+
+| material | texture | Diff | Spec | Refl | Gloss | RVSM albedo/normal/rough/metal/AO | CPU normal map | GPU normal map |
+|---|---|--:|--:|--:|--:|---|---|---|
+| `cockpit` | MECH_COK.JPG | 1.00 | 1.00 | **50.00** | 64 | **none** | **Sobel-from-diffuse** | **none** |
+| `hull not smooth` | MECH_HUL.JPG | 1.00 | 0.40 | 0.00 | 48 | **none** | **Sobel-from-diffuse** | **none** |
+| `hull` | MECH_HUL.JPG | 1.00 | 0.40 | 0.00 | 48 | **none** | **Sobel-from-diffuse** | **none** |
+| `canons` | MECH_HUL.JPG | 1.00 | 0.00 | 0.00 | 0 | **none** | none | none |
+| `screen emiter` | PELLOW.JPG | 0.67 | 0.62 | 0.00 | 128 | albedo, normal, rough, **metal** | authored PNG | authored PNG |
+
+**No mech material carries an RVSM PBR map of any kind.** The registry has exactly seven entries —
+`momy-1`, `momy-2`, `amudim`, `screen emiter`, `stairs`, `rooms`, `teleporter` — and not one is a mech
+surface (MEASURED, both arms' logs agree: CPU 32 maps applied, GPU 32 maps applied, same seven
+materials). So "the metalness map sets the look" is a rule with **no input to act on** here. On both
+arms every mech material has `metalness = 0` at every pixel, which is why `--metal_spec_f0` moved
+**0 px** and `--env_metal_tint_linear` moved **4 px** over the mech: those flags only touch conductors.
+
+`Runtime/TEXTURES/MECH_RM.JPG` exists (256², flat grey, mean 136/136/136) and GREETS.FLD names it on
+the `cockpit` surface in the slot immediately before `MECH_COK.JPG` — a 1998-era spherical
+**reflection map**, not a roughness/metalness map. **Neither arm loads it** (no `[MAT]`/`[INGEST]`
+line mentions it in either log). Stale authoring data, inert on both sides.
+
+### 11.2 The env-qualification decision, per material — both arms AGREE
+
+CPU gate `DeferredSurfaceKernel.cpp:1904` and `EnvBake.cpp:1218`: `env_refl && (Reflection > 0 || MetallicMap)`.
+GPU gate `SceneIngest.cpp:1671`: `(b.reflection > 0.0f) || (b.metalTexIndex >= 0)`. **Same rule, same
+inputs, same outcome.** Measured, per material:
+
+| material | CPU `[ENVDBG]` | GPU `[ENVREFL]` | qualifies? |
+|---|---|---|---|
+| `Hull.lwo::cockpit_upper::mirUV` | `refl=50 metal=0` → probe at (−3.5, 2.3, −30.0) | `'cockpit' (Reflection=50.00)` → probe 2 at (−3.4, 2.3, −30.0) | **YES, both** — `Reflection > 0` |
+| `Hull.lwo::cockpit_body::mirUV` | `refl=50 metal=0`, centroid (−3.3, 2.2, −29.9) | same probe (same material name) | **YES, both** — shares the store, 0.24 u apart, under the 4-u dedup |
+| `hull`, `hull not smooth`, `canons` | **absent from the dump** | **absent from the census** | **NO, both** — `Reflection = 0`, no metalness map |
+| `screen emiter` | `refl=0 metal=1` | `'screen emiter' (Reflection=0.00, metallic map)` → probe 5 | **YES, both** — qualified **by the map alone** |
+
+`screen emiter` is the clean demonstration that "a metalness map qualifies a surface regardless of
+`Reflection`" is **already the rule on both arms**. `hull`/`canons` do not reflect on **either** arm —
+the GPU's richer look on them is not an env reflection. Confirmed independently: `--no-env_refl` on
+the GPU changes **33,478 px, all inside x[569..945] y[551..699]** — the canopy and nothing else.
+
+So the leading hypothesis (the GPU qualifies on a metalness map where the CPU demands `Reflection > 0`)
+is **DEAD, measured**. The difference is four other things.
+
+---
+
+### E6 — the CPU keeps **every ANIMATED mesh** out of every env probe; this arm keeps none out
+
+| | CPU | GPU |
+|---|---|---|
+| rule | `EnvBake.cpp:311` sets `g_envBakeSkipDynamic = true` for every ordinary probe bake; `Transform.cpp:1274` folds it into `inStaticBake`; `Transform.cpp:1559` `continue`s past every mesh `isDynamicForBake` calls dynamic (Pos-spline extent > 0.1 u, or Rotate quaternion extent > 0.01, on the object **or any ancestor**) | nothing — every batch is drawn into every probe (`Deferred.mm` `bakeEnvProbes`), only the probe's own material is excluded |
+| stated rationale | `Transform.cpp:1265` — *"the panorama is a STATIC capture, so moving meshes (the walking mech) must not be frozen into it — they'll have walked away by the time the reflection is seen"* | one-bounce static capture, no motion model |
+| on greets | excludes `Hull.lwo`, `Hull2.lwo`, `L_leg1/2.lwo`, `R_leg1/2.lwo` — **the entire mech**, named in the log's `[STATIC-BAKE-SKIP-MESH]` lines (which are capped at 32 emissions, so the line COUNT is not an exclusion count — the six distinct mesh names are) | includes all of it |
+
+**Verdict: DIVERGE, and it is the largest CONTENT difference between the two arms' probes.** The
+CPU's `cockpit` probe holds the **empty room**; this arm's holds the mech's own hull, barrels and
+legs. Side-by-side face atlases: `/tmp/atlas_cpu_big.png` (CPU, no mech anywhere) vs
+`/tmp/atlas_gpu_big.png` (GPU, mech in five of six faces).
+
+PRICED with the new `--env_bake_skip_animated` (GpuBench, **default OFF**, so every pinned md5 is
+unchanged — verified byte-identical, md5 `d3a8301a22495c80dfdd5c3f8509f771` before and after the
+build): **5,268 px changed, all inside x[569..929] y[551..695], mean |Δ| 24.94, max 126.**
+Probe face means rise 47.91 → 52.22 on the 0–255 linear radiance scale.
+
+### E7 — the same roughness selects a **3× wider lobe** on the GPU, because the mip chains differ in DEPTH
+
+| | CPU | GPU |
+|---|---|---|
+| store | face res from `env_bake_res` (**256** for `cockpit`), chain **fixed at `EnvPanoLinear::kMaxMips = 4`** (`EnvBake.h:63`) → 256/128/64/32 | face res `--env_res` (**128** default), `textureCubeDescriptor … mipmapped:YES` + `generateMipmaps` → the **FULL** chain, 8 levels (128…1) |
+| level select | `lvlF = rough * (numMips − 1)` (`DeferredSurfaceKernel.cpp:1109`) | `lvl = rough * (nMips − 1)` (`deferred.metal:714`) |
+| `cockpit`: gloss 64 → `rough = sqrt(2/66) = 0.1741` | `lvlF = 0.1741 × 3 = 0.522` → between 256² and 128², effective **≈178²** | `lvl = 0.1741 × 7 = 1.219` → between 64² and 32², effective **≈55²** |
+
+**The formula is identical; the divisor is not.** `rough = 0.174` means "half a level into a 4-level
+chain" on the CPU and "1.2 levels into an 8-level chain" on the GPU. Two compounding factors — base
+face res 256 vs 128, and chain depth 4 vs 8 — leave the GPU sampling the environment at roughly
+**one third** the CPU's angular resolution. That is the mechanism behind *"the GPU melts the canopy's
+window-frame ribs into a smooth mirror sweep"*.
+
+CONFIRMED by sweep. High-pass RMS (7×7 box, luma) over the 33,310-px `cockpit` mask:
+
+| render | effective face res | high-pass RMS |
+|---|--:|--:|
+| GPU `--env_res=128` (default) | ≈55² | **9.97** |
+| GPU `--env_res=256` | ≈98² | **11.02** |
+| GPU `--env_res=512` | ≈173² | **12.45** |
+| CPU (checkerboard off, see P2 below) | ≈178² | **13.20** |
+
+At matched effective resolution the two arms' canopy detail agrees to **6 %**. E3b said "DIVERGE
+(unpriced)"; this prices it, and identifies the mip-chain **depth** — not the padding or the face
+geometry — as the dominant half.
+
+### 11.3 Walk three pixels through both arms
+
+Material identified by GpuBench's host ray-cast (`--probe_px=X,Y`, which names the nearest hit's
+mesh/material), so the attribution is ground truth and not inferred from colour.
+
+| px | material | CPU shipped | CPU `--nmap_strength=0` | GPU |
+|---|---|--:|--:|--:|
+| (760, 620) | `Hull.lwo/cockpit` — canopy | Y 146.4, BGR (194,173,76) | 157.1 | 161.4, BGR (174,174,132) |
+| (767, 723) | `Hull.lwo/hull` — hull highlight | Y **131.2**, BGR (37,146,138) | **45.0**, BGR (35,53,33) | **41.0**, BGR (36,48,29) |
+| (780, 795) | `Hull.lwo/hull` — gun barrel | Y 108.4 | 110.1 | 82.6 |
+| (560, 845) | `Hull.lwo/canons` | Y 76.6 | 76.6 | 94.6 |
+
+Row 2 is the whole story of the hull: **one input differs and it is the normal map.** Both arms read
+the same albedo, the same `Specular = 0.40`, the same `Gloss = 48` → `rough = sqrt(2/50) = 0.2`, and
+neither applies an env lobe. Neutralise the CPU's Sobel map and the pixel goes 131.2 → 45.0, landing
+4.0 luma from the GPU's 41.0.
+
+### E8 — the CPU bakes a **normal map out of the DIFFUSE** for the mech; this arm has none
+
+`DEMO/GREETS.CPP:1948-1970`: every material whose name contains `stairs`, `amudim`, `floor`, `marb`,
+`MARB`, **`hull`** or **`cockpit`**, plus `rooms`/`siling`, gets
+`M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f)` **if it does not already have one**. On greets
+that fires for exactly four materials (log lines, MEASURED): `cockpit`, `hull not smooth`, `hull`,
+`siling` — the others already carry authored/RVSM normals. `BakeNormalMapFromDiffuse`
+(`DEMO/MeshOps.cpp:1079`) box-blurs the **luminance** of the albedo `--nmap_blur` times (default 4)
+and Sobels it. On MECH_HUL.JPG that is camouflage paint: **dark green blotches become geometric
+dents.** GpuBench replicates none of it — `SceneIngest.cpp:1409` takes `M->NormalMap` only if an RVSM
+or sidecar set one, and no mech material has either.
+
+Recorded while reading it: the caller passes `4.0f`, and the function **ignores the argument** —
+`MeshOps.cpp:1162` does `const float effStrength = fds::FeatureFlags::nmap_strength(); … (void)strength;`.
+The strength that actually ships is the flag default, **1.5**.
+
+PRICED with `--nmap_strength=0` (which zeroes the Sobel gradient — a flat tangent-space map, i.e. no
+map — while leaving every **authored** normal map, the wall/floor stone included, untouched):
+**311,080 px changed frame-wide (15.0 %).** It is concentrated, not diffuse: over the 143,343-px
+`hull`+`hull not smooth` mask the mean |ΔY| is only **2.33** (p50 1.00), but **3.3 % of pixels move
+more than 10 luma and the maximum is 162.7.** That is the precise shape of the user's report — *not*
+a brightness difference, a **highlight-character** difference: the bump map is shredding the specular
+lobe exactly where the lobe is bright and doing nothing elsewhere.
+
+### 11.4 The canopy, term by term
+
+Over the 33,310-px `cockpit` mask (mask built rigorously as "pixels where the GPU's env term is
+non-zero", from a `--no-env_refl` A/B):
+
+| render | Y mean | std | high-pass RMS | B/G/R |
+|---|--:|--:|--:|---|
+| CPU shipped | 143.73 | 28.29 | 18.54 | 153.98 / 155.33 / 117.06 |
+| CPU `--nmap_strength=0` | 144.87 | 28.59 | 16.24 | 154.78 / 157.11 / 117.06 |
+| CPU + `--env_bake_linear=1` | **114.08** | 31.23 | 18.12 | 110.68 / 124.71 / 94.51 |
+| CPU + also `--deferred_checkerboard=0` | 107.75 | 29.36 | **13.20** | — |
+| GPU default | 121.80 | 36.65 | 10.38 | 117.56 / 129.19 / 108.91 |
+| GPU `--env_bake_skip_animated` | 124.39 | 34.37 | 9.97 | 119.02 / 131.45 / 112.58 |
+| GPU + `--env_res=512` | 124.06 | 35.72 | **12.45** | — |
+
+**E0 dominates the brightness and the colour cast.** Probe face census, same probe, both arms, on the
+CPU's own 0–255 linear radiance scale (CPU: `FDS_ENVBAKE_DUMP=1` `[ENVBAKE-FACE]`; GPU:
+`--dump_env_cube`):
+
+| face | CPU shipped | CPU `--env_bake_linear` | GPU default | GPU `--env_bake_skip_animated` |
+|---|--:|--:|--:|--:|
+| +X | 96.54 | 42.01 | 43.90 | 47.47 |
+| −X | 92.79 | 36.10 | 32.96 | 35.92 |
+| +Y | 122.94 | 75.84 | 102.64 | 102.74 |
+| −Y | 96.22 | 33.14 | 25.93 | 35.92 |
+| +Z | 105.59 | 47.92 | 46.08 | 51.94 |
+| −Z | 87.80 | 32.99 | 35.92 | 39.30 |
+| **mean** | **100.31** | **44.67** | **47.91** | **52.22** |
+
+The CPU's shipped probe is **2.09×** the GPU's — E0's `255/albedo` signature, and larger here than
+§6.2k's 1.82× because the reflected room is the dark stone floor. It is a **per-channel** error, not a
+gain: gamma storage lifts the darkest channel most, so the blue-poor brown room comes back
+blue-dominant (`B/R = 2.27` on +Y vs the GPU's 1.39). That is why the shipped CPU canopy reads as pale
+frosted blue and the GPU's reads as polished glass over a warm floor. With both fixes applied the
+probes agree to **1.17×**, the residual being the +Y (ceiling) face — the already-documented
+ambient-source divergence (B2 / §9.4b), not a new term.
+
+**P2 is a third of the CPU's apparent "detail".** `deferred_checkerboard` is ON for greets
+(`GREETS.CPP:1183`): half the canopy's pixels are reconstructed by the fill wave, not shaded, and the
+cross-hatch is plainly visible at 2× zoom. Turning it off takes the CPU's high-pass RMS from 18.12 to
+**13.20** — i.e. **4.92 of the CPU's excess high-frequency energy is the shading pattern, not
+reflected content.**
+
+### 11.5 What is left after all of it
+
+Over the whole 300,352-px mech mask (built from the GPU's `--viz=worldpos` decode, box
+x∈[−5.2,−1.8] y∈[0.6,4.2] z∈[−31.5,−27.5]):
+
+| render | Y mean | signed ΔY vs GPU | mean \|ΔY\| vs GPU |
+|---|--:|--:|--:|
+| CPU shipped | 86.27 | +2.87 | 11.76 |
+| CPU `--nmap_strength=0` | 86.55 | +3.15 | 11.43 |
+| CPU + `--env_bake_linear=1` | 83.02 | **−0.37** | **10.28** |
+| GPU | 83.40 | — | — |
+
+Split by material: on the `hull`+`hull not smooth` mask the two arms already agree in the mean to
+**+0.89** luma before any change; on the remainder (`canons` and the untextured mech parts) to
+**+0.03**. **There is no systematic brightness disagreement anywhere on the mech.** The whole
+complaint lives in the four rows above — E6, E7, E8 and E0 — plus P2, all of which move *where* light
+sits, not how much of it there is.
+
+### 11.6 Summary of the five mechanisms, ranked by what they do to the eye
+
+| # | mechanism | which arm is different | measured size |
+|---|---|---|---|
+| **E8** | Sobel-baked-from-diffuse normal map on `cockpit`/`hull`/`hull not smooth` | CPU has it, GPU has none | 311,080 px frame-wide; 3.3 % of hull pixels > 10 luma, max 162.7; hull pixel 131.2 → 45.0 |
+| **E0** | probe content stored as gamma VPage, added into a linear accumulator | CPU (documented, fix exists behind `--env_bake_linear`) | probe faces **2.09×**; canopy Y 143.73 → 114.08 |
+| **E7** | env mip-chain depth 4 (CPU) vs full 8 (GPU) for the same `rough` | both — different divisors | ≈3× lobe width; canopy high-pass RMS 9.97 vs 13.20, closing to 6 % at matched res |
+| **E6** | animated meshes excluded from probes | CPU excludes, GPU includes | 5,268 px, mean \|Δ\| 24.94, max 126 |
+| **P2** | half-rate checkerboard shading | CPU only | 4.92 of the CPU's canopy high-pass RMS |
+
+**Images** (absolute paths):
+
+* `/tmp/mech_explain_strip.png` — mech crop, four panels: **A** CPU shipped, **B** CPU + `--nmap_strength=0 --env_bake_linear=1`, **C** GPU + `--env_bake_skip_animated`, **D** GPU default.
+* `/tmp/canopy_explain_strip.png` — canopy at 2×, four panels: **A** CPU shipped, **B** CPU + `--nmap_strength=0 --env_bake_linear=1 --deferred_checkerboard=0`, **C** GPU + `--env_bake_skip_animated --env_res=512`, **D** GPU default. B and C are the same look; A and D are the two ends the user was comparing.
+* `/tmp/atlas_cpu_big.png`, `/tmp/atlas_gpu_big.png` — the `cockpit` probe's six faces on each arm.
+
+Literal commands for each panel, run from `Runtime/` (no shell variables — `--strict_flags` aborts on
+an unsplit token):
+
+```
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy FDS_GREETS_CAM="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" FDS_GREETS_FOV=58.1092072 ./DEMO --snapshot=greets@t=4871 --out=/tmp/m_cpu_base --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy FDS_GREETS_CAM="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" FDS_GREETS_FOV=58.1092072 ./DEMO --snapshot=greets@t=4871 --out=/tmp/cv_ebl --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --nmap_strength=0 --env_bake_linear=1
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy FDS_GREETS_CAM="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" FDS_GREETS_FOV=58.1092072 ./DEMO --snapshot=greets@t=4871 --out=/tmp/cv_nocb --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --nmap_strength=0 --env_bake_linear=1 --deferred_checkerboard=0
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ../build-gpu/GpuBench/GpuBench --fld=SCENES/GREETS.FLD --t=4871 --cam="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" --pass=deferred --xres=1920 --yres=1080 --out=/tmp/gpu_probe.ppm --iters=1 --warmup=0
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ../build-gpu/GpuBench/GpuBench --fld=SCENES/GREETS.FLD --t=4871 --cam="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" --pass=deferred --xres=1920 --yres=1080 --out=/tmp/gpu_skipanim.ppm --iters=1 --warmup=0 --env_bake_skip_animated
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ../build-gpu/GpuBench/GpuBench --fld=SCENES/GREETS.FLD --t=4871 --cam="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" --pass=deferred --xres=1920 --yres=1080 --out=/tmp/gpu_envres512.ppm --iters=1 --warmup=0 --env_bake_skip_animated --env_res=512
+```
+
+Per-material decision dumps, both arms:
+
+```
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ENVDBG=1 FDS_GREETS_CAM="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" FDS_GREETS_FOV=58.1092072 ./DEMO --snapshot=greets@t=4871 --out=/tmp/m_cpu_envdbg --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --dump_mats
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy FDS_ENVBAKE_DUMP=1 FDS_GREETS_CAM="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" FDS_GREETS_FOV=58.1092072 ./DEMO --snapshot=greets@t=4871 --out=/tmp/cv_envdump --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0
+
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ../build-gpu/GpuBench/GpuBench --fld=SCENES/GREETS.FLD --t=4871 --cam="-4.11296749,3.19500089,-27.1061916,0.0976696312,-0.227209002,-0.968935847" --pass=deferred --xres=1920 --yres=1080 --out= --iters=1 --warmup=0 --dump_env_cube --dump_env_cube_dir=/tmp/gpuenv
+```
+
+### 11.7 One line on what a fix would be, since the explanation makes it obvious
+
+Not applied, not recommended, stated because it follows directly: **E8 is the only one of the five
+that is a data-quality question rather than an encoding one** — a normal map Sobelled out of camouflage
+paint is not surface relief, and the gate that produces it is a substring match on the material name
+(`strstr(n, "hull")`, `strstr(n, "cockpit")`, `DEMO/GREETS.CPP:1951-1953`). Removing `hull`/`cockpit`
+from that name list is a one-line `DEMO/` edit that needs no flag and no authoring change; everything
+else in §11.6 already has a flag (`--env_bake_linear`, `--env_bake_skip_animated`, `--env_res`,
+`--deferred_checkerboard`) or is a deliberate design decision with its rationale in the source.

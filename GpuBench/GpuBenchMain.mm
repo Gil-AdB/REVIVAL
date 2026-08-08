@@ -199,6 +199,15 @@ const char *kUsage =
     "                    reaches only the LDR combine, never the HDR frame), D2 tints\n"
     "                    the highlight by the GAMMA albedo instead of the linear one.\n"
     "                    Both make this arm LESS physically correct, deliberately.\n"
+    "  --env_bake_skip_animated   MEASUREMENT ONLY. Keep ANIMATED meshes out of the\n"
+    "                    env-reflection probe bakes, which is what the CPU does\n"
+    "                    unconditionally (EnvBake.cpp:311 -> Transform.cpp:1274 ->\n"
+    "                    :1560, predicate isDynamicForBake). On greets that is the\n"
+    "                    WHOLE MECH -- Hull.lwo, Hull2.lwo and the four leg meshes --\n"
+    "                    so the CPU's 'cockpit' probe holds the EMPTY ROOM while this\n"
+    "                    arm's holds the mech's own hull, barrels and legs. ON is CPU\n"
+    "                    parity; OFF (the default) is what every pinned md5 here was\n"
+    "                    recorded with. Prices SHADING_CONTRACT.md row E6.\n"
     "  --no-disco        do NOT synthesise GreetsDisco.cpp's 10 cone spotlights + glow\n"
     "                    omni. greets_disco defaults ON in DEMO, so these are PARITY --\n"
     "                    turning them off makes the arm dimmer than the shipped scene.\n"
@@ -396,6 +405,7 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);
         else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
         else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;
+        else if (a == "--env_bake_skip_animated")   dopt.envSkipAnimated = true;
         else if (const char *v = val("--anim_probe=")) {
             if (std::sscanf(v, "%d,%d", &dopt.animProbeT[0], &dopt.animProbeT[1]) == 2)
                 dopt.animProbe = true;

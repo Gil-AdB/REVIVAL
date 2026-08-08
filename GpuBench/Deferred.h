@@ -195,6 +195,17 @@ struct DeferredOptions {
     // Turning either ON makes the GPU LESS physically correct on purpose.
     bool  cpuMetalDiffuse = false;
     bool  cpuMetalTint = false;
+    //   envSkipAnimated: keep ANIMATED meshes out of the env-reflection probe
+    //     bakes, which is what the CPU does unconditionally
+    //     (FDS/RENDER/EnvBake.cpp:311 sets g_envBakeSkipDynamic, and
+    //     FDS/RENDER/Transform.cpp:1274 folds it into `inStaticBake`, which at
+    //     :1560 `continue`s past every mesh `isDynamicForBake` calls dynamic).
+    //     On greets that is the entire mech — Hull.lwo, Hull2.lwo and the four
+    //     leg meshes — so the CPU's cockpit probe holds the EMPTY ROOM while
+    //     this arm's holds the mech's own hull, barrels and legs. MEASUREMENT
+    //     ONLY, default OFF: ON is CPU parity, OFF is what every pinned md5
+    //     in this arm was recorded with.
+    bool  envSkipAnimated = false;
     bool  cones = true;
     // GREETS.CPP:1187 setDefault(cone_strength, 2.0f). GreetsDisco.cpp:434 also
     // setDefaults it, to 1.2 — but setDefault only skips when the flag was set

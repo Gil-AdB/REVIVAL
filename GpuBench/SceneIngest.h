@@ -138,6 +138,21 @@ struct Batch {
     // filter each light bakes the inside of its own housing and the whole room
     // reads as shadowed.
     bool     castsShadow = true;
+    // Is the OBJECT this batch belongs to ANIMATED, by the CPU's own
+    // static-bake predicate (`isDynamicForBake`, FDS/RENDER/Transform.cpp:1466)?
+    // Pos-spline extent > 0.1 world units, or a Rotate spline whose quaternion
+    // extent > 0.01, on this object OR ANY ANCESTOR.
+    //
+    // WHY IT IS HERE, and it is not an optimisation: the CPU EXCLUDES every
+    // animated mesh from every env-reflection probe bake
+    // (Transform.cpp:1274 `inStaticBake |= g_envBakeSkipDynamic`, applied at
+    // :1560), on the stated grounds that "the panorama is a STATIC capture, so
+    // moving meshes (the walking mech) must not be frozen into it". This arm
+    // has no such rule, so its cockpit probe contains the mech's own hull,
+    // barrels and legs while the CPU's contains the empty room. That is the
+    // largest single CONTENT difference between the two arms' probes on greets
+    // and `--env_bake_skip_animated` is what prices it.
+    bool     animForBake = false;
     // Model matrix: FDS Matrix is float[3][3], ROW-major, applied as row-dot-v
     // (Animate_Objects has already folded IScale into the rows and resolved the
     // parent hierarchy into IPos). worldPos = rot * objPos + pos.
