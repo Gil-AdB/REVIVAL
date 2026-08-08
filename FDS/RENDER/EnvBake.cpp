@@ -1182,6 +1182,30 @@ bool EnvReflection_FramePrep(Scene* sc) {
     if (!sc || g_envBakeInProgress) return false;
     SceneEnv& env = g_envByScene[sc];
     bool bakedAny = false;
+    // ── --env_bake_sh_first ────────────────────────────────────────────────
+    // WHAT AMBIENT DOES A REFLECTION PROBE CONTAIN? By default: the FLAT
+    // Sc->Ambient constant, because renderFrame calls this function
+    // (RENDER.CPP:491) BEFORE SHAmbient_EnsureBaked (RENDER.CPP:511), and
+    // SHAmbient_Coeffs returns null until SHProbe::baked is set — so every
+    // face below is shaded through the kernel's flat-ambient fallback
+    // (DeferredSurfaceKernel.cpp:1799) instead of its SH branch (:1789).
+    // Greets authors that constant as (32,32,32), an ACHROMATIC grey, while
+    // the shipped frame's ambient is coloured and directional. That is a
+    // per-channel difference in what the probe holds, and it is upstream of
+    // every compose-side conductor fix.
+    //
+    // The order is incidental: SHAmbient_EnsureBaked reads nothing this
+    // function produces (it derives its own scene AABB), and the recursion
+    // guards are symmetric, so it is legal either way. Flipping it here rather
+    // than in RENDER.CPP keeps the change inside the bake's own file.
+    if (fds::FeatureFlags::env_bake_sh_first() && fds::FeatureFlags::sh_ambient()) {
+        // Its own return value matters: if it baked, the scene's transform
+        // state has been through a nested render, and the caller's post-bake
+        // Transform_Objects/Radix_Sort re-run is keyed on OUR return value.
+        // Fold it in, or a scene whose reflection probes are all cached would
+        // do the SH bake and skip the re-transform.
+        if (SHAmbient_EnsureBaked(sc)) bakedAny = true;
+    }
     // Bake for every reflective material that lacks one; centroids within a
     // few world units share a store (clone materials, adjacent panels).
     for (Material* M = MatLib; M; M = M->Next) {

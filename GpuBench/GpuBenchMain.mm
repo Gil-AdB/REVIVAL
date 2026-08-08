@@ -257,6 +257,30 @@ const char *kUsage =
     "  --pcl_synth=PATH [--pcl_synth_n=N]   write a CONFORMING synthetic dump and exit,\n"
     "                    so the replay path is testable before the DEMO-side writer\n"
     "                    exists. N defaults to fountain's own 8250.\n"
+    "  --pcl_sim / --no_pcl_sim    SIMULATE the spray on the GPU instead of replaying a\n"
+    "                    dump: DEMO/FOUNTAIN.CPP's Particle_Kinematics motion model as a\n"
+    "                    compute kernel (cs_pcl_sim), stepped on the window's own clock.\n"
+    "                    This is what makes a FREE-FLY window show spray -- a dump only\n"
+    "                    covers the pose it was recorded at, so an interactive session can\n"
+    "                    never have one. DEFAULT: ON for --window on fountain, OFF\n"
+    "                    everywhere else, so every offscreen md5 already recorded stays\n"
+    "                    valid. --pcl_sim forces it on offscreen (use it with --reanimate\n"
+    "                    to render the window's own path headlessly).\n"
+    "                    *** IT IS NOT AN ORACLE. *** It does not reproduce the CPU's\n"
+    "                    RAND_15() history, so individual particles differ from frame one.\n"
+    "                    Shape, spread, density, lifetime, size and colour are ported term\n"
+    "                    for term and are what a by-eye comparison can use; a per-pixel\n"
+    "                    one cannot. For bit-comparable particles use --pcl=PATH. If both\n"
+    "                    are given the DUMP wins. Deterministic within this arm: same seed\n"
+    "                    and same step sequence give the same spray.\n"
+    "  --pcl_sim_warm=S  seconds of scene time to spin the sim through before the first\n"
+    "                    frame (default 5.0 — longer than the longest particle lifetime,\n"
+    "                    so the population is at equilibrium and the rotating emitters\n"
+    "                    carry their real phase history). --pcl_sim_step=S sets the fixed\n"
+    "                    warm-up step (default 1/60); being fixed is what makes a\n"
+    "                    --reanimate render reproducible.\n"
+    "  --pcl_image_size=F  override FDS's ImageSize for the sprite half-extent. 0 (the\n"
+    "                    default) uses the scene's own — fountain 10.0, FOUNTAIN.CPP:2844.\n"
     "  --help\n";
 
 }  // namespace
@@ -362,6 +386,11 @@ int main(int argc, const char *argv[]) {
         else if (a == "--tex_point")                dopt.texPoint = true;
         else if (a == "--pcl_after_xpar")           dopt.pclAfterXpar = true;   // the default; accepted for symmetry
         else if (a == "--pcl_before_xpar")          dopt.pclAfterXpar = false;
+        else if (a == "--pcl_sim")                  dopt.pclSim = 1;
+        else if (a == "--no_pcl_sim" || a == "--no-pcl_sim") dopt.pclSim = 0;
+        else if (const char *v = val("--pcl_sim_warm=")) dopt.pclSimWarm = float(std::atof(v));
+        else if (const char *v = val("--pcl_sim_step=")) dopt.pclSimStep = float(std::atof(v));
+        else if (const char *v = val("--pcl_image_size=")) dopt.pclImageSize = float(std::atof(v));
         else if (const char *v = val("--pcl_synth=")) pclSynth = v;
         else if (const char *v = val("--pcl_synth_n=")) pclSynthN = std::atoi(v);
         else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);

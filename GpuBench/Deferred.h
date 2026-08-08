@@ -113,6 +113,47 @@ struct DeferredOptions {
     // the file format and the DEMO-side dump this reads. Empty = no particle
     // pass at all, which is the state fountain has been in.
     std::string pclPath;
+    // ---- GPU PARTICLE SIMULATION (--pcl_sim) ------------------------------
+    // The replay above is an ORACLE and only an oracle: it needs a recording
+    // made for the exact pose being rendered, so a free-fly window — where the
+    // pose is whatever the user just flew to — can never have a spray from it.
+    // This runs the motion model of DEMO/FOUNTAIN.CPP's Particle_Kinematics as
+    // a Metal compute kernel instead (shaders/deferred.metal, cs_pcl_sim), so
+    // the window has live, animated spray at any pose and any time.
+    //
+    // SAY THIS OUT LOUD WHENEVER IT IS ON: with the sim active THE ARM IS NOT AN
+    // ORACLE FOR PARTICLES. A GPU integrator does not track the CPU's stateful
+    // RAND_15() history, so the individual particles diverge from frame one.
+    // The shape, spread, density, lifetime, size and colour distribution are
+    // ported term for term and are what a visual comparison can use; a per-pixel
+    // one cannot. Every OTHER quantity in the arm keeps its oracle property —
+    // the sim writes only the particle instance buffer and nothing else reads
+    // it. For a bit-comparable particle pass use --pcl=PATH, which is unchanged
+    // and is what the comparison tables keep using.
+    //
+    // DEFAULT: ON for the interactive window on fountain (so flying it just
+    // shows the spray), OFF everywhere else — every offscreen md5 in this
+    // document was taken without it and stays valid. `--pcl_sim` forces it on
+    // offscreen, `--no_pcl_sim` forces it off anywhere. --pcl wins if both are
+    // given: a dump is the more precise instrument.
+    int   pclSim = -1;              // -1 auto (window+fountain), 0 off, 1 on
+    // Seconds of scene time to spin the sim through before the first rendered
+    // frame. Nothing is authored about particle state at a given t — the CPU
+    // reaches steady state by having simulated from scene start — so the sim
+    // replays the wall of scene time immediately BEFORE the render target time
+    // at a fixed step. 5 s covers the longest particle lifetime (outer ~4 s,
+    // inner 2.5 s), so the population is at equilibrium and the emitter phase
+    // history is the real one.
+    float pclSimWarm = 5.0f;
+    // Fixed step for the warm-up, in seconds. 1/60 matches the demo's own tick
+    // rate closely enough that the ballistics land in the same place, and being
+    // FIXED is what makes a --reanimate render reproducible.
+    float pclSimStep = 1.0f / 60.0f;
+    // ImageSize at the sprite blit. fountain sets it to 10.0 (FOUNTAIN.CPP:2844)
+    // and the sprite half-extent is ImageSize*RZ*PerspX*FlareSize*2, so it is
+    // load-bearing for sprite SIZE. GpuBench does not link DEMO and cannot read
+    // the global, so it is named here and overridable with --pcl_image_size=.
+    float pclImageSize = 10.0f;
     // --tex_point: POINT-sample every albedo/material texture with NO mip
     // filtering, instead of this arm's trilinear + 8x anisotropic default.
     // MEASUREMENT ONLY. The CPU rasterizer point-samples and selects its mip by

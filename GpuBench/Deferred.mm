@@ -2258,6 +2258,213 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             pclCount, fi, fr.curFrame, fr.imageSize);
     }
 
+    // ---- GPU PARTICLE SIMULATION (--pcl_sim) -------------------------------
+    // The replay above needs a recording of the exact pose. A free-fly window
+    // has no such recording and never can, so this is the interactive half:
+    // Particle_Kinematics' motion model, ported to a compute kernel, stepped on
+    // the same clock the rest of the frame animates on.
+    //
+    // IT IS NOT AN ORACLE. It does not reproduce the CPU's RAND_15() history,
+    // so the individual particles differ from frame one. Shape, spread,
+    // density, lifetime, size and colour ARE ported term for term and are what
+    // a by-eye comparison can use. --pcl (a dump) remains the bit-comparable
+    // instrument and is what the tables in docs/GPU_BENCHMARK_PLAN.md use.
+    struct PclSimU {
+        float dt, timer, sizeScale;
+        uint32_t frameIdx, outerCursor, outerSpawn, innerCursor, innerSpawn;
+    };
+    const uint32_t kPclOuter = 3000, kPclInner = 1500, kPclTotal = 8250;
+    // Auto = the window, on fountain only. The emitter geometry in the kernel is
+    // fountain's (FntSpring/FntHead/magwav), so switching it on elsewhere would
+    // paint a fountain's spray into another scene.
+    const char *pclFld = (opt.loadOpt && opt.loadOpt->fldPath) ? opt.loadOpt->fldPath : "";
+    const bool pclSceneIsFountain = std::strstr(pclFld, "FOUNTAIN") != nullptr;
+    // The ingest already resolves the scene's FDS ImageSize (SceneIngest.cpp:574
+    // — fountain 10.0, everything else 0.25) because the flare pass needs it;
+    // the sprite half-extent is the same expression, so reuse it rather than
+    // carry a second constant that can drift.
+    const float pclImgSize = (opt.pclImageSize > 0.0f) ? opt.pclImageSize : scene.imageSize;
+    bool pclSimOn = (opt.pclSim == 1) ||
+                    (opt.pclSim < 0 && opt.interactive && pclSceneIsFountain);
+    // A dump is strictly more precise than a re-derivation; if the user supplied
+    // one, it wins and says so.
+    if (pclSimOn && pclBuf) {
+        std::fprintf(stderr,
+            "[PCL] --pcl= dump given as well as the sim: the DUMP wins (it is the "
+            "bit-comparable instrument). Drop --pcl to use the sim.\n");
+        pclSimOn = false;
+    }
+    if (pclSimOn && !pclSceneIsFountain)
+        std::fprintf(stderr,
+            "[PCL] WARNING: the sim's emitter geometry is FOUNTAIN's "
+            "(FntSpring/magwav, DEMO/FOUNTAIN.H); this scene is '%s'.\n", pclFld);
+
+    id<MTLComputePipelineState> psoPclSim = nil;
+    id<MTLBuffer> pclSimBuf = nil;      // persistent per-slot state
+    id<MTLBuffer> pclInstBuf = nil;     // what vs_pcl reads
+    uint32_t pclFrameIdx = 0, pclOuterCursor = 0, pclInnerCursor = 0;
+    float pclCarryOuter = 0.0f, pclCarryInner = 0.0f;
+    double pclSimMs = 0.0;              // last measured step cost, GPU time
+    if (pclSimOn) {
+        NSError *e = nil;
+        psoPclSim = [dev newComputePipelineStateWithFunction:fn_(@"cs_pcl_sim") error:&e];
+        if (!psoPclSim) {
+            std::fprintf(stderr, "[PCL] sim pso: %s\n", [[e localizedDescription] UTF8String]);
+            return false;
+        }
+        // 48 B of state per slot; zeroed = every slot dead, which is the CPU's
+        // own post-memset state in Initialize_Particles (:433).
+        pclSimBuf = [dev newBufferWithLength:kPclTotal * 48
+                                     options:MTLResourceStorageModePrivate];
+        // SHARED, not private: 264 KB on a unified-memory device costs nothing
+        // to the draw and buys a per-run CENSUS (alive count, bounding box,
+        // mean colour) that can be diffed against the CPU dump's own numbers.
+        // A spray that renders is not the same claim as a spray with the right
+        // population, and this arm has already paid twice for a pass that drew
+        // a fraction of what it should and read as "the GPU is too dark".
+        pclInstBuf = [dev newBufferWithLength:kPclTotal * sizeof(float) * 8
+                                      options:MTLResourceStorageModeShared];
+        {   // Private buffers are not zero-initialised by contract. Fill them.
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+            [bl fillBuffer:pclSimBuf range:NSMakeRange(0, [pclSimBuf length]) value:0];
+            [bl fillBuffer:pclInstBuf range:NSMakeRange(0, [pclInstBuf length]) value:0];
+            [bl endEncoding];
+            [cb commit]; [cb waitUntilCompleted];
+        }
+        std::vector<uint8_t> rgba; int tw = 0, th = 0;
+        PclBuildSpriteTexture(rgba, tw, th);
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                               width:NSUInteger(tw)
+                                                              height:NSUInteger(th)
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeShared;
+        pclTex = [dev newTextureWithDescriptor:td];
+        [pclTex replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(tw), NSUInteger(th))
+                  mipmapLevel:0 withBytes:rgba.data() bytesPerRow:NSUInteger(tw) * 4];
+        pclBuf = pclInstBuf;
+        pclCount = kPclTotal;
+    }
+
+    // One simulation step. `dtSec` is the step, `timerCs` the scene Timer
+    // (centiseconds) AT that step — the emitter phase depends on it, so a
+    // warm-up has to walk the real time wall, not repeat one instant.
+    // Encoded into a caller-supplied command buffer so a 300-step warm-up is
+    // 300 dispatches in a handful of submissions rather than 300 round trips.
+    auto pclSimEncode = [&](id<MTLCommandBuffer> cb, float dtSec, float timerCs) {
+        if (!psoPclSim) return;
+        // The spawn accumulators are the CPU's own (SwCarry / SwCarry2,
+        // FOUNTAIN.CPP:655 and :748): a fractional spawn budget carried across
+        // frames so the rate is exact at any frame rate.
+        const float swOut = dtSec * 600.0f + pclCarryOuter;      // FntSpawnOutPcl
+        const uint32_t spawnOut = uint32_t(swOut);
+        pclCarryOuter = swOut - float(spawnOut);
+        const float swIn = dtSec * 120.0f + pclCarryInner;       // FntSpawnInnerPcl
+        const uint32_t spawn2 = uint32_t(swIn);
+        pclCarryInner = swIn - float(spawn2);
+        const uint32_t spawnIn = spawn2 * 3;                     // the CPU's Spwn = Spwn2*3
+
+        PclSimU su{};
+        su.dt = dtSec;
+        su.timer = timerCs;
+        su.sizeScale = pclImgSize * scene.camera.perspX * 2.0f;
+        su.frameIdx = pclFrameIdx++;
+        su.outerCursor = pclOuterCursor;
+        su.outerSpawn = std::min(spawnOut, kPclOuter);
+        su.innerCursor = pclInnerCursor;
+        su.innerSpawn = std::min(spawnIn, kPclInner);
+        pclOuterCursor = (pclOuterCursor + su.outerSpawn) % kPclOuter;
+        pclInnerCursor = (pclInnerCursor + su.innerSpawn) % kPclInner;
+
+        id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        [ce setComputePipelineState:psoPclSim];
+        [ce setBuffer:pclSimBuf offset:0 atIndex:0];
+        [ce setBuffer:pclInstBuf offset:0 atIndex:1];
+        [ce setBytes:&su length:sizeof(su) atIndex:2];
+        const NSUInteger tg = std::min<NSUInteger>(
+            [psoPclSim maxTotalThreadsPerThreadgroup], 256);
+        [ce dispatchThreads:MTLSizeMake(kPclTotal, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [ce endEncoding];
+    };
+
+    // Spin the sim through the wall of scene time immediately BEFORE `timerCs`
+    // at a fixed step, so the population is at equilibrium and the rotating
+    // emitters carry their real phase history. Nothing about particle state is
+    // authored at a given t; the CPU gets there by having simulated from scene
+    // start, and this is the same thing done cheaply.
+    auto pclSimWarmTo = [&](float timerCs) {
+        if (!psoPclSim) return;
+        const float stepSec = std::max(opt.pclSimStep, 1e-4f);
+        const int n = std::max(0, int(opt.pclSimWarm / stepSec + 0.5f));
+        const auto t0 = std::chrono::steady_clock::now();
+        // Batched: one command buffer per 64 steps. Each dispatch reads the
+        // buffer the previous one wrote, and Metal orders dispatches within an
+        // encoder-per-dispatch chain on the same queue, so this is safe.
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        for (int i = 0; i < n; ++i) {
+            const float tCs = timerCs - float(n - i) * stepSec * 100.0f;
+            pclSimEncode(cb, stepSec, tCs);
+            if ((i % 64) == 63) { [cb commit]; [cb waitUntilCompleted]; cb = [queue commandBuffer]; }
+        }
+        [cb commit]; [cb waitUntilCompleted];
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
+        // CENSUS. Same three quantities the CPU dump can be asked for, so the
+        // motion model is checkable as numbers and not only by eye.
+        const auto *inst = static_cast<const float *>([pclInstBuf contents]);
+        uint32_t alive = 0, aOuter = 0;
+        float lo3[3] = {1e30f, 1e30f, 1e30f}, hi3[3] = {-1e30f, -1e30f, -1e30f};
+        double sc3[3] = {0, 0, 0};
+        for (uint32_t i = 0; i < kPclTotal; ++i) {
+            const float *d = inst + i * 8;
+            if (!(d[3] > 0.0f)) continue;
+            ++alive; if (i < kPclOuter) ++aOuter;
+            for (int c = 0; c < 3; ++c) {
+                lo3[c] = std::min(lo3[c], d[c]); hi3[c] = std::max(hi3[c], d[c]);
+                sc3[c] += double(d[4 + c]) * 255.0;
+            }
+        }
+        const double inv = alive ? 1.0 / double(alive) : 0.0;
+        std::fprintf(stderr,
+            "[PCL] SIM (NOT an oracle — GPU-integrated, does not track the CPU's RNG):\n"
+            "[PCL]   warmed %d steps of %.4f s to Timer %.1f (%.2f s of scene time) in "
+            "%.2f ms wall\n"
+            "[PCL]   %u slots (outer %u + inner 3x%u + spiral %u inert), ImageSize %.2f, "
+            "perspX %.1f\n"
+            "[PCL]   census: %u ACTIVE (%u outer + %u inner) | bbox x[%.1f %.1f] "
+            "y[%.1f %.1f] z[%.1f %.1f] | mean RGB %.1f/%.1f/%.1f\n",
+            n, stepSec, timerCs, opt.pclSimWarm, ms,
+            kPclTotal, kPclOuter, kPclInner, kPclTotal - kPclOuter - 3 * kPclInner,
+            pclImgSize, scene.camera.perspX,
+            alive, aOuter, alive - aOuter,
+            lo3[0], hi3[0], lo3[1], hi3[1], lo3[2], hi3[2],
+            sc3[0] * inv, sc3[1] * inv, sc3[2] * inv);
+    };
+    if (pclSimOn) pclSimWarmTo(float(scene.resolvedDemoT));
+    // Price ONE step the way the WINDOW pays for it: its own command buffer,
+    // committed and waited on, one dispatch inside. Not amortised over a
+    // batched warm-up, because the window cannot batch — it has to have this
+    // frame's particles before it encodes this frame.
+    if (pclSimOn && opt.iters > 0) {
+        const int n = 60;
+        double mn = 1e30, sum = 0; int got = 0;
+        for (int i = 0; i < n; ++i) {
+            id<MTLCommandBuffer> scb = [queue commandBuffer];
+            pclSimEncode(scb, 1.0f / 60.0f, float(scene.resolvedDemoT));
+            [scb commit]; [scb waitUntilCompleted];
+            const double ms = ([scb GPUEndTime] - [scb GPUStartTime]) * 1000.0;
+            if (ms > 0) { mn = std::min(mn, ms); sum += ms; ++got; }
+        }
+        if (got) std::fprintf(stderr,
+            "[PCL]   step cost, %d single-step command buffers (the window's own "
+            "submission shape): min %.4f ms, mean %.4f ms GPU\n", got, mn, sum / got);
+        // Put the population back where the render expects it.
+        pclSimWarmTo(float(scene.resolvedDemoT));
+    }
+
     // Particle sprites: ONE instanced draw, additive into `dst`, depth-TESTED
     // against `depthTex` with no depth write — Spriter's own semantics.
     auto encodePcl = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
@@ -2847,6 +3054,9 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // Reanimate would otherwise snap the window straight back to the
         // out-of-range frame the substitution existed to avoid.
         float demoT = scene.resolvedDemoT;
+        // The sim was already warmed to resolvedDemoT above, so the first
+        // window frame steps by whatever the first tick advances demoT by.
+        float pclPrevDemoT = demoT;
         LoadOptions lo = *opt.loadOpt;
         // THE CAMERA-INTERPOLATION FIX. `lo` drives Reanimate's RefreshCamera
         // every frame, and with a non-empty camPose RefreshCamera PINS the
@@ -2971,6 +3181,35 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             const auto tUp1 = std::chrono::steady_clock::now();
             cpuUploadMs = std::chrono::duration<double, std::milli>(tUp1 - tUp0).count();
 
+            // --- GPU particle sim: ONE step, on the window's own clock -------
+            // demoT is in centiseconds (the scene Timer's unit), so the step is
+            // (demoT - prev)/100 seconds — the SAME quantity DEMO derives as
+            // `dt = 0.01*dTime`. Driving it from demoT and not from the wall
+            // clock is what makes [ and ] scrubbing and SPACE-pause behave: a
+            // paused window has a still spray, and scrubbing forward advances
+            // it. Timed as its own command buffer so the cost is a number on
+            // the window path, not an inference from an offscreen run.
+            if (psoPclSim) {
+                const float simDt = (demoT - pclPrevDemoT) * 0.01f;
+                pclPrevDemoT = demoT;
+                // A big jump ([ / ] scrub, or a hitch) would integrate one
+                // enormous step and fling the whole spray out of the basin.
+                // Clamp to a tick and re-warm on a backwards or large jump —
+                // which is exactly what a scrub means: "show me that instant".
+                if (simDt < 0.0f || simDt > 0.5f) {
+                    pclSimWarmTo(demoT);
+                } else if (simDt > 0.0f) {
+                    const auto s0 = std::chrono::steady_clock::now();
+                    id<MTLCommandBuffer> scb = [queue commandBuffer];
+                    pclSimEncode(scb, simDt, demoT);
+                    [scb commit]; [scb waitUntilCompleted];
+                    pclSimMs = ([scb GPUEndTime] > [scb GPUStartTime])
+                                 ? ([scb GPUEndTime] - [scb GPUStartTime]) * 1000.0
+                                 : std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - s0).count();
+                }
+            }
+
             id<MTLCommandBuffer> cb = renderFrame();
             [cb waitUntilCompleted];
             gpuFrameMs = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
@@ -3080,7 +3319,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                     "[WINDOW] f=%4d t=%7.0f CurFrame=%7.1f cam=(%.2f,%.2f,%.2f) "
                     "fwd=(%.4f,%.4f,%.4f) %s | "
                     "gpu %6.3f ms (bake %.3f gbuf %.3f light %.3f tone %.3f) | "
-                    "cpu anim %.3f upload %.3f | %.0f fps\n"
+                    "cpu anim %.3f upload %.3f | pclsim %.4f ms | %.0f fps\n"
                     // The census on every telemetry line, not only in the HUD:
                     // a pasted log is the other half of a window report, and
                     // "draws=N" alone never said whether N was the whole scene.
@@ -3090,7 +3329,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                     f[0], f[1], f[2],
                     freeFly ? "free-fly" : "spline",
                     gpuFrameMs, perPass[0], perPass[1], perPass[2], perPass[3],
-                    cpuAnimMs, cpuUploadMs, emaFps,
+                    cpuAnimMs, cpuUploadMs, pclSimMs, emaFps,
                     scene.batches.size(),
                     int(scene.meshCount), int(scene.meshCount) + scene.droppedMeshes,
                     out.litLights, scene.lights.size(),

@@ -2187,6 +2187,184 @@ path warns and the run continues.
 
 ---
 
+### 6.2q PARTICLES IN THE WINDOW — a GPU integrator, because a recording cannot follow a free-fly camera
+
+**The honest prior state:** `--pcl=PATH` replayed a dump and rendered the spray
+correctly *offscreen, at the pose the dump was recorded at*. **The window had no
+particles at all**, and could not have: a dump only exists for the pose someone
+made it for, and an interactive session's pose is whatever the user just flew
+to. "Particles work" and "particles appear when I fly it" were different claims
+and only the first one was true.
+
+**The user's call: simulate them on the GPU.** So `cs_pcl_sim`
+(`GpuBench/shaders/deferred.metal`) is `Particle_Kinematics`' motion model as a
+Metal compute kernel, stepped on the window's own clock and feeding the instanced
+additive draw that already existed.
+
+#### SAY IT FIRST: with the sim on, THIS ARM IS NOT AN ORACLE FOR PARTICLES
+
+A GPU integrator does not track the CPU's stateful `RAND_15()` history, so the
+individual particles differ **from frame one**. That is the accepted trade and it
+was made knowingly. Scope of the damage, stated so it cannot leak: the sim writes
+**only** the particle instance buffer, nothing else reads it, and **`--pcl=PATH`
+is unchanged and remains the bit-comparable instrument** — §6.2m's comparison
+table and every md5 in this document keep using it. A run says which is active on
+its own `[PCL]` line.
+
+#### Defaults, so that flying it just works and nothing recorded moves
+
+| context | particles |
+|---|---|
+| `--window` on fountain | **sim ON** (auto) |
+| `--window` elsewhere | off — the emitter geometry in the kernel is fountain's |
+| offscreen, anything | **off**, unless `--pcl_sim` is given |
+| `--pcl=` and `--pcl_sim` both given | the **dump wins**, and says so |
+
+**Byte-null, proved not asserted.** Four GpuBench recipes hashed with the sim
+code compiled in and with it stashed out, `md5 -q` on the PPM:
+
+| recipe | before | after |
+|---|---|---|
+| fountain t=2400 offscreen | `97f7117c…` | `97f7117c…` |
+| fountain t=705 `--pcl=` (the replay) | `ff6729c7…` | `ff6729c7…` |
+| fountain t=705 `--reanimate` | `8730f692…` | `8730f692…` |
+| greets t=5743 offscreen | `0bd77ba2…` | `0bd77ba2…` |
+
+The last two also match what §6.2p and §6.2m recorded **before this work
+existed**, which is the independent check. CPU pins untouched: greets
+`6780642b`, fountain `8db68ccb`, city `5476be8c`, `render_gate.sh` 3/3.
+
+#### The model, ported term for term — and what is deliberately different
+
+Read out of `DEMO/FOUNTAIN.H` (the `Fnt*` constants) and `DEMO/FOUNTAIN.CPP`
+(`Initialize_Particles` :426-624, `Particle_Kinematics` :627-900):
+
+* **Outer spray**, slots 0..2999. Spawn at `FntSpring-(0,20,0)` with ±1 unit xz
+  jitter, speed `(30 + sin(T·0.04)·5 + rand·23.5)·0.6` on the cone
+  `v ∈ [0.6π, 1.6π)`. Phase 1 rises by `|vel|` **per frame** — not per dt; that
+  is the CPU's own expression — until `y > 83.106`, then ballistic at
+  `g = 20/s²`. Killed at `y < 0`.
+* **Inner ring**, three blocks of 1500. Emitted from a point rotating at
+  `0.008·0.8` rad/cs on radius 55 at height `35 + 55·0.3·cos(T·0.008 + I·2π/3)`,
+  speed 4.5 on a full sphere, life `Charge = 2.5 s`, brightness `∝ Charge`. Each
+  spawn is rotated 0/120/240° — note the CPU's `case 1:` has **no `break`** and
+  therefore rotates **twice**; nine streams in total.
+* **Spiral**, slots 7500..8249: the CPU's block is entirely commented out
+  (`:902-960`), so they are allocated and never spawned. Kept so the slot count
+  is the authored 8,250.
+
+**The one deliberate departure is spawn ALLOCATION.** The CPU re-scans from slot
+0 for the first free slot on every single spawn, which is inherently serial. The
+kernel uses a **ring**: the host advances a cursor by the frame's spawn count and
+each thread spawns iff its index is in `[cursor, cursor+N)`. No atomics — so it
+is **deterministic**, which is what makes a `--reanimate` render reproducible.
+The ring period exceeds the maximum lifetime in both blocks (outer 3000/600 =
+5.0 s against ~4 s of flight; inner 1500/360 = 4.2 s against 2.5 s), so a live
+particle is essentially never overwritten.
+
+**Warm-up, because particle state is not authored at a `t`.** The CPU reaches
+steady state by having simulated from scene start. The sim replays the wall of
+scene time immediately before the target `t` at a fixed 1/60 s step
+(`--pcl_sim_warm`, default 5 s = 300 steps, longer than the longest lifetime), so
+the population is at equilibrium **and** the rotating emitters carry their real
+phase history. 300 steps cost **3.9–6.1 ms wall**, once.
+
+#### DOES THE MODEL MATCH? Measured against a DEVELOPED CPU spray, not a cold tick
+
+§6.2m's dump was a **cold tick** (one spawn quantum, 5,040 slots) because
+`--snapshot` runs a single tick from init. Driving the snapshot harness at 0.1 s
+intervals — `--snapshot=fountain@t=5,15,…,705` in one process — develops the
+spray over 7 s of scene time, and `--pcl_dump` then records what the CPU
+**actually rendered** at a steady state:
+
+| | CPU, developed, t=705 | GPU sim, t=705 |
+|---|--:|--:|
+| active | **4,899** | **4,716** |
+| outer / inner | 2,091 / 2,808 | 1,998 / 2,718 |
+| bbox x | [−103.7, 112.5] | [−109.3, 120.5] |
+| bbox y | [−7.4, 158.5] | [−1.0, 156.7] |
+| bbox z | [−105.0, 100.1] | [−113.1, 105.2] |
+| **mean RGB** | **20.8 / 32.0 / 40.4** | **20.8 / 32.0 / 40.3** |
+
+Population within **3.7 %**, extent within ~8 units on a 220-unit box, and the
+mean emitted colour agrees to **0.1 of 255**. The two are not the same particles
+and never will be; they are the same *spray*.
+
+Reproduce the CPU half (one command, from `Runtime/`):
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  FNTSNAP_POS=188.559998,124.620003,-183.830002 \
+  FNTSNAP_FWD=-0.665440023,-0.369211614,0.648746789 FNTSNAP_FOV=58.1092072 \
+  ./DEMO --snapshot=fountain@t=5,15,25,35,45,55,65,75,85,95,105,115,125,135,145,155,165,175,185,195,205,215,225,235,245,255,265,275,285,295,305,315,325,335,345,355,365,375,385,395,405,415,425,435,445,455,465,475,485,495,505,515,525,535,545,555,565,575,585,595,605,615,625,635,645,655,665,675,685,695,705 \
+  --out=/tmp/fntcpu --deferred --hdr --glass-refract=1 --glass-test --profiler=0 \
+  --pcl_dump=/tmp/fnt705.pcl,700,710
+```
+
+Image (CPU / GPU replaying that dump / GPU sim, one camera, 1920×1080):
+`/Users/gil-ad/work/revival-fog/docs/img/pclsim/fountain_t705_cpu_replay_sim.png`
+
+#### THE PROOF ON THE PATH HE ACTUALLY USES — `--reanimate`, five CurFrames
+
+`--reanimate` runs the window's own per-frame `Reanimate()` before rendering and
+is byte-identical to the window (§6.2p). Every command below is literal.
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ../build-gpu/GpuBench/GpuBench --fld=SCENES/FOUNTAIN.FLD --t=2400 \
+  --cam="188.559998,124.620003,-183.830002,-0.665440023,-0.369211614,0.648746789" \
+  --pass=deferred --xres=1280 --yres=720 --iters=1 --warmup=0 \
+  --reanimate --pcl_sim --out=/tmp/sim_t2400.ppm
+```
+
+(the same line with `--t=300`, `--t=1200`, `--t=3600`, `--t=4800`, `--t=705`)
+
+| t | CurFrame | active | outer | inner |
+|--:|--:|--:|--:|--:|
+| 300 | 78 | 4,726 | 2,008 | 2,718 |
+| 705 | 183 | 4,716 | 1,998 | 2,718 |
+| 1200 | 312 | 4,712 | 1,994 | 2,718 |
+| 2400 | 624 | 4,735 | 2,017 | 2,718 |
+| 3600 | 936 | 4,727 | 2,009 | 2,718 |
+| 4800 | 1248 | 4,714 | 1,996 | 2,718 |
+
+Steady population across the scene's whole authored range, and the ring arms are
+in visibly different places at each `t` — i.e. it is animated, not a still.
+Image: `/Users/gil-ad/work/revival-fog/docs/img/pclsim/fountain_pcl_sim_reanimate_range.png`
+
+**Determinism inside this arm: YES, measured.** The `--t=2400` command above run
+twice gives md5 `e702db97…` both times.
+
+#### COST, on the window path
+
+Two parts, and only one of them is resolved.
+
+* **The sim step: 0.0145–0.0192 ms GPU**, over 60 single-step command buffers —
+  the window's own submission shape (its own `MTLCommandBuffer`, committed and
+  waited on, one dispatch inside), not amortised over a batched warm-up. Printed
+  by every `--pcl_sim` run, so his own window log carries it.
+* **The draw pass: NOT RESOLVED.** 9 interleaved reps, fountain t=2400,
+  1920×1080, 150 frames after 30 warmup, machine **load 5.4–10.2** (recorded):
+  min-of-arm 3.9455 vs 3.9038 = **+0.042 ms**, paired mean **+0.109 ms**. The
+  arms **overlap** — the no-particle arm is slower in 2 of the 9 pairs — so this
+  is a bound, not a number. It is not larger than §6.2m's **resolved +0.170 ms**
+  for 5,040 replayed sprites, which is the comparable figure; the sim draws
+  8,250 instances of which ~4,735 are live and ~3,515 collapse in the vertex
+  stage.
+
+The pass costs what it costs and that is not nothing at 60 Hz — ~0.13 ms of a
+16.7 ms budget on the loose end of the bound. Recorded rather than waved away.
+
+#### Instrumentation added, because "it renders" is not "it renders the right amount"
+
+The instance buffer is `Shared` (264 KB, unified memory) purely so every run can
+print a **census** — active count split outer/inner, world bounding box, mean
+emitted RGB. A pass drawing a fraction of the spray reads as "the GPU is too
+dark", which is a mistake this arm has already paid for twice.
+
+
+---
+
 ### 6.2p "Only one spire" ROOT-CAUSED: the window's per-frame refresh keyed transforms by mesh NAME
 
 **The spire defect was never CPU-vs-GPU. It was WINDOW-vs-OFFSCREEN, inside

@@ -1548,6 +1548,228 @@ struct PclOut {
     float3 color;
 };
 
+// ---------------------------------------------------------------------------
+// GPU PARTICLE SIMULATION (--pcl_sim) — the INTERACTIVE half
+// ---------------------------------------------------------------------------
+//
+// READ THIS BEFORE TRUSTING A PARTICLE COMPARISON. The replay above
+// (`--pcl=PATH`) is the ORACLE: identical positions on both arms, so any image
+// difference is rendering. This kernel is NOT an oracle. It re-derives the
+// motion model of DEMO/FOUNTAIN.CPP's `Particle_Kinematics` so that a free-fly
+// window has a live, animated spray at an arbitrary pose — which a recording of
+// one pinned pose can never provide. It does NOT track the CPU's RNG history,
+// so the individual particles differ from frame one. Shape, spread, density,
+// lifetime, colour and size are ported term for term; the samples are not.
+//
+// Model, from DEMO/FOUNTAIN.H (the Fnt* constants) and DEMO/FOUNTAIN.CPP
+// (`Initialize_Particles` :426-624, `Particle_Kinematics` :627-900):
+//
+//   slots 0..2999      OUTER water spray. Spawns at FntSpring-(0,20,0) with a
+//                      +-1 unit xz jitter, speed fpow = (30 + sin(T*0.04)*5 +
+//                      rand*23.5)*0.6 on a cone (u in [0,2pi), v in
+//                      [0.6pi, 1.6pi)). Phase 1 rises by |vel| PER FRAME (not
+//                      per dt -- that is the CPU's own expression) until
+//                      y > 83.106, then flips to ballistic with g = 20/s^2.
+//                      Killed at y < 0. Colour (63,127,255) * 0.3 * 0.8,
+//                      truncated to bytes exactly as QColor does.
+//   slots 3000..7499   INNER ring, THREE blocks of 1500, one per track. Emitted
+//                      from a rotating point (angular velocity 0.008*0.8, radius
+//                      55, height 35 + 55*0.3*cos(T*0.008 + I*2pi/3)), speed
+//                      4.5 on a full sphere, lifetime `Charge` = 2.5 s, and each
+//                      spawn is rotated 0, 120 or 240 degrees by the xForm pair
+//                      -- note the CPU's `case 1:` FALLS THROUGH into `case 2:`,
+//                      so case 1 rotates TWICE. Nine streams total.
+//                      Brightness fades as Charge*0.7/3.5.
+//   slots 7500..8249   SPIRAL. The CPU's block is entirely commented out
+//                      (FOUNTAIN.CPP:902-960), so these are allocated and never
+//                      spawned. Kept so the slot count is the authored 8,250.
+//
+// SPAWN ALLOCATION is where this deliberately departs from the CPU. The CPU
+// re-scans from slot 0 for the first free slot on every single spawn; that is
+// inherently serial. This uses a RING: the host advances a cursor by the frame's
+// spawn count and each thread spawns iff its index falls in [cursor, cursor+N).
+// No atomics, so it is DETERMINISTIC -- the same (seed, frame sequence) gives
+// the same spray, which is what makes a --reanimate run reproducible. The ring
+// period exceeds the maximum lifetime in both blocks (outer 3000/600 = 5.0 s vs
+// ~4 s max flight; inner 1500/360 = 4.2 s vs 2.5 s), so a live particle is
+// essentially never overwritten -- and when the ring does lap, the CPU's own
+// behaviour (refuse to spawn) and this one (overwrite the oldest) differ only in
+// which of two saturated states you get.
+struct PclSimU {
+    float dt;            // seconds this step
+    float timer;         // scene Timer (centiseconds) at this step
+    float sizeScale;     // ImageSize * View->PerspX * 2, the constant half of
+                         // FILLERS.CPP:2330's edgeLen
+    uint  frameIdx;      // RNG salt; monotonic per sim step
+    uint  outerCursor;   // ring write cursor, outer block
+    uint  outerSpawn;    // spawns this step, outer block
+    uint  innerCursor;   // ring write cursor, EVERY inner block (they share a
+                         // rate, so one cursor is enough and it keeps the three
+                         // tracks phase-locked exactly as the CPU's shared
+                         // Spwn2 does)
+    uint  innerSpawn;    // spawns this step, PER inner block (= Spwn2*3)
+};
+
+// Persistent per-slot state. 48 B x 8,250 = 396 KB, private to the GPU.
+struct PclSimState {
+    packed_float3 pos;
+    float         charge;    // inner: seconds of life left. outer: unused.
+    packed_float3 vel;
+    uint          flags;     // 0 dead, 1 active, 3 active+ballistic (outer)
+    packed_float3 color;     // 0..255, the CPU's post-truncation QColor bytes
+    uint          rng;
+};
+
+// PCG-XSH-RR. Any decent hash would do; what matters is that it is a pure
+// function of (slot, frame), so the sequence is reproducible.
+static inline uint pclRandBits(thread uint &s) {
+    s = s * 747796405u + 2891336453u;
+    const uint w = ((s >> ((s >> 28) + 4u)) ^ s) * 277803737u;
+    return (w >> 22) ^ w;
+}
+// The CPU's RAND_15()/32768.0 is in [0,1). Match the half-open range.
+static inline float pclRand01(thread uint &s) {
+    return float(pclRandBits(s) & 0x7FFFFFu) * (1.0f / 8388608.0f);
+}
+
+kernel void cs_pcl_sim(uint gid [[thread_position_in_grid]],
+                       device PclSimState *S      [[buffer(0)]],
+                       device PclInstance *inst   [[buffer(1)]],
+                       constant PclSimU   &u      [[buffer(2)]])
+{
+    const uint kOuter = 3000u;             // FntOuterPcls  = int(2000*1.5)
+    const uint kInner = 1500u;             // FntInnerPcls  = int(1000*1.5)
+    const uint kTotal = 8250u;             // + FntSpiralPcls = int(500*1.5)
+    if (gid >= kTotal) return;
+
+    device PclSimState &p = S[gid];
+    const bool isOuter = (gid < kOuter);
+    const bool isInner = (gid >= kOuter && gid < kOuter + kInner * 3u);
+    const uint innerBlk = isInner ? (gid - kOuter) / kInner : 0u;
+    const uint innerIdx = isInner ? (gid - kOuter) % kInner : 0u;
+
+    // ---- 1. KILL, exactly where the CPU's kill scan sits: at the TOP of the
+    // frame, reading the PREVIOUS step's state (FOUNTAIN.CPP:645-650, :739-745).
+    if (p.flags != 0u) {
+        if (isOuter) { if (p.pos.y < 0.0f) p.flags = 0u; }
+        else if (isInner) {
+            p.charge -= u.dt;
+            if (p.charge < 0.0f) p.flags = 0u;
+        }
+    }
+
+    // ---- 2. SPAWN (ring). `ord` is this slot's ordinal within the frame's
+    // spawn batch, which stands in for the CPU's loop counter.
+    bool spawned = false;
+    uint ord = 0u;
+    if (isOuter && u.outerSpawn > 0u) {
+        const uint ring = (gid + kOuter - (u.outerCursor % kOuter)) % kOuter;
+        if (ring < u.outerSpawn) { spawned = true; ord = ring; }
+    } else if (isInner && u.innerSpawn > 0u) {
+        const uint ring = (innerIdx + kInner - (u.innerCursor % kInner)) % kInner;
+        if (ring < u.innerSpawn) { spawned = true; ord = ring; }
+    }
+
+    if (spawned) {
+        // Seed is a pure function of (slot, frame): reproducible, and
+        // decorrelated between neighbouring slots.
+        uint s = (gid * 2654435761u) ^ (u.frameIdx * 1013904223u) ^ 0x9E3779B9u;
+        pclRandBits(s); pclRandBits(s);         // discard, decorrelate the seed
+        if (isOuter) {
+            const float powr = 30.0f + sin(u.timer * 0.04f) * 5.0f;   // FntSpawnOutPow/Tilt/Freq
+            const float fpow = (powr + pclRand01(s) * 23.5f) * 0.6f;  // FntSpawnOutPowRand
+            float3 pos = float3(-0.261f, 85.106f, -0.159f);           // FntSpring
+            pos.x += (pclRand01(s) * 2.0f - 1.0f) * 1.0f;             // FntSpawnOutDisp
+            pos.z += (pclRand01(s) * 2.0f - 1.0f) * 1.0f;
+            pos.y -= 20.0f;
+            const float uu = pclRand01(s) * 6.28318530718f;
+            const float vv = pclRand01(s) * 3.14159265359f + 3.14159265359f * 0.6f;
+            const float cv = cos(vv);
+            p.pos   = pos;
+            p.vel   = float3(cv * cos(uu) * fpow, sin(vv) * fpow, cv * sin(uu) * fpow);
+            // 63/127/255 * (0.3 * 0.8), stored through a byte QColor -> trunc.
+            p.color = float3(float(int(63.0f * 0.24f)), float(int(127.0f * 0.24f)),
+                             float(int(255.0f * 0.24f)));   // (15, 30, 61)
+            p.charge = 0.0f;
+            p.flags  = 1u;
+        } else {
+            // The CPU's `Spwn` counts DOWN from Spwn2*3-1, and `Spwn%3` picks
+            // the rotation. Mirror that so all three arms are populated evenly.
+            const uint spwn = (u.innerSpawn - 1u) - ord;
+            // Temporal antialiasing: the CPU back-dates the emitter by a random
+            // fraction of the step so a 60 Hz spawn burst is not a ring of
+            // co-located points (FOUNTAIN.CPP:783).
+            const float rtime = u.timer - u.dt * 100.0f * pclRand01(s);
+            const float ang   = rtime * 0.008f * 0.8f;      // angularVelocity*0.8
+            const float phase = float(innerBlk) * (2.0f * 3.14159265359f / 3.0f);
+            float3 pos = float3(cos(ang) * 55.0f,                        // magwav
+                                35.0f + cos(rtime * 0.01f * 0.8f + phase) * 0.3f * 55.0f,
+                                sin(ang) * 55.0f);
+            const float uu = pclRand01(s) * 6.28318530718f;
+            const float vv = pclRand01(s) * 3.14159265359f - 1.57079632679f;
+            const float cv = cos(vv);
+            float3 vel = float3(cv * cos(uu) * 4.5f, sin(vv) * 4.5f, cv * sin(uu) * 4.5f);
+            // xForm1 == xForm2 == a 120-degree rotation about y. `case 1:` in
+            // the CPU has NO break, so it applies the pair; `case 2:` applies
+            // one; `case 0:` none.
+            const float ax = -0.5f, az = 0.8660254038f;     // -0.5, sqrt(3)/2
+            const uint rots = (spwn % 3u == 0u) ? 0u : ((spwn % 3u == 1u) ? 2u : 1u);
+            for (uint r = 0; r < rots; ++r) {
+                const float px = pos.x * ax + pos.z * az;
+                pos.z = pos.z * ax - pos.x * az; pos.x = px;
+                const float vx = vel.x * ax + vel.z * az;
+                vel.z = vel.z * ax - vel.x * az; vel.x = vx;
+            }
+            float3 c = (innerBlk == 0u) ? float3(48.0f, 128.0f, 255.0f)
+                     : (innerBlk == 1u) ? float3(80.0f, 255.0f,  80.0f)
+                                        : float3(255.0f, 128.0f, 48.0f);
+            c = float3(float(int(c.x * 0.8f)), float(int(c.y * 0.8f)), float(int(c.z * 0.8f)));
+            p.pos = pos; p.vel = vel; p.color = c;
+            p.charge = 2.5f;
+            p.flags  = 1u;
+        }
+        p.rng = s;
+    }
+
+    // ---- 3. ANIMATE (FOUNTAIN.CPP:706-736 outer, :877-900 inner) -----------
+    float3 lit = float3(0.0f);
+    float  flareSize = 0.0f;
+    if (p.flags != 0u) {
+        if (isOuter) {
+            if (p.flags & 2u) {
+                float3 v = p.vel;
+                v.y -= u.dt * 20.0f;                 // FntSpawnOutGrav
+                p.vel = v;
+                p.pos = float3(p.pos) + v * u.dt;
+            } else {
+                if (p.pos.y > 83.106f) p.flags |= 2u;
+                float3 q = p.pos; q.y += length(float3(p.vel)); p.pos = q;
+            }
+            lit = float3(p.color);                   // the "dummy illumination model"
+            flareSize = 0.06f * 20.0f / 10.0f;       // 0.12
+        } else if (isInner) {
+            p.pos = float3(p.pos) + float3(p.vel) * u.dt;
+            lit = float3(p.color) * (p.charge * 0.7f / 3.5f);
+            flareSize = 0.07f * 20.0f / 10.0f;       // 0.14
+        }
+    }
+
+    // ---- 4. EMIT the instance the existing vs_pcl/fs_pcl pair consumes ------
+    // Byte-truncated on the way out, because the dump path carries LR/LG/LB as
+    // uint8 and the two paths must be radiometrically identical.
+    device PclInstance &d = inst[gid];
+    if (p.flags == 0u || flareSize <= 0.0f) {
+        // Dead: w <= 0 is the collapse marker vs_pcl tests. The instance count
+        // stays at the authored 8,250 so no readback is needed to draw.
+        d.posSize = float4(0.0f);
+        d.color   = float4(0.0f);
+    } else {
+        d.posSize = float4(p.pos.x, p.pos.y, p.pos.z, u.sizeScale * flareSize);
+        const float3 b = clamp(floor(lit), 0.0f, 255.0f);
+        d.color   = float4(b * (1.0f / 255.0f), 1.0f);
+    }
+}
+
 vertex PclOut vs_pcl(uint vid [[vertex_id]],
                      uint iid [[instance_id]],
                      constant FrameUniforms &u [[buffer(1)]],
@@ -1560,7 +1782,12 @@ vertex PclOut vs_pcl(uint vid [[vertex_id]],
     const float3 rel = p.posSize.xyz - u.camSrc;
     const float3 V = rowmul(u.camRow0, u.camRow1, u.camRow2, rel);
     PclOut out;
-    if (!(V.z > u.nearZ && V.z < u.farZ)) {
+    // w <= 0 is the DEAD marker cs_pcl_sim writes. The GPU sim keeps the
+    // instance count pinned at the authored 8,250 rather than compacting, so
+    // that no readback (and no atomic, and no nondeterminism) sits between the
+    // sim and the draw; the dead slots cost one collapsed vertex each. The
+    // replay path never writes a non-positive w, so this is inert there.
+    if (!(p.posSize.w > 0.0f) || !(V.z > u.nearZ && V.z < u.farZ)) {
         // Behind the eye or past the far plane: collapse the quad so it
         // rasterises nothing. Cheaper and simpler than a CPU-side cull, and it
         // keeps the instance count equal to the dump's particle count so the

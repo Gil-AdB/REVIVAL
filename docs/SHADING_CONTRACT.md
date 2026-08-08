@@ -763,6 +763,12 @@ reflection probes contain no SH ambient at all** — the six faces are byte-iden
 `SHAmbient_EnsureBaked` runs, while `--no-sh_ambient` moves the main frame by −6.15 luma. The GPU's
 probes do carry its ambient. Recorded as open.
 
+> **CLOSED by §9.4 (2026-08-09).** The candidate above is confirmed as a real bug and fixed behind
+> `--env_bake_sh_first` — but it is **only 14 % of the chroma gap**, and the rest is contract row
+> **B2**: the two arms' ambients are *different quantities* (CPU = a neutral scene-centre room
+> capture, DC 148.3/158.8/154.5; GPU = the FLD's blue-zenith sky gradient (0,40,80)→(100,80,60) ×
+> 0.25). Read §9.4 before treating the ordering fix as the answer.
+
 ### 9.3 `--env_bake_linear` split in two
 
 `renderSixFaces` feeds two consumers, and one flag drove both. The gate is now the caller's:
@@ -787,6 +793,214 @@ Images: `docs/img/metal/projector_users_arm_tint.png` — **the user's own arm**
 `docs/img/metal/projector_env_metal_tint.png` (default | tint | GPU),
 `docs/img/metal/projector_env_metal_tint_2rows.png` (the same, second row with `--env_bake_linear`),
 `docs/img/metal/greets_bake_linear_2x2.png` (neither | probe | ambient | both).
+
+---
+
+## 9.4 The probe-colour residual, run upstream — it is TWO things, and only one is a CPU bug
+
+§9.2 left this open: with `--env_bake_linear --env_metal_tint_linear` the
+conductor's LUMA lands at 1.014× the GPU's but the CHROMA overshoots, because the
+CPU's linear-captured probe **content** is itself more saturated than the GPU's
+(mean face B/G/R **10.86/21.30/29.87** vs **12.93/22.69/27.85**). All figures
+below are the same pose and the same 73,831-px mask as §9.1, and they reproduce
+§9.1's whole table exactly (CPU default 127.42/101.32/39.95 sat 0.687, GPU
+87.38/57.78/13.99 sat 0.840), so they are directly comparable.
+
+### 9.4a Cause 1, a CPU BUG, and it is an ORDERING one — fixed behind `--env_bake_sh_first`
+
+**The CPU's reflection probes contain the FLAT `Sc->Ambient` constant where the
+shipped frame contains the coloured SH irradiance.** Mechanism, read out of the
+source and confirmed by measurement:
+
+| | |
+|---|---|
+| `RENDER.CPP:491` | `EnvReflection_FramePrep` — the reflection probes |
+| `RENDER.CPP:511` | `SHAmbient_EnsureBaked` — the scene-centre SH probe |
+
+Same frame, that source order. `SHAmbient_Coeffs` (`EnvBake.cpp:2135`) returns
+null until `SHProbe::baked` is set at `:2223`, so **every reflection-probe face
+is shaded through the kernel's flat-ambient fallback**
+(`DeferredSurfaceKernel.cpp:1799`, `lB = Lum·255 + Mat->Diffuse · Sc->Ambient.B`)
+rather than its SH branch (`:1789-1793`). Greets authors that constant as
+**(32, 32, 32)** — an **achromatic** grey. The GPU's probe bake, by contrast,
+runs the frame's own `fs_lighting` with `shBuf` bound (`Deferred.mm:2153-2156`),
+so `AmbientRadiance` (`deferred.metal:785`) is live in every probe texel.
+
+**The order is incidental, not a dependency.** `SHAmbient_EnsureBaked` reads
+nothing the reflection bake produces — it derives its own scene AABB
+(`EnvBake.cpp:2153`) — and the two anti-recursion guards (`g_envBakeInProgress`,
+`g_offscreenViewDepth`) are symmetric, so either order is legal. `--env_bake_sh_first`
+(`FeatureFlags.def`, **default 0, byte-null**, inert unless both `--sh_ambient`
+and `--env_refl` are on) calls the SH bake from the top of
+`EnvReflection_FramePrep`. One bake either way; no extra render.
+
+**MEASURED, probe content** (`FDS_ENVBAKE_DUMP=1`, `screen emiter`, mean over the
+six faces; the GPU column is `--dump_env_cube`, ×255 onto the same 0–255 scale):
+
+| arm | B | G | R | Y | chromaticity (R,G,B)/Σ | distance to GPU |
+|---|--:|--:|--:|--:|---|--:|
+| CPU `--env_bake_linear` | 10.86 | 21.29 | 29.87 | 22.67 | 0.482 / 0.343 / 0.175 | 0.053 |
+| CPU **+ `--env_bake_sh_first`** | 12.31 | 23.54 | 32.38 | 24.91 | 0.475 / 0.345 / 0.180 | **0.045** |
+| GPU (oracle) | 12.93 | 22.69 | 27.85 | 23.12 | 0.439 / 0.358 / 0.204 | — |
+
+**MEASURED, the lit conductor mask** (73,831 px):
+
+| arm | R | G | B | Y | chromaticity | distance to GPU |
+|---|--:|--:|--:|--:|---|--:|
+| `--env_bake_linear --env_metal_tint_linear` | 95.18 | 55.85 | 11.22 | 62.52 | 0.587 / 0.344 / 0.069 | 0.047 |
+| **+ `--env_bake_sh_first`** | 100.25 | 59.90 | 12.22 | 66.53 | 0.582 / 0.348 / 0.071 | **0.040** |
+| GPU | 87.38 | 57.78 | 13.99 | 61.64 | 0.549 / 0.363 / 0.088 | — |
+
+**Verdict, and it is deliberately unflattering to the fix.** It is a real defect
+and the fix is correct by the CPU's own standard — the probe should hold the same
+ambient the frame does. But it buys **17 %** of the probe-chroma gap and **14 %**
+of the mask-chroma gap, and it costs luma: the conductor ratio goes **1.014× →
+1.079×**. **It does not close the tint gap.** Anyone reading §9.2's "recorded as
+open" as "this is the answer" would be wrong, and this section exists to say so.
+
+Cost stated: with the SH probe baked first, the SH probe's own faces no longer
+see the reflection probes' output. **MEASURED as −0.6 %:** `[SHAMB]` DC ambient
+B/G/R **148.3/158.8/154.5 → 147.5/157.9/153.4** — the same tiny reverse coupling
+already recorded on `--sh_bake_linear` as −0.4 %.
+
+Note it is not a small-coverage flag: it moves **1,315,524 px (63.4 %)** of the
+greets frame and whole-frame luma **101.07 → 103.02**, because greets is largely
+reflective (`--env_bake_linear` alone moves 57.0 %).
+
+### 9.4b Cause 2, NOT a CPU bug — the two arms' ambients are DIFFERENT QUANTITIES
+
+This is contract row **B2**, and §9.4a is what makes it visible in probe content
+for the first time. Both arms' ambient sources, measured:
+
+| arm | SH source | measured |
+|---|---|---|
+| CPU | a 32²×6 cube capture at the scene AABB centre — **the room** | `[SHAMB]` DC B/G/R **148.3 / 158.8 / 154.5** → RGB ≈ (155, 159, 148), effectively **NEUTRAL** |
+| GPU | the FLD's authored **sky gradient**, analytically projected (`Deferred.mm:263`), × `ambientFactor` 0.25 | `[FLD] scene sky gradient: zenith=(0,40,80) nadir=(100,80,60)` — a **deep-blue** zenith |
+
+So the GPU's probes carry a **blue-leaning** ambient and the CPU's a neutral one,
+and that is exactly the direction of the residual: the GPU's probe chromaticity
+has **B = 0.204** against the CPU's **0.175 / 0.180**. **No ordering change on
+the CPU can add blue that the CPU's own ambient does not contain.** B2 and B4 had
+recorded the source and normalisation divergence; what is new here is that it
+**propagates into probe content**, which is why the tint fix overshoots on chroma
+while agreeing on luma.
+
+**Where that leaves "still no gpu parity".** The colour gap decomposes into: the
+env-lobe tint (§9.1, fixed, `--env_metal_tint_linear`, saturation 0.687 → 0.840,
+GPU's 0.840 exactly); the probe's missing ambient (§9.4a, fixed,
+`--env_bake_sh_first`, 14 % of what is left); and **the two arms disagreeing
+about what the ambient IS** (§9.4b), which is a scope divergence in the GPU arm
+and cannot be closed from the CPU side. A fourth candidate remains unpriced and
+is now the leading one: **E3b**, the CPU's padded 102.68° software faces with
+face-major bilinear against the GPU's plain 90° hardware `texturecube` — note the
+two censuses above are not even integrating the same solid angle.
+
+Image: `/Users/gil-ad/work/revival-fog/docs/img/metal/decision_env_bake_sh_first.png`
+
+Reproduce (literal, from `Runtime/`):
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy FDS_ENVBAKE_DUMP=1 \
+  FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0" ./DEMO --snapshot=greets@t=2000 \
+  --out=/tmp/gr --deferred --hdr --glass-refract=1 --glass-test \
+  --xpar-peel-passes=4 --profiler=0 --no-bloom --env_bake_linear --env_bake_sh_first
+```
+
+---
+
+## 9.5 DEFAULT RECOMMENDATION for each conductor flag — HIS call, with a picture and a command each
+
+Every command below is literal and runs from `Runtime/` with dummy SDL drivers.
+Every image is a full path. The mask is §9.1's 73,831 px.
+
+### `--hdr_metal_kill=2` — **KEEP ON.** Already shipped, already reviewed.
+
+Nothing new. It is the reason `--no-env_refl` renders a conductor at 0.00, i.e.
+the reason the env lobe is the whole argument.
+Image: `/Users/gil-ad/work/revival-fog/docs/img/metal/decision_hdr_metal_kill.png`
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0" ./DEMO --snapshot=greets@t=2000 \
+  --out=/tmp/gr --deferred --hdr --glass-refract=1 --glass-test \
+  --xpar-peel-passes=4 --profiler=0 --no-bloom --hdr_metal_kill=0
+```
+
+### `--env_metal_tint_linear` — **RECOMMEND ON.**
+
+The strongest of the four. It is the last GAMMA-LIVE row of the `--hdr_linear`
+migration audit (§8.2 S-d), it is a per-channel defect and not a brightness one
+(**R does not move at all**, because `screen emiter` authors albedo (255,206,104)
+and squaring the normalised R is the identity), and it lands the conductor's
+saturation on **0.840, the GPU's value exactly**. Chromaticity distance to the
+oracle **0.097 → 0.016**. Whole-frame luma moves **101.07 → 100.53**, 11.1 % of
+pixels. **Byte-pin consequence:** greets `6780642b` moves; fountain `8db68ccb`
+and city `5476be8c` do NOT (no metallic-mapped material).
+Image: `/Users/gil-ad/work/revival-fog/docs/img/metal/decision_env_metal_tint_linear.png`
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0" ./DEMO --snapshot=greets@t=2000 \
+  --out=/tmp/gr --deferred --hdr --glass-refract=1 --glass-test \
+  --xpar-peel-passes=4 --profiler=0 --no-bloom --env_metal_tint_linear
+```
+
+### `--metal_spec_f0` — **RECOMMEND OFF**, and this reverses nothing: it was already OFF.
+
+Physically right and visually absent. MEASURED at the momy pose (its only live
+target — it moves **0 px** at the projector, for §10's shadow reason):
+**22,364 px, 1.08 % of the frame**, mean signed ΔRGB **+0.02 / +0.63 / +1.46**,
+**max single-pixel delta 8/255**. Against that, it moves the CPU *away* from the
+current oracle — the GPU uses the same dielectric F0 (`deferred.metal:575`).
+Turning it on buys a byte-pin move for a change nobody can see. **Land it when
+the GPU gets the same fix, as a pair.**
+Image (the third panel is |difference| ×16, because at ×1 there is nothing to
+show): `/Users/gil-ad/work/revival-fog/docs/img/metal/decision_metal_spec_f0.png`
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  FDS_GREETS_CAM="12.0,3.0,-29.0,0.0,-0.0875,-0.9962" ./DEMO --snapshot=greets@t=2000 \
+  --out=/tmp/gr --deferred --hdr --glass-refract=1 --glass-test \
+  --xpar-peel-passes=4 --profiler=0 --no-bloom --metal_spec_f0
+```
+
+### `--shadow_noncaster_depth` — **RECOMMEND ON, but it is a LOOK decision and it is a big one.**
+
+The correctness case is closed (§10): the recovered direct term is **bit-identical
+to removing the shadows entirely**, so it recovers 100 % of what the identity test
+was eating and nothing more, and the GPU's own ray-cast ground truth agrees. The
+scale is what makes it his call, not mine: **489,567 px (23.6 %)** of the frame,
+whole-frame luma **101.07 → 104.72**. In the image the pillars stop being
+uniformly black-shadowed and take the amber omnis — that is not a subtle
+re-grade, it is a re-lighting of every non-casting material in the scene. On the
+conductor mask itself it is small (**102.13 → 103.14**). **Byte-pin
+consequence:** greets `6780642b` moves. Fountain and city need checking before it
+lands — any scene with a `lamp`/`emi`-named or transparent/additive material is
+in scope, which is not greets-only the way the tint is.
+Image: `/Users/gil-ad/work/revival-fog/docs/img/metal/decision_shadow_noncaster_depth.png`
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0" ./DEMO --snapshot=greets@t=2000 \
+  --out=/tmp/gr --deferred --hdr --glass-refract=1 --glass-test \
+  --xpar-peel-passes=4 --profiler=0 --no-bloom --shadow_noncaster_depth
+```
+
+### `--env_bake_sh_first` (new, §9.4a) — **RECOMMEND OFF for now.**
+
+Correct by the CPU's own standard, but it buys 14 % of the chroma gap, costs 6.5 %
+on luma in the wrong direction, and moves 63 % of the greets frame. Its natural
+home is **with** `--env_bake_linear`, which is itself still OFF pending review —
+and `--env_bake_linear` is the flag that owns the brightness half of the same
+problem. Land the two together or neither.
+
+### One item that is REPORTED and NOT FIXED, and it bites whoever flips these
+
+`DEMO/CITY.CPP`'s env-cube cache salt hashes an explicit list of bake-affecting
+flags. `--env_metal_tint_linear`, `--sh_bake_linear`, `--shadow_noncaster_depth`
+and now `--env_bake_sh_first` are **not** in it, so a city run with any of them on
+hits a cache baked without them. Inert at the defaults; that file is not this
+arm's to edit.
 
 ---
 
