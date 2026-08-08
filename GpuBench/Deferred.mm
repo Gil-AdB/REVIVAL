@@ -1,4 +1,5 @@
 #include "Deferred.h"
+#include "ParticleReplay.h"
 
 #import <Foundation/Foundation.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -401,6 +402,25 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         psoFlare = [dev newRenderPipelineStateWithDescriptor:p error:&e];
         if (!psoFlare) { std::fprintf(stderr, "[DEFERRED] flare pso: %s\n",
                                       [[e localizedDescription] UTF8String]); return false; }
+    }
+
+    // PARTICLE REPLAY pipeline — additive into HDR, instanced. See
+    // ParticleReplay.h for the format and the DEMO-side dump it reads.
+    id<MTLRenderPipelineState> psoPcl = nil;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_pcl");
+        p.fragmentFunction = fn_(@"fs_pcl");
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoPcl = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoPcl) { std::fprintf(stderr, "[DEFERRED] pcl pso: %s\n",
+                                    [[e localizedDescription] UTF8String]); return false; }
     }
     // Volumetric cones: ADDITIVE into the HDR target before bloom, which is
     // where the CPU composites them (VolCompositeAdd into g_hdrBuf, unclamped).
@@ -2171,6 +2191,88 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                    std::chrono::steady_clock::now() - t0).count();
     };
 
+    // ---- PARTICLE REPLAY: load the dump, build the instance buffer --------
+    // This is the GPU half of dump-and-replay (ParticleReplay.h). Positions and
+    // colours come from the CPU's OWN per-frame particle state, so identical
+    // input on both arms means any image difference is RENDERING, not
+    // simulation — the property that makes this an oracle. Nothing is
+    // simulated here and nothing is guessed: with no --pcl file the pass is
+    // simply absent, which is the state fountain has been in all along.
+    struct PclInstance { float posSize[4]; float color[4]; };
+    id<MTLBuffer> pclBuf = nil;
+    id<MTLTexture> pclTex = nil;
+    size_t pclCount = 0;
+    if (!opt.pclPath.empty()) {
+        PclDump dump;
+        if (!PclLoad(opt.pclPath, dump, /*verbose=*/true)) return false;
+        const int fi = dump.nearestByCurFrame(scene.curFrame);
+        if (fi < 0) { std::fprintf(stderr, "[PCL] dump has no frames\n"); return false; }
+        const PclFrame &fr = dump.frames[size_t(fi)];
+        if (std::fabs(fr.curFrame - scene.curFrame) > 0.5f)
+            std::fprintf(stderr, "[PCL] WARNING: nearest dumped frame is curFrame %.2f but "
+                                 "this render is at %.2f — the spray is from a DIFFERENT "
+                                 "instant and any diff is partly simulation\n",
+                         fr.curFrame, scene.curFrame);
+        std::vector<PclInstance> inst(fr.particles.size());
+        for (size_t i = 0; i < fr.particles.size(); ++i) {
+            const PclParticle &q = fr.particles[i];
+            PclInstance &d = inst[i];
+            for (int c = 0; c < 3; ++c) d.posSize[c] = q.pos[c];
+            // FILLERS.CPP:2329 — edgeLen = ImageSize * RZ * PerspX * FlareSize * 2,
+            // and Spriter takes that as the HALF-extent. Everything except the
+            // 1/z is constant per particle, so fold it here and divide in the
+            // vertex stage, exactly as the flare path does.
+            d.posSize[3] = fr.imageSize * scene.camera.perspX * q.flareSize * 2.0f;
+            for (int c = 0; c < 3; ++c) d.color[c] = float(q.rgb[c]) * (1.0f / 255.0f);
+            d.color[3] = 1.0f;
+        }
+        pclCount = inst.size();
+        if (pclCount) {
+            pclBuf = [dev newBufferWithBytes:inst.data()
+                                      length:inst.size() * sizeof(PclInstance)
+                                     options:MTLResourceStorageModeShared];
+            std::vector<uint8_t> rgba; int tw = 0, th = 0;
+            PclBuildSpriteTexture(rgba, tw, th);
+            MTLTextureDescriptor *td =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                   width:NSUInteger(tw)
+                                                                  height:NSUInteger(th)
+                                                               mipmapped:NO];
+            td.usage = MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModeShared;
+            pclTex = [dev newTextureWithDescriptor:td];
+            [pclTex replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(tw), NSUInteger(th))
+                      mipmapLevel:0 withBytes:rgba.data() bytesPerRow:NSUInteger(tw) * 4];
+        }
+        std::fprintf(stderr,
+            "[PCL] replaying %zu particle(s) from dump frame %d (curFrame %.2f, "
+            "ImageSize %.3f) — ONE instanced draw, additive into HDR, no peel\n",
+            pclCount, fi, fr.curFrame, fr.imageSize);
+    }
+
+    // Particle sprites: ONE instanced draw, additive into `dst`, depth-TESTED
+    // against `depthTex` with no depth write — Spriter's own semantics.
+    auto encodePcl = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                         id<MTLTexture> dst, id<MTLTexture> depthTex) {
+        if (!pclBuf || pclCount == 0) return;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoPcl];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc setVertexBuffer:pclBuf offset:0 atIndex:2];
+        const float vp[4] = { float(W), float(H), scene.camera.cntrEX, scene.camera.cntrEY };
+        [enc setVertexBytes:vp length:sizeof(vp) atIndex:3];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        [enc setFragmentTexture:pclTex atIndex:0];
+        [enc setFragmentTexture:depthTex atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+                                                   instanceCount:NSUInteger(pclCount)];
+        [enc endEncoding];
+    };
+
     // Flare sprites, additive into `dst`, projected with camera `camRot/camSrc`
     // taken from a FrameUniforms. `clip` skips lights at/behind a mirror plane
     // (their reflections would otherwise hang in front of it).
@@ -2451,6 +2553,13 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // --- pass 2b: flare sprites, additive into the HDR target ---
         if (!viz && opt.stages >= 2)
             encodeFlares(cb, fu, hdrTex, gDepth, nullptr);
+            // Particle spray, same slot as the flares: additive, depth-tested,
+            // BEFORE the peel. The CPU interleaves sprites and transparent
+            // clumps in one back-to-front TBR list, so a sprite in FRONT of
+            // glass is not attenuated by it while this arm's is. Stated as the
+            // known deviation rather than hidden; it needs a real dump to
+            // price, and additive-vs-additive order is exact either way.
+            encodePcl(cb, fu, hdrTex, gDepth);
 
         // --- pass 2b1: TRANSPARENT SURFACES (depth peel) ---
         // RENDER.CPP order: the peel runs after the deferred lighting resolve

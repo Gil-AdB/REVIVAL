@@ -107,6 +107,12 @@ struct DeferredOptions {
     // off, each clump gets its own encoder pair per (side, pass) — the
     // pre-2026-08-08 scheduling.
     bool  xparMerge = true;
+    // PARTICLE REPLAY (--pcl=PATH). fountain's 8,250 water sprays live in
+    // Scene::Pcl[], which DEMO fills and FDS never does, so they are not
+    // reachable by ANY ingest — see GpuBench/ParticleReplay.h for the proof,
+    // the file format and the DEMO-side dump this reads. Empty = no particle
+    // pass at all, which is the state fountain has been in.
+    std::string pclPath;
     // xparPeelPassesEffective() (DeferredSurfaceKernel.cpp:3600): an explicit
     // flag wins, otherwise Scene::XparPeelPasses (greets 1, fountain 4).
     int   xparPeelPasses = 0;       // 0 = use the scene's own value

@@ -15,6 +15,7 @@
 
 #include "SceneIngest.h"
 #include "Deferred.h"
+#include "ParticleReplay.h"
 
 #include <algorithm>
 #include <cmath>
@@ -219,6 +220,8 @@ int main(int argc, const char *argv[]) {
     bool doCamTrack = false;
     float camTrack[3] = {0, 0, 0};
     gpubench::DeferredOptions dopt;
+    std::string pclSynth;
+    int pclSynthN = 8250;   // FntInnerPcls*3 + FntOuterPcls + FntSpiralPcls
 
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
@@ -288,6 +291,9 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-cones")                 dopt.cones = false;
         else if (a == "--no-xpar")                  dopt.xpar = false;
         else if (a == "--no-xpar_merge")            dopt.xparMerge = false;
+        else if (const char *v = val("--pcl="))     dopt.pclPath = v;
+        else if (const char *v = val("--pcl_synth=")) pclSynth = v;
+        else if (const char *v = val("--pcl_synth_n=")) pclSynthN = std::atoi(v);
         else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);
         else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
         else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;
@@ -363,6 +369,16 @@ int main(int argc, const char *argv[]) {
     // viewpoint until this was cleared. An explicit --cam still wins. Must happen
     // BEFORE Load, which is what builds the first camera.
     if (dopt.interactive && !dopt.freeFly && !camExplicit) opt.camPose.clear();
+
+    // --pcl_synth: write a CONFORMING synthetic particle dump and exit. Exists
+    // so the replay reader + instanced additive pass are testable before the
+    // DEMO-side writer specified in ParticleReplay.h lands — and so the format
+    // has an executable definition, not only a comment.
+    if (!pclSynth.empty()) {
+        const float centre[3] = {0.0f, 20.0f, 0.0f};   // fountain head, world
+        return gpubench::PclWriteSynthetic(pclSynth, pclSynthN, centre,
+                                           float(opt.demoT) * 0.26f, 10.0f) ? 0 : 1;
+    }
 
     // ---- scene ------------------------------------------------------------
     gpubench::Scene scene;

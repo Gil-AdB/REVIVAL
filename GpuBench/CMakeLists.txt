@@ -16,7 +16,9 @@ add_executable(${PROJECT_NAME}
     Deferred.mm
     Deferred.h
     SceneIngest.cpp
-    SceneIngest.h)
+    SceneIngest.h
+    ParticleReplay.cpp
+    ParticleReplay.h)
 
 # This machine has Command Line Tools only, so there is no offline `metal`
 # compiler; shaders are compiled at RUNTIME from source (measured working). They

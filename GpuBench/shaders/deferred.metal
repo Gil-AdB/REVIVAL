@@ -1523,6 +1523,78 @@ fragment float4 fs_flare(FlareOut in [[stage_in]],
 }
 
 // ---------------------------------------------------------------------------
+// PARTICLE REPLAY — fountain's water spray, from a CPU dump (ParticleReplay.h)
+// ---------------------------------------------------------------------------
+//
+// The CPU blits these through TBR_Sprite -> Spriter's HDRAccum path, which is
+// (FILLERS.CPP:2324-2374 and :1395-1409):
+//     halfExtent_px = ImageSize * (1/z) * View->PerspX * F->FlareSize * 2
+//     colour        = (V->LR, V->LG, V->LB)          -- already lit, 0..255
+//     h[c]         += texel[c] * colour[c] / 255     -- ADDITIVE into the float
+//                                                       radiance buffer
+//     reversed-Z TEST against ZPage16, NO Z-write
+// Additive means order-independent: these need no peel and must not go through
+// one. One INSTANCED draw for the whole spray, so 8,250 sprites are one encoder
+// and not 8,250 of them.
+struct PclInstance {
+    float4 posSize;      // .xyz world position, .w  ImageSize*perspX*flareSize*2
+    float4 color;        // .rgb 0..1 (the dump's 0..255 / 255), .w unused
+};
+
+struct PclOut {
+    float4 position [[position]];
+    float2 uv;
+    float  refZ;
+    float3 color;
+};
+
+vertex PclOut vs_pcl(uint vid [[vertex_id]],
+                     uint iid [[instance_id]],
+                     constant FrameUniforms &u [[buffer(1)]],
+                     constant PclInstance   *P [[buffer(2)]],
+                     constant float4        &vp [[buffer(3)]])   // .xy = W,H, .zw = cntrE
+{
+    const float2 c[6] = {float2(-1,-1), float2(1,-1), float2(-1,1),
+                         float2(1,-1),  float2(1,1),  float2(-1,1)};
+    constant PclInstance &p = P[iid];
+    const float3 rel = p.posSize.xyz - u.camSrc;
+    const float3 V = rowmul(u.camRow0, u.camRow1, u.camRow2, rel);
+    PclOut out;
+    if (!(V.z > u.nearZ && V.z < u.farZ)) {
+        // Behind the eye or past the far plane: collapse the quad so it
+        // rasterises nothing. Cheaper and simpler than a CPU-side cull, and it
+        // keeps the instance count equal to the dump's particle count so the
+        // census is honest.
+        out.position = float4(0, 0, -1, 1);
+        out.uv = 0; out.refZ = 0; out.color = 0;
+        return out;
+    }
+    // Same projection the frame's own vertex stage uses, expressed in pixels
+    // because Spriter's extent is in pixels.
+    const float2 ctr = float2(vp.z + V.x * (u.sx * vp.x * 0.5f) / V.z,
+                              vp.w - V.y * (u.sy * vp.y * 0.5f) / V.z);
+    const float  hx = p.posSize.w / V.z;
+    const float2 px = ctr + c[vid] * hx;
+    out.position = float4(2.0f * px.x / vp.x - 1.0f, 1.0f - 2.0f * px.y / vp.y, 0.0f, 1.0f);
+    out.uv = c[vid] * 0.5f + 0.5f;
+    out.refZ = u.dza + u.dzb / max(V.z, 1e-4f);
+    out.color = p.color.rgb;
+    return out;
+}
+
+fragment float4 fs_pcl(PclOut in [[stage_in]],
+                       texture2d<float> pclTex [[texture(0)]],
+                       depth2d<float>   gDepth [[texture(1)]],
+                       sampler samp [[sampler(0)]])
+{
+    const float zEnc = gDepth.read(uint2(in.position.xy));
+    // Reversed-Z: bigger == nearer. Spriter's `if (Z <= ZPage16[..]) skip`.
+    if (zEnc > 0.0f && in.refZ <= zEnc) discard_fragment();
+    const float3 t = pclTex.sample(samp, in.uv).rgb;
+    return float4(t * in.color, 1.0f);
+}
+
+// ---------------------------------------------------------------------------
 // bloom — the SAME construction as FDS/RENDER/Hdr.cpp's Render_BloomPass
 // ---------------------------------------------------------------------------
 //
