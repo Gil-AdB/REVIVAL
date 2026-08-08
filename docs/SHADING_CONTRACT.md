@@ -1383,3 +1383,299 @@ so alternate pixels of every reflective surface carry two different BRDFs at a s
 +5.51, `--no-pbr` **+0.90**, both off **−0.01**, full rate +0.04, GPU −0.05. Fixed → **+0.02**, and
 **free** (`lighting-w2` 3.51 → 3.14 ms, 3/3 reps; the fill was already full-shading that set).
 Crop: `docs/img/mech/task3_canopy_lattice.png`.
+
+---
+
+## 12. EVERY SHADING PATH AUDITED — the reduced-kernel sweep
+
+**Why this section exists.** §11.8 root-caused one defect: the wave-2 checkerboard fill,
+for **env-reflective** pixels, re-shades through a **REDUCED kernel** — a second
+implementation of the same shading that had drifted from the primary. `--deferred_checker_env_full`
+closed it (+6.82 → +0.02 luma odd-even bias, and it was cheaper). The obvious question was
+whether that was the only one. **It was not.** This section is the systematic sweep: every path
+that shades a surface, against the **scalar wave-1 deferred kernel**
+(`Render_DeferredLighting_Tile`) as the reference.
+
+> Everything below is **read out of the source** unless a row says MEASURED. All MEASURED numbers
+> are runs made for this audit, dummy SDL drivers, at the poses named. Line numbers are anchors —
+> the file moved under three concurrent agents while this was written; grep the symbol.
+>
+> **Measurement-environment caveat, stated up front.** Another agent held ~880 lines of
+> uncommitted work in `FDS/RENDER/EnvBake.cpp`, `DEMO/GREETS.CPP`, `RENDER.CPP` and friends
+> throughout this audit, so the greets and city **absolute** pins here (`778fa6ac…`, `3cbe42b1…`)
+> are *not* the recorded `91ec081a…` / `5476be8c…` and that difference is **not mine**. Byte-null
+> was therefore certified **differentially**: two binaries built back to back from the identical
+> tree, one with my kernel diff and one with it reverted (`git checkout` + rebuild + `git apply`),
+> with the non-kernel diff fingerprinted before and after. Fountain reproduces its recorded pin
+> `8db68ccb59416e9a44037e9f387b7bd9` exactly, which is the one absolute anchor that survived.
+
+### 12.1 The census — how many kernels shade a surface, and what each one has
+
+Seven. The columns are the terms that actually separate them; **✓** = present and matching the
+scalar reference, **✗** = absent, **≠** = present but computing something else.
+
+| term | **scalar wave-1** (the reference) | wave-1 **vec** branch (`--deferred_vec`) | **OuterVec** (`Tile_OuterVec`) | **wave-2 fill** fallback (`TileFill`) | **transparent** (`…TransparentLighting_Tile`) | **forward** (`TheOtherBarry` + `Lighting()`) |
+|---|---|---|---|---|---|---|
+| SH ambient (`--sh_ambient`) | ✓ | ✓ (shared, outside the loop) | ✓ | ✓ | **✗** flat `Sc->Ambient` | **✗** flat `Sc->Ambient`, and **per-MESH** (`Faces[0].Txtr`), not per-pixel |
+| emissive `Lum·255` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Lambert × linear falloff | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (per-VERTEX) |
+| spot cone → **diffuse** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| spot cone → **specular** | **✗** (contract D4) | **≠ present** | ✗ | **≠ present** | ✗ | n/a |
+| mirror-bounce window portal | ✓ | **✗** | **✗** | ✓ | ✗ | ✗ |
+| 2-D spot map / mirror-clone shadow (`computeMapShadowAtten`) | ✓ | ✓ | **✗** | **✗** | **✗** | **✗** |
+| cube tap + static shadow lightmap + PolyId (`resolveCubeAtten`) | ✓ | ✓ | **✗** | **✗** | **✗** | **✗** |
+| `--shadow_bias` / `--shadow_slope_bias` | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `--shadow_noncaster_depth` | ✓ | ✓ | ✗ | **✗** | ✗ | ✗ |
+| `--pom_horizon` relief self-shadow | ✓ | **✗** | **✗** | **✗** | ✗ | ✗ |
+| AO — `Mat_AoInAlpha` | ✓ | ✓ | **✗** (never fetches `texA`) | **✗** (never fetches `texA`) | `--xpar_pbr` only | ✗ |
+| AO — `Mat->AoMap`, `--ao_direct` | ✓ | ✓ (forces scalar) | **✗** | **✗** | `--xpar_pbr` only | ✗ |
+| normal map | ✓ (forces scalar) | — | ✓ | ✓ | `--xpar_pbr` | **✗** |
+| normal-map **LOD fade** | ✓ | — | **✗** | **✗** | ✓ | ✗ |
+| `--no_nmap` gate honoured | ✓ | — | **✗** | **✗** | ✓ | n/a |
+| specular model | **GGX** under `--pbr`, else `pow_glossClass` | **GGX** (`run_vec_ggx_loop`) | **≠ Blinn-Phong `std::pow`** | **≠ Blinn-Phong `std::pow`** | **≠ Blinn-Phong `std::pow`** | **✗ NO SPECULAR AT ALL** |
+| `--metal_spec_f0` (now **default 1**) | ✓ | **✗** (fixed F0 0.04) | **✗** | **✗** | ✗ | ✗ |
+| metal diffuse kill on `fdB` (LDR) | ✓ | ✓ | **✗** | ✓ | ✗ | ✗ |
+| metal spec tint | ✓ | ✓ | **✗** | ✓ | `--xpar_pbr` | ✗ |
+| roughness map | ✓ | ✓ | ✓ | ✓ | `--xpar_pbr` | ✗ |
+| env compose (`EnvSpecComposeScalar`) | ✓ | ✓ | ✓ | ✓ | **✗** | **≠** fixed 50 % `env + albedo>>1`, no Fresnel |
+| `--diffuse_energy` `(1-F)` | ✓ | ✓ | ✓ | ✓ | — | — |
+| `Material::SpecMul` | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
+| `--texture_filter` / `--poly_viz` albedo plane | ✓ | ✓ | ✓ | **✗** | ✗ | ✗ |
+| `--hdr_metal_kill` (default 2) | ✓ | ✓ | **✗** | **✗** | ✗ | ✗ |
+| **writes `g_hdrBuf` at all** | ✓ linear | ✓ | **✗ — NOTHING** | ✓ | ✓ | ✗ (except the additive `HDRAccum` bolt) |
+
+**The pattern the sweep confirms.** Every one of these is a *second implementation written for a
+special case* (half-rate fill, 8-wide pixel batch, transparent layer) that then failed to inherit
+terms added to the primary. Nobody removed a shadow tap from the fill; the shadow chain was
+*added to wave 1* and the fill was never revisited. That is the same failure mode §8.4 named for
+the `--hdr_linear` migration — *"the composite changed underneath expressions that nobody re-read"* —
+one level up, at the kernel rather than the term.
+
+### 12.2 FIXED — `--deferred_checker_edge_full`: the fill's OTHER reduced-kernel trigger
+
+**The defect.** §11.8 / `--deferred_checker_env_full` fixed the fill's full-shade path for
+**env-reflective** cells. But the fill has a **second** trigger for the same reduced kernel, and it
+was left live: the averaging only runs when at least one neighbour is **compatible** (same matID,
+`dot(N,Nₙ) ≥ --quarter_normal_cos`, relative `|ΔZ| ≤ --quarter_z_jump`). When **none** is — i.e. at
+every **material / normal / depth EDGE**, which is every silhouette and every crease — it falls
+through to the same reduced re-shade. Column 4 of §12.1 is the exhaustive list of what that
+fallback omits. **Shadows matter most exactly at silhouettes**, and that is precisely the set that
+was being shaded without any shadow term.
+
+**The fix.** The fill's trigger reads **only** G-buffer + ZPage state, so wave 1 can evaluate it
+exactly as the fill will. One shared function, `fillFallsBackHere()`, called from both waves —
+wave 1 keeps the cell and shades it with the real kernel, the fill recognises the identical
+condition (`matched == false` **is** the predicate, so the fill pays nothing for a second
+evaluation) and leaves it alone. Env cells are excluded from this flag; they belong to
+`--deferred_checker_env_full`.
+
+**MEASURED.** The honest test is against the **full-rate ground truth**
+(`--deferred_checkerboard=0`), over the mask of pixels the flag moves:
+
+| pose | mask px | mean \|ΔY\| vs full-rate, OFF → ON | mean **SIGNED** ΔY vs full-rate, OFF → ON | max chan Δ | px > 10 luma |
+|---|--:|---|---|--:|--:|
+| greets `t=4871` (the §11 mech pose) | **85,606 (4.13 %)** | 0.947 → **0.584** | **+0.488 → −0.004** | 173 | 291 |
+| greets `t=2000` (the projector, `--no-bloom`) | **164,393 (7.93 %)** | 0.409 → **0.144** | **+0.344 → −0.040** | 4 | 0 |
+| greets `t=1588` (the pin pose, `--no-env_refl`) | 5,252 (0.25 %) | 1.144 → **0.785** | **+0.569 → −0.153** | 118 | 52 |
+
+Same signature as the env row: a **one-sided bias** (the reduced kernel is systematically
+*brighter*, because it drops every shadow term) closed to ~0. The residual \|ΔY\| that remains is
+the fill's *reconstruction* of the other cells, which is a rate question, not a kernel question.
+
+**COST — and unlike the env row this one is NOT free.** `--bench=scene@scene=greets,t=4871,iters=40`,
+`--deferred_prof=5`: `lighting-w1` 32.1 → 34.5 ms and `lighting-w2` 3.48 → 4.62 ms on the first
+rep; a second rep landed 46.1 → 41.3 and 7.25 → 5.08, i.e. **inside the run-to-run spread of this
+harness on a 12-worker pool.** What is *not* noise is the mechanism: 85,606 px move from the cheap
+fallback to the full kernel, and at wave-1's measured ~0.36 µs/px that is ≈31 ms of thread-sum,
+≈2.6 ms of wall at the observed 11.2× parallel efficiency. **Treat the price as ≈2–3 ms/frame at
+1920×1080 on greets, not as zero.** (The first cut cost ~4 ms because it evaluated the predicate
+twice; folding the fill's side onto `matched` removed that half.)
+
+**Default OFF.** It is a real fidelity fix, it is a **look** change on 4–8 % of the frame, and it
+costs single-digit milliseconds. That trade is the user's call, not mine.
+
+### 12.3 FIXED (no flag, inert at defaults) — OuterVec dropped cells the fill refused to fill
+
+**A hole class, not a shading class.** `Render_DeferredLighting_Tile_OuterVec` implements the
+checkerboard/quarter wave-1 drop on **parity alone**. It has no `--deferred_checker_env_full`
+branch. But the fill honours that flag (**default 1** since `1782351`) and *skips* env-reflective
+dropped cells, expecting wave 1 to have taken them. Under `--deferred_outer_vec
+--deferred_checkerboard` those cells were therefore shaded by **neither wave**.
+
+MEASURED, greets `t=4871`, LDR (`--no-hdr`), against that configuration's own full-rate render:
+
+| | changed px | mean \|ΔY\| on changed | max chan Δ | px > 10 luma | whole-frame ΔY |
+|---|--:|--:|--:|--:|--:|
+| **before** | 368,684 (17.78 %) | **3.958** | **255** | 17,887 | −0.566 |
+| **after** | 354,481 (17.09 %) | **0.815** | 61 | 1,739 | **−0.001** |
+
+`max chan Δ = 255` is the signature: literal unshaded holes. The scalar control
+(scalar wave-1 + checkerboard vs scalar full-rate) sits at mean 1.434 / max 167 at the same pose,
+so 0.815 is now *better* than the reference path's own reconstruction error.
+
+Fixed in place with no flag: the OuterVec drop mask re-admits an env-qualified lane, and the fill's
+`--deferred_checker_edge_full` skip is additionally gated on `!deferredLightingOuterVecEnabled()`
+(OuterVec cannot evaluate the edge predicate either, so the new flag must not create the same hole
+class). Both are unreachable at the shipped defaults — **no scene sets both** (greets = checkerboard
+with `PreferOuterVec = 0`; city/fountain/crash = OuterVec with no checkerboard) — hence byte-null by
+construction and no flag.
+
+**REPORTED, NOT FIXED, and it is bigger:** under **`--hdr`** the same combination is broken for a
+different reason and remains so. OuterVec writes **nothing** to `g_hdrBuf`; the fill's HDR path
+averages the *neighbours'* `g_hdrBuf` and then stamps `h[3] = 1.0` (covered). So every dropped cell
+becomes "covered, zero radiance" and `Hdr_ActivateNoFog` can no longer lift it from VPage.
+MEASURED at greets `t=4871`: `--deferred_outer_vec --deferred_checkerboard` vs the same with
+`--deferred_checkerboard=0` is **99.94 % of pixels, whole-frame Y 57.6 vs 113.9**. The honest fix is
+either an HDR write in OuterVec or a hard refusal of the combination under `--hdr`; both are larger
+than this audit and neither is reachable by default.
+
+### 12.4 THE SIMD VERDICT — `--deferred_vec`, asked for by name
+
+**The flag's own documentation is STALE, in two places.** `FeatureFlags.def:32` and
+`FeatureFlags.h:24-26` both say *"still omits 2D spot-shadow maps + mirror-clone shadows."* Read the
+code: the vec lane loop calls **`computeMapShadowAtten(tl, gi, ctx, …)`**, and that function's own
+contract comment says it covers *"mirror-clone source maps (srcSm), mirror-clone source cubes
+(srcCube), and the light's own 2-D spot map (smIdx + PCF)"* — i.e. exactly the two things the caveat
+claims are missing. It also calls `resolveCubeAtten` per lane and folds the result into
+`coneShadowAtten` so the templated spec loop applies it. **That caveat describes a state the code
+left behind.**
+
+**MEASURED (greets `t=4871`, arm64, vec vs scalar, same binary):**
+
+| arm | changed px | mean \|ΔY\| on changed | max chan Δ | px > 10 luma |
+|---|--:|--:|--:|--:|
+| `--deferred_vec` (shipped `--pbr`) | 32,967 (1.59 %) | **7.931** | **164** | **4,643** |
+| `--deferred_vec --deferred_vec_force` | 148,246 (7.15 %) | 2.079 | 164 | 4,663 |
+| `--deferred_vec --prof_no_spec` (**diffuse only**) | 16,350 (0.79 %) | **0.377** | **6** | **0** |
+| `--deferred_vec --no-pbr` (**Blinn-Phong both sides**) | 63,739 (3.07 %) | 1.005 | **12** | **0** |
+| `--deferred_vec --no-shadows` | 66,138 (3.19 %) | 4.996 | 168 | 6,438 |
+| `--deferred_vec --no-pom_horizon` | 32,967 | 7.931 | 164 | 4,643 (**identical to shipped**) |
+
+Read the ablations in order and the answer is forced:
+
+1. **The diffuse term AGREES.** With specular removed, the two kernels differ by max **6/255** and
+   **0 px** above 10 luma. That is float noise, and it is also the measurement that retires the
+   stale shadow caveat — a vec path missing the 2-D spot map or the mirror-clone shadow could not
+   agree with the scalar path to 6/255 on the diffuse term.
+2. **It is not the shadows** — the gap *survives* `--no-shadows`.
+3. **It is not `--pom_horizon`** — that arm is bit-identical to the shipped one.
+4. **It is the GGX lobe, and only under `--pbr`.** Under Blinn-Phong the same vec path lands at max
+   12/255 with 0 px over 10 luma.
+
+**Mechanism, isolated by a roughness sweep** (`--pbr_roughness` forces the lobe width on both arms):
+
+| `--pbr_roughness` | changed px | mean \|ΔY\| | max chan Δ | px > 10 luma |
+|---|--:|--:|--:|--:|
+| **0.2** (≈ the shipped gloss-48/64 lobes) | 33,474 | **8.379** | **178** | **5,091** |
+| 0.5 | 25,708 | 0.421 | 6 | 0 |
+| 1.0 | 17,005 | 0.374 | 6 | **0** |
+
+At `rough = 1` the GGX denominator `NdotH²(a²−1)+1` is **exactly 1**, D is constant, and the
+divergence collapses to the same 0.37 / max-6 floor as the diffuse-only arm. At `rough = 0.2` that
+denominator is `1 − 0.9984·NdotH²`, which is ≈0.0016 at the highlight core, and `D ∝ 1/d²` — so the
+lobe **amplifies small input errors by orders of magnitude at exactly the pixels that are bright**.
+
+The only arithmetic difference between the two GGX implementations is precision, read from source:
+`run_vec_ggx_loop` takes `_mm256_rsqrt_ps` for both `lenInv` and `hInv` and `_mm256_rcp_ps` for the
+D denominator, `Gv`, `Gl` and `1/(4·NdotV)` — **five approximate reciprocals with no
+Newton-Raphson** — where the scalar body uses exact divides and the NR-corrected `fast_rsqrt`. On
+x86 those are the native 12-bit `rsqrtps`/`rcpps`; on arm64 simde lowers them to bare
+`vrsqrteq_f32` / `vrecpeq_f32` (`FDS/simde/x86/sse.h`), an ~8-bit estimate — **coarser than x86, not
+finer.** (The lobe-width sweep is MEASURED; the attribution to these five instructions is
+READ-FROM-SOURCE by elimination, since nothing else in the two GGX bodies differs at
+`metalness = 0`.)
+
+**Structural divergences the vec path also carries** (source, not measured — each needs a pose I
+could not make fire at t=4871): the **mirror-bounce window portal** (`bouncePortalReject`) is absent
+from the vec diffuse loop; **`--pom_horizon`** is absent; **`--metal_spec_f0`** is absent from
+`run_vec_ggx_loop` (fixed F0 0.04) and that flag is now **default 1**, so on any conductor the vec
+path's direct lobe is a different quantity — the mech has no metalness, which is why it does not
+show at this pose.
+
+**VERDICT.** *Can the two be reconciled?* **The diffuse halves already are** — to 6/255, including
+every shadow term. **The specular halves cannot be, as written**: the vec GGX is not a different
+model, it is the *same* model evaluated through five un-refined reciprocal estimates, and a
+`rough ≈ 0.2` lobe has no tolerance for that. Reconciling means one NR step on each (the OuterVec
+normal decode already carries exactly this fix, with a comment naming the identical failure —
+"the raw 12-bit rsqrt … snapped the reflected direction ~0.35° per LUT-cell crossing"), which
+gives back most of what the approximations bought. **So the x86 default is shipping a different
+image from arm64's** — 4,643 px more than 10 luma apart on one greets frame — and the flag doc
+does not say so; it warns about shadows, which are fine. **Not fixed here**: I cannot measure the
+x86 arm, and adding NR to the vec lobe is a perf decision on the platform where the path is ON by
+default.
+
+### 12.5 The QUARTER path
+
+`--deferred_quarter` has **no kernel of its own**. It reuses `Render_DeferredLighting_Tile` for
+wave 1 (same drop test, `(px|py)&1`) and `Render_DeferredLighting_TileFill` for wave 2 (different
+neighbour *pattern* — 2 horizontal, 2 vertical or 4 diagonal — into the *same* averaging and the
+*same* reduced fallback). So it inherits §12.2 exactly, over a **3× larger** dropped set.
+`--deferred_checker_edge_full` covers it: `fillFallsBackHere()` implements both neighbour patterns.
+Not measured — no scene ships `--deferred_quarter`.
+
+### 12.6 The FORWARD path — deliberate, but the contract described it WRONG
+
+§0 and §2 of this document say the forward/transparent arm runs "Blinn-Phong". **For the forward
+filler that is false.** `grep -c "NdotH\|Specular\|Glossiness" FDS/RENDER/Lighting.cpp
+FDS/FILLERS/TheOtherBarry.h` returns **0 and 0** (MEASURED). The forward path has **no specular
+term of any kind** — `Material::Specular`, `Glossiness` and `SpecMul` are never read on it, and
+`The_Specular_Gouraud` / `The_Specular_TGouraud` in `FILLERS.CPP` are inside a comment block and
+unreferenced. What it has: flat `Sc->Ambient` **per MESH** (from `Faces[0].Txtr`, not per pixel),
+per-vertex Lambert × linear falloff, the spot cone, per-vertex `sqrt` fog, a fixed **50 %**
+`env + albedo>>1` blend for `Face_Reflective` with **no Fresnel and no roughness lobe**, and no
+shadow / AO / normal / roughness / metal map at all. It writes 8-bit VPage and stamps the
+`0xFFFFFFFF` sentinel so the deferred kernel skips those pixels.
+
+**DELIBERATE — do not "fix".** It is the 1998 vertex model, it survives only for
+`Face_Reflective` and `Mat_Additive` faces plus the RTT/shard forward fallbacks, and the GPU arm
+does not implement its layers at all. **Corrected in the record**, not changed in the code. One
+genuine unit wrinkle worth keeping: those VPage pixels are later lifted into `g_hdrBuf` and
+**squared** by `Hdr_ActivateNoFog` even though `texel·light/256` was never gamma-encoded — the
+same mixed-unit class as E0.
+
+The **transparent** kernel is a separate story and is closer to the reference: it has the normal
+map, the LOD fade, `SpecMul`, the `--hdr_linear` write and (under `--xpar_pbr`, default 0) AO,
+roughness and metal maps. What it lacks: SH ambient (flat `Sc->Ambient`), **any** shadow tap — note
+`surfaceShadowId` is computed and then **never read**, a dead local — the GGX lobe, and the env
+compose. Recorded as SCOPE per §0; unchanged.
+
+### 12.7 The OFFSCREEN passes
+
+| pass | kernel it runs | what it gets |
+|---|---|---|
+| **shadow cube / 2-D bake** (`Shadows.cpp`) | `MekaleleShadowDepth` | **Depth + polyId only, no colour.** Not a shading path. Recorded so nobody audits it again. |
+| **env probe bake** (`EnvBake.cpp renderSixFaces`) | the **full `renderFrame`** at face res, `RenderPath::ForceDeferred`, `skipVolumetric=true` | so it gets whichever wave-1 kernel the scene's policy selects — **including OuterVec on city/fountain/crash**, i.e. probes baked with no shadows and no GGX. Capture is a **deliberate mix**: linear `g_hdrBuf` where `h[3] > 0`, the 8-bit LDR VPage everywhere else (sky, void, forward-filler content). E0/§9.3 own the encoding half. |
+| **greets mirror RTT** (`GreetsMirror.cpp`) | `Render_DeferredLighting` with `inlineDispatch`, at RTT res | **it DOES get the HDR-linear composite** — `Hdr_BeginFramePass(texW, texH)` is called first, so `Hdr_WritableFor` passes. **Two comments say otherwise and are stale**: `Hdr.h:44-51` and the `hdrWrite` comment in `DeferredSurfaceKernel.cpp` both assert the RTT "never ran `Hdr_BeginFrame`, so `g_hdrBuf` is unsized there". **REPORTED, NOT FIXED:** only order-1 slots that carry a `textTex` publish the pre-tonemap float radiance (`Mat->hdrRefl`); every other slot — order-2, recursive, `--no-hdr`, `--no-shard_deferred` — has ACES + the sqrt encode applied at RTT res and then **again** at the frame tonemap. The reflection is **tonemapped twice**. |
+| **mirror-shatter shard bake** (`MirrorShatter.cpp`) | `Render_DeferredLighting` with `inlineDispatch`, at `greets_shard_res = 64` | **LDR gamma composite** — there is no `Hdr_*` call anywhere in that file, so `Hdr_WritableFor(64,64)` is false and the 250 cap is live. The 8-bit atlas is then used as an ordinary albedo texture, which the main kernel **squares** under `--hdr_linear`. That is exactly E0's "a gamma value entering the linear composite", on the shard atlas, and **it has no flag** the way `--env_bake_linear` does. REPORTED, NOT FIXED — unpriced, and `MirrorShatter.cpp` was not this audit's file to change. |
+
+### 12.8 What this section changes, and what it leaves owed
+
+**Fixed:** `--deferred_checker_edge_full` (default OFF, byte-null, numbers in §12.2); the
+OuterVec/checkerboard hole class (no flag, unreachable at defaults, numbers in §12.3).
+
+**Byte-null certified** differentially against a binary built from the identical tree with the
+kernel diff reverted: greets `778fa6ac…`, fountain `8db68ccb…` (= its recorded pin), city
+`3cbe42b1…` — all three identical on both arms. `tools/render_gate.sh` **3/3 PASS**.
+`make wasm` builds.
+
+**Owed, in the order I would take them:**
+
+1. **The vec GGX lobe** (§12.4) — one Newton-Raphson step on each of the five reciprocals, measured
+   on x86 where the path is default ON. This is the one that ships a different image to different
+   users.
+2. **OuterVec has no HDR write** — city, fountain and crash all run it by scene policy
+   (`Scene::PreferOuterVec = 1`, `CITY.CPP`, `FOUNTAIN.CPP`, `CRASH.CPP`) and it is the *only* kernel
+   with no `g_hdrBuf` store at all, so their whole `--hdr` frame is the clamped 8-bit LDR combine
+   lifted by `Hdr_ActivateNoFog`. Priced here for the first time: on **fountain t=2500**, OuterVec
+   against the scalar wave-1 kernel is **285,868 px (13.79 %), mean \|ΔY\| 3.774, max chan Δ 205,
+   20,229 px > 10 luma** (MEASURED, `--no-deferred_outer_vec` A/B). On **city t=1961** the same A/B
+   is **91,270 px, mean 0.429, max 3, 0 px > 10 luma** — inert, because city's materials are matte
+   and it has no live shadow/AO/metal term for OuterVec to be missing. So this is a **fountain**
+   problem, not a city one.
+3. **The mirror RTT double tonemap** and the **shard atlas gamma-into-linear** (§12.7).
+4. **`--metal_spec_f0` is default 1 and three of the seven kernels do not implement it** — the vec
+   GGX, OuterVec and the wave-2 fill. Inert wherever there is no metalness map; live on `momy`,
+   `amudim`, `screen emiter`.
+5. **The two stale doc strings** — the `deferred_vec` shadow caveat (`FeatureFlags.def:32`,
+   `FeatureFlags.h:24-26`) and the mirror-RTT "g_hdrBuf is unsized there" comments (`Hdr.h:44-51`
+   and the kernel). Both actively mislead; neither file was mine to edit under the contention.

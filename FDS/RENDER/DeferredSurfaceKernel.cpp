@@ -1376,6 +1376,74 @@ static inline void EnvSpecComposeScalar(
 	}
 }
 
+// --deferred_checker_edge_full (docs/SHADING_CONTRACT.md §12).
+//
+// THE SHARED PREDICATE. The wave-2 fill averages a dropped cell from its
+// already-shaded neighbours when they are compatible (same matID + similar
+// normal + similar Z); when NO neighbour is compatible it falls through to its
+// own REDUCED scalar re-shade (no --pbr GGX lobe, no shadow term of any kind,
+// no AO, no normal-map LOD fade, no --hdr_metal_kill; and it applies the spot
+// cone to specular where wave 1 does not). That is the SAME defect
+// --deferred_checker_env_full closed for env-reflective pixels, on a different
+// pixel set: every material / normal / depth EDGE, i.e. silhouettes.
+//
+// The predicate reads ONLY G-buffer + ZPage state, so wave 1 can evaluate it
+// exactly as the fill will. One function, two call sites — they cannot drift.
+// Returns true iff the fill would take its full-shade fallback here.
+static inline bool fillFallsBackHere(const meka::GBuffer &gb, const word *ZPage16,
+                                     int XRes, int YRes, int px, int py,
+                                     bool quarter,
+                                     bool normalCheck, float normalCos,
+                                     bool zCheck, float zJump)
+{
+	const size_t i = size_t(py) * XRes + px;
+	const word zEnc = ZPage16[i];
+	if (zEnc == 0) return false;              // fill skips it entirely
+	const uint32_t matIDc = (gb.txtr[i] >> 20) & 0xFF;
+	// Centre normal decoded LAZILY — the matID compare rejects most neighbours
+	// first, and on a continuous surface the very first neighbour passes, so
+	// paying the oct decode up front would tax every dropped cell in the frame.
+	float ncX = 0, ncY = 0, ncZ = 0;
+	bool  ncDone = false;
+	// Mirrors TileFill's neighborCompatible() term for term.
+	auto compatible = [&](size_t ni) -> bool {
+		if (((gb.txtr[ni] >> 20) & 0xFF) != matIDc) return false;
+		if (normalCheck) {
+			if (!ncDone) { meka::oct_decode_u32(gb.normal[i], ncX, ncY, ncZ); ncDone = true; }
+			float nx, ny, nz;
+			meka::oct_decode_u32(gb.normal[ni], nx, ny, nz);
+			if ((ncX*nx + ncY*ny + ncZ*nz) < normalCos) return false;
+		}
+		if (zCheck) {
+			const word zN = ZPage16[ni];
+			if (zN == 0) return false;
+			const int diff = int(zN) - int(zEnc);
+			const int absDiff = diff < 0 ? -diff : diff;
+			if (float(absDiff) > zJump * float(zEnc)) return false;
+		}
+		return true;
+	};
+	if (quarter) {
+		const bool odd_x = (px & 1) != 0, odd_y = (py & 1) != 0;
+		if (odd_x && !odd_y) {
+			if (px > 0        && compatible(i - 1)) return false;
+			if (px < XRes - 1 && compatible(i + 1)) return false;
+		} else if (!odd_x && odd_y) {
+			if (py > 0        && compatible(i - size_t(XRes))) return false;
+			if (py < YRes - 1 && compatible(i + size_t(XRes))) return false;
+		} else {
+			if (px > 0 && py > 0               && compatible(i - size_t(XRes) - 1)) return false;
+			if (px < XRes - 1 && py > 0        && compatible(i - size_t(XRes) + 1)) return false;
+			if (px > 0 && py < YRes - 1        && compatible(i + size_t(XRes) - 1)) return false;
+			if (px < XRes - 1 && py < YRes - 1 && compatible(i + size_t(XRes) + 1)) return false;
+		}
+	} else {
+		if (px > 0        && compatible(i - 1)) return false;
+		if (px < XRes - 1 && compatible(i + 1)) return false;
+	}
+	return true;
+}
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
@@ -1397,6 +1465,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// --deferred_checker_env_full: see the drop test in the pixel loop.
 	const bool checkerEnvFull = (checker || quarter)
 	    && fds::FeatureFlags::deferred_checker_env_full();
+	// --deferred_checker_edge_full: same defect as the env row, on the fill's
+	// OTHER full-shade trigger — the material/normal/Z EDGE. Predicate below.
+	const bool checkerEdgeFull = (checker || quarter)
+	    && fds::FeatureFlags::deferred_checker_edge_full();
+	const float w1QNormalCos   = checkerEdgeFull ? fds::FeatureFlags::quarter_normal_cos() : 0.0f;
+	const bool  w1QNormalCheck = checkerEdgeFull && w1QNormalCos > 0.0f;
+	const float w1QZJump       = checkerEdgeFull ? fds::FeatureFlags::quarter_z_jump() : 0.0f;
+	const bool  w1QZCheck      = checkerEdgeFull && w1QZJump > 0.0f;
 	const bool useVec         = deferredLightingVecEnabled();
 	const bool sVecForce      = fds::FeatureFlags::deferred_vec_force();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
@@ -1567,12 +1643,25 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const bool drop = checker ? (((px ^ py) & 1) != 0)
 				                          : (((px | py) & 1) != 0);
 				if (drop) {
-					bool keepForEnv = false;
-					if (checkerEnvFull && envTabG) {
+					bool envHere = false;
+					if (envTabG && (checkerEnvFull || checkerEdgeFull)) {
 						const uint32_t m32e = gb.txtr[size_t(py) * XRes + px];
-						keepForEnv = envTabG[(m32e >> 20) & 0xFF] != nullptr;
+						envHere = envTabG[(m32e >> 20) & 0xFF] != nullptr;
 					}
-					if (!keepForEnv) continue;
+					bool keep = checkerEnvFull && envHere;
+					// --deferred_checker_edge_full: the fill has a SECOND
+					// full-shade trigger — "no compatible neighbour", i.e. every
+					// material/normal/depth edge — and it re-shades those with
+					// the same REDUCED kernel the env row was about. Shade them
+					// here instead, with the real one. Env pixels are excluded:
+					// the fill force-fulls those by a different rule and they
+					// belong to --deferred_checker_env_full, not to this flag.
+					if (!keep && checkerEdgeFull && !envHere)
+						keep = fillFallsBackHere(gb, ZPage16, XRes, ctx.yres,
+						                         px, py, quarter,
+						                         w1QNormalCheck, w1QNormalCos,
+						                         w1QZCheck, w1QZJump);
+					if (!keep) continue;
 				}
 			}
 
@@ -4163,6 +4252,30 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	// The omni loop builds a per-lane mask against broadcast(tl.mirrorId[n]).
 	alignas(32) uint32_t lane_mirrorId[8];
 
+	// --deferred_checker_env_full parity with the scalar wave-1 kernel. THE BUG
+	// this closes: the wave-2 fill skips an env-reflective dropped cell when the
+	// flag is on (`envForceFull && checkerEnvFullG`, TileFill) because the SCALAR
+	// wave 1 keeps it — but THIS kernel dropped it on parity alone, so under
+	// `--deferred_outer_vec --deferred_checkerboard` those cells were shaded by
+	// NEITHER wave. MEASURED on greets t=4871: 17,897 px, mean |dY| 111.6, max
+	// 220 (i.e. unshaded holes) between the flag on and off. Latent at the
+	// shipped defaults — no scene sets both — hence no new flag: with the flag
+	// off, or with checker/quarter off, `envFullKeep` is the identity.
+	const bool checkerEnvFullOV = (checker || quarter)
+	    && fds::FeatureFlags::deferred_checker_env_full() && envTabG != nullptr;
+	auto envFullKeep = [&](__m256i keep, size_t base) -> __m256i {
+		if (!checkerEnvFullOV) return keep;
+		alignas(32) int32_t kArr[8];
+		_mm256_store_si256((__m256i*)kArr, keep);
+		bool any = false;
+		for (int k = 0; k < 8; ++k) {
+			if (kArr[k]) continue;
+			const uint32_t mid = (gb.txtr[base + k] >> 20) & 0xFF;
+			if (envTabG[mid] != nullptr) { kArr[k] = -1; any = true; }
+		}
+		return any ? _mm256_load_si256((const __m256i*)kArr) : keep;
+	};
+
 	for (int py = y1; py < y2; ++py) {
 		// vec body: groups of 8 pixels
 		int px = x1;
@@ -4223,15 +4336,22 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					_mm256_xor_si256(px_lane, _mm256_set1_epi32(py)),
 					_mm256_set1_epi32(1));
 				__m256i keep = _mm256_cmpeq_epi32(parity, _mm256_setzero_si256());
+				keep = envFullKeep(keep, i);   // see envFullKeep
 				mask_alive = _mm256_and_si256(mask_alive, keep);
 			}
 			// Quarter-rate: keep only lanes where both px AND py even.
 			if (quarter) {
-				if (py & 1) continue;  // entire row skipped in wave-1
+				// Odd rows are entirely wave-2 — but under
+				// --deferred_checker_env_full the fill SKIPS env-reflective
+				// cells expecting wave 1 to have taken them, so the row can
+				// only be skipped wholesale when that flag is off.
+				if ((py & 1) && !checkerEnvFullOV) continue;
 				__m256i lane_idx = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
 				__m256i px_lane  = _mm256_add_epi32(_mm256_set1_epi32(px), lane_idx);
 				__m256i parity_x = _mm256_and_si256(px_lane, _mm256_set1_epi32(1));
-				__m256i keep = _mm256_cmpeq_epi32(parity_x, _mm256_setzero_si256());
+				__m256i keep = (py & 1) ? _mm256_setzero_si256()
+				                        : _mm256_cmpeq_epi32(parity_x, _mm256_setzero_si256());
+				keep = envFullKeep(keep, i);
 				mask_alive = _mm256_and_si256(mask_alive, keep);
 			}
 
@@ -4991,6 +5111,15 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	// rate in wave 1, so this fill must leave them alone.
 	const bool checkerEnvFullG = (checker || quarter)
 	    && fds::FeatureFlags::deferred_checker_env_full();
+	// --deferred_checker_edge_full: wave 1 already shaded every cell whose
+	// neighbours are all incompatible (the fill's OTHER full-shade trigger).
+	// Only the SCALAR wave-1 kernel evaluates that predicate — the OuterVec
+	// kernel drops on parity alone — so skipping here under OuterVec would
+	// leave those cells shaded by neither wave (the hole class this commit
+	// closes for the env row). Fall back to the reduced re-shade there.
+	const bool checkerEdgeFullG = (checker || quarter)
+	    && fds::FeatureFlags::deferred_checker_edge_full()
+	    && !deferredLightingOuterVecEnabled();
 	const bool hdrWrite     = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);   // HDR B1: see main kernel
 	const bool hdrLinear    = hdrWrite && fds::FeatureFlags::hdr_linear();  // HDR B2
 	// Normal-similarity threshold for the quarter fill predicate. matID
@@ -5306,6 +5435,14 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				}
 			}
 			if (matched) continue;
+			// --deferred_checker_edge_full: reaching here means NO neighbour was
+			// compatible — the exact condition wave 1's fillFallsBackHere()
+			// predicts — so wave 1 already shaded this pixel with the REAL
+			// kernel. `!envForceFull` because an env pixel arrives here without
+			// the averaging having run at all (it is force-full by a different
+			// rule), and wave 1 leaves those to --deferred_checker_env_full.
+			// Free: no second predicate evaluation, `matched` IS the predicate.
+			if (checkerEdgeFullG && !envForceFull) continue;
 
 			// Fallback path — replays the wave-1 kernel for this pixel.
 			// We don't expect this branch to be hot (most frame area is
