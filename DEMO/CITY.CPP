@@ -2554,8 +2554,50 @@ void Initialize_City()
 
 	if ((useCube || cityEnvPixel) && !skipCubeMap) {
 		constexpr int CITY_CUBE_FACE_RES = 512;
+		// BAKE-AFFECTING FLAGS MUST BE IN THE KEY. The cube is produced by the
+		// ordinary software rasterizer, so any flag that changes a rendered
+		// pixel changes the cube — but ComputeCityPanoramaCacheKey only sees
+		// CITY.FLD's bytes, the dims, this salt and the building names, and the
+		// filename is FIXED. A differing bake therefore OVERWRITES the file
+		// silently, and a stale one is never invalidated.
+		//
+		// That cost a whole investigation on 2026-08-08: the `--mips` default
+		// flip changed the bake, the user's Runtime/cache kept the pre-flip cube
+		// (so his pin still passed), a fresh worktree cold-baked a different one
+		// (so the pin "drifted"), and the --no-mips control could not exonerate
+		// the flip because --no-mips changes the FRAME and cannot un-bake a cube
+		// already on disk. See docs/SESSION_STATE.md, commit ad55e94.
+		//
+		// Fold in every flag the bake reads. Adding a flag here is cheap; the
+		// cost of omitting one is a silent wrong-content cache that survives
+		// rebuilds. The POM caches already do this properly — see
+		// ConeExactCacheKey in DEMO/MeshOps.cpp, which hashes the real input
+		// texels plus every parameter.
+		uint32_t bakeFlagSalt = 0u;
+		{
+			using FF = fds::FeatureFlags;
+			const uint32_t bits =
+			      (FF::mips()            ? 1u <<  0 : 0u)
+			    | (FF::mip_fix()         ? 1u <<  1 : 0u)
+			    | (FF::mip_aniso()       ? 1u <<  2 : 0u)
+			    | (FF::hdr_metal_kill()  ? 1u <<  3 : 0u)
+			    | (FF::env_bake_linear() ? 1u <<  4 : 0u)
+			    | (FF::env_bake_fix()    ? 1u <<  5 : 0u)
+			    | (FF::pbr()             ? 1u <<  6 : 0u)
+			    | (FF::metal_map()       ? 1u <<  7 : 0u)
+			    | (FF::roughness_map()   ? 1u <<  8 : 0u)
+			    | (FF::ao_map()          ? 1u <<  9 : 0u)
+			    | (FF::deferred()        ? 1u << 10 : 0u);
+			// mip_bias is a float and it moves the selected level, so it is
+			// bake-affecting too; quantize rather than hash the raw bits so
+			// harmless last-digit noise doesn't thrash a 426 MiB artifact.
+			const uint32_t biasQ = uint32_t(int32_t(FF::mip_bias() * 256.0f)) & 0xFFFFu;
+			bakeFlagSalt = bits ^ (biasQ << 12);
+		}
 		const uint32_t cubeSalt = (0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f))
-		                          + 1u;   // v2: flares muted in the bake
+		                          + 1u      // v2: flares muted in the bake
+		                          + 1u      // v3: bake-affecting flags folded in
+		                          + bakeFlagSalt;
 		const size_t faceBytes = size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4;
 		fprintf(stderr, "[CITY] env_cube on — 6 padded faces/building @ %d^2 (fov %.1f)\n",
 		        CITY_CUBE_FACE_RES, fds::EnvCube_FaceFovDegrees());
@@ -2574,7 +2616,20 @@ void Initialize_City()
 		// salted file would double a ~450 MB artifact. Fresh bake ≈ 4 s at
 		// init; the re-shade itself depends on live water_* flag values, so
 		// re-deriving it each run also keeps those tunables live.
-		const char* kCubeCacheFile = "cache/city_envmap_cube.bin";
+		// KEY IN THE FILENAME, so variants COEXIST instead of overwriting each
+		// other. A fixed name means flipping a bake-affecting flag silently
+		// replaces the other variant's 426 MiB artifact and the next run under
+		// the old flags cold-bakes again — thrashing, and worse, a pin taken
+		// under one flag set can be invalidated by a run under another with no
+		// commit and no trace. Same shape as pom_cone_exact_%016llx.bin
+		// (DEMO/MeshOps.cpp). Old fixed-name files are simply never hit again;
+		// they are safe to delete and are NOT auto-removed here, because
+		// silently deleting a ~450 MB file the user may have deliberately kept
+		// is not this code's call.
+		char cubeCacheName[96];
+		std::snprintf(cubeCacheName, sizeof cubeCacheName,
+		              "cache/city_envmap_cube_%08x.bin", cubeSalt);
+		const char* kCubeCacheFile = cubeCacheName;
 		const bool cacheOn = fds::FeatureFlags::city_envmap_cache() && !liveWaterShade;
 		uint64_t ck = 0;
 		if (cacheOn)
