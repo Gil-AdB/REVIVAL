@@ -25,9 +25,12 @@
 >   **`--pom_shell_lid_planar`** (new, default 0, byte-null) removes the crease at
 >   zero measured cost on void/black, the silhouette and perf. It does **not** fix
 >   the silhouette — two defects, two fixes.
-> - **NOT MINE, FLAGGED:** the **city pin does not reproduce** from a clean
->   `97b13fd` build — `5476be8c` vs `e1221676`, and the `--no-mips --no-mip_fix`
->   control also fails (`b88ecb7b` vs `37e62845`), so the mip flip is not the cause.
+> - **NOT MINE, FLAGGED: the city pin does not reproduce, stably (2/2)** —
+>   `5476be8c` vs the recorded `e1221676`, and the `--no-mips --no-mip_fix` control
+>   also fails (`b88ecb7b` vs `37e62845`), so the mip flip is not the cause; the
+>   `--hdr_metal_kill` re-pin records that city did not move for that either.
+>   A real drift with no owner, most likely the env-reflection work (this recipe
+>   IS the env-pixel gate).
 
 > ## 2026-08-08 — MIP SELECTION IS ON BY DEFAULT; ALL SCENE PINS MOVED
 >

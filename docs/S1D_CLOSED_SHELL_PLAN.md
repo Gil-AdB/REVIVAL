@@ -3404,16 +3404,25 @@ cmake -S /path/rev-s1d8 -B /path/rev-s1d8/build -G Ninja \
        --pom_shell_census 2>&1 | grep QUADPLANE
 ```
 
-**Gates at this commit:** `render_gate` 3/3 PASS (`4ac809e5` / `b41894f9` /
-`166fa25a`), greets pin **`adfba8ba`** (mips ON) and **`f1297141`**
-(`--no-mips --no-mip_fix`), fountain **`8db68ccb`** — all byte-exact with the new
-flag defaulted off.
+**Gates.** All measurement above ran on `97b13fd`, where the greets pin is
+**`adfba8ba`** (mips ON) and **`f1297141`** (`--no-mips --no-mip_fix`), plus
+`render_gate` 3/3 (`4ac809e5` / `b41894f9` / `166fa25a`) and fountain
+**`8db68ccb`** — all byte-exact.
 
-**NOT A GATE, AND NOT MINE — the city pin does not reproduce from a clean
-`97b13fd` build.** `FDS_CITY_ENV_PIXEL=1 --snapshot=city@t=1961 --deferred` gives
-`5476be8c…` against the recorded `e1221676…`, **and the `--no-mips --no-mip_fix`
-control also fails** (`b88ecb7b…` against `37e62845…`). Both halves of the pair
-moving rules out the mip flip, and `--pom_shell_lid_planar` cannot be involved (it
-is default off and never runs outside `PomShell_Build`). Something between the
-2026-08-08 city re-pin and `97b13fd` moved city — the env-reflection work is the
-obvious suspect since this recipe is the env-pixel gate. Flagged, not chased.
+**Byte-null proof for `--pom_shell_lid_planar`, taken the only way that is valid
+on a tree four agents are committing to: against its OWN PARENT, same binary
+recipe.** By the time this landed the greets pin had already moved to
+**`6780642b`** under another agent's `--hdr_metal_kill` default 0→2. Built at the
+parent `06b6291` it gives `6780642b`; built at this commit it gives `6780642b`.
+Identical, so this commit moves nothing.
+
+**NOT A GATE, AND NOT MINE — the city pin does not reproduce.**
+`FDS_CITY_ENV_PIXEL=1 --snapshot=city@t=1961 --deferred` gives `5476be8c…`
+against the recorded `e1221676…`, **stably (2/2 identical runs, so it is a real
+drift and not the old nondeterminism)**, and the `--no-mips --no-mip_fix` control
+also fails (`b88ecb7b…` against `37e62845…`). Both halves of the pair moving rules
+out the mip flip; `--pom_shell_lid_planar` cannot be involved (default off, never
+runs outside `PomShell_Build`); and the `--hdr_metal_kill` re-pin explicitly
+records that city did **not** move for it. So something else between the
+2026-08-08 city re-pin and `97b13fd` moved it — the env-reflection work is the
+obvious suspect, since this recipe is the env-pixel gate. Flagged, not chased.
