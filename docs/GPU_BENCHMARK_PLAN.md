@@ -1743,6 +1743,28 @@ fountain's `daimond`, `spc1 in engine` and `in engine` author **`Luminosity = 10
 frame moves **21.524 → 21.567** mean |dY|, against removing a 25× clamp on a whole
 scene.
 
+#### The pairs, and t=5743 as a regression check
+
+`scratchpad/pairs/{t2000,t5743,fountain,projector,momy}_final_{sbs,diff}.png` —
+CPU top / GPU bottom in each `_sbs`, signed luma difference 4× amplified in each
+`_diff` (red = GPU brighter, blue = GPU darker, grey = agreement).
+
+The **primary review pose was checked for regression and improved**: t=5743
+against a same-day reference is **+1.220 signed / 12.432 mean |dY|**, against
+§6.2e's 13.10. Its region breakdown now reads ceiling +7.18 / upper −1.88 /
+mid −1.15 / floor +2.36 — the ceiling remains the worst region and remains the
+predicted signature of the ambient-source gap (§6.2d), untouched by this round.
+
+At t=2000 the worst region is now **mid (y 430–700) at +13.38 signed / 33.38
+absolute** — the band that holds the screens and the `P_TEXT` content gap. The
+fountain pair's worst region is **floor (y > 700) at −44.60 / 68.85**, which is
+exactly where 8,250 missing water sprites land.
+
+One honesty note on the ledger: the `cone_strength` row **also carries the
+cones-in-mirrors fix**, because both landed in the same build. The latter can only
+touch mirror-panel pixels, which §6.2f measured at 32,831 px (1.6 % of the frame)
+at t=2000, so that row is dominated by `cone_strength`. Not separately priced.
+
 #### New instruments (offscreen stays the default; no window is ever opened)
 
 `[XPAR]` census (per-material transparency flags, `XparBlendAlpha`, `Transparency`,
