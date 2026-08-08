@@ -531,6 +531,32 @@ struct EnvPanoStore {
     // Computed once (the reflective owner geometry is static) and cached.
     WorldAabb             ownerFaceAabb;
     bool                  ownerFaceAabbDone = false;
+
+    // ── ENVDYN A4: screen-priority scheduling + the interval instrument ───
+    // lastOverlay is the SceneEnv::dynFrame index of the last composite; the
+    // scheduler's ageing term and the --env_dyn_stats histogram both read it.
+    // `everOverlaid` false means "never updated", which must outrank every
+    // aged probe (a probe showing no mech at all is the worst staleness).
+    uint32_t lastOverlay   = 0;
+    bool     everOverlaid  = false;
+    // --env_dyn_stats accumulators, reset at every report. stderr only.
+    uint32_t stWant        = 0;   // frames flagged + a mover in some face
+    uint32_t stWantVisible = 0;   // ...and the owner was on screen
+    uint32_t stUpdates     = 0;   // frames actually composited
+    uint32_t stFaces       = 0;   // faces rendered
+    uint32_t stGapSum      = 0;   // Σ interval, over stUpdates-1 intervals
+    uint32_t stGapMax      = 0;
+    uint32_t stVisStreak   = 0;   // current run of visible-want-but-no-update
+    uint32_t stVisStale    = 0;   // worst such run
+    std::vector<uint32_t> stGaps; // every interval, for the p50
+    // THE POP. The metric "jumpy" actually names: how stale a probe's content
+    // is at the INSTANT its owner comes back on screen. A plain max-interval is
+    // censored (a probe that goes off screen and never returns before the
+    // window ends never closes its interval, so the legacy path's off-screen
+    // staleness does not appear in it at all), and a mean is dominated by the
+    // frames where the probe is visible and refreshing every frame anyway.
+    bool     stPrevVisible = false;
+    uint32_t stPopN = 0, stPopSum = 0, stPopMax = 0;
 };
 struct SceneEnv {
     // Owning stores + Material* → store index (materials with near-identical
@@ -543,6 +569,11 @@ struct SceneEnv {
     // Scene AABB proxy (world), computed once.
     float boxMin[3] = {}, boxMax[3] = {};
     bool  boxValid = false;
+    // ENVDYN A4: EnvDynamic_Overlay call counter (the scheduler's clock) and
+    // the --env_dyn_stats reporting window.
+    uint32_t dynFrame = 0;
+    uint32_t statFrom = 0;
+    double   statMs = 0.0;
 };
 std::map<Scene*, SceneEnv> g_envByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
@@ -1351,6 +1382,97 @@ WorldAabb materialFaceAabb(Scene* sc, const Material* M) {
     return out;
 }
 
+// ENVDYN A4 — the scheduler's PRIORITY INPUT: how much of the screen the
+// probe's owner covers. Projects the owner faces' world AABB through the MAIN
+// camera (the same 8-corner projection --draw_aabbs uses, so no new pass and
+// no new convention) and returns the screen bbox area as a fraction of the
+// viewport. This is an OVER-estimate twice over — an AABB around the faces,
+// then a screen bbox around its projection — which is the right direction for
+// a priority: it never under-rates a probe the camera is looking at.
+// Straddling the near plane means the owner is effectively on top of the
+// camera, so that case returns the whole screen rather than a meaningless box.
+float ownerScreenAreaFrac(Scene* sc, const WorldAabb& b) {
+    if (!b.valid || !View || XRes <= 0 || YRes <= 0) return 0.0f;
+    const Matrix& Mat = View->Mat;
+    const Vector  P   = View->ISource;
+    const float nearZ = (sc && sc->NZP > 0.01f) ? sc->NZP : 0.01f;
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    int behind = 0;
+    for (int ci = 0; ci < 8; ++ci) {
+        const Vector w = { b.mn[0] + ((ci & 1) ? (b.mx[0] - b.mn[0]) : 0.0f),
+                           b.mn[1] + ((ci & 2) ? (b.mx[1] - b.mn[1]) : 0.0f),
+                           b.mn[2] + ((ci & 4) ? (b.mx[2] - b.mn[2]) : 0.0f) };
+        Vector d = { w.x - P.x, w.y - P.y, w.z - P.z }, s;
+        MatrixXVector(Mat, &d, &s);
+        if (s.z <= nearZ) { ++behind; continue; }
+        const float sx = CntrEX + FOVX * s.x / s.z;
+        const float sy = CntrEY - FOVY * s.y / s.z;
+        if (sx < x0) x0 = sx;  if (sx > x1) x1 = sx;
+        if (sy < y0) y0 = sy;  if (sy > y1) y1 = sy;
+    }
+    if (behind == 8) return 0.0f;
+    if (behind > 0)  return 1.0f;
+    if (x0 < 0.0f) x0 = 0.0f;  if (x1 > float(XRes)) x1 = float(XRes);
+    if (y0 < 0.0f) y0 = 0.0f;  if (y1 > float(YRes)) y1 = float(YRes);
+    const float w = x1 - x0, h = y1 - y0;
+    if (w <= 0.0f || h <= 0.0f) return 0.0f;
+    return (w * h) / (float(XRes) * float(YRes));
+}
+
+// ENVDYN A4 — the deliverable's own instrument (--env_dyn_stats=N). "Jumpy" is
+// a complaint about TIME, so the metric a scheduler change has to move is the
+// distribution of UPDATE INTERVALS, not a frame diff. Prints one row per
+// flagged probe every N overlay frames and resets. stderr only.
+void envDynStatsMaybeReport(SceneEnv& env,
+                            const std::chrono::high_resolution_clock::time_point& t0,
+                            int statEvery, int sched, int budget) {
+    if (statEvery <= 0) return;
+    env.statMs += std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t0).count();
+    if (env.dynFrame - env.statFrom < uint32_t(statEvery)) return;
+    const uint32_t span = env.dynFrame - env.statFrom;
+    std::fprintf(stderr, "[ENVDYN-STATS] %u overlay frame(s), sched=%d "
+                 "budget=%d %s, total overlay %.2f ms (%.3f ms/frame)\n",
+                 span, sched, budget, sched >= 1 ? "face(s)/frame" : "probe(s)/frame",
+                 env.statMs, env.statMs / double(span ? span : 1));
+    for (auto& sp : env.stores) {
+        EnvPanoStore& S = *sp;
+        if (!S.envDynamic || !S.view.isCube || S.staticColorMaster.empty()) continue;
+        std::sort(S.stGaps.begin(), S.stGaps.end());
+        const double meanGap = S.stGaps.empty() ? 0.0
+            : double(S.stGapSum) / double(S.stGaps.size());
+        const uint32_t p50 = S.stGaps.empty() ? 0
+            : S.stGaps[S.stGaps.size() / 2];
+        const uint32_t p95 = S.stGaps.empty() ? 0
+            : S.stGaps[size_t(0.95 * double(S.stGaps.size() - 1))];
+        // CONTENT HASH over every mip level of the store. This is what proves
+        // the touched-faces-only mip refilter in overlayComposite is
+        // bit-identical to the old whole-cube one: run the same sweep with
+        // both and the hashes must match probe for probe. A frame diff cannot
+        // do that job — one snapshot exercises one overlay, and the divergence
+        // (if any) would only appear after many partial updates.
+        uint64_t hsh = 1469598103934665603ull;
+        for (int k = 0; k < S.view.numMips; ++k)
+            for (uint32_t t : S.levels[k]) {
+                hsh ^= t; hsh *= 1099511628211ull;
+            }
+        std::fprintf(stderr, "[ENVDYN-STATS]   %-22s want %4u (vis %4u)  upd %4u"
+            "  faces %4u  interval mean %5.2f p50 %3u p95 %3u max %4u"
+            "  visStall %2u  POP n %3u mean %6.1f MAX %4u  store %016llx\n",
+            S.bakedSkipMat && S.bakedSkipMat->Name ? S.bakedSkipMat->Name : "?",
+            S.stWant, S.stWantVisible, S.stUpdates, S.stFaces,
+            meanGap, p50, p95, S.stGapMax, S.stVisStale,
+            S.stPopN, S.stPopN ? double(S.stPopSum) / double(S.stPopN) : 0.0,
+            S.stPopMax, (unsigned long long)hsh);
+        S.stWant = S.stWantVisible = S.stUpdates = S.stFaces = 0;
+        S.stGapSum = S.stGapMax = S.stVisStale = 0;
+        S.stPopN = S.stPopSum = S.stPopMax = 0;
+        S.stGaps.clear();
+    }
+    env.statFrom = env.dynFrame;
+    env.statMs = 0.0;
+}
+
 // Render the dynamic meshes into store S's touched cube faces and composite
 // them over S's retained static master (A2). Occlusion vs static geometry is
 // the per-face depth compare (ZPage16: larger zEnc = nearer, 0 = untouched).
@@ -1397,13 +1519,51 @@ int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
             "%d were OCCLUDED by static geometry nearer the probe (%d survived)\n",
             mechRendered, mechRendered - mechTexels, mechTexels);
     // Per-face mip refilter (REQUIRED — rough surfaces sample mips; without it
-    // the mech vanishes on rough metals). boxDownsampleCube filters each face
-    // independently. level0 was composited in place; rebuild 1..3 and re-point
-    // the view pointers (the level vectors may reallocate).
-    int frl = fr;
-    for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
-        boxDownsampleCube(S.levels[k-1], frl, S.levels[k]);
-        frl >>= 1;
+    // the mech vanishes on rough metals). level0 was composited in place;
+    // rebuild 1..3 and re-point the view pointers.
+    //
+    // ONLY THE TOUCHED FACES. boxDownsampleCube filters each face
+    // independently (the padding ring means the 2x2 box at a face edge already
+    // averages valid neighbour content, so the filter never crosses a face
+    // boundary) — therefore level k of face f depends ONLY on level k-1 of
+    // face f, and refiltering an untouched face reproduces the texels already
+    // there — proved, not asserted: --env_dyn_stats prints an FNV hash of every
+    // store's whole mip chain, and over a 400-frame greets sweep (t=3800..5400,
+    // 346 probe updates, 931 faces, five probes) all five hashes are IDENTICAL
+    // to the whole-cube version. A frame diff could not have shown that; one
+    // snapshot exercises one overlay.
+    //
+    // Worth MEASURED 3.372 -> 3.076 ms/frame of overlay on that sweep, i.e.
+    // 0.34 ms per probe update — real, but note it does NOT make the refilter
+    // the dominant cost: at 2.7 faces per update the face RENDER is, which is
+    // why the scheduler's budget is a FACE budget.
+    {
+        int frl = fr;
+        for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
+            const int dfr = frl >> 1;
+            if (S.levels[k].size() != size_t(6) * dfr * dfr)
+                S.levels[k].assign(size_t(6) * dfr * dfr, 0);
+            for (int f = 0; f < 6; ++f) {
+                if (!faceMask[f]) continue;
+                const uint32_t* sp = S.levels[k-1].data() + size_t(f) * frl * frl;
+                uint32_t* dp = S.levels[k].data() + size_t(f) * dfr * dfr;
+                for (int y = 0; y < dfr; ++y)
+                    for (int x = 0; x < dfr; ++x) {
+                        const uint32_t a = sp[size_t(2*y)   * frl + 2*x];
+                        const uint32_t b = sp[size_t(2*y)   * frl + 2*x + 1];
+                        const uint32_t c = sp[size_t(2*y+1) * frl + 2*x];
+                        const uint32_t d = sp[size_t(2*y+1) * frl + 2*x + 1];
+                        uint32_t out = 0;
+                        for (int sh8 = 0; sh8 < 32; sh8 += 8) {
+                            const uint32_t s = ((a >> sh8) & 0xFF) + ((b >> sh8) & 0xFF)
+                                             + ((c >> sh8) & 0xFF) + ((d >> sh8) & 0xFF);
+                            out |= ((s + 2) >> 2) << sh8;
+                        }
+                        dp[size_t(y) * dfr + x] = out;
+                    }
+            }
+            frl = dfr;
+        }
     }
     for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
         S.view.mip[k] = S.levels[k].data();
@@ -1504,19 +1664,161 @@ void EnvDynamic_Overlay(Scene* sc) {
     const float range = std::sqrt(diag2) * 2.0f + 1.0f;
 
     const auto tProf0 = std::chrono::high_resolution_clock::now();
+    ++env.dynFrame;
+    const int  sched     = fds::FeatureFlags::env_dyn_sched();
+    const int  statEvery = fds::FeatureFlags::env_dyn_stats();
 
     static int cursor = 0;   // round-robin start so >budget probes share frames
     const size_t N = env.stores.size();
     int processed = 0, facesTotal = 0;
+
+    // ── ENVDYN A4: SCREEN-PRIORITY FACE SCHEDULING (--env_dyn_sched=1) ─────
+    // The legacy path below is left byte-for-byte intact and is still the
+    // default. See the flag help for why the legacy one updates unevenly:
+    // the cursor walks ALL stores (not just the flagged ones) and advances by
+    // processed+1, an off-screen owner is skipped OUTRIGHT (unbounded
+    // staleness → a pop when the camera turns onto it), and the budget is
+    // whole probes regardless of how much screen the owner covers.
+    if (sched >= 1) {
+        const int faceBudget = fds::FeatureFlags::env_dyn_face_budget();
+        const int maxStall   = fds::FeatureFlags::env_dyn_max_stall();
+        const int offPeriod  = fds::FeatureFlags::env_dyn_offscreen_period();
+        struct Cand {
+            size_t   si;
+            int      tier;     // 0 = never overlaid, 1 = visible+stalled,
+                               // 2 = visible, 3 = off-screen refresh
+            float    key;      // ordering WITHIN the tier, descending
+            float    area;
+            uint32_t gap;
+            int      touched;
+            bool     onScreen;
+            bool     mask[6];
+        };
+        std::vector<Cand> cands;
+        cands.reserve(N);
+        for (size_t si = 0; si < N; ++si) {
+            EnvPanoStore& S = *env.stores[si];
+            if (!S.envDynamic || !S.view.isCube || S.staticColorMaster.empty()) continue;
+            const char* nm = S.bakedSkipMat && S.bakedSkipMat->Name ? S.bakedSkipMat->Name : "?";
+            if (S.bakedSkipMat && !S.ownerFaceAabbDone) {
+                S.ownerFaceAabb = materialFaceAabb(sc, S.bakedSkipMat);
+                S.ownerFaceAabbDone = true;
+            }
+            const WorldAabb& owner = S.ownerFaceAabb;
+            // NOT a hard gate any more — off-screen only demotes.
+            const bool onScreen = !(owner.valid && fds::Frustum_CullsAabb(cam, owner));
+            // Mover relevance + touched faces. A probe no mover reaches has
+            // nothing to overlay, so it is not a candidate at any priority.
+            Cand c{}; c.si = si; c.onScreen = onScreen;
+            for (int f = 0; f < 6; ++f) {
+                const Frustum fp = fds::Frustum_FromProbeFace(
+                    (const float[3]){ S.view.bakeX, S.view.bakeY, S.view.bakeZ }, f, range);
+                for (const auto& m : movers)
+                    if (!fds::Frustum_CullsSphere(fp, m.c, m.r)) {
+                        c.mask[f] = true; ++c.touched; break;
+                    }
+            }
+            if (!c.touched) continue;
+            ++S.stWant;
+            if (onScreen) ++S.stWantVisible;
+            if (onScreen && !S.stPrevVisible && S.everOverlaid) {
+                const uint32_t pop = env.dynFrame - S.lastOverlay;
+                ++S.stPopN; S.stPopSum += pop;
+                if (pop > S.stPopMax) S.stPopMax = pop;
+            }
+            S.stPrevVisible = onScreen;
+            // Priority: TIER first, then the tier's own key. Screen area is the
+            // owner's world AABB projected through the MAIN camera.
+            c.area = onScreen ? ownerScreenAreaFrac(sc, owner) : 0.0f;
+            c.gap  = S.everOverlaid ? (env.dynFrame - S.lastOverlay) : 0u;
+            if (!S.everOverlaid) {
+                c.tier = 0; c.key = 0.0f;                    // must run once
+            } else if (onScreen && maxStall > 0 && int(c.gap) >= maxStall) {
+                c.tier = 1; c.key = float(c.gap);            // starvation guard
+            } else if (onScreen) {
+                // Proportional share: in steady state gap ends up inversely
+                // proportional to area, i.e. a probe with 4x the screen gets
+                // 4x the updates — which is exactly "spend the budget where
+                // it is visible" without ever being the ONLY rule (tier 1 caps
+                // what that costs the small ones).
+                c.tier = 2; c.key = c.area * float(c.gap);
+            } else if (offPeriod > 0 && int(c.gap) >= offPeriod) {
+                c.tier = 3; c.key = float(c.gap);            // bounded staleness
+            } else {
+                continue;    // off-screen and fresh enough — NOT a candidate
+            }
+            if (sProf) std::fprintf(stderr, "[ENVDYN-SCHED] '%s' (store %zu): "
+                "onScreen=%d area=%.5f gap=%u touched=%d -> tier %d key %.6f\n",
+                nm, si, int(onScreen), double(c.area), c.gap, c.touched,
+                c.tier, double(c.key));
+            cands.push_back(c);
+        }
+        // Lowest tier first, then highest key; ties broken by store index
+        // (stable_sort over an index-ordered vector), so the schedule is a pure
+        // function of the frame and reproduces run to run.
+        std::stable_sort(cands.begin(), cands.end(),
+                         [](const Cand& a, const Cand& b) {
+                             if (a.tier != b.tier) return a.tier < b.tier;
+                             return a.key > b.key;
+                         });
+        int remaining = faceBudget;
+        for (const Cand& c : cands) {
+            // The PROBE cap (env_dynamic_budget) still binds alongside the face
+            // budget. Keeping it is what makes this scheduler spend the SAME
+            // budget as the legacy path and change only WHERE it goes — which
+            // is the whole claim, and it has to be true for the before/after
+            // interval comparison to mean anything.
+            if (processed >= budget) break;
+            // Whole-probe-at-a-time: a partially updated cube would show the
+            // mech at TWO positions across its own faces. touched <= 6 <= the
+            // default face budget, so the top-priority probe is never truncated.
+            if (c.touched > remaining) continue;
+            EnvPanoStore& S = *env.stores[c.si];
+            const int mechTexels = overlayComposite(sc, S, c.mask);
+            remaining -= c.touched;
+            ++processed;
+            facesTotal += c.touched;
+            if (S.everOverlaid) {
+                const uint32_t gap = env.dynFrame - S.lastOverlay;
+                S.stGapSum += gap;
+                if (gap > S.stGapMax) S.stGapMax = gap;
+                S.stGaps.push_back(gap);
+            }
+            S.lastOverlay = env.dynFrame;
+            S.everOverlaid = true;
+            ++S.stUpdates;
+            S.stFaces += uint32_t(c.touched);
+            S.stVisStreak = 0;
+            if (sProf) std::fprintf(stderr, "[ENVDYN-SCHED] '%s' (store %zu): OK — "
+                "%d face(s), %d mech texel(s), %d face budget left\n",
+                S.bakedSkipMat && S.bakedSkipMat->Name ? S.bakedSkipMat->Name : "?",
+                c.si, c.touched, mechTexels, remaining);
+        }
+        // Worst-case bookkeeping: a run of frames where the owner was ON SCREEN
+        // and wanted an update but did not get one is exactly what a viewer
+        // sees as a stale reflection.
+        for (const Cand& c : cands) {
+            EnvPanoStore& S = *env.stores[c.si];
+            if (!c.onScreen) continue;
+            if (S.lastOverlay == env.dynFrame) continue;
+            if (++S.stVisStreak > S.stVisStale) S.stVisStale = S.stVisStreak;
+        }
+        envDynStatsMaybeReport(env, tProf0, statEvery, sched, faceBudget);
+        return;
+    }
+
     // Loop bound: normally stop once the budget is spent (byte-identical to the
     // original). Under sProf keep scanning so BUDGET-DEFERRED probes are still
     // reported — the extra iterations only run the (cheap) gates, never
-    // overlayComposite, so the rendered output is unchanged.
-    for (size_t k = 0; k < N && (processed < budget || sProf); ++k) {
+    // overlayComposite, so the rendered output is unchanged. `statEvery` widens
+    // it the same way, so the legacy arm's histogram counts the frames a probe
+    // WANTED an update as well as the ones it got.
+    for (size_t k = 0; k < N && (processed < budget || sProf || statEvery > 0); ++k) {
         const size_t si = (size_t(cursor) + k) % N;
         EnvPanoStore& S = *env.stores[si];
         if (!S.envDynamic || !S.view.isCube || S.staticColorMaster.empty()) continue;
         const char* nm = S.bakedSkipMat && S.bakedSkipMat->Name ? S.bakedSkipMat->Name : "?";
+        bool ownerOff = false;   // --env_dyn_stats: deferred owner-gate skip
 
         // (1) owner-visibility gate: the OWNING FACES' world AABB vs the camera
         // frustum — offscreen owner ⇒ skip (so the budget goes to the probes
@@ -1539,7 +1841,14 @@ void EnvDynamic_Overlay(Scene* sc) {
             if (owner.valid && fds::Frustum_CullsAabb(cam, owner)) {
                 if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): "
                     "OWNER-OFFSCREEN — owner faces outside the camera frustum, skip\n", nm, si);
-                continue;
+                // Under --env_dyn_stats the skip is DEFERRED past the relevance
+                // test so the histogram counts the frames this probe WANTED an
+                // update as well as the ones it got — otherwise the legacy arm
+                // and the scheduler arm would have different denominators and
+                // the before/after comparison would be meaningless. The probe
+                // is still never composited here: `ownerOff` skips below.
+                if (statEvery <= 0) continue;
+                ownerOff = true;
             }
         }
 
@@ -1561,6 +1870,17 @@ void EnvDynamic_Overlay(Scene* sc) {
                 nm, si, bake[0], bake[1], bake[2]);
             continue;
         }
+        if (statEvery > 0) {
+            ++S.stWant;
+            if (!ownerOff) ++S.stWantVisible;
+            if (!ownerOff && !S.stPrevVisible && S.everOverlaid) {
+                const uint32_t pop = env.dynFrame - S.lastOverlay;
+                ++S.stPopN; S.stPopSum += pop;
+                if (pop > S.stPopMax) S.stPopMax = pop;
+            }
+            S.stPrevVisible = !ownerOff;
+        }
+        if (ownerOff) continue;   // deferred owner-gate skip (stats only)
 
         // (3) render dynamic-only into the touched faces + composite + refilter.
         // Budget cap: when spent, later relevant probes wait for a future frame
@@ -1569,12 +1889,27 @@ void EnvDynamic_Overlay(Scene* sc) {
             if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): "
                 "BUDGET-DEFERRED — relevant but budget %d already spent this "
                 "frame (round-robins in next frame)\n", nm, si, budget);
+            if (statEvery > 0 && ++S.stVisStreak > S.stVisStale)
+                S.stVisStale = S.stVisStreak;
             continue;
         }
         const int mechTexels = overlayComposite(sc, S, faceMask);
         ++processed;
         int nf = 0; for (int f = 0; f < 6; ++f) nf += faceMask[f] ? 1 : 0;
         facesTotal += nf;
+        if (statEvery > 0) {
+            if (S.everOverlaid) {
+                const uint32_t gap = env.dynFrame - S.lastOverlay;
+                S.stGapSum += gap;
+                if (gap > S.stGapMax) S.stGapMax = gap;
+                S.stGaps.push_back(gap);
+            }
+            ++S.stUpdates;
+            S.stFaces += uint32_t(nf);
+            S.stVisStreak = 0;
+        }
+        S.lastOverlay  = env.dynFrame;
+        S.everOverlaid = true;
         if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): OK — "
             "overlaid the mech into %d touched face(s), %d mech texel(s) "
             "composited over static%s\n", nm, si, nf, mechTexels,
@@ -1590,6 +1925,7 @@ void EnvDynamic_Overlay(Scene* sc) {
                      processed, facesTotal, (int)movers.size(),
                      env.stores.empty() ? 0 : env.stores[0]->view.W, ms);
     }
+    envDynStatsMaybeReport(env, tProf0, statEvery, sched, budget);
 }
 
 // Availability probe for the runtime viz cycle (FDS/RENDER/VizCycle.cpp):
