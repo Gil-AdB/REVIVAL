@@ -515,6 +515,68 @@ Ranked leftovers:
   used to hold was the orphan block, twice removed (`799c808`, `964bf1d`). Do
   not re-propose without a new measurement.
 
+## Three architecture candidates, decided on measurement (2026-08-08)
+
+Measured with `--deferred_prof` (`docs/PERF_STATE.md` §0). Read that section for the
+tables; this is the disposition.
+
+- **(C) make the filtered-albedo plane (`--texture_filter>0`) the default — KILLED.**
+  The premise was that the G-buffer stores a texel ADDRESS, so the kernel pays a
+  dependent random gather per pixel that a linear filtered plane would remove.
+  Measured at 5 poses × 3 interleaved reps: the kernel is **not faster at any pose**
+  (`lighting-w1` 27.32→27.29→27.53 at greets 5743; same flat result at greets 2000 /
+  4200, city, fountain), while the raster pass pays a consistent **+1.2–1.4 ms** for
+  the extra plane. Frame cost +0.9…+4.0 ms. Proven directly by `--prof_no_tex`:
+  deleting the albedo gather outright changes the kernel by +0.9 % — there is no
+  gather cost to recover, because the normal / metal / roughness / AO / horizon maps
+  are still fetched at the same `Mipmap[mip][swizzledUV]` address. `--texture_filter`
+  stays a quality flag. **Do not re-propose as a perf lever without new evidence
+  against the `--prof_no_tex` row.**
+- **(B) clustered / finer light assignment — NOT SUPPORTED as stated, but the light
+  loop IS the elephant.** The omni loop is **20.9 ms = 45 % of the greets frame**
+  (`--prof_no_lights`), the single largest slice. But finer binning attacks light
+  COUNT, and count is not what sets the cost: the per-tile census (12×8 grid) gives
+  greets **6.9 lights/tile → 20.9 ms** and city **26.1 lights/tile → 3.4 ms**. 3.8×
+  more lights for 1/6 the cost. The difference is per-light WORK (greets' pixels are
+  normal-mapped → scalar kernel path with cube-shadow taps; city's take the 8-wide vec
+  path). Corroborating: `--cone_fine_tiles` on city — the same "finer tiles" idea on
+  the pass that owns 44 % of that frame — measured **no gain** (30.87 vs 30.97 ms,
+  3 reps each). Attack per-light cost, not lights-per-tile.
+- **(A) material binning inside the tile — the honest ceiling is ~8.6 ms.** Binning a
+  tile's pixels by matID would hoist the `matID → Material*` resolve and the
+  has-normal-map / has-AO / has-roughness branches out of the inner loop. That work is
+  the NON-light part of the shading wave, measured at **8.61 ms** (`--prof_no_lights`,
+  greets 5743) out of a 46.4 ms frame — and binning would recover a fraction of it,
+  not all of it. Not refuted, but it is an 18 %-of-frame target where (B)'s territory
+  is 45 %, and the (C) result says the coherent-gather half of the argument is worth
+  ~0.
+
+**What the numbers actually point at, in order:** the per-light cube-shadow/PBR loop
+on greets (20.6 ms, split 10.8 ms shadow sampling / 9.8 ms per-light shading math),
+the volumetric cone pass on city (30.7 ms = 44 %, and not a tile-balance problem), and
+`TBR_Render` on fountain (14.8 ms = 73 %). None of the three candidates on the table
+addresses any of those three directly.
+
+**The one measurement that would settle (B), and does not exist:** a per-PIXEL count
+of lights that survive the range/cone test inside the kernel loop. The census counts
+per TILE. If most of a tile's 6.9 lights are rejected per pixel, finer binning removes
+the rejects and (B) is worth its 20.6 ms target; if most survive, finer binning
+removes nothing and the lever is per-light cost (cheaper shadow tap, fewer shadowed
+omnis). Cheap to add next to `FDS_TILE_LIGHT_PROF` in `DeferredSurfaceKernel.cpp`.
+
+Also newly visible and previously unattributed (all `docs/PERF_STATE.md` §0):
+- **city `cones-call` 30.7 ms = 44 % of the city frame** — the largest single phase
+  in any scene measured, and nobody was looking at it. `--cone_fine_tiles` does not
+  help (measured). Untouched question: what the cone pass actually costs per spot.
+- **fountain `TBR_Render` 14.8 ms = 73 %** — the fountain is a TBR-bound frame, not a
+  lighting-bound one (its whole deferred lighting is 1.7 ms).
+- **the bloom chain (DoF + bright pass + anamorphic + bloom + lens ghosts) is
+  ~1.8 ms/frame on greets** and sat OUTSIDE every existing timer until now.
+- **`mirror-grid` 0.68 ms/frame** — a full-res scalar scan of the mirrorMask plane in
+  the lighting setup, every frame, on every scene that has a mirror mask.
+- **the mirror clone costs ~3.4 ms of G-buffer raster** on greets t=5743 (5.69 ms with
+  `--greets_mirror`, 2.30 without).
+
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,
 where in code, expected cost/benefit). Mark DONE with the commit + measured

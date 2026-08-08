@@ -1,5 +1,12 @@
 # PERF_STATE.md — current state of the deferred pipeline (greets, 2026-05)
 
+> **§0 below (2026-08-08) supersedes the numbers in §1–§2 and §9.** Those were
+> estimates and partial brackets from 2026-05, before `renderFrame` had any interior
+> instrumentation and before the PBR/mip/env defaults moved. §0 is a measured,
+> self-checking phase split of five poses across three scenes. The rest of the
+> document remains the best description of the *mechanism* (kernel structure, cube
+> tap, sampling modes, flag inventory) — read it for "how", read §0 for "how much".
+
 State of the engine on `feature/static-shadow-lightmaps`, gathered for invasive perf work on
 the deferred kernel. Numbers measured at greets `t=500`, 1920×1080, low-poly Piramid (5.5k
 faces), chunked at `--greets-piramid-chunk-grid=8`, per-cube-face cull on. Read this top-to-
@@ -7,6 +14,261 @@ bottom once; thereafter use the tables.
 
 This is descriptive, not prescriptive. Things that look wasteful are flagged; fixes are not
 proposed here.
+
+---
+
+## 0. MEASURED phase split of `renderFrame` — 2026-08-08
+
+Instrument: `--deferred_prof=<warmup>` (`FDS/RENDER/TailProf.h`, see
+`docs/GRAPHICS_PIPELINE.md` §8b). 1920×1080, 12 pool workers, scene defaults as
+shipped (greets: PBR + HDR + bloom 2.0 + checkerboard + mirror + `cone_fine_tiles`;
+city: `cine::kCity`; fountain: `cine::kFountain`).
+`--bench=scene@scene=<s>,t=<T>,iters=60`, warmup 5, **min over steady frames, then
+min-of-arm over 3 interleaved repetitions.**
+
+**Load: the machine was shared for the whole campaign** (two other agents running
+`./DEMO`; 1-min load average 16–57 per run, recorded per row). Serial phases
+(`hdr-begin`, `mirror-grid`, `depth-bounds`, `tile-cull`) came out identical to 3
+decimals across every arm and act as the internal control; the *parallel* waves are
+the load-sensitive ones, which is why every comparison below is interleaved and
+min-of-arm. **Sub-0.1 ms phases are not resolvable here and are not interpreted.**
+
+`OTHER` (per-frame `renderFrame` minus Σ of its phases) is **0.048–0.056 ms on every
+greets/fountain row and 0.15 ms on city** — i.e. the frame is fully attributed, which
+is what makes the rest of the table quotable.
+
+### The five poses (ms/frame, `wall_min`)
+
+| phase | greets 5743 | greets 2000 | greets 4200 | fountain 2500 | city 1961 |
+|---|--:|--:|--:|--:|--:|
+| **renderFrame (= essentially all of RNDR)** | **43.65** | **63.82** | **38.81** | **20.09** | **69.82** |
+| G-buffer clear | 0.34 | 0.32 | 0.32 | 0.34 | 0.73 |
+| **G-buffer fill (`gbuffer`)** | **5.59** | **4.77** | **5.12** | **2.51** | **9.20** |
+| HDR buffer begin (33 MB f32 clear) | 0.13 | 0.13 | 0.13 | — | — |
+| **deferred lighting (total)** | **32.59** | **47.14** | **29.18** | **1.74** | **10.48** |
+| ⤷ light list + per-tile cull + depth bounds + mirror grid | 1.04 | 1.07 | 1.03 | 0.29 | 0.74 |
+| ⤷ shading wave 1 (`lighting-w1`) | 27.32 | 35.57 | 24.25 | 1.36 | 9.38 |
+| ⤷ checkerboard fill wave 2 | 3.14 | 9.20 | 3.04 | — | — |
+| froxel fog (`fastfog` + sky paint) | — | — | — | — | 10.39 |
+| volumetric cones (`cones-call`) | 1.22 | 6.20 | 0.53 | — | **30.72** |
+| transparent peel (`xpar-peel`) | 0.08 | 0.05 | 0.05 | 0.14 | 0.25 |
+| **TBR (sprites + unified transparents)** | 0.59 | 2.19 | 0.21 | **14.77** | 7.24 |
+| bloom chain (DoF+bright+anam+bloom+ghosts) | 1.74 | 1.78 | 1.77 | — | — |
+| tonemap + LDR post | 0.69 | 0.67 | 0.69 | — | — |
+| everything else (sprite insert, prologue, overlays, edge AA) | <0.03 | <0.03 | <0.03 | 0.16 | 0.06 |
+| `OTHER` (unattributed) | 0.049 | 0.051 | 0.049 | 0.053 | 0.149 |
+| — outside RNDR — | | | | | |
+| shadow cube bake (`BAKE` section) | 2.05 | 3.39 | 2.28 | 0 | 0 |
+
+Notes on shape:
+- city's `renderFrame` runs **twice per frame** (the water-reflection underlay plus
+  the final view); the column is the per-frame total of both.
+- **Mirror RTT and the shadow bake are NOT inside RNDR.** In `GREETS.CPP` the RTT sits
+  in `PROF_ANIM` (~L3712) and `ShadowBake_DispatchGreets` in `PROF_BAKE` (~L3813); both
+  measured 0.00 and 2.05 ms respectively at t=5743. Nothing hides in RNDR on their behalf.
+- fountain is the only scene with a TBR, and it is **73 % of its frame**.
+
+### Wall vs thread-sum (they answer different questions)
+
+`wall` above is ELAPSED on the tick thread and sums to the frame. The parallel waves
+also report `thrsum` = Σ tile-task durations (CORE-ms) and `effPar = thrsum/wall`:
+
+| wave (greets 5743) | wall | thrsum | effPar (of 12) |
+|---|--:|--:|--:|
+| `lighting-w1` | 27.3 | ~370–520 | **10.2–11.4** |
+| `lighting-w2` | 3.1 | ~40–49 | 5.9–11.3 |
+| `gbuffer` | 5.6 | ~62–76 | 6.7–9.7 |
+| `cones` | 1.2 | ~9–13 | 4.1–7.4 |
+
+**The lighting wave is compute-bound and balanced, not barrier-tail-bound** (effPar
+10–11 of 12 workers). There is no reclaimable idle there: the fix has to remove
+per-pixel work, not rebalance tiles. The `gbuffer` and `cones` waves *do* leave
+parallelism on the table (effPar 4–10), and `cones` runs on the coarse 6×4 grid
+outside greets.
+
+### Inside the lighting wave — ablation
+
+`--prof_no_lights` (omni loop off) against the same-pose baseline, control phases
+matched within 2–9 %:
+
+| pose | `lighting-w1` base | `--prof_no_lights` | ⇒ omni loop | share of frame |
+|---|--:|--:|--:|--:|
+| greets 5743 | 27.32 | 8.28 | **19.0** | **44 %** |
+| greets 2000 | 35.57 | 10.14 | **25.4** | **40 %** |
+| city 1961 | 9.38 | 5.99 | 3.4 | 5 % |
+
+So on greets the **per-light loop (cube-shadow taps + per-light PBR) is the single
+largest slice of the frame**, and the remaining ~8 ms of the wave is the G-buffer
+decode + material resolve + all the map fetches + ambient/SH + env compose.
+
+Three independent sets at greets 5743 (this one, plus the mechanism and shadow sets
+below, taken at different loads on different arms) put the omni loop at **19.0 / 21.25
+/ 20.61 ms** — call it **~20 ms, 43–46 % of the frame**. The spread is entirely in the
+baseline `lighting-w1` (27.32 / 29.50 / 28.90, load-driven); `--prof_no_lights` itself
+lands at **8.28 / 8.26 / 8.29 ms across all three**, which is as tight a repeat as this
+machine gives and is why the non-light remainder is quoted with confidence.
+
+#### Splitting the omni loop — shadow sampling vs per-light shading
+
+Tightly interleaved, greets t=5743, **3 reps each at load 22–26** (the quietest set of
+the campaign; controls `hdr-begin` 0.128–0.129, `mirror-grid` 0.645–0.661,
+`bloom-chain` 1.82–1.89, `gbuffer` 5.52–5.80 — all matched within 4 %):
+
+| arm | `renderFrame` | `lighting-w1` | removes |
+|---|--:|--:|---|
+| base | 46.34 | **28.90** | — |
+| `--shadow_polyid_no_pcf` | 44.59 | **27.10** | 3 of the 4 PCF taps |
+| `--no-shadows` | 35.09 | **18.10** | all shadow sampling |
+| `--prof_no_lights` | 25.85 | **8.29** | the whole omni loop |
+
+Differencing the shading wave:
+
+| component | ms | % of `lighting-w1` | % of the 46.3 ms frame |
+|---|--:|--:|--:|
+| everything before/around the light loop (G-buffer decode, matID→Material\*, normal/metal/rough/AO/horizon fetches, ambient + SH, env compose, store) | **8.29** | 29 % | 18 % |
+| per-light shading math, shadows excluded (range/cone tests, attenuation, GGX/Fresnel, accumulate) | **9.81** | 34 % | 21 % |
+| shadow sampling (cube taps + lightmap + spot maps) | **10.80** | 37 % | **23 %** |
+| ⤷ of which the 3 extra PCF taps | 1.80 | 6 % | 4 % |
+
+The 2026-05 estimate at the top of this document put "per-pixel cube-shadow taps" at
+~32 ms and called it the #1 cost; on today's content and defaults it is **10.8 ms** and
+it is roughly TIED with the per-light shading math it sits inside. The headline has
+changed: no single stage owns the greets frame — shadows 23 %, per-light math 21 %,
+the rest of the kernel 18 %, the checkerboard fill wave 7 %, the G-buffer fill 12 %.
+
+### `--texture_filter` 0 / 1 / 2 — MEASURED, and it does NOT pay
+
+Hypothesis under test: the G-buffer stores a texel ADDRESS, so the kernel pays a
+dependent random gather per pixel; `--texture_filter>0` makes the rasterizer write a
+filtered BGRA plane the kernel reads LINEARLY, which might be a free perf win.
+
+`renderFrame` ms/frame, min-of-arm over 3 interleaved reps:
+
+| pose | tf=0 | tf=1 (bilinear) | tf=2 (trilinear) |
+|---|--:|--:|--:|
+| greets 5743 | **43.65** | 44.58 | 45.36 |
+| greets 2000 | **63.82** | 65.85 | 65.87 |
+| greets 4200 | **38.81** | 39.68 | 41.17 |
+| fountain 2500 | 20.09 | **20.03** | 21.09 |
+| city 1961 | **69.82** | 71.32 | 73.79 |
+
+It **costs** 0.9–4.0 ms and never wins. The two phases that move say why:
+
+| pose | `lighting-w1` tf0→tf1→tf2 | `gbuffer` tf0→tf1→tf2 |
+|---|---|---|
+| greets 5743 | 27.32 → 27.29 → 27.53 | 5.59 → 6.76 → 6.86 |
+| greets 2000 | 35.57 → 35.52 → 35.93 | 4.77 → 6.11 → 6.23 |
+| greets 4200 | 24.25 → 23.99 → 25.03 | 5.12 → 6.52 → 6.71 |
+| city 1961 | 9.38 → 9.39 → 9.59 | 9.20 → 10.06 → 10.95 |
+| fountain 2500 | 1.36 → 1.32 → 1.39 | 2.51 → 2.84 → 3.07 |
+
+**The kernel does not get faster — at all, at any pose.** The mechanism: the filtered
+plane replaces only the *albedo* gather. The normal, metal, roughness, AO and horizon
+maps are still fetched at the same `Mipmap[miplevel][swizzledUV]` address
+(`DeferredSurfaceKernel.cpp` ~1659/2519/2535/1905/1972), so the dependent address
+chase and its miss pattern survive intact — one of five gathers removed changes
+nothing measurable. Meanwhile the raster pass pays a consistent **+1.2–1.4 ms** to
+bilinear-sample and write an extra full-res BGRA plane.
+
+`--texture_filter` remains a QUALITY flag (it fixes texel crawl). It is not a perf
+lever, and it should not be defaulted on for performance reasons.
+
+#### The direct proof: `--prof_no_tex` makes the kernel no faster
+
+A separate, TIGHTLY interleaved set at greets t=5743 (every arm back-to-back inside
+each rep so they share the same competing load; 4 reps; control phases `hdr-begin`
+0.129-0.130, `cones-call` 1.218-1.274, `TBR-render` 0.619-0.650 confirm comparability):
+
+| arm | `renderFrame` | `lighting-w1` | `gbuffer` |
+|---|--:|--:|--:|
+| baseline | 46.42 | **29.50** | 5.93 |
+| `--prof_no_tex` (albedo fetch -> constant) | 47.47 | **28.79** | 5.87 |
+| `--texture_filter=1` | 49.13 | **29.46** | 7.30 |
+| `--texture_filter=1 --prof_no_tex` | 47.51 | 28.92 | 7.23 |
+| `--prof_no_spec` | 44.42 | 26.43 | 5.50 |
+| `--prof_no_lights` | 25.53 | **8.26** | 5.59 |
+
+Two rows kill candidate (C) between them:
+
+- **The albedo gather is worth only 0.71 ms** (29.50 - 28.79 = 2.4 % of the wave,
+  1.5 % of the frame). Deleting it *outright* - not replacing it, deleting it - buys
+  0.7 ms. That is the entire prize the filtered-albedo plane is competing for.
+- **The filtered plane does not even collect it: 29.46 vs 29.50, a 0.14 % difference**,
+  while `gbuffer` pays +1.37 ms for the extra plane. Net loss by construction.
+
+The reason is structural, not incidental: the plane replaces one of *five* fetches at
+the same `Mipmap[miplevel][swizzledUV]` address - normal, metal, roughness, AO and
+horizon maps all still chase it (`DeferredSurfaceKernel.cpp` ~1659 / 2519 / 2535 /
+1905 / 1972). Removing one of five leaves the address chase and its miss pattern
+intact.
+
+Same set, other splits: **specular = 3.07 ms** (29.50 - 26.43, 10 % of the wave);
+**omni loop = 21.25 ms** (29.50 - 8.26, **72 % of the wave, 46 % of the frame**),
+which agrees with the independent 20.61 ms from the shadow set above (different arms,
+different load) and whose non-light remainder agrees to 8.26 vs 8.29.
+
+### Anchor — the `RNDR 64.017` in GPU_BENCHMARK_PLAN §6.2c, split
+
+§6.2c's CPU column was taken at greets t=5743 under the matched-tier flags
+(`--no-greets_mirror --no-mirror_rtt --no-greets_disco --no-parallax
+--no-shadow_lightmap --no-deferred_checkerboard`). Re-run today on this tree
+alongside the shipped-defaults arm, 3 interleaved reps:
+
+| | shipped defaults | §6.2c tier C | §6.2c reported |
+|---|--:|--:|--:|
+| frame min | 50.59 | **66.67** | 67.61 |
+| `RNDR` min | 46.72 | **62.93** | 64.017 |
+| `BAKE` min | 3.06 | 3.04 | 2.992 |
+| `renderFrame` | 46.10 | 62.80 | — |
+| ⤷ `lighting-w1` | 28.83 | **56.22** | — |
+| ⤷ `gbuffer` | 5.69 | 2.30 | — |
+| ⤷ `lighting-w2` (checkerboard fill) | 3.35 | n/a (full rate) | — |
+
+So §6.2c reproduces within **1.7 %**, and its 64 ms is **89.5 % one thing: the
+deferred lighting shading wave** at full shading rate. (The tier's `--no-greets_mirror`
+also removes the mirror clone geometry, which is why its G-buffer fill is 2.30 vs 5.69
+— the clone costs ~3.4 ms of raster in the shipped configuration.)
+
+### Per-tile light census (`FDS_TILE_LIGHT_PROF=1`), 12×8 grid = 160×135 px
+
+| pose | view lights | avg/tile | avg/non-empty tile | max |
+|---|--:|--:|--:|--:|
+| greets 5743 | 117 | 6.9 | 8.3 | 39 |
+| greets 2000 | 117 | 7.3 | 8.8 | 41 |
+| city 1961 | 76 | 26.1 | 33.0 | 53 |
+
+**Read this next to the omni-loop table above and it settles an argument:** city
+carries **3.8× more lights per tile than greets** and its omni loop costs **3.4 ms**;
+greets carries 6.9 and its omni loop costs **19–21 ms**. Whatever sets the per-light
+cost, it is **not the per-tile light count** — the two move in opposite directions by
+a factor of ~23. Any proposal that attacks lights-per-pixel has to get past this row
+first.
+
+I did **not** determine why the per-light cost differs so much between the two
+scenes, and will not guess: the obvious candidate (greets on the scalar path, city on
+the 8-wide vec path) is **wrong** — `deferred_vec` defaults OFF on arm64
+(`FDS_DEFERRED_VEC_DEFAULT`, FeatureFlags.h), so both scenes run the scalar per-light
+loop on this machine. Plausible remaining differences (unmeasured): how many of each
+tile's lights survive the per-pixel range/cone test, how many pixels are sky
+(`zEnc == 0`, skipped entirely), and how many lights carry a cube shadow map. **The
+per-pixel surviving-light count is the measurement candidate (B) actually needs and
+it does not exist yet** — the census above counts per TILE, not per pixel.
+
+### `--cone_fine_tiles` on city — measured, no win
+
+The cone pass is 30.7 ms = 44 % of the city frame and runs on the coarse 6×4 grid
+there (greets defaults it to 12×8, where it was worth ~8 %). Interleaved A/B at
+city t=1961, 3 reps each, load 28–37 — an unusually stable pair (`renderFrame` spread
+0.8 % within each arm):
+
+| | coarse 6×4 | fine 12×8 |
+|---|--:|--:|
+| `cones-call` | 30.866 | 30.967 |
+| `renderFrame` | 70.837 | 71.399 |
+| `RNDR` min | 79.763 | 79.136 |
+
+**No gain — the greets result does not transfer.** The two arms are within 0.8 %,
+i.e. inside the run-to-run spread. city's cone cost is not a tile-balance problem.
 
 ---
 
