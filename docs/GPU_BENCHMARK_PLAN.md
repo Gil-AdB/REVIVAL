@@ -2128,7 +2128,7 @@ gloss-derived value (contract **E3**); 8-bit LINEAR quantization in the store; a
 
 ---
 
-### 6.2l The projector's "missing specular" is a SHADOW, and the GPU arm is not a conductor oracle right now
+### 6.2l The projector's "missing specular" is a SHADOW — and the GPU's viz modes are metal-blind
 
 Two claims went into this round: *"the GPU computes specular reflections on the projector, the CPU
 doesn't"* (the user), and *"the CPU's direct specular on conductors is exactly zero, probably because
@@ -2169,7 +2169,8 @@ makes the CPU's two GGX highlights appear, in the same two places as the GPU's:
 #### The GPU disagrees completely, and its own ray-cast sides against its own bake
 
 - GPU `--viz=direct` on the mask: **68.98**. GPU `--viz=direct_noshadow`: **68.98, bit-identical** —
-  the GPU's shadow removes **exactly nothing** on this object.
+  the GPU's shadow removes **exactly nothing** on this object. (Both viz numbers are metal-blind —
+  see the correction below — but they are blind *identically*, so the shadow comparison holds.)
 - `--probe_px=960,540` names the surface `Piramid.lwo/screen emiter` and reports lights **5 and 6**
   (`(33.50,10.85,−49.82)` and `(33.51,10.89,−75.46)`, rgb `(0.5,0.5,0)`) as `reaches`,
   d ≈ 20 of range 30, atten 0.331/0.340 — and the CPU's own instrumentation returns
@@ -2185,39 +2186,45 @@ only ground truth in the room. **VERDICT: the CPU's cube shadow on `screen emite
 wrong, but this is a SHADOW investigation (contract H2), not a metal one, and it is left open rather
 than guessed at.** It is the single reason the projector has no direct term of any kind.
 
-#### The GPU arm's metalness is INERT — measured two independent ways
+#### The GPU arm's `--viz=*` modes are METAL-BLIND — corrected in place, because I got this wrong first
 
-This invalidates the conductor half of §6.2g and §6.2k as a comparison, and it must be fixed before
-the GPU is quoted on metals again.
+**First conclusion, WRONG and retracted:** "GpuBench's metalness is inert." It was drawn from two
+measurements that looked independent and were not — both were **viz** modes:
 
-1. **`--cpu_metal_diffuse` changes 0 pixels.** The dial replaces `(1 - S.metal)` with `1` in *both*
-   `DirectRadiance` (`deferred.metal:600`) and `AmbientRadiance` (`:646`). At the projector pose
-   `--viz=direct` is byte-identical with and without it; at the momy pose
-   (`--cam="12.0,3.0,-29.0,0.0,-0.0875,-0.9962"`) `--viz=ambient` is **md5-identical**
-   (`da89e22f7e49b0711ab6e2dd5eebfec4`) with and without it. A dial that cannot move a pixel means
-   `S.metal == 0`.
-2. **`--viz=ambient` on the conductor mask is 76.38 with 147,559/147,665 px non-zero.**
-   `AmbientRadiance` multiplies by `(1 - S.metal)`; a metalness-1 surface must render **black**
-   there. It does not.
+- `--cpu_metal_diffuse` (the D1 dial) changed **0 px** in `--viz=direct` at the projector pose and
+  produced an **md5-identical** `--viz=ambient` at the momy pose;
+- `--viz=ambient` read **76.38** on the conductor mask, where `AmbientRadiance`'s `(1 - S.metal)`
+  must render a metalness-1 surface black.
 
-The ingest is not the problem — `[INGEST] revmap 'screen emiter' <- metallic
-TEXTURES/PBR/screen_emiter/metallic.png` and `[ENVREFL] 'screen emiter' (Reflection=0.00, metallic
-map)` both fire, and the map is constant 255 (re-verified). The break is somewhere between
-`acquireTexture` / `misc[2]` / `texture(4)` and `gMirror.y`; **root cause NOT found, reported
-rather than guessed.**
+**The real defect.** `DecodeSurface` takes metalness as a **defaulted parameter**
+(`deferred.metal:406-408`, `float metal = 0.0f`). `fs_lighting` passes it
+(`float(mirEnc.y)*(1/255)`, `:768-770`); **`fs_viz` does not** (`:1338-1339`). So every `--viz=`
+mode shades every surface as a **dielectric**. That is precisely the failure the shader's own
+"SHARED shading kernels" header (`:376-388`) was written to make impossible — "no mode can compute a
+DIFFERENT quantity from the one the frame applies" — and a defaulted argument walked straight
+through it. **One-line fix; not applied here because `GpuBench/` is another thread's file.**
 
-**Consequence:** the broad smooth amber body in the GPU's `--viz=direct` above is a **diffuse** lobe
-on a surface the GPU is treating as a **dielectric**. What the user read as "the GPU computes
-specular reflections and the CPU doesn't" is, at that pose, the GPU rendering a conductor as a
-plastic. The two tiny dots in each image *are* the direct specular, and the CPU has them too the
-moment the shadow is lifted.
+**The LIT frame's metalness is FINE, MEASURED:** `--cpu_metal_diffuse` on the lit frame moves the
+conductor mask **61.66 → 138.58** and **463,616 px** overall. `S.metal == 1` on `screen emiter`
+where it counts.
 
-#### The 1.12x residual (§6.2k) — VERDICT: not priceable today, and the two named candidates are dead
+**What this corrects in the rest of this section:** the GPU's `--viz=direct` figure of **68.98** is
+metal-blind and therefore carries a full diffuse lobe the lit frame kills. The GPU's *true* direct
+term on this conductor is the **two small dots** and nothing else — i.e. **both arms have a small
+direct specular here, and the CPU's is zero only because of the shadow above.** The user's "the GPU
+computes specular reflections on the projector" is, in the lit frame, about the **environment**
+reflection: the GPU's reads like a mirror, the CPU's like a wash. Pair:
+`docs/img/metal/projector_env_bake_linear.png`.
 
-The residual was defined as CPU-conductor ÷ GPU-conductor after `--env_bake_linear`. Its denominator
-is a dielectric render (above), so **the ratio is not a like-for-like measurement and no number
-should be quoted from it.** Separately, two of the four named candidates are now **priced and
-eliminated** (projector pose, `--hdr_metal_kill=2 --env_bake_linear`, conductor mask):
+#### The 1.12x residual (§6.2k) — VERDICT: it STANDS, and two of the four named candidates are dead
+
+The residual is CPU-conductor ÷ GPU-conductor after `--env_bake_linear`, both from **lit** frames,
+so — unlike the viz numbers above — it **is** like-for-like and §6.2k's 1.121x stands as measured.
+(Re-measured here at 1.656x: 102.10 vs 61.66. That is a different mask, not a regression — mine is
+the `--no-bloom` change set at **147,665 px** against §6.2k's 73,954, and it sits on the user's
+current uncommitted greets assets. Quote §6.2k's number, not this one, until the two masks are
+reconciled.) Two of the four named candidates are now **priced and eliminated** (projector pose,
+`--hdr_metal_kill=2 --env_bake_linear`, conductor mask):
 
 | candidate (contract row) | how priced | conductor-mask luma | verdict |
 |---|---|--:|---|
@@ -2227,8 +2234,13 @@ eliminated** (projector pose, `--hdr_metal_kill=2 --env_bake_linear`, conductor 
 | **E3b** — padded 102.68° software faces vs 90° hardware cube | no dial isolates it; would need a 90°-unpadded bake path | — | **UNPRICED** |
 | **centroid** — 0.2 world units | — | — | **UNPRICED**, and §6.2k already bounded probe placement as agreeing to 0.2 u |
 
-Against a ~40-luma gap, 0.03 and 0.39 are noise. **If a residual survives a fixed GPU metalness, it
-is not E3 and it is not resolution.**
+Against a ~40-luma gap, 0.03 and 0.39 are noise. **The residual is not E3 and it is not resolution.**
+Note the mean is blind to blur, so E3 was also checked on spread: std over the mask is 43.63
+(baseline) vs 43.61 (`--no-roughness_map`) — the roughness map moves the env lobe's **sharpness** by
+nothing either. Relative contrast std/mean is CPU **0.427** vs GPU **0.519**, so the CPU's
+reflection is genuinely flatter as well as brighter, and E3b (padded 102.68° software faces +
+face-major bilinear vs a 90° hardware `texturecube`) is the surviving candidate for the flatness —
+still **UNPRICED**, because no dial isolates it.
 
 #### What did land
 
