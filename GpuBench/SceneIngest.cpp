@@ -1398,6 +1398,73 @@ bool Load(Scene &out, const LoadOptions &opt) {
             out.skyZenith[0], out.skyZenith[1], out.skyZenith[2],
             out.skyNadir[0], out.skyNadir[1], out.skyNadir[2]);
     }
+
+    // ---- PER-MESH CENSUS (--dump_meshes) -----------------------------------
+    // The camera-independent answer to "is geometry MISSING on this arm", to be
+    // diffed straight against the CPU's `DUMP_MESHES=1 ./DEMO --snapshot=...`
+    // `[MESH n] obj='...' num=N parent='...' K faces: surf | surf` lines. Names
+    // and face counts on both sides; a diff of the two listings settles the
+    // question without a render, without a pose, and without an argument.
+    //
+    // It reports ROUTE as well as presence, because "ingested but never drawn"
+    // and "not ingested" look identical from the window: a transparent batch
+    // leaves the opaque G-buffer draw list entirely and is composited by the
+    // peel instead, and a non-caster is absent from every shadow map. The
+    // per-cube-face shadow frustum cull and the main-view backface cull are
+    // per-frame and per-triangle, so they cannot remove a mesh from here —
+    // anything listed IS submitted for the main view.
+    if (opt.dumpMeshes) {
+        std::fprintf(stderr,
+            "\n[MESHCENSUS] %s t=%d CurFrame=%.1f — diff against the CPU's\n"
+            "[MESHCENSUS]   DUMP_MESHES=1 SDL_VIDEODRIVER=dummy ./DEMO --snapshot=fountain@t=%d ...\n",
+            opt.fldPath, opt.demoT, out.curFrame, opt.demoT);
+        int lastMesh = -999;
+        long totalTri = 0;
+        int meshes = 0;
+        for (const auto &b : out.batches) {
+            if (b.meshId != lastMesh) {
+                // One header line per OBJECT. meshId is the running object
+                // index, not the name: fountain has six distinct objects all
+                // called "pilon.lwo".
+                long meshTri = 0;
+                for (const auto &c : out.batches)
+                    if (c.meshId == b.meshId) meshTri += c.vertexCount / 3;
+                std::fprintf(stderr,
+                    "[MESHCENSUS] mesh %2d '%s' %ld tri at (%.1f,%.1f,%.1f)\n",
+                    b.meshId, b.meshName.c_str(), meshTri,
+                    b.pos[0], b.pos[1], b.pos[2]);
+                lastMesh = b.meshId;
+                ++meshes;
+            }
+            const char *route = b.additive ? "ADDITIVE (no peel)"
+                              : b.transparent ? "XPAR PEEL (not in the G-buffer)"
+                                              : "opaque G-buffer";
+            std::fprintf(stderr,
+                "[MESHCENSUS]      '%s' %u tri  -> %s%s\n",
+                b.materialName.c_str(), b.vertexCount / 3, route,
+                b.castsShadow ? "" : "  [no shadow cast]");
+            totalTri += b.vertexCount / 3;
+        }
+        std::fprintf(stderr,
+            "[MESHCENSUS] TOTAL %d object(s), %zu batch(es), %ld tri "
+            "(ingest header says meshes=%u faces=%u — the CPU's DUMP_MESHES face\n"
+            "[MESHCENSUS]   counts must sum to the same number, or geometry is genuinely missing)\n",
+            meshes, out.batches.size(), totalTri, out.meshCount, out.faceCount);
+        std::fprintf(stderr, "[MESHCENSUS] textures actually referenced: %u\n",
+                     out.texturesLoaded);
+        for (size_t i = 0; i < out.textures.size(); ++i)
+            std::fprintf(stderr, "[MESHCENSUS]      [%2zu] %s (%dx%d)\n",
+                         i, out.textures[i].fileName.c_str(),
+                         out.textures[i].w, out.textures[i].h);
+        std::fprintf(stderr,
+            "[MESHCENSUS] NOTE this counts DISTINCT ::Texture* actually reached by a\n"
+            "[MESHCENSUS]   batch or a flare, deduplicated. The CPU's [MAT] txtrID is the\n"
+            "[MESHCENSUS]   SIZE OF THE SCENE TEXTURE TABLE, which also holds entries no\n"
+            "[MESHCENSUS]   visible surface references. The two are not the same quantity\n"
+            "[MESHCENSUS]   and a difference is not by itself a missing texture — 'missing'\n"
+            "[MESHCENSUS]   is the texturesMissing counter above, and it is %u.\n",
+            out.texturesMissing);
+    }
     // ---- mirror panel TALLY -------------------------------------------------
     // Reported 2026-08-08: "the rtt mirrors are just not there". That has three
     // possible meanings and they need different fixes, so the tally names which:

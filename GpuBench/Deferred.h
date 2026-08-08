@@ -113,6 +113,14 @@ struct DeferredOptions {
     // the file format and the DEMO-side dump this reads. Empty = no particle
     // pass at all, which is the state fountain has been in.
     std::string pclPath;
+    // --tex_point: POINT-sample every albedo/material texture with NO mip
+    // filtering, instead of this arm's trilinear + 8x anisotropic default.
+    // MEASUREMENT ONLY. The CPU rasterizer point-samples and selects its mip by
+    // clipper subdivision, so the two arms do not resolve the same detail on a
+    // steeply foreshortened surface. This makes that difference priceable
+    // instead of arguable. It is NOT a fidelity improvement — point sampling
+    // aliases — and it is not the default.
+    bool  texPoint = false;
     // Sprite-vs-glass ORDER. The CPU walks ONE back-to-front list holding both
     // sprites and transparent clumps, so a sprite BEHIND glass is attenuated by
     // it and one IN FRONT is not; a single whole-spray pass cannot be both.

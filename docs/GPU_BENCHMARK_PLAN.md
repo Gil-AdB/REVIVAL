@@ -2042,6 +2042,255 @@ it, while this arm draws the whole spray before the peel (the slot the flares
 already use). Additive-vs-additive order is exact either way; only
 sprite-in-front-of-glass differs, and pricing it needs a real dump.
 
+> **Superseded by §6.2m**: the DEMO-side writer now exists, so the cost is
+> measured on real data (**+0.170 ms**, resolved rather than bounded), and the
+> "known deviation" above is priced — and it cost this arm the wrong default.
+> The spray now draws **after** the peel.
+
+---
+
+### 6.2m The dump exists, the two halves meet, and the sprite/glass order was the WRONG bracket
+
+`--pcl_dump=PATH[,t0,t1]` (commit `d886b45`, `DEMO/FOUNTAIN.CPP`) writes the
+per-frame particle state the CPU actually rendered; GpuBench's `--pcl` replays
+it. Placement is §6.2j's, **re-verified rather than inherited**:
+`Particle_Kinematics` has exactly one call site in the tree (`FOUNTAIN.CPP:2732`)
+and everything after it in `tick()` touches omnis, so it is the last writer of
+`V.Pos`, `V.LR/LG/LB` and `Flags` for the frame. The gate is
+`Flags & Particle_Active`, the same one `Transform.cpp:2806` applies.
+
+The flag is an argv pre-scan, not a FeatureFlag: it carries a PATH and that
+table is bool/float/int only. Same shape as `--material-import` / `--snapshot`,
+registered in `FeatureFlags.cpp`'s `ownedByOtherParser` so `--strict_flags`
+does not kill the run over it.
+
+**Byte-null when off — proved, not asserted.** The fountain pin recipe
+(`--snapshot=fountain@t=2500 --deferred --hdr --glass-refract=1 --glass-test
+--profiler=0`) is md5 **`8db68ccb`** with the dump code compiled in and off,
+**and** with `--pcl_dump` active. `tools/render_gate.sh` 3/3.
+
+#### What the dump actually contains — and one thing worth knowing about the pin
+
+**5,040 of 8,250 slots active**, 100,852 B. That is a **cold-tick** spray:
+`--snapshot` runs one tick from init with `dTime` capped at 300, so the frame
+holds one spawn quantum (1,800 outer + 3,240 inner) rather than a developed
+fountain. It is nonetheless exactly what the CPU rendered, which is the only
+property the oracle needs — but it means "8,250 missing sprites" was never the
+count at this pose.
+
+Corollary, measured: a multi-`t` sweep in ONE process **accumulates** particle
+state (`@t=1500,2500,3500` reports 6,240 active at t=2500, against 5,040 for a
+single-t run). A pin-matching dump has to be its own process.
+
+#### The pair — fountain t=2500, 1920×1080, Rec.601 luma, all 2,073,600 px
+
+CPU reference `8db68ccb`, rendered the same day.
+
+| step | signed dY (GPU−CPU) | mean abs dY |
+|---|--:|--:|
+| no particle pass (§6.2h) | −20.525 | 24.559 |
+| **+ 5,040 replayed sprites** | **−5.369** | **10.595** |
+
+| region | no spray | with spray | what changed |
+|---|--:|--:|---|
+| ceiling (y < 170) | −7.273 / 7.273 | −7.273 / 7.273 | **byte-identical** — the SkyCube gap, untouched |
+| upper (170–430) | −6.192 / 6.214 | −6.192 / 6.214 | **byte-identical** |
+| mid (430–700) | −7.196 / 8.542 | −6.744 / 8.332 | the top of the spray |
+| floor (y > 700) | **−45.731 / 56.224** | **−2.978 / 16.686** | the spray |
+
+The no-spray row **reproduces §6.2h to three decimals on every region**, which
+is the check that the instrument, not the change, is what moved. Ceiling and
+upper being byte-identical is the check that the whole delta is the spray and
+nothing else.
+
+Pair: `docs/img/gpubench/fountain_t2500_particles.png` (CPU / GPU no spray /
+GPU with spray / signed dY ×4, red = GPU brighter). Full-res set in
+`scratchpad/fountain_t2500_{nopcl,pcl}_{cpu,gpu,sbs,diff}.png`.
+
+#### The known deviation, PRICED — and it was the wrong default
+
+The CPU walks ONE back-to-front list holding both sprites and transparent
+clumps: `FILLERS.CPP:2317-2380`, where a sprite **flushes the open clump** before
+blitting itself. Per particle that means
+
+* sprite **behind** glass → blitted first, glass composites over it → **attenuated**;
+* sprite **in front** → glass composites first, sprite added on top → **not attenuated**.
+
+A single whole-spray pass cannot be both. Drawing **before** the peel attenuates
+*every* sprite; drawing **after** attenuates *none*. The CPU is bracketed by the
+two, so both are runnable (`--pcl_before_xpar`) and both are measured. The mask
+below is the pixels where the two orderings actually differ.
+
+| t | ordering-sensitive px | on-mask abs dY, before → after | whole-frame abs dY, before → after | AFTER closer on |
+|---|--:|--:|--:|--:|
+| 1500 | 68,233 (3.29 %) | 61.657 → **13.469** | 15.906 → **14.320** | 98.7 % |
+| 2500 | 76,224 (3.68 %) | 60.090 → **20.550** | 12.048 → **10.595** | 85.9 % |
+| 3500 | 110,316 (5.32 %) | 61.467 → **20.587** | 19.451 → **17.276** | 91.0 % |
+
+On those pixels the two orderings differ by **mean 52–62 luma, max 209** — that
+is not a rounding matter on 3–5 % of the frame. **The default is flipped to
+AFTER.** Nothing previously recorded moves: the particle pass only exists when
+`--pcl` is given, which is new.
+
+**Neither bracket is exact**, and the residual says so: on-mask AFTER is
+**+10.370** signed at t=2500 and **+8.307** at t=3500 — the sprays that really
+*are* behind glass stay too bright. Only their absence from the "before" side
+was ever the bigger error.
+
+#### What the CORRECT ordering would cost — specified, NOT built, NOT measured
+
+The exact rule is per-fragment: scale each sprite's additive contribution by the
+transmittance of the transparent layers **in front of it**. Three forms, in
+increasing fidelity:
+
+1. **One extra attachment (approximate, cheapest).** The peel's composite pass
+   (`Deferred.mm` pass (b)) already runs per (run, side, layer); give it a second
+   colour attachment holding `(nearestXparDepth, accumulated 1−alpha)` and have
+   `fs_pcl` multiply by it when its own `refZ` is behind that depth. **No new
+   encoders**, one RG16F store per composite pass (~16 MB at 1920×1080) and one
+   tap per sprite fragment. Exact whenever at most one transparent layer
+   separates a sprite from the eye — which is the fountain basin case.
+2. **Layer-stratified transmittance.** Store `(depth, alpha)` for up to K layers
+   and walk them in `fs_pcl`. Exact for the nested spire orbs too; ~66 MB at
+   K = 8 and 8 taps per sprite fragment.
+3. **True interleave.** Draw the spray once per composite pass with a depth-slice
+   test, inside the existing encoders. Exactly the CPU's semantics. Fountain has
+   5 encoder runs × 2 sides × 4 passes = **40** composite passes, so the spray's
+   vertex+raster work is paid up to 40 times; the per-pass fragment work is
+   sliced, so the true figure is well under 40 × 0.170 ms, **but that product is
+   an upper bound and the real number is not measured.**
+
+None of the three is implemented. Form 1 is the one worth building next.
+
+#### Cost of the pass itself — RESOLVED, not bounded
+
+5,040 sprites in **one** instanced additive draw, one extra render encoder:
+**+0.170 ms**. Min-of-arm 4.2204 → 4.3920; means over the 7 stable interleaved
+reps 4.2512 → 4.4217. 150 frames after 30 warmup, machine **load 7.6–8.9**
+(recorded). The two arms **do not overlap** across those 7 reps — unlike
+§6.2j's synthetic +0.22 ms, which sat inside the run-to-run spread and was
+correctly stated there as an upper bound only.
+
+#### Bug found while measuring
+
+`encodePcl` sat **outside** the `if (!viz && opt.stages >= 2)` — missing braces —
+so the spray was painted over every `--viz` mode and over `--stages=1`. Fixed.
+
+#### Regression
+
+fountain without `--pcl` byte-identical (`ea75af78`), greets t=5743
+byte-identical (`0bd77ba2`), both matching §6.2i. `tools/render_gate.sh` 3/3.
+Reader failure paths exercised against the real writer: a window matching
+nothing yields a 24-byte header-only file reported as "dump has no frames"; a
+truncated file is named with the frame and particle index; an unwritable dump
+path warns and the run continues.
+
+---
+
+### 6.2n Two window reports, run to ground: NO geometry is missing, and the "material HDR" is a CONTRAST deficit, not an encoding bug
+
+Reported from the `--window` build: *"gpu fountain only shows one spire, and the
+material hdr handling is very wrong"*, later pinned to *"there is only one spire
+present"* at HUD `t=8002 CurFrame=2080.6 cam=(188.56,124.62,-183.83) free-fly`.
+
+#### New instrument, built first so the geometry question stops being an argument
+
+`--dump_meshes` prints a PER-OBJECT census — name, triangle count, world
+position, and each material's ROUTE (opaque G-buffer / xpar peel / additive / no
+shadow cast) — for a straight diff against the CPU's own listing, which already
+existed as the env hook `DUMP_MESHES=1` (it is not a `--flag`, which is why it
+reads as absent). Camera-independent, pose-independent, render-independent. It
+reports the route because *"ingested but composited elsewhere"* and *"not
+ingested"* look identical from the window.
+
+#### Report 2 — geometry. NOTHING IS MISSING. The diff is exact.
+
+| | CPU (`DUMP_MESHES=1`) | GPU (`--dump_meshes`) |
+|---|--:|--:|
+| objects | 22 | 22 |
+| triangles | 243 + 1413 + 6x(274+80+8) + 34176 + 296 = **38,300** | **38,300** |
+| the six spires | `pilon.lwo` x6, `inbal.lwo` x6, `dio.lwo` x6 | identical, at (-74.7,1.0,-106.3), (48.6,0.8,-116.3), (114.9,1.0,-0.2), (61.1,0.6,86.8), (-35.8,0.6,112.5), (-112.5,0.9,22.8) |
+
+**The 33-vs-24 texture "gap" is not a gap.** The CPU's `[MAT] txtrID=33` is the
+SIZE OF THE SCENE TEXTURE TABLE; the GPU's 24 is the count of DISTINCT
+`::Texture*` a batch or flare actually reaches, deduplicated — 16 image files
+plus 8 flare textures. `texturesMissing = 0`. The census prints the full roster
+and says so in place, so the number is not re-litigated.
+
+And the GPU renders **six** spires at the user's own CurFrame 2080.6, offscreen,
+at his own pinned camera. **"Only one spire" is not reproducible on the GPU arm.**
+
+#### What IS true at his CurFrame, and it is the opposite of the report
+
+At an IDENTICAL pinned camera, sweeping scene time:
+
+| t | CurFrame | CPU | GPU |
+|---|--:|---|---|
+| 2500 | 650.0 | six spires + centre | six spires + centre — agree |
+| 5000 | 1300.0 | **centre only, all six spires GONE** | six spires + centre |
+| 8002 | 2080.5 | **centre only** | six spires + centre |
+
+Bisected: the spires are present on the CPU at t = 2500, 3000, 3500, 4000, 4400,
+4700 and gone at 5000. CurFrame 1300 is the scene's own `EndFrame`. So the two
+arms diverge AT OR AFTER the last animation key, and the CPU is the one that
+drops the geometry.
+
+Image: `docs/img/gpubench/fountain_spires_cpu_vs_gpu.png` (CPU left / GPU right,
+three scene times, one camera).
+
+**This contradicts "the spires are static geometry".** They are static in the
+FLD — the GPU's own `--anim_probe` shows their flare omnis at byte-identical
+positions at t=2500 and t=8002 while the ship omnis move (-147.60,64.90,-163.24)
+-> (42.11,375.70,-23.14) — and they are static in the CPU render up to t=4700.
+But the CPU stops drawing them past CurFrame 1300, and that is measured, not
+inferred. **Whether the CPU or the GPU is right past the last key is NOT
+settled here** and needs the FLD's spline end-behaviour read. Recorded as an open
+divergence rather than resolved in either direction.
+
+#### Report 1 — the pod windows. NOT an HDR encoding defect.
+
+The surface is `f in shpere` (`inbal.lwo`, `Luminosity = 100`) seen through the
+`f_sphere` shell. Four things measured, in the order that kills candidates
+fastest:
+
+1. **The frame is not uniformly dark from a material bug — two thirds of it was
+   the MISSING SPRAY.** Whole-frame mean luma: CPU **39.29**, GPU without
+   particles **18.77**, GPU with the replayed dump **33.92** (§6.2m). The
+   "GPU is half the mean brightness" observation was largely the gap this
+   session closed.
+2. **At an exposure where NEITHER arm clips (0.05 both sides, `pure255 = 0` in
+   the crop), the GPU is DIMMER, not brighter**: crop mean **48.35** vs the
+   CPU's **54.94**. There is no emissive over-brightening to find.
+3. **What actually differs is local contrast.** Mean |luma gradient| over the
+   window crop: CPU **10.38**, GPU **4.40** — the GPU resolves **42 %** of the
+   CPU's detail. At exposure 1.0 both clip and that deficit reads exactly as
+   "blown to flat white with no content".
+4. **The §6.2h `sqrt(Lum/128)` encoding is NOT implicated, and the census proves
+   why:** `f in shpere` and `f_sphere` are `TRANSPARENT` and route to the XPAR
+   PEEL, never entering the G-buffer params plane that encoding lives on.
+   `fs_xpar` reads raw `Luminosity` with no encode. The algebra also agrees
+   term for term — CPU `lit = tex*(Lum*255 + Diffuse*Ambient)/256 = tex*99.86`
+   on the 0..255 scale, GPU `lit = tex01*(Lum + Diffuse*Ambient/255) =
+   tex01*100.25`, a ratio of 1.004.
+
+Ruled out by measurement, not by argument:
+
+| candidate | test | result |
+|---|---|---|
+| Luminosity encoding | route census + algebra | not on this path; ratio 1.004 |
+| peel pass count | `--xpar_peel_passes=1/2/4` | crop mean 70.75 / 70.74 / 70.64 — 0.11 luma |
+| texture filtering | `--tex_point` (new flag: point sample, no mips) | |grad| 4.40 -> **4.73** against the CPU's 10.38 — explains ~6 % |
+| tonemap shape | both are the same Narkowicz ACES fit, CPU `Hdr.cpp:833`, GPU `fs_tonemap` | same curve |
+
+**MECHANISM NOT IDENTIFIED. I do not know what removes the remaining detail.**
+Image: `docs/img/gpubench/fountain_podwindow_detail.png`. One further OBSERVED
+artifact, offered as a lead and not a conclusion: the GPU's version of that
+surface carries a regular lattice of DARK DOTS the CPU has none of. A dot
+lattice on a peeled layer is what a fragile depth-EQUAL composite test looks
+like (`dssXparEqual`, `MTLCompareFunctionEqual` against a separately-resolved
+depth) — dropped fragments would both make the dots and lose emissive coverage.
+Untested.
+
 ---
 
 ### 6.2k The conductor gap closed: it was PROBE CONTENT, and the CPU bakes it in GAMMA

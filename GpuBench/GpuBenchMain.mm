@@ -229,6 +229,18 @@ const char *kUsage =
     "                    TESTED with no depth write, no peel (additive is order-free).\n"
     "                    Produce the dump from DEMO: --pcl_dump=PATH[,t0,t1] (default off,\n"
     "                    byte-null when off; t0/t1 are an inclusive scene-Timer window).\n"
+    "  --dump_meshes     PER-OBJECT census: name, triangle count, world position, and each\n"
+    "                    material's ROUTE (opaque G-buffer / xpar peel / additive / no\n"
+    "                    shadow cast), plus the texture roster. Diff it against the CPU's\n"
+    "                    `DUMP_MESHES=1 ./DEMO --snapshot=<scene>@t=N ...` [MESH] lines to\n"
+    "                    answer 'is geometry missing on this arm' WITHOUT a pose, a render\n"
+    "                    or an argument. Distinguishes 'not ingested' from 'ingested but\n"
+    "                    routed away from the G-buffer'.\n"
+    "  --tex_point       MEASUREMENT ONLY: point-sample textures with no mip filtering,\n"
+    "                    instead of the default trilinear + 8x aniso. The CPU rasterizer\n"
+    "                    point-samples and picks its mip by clipper subdivision, so the\n"
+    "                    two arms resolve different detail on foreshortened surfaces; this\n"
+    "                    prices that. It ALIASES — not a fidelity improvement.\n"
     "  --pcl_before_xpar draw the spray BEFORE the depth peel (the other bracket). The CPU\n"
     "                    walks ONE back-to-front list holding both sprites and transparent\n"
     "                    clumps, so a sprite BEHIND glass is attenuated by it and one IN\n"
@@ -332,6 +344,8 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-xpar")                  dopt.xpar = false;
         else if (a == "--no-xpar_merge")            dopt.xparMerge = false;
         else if (const char *v = val("--pcl="))     dopt.pclPath = v;
+        else if (a == "--dump_meshes")              opt.dumpMeshes = true;
+        else if (a == "--tex_point")                dopt.texPoint = true;
         else if (a == "--pcl_after_xpar")           dopt.pclAfterXpar = true;   // the default; accepted for symmetry
         else if (a == "--pcl_before_xpar")          dopt.pclAfterXpar = false;
         else if (const char *v = val("--pcl_synth=")) pclSynth = v;

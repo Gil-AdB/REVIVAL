@@ -540,12 +540,17 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     }
 
     MTLSamplerDescriptor *sdesc = [MTLSamplerDescriptor new];
-    sdesc.minFilter = MTLSamplerMinMagFilterLinear;
-    sdesc.magFilter = MTLSamplerMinMagFilterLinear;
-    sdesc.mipFilter = MTLSamplerMipFilterLinear;
+    // --tex_point prices the FILTERING difference against the CPU, which point-
+    // samples and picks its mip by clipper subdivision. Default stays trilinear
+    // + 8x aniso: it is the better image, just not the CPU's image.
+    sdesc.minFilter = opt.texPoint ? MTLSamplerMinMagFilterNearest
+                                   : MTLSamplerMinMagFilterLinear;
+    sdesc.magFilter = sdesc.minFilter;
+    sdesc.mipFilter = opt.texPoint ? MTLSamplerMipFilterNotMipmapped
+                                   : MTLSamplerMipFilterLinear;
     sdesc.sAddressMode = MTLSamplerAddressModeRepeat;
     sdesc.tAddressMode = MTLSamplerAddressModeRepeat;
-    sdesc.maxAnisotropy = 8;
+    sdesc.maxAnisotropy = opt.texPoint ? 1 : 8;
     id<MTLSamplerState> samp = [dev newSamplerStateWithDescriptor:sdesc];
 
     MTLSamplerDescriptor *shd = [MTLSamplerDescriptor new];

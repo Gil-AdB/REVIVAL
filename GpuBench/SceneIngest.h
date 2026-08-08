@@ -263,6 +263,10 @@ struct LoadOptions {
     // "px,py,pz,fx,fy,fz" as in FDS_GREETS_CAM. Empty = use the scripted camera.
     std::string camPose;
     bool        verbose = true;
+    // --dump_meshes: per-OBJECT name + triangle count + per-material route,
+    // for a straight diff against the CPU's `DUMP_MESHES=1` listing. The
+    // camera-independent answer to "is geometry missing on this arm".
+    bool        dumpMeshes = false;
     // Replicate GreetsDisco.cpp's 10 rotating cone spotlights + glow omni clone.
     // greets_disco defaults to 1 in FeatureFlags.def, so these are part of the
     // DEFAULT greets run — reproducing them is parity. ON here for the same
