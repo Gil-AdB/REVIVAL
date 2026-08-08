@@ -2842,7 +2842,11 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // renders use, and calibrated for this scene's depth range.
         FreeCamInit(scene);
         bool  freeFly = opt.freeFly, paused = false, mouseLook = false, running = true;
-        float demoT = float(opt.loadOpt->demoT);
+        // resolvedDemoT, not loadOpt->demoT: Load may have substituted a
+        // mid-scene t for the greets-specific default, and the first
+        // Reanimate would otherwise snap the window straight back to the
+        // out-of-range frame the substitution existed to avoid.
+        float demoT = scene.resolvedDemoT;
         LoadOptions lo = *opt.loadOpt;
         // THE CAMERA-INTERPOLATION FIX. `lo` drives Reanimate's RefreshCamera
         // every frame, and with a non-empty camPose RefreshCamera PINS the

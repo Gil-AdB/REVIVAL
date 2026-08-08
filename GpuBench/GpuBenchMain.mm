@@ -475,14 +475,19 @@ int main(int argc, const char *argv[]) {
         camExplicit          ? gpubench::PoseOrigin::ExplicitCam
       : !opt.camPose.empty() ? gpubench::PoseOrigin::DefaultReviewPose
                              : gpubench::PoseOrigin::Spline,
-        float(opt.demoT));
+        // scene.resolvedDemoT, NOT opt.demoT: when Load substitutes a mid-scene
+        // t for the greets-specific default, the repro lines must name the t
+        // that was actually RENDERED. Printing the requested one produced a
+        // block whose own two numbers disagreed (t=5743 -> CurFrame 650) and
+        // two commands that reproduced a different frame.
+        scene.resolvedDemoT);
 
     // Replay the window's per-frame animation step before rendering, so the
     // offscreen image is produced by the SAME code the window runs.
     if (doReanimate) {
         gpubench::LoadOptions ro = opt;
         ro.verbose = false;
-        gpubench::Reanimate(scene, ro, float(opt.demoT));
+        gpubench::Reanimate(scene, ro, scene.resolvedDemoT);
         std::fprintf(stderr,
             "[REANIMATE] replayed the window's per-frame Reanimate() at t=%d "
             "(CurFrame %.1f): %zu batches, %zu lights\n",
