@@ -259,8 +259,18 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
     GBufOut o;
     o.albedo = float4(alb.rgb, ao);
     o.normal = oct_encode(n);
+    // LUMINOSITY encoding. This plane is RGBA8Unorm, so the emissive has to be
+    // squeezed into 8 bits. It used to be saturate(Lum*0.25) with a *4 decode —
+    // a hard clamp at Lum = 4, which is fine for greets (hottest 2.25) and
+    // catastrophic for FOUNTAIN, whose 'daimond', 'spc1 in engine' and
+    // 'in engine' materials author Luminosity = 100 (MEASURED via the ingest's
+    // own emissive census): they rendered at 4, i.e. 25x too dim.
+    // sqrt(Lum/128) with a squared decode covers 0..128 and puts the precision
+    // where the values are: at Lum 2.25 the round trip is 2.274 (1.1 % error),
+    // at Lum 100 it is 99.6 (0.4 %). A linear /128 encoding would have made
+    // greets' 2.25 land on 2.5.
     o.params = float4(b.matParams.x, spec, b.matParams.z,
-                      saturate(b.matParams.w * 0.25f));
+                      sqrt(saturate(b.matParams.w * (1.0f / 128.0f))));
     float f0 = max(b.misc2.y * 0.01f, 0.04f);
     f0 = f0 + (0.98f - f0) * saturate(metal);
     o.mirror = uint4(uint(b.misc.x + 0.5f), uint(saturate(metal) * 255.0f + 0.5f),
@@ -418,7 +428,7 @@ static inline Surface DecodeSurface(constant FrameUniforms &u,
     // carries the roughness map's magnitude attenuation.
     S.rough     = clamp(par.z, 0.04f, 1.0f);
     S.a         = S.rough * S.rough;
-    S.lum       = par.w * 4.0f;
+    S.lum       = par.w * par.w * 128.0f;   // inverse of fs_gbuffer's sqrt(Lum/128)
     S.metal     = metal;
     // No F0 / env-BRDF / multiscatter precompute: the direct spec uses the
     // CPU's fixed dielectric F = 0.04 + 0.96*(1-VoH)^5 scaled by Specular, and

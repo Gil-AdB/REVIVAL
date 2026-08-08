@@ -416,7 +416,7 @@ that got the scene-dump-tool option rejected in §2.2 — the dump would silentl
 
 | Excluded | Why |
 |---|---|
-| **Mirrors / planar RTT** (`GreetsMirror.cpp`) | ≥3 mirrors, each cloning the entire non-wall scene as one TriMesh **and** cloning every omni across its plane, plus second-order `mirror_rtt` re-renders at density 1024 — all ON by default. It's a *scene-authoring* feature, not a renderer-cost question, and another agent owns that file. **Because it duplicates an entire room and multiplies the light count, the CPU baseline MUST also be captured with mirrors off, or the comparison is invalid.** |
+| **Mirrors / planar RTT** (`GreetsMirror.cpp`) | ≥3 mirrors, each cloning the entire non-wall scene as one TriMesh **and** cloning every omni across its plane. *(The "second-order `mirror_rtt` re-renders at density 1024 — all ON by default" this row used to claim is **WRONG** and is corrected in §6.2g: greets builds **0** RTT slots, MEASURED, because its `setDefault(mirror_rtt, true)` runs after the slot builders. The CPU renders exactly ONE bounce.)* It's a *scene-authoring* feature, not a renderer-cost question, and another agent owns that file. **Because it duplicates an entire room and multiplies the light count, the CPU baseline MUST also be captured with mirrors off, or the comparison is invalid.** |
 | **Volumetric cones / god-rays / froxel fog** | Ray-march passes whose cost is a *tuning dial*. The global `--draw_cones` is OFF, but the 10 disco spots force-enable beams per-light (`Omni_ForceVolCone`), and `cone_strength` ends up at the disco ball's 1.2 rather than the scene-init 2.0. A number that depends on that ordering is not a benchmark. Excluded on both sides (disco off). |
 | **SSAO / GTAO** | OFF in greets by default (VERIFIED: no `setDefault` for it anywhere in `GREETS.CPP`), and it has a whole downscale ladder. Excluding it is parity. A GPU GTAO arm is a well-understood optional extension later. |
 | **Transparent depth-peel layers** | `PERF_STATE.md` records greets' xpar contribution as "small", and `xpar_pbr` is deliberately left OFF; it doubles the G-buffer plumbing for little benchmark value. |
@@ -1374,6 +1374,381 @@ authored `P_TEXT` image **opaque** — a large black rectangle where the referen
 translucent generated glyphs. The plan excludes transparent depth-peel layers on both
 sides, so this is a stated scope boundary rather than a defect, but it should be named as
 the reason the number does not go lower.
+
+---
+
+### 6.2g Transparency, the two-sided cull, the reflection-completeness answers, and the CONDUCTOR verdict
+
+Driven by a second `--window` review. Everything measured against CPU references
+rendered **on the day** (2026-08-08); the previous day's `t2000_cpu_today.ppm` had
+itself drifted **0.976 mean |dY|** under concurrent engine work, so it was not used.
+
+#### The t=2000 ledger, each change priced alone
+
+1920×1080, authored spline camera on both arms, full shipping stack, all 2,073,600 px.
+
+| step | signed dY (GPU−CPU) | mean abs dY |
+|---|--:|--:|
+| baseline at `982203a` | −6.026 | 24.604 |
+| + `Mat_TwoSided` cull bypass | **−0.731** | **22.487** |
+| + transparent forward kernel + depth peel | −1.279 | 23.094 |
+| + `cone_strength` 1.2 → 2.0 | +2.115 | 21.524 |
+| + Luminosity encoding widened past 4 | **+3.052** | **21.567** |
+
+The headline moved **24.604 → 21.567** mean |dY|, and the signed error crossed zero
+(the GPU is now marginally *brighter* than the reference rather than darker). The
+two middle rows are the interesting ones and neither is a win in aggregate — see
+below. Both are kept because either number alone misrepresents the change.
+
+#### Item 2 — the cull was wrong, but NOT "for transparent materials"
+
+The engine's backface test has exactly **one** per-material bypass, and it is not
+transparency (`FDS/RENDER/Transform.cpp:2429-2434`):
+
+```cpp
+if ((!F->VisibilityFlagsAll())
+    && (forceTS || shadowNoBackface
+        || (F->Txtr->Flags & Mat_TwoSided)
+        || (AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z < F->NormProd)))   // backface cull
+```
+
+`69bf0f0` added culling as **one `setCullMode` for the whole pass**, so every
+`Mat_TwoSided` material lost half its faces. The cull is now per batch.
+
+**"The greets box at the amudim" is the material `screen2`** — MEASURED through the
+ingest at world **(−0.0, 1.5, −21.0)** with radius 0.9, against the `amudim` face
+centroid at **(−0.0, 3.2, −21.0)**; flags **0x0034** = `Mat_Transparent |
+Mat_TwoSided | Mat_RGBInterp`; `Transparency = 50`. It is a face cluster of
+`Piramid.lwo`, not a separate mesh, and `GreetsDisco.cpp:111-113` names it
+independently ("the central `'screen2'` panel, between the `'amudim'` columns (both
+at x≈0, z≈−21)"). So the user's two reports are one object: it is two-sided *and*
+transparent, and both were broken.
+
+`lamp light` / `screen 3` / `screen 4` are **0x0024** — no `Mat_TwoSided` — so they
+are single-sided on the CPU too and culling them was already parity. Worth
+recording because "transparent surfaces need both faces" is the natural assumption
+and it is **wrong for this engine**.
+
+This single fix is the largest share of the ledger: −6.026 → −0.731 signed,
+24.604 → 22.487 absolute.
+
+#### Item 1 — TRANSPARENT SURFACES: the census, the kernel, the peel, the honest result
+
+**Census (MEASURED, printed by the ingest as `[XPAR]`).** greets: **6 transparent
+batches / 592 tri, 0 additive**, all `Transparency = 50` → `dw = 0.5`. fountain:
+**14 transparent batches / 1,328 tri, 0 additive** in the FLD.
+
+**The shading model is NOT the deferred kernel's**, and `docs/SHADING_CONTRACT.md`
+therefore does not describe it. Read out of
+`Render_DeferredTransparentLighting_Tile` (`DeferredSurfaceKernel.cpp:2751`) and
+reproduced term for term in `fs_xpar`:
+
+| quantity | the transparent kernel |
+|---|---|
+| ambient | `Mat->Diffuse * Scene::Ambient` — a **flat** constant, not the L2 SH irradiance, not scaled by `Ambient_Factor`. greets' `Scene::Ambient` is **(0,0,0)** (MEASURED), so greets' transparents have no ambient at all |
+| emissive | `Mat->Luminosity * 255`, uncapped |
+| direct diffuse | `k = NoL·(1−dist·rRange)`, spot cone smoothstep on `k`, `× Mat->Diffuse` |
+| specular | **Blinn-Phong** `pow(NoH, Glossiness) · Mat->Specular · falloff` — not Cook-Torrance, no Fresnel, no GGX; and the cone does **not** reach it (the same penumbra gap as contract D4) |
+| shadows | **none.** The loop has no `shadowAtten` term at all |
+| maps | **none.** `--xpar_pbr` defaults OFF (`FeatureFlags.def:103`) |
+| linearise | `lit = (tex/255)² · l` under `--hdr_linear` |
+
+**The peel sets the ORDER; the TBR only makes it fast.** Reproduced: clumping by
+**mesh** (the CPU clumps by `ParentTri`, so greets' four transparent materials —
+all inside `Piramid.lwo` — form ONE clump per side); **every back-facing clump
+before every front-facing one**, each side far-to-near (the `+4·fzp` term in
+`Transform.cpp:2621-2632`, whose documented result for a nested pair is
+`outer.back, inner.back, inner.front, outer.front`); `K` passes **per side** from
+`Scene::XparPeelPasses` exactly as `xparPeelPassesEffective()` resolves it —
+**greets 1, fountain 4**. `K == 1` keeps the single nearest fragment; `K > 1` peels
+farthest-first against a per-pixel floor. **The back layer is skipped for
+single-sided materials**, because the peel splits faces that already survived the
+backface cull — which is precisely why `FOUNTAIN.CPP:854-864` force-sets
+`Mat_TwoSided` on the orb shells. Drawing both sides unconditionally was measured
+wrong: 223,547 px moved with |err| rising 40.82 → 46.47.
+
+The **composite is blend state**, not shader arithmetic: `lit + dst·dw` via
+`MTLBlendFactorBlendColor`, the `XparBlendAlpha > 0` lerp, and `Mat_Additive`'s
+`src+dst`. Scheduling is this arm's own — two encoders per (clump, side, pass), no
+tile binning. The TBR's per-strip linked lists are a *performance* structure and
+are deliberately not reproduced.
+
+**The honest result at t=2000: the transparent pass does not improve the
+aggregate.** It moves **223,547 px (10.8 %)** whose |err| against the reference goes
+**40.82 → 46.47**; whole-frame mean |dY| 22.487 → 23.094. Those pixels were already
+**+29.5** too bright as opaque geometry, and they are the same central band that
+carries the known `P_TEXT` content gap — the GPU draws the authored image where the
+CPU draws `GreetsGenerator`'s per-frame text. Signed error on them improves
+(+29.5 → +24.4); the absolute distribution widens. **On fountain, where
+transparency is the scene, it is a clear win** (below).
+
+Not implemented, named rather than skipped: screen-space refraction
+(`--glass_refract` / `Mat_Refractive`), froxel fog per layer (`--fast_fog_xpar`),
+the water path, and `Mat_HdrReflection` panel sampling (this arm keeps its own
+mirror composite in `fs_lighting`).
+
+#### Item 3 — the three reflection-completeness answers
+
+**(a) Second-order mirrors: the CPU has ONE bounce, so the GPU is ALREADY at
+parity. Nothing was implemented, deliberately.** This corrects §3's table, which
+claims "second-order `mirror_rtt` re-renders at density 1024 — all ON by default".
+
+- `mirror_rtt` defaults **0** (`FeatureFlags.def:457`). greets *does*
+  `setDefault(mirror_rtt, true)` — but at `GREETS.CPP:1191`, inside
+  `GreetsApplyRunDefaults`, which runs from `createGreetsScene`. The RTT slot
+  builders run in `Initialize_Greets` (`GREETS.CPP:2905`, `:2917`), **earlier**, and
+  `PrepareSecondOrderMirrorRtt` bails on its first line
+  (`GreetsMirror.cpp:2651`). MEASURED in today's reference run:
+  `[MIRROR-CLUSTER 'P_TEXT.JPG'] 32 faces -> 16 clusters -> 3 mirrors + **0
+  first-order RTT**`.
+- The clone path is a hard clamp at one bounce by construction — `isCloneMesh`
+  (`GreetsMirror.cpp:191-196`) is applied in every loop that could recurse, with
+  the reason stated at `:179-190`.
+- `BuildCompoundMirrors` (`:1787-2090`) is a real second geometric bounce and is
+  **never called** from anywhere.
+- `mirror_recurse_depth` defaults 0.
+- Even with `--mirror_rtt`, the bake **hides every clone mesh** (`:3068-3076`) and
+  order-1 panels are `Mat_Transparent`, so the RTT is invisible inside another
+  RTT (`:1618-1638`): no cross-frame feedback, max 2 bounces.
+
+So: **never computed on the CPU either.** The GPU's `fum.mirrorCount = 0` is right.
+
+*A related gap that IS real:* the CPU has **4 active mirrors** at t=2000
+(`teleporter` plus three `P_TEXT.JPG` clusters at `N=(−1,0,0) d=48.795`,
+`N=(0,0,−1) d=−56.163`, `N=(0,0,1) d=56.039`); this arm builds **3**, because it
+picks ONE room-facing plane per material name. Two of the GPU's three match the
+CPU's to 0.001 in `d`. The missing one is the `screen 4` box's −Z face, which the
+ingest already prints as a cluster and labels "NOT A MIRROR". Recorded, not fixed.
+
+**(b) The disco ball: NEVER COMPUTED — no geometry, in any view.** The ingest
+synthesises only GreetsDisco's **lights** (10 cone spots + the glow omni clone);
+`grep discoBall GpuBench/**` is empty. On the CPU it is a real Scene TriMesh —
+`"__discoBall"`, material `"disco_ball"`, 10×14 UV sphere, **252 faces**,
+`HTrack_Visible | Tri_Possessed | Tri_Noshading`, confirmed present in today's run
+(`[LM-SKIP] '__discoBall' (252 faces)`) — but it is drawn by the **forward** env
+filler, not Mekalele: `Face_Reflective` faces bypass the deferred path
+(`RenderInner.cpp:297-317` → `TheOtherBarry<OVERWRITE, TEXTURETEXTURE>`), carrying a
+baked 1024² equirect panorama, a per-facet shimmer pass that rewrites `LR/LG/LB`
+every tick, and `Mat_HdrEmissive`. Reproducing it means a procedural mesh **plus** a
+forward env filler **plus** the glint pass — a real piece of work, not a wiring fix.
+It is also cloned into every mirror (`GreetsDisco.h:18-22`: "BuildDiscoBall BEFORE
+the greets mirror build (so the teleporter mirror clones the ball too)"), so its
+absence costs both the main view and the reflections.
+
+**(c) Spot cones in mirrors: COMPUTED AND NOT COMPOSITED — for the main camera
+only. Now fixed.** The cone pass was inline in `renderFrame` against the main
+depth buffer; the reflection renders never called it. The CPU shows beams inside
+its mirrors and does it differently: one screen-space pass that **admits the
+mirror-clone spots**, gated per pixel on the mirror's stamped footprint with the
+chord clamped to the glass depth (`DeferredVolumetric.cpp:761-772`, and the comment
+at `:1858-1883` — "Mirror-clone spots ARE admitted (beams show in mirrors)"). This
+arm has no clone geometry and no footprint mask, so the faithful equivalent is to
+run the same integral from the reflected camera against the reflection's own depth,
+which is what it now does. The transparent peel runs in the reflections too, in the
+same order (peel, then cones).
+
+*Also found while checking the cones:* `cone_strength` was **1.2**, the value
+`GreetsDisco.cpp:434` `setDefault`s. `GREETS.CPP:1187` `setDefault`s it to **2.0**
+and runs **later**; `setDefault` yields only to an *explicitly* set flag
+(`FeatureFlags.h:148`), so **2.0 is what ships**. Worth −1.279 → +2.115 signed at
+t=2000.
+
+#### Items 4 + 5 — ONE conductor investigation, and the GPU is RIGHT
+
+The two objects the user named are the **only two full-metal materials in the
+scene**, which is why this is one item and not two. MEASURED (pure-`python3` PNG
+decode of the map files themselves):
+
+| material | metallic map | verdict |
+|---|---|---|
+| `momy-1`, `momy-2` | `PBR/momy/metallic.png`, **mean 255.0, min = max = 255** | **metalness 1.0 everywhere** |
+| `screen emiter` | the *same file* (md5-identical) | **metalness 1.0 everywhere** |
+| `amudim` | `PBR/amudim/metallic.png`, **mean 1.263**, max 189 | metalness ≈ **0.005** — a dielectric |
+
+**"The screen projector" is the `screen emiter*` trio**, not a screen: three nested
+surfaces at a common centre (47.3–47.5, 3.2–3.7, **−62.85**) — `screen emiter fance`
+(a `PMETALL` cage), `screen emiter` (the amber metal housing, `Luminosity = 0`,
+`Specular = 0.62`, `Glossiness = 128`, constant albedo (255,206,104)), and
+`screen emiter green` (a green `Luminosity = 1` core) — sharing their z centreline
+with the 11.9 × 14.6 `screen 3` display at the same z. It is **not** the
+`P_TEXT`/`GreetsGenerator` scope boundary; that item is dropped as the coordinator
+directed.
+
+**The experiment.** Two new measurement-only dials switch the GPU's conductor
+shading to the CPU's *HDR-frame* semantics, so contract D1 and D2 are priced in
+pixels instead of argued from source: `--cpu_metal_diffuse` (D1: keep the diffuse
+lobe on metal) and `--cpu_metal_tint` (D2: tint the highlight by the gamma albedo).
+Because only metal pixels can move when D1 flips, **the change mask IS an exact
+conductor mask** — no material thresholding needed.
+
+Two forced poses, `t=2000`, both arms:
+`FDS_GREETS_CAM="12.0,3.0,-29.0,0.0,-0.0875,-0.9962"` (momy-1) and
+`"43.0,3.4,-62.85,1.0,0.0,0.0"` (the projector).
+
+| | conductor px | CPU luma | GPU luma | GPU signed | GPU+D1 signed | D1 recovers |
+|---|--:|--:|--:|--:|--:|--:|
+| momy | 100,476 (4.85 %) | 199.26 | 147.50 | **−51.76** | −32.35 | **+19.41** |
+| projector | 434,433 (20.95 %) | 121.48 | 70.95 | **−50.53** | −21.60 | **+28.93** |
+| t=2000 spline | 6,480 (0.31 %) | 63.07 | 46.61 | −16.46 | −14.83 | +1.63 |
+
+Whole-frame: momy 13.972 → 13.041 mean |dY|, projector 27.487 → 22.250.
+
+**D1 is real and it is worth 19–29 luma on a conductor.** D2 is **MEASURED at ≈0.001
+luma at both poses** — it is confined to the *direct* highlight, which is negligible
+on these surfaces at these poses, so whatever the user is seeing, D2 is not it. That
+corrects the contract's ranking: D1 dominates, D2 is inert here.
+
+**Two corrections to `docs/SHADING_CONTRACT.md` D1, which the measurement forces:**
+it names `amudim` among the affected materials and says "the `amudim` columns
+dominate the t=2000 pose". `amudim`'s metallic map is essentially zero, so it is
+**not** affected; and the t=2000 pose contains only **0.31 %** conductor pixels, so
+D1 cannot be what §6.2e's `(84,68,48)` vs `(96,77,53)` column deficit was. The
+affected set is exactly `momy-1`, `momy-2`, `screen emiter`.
+
+**VERDICT: the GPU is physically correct and the CPU's HDR frame has a bug.**
+Reasoning, in order of weight:
+
+1. A conductor has no diffuse lobe. There is no subsurface scattering to produce
+   one; all of a metal's reflection is specular. Applying `albedo² · Diffuse ·
+   (E(n) + Σ NoL·atten·shadow·colour)` to a metalness-1 surface is not a stylistic
+   choice, it is a category error.
+2. **The CPU's own code expresses the correct intent and simply fails to reach the
+   frame.** `DeferredSurfaceKernel.cpp:2521-2523` computes
+   `dk = 1 - metalM; fdB *= dk;` — but `fdB` is the **LDR VPage combine**, and the
+   `--hdr_linear` frame greets actually ships is built at `:2625` from
+   `rlB = aB*aB*lB + sB`, the **raw** accumulator. So the kill was written, and the
+   HDR path bypasses it. That is a bug by the code's own standard, not a
+   disagreement about aesthetics.
+3. It is the correct **direction** for the user's report: with the illegitimate
+   diffuse removed, a mirror-like metal stops being washed out and reads as
+   reflective. He describes the GPU projector as looking "much better" and
+   volunteers that the GPU `momy` may be the right look.
+
+**THE CPU FIX, SPECIFIED AND NOT APPLIED** (`FDS/RENDER/DeferredSurfaceKernel.cpp`
+belongs to another thread, and this is a shipping-look change that is the user's
+call):
+
+*Minimal form — faithful to the kernel's own already-written intent.* At `:2625-2627`
+the composite currently reads
+
+```cpp
+float rlB = aB*aB*lB + sB;          // and the G / R siblings
+```
+
+Hoist the `dk` the LDR branch already computes at `:2521` and apply it:
+
+```cpp
+const float dkH = (metalM > 0.0f) ? (1.0f - metalM) : 1.0f;
+float rlB = aB*aB*lB*dkH + sB;      // same for rlG, rlR
+```
+
+*Correct form — one extra subtlety the minimal form gets wrong.* `lB` also carries
+`Mat->Luminosity * 255` (`:1753`), and **emission is not diffuse**: a glowing metal
+still glows. The minimal form kills it, exactly as the existing LDR path does. To
+split them, keep the emissive out of the diffuse accumulator at `:1741-1760`
+(`emB = Mat->Luminosity*255` as its own term, `lB = Mat->Diffuse*E(n)`) and compose
+`rlB = aB*aB*(lB*dkH + emB) + sB`. The GPU already does exactly this split
+(`deferred.metal:730` adds `S.baseColor * S.lum` with no metal factor).
+
+The two forms **agree exactly for the projector** — `screen emiter` has
+`Luminosity = 0` (MEASURED: it is absent from the ingest's emissive census) — and
+differ for `momy`, whose `Luminosity` is **0.15**, i.e. 38/255 of emissive before
+albedo. So the projector's measured **+28.93** is pure diffuse either way.
+
+**What the fix does NOT explain, stated rather than hidden.** After D1 the projector
+conductors are still **−21.60** signed against the CPU. Ruled out by measurement:
+env probe resolution (128² → 512² moves the frame by **0.07** luma) and `env_refl_gain`
+(1.0 on both; greets' `setDefault(hdr_refl_gain, 4.0)` applies only to forward
+`Mat_HdrEmissive` surfaces, `Hdr.cpp:77`). Env reflection *is* contributing — turning
+it off costs **8.37** whole-frame luma at that pose. Leading unmeasured hypothesis:
+the CPU's probe for `screen emiter` is baked at its own material centroid
+(`EnvBake.cpp:1101-1103`), which lies **inside** the `screen emiter fance` cage, and
+self-exclusion is per-material (`:1174-1175`) so the cage is not excluded — the CPU
+housing may be reflecting the bright interior of its own housing. This is the same
+failure mode the shadow bake already fixed by name-matching `"lamp"`/`"emi"`
+(`Shadows.cpp:703-760`); the env bake has no equivalent filter. **HYPOTHESIS, not
+measured** — `ENVDBG=1` prints the probe centroid and would settle it.
+
+#### Item 6 — FOUNTAIN
+
+**The ingest reaches the scene but NOT the particles, and that is a hard boundary.**
+`--fld=SCENES/FOUNTAIN.FLD` loads and renders: **22 meshes, 38,300 faces, 58
+batches, 114,900 GPU verts, 24 usable lights, 13 shadow cubes, 14 flare sprites**.
+
+But the spray particles are **8,250** (`FntInnerPcls*3 + FntOuterPcls +
+FntSpiralPcls` with `FntFactor 1.5` → 4,500 + 3,000 + 750, `DEMO/FOUNTAIN.H:1-5`)
+and they live in **`Scene::Pcl[]`**, allocated by `Initialize_Particles`
+(`FOUNTAIN.CPP:245-444`) — **not** in `TriMeshHead`, not `Object`s, not faces of any
+mesh. Each carries a *degenerate* `Face` with `A == B == &Pcl.V` (that degeneracy is
+the engine's own "this is a sprite" test, `RENDER.CPP:1200`) and
+`F.Filler = TBR_Sprite`, an additive `add_saturated(src, dst)` blitter with Z-test
+and **no** Z-write. A `TriMesh`-walking ingest cannot see them, and they are not
+statically reachable either: `Particle_Kinematics` is a **stateful per-frame
+integrator with random spawning**, so a pinned-pose ingest would have to run the
+scene forward from t=0 to reproduce them, and the result would not be reproducible.
+**So: 0 additive draws on the GPU arm, by architecture.** The FLD's only
+`Mat_Additive` surface is the code-built 2-face vortex quad
+(`Add_Vortex_ToScene`, `FOUNTAIN.CPP:2522-2595`), which is also DEMO-side and also
+absent. Additive blending being order-independent would have made it the *easiest*
+transparency case — the difficulty is reachability, not blending.
+
+What the arm *does* now get right, replicated from `Initialize_Fountain`
+(`FOUNTAIN.CPP:845-902`) the same way `greets_stone_tex` is: `Mat_TwoSided` forced
+on the orb shells, `mizraka glass` at `XparBlendAlpha 0.4 / Specular 1.0 /
+Glossiness 128`, `Scene::Ambient = 64`, **`NZP = 20`, `FZP = 5000`** and
+`XparPeelPasses = 4`. The near/far numbers matter: the FLD header carries 0, so this
+arm had been rendering fountain with a **150-unit far plane and the camera 300 units
+out**. Also fixed: fountain's demo-t → `CurFrame` mapping is
+`span · t / FNTPartTime` with `FNTPartTime = 5000` (`FOUNTAIN.CPP:66`, `:2714`), not
+greets' span-derived form — the two **coincide at t=2500** on the shipped FLD, which
+is exactly the kind of accident that hides a wrong formula everywhere else.
+
+**Transparency census:** 14 batches / 1,328 tri. `mizraka glass` (32 tri, TwoSided)
+and `main down hull` (384 tri, TwoSided) plus six spire pairs of `f_sphere`
+(72 tri shell, r 18.3) and `f in shpere` (80 tri core, r 13.3) **concentric to
+within 2 units** — the nested case the peel exists for. **13 peel clumps × 2 sides ×
+4 passes.**
+
+**The pair, `--snapshot=fountain@t=2500 --deferred --hdr --glass-refract=1
+--glass-test --profiler=0` on the CPU:**
+
+| GPU configuration | signed dY | mean abs dY |
+|---|--:|--:|
+| transparents drawn OPAQUE (`--no-xpar`) | −36.680 | 37.377 |
+| **peel ON (4 passes/side, as the scene authors)** | −23.822 | 32.354 |
+| + Luminosity encoding widened | **−22.813** | **32.692** |
+
+So on fountain the peel is unambiguously the right thing: it removes **13 luma of
+signed error and 5 of absolute**. The residual −22.8 is the expected sign and
+magnitude for **8,250 missing additive sprites** plus the missing vortex.
+
+**Cost — the benchmark claim, kept separate from the parity claim.** GPU frame
+median over 60 frames after 20 warmup: **2.322 ms** with transparents opaque,
+**13.289 ms** with the peel. The peel adds **≈11 ms** for 1,328 triangles, and it is
+**encoder-bound, not fragment-bound**: 13 clumps × 2 sides × 4 passes × 2 encoders =
+**208 render encoders per frame** over a 1920×1080 depth target. This is the one
+place in the arm where the GPU is *not* obviously ahead, and the cause is the
+scheduling this arm chose (one encoder pair per layer) rather than the algorithm —
+which is precisely the separation the fountain's own architecture makes: the peel is
+the correctness half, the tiling is the performance half. A GPU-native rewrite
+(bounded per-pixel layer lists, or one encoder per side with layer indexing) is the
+obvious next step and is not attempted here.
+
+**A GPU-side gap this scene exposed and closed:** `Luminosity` rode an `RGBA8Unorm`
+params plane as `saturate(Lum*0.25)` with a `*4` decode — a hard clamp at 4.
+fountain's `daimond`, `spc1 in engine` and `in engine` author **`Luminosity = 100`**
+(MEASURED via the ingest's emissive census), so they rendered **25× too dim**. Now
+`sqrt(Lum/128)` with a squared decode: Lum 100 round-trips to 99.6, Lum 2.25 to
+2.274. The trade is stated: greets' small luminosities get slightly coarser and its
+frame moves **21.524 → 21.567** mean |dY|, against removing a 25× clamp on a whole
+scene.
+
+#### New instruments (offscreen stays the default; no window is ever opened)
+
+`[XPAR]` census (per-material transparency flags, `XparBlendAlpha`, `Transparency`,
+resolved blend form, world centroid + radius) printed by the ingest for any FLD;
+`--no-xpar`; `--xpar_peel_passes=K`; `--cpu_metal_diffuse`; `--cpu_metal_tint`;
+`--no-env_refl`; `--env_res=N`.
 
 ---
 

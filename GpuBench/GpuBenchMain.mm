@@ -266,6 +266,8 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-mirror")                opt.mirrors = false;
         else if (a == "--no-mirror_face")           opt.mirrorFacing = false;
         else if (a == "--no-revmaps")               opt.revMaps = false;
+        else if (a == "--no-env_refl")               opt.envRefl = false;
+        else if (const char *v = val("--env_res="))   opt.envRes = std::atoi(v);
         else if (const char *v = val("--cam_track=")) {
             if (std::sscanf(v, "%f:%f:%f", &camTrack[0], &camTrack[1], &camTrack[2]) == 3)
                 doCamTrack = true;

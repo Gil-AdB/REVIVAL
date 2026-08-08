@@ -41,8 +41,17 @@ namespace {
 // camera spline: t=5743 -> 1722.9, which sits just past key 16 (frame 1716,
 // source (8.54, 3.195, -51.82)) heading toward key 17 — and the review pose at
 // t=5743 is (9.076, 3.196, -52.93). Consistent.
-float DemoTimeToCurFrame(const ::Scene &sc, float demoT) {
+float DemoTimeToCurFrame(const ::Scene &sc, float demoT, const char *fldPath) {
     const float span = sc.EndFrame - sc.StartFrame;
+    // FOUNTAIN uses a DIFFERENT mapping: CurFrame = StartFrame + span *
+    // g_FrameTime / FNTPartTime with FNTPartTime = 50.00*100 = 5000
+    // (DEMO/FOUNTAIN.CPP:66, :2714) — a fixed 50-second part, not greets'
+    // span-derived one. The two happen to AGREE at t=2500 on the shipped
+    // FOUNTAIN.FLD (both give CurFrame 750, because its span is 1500 and
+    // 0.3*2500 == 1500/2), which is exactly the kind of coincidence that hides
+    // a wrong formula at every other t. Keyed explicitly.
+    if (fldPath && std::strstr(fldPath, "FOUNTAIN"))
+        return sc.StartFrame + span * demoT / 5000.0f;
     const float chPartTime = 500.0f + 100.0f * span / 30.0f;
     const float denom = chPartTime - 500.0f;
     if (denom <= 0.0f) return sc.StartFrame;
@@ -931,7 +940,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
     Scene_Computations(&sc);
 
     // ---- 2. pose ------------------------------------------------------------
-    out.curFrame = DemoTimeToCurFrame(sc, opt.demoT);
+    out.curFrame = DemoTimeToCurFrame(sc, opt.demoT, opt.fldPath);
     CurFrame = out.curFrame;
     Animate_Objects(&sc, sc.CameraHead);
 
@@ -1677,7 +1686,7 @@ bool Reanimate(Scene &out, const LoadOptions &opt, float demoT) {
     // Exactly how RENDER.CPP derives the engine frame: t = Timer/SceneTime, then
     // CurFrame = lerp(StartFrame, EndFrame, t). DemoTimeToCurFrame is greets' own
     // form of that (GREETS.CPP:3374).
-    out.curFrame = DemoTimeToCurFrame(sc, demoT);
+    out.curFrame = DemoTimeToCurFrame(sc, demoT, opt.fldPath);
     CurFrame = out.curFrame;
     Animate_Objects(&sc, sc.CameraHead);
     RefreshBatchTransforms(out, sc);
