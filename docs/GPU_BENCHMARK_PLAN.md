@@ -2187,6 +2187,172 @@ path warns and the run continues.
 
 ---
 
+### 6.2p "Only one spire" ROOT-CAUSED: the window's per-frame refresh keyed transforms by mesh NAME
+
+**The spire defect was never CPU-vs-GPU. It was WINDOW-vs-OFFSCREEN, inside
+GpuBench, and it reproduces headlessly in one command.**
+
+§6.2n recorded "the GPU renders six spires at his own CurFrame, offscreen" and
+could not reproduce "only one spire". That was correct and it was the wrong
+experiment: **the offscreen path never calls `Reanimate`, and the bug lived
+entirely inside it.** The window calls it every frame; the offscreen render
+calls it never. So the two arms ran different code at the same pose, and the
+half that was broken was the half nobody could render.
+
+#### Root cause
+
+`RefreshBatchTransforms` (SceneIngest.cpp) rebuilt each batch's model matrix
+through an `unordered_map<string, TriMesh*>` keyed on the mesh NAME. A name map
+keeps only the LAST object of each name — and fountain has **six** distinct
+objects called `pilon.lwo`, six called `inbal.lwo`, six called `dio.lwo`. On the
+first `Reanimate`, all eighteen of those batches were handed the SIXTH object's
+transform. **The six spires stack onto one.**
+
+The census in the same file already carried the comment "fountain has six
+distinct objects all called 'pilon.lwo'" (that is why `Batch::meshId` exists).
+The transform refresh did not get the memo.
+
+Fixed by keying on `Batch::srcMesh` — the source `TriMesh*`, the object's
+identity — with no name lookup anywhere in the path.
+
+#### New instrument, built first so this class of bug stops being invisible
+
+`--reanimate` runs the window's per-frame `Reanimate()` once before rendering,
+OFFSCREEN. Any per-frame bug is now renderable without a window.
+
+| run (fountain, `--t=705`, same `--cam`) | md5 | spires |
+|---|---|--:|
+| plain offscreen | `8730f692` | 6 |
+| `--reanimate`, BEFORE the fix | `77c05e6e` | **1** |
+| `--reanimate`, AFTER the fix | `8730f692` | 6 |
+
+**After the fix the window's own code path is BYTE-IDENTICAL to the offscreen
+render** — on fountain (`8730f692`) and on greets (`044537560519dce9ed9b83fc6bddd534`).
+
+Reproduce (headless, no window):
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ../build-gpu/GpuBench/GpuBench --fld=SCENES/FOUNTAIN.FLD --t=705 \
+  --cam="188.56,124.62,-183.83,-0.665439949,-0.369210476,0.648747485" \
+  --pass=deferred --xres=1280 --yres=720 --iters=1 --warmup=0 \
+  --reanimate --out=/tmp/reanim.ppm
+```
+
+Image: `docs/img/gpubench/fountain_window_one_spire.png` (offscreen / broken /
+fixed, one camera).
+
+#### The SECOND bug the same report contained: 48 draws, 7 lights
+
+Reported HUD: `T=705 FRAME 183.4 SPLINE (PAUSED) / 7 LIGHTS 48 DRAWS`, against
+58 batches and 13 lights offscreen at the same `t`. Not a cull and not the
+window: **the built-in default `--t=5743` is GREETS', and on fountain it
+resolves to CurFrame 1493 — past that scene's `EndFrame` of 1300.** Same leak
+class as the greets review pose in §6.2h.
+
+Past its last position key, FDS's `Animate_Objects` returns a **non-finite**
+transform for the two `Tri_AlignToPath` ships. Mechanism, read out of the
+engine and not inferred: `Spline_Calc_3D` CLAMPS past the last key
+(`MATH.CPP:1506`), so the `CurFrame+1` lookahead at `Transform.cpp:769` returns
+the SAME point, the path delta is exactly zero, `T->Heading` is never updated —
+and `Kick_Camera` then normalises a zero direction, computing
+`F = 1.0f/sqrtf(0)` = inf and `0*inf` = NaN straight into the matrix
+(`CAMERAS.CPP:94`). Ingest drops those objects, and the drop is PERMANENT: the
+per-frame refresh only updates batches that already exist, so scrubbing back
+to `t=705` cannot bring them back. Measured, at the default `t`:
+
+| | objects | batches | tris | usable lights |
+|---|--:|--:|--:|--:|
+| fountain, default `--t=5743` | 20 | **48** | 3,828 | **7** |
+| fountain, in-range `--t` | 22 | 58 | 38,300 | 13 |
+
+The 48/7 in the HUD is that row exactly — the six ship-engine omnis go with the
+ships.
+
+Three changes, all GpuBench-side:
+
+1. **An unspecified `--t` now resolves to the middle of the scene's own authored
+   frame range**, with a printed explanation. An explicit `--t` is still always
+   honoured — scrubbing past `EndFrame` is legitimate — but warns and names the
+   mechanism. greets is unaffected (its default `t` is in range).
+2. **A non-finite transform is REJECTED, not written**, in the per-frame
+   refresh: the batch holds its last good pose instead of taking NaN into its
+   bounding sphere and its vertices.
+3. **The HUD prints the census** — `DRAWS n  OBJ k/n  LIGHTS l/m` — plus a red
+   `!! n OBJ DROPPED AT LOAD ... PERMANENT` banner naming the objects, and the
+   same census on every `[WINDOW]` telemetry line. A screenshot that says only
+   "48 DRAWS" cannot be told apart from a scene that has 48; now it can.
+
+**The underlying `Kick_Camera` zero-direction NaN is an FDS latent bug**
+(`FDS/CAMERAS/CAMERAS.CPP:94`, no guard on a degenerate direction). Not fixed
+here — outside this arm's ownership — and recorded as such.
+
+#### Camera parity: every run now prints its own pose
+
+`[POSE]`, printed once by EVERY run, offscreen and windowed, and again on `G`:
+resolved position and forward at **9 significant digits** (DEMO's own precision,
+for DEMO's own stated reason — a grazing face's front/back test flips inside
+3-decimal truncation error), the pose's ORIGIN, `t` and `CurFrame`, and two
+COMPLETE, runnable repro commands — the GPU one and the scene-keyed CPU one
+(`FNTSNAP_*` / `FDS_GREETS_CAM` / `CITYSNAP_VIEW`).
+
+The window telemetry added in `569fdb0` was checked and had three defects that
+made it not paste-ready: `%.5f` instead of 9 significant digits, an unquoted
+`--cam=`, and a literal `<scene>` that zsh parses as a redirection and refuses
+to run. It also printed `FNTSNAP_*` on every scene. Both sites now build their
+commands from one shared pair of functions.
+
+**Does `--t=N` alone put the GPU on the authored camera spline?**
+
+| scene | `--t=N` alone | why |
+|---|---|---|
+| fountain | **YES** | `camPose` is cleared for every non-greets scene (§6.2h) |
+| city | **YES** | same |
+| greets | **NO** | `GpuBenchMain` seeds `camPose` with the built-in greets review pose. Measured: `--t=1588` and `--t=5743` return a byte-identical pose. `--t` moves the SCENE only. Pass `--spline` for the camera track. |
+
+`--spline` used to be a no-op offscreen (gated on `--window`); it now works
+headless, which is what makes that last row actionable. Cross-check: greets
+`--t=1588 --spline` returns `(-0.616376519, 2.79000092, -24.4848595)` — exactly
+the `FDS_GREETS_CAM` in the committed greets pin.
+
+#### The §6.2n "CPU drops the spires past EndFrame" divergence — SETTLED, and it was the harness
+
+The CPU is not dropping anything. `FountainScene::tick()` returns false at its
+first line when `Timer >= FNTPartTime` (5000) — `FOUNTAIN.CPP:2852` — so at
+`--snapshot=fountain@t>=5000` the frame is **never animated and never
+rendered**; `CurFrame` and `Animate_Objects` do not run, and the harness writes
+whatever `MainSurf` holds and exits 0.
+
+Proof, two ways:
+
+- `--snapshot=fountain@t=2500,8002` in ONE process: `CAll=5080` at BOTH
+  timestamps, and the t=8002 image (`b2cf33b4`) differs from the same t rendered
+  ALONE (`e33b57d5`). A frame whose content depends on what preceded it in the
+  process is a frame that is not being computed.
+- Alone, `t=8002` gives `CAll=34` against `24,573` at `t=2500` — an un-animated
+  scene that matches no `CurFrame` the GPU can produce.
+
+**Verdict.** The CPU's `return false` is CORRECT for the demo — it is the
+part-end handoff, and fountain is a 50-second part. **The CPU SNAPSHOT HARNESS
+is wrong**: `--snapshot=fountain@t>=5000` silently produces an un-animated frame
+and reports success. The GPU is right to hold the spires: `Spline_Calc_3D`
+clamping at the last key IS the engine's defined extrapolation. Nothing past
+`EndFrame` is authored, so neither arm is "showing the scene" there.
+Image: `docs/img/gpubench/fountain_cpu_gpu_endframe.png`.
+
+#### And the framing, since it was never the geometry
+
+From the user's own eye `(188.56, 124.62, -183.83)`, counting spire orbs inside
+the actual 58.1-degree frustum (`perspX=1728` at 1920 wide, from the `[POSE]`
+block) as a function of heading: **0 spires over 240 degrees of yaw, exactly 1
+at yaw 260, up to 5 at yaw 310-320.** At that position the whole scene occupies
+about one 60-degree sector. A report of "one spire" from a free-fly camera whose
+forward vector was never recorded is not evidence of missing geometry — which is
+the entire reason `[POSE]` now prints the forward vector on every run.
+Image: `docs/img/gpubench/fountain_user_eye_360.png`.
+
+---
+
 ### 6.2n Two window reports, run to ground: NO geometry is missing, and the "material HDR" is a CONTRAST deficit, not an encoding bug
 
 Reported from the `--window` build: *"gpu fountain only shows one spire, and the

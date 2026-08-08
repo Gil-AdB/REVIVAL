@@ -18,6 +18,7 @@
 #include <cstring>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // A DOCUMENTED GAP, not a workaround. FDS_VARS.H DECLARES `dTime` (the free
@@ -56,6 +57,17 @@ float DemoTimeToCurFrame(const ::Scene &sc, float demoT, const char *fldPath) {
     const float denom = chPartTime - 500.0f;
     if (denom <= 0.0f) return sc.StartFrame;
     return sc.StartFrame + span * demoT / denom;
+}
+
+// The inverse, so "put me mid-scene" can be expressed as a demo-t the user can
+// paste back in. Same two mappings, solved for t.
+float DemoTimeFromCurFrame(const ::Scene &sc, float curFrame, const char *fldPath) {
+    const float span = sc.EndFrame - sc.StartFrame;
+    if (span <= 0.0f) return 0.0f;
+    if (fldPath && std::strstr(fldPath, "FOUNTAIN"))
+        return (curFrame - sc.StartFrame) * 5000.0f / span;
+    const float denom = 100.0f * span / 30.0f;
+    return (curFrame - sc.StartFrame) * denom / span;
 }
 
 // Publish XRes/YRes/CntrX/CntrY/CntrEX/CntrEY etc. CalcPersp reads CntrX and
@@ -785,19 +797,62 @@ void ComputeBatchSphere(Scene &out, Batch &b) {
 // Per-frame refresh of the model matrices. Animate_Objects has already run.
 void ComputeBatchSphere(Scene &out, Batch &b);
 
+// Keyed on the batch's OWN source TriMesh (Batch::srcMesh), never on the mesh
+// NAME. The name-keyed version this replaces built an
+// unordered_map<string, TriMesh*> over the object list, which keeps only the
+// LAST object of each name — and fountain has SIX distinct objects called
+// "pilon.lwo", six called "inbal.lwo" and six called "dio.lwo". Every one of
+// those eighteen batches was therefore handed the SIXTH object's model matrix
+// on the first refresh, stacking all six spires onto one position.
+//
+// It only ever showed in --window, because the offscreen render never calls
+// Reanimate: Load() writes the correct per-object transforms and nothing
+// overwrites them. That asymmetry is what made the report irreproducible
+// headlessly, and is why `--reanimate` now exists.
+//
+// The pointer is also stable in a way the name is not: two objects can share a
+// name, and an object with a null name matched nothing at all.
 static void RefreshBatchTransforms(Scene &out, ::Scene &sc) {
-    std::unordered_map<std::string, TriMesh *> byName;
+    // Objects still present in the scene, so a batch whose source has been
+    // freed is skipped instead of dereferenced.
+    std::unordered_set<const void *> live;
     for (Object *obj = sc.ObjectHead; obj; obj = obj->Next)
-        if (obj->Type == Obj_TriMesh && obj->Data && obj->Name)
-            byName[obj->Name] = (TriMesh *)obj->Data;
+        if (obj->Type == Obj_TriMesh && obj->Data) live.insert(obj->Data);
+
+    int nonFinite = 0;
     for (auto &b : out.batches) {
-        auto it = byName.find(b.meshName);
-        if (it == byName.end()) continue;
-        TriMesh *T = it->second;
+        if (!b.srcMesh || !live.count(b.srcMesh)) continue;
+        const TriMesh *T = static_cast<const TriMesh *>(b.srcMesh);
+        // A non-finite transform is REJECTED, not written. FDS hands one back
+        // for any Tri_AlignToPath mesh evaluated past its last position key:
+        // Spline_Calc_3D clamps (MATH.CPP:1506), so the CurFrame+1 lookahead in
+        // Animate_Objects (Transform.cpp:769) returns the SAME point, the path
+        // delta is exactly zero, T->Heading is never updated, and Kick_Camera
+        // normalises a zero direction — CAMERAS.CPP:94 computes
+        // 1/sqrtf(0) = inf and 0*inf = NaN straight into the matrix. Writing
+        // that through would put NaN in the bounding sphere and hand NaN
+        // vertices to the GPU. Holding the last good transform keeps the object
+        // where it was, which is what the clamped spline means anyway.
+        if (!FiniteVec(T->IPos) || !std::isfinite(T->RotMat[0][0]) ||
+            !std::isfinite(T->RotMat[1][1]) || !std::isfinite(T->RotMat[2][2])) {
+            ++nonFinite;
+            continue;
+        }
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
         b.pos[0] = T->IPos.x; b.pos[1] = T->IPos.y; b.pos[2] = T->IPos.z;
         ComputeBatchSphere(out, b);   // the sphere rides the model matrix
+    }
+    if (nonFinite) {
+        static int warned = 0;
+        if (warned < 3) {
+            ++warned;
+            std::fprintf(stderr,
+                "[ANIM] %d batch(es) had a NON-FINITE transform at CurFrame %.1f "
+                "— holding their last good pose (FDS Tri_AlignToPath past the "
+                "last position key; see RefreshBatchTransforms).\n",
+                nonFinite, out.curFrame);
+        }
     }
 }
 
@@ -967,6 +1022,51 @@ bool Load(Scene &out, const LoadOptions &opt) {
 
     // ---- 2. pose ------------------------------------------------------------
     out.curFrame = DemoTimeToCurFrame(sc, opt.demoT, opt.fldPath);
+
+    // THE DEFAULT --t IS GREETS' (5743), and it is meaningless in another
+    // scene's timeline — the same leak class as the greets review pose that
+    // §6.2h caught in the camera. On fountain it resolves to CurFrame 1493,
+    // PAST that scene's EndFrame of 1300, and past the last position key FDS's
+    // Animate_Objects starts returning a NON-FINITE transform for the two
+    // Tri_AlignToPath ships (mechanism in RefreshBatchTransforms). Ingest then
+    // drops them permanently, because the per-frame refresh only updates
+    // batches that already exist.
+    //
+    // MEASURED: a bare `--fld=SCENES/FOUNTAIN.FLD` at the default t reports
+    // 20 objects / 48 batches / 3,828 tri / 7 usable lights, against
+    // 22 / 58 / 38,300 / 13 at an in-range t — and the interactive HUD shows
+    // exactly that "48 DRAWS 7 LIGHTS" however far you then scrub back, which
+    // is what a window report of missing geometry looked like.
+    //
+    // So: an UNSPECIFIED --t resolves to the middle of the scene's own authored
+    // range. An EXPLICIT --t is always honoured — scrubbing past EndFrame is a
+    // legitimate thing to ask for — but it warns, because that is where FDS's
+    // animation stops being defined.
+    const float span = sc.EndFrame - sc.StartFrame;
+    const bool outOfRange = (out.curFrame < sc.StartFrame || out.curFrame > sc.EndFrame);
+    if (outOfRange && span > 0.0f) {
+        if (!opt.demoTExplicit) {
+            const float midFrame = sc.StartFrame + 0.5f * span;
+            const float newT = DemoTimeFromCurFrame(sc, midFrame, opt.fldPath);
+            std::fprintf(stderr,
+                "[INGEST] --t not given: the built-in default t=%d is GREETS' and lands at "
+                "CurFrame %.1f, outside this scene's authored range [%.0f, %.0f]. Using "
+                "t=%.0f (CurFrame %.1f, mid-scene) instead. Pass --t=N explicitly to override.\n",
+                opt.demoT, out.curFrame, sc.StartFrame, sc.EndFrame, newT, midFrame);
+            out.curFrame = midFrame;
+            out.resolvedDemoT = newT;
+        } else {
+            std::fprintf(stderr,
+                "[INGEST] WARNING t=%d -> CurFrame %.1f is OUTSIDE this scene's authored "
+                "range [%.0f, %.0f]. Past the last key FDS's splines CLAMP, and any "
+                "Tri_AlignToPath mesh gets a non-finite transform (zero path delta -> "
+                "Kick_Camera normalises a zero vector, CAMERAS.CPP:94). Objects that hit "
+                "that are dropped from this ingest.\n",
+                opt.demoT, out.curFrame, sc.StartFrame, sc.EndFrame);
+        }
+    }
+    if (out.resolvedDemoT < 0.0f) out.resolvedDemoT = float(opt.demoT);
+
     CurFrame = out.curFrame;
     Animate_Objects(&sc, sc.CameraHead);
 
@@ -1183,10 +1283,14 @@ bool Load(Scene &out, const LoadOptions &opt) {
         TriMesh *T = static_cast<TriMesh *>(obj->Data);
         if (!T->FIndex || !T->Faces || !T->Verts) continue;
         if (!FiniteVec(T->IPos)) {
+            const char *nm = obj->Name ? obj->Name : "?";
+            ++out.droppedMeshes;
+            if (!out.droppedNames.empty()) out.droppedNames += ",";
+            out.droppedNames += nm;
             if (opt.verbose)
                 std::fprintf(stderr,
                              "[INGEST] skip '%s': non-finite IPos at CurFrame %.1f\n",
-                             obj->Name ? obj->Name : "?", out.curFrame);
+                             nm, out.curFrame);
             continue;
         }
 
@@ -1228,6 +1332,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
             b.firstVertex = uint32_t(out.verts.size());
             b.meshName = obj->Name ? obj->Name : "?";
             b.meshId   = int(out.meshCount) - 1;   // per-OBJECT, see the header
+            b.srcMesh  = T;                        // OBJECT IDENTITY, see the header
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
             b.pos[0] = T->IPos.x;
@@ -1729,6 +1834,137 @@ void FreeCamDumpPose(const Scene &s) {
     // And the form THIS arm and FDS_GREETS_CAM take.
     std::fprintf(stderr, "[GPUBENCH-POSE] --cam=\"%.8g,%.8g,%.8g,%.8g,%.8g,%.8g\"\n",
                  e[0], e[1], e[2], fx, fy, fz);
+}
+
+// ---- THE POSE BLOCK -----------------------------------------------------
+// See SceneIngest.h. Two hard requirements, both from being asked repeatedly
+// for camera information the tools should have printed themselves:
+//   1. it prints on EVERY run, offscreen included — an offscreen run that says
+//      nothing about its camera cannot be checked against a window report;
+//   2. the two repro lines are COMPLETE COMMANDS. A pose that has to be
+//      hand-assembled into a command line is a pose that gets mistyped.
+namespace {
+// One place that decides which scene this FLD is, so the pose block and the
+// window telemetry cannot disagree about which env var the CPU honours.
+struct PoseIds {
+    const char *fld;
+    bool fountain, greets, city;
+    const char *tag;
+    char pose6[192];   // "px,py,pz,fx,fy,fz"  (--cam= / FDS_GREETS_CAM)
+    char pos3[96];     // "px,py,pz"           (FNTSNAP_POS)
+    char fwd3[96];     // "fx,fy,fz"           (FNTSNAP_FWD)
+};
+PoseIds MakePoseIds(const Scene &s, const LoadOptions &opt) {
+    PoseIds p{};
+    p.fld = opt.fldPath ? opt.fldPath : "(none)";
+    p.fountain = std::strstr(p.fld, "FOUNTAIN") != nullptr;
+    p.greets   = std::strstr(p.fld, "GREETS")   != nullptr;
+    p.city     = std::strstr(p.fld, "CITY")     != nullptr;
+    p.tag = p.fountain ? "fountain" : p.greets ? "greets"
+          : p.city     ? "city"     : "(no snapshot driver)";
+    const float px = s.camera.src[0], py = s.camera.src[1], pz = s.camera.src[2];
+    const float fx = s.camera.rot[2][0], fy = s.camera.rot[2][1],
+                fz = s.camera.rot[2][2];
+    std::snprintf(p.pose6, sizeof p.pose6, "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+                  px, py, pz, fx, fy, fz);
+    std::snprintf(p.pos3, sizeof p.pos3, "%.9g,%.9g,%.9g", px, py, pz);
+    std::snprintf(p.fwd3, sizeof p.fwd3, "%.9g,%.9g,%.9g", fx, fy, fz);
+    return p;
+}
+}  // namespace
+
+void PoseGpuCommand(const Scene &s, const LoadOptions &opt, float demoT,
+                    char *out, size_t n) {
+    const PoseIds p = MakePoseIds(s, opt);
+    std::snprintf(out, n,
+        "./GpuBench --fld=%s --t=%.0f --cam=\"%s\" --pass=deferred "
+        "--xres=%d --yres=%d --out=/tmp/gpu.ppm",
+        p.fld, demoT, p.pose6, s.xres, s.yres);
+}
+
+void PoseCpuCommand(const Scene &s, const LoadOptions &opt, float demoT,
+                    char *out, size_t n) {
+    const PoseIds p = MakePoseIds(s, opt);
+    if (p.fountain)
+        std::snprintf(out, n,
+            "SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "
+            "FNTSNAP_POS=%s FNTSNAP_FWD=%s FNTSNAP_FOV=%.9g "
+            "./DEMO --snapshot=fountain@t=%.0f --out=/tmp/cpu --deferred --hdr "
+            "--glass-refract=1 --glass-test --profiler=0",
+            p.pos3, p.fwd3, s.camera.fov, demoT);
+    else if (p.greets)
+        std::snprintf(out, n,
+            "SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "
+            "FDS_GREETS_CAM=\"%s\" FDS_GREETS_FOV=%.9g "
+            "./DEMO --snapshot=greets@t=%.0f --out=/tmp/cpu --deferred --hdr "
+            "--glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0",
+            p.pose6, s.camera.fov, demoT);
+    else if (p.city)
+        std::snprintf(out, n,
+            "SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "
+            "CITYSNAP_VIEW=\"%s,%.9g\" "
+            "./DEMO --snapshot=city@t=%.0f --out=/tmp/cpu --deferred --hdr "
+            "--profiler=0",
+            p.pose6, s.camera.fov, demoT);
+    else
+        std::snprintf(out, n,
+            "(no DEMO snapshot driver keyed to %s — fountain/greets/city only)",
+            p.fld);
+}
+
+void PrintPoseBlock(const Scene &s, const LoadOptions &opt, PoseOrigin origin,
+                    float demoT) {
+    const PoseIds p = MakePoseIds(s, opt);
+    const char *fld = p.fld;
+    const float px = s.camera.src[0], py = s.camera.src[1], pz = s.camera.src[2];
+    const float fx = s.camera.rot[2][0], fy = s.camera.rot[2][1],
+                fz = s.camera.rot[2][2];
+    const char *tag = p.tag;
+
+    const char *originStr =
+        origin == PoseOrigin::ExplicitCam ? "EXPLICIT --cam= (PINNED; --t moves the SCENE only, not the camera)"
+      : origin == PoseOrigin::DefaultReviewPose
+            ? "BUILT-IN GREETS REVIEW POSE (PINNED, and it is the DEFAULT on greets) "
+              "-- --t moves the SCENE only. Pass --spline for the authored camera track."
+      : origin == PoseOrigin::FreeFly     ? "INTERACTIVE FREE-FLY (Dynamic_Camera; not reproducible from --t alone)"
+                                          : "AUTHORED SPLINE (the FLD's own camera track, evaluated at this CurFrame)";
+
+    std::fprintf(stderr,
+        "\n[POSE] ======================= CAMERA POSE =======================\n"
+        "[POSE] scene    %s   (%s)\n"
+        "[POSE] time     t=%.0f  ->  CurFrame=%.4f   %s\n"
+        "[POSE] origin   %s\n"
+        "[POSE] pos      %.9g %.9g %.9g\n"
+        "[POSE] fwd      %.9g %.9g %.9g\n"
+        "[POSE] fov      %.4f   perspX=%.4f perspY=%.4f   %dx%d   near=%.4f far=%.1f\n",
+        fld, tag, demoT, s.curFrame,
+        p.fountain ? "(fountain: CurFrame = StartFrame + span*t/5000, FOUNTAIN.CPP:2895)"
+                   : "(CurFrame = StartFrame + span*t/(CHPartTime-500))",
+        originStr, px, py, pz, fx, fy, fz,
+        s.camera.fov, s.camera.perspX, s.camera.perspY, s.xres, s.yres,
+        s.camera.nearZ, s.camera.farZ);
+
+    // ---- The two commands. The GPU one is always fully PINNED with --cam=,
+    // even when this pose came off the spline: that is the point — it is what
+    // lets the other arm land on this exact view without re-deriving anything.
+    char gpuCmd[512], cpuCmd[768];
+    PoseGpuCommand(s, opt, demoT, gpuCmd, sizeof gpuCmd);
+    PoseCpuCommand(s, opt, demoT, cpuCmd, sizeof cpuCmd);
+    std::fprintf(stderr,
+        "[POSE] --- paste-ready, GPU (this arm) ---\n"
+        "[POSE] %s\n"
+        "[POSE] --- paste-ready, CPU (DEMO, run from Runtime/) ---\n"
+        "[POSE] %s\n",
+        gpuCmd, cpuCmd);
+    if (p.fountain && demoT >= 5000.0f)
+        std::fprintf(stderr,
+            "[POSE] WARNING t >= FNTPartTime (5000): fountain's driver returns "
+            "false at the top of tick() (FOUNTAIN.CPP:2852), so on the CPU that "
+            "frame is NEVER animated or rendered — CurFrame and Animate_Objects "
+            "do not run. The CPU command above will not reproduce this view.\n");
+    std::fprintf(stderr,
+        "[POSE] ===========================================================\n");
+    std::fflush(stderr);
 }
 
 void CameraTrack(Scene &s, const LoadOptions &opt, float t0, float t1, float step) {

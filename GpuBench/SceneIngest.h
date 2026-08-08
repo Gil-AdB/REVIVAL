@@ -156,6 +156,18 @@ struct Batch {
     // fountain has six distinct Objects all called "pilon.lwo", so grouping by
     // name would fuse six separate glass shells into one peel clump.
     int      meshId = -1;
+    // The SOURCE TriMesh this batch was de-indexed from, as an opaque pointer
+    // (this header stays FDS-free; SceneIngest.cpp casts it back).
+    //
+    // This is the object's IDENTITY, and the per-frame transform refresh keys
+    // on it. It used to key on `meshName`, which is a BUG with a picture: a
+    // name->TriMesh* map keeps only the LAST object of each name, so on the
+    // first Reanimate all six of fountain's "pilon.lwo" batches were handed the
+    // SIXTH pilon's model matrix and the six spires stacked onto one. Offscreen
+    // renders never call Reanimate, so it only ever showed in the --window
+    // build — the "there is only one spire present" report. Reproduce with
+    // `--reanimate`; see docs/GPU_BENCHMARK_PLAN.md.
+    const void *srcMesh = nullptr;
 };
 
 struct TextureImage {
@@ -240,6 +252,19 @@ struct Scene {
     // (DeferredSurfaceKernel.cpp:3600): an explicit flag wins, else this.
     int      xparPeelPasses = 1;
     float    curFrame = 0.0f;
+    // The demo-t that actually produced `curFrame`. Differs from
+    // LoadOptions::demoT only when Load() substituted a mid-scene default for
+    // the greets-specific built-in. The pose block and the window HUD report
+    // THIS one, so the paste-ready repro lines name the t that was rendered.
+    float    resolvedDemoT = -1.0f;
+    // Objects the ingest REFUSED, and why. Non-zero means the batch list on
+    // screen is smaller than the scene, permanently — the per-frame refresh
+    // only updates batches that already exist, so scrubbing back into the
+    // authored range does NOT bring them back. Surfaced in the window HUD
+    // because a screenshot that says "48 DRAWS" and nothing else cannot be
+    // told apart from a scene that only has 48.
+    int         droppedMeshes = 0;
+    std::string droppedNames;
     // FDS global ImageSize at ingest time (greets sets 0.25) — the flare
     // sprite's world scale. Carried so the GPU flare pass uses the scene's
     // number rather than a constant of its own.
@@ -260,6 +285,11 @@ struct LoadOptions {
     // Demo-timer value from docs/greets_review_poses.txt. Mapped to the
     // engine's CurFrame with the greets scene's own formula (see .cpp).
     int         demoT = 5743;
+    // Was --t actually given on the command line? The default above is GREETS'
+    // and lands outside every other scene's authored frame range; Load()
+    // substitutes a mid-scene t when this is false. An explicit --t is always
+    // honoured, warning if out of range. See Load().
+    bool        demoTExplicit = false;
     // "px,py,pz,fx,fy,fz" as in FDS_GREETS_CAM. Empty = use the scripted camera.
     std::string camPose;
     bool        verbose = true;
@@ -377,6 +407,50 @@ void FreeCamSyncFromScene(const Scene &s);
 // The `G` key: print the pose under the camera, in DisplaceTest's own
 // [DTEST-POSE] form AND as this arm's --cam= string.
 void FreeCamDumpPose(const Scene &s);
+
+// ---- THE POSE BLOCK -----------------------------------------------------
+// Where the camera came from. Printed as part of the block because "the GPU
+// shows X and the CPU shows Y" is unanswerable until both arms agree they were
+// looking at the same thing, and a pinned pose and a spline pose at the same
+// `t` are NOT the same thing (the spline moves; the pin does not).
+enum class PoseOrigin {
+    Spline,       // camPose empty: the FLD's own authored camera track at CurFrame
+    ExplicitCam,  // --cam="px,py,pz,fx,fy,fz" on the command line
+    // GREETS ONLY, and it is the DEFAULT there: GpuBenchMain seeds camPose with
+    // the greets primary review pose and clears it for every other scene. So a
+    // bare `--t=N` on greets PINS the camera and animates only the scene — the
+    // pose is byte-identical at t=1588 and t=5743. This is a distinct origin and
+    // not "the spline", which is why it has its own name: reporting it as the
+    // spline is how you end up comparing two arms that were never on the same
+    // camera at all.
+    DefaultReviewPose,
+    FreeFly,      // the interactive window's Dynamic_Camera free camera
+};
+
+// Print, ONCE, the block that names exactly where this camera is and how to
+// reproduce it in the OTHER arm. Every GpuBench run prints it — offscreen from
+// Load(), interactive from the window loop and again on `G`.
+//
+// Nine significant digits, for DEMO's own stated reason (GREETS.CPP:3932): a
+// grazing face's front/back test (N.A ~ 0) flips inside 3-decimal truncation
+// error, so a pose quoted at 3 decimals reproduces the OTHER side of the flip
+// from the run being reported. The GPU line and the CPU line are emitted as
+// complete, copy-paste-runnable commands, not as fragments to be assembled.
+void PrintPoseBlock(const Scene &s, const LoadOptions &opt, PoseOrigin origin,
+                    float demoT);
+
+// The two repro COMMANDS on their own, so the window's periodic telemetry and
+// the block share one source of truth instead of two drifting snprintf sites.
+// Both are complete, quoted, runnable command lines at 9 significant digits.
+// The CPU one is keyed to the scene's OWN snapshot driver: fountain reads
+// FNTSNAP_POS/FWD/FOV, greets reads FDS_GREETS_CAM, city reads CITYSNAP_VIEW —
+// they are not interchangeable, and a line that prints the wrong one (or a
+// literal "<scene>" placeholder, which zsh reads as a redirection and refuses)
+// is not paste-ready.
+void PoseGpuCommand(const Scene &s, const LoadOptions &opt, float demoT,
+                    char *out, size_t n);
+void PoseCpuCommand(const Scene &s, const LoadOptions &opt, float demoT,
+                    char *out, size_t n);
 
 // OFFSCREEN evidence for "the scripted camera interpolates". Re-animates the
 // scene at each demo-t in [t0, t1] step `step` and prints the resulting camera

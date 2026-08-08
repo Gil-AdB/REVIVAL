@@ -2825,7 +2825,10 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             if (!psoHud) { std::fprintf(stderr, "[WINDOW] hud pso: %s\n",
                                         [[e localizedDescription] UTF8String]); return false; }
         }
-        const int HUDW = 520, HUDH = 190;
+        // Tall enough for the census + the dropped-object warning. The HUD is a
+        // fixed-size texture and HudText clips, so a too-short one silently
+        // swallows the last lines -- which would be exactly the diagnostic ones.
+        const int HUDW = 560, HUDH = 240;
         MTLTextureDescriptor *htd =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                               width:HUDW height:HUDH mipmapped:NO];
@@ -2884,8 +2887,19 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                         case SDLK_SPACE:  paused = !paused; break;
                         case SDLK_LEFTBRACKET:  demoT -= 100.0f; break;
                         case SDLK_RIGHTBRACKET: demoT += 100.0f; break;
-                        // G, rising edge only — DisplaceTest's pose dump.
-                        case SDLK_g: FreeCamDumpPose(scene); break;
+                        // G, rising edge only — the FULL pose block (both arms'
+                        // paste-ready repro lines at 9 significant digits) plus
+                        // DisplaceTest's own [DTEST-POSE] form. The live demo
+                        // timer and free-fly/spline state are passed in, so a
+                        // pose dumped after scrubbing with [ / ] reproduces the
+                        // SCENE time as well as the viewpoint.
+                        case SDLK_g:
+                            PrintPoseBlock(scene, lo,
+                                           freeFly ? PoseOrigin::FreeFly
+                                                   : PoseOrigin::Spline,
+                                           demoT);
+                            FreeCamDumpPose(scene);
+                            break;
                         case SDLK_F1: std::fputs(kKeymap, stderr); break;
                         default: break;
                     }
@@ -2986,10 +3000,30 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                           demoT, scene.curFrame, freeFly ? "FREE-FLY" : "SPLINE",
                           paused ? " (PAUSED)" : "");
             HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 200, 255, 200); ly += 15;
-            std::snprintf(line, sizeof line, "%d LIGHTS  %zu DRAWS  VERTS %s",
-                          out.litLights, scene.batches.size(),
-                          vertsEverChanged ? "RE-UPLOADED" : "STATIC (NO RE-UPLOAD)");
-            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 190, 190, 190); ly += 18;
+            // THE CENSUS, on screen. A HUD that says only "48 DRAWS" cannot be
+            // told apart from a scene that has 48 draws, which is how a window
+            // screenshot of a scene missing two objects and half its lights got
+            // reported as a rendering defect. Every number here is shown as
+            // submitted/total so the screenshot itself says whether anything
+            // was lost, and OBJ carries the ingest drop that DRAWS alone hides.
+            std::snprintf(line, sizeof line, "DRAWS %zu  OBJ %d/%d  LIGHTS %d/%zu  VERTS %s",
+                          scene.batches.size(),
+                          int(scene.meshCount), int(scene.meshCount) + scene.droppedMeshes,
+                          out.litLights, scene.lights.size(),
+                          vertsEverChanged ? "RE-UPLOADED" : "STATIC");
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 190, 190, 190); ly += 15;
+            if (scene.droppedMeshes > 0) {
+                // Loud, and it names the objects: this state is PERMANENT for
+                // the life of the window (Reanimate only refreshes batches that
+                // already exist), so scrubbing back will not fix it and the
+                // user needs to know to relaunch with an in-range --t.
+                std::snprintf(line, sizeof line, "!! %d OBJ DROPPED AT LOAD: %.40s",
+                              scene.droppedMeshes, scene.droppedNames.c_str());
+                HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 90, 90); ly += 15;
+                HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                        "PERMANENT - RELAUNCH WITH AN IN-RANGE --t", 255, 140, 140); ly += 11;
+            }
+            ly += 4;
             // The keymap belongs on screen, not only in the startup log — the
             // report that "I don't get the complete set of keys" was made at the
             // window, where the log had already scrolled.
@@ -3042,24 +3076,38 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                     "[WINDOW] f=%4d t=%7.0f CurFrame=%7.1f cam=(%.2f,%.2f,%.2f) "
                     "fwd=(%.4f,%.4f,%.4f) %s | "
                     "gpu %6.3f ms (bake %.3f gbuf %.3f light %.3f tone %.3f) | "
-                    "cpu anim %.3f upload %.3f | %.0f fps\n",
+                    "cpu anim %.3f upload %.3f | %.0f fps\n"
+                    // The census on every telemetry line, not only in the HUD:
+                    // a pasted log is the other half of a window report, and
+                    // "draws=N" alone never said whether N was the whole scene.
+                    "[WINDOW]   census: draws=%zu obj=%d/%d lights=%d/%zu%s\n",
                     frameNo, demoT, scene.curFrame,
                     scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
                     f[0], f[1], f[2],
                     freeFly ? "free-fly" : "spline",
                     gpuFrameMs, perPass[0], perPass[1], perPass[2], perPass[3],
-                    cpuAnimMs, cpuUploadMs, emaFps);
-                std::fprintf(stderr,
-                    "[WINDOW]   repro: --fld=%s --t=%d --pass=deferred "
-                    "--cam=%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n"
-                    "[WINDOW]   CPU:   FNTSNAP_POS=%.5f,%.5f,%.5f "
-                    "FNTSNAP_FWD=%.5f,%.5f,%.5f FNTSNAP_FOV=%.2f "
-                    "./DEMO --snapshot=<scene>@t=%d ...\n",
-                    lo.fldPath, int(demoT + 0.5f),
-                    scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
-                    f[0], f[1], f[2],
-                    scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
-                    f[0], f[1], f[2], scene.camera.fov, int(demoT + 0.5f));
+                    cpuAnimMs, cpuUploadMs, emaFps,
+                    scene.batches.size(),
+                    int(scene.meshCount), int(scene.meshCount) + scene.droppedMeshes,
+                    out.litLights, scene.lights.size(),
+                    scene.droppedMeshes ? "  !! OBJECTS DROPPED AT LOAD, PERMANENT" : "");
+                // The repro pair, through the SAME builders the [POSE] block
+                // uses. The hand-rolled version this replaces had three defects
+                // that made it not paste-ready: %.5f instead of 9 significant
+                // digits (the precision DEMO deliberately prints, because a
+                // grazing face's front/back test flips inside the truncation
+                // error); an unquoted --cam=; and a literal "<scene>" that zsh
+                // parses as a redirection and refuses to run. It also printed
+                // FNTSNAP_* on every scene, which is only correct on fountain.
+                {
+                    char gpuCmd[512], cpuCmd[768];
+                    PoseGpuCommand(scene, lo, demoT, gpuCmd, sizeof gpuCmd);
+                    PoseCpuCommand(scene, lo, demoT, cpuCmd, sizeof cpuCmd);
+                    std::fprintf(stderr,
+                        "[WINDOW]   GPU repro: %s\n"
+                        "[WINDOW]   CPU repro: %s\n",
+                        gpuCmd, cpuCmd);
+                }
             }
             ++frameNo;
             if (opt.winFrames > 0 && frameNo >= opt.winFrames) running = false;

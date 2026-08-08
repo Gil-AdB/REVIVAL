@@ -229,6 +229,11 @@ const char *kUsage =
     "                    TESTED with no depth write, no peel (additive is order-free).\n"
     "                    Produce the dump from DEMO: --pcl_dump=PATH[,t0,t1] (default off,\n"
     "                    byte-null when off; t0/t1 are an inclusive scene-Timer window).\n"
+    "  --reanimate       run the WINDOW's per-frame Reanimate() once before rendering,\n"
+    "                    OFFSCREEN. The window animates every frame; the plain offscreen\n"
+    "                    render never calls Reanimate at all, so a bug that lives in the\n"
+    "                    per-frame refresh rather than in Load is invisible without this.\n"
+    "                    Use it to reproduce a --window report headlessly.\n"
     "  --dump_meshes     PER-OBJECT census: name, triangle count, world position, and each\n"
     "                    material's ROUTE (opaque G-buffer / xpar peel / additive / no\n"
     "                    shadow cast), plus the texture roster. Diff it against the CPU's\n"
@@ -268,6 +273,14 @@ int main(int argc, const char *argv[]) {
     std::string passMode = "albedo";
     bool camExplicit = false;
     bool doCamTrack = false;
+    // --reanimate: run the WINDOW's per-frame path once, offscreen. The window
+    // loop calls Reanimate(scene, lo, demoT) every frame; the offscreen render
+    // never calls it at all. So any bug that lives in the per-frame refresh
+    // rather than in Load is INVISIBLE offscreen — which is exactly how a
+    // "window shows one spire, offscreen shows six" report ends up with no
+    // headless reproduction. This makes the window's own code path renderable
+    // without a window.
+    bool doReanimate = false;
     float camTrack[3] = {0, 0, 0};
     gpubench::DeferredOptions dopt;
     std::string pclSynth;
@@ -283,7 +296,7 @@ int main(int argc, const char *argv[]) {
         };
         if (a == "--help" || a == "-h") { std::fputs(kUsage, stdout); return 0; }
         else if (const char *v = val("--fld="))     { static std::string s; s = v; opt.fldPath = s.c_str(); }
-        else if (const char *v = val("--t="))       opt.demoT = std::atoi(v);
+        else if (const char *v = val("--t="))       { opt.demoT = std::atoi(v); opt.demoTExplicit = true; }
         else if (const char *v = val("--cam="))     { opt.camPose = v; camExplicit = true; }
         else if (const char *v = val("--xres="))    opt.xres = std::atoi(v);
         else if (const char *v = val("--yres="))    opt.yres = std::atoi(v);
@@ -345,6 +358,7 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-xpar_merge")            dopt.xparMerge = false;
         else if (const char *v = val("--pcl="))     dopt.pclPath = v;
         else if (a == "--dump_meshes")              opt.dumpMeshes = true;
+        else if (a == "--reanimate")                doReanimate = true;
         else if (a == "--tex_point")                dopt.texPoint = true;
         else if (a == "--pcl_after_xpar")           dopt.pclAfterXpar = true;   // the default; accepted for symmetry
         else if (a == "--pcl_before_xpar")          dopt.pclAfterXpar = false;
@@ -424,7 +438,12 @@ int main(int argc, const char *argv[]) {
     // the review pose, which PINS the camera — the spline arm showed a frozen
     // viewpoint until this was cleared. An explicit --cam still wins. Must happen
     // BEFORE Load, which is what builds the first camera.
-    if (dopt.interactive && !dopt.freeFly && !camExplicit) opt.camPose.clear();
+    // NOT gated on --window any more. `--spline` used to be a no-op offscreen,
+    // so `--fld=SCENES/GREETS.FLD --t=N --spline` silently rendered the PINNED
+    // built-in review pose at every t — the [POSE] block now advertises
+    // --spline as the way to get greets onto its authored camera track, and
+    // that advice has to be true in the arm the user can actually run headless.
+    if (!dopt.freeFly && !camExplicit) opt.camPose.clear();
 
     // --pcl_synth: write a CONFORMING synthetic particle dump and exit. Exists
     // so the replay reader + instanced additive pass are testable before the
@@ -439,6 +458,36 @@ int main(int argc, const char *argv[]) {
     // ---- scene ------------------------------------------------------------
     gpubench::Scene scene;
     if (!gpubench::Load(scene, opt)) Die("scene ingest failed", nil);
+
+    // THE POSE BLOCK — unconditional, offscreen included. An offscreen render
+    // that does not say where its camera was cannot be checked against a window
+    // report, and asking for the pose after the fact is asking for it to be
+    // re-derived. Printed here (not inside Load) so it sees the camera AFTER
+    // every override in this function has been applied, and so --cam_track /
+    // --dump_meshes runs carry it too. The window loop reprints it live on `G`.
+    // The origin is read off camPose, NOT off camExplicit: greets keeps the
+    // BUILT-IN review pose when no --cam is given, so `--t=N` there pins the
+    // camera and animates only the scene. Deriving this from camExplicit
+    // reported greets as "authored spline" while it returned a byte-identical
+    // pose at t=1588 and t=5743 — measured, and the reason this distinction
+    // exists at all.
+    gpubench::PrintPoseBlock(scene, opt,
+        camExplicit          ? gpubench::PoseOrigin::ExplicitCam
+      : !opt.camPose.empty() ? gpubench::PoseOrigin::DefaultReviewPose
+                             : gpubench::PoseOrigin::Spline,
+        float(opt.demoT));
+
+    // Replay the window's per-frame animation step before rendering, so the
+    // offscreen image is produced by the SAME code the window runs.
+    if (doReanimate) {
+        gpubench::LoadOptions ro = opt;
+        ro.verbose = false;
+        gpubench::Reanimate(scene, ro, float(opt.demoT));
+        std::fprintf(stderr,
+            "[REANIMATE] replayed the window's per-frame Reanimate() at t=%d "
+            "(CurFrame %.1f): %zu batches, %zu lights\n",
+            opt.demoT, scene.curFrame, scene.batches.size(), scene.lights.size());
+    }
 
     // --cam_track: a pure CPU-side diagnostic, no device, no render, no window.
     if (doCamTrack) {
