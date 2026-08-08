@@ -501,6 +501,30 @@ material global ID or ptr
 // Tries: <bindir>, <bindir>/../Runtime, <bindir>/../../Runtime — the
 // first one that has rev.cfg wins. No-op on emscripten (assets are
 // preloaded at "/").
+// --no-chdir_assets / FDS_CHDIR_ASSETS=0: skip the chdir entirely and render
+// whatever the launch CWD points at. Parsed straight from argv because the
+// chdir is the FIRST thing main() does — the FeatureFlags table does not exist
+// yet — so only the exact spellings below work for this one flag. It is still
+// registered in FeatureFlags.def so --help lists it and --strict_flags does not
+// reject it. See that flag's doc for why you would want it: the chdir keys the
+// asset root off the BINARY's location, so a worktree build silently renders
+// worktree assets and writes worktree caches, which is a measurement hazard
+// when the pins are taken against the user's uncommitted authoring files.
+static bool WantChdirToAssetRoot(int argc, const char* const* argv)
+{
+	if (const char* e = std::getenv("FDS_CHDIR_ASSETS")) {
+		if (e[0] == '0' && e[1] == '\0') return false;
+	}
+	for (int i = 1; i < argc; ++i) {
+		if (!argv[i]) continue;
+		if (std::strcmp(argv[i], "--no-chdir_assets") == 0) return false;
+		if (std::strcmp(argv[i], "--no-chdir-assets") == 0) return false;
+		if (std::strcmp(argv[i], "--chdir_assets=0")  == 0) return false;
+		if (std::strcmp(argv[i], "--chdir-assets=0")  == 0) return false;
+	}
+	return true;
+}
+
 static void ChdirToAssetRoot(const char* argv0)
 {
 #ifndef __EMSCRIPTEN__
@@ -1290,7 +1314,15 @@ demo_exit:;
 
 int main(int argc, const char *argv[])
 {
-	ChdirToAssetRoot(argc > 0 ? argv[0] : "");
+	if (WantChdirToAssetRoot(argc, argv)) {
+		ChdirToAssetRoot(argc > 0 ? argv[0] : "");
+	} else {
+		char cwd[4096] = {0};
+		if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+		std::fprintf(stderr,
+			"[CHDIR] asset-root chdir SKIPPED (--no-chdir_assets); assets resolve "
+			"from the launch CWD: %s\n", cwd[0] ? cwd : "(unknown)");
+	}
 
 	// Headless modes (--snapshot / --bench / --repro) must never pop an SDL window,
 	// steal desktop focus, or play music when run in the background (the byte
