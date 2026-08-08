@@ -58,6 +58,10 @@ struct FrameUniforms {
     float  envReflGain;
     float4 aabbMin, aabbMax;
     float4 envProbePos[8];
+    // CONDUCTOR PARITY DIALS, measurement only (Deferred.h): .x = 1 keeps the
+    // diffuse lobe on metal (the CPU's HDR-frame behaviour, contract D1),
+    // .y = 1 tints the metal highlight by the GAMMA albedo (contract D2).
+    float4 metalCompat;
 };
 
 struct BatchUniforms {
@@ -70,8 +74,14 @@ struct BatchUniforms {
     // .w AO strength (--ao_map_strength x Material::AoStrength)
     float4 misc;
     // .x env probe index (1-based; 0 = this material reflects nothing),
-    // .y Material::Reflection, .z/.w spare
+    // .y Material::Reflection, .z Material::XparBlendAlpha, .w the destination
+    // weight dw of the transparent composite (Transparency*0.01, else 0.5).
     float4 misc2;
+    // TRANSPARENT path only (see fs_xpar): .x raw Material::Luminosity
+    // (UNCLAMPED — the transparent kernel writes Luminosity*255 with no cap,
+    // where the deferred params plane clamps at 4), .y Material::Specular,
+    // .z Material::Glossiness, .w 1 = additive (Mat_Additive).
+    float4 xpar;
 };
 
 struct GpuLight {
@@ -552,8 +562,13 @@ static inline float3 DirectRadiance(constant FrameUniforms &u,
         // metal behaviour — the albedo BECOMING an env reflection — needs the
         // baked equirect pano this arm does not have, so metal here reads
         // darker than the reference. Stated, not hidden.
-        const float3 diff = S.baseColor * S.diffuseK * (1.0f - S.metal);
-        const float3 specTint = mix(float3(1.0f), S.baseColor, S.metal);
+        // D1 / D2 dials — see FrameUniforms::metalCompat. Default (0,0) is the
+        // physically correct form: a conductor has no diffuse lobe, and its F0
+        // is the LINEAR albedo because the whole frame is linear.
+        const float metalKill = mix(1.0f - S.metal, 1.0f, u.metalCompat.x);
+        const float3 tintAlbedo = mix(S.baseColor, sqrt(S.baseColor), u.metalCompat.y);
+        const float3 diff = S.baseColor * S.diffuseK * metalKill;
+        const float3 specTint = mix(float3(1.0f), tintAlbedo, S.metal);
 
         radiance += (diff + spec1 * specTint) * L[i].color * (NoL * atten * shadow);
     }
@@ -587,8 +602,12 @@ static inline float3 AmbientRadiance(constant FrameUniforms &u,
     // came out about right.
     const float3 Nw = normalize(u.camRow0 * S.N.x + u.camRow1 * S.N.y + u.camRow2 * S.N.z);
     const float3 irr = SH_Irradiance(sh, Nw) * u.ambientFactor;
-    // (1 - metal): a conductor has no diffuse ambient either.
-    return S.baseColor * S.diffuseK * (1.0f - S.metal) * irr * S.ao;
+    // (1 - metal): a conductor has no diffuse ambient either. The D1 dial
+    // suppresses the kill here too, because the CPU's `lB` — which the HDR
+    // frame is built from — carries the AMBIENT as well as the direct term
+    // (DeferredSurfaceKernel.cpp:1741-1760 fills lB before the light loop).
+    const float metalKill = mix(1.0f - S.metal, 1.0f, u.metalCompat.x);
+    return S.baseColor * S.diffuseK * metalKill * irr * S.ao;
 }
 
 
@@ -971,6 +990,206 @@ fragment float4 fs_cones(FsQuadOut in [[stage_in]],
         acc += (vAcc * cu.density) * Li.color;
     }
     return float4(max(acc, 0.0f), 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// TRANSPARENT SURFACES — the FORWARD kernel plus a depth peel.
+//
+// This is NOT the deferred kernel with a blend bolted on, and that matters:
+// the CPU shades transparents in `Render_DeferredTransparentLighting_Tile`
+// (DeferredSurfaceKernel.cpp:2751), a DIFFERENT shading model from the opaque
+// kernel. Read out of that function, and reproduced here term for term:
+//
+//   l   = Luminosity*255 + Diffuse * Scene::Ambient            (:2996-2998)
+//         — a FLAT scene ambient, NOT the L2 SH irradiance the opaque kernel
+//           uses, and NOT scaled by Ambient_Factor.
+//   per light in range (:3234-3262):
+//         k = NoL * (1 - dist*rRange);  spot cone smoothstep multiplies k
+//         l += k * Diffuse * L.colour
+//   spec, only if Material::Specular > 0 (:3262-3277):
+//         BLINN-PHONG pow(NoH, Glossiness) * Specular * falloff * L.colour
+//         — not Cook-Torrance, no Fresnel, no GGX. The cone does NOT reach it
+//           (the same penumbra gap as the opaque scalar path, contract D4).
+//   NO SHADOW TAP AT ALL — the loop has no shadowAtten term.
+//   NO normal / roughness / metal / AO maps: --xpar_pbr defaults OFF
+//         (FeatureFlags.def:103), so the shipped transparents are flat-textured.
+//   lit = (tex/255)^2 * l   under --hdr_linear                  (:3389-3391)
+//   out = lit + spec                                            (:3456-3465)
+//
+// The composite is the BLEND STATE, not shader arithmetic (:3506-3532):
+//   XparBlendAlpha > 0 : out = lit*a + dst*(1-a)
+//   else               : out = lit + dst*dw,  dw = Transparency*0.01 else 0.5
+//                        — UNCLAMPED in HDR, which is why transparents bloom.
+//   Mat_Additive       : out = lit + dst  (TheOtherBarry<ADDITIVE>, :600-604)
+//
+// Everything is in the GPU's 0..1 scale; the CPU's 0..255 radiance divides out
+// because L.colour and Scene::Ambient are both already /255 on this side, and
+// (tex01)^2 * l == (texB/255)^2 * lB / 255. Verified algebraically, not assumed.
+//
+// DELIBERATE OMISSIONS, stated rather than hidden: no screen-space refraction
+// (--glass_refract / Mat_Refractive), no froxel fog on the layer
+// (--fast_fog_xpar), no water path, no Mat_HdrReflection panel sampling (the
+// mirror panels keep this arm's own reflection composite in fs_lighting).
+// ---------------------------------------------------------------------------
+
+struct XparUniforms {
+    float3 sceneAmbient;   // Scene::Ambient / 255
+    // 0 = single-layer peel, keep NEAREST (the CPU's legacy xpar_peel_passes==1
+    // path: sideZ cleared to 0 = farthest, rasterizer keeps the greater encoded
+    // z = the nearer fragment — Mekalele.h:1392-1398).
+    // 1 = reverse peel, keep FARTHEST above the peel floor (Mekalele.h:1399-1420
+    // under g_xparPeelReverse).
+    float peelReverse;
+    float usePeelFloor;    // 0 on pass 0 (nothing peeled yet)
+    float pad;
+};
+
+struct XparVertexOut {
+    float4 position [[position]];
+    float2 uv;
+    float3 viewNormal;
+    float3 viewPos;
+    float3 worldPos;
+};
+
+vertex XparVertexOut vs_xpar(VertexIn in [[stage_in]],
+                             constant FrameUniforms &u [[buffer(1)]],
+                             constant BatchUniforms &b [[buffer(2)]])
+{
+    const float3 wp  = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, in.pos) + b.objPos;
+    const float3 vp  = rowmul(u.camRow0, u.camRow1, u.camRow2, wp - u.camSrc);
+    XparVertexOut o;
+    o.position = float4(u.sx * vp.x + u.ox * vp.z,
+                        u.sy * vp.y + u.oy * vp.z,
+                        u.dza * vp.z + u.dzb,
+                        vp.z);
+    o.uv = in.uv;
+    const float3 wn = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, in.normal);
+    o.viewNormal = rowmul(u.camRow0, u.camRow1, u.camRow2, wn);
+    o.viewPos = vp;
+    o.worldPos = wp;
+    return o;
+}
+
+// The gates shared by the depth-resolve pass and the colour pass, so a fragment
+// can never be resolved by one and rejected by the other.
+//   1. the mirror-reflection oblique clip (main pass: inert);
+//   2. OPAQUE-Z OCCLUSION. The CPU applies this in the composite, not the
+//      raster, because MekaleleTransparent's z-buffer is the xpar Z and never
+//      sees the opaque one: `if (ZPage16[i] > zEnc) continue;`
+//      (DeferredSurfaceKernel.cpp:2946-2954). Reversed-Z here, so the test is
+//      "the opaque fragment is nearer" == opaqueZ > myZ.
+//   3. the PEEL FLOOR: only fragments strictly nearer than the previous pass's
+//      peeled depth survive (Mekalele.h:1409-1419's `cand > peelFloor`).
+static inline bool XparFragmentPasses(constant FrameUniforms &u,
+                                      constant XparUniforms &xu,
+                                      float3 worldPos, float myZ,
+                                      depth2d<float> opaqueDepth,
+                                      depth2d<float> peelFloor,
+                                      uint2 px)
+{
+    if (dot(u.clipPlane.xyz, u.clipPlane.xyz) > 0.0f &&
+        dot(worldPos, u.clipPlane.xyz) + u.clipPlane.w < 0.05f)
+        return false;
+    const float zOpaque = opaqueDepth.read(px);
+    if (zOpaque > myZ) return false;
+    if (xu.usePeelFloor > 0.5f) {
+        const float zFloor = peelFloor.read(px);
+        if (myZ <= zFloor) return false;
+    }
+    return true;
+}
+
+// Depth-resolve pass: no colour attachment, depth only. It exists because the
+// CPU keeps exactly ONE fragment per pixel per (mesh, side) clump — the xpar
+// G-buffer has one slot per pixel per side — while a plain blended draw would
+// composite every overlapping triangle of the clump. Reproducing "one fragment,
+// depth-resolved" is what makes the layer count match.
+fragment void fs_xpar_depth(XparVertexOut in [[stage_in]],
+                            constant FrameUniforms &u  [[buffer(1)]],
+                            constant XparUniforms  &xu [[buffer(5)]],
+                            depth2d<float> opaqueDepth [[texture(5)]],
+                            depth2d<float> peelFloor   [[texture(6)]])
+{
+    if (!XparFragmentPasses(u, xu, in.worldPos, in.position.z,
+                            opaqueDepth, peelFloor, uint2(in.position.xy)))
+        discard_fragment();
+}
+
+fragment float4 fs_xpar(XparVertexOut in [[stage_in]],
+                        constant FrameUniforms &u   [[buffer(1)]],
+                        constant BatchUniforms &b   [[buffer(2)]],
+                        constant GpuLight      *L   [[buffer(3)]],
+                        constant XparUniforms  &xu  [[buffer(5)]],
+                        texture2d<float> albedoTex  [[texture(0)]],
+                        depth2d<float>   opaqueDepth[[texture(5)]],
+                        depth2d<float>   peelFloor  [[texture(6)]],
+                        sampler samp [[sampler(0)]])
+{
+    if (!XparFragmentPasses(u, xu, in.worldPos, in.position.z,
+                            opaqueDepth, peelFloor, uint2(in.position.xy)))
+        discard_fragment();
+
+    float4 tex = float4(b.baseColor.rgb, 1.0f);
+    if (b.baseColor.w > 0.5f) tex = albedoTex.sample(samp, in.uv);
+
+    const float3 N = normalize(in.viewNormal);
+    const float3 P = in.viewPos;
+    const float  lum      = b.xpar.x;      // raw Luminosity, no /4 clamp
+    const float  diffuseK = b.matParams.x;
+    const float  specK    = b.xpar.y;      // Material::Specular
+    const float  gloss    = max(b.xpar.z, 1.0f);
+
+    // l = Luminosity*255 + Diffuse*Scene::Ambient, in 0..1 units.
+    float3 l = float3(lum) + diffuseK * xu.sceneAmbient;
+    float3 s = 0.0f;
+    const bool wantSpec = specK > 0.0f;
+    const float3 V = normalize(-P);
+
+    for (uint i = 0; i < u.numLights; ++i) {
+        constant GpuLight &Li = L[i];
+        const float3 lPos = rowmul(u.camRow0, u.camRow1, u.camRow2, Li.pos - u.camSrc);
+        const float3 w = lPos - P;
+        const float dotN = dot(w, N);
+        if (dotN < 0.0f) continue;
+        const float len2 = dot(w, w);
+        const float range = Li.range * u.lightRangeScale;
+        if (len2 > range * range) continue;
+        const float dist = sqrt(len2);
+        const float lenInv = 1.0f / max(dist, 1e-6f);
+        const float falloff = 1.0f - dist * (Li.invRange / u.lightRangeScale);
+        float k = dotN * lenInv * falloff;
+        if (Li.isSpot != 0) {
+            // The CPU measures the cone in VIEW space here off the same w
+            // vector, with dir already rotated into view. This arm keeps the
+            // light dir in world, so use the world-space equivalent — same
+            // angle, and it avoids carrying a second copy of the direction.
+            const float cosTheta = dot(Li.dir, normalize(in.worldPos - Li.pos));
+            if (cosTheta <= Li.cosOuter) continue;
+            if (cosTheta < Li.cosInner) {
+                const float t = (cosTheta - Li.cosOuter)
+                              / max(Li.cosInner - Li.cosOuter, 1e-6f);
+                k *= t * t * (3.0f - 2.0f * t);
+            }
+        }
+        l += (k * diffuseK) * Li.color;
+        if (wantSpec) {
+            const float3 H = normalize(w * lenInv + V);
+            const float NoH = dot(N, H);
+            if (NoH <= 0.0f) continue;
+            // NOTE the cone is NOT applied here: `falloff`, not `k`. That is
+            // the CPU's expression at :3271-3273, gap and all.
+            s += (pow(NoH, gloss) * specK * falloff) * Li.color;
+        }
+    }
+
+    // hdr_linear: the transparent albedo is squared exactly as the opaque
+    // composite squares its own (DeferredSurfaceKernel.cpp:3389-3391).
+    const float3 lit = tex.rgb * tex.rgb * l + s;
+    // alpha carries XparBlendAlpha for the lerp pipeline's SourceAlpha factor;
+    // the legacy `lit + dst*dw` pipeline takes dw from the blend colour and
+    // ignores this.
+    return float4(max(lit, 0.0f), b.misc2.z);
 }
 
 // ---------------------------------------------------------------------------

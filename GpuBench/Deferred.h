@@ -81,8 +81,37 @@ struct DeferredOptions {
     // cone_strength from the global 0.05 to 1.2, because 0.05 is city-scale and
     // invisible over greets' ~10-unit beams. Under --hdr the CPU scales the
     // density by hdr_glow_scale (0.25), which this arm reproduces.
+    // TRANSPARENT SURFACES. The CPU routes Mat_Transparent / Mat_Additive faces
+    // away from the deferred kernel entirely (RenderInner.cpp:294-296, :317-318)
+    // and composites them afterwards through the forward transparent kernel +
+    // the front/back depth peel. ON is parity; --no-xpar prices the pass and
+    // restores the pre-2026-08-08 behaviour of shading them as opaque.
+    bool  xpar = true;
+    // xparPeelPassesEffective() (DeferredSurfaceKernel.cpp:3600): an explicit
+    // flag wins, otherwise Scene::XparPeelPasses (greets 1, fountain 4).
+    int   xparPeelPasses = 0;       // 0 = use the scene's own value
+    // ---- CONDUCTOR PARITY DIALS — MEASUREMENT ONLY, both default OFF -------
+    // These switch the GPU's metal shading to the CPU's *HDR-frame* semantics
+    // so the two divergences docs/SHADING_CONTRACT.md calls D1 and D2 can be
+    // priced in pixels instead of argued from source.
+    //   cpuMetalDiffuse: do NOT kill diffuse on conductors. The CPU applies
+    //     `fdB *= (1-metal)` at DeferredSurfaceKernel.cpp:2521-2523 to `fdB`,
+    //     the LDR combine, while the --hdr_linear frame is built from the RAW
+    //     accumulator `lB` (:2625) — so the shipped HDR frame keeps FULL
+    //     diffuse on a conductor.
+    //   cpuMetalTint:    tint the metal highlight by the GAMMA texel, as the
+    //     CPU does at :2541-2546 (`sB *= 1-m + m*texB/255`), instead of by the
+    //     squared/linear albedo (deferred.metal:556).
+    // Turning either ON makes the GPU LESS physically correct on purpose.
+    bool  cpuMetalDiffuse = false;
+    bool  cpuMetalTint = false;
     bool  cones = true;
-    float coneStrength = 1.2f;      // GreetsDisco.cpp:434-441
+    // GREETS.CPP:1187 setDefault(cone_strength, 2.0f). GreetsDisco.cpp:434 also
+    // setDefaults it, to 1.2 — but setDefault only skips when the flag was set
+    // EXPLICITLY (FeatureFlags.h:148), so the later of the two wins, and
+    // GreetsApplyRunDefaults runs after Initialize_Greets' BuildDiscoBall.
+    // 1.2 was this arm's value until that ordering was checked.
+    float coneStrength = 2.0f;
     float hdrGlowScale = 0.25f;     // FeatureFlags.def:337
     int   volNSamples = 4;          // FeatureFlags.def:256 — the N in "N x mean"
     // INTERACTIVE WINDOW. Opens a real SDL2 window with a CAMetalLayer, animates

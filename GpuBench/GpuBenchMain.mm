@@ -176,6 +176,20 @@ const char *kUsage =
     "                    DeferredVolumetric.cpp with ONE shadow-map tap per segment.\n"
     "                    greets' cone_strength is 1.2 (GreetsDisco.cpp), not the global\n"
     "                    0.05, so ON at 1.2 is PARITY.\n"
+    "  --no-xpar / --xpar_peel_passes=K   TRANSPARENT SURFACES. The CPU routes\n"
+    "                    Mat_Transparent / Mat_Additive faces away from the deferred\n"
+    "                    kernel (RenderInner.cpp:294-296) and composites them after the\n"
+    "                    lighting resolve through the FORWARD transparent kernel + a\n"
+    "                    front/back depth peel. ON is parity. K defaults to the scene's\n"
+    "                    own Scene::XparPeelPasses (greets 1, fountain 4), matching the\n"
+    "                    CPU's xparPeelPassesEffective().\n"
+    "  --cpu_metal_diffuse / --cpu_metal_tint   MEASUREMENT ONLY. Switch the GPU's\n"
+    "                    conductor shading to the CPU's HDR-frame semantics so\n"
+    "                    SHADING_CONTRACT.md's D1 / D2 can be priced in pixels:\n"
+    "                    D1 keeps the diffuse lobe on metal (the CPU's metalness kill\n"
+    "                    reaches only the LDR combine, never the HDR frame), D2 tints\n"
+    "                    the highlight by the GAMMA albedo instead of the linear one.\n"
+    "                    Both make this arm LESS physically correct, deliberately.\n"
     "  --no-disco        do NOT synthesise GreetsDisco.cpp's 10 cone spotlights + glow\n"
     "                    omni. greets_disco defaults ON in DEMO, so these are PARITY --\n"
     "                    turning them off makes the arm dimmer than the shipped scene.\n"
@@ -267,6 +281,10 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
         else if (a == "--no-flares")                dopt.flares = false;
         else if (a == "--no-cones")                 dopt.cones = false;
+        else if (a == "--no-xpar")                  dopt.xpar = false;
+        else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);
+        else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
+        else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;
         else if (const char *v = val("--anim_probe=")) {
             if (std::sscanf(v, "%d,%d", &dopt.animProbeT[0], &dopt.animProbeT[1]) == 2)
                 dopt.animProbe = true;

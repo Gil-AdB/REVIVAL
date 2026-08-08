@@ -110,6 +110,25 @@ struct Batch {
     uint32_t glossiness = 0;
     float    parallaxScale = 1.0f;
     bool     aoInAlpha = false;   // albedo alpha holds baked AO (Mat_AoInAlpha)
+    // ---- TRANSPARENCY (FDS_DEFS.H:129-141 material flag bits) --------------
+    // Carried per batch because the CPU routes transparent faces through a
+    // completely different renderer: the FORWARD transparent kernel + the
+    // per-clump depth peel (DeferredSurfaceKernel.cpp:3654 RenderXparClumpInStrip),
+    // not the deferred G-buffer. A transparent batch must therefore be REMOVED
+    // from the opaque G-buffer draw list, not merely shaded differently.
+    uint32_t matFlags = 0;        // Material::Flags, verbatim
+    bool     transparent = false; // Mat_Transparent (0x0020)
+    bool     additive = false;    // Mat_Additive    (0x0040)
+    bool     skipZ = false;       // Mat_SkipZ       (0x0100)
+    bool     twoSided = false;    // Mat_TwoSided    (0x0010)
+    bool     refractive = false;  // Mat_Refractive  (0x1000) — --glass_refract opt-in
+    // Blend weights, read out of the transparent kernel's composite
+    // (DeferredSurfaceKernel.cpp:3506-3532, the g_hdrActive branch greets runs):
+    //   XparBlendAlpha > 0 : out = lit*a + dst*(1-a)          (lerp)
+    //   else               : out = lit + dst*dw, UNCLAMPED in HDR,
+    //                        dw = Transparency*0.01 if > 0 else 0.5
+    float    xparBlendAlpha = 0.0f;   // Material::XparBlendAlpha
+    float    transparency = 0.0f;     // Material::Transparency (LWO TRAN, 0-100)
     // Does this material act as a solid shadow occluder? Reproduces the CPU
     // bake's caster filter EXACTLY (FDS/RENDER/Shadows.cpp:713-724): skip
     // Mat_Transparent | Mat_Additive | Mat_SkipZ, plus any material whose NAME
@@ -132,6 +151,11 @@ struct Batch {
     float    bsRad = 0.0f;
     std::string meshName;
     std::string materialName;
+    // Running index of the OBJECT this batch came from. The CPU's transparent
+    // peel clumps by (ParentTri, side) — the mesh POINTER, not its name — and
+    // fountain has six distinct Objects all called "pilon.lwo", so grouping by
+    // name would fuse six separate glass shells into one peel clump.
+    int      meshId = -1;
 };
 
 struct TextureImage {
@@ -202,6 +226,11 @@ struct Scene {
     float                     skyNadir[3] = {0, 0, 0};
 
     int      xres = 0, yres = 0;
+    // Scene::XparPeelPasses — transparent depth-peel passes PER SIDE, the CPU's
+    // own per-scene value (greets leaves it 0 -> 1; fountain sets 4). The
+    // effective value follows the CPU's xparPeelPassesEffective()
+    // (DeferredSurfaceKernel.cpp:3600): an explicit flag wins, else this.
+    int      xparPeelPasses = 1;
     float    curFrame = 0.0f;
     // FDS global ImageSize at ingest time (greets sets 0.25) — the flare
     // sprite's world scale. Carried so the GPU flare pass uses the scene's

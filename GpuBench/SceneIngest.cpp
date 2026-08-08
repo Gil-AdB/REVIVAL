@@ -408,6 +408,54 @@ int ApplyRevMaps(::Scene &sc, bool verbose) {
 }
 
 // Returns the number of materials overridden.
+// ---------------------------------------------------------------------------
+// FOUNTAIN's DEMO-side scene init, replicated — the same class of thing as
+// ApplyStoneTex for greets. `LoadFLD` gives the authored fountain; everything
+// below is done by Initialize_Fountain (DEMO/FOUNTAIN.CPP:845-905) and is NOT
+// reachable from FDS, so without it this arm renders a scene the reference
+// never draws. Each line cites what it replicates.
+//
+// NOT replicated, and named as gaps rather than skipped silently:
+//   - Mat_Refractive on 'mizraka glass'/'f_sphere' (:884-888) — this arm has no
+//     screen-space refraction, so the flag would do nothing;
+//   - Add_Vortex_ToScene (:889) — a code-built 2-face additive TriMesh;
+//   - Initialize_Particles (:245-444) — 8,250 additive point SPRITES in
+//     Scene::Pcl[], not TriMeshes. See the report.
+// ---------------------------------------------------------------------------
+int ApplyFountainInit(::Scene &sc, bool verbose) {
+    int twoSided = 0, crystal = 0;
+    for (::Material *M = MatLib; M; M = M->Next) {
+        if (!M->Name) continue;
+        M->Flags |= Mat_RGBInterp;                              // :852
+        // The orbs ship single-sided from the FLD; with a 2-deep xpar G-buffer
+        // the back-facing half IS the back layer, so without TwoSided those
+        // tris are culled in Transform_Objects and the orbs render as a thin
+        // shell (:854-864).
+        if (!std::strcmp(M->Name, "f_sphere") || std::strstr(M->Name, "in shpere")) {
+            M->Flags |= Mat_TwoSided; ++twoSided;
+        }
+        if (!std::strcmp(M->Name, "mizraka glass")) {           // :871-875
+            M->XparBlendAlpha = 0.4f;
+            M->Specular   = 1.0f;
+            M->Glossiness = 128;
+            ++crystal;
+        }
+    }
+    // :891-897. The FLD header carries 0 for all of these, so without the
+    // replication this arm ran fountain at near 0.01 / far 150 in a scene whose
+    // camera sits 300 units out — most of it beyond the far plane.
+    sc.Ambient.B = sc.Ambient.G = sc.Ambient.R = sc.Ambient.A = 64;
+    sc.NZP = 20.0f;
+    sc.FZP = 5000.0f;
+    sc.XparPeelPasses = 4;                                      // :902
+    if (verbose)
+        std::fprintf(stderr,
+            "[INGEST] fountain init: %d material(s) forced TwoSided, %d crystal, "
+            "Ambient=64 NZP=20 FZP=5000 XparPeelPasses=4 "
+            "(parity with DEMO/FOUNTAIN.CPP:845-902)\n", twoSided, crystal);
+    return twoSided + crystal;
+}
+
 int ApplyStoneTex(Material *M, bool verbose) {
     if (!M || !M->Name || !M->Txtr) return 0;
     for (const auto &o : kStoneOverrides) {
@@ -846,6 +894,12 @@ bool Load(Scene &out, const LoadOptions &opt) {
         // derives from the FLD parent chain to the same static/moving split.)
     }
 
+    // ---- 1b1b. FOUNTAIN's DEMO-side scene init ------------------------------
+    // Keyed on the scene FILE, the same way stoneTex is keyed on the material
+    // names it repoints: a per-scene DEMO init has no FDS-side hook.
+    if (opt.fldPath && std::strstr(opt.fldPath, "FOUNTAIN"))
+        ApplyFountainInit(sc, opt.verbose);
+
     // ---- 1b2. floor UV retile (DEMO-side geometry fixup, default-active) ----
     // DEMO order is Preprocess -> GreetsRetileFloor -> MakeFacesIndependent
     // (which recomputes normals+tangents from the retiled per-face UVs). Here
@@ -1138,6 +1192,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
             b.mirrorIndex = mirrorIdx;
             b.firstVertex = uint32_t(out.verts.size());
             b.meshName = obj->Name ? obj->Name : "?";
+            b.meshId   = int(out.meshCount) - 1;   // per-OBJECT, see the header
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) b.rot[r][c] = T->RotMat[r][c];
             b.pos[0] = T->IPos.x;
@@ -1154,6 +1209,14 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 b.reflection = M->Reflection;
                 b.parallaxScale = M->ParallaxScale;
                 b.aoInAlpha = (M->Flags & Mat_AoInAlpha) != 0;
+                b.matFlags        = uint32_t(M->Flags);
+                b.transparent     = (M->Flags & Mat_Transparent) != 0;
+                b.additive        = (M->Flags & Mat_Additive) != 0;
+                b.skipZ           = (M->Flags & Mat_SkipZ) != 0;
+                b.twoSided        = (M->Flags & Mat_TwoSided) != 0;
+                b.refractive      = (M->Flags & Mat_Refractive) != 0;
+                b.xparBlendAlpha  = M->XparBlendAlpha;
+                b.transparency    = M->Transparency;
                 b.textureIndex   = acquireTexture(M->Txtr);
                 b.normalTexIndex = acquireTexture(M->NormalMap);
                 b.roughTexIndex  = acquireTexture(M->RoughnessMap);
@@ -1240,6 +1303,8 @@ bool Load(Scene &out, const LoadOptions &opt) {
 
     RefreshLights(out, opt, sc);
 
+    out.xparPeelPasses = (sc.XparPeelPasses > 0) ? int(sc.XparPeelPasses) : 1;
+
     out.loadMs = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
 
     if (opt.verbose) {
@@ -1261,6 +1326,36 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 std::fprintf(stderr,
                     "[INGEST] emissive material '%s' (%s): Luminosity=%.3f Diffuse=%.2f\n",
                     b.materialName.c_str(), b.meshName.c_str(), b.luminosity, b.diffuse);
+        // ---- TRANSPARENCY CENSUS -------------------------------------------
+        // The definitive answer to "which surfaces does the CPU send down its
+        // FORWARD transparent path", read off Material::Flags through the
+        // engine's own loader. Printed unconditionally under --verbose because
+        // every transparency question in this arm starts here, and because a
+        // material list is the one thing a frame diff cannot show.
+        {
+            long xTri = 0, aTri = 0; int xB = 0, aB = 0;
+            for (const auto &b : out.batches) {
+                if (!b.transparent && !b.additive) continue;
+                if (b.additive) { ++aB; aTri += b.vertexCount / 3; }
+                else            { ++xB; xTri += b.vertexCount / 3; }
+                std::fprintf(stderr,
+                    "[XPAR] '%s' (%s) %u tri at (%.1f,%.1f,%.1f) r=%.1f  flags=0x%04X%s%s%s%s%s  "
+                    "XparBlendAlpha=%.3f Transparency=%.1f -> blend %s\n",
+                    b.materialName.c_str(), b.meshName.c_str(), b.vertexCount / 3,
+                    b.bsCtr[0], b.bsCtr[1], b.bsCtr[2], b.bsRad,
+                    b.matFlags,
+                    b.transparent ? " TRANSPARENT" : "", b.additive ? " ADDITIVE" : "",
+                    b.skipZ ? " SKIPZ" : "", b.twoSided ? " TWOSIDED" : "",
+                    b.refractive ? " REFRACTIVE" : "",
+                    b.xparBlendAlpha, b.transparency,
+                    b.additive ? "src+dst (order-independent)"
+                    : (b.xparBlendAlpha > 0.0f ? "lit*a + dst*(1-a)"
+                                               : "lit + dst*dw"));
+            }
+            std::fprintf(stderr,
+                "[XPAR] %d transparent batch(es) / %ld tri, %d additive batch(es) / %ld tri "
+                "out of %zu batches\n", xB, xTri, aB, aTri, out.batches.size());
+        }
         std::fprintf(stderr,
             "[INGEST] ambient: Scene::Ambient=(%.1f,%.1f,%.1f)  SkyZenith=(%.1f,%.1f,%.1f)  "
             "SkyNadir=(%.1f,%.1f,%.1f)\n",

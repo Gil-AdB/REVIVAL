@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <map>
+#include <vector>
 
 namespace gpubench {
 namespace {
@@ -57,6 +59,7 @@ struct FrameUniforms {
     float pad3[2];
     float aabbMin[4], aabbMax[4];
     float envProbePos[8][4];
+    float metalCompat[4];       // .x = D1 dial, .y = D2 dial (see Deferred.h)
 };
 
 struct ConeUniforms {
@@ -70,7 +73,15 @@ struct BatchUniforms {
     float matParams[4];
     float mapFlags[4];
     float misc[4];              // .x = mirror panel index (1-based)
-    float misc2[4];             // .x = env probe index (1-based), .y = Reflection
+    float misc2[4];             // .x = env probe index (1-based), .y = Reflection,
+                                // .z = XparBlendAlpha, .w = transparent dst weight
+    float xpar[4];              // .x raw Luminosity, .y Specular, .z Glossiness,
+                                // .w additive flag — the FORWARD transparent kernel
+};
+
+struct XparUniforms {
+    float sceneAmbient[4];      // Scene::Ambient / 255 (float3 + pad)
+    float peelReverse, usePeelFloor, pad0, pad1;
 };
 
 struct GpuLight {
@@ -420,6 +431,57 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         if (!psoBloomAdd) { std::fprintf(stderr, "[DEFERRED] bloom-add pso: %s\n",
                                          [[e localizedDescription] UTF8String]); return false; }
     }
+    // ---- TRANSPARENT surfaces: depth-resolve + three composite modes -------
+    // The depth-resolve pipeline has NO colour attachment: it exists only to
+    // pick the one fragment per pixel that this (mesh, side, peel pass) layer
+    // keeps, which is what the CPU's single-slot xpar G-buffer does implicitly.
+    id<MTLRenderPipelineState> psoXparDepth;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_xpar");
+        p.fragmentFunction = fn_(@"fs_xpar_depth");
+        p.vertexDescriptor = vd;
+        p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        NSError *e = nil;
+        psoXparDepth = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoXparDepth) { std::fprintf(stderr, "[DEFERRED] xpar-depth pso: %s\n",
+                                          [[e localizedDescription] UTF8String]); return false; }
+    }
+    // Three blend modes, one per CPU composite form. The per-material weight
+    // travels as the encoder's BLEND COLOUR, so `dw` and `alpha` are real
+    // blend factors rather than shader arithmetic against a stale destination.
+    auto makeXparPso = [&](MTLBlendFactor srcF, MTLBlendFactor dstF)
+                       -> id<MTLRenderPipelineState> {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_xpar");
+        p.fragmentFunction = fn_(@"fs_xpar");
+        p.vertexDescriptor = vd;
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = srcF;
+        p.colorAttachments[0].destinationRGBBlendFactor = dstF;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        NSError *e = nil;
+        id<MTLRenderPipelineState> s = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!s) std::fprintf(stderr, "[DEFERRED] xpar pso: %s\n",
+                             [[e localizedDescription] UTF8String]);
+        return s;
+    };
+    // out = lit + dst*dw               (Transparency-weighted, the shipped form)
+    id<MTLRenderPipelineState> psoXparLegacy =
+        makeXparPso(MTLBlendFactorOne, MTLBlendFactorBlendColor);
+    // out = lit*a + dst*(1-a)          (XparBlendAlpha > 0: fountain's crystal)
+    id<MTLRenderPipelineState> psoXparLerp =
+        makeXparPso(MTLBlendFactorBlendColor, MTLBlendFactorOneMinusBlendColor);
+    // out = lit + dst                  (Mat_Additive, order-independent)
+    id<MTLRenderPipelineState> psoXparAdd =
+        makeXparPso(MTLBlendFactorOne, MTLBlendFactorOne);
+    if (!psoXparLegacy || !psoXparLerp || !psoXparAdd) return false;
+
     id<MTLRenderPipelineState> psoLight   = makeFsPso(@"fs_lighting", MTLPixelFormatRGBA16Float);
     id<MTLRenderPipelineState> psoTonemap = makeFsPso(@"fs_tonemap",  MTLPixelFormatBGRA8Unorm);
     id<MTLRenderPipelineState> psoViz     = makeFsPso(@"fs_viz",      MTLPixelFormatBGRA8Unorm);
@@ -429,6 +491,24 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     dsd.depthCompareFunction = MTLCompareFunctionGreater;   // reversed-Z
     dsd.depthWriteEnabled = YES;
     id<MTLDepthStencilState> dss = [dev newDepthStencilStateWithDescriptor:dsd];
+
+    // Transparent depth-peel resolve states. `Near` reproduces the CPU's legacy
+    // single-pass peel (side Z cleared to "farthest", the rasterizer keeps the
+    // nearer fragment — Mekalele.h:1392-1398); `Far` reproduces the K>1 reverse
+    // peel (cleared to "nearest", keep the farther one above the peel floor,
+    // ibid. :1399-1420) so the layers composite farthest-first.
+    id<MTLDepthStencilState> dssXparNear, dssXparFar, dssXparEqual;
+    {
+        MTLDepthStencilDescriptor *d = [MTLDepthStencilDescriptor new];
+        d.depthCompareFunction = MTLCompareFunctionGreater;   // reversed-Z: nearer
+        d.depthWriteEnabled = YES;
+        dssXparNear = [dev newDepthStencilStateWithDescriptor:d];
+        d.depthCompareFunction = MTLCompareFunctionLess;      // farther
+        dssXparFar = [dev newDepthStencilStateWithDescriptor:d];
+        d.depthCompareFunction = MTLCompareFunctionEqual;
+        d.depthWriteEnabled = NO;
+        dssXparEqual = [dev newDepthStencilStateWithDescriptor:d];
+    }
 
     MTLSamplerDescriptor *sdesc = [MTLSamplerDescriptor new];
     sdesc.minFilter = MTLSamplerMinMagFilterLinear;
@@ -523,6 +603,21 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLTexture> hdrTex  = mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate);
     id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> stageTex = mkTarget(MTLPixelFormatBGRA8Unorm, MTLStorageModeShared);
+    // Transparent peel scratch: the per-layer resolved depth, and the previous
+    // layer's resolved depth (the CPU's g_xparPeelFloor). Both are depth
+    // textures so the resolve can render into them AND the shader can read them.
+    auto mkDepthRW = [&](void) -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                               width:NSUInteger(W)
+                                                              height:NSUInteger(H)
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    id<MTLTexture> xparDepth = mkDepthRW();
+    id<MTLTexture> xparFloor = mkDepthRW();
 
     // ---- mirror reflection targets -----------------------------------------
     // One full-res lit HDR reflection per active mirror panel (greets has 3),
@@ -740,6 +835,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     fu.vizLight = opt.vizLight;
     // env_refl_gain, FeatureFlags.def:142, default 1.0.
     fu.envReflGain = 1.0f;
+    fu.metalCompat[0] = opt.cpuMetalDiffuse ? 1.0f : 0.0f;
+    fu.metalCompat[1] = opt.cpuMetalTint ? 1.0f : 0.0f;
     for (int c = 0; c < 3; ++c) {
         fu.aabbMin[c] = scene.aabbMin[c];
         fu.aabbMax[c] = scene.aabbMax[c];
@@ -972,6 +1069,20 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         u.misc[3] = 2.0f * b.aoStrength;
         u.misc2[0] = float(b.envProbe);
         u.misc2[1] = b.reflection;
+        // Transparent composite weights, verbatim from the CPU's blend
+        // (DeferredSurfaceKernel.cpp:3514-3532): XparBlendAlpha > 0 selects the
+        // lerp, otherwise dw = Transparency*0.01 with a 0.5 fallback for the
+        // hand-built xpar materials that author Transparency = 0.
+        u.misc2[2] = b.xparBlendAlpha;
+        u.misc2[3] = (b.transparency > 0.0f) ? b.transparency * 0.01f : 0.5f;
+        // The FORWARD transparent kernel's own material inputs. Luminosity is
+        // passed RAW: the transparent composite is `Luminosity*255 + ...` with
+        // no cap (ibid. :2996), while matParams[3] rides an RGBA8 plane that
+        // saturates at 4 — fountain's 'f in shpere' authors 100.
+        u.xpar[0] = b.luminosity;
+        u.xpar[1] = b.specular;
+        u.xpar[2] = float(b.glossiness > 0 ? b.glossiness : 32u);
+        u.xpar[3] = b.additive ? 1.0f : 0.0f;
     }
     };
     refreshBatchUniforms();
@@ -1066,13 +1177,44 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         const size_t k = n.rfind("::mirUV");
         return (k != std::string::npos) ? n.substr(0, k) : n;
     };
-    auto drawScene = [&](id<MTLRenderCommandEncoder> enc, bool gbuffer) {
+    // `baseCull` is the pass's cull mode; drawScene overrides it PER BATCH for
+    // Mat_TwoSided materials and restores it after. THE BUG THIS FIXES
+    // (reported 2026-08-08: "has backface culling for transparent materials"):
+    // culling landed in 69bf0f0 as one setCullMode for the whole pass, but the
+    // engine's own test has a per-material bypass —
+    //   FDS/RENDER/Transform.cpp:2429-2434
+    //     if ((!F->VisibilityFlagsAll()) && (forceTS || shadowNoBackface
+    //         || (F->Txtr->Flags & Mat_TwoSided)
+    //         || (AP·F->N < F->NormProd)))            // backface culling
+    // so a Mat_TwoSided face is NEVER culled on the CPU. greets' 'screen2' —
+    // the display box between the amudim columns, flags 0x0034 — is exactly
+    // such a material, and this arm was dropping half of it. The bypass is
+    // keyed on TwoSided, NOT on transparency: 'lamp light' / 'screen 3' /
+    // 'screen 4' (0x0024) are single-sided on both arms and culling them is
+    // correct parity.
+    MTLCullMode curCull = MTLCullModeNone;
+    auto drawScene = [&](id<MTLRenderCommandEncoder> enc, bool gbuffer,
+                         MTLCullMode baseCull = MTLCullModeNone) {
         [enc setVertexBuffer:vb offset:0 atIndex:0];
+        curCull = baseCull;
         for (size_t i = 0; i < scene.batches.size(); ++i) {
             const Batch &b = scene.batches[i];
             if (!envSkipMat.empty() && baseMatName(b.materialName) == envSkipMat) continue;
+            // TRANSPARENT + ADDITIVE surfaces are NOT in the opaque G-buffer.
+            // That is the CPU's own routing, not a simplification:
+            // RenderInner.cpp:294-296 `if (Mat_Transparent) continue;` in
+            // RenderInnerMekalele, and :317-318 sends Mat_Additive to the
+            // forward TheOtherBarry<ADDITIVE> instead of Mekalele. Both are
+            // composited later, by encodeXpar. Mirror-tagged panels stay here:
+            // this arm composites their reflection in fs_lighting rather than
+            // through the CPU's transparent wallMatClone (a stated deviation).
+            if (gbuffer && b.mirrorIndex == 0 && (b.transparent || b.additive)) continue;
             // Shadow pass: honour the same caster filter the CPU bake applies.
             if (!gbuffer && !b.castsShadow) continue;
+            if (gbuffer) {
+                const MTLCullMode want = b.twoSided ? MTLCullModeNone : baseCull;
+                if (want != curCull) { [enc setCullMode:want]; curCull = want; }
+            }
             if (!gbuffer && opt.shadowCull && curFace && curLightPos) {
                 if (!sphereInCubeFace(b, curLightPos, *curFace, curFar)) {
                     ++shadowBatchesCulled;
@@ -1581,14 +1723,220 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // stale invariant, not a new mistake — and the reason the mirror lost
         // most of its content while still rendering something (the panels'
         // own emissive and whatever happened to face the other way).
-        [enc setCullMode:opt.cull ? (mirroredBasis ? MTLCullModeBack
-                                                   : MTLCullModeFront)
-                                  : MTLCullModeNone];
+        const MTLCullMode baseCull = opt.cull ? (mirroredBasis ? MTLCullModeBack
+                                                               : MTLCullModeFront)
+                                              : MTLCullModeNone;
+        [enc setCullMode:baseCull];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentSamplerState:samp atIndex:0];
-        drawScene(enc, /*gbuffer=*/true);
+        drawScene(enc, /*gbuffer=*/true, baseCull);
         [enc endEncoding];
+    };
+
+    // ---- TRANSPARENT SURFACES: the depth peel ------------------------------
+    // The CPU's mechanism, in its own two halves (the user's framing): the PEEL
+    // sets the ORDER, the tiled TBR only makes it fast. This arm reproduces the
+    // order exactly and picks its own scheduling, because a GPU's natural
+    // scheduling is not a per-strip linked list.
+    //
+    // ORDER, read out of FDS/RENDER/Transform.cpp:2586-2633 (the sort key) and
+    // RENDER.CPP:895-1140 (the batcher):
+    //   * transparents are clumped by (ParentTri, side) — the MESH pointer, not
+    //     the material, so greets' four transparent materials all living in
+    //     Piramid.lwo form ONE clump per side;
+    //   * the key is objScore + faceFine, with +4*fzp for front-facing, so
+    //     EVERY back-facing clump composites before EVERY front-facing one, and
+    //     within a side the clumps run far-to-near. The documented result for a
+    //     nested pair is outer.back, inner.back, inner.front, outer.front;
+    //   * within a clump, K = xparPeelPassesEffective() passes PER SIDE
+    //     (DeferredSurfaceKernel.cpp:3600): K == 1 keeps the single nearest
+    //     fragment (the legacy 2-deep front/back peel greets runs); K > 1 peels
+    //     farthest-first against a per-pixel peel floor (fountain authors 4).
+    //
+    // SCHEDULING, chosen freely and stated: two encoders per (clump, side,
+    // pass) — a depth resolve then a blended colour pass at depth-Equal — plus
+    // one depth blit per extra pass to advance the floor. No tile binning.
+    struct XparGroup { std::vector<size_t> batches; float ctr[3]; float rad; };
+    std::vector<XparGroup> xparGroups;
+    {
+        std::map<int, size_t> byMesh;
+        for (size_t i = 0; i < scene.batches.size(); ++i) {
+            const Batch &b = scene.batches[i];
+            if (b.mirrorIndex != 0) continue;
+            if (!b.transparent && !b.additive) continue;
+            auto it = byMesh.find(b.meshId);
+            if (it == byMesh.end()) {
+                byMesh[b.meshId] = xparGroups.size();
+                XparGroup g;
+                g.batches.push_back(i);
+                for (int c = 0; c < 3; ++c) g.ctr[c] = b.bsCtr[c];
+                g.rad = b.bsRad;
+                xparGroups.push_back(std::move(g));
+            } else {
+                XparGroup &g = xparGroups[it->second];
+                g.batches.push_back(i);
+                // Union of bounding spheres, coarse but only used for ordering.
+                g.rad = std::max(g.rad, b.bsRad);
+            }
+        }
+    }
+    const int xparPeelPasses = std::max(1, opt.xparPeelPasses > 0 ? opt.xparPeelPasses
+                                                                  : scene.xparPeelPasses);
+    if (!xparGroups.empty())
+        std::fprintf(stderr,
+            "[XPAR] %zu peel clump(s) (grouped by mesh, as the CPU clumps by "
+            "ParentTri), %d peel pass(es) per side -> %d layers per pixel per "
+            "clump; %zu encoder(s)/frame\n",
+            xparGroups.size(), xparPeelPasses, 2 * xparPeelPasses,
+            xparGroups.size() * size_t(xparPeelPasses) * 2 * 2);
+
+    // dst = the HDR target this composite lands in (the main frame's, or a
+    // mirror reflection's). `srcDepth` is the OPAQUE depth of that same view.
+    auto encodeXpar = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                          id<MTLTexture> dst, id<MTLTexture> srcDepth,
+                          bool mirroredBasis) {
+        if (xparGroups.empty() || !opt.xpar) return;
+        // Order groups within a side. `extent` is the CPU's own: the object's
+        // bounding-sphere view depth pushed to its FAR edge for back faces and
+        // its NEAR edge for front faces (Transform.cpp:2621-2626). Larger
+        // extent composites first.
+        auto viewZ = [&](const XparGroup &g) {
+            float z = 0.0f;
+            for (int c = 0; c < 3; ++c) z += u.camRow2[c] * (g.ctr[c] - u.camSrc[c]);
+            return z;
+        };
+        for (int side = 0; side < 2; ++side) {          // 0 = BACK faces first
+            const bool front = (side == 1);
+            std::vector<size_t> order(xparGroups.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                const float ea = viewZ(xparGroups[a]) + (front ? -xparGroups[a].rad
+                                                               :  xparGroups[a].rad);
+                const float eb = viewZ(xparGroups[b]) + (front ? -xparGroups[b].rad
+                                                               :  xparGroups[b].rad);
+                return ea > eb;                          // far to near
+            });
+            // Engine-front-facing == Metal BACK-facing here (measured, see the
+            // G-buffer cull comment), so drawing only the engine's front faces
+            // means CullModeFront. A reflection basis has determinant -1 and
+            // reverses screen winding, so both senses flip.
+            MTLCullMode cull = front ? MTLCullModeFront : MTLCullModeBack;
+            if (mirroredBasis)
+                cull = (cull == MTLCullModeFront) ? MTLCullModeBack : MTLCullModeFront;
+
+            for (size_t oi = 0; oi < order.size(); ++oi) {
+                const XparGroup &g = xparGroups[order[oi]];
+                for (int pass = 0; pass < xparPeelPasses; ++pass) {
+                    XparUniforms xu{};
+                    for (int c = 0; c < 3; ++c)
+                        xu.sceneAmbient[c] = scene.ambient[c] * (1.0f / 255.0f);
+                    xu.peelReverse   = (xparPeelPasses > 1) ? 1.0f : 0.0f;
+                    xu.usePeelFloor  = (pass > 0) ? 1.0f : 0.0f;
+
+                    // (a) depth resolve — one fragment per pixel for this layer
+                    {
+                        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                        rp.depthAttachment.texture = xparDepth;
+                        rp.depthAttachment.loadAction = MTLLoadActionClear;
+                        rp.depthAttachment.storeAction = MTLStoreActionStore;
+                        // reversed-Z: 0 = far (keep-nearest init), 1 = near
+                        // (keep-farthest init), matching the CPU's 0 / 0xFFFF.
+                        rp.depthAttachment.clearDepth = (xparPeelPasses > 1) ? 1.0 : 0.0;
+                        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                        [e setRenderPipelineState:psoXparDepth];
+                        [e setDepthStencilState:(xparPeelPasses > 1) ? dssXparFar : dssXparNear];
+                        [e setCullMode:cull];
+                        [e setVertexBuffer:vb offset:0 atIndex:0];
+                        [e setVertexBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBytes:&xu length:sizeof(xu) atIndex:5];
+                        [e setFragmentTexture:srcDepth atIndex:5];
+                        [e setFragmentTexture:xparFloor atIndex:6];
+                        for (size_t bi : g.batches) {
+                            const Batch &b = scene.batches[bi];
+                            if (!front && !b.twoSided) continue;   // see below
+                            [e setVertexBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
+                            [e drawPrimitives:MTLPrimitiveTypeTriangle
+                                  vertexStart:NSUInteger(b.firstVertex)
+                                  vertexCount:NSUInteger(b.vertexCount)];
+                        }
+                        [e endEncoding];
+                    }
+                    // (b) composite the resolved layer
+                    {
+                        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                        rp.colorAttachments[0].texture = dst;
+                        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        rp.depthAttachment.texture = xparDepth;
+                        rp.depthAttachment.loadAction = MTLLoadActionLoad;
+                        rp.depthAttachment.storeAction = MTLStoreActionStore;
+                        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                        [e setDepthStencilState:dssXparEqual];
+                        [e setCullMode:cull];
+                        [e setVertexBuffer:vb offset:0 atIndex:0];
+                        [e setVertexBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBuffer:lightBuf offset:0 atIndex:3];
+                        [e setFragmentBytes:&xu length:sizeof(xu) atIndex:5];
+                        [e setFragmentSamplerState:samp atIndex:0];
+                        [e setFragmentTexture:srcDepth atIndex:5];
+                        [e setFragmentTexture:xparFloor atIndex:6];
+                        for (size_t bi : g.batches) {
+                            const Batch &b = scene.batches[bi];
+                            // THE BACK LAYER ONLY EXISTS FOR Mat_TwoSided. The
+                            // peel splits the faces that SURVIVED
+                            // Transform_Objects' backface cull, and that cull's
+                            // only bypass is Mat_TwoSided
+                            // (Transform.cpp:2429-2434) — so a single-sided
+                            // transparent contributes nothing to the back
+                            // layer. This is the reason FOUNTAIN.CPP:854-864
+                            // force-sets TwoSided on the orb shells: without it
+                            // "those back-facing tris get culled before reaching
+                            // the deferred dispatch, so the back layer stays
+                            // empty and the orbs render as a thin shell."
+                            // Drawing both sides unconditionally double-lit
+                            // greets' 560-tri 'lamp light' set: MEASURED at
+                            // t=2000 as 223,615 px moved with |err| against the
+                            // reference rising 40.81 -> 46.44 on them.
+                            if (!front && !b.twoSided) continue;
+                            if (b.additive) {
+                                [e setRenderPipelineState:psoXparAdd];
+                            } else if (b.xparBlendAlpha > 0.0f) {
+                                [e setRenderPipelineState:psoXparLerp];
+                                [e setBlendColorRed:b.xparBlendAlpha green:b.xparBlendAlpha
+                                               blue:b.xparBlendAlpha alpha:1.0f];
+                            } else {
+                                const float dw = (b.transparency > 0.0f)
+                                               ? b.transparency * 0.01f : 0.5f;
+                                [e setRenderPipelineState:psoXparLegacy];
+                                [e setBlendColorRed:dw green:dw blue:dw alpha:1.0f];
+                            }
+                            [e setVertexBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
+                            [e setFragmentBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
+                            [e setFragmentTexture:(b.textureIndex >= 0
+                                                       ? texes[size_t(b.textureIndex)]
+                                                       : texes[0]) atIndex:0];
+                            [e drawPrimitives:MTLPrimitiveTypeTriangle
+                                  vertexStart:NSUInteger(b.firstVertex)
+                                  vertexCount:NSUInteger(b.vertexCount)];
+                        }
+                        [e endEncoding];
+                    }
+                    // (c) advance the peel floor to this layer's depth
+                    if (xparPeelPasses > 1 && pass + 1 < xparPeelPasses) {
+                        id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+                        [bl copyFromTexture:xparDepth sourceSlice:0 sourceLevel:0
+                               sourceOrigin:MTLOriginMake(0, 0, 0)
+                                 sourceSize:MTLSizeMake(NSUInteger(W), NSUInteger(H), 1)
+                                  toTexture:xparFloor destinationSlice:0 destinationLevel:0
+                          destinationOrigin:MTLOriginMake(0, 0, 0)];
+                        [bl endEncoding];
+                    }
+                }
+            }
+        }
     };
 
     // ---- ENVIRONMENT PROBE BAKE --------------------------------------------
@@ -1731,6 +2079,41 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         [enc endEncoding];
     };
 
+    // VOLUMETRIC SPOT CONES into an arbitrary HDR target with an arbitrary
+    // camera. Factored out of renderFrame so the MIRROR REFLECTION views can
+    // run it too — reported 2026-08-08 as "no spotlight cones in mirrors".
+    //
+    // The CPU shows beams inside its mirrors, and it is worth being precise
+    // about how, because the two arms get there differently. The CPU has ONE
+    // screen-space cone pass (RENDER.CPP:1237) and admits the MIRROR-CLONE
+    // spots into it, gated per pixel on the mirror's stamped footprint with the
+    // chord clamped to start at the glass depth (DeferredVolumetric.cpp:761-772
+    // and the comment at :1858-1883, "Mirror-clone spots ARE admitted (beams
+    // show in mirrors)"). This arm has no clone geometry and no footprint mask:
+    // its mirror is a real reflection render, so the faithful equivalent is to
+    // run the same integral from the reflected camera against the reflection's
+    // own depth buffer. Same beams, same shadow taps, different bookkeeping.
+    auto encodeCones = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                           id<MTLTexture> dst, id<MTLTexture> depthTex) {
+        if (!opt.cones || coneU.density <= 0.0f || nSpotLights <= 0) return;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoCones];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+        [enc setFragmentBytes:&coneU length:sizeof(coneU) atIndex:4];
+        [enc setFragmentTexture:depthTex atIndex:3];
+        for (int i = 0; i < kMaxSpotMaps; ++i)
+            [enc setFragmentTexture:(i < int(spots.size()) ? spots[size_t(i)] : dummy2D)
+                            atIndex:NSUInteger(20 + i)];
+        [enc setFragmentSamplerState:shadowSamp atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+    };
+
     auto renderFrame = [&]() -> id<MTLCommandBuffer> {
         id<MTLCommandBuffer> cb = [queue commandBuffer];
 
@@ -1833,6 +2216,14 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 const float clip4[4] = {N[0], N[1], N[2], m.d};
                 encodeFlares(cb, fum, reflHdr[size_t(i)], mDepth, clip4);
             }
+            // Transparent surfaces and volumetric beams INSIDE the reflection.
+            // The CPU gets both: its clone mesh carries the transparent faces
+            // (they composite through the same peel, bounded to the mirror
+            // window, RENDER.CPP:936-985) and its clone spots are admitted to
+            // the cone pass behind the glass. Order matches the main view:
+            // peel, then cones.
+            encodeXpar(cb, fum, reflHdr[size_t(i)], mDepth, /*mirroredBasis=*/true);
+            encodeCones(cb, fum, reflHdr[size_t(i)], mDepth);
             if (sampleBuf && last) {
                 // close the mirror-pass counter interval with an empty encoder
                 MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1921,29 +2312,21 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         if (!viz && opt.stages >= 2)
             encodeFlares(cb, fu, hdrTex, gDepth, nullptr);
 
+        // --- pass 2b1: TRANSPARENT SURFACES (depth peel) ---
+        // RENDER.CPP order: the peel runs after the deferred lighting resolve
+        // and the sprite loop, and BEFORE the volumetric cones and the bloom
+        // bright-pass (:741-1161 peel, :1192-1206 sprites, :1233-1239 cones,
+        // :1266 bloom). Transparents therefore bloom, which is why the CPU
+        // deliberately leaves their composite unclamped under HDR.
+        if (!viz && opt.stages >= 2)
+            encodeXpar(cb, fu, hdrTex, gDepth, /*mirroredBasis=*/false);
+
         // --- pass 2b2: VOLUMETRIC SPOT CONES, additive into HDR ---
         // RENDER.CPP:1231-1240 order: after the opaque/TBR draws, BEFORE
         // DoF/bright/bloom/tonemap. So the shafts feed the bloom, as they do on
         // the CPU — putting this after bloom would render visibly harder beams.
-        if (!viz && opt.stages >= 2 && opt.cones && coneU.density > 0.0f &&
-            nSpotLights > 0) {
-            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-            rp.colorAttachments[0].texture = hdrTex;
-            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
-            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-            [enc setRenderPipelineState:psoCones];
-            [enc setFragmentBytes:&fu length:sizeof(fu) atIndex:1];
-            [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
-            [enc setFragmentBytes:&coneU length:sizeof(coneU) atIndex:4];
-            [enc setFragmentTexture:gDepth atIndex:3];
-            for (int i = 0; i < kMaxSpotMaps; ++i)
-                [enc setFragmentTexture:(i < int(spots.size()) ? spots[size_t(i)] : dummy2D)
-                                atIndex:NSUInteger(20 + i)];
-            [enc setFragmentSamplerState:shadowSamp atIndex:1];
-            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-            [enc endEncoding];
-        }
+        if (!viz && opt.stages >= 2)
+            encodeCones(cb, fu, hdrTex, gDepth);
 
         // --- pass 2c: bloom (bright-pass -> 4 blur taps -> additive upsample) ---
         if (!viz && opt.stages >= 3 && opt.bloom && opt.bloomIntensity > 0.0f) {
