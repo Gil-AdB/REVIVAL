@@ -68,6 +68,187 @@ static Material *PclT;
 static DWord NPMats;
 static float SwCarry = 0.0f, SwCarry2 = 0.0f;
 
+// ---------------------------------------------------------------------------
+// --pcl_dump=PATH[,t0,t1] — the CPU half of DUMP-AND-REPLAY (GpuBench)
+// ---------------------------------------------------------------------------
+// The standalone Metal arm (GpuBench) links FDS and NOT DEMO, and fountain's
+// spray is DEMO data: `Scene::Pcl` / `NumOfParticles` / `PclExec` are FDS
+// FIELDS that FDS transforms (`Transform.cpp:2788-2825`), but nothing in FDS
+// ever FILLS them — `Initialize_Particles` allocates them and
+// `Particle_Kinematics` advances them, both here. So no scene-ingest change can
+// reach the spray, and re-deriving it on the GPU would mean re-deriving an RNG
+// history: any drift would silently turn a RENDERING comparison into a
+// SIMULATION one, which is the one thing that instrument exists to avoid.
+//
+// Hence: this side writes the per-frame particle state it ACTUALLY RENDERED,
+// and GpuBench replays it byte-for-byte (`GpuBench/ParticleReplay.{h,cpp}`,
+// `--pcl=PATH`). Identical positions on both arms means any image difference is
+// rendering, not simulation.
+//
+// Format v1, little-endian (the executable definition lives in
+// GpuBench/ParticleReplay.h; this writer and that reader are the two halves):
+//
+//   header   char magic[8] "FDSPCL1"; uint32 version=1; uint32 frameCount;
+//            uint32 reserved[2]
+//   frame    uint32 'PFRM'; float timer; float curFrame; float imageSize;
+//            float perspX; uint32 count; uint32 reserved
+//   particle float px,py,pz; float flareSize; uint8 r,g,b; uint8 tex   (20 B)
+//
+// `frameCount` is BACK-PATCHED after every frame, so a run killed mid-dump
+// still leaves a readable file rather than a header claiming zero frames.
+//
+// DEFAULT OFF, and off means byte-null: with no `--pcl_dump=` token nothing is
+// opened, nothing is written and `ParticleDump_Write` returns on a null FILE*.
+//
+// SIZE is why the range form is not decoration: 8,250 particles x 20 B x 1,500
+// frames is ~250 MB. `--pcl_dump=/tmp/f.pcl,2500,2500` writes one frame.
+namespace {
+
+struct PclDumpState {
+	std::FILE *f      = nullptr;
+	std::string path;
+	float       t0    = -1e30f;      // inclusive Timer window
+	float       t1    =  1e30f;
+	uint32_t    frames = 0;
+	bool        closed = false;
+};
+PclDumpState g_pclDump;
+
+template <typename T> void pclWr(std::FILE *f, const T &v) {
+	std::fwrite(&v, sizeof(T), 1, f);
+}
+
+void ParticleDump_Close() {
+	if (!g_pclDump.f || g_pclDump.closed) return;
+	g_pclDump.closed = true;
+	std::fclose(g_pclDump.f);
+	g_pclDump.f = nullptr;
+	std::fprintf(stderr, "[PCL-DUMP] closed %s (%u frame(s))\n",
+	             g_pclDump.path.c_str(), g_pclDump.frames);
+}
+
+}  // namespace
+
+// Pre-scan argv for `--pcl_dump=PATH[,t0,t1]`, exactly as
+// MaterialImport_ParseArgs / ParseSnapshotArgs do for their own tokens: the
+// flag carries a PATH, and FeatureFlags has no string type (bool/float/int
+// only), so it cannot live in FeatureFlags.def. The token is registered in
+// FeatureFlags.cpp's `ownedByOtherParser` list so `--strict_flags` does not
+// kill the run over it.
+//
+// t0/t1 are an INCLUSIVE window on the scene `Timer` (centiseconds), the same
+// clock `--snapshot=fountain@t=2500` pins. Omit them to dump every frame.
+void ParticleDump_ParseArgs(int argc, const char *const *argv) {
+	const char *spec = nullptr;
+	for (int i = 1; i < argc; ++i) {
+		if (!argv[i]) continue;
+		// Accept both spellings; FeatureFlags normalises dash<->underscore
+		// and a reader of --help would reasonably try either.
+		if (std::strncmp(argv[i], "--pcl_dump=", 11) == 0) spec = argv[i] + 11;
+		else if (std::strncmp(argv[i], "--pcl-dump=", 11) == 0) spec = argv[i] + 11;
+	}
+	if (!spec || !*spec) return;      // OFF: byte-null, nothing opened
+
+	std::string s(spec);
+	std::string path = s;
+	float t0 = -1e30f, t1 = 1e30f;
+	const size_t c1 = s.find(',');
+	if (c1 != std::string::npos) {
+		path = s.substr(0, c1);
+		const std::string rest = s.substr(c1 + 1);
+		const size_t c2 = rest.find(',');
+		t0 = float(std::atof(rest.substr(0, c2).c_str()));
+		t1 = (c2 == std::string::npos) ? t0
+		                               : float(std::atof(rest.substr(c2 + 1).c_str()));
+	}
+	if (path.empty()) {
+		std::fprintf(stderr, "[PCL-DUMP] --pcl_dump= needs a path\n");
+		return;
+	}
+
+	std::FILE *f = std::fopen(path.c_str(), "wb");
+	if (!f) {
+		std::fprintf(stderr, "[PCL-DUMP] cannot write %s\n", path.c_str());
+		return;
+	}
+	const char magic[8] = {'F','D','S','P','C','L','1','\0'};
+	std::fwrite(magic, 1, 8, f);
+	const uint32_t version = 1u, frameCount = 0u, rsv = 0u;
+	pclWr(f, version); pclWr(f, frameCount); pclWr(f, rsv); pclWr(f, rsv);
+
+	g_pclDump.f    = f;
+	g_pclDump.path = path;
+	g_pclDump.t0   = t0;
+	g_pclDump.t1   = t1;
+	std::atexit(ParticleDump_Close);
+	if (t0 <= -1e29f)
+		std::fprintf(stderr, "[PCL-DUMP] %s: ALL frames "
+		                     "(8,250 x 20 B/frame — mind the size)\n", path.c_str());
+	else
+		std::fprintf(stderr, "[PCL-DUMP] %s: Timer in [%.0f, %.0f]\n",
+		             path.c_str(), t0, t1);
+}
+
+// Called from FountainScene::tick() immediately after Particle_Kinematics —
+// the LAST writer of V.Pos, V.LR/LG/LB and Flags for the frame. See the call
+// site for why that placement is not a matter of taste.
+void ParticleDump_Write(Scene *Sc) {
+	if (!g_pclDump.f || !Sc || !Sc->Pcl) return;
+	const float t = float(Timer);
+	if (t < g_pclDump.t0 || t > g_pclDump.t1) return;
+
+	// The ACTIVE gate is the one Transform.cpp:2806 applies before inserting a
+	// particle into the face list — dumping inactive slots would hand GpuBench
+	// thousands of stale sprites the CPU never blitted.
+	uint32_t count = 0;
+	for (DWord i = 0; i < Sc->NumOfParticles; ++i)
+		if (Sc->Pcl[i].Flags & Particle_Active) ++count;
+
+	std::FILE *f = g_pclDump.f;
+	const uint32_t frameMagic = 0x4D524650u;   // 'PFRM'
+	const uint32_t rsv = 0u;
+	pclWr(f, frameMagic);
+	pclWr(f, t);
+	pclWr(f, CurFrame);
+	pclWr(f, ImageSize);
+	pclWr(f, View ? View->PerspX : 0.0f);
+	pclWr(f, count);
+	pclWr(f, rsv);
+
+	for (DWord i = 0; i < Sc->NumOfParticles; ++i) {
+		const Particle &P = Sc->Pcl[i];
+		if (!(P.Flags & Particle_Active)) continue;
+		const float pos[3] = { P.V.Pos.x, P.V.Pos.y, P.V.Pos.z };
+		std::fwrite(pos, sizeof(float), 3, f);
+		pclWr(f, P.F.FlareSize);
+		// LR/LG/LB are already LIT (Particle_Kinematics' "dummy illumination
+		// model"); the sprite blitter feeds them straight to colorize().
+		const uint8_t rgb[3] = { uint8_t(P.V.LR), uint8_t(P.V.LG), uint8_t(P.V.LB) };
+		std::fwrite(rgb, 1, 3, f);
+		// Which PclT material — derived from the pointer, not re-derived from
+		// I%NPMats, so it stays true if the assignment ever changes. Both
+		// materials carry the SAME procedural 32x32 disc, so this is
+		// informational; GpuBench regenerates the texture either way.
+		uint8_t tex = 0;
+		if (PclT && P.F.Txtr >= PclT && P.F.Txtr < PclT + NPMats)
+			tex = uint8_t(P.F.Txtr - PclT);
+		pclWr(f, tex);
+	}
+
+	// Back-patch frameCount so a killed run still yields a readable file.
+	++g_pclDump.frames;
+	const long end = std::ftell(f);
+	std::fseek(f, 12, SEEK_SET);           // magic[8] + version[4]
+	pclWr(f, g_pclDump.frames);
+	std::fseek(f, end, SEEK_SET);
+	std::fflush(f);
+
+	std::fprintf(stderr, "[PCL-DUMP] frame %u: Timer=%.0f CurFrame=%.2f "
+	                     "ImageSize=%.3f PerspX=%.2f active=%u/%u\n",
+	             g_pclDump.frames, t, CurFrame, ImageSize,
+	             View ? View->PerspX : 0.0f, count, unsigned(Sc->NumOfParticles));
+}
+
 static Vector Vortex_Center(-0.053f,343.381f, 0.251f);
 
 static int32_t g_LnLastTimer = -1;   // scrub tracking for strike triggers
@@ -2730,6 +2911,15 @@ struct FountainScene : SceneDriver {
 		} else VortexTri.Flags &= 0xFFFFFFFF-HTrack_Visible;
 
 		Particle_Kinematics(FntSc);
+
+		// DUMP-AND-REPLAY (--pcl_dump=PATH[,t0,t1], default off). HERE and not
+		// elsewhere: CurFrame is set above, Animate_Objects has run, and
+		// Particle_Kinematics is the LAST writer of V.Pos, V.LR/LG/LB and Flags
+		// for this frame (it assigns the colour in its "dummy illumination
+		// model" blocks). Everything after this point touches omnis, not
+		// particles. So the state written here is exactly the state
+		// Transform_Objects will project and TBR_Render will blit.
+		ParticleDump_Write(FntSc);
 
 		// Update stream-head omnis from inner-spawn emit math.
 		{

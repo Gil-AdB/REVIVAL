@@ -464,6 +464,7 @@ material global ID or ptr
 #include "Snapshot.h"
 #include "ReproHarness.h"
 #include "MaterialImport.h"
+#include "FOUNTAIN.H"      // ParticleDump_ParseArgs (--pcl_dump=, argv pre-scan)
 #include "Resize.h"
 #include <float.h>
 #include <Base/TriMesh.h>
@@ -1353,6 +1354,12 @@ int main(int argc, const char *argv[])
 	// --material-import=MAT:DIR specs aren't FeatureFlags; pre-scan argv (like
 	// --snapshot above). Scenes apply them at init via MaterialImport_Apply.
 	fds::MaterialImport_ParseArgs(argc, argv);
+	// --pcl_dump=PATH[,t0,t1] carries a PATH, so it is not a FeatureFlag either
+	// (that table is bool/float/int only). Same pre-scan; default off and
+	// byte-null when off. FOUNTAIN.CPP owns it — it is the CPU half of
+	// dump-and-replay for GpuBench's fountain spray (docs/GPU_BENCHMARK_PLAN.md
+	// §6.2j).
+	ParticleDump_ParseArgs(argc, argv);
 	ConfigurationDB cfg;
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
@@ -1405,6 +1412,11 @@ int main(int argc, const char *argv[])
 "  ./DEMO --bench=<kind>[@iters=N,seed=N,...]\n"
 "  ./DEMO --repro=<scene>@t=T1,T2,... [--out=DIR]\n"
 "  ./DEMO [--<flag> | --no-<flag> | --<flag>=VALUE]...\n"
+"  ./DEMO --pcl_dump=PATH[,t0,t1]           dump fountain's particle state per frame\n"
+"                                           (for GpuBench --pcl; default off, and\n"
+"                                            byte-null when off. t0/t1 are an\n"
+"                                            inclusive scene-Timer window — 8,250\n"
+"                                            particles x 20 B/frame adds up fast)\n"
 "  ./DEMO --help | -h                       this message\n"
 "  ./DEMO --print-completion[=bash|zsh]     emit shell completion script\n"
 "\n"

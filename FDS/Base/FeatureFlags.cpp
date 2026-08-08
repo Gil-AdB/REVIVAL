@@ -139,6 +139,7 @@ bool ownedByOtherParser(const char *name) {
         "material_import_flip_normal",
         "material_import_no_mips",
         "print_completion",            // DEMO/REV.CPP (exits before parseArgs, listed for safety)
+        "pcl_dump",                    // DEMO/FOUNTAIN.CPP ParticleDump_ParseArgs (carries a PATH)
     };
     for (const char *k : kKnownElsewhere)
         if (std::strcmp(name, k) == 0) return true;
