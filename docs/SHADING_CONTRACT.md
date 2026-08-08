@@ -782,7 +782,9 @@ Two things the split settles. **(1) §8.1 M2's "most of the flag's move" was wro
 from a metalness-1 surface, so a conductor has no ambient to correct. That is a consistency check on
 D1 as much as on this flag.
 
-Images: `docs/img/metal/projector_env_metal_tint.png` (default | tint | GPU),
+Images: `docs/img/metal/projector_users_arm_tint.png` — **the user's own arm**:
+`--no-greets_omni_shadows` | the same **+ `--env_metal_tint_linear`** | GPU.
+`docs/img/metal/projector_env_metal_tint.png` (default | tint | GPU),
 `docs/img/metal/projector_env_metal_tint_2rows.png` (the same, second row with `--env_bake_linear`),
 `docs/img/metal/greets_bake_linear_2x2.png` (neither | probe | ambient | both).
 
