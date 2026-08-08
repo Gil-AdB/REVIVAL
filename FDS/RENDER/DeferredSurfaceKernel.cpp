@@ -847,6 +847,19 @@ static inline void EnvCubeFetchBil(const fds::EnvPanoLinear* envP, int lvl,
 	B = ch(0); G = ch(8); R = ch(16);
 }
 
+// --env_mip_chain (§11 row E7): the VIRTUAL chain depth the roughness→level
+// select divides by. 0 / <=1 = unset → the store's real numMips, so the
+// default is byte-identical. Clamped to 2..16 (a depth of 1 would make every
+// roughness select level 0, which is not a lobe width anyone wants and is
+// already reachable with --no-env_refl). The RESULT is still clamped to the
+// real chain by the caller — this widens the lobe for a given roughness, it
+// does not invent levels the store does not have.
+static inline int envMipChainDepth(int realMips) {
+	const int v = fds::FeatureFlags::env_mip_chain();
+	if (v <= 1) return realMips;
+	return v > 16 ? 16 : v;
+}
+
 static inline void EnvSpecComposeScalar(
 	const DeferredLightingCtx &ctx, const fds::EnvPanoLinear *envP,
 	const Material *Mat, uint32_t miplevel, uint32_t swizzledUV,
@@ -1106,7 +1119,14 @@ static inline void EnvSpecComposeScalar(
 	// Trilinear across the blur chain: nearest-level select on a
 	// NOISY roughness map made adjacent pixels flip between sharp
 	// and blurred mips (speckle). Lerp the two straddling levels.
-	float lvlF = rough * float(envP->numMips - 1);
+	//
+	// --env_mip_chain (§11 row E7, default 0 = unset = byte-null): the
+	// DIVISOR here is the store's fixed 4-level chain, while the GPU arm's
+	// is its full hardware chain — the same `rough` therefore selects a ~3x
+	// wider lobe over there. The flag substitutes a VIRTUAL chain depth so
+	// the CPU's effective lobe width can be matched; the result still clamps
+	// to the real chain, so the reachable floor is faceRes>>(numMips-1).
+	float lvlF = rough * float(envMipChainDepth(envP->numMips) - 1);
 	if (lvlF < 0.0f) lvlF = 0.0f;
 	if (lvlF > float(envP->numMips - 1)) lvlF = float(envP->numMips - 1);
 	const int lvl0 = int(lvlF);
@@ -1374,6 +1394,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// 2M function calls/frame adds up.
 	const bool quarter        = deferredLightingQuarterEnabled();
 	const bool checker        = deferredLightingCheckerboardEnabled() && !quarter;
+	// --deferred_checker_env_full: see the drop test in the pixel loop.
+	const bool checkerEnvFull = (checker || quarter)
+	    && fds::FeatureFlags::deferred_checker_env_full();
 	const bool useVec         = deferredLightingVecEnabled();
 	const bool sVecForce      = fds::FeatureFlags::deferred_vec_force();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
@@ -1528,8 +1551,30 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 		for (int px = x1; px < x2; ++px) {
 			// Wave-1 of checkerboard: skip odd cells (filled by the
 			// fill-pass after all wave-1 tiles complete).
-			if (checker && ((px ^ py) & 1)) continue;
-			if (quarter && ((px | py) & 1)) continue;  // shade only (even, even)
+			//
+			// --deferred_checker_env_full (default OFF = byte-null): an
+			// ENV-REFLECTIVE pixel is NOT dropped. The fill refuses to
+			// average those (`envForceFull`, TileFill) and re-shades them
+			// with the scalar fallback — which is a REDUCED kernel (no
+			// --pbr GGX lobe, no shadow maps, no AO, no nmap LOD fade), so
+			// shading alternate pixels of a reflective surface with two
+			// different BRDFs prints a STATIC lattice. Shading them here
+			// costs no extra shaded PIXELS (the fill was already
+			// full-shading exactly this set), only the terms the fallback
+			// was skipping. Test costs one extra G-buffer load per dropped
+			// cell, and only when the flag is on.
+			if (checker || quarter) {
+				const bool drop = checker ? (((px ^ py) & 1) != 0)
+				                          : (((px | py) & 1) != 0);
+				if (drop) {
+					bool keepForEnv = false;
+					if (checkerEnvFull && envTabG) {
+						const uint32_t m32e = gb.txtr[size_t(py) * XRes + px];
+						keepForEnv = envTabG[(m32e >> 20) & 0xFF] != nullptr;
+					}
+					if (!keepForEnv) continue;
+				}
+			}
 
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
@@ -4023,8 +4068,11 @@ static inline void EnvComposeCityVec8(const DeferredLightingCtx &ctx,
 	const __m256 rough = rsqrt8_nr(_mm256_mul_ps(
 		_mm256_add_ps(gloss, _mm256_set1_ps(2.0f)), _mm256_set1_ps(0.5f)));
 	const __m256 maxLvl = _mm256_set1_ps(float(envP->numMips - 1));
+	// --env_mip_chain: virtual chain depth as the multiplier (§11 row E7);
+	// the CLAMP stays on the real chain. Unset → mulLvl == maxLvl, byte-null.
+	const __m256 mulLvl = _mm256_set1_ps(float(envMipChainDepth(envP->numMips) - 1));
 	_mm256_store_ps(outLvlF,
-		_mm256_min_ps(maxLvl, _mm256_max_ps(zero, _mm256_mul_ps(rough, maxLvl))));
+		_mm256_min_ps(maxLvl, _mm256_max_ps(zero, _mm256_mul_ps(rough, mulLvl))));
 
 	// Schlick Fresnel (metal = 0 on this path), ek = fres * gain.
 	const __m256 ndv = _mm256_min_ps(one, _mm256_max_ps(zero,
@@ -4939,6 +4987,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 		? fds::SHAmbient_Coeffs(ctx.Sc) : nullptr;
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
+	// --deferred_checker_env_full: env-reflective cells were shaded at full
+	// rate in wave 1, so this fill must leave them alone.
+	const bool checkerEnvFullG = (checker || quarter)
+	    && fds::FeatureFlags::deferred_checker_env_full();
 	const bool hdrWrite     = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);   // HDR B1: see main kernel
 	const bool hdrLinear    = hdrWrite && fds::FeatureFlags::hdr_linear();  // HDR B2
 	// Normal-similarity threshold for the quarter fill predicate. matID
@@ -5001,6 +5053,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// reflections as alternating lit/dark columns. Reflective pixels
 			// are a small fraction of the frame; full shading them is cheap.
 			const bool envForceFull = envTabG && envTabG[matIDc] != nullptr;
+			// --deferred_checker_env_full: wave 1 already shaded this
+			// pixel with the REAL kernel (see the drop test there), so
+			// the reduced fallback below must not overwrite it.
+			if (envForceFull && checkerEnvFullG) continue;
 
 			// Center normal decoded once; reused by every fill pattern's
 			// neighbor-similarity test below. Cheap enough vs the avoided

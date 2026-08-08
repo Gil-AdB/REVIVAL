@@ -1948,10 +1948,20 @@ void Initialize_Greets()
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != GreetSc || !M->Name) continue;
 		const char *n = M->Name;
+		// 'hull' and 'cockpit' were REMOVED from this list 2026-08-09
+		// (docs/SHADING_CONTRACT.md §11, row E8). MECH_HUL.JPG /
+		// MECH_COK.JPG are CAMOUFLAGE PAINT, not surface relief, so
+		// Sobelling their luminance turned dark-green blotches into
+		// geometric dents: measured at hull pixel (767,723) the shipped
+		// frame read Y 131.2 against 45.0 with the map neutralised and
+		// 41.0 on the standalone Metal arm. If the mech ever WANTS relief
+		// it comes through the authoring pipeline (an authored
+		// TEXTURES/PBR/<set>/normal.png reached by the LWO 'RVSM'
+		// sub-chunk, the same route 'rooms'/'stairs'/'amudim' take) —
+		// never from a substring match on the material name.
 		const bool isShiny = strstr(n, "stairs") || strstr(n, "amudim") ||
 		                     strstr(n, "floor")  || strstr(n, "marb")   ||
-		                     strstr(n, "MARB")   || strstr(n, "hull")   ||
-		                     strstr(n, "cockpit");
+		                     strstr(n, "MARB");
 		// Wall / ceiling surfaces — the FLD names them 'rooms' (the
 		// big brick wall texture in the back of the greets scene) and
 		// 'siling' (the ceiling that uses the same brick atlas). They show

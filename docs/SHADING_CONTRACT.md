@@ -1330,3 +1330,56 @@ paint is not surface relief, and the gate that produces it is a substring match 
 from that name list is a one-line `DEMO/` edit that needs no flag and no authoring change; everything
 else in §11.6 already has a flag (`--env_bake_linear`, `--env_bake_skip_animated`, `--env_res`,
 `--deferred_checkerboard`) or is a deliberate design decision with its rationale in the source.
+
+### 11.8 APPLIED 2026-08-09 — the gate is gone, E6/E7 have CPU flags, and P2 was a BUG
+
+His three calls on §11.6, and what each one turned out to be. Every number here is MEASURED at the
+same t=4871 pose as the rest of §11, on the 33,478-px canopy mask or the frame as stated.
+
+**E8 — DONE, no flag.** `hull` and `cockpit` are out of the `strstr` list at `DEMO/GREETS.CPP:1951`.
+Frame-wide **179,829 px (8.67 %)**, max channel Δ 164, 11,677 px > 10 luma; hull pixel (767,723)
+**131.2 → 44.9** against the GPU's 41.0; canopy pixel (760,620) 146.4 → 157.4 against 161.4. The
+greets byte pin moves `6780642b…` → **`9eeaf860cb5a7f124884a89e0fc3ff5b`** (3/3) — and note the pin
+pose t=1588 changes by **one pixel at one LSB**, so the pin move is not the measurement.
+Crop: `docs/img/mech/task1_mech_strip.png`.
+
+`siling` is the ONLY material still reaching the Sobel bake. Its diffuse (`PSILING.JPG`, 256²) is a
+diagonal-grained stone noise, so unlike camo paint its luminance is a defensible height proxy — but
+the ceiling is almost always seen at a grazing angle, where a texel-frequency bump reads as sparkle.
+Isolated (`--nmap_strength=0` now touches nothing else): **155,242 px (7.49 %)**, mean |ΔY| 9.24 on
+changed, 54,184 px > 10 luma, concentrated in the top ~135 rows.
+A/B at 3×: `docs/img/mech/task1_siling_zoom.png`. **The verdict is his**; if it stays, the authored
+replacement is a `normal.png` in a new `Runtime/TEXTURES/PBR/<set>/` reached by an `RVSM` sub-chunk
+on the `siling` surface in the LWO — `MaterialImport_ApplyRevMaps` then loads it with no code change,
+and the name match can be deleted outright.
+
+**E6 — `--env_bake_include_animated`** (CPU, default OFF, byte-null). Probe faces mean
+**100.31 → 89.14**, all six 100 % nonvoid, −Y (toward the mech's own body) 96.22 → 74.55; canopy
+**2,817 px**, mean |ΔY| 22.86 on changed, max 102.4; frame-wide 39,473 px (1.90 %). Mirror of the
+GPU's `--env_bake_skip_animated` (5,268 px, mean 24.94). **Trap:** `g_envBakeSkipDynamic` is read in
+THREE places in `Transform.cpp` and clearing it also disables the reflector's **own-face** skip —
+the first cut did that and the +Y face came back 91 % VOID, probe mean 49.11. The flag hooks
+`Transform.cpp:1274` only.
+
+**E7 — `--env_mip_chain`** (CPU, default 0 = unset, byte-null). It reproduces the GPU's full-chain
+select: at the shipped `--env_bake_res=256`, `--env_mip_chain=9` ≡ GPU `--env_res=256`; with
+`--env_bake_res=128`, `--env_mip_chain=8` is an exact emulation of the GPU default. **But E7 is much
+smaller on the CPU than §11 implied.** A within-arm sweep of the ISOLATED env term (render minus
+`--no-env_refl`, 7×7 high-pass RMS over the canopy) gives **24.68 (default) → 24.32 (chain 9) → 24.05
+(chain 8 + res 128) → 23.92 (chain 16, the bottom of the store's chain)** — **3 % across the whole
+dial**, against the GPU's own `--env_res` sweep spanning 16.22 → 17.95 (11 %). §11's 9.97-vs-13.20
+comparison was ACROSS arms, which differ in many things at once; the within-arm sweep is the cleaner
+test. So on the CPU the canopy's high-frequency energy is **not** reflected detail — it is
+Fresnel/normal modulation of an already-smooth reflection plus the frame ribs and the glass. What is
+left between the two canopies is the env term's BRIGHTNESS (CPU +131.0 vs GPU +107.6 over the mask,
+i.e. E0) and probe content.
+
+**P2 — NOT a rate artefact. A BUG, and it is fixed.** See the dated note in `docs/SESSION_STATE.md`
+and the `--deferred_checker_env_full` entry in `FeatureFlags.def`. Short form: the fill refuses to
+average env-reflective pixels (`envForceFull`, `DeferredSurfaceKernel.cpp:5003`) and re-shades them
+with a **reduced** kernel — no `--pbr` GGX lobe, no shadow terms at all, no AO, no nmap LOD fade —
+so alternate pixels of every reflective surface carry two different BRDFs at a static
+`(px ^ py) & 1` phase. Wave-2-minus-wave-1 mean luma on the canopy: shipped **+6.82**, `--no-shadows`
++5.51, `--no-pbr` **+0.90**, both off **−0.01**, full rate +0.04, GPU −0.05. Fixed → **+0.02**, and
+**free** (`lighting-w2` 3.51 → 3.14 ms, 3/3 reps; the fill was already full-shading that set).
+Crop: `docs/img/mech/task3_canopy_lattice.png`.

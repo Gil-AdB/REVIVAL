@@ -1266,12 +1266,21 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// moving meshes (the walking mech) must not be frozen into it — they'll
 	// have walked away by the time the reflection is seen. Same predicate as
 	// the static shadow bake.
+	//
+	// --env_bake_include_animated (docs/SHADING_CONTRACT.md §11 row E6,
+	// default OFF = byte-null) drops ONLY this term. It deliberately does not
+	// clear g_envBakeSkipDynamic itself: that global also drives the legacy
+	// whole-mesh exclusion (:1549) and the reflector's OWN-FACE skip (:2396),
+	// and clearing it lets a reflector's own canopy glass into its own probe
+	// (measured on greets' `cockpit`: +Y face 91 % VOID, probe mean 100.31 →
+	// 49.11). This is the animated-mesh rule and nothing else.
 	const bool inStaticBake = (g_inShadowPass
 		&& g_currentShadowOmni
 		&& (g_currentShadowOmni->Flags & Omni_StaticShadow)
 		&& !g_inDynamicShadowBake
 		&& fds::FeatureFlags::shadow_skip_animated())
-		|| fds::g_envBakeSkipDynamic;
+		|| (fds::g_envBakeSkipDynamic
+		    && !fds::FeatureFlags::env_bake_include_animated());
 	// inDynamicBake keeps DYNAMIC meshes only, skipping static ones. The
 	// shadow dynamic bake sets it via g_inDynamicShadowBake; the ENVDYN env
 	// overlay (A3) sets it via g_envOverlayDynamicOnly (not a shadow pass, so

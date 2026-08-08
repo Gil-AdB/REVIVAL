@@ -1,5 +1,88 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-09 — THE CHECKERBOARD LATTICE IS A SECOND BRDF, NOT A RECONSTRUCTION BLUR
+>
+> The user pushed back on "half-rate shading is a third of the CPU's canopy
+> detail" — *"this still doesn't make complete sense … could be an issue in the
+> checkerboard path?"* He was right. It is a **defect**, and it is not in the
+> reconstruction filter at all.
+>
+> **Mechanism, read from source.** The wave-2 fill refuses to AVERAGE an
+> env-reflective pixel (`envForceFull`, `DeferredSurfaceKernel.cpp:5003` — both
+> averaging models break on reflections) and instead re-shades it with the
+> scalar fallback at `:5254`. **That fallback is a REDUCED kernel.** Against the
+> wave-1 scalar kernel it is missing: the `--pbr` Cook-Torrance GGX lobe (it
+> runs Blinn-Phong `std::pow(NdotH, gloss)` at `:5420`), **every** shadow term
+> (`computeMapShadowAtten`, `resolveCubeAtten`, the static lightmap, the PolyId
+> compare, the bias pair), the AO map, the normal-map LOD fade, and
+> `--hdr_metal_kill`; and it applies the spot-cone penumbra to SPECULAR where
+> wave 1 does not. greets sets `--pbr` and `--shadows` ON. So alternate pixels
+> of every reflective surface are shaded **by two different BRDFs**, and the
+> phase is `(px ^ py) & 1` with **no frame term** — a fixed lattice that never
+> averages out under motion.
+>
+> **MEASURED** on greets t=4871 at the user's mech pose, over the 33 478-px
+> canopy mask, as *mean luma of the wave-2 cells minus the wave-1 cells* (0 if
+> the reconstruction were unbiased):
+>
+> | arm | ODD−EVEN luma |
+> |---|--:|
+> | shipped | **+6.82** |
+> | `--no-shadows` | +5.51 |
+> | `--no-pbr` | **+0.90** |
+> | `--no-pbr --no-shadows` | **−0.01** |
+> | `--deferred_checkerboard=0` (full rate) | +0.04 |
+> | standalone Metal arm | −0.05 |
+>
+> `--pbr` owns ~5.9 luma of it and the shadow terms ~0.9–1.3; with both taken
+> out of wave 1 the two kernels agree to a hundredth of a luma. Whole-frame bias
+> is only +0.19, because the fallback only fires on reflective materials.
+>
+> **FIXED behind `--deferred_checker_env_full`** (default OFF, byte-null,
+> verified: greets pin and the t=4871 frame both unchanged). It shades
+> env-reflective pixels at FULL rate in wave 1 instead of letting the reduced
+> fallback do it. Bias +6.82 → **+0.02**; against the full-rate render the
+> canopy now agrees to mean |ΔY| **0.99** (was 4.48) with 174 px > 10 luma (was
+> 4 349). **Cost: none.** The fill was already full-shading exactly this set, so
+> `lighting-w2` FALLS 3.51 → 3.14 ms (3/3 reps) while `lighting-w1` moves within
+> noise; `renderFrame` min-of-mins 53.11 vs 53.03 ms. For scale, the "just turn
+> the checkerboard off" alternative is **53.1 → 79.3 ms**.
+>
+> Crop (A shipped / B fixed / C full-rate / D GPU): `/tmp/fogwt/task3_canopy_lattice.png`.
+>
+> **STILL OPEN, not mine this run:** the same reduced fallback also fires at
+> every material/normal/Z EDGE (the `neighborCompatible` miss), where shadows
+> matter most. That is a broader instance of the same defect and is unpriced.
+
+> ## 2026-08-09 — E6 / E7 now have CPU-side flags, and E7 is much smaller than §11 implied
+>
+> `--env_bake_include_animated` (E6) and `--env_mip_chain` (E7), both default
+> OFF / byte-null. Full rationale + numbers in `FeatureFlags.def`.
+>
+> **TRAP RECORDED:** `g_envBakeSkipDynamic` is NOT "skip animated meshes". It is
+> read in THREE places in `Transform.cpp` — the animated-mesh skip (`:1274`),
+> the legacy whole-mesh exclusion (`:1549`) and **the reflector's own-FACE skip**
+> (`:2396`). The first cut of E6 cleared the global and thereby let the cockpit's
+> own canopy glass into its own probe: the +Y face went **91 % VOID** and the
+> probe mean **100.31 → 49.11**. The shipped flag hooks `:1274` and only that.
+> With it scoped correctly: probe mean 100.31 → **89.14**, all faces 100 %
+> nonvoid, −Y (toward the mech's own body) 96.22 → 74.55; canopy **2 817 px**
+> changed, mean |ΔY| 22.86 on changed, max 102.4; frame-wide 39 473 px (1.90 %).
+> The GPU's mirror-image `--env_bake_skip_animated` moves 5 268 px / mean 24.94.
+>
+> **E7 IS SMALL ON THE CPU, and this corrects the emphasis in §11.** The flag
+> works and has full range — `--env_mip_chain=16` drives the select to the
+> bottom of the store's chain (32² face) — but a WITHIN-ARM sweep of the isolated
+> env term (render minus `--no-env_refl`, 7×7 high-pass RMS on the canopy) moves
+> only **24.68 → 24.32 (chain 9) → 24.05 (chain 8 + `--env_bake_res=128`, the
+> exact GPU emulation) → 23.92 (chain 16)**. That is **3 %** across the whole
+> dial, against the GPU's own `--env_res` sweep spanning 16.22 → 17.95 (11 %).
+> Conclusion: on the CPU the canopy's high-frequency energy is **not** reflected
+> detail — it is Fresnel/normal modulation of an already-smooth reflection plus
+> the frame ribs and the glass. Matching the lobe width will not make the CPU
+> canopy look like the GPU's; what is left is the env term's BRIGHTNESS (CPU
+> +131.0 vs GPU +107.6 over the mask, i.e. E0) and probe content.
+
 > ## 2026-08-08 — POM CAMPAIGN RE-BASELINED AFTER THE MIP FLIP (`docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-8)
 >
 > Every S1d number was measured with `--mips` OFF. Re-measured as OFF/ON **pairs**
@@ -697,7 +780,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | gate | recipe | pin |
 |---|---|---|
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **⚠ THIS PIN IS CONDITIONAL ON THE ENV CUBE ON DISK — check `md5 Runtime/cache/city_envmap_cube.bin` BEFORE calling a mismatch a regression.** The cache key ignores FeatureFlags, so the cube is a hidden input the recipe does not state (full analysis + 2×2 matrix in the dated note above). `d1d67f0f84fb4af3713e15a64a1b827b` = pre-flip bake → the pins below hold. `63978a18ed31837348598014716f9932` = cold/current bake (mips ON) → **`5476be8c43864c761b94e2dd83f86aa8`** default and **`b88ecb7bbd0340145e35a80bc7a82f6b`** under the control; both are correct-for-that-cube, NOT drift. A **fresh worktree always cold-bakes**, so it lands in the second column unless you copy the cube in. Also: `DEMO` chdirs to its OWN directory (`ChdirToAssetRoot`, `DEMO/REV.CPP:503`) — launching a worktree binary from the main `Runtime/` does **not** render the main tree's assets or its cube. **Pending decision:** adopting the flip properly means `rm Runtime/cache/city_envmap_cube.bin` and re-pinning to `5476be8c…`; held for the user's eye on `docs/img/mipsel/city_t1961_envbake_crop.png` (max Δ 6/255, glass only). — **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2, pre-flip cube). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix` **on the pre-flip cube** (on a cold-baked cube that control arm is invalid — it measures a mips-ON bake under a mips-OFF frame). Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
-| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-08 (`--hdr_metal_kill` default 0→2, the conductor diffuse kill): `6780642b30430efa4fd2f87810b2dfdb`** (stable 2/2). city `e1221676…` and fountain `8db68ccb…` did NOT move — neither scene has a metallic-mapped material, so the fix is greets-only. Prior pin `adfba8ba3a1971a7c9cac0da689581b1` reproduces under `--hdr_metal_kill=0`. Preceding that: **RE-PINNED 2026-08-08 (`--mips` default 0→1): `adfba8ba3a1971a7c9cac0da689581b1`** (stable 2/2). Prior pin `f1297141611c484bac7cc10a8bdcf630` reproduces EXACTLY under `--no-mips --no-mip_fix` — note BOTH flags are required, because `--mip_fix` moves the subdivision cut lines and the `--mips` gate zeroes only the mip LEVEL, not the geometry. Superseded pin history follows: **RE-PINNED 2026-08-06: `f1297141611c484bac7cc10a8bdcf630`** (3/3 identical runs). Two intended overlay removals moved it in sequence, both pure screen text: `f5778c7b` → `06e1d4d1` (earlier work) → `ae358a6a` (the "Shadow: Depth\|PolyId [F3]" indicator deleted, commit `6b5556d`) → `f1297141` (the always-on centre-pixel `[MAT@…]` material probe moved behind `--mat_probe`, default off, commit `35ec295`; re-running that arm WITH `--mat_probe` reproduces `ae358a6a` byte-exact, which is what proves nothing else moved). Prior pin, for the record: **`f5778c7b78a4d70655291363e4119c66`** — taken over **128 sequential runs, 0 flips** (95 % UB on the flip rate 0.023) after the 8-bit-AO-map fix closed the nondeterminism. This supersedes both `de3e9a5fb3aa39e008ef41b83f2b8d1b` (pre-PBR-defaults) and the "NO VALID PIN" state. Includes the PBR scene defaults AND the user's uncommitted GREETS.FLD / momy textures / Piramid.lwo — a clean checkout hashes differently. Verify with `tools/flip_rate.sh -n 24` if a mismatch appears; a single differing run is now a real regression, not noise. |
+| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-09 (`hull`/`cockpit` removed from the Sobel normal-map name gate, `DEMO/GREETS.CPP:1951`; docs/SHADING_CONTRACT.md §11 row E8): `9eeaf860cb5a7f124884a89e0fc3ff5b`** (stable 3/3, across two binary revisions). REASON: `BakeNormalMapFromDiffuse` was Sobelling MECH_HUL.JPG / MECH_COK.JPG — camouflage PAINT — into geometric relief; the user compared the mech against the standalone Metal arm (which bakes no such map) and preferred the GPU's. Only four materials ever hit the gate (`!M->NormalMap` guard); `hull`, `hull not smooth` and `cockpit` are gone, `siling` remains. **AT THIS PIN POSE THE CHANGE IS 1 PIXEL AT 1 LSB** (702,172) — t=1588 barely shows the mech, so the pin move is not the measurement. The measurement is at the §11 mech pose (t=4871): **179 829 px (8.67 %), max channel Δ 164, 11 677 px > 10 luma**, hull pixel (767,723) Y **131.2 → 44.9** against the GPU's 41.0, canopy pixel (760,620) 146.4 → 157.4 against 161.4. Crop: `/tmp/fogwt/task1_mech_strip.png`. city `e1221676…` and fountain `8db68ccb…` do NOT move (greets-only, guarded on `M->RelScene != GreetSc`); fountain re-verified. Prior pin `6780642b30430efa4fd2f87810b2dfdb` reproduces by re-adding the two `strstr` terms. Preceding that: **RE-PINNED 2026-08-08 (`--hdr_metal_kill` default 0→2, the conductor diffuse kill): `6780642b30430efa4fd2f87810b2dfdb`** (stable 2/2). city `e1221676…` and fountain `8db68ccb…` did NOT move — neither scene has a metallic-mapped material, so the fix is greets-only. Prior pin `adfba8ba3a1971a7c9cac0da689581b1` reproduces under `--hdr_metal_kill=0`. Preceding that: **RE-PINNED 2026-08-08 (`--mips` default 0→1): `adfba8ba3a1971a7c9cac0da689581b1`** (stable 2/2). Prior pin `f1297141611c484bac7cc10a8bdcf630` reproduces EXACTLY under `--no-mips --no-mip_fix` — note BOTH flags are required, because `--mip_fix` moves the subdivision cut lines and the `--mips` gate zeroes only the mip LEVEL, not the geometry. Superseded pin history follows: **RE-PINNED 2026-08-06: `f1297141611c484bac7cc10a8bdcf630`** (3/3 identical runs). Two intended overlay removals moved it in sequence, both pure screen text: `f5778c7b` → `06e1d4d1` (earlier work) → `ae358a6a` (the "Shadow: Depth\|PolyId [F3]" indicator deleted, commit `6b5556d`) → `f1297141` (the always-on centre-pixel `[MAT@…]` material probe moved behind `--mat_probe`, default off, commit `35ec295`; re-running that arm WITH `--mat_probe` reproduces `ae358a6a` byte-exact, which is what proves nothing else moved). Prior pin, for the record: **`f5778c7b78a4d70655291363e4119c66`** — taken over **128 sequential runs, 0 flips** (95 % UB on the flip rate 0.023) after the 8-bit-AO-map fix closed the nondeterminism. This supersedes both `de3e9a5fb3aa39e008ef41b83f2b8d1b` (pre-PBR-defaults) and the "NO VALID PIN" state. Includes the PBR scene defaults AND the user's uncommitted GREETS.FLD / momy textures / Piramid.lwo — a clean checkout hashes differently. Verify with `tools/flip_rate.sh -n 24` if a mismatch appears; a single differing run is now a real regression, not noise. |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | **RE-PINNED 2026-08-08 (`--mips` default 0→1): `8db68ccb59416e9a44037e9f387b7bd9`** (stable 2/2). Prior pin `51fff7cd38767d619280afe0498a6f24` reproduces EXACTLY under `--no-mips --no-mip_fix`. Divergence: 266 063 px changed (12.83 %), mean \|d\| 9.27 on changed, 53 238 px >12/255, max 254. |
 | chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>**RE-PINNED 2026-08-08 (`--mips` default 0→1):** t100 `76e7cf68714666bda278f094be4f2c72` t400 `d458e82bf4514c4ff2850468aab5743c` t800 `c145c7a5861fba81d56746f7c10764ee` t1200 `31aa52039f9b228fa6307c12e14811eb` t1600 `1544b0e775900b099ac9e38d42fd750d`.<br>Control under `--no-mips --no-mip_fix` reproduces the 2026-07-30 pins EXACTLY for t100/t400/t800/t1200 — **but t1600 gives `c8c93b886dd31fcc01363c806d7626de`, NOT the recorded `7265d7855bdaae74e39f3c21d4f7e612`. chase t1600 had ALREADY drifted before the mip work; cause unidentified, needs its own bisect.** Prior (2026-07-30): t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (cone-tile sky-clip fix; 3-run stable, byte==cull-off): **RE-PINNED 2026-08-08 (`--mips` default 0→1):** t800 `857d899d48ca55a6ae67f03e30b9bf02` t1600 `567e61532fb075b6e590b53a26cea2b6`.<br>Control under `--no-mips --no-mip_fix`: t800 `28e5a2a78d64ae98a1fcc4b739991be2` matches the 2026-07-30 pin, **t1600 gives `debdb1f435a14949b2e05be0bb53b1e7`, NOT the recorded `1cbde501c26d231a4295632dfbebd34b` — same pre-existing t1600 drift as the default arm.** |

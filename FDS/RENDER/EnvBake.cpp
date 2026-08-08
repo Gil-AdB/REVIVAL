@@ -308,6 +308,14 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
         // Static-only bake (default) vs dynamic-only overlay (ENVDYN A3). Never
         // both true at once — the overlay skips STATIC meshes, keeping the
         // movers, and the static capture already lives in the store (A2).
+        //
+        // NB this flag is NOT just "skip animated meshes": Transform.cpp reads
+        // it in THREE places — the animated-mesh skip (:1274), the legacy
+        // whole-mesh exclusion (:1549) and the reflector's OWN-FACE skip
+        // (:2396). --env_bake_include_animated therefore hooks the first of
+        // those and only that one; clearing this global would also let the
+        // reflector's own canopy glass back into its own probe (measured: the
+        // +Y face goes 91 % VOID and the probe mean 100.31 → 49.11).
         g_envBakeSkipDynamic     = !dynamicOnly;
         g_envOverlayDynamicOnly  =  dynamicOnly;
         // (the reflector's own faces stay out too — g_envBakeSkipMats above)
