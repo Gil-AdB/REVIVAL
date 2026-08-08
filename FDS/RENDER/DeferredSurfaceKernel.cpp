@@ -1428,6 +1428,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const bool sPbr             = fds::FeatureFlags::pbr();
 	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
+	// --metal_spec_f0: a conductor's DIRECT-lobe F0 is its albedo, not the
+	// dielectric 0.04. Off = byte-null (the scalar Schlick below is untouched).
+	const bool metalSpecF0G     = fds::FeatureFlags::metal_spec_f0();
 	// Env-specular reflection (--env_refl): per-SURFACE baked panoramas,
 	// matID-indexed (each reflective material's pano is captured from its own
 	// centroid; the lookup is parallax-corrected against the scene AABB).
@@ -1867,6 +1870,34 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool hasEnvRefl = envP != nullptr;
 			const bool useVecHere = useVec
 				&& (sVecForce || (!hasNormalMap && !(hasAoMap && !aoInAlpha)));
+
+			// --metal_spec_f0: the DIRECT lobe needs the metalness BEFORE the
+			// light loop (F0 is a per-light Fresnel input), whereas the compose
+			// below fetches it after. Hoisted ONLY when the flag is on, so the
+			// default path keeps the single post-loop fetch it always had and
+			// stays byte-identical. Same texel, same mip, same swizzled UV.
+			float metalF0B = 0.04f, metalF0G = 0.04f, metalF0R = 0.04f;
+			bool  metalF0On = false;
+			if (metalSpecF0G && hasMetal) {
+				const byte *mdEarly = (miplevel < Mat->MetallicMap->numMipmaps)
+					? reinterpret_cast<const byte*>(Mat->MetallicMap->Mipmap[miplevel]) : nullptr;
+				const float mEarly = mdEarly ? float(mdEarly[swizzledUV]) * (1.0f/255.0f) : 0.0f;
+				if (mEarly > 0.0f) {
+					// F0 = mix(0.04, albedo, metalness), per channel, on the
+					// LINEAR albedo — the --hdr_linear composite squares the
+					// albedo everywhere else, so the reflectance has to be the
+					// squared value too or the highlight is authored in a
+					// different space from the surface it sits on.
+					const float kNf = 1.0f/255.0f;
+					const float lb0 = texB*kNf*texB*kNf;
+					const float lg0 = texG*kNf*texG*kNf;
+					const float lr0 = texR*kNf*texR*kNf;
+					metalF0B = 0.04f + (lb0 - 0.04f) * mEarly;
+					metalF0G = 0.04f + (lg0 - 0.04f) * mEarly;
+					metalF0R = 0.04f + (lr0 - 0.04f) * mEarly;
+					metalF0On = true;
+				}
+			}
 
 			// Ambient occlusion. DEFAULT: darken ONLY the ambient term (lB/lG/lR
 			// before the direct-light loop adds to them) — direct light is
@@ -2421,6 +2452,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								const float hInv  = fast_rsqrt(hLen2);
 								const float NdotH = NdotH_raw * hInv;
 								float spec;
+								// --metal_spec_f0 only: the lobe WITHOUT Fresnel, and the
+								// Schlick (1-VoH)^5 factor, so F can be re-evaluated per
+								// CHANNEL against a conductor's albedo F0. Filled inside the
+								// flag's own branch so the default lobe below keeps its exact
+								// arithmetic (reassociating it would not be byte-null).
+								float specNoF = 0.0f, specOm5 = 0.0f;
 								if (sPbr) {
 									// Scalar Cook-Torrance (GGX D + Smith-Schlick G +
 									// Schlick F), mirroring run_vec_ggx_loop. NdotL =
@@ -2436,6 +2473,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									const float om2 = om*om;
 									const float F = 0.04f + 0.96f * (om2*om2*om);
 									spec = D * Gv * Gl * F / (4.0f * pbrNdotV);
+									if (metalF0On) {
+										specOm5 = om2*om2*om;
+										specNoF = D * Gv * Gl / (4.0f * pbrNdotV);
+									}
 								} else {
 									spec = pow_glossClass(NdotH, Mat->Glossiness);
 								}
@@ -2445,11 +2486,23 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									// bumped-mortar pixels inside shadow regions, where
 									// the bumped N satisfies the sharp Gloss=48 lobe
 									// while diffuse was correctly killed.
-									const float specStrength = spec * Mat->Specular *
-										(1.0f - dist * rRange) * shadowAtten;
-									sB += specStrength * Lcb;
-									sG += specStrength * Lcg;
-									sR += specStrength * Lcr;
+									if (metalF0On && sPbr) {
+										// Conductor: F0 = mix(0.04, LINEAR albedo, metalness),
+										// Schlick evaluated per channel. The post-loop gamma metal
+										// tint is SKIPPED under this flag (see the compose) — the
+										// albedo is already in F0 and would otherwise count twice.
+										const float base = specNoF * Mat->Specular *
+											(1.0f - dist * rRange) * shadowAtten;
+										sB += base * (metalF0B + (1.0f - metalF0B) * specOm5) * Lcb;
+										sG += base * (metalF0G + (1.0f - metalF0G) * specOm5) * Lcg;
+										sR += base * (metalF0R + (1.0f - metalF0R) * specOm5) * Lcr;
+									} else {
+										const float specStrength = spec * Mat->Specular *
+											(1.0f - dist * rRange) * shadowAtten;
+										sB += specStrength * Lcb;
+										sG += specStrength * Lcg;
+										sR += specStrength * Lcr;
+									}
 								}
 							}
 						}
@@ -2538,7 +2591,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				}
 			}
 			// Metals: tint the accumulated analytic highlights by the albedo.
-			if (metalM > 0.0f) {
+			// SKIPPED under --metal_spec_f0, which puts the albedo into the
+			// direct lobe's Fresnel F0 instead (the physically correct place);
+			// applying both would count the conductor's albedo twice. NOTE the
+			// templated/vec spec loop does NOT implement --metal_spec_f0 —
+			// greets runs the scalar path (nmap pixels force it) and the vec
+			// path is off for this scene by policy.
+			if (metalM > 0.0f && !metalF0On) {
 				const float inv255 = 1.0f / 255.0f;
 				sB *= 1.0f - metalM + metalM * texB * inv255;
 				sG *= 1.0f - metalM + metalM * texG * inv255;
