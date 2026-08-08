@@ -113,6 +113,21 @@ struct DeferredOptions {
     // the file format and the DEMO-side dump this reads. Empty = no particle
     // pass at all, which is the state fountain has been in.
     std::string pclPath;
+    // Sprite-vs-glass ORDER. The CPU walks ONE back-to-front list holding both
+    // sprites and transparent clumps, so a sprite BEHIND glass is attenuated by
+    // it and one IN FRONT is not; a single whole-spray pass cannot be both.
+    // Drawing after the peel attenuates NO sprite, drawing before attenuates
+    // EVERY sprite, and the CPU is bracketed by the two.
+    //
+    // DEFAULT = after, because it is MEASURED closer at every pose tried
+    // (t=1500/2500/3500: whole-frame mean |dY| 15.906/12.048/19.451 before vs
+    // 14.320/10.595/17.276 after; on the 3.3-5.3 % of the frame the ordering
+    // can touch, 61.7/60.1/61.5 before vs 13.5/20.6/20.6 after, and after is
+    // the closer of the two on 98.7/85.9/91.0 % of those pixels). Nothing
+    // previously recorded moves with this default: the particle pass only
+    // exists when --pcl is given, which is new. --pcl_before_xpar restores the
+    // other bracket so the choice stays priceable.
+    bool  pclAfterXpar = true;
     // xparPeelPassesEffective() (DeferredSurfaceKernel.cpp:3600): an explicit
     // flag wins, otherwise Scene::XparPeelPasses (greets 1, fountain 4).
     int   xparPeelPasses = 0;       // 0 = use the scene's own value

@@ -2554,15 +2554,18 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         }
 
         // --- pass 2b: flare sprites, additive into the HDR target ---
-        if (!viz && opt.stages >= 2)
+        // BRACES MATTER HERE. They were missing until the particle pass was
+        // measured against a real dump: `encodePcl` sat outside the `if` and so
+        // ran under every --viz mode and at --stages=1, painting spray over
+        // buffers that are supposed to show one isolated quantity.
+        if (!viz && opt.stages >= 2) {
             encodeFlares(cb, fu, hdrTex, gDepth, nullptr);
-            // Particle spray, same slot as the flares: additive, depth-tested,
-            // BEFORE the peel. The CPU interleaves sprites and transparent
-            // clumps in one back-to-front TBR list, so a sprite in FRONT of
-            // glass is not attenuated by it while this arm's is. Stated as the
-            // known deviation rather than hidden; it needs a real dump to
-            // price, and additive-vs-additive order is exact either way.
-            encodePcl(cb, fu, hdrTex, gDepth);
+            // Particle spray, same slot as the flares: additive, depth-tested.
+            // ORDER vs the peel is a MEASURED deviation, not a free choice —
+            // see pass 2b1' below and §6.2m. This is the --pcl_before_xpar
+            // bracket; the default draws AFTER the peel.
+            if (!opt.pclAfterXpar) encodePcl(cb, fu, hdrTex, gDepth);
+        }
 
         // --- pass 2b1: TRANSPARENT SURFACES (depth peel) ---
         // RENDER.CPP order: the peel runs after the deferred lighting resolve
@@ -2572,6 +2575,22 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         // deliberately leaves their composite unclamped under HDR.
         if (!viz && opt.stages >= 2)
             encodeXpar(cb, fu, hdrTex, gDepth, /*mirroredBasis=*/false);
+
+        // --- pass 2b1': the OTHER side of the sprite/glass ordering ---
+        // The CPU walks ONE back-to-front TBR list holding both sprites and
+        // transparent clumps (FILLERS.CPP:2317-2380: a sprite FLUSHES the open
+        // clump before blitting itself). So per particle:
+        //   sprite BEHIND glass -> blitted first, then the glass composites
+        //                          over it, so it IS attenuated by (1-alpha);
+        //   sprite IN FRONT     -> the glass composites first, then the sprite
+        //                          is added on top, so it is NOT attenuated.
+        // A single whole-spray pass cannot express both. Drawing before the
+        // peel attenuates EVERY sprite (right for the ones behind, too dim for
+        // the ones in front); drawing after attenuates NONE (right for the ones
+        // in front, too bright for the ones behind). The truth is bracketed by
+        // the two, which is why both are runnable and both are measured.
+        if (!viz && opt.stages >= 2 && opt.pclAfterXpar)
+            encodePcl(cb, fu, hdrTex, gDepth);
 
         // --- pass 2b2: VOLUMETRIC SPOT CONES, additive into HDR ---
         // RENDER.CPP:1231-1240 order: after the opaque/TBR draws, BEFORE

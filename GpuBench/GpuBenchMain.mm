@@ -227,6 +227,16 @@ const char *kUsage =
     "                    GpuBench/ParticleReplay.h for the proof, the file format and the\n"
     "                    DEMO-side dump this reads. One instanced additive draw, depth-\n"
     "                    TESTED with no depth write, no peel (additive is order-free).\n"
+    "                    Produce the dump from DEMO: --pcl_dump=PATH[,t0,t1] (default off,\n"
+    "                    byte-null when off; t0/t1 are an inclusive scene-Timer window).\n"
+    "  --pcl_before_xpar draw the spray BEFORE the depth peel (the other bracket). The CPU\n"
+    "                    walks ONE back-to-front list holding both sprites and transparent\n"
+    "                    clumps, so a sprite BEHIND glass is attenuated by it and one IN\n"
+    "                    FRONT is not; a single whole-spray pass cannot be both. Before\n"
+    "                    the peel attenuates EVERY sprite, after attenuates NONE, and the\n"
+    "                    CPU is bracketed by the two. AFTER is the default because it is\n"
+    "                    MEASURED closer at t=1500/2500/3500 (§6.2m); this restores the\n"
+    "                    other bracket so the choice stays priceable. Neither is exact.\n"
     "  --pcl_synth=PATH [--pcl_synth_n=N]   write a CONFORMING synthetic dump and exit,\n"
     "                    so the replay path is testable before the DEMO-side writer\n"
     "                    exists. N defaults to fountain's own 8250.\n"
@@ -322,6 +332,8 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-xpar")                  dopt.xpar = false;
         else if (a == "--no-xpar_merge")            dopt.xparMerge = false;
         else if (const char *v = val("--pcl="))     dopt.pclPath = v;
+        else if (a == "--pcl_after_xpar")           dopt.pclAfterXpar = true;   // the default; accepted for symmetry
+        else if (a == "--pcl_before_xpar")          dopt.pclAfterXpar = false;
         else if (const char *v = val("--pcl_synth=")) pclSynth = v;
         else if (const char *v = val("--pcl_synth_n=")) pclSynthN = std::atoi(v);
         else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);
