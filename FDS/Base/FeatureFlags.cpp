@@ -135,6 +135,11 @@ bool ownedByOtherParser(const char *name) {
         "snapshot",                    // DEMO/Snapshot.cpp ParseSnapshotArgs + REV.CPP headless scan
         "out",                         // DEMO/Snapshot.cpp ParseSnapshotArgs
         "bench",                       // DEMO/Snapshot.cpp ParseBenchArgs + REV.CPP headless scan
+        "repro",                       // DEMO/ReproHarness.cpp ParseReproArgs + REV.CPP headless scan
+                                       // (--repro=<scene>@t=... carries a scene+time payload, so it is
+                                       //  not a FeatureFlag; without this entry --strict_flags — ON by
+                                       //  default since 1782351 — killed every command line in
+                                       //  docs/INTERACTIVE_REPRO.md.)
         "material_import",             // DEMO/MaterialImport.cpp MaterialImport_ParseArgs
         "material_import_flip_normal",
         "material_import_no_mips",

@@ -837,6 +837,22 @@ static void BuildGreetsShatter()
 	//       all-inside test rejects the surrounding wall; behind-front
 	//       rejects the coplanar front faces; depth is slabbed so we
 	//       don't reach far geometry.
+	//       *** The "all-inside test rejects the surrounding wall" claim is
+	//       true only of FLAT geometry, and that was the bug the user hit as
+	//       "when the mirror breaks it takes the wall behind it with it —
+	//       it's caused by the displace flag". (A) had NO material filter, so
+	//       its only scoping was the footprint + a depth slab reaching
+	//       0.5*min(span) = 5.93u BEHIND the glass — and the stone wall
+	//       'rooms' sits inside that slab. Flat, 'rooms' is 2 room-spanning
+	//       quads and no face fits the 14.55x11.86 footprint (measured: (A)
+	//       contributes ZERO faces (B) didn't already have). Under
+	//       --greets_displace, DisplaceStoneSubdiv splits 'rooms' into ~68.5k
+	//       faces and 2436 of them fit entirely inside it → the break hides
+	//       the WALL, leaving a hole into the void once the shards fall.
+	//       --greets_shatter_screen_mat_only (default ON) scopes (A) by the
+	//       same material test (B)/(C) use, so the mirror can only take its
+	//       own geometry with it. Measured hide-face counts:
+	//       450 flat / 2886 displaced before → 450 / 450 after.
 	//   (B) the emissive frame ("screen emiter*") — it PROTRUDES in front
 	//       of the glass (positive depth) and sits just OUTSIDE the glass
 	//       rect, so (A) never catches it; that's the black border on the
@@ -856,7 +872,7 @@ static void BuildGreetsShatter()
 		// neighbouring screens on other planes don't match here).
 		const float uExp = 1.00f * (u1 - u0), vExp = 1.00f * (v1 - v0);
 		const bool  dump = std::getenv("FDS_GREETS_SHATTER_BOXDUMP") != nullptr;
-		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0;
+		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0, nMatRejected = 0;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh) continue;
 			TriMesh *T = (TriMesh*)Obj->Data;
@@ -891,7 +907,13 @@ static void BuildGreetsShatter()
 					// neighbours that share the plane.
 					if (pu < u0 - uPan || pu > u1 + uPan || pv < v0 - vPan || pv > v1 + vPan) inPanel = false;
 				}
-				const bool isBox   = inGlass && behindFront;          // (A) box body
+				// (A) box body. The material test is the scoping the geometric
+				// footprint cannot provide once the room shell is tessellated —
+				// see the block comment above. --no-greets_shatter_screen_mat_only
+				// restores the unscoped collector (the wall-eating arm).
+				const bool boxMatOK = isFrameMat ||
+				    !fds::FeatureFlags::greets_shatter_screen_mat_only();
+				const bool isBox   = inGlass && behindFront && boxMatOK;  // (A) box body
 				const bool isFrame = inExp   && isFrameMat;           // (B) frame in footprint
 				// (C) The mirror cluster is only a SUB-RECTANGLE of the physical
 				// glass panel; the rest of the coplanar 'screen*' glass survives
@@ -899,6 +921,9 @@ static void BuildGreetsShatter()
 				// by a generous (3x) footprint so it can't reach a different
 				// screen that merely shares this X-plane far away in Z.
 				const bool isPanelFace = coplanar && isFrameMat && inPanel; // (C)
+				// Census: faces rule (A) WOULD have taken without the material
+				// scope. Under --greets_displace this is the displaced wall.
+				if (inGlass && behindFront && !isFrameMat) ++nMatRejected;
 				if (isBox || isFrame || isPanelFace) {
 					g_greetsScreenBoxFaces.push_back(&F);
 					if (isFrame) ++nFrame;
@@ -912,9 +937,13 @@ static void BuildGreetsShatter()
 		}
 		if (dump)
 			std::fprintf(stderr, "[GREETS-SHATTER] hide faces=%zu (frame=%d) depth=[%.3f..%.3f] "
-			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
+			             "(maxDepth=%.3f span u=%.2f v=%.2f) non-screen-mat in rule(A) "
+			             "footprint=%d (%s)\n",
 			             g_greetsScreenBoxFaces.size(), nFrame, dmin, dmax, maxDepth,
-			             u1-u0, v1-v0);
+			             u1-u0, v1-v0, nMatRejected,
+			             fds::FeatureFlags::greets_shatter_screen_mat_only()
+			                 ? "REJECTED by --greets_shatter_screen_mat_only"
+			                 : "COLLECTED — the wall goes with the mirror");
 		// One-shot per-material census over a GENEROUS region around the
 		// screen (0.6x footprint margin, 1.5x depth slab), tallying total
 		// vs collected per material so we can see what survives the break
