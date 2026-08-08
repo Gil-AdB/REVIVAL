@@ -226,7 +226,8 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                            float skipRadius = 0.0f, bool publishProj = false,
                            std::vector<uint16_t>* facesZOut = nullptr,
                            bool dynamicOnly = false,
-                           const bool* faceMask = nullptr) {
+                           const bool* faceMask = nullptr,
+                           bool linearCapture = false) {
     // facesZOut (ENVDYN A2): optional per-face depth capture (6 vectors of
     // res², filled from surf.Z16 before it is freed). nullptr = no capture,
     // byte-identical to the legacy bake.
@@ -368,17 +369,24 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                     kCubeFaces[i].fwd.x, kCubeFaces[i].fwd.y, kCubeFaces[i].fwd.z);
             }
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
-            // --env_bake_linear: replace the LDR VPage capture with the
-            // kernel's own LINEAR radiance for this face. The bake's nested
-            // renderFrame already called Hdr_BeginFrame at the FACE res
-            // (RENDER.CPP:648 runs inside this Render()), so g_hdrBuf holds
-            // this face's linear radiance on the 0-255 scale — the same scale
-            // EnvSpecComposeScalar adds the store into. Storing it in the same
+            // LINEAR CAPTURE: replace the LDR VPage capture with the kernel's
+            // own LINEAR radiance for this face. The bake's nested renderFrame
+            // already called Hdr_BeginFrame at the FACE res (RENDER.CPP:648
+            // runs inside this Render()), so g_hdrBuf holds this face's linear
+            // radiance on the 0-255 scale — the same scale EnvSpecComposeScalar
+            // and the SH projection read the store on. Storing it in the same
             // 8-bit face buffer keeps every consumer unchanged. h[3] is the
             // kernel's coverage flag: uncovered texels (sky / void / forward
             // content the deferred kernel never wrote) keep the LDR value.
-            if (fds::FeatureFlags::env_bake_linear()
-                && fds::Hdr_WritableFor(res, res)) {
+            //
+            // The gate is the CALLER's, not a flag read here: this one routine
+            // feeds two different consumers — the REFLECTION probes
+            // (--env_bake_linear) and the scene-centre SH AMBIENT probe
+            // (--sh_bake_linear, SHAmbient_EnsureBaked) — and they were a
+            // single flag until 2026-08-08, which hid the fact that the SH half
+            // owns most of the whole-frame move (docs/SHADING_CONTRACT.md §8
+            // row M2). Split so the two looks can be judged apart.
+            if (linearCapture && fds::Hdr_WritableFor(res, res)) {
                 uint32_t* dstf = faces[i].data();
                 const fds::hdrf* hb = fds::g_hdrBuf.data();
                 for (size_t k = 0; k < size_t(res) * res; ++k) {
@@ -430,7 +438,9 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
 
     std::vector<uint32_t> faces[6];
     if (!renderSixFaces(sc, center, res, 90.0f, params.voidColor, faces, skipMat,
-                        skipRadius, publishProj))
+                        skipRadius, publishProj, /*facesZOut=*/nullptr,
+                        /*dynamicOnly=*/false, /*faceMask=*/nullptr,
+                        /*linearCapture=*/fds::FeatureFlags::env_bake_linear()))
         return false;
 
     // Stitch to equirectangular. The (eu,ev)→direction mapping is the exact
@@ -761,7 +771,9 @@ bool renderCubeFacesMajor(Scene* sc, const Vector& center,
     if (!renderSixFaces(sc, center, fr, fds::EnvCube_FaceFovDegrees(),
                         params.voidColor, faces, skipMat, skipRadius,
                         /*publishProj=*/fds::FeatureFlags::env_bake_fix(),
-                        faceZMajorOut ? facesZ : nullptr))
+                        faceZMajorOut ? facesZ : nullptr,
+                        /*dynamicOnly=*/false, /*faceMask=*/nullptr,
+                        /*linearCapture=*/fds::FeatureFlags::env_bake_linear()))
         return false;
     level0.resize(size_t(6) * fr * fr);
     for (int f = 0; f < 6; ++f)
@@ -1491,7 +1503,8 @@ int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
                                    0xFF202020u, mech,
                                    /*skipMat=*/nullptr, /*skipRadius=*/0.0f,
                                    /*publishProj=*/true, mechZ,
-                                   /*dynamicOnly=*/true, faceMask);
+                                   /*dynamicOnly=*/true, faceMask,
+                                   /*linearCapture=*/fds::FeatureFlags::env_bake_linear());
     g_envBakeInProgress = false;
     if (!ok) return 0;
     int mechTexels = 0, mechRendered = 0;
@@ -2145,10 +2158,15 @@ bool SHAmbient_EnsureBaked(Scene* sc) {
     g_envBakeInProgress = true;
     // publishProj=true → each face rendered with a real 90° projection (not
     // the main window's telephoto FOV); skipMat=null → whole scene captured.
+    // linearCapture is --sh_bake_linear, NOT --env_bake_linear: this probe is
+    // the SH AMBIENT source, and until 2026-08-08 the two shared one flag (see
+    // renderSixFaces' linearCapture comment and SHADING_CONTRACT §8 row M2).
     const bool ok = renderSixFaces(sc, center, kSHFaceRes, 90.0f,
                                    params.voidColor, faces,
                                    /*skipMat=*/nullptr, /*skipRadius=*/0.0f,
-                                   /*publishProj=*/true);
+                                   /*publishProj=*/true, /*facesZOut=*/nullptr,
+                                   /*dynamicOnly=*/false, /*faceMask=*/nullptr,
+                                   /*linearCapture=*/fds::FeatureFlags::sh_bake_linear());
     g_envBakeInProgress = false;
     if (!ok) return false;
 

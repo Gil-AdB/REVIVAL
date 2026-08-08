@@ -666,7 +666,7 @@ behind a flag).
 | # | term | line | verdict | note |
 |---|---|---|--:|---|
 | **M1** | emissive seed `Mat->Luminosity · 255` | `:1756` | **LINEAR-OK** | It rides the same `aB²` the composite applies, so the emissive is albedo-**squared** where the gamma composite gave it albedo¹. That is a real change of both magnitude and saturation made silently at the migration — but it is the correct linear form and the GPU does the same (`S.baseColor * S.lum`, `deferred.metal:786`; contract B5). Recorded so nobody re-opens it. |
-| **M2** | **SH ambient `Mat->Diffuse · E(n)`** | `:1756`, source `EnvBake.cpp:2148-2200` | **GAMMA-LIVE → FIXED** by `--env_bake_linear` | **NEW, and it is the largest row in this table.** The scene-centre SH probe is projected from `renderSixFaces`' **8-bit face store** — the same store E0 indicts. By default that store is the LDR VPage combine `texel·light/256`, i.e. **gamma albedo at power 1**, so `E(n)` is a gamma irradiance being multiplied by `aB²` in a linear frame — E0's bug, in the term that touches **every pixel** rather than only conductors. `--env_bake_linear` fixes it as a side effect because it fixes `renderSixFaces`. **MEASURED:** `[SHAMB]` DC ambient B/G/R **148.3/158.8/154.5 → 107.8/116.7/118.3 (−27 %)**. That is why the flag moves the whole frame by ~15 luma, which reflections alone could never do. The flag's doc string said "every reflective surface"; it has been corrected. |
+| **M2** | **SH ambient `Mat->Diffuse · E(n)`** | `:1756`, source `EnvBake.cpp:2148-2200` | **GAMMA-LIVE → FIXED** by `--env_bake_linear` | **NEW, and it is the largest row in this table.** The scene-centre SH probe is projected from `renderSixFaces`' **8-bit face store** — the same store E0 indicts. By default that store is the LDR VPage combine `texel·light/256`, i.e. **gamma albedo at power 1**, so `E(n)` is a gamma irradiance being multiplied by `aB²` in a linear frame — E0's bug, in the term that touches **every pixel** rather than only conductors. **SPLIT 2026-08-08 into its own flag, `--sh_bake_linear`** (default OFF), because `--env_bake_linear` was doing two things at once and the halves had never been priced apart. **MEASURED:** `[SHAMB]` DC ambient B/G/R **148.3/158.8/154.5 → 107.8/116.7/118.3 (−27 %)** under `--sh_bake_linear`. **The claim in the sentence this replaces — that the ambient half is "most of" the flag's ~15-luma whole-frame move — is WRONG, and the split is what showed it:** at the greets projector pose the reflection half is **−9.64** luma and this ambient half **−5.44** of a **−15.27** total. See §9. |
 | M3 | AO `lB *= ao` | `:1949` | LINEAR-OK (as a *migration* row) | The composite change did not alter its meaning. Its own defects — unclamped, can go negative, occludes the emissive — are D6/D6b and are unrelated to the migration. |
 | M4 | vec-path light sums `lB += bufB[i]` | `:2200` | LINEAR-OK | light enters at power 1, which is the linear convention (L1). |
 | M5 | direct diffuse `lB += intensity · Lcb` | `:2426` | LINEAR-OK | same. This is the row the squared-light-colour bug (§6.2d bug 1) was on the GPU side of; the CPU was already right. |
@@ -681,7 +681,7 @@ behind a flag).
 | S-a | direct GGX add | `:2502` | LINEAR-OK | `spec` is dimensionless × `Lcb` (0–255 light) → a radiance. |
 | S-b | roughness-map `sB *= specMul` | `:2590` | LINEAR-OK | dimensionless magnitude scale. |
 | **S-c** | **metal tint `sB *= 1-m + m·texB/255`** | `:2601` | **GAMMA-LIVE → FIXED (direct lobe only)** by `--metal_spec_f0` | `texB` is the **gamma** texel used as a linear reflectance. Contract D2. Now superseded on the direct lobe: `--metal_spec_f0` puts the **linear** albedo into F0 and skips this block. |
-| **S-d** | **env metal tint `tB = 1-m + m·texB/255`** | `:1309-1311` (`EnvSpecComposeScalar`) | **GAMMA-LIVE, UNFIXED** | The identical gamma-albedo-as-linear-reflectance expression, on the **env** lobe — which is where essentially all of a conductor's appearance lives (with `--no-env_refl` a conductor renders at 0.00). `--metal_spec_f0` does **not** cover it. This is the next fix in this family, and it is a darkening one (a mid-tone gamma 0.7 becomes linear 0.49). |
+| **S-d** | **env metal tint `tB = 1-m + m·texB/255`** | `:1309-1311` (`EnvSpecComposeScalar`) | **GAMMA-LIVE → FIXED** by `--env_metal_tint_linear` | The identical gamma-albedo-as-linear-reflectance expression, on the **env** lobe — which is where essentially all of a conductor's appearance lives (with `--no-env_refl` a conductor renders at 0.00). `--metal_spec_f0` does **not** cover it. Fixed behind `--env_metal_tint_linear`, **default OFF**. It is a **TINT** fix, not a brightness one — see §9. |
 | **S-e** | env probe content `sB += ecB·ek·tB` | `:1312` | **GAMMA-LIVE → FIXED** by `--env_bake_linear` | E0. |
 | S-f | `Mat->SpecMul` | `:2638` | LINEAR-OK | dimensionless. |
 
@@ -711,3 +711,136 @@ S-a, S-b, S-f, F-d.
 is correct. Every row that was migrated *implicitly*, by simply being upstream of the composite, is
 correct only by luck (M1) or wrong (M2, S-c, S-d, S-e). The failure mode is not carelessness in the
 math — it is that the composite changed underneath expressions that nobody re-read.
+
+> **§8.4 update, 2026-08-08.** **S-d is now FIXED** behind `--env_metal_tint_linear` and **M2 has been
+> split out** as `--sh_bake_linear`. Of the audit's GAMMA-LIVE rows only **F-c** remains, and it is a
+> dead term (a `(1-F)` that never reaches the frame), not a live error. See §9 for the measurements.
+
+---
+
+## 9. S-d measured — it is a TINT, and the split of `--env_bake_linear`
+
+All figures: greets `t=2000`, `FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0"` (the projector),
+`--no-bloom`, dummy SDL drivers, **one** conductor mask — the `--hdr_metal_kill` 0-vs-2 change set at
+that pose, **73,831 px** (3.56 % of the frame). Everything is read off the final tonemapped 8-bit
+frame, so ACES + the sqrt encode are already in the numbers. §6.2l's 147,665-px mask is a different
+definition and is not quoted here.
+
+### 9.1 The tint, per channel
+
+| arm | R | G | B | Y | chromaticity (R,G,B)/Σ | hue | sat |
+|---|--:|--:|--:|--:|---|--:|--:|
+| CPU default | 127.42 | 101.32 | 39.95 | 102.13 | 0.474 / 0.377 / 0.149 | 42.1° | 0.687 |
+| CPU `--env_metal_tint_linear` | **127.42** | 88.75 | 20.37 | 92.52 | 0.539 / 0.375 / 0.086 | 38.3° | **0.840** |
+| GPU (oracle) | 87.38 | 57.78 | 13.99 | 61.64 | 0.549 / 0.363 / 0.088 | 35.8° | **0.840** |
+
+**R does not move at all.** `screen emiter` authors a constant albedo (255, 206, 104), so squaring the
+normalised R is the identity. A brightness bug cannot leave one channel exactly fixed while moving the
+other two by 12 % and 49 % — that is the signature that S-d is a per-channel defect, and it is why a
+week of luma-only comparison did not see it. Chromaticity distance to the GPU falls **0.097 → 0.016**;
+saturation lands on the GPU's **0.840 exactly**.
+
+The same holds with the user's shadow arm: `--no-greets_omni_shadows` alone gives
+129.73/103.53/39.95, and with the tint 129.73/90.82/20.37 — the tint fix is orthogonal to the shadow.
+
+### 9.2 The §6.2k residual
+
+| arm | conductor Y | ÷ GPU |
+|---|--:|--:|
+| CPU `--env_bake_linear` | 69.05 | **1.120×** |
+| CPU `--env_bake_linear --env_metal_tint_linear` | 62.52 | **1.014×** |
+| GPU | 61.64 | — |
+
+**S-d absorbs almost all of the 1.121× residual on LUMA.** It does **not** close it on chroma: at
+1.014× the CPU sits at (0.587, 0.344, 0.069) against the GPU's (0.549, 0.363, 0.088) — it now
+*overshoots*. Cause, MEASURED and separate: the CPU's **linear-captured probe content is itself more
+saturated than the GPU's**. Mean face B/G/R over the six `screen emiter` faces — CPU
+`--env_bake_linear` **10.86 / 21.30 / 29.87** (Y 22.67) vs GPU **12.93 / 22.69 / 27.85** (Y 23.12).
+The luma agrees to 2 % (as §6.2k reported) and the *colour* does not; nobody had compared the faces
+per channel. A candidate mechanism, MEASURED as a fact but not as the attribution: **the CPU's
+reflection probes contain no SH ambient at all** — the six faces are byte-identical under
+`--sh_ambient` and `--no-sh_ambient`, because the reflection probes are baked before
+`SHAmbient_EnsureBaked` runs, while `--no-sh_ambient` moves the main frame by −6.15 luma. The GPU's
+probes do carry its ambient. Recorded as open.
+
+### 9.3 `--env_bake_linear` split in two
+
+`renderSixFaces` feeds two consumers, and one flag drove both. The gate is now the caller's:
+`--env_bake_linear` = the **reflection** probes, `--sh_bake_linear` = the **scene-centre SH ambient**
+probe. Both default OFF.
+
+| arm | whole-frame Y | conductor-mask Y | `[SHAMB]` DC B/G/R |
+|---|--:|--:|---|
+| neither | 101.43 | 102.13 | 148.3 / 158.8 / 154.5 |
+| `--env_bake_linear` only | 91.79 | 69.05 | 147.7 / 158.1 / 153.8 |
+| `--sh_bake_linear` only | 95.99 | **102.13** | 108.4 / 117.3 / 119.0 |
+| both (the old combined flag) | 86.17 | 69.05 | 107.8 / 116.7 / 118.3 |
+
+Two things the split settles. **(1) §8.1 M2's "most of the flag's move" was wrong**: reflections own
+−9.64 of the −15.27 and the ambient −5.44. **(2) The conductor mask does not move under
+`--sh_bake_linear` at all** — `--hdr_metal_kill=2` already removes the entire diffuse/ambient term
+from a metalness-1 surface, so a conductor has no ambient to correct. That is a consistency check on
+D1 as much as on this flag.
+
+Images: `docs/img/metal/projector_env_metal_tint.png` (default | tint | GPU),
+`docs/img/metal/projector_env_metal_tint_2rows.png` (the same, second row with `--env_bake_linear`),
+`docs/img/metal/greets_bake_linear_2x2.png` (neither | probe | ambient | both).
+
+---
+
+## 10. The projector's dead direct term — PolyId, not bias, not the cage
+
+§6.2l left this open: `screen emiter`'s direct term is **exactly zero** and only
+`--greets_omni_shadows` moves it. **Root cause, MEASURED:**
+
+`RENDER/Shadows.cpp` excludes a material from the shadow **bake** when it is
+`Mat_Transparent|Mat_Additive|Mat_SkipZ` or its **name** contains `"lamp"`/`"emi"` — the heuristic that
+stops a lamp housing occluding the omni inside it. The source comment there already lists the
+casualties by name: *"name-hit but NOT Luminous: 'lamp', 'screen emiter fance', 'screen emiter'"*.
+
+Greets runs `ShadowMode::PolyId`, where a cube tap is occluded iff the stored id is non-zero **and
+differs from the receiver's own id** — an identity test, "the closest thing to the light along this ray
+must be ME". **A material that was never rasterised into the cube can never satisfy it.** Whatever the
+bake *did* store along that ray — the room behind the surface — reads as an occluder, so a non-casting
+material is shadowed **for ever, by every shadow-casting omni**.
+
+Isolated with `--no-env_refl`, which leaves only the direct term on a conductor (73,831-px mask,
+per channel R/G/B):
+
+| arm | R | G | B | Y |
+|---|--:|--:|--:|--:|
+| default | 0.000 | 0.000 | 0.000 | 0.000 |
+| `--shadow_noncaster_depth` | 0.397 | 0.348 | 0.000 | 0.323 |
+| `--no-greets_omni_shadows` | 0.397 | 0.348 | 0.000 | 0.323 |
+| `--no-shadows` | 0.397 | 0.348 | 0.000 | 0.323 |
+
+**Bit-identical to removing the shadows entirely** — the fix recovers 100 % of the lost direct term
+and nothing more. Full shipping stack: conductor mask 102.13 → 103.14 (`--no-greets_omni_shadows`
+gives 104.11, the extra being other objects' real shadows), whole frame 101.43 → 105.06, **487,634 px
+(23.5 %) changed** — every non-casting material in the scene, not just the projector.
+
+**The other three hypotheses are dead.** The cage does *not* occlude its own contents:
+`screen emiter fance` matches `"emi"` too and is equally excluded from the bake. It is not a bias or
+near-plane problem: with the identity test replaced by the **existing** biased depth compare the term
+returns in full. It is not face selection: the same tap, same face, different test.
+
+**A measurement trap that produced a wrong verdict, recorded so it is not repeated.**
+`--no-shadow_polyid` **on the command line does nothing**. `g_shadowMode` is a namespace-scope dynamic
+initialiser (`Shadows.cpp`) that reads the flag *before* `main()` parses argv; only the env form
+`FDS_SHADOW_POLYID=0` (the flag table's eager env scan does see it) or the F3 toggle can move it.
+§6.2l's "`--no-shadow_polyid` changes nothing, so this is not PolyId" was measuring a flag that never
+took effect — with the env form, Depth mode recovers the whole direct term.
+
+**Verdict: the CPU is wrong and the GPU is right**, agreeing with the GPU's own ray-cast ground truth
+(`--probe`: lights 5 and 6 `RAYCAST: clear`). Fixed behind **`--shadow_noncaster_depth`**, default OFF:
+a receiver the caster predicate excludes resolves its `surfaceShadowId` to −1, the already-documented
+"force Depth semantics" sentinel of `resolveCubeAtten` / `CubeShadow_Sample`, and also skips the static
+shadow lightmap (whose atlas was baked through the same identity test). Depth acne is not a risk for
+such a surface: acne comes from comparing a surface against its **own** stored depth, and this one
+never wrote any. Image: `docs/img/metal/projector_noncaster_depth.png` (top row full stack, bottom row
+`--no-env_refl` direct-only; bottom-right is where the two GGX highlights appear).
+
+**Reported, not fixed:** `DEMO/CITY.CPP`'s env-cube cache salt hashes an explicit list of
+bake-affecting flags. `--env_metal_tint_linear`, `--sh_bake_linear` and `--shadow_noncaster_depth` all
+change what the city bake renders and are **not** in that list, so running city with any of them on
+would hit a cache baked without them. Inert at the defaults; that file is not mine to edit.

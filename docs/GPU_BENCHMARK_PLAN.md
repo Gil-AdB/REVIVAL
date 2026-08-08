@@ -2512,6 +2512,63 @@ still **UNPRICED**, because no dial isolates it.
 
 ---
 
+### 6.2o The conductor's TINT (S-d), `--env_bake_linear` split in two, and the projector's shadow ROOT-CAUSED
+
+Full write-up with every table: **`docs/SHADING_CONTRACT.md` §9 and §10.** Summary, and the three
+things it corrects in the sections above.
+
+All figures: greets `t=2000`, `FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0"`, `--no-bloom`, dummy SDL
+drivers, **one** conductor mask — the `--hdr_metal_kill` 0-vs-2 change set at that pose, **73,831 px**.
+It reproduces §6.2k's baseline exactly (whole frame 101.43, conductor 102.13 CPU / 61.64 GPU), so
+§6.2k's numbers are directly comparable and §6.2l's 147,665-px mask is not quoted.
+
+**1. `--env_metal_tint_linear` (contract §8 row S-d) — the user's "still not the same tint".** The env
+lobe's conductor tint used the **gamma** albedo as a linear reflectance. Per channel on the mask:
+R/G/B **127.42/101.32/39.95 → 127.42/88.75/20.37** against the GPU's 87.38/57.78/13.99. **R does not
+move at all** — `screen emiter` authors albedo (255,206,104), so squaring the normalised R is the
+identity; no brightness bug can do that. Chromaticity distance to the GPU **0.097 → 0.016**, saturation
+**0.687 → 0.840** against the GPU's 0.840 exactly, hue 42.1° → 38.3° vs 35.8°. Default OFF.
+
+**2. It absorbs the §6.2k residual on luma, and opens a new one on colour.** With
+`--env_bake_linear`, conductor ÷ GPU goes **1.120× → 1.014×**. But the chroma then overshoots, because
+the CPU's *linear-captured probe content* is itself more saturated than the GPU's — mean face B/G/R,
+CPU **10.86/21.30/29.87** vs GPU **12.93/22.69/27.85**, luma agreeing to 2 % while the colour does
+not. §6.2k compared the faces on luma only. Related fact, MEASURED: the CPU's reflection probes carry
+**no SH ambient at all** (faces byte-identical under `--sh_ambient` / `--no-sh_ambient`, while the flag
+moves the main frame −6.15 luma) — they bake before `SHAmbient_EnsureBaked`. The GPU's do.
+
+**3. `--env_bake_linear` is now reflections ONLY; `--sh_bake_linear` is the SH ambient.** Whole-frame /
+conductor-mask luma: neither **101.43/102.13**, reflections only **91.79/69.05**, ambient only
+**95.99/102.13**, both **86.17/69.05**. **This corrects §6.2l's "that, not reflections, is most of the
+flag's ~15-luma move":** reflections own **−9.64** of the −15.27, the ambient **−5.44**. The conductor
+mask does not move under the ambient half at all, because `--hdr_metal_kill=2` already deletes a
+conductor's whole diffuse/ambient term.
+
+**4. The projector's dead direct term is the PolyId IDENTITY TEST, and §6.2l's exoneration of it was a
+measurement artefact.** `Shadows.cpp` excludes `"lamp"`/`"emi"`-named materials from the shadow **bake**
+— its own comment names `screen emiter` and `screen emiter fance`. Under `ShadowMode::PolyId` a tap is
+occluded iff the stored id differs from the receiver's own, which a material that never wrote its id
+into the cube **can never satisfy**; the room behind it reads as the occluder and it is shadowed for
+ever. Isolated with `--no-env_refl` (direct term only): default **0.000**, `--shadow_noncaster_depth`
+**0.397/0.348/0.000**, `--no-greets_omni_shadows` **0.397/0.348/0.000**, `--no-shadows`
+**0.397/0.348/0.000** — bit-identical, i.e. 100 % recovered. The cage hypothesis is dead (the cage is
+excluded from the bake too) and so is bias (the *existing* biased depth compare is what recovers it).
+**The trap:** `--no-shadow_polyid` on argv cannot move `g_shadowMode` — it is a namespace-scope dynamic
+initialiser read before argv is parsed. Only `FDS_SHADOW_POLYID=0` or F3 works. §6.2l's "only the
+per-omni cube moves it" was measuring a dead flag.
+
+**Landed**, all three default OFF and byte-null: `--env_metal_tint_linear`, `--sh_bake_linear`,
+`--shadow_noncaster_depth`. Verified against greets `6780642b30430efa4fd2f87810b2dfdb`, fountain
+`8db68ccb59416e9a44037e9f387b7bd9`, city `5476be8c43864c761b94e2dd83f86aa8` (cache HIT, no re-bake)
+and `tools/render_gate.sh` **3/3**. Images: `docs/img/metal/projector_env_metal_tint.png`,
+`docs/img/metal/projector_env_metal_tint_2rows.png`, `docs/img/metal/greets_bake_linear_2x2.png`,
+`docs/img/metal/projector_noncaster_depth.png`.
+
+**Reported, not fixed:** `DEMO/CITY.CPP`'s env-cube cache salt hashes an explicit flag list; none of
+these three are in it, so a city run with any of them ON would hit a cache baked without them.
+
+---
+
 ### 6.2 Phase 3 stage 1 — deferred arm built, shadow CASTER FILTER correct, timings RETRACTED
 
 > **Superseded in part by §6.2a.** This section's conclusion that "shadows are now correct" was

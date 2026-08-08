@@ -709,7 +709,10 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 				const float w11 =         fx  *         fy;
 				const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
 				float occ = 0.0f;
-				if (mode == ShadowMode::PolyId) {
+				// surfaceShadowId < 0 = non-casting receiver under
+				// --shadow_noncaster_depth; the identity test below is
+				// unsatisfiable for it, so take the biased depth branch.
+				if (mode == ShadowMode::PolyId && surfaceShadowId >= 0) {
 					// Surface matID extracted from gb.txtr's packed
 					// (miplevel:4 | matID:8 | swizzledUV:20). Shadow buffer
 					// stores matID+1 of the closest occluder; +1 here too so the
@@ -851,7 +854,7 @@ static inline void EnvSpecComposeScalar(
 	float sampleWorldX, float sampleWorldY, float sampleWorldZ,
 	float texB, float texG, float texR,
 	float gloss, float metalM, bool roughMapOn, float envReflGain,
-	bool envBrdfAnalytic, bool multiScatter,
+	bool envBrdfAnalytic, bool multiScatter, bool metalTintLinear,
 	float &sB, float &sG, float &sR,
 	float *fresOut = nullptr)
 {
@@ -1305,10 +1308,25 @@ static inline void EnvSpecComposeScalar(
 	// early return (sSkipNegY diagnostic, no env added) leaves diffuse at full.
 	if (fresOut) *fresOut = fres;
 	const float inv255 = 1.0f / 255.0f;
-	// Metal tint: reflection takes the albedo's color.
-	const float tB = 1.0f - metalM + metalM * texB * inv255;
-	const float tG = 1.0f - metalM + metalM * texG * inv255;
-	const float tR = 1.0f - metalM + metalM * texR * inv255;
+	// Metal tint: reflection takes the albedo's colour — i.e. the albedo is
+	// used here as a REFLECTANCE, a linear multiplier on the probe radiance.
+	//
+	// --env_metal_tint_linear (docs/SHADING_CONTRACT.md §8 row S-d): texB is
+	// the GAMMA 0-255 texel. The --hdr_linear composite squares the albedo
+	// everywhere else (`aB*aB*lB`, :2708) and this lobe's output lands in sB,
+	// which enters that composite unsquared — so a gamma reflectance in a
+	// linear frame is a per-CHANNEL error, not a brightness one: it pulls the
+	// channels together and DESATURATES the conductor. ON squares the
+	// normalised albedo, matching --metal_spec_f0's treatment of the direct
+	// lobe and the GPU oracle's `mix(1, S.baseColor, metal)` where
+	// S.baseColor is `alb*alb`. Dielectrics (metalM == 0) are bit-unchanged.
+	const float aBn = texB * inv255, aGn = texG * inv255, aRn = texR * inv255;
+	const float rB = metalTintLinear ? aBn * aBn : aBn;
+	const float rG = metalTintLinear ? aGn * aGn : aGn;
+	const float rR = metalTintLinear ? aRn * aRn : aRn;
+	const float tB = 1.0f - metalM + metalM * rB;
+	const float tG = 1.0f - metalM + metalM * rG;
+	const float tR = 1.0f - metalM + metalM * rR;
 	sB += ecB * ek * tB;
 	sG += ecG * ek * tG;
 	sR += ecR * ek * tR;
@@ -1441,6 +1459,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  multiScatterG   = fds::FeatureFlags::pbr_multiscatter();
+	// --env_metal_tint_linear: the ENV lobe's conductor tint as a LINEAR
+	// reflectance (contract §8 row S-d). Default OFF = byte-null.
+	const bool  metalTintLinG   = fds::FeatureFlags::env_metal_tint_linear();
+	// --shadow_noncaster_depth: PolyId's identity test is unsatisfiable for a
+	// receiver that is excluded from the CASTER set. Default OFF = byte-null.
+	const bool  noncasterDepthG = fds::FeatureFlags::shadow_noncaster_depth();
 	const bool  metalMapOnG     = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG  = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: per-scene L2 SH irradiance coefficients (null = flag off /
@@ -1562,9 +1586,20 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// When the plane is empty (non-opaque renderers, or scenes
 			// where the plane wasn't allocated), fall back to the
 			// legacy uint16_t(matID+1) decoded from `txtr`.
-			const int surfaceShadowId = gb.shadowMatID.empty()
+			//
+			// --shadow_noncaster_depth: a material EXCLUDED from the shadow
+			// bake (Shadow_MaterialSkipsCasting — Transparent/Additive/SkipZ
+			// or a name containing "lamp"/"emi") never writes its own id into
+			// any cube, so the PolyId identity test "the closest thing to the
+			// light along this ray must be ME" is unsatisfiable for it and it
+			// is shadowed FOR EVER by whatever the bake did rasterise behind
+			// it. Resolve such a receiver to -1, the documented "force Depth
+			// semantics" sentinel of resolveCubeAtten / CubeShadow_Sample.
+			int surfaceShadowId = gb.shadowMatID.empty()
 			    ? int(matID + 1)
 			    : int(gb.shadowMatID[i]);
+			if (noncasterDepthG && Shadow_MaterialSkipsCasting(Mat))
+				surfaceShadowId = -1;
 
 			// Texture sample: Mekalele's apply_exact already wrote a
 			// swizzled offset into mat32, so it's a direct lookup into
@@ -2620,7 +2655,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				                     sampleWorldX, sampleWorldY, sampleWorldZ,
 				                     texB, texG, texR, gloss, metalM,
 				                     roughMapOnG, envReflGainG,
-				                     envBrdfAnalyticG, multiScatterG, sB, sG, sR, &fresEC);
+				                     envBrdfAnalyticG, multiScatterG, metalTintLinG, sB, sG, sR, &fresEC);
 				// (1-F) diffuse energy conservation: the Fresnel-reflected
 				// fraction can't also diffuse. Scales BOTH the LDR combine
 				// (int(fdB)) and the HDR radiance (fdB+sB) below.
@@ -4037,6 +4072,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  multiScatterG  = fds::FeatureFlags::pbr_multiscatter();
+	const bool  metalTintLinG  = fds::FeatureFlags::env_metal_tint_linear();
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
 	const float roughStrengthG = fds::FeatureFlags::roughness_strength();  // redo-lane rough attenuation (see wave-1)
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
@@ -4733,7 +4769,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     envBrdfAnalyticG, multiScatterG, sBs, sGs, sRs, &fresEC);
+						                     envBrdfAnalyticG, multiScatterG, metalTintLinG, sBs, sGs, sRs, &fresEC);
 						// (1-F) diffuse energy conservation (see wave-1).
 						if (diffuseEnergyG) {
 							const float dc = 1.0f - fresEC;
@@ -4829,7 +4865,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     envBrdfAnalyticG, multiScatterG, sBs, sGs, sRs, &fresLane);
+						                     envBrdfAnalyticG, multiScatterG, metalTintLinG, sBs, sGs, sRs, &fresLane);
 						// ×lane_specMul (see the vec env lane above).
 						outB += int(sBs * lane_specMul[k]);
 						outG += int(sGs * lane_specMul[k]);
@@ -4895,6 +4931,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  multiScatterG  = fds::FeatureFlags::pbr_multiscatter();
+	const bool  metalTintLinG  = fds::FeatureFlags::env_metal_tint_linear();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked).
@@ -5455,7 +5492,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					                     sampleWorldX, sampleWorldY, sampleWorldZ,
 					                     texB, texG, texR, gloss, metalM,
 					                     roughMapOnG, envReflGainG,
-					                     envBrdfAnalyticG, multiScatterG, sB, sG, sR, &fresEC);
+					                     envBrdfAnalyticG, multiScatterG, metalTintLinG, sB, sG, sR, &fresEC);
 					// (1-F) diffuse energy conservation (see wave-1); scales
 					// the LDR combine and the HDR radiance below.
 					if (diffuseEnergyG) {

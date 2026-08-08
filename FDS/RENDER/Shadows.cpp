@@ -105,8 +105,62 @@ static bool shadowsEnabled() {
 thread_local bool g_inShadowPass = false;
 
 // PolyId is the production default. F3 still toggles at runtime.
+//
+// TRAP, MEASURED 2026-08-08: this is a NAMESPACE-SCOPE dynamic initialiser, so
+// it reads shadow_polyid() BEFORE main() parses argv. `--no-shadow_polyid` on
+// the command line therefore does NOTHING to g_shadowMode (only the F3 toggle
+// or the ENV form FDS_SHADOW_POLYID=0, which the flag table's eager env scan
+// does see, can move it). An investigation concluded "--no-shadow_polyid
+// changes nothing, so PolyId is not the cause" from exactly this; with the env
+// form the same experiment recovers 100 % of the projector's direct term.
 std::atomic<ShadowMode> g_shadowMode{
 	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
+
+// ── the shadow CASTER predicate — one definition ────────────────────────────
+// Which materials are excluded from the shadow bake. The long rationale (why
+// the name heuristic exists, why Surf_Luminous is not a substitute, and why
+// 'lamp' is the load-bearing case) lives at the call site in the bake loop
+// below. Hoisted to file scope because the DEFERRED KERNEL needs the same
+// answer at RECEIVE time: under ShadowMode::PolyId a tap is "occluded" iff the
+// stored id is non-zero and differs from the receiver's own id — an identity
+// test that a material excluded from the CASTER set can never satisfy, since it
+// never wrote its id into the cube. Whatever the bake did rasterise along that
+// ray (the room BEHIND the surface, typically) then reads as an occluder and
+// the surface is shadowed for ever. See --shadow_noncaster_depth.
+static bool shadowLooksEmissive(const char *n) {
+	if (!n) return false;
+	for (const char *p = n; *p; ++p) {
+		if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
+		    (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
+		if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
+		    (p[2]=='i'||p[2]=='I')) return true;  // emit/emiter/emitter
+	}
+	return false;
+}
+
+bool Shadow_MaterialSkipsCasting(const Material *m) {
+	// Pack (material pointer | skip-bit) into ONE atomic so the pointer-match
+	// and the skip flag are read/written together, atomically. Two separate
+	// atomics (mat[k] + skip[k]) tore under thread contention: a reader could
+	// match mat[k] yet read a STALE skip[k] left by a different material that
+	// previously occupied slot k (pointers collide mod 256). That gave a
+	// load-dependent wrong skip decision, which dropped/added shadow polygons
+	// frame-to-frame — THE shadow tile flicker. TSan never caught it because
+	// data races on atomics are not reported. Material is >=2-aligned, so bit 0
+	// of the pointer is free for the flag.
+	struct MatShadowCache { std::atomic<uintptr_t> entry[256] = {}; };
+	static MatShadowCache sCache;
+	if (!m) return true;
+	const uintptr_t k = (uintptr_t(m) >> 4) & 255;
+	const uintptr_t mbits = uintptr_t(m);  // bit0 = 0 (aligned)
+	const uintptr_t e = sCache.entry[k].load(std::memory_order_relaxed);
+	if ((e & ~uintptr_t(1)) == mbits) return (e & 1) != 0;
+	const bool skip = (m->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
+	                 || shadowLooksEmissive(m->Name);
+	sCache.entry[k].store(mbits | (skip ? uintptr_t(1) : uintptr_t(0)),
+	                      std::memory_order_relaxed);
+	return skip;
+}
 
 
 // [experiment: --shadow-swizzle] Re-tile one map's freshly-baked planes into
@@ -739,44 +793,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 						// NOTE FOR GpuBench: GpuBench/ reproduces this predicate
 						// byte-for-byte as Batch::castsShadow. Any change here must be
 						// mirrored there or the two arms diverge.
-						struct MatShadowCache {
-							// Pack (material pointer | skip-bit) into ONE atomic
-							// so the pointer-match and the skip flag are read/
-							// written together, atomically. Two separate atomics
-							// (mat[k] + skip[k]) tore under thread contention: a
-							// reader could match mat[k] yet read a STALE skip[k]
-							// left by a different material that previously
-							// occupied slot k (pointers collide mod 256). That
-							// gave a load-dependent wrong skip decision, which
-							// dropped/added shadow polygons frame-to-frame — THE
-							// shadow tile flicker. TSan never caught it because
-							// data races on atomics are not reported. Material is
-							// ≥2-aligned, so bit 0 of the pointer is free for the
-							// flag.
-							std::atomic<uintptr_t> entry[256] = {};
-						};
-						static MatShadowCache sCache;
-						auto looksEmissive = [](const char *n) -> bool {
-							if (!n) return false;
-							for (const char *p = n; *p; ++p) {
-								if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
-								    (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
-								if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
-								    (p[2]=='i'||p[2]=='I')) return true;  // emit/emiter/emitter
-							}
-							return false;
-						};
-						auto shouldSkip = [&](Material *m) -> bool {
-							if (!m) return true;
-							const uintptr_t k = (uintptr_t(m) >> 4) & 255;
-							const uintptr_t mbits = uintptr_t(m);  // bit0 = 0 (aligned)
-							const uintptr_t e = sCache.entry[k].load(std::memory_order_relaxed);
-							if ((e & ~uintptr_t(1)) == mbits) return (e & 1) != 0;
-							const bool skip = (m->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
-							                 || looksEmissive(m->Name);
-							sCache.entry[k].store(mbits | (skip ? uintptr_t(1) : uintptr_t(0)),
-							                      std::memory_order_relaxed);
-							return skip;
+						// The predicate itself now lives at file scope as
+						// Shadow_MaterialSkipsCasting (with the same packed
+						// atomic cache), because the deferred kernel needs the
+						// SAME answer at RECEIVE time — see the header comment
+						// there for why (a non-caster can never satisfy the
+						// PolyId identity test and is otherwise shadowed for
+						// ever). One definition, no drift.
+						auto shouldSkip = [](Material *m) -> bool {
+							return Shadow_MaterialSkipsCasting(m);
 						};
 						int kept = 0, skXpar = 0, skDegen = 0, skBack = 0, skNoTxtr = 0;
 						// Material flag census — one-shot dump of (Name,
