@@ -1,5 +1,34 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-08 — POM CAMPAIGN RE-BASELINED AFTER THE MIP FLIP (`docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-8)
+>
+> Every S1d number was measured with `--mips` OFF. Re-measured as OFF/ON **pairs**
+> on a private worktree build (so concurrent agents cannot contaminate a figure);
+> the arm reproduces its published 10 void / 73 black **to the per-pose digit**,
+> and the slip ladder and the silhouette table reproduce **exactly**.
+>
+> - **Void is mip-INVARIANT** — 10 at both settings, same three poses. Black falls
+>   ~25 % (73→52) and is a sampling artefact; do not quote a pre-flip black figure.
+> - **The grazing smear does not move** — slip p90 identical to 3 decimals at every
+>   cap, and `--texture_filter=2` cannot move it because `slip` is a MARCHED-UV
+>   metric and the filter runs downstream of the march. The campaign needs a
+>   filter-sensitive motion metric before spending more on the smear.
+> - **The silhouette table is byte-for-byte unchanged.** §S1d-6 stands in full.
+> - **PERF, two corrections:** `--mips` ON is **not** neutral for the parallax arms
+>   (−0.6/−0.7 ms on +POM / +tess / the shell arm, −0.1 on flat), and the
+>   **"tessellation and the POM arm cost the same" result does NOT reproduce** —
+>   the shell arm is **+1.0 to +1.6 ms MORE expensive** at matched amplitude, at
+>   both mip settings.
+> - **The quad-diagonal crease is ROOT-CAUSED AND FIXED.** The lid quad really is
+>   non-planar (`rooms`: 133 pairs, lid-normal angle max 3.07°, plane gap 0.0878
+>   world vs a 0.0900 offset; `floor`, which has no corner verts, measures 0.0000°).
+>   **`--pom_shell_lid_planar`** (new, default 0, byte-null) removes the crease at
+>   zero measured cost on void/black, the silhouette and perf. It does **not** fix
+>   the silhouette — two defects, two fixes.
+> - **NOT MINE, FLAGGED:** the **city pin does not reproduce** from a clean
+>   `97b13fd` build — `5476be8c` vs `e1221676`, and the `--no-mips --no-mip_fix`
+>   control also fails (`b88ecb7b` vs `37e62845`), so the mip flip is not the cause.
+
 > ## 2026-08-08 — MIP SELECTION IS ON BY DEFAULT; ALL SCENE PINS MOVED
 >
 > **`--mips` default 0 → 1** (user decision). Mip selection had been force-disabled

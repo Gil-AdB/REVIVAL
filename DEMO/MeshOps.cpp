@@ -4544,6 +4544,13 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	struct CensusFace { float wu, wv, w, area; };
 	std::vector<CensusFace> cenF;                       // parallel to refs
 	std::map<std::pair<const TriMesh*, int32_t>, int> refIdx;
+	// S1d-7: every pair of target faces that shared an edge AND one AUTHORED
+	// plane — i.e. the two halves of one authored quad (its triangulation
+	// diagonal) and any other authored-coplanar adjacency. The lid move below
+	// re-derives N/NormProd PER TRIANGLE, so this is the population where the
+	// two halves can end up on DIFFERENT lid planes; the census after the move
+	// measures by how much.
+	std::vector<std::pair<int,int>> coplanarAdj;
 	{
 		std::map<EdgeKey, std::vector<int>> edges;
 		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
@@ -4637,6 +4644,7 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				const float nd = F0.N.x*Fj.N.x + F0.N.y*Fj.N.y + F0.N.z*Fj.N.z;
 				if (nd < 0.999f) continue;                       // not coplanar-parallel
 				if (std::fabs(F0.NormProd - Fj.NormProd) > 1e-3f) continue;   // parallel but offset
+				if (census) coplanarAdj.push_back({ kv.second[0], kv.second[j] });
 				const int ra = find(kv.second[0]), rb = find(kv.second[j]);
 				if (ra != rb) uf[ra] = rb;
 			}
@@ -5025,6 +5033,107 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 		std::fprintf(stderr, "[POM-SHELL] '%s': nothing built (%lld target faces, "
 		             "%lld verts pinned) — no shell\n", matName, nFaces, nPinned);
 		return 0.0f;
+	}
+	// ── S1d-7 THE NON-PLANAR LID QUAD ───────────────────────────────────────
+	// Census, then the causal A/B. The lid vertices move along their SMOOTHED
+	// normals by an offset that carries the corner correction, so four corners
+	// of an authored-FLAT quad can move by different amounts in different
+	// directions: the lid quad is then NON-PLANAR, and the re-planing loop
+	// above re-derives (N, NormProd) from EACH TRIANGLE's own three moved
+	// vertices. The two halves of one quad therefore carry different plane
+	// equations, and every per-face quantity the march takes from the plane
+	// (march frame, the depth write's Vz/(V·N), the tangent frame) steps across
+	// the triangulation diagonal — which is exactly where the reported crease
+	// lies. --pom_shell_lid_planar is the A/B: give every face of one AUTHORED
+	// plane ONE lid plane (the union-find root already IS "one authored
+	// plane"), area-weighted, so the per-triangle discontinuity is removed
+	// without changing where any vertex sits.
+	{
+		auto faceOf = [&](int i) -> Face& { return refs[i].T->Faces[refs[i].fi]; };
+		auto cenOf  = [&](int i) {
+			const Face &F = faceOf(i);
+			return Vector{ (F.A->Pos.x + F.B->Pos.x + F.C->Pos.x) / 3.0f,
+			               (F.A->Pos.y + F.B->Pos.y + F.C->Pos.y) / 3.0f,
+			               (F.A->Pos.z + F.B->Pos.z + F.C->Pos.z) / 3.0f };
+		};
+		if (censusPrint && !coplanarAdj.empty()) {
+			int nPair = 0, hist[6] = {};   // <0.01 <0.1 <0.5 <2 <10 >=10 degrees
+			double angMax = 0.0, gapMax = 0.0, angSum = 0.0;
+			for (auto &pr : coplanarAdj) {
+				const Face &Fa = faceOf(pr.first), &Fb = faceOf(pr.second);
+				const float d = Fa.N.x*Fb.N.x + Fa.N.y*Fb.N.y + Fa.N.z*Fb.N.z;
+				const double ang = std::acos(std::min(1.0f, std::max(-1.0f, d)))
+				                 * 57.29577951308232;
+				const Vector ca = cenOf(pr.first), cb = cenOf(pr.second);
+				const double ga = std::fabs(Fa.N.x*cb.x + Fa.N.y*cb.y + Fa.N.z*cb.z
+				                            + Fa.NormProd);
+				const double gb = std::fabs(Fb.N.x*ca.x + Fb.N.y*ca.y + Fb.N.z*ca.z
+				                            + Fb.NormProd);
+				++nPair; angSum += ang;
+				angMax = std::max(angMax, ang);
+				gapMax = std::max({ gapMax, ga, gb });
+				hist[ang < 0.01 ? 0 : ang < 0.1 ? 1 : ang < 0.5 ? 2
+				     : ang < 2.0 ? 3 : ang < 10.0 ? 4 : 5]++;
+			}
+			std::fprintf(stderr,
+				"[POM-SHELL-QUADPLANE] '%s': %d authored-coplanar adjacent pairs; "
+				"lid normal angle deg mean %.4f max %.4f | plane gap at the "
+				"partner centroid max %.5f world | hist <0.01:%d <0.1:%d <0.5:%d "
+				"<2:%d <10:%d >=10:%d\n", matName, nPair, angSum / nPair, angMax,
+				gapMax, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]);
+		}
+		if (fds::FeatureFlags::pom_shell_lid_planar()) {
+			std::map<int, std::array<double,4>> acc;   // root -> Σ area*(N, d)
+			for (size_t i = 0; i < refs.size(); ++i) {
+				const Face &F = faceOf(int(i));
+				const Vector &A = F.A->Pos, &B = F.B->Pos, &C = F.C->Pos;
+				const float e1x = B.x-A.x, e1y = B.y-A.y, e1z = B.z-A.z;
+				const float e2x = C.x-A.x, e2y = C.y-A.y, e2z = C.z-A.z;
+				const float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z,
+				            gz = e1x*e2y - e1y*e2x;
+				const double w = 0.5 * std::sqrt(double(gx)*gx + double(gy)*gy
+				                                 + double(gz)*gz);
+				auto &a = acc[find(int(i))];
+				a[0] += w * F.N.x; a[1] += w * F.N.y; a[2] += w * F.N.z;
+				a[3] += w * F.NormProd;
+			}
+			int nSet = 0;
+			for (auto &kv : acc) {
+				const double l = std::sqrt(kv.second[0]*kv.second[0]
+				                         + kv.second[1]*kv.second[1]
+				                         + kv.second[2]*kv.second[2]);
+				if (l < 1e-12) { kv.second[0] = kv.second[1] = kv.second[2] = 0.0; continue; }
+				const double s = 1.0 / l;
+				kv.second[0] *= s; kv.second[1] *= s; kv.second[2] *= s;
+			}
+			// The plane CONSTANT has to be re-fitted to the unified normal, not
+			// averaged with the old one: d = -(N̂ · area-weighted centroid).
+			std::map<int, std::array<double,4>> cen;   // root -> Σ area*centroid, Σ area
+			for (size_t i = 0; i < refs.size(); ++i) {
+				const Face &F = faceOf(int(i));
+				const Vector &A = F.A->Pos, &B = F.B->Pos, &C = F.C->Pos;
+				const float e1x = B.x-A.x, e1y = B.y-A.y, e1z = B.z-A.z;
+				const float e2x = C.x-A.x, e2y = C.y-A.y, e2z = C.z-A.z;
+				const float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z,
+				            gz = e1x*e2y - e1y*e2x;
+				const double w = 0.5 * std::sqrt(double(gx)*gx + double(gy)*gy
+				                                 + double(gz)*gz);
+				const Vector c = cenOf(int(i));
+				auto &a = cen[find(int(i))];
+				a[0] += w * c.x; a[1] += w * c.y; a[2] += w * c.z; a[3] += w;
+			}
+			for (size_t i = 0; i < refs.size(); ++i) {
+				const auto &n = acc[find(int(i))];
+				const auto &c = cen[find(int(i))];
+				if (c[3] <= 0.0 || (n[0] == 0.0 && n[1] == 0.0 && n[2] == 0.0)) continue;
+				Face &F = faceOf(int(i));
+				F.N.x = float(n[0]); F.N.y = float(n[1]); F.N.z = float(n[2]);
+				F.NormProd = float(-(n[0]*c[0] + n[1]*c[1] + n[2]*c[2]) / c[3]);
+				++nSet;
+			}
+			std::fprintf(stderr, "[POM-SHELL] '%s': --pom_shell_lid_planar unified "
+			             "%d faces onto %zu authored planes\n", matName, nSet, acc.size());
+		}
 	}
 	// Collapse the union-find into 1-based group ids, union each group's UV box
 	// (from the AUTHORED per-face UVs, which the rasterizer also reads), and

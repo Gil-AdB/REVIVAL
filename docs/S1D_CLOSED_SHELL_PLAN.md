@@ -2496,6 +2496,8 @@ production candidate, and §S1d-5b.7 overturned that on measurement; modes 2 and
 
 ## S1d-5b.1 THE HEADLINE TABLE — 19 poses, void / black
 
+> **MIP-CONDITION NOTE (S1d-8, 2026-08-08): every number in this section was measured with `--mips` OFF, which is no longer the default.** Re-measured under the flip in **§S1d-8.1**: the arm's **void is mip-INVARIANT** (10 at both settings, same three poses, same counts), so every void comparison here stands. **BLACK does not**: it falls ~25 % (73→52 on the arm, 139→120 on flat) because coarser mips average pure-black stone texels away. Do not quote a black figure from this section against a post-flip render.
+
 | arm (cap=16, amp=0.18, prism=1) | void | black |
 |---|--:|--:|
 | S1d-4 shipping arm (flat quads, weld=0, lid_edge=3) | 106 682 | 106 743 |
@@ -2678,6 +2680,8 @@ authored-camera timeline before claiming a coverage stage is closed.
 
 ## S1d-5b.6 PERF at t=5743 — and the 5 ms is not where it looked
 
+> **MIP-CONDITION NOTE (S1d-8, 2026-08-08): every number in this section was measured with `--mips` OFF, which is no longer the default.** **SUPERSEDED by §S1d-8.4 on two rows.** (a) `--mips` ON is NOT perf-neutral for the parallax arms — it buys 0.6–0.7 ms on +POM, +tessellation and the shell arm (and only 0.1 on flat). (b) **the `mode 1 + weld=1` 56.98 vs `tessellation@0.18` 56.66 tie (+0.32 ms) DOES NOT REPRODUCE**: over 14 interleaved rounds the shell arm costs **+1.04 to +1.58 ms MORE than tessellation** at matched amplitude, at BOTH mip settings. `arm − flat` reproduces exactly (+7.09 fmin / +7.50 bench vs the published +7.44).
+
 `--bench=scene@scene=greets,t=5743,iters=20`, 5 interleaved rounds, min-of-arm
 (the only load-robust statistic; load averaged 7–11 from a concurrent agent, so
 read every row as an upper bound). Both statistics recorded per run.
@@ -2723,7 +2727,7 @@ never measured **mode 1 with weld=1** — the cheap corner of the grid.
 
 | arm | 19 poses void/black | authored timeline, 63 steps | t=5743 ms |
 |---|--:|--:|--:|
-| flat | 21 / 148 | 5 332 | 49.54 |
+| flat | 21 / 148 [S1d-8: re-measures **18 / 146**, unattributed — see §S1d-8.0] | 5 332 | 49.54 |
 | S1d-4 | 106 682 / 106 743 | — | 56.69 |
 | mode 2 (ex-candidate) | 10 / 84 | **7 271** | 61.86 |
 | **mode 1 + weld=1** | **10 / 84** | **3 575** | **56.98** |
@@ -2750,6 +2754,8 @@ GEOMETRY is needed on top of it. It is not; it is a net negative.
 
 ## S1d-5b.8 THE GRAZING SMEAR — S1d-5 does not touch it
 
+> **MIP-CONDITION NOTE (S1d-8, 2026-08-08): every number in this section was measured with `--mips` OFF, which is no longer the default.** **Re-measured and CONFIRMED UNCHANGED (§S1d-8.2): the flip does not move slip by 0.1 % at any cap**, and `--texture_filter=2` does not move it either — because `slip` is a MARCHED-UV metric and the albedo filter runs downstream of the march, so a slip ladder is blind to filtering by construction. The ladder below is therefore still live; what is retired is the expectation that a sampling change could show up in it.
+
 Sweep A (t=5958, p9→p10, 16 frames, `FDS_DUMP_TXTR=1`), `slip.py`, against the
 §S1d-4.1 published ladder. Slip p90 is the comparable column.
 
@@ -2772,6 +2778,8 @@ BOUNDARIES — entry geometry and exit policy — and touches neither the lid ma
 nor the cap. **The grazing smear remains open and is untouched by this stage.**
 
 ## S1d-5b.9 CAP SENSITIVITY — the cap is free for coverage
+
+> **MIP-CONDITION NOTE (S1d-8, 2026-08-08): every number in this section was measured with `--mips` OFF, which is no longer the default.** Still true post-flip: void is 10 at every cap at BOTH settings (§S1d-8.1/§S1d-8.2).
 
 S1d-3 found the prism made `--pom_shell_cap` a free parameter. Confirmed for
 this arm, 19 poses:
@@ -2800,8 +2808,7 @@ cd Runtime && ./DEMO \
   --pom_shell_cap=4 --texture_filter=1
 ```
 
-Measured: **19 poses 10 void / 73 black; authored-camera bands t=900–2400 and
-t=3500–4000 both 0 void; 56.98 ms at t=5743** (+7.44 vs flat, +0.29 vs S1d-4,
+Measured **with `--mips` OFF**: **19 poses 10 void / 73 black; authored-camera bands t=900–2400 and t=3500–4000 both 0 void; 56.98 ms at t=5743**. **POST-FLIP (§S1d-8): 10 void / 52 black; 55.81 ms** (fmin min, 14 rounds) — void identical, black is a metric artefact of the sampling change, and the arm is now measured **+1.04 ms MORE than tessellation**, not level with it (+7.44 vs flat, +0.29 vs S1d-4,
 +0.32 vs tessellation at matched amplitude).
 
 **What was dropped, and why — each measured, not assumed:**
@@ -2877,6 +2884,8 @@ four candidate rules were built and measured, all four are recorded below with
 their numbers, and none is shippable. Read §S1d-6.5 before trying a fifth.
 
 ## S1d-6.1 WHY EVERY CENSUS MISSED IT — the methodological finding
+
+> **MIP-CONDITION NOTE (S1d-8, 2026-08-08): every number in this section was measured with `--mips` OFF, which is no longer the default.** **Re-measured post-flip in §S1d-8.3 and BYTE-FOR-BYTE UNCHANGED** — every column of the four-arm table below is identical at both mip settings, because the metric reads the `z16` plane and mips change sampling, not where the lid projects. §S1d-6 stands in full.
 
 **The void/black metric family cannot see this defect, structurally.** `void` is
 `popcount(z16==0)`, `black` is `popcount(max(r,g,b)==0)`. Silhouette
@@ -3099,7 +3108,9 @@ depth write's `Vz/(V·N)`, the tangent frame) steps across the diagonal. That
 explains why removing the entry-height kink attenuates the crease without
 removing it: `entry_flat` fixes one of two per-triangle discontinuities.
 
-**Next step, unverified:** confirm by measuring the angle between the two
+> **RESOLVED 2026-08-08 — §S1d-8.5. The census was run and the hypothesis is CONFIRMED**: on `rooms` the two halves of a quad carry lid normals a mean 0.659° / max 3.068° apart, with a plane gap up to **0.0878 world against a 0.0900 lid offset**, over 133 authored-coplanar pairs; `floor`, which has **zero** corner verts, measures exactly 0.0000° on all 24 — the effect exists exactly where the smoothed-normal corner correction does. **`--pom_shell_lid_planar` (new, default 0, byte-null) removes the crease** at t=2993 on both the minimal and the full arm, at zero cost on the 19 poses (10/52 and 10/73 unchanged), on the silhouette (identical) and on perf (inside the noise floor). **It does NOT fix the silhouette** — §S1d-6.4's hope that one fix serves both is measured false, because the overhang is made by where the vertices SIT and this flag moves none of them.
+
+**Next step, unverified (the original text, kept for the record):** confirm by measuring the angle between the two
 triangles' re-derived normals per target quad (a bake-time census) and
 correlating it with where the crease is visible; then decide whether the lid
 should be made PLANAR per authored quad (project the corner offsets onto the
@@ -3107,3 +3118,302 @@ authored plane's normal, losing the mitre) or whether the march should read the
 AUTHORED plane rather than the re-derived lid plane. The latter is also what
 §S1d-6.4 wants for the silhouette — both defects are about what the shell hands
 the march at a face's boundary, so look for one fix before building two.
+
+---
+
+# S1d-8 — THE POST-MIP-FLIP BASELINE, and the quad-diagonal crease ROOT-CAUSED AND FIXED
+
+Added 2026-08-08, after `--mips` and `--mip_fix` both went **default ON** (see
+`docs/SESSION_STATE.md`, 2026-08-08). **Every number in S1d-1 … S1d-7 was measured
+with `--mips` OFF, i.e. every texture — albedo, normal, roughness, metal, AO *and
+the height/cone maps the march samples* — pinned at level 0.** The height gathers
+take the face's albedo miplevel unless `--pom_height_mip` pins them, so in
+principle the flip changes the surface the march walks. This section re-establishes
+the baseline. **Every figure is reported as a PAIR:** `--no-mips --no-mip_fix`
+(reproducing the published number as a control) and the new default.
+
+**Measurement isolation.** All of it was run on a private `git worktree` built from
+`97b13fd` (`/Users/gil-ad/work/rev-s1d8`), executed with `cwd=Runtime/` of the main
+tree so it sees the user's uncommitted authoring assets, so four concurrent agents'
+in-flight edits to `FDS/RENDER/**` and `DEMO/*` cannot contaminate a single figure.
+That binary reproduces the greets pin **`adfba8ba`** (mips ON) and **`f1297141`**
+(`--no-mips --no-mip_fix`) byte-exact, and `render_gate` 3/3.
+
+## S1d-8.0 THE CONTROLS — what reproduced and what did not
+
+| control | published | mine, `--no-mips --no-mip_fix` | verdict |
+|---|---|---|---|
+| the §S1d-5b.10 arm, 19 poses | 10 void / 73 black | **10 / 73**, and per-pose **7@p5518 + 2@p5773 + 1@p5877** — the §S1d-5b.3 residual breakdown to the digit | **EXACT** |
+| slip p90, flat POM | 0.094 | **0.0944** (p50 0.0072, p99 0.5731 vs published 0.007 / 0.57) | **EXACT** |
+| slip p90, cap 2 / 4 / 8 / 16 | 0.254 / 0.891 / 2.530 / 6.271 | **0.2541 / 0.8910 / 2.5379 / 6.2705** | **EXACT** |
+| silhouette t=5877, flat / tess@0.18 / shell | 0.46 / 2.43 / 0.35, off 0 / +5 / −28 | **0.46 / 2.43 / 0.35, off 0 / +5 / −28**, every column identical | **EXACT** |
+| flat arm, 19 poses | 21 / 148 | **18 / 146** (bare `--deferred`); **18 / 139** with `--texture_filter=1`; **18 / 139** for flat+POM | **3 void / 2 black SHORT — not attributed** |
+
+**The flat control is the one gap, and it is stated rather than papered over.**
+Three different flat flag-sets all give exactly 18 void, never 21, while the ARM
+reproduces to the digit on the same binary and the same pose list. Since the arm
+matches, neither the pose set (the two undocumented extras t=2980/t=5518 are on
+the AUTHORED camera — confirmed by the residual breakdown matching) nor the
+metric nor the binary is at fault; the published "flat" row's exact flag-set is
+not recorded anywhere in the repo and cannot be traced. **The comparative claim it
+was used for survives unchanged: the shell arm's void (10) is still BELOW the
+undisplaced arm's own rasterizer-crack count (18), so the metric has still
+bottomed out against the engine.**
+
+## S1d-8.1 VOID / BLACK over the 19 poses — void is MIP-INVARIANT
+
+| arm | mips OFF | mips ON | Δ |
+|---|--:|--:|--:|
+| **the §S1d-5b.10 arm** | **10 / 73** | **10 / 52** | void **0**, black −21 |
+| flat, `--texture_filter=1` | 18 / 139 | 18 / 120 | void **0**, black −19 |
+| flat, bare `--deferred` | 18 / 146 | 18 / 132 | void **0**, black −14 |
+| flat + POM (no shell) | 18 / 139 | — | — |
+
+**Void does not move by a single pixel at any pose**, and the residual is the same
+three poses with the same counts (7 @ t=5518, 2 @ t=5773, 1 @ t=5877). That is the
+expected result stated as a mechanism, not an excuse: `void = popcount(z16==0)`
+counts pixels **no fragment was ever rasterised into**, and mip selection changes
+what a covered pixel SAMPLES, not what gets covered. (`--mip_fix` does move the
+subdivision cut lines, so this was not free by construction — it is measured.)
+
+**Black drops ~25 % on every arm** (73→52, 139→120, 146→132). Per §S1d-5b.10 the
+black metric is not comparable across a texture-sampling change, and this is the
+same effect one step further: coarser mips average a few pure-black stone texels
+away. It is a metric artefact, not a coverage improvement.
+
+**The flat control is mandatory here and it holds: 10 < 18 at both mip settings.**
+
+## S1d-8.2 THE GRAZING SMEAR — the flip does NOT move it, and trilinear CANNOT
+
+Sweep A rebuilt (t=5958, p5958a→p5958b, 16 frames, 0.040 world/frame lateral
+dolly, `FDS_DUMP_TXTR=1`). The dumped `uf/vf` are in UV-repeat units; **the
+published metric's texel scale is ×1024** (`greets_wall_h.png` / `greets_floor_h.png`
+are both 1024²), which is what makes the ladder reproduce exactly.
+
+| arm | slip p90 mips OFF | slip p90 mips ON | slip p90 mips ON + `--texture_filter=2` |
+|---|--:|--:|--:|
+| flat POM | 0.0944 | 0.0947 | 0.0944 |
+| cap 2 | 0.2541 | 0.2546 | — |
+| **cap 4 (the arm)** | **0.8910** | **0.8917** | **0.8912** |
+| cap 8 | 2.5379 | 2.5390 | — |
+| cap 16 | 6.2705 | 6.2717 | 6.2708 |
+
+**THE SMEAR DID NOT MOVE. Not at any cap, not by 0.1 %.** Reach p90 is identical
+to three decimals as well (7.19 / 26.85 / 47.28 / 88.89 / 170.64).
+
+**And trilinear cannot move it, structurally — this is the finding, not the
+number.** `slip` is a **marched-UV** metric: it is `uv − uvgeo` at the pixel, and
+the march runs *upstream* of the albedo filter. `--texture_filter=2` changes how
+the texel at the marched UV is *fetched*; it cannot change *which* UV the march
+returns. So a slip ladder is blind to the filter by construction, and the campaign
+should stop expecting a filter change to show up in it.
+
+What the filter and the flip actually do at the smear pose, measured directly
+(t=5958 p5958b, the arm, full-frame colour A/B):
+
+| A/B | px changed | mean \|d\| on changed | px >12/255 | max |
+|---|--:|--:|--:|--:|
+| `--texture_filter=1` vs `=2` (mips ON) | 406 838 (19.6 %) | 1.02 | **182** | 107 |
+| mips OFF vs mips ON (tf=1) | 1 339 474 (64.6 %) | 1.03 | **462** | 111 |
+| height mip auto vs `--pom_height_mip=0`, t=5958 | 460 772 (22.2 %) | 1.01 | **73** | 83 |
+| height mip auto vs `--pom_height_mip=0`, t=5743 | 399 824 (19.3 %) | 1.27 | **2 436** | 163 |
+
+Both touch a fifth to two thirds of the frame **at ~1 LSB**. The height field the
+march walks *is* coarser in places after the flip (`--pom_height_mip=0` is not a
+no-op: 2 436 px >12/255 at t=5743) — but at the grazing poses the near wall is
+mip 0 (79.8 % of screen AREA at level 0 at t=5958), which is why the marched UV,
+and therefore the smear, is untouched.
+
+**The grazing smear remains open, and the mip flip is now measured NOT to be a
+lead on it.** The mechanism is unchanged: it is the cap-bounded `1/(V·N)` reach on
+the lid march (§S1d-4.1, §S1d-5b.8).
+
+## S1d-8.3 THE SILHOUETTE — byte-for-byte unchanged by the flip
+
+`tools/greets_silhouette.py`, t=5877, 1920×1080, matched world amplitude 0.18 on
+both displacement arms, flat passed first as the `off` datum:
+
+| arm | med | off | std | p95 | rng | area | tv-net |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| flat (OFF **and** ON) | 978.0 | 0.0 | 0.46 | 1.00 | 1 | 188 | 0 |
+| tessellation @0.18 (OFF **and** ON) | 983.0 | +5.0 | 2.43 | 5.00 | 17 | 1045 | 42 |
+| the shell arm (OFF **and** ON) | 950.0 | −28.0 | 0.35 | 1.00 | 1 | 85 | 0 |
+| the shell arm + `--pom_shell_lid_planar` | 950.0 | −28.0 | 0.35 | 1.00 | 1 | 85 | 0 |
+
+**Every column is identical at both mip settings** — the two tables are the same
+table. Expected and now measured: the metric traces the first NEAR pixel per row
+off the `z16` plane, and mips change texture sampling, not where the lid
+geometry projects. **§S1d-6 stands entirely: the shell's silhouette is still
+straighter than flat (0.35 vs 0.46) and still sits 28 px outside the authored
+footprint.** The S1d-7 fix below does not touch it either.
+
+## S1d-8.4 PERF at t=5743 — the flip is not neutral for the POM arms, and
+## tessellation is now measurably CHEAPER than the shell arm
+
+`--bench=scene@scene=greets,t=5743,iters=20`, interleaved, min-of-arm, **14 rounds
+over two batches** (8 at load 10–21, 6 at load 5.8–6.3; a third 6-round batch at
+load 16–43 is discarded for absolute values and agrees on every ordering). Both
+statistics recorded: `bench` = min over rounds of the bench mean; `fmin` = min over
+rounds of the profiler's `frame_ms min`.
+
+| arm | bench OFF | bench ON | **fmin OFF** | **fmin ON** | fmin Δ flat OFF | fmin Δ flat ON |
+|---|--:|--:|--:|--:|--:|--:|
+| flat | 51.10 | 50.70 | **49.41** | **49.32** | — | — |
+| + POM | 56.28 | 56.47 | **54.77** | **54.13** | +5.36 | +4.81 |
+| + tessellation @0.18 | 57.32 | 56.27 | **55.43** | **54.77** | +6.02 | +5.45 |
+| **the §S1d-5b.10 arm** | 58.60 | 57.85 | **56.50** | **55.81** | **+7.09** | **+6.49** |
+
+**Noise floor on this harness: 0.09–0.25 ms** (flat OFF vs flat ON, two arms whose
+true separation `SESSION_STATE` measures at ~0.1 ms). Nothing below ~0.3 ms is
+quoted as resolved.
+
+Two results, both above that floor and both reproduced in two independent batches:
+
+1. **`--mips` ON is NOT perf-neutral for the parallax arms.** It buys
+   **−0.6 ms (POM), −0.7 ms (tessellation), −0.7 ms (the shell arm)** and only
+   −0.1 ms on flat. The flip's own measurement (`SESSION_STATE`: RNDR 39.855 vs
+   39.965 at greets t=2993) was on a **non-POM** arm at a different pose; it is not
+   contradicted, it just did not cover this. Mechanism (inferred, not measured):
+   the parallax arms are the ones doing many dependent height/cone/albedo gathers,
+   so they are the ones with a texture-cache win to collect.
+2. **Tessellation is CHEAPER than the shell arm, at both mip settings.**
+   `arm − tess` = **+1.07 ms** (fmin OFF), **+1.04 ms** (fmin ON), +1.28 / +1.58 on
+   `bench` min. **§S1d-5b.6's +0.32 ms — the "they cost the same" result — does NOT
+   reproduce.** The direction is the same and the gap is still ~1 ms on a ~56 ms
+   frame, but the strategic sentence has to change: *at matched world amplitude
+   the geometric carve is now the cheaper of the two, not the equal.* The mip flip
+   is NOT what did it (the gap is the same either side of it, 1.07 vs 1.04).
+
+`arm − flat` reproduces the published +7.44 exactly at mips OFF (+7.09 fmin,
++7.50 bench). `--pom_shell_lid_planar` is free: 56.46 vs 56.58 fmin min, 58.49 vs
+57.91 bench min over 5 interleaved rounds — inside the floor, in both directions.
+
+## S1d-8.5 THE QUAD DIAGONAL (S1d-7) — the non-planar lid quad is CONFIRMED, and `--pom_shell_lid_planar` removes the crease
+
+**Reproduced post-flip** at the user's own repro, t=2993, cam
+`-14.1865349,2.84484363,-53.351326,0.998402655,-0.0386195704,0.0412385091`,
+1920×1080: the crease is present at **both** mip settings, plain POM has none.
+Mips are irrelevant to it, as §S1d-7 predicted.
+
+**THE CENSUS §S1d-7 ASKED FOR, built and run** (`--pom_shell_census` now prints
+`[POM-SHELL-QUADPLANE]`: per pair of target faces that shared an edge AND one
+AUTHORED plane — the quad's triangulation diagonal — the angle between the two
+RE-DERIVED lid normals, and the plane gap evaluated at the partner triangle's
+centroid):
+
+| material | pairs | lid-normal angle mean | max | plane gap at partner centroid, max | <0.01° | <0.1° | <0.5° | <2° | <10° |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| **`rooms`** (the walls, where the crease is) | 133 | **0.659°** | **3.068°** | **0.0878 world** | 10 | 17 | 56 | 35 | 15 |
+| `floor` | 24 | **0.0000°** | 0.0000° | 0.00000 | 24 | 0 | 0 | 0 | 0 |
+
+**The hypothesis is confirmed as a real, large population.** 123 of 133 wall pairs
+carry a non-zero angle; the worst plane gap is **0.0878 world against a lid offset
+of 0.0900** — one triangle's plane is nearly a full amplitude away from its own
+quad-partner's at that partner's centroid. And `floor` is the perfect internal
+control: it reports `0 corner verts (ShellH min 1.000)` — no smoothed-normal
+divergence, therefore exactly 0.0000° on all 24 pairs. **The effect appears
+exactly where corner verts exist and nowhere else.**
+
+**THE CAUSAL A/B — `--pom_shell_lid_planar` (new, default 0, byte-null).** It gives
+every lid face of ONE AUTHORED PLANE a single lid plane: the area-weighted mean
+normal over the shell's own union-find patch (which already *is* "the faces sharing
+one authored plane"), with the plane constant re-fitted to that patch's
+area-weighted centroid. **No vertex moves**; only the per-face plane the march
+reads changes.
+
+| arm at t=2993 | diagonal crease |
+|---|---|
+| plain POM, no shell | absent |
+| `--pom_shell` (minimal), mips OFF **and** ON | **present**, sharp, on the diagonal |
+| the full §S1d-5b.10 arm, mips ON | **present** |
+| `--pom_shell --pom_shell_entry_flat` (§S1d-7) | present, attenuated |
+| **`--pom_shell --pom_shell_lid_planar`** | **GONE** |
+| **the full arm + `--pom_shell_lid_planar`** | **GONE** |
+
+`docs/img/s1d_7/t2993_quad_diagonal_lid_planar.png` is the three-way crop.
+The flag moves 57 394 px at this pose (25 903 >12/255).
+
+**And it costs nothing measured:**
+
+| gate | the arm | the arm + `--pom_shell_lid_planar` |
+|---|---|---|
+| 19 poses, mips ON | 10 / 52 | **10 / 52** |
+| 19 poses, mips OFF | 10 / 73 | **10 / 73** |
+| silhouette t=5877 | std 0.35, off −28 | **std 0.35, off −28** (unchanged) |
+| t=5743 perf | 56.46 fmin / 58.49 bench | **56.58 / 57.91** (inside the noise floor) |
+
+**What it does NOT do: it does not fix the silhouette.** §S1d-7 hoped one fix might
+serve both defects because §S1d-6.4 also wants "the march should read the authored
+plane". Measured: **it does not.** The silhouette is byte-identical with the flag
+on. The overhang is created by *where the lid vertices sit* (`worldAmp/2` along N
+past the patch border), and unifying the *plane* moves no vertex. **Two defects,
+two fixes.**
+
+**Recommendation: fly `--pom_shell_lid_planar` with the arm.** It removes a
+user-reported, plainly visible defect at zero measured cost on every other metric.
+It is left default OFF pending the user's eyes on a moving camera.
+
+## S1d-8.6 WHAT THE NEW BASELINE MAKES CHEAPEST TO ATTACK NEXT
+
+Ranked by (defect visible to the user) ÷ (measurement cost now known):
+
+1. **The silhouette (§S1d-6.4)** — the one defect the user reported by eye that is
+   still open, with a validated instrument, a known root cause, four measured dead
+   ends and two untried candidates already written down. Mips are now measured
+   irrelevant to it, so the search space did not grow. **Candidate 2 (gate on the
+   base clip's OVERSHOOT DISTANCE, not its boolean) is the cheap one** — the
+   quantity is already computed inside the base clip.
+2. **The grazing smear** — now measured to be mip-independent AND filter-independent
+   *in the marched-UV metric*. Before spending more on it, the campaign needs a
+   metric that is not blind to filtering, because the user's complaint ("swimming
+   textures") is about what the *pixel* does, and every instrument in this document
+   scores the *march*. That is a real gap, and it is why cap 4 vs cap 16 "costs
+   slip" numbers may be overstating what the eye sees.
+3. **The `rooms` vs `floor` asymmetry the census exposed.** `floor` has zero corner
+   verts and zero non-planarity; `rooms` has 438 of 588 moved verts corner-corrected.
+   Whatever the smoothed-normal offset is buying on the walls, it is what
+   manufactured the crease — and `--pom_shell_lid_planar` throws its *plane* away
+   while keeping its *positions*. Whether the positions should be projected onto
+   the authored plane too (the other half of §S1d-7's "make the lid planar") is
+   untried and is now a one-flag experiment.
+
+## S1d-8.7 REPRODUCTION
+
+```sh
+# isolated binary (so four concurrent agents cannot contaminate a figure)
+git worktree add --detach /path/rev-s1d8 <sha>
+cmake -S /path/rev-s1d8 -B /path/rev-s1d8/build -G Ninja \
+      -DMODPLAYER_DIR=$PWD/Modplayer/modplayer && cmake --build /path/rev-s1d8/build
+# ...then run it with cwd = the MAIN tree's Runtime/, so the user's uncommitted
+# authoring assets are the ones rendered (the greets pin depends on them).
+
+# 19-pose battery: poses = 16 lines of docs/greets_review_poses.txt
+#   + t=2980 and t=5518 on the AUTHORED camera (FDS_GREETS_CAM UNSET)
+#   + t=5877 on the S1d-6.1 silhouette cam.
+#   FDS_SNAPSHOT_ZDUMP=1; void = popcount(z16==0), black = popcount(max rgb==0)
+
+# sweep A (slip/reach): 16 frames, lerp cam pos p5958a -> p5958b, dir fixed,
+#   FDS_DUMP_TXTR=1; offset = (uv - uvgeo) * 1024  [TEXELS - the x1024 is what
+#   makes the published ladder reproduce]; cells = floor(uvgeo*1024), mean
+#   offset per cell; slip = |offset(f) - offset(f-1)| pooled over 15 pairs.
+
+# the quad-plane census (init-time print, changes no pixel)
+./DEMO --snapshot=greets@t=2993 --deferred --pom_shell --pom_shell_world_amp \
+       --pom_shell_world_amp_set=0.18 --parallax_pom_cone --parallax_pom=32 \
+       --pom_cone_exact=1 --pom_cone_min_step=1 --texture_filter=1 \
+       --pom_shell_census 2>&1 | grep QUADPLANE
+```
+
+**Gates at this commit:** `render_gate` 3/3 PASS (`4ac809e5` / `b41894f9` /
+`166fa25a`), greets pin **`adfba8ba`** (mips ON) and **`f1297141`**
+(`--no-mips --no-mip_fix`), fountain **`8db68ccb`** — all byte-exact with the new
+flag defaulted off.
+
+**NOT A GATE, AND NOT MINE — the city pin does not reproduce from a clean
+`97b13fd` build.** `FDS_CITY_ENV_PIXEL=1 --snapshot=city@t=1961 --deferred` gives
+`5476be8c…` against the recorded `e1221676…`, **and the `--no-mips --no-mip_fix`
+control also fails** (`b88ecb7b…` against `37e62845…`). Both halves of the pair
+moving rules out the mip flip, and `--pom_shell_lid_planar` cannot be involved (it
+is default off and never runs outside `PomShell_Build`). Something between the
+2026-08-08 city re-pin and `97b13fd` moved city — the env-reflection work is the
+obvious suspect since this recipe is the env-pixel gate. Flagged, not chased.
