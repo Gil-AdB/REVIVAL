@@ -633,3 +633,81 @@ Where a consequence is arithmetic I derived (D2's 2×, D7's π/4), it says INFER
 came from a run someone did, it says MEASURED and points at the section of
 `GPU_BENCHMARK_PLAN.md` that owns it. Where I could not establish something from source — A3, N2,
 S14, H2, D6b's magnitude — it says UNKNOWN, and UNKNOWN is not a soft AGREE.
+
+---
+
+## 8. The `--hdr_linear` MIGRATION AUDIT — every term that feeds the HDR accumulator
+
+**Why this section exists.** Three defects found separately turned out to be one defect: a term
+written for the pre-`hdr_linear` **gamma** composite that was never converted when the composite
+went **linear**. The conductor diffuse kill (D1 → `--hdr_metal_kill`), the `(1-F)` diffuse-energy
+asymmetry (F1), and the env probe capture (E0 → `--env_bake_linear`) are the same bug three times.
+That is an unfinished migration, not three coincidences — so this is the exhaustive sweep.
+
+**Method.** Every write to `lB/lG/lR`, `sB/sG/sR` and `fdB/fdG/fdR` in the scalar tile
+(`Render_DeferredLighting_Tile`, the only path greets runs) was enumerated mechanically and asked
+two questions: *(1) which composite was this expression written for?* and *(2) is it correct where
+it currently lands?* The composite is `DeferredSurfaceKernel.cpp:2708`:
+
+```cpp
+float rlB = aB*aB*dlB + sB;      // aB = texB/255 ; dlB = lB after --hdr_metal_kill
+```
+
+Verdicts: **LINEAR-OK** (correct as it stands), **GAMMA-DEAD** (a gamma-composite term that lands
+only on the discarded LDR `fdB` and therefore does nothing), **GAMMA-LIVE** (a gamma-composite term
+that DOES reach the linear frame and is therefore wrong), **FIXED** (a former GAMMA-LIVE row now
+behind a flag).
+
+> Line numbers at `fog-wt` / `fac9732`. All "MEASURED" rows are runs made for this audit at greets
+> `t=2000`, `--no-bloom`, dummy SDL drivers.
+
+### 8.1 The diffuse / ambient accumulator `lB` — enters the frame as `albedo² · lB`
+
+| # | term | line | verdict | note |
+|---|---|---|--:|---|
+| **M1** | emissive seed `Mat->Luminosity · 255` | `:1756` | **LINEAR-OK** | It rides the same `aB²` the composite applies, so the emissive is albedo-**squared** where the gamma composite gave it albedo¹. That is a real change of both magnitude and saturation made silently at the migration — but it is the correct linear form and the GPU does the same (`S.baseColor * S.lum`, `deferred.metal:786`; contract B5). Recorded so nobody re-opens it. |
+| **M2** | **SH ambient `Mat->Diffuse · E(n)`** | `:1756`, source `EnvBake.cpp:2148-2200` | **GAMMA-LIVE → FIXED** by `--env_bake_linear` | **NEW, and it is the largest row in this table.** The scene-centre SH probe is projected from `renderSixFaces`' **8-bit face store** — the same store E0 indicts. By default that store is the LDR VPage combine `texel·light/256`, i.e. **gamma albedo at power 1**, so `E(n)` is a gamma irradiance being multiplied by `aB²` in a linear frame — E0's bug, in the term that touches **every pixel** rather than only conductors. `--env_bake_linear` fixes it as a side effect because it fixes `renderSixFaces`. **MEASURED:** `[SHAMB]` DC ambient B/G/R **148.3/158.8/154.5 → 107.8/116.7/118.3 (−27 %)**. That is why the flag moves the whole frame by ~15 luma, which reflections alone could never do. The flag's doc string said "every reflective surface"; it has been corrected. |
+| M3 | AO `lB *= ao` | `:1949` | LINEAR-OK (as a *migration* row) | The composite change did not alter its meaning. Its own defects — unclamped, can go negative, occludes the emissive — are D6/D6b and are unrelated to the migration. |
+| M4 | vec-path light sums `lB += bufB[i]` | `:2200` | LINEAR-OK | light enters at power 1, which is the linear convention (L1). |
+| M5 | direct diffuse `lB += intensity · Lcb` | `:2426` | LINEAR-OK | same. This is the row the squared-light-colour bug (§6.2d bug 1) was on the GPU side of; the CPU was already right. |
+| M6 | `--ao_direct` `lB *= aoD` | `:2520` | LINEAR-OK, inert | default OFF. |
+| M7 | the 250 clamp | `:2541` | **explicitly migrated** | `if (!hdrWrite)` — the author of the HDR path lifted it deliberately. Cited as the counter-example: when the migration was done consciously it was done right. |
+| M8 | `--hdr_metal_kill` | `:2690-2707` | **FIXED** (default 2) | the D1 row. |
+
+### 8.2 The specular accumulator `sB` — enters the frame **unsquared**, at power 1
+
+| # | term | line | verdict | note |
+|---|---|---|--:|---|
+| S-a | direct GGX add | `:2502` | LINEAR-OK | `spec` is dimensionless × `Lcb` (0–255 light) → a radiance. |
+| S-b | roughness-map `sB *= specMul` | `:2590` | LINEAR-OK | dimensionless magnitude scale. |
+| **S-c** | **metal tint `sB *= 1-m + m·texB/255`** | `:2601` | **GAMMA-LIVE → FIXED (direct lobe only)** by `--metal_spec_f0` | `texB` is the **gamma** texel used as a linear reflectance. Contract D2. Now superseded on the direct lobe: `--metal_spec_f0` puts the **linear** albedo into F0 and skips this block. |
+| **S-d** | **env metal tint `tB = 1-m + m·texB/255`** | `:1309-1311` (`EnvSpecComposeScalar`) | **GAMMA-LIVE, UNFIXED** | The identical gamma-albedo-as-linear-reflectance expression, on the **env** lobe — which is where essentially all of a conductor's appearance lives (with `--no-env_refl` a conductor renders at 0.00). `--metal_spec_f0` does **not** cover it. This is the next fix in this family, and it is a darkening one (a mid-tone gamma 0.7 becomes linear 0.49). |
+| **S-e** | env probe content `sB += ecB·ek·tB` | `:1312` | **GAMMA-LIVE → FIXED** by `--env_bake_linear` | E0. |
+| S-f | `Mat->SpecMul` | `:2638` | LINEAR-OK | dimensionless. |
+
+### 8.3 The LDR combine `fdB` — **discarded** under `--hdr_linear`
+
+Everything here is applied to `fdB` and then thrown away at `:2708`, which uses `lB`. These rows are
+the migration's dead letters.
+
+| # | term | line | verdict | note |
+|---|---|---|--:|---|
+| F-a | `fdB = texB·lB/256` | `:2562` | GAMMA-DEAD | the gamma composite itself. |
+| F-b | metal diffuse kill `fdB *= dk` | `:2575` | GAMMA-DEAD, **re-landed** | the intent was re-expressed in the linear path as `--hdr_metal_kill`. The dead line is left in place because the LDR VPage path still ships in non-HDR configurations. |
+| **F-c** | **`(1-F)` diffuse energy `fdB *= dc`** | `:2629` | **GAMMA-DEAD, NOT re-landed** | `--diffuse_energy` is **ON for greets** (`GREETS.CPP:1113`) and has **no effect whatsoever** on the shipped frame. Contract F1. Deliberately left alone here: re-landing it removes energy from diffuse in proportion to a Fresnel whose own reflection term (S-d, S-e) is still being corrected, so it should land **after** the env side is settled, not before. Recorded as owed. |
+| F-d | water blend on `hB` | `:2666` | GAMMA-DEAD, **re-landed** | the linear path has its own at `:2712`, and it correctly squares the gamma underlay. Another consciously-migrated row. |
+
+### 8.4 What the audit concludes
+
+**Four instances of one bug, not three.** The known three (D1 / F1 / E0) plus **M2, the SH ambient
+probe**, which is the biggest of them by pixel count and was hiding inside `--env_bake_linear`
+without anybody saying so. Two rows remain **GAMMA-LIVE and unfixed**: **S-d** (the env lobe's metal
+tint) and, if one counts a dead term as a defect, **F-c**.
+
+**The rows that are RIGHT are now recorded**, so this sweep does not have to be repeated: M1, M3–M7,
+S-a, S-b, S-f, F-d.
+
+**Pattern worth keeping:** every row that was migrated *consciously* (M7's clamp, M8, F-d's water)
+is correct. Every row that was migrated *implicitly*, by simply being upstream of the composite, is
+correct only by luck (M1) or wrong (M2, S-c, S-d, S-e). The failure mode is not carelessness in the
+math — it is that the composite changed underneath expressions that nobody re-read.

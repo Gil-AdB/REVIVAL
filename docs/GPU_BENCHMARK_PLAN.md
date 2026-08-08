@@ -2128,6 +2128,129 @@ gloss-derived value (contract **E3**); 8-bit LINEAR quantization in the store; a
 
 ---
 
+### 6.2l The projector's "missing specular" is a SHADOW, and the GPU arm is not a conductor oracle right now
+
+Two claims went into this round: *"the GPU computes specular reflections on the projector, the CPU
+doesn't"* (the user), and *"the CPU's direct specular on conductors is exactly zero, probably because
+these materials author `Material::Specular = 0`"* (the previous agent's hypothesis). The zero
+reproduces. **Neither explanation survives measurement.**
+
+All figures: greets `t=2000`, `FDS_GREETS_CAM="43.0,3.4,-62.85,1.0,0.0,0.0"`, `--no-bloom`, dummy
+SDL drivers, conductor mask = the `--hdr_metal_kill` 0-vs-2 change set (**147,665 px**, a single
+solid object — `--mat_probe` names the centre pixel `id=13 screen emiter`).
+
+#### The materials — MEASURED, not inferred (`--dump_mats`, the `[MAT-TABLE]` census)
+
+| material | Diffuse | **Specular** | Gloss | Luminosity | metallic map |
+|---|--:|--:|--:|--:|---|
+| `screen emiter` | 0.67 | **0.62** | 128 | 0.00 | constant 255 |
+| `momy-1` / `momy-2` | 0.25 | **0.25** | 16 | 0.15 | constant 255 |
+| `screen emiter fance` | 1.00 | 0.00 | 0 | 0.00 | — |
+
+**The `Specular = 0` hypothesis is FALSIFIED.** `screen emiter` authors 0.62 at gloss 128, and
+in-kernel instrumentation confirms `wantSpecular` is **true on all 69,150 of its pixels**.
+
+#### Root cause: the omni cube shadow rejects 98.6 % of the pixel-light pairs
+
+Temporary counters in the scalar tile, main pass only:
+
+| arm | pixels of `screen emiter` | `wantSpecular` | light-passes reaching the accumulate | max `shadowAtten` |
+|---|--:|--:|--:|--:|
+| default | 69,150 | 69,150 | **1,542** | **< 1e-6** |
+| `--no-greets_omni_shadows` | 69,150 | 69,150 | **114,249** | 1.0 |
+
+`--no-shadow_lightmap` and `--no-shadow_polyid` change **nothing** (1,542 either way); only
+`--greets_omni_shadows`' per-omni cube moves it. So the direct term — **diffuse and specular
+together** — is being shadowed to nothing before Fresnel is ever evaluated. Turning the cube off
+makes the CPU's two GGX highlights appear, in the same two places as the GPU's:
+
+`docs/img/metal/projector_direct_shadow.png`
+
+#### The GPU disagrees completely, and its own ray-cast sides against its own bake
+
+- GPU `--viz=direct` on the mask: **68.98**. GPU `--viz=direct_noshadow`: **68.98, bit-identical** —
+  the GPU's shadow removes **exactly nothing** on this object.
+- `--probe_px=960,540` names the surface `Piramid.lwo/screen emiter` and reports lights **5 and 6**
+  (`(33.50,10.85,−49.82)` and `(33.51,10.89,−75.46)`, rgb `(0.5,0.5,0)`) as `reaches`,
+  d ≈ 20 of range 30, atten 0.331/0.340 — and the CPU's own instrumentation returns
+  `maxFalloff = 0.3446`, i.e. **both arms agree on which lights arrive and at what attenuation.**
+- `--probe=46.816,3.397,-62.852` ray-casts the bake's own casting triangles: lights 5 and 6
+  **`RAYCAST: clear`**, every other light `BLOCKED` by `Piramid.lwo/rooms`. The GPU's cube tap agrees
+  (`tap says LIT`).
+
+**But the GPU's own cube stores an occluder at 14.5 units on the tapped texel** (`storedDist=14.540`
+against a true 20.065) and only reads LIT because its `mix(0.0025, 0.0004, NoL)` bias exceeds the
+depth difference. So the ray-cast and the GPU's own bake **also** disagree, and the ray-cast is the
+only ground truth in the room. **VERDICT: the CPU's cube shadow on `screen emiter` is very likely
+wrong, but this is a SHADOW investigation (contract H2), not a metal one, and it is left open rather
+than guessed at.** It is the single reason the projector has no direct term of any kind.
+
+#### The GPU arm's metalness is INERT — measured two independent ways
+
+This invalidates the conductor half of §6.2g and §6.2k as a comparison, and it must be fixed before
+the GPU is quoted on metals again.
+
+1. **`--cpu_metal_diffuse` changes 0 pixels.** The dial replaces `(1 - S.metal)` with `1` in *both*
+   `DirectRadiance` (`deferred.metal:600`) and `AmbientRadiance` (`:646`). At the projector pose
+   `--viz=direct` is byte-identical with and without it; at the momy pose
+   (`--cam="12.0,3.0,-29.0,0.0,-0.0875,-0.9962"`) `--viz=ambient` is **md5-identical**
+   (`da89e22f7e49b0711ab6e2dd5eebfec4`) with and without it. A dial that cannot move a pixel means
+   `S.metal == 0`.
+2. **`--viz=ambient` on the conductor mask is 76.38 with 147,559/147,665 px non-zero.**
+   `AmbientRadiance` multiplies by `(1 - S.metal)`; a metalness-1 surface must render **black**
+   there. It does not.
+
+The ingest is not the problem — `[INGEST] revmap 'screen emiter' <- metallic
+TEXTURES/PBR/screen_emiter/metallic.png` and `[ENVREFL] 'screen emiter' (Reflection=0.00, metallic
+map)` both fire, and the map is constant 255 (re-verified). The break is somewhere between
+`acquireTexture` / `misc[2]` / `texture(4)` and `gMirror.y`; **root cause NOT found, reported
+rather than guessed.**
+
+**Consequence:** the broad smooth amber body in the GPU's `--viz=direct` above is a **diffuse** lobe
+on a surface the GPU is treating as a **dielectric**. What the user read as "the GPU computes
+specular reflections and the CPU doesn't" is, at that pose, the GPU rendering a conductor as a
+plastic. The two tiny dots in each image *are* the direct specular, and the CPU has them too the
+moment the shadow is lifted.
+
+#### The 1.12x residual (§6.2k) — VERDICT: not priceable today, and the two named candidates are dead
+
+The residual was defined as CPU-conductor ÷ GPU-conductor after `--env_bake_linear`. Its denominator
+is a dielectric render (above), so **the ratio is not a like-for-like measurement and no number
+should be quoted from it.** Separately, two of the four named candidates are now **priced and
+eliminated** (projector pose, `--hdr_metal_kill=2 --env_bake_linear`, conductor mask):
+
+| candidate (contract row) | how priced | conductor-mask luma | verdict |
+|---|---|--:|---|
+| baseline | — | 102.099 | — |
+| **E3** — CPU env lobe driven by the roughness MAP, GPU by gloss | `--no-roughness_map` (removes the map from the env mip select) | 102.130 | **+0.03 — dead** |
+| **probe resolution / face store** | `--env_bake_res=512` (128 → 512) | 102.493 | **+0.39 — dead** |
+| **E3b** — padded 102.68° software faces vs 90° hardware cube | no dial isolates it; would need a 90°-unpadded bake path | — | **UNPRICED** |
+| **centroid** — 0.2 world units | — | — | **UNPRICED**, and §6.2k already bounded probe placement as agreeing to 0.2 u |
+
+Against a ~40-luma gap, 0.03 and 0.39 are noise. **If a residual survives a fixed GPU metalness, it
+is not E3 and it is not resolution.**
+
+#### What did land
+
+- **`--metal_spec_f0`** (commit `fac9732`, default OFF, byte-null against the greets pin
+  `6780642b30430efa4fd2f87810b2dfdb`, the fountain pin `8db68ccb59416e9a44037e9f387b7bd9` and
+  `render_gate.sh` 3/3). A conductor's direct-lobe F0 is its albedo, not the dielectric 0.04; the
+  kernel's ENV lobe already knew that (`f0 + (0.98−f0)·metalM`, `:1255`) and its DIRECT lobe did
+  not. MEASURED at the momy pose (100,370-px conductor mask): direct-only **96.470 → 97.370**
+  (+0.90, max pixel +7.4), full shipping stack **194.017 → 194.132** (+0.12). Pair:
+  `docs/img/metal/momy_metal_spec_f0.png`. It moves **0 px** at the projector, for the shadow reason
+  above. Note the GPU uses the same dielectric F0 (`deferred.metal:575`), so this moves the CPU
+  toward physics and **away** from the current oracle — the GPU needs the same change.
+- **The `--hdr_linear` migration audit** — `docs/SHADING_CONTRACT.md` §8, every accumulator term with
+  a verdict. Headline: **`--env_bake_linear` also fixes the SH AMBIENT probe**, which is projected
+  from the same `renderSixFaces` face store (`EnvBake.cpp:2148`). MEASURED: `[SHAMB]` DC ambient
+  B/G/R **148.3/158.8/154.5 → 107.8/116.7/118.3 (−27 %)**. That, not reflections, is most of the
+  flag's ~15-luma whole-frame move. The flag's doc string has been corrected. One row remains
+  GAMMA-LIVE and unfixed: **S-d**, the env lobe's metal tint, which uses the gamma albedo as a linear
+  reflectance and is where nearly all of a conductor's appearance lives.
+
+---
+
 ### 6.2 Phase 3 stage 1 — deferred arm built, shadow CASTER FILTER correct, timings RETRACTED
 
 > **Superseded in part by §6.2a.** This section's conclusion that "shadows are now correct" was
