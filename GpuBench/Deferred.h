@@ -102,6 +102,11 @@ struct DeferredOptions {
     // the front/back depth peel. ON is parity; --no-xpar prices the pass and
     // restores the pre-2026-08-08 behaviour of shading them as opaque.
     bool  xpar = true;
+    // Peel ENCODER MERGING (--no-xpar_merge prices it). Merging is restricted to
+    // clumps whose screen footprints are disjoint, so it cannot change a pixel;
+    // off, each clump gets its own encoder pair per (side, pass) — the
+    // pre-2026-08-08 scheduling.
+    bool  xparMerge = true;
     // xparPeelPassesEffective() (DeferredSurfaceKernel.cpp:3600): an explicit
     // flag wins, otherwise Scene::XparPeelPasses (greets 1, fountain 4).
     int   xparPeelPasses = 0;       // 0 = use the scene's own value

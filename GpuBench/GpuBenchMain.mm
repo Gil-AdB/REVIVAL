@@ -287,6 +287,7 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-flares")                dopt.flares = false;
         else if (a == "--no-cones")                 dopt.cones = false;
         else if (a == "--no-xpar")                  dopt.xpar = false;
+        else if (a == "--no-xpar_merge")            dopt.xparMerge = false;
         else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);
         else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
         else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;

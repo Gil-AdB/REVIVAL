@@ -625,8 +625,11 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         td.storageMode = MTLStorageModePrivate;
         return [dev newTextureWithDescriptor:td];
     };
-    id<MTLTexture> xparDepth = mkDepthRW();
-    id<MTLTexture> xparFloor = mkDepthRW();
+    // PING-PONG, not a copy. The peel floor is "the previous layer's resolved
+    // depth"; the arm used to produce it with a full-screen blit encoder per
+    // extra pass (78 blit encoders/frame on fountain). Alternating the two
+    // textures is the same data with no copy and no encoder.
+    id<MTLTexture> xparDepthPP[2] = { mkDepthRW(), mkDepthRW() };
 
     // ---- mirror reflection targets -----------------------------------------
     // One full-res lit HDR reflection per active mirror panel (greets has 3),
@@ -1780,7 +1783,14 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     // SCHEDULING, chosen freely and stated: two encoders per (clump, side,
     // pass) — a depth resolve then a blended colour pass at depth-Equal — plus
     // one depth blit per extra pass to advance the floor. No tile binning.
-    struct XparGroup { std::vector<size_t> batches; float ctr[3]; float rad; };
+    struct XparGroup {
+        std::vector<size_t> batches; float ctr[3]; float rad;
+        // Conservative WORLD AABB of the clump — the union of its batches'
+        // bounding-sphere boxes. Used ONLY by the encoder-merge disjointness
+        // test below; the ordering still uses ctr/rad unchanged, so the
+        // composite sequence is bit-for-bit what it was.
+        float bmin[3], bmax[3];
+    };
     std::vector<XparGroup> xparGroups;
     {
         std::map<int, size_t> byMesh;
@@ -1795,12 +1805,20 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 g.batches.push_back(i);
                 for (int c = 0; c < 3; ++c) g.ctr[c] = b.bsCtr[c];
                 g.rad = b.bsRad;
+                for (int c = 0; c < 3; ++c) {
+                    g.bmin[c] = b.bsCtr[c] - b.bsRad;
+                    g.bmax[c] = b.bsCtr[c] + b.bsRad;
+                }
                 xparGroups.push_back(std::move(g));
             } else {
                 XparGroup &g = xparGroups[it->second];
                 g.batches.push_back(i);
                 // Union of bounding spheres, coarse but only used for ordering.
                 g.rad = std::max(g.rad, b.bsRad);
+                for (int c = 0; c < 3; ++c) {
+                    g.bmin[c] = std::min(g.bmin[c], b.bsCtr[c] - b.bsRad);
+                    g.bmax[c] = std::max(g.bmax[c], b.bsCtr[c] + b.bsRad);
+                }
             }
         }
     }
@@ -1814,12 +1832,19 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             xparGroups.size(), xparPeelPasses, 2 * xparPeelPasses,
             xparGroups.size() * size_t(xparPeelPasses) * 2 * 2);
 
+    // Encoder census for the report: render encoders actually emitted by the
+    // peel, and how many times encodeXpar ran (main view + one per mirror
+    // reflection), so the per-frame figure is a measurement rather than the
+    // clump-count arithmetic that used to be printed.
+    size_t xparEncoders = 0, xparEncodeCalls = 0, xparRunsTotal = 0;
+
     // dst = the HDR target this composite lands in (the main frame's, or a
     // mirror reflection's). `srcDepth` is the OPAQUE depth of that same view.
     auto encodeXpar = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
                           id<MTLTexture> dst, id<MTLTexture> srcDepth,
                           bool mirroredBasis) {
         if (xparGroups.empty() || !opt.xpar) return;
+        ++xparEncodeCalls;
         // Order groups within a side. `extent` is the CPU's own: the object's
         // bounding-sphere view depth pushed to its FAR edge for back faces and
         // its NEAR edge for front faces (Transform.cpp:2621-2626). Larger
@@ -1848,9 +1873,101 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             if (mirroredBasis)
                 cull = (cull == MTLCullModeFront) ? MTLCullModeBack : MTLCullModeFront;
 
+            // ---- ENCODER MERGING, with the proof that makes it faithful ----
+            // The obvious restructure — "one encoder per LAYER, draw every
+            // transparent clump into it" — is NOT semantics-preserving, and the
+            // CPU source says so. `RenderXparClumpInStrip`
+            // (DeferredSurfaceKernel.cpp:3768-3789) is called PER CLUMP and its
+            // pass 0 does `memset(g_xparPeelFloor, 0)`: the floor is a per-pixel
+            // BUFFER but its LIFETIME is one clump. Layer 0 of clump B therefore
+            // starts from "accept everything" again, not from clump A's layer 0.
+            // Merging all clumps into one layer pass would make layer 0 the
+            // farthest fragment over the WHOLE scene and reorder every
+            // overlapping pair. On fountain that is exactly the case the peel
+            // exists for — 'f_sphere' (pilon.lwo) and 'f in shpere' (inbal.lwo)
+            // are concentric to within 2 units and are DIFFERENT MESHES, so they
+            // are different clumps.
+            //
+            // What IS exactly equivalent: merge encoders across clumps whose
+            // SCREEN FOOTPRINTS ARE DISJOINT. Every buffer the peel touches —
+            // the floor, the side depth, the destination colour — is per-pixel,
+            // so two clumps that share no pixel cannot observe each other, in
+            // either order. Restricting the merge to a CONSECUTIVE RUN of the
+            // existing far-to-near order additionally guarantees that any two
+            // clumps that DO overlap keep their relative order: they land in
+            // different runs, and runs are encoded in order.
+            //
+            // The footprint is the projection of the clump's world AABB corners
+            // through the frame's own constants, padded, with anything crossing
+            // the near plane treated as full-screen. Over-estimating can only
+            // refuse a merge; it can never permit a wrong one.
+            struct Rect { float x0, y0, x1, y1; bool all; };
+            std::vector<Rect> rects(order.size());
             for (size_t oi = 0; oi < order.size(); ++oi) {
                 const XparGroup &g = xparGroups[order[oi]];
+                Rect r{ 1e30f, 1e30f, -1e30f, -1e30f, false };
+                for (int k = 0; k < 8 && !r.all; ++k) {
+                    const float wp[3] = { (k & 1) ? g.bmax[0] : g.bmin[0],
+                                          (k & 2) ? g.bmax[1] : g.bmin[1],
+                                          (k & 4) ? g.bmax[2] : g.bmin[2] };
+                    float P[3] = {0, 0, 0};
+                    const float d[3] = { wp[0] - u.camSrc[0], wp[1] - u.camSrc[1],
+                                         wp[2] - u.camSrc[2] };
+                    for (int c = 0; c < 3; ++c) {
+                        P[0] += u.camRow0[c] * d[c];
+                        P[1] += u.camRow1[c] * d[c];
+                        P[2] += u.camRow2[c] * d[c];
+                    }
+                    if (P[2] <= u.nearZ) { r.all = true; break; }
+                    const float nx = (P[0] / P[2]) * u.sx + u.ox;
+                    const float ny = (P[1] / P[2]) * u.sy + u.oy;
+                    r.x0 = std::min(r.x0, nx); r.x1 = std::max(r.x1, nx);
+                    r.y0 = std::min(r.y0, ny); r.y1 = std::max(r.y1, ny);
+                }
+                if (!r.all) {   // ~2 px of NDC slack on each edge
+                    const float px = 4.0f / float(W), py = 4.0f / float(H);
+                    r.x0 -= px; r.x1 += px; r.y0 -= py; r.y1 += py;
+                }
+                rects[oi] = r;
+            }
+            auto overlaps = [](const Rect &a, const Rect &b) {
+                if (a.all || b.all) return true;
+                return !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
+            };
+            // First-fit LAYERING, not just consecutive runs: clump i goes into
+            // the earliest run that (a) sits at or after every earlier clump it
+            // OVERLAPS, and (b) holds nothing it overlaps. (a) preserves the
+            // far-to-near order for every overlapping pair — the only pairs
+            // whose order is observable — and (b) makes within-run order
+            // irrelevant. A clump that overlaps nothing can therefore join run 0
+            // even if a barrier clump sits between it and run 0 in the sort.
+            std::vector<std::vector<size_t>> runs;   // indices into `order`
+            std::vector<size_t> runOf(order.size(), 0);
+            for (size_t oi = 0; oi < order.size(); ++oi) {
+                // --no-xpar_merge: one run per clump, i.e. the pre-merge
+                // scheduling, so the merge can be priced on its own.
+                if (!opt.xparMerge) { runs.push_back({oi}); runOf[oi] = runs.size() - 1; continue; }
+                size_t lo = 0;
+                for (size_t j = 0; j < oi; ++j)
+                    if (overlaps(rects[j], rects[oi]) && runOf[j] + 1 > lo) lo = runOf[j] + 1;
+                size_t r = lo;
+                for (; r < runs.size(); ++r) {
+                    bool clash = false;
+                    for (size_t m : runs[r]) if (overlaps(rects[m], rects[oi])) { clash = true; break; }
+                    if (!clash) break;
+                }
+                while (runs.size() <= r) runs.push_back({});
+                runs[r].push_back(oi);
+                runOf[oi] = r;
+            }
+            xparRunsTotal += runs.size();
+            xparEncoders  += runs.size() * size_t(xparPeelPasses) * 2;
+
+            for (const auto &run : runs) {
+                int cur = 0;                     // ping-pong slot for this run
                 for (int pass = 0; pass < xparPeelPasses; ++pass) {
+                    id<MTLTexture> layerTex = xparDepthPP[cur];
+                    id<MTLTexture> floorTex = xparDepthPP[cur ^ 1];
                     XparUniforms xu{};
                     for (int c = 0; c < 3; ++c)
                         xu.sceneAmbient[c] = scene.ambient[c] * (1.0f / 255.0f);
@@ -1860,7 +1977,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                     // (a) depth resolve — one fragment per pixel for this layer
                     {
                         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-                        rp.depthAttachment.texture = xparDepth;
+                        rp.depthAttachment.texture = layerTex;
                         rp.depthAttachment.loadAction = MTLLoadActionClear;
                         rp.depthAttachment.storeAction = MTLStoreActionStore;
                         // reversed-Z: 0 = far (keep-nearest init), 1 = near
@@ -1875,14 +1992,17 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                         [e setFragmentBytes:&u length:sizeof(u) atIndex:1];
                         [e setFragmentBytes:&xu length:sizeof(xu) atIndex:5];
                         [e setFragmentTexture:srcDepth atIndex:5];
-                        [e setFragmentTexture:xparFloor atIndex:6];
-                        for (size_t bi : g.batches) {
-                            const Batch &b = scene.batches[bi];
-                            if (!front && !b.twoSided) continue;   // see below
-                            [e setVertexBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
-                            [e drawPrimitives:MTLPrimitiveTypeTriangle
-                                  vertexStart:NSUInteger(b.firstVertex)
-                                  vertexCount:NSUInteger(b.vertexCount)];
+                        [e setFragmentTexture:floorTex atIndex:6];
+                        for (size_t oi : run) {
+                            const XparGroup &g = xparGroups[order[oi]];
+                            for (size_t bi : g.batches) {
+                                const Batch &b = scene.batches[bi];
+                                if (!front && !b.twoSided) continue;   // see below
+                                [e setVertexBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
+                                [e drawPrimitives:MTLPrimitiveTypeTriangle
+                                      vertexStart:NSUInteger(b.firstVertex)
+                                      vertexCount:NSUInteger(b.vertexCount)];
+                            }
                         }
                         [e endEncoding];
                     }
@@ -1892,7 +2012,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                         rp.colorAttachments[0].texture = dst;
                         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
                         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-                        rp.depthAttachment.texture = xparDepth;
+                        rp.depthAttachment.texture = layerTex;
                         rp.depthAttachment.loadAction = MTLLoadActionLoad;
                         rp.depthAttachment.storeAction = MTLStoreActionStore;
                         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
@@ -1905,8 +2025,10 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                         [e setFragmentBytes:&xu length:sizeof(xu) atIndex:5];
                         [e setFragmentSamplerState:samp atIndex:0];
                         [e setFragmentTexture:srcDepth atIndex:5];
-                        [e setFragmentTexture:xparFloor atIndex:6];
-                        for (size_t bi : g.batches) {
+                        [e setFragmentTexture:floorTex atIndex:6];
+                        for (size_t oi : run) {
+                            const XparGroup &g = xparGroups[order[oi]];
+                            for (size_t bi : g.batches) {
                             const Batch &b = scene.batches[bi];
                             // THE BACK LAYER ONLY EXISTS FOR Mat_TwoSided. The
                             // peel splits the faces that SURVIVED
@@ -1944,19 +2066,14 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                             [e drawPrimitives:MTLPrimitiveTypeTriangle
                                   vertexStart:NSUInteger(b.firstVertex)
                                   vertexCount:NSUInteger(b.vertexCount)];
+                            }
                         }
                         [e endEncoding];
                     }
-                    // (c) advance the peel floor to this layer's depth
-                    if (xparPeelPasses > 1 && pass + 1 < xparPeelPasses) {
-                        id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
-                        [bl copyFromTexture:xparDepth sourceSlice:0 sourceLevel:0
-                               sourceOrigin:MTLOriginMake(0, 0, 0)
-                                 sourceSize:MTLSizeMake(NSUInteger(W), NSUInteger(H), 1)
-                                  toTexture:xparFloor destinationSlice:0 destinationLevel:0
-                          destinationOrigin:MTLOriginMake(0, 0, 0)];
-                        [bl endEncoding];
-                    }
+                    // (c) the next pass's floor IS this pass's resolved depth —
+                    // ping-pong, no blit. (Was a full-screen depth copy encoder
+                    // per extra pass: 78 blit encoders/frame on fountain.)
+                    cur ^= 1;
                 }
             }
         }
@@ -2807,6 +2924,21 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 ? 100.0 * double(shadowBatchesCulled)
                         / double(shadowBatchesDrawn + shadowBatchesCulled)
                 : 0.0);
+    }
+    if (opt.xpar && xparEncodeCalls > 0) {
+        // Peel scheduling census. `runs` are the merged encoder groups; the
+        // unmerged form is one run per clump, which is what the old scheduling
+        // emitted. Blit encoders are now zero (the floor ping-pongs).
+        const double calls = double(xparEncodeCalls);
+        std::fprintf(stderr,
+            "[XPAR] peel scheduling: %.1f encoder run(s)/view (%zu clump(s)), "
+            "%.0f render encoder(s) per encodeXpar call vs %zu unmerged, "
+            "0 blit encoder(s) (was %zu) -- merge admits only SCREEN-DISJOINT "
+            "clumps, so the composite is unchanged\n",
+            double(xparRunsTotal) / calls / 2.0, xparGroups.size(),
+            double(xparEncoders) / calls,
+            xparGroups.size() * size_t(xparPeelPasses) * 2 * 2,
+            xparGroups.size() * size_t(xparPeelPasses > 1 ? xparPeelPasses - 1 : 0) * 2);
     }
     out.frame = {"frame", Percentile(frameMs, 0.5), Percentile(frameMs, 0.05), Percentile(frameMs, 0.95)};
     for (int p = 0; p < kPasses; ++p) {
