@@ -3887,6 +3887,16 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
     if (cfg.scene == "city") {
         Initialize_City();
         driver = createCityScene();
+    } else if (cfg.scene == "fountain") {
+        // Fountain's tick calls RenderSkyCube(SkySc, …) and SkySc is created
+        // inside Initialize_City — same two-step the fountain SNAPSHOT does
+        // (RunFountainSnapshot above). The cinematic profile is applied by the
+        // live factory, so a bench that skipped it would measure a different
+        // post chain than the demo runs.
+        Initialize_City();
+        Initialize_Fountain();
+        ApplyCinematicProfile(cine::kFountain);
+        driver = createFountainScene();
     } else if (cfg.scene == "greets") {
         Initialize_Greets();
         // Initialize_Greets spawns the lightmap bake on a background
@@ -3896,7 +3906,7 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
         Greets_JoinBakeThread();
         driver = createGreetsScene();
     } else {
-        std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, greets)\n",
+        std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, fountain, greets)\n",
                      cfg.scene.c_str());
         ThreadPool::instance().close();
         return 2;

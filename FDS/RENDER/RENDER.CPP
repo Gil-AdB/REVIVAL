@@ -458,6 +458,21 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// RenderPath::ForceDeferred takes the deferred path regardless of
 	// the FDS_DEFERRED env var (which is read-once-and-cached) so
 	// snapshot harnesses can render both modes in a single process.
+	// --deferred_prof: the depth-0 bracket every phase below is measured
+	// against, and the MAIN-vs-OFFSCREEN tag. A pass is "main view" if it is
+	// the on-axis camera and not inside an OffscreenViewScope (mirror RTT,
+	// shard bake, env / SH probe cube face). city's water-reflection underlay
+	// (skipVolumetric) IS counted as main — it is a real cost of the city
+	// frame — and shows up as renderFrame calls/f = 2 rather than being hidden.
+	TailProf::PassScope _profPass(path != RenderPath::ForceForward &&
+	                              fds::g_offscreenViewDepth == 0);
+	TailProf::ScopeTimer _profFrame("renderFrame", 0);
+	// Everything before the G-buffer clear: the fog grid roll, the one-shot
+	// env-reflection / SH-probe bakes, the deferred-vs-forward decision, the SSR
+	// previous-frame copy. Marked at the clear (below) rather than RAII'd because
+	// the region ends mid-function.
+	const long long _profPrologue = TailProf::nowNs();
+
 	// New frame for the fast-fog grid: until this frame's fog dispatch runs
 	// (if it runs at all), the transparent peel must not sample a stale grid.
 	FastFog_BeginFrame();
@@ -469,6 +484,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// panorama, mirror RTT) already hold the non-reentrant
 	// g_engineSurfaceMutex and starting our own OffscreenViewScope inside one
 	// deadlocks (found the hard way: hung 20 min inside UpdateDiscoBall).
+	TailProf::mark("rf-fogbegin", _profPrologue, 2);
+	const long long _profEnvPrep = TailProf::nowNs();
 	if (fds::FeatureFlags::env_refl() && CurScene && View
 	    && fds::g_offscreenViewDepth == 0) {
 		if (fds::EnvReflection_FramePrep(CurScene)) {
@@ -487,6 +504,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// gate + re-Transform-after-bake contract as EnvReflection_FramePrep (the
 	// probe renders six cube faces through the deferred pipeline, clobbering the
 	// frame's transformed state).
+	TailProf::mark("rf-envprep", _profEnvPrep, 2);
+	const long long _profShAmb = TailProf::nowNs();
 	if (fds::FeatureFlags::sh_ambient() && CurScene && View
 	    && fds::g_offscreenViewDepth == 0) {
 		if (fds::SHAmbient_EnsureBaked(CurScene)) {
@@ -494,6 +513,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			if (CAll != 0) Radix_Sort(FList, SList, CAll);
 		}
 	}
+
+	TailProf::mark("rf-shambient", _profShAmb, 2);
 
 	bool deferred;
 	if (path == RenderPath::ForceForward)       deferred = false;
@@ -521,7 +542,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		const bool doCapture = skipVolumetric || !s_prevWasSkipVol;
 		s_prevWasSkipVol = skipVolumetric;
 		if (doCapture) {
-			TailProf::ScopeTimer _tp("ssr-prevcopy");
+			TailProf::ScopeTimer _tp("ssr-prevcopy", 1);
 			if ((int)g_ssrPrevColor.size() != PageSize)
 				g_ssrPrevColor.resize(size_t(PageSize));
 			g_ssrPrevW = XRes; g_ssrPrevH = YRes;
@@ -535,8 +556,9 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// windows) leaves mat32 untouched. The deferred lighting pass then
 	// skips matID >= count via the existing range check, leaving those
 	// forward-rendered pixels alone.
+	TailProf::mark("rf-prologue", _profPrologue, 1);
 	if (deferred && g_gbuffer) {
-		TailProf::ScopeTimer _tpClear("gbuf-clear");
+		TailProf::ScopeTimer _tpClear("gbuf-clear", 1);
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
 		parallel_memset(g_gbuffer->txtr.data(), 0xFF, numPixels * sizeof(uint32_t));
 		// Lightmap planes: clear to 0 each frame (sentinel = "no
@@ -594,11 +616,16 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		const int y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
 		const int x1 = tileSizeX * i;
 		const int x2 = (i == numTilesX - 1) ? XRes : (x1 + tileSizeX);
+		// --deferred_prof thread-sum: the tile kernels release tileDone from
+		// inside, so this add can land just after the release — drain() waits
+		// for the stragglers (bounded), see TailProf.h.
+		const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 		if (deferred) RenderInnerMekalele(x1, y1, x2, y2);
 		else          RenderInner(fctx, x1, y1, x2, y2);
+		TailProf::addBusy(_tp);
 	});
 
-	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer");
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer", 1);
 
 	// Per-pass deferred lighting context, owned by renderFrame (RenderContext
 	// migration): Render_DeferredLighting fills it; it's threaded to every
@@ -615,7 +642,9 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// precede Render_DeferredLighting (which writes it) and run exactly once
 		// per frame (clearing it again afterward would wipe the coverage). Gated
 		// on --hdr.
-		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFrame();
+		// A full-res f32 RGBA radiance clear (33 MB at 1080p) — worth its own row.
+		if (fds::FeatureFlags::hdr())
+			{ TailProf::ScopeTimer _tp("hdr-begin", 1); fds::Hdr_BeginFrame(); }
 
 		// Stage A overlap (docs/THREADING_OVERLAP_PLAN.md): join the dynamic
 		// shadow bake here — as late as possible (after the gbuffer fill, which
@@ -623,14 +652,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// unless a bake was dispatched async this frame (--shadow-gbuffer-overlap,
 		// greets only); pending is cleared by this first join so recursive
 		// shard/RTT lighting passes don't re-join.
-		ShadowBake_JoinPending();
+		{ TailProf::ScopeTimer _tp("shadow-join", 1); ShadowBake_JoinPending(); }
 
 		// Phase A deferred lighting pass: per-pixel ambient + Lambertian
 		// + linear falloff against the scene's omnis, modulated by the
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
-		{ TailProf::ScopeTimer _tp("DeferredLighting-call"); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
+		{ TailProf::ScopeTimer _tp("DeferredLighting-call", 1); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
 		// pixels, BEFORE fog/volumetric so haze layers on top of the occluded
@@ -638,7 +667,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// water-reflection underlay passes (cost + the static AO scratch buffer
 		// isn't re-entrant). No-op unless --ssao.
 		if (!skipVolumetric)
-			{ TailProf::ScopeTimer _tp("ssao"); Render_SSAO(); }
+			{ TailProf::ScopeTimer _tp("ssao", 1); Render_SSAO(); }
 
 		// --ssao-debug self-isolation: Render_SSAO has written the greyscale AO
 		// term to VPage; STOP here so the downstream compositing (skybox, fog,
@@ -656,6 +685,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// its overdraw. Gated on --deferred-skybox; off by default
 		// until visually validated.
 		if (fds::FeatureFlags::deferred_skybox()) {
+			TailProf::ScopeTimer _tp("skybox", 1);
 			Render_DeferredSkybox();
 		}
 
@@ -665,7 +695,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// the SSAO/fog guard so reflection/RTT passes are untouched → flag-off
 		// (default) is byte-identical.
 		if (!skipVolumetric && fds::FeatureFlags::sky_gradient())
-			{ TailProf::ScopeTimer _tp("sky-gradient"); Render_DeferredSkyGradient(); }
+			{ TailProf::ScopeTimer _tp("sky-gradient", 1); Render_DeferredSkyGradient(); }
 
 		// Full-screen distance fog over deferred-lit opaque pixels. Runs
 		// BEFORE the transparent peel AND before the cone/halo volumetric
@@ -685,11 +715,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				// otherwise keep stale VPage content (uninitialized on a
 				// scene's first frames) that the water then reflects.
 				if (!(skipVolumetric && fds::FeatureFlags::fast_fog_froxel()))
-					{ TailProf::ScopeTimer _tp("fastfog"); Render_DeferredFastFog(dctx); }
+					{ TailProf::ScopeTimer _tp("fastfog", 1); Render_DeferredFastFog(dctx); }
 				else
-					{ TailProf::ScopeTimer _tp("fog-skypaint"); Render_DeferredFastFogSkyPaint(dctx); }
+					{ TailProf::ScopeTimer _tp("fog-skypaint", 1); Render_DeferredFastFogSkyPaint(dctx); }
 			} else
-				{ TailProf::ScopeTimer _tp("fog-legacy"); Render_DeferredFogPass(dctx); }
+				{ TailProf::ScopeTimer _tp("fog-legacy", 1); Render_DeferredFogPass(dctx); }
 		}
 
 		// Fog-off HDR activation: a no-fog scene (greets) never ran the froxel
@@ -701,7 +731,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// pass (skipVolumetric) is an intermediate LDR underlay that must NOT route
 		// its transparents into g_hdrBuf (it never tonemaps), same as the RTT.
 		if (fds::FeatureFlags::hdr() && !fds::g_hdrActive && !skipVolumetric)
-			{ TailProf::ScopeTimer _tp("hdr-activate"); fds::Hdr_ActivateNoFog(); } fds::Hdr_DebugScan("activate");
+			{ TailProf::ScopeTimer _tp("hdr-activate", 1); fds::Hdr_ActivateNoFog(); } fds::Hdr_DebugScan("activate");
 
 		// Glass refraction (--glass_refract): snapshot the current accumulated
 		// background into the STABLE read-only buffers g_glassRefrHdr/Ldr that the
@@ -831,7 +861,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				workFn(tbX0[tileIdx], tbY0[tileIdx],
 				       tbX1[tileIdx], tbY1[tileIdx], tileIdx);
 			});
-			TailProf::drain(renderns::tileDone, enq, "postlight");
+			TailProf::drain(renderns::tileDone, enq, "postlight", 2);
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
@@ -1161,9 +1191,22 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		}  // close unifiedTbr=false legacy block
 xpar_done: ;
 	if (TailProf::enabled()) {
+		// The span itself goes through the registry (depth 1) so it lands in the
+		// --deferred_prof table and its per-frame normalisation; the sub-phase
+		// lines below stay on the legacy rolling print.
+		TailProf::mark("xpar-peel", _xparT0, 1);
+		// Per-frame DELTA of the three cumulative sub-phase accumulators, so the
+		// one-shot table gets them without disturbing the rolling-print path.
+		if (TailProf::oneShot()) {
+			static double pC = 0, pR = 0, pK = 0;
+			TailProf::addMs("xpar-clear",     s_xparClearMs  - pC, 2);
+			TailProf::addMs("xpar-raster",    s_xparRasterMs - pR, 2);
+			TailProf::addMs("xpar-composite", s_xparCompMs   - pK, 2);
+			pC = s_xparClearMs; pR = s_xparRasterMs; pK = s_xparCompMs;
+		}
 		static double _xa = 0; static int _xn = 0;
 		_xa += double(TailProf::nowNs() - _xparT0) / 1e6;
-		if (++_xn >= 60) {
+		if (++_xn >= 60 && !TailProf::oneShot()) {
 			std::fprintf(stderr, "[TAIL-PROF] serial %-18s %7.3fms/f\n", "xpar-peel", _xa / _xn);
 			std::fprintf(stderr, "[TAIL-PROF] xpar-phases  clear=%.3f raster=%.3f composite=%.3f ms/f  (%.1f batches/f)\n",
 			             s_xparClearMs / _xn, s_xparRasterMs / _xn, s_xparCompMs / _xn,
@@ -1189,6 +1232,7 @@ xpar_done: ;
 	const auto rt  = fds::MainRenderTargetFromGlobals();
 	const auto& cam = fds::g_mainCamera;
 
+	{ TailProf::ScopeTimer _tpSprites("sprite-insert", 1);
 	while (I--)
 	{
 		Face* F = (FLS++)->face;
@@ -1204,13 +1248,14 @@ xpar_done: ;
 			F->Filler(F, &A, 1, 0, rt, cam);
 		}
 	}
+	}
 
 	// TBR_MatchesTarget: an offscreen pass (mirror RTT) must not flush the
 	// main frame's strip lists onto its small target — its sprites drew
 	// immediate (see The_MMX_Scalar) and its transparents took the peel.
 	if ((CurScene->Flags & Scn_SpriteTBR) && TBR_MatchesTarget(CurScene))
 	{
-		{ TailProf::ScopeTimer _tp("TBR-render"); TBR_Render(CurScene, deferred ? &dctx : nullptr); }
+		{ TailProf::ScopeTimer _tp("TBR-render", 1); TBR_Render(CurScene, deferred ? &dctx : nullptr); }
 	}
 
 	// HDR (Phase 2 overlay reorg): the tonemap walks down the pipeline as each
@@ -1232,10 +1277,11 @@ xpar_done: ;
 	//     or halos if enabled.
 	if (!skipVolumetric) {
 		if (useUnifiedVolumetric()) {
+			TailProf::ScopeTimer _tp("unified-vol", 1);
 			Render_DeferredVolumetric(dctx);   // NB: not yet HDR-redirected (no scene uses it)
 		} else {
-			Render_VolumetricCones(dctx);
-			{ TailProf::ScopeTimer _tp("halos"); Render_OmniHalos(dctx); } fds::Hdr_DebugScan("cones+halos");
+			{ TailProf::ScopeTimer _tp("cones-call", 1); Render_VolumetricCones(dctx); }
+			{ TailProf::ScopeTimer _tp("halos", 1); Render_OmniHalos(dctx); } fds::Hdr_DebugScan("cones+halos");
 		}
 
 		// Screen-space rain LAST among the view-aligned scene passes (streaks
@@ -1244,7 +1290,7 @@ xpar_done: ;
 		// screen-space effect re-run from the mirror camera would rain
 		// upward in the water. Rain is scene radiance → in HDR it accumulates
 		// into g_hdrBuf (gated g_hdrActive) and is captured by the tonemap.
-		Render_ScreenSpaceRain();
+		{ TailProf::ScopeTimer _tp("rain", 1); Render_ScreenSpaceRain(); }
 
 		// HDR (Phase 2.x): tonemap now that ALL scene-radiance overlays (cones,
 		// halos, rain) have accumulated into g_hdrBuf. SKIPPED when
@@ -1260,12 +1306,14 @@ xpar_done: ;
 		// smear under camera motion). Snapshots hid it: on a one-frame render
 		// g_hdrActive starts false so the sky-cube pass's tonemap no-ops.
 		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) {
+		{ TailProf::ScopeTimer _tp("bloom-chain", 1);
 			fds::Hdr_DebugScan("pre-dof"); fds::Render_DoFPass(); fds::Hdr_DebugScan("post-dof");
 			fds::Render_HdrBrightPass();    // one shared bright-pass for anamorphic+bloom+lens-ghost (no-op unless one is on)
 			fds::Render_AnamorphicPass();   // lens streaks before the tonemap (no-op unless --anamorphic)
 			fds::Render_BloomPass();        // glow into g_hdrBuf BEFORE the tonemap (no-op unless --bloom)
 			fds::Render_LensGhostPass();    // ghost discs + halo into g_hdrBuf BEFORE the tonemap (no-op unless --lens_ghosts)
-		{ TailProf::ScopeTimer _tp("tonemap-post");
+		}
+		{ TailProf::ScopeTimer _tp("tonemap-post", 1);
 			fds::Render_TonemapToVPage();
 			fds::Render_LensPostPass();     // CA + vignette (no-op unless --chromatic/--vignette)
 			fds::Render_GradeGrainPass();   // grade + grain (no-op unless --grade/--grain)
@@ -1277,14 +1325,18 @@ xpar_done: ;
 		// UI). The deferred fountain tonemaps in its tick, so it runs lens
 		// drops there instead; skip here when the tonemap is deferred.
 		if (!(fds::FeatureFlags::hdr() && fds::g_hdrDeferTonemap))
-			Render_LensDrops();
+			{ TailProf::ScopeTimer _tp("lensdrops", 1); Render_LensDrops(); }
 	}
 	VolProf_Tick();
 
 	// Edge-aware AA (--aa): blend across G-buffer geometry edges on the final
 	// LDR image. After the tonemap + all post (operates on VPage), before the
 	// debug overlays. No-op when --aa is off or on the forward path.
-	{ TailProf::ScopeTimer _tp("edge-aa"); Render_EdgeAA(dctx); }
+	{ TailProf::ScopeTimer _tp("edge-aa", 1); Render_EdgeAA(dctx); }
+
+	// Everything from here to the end of renderFrame: the debug/viz overlays and
+	// the editor highlight. Function-scope RAII so it closes on any return path.
+	TailProf::ScopeTimer _tpTail("rf-tail-overlays", 1);
 
 	// Lightmap debug viz — paints VPage with mesh/face/bary/factor
 	// data when --shadow-lightmap-viz != 0. No-op otherwise. Runs last

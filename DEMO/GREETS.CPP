@@ -3458,7 +3458,7 @@ struct GreetsScene : SceneDriver {
 		}
 
 		Animate_Objects(GreetSc, View);
-		TailProf::mark("Tick-Anim", _tickT); _tickT = TailProf::nowNs();
+		TailProf::mark("Tick-Anim", _tickT, 3); _tickT = TailProf::nowNs();
 
 		// Mirror shatter (Y key): bake the room into a panorama from the
 		// screen's centre, break it into reflecting shards, and close the
@@ -3701,7 +3701,7 @@ struct GreetsScene : SceneDriver {
 			}
 		}
 
-		TailProf::mark("Tick-Logic", _tickT);
+		TailProf::mark("Tick-Logic", _tickT, 3);
 
 		// Second-order mirror RTT pass (no-op without --mirror-rtt):
 		// re-render the visible mirror-in-mirror panels into their slot
@@ -3709,7 +3709,7 @@ struct GreetsScene : SceneDriver {
 		// camera pose from this frame's spline step) and BEFORE the
 		// main Transform_Objects (the pass clobbers per-vertex
 		// transforms, which the main transform recomputes).
-		{ TailProf::ScopeTimer _tp("RTT");
+		{ TailProf::ScopeTimer _tp("RTT", 3);
 		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
 		                              g_greetsRttSlots); }
 
@@ -3763,7 +3763,7 @@ struct GreetsScene : SceneDriver {
 
 		_tickT = TailProf::nowNs();
 		Transform_Objects(GreetSc, fds::g_mainCamera, fds::g_mainFaces);
-		TailProf::mark("Tick-Xfrm", _tickT); _tickT = TailProf::nowNs();
+		TailProf::mark("Tick-Xfrm", _tickT, 3); _tickT = TailProf::nowNs();
 
 		// PROFILER: LGHT phase.
 		prof.switchTo(PROF_LGHT);
@@ -3780,7 +3780,7 @@ struct GreetsScene : SceneDriver {
 		    fds::g_rttJobsLastFrame > 0;
 		if (lightingConsumed)
 			Lighting(GreetSc);
-		TailProf::mark("Tick-Light", _tickT); _tickT = TailProf::nowNs();
+		TailProf::mark("Tick-Light", _tickT, 3); _tickT = TailProf::nowNs();
 
 		// PROFILER: SORT phase.
 		prof.leave(PROF_LGHT);
@@ -3788,7 +3788,7 @@ struct GreetsScene : SceneDriver {
 		prof.enter(PROF_SORT);
 
 		Radix_Sort(FList, SList, CAll);
-		TailProf::mark("Tick-Radix", _tickT);
+		TailProf::mark("Tick-Radix", _tickT, 3);
 
 		// PROFILER: RNDR phase.
 		prof.switchTo(PROF_BAKE);
@@ -3814,7 +3814,7 @@ struct GreetsScene : SceneDriver {
 			ShadowBake_JoinPending();   // tick-thread join: the bake never
 			                            // contends the render's own waves
 		prof.switchTo(PROF_RNDR);
-		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
+		{ TailProf::ScopeTimer _tp("GreetsCodeStage", 3); gg->Render(); }
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;
 		// Diagnostic: identify shadow maps whose dynamic polyId hash isn't
@@ -3838,8 +3838,8 @@ struct GreetsScene : SceneDriver {
 		// wall covers. Without this clones spill outside the mirror
 		// surface footprint (worked for teleporter only because the
 		// surrounding Piramid walls were the de facto occluder mask).
-		{ TailProf::ScopeTimer _tp("StampMasks");   fds::StampMirrorMasks(GreetSc, g_greetsMirrors); }
-		{ TailProf::ScopeTimer _tp("ProbeMirrors"); fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors); }
+		{ TailProf::ScopeTimer _tp("StampMasks", 3);   fds::StampMirrorMasks(GreetSc, g_greetsMirrors); }
+		{ TailProf::ScopeTimer _tp("ProbeMirrors", 3); fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors); }
 
 		// The mirror clone-mask (Mekalele's per-pixel gb.mirrorId ==
 		// ctx.mirrorTag) only runs on the deferred path. Forward sends
@@ -3870,7 +3870,7 @@ struct GreetsScene : SceneDriver {
 			             fwd, def, def/fwd, defNV, defNV/fwd, int(CAll), int(XRes), int(YRes));
 		}
 		if (fds::FeatureFlags::greets_mirror()) {
-			TailProf::ScopeTimer _tp("Render-3D");
+			TailProf::ScopeTimer _tp("Render-3D", 3);
 			Render(RenderPath::ForceDeferred);
 		} else {
 			Render();

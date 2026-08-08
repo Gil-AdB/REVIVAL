@@ -5932,8 +5932,12 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		// byte-identical.
 		dispatchIndexed(nTiles, nullptr, [&ctx, useOuterVec, tileBounds](int t) {
 			int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+			// --deferred_prof thread-sum (the kernel releases tileDone from
+			// inside, so the add can trail the release — drain() settles it).
+			const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 			if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
 			else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
+			TailProf::addBusy(_tp);
 		});
 		TailProf::mark("w1-enqueue", _w1q);
 		TailProf::drain(renderns::tileDone, nTiles, "lighting-w1");
@@ -5954,7 +5958,9 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			// Same dispatchIndexed shape as wave 1 (see above).
 			dispatchIndexed(nTiles, nullptr, [&ctx, tileBounds](int t) {
 				int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+				const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 				Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
+				TailProf::addBusy(_tp);
 			});
 			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2");
 		}

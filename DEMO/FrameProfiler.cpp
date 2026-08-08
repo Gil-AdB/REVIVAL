@@ -1,5 +1,6 @@
 #include "FrameProfiler.h"
 #include <Base/FeatureFlags.h>
+#include <RENDER/TailProf.h>   // --deferred_prof: per-frame normaliser
 #include "Rev.h"
 
 #include <Base/FDS_DECS.H>
@@ -66,6 +67,11 @@ void FrameProfiler::beginFrame() {
     // mirror it into the legacy global here — the one call every scene
     // makes each frame — so P-key-less toggling works everywhere.
     g_profilerActive = fds::FeatureFlags::profiler();
+    // --deferred_prof: the single per-tick hook the phase table normalises by,
+    // and the point where it learns which thread is the tick thread (so a
+    // renderFrame running on a pool worker — shard / probe bake — can never be
+    // counted as a main-view pass). No-op when the flag is off.
+    TailProf::NewFrame();
     for (int i = 0; i < PROF_NUM; ++i) currentFrame_[i] = 0;
     frameStart_ = clock::now();
 }

@@ -3465,7 +3465,7 @@ struct CityScene : SceneDriver {
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
 			g_mipLastMipWrite = true;
 			{
-				TailProf::ScopeTimer _tp("dispmap-resample");
+				TailProf::ScopeTimer _tp("dispmap-resample", 3);
 				// Row-band parallel resample (mirrors updateRippleDispMap's
 				// pool fan-out). Independence: the memcpy snapshots VPage into
 				// the immutable backBuffer; the gather then reads only
