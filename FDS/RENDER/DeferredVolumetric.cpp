@@ -2057,6 +2057,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         // tileDone itself → done=nullptr; the [&] captures reference this
         // frame's stack, valid until the drain below). Tiles write
         // disjoint rows in any order → byte-identical.
+        const long long _profCones = TailProf::enabled() ? TailProf::nowNs() : 0;
         dispatchIndexed(numTiles, nullptr, [&](int t) {
             const int j = t / numTilesX, i = t - j * numTilesX;
             const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
@@ -2069,7 +2070,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             TailProf::addBusy(_tp);   // before release → race-free idle metric
             renderns::tileDone.release();
         });
-        TailProf::drain(renderns::tileDone, numTiles, "cones");
+        TailProf::drain(renderns::tileDone, numTiles, "cones", 2, _profCones);
     }
 }
 
@@ -3096,6 +3097,7 @@ void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
 	const auto tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
 	const auto tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 	renderns::tileCounter = 0;
+	const long long _profFog = TailProf::enabled() ? TailProf::nowNs() : 0;
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
 	    [&ctx, tileSizeX, tileSizeY, invFZP](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
@@ -3104,6 +3106,6 @@ void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
 		Render_DeferredFogPass_Tile(ctx, x1, y1, x2, y2, invFZP);
 		renderns::tileDone.release();
 	});
-	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog");
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog", 2, _profFog);
 }
 

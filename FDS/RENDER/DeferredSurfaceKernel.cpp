@@ -2622,7 +2622,31 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// longer decodes; T·scene + in-scatter compose in linear).
 					const float kN = 1.0f / 255.0f;
 					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
-					float rlB = aB*aB*lB + sB, rlG = aG*aG*lG + sG, rlR = aR*aR*lR + sR;
+					// --hdr_metal_kill (docs/SHADING_CONTRACT.md D1): a conductor
+					// has no diffuse lobe. The kernel computes that kill above
+					// (`fdB *= 1-metalM`) but it lands on the LDR combine only,
+					// while THIS — the shipped HDR frame — is built from the raw
+					// accumulator, so metals keep a diffuse term they should not
+					// have. Mode 2 spares the emissive the accumulator was seeded
+					// with (see the lB seed); mode 1 is the blunt whole-accumulator
+					// form. Default 0 = the historical behaviour, byte-null.
+					float dlB = lB, dlG = lG, dlR = lR;
+					const int metalKill = fds::FeatureFlags::hdr_metal_kill();
+					if (metalKill > 0 && metalM > 0.0f) {
+						const float dkH = 1.0f - metalM;
+						if (metalKill >= 2) {
+							const float lum = Mat->Luminosity;
+							const float eB2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.B);
+							const float eG2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.G);
+							const float eR2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.R);
+							dlB = eB2 + (lB - eB2) * dkH;
+							dlG = eG2 + (lG - eG2) * dkH;
+							dlR = eR2 + (lR - eR2) * dkH;
+						} else {
+							dlB = lB * dkH; dlG = lG * dkH; dlR = lR * dkH;
+						}
+					}
+					float rlB = aB*aB*dlB + sB, rlG = aG*aG*dlG + sG, rlR = aR*aR*dlR + sR;
 					if (isWater) {            // reflection underlay is gamma → linearize
 						const dword e = out[i];
 						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
@@ -5940,7 +5964,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			TailProf::addBusy(_tp);
 		});
 		TailProf::mark("w1-enqueue", _w1q);
-		TailProf::drain(renderns::tileDone, nTiles, "lighting-w1");
+		TailProf::drain(renderns::tileDone, nTiles, "lighting-w1", 2, _w1q);
 	}
 
 	// Wave 2: fill odd cells via 2-tap interpolation (with full-shade
@@ -5956,13 +5980,14 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			}
 		} else {
 			// Same dispatchIndexed shape as wave 1 (see above).
+			const long long _w2q = TailProf::enabled() ? TailProf::nowNs() : 0;
 			dispatchIndexed(nTiles, nullptr, [&ctx, tileBounds](int t) {
 				int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
 				const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 				Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
 				TailProf::addBusy(_tp);
 			});
-			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2");
+			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2", 2, _w2q);
 		}
 	}
 

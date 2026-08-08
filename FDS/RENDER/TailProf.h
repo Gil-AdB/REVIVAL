@@ -149,6 +149,9 @@ inline std::vector<std::string>& regOrder() {
 	static auto* v = new std::vector<std::string>(); return *v;
 }
 inline long long& frameCount() { static long long f = 0; return f; }
+// Synthetic accumulator for the per-frame unattributed remainder (see
+// closeFrameLocked). Not in the registry — it is derived, not recorded.
+inline Acc& otherAcc() { static auto* a = new Acc(); return *a; }
 
 // Main-view frame counter + the identity of the thread that drives it. Set by
 // NewFrame(); everything else compares against it so a render on a pool worker
@@ -177,6 +180,22 @@ inline int bucketIdx() {
 // phase actually ran in are candidates, so a phase that fires on some frames
 // (a batched bake) doesn't get a spurious 0 min.
 inline void closeFrameLocked() {
+	// True per-frame unattributed remainder: depth-0 minus Σ depth-1, computed
+	// WITHIN the frame. (The report's residual-of-minima is not this — each
+	// phase's min comes from its own best frame.) This row is the instrument's
+	// own credibility gate: near zero = the frame is fully attributed and the
+	// per-phase numbers can be trusted; several ms = the tick thread lost time
+	// somewhere no scope covers (on a loaded machine, descheduled mid-phase),
+	// and the breakdown should be re-taken.
+	double d0 = 0.0, d1 = 0.0;
+	bool   any = false;
+	for (auto& kv : registry()) {
+		const Acc& a = kv.second;
+		if (a.curCalls == 0) continue;
+		any = true;
+		if (a.depth == 0) d0 += a.curWall;
+		else if (a.depth == 1) d1 += a.curWall;
+	}
 	for (auto& kv : registry()) {
 		Acc& a = kv.second;
 		if (a.curCalls > 0 && a.curWall < a.minWall) {
@@ -184,6 +203,12 @@ inline void closeFrameLocked() {
 			a.minBusy = a.curBusy;
 		}
 		a.curWall = a.curBusy = 0; a.curCalls = 0;
+	}
+	if (any && d0 > 0.0) {
+		Acc& o = otherAcc();
+		const double v = d0 - d1;
+		o.b[0].wall += v; ++o.b[0].calls;
+		if (v < o.minWall) o.minWall = v;
 	}
 }
 
@@ -316,13 +341,22 @@ struct PassScope {
 
 // Drain `n` permits from `sem`. Identical to a plain `for(n) sem.acquire()`
 // loop when disabled; when enabled, measures the wave's wall + thread-sum.
+//
+// `startNs` MUST be taken BEFORE the dispatch that enqueues the tasks. Timing
+// only the acquire loop measures a fiction: the pool starts consuming tiles the
+// instant the first task is queued, so any time the tick thread spends inside
+// the enqueue — or descheduled during it, which on a loaded machine is
+// milliseconds — is work the wave did while unobserved, and the drain then
+// returns almost immediately. That produced 0.3 ms readings for a G-buffer wave
+// carrying 67 core-ms of work. Passing 0 keeps the old (wrong) behaviour and is
+// only there so an un-updated call site still compiles.
 inline void drain(std::counting_semaphore<INT_MAX>& sem, int n, const char* wave,
-                  int depth = 2) {
+                  int depth = 2, long long startNs = 0) {
 	if (!enabled() || n <= 0) {
 		for (int i = 0; i < n; ++i) sem.acquire();
 		return;
 	}
-	const long long t0 = nowNs();
+	const long long t0 = startNs ? startNs : nowNs();
 	for (int i = 0; i < n; ++i) sem.acquire();
 	const long long tLast = nowNs();
 	// Straggler settle: a task whose addBusy lands just after its release. Wait
@@ -401,11 +435,14 @@ inline void Report(const char* label) {
 				double(offB.calls) / f, offB.wall / f);
 			std::fprintf(stderr, "\n");
 		}
-		if (d == 1 && depth0 > 0.0)
+		if (d == 1 && depth0 > 0.0) {
+			const Acc& o = otherAcc();
 			std::fprintf(stderr,
-				"[DPROF]   %-24s %7s %9.3f %9.3f %9s %7s   (= renderFrame - Σ depth-1)\n",
-				"OTHER (unattributed)", "-", min0 - sumMin1,
+				"[DPROF]   %-24s %7s %9.3f %9.3f %9s %7s   (per-frame renderFrame - Σ depth-1)\n",
+				"OTHER (unattributed)", "-",
+				(o.minWall < 1e29) ? o.minWall : (min0 - sumMin1),
 				(depth0 - sumDepth1) / f, "-", "-");
+		}
 	}
 	std::fprintf(stderr,
 		"[DPROF] depth 0 = renderFrame, 1 = its phases, 2 = detail inside a phase,"

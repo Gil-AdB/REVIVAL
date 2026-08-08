@@ -609,6 +609,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// Work-stealing chunk dispatch — one enqueue per worker instead of per
 	// tile (the per-enqueue mutex+notify cost was ~12 us serial on the tick
 	// thread; see dispatchIndexed). Tile kernels release tileDone per tile.
+	const long long _profGbuf = TailProf::enabled() ? TailProf::nowNs() : 0;
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
 	    [&fctx, deferred, tileSizeX, tileSizeY](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
@@ -625,7 +626,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		TailProf::addBusy(_tp);
 	});
 
-	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer", 1);
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer", 1, _profGbuf);
 
 	// Per-pass deferred lighting context, owned by renderFrame (RenderContext
 	// migration): Render_DeferredLighting fills it; it's threaded to every
@@ -855,13 +856,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				    tbY0[tileIdx] >= tbY1[tileIdx]) continue;   // no face in this tile
 				tileList[enq++] = tileIdx;
 			}
+			const long long _profPost = TailProf::enabled() ? TailProf::nowNs() : 0;
 			dispatchIndexed(enq, nullptr,
 			                [&tbX0, &tbY0, &tbX1, &tbY1, &tileList, workFn](int k) {
 				const int tileIdx = tileList[k];
 				workFn(tbX0[tileIdx], tbY0[tileIdx],
 				       tbX1[tileIdx], tbY1[tileIdx], tileIdx);
 			});
-			TailProf::drain(renderns::tileDone, enq, "postlight", 2);
+			TailProf::drain(renderns::tileDone, enq, "postlight", 2, _profPost);
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);

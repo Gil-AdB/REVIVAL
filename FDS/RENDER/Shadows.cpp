@@ -910,12 +910,13 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		}
 	}
 	// Same thread_local capture trap as Phase A: snapshot data() by value.
+	const long long _profShadowB = TailProf::enabled() ? TailProf::nowNs() : 0;
 	{
 		const PhaseBJob *const bJobs = sPhaseBJobs.data();
 		dispatchIndexed((int)sPhaseBJobs.size(), nullptr,
 		                [bJobs, &runPhaseBTile](int jj) { runPhaseBTile(bJobs[jj]); });
 	}
-	TailProf::drain(renderns::shadowDone, tilesEnqueued, "shadow-bake", 3);
+	TailProf::drain(renderns::shadowDone, tilesEnqueued, "shadow-bake", 3, _profShadowB);
 	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on
 	// the buffer this mode just wrote. Reports a tile flipping between
 	// occupied and empty across consecutive frames — the whole-tile
