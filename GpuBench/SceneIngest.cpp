@@ -416,6 +416,18 @@ int ApplyRevMaps(::Scene &sc, bool verbose) {
     return applied;
 }
 
+// greets-only DEMO-side replications. GREETS.CPP / GreetsDisco.cpp run for
+// GREETS.FLD and nothing else, so applying them to another scene injects
+// content the reference never has. MEASURED on fountain before this gate: 11
+// greets disco lights (10 cone spots at the world origin with 256^2 shadow maps
+// RE-BAKED EVERY FRAME, plus the glow omni) that the CPU frame does not carry,
+// and greets' SceneCorrections OmniSizeMult scaling fountain's ship-engine
+// omnis by 1.5.
+static bool IsGreetsScene(const char *fld) {
+    return fld && std::strstr(fld, "GREETS") != nullptr;
+}
+
+
 // Returns the number of materials overridden.
 // ---------------------------------------------------------------------------
 // FOUNTAIN's DEMO-side scene init, replicated — the same class of thing as
@@ -627,7 +639,7 @@ static void RefreshLights(Scene &out, const LoadOptions &opt, ::Scene &sc) {
     // greets_disco defaults to 1, so these ship in the DEFAULT greets run and
     // reproducing them is PARITY. Every constant below is read out of
     // DEMO/GreetsDisco.cpp, not chosen here.
-    if (opt.disco) {
+    if (opt.disco && IsGreetsScene(opt.fldPath)) {
         constexpr int   kSpotCount      = 10;
         constexpr float kRadius         = 0.6f;
         constexpr float kSpinRadPerTick = 0.008f;
@@ -896,7 +908,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
     // isolated to the mech omnis at a factor ~1.5-1.6 while the yellow FLD
     // omnis agreed within 8% — exactly this table. Same engine call
     // (Spline_Scale), same order (before Animate_Objects evaluates ISize).
-    {
+    if (IsGreetsScene(opt.fldPath)) {
         static const float kOmniSizeMult[10] =
             {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.5f, 1.5f, 1.5f};
         int idx = 0;
@@ -928,7 +940,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
     // (which recomputes normals+tangents from the retiled per-face UVs). Here
     // the retile runs BEFORE Scene_Computations so every downstream tangent
     // sees the final UVs; positions are untouched so normals cannot differ.
-    if (opt.stoneTex) ReplicateRetileFloor(sc, opt.verbose);
+    if (opt.stoneTex && IsGreetsScene(opt.fldPath)) ReplicateRetileFloor(sc, opt.verbose);
 
     // ---- 1c. RUN THE ENGINE'S OWN MESH PREPROCESSING ------------------------
     // LoadFLD does NOT compute normals. It fills Vertex::Pos and the Face
@@ -996,7 +1008,7 @@ bool Load(Scene &out, const LoadOptions &opt) {
     // ---- 4b. stone-tex override (BEFORE any texture is decoded) ------------
     // docs/GPU_BENCHMARK_PLAN.md §3.2. Must run before acquireTexture touches
     // anything, exactly as GREETS.CPP runs before Preprocess_Scene.
-    if (opt.stoneTex) {
+    if (opt.stoneTex && IsGreetsScene(opt.fldPath)) {
         std::vector<Material *> seenMats;
         int overridden = 0;
         for (TriMesh *T = sc.TriMeshHead; T; T = T->Next) {

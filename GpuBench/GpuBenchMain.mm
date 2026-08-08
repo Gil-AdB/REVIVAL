@@ -278,7 +278,10 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--time_scale=")) dopt.timeScale = float(std::atof(v));
         else if (a == "--spline")                   dopt.freeFly = false;
         else if (const char *v = val("--win_frames=")) dopt.winFrames = std::atoi(v);
-        else if (a == "--no-bloom")                 dopt.bloom = false;
+        else if (a == "--no-bloom")                 { dopt.bloom = false; dopt.bloomExplicit = true; }
+        else if (a == "--bloom")                    { dopt.bloom = true;  dopt.bloomExplicit = true; }
+        else if (a == "--no-hdr_linear")            { dopt.hdrLinear = false; dopt.hdrLinearExplicit = true; }
+        else if (a == "--hdr_linear")               { dopt.hdrLinear = true;  dopt.hdrLinearExplicit = true; }
         else if (const char *v = val("--bloom_intensity=")) dopt.bloomIntensity = float(std::atof(v));
         else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
         else if (a == "--no-flares")                dopt.flares = false;
@@ -327,11 +330,26 @@ int main(int argc, const char *argv[]) {
     // the render bore no relation to `--snapshot=fountain@t=2500`. Any scene
     // that is not greets follows its AUTHORED camera spline unless --cam says
     // otherwise; an explicit --cam still wins everywhere.
-    if (!camExplicit && (!opt.fldPath || !std::strstr(opt.fldPath, "GREETS"))) {
+    const bool isGreets = opt.fldPath && std::strstr(opt.fldPath, "GREETS") != nullptr;
+    if (!camExplicit && !isGreets) {
         opt.camPose.clear();
         std::fprintf(stderr, "[GPUBENCH] non-greets scene: following the AUTHORED "
                              "camera spline (the built-in review pose is greets-only; "
                              "pass --cam=\"px,py,pz,fx,fy,fz\" to pin one)\n");
+    }
+
+    // greets' RUN FLAGS are greets'. `hdr_linear` and `bloom` both default 0
+    // (FeatureFlags.def:343-344) and the only setDefaults in the tree are
+    // GREETS.CPP:1177-1185. fountain's shipping recipe is `--deferred --hdr`
+    // with neither, so carrying greets' stack into it renders a tone curve and
+    // a bloom the reference does not have. An explicit flag still wins.
+    if (!isGreets) {
+        if (!dopt.hdrLinearExplicit) dopt.hdrLinear = false;
+        if (!dopt.bloomExplicit)     dopt.bloom = false;
+        std::fprintf(stderr, "[GPUBENCH] non-greets scene: hdr_linear=%d bloom=%d "
+                             "(both default 0 in FeatureFlags.def; only greets "
+                             "setDefaults them)\n",
+                     dopt.hdrLinear ? 1 : 0, dopt.bloom ? 1 : 0);
     }
 
     // --window implies the deferred arm: interactive is only wired there, and a

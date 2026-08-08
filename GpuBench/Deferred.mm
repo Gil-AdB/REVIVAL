@@ -68,6 +68,7 @@ struct FrameUniforms {
     // with NO Ambient_Factor (that global is dead in FDS — SHADING_CONTRACT D7).
     // .rgb = Scene::Ambient/255, .w = 1 selects it over the SH evaluation.
     float flatAmbient[4];
+    float hdrMode[4];           // .x = hdr_linear (albedo^2 + sqrt encode)
 };
 
 struct ConeUniforms {
@@ -845,6 +846,12 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     fu.flatAmbient[1] = scene.ambient[1] * (1.0f / 255.0f);
     fu.flatAmbient[2] = scene.ambient[2] * (1.0f / 255.0f);
     fu.flatAmbient[3] = scene.shAmbient ? 0.0f : 1.0f;
+    // Which HDR composite the CPU reference for this scene is built from —
+    // see FrameUniforms::hdrMode in the shader. greets setDefaults hdr_linear
+    // (GREETS.CPP:1178); the global default is 0, so every other scene runs the
+    // gamma composite and its tonemap does NOT sqrt-encode.
+    fu.hdrMode[0] = opt.hdrLinear ? 1.0f : 0.0f;
+    fu.hdrMode[1] = fu.hdrMode[2] = fu.hdrMode[3] = 0.0f;
     fu.diffuseFactor = 1.0f;
     fu.specularFactor = 1.0f;
     fu.lightRangeScale = opt.lightRangeScale;

@@ -70,6 +70,15 @@ struct FrameUniforms {
     // with NO Ambient_Factor (dead in FDS — SHADING_CONTRACT.md D7).
     // .rgb = Scene::Ambient/255, .w = 1 selects the flat branch.
     float4 flatAmbient;
+    // WHICH HDR COMPOSITE this scene's reference is built from. `hdr_linear`
+    // defaults 0 (FeatureFlags.def:343) and only greets setDefaults it
+    // (GREETS.CPP:1178). .x = 1 -> DeferredSurfaceKernel.cpp:2625's
+    //     rl = albedo^2 * l + s,   tonemap ... then sqrt   (Hdr.cpp:847-851)
+    // .x = 0 -> :2587's
+    //     h  = fd + s = (albedo * l)/256 * (1-metal) + s,  NO sqrt on the way out.
+    // The difference is not cosmetic: albedo^2 against albedo^1 darkens every
+    // mid-tone, and the missing output encode changes the whole tone curve.
+    float4 hdrMode;
 };
 
 struct BatchUniforms {
@@ -426,7 +435,12 @@ static inline Surface DecodeSurface(constant FrameUniforms &u,
     // re-encodes with sqrt on the way out — which is exactly what fs_tonemap
     // does. The G-buffer stores the raw GAMMA texel (as the CPU's does), so the
     // square belongs at the point of use.
-    S.baseColor = alb.rgb * alb.rgb;
+    //
+    // WITHOUT --hdr_linear (every scene but greets — see FrameUniforms::hdrMode)
+    // the CPU composites `fdB = texB*lB/256` at :2509 and writes `hB = fdB + sB`
+    // at :2587: the albedo enters at power ONE, in gamma, and the tonemap does
+    // not re-encode. So the square is CONDITIONAL on the same flag the CPU's is.
+    S.baseColor = (u.hdrMode.x > 0.5f) ? (alb.rgb * alb.rgb) : alb.rgb;
     S.ao        = alb.a;
     S.rawAlpha  = alb.a;
     S.diffuseK  = par.x * u.diffuseFactor;
@@ -1207,8 +1221,11 @@ fragment float4 fs_xpar(XparVertexOut in [[stage_in]],
     }
 
     // hdr_linear: the transparent albedo is squared exactly as the opaque
-    // composite squares its own (DeferredSurfaceKernel.cpp:3389-3391).
-    const float3 lit = tex.rgb * tex.rgb * l + s;
+    // composite squares its own (DeferredSurfaceKernel.cpp:3408-3414) — and the
+    // gate is the SAME flag, because the `else` at :3416 is
+    // `lit = tex*l/256`, the albedo at power ONE. fountain runs that branch.
+    const float3 texLin = (u.hdrMode.x > 0.5f) ? (tex.rgb * tex.rgb) : tex.rgb;
+    const float3 lit = texLin * l + s;
     // alpha carries XparBlendAlpha for the lerp pipeline's SourceAlpha factor;
     // the legacy `lit + dst*dw` pipeline takes dw from the blend colour and
     // ignores this.
@@ -1231,8 +1248,11 @@ fragment float4 fs_tonemap(FsQuadOut in [[stage_in]],
 {
     float3 c = hdr.read(uint2(in.position.xy)).rgb;
     c = ACES(c * u.exposure);
-    // hdr_linear: the buffer is linear, so encode on the way out.
-    c = sqrt(c);
+    // hdr_linear: the buffer is linear, so encode on the way out. Hdr.cpp:847-851
+    // gates that sqrt on the SAME flag — the gamma path (`--hdr` without
+    // `--hdr_linear`, which is what every scene but greets ships) writes the
+    // ACES result straight out. This shader used to encode unconditionally.
+    if (u.hdrMode.x > 0.5f) c = sqrt(c);
     return float4(c, 1.0f);
 }
 

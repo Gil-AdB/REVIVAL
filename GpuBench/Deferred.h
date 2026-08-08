@@ -72,9 +72,24 @@ struct DeferredOptions {
     // Bloom. greets sets bloom ON with bloom_intensity 2.0 (GREETS.CPP:1168-9)
     // and the global bloom_threshold default is 200 in the CPU's linear 0-255
     // radiance scale — divided by 255 on the way into this arm's 0..1 buffer.
+    // Bloom / hdr_linear are PER-SCENE RUN FLAGS, not global truths. Both
+    // default 0 in FeatureFlags.def (:344, :343) and the only setDefaults in
+    // the tree are greets' (GREETS.CPP:1177-1185). fountain sets NEITHER — its
+    // shipping recipe is `--deferred --hdr` and nothing else — so applying
+    // greets' stack to it renders a different tone curve AND a bloom the CPU
+    // never draws. `*Explicit` records whether the user overrode the default on
+    // the command line, so the scene-derived value only fills an untouched dial.
     bool  bloom = true;
+    bool  bloomExplicit = false;
     float bloomThreshold = 200.0f / 255.0f;
     float bloomIntensity = 2.0f;
+    // hdr_linear: albedo^2 * light with an sqrt encode on the way out
+    // (DeferredSurfaceKernel.cpp:2618-2631 + Hdr.cpp:847-851) vs the gamma
+    // path's albedo^1 * light with no encode (:2587). MEASURED that fountain
+    // ships the gamma path: adding --hdr_linear to the pinned reference recipe
+    // CHANGES the image (md5 8db68ccb -> ded91a13), so the pin is the gamma one.
+    bool  hdrLinear = true;
+    bool  hdrLinearExplicit = false;
     // VOLUMETRIC SPOT CONES — the disco beams in the air. PARITY: greets turns
     // them on per-light (GreetsDisco.cpp sets Omni_ForceVolCone on all ten
     // spots, which bypasses the scene-wide draw_cones default of 0) and raises
