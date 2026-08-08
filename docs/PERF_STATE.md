@@ -37,6 +37,14 @@ min-of-arm. **Sub-0.1 ms phases are not resolvable here and are not interpreted.
 greets/fountain row and 0.15 ms on city** — i.e. the frame is fully attributed, which
 is what makes the rest of the table quotable.
 
+**The instrument is byte-null with the flag off** — verified, not assumed:
+`tools/render_gate.sh` 3/3 PASS and the city (`e1221676`) and fountain (`8db68ccb`)
+pins unchanged. The greets pin reads `6780642b` on this tree rather than `adfba8ba`,
+and that is **not** the instrument: `--hdr_metal_kill=0` reproduces `adfba8ba`
+byte-exactly, so the mover is that flag's default of 2 (a separate, intended look
+change landed the same day — `docs/SHADING_CONTRACT.md` D1). Values 0/1/2 give
+`adfba8ba` / `3d82e4b6` / `6780642b`, all stable 3/3.
+
 ### The five poses (ms/frame, `wall_min`)
 
 | phase | greets 5743 | greets 2000 | greets 4200 | fountain 2500 | city 1961 |
