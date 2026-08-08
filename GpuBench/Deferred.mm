@@ -3030,16 +3030,37 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             }
             // Periodic telemetry so the window's animation and per-pass costs are
             // verifiable from a log, not only from the on-screen HUD.
-            if ((frameNo % 30) == 0)
+            if ((frameNo % 30) == 0) {
+                // The FORWARD vector and a paste-ready reproduction line are part
+                // of this, not a nicety: a report that quotes only the position
+                // cannot be reproduced offscreen, and a defect nobody can re-render
+                // is a defect nobody can measure. Row 2 of the view matrix IS the
+                // forward axis (row-major, row-dot-v), the same convention --cam=
+                // and DEMO's FNTSNAP_FWD take.
+                const float *f = scene.camera.rot[2];
                 std::fprintf(stderr,
-                    "[WINDOW] f=%4d t=%7.0f CurFrame=%7.1f cam=(%6.2f,%5.2f,%7.2f) %s | "
+                    "[WINDOW] f=%4d t=%7.0f CurFrame=%7.1f cam=(%.2f,%.2f,%.2f) "
+                    "fwd=(%.4f,%.4f,%.4f) %s | "
                     "gpu %6.3f ms (bake %.3f gbuf %.3f light %.3f tone %.3f) | "
                     "cpu anim %.3f upload %.3f | %.0f fps\n",
                     frameNo, demoT, scene.curFrame,
                     scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
+                    f[0], f[1], f[2],
                     freeFly ? "free-fly" : "spline",
                     gpuFrameMs, perPass[0], perPass[1], perPass[2], perPass[3],
                     cpuAnimMs, cpuUploadMs, emaFps);
+                std::fprintf(stderr,
+                    "[WINDOW]   repro: --fld=%s --t=%d --pass=deferred "
+                    "--cam=%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n"
+                    "[WINDOW]   CPU:   FNTSNAP_POS=%.5f,%.5f,%.5f "
+                    "FNTSNAP_FWD=%.5f,%.5f,%.5f FNTSNAP_FOV=%.2f "
+                    "./DEMO --snapshot=<scene>@t=%d ...\n",
+                    lo.fldPath, int(demoT + 0.5f),
+                    scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
+                    f[0], f[1], f[2],
+                    scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
+                    f[0], f[1], f[2], scene.camera.fov, int(demoT + 0.5f));
+            }
             ++frameNo;
             if (opt.winFrames > 0 && frameNo >= opt.winFrames) running = false;
         }
