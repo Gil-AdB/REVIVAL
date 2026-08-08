@@ -60,6 +60,14 @@ struct FrameUniforms {
     float aabbMin[4], aabbMax[4];
     float envProbePos[8][4];
     float metalCompat[4];       // .x = D1 dial, .y = D2 dial (see Deferred.h)
+    // FLAT AMBIENT — the CPU's `else` branch, not an approximation of it.
+    // `sh_ambient` defaults 0 (FeatureFlags.def:47) and ONLY greets turns it on
+    // (GREETS.CPP:1175 setDefault). Every other scene therefore runs the flat
+    // branch at DeferredSurfaceKernel.cpp:1761-1768,
+    //     lB = Luminosity*255 + Diffuse * Sc->Ambient.B
+    // with NO Ambient_Factor (that global is dead in FDS — SHADING_CONTRACT D7).
+    // .rgb = Scene::Ambient/255, .w = 1 selects it over the SH evaluation.
+    float flatAmbient[4];
 };
 
 struct ConeUniforms {
@@ -827,8 +835,16 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     fu.dzb = fu.nearZ * fu.farZ / (fu.farZ - fu.nearZ);
     fu.exposure = opt.exposure;
     fu.shadowsOn = opt.shadows ? 1u : 0u;
-    // GREETS.CPP ~3005, verified by reading.
+    // GREETS.CPP ~3005, verified by reading. Applies to the SH branch only.
     fu.ambientFactor = 0.25f;
+    // Which ambient branch of the CPU kernel this scene runs — see
+    // Scene::shAmbient. greets: SH (sh_ambient setDefault true). Everything
+    // else: the flat Sc->Ambient constant. fountain's authored sky gradient is
+    // (0,0,0), so the SH branch gave it zero ambient and the frame went black.
+    fu.flatAmbient[0] = scene.ambient[0] * (1.0f / 255.0f);
+    fu.flatAmbient[1] = scene.ambient[1] * (1.0f / 255.0f);
+    fu.flatAmbient[2] = scene.ambient[2] * (1.0f / 255.0f);
+    fu.flatAmbient[3] = scene.shAmbient ? 0.0f : 1.0f;
     fu.diffuseFactor = 1.0f;
     fu.specularFactor = 1.0f;
     fu.lightRangeScale = opt.lightRangeScale;

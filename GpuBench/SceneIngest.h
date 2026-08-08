@@ -224,6 +224,14 @@ struct Scene {
     // content rather than a flat constant.
     float                     skyZenith[3] = {0, 0, 0};
     float                     skyNadir[3] = {0, 0, 0};
+    // Which ambient BRANCH of the CPU kernel this scene runs. `sh_ambient`
+    // defaults 0 (FeatureFlags.def:47) and the ONLY setDefault in the tree is
+    // greets' (GREETS.CPP:1175) — so greets takes the SH branch
+    // (DeferredSurfaceKernel.cpp:1741-1760) and every other scene takes the FLAT
+    // one (:1761-1768), `Diffuse * Sc->Ambient`. Getting this wrong is not a
+    // shade of grey: fountain authors SkyZenith = SkyNadir = (0,0,0), so an
+    // unconditional SH path gives it EXACTLY ZERO ambient.
+    bool                      shAmbient = false;
 
     int      xres = 0, yres = 0;
     // Scene::XparPeelPasses — transparent depth-peel passes PER SIDE, the CPU's

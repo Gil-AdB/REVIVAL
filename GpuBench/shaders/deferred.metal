@@ -62,6 +62,14 @@ struct FrameUniforms {
     // diffuse lobe on metal (the CPU's HDR-frame behaviour, contract D1),
     // .y = 1 tints the metal highlight by the GAMMA albedo (contract D2).
     float4 metalCompat;
+    // FLAT AMBIENT. `sh_ambient` defaults 0 (FeatureFlags.def:47) and ONLY
+    // greets sets it (GREETS.CPP:1175), so greets is the only scene whose CPU
+    // reference evaluates L2 SH irradiance. Every other scene runs
+    // DeferredSurfaceKernel.cpp:1761-1768's flat branch,
+    //     lB = Luminosity*255 + Diffuse * Sc->Ambient.B
+    // with NO Ambient_Factor (dead in FDS — SHADING_CONTRACT.md D7).
+    // .rgb = Scene::Ambient/255, .w = 1 selects the flat branch.
+    float4 flatAmbient;
 };
 
 struct BatchUniforms {
@@ -611,7 +619,12 @@ static inline float3 AmbientRadiance(constant FrameUniforms &u,
     // it survived unnoticed because the gradient is smooth and the magnitude
     // came out about right.
     const float3 Nw = normalize(u.camRow0 * S.N.x + u.camRow1 * S.N.y + u.camRow2 * S.N.z);
-    const float3 irr = SH_Irradiance(sh, Nw) * u.ambientFactor;
+    // FLAT vs SH is not a quality dial — it is WHICH BRANCH OF THE CPU KERNEL
+    // this scene runs. See FrameUniforms::flatAmbient. The flat branch carries
+    // no ambientFactor because the CPU's `Diffuse * Sc->Ambient` has none.
+    const float3 irr = (u.flatAmbient.w > 0.5f)
+                     ? u.flatAmbient.rgb
+                     : SH_Irradiance(sh, Nw) * u.ambientFactor;
     // (1 - metal): a conductor has no diffuse ambient either. The D1 dial
     // suppresses the kill here too, because the CPU's `lB` — which the HDR
     // frame is built from — carries the AMBIENT as well as the direct term

@@ -543,7 +543,11 @@ static void RefreshLights(Scene &out, const LoadOptions &opt, ::Scene &sc) {
     // blitter's half-extent in pixels is 2 * ImageSize * perspX * flareSize / z
     // (FILLERS.CPP: Size = ImageSize*RZ*PerspX*FlareSize, edgeLen = 2*Size, and
     // Spriter treats its width argument as the HALF-extent).
-    ImageSize = 0.25f;
+    // GREETS.CPP:3103 sets ImageSize = 0.25; FOUNTAIN.CPP:2663 sets 10.0. The
+    // engine default is 1000.0 (city scale). It is a per-scene constant with no
+    // FDS-side hook, so it is keyed on the scene file like the rest of the
+    // DEMO-side init above. Before this every fountain flare was 40x too small.
+    ImageSize = (opt.fldPath && std::strstr(opt.fldPath, "FOUNTAIN")) ? 10.0f : 0.25f;
     out.imageSize = ImageSize;
     out.ambient[0] = sc.Ambient.R;
     out.ambient[1] = sc.Ambient.G;
@@ -908,6 +912,16 @@ bool Load(Scene &out, const LoadOptions &opt) {
     // names it repoints: a per-scene DEMO init has no FDS-side hook.
     if (opt.fldPath && std::strstr(opt.fldPath, "FOUNTAIN"))
         ApplyFountainInit(sc, opt.verbose);
+
+    // Which ambient BRANCH the CPU kernel takes for THIS scene. `sh_ambient`
+    // defaults 0 and greets is the only setDefault in the tree
+    // (GREETS.CPP:1175), so greets is the only scene whose reference frame is
+    // built from L2 SH irradiance; every other scene runs the flat
+    // `Diffuse * Sc->Ambient` branch (DeferredSurfaceKernel.cpp:1761-1768).
+    // Not a style choice: fountain authors SkyZenith = SkyNadir = (0,0,0), so
+    // running the SH branch there gives it EXACTLY ZERO ambient and the scene
+    // renders black wherever no omni is in range.
+    out.shAmbient = (opt.fldPath && std::strstr(opt.fldPath, "GREETS") != nullptr);
 
     // ---- 1b2. floor UV retile (DEMO-side geometry fixup, default-active) ----
     // DEMO order is Preprocess -> GreetsRetileFloor -> MakeFacesIndependent

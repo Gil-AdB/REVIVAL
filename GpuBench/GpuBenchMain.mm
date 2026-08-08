@@ -319,6 +319,21 @@ int main(int argc, const char *argv[]) {
         else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }
     }
 
+    // The built-in default pose is GREETS' primary review pose, and it is
+    // meaningless in any other scene's coordinate system. Applied unconditionally
+    // it put fountain's camera at (9.08, 3.20, -52.93) — INSIDE the fountain
+    // basin, under the water surface, in a scene whose own camera sits ~300
+    // units out. MEASURED: 68 % of the frame had no G-buffer coverage at all and
+    // the render bore no relation to `--snapshot=fountain@t=2500`. Any scene
+    // that is not greets follows its AUTHORED camera spline unless --cam says
+    // otherwise; an explicit --cam still wins everywhere.
+    if (!camExplicit && (!opt.fldPath || !std::strstr(opt.fldPath, "GREETS"))) {
+        opt.camPose.clear();
+        std::fprintf(stderr, "[GPUBENCH] non-greets scene: following the AUTHORED "
+                             "camera spline (the built-in review pose is greets-only; "
+                             "pass --cam=\"px,py,pz,fx,fy,fz\" to pin one)\n");
+    }
+
     // --window implies the deferred arm: interactive is only wired there, and a
     // bare `--window` under the default albedo pass silently rendered offscreen
     // and exited — the "doesn't open a window" report.
