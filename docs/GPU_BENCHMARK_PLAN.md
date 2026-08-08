@@ -1686,7 +1686,10 @@ and **no** Z-write. A `TriMesh`-walking ingest cannot see them, and they are not
 statically reachable either: `Particle_Kinematics` is a **stateful per-frame
 integrator with random spawning**, so a pinned-pose ingest would have to run the
 scene forward from t=0 to reproduce them, and the result would not be reproducible.
-**So: 0 additive draws on the GPU arm, by architecture.** The FLD's only
+**So: 0 additive draws on the GPU arm, by architecture.** *(Settled and half-built
+in §6.2j: the reachability verdict is confirmed by reading — FDS declares and
+transforms `Scene::Pcl` but never fills it — and the REPLAY side now exists,
+against a DEMO-side dump specified there.)* The FLD's only
 `Mat_Additive` surface is the code-built 2-face vortex quad
 (`Add_Vortex_ToScene`, `FOUNTAIN.CPP:2522-2595`), which is also DEMO-side and also
 absent. Additive blending being order-independent would have made it the *easiest*
@@ -1721,6 +1724,12 @@ within 2 units** — the nested case the peel exists for. **13 peel clumps × 2 
 So on fountain the peel is unambiguously the right thing: it removes **13 luma of
 signed error and 5 of absolute**. The residual −22.8 is the expected sign and
 magnitude for **8,250 missing additive sprites** plus the missing vortex.
+
+> **The parity rows above are SUPERSEDED by §6.2h and the cost rows by §6.2i.**
+> The −22.813 / 32.692 row is reproduced exactly by an arm with the authored
+> camera and a ZERO ambient, so its residual attribution ("the expected sign and
+> magnitude for 8,250 missing additive sprites") was carrying the ambient bug
+> too. The peel's ≈11 ms was real and is now 2.34 ms at byte-identical output.
 
 **Cost — the benchmark claim, kept separate from the parity claim.** GPU frame
 median over 60 frames after 20 warmup: **2.322 ms** with transparents opaque,
@@ -1771,6 +1780,267 @@ at t=2000, so that row is dominated by `cone_strength`. Not separately priced.
 resolved blend form, world centroid + radius) printed by the ingest for any FLD;
 `--no-xpar`; `--xpar_peel_passes=K`; `--cpu_metal_diffuse`; `--cpu_metal_tint`;
 `--no-env_refl`; `--env_res=N`.
+
+---
+
+### 6.2h FOUNTAIN was dark because this arm was still rendering GREETS
+
+Reported by the user as "gpu fountain is almost completely dark" and reproduced
+offscreen: `--fld=SCENES/FOUNTAIN.FLD --t=2500 --pass=deferred` gave mean luma
+**19.0**, median **0**, **56 %** of pixels effectively black. The known missing
+particles are NOT the cause and were never a candidate — 8,250 additive
+highlights cannot make base surfaces render black.
+
+Two independent root causes, both measured, plus a family of leaks found while
+closing the residual.
+
+#### Root cause 1 — the camera was GREETS'
+
+`GpuBenchMain` seeded `LoadOptions::camPose` with the greets primary review pose
+unconditionally, and cleared it only inside the `--window --spline` branch. Every
+non-greets scene therefore rendered from **(9.08, 3.20, −52.93)** — for fountain
+that is inside the basin, under the water surface, in a scene whose own camera
+sits ~300 units out.
+
+MEASURED with the arm's own instrument: `--viz=ambient` returned the
+no-G-buffer marker on **67.7 %** of the frame. The teal band the user described
+is the underside of the water plane. `--viz=direct` and `--viz=ambient` came back
+**byte-identical**, which is what said "this is not a lighting bug" before
+anything else was tried.
+
+#### Root cause 2 — the ambient was EXACTLY ZERO
+
+This arm evaluated L2 SH irradiance projected from the FLD's sky gradient on
+every scene. But `sh_ambient` **defaults 0** (`FeatureFlags.def:47`) and the only
+`setDefault` in the tree is greets' (`GREETS.CPP:1175`). So greets is the one
+scene whose CPU reference takes the SH branch
+(`DeferredSurfaceKernel.cpp:1741-1760`); every other scene takes the flat branch
+at `:1761-1768`, `lB = Luminosity*255 + Diffuse * Sc->Ambient`, with **no
+`Ambient_Factor`** (that global is dead in FDS — `SHADING_CONTRACT.md` D7).
+
+fountain authors `SkyZenith = SkyNadir = (0,0,0)` and `Scene::Ambient = 64`. The
+SH branch therefore handed it **zero**. MEASURED: `--viz=ambient` was black on
+every covered pixel.
+
+#### The leak family this exposed: greets' RUN FLAGS were being applied to every scene
+
+Each of these has exactly one `setDefault`/call site in the tree and it is
+greets'. All were firing on fountain.
+
+| leak | default | who sets it | what it did to fountain |
+|---|--:|---|---|
+| `hdr_linear` | 0 (`FeatureFlags.def:343`) | `GREETS.CPP:1178` | albedo² × light + an `sqrt` encode, where fountain's reference is `:2587`'s gamma composite `(albedo·l)/256·(1−metal) + s` with **no** encode |
+| `bloom` | 0 (`:344`) | `GREETS.CPP:1184-5` at intensity 2.0 | blown-out white halos over the spire orbs the reference does not have |
+| GreetsDisco's lights | — | `GreetsDisco.cpp` | **11 lights the CPU frame does not have**: 10 cone spots at the world origin, range 38, each with a 256² spot shadow map **re-baked every frame**, plus the glow omni. 24 usable lights → 13 |
+| `SceneCorrections` `OmniSizeMult` | — | `GREETS.CPP:207-236` | fountain's ship-engine omnis scaled ×1.5 |
+| `greets_stone_tex` + `GreetsRetileFloor` | — | `GREETS.CPP` | attempted on every scene (name-matched to a no-op, but the retile is a geometry edit and the arm printed a misleading warning) |
+| `ImageSize` | 1000 (engine) | `GREETS.CPP:3103` = 0.25 | hard-coded 0.25 here; `FOUNTAIN.CPP:2663` sets **10.0**, so every fountain flare was **40× too small** |
+
+That `hdr_linear` is off for the shipped fountain was **measured, not inferred
+from the default**: adding `--hdr_linear` to the pinned reference recipe changes
+the image (md5 `8db68ccb` → `ded91a13`). Adding `--pbr` is **byte-identical**
+(both `8db68ccb`), so the GGX-vs-Blinn-Phong divergence — `pbr` also defaults 0 —
+does not move this pose, and no Blinn-Phong path was written.
+
+#### The pair, each step priced alone
+
+CPU reference rendered the same day: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy
+./DEMO --snapshot=fountain@t=2500 --out=<d> --deferred --hdr --glass-refract=1
+--glass-test --profiler=0` from `Runtime/` — md5 **`8db68ccb`**, i.e. the scene
+byte-pin. 1920×1080, Rec.601 luma over all 2,073,600 px.
+
+| step | signed dY (GPU−CPU) | mean abs dY |
+|---|--:|--:|
+| as the user hit it | **−20.330** | **51.474** |
+| + authored camera | −22.813 | 32.692 |
+| + flat ambient | −8.471 | 29.646 |
+| + gamma HDR composite | −14.110 | 27.041 |
+| + bloom off | −19.424 | 25.248 |
+| + greets disco / OmniSizeMult gated | **−20.525** | **24.559** |
+
+The last three are **parity removals**, so each makes the signed error more
+negative while improving the absolute — the signed figure cannot be read as "the
+GPU is too dark overall". Where the residual actually is:
+
+| region | signed dY | mean abs dY | what it is |
+|---|--:|--:|---|
+| ceiling (y < 170) | −7.27 | 7.27 | the DEMO-side **SkyCube** backdrop (`FOUNTAIN.CPP:2695 RenderSkyCube(SkySc, …)`), absent here — a scope boundary, not a defect |
+| upper (170–430) | −6.19 | 6.21 | |
+| mid (430–700) | −7.20 | 8.54 | |
+| floor (y > 700) | **−45.73** | **56.22** | the 8,250 missing additive water sprites + the missing vortex quad |
+
+Pairs: `fountain_t2500_{cpu,gpu,sbs,diff}.png` in the session scratch
+(`/tmp/gpubench_pairs/`), CPU top / GPU bottom in `_sbs`, signed luma difference
+4× amplified in `_diff` (red = GPU brighter).
+
+**greets is BYTE-IDENTICAL through all of it** — t=5743 md5 `0bd77ba2` against
+the pre-change shader on the same binary, which is the check that these are
+scene-identity fixes and not a re-tune.
+
+**Superseded:** §6.2g's fountain row (−22.813 / 32.692) is reproduced exactly by
+the camera-fixed / ambient-broken arm, so that measurement was taken with the
+authored camera but the zero ambient. Its conclusion — that the peel is the right
+thing on fountain — stands; its residual attribution ("the expected sign and
+magnitude for 8,250 missing additive sprites") was carrying the ambient bug too.
+
+---
+
+### 6.2i The peel was ENCODER-BOUND. 286 encoders → 80, 8.84 → 2.34 ms, byte-identical
+
+§6.2g measured the fountain peel at ~11 ms for 1,328 triangles and diagnosed it
+as encoder-bound: 13 clumps × 2 sides × 4 passes × 2 encoders = **208 render
+encoders**, plus **78 blit encoders** for the peel-floor copy that were not
+counted.
+
+#### The obvious restructure is WRONG, and the CPU source says so
+
+"One encoder per LAYER: bind the previous layer's depth as the peel floor and
+draw ALL transparent geometry in a single pass per layer" rests on the premise
+that the CPU's peel floor is per-pixel and not per-object. **It is not.**
+`RenderXparClumpInStrip` (`DeferredSurfaceKernel.cpp:3768-3789`) is called **per
+clump**, and its pass 0 does `memset(g_xparPeelFloor + rowStart, 0, …)`. The
+floor is a per-pixel BUFFER whose LIFETIME is one clump: layer 0 of clump B
+starts from "accept everything" again, not from clump A's layer 0.
+
+Merging all clumps into one layer pass would make layer 0 the farthest fragment
+over the whole scene and reorder every overlapping pair. On fountain that is
+precisely the case the peel exists for: `f_sphere` (`pilon.lwo`) and
+`f in shpere` (`inbal.lwo`) are concentric to within 2 units and are **different
+meshes**, hence different clumps. So the clumping IS load-bearing for
+correctness here.
+
+#### What is exactly equivalent
+
+1. **Merge encoders across SCREEN-DISJOINT clumps.** Every buffer the peel
+   touches — floor, side depth, destination colour — is per-pixel, so two clumps
+   sharing no pixel cannot observe each other in either order. Footprints come
+   from projecting each clump's world AABB corners through the frame's own
+   constants (near-plane crossers treated as full-screen, ~2 px of slack):
+   over-estimating can only refuse a merge, never permit a wrong one. Assignment
+   is first-fit **layering** that keeps every overlapping pair in its far-to-near
+   order, so the composite sequence is unchanged.
+2. **Ping-pong the peel depth** instead of blitting it into a separate floor
+   texture. Same data, no copy, no encoder.
+
+#### Measured
+
+fountain t=2500, 1920×1080, **min-of-arm over 3 interleaved reps** of 60 frames
+after 20 warmup, machine **load 27–42** (recorded, and the reason for
+min-of-arm).
+
+| scheduling | render enc | blit enc | frame ms | peel ms |
+|---|--:|--:|--:|--:|
+| per-clump + blit floor (was) | 208 | 78 | 10.451 | 8.838 |
+| + ping-pong floor | 208 | 0 | 8.172 | 6.559 |
+| + screen-disjoint merge | **80** | **0** | **3.948** | **2.335** |
+| `--no-xpar` (no peel at all) | 0 | 0 | 1.613 | — |
+
+**286 encoders → 80. Peel 8.84 → 2.34 ms, 3.8×.** 13 clumps collapse to 5
+encoder runs per view.
+
+**The image is byte-identical**, old binary vs new, both scenes: fountain
+`ea75af78`, greets `0bd77ba2` (the greets figure includes its mirror reflection
+passes, which run their own `encodeXpar`). greets is untouched by construction —
+1 clump, K = 1, 4 encoders before and after. `--no-xpar_merge` restores the
+per-clump scheduling so the merge stays priceable.
+
+#### Costed, not built: the GPU-native form
+
+80 encoders is still 10 encoder pairs per side for a scene whose per-side depth
+complexity is ~1 — K = 4 is spent almost entirely on empty layers. Apple tile
+shading / imageblocks can hold K (depth, colour) entries per pixel in tile memory
+and resolve the peel in **one encoder per (run, side)**, ~10 encoders, with no
+separate depth-resolve pass at all. At 16×16 tiles and K = 4 that is ~12 KB of
+the 32 KB threadgroup budget (32×32 tiles would need ~49 KB and does not fit).
+The exact-skip alternative — stop peeling a clump once a layer resolves nothing —
+needs a visibility-result readback and a CPU stall, or a one-frame lag that would
+be wrong under motion; recorded as rejected rather than untried.
+
+---
+
+### 6.2j FOUNTAIN PARTICLES — reachability settled, and the replay half built
+
+**Are they reachable from FDS alone? NO — and it is not a walk the ingest is
+failing to do.** `Scene::Pcl`, `Scene::NumOfParticles` and `Scene::PclExec` are
+FDS *fields* (`Base/Scene.h:38-40`) and FDS *transforms* them
+(`Transform.cpp:2788-2825`), but nothing in FDS ever *fills* them. `LoadFLD`
+leaves the array null; it is allocated and populated by `Initialize_Particles`
+(`DEMO/FOUNTAIN.CPP:245-444`) and advanced by `Particle_Kinematics` (`:446`),
+both DEMO-side. GpuBench links FDS and not DEMO, so the data does not exist in
+the process at all.
+
+**Dump-and-replay, because it preserves the oracle property.** Identical particle
+positions on both arms means any image difference is RENDERING, not simulation.
+Replicating the integrator would mean replicating an RNG history, and any drift
+silently converts a rendering comparison into a simulation one.
+
+#### Built: the replay half, complete and tested against a synthetic dump
+
+`GpuBench/ParticleReplay.{h,cpp}` carries the v1 format, the reader and a
+conforming synthetic writer. `deferred.metal`'s `vs_pcl`/`fs_pcl` render the
+spray as **one instanced draw** — 8,250 sprites are one encoder, not 8,250 —
+additive into the HDR target, reversed-Z **tested** against the opaque depth with
+**no depth write**, which is `Spriter`'s own semantics. Additive is
+order-independent, so they do **not** go through the peel machinery.
+
+The field set is read out of the CPU blitter, not guessed
+(`FILLERS.CPP:2324-2374` and `:1395-1409`):
+
+```
+halfExtent_px = ImageSize * (1/z) * View->PerspX * F->FlareSize * 2
+colour        = (V->LR, V->LG, V->LB)        // already lit, 0..255
+h[c]         += texel[c] * colour[c]         // additive, float radiance buffer
+```
+
+The 32×32 sprite **texture is deliberately not in the file**: both `PclT`
+materials are the same procedurally generated radial disc
+(`FOUNTAIN.CPP:310-330`, and the loop body does not depend on the index), so this
+arm regenerates it from that expression and there is no asset to keep in sync.
+
+A truncated or corrupt dump is a **named failure with the frame index**, never a
+silently short particle list — a replay quietly rendering a fraction of the spray
+would read as "the GPU is too dark", which is the exact class of mistake this arm
+has already paid for twice.
+
+#### THE DEMO-SIDE DUMP THIS NEEDS — specified, not written
+
+`DEMO/` belongs to other threads, so this is a follow-up request. It is small and
+its placement is not a matter of taste.
+
+| | |
+|---|---|
+| **file** | `DEMO/FOUNTAIN.CPP` |
+| **site** | immediately after `Particle_Kinematics(FntSc);` in `FountainScene::tick()` (currently `:2732`) |
+| **why there** | `CurFrame` is already set (`:2712`), `Animate_Objects` has run (`:2726`), and `Particle_Kinematics` is the **last writer** of `V.Pos`, `V.LR/LG/LB` and `Flags` for the frame (it assigns the colour at `:551`). Everything after it touches omnis. So that state is exactly what `Transform_Objects` projects and `TBR_Render` blits. |
+| **gate** | `--pcl_dump=PATH[,t0,t1]`, default off. 8,250 × 20 B × 1,500 frames is ~250 MB, so a frame RANGE matters; a pinned-pose pair needs one frame. |
+| **body** | walk `Sc->Pcl[0 .. Sc->NumOfParticles)`, skip entries whose `Flags & Particle_Active` is clear — the same gate `Transform.cpp:2806` applies — and write the record below, with `ImageSize` and `View->PerspX` in the frame header. |
+
+Format v1, little-endian:
+
+```
+header   char magic[8] "FDSPCL1"; uint32 version=1; uint32 frameCount; uint32 reserved[2]
+frame    uint32 'PFRM'; float timer; float curFrame; float imageSize; float perspX;
+         uint32 count; uint32 reserved
+particle float px,py,pz; float flareSize; uint8 r,g,b; uint8 tex      (20 bytes)
+```
+
+#### Tested TODAY, without the writer
+
+`--pcl_synth=PATH` writes a conforming dump (8,250 particles on a deterministic
+ballistic fan) and `--pcl=PATH` replays it: the spray renders as an additive
+cloud in the basin, where the CPU reference has its water. So the format has an
+executable definition rather than only a comment, and the two halves meet the
+moment the writer exists.
+
+**Cost:** at load 18–23, min-of-arm over 5 interleaved reps of 150 frames, the
+8,250-sprite pass is **+0.22 ms** — which is *inside* the ±0.6 ms run-to-run
+spread of either arm, so it is an **upper bound, not a resolved number**.
+
+**Known deviation, stated:** the CPU interleaves sprites and transparent clumps
+in ONE back-to-front TBR list, so a sprite in front of glass is not attenuated by
+it, while this arm draws the whole spray before the peel (the slot the flares
+already use). Additive-vs-additive order is exact either way; only
+sprite-in-front-of-glass differs, and pricing it needs a real dump.
 
 ---
 
