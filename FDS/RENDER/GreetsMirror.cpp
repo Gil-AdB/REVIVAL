@@ -3780,9 +3780,22 @@ void DebugOverlayMirrorMask(Scene *sc)
     }
 }
 
+// Per-tag screen bbox of this frame's stamp (see MirrorMaskScreenBBox in the
+// header). Indexed by mirror id 0..255; id 0 is "no mirror" and stays invalid.
+static MirrorMaskBBox s_maskBBox[256];
+
+const MirrorMaskBBox &MirrorMaskScreenBBox(uint8_t tag)
+{
+    return s_maskBBox[tag];
+}
+
 void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
 {
     ScopedMirrorMs _t(&g_mirrorProf.stampMs);
+    // Invalidate every tag up front: a mirror that goes inactive this frame
+    // must not leave last frame's box behind for the flare gate to trust.
+    // Done before the early-outs below for exactly that reason.
+    for (MirrorMaskBBox &b : s_maskBBox) b = MirrorMaskBBox{};
     if (!sc || !g_gbuffer) return;
     // The pre-stamp lives in the gate plane (mirrorMask), NOT the
     // ownership plane (mirrorId). Mekalele's commit mutates mirrorId
@@ -3965,6 +3978,30 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
                            sx[i], sy[i], rz[i],
                            sx[i+1], sy[i+1], rz[i+1],
                            m.id, g_zscale, requireExisting);
+            }
+            // Screen bbox of the SAME clipped polygon, clamped to the screen.
+            // A compound mirror stamps into its parent's id, so accumulate
+            // under the id actually written (requireExisting != 0xFF means the
+            // parent owns those pixels) — otherwise a compound's flares would
+            // look up an empty box. Only bookkeeping; no pixels change here.
+            {
+                float bx0 = sx[0], bx1 = sx[0], by0 = sy[0], by1 = sy[0];
+                for (int i = 1; i < nc; ++i) {
+                    bx0 = std::min(bx0, sx[i]); bx1 = std::max(bx1, sx[i]);
+                    by0 = std::min(by0, sy[i]); by1 = std::max(by1, sy[i]);
+                }
+                int ix0 = int(std::floor(bx0)), ix1 = int(std::ceil(bx1));
+                int iy0 = int(std::floor(by0)), iy1 = int(std::ceil(by1));
+                if (ix0 < 0) ix0 = 0; if (iy0 < 0) iy0 = 0;
+                if (ix1 > w - 1) ix1 = w - 1; if (iy1 > h - 1) iy1 = h - 1;
+                if (ix0 <= ix1 && iy0 <= iy1) {
+                    MirrorMaskBBox &bb = s_maskBBox[m.id];
+                    if (!bb.valid) { bb.x0 = ix0; bb.y0 = iy0; bb.x1 = ix1; bb.y1 = iy1; bb.valid = true; }
+                    else {
+                        bb.x0 = std::min(bb.x0, ix0); bb.y0 = std::min(bb.y0, iy0);
+                        bb.x1 = std::max(bb.x1, ix1); bb.y1 = std::max(bb.y1, iy1);
+                    }
+                }
             }
         }
     }

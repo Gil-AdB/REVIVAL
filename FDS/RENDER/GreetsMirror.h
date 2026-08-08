@@ -403,4 +403,23 @@ void DebugOverlayMirrorMask(Scene *sc);
 // place when clone faces rasterize).
 void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors);
 
+// Screen-space bounding box of the footprint StampMirrorMasks stamped for one
+// mirror tag THIS FRAME. Accumulated from the very same clipped wall polygons
+// the stamp rasterizes, so it costs 4 min/max per wall vertex and can never
+// disagree with the mask about where the mirror is; it is a SUPERSET of the
+// stamped pixels (the quad's bbox), which is exactly what an extent-vs-extent
+// reject wants — the exact per-pixel decision stays with the mask itself.
+//
+// Exists for --mirror_flare_bbox: a mirror-clone FLARE is a sprite with real
+// screen extent, and gating it on whether its CENTRE pixel carries the tag
+// deletes the whole sprite the moment the centre crosses the mirror edge (the
+// user-reported "flares rendering in mirrors should be decided by their bbox,
+// no center point"). The bbox answers "could this sprite touch the mirror at
+// all" in O(1); FILLERS' Spriter then clips it per pixel.
+struct MirrorMaskBBox {
+    int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    bool    valid = false;
+};
+const MirrorMaskBBox &MirrorMaskScreenBBox(uint8_t tag);
+
 }  // namespace fds

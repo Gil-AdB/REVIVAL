@@ -16,6 +16,8 @@
 #include "SimdHelpers.h"
 #include "Mekalele.h"  // g_gbuffer — flare filler's mirror-footprint gate
 #include "RENDER/Hdr.h"  // HDR overlay reorg — sprites accumulate into g_hdrBuf
+#include "RENDER/GreetsMirror.h"  // MirrorMaskScreenBBox — --mirror_flare_bbox
+#include "Base/FeatureFlags.h"
 #include <Threads.h>
 // #define SIMDE_ENABLE_NATIVE_ALIASES
 #include "simde/x86/mmx.h"
@@ -1295,8 +1297,17 @@ constexpr uint32_t clog2(uint32_t n)
 }
 
 
-template <int TextureRes = 32, bool EnableZTest = false, bool HDRAccum = false>
-void Spriter(float x, float y, float width, float height, void* txtr, void* vpage, dword Color, dword Z, float spriteClipX1, float spriteClipY1, float spriteClipX2, float spriteClipY2) {
+// MaskMirror: per-pixel planar-mirror clip for MIRROR-CLONE flares
+// (--mirror_flare_bbox). A clone flare may only paint pixels the mask pre-pass
+// stamped with its own mirror's tag; every other lane is killed. This replaces
+// the all-or-nothing CENTRE-pixel gate the clone flares used to take, which
+// deleted an entire sprite the moment its centre crossed the mirror edge even
+// though most of the sprite was still over the mirror. Default false → the
+// instantiation, and its output, are exactly what they were.
+template <int TextureRes = 32, bool EnableZTest = false, bool HDRAccum = false,
+          bool MaskMirror = false>
+void Spriter(float x, float y, float width, float height, void* txtr, void* vpage, dword Color, dword Z, float spriteClipX1, float spriteClipY1, float spriteClipX2, float spriteClipY2,
+             const uint8_t* mmask = nullptr, uint32_t mtag = 0) {
 	float x1, y1, x2, y2;
 	float du, dv;
 	float u0 = 0, v0 = 0;
@@ -1363,6 +1374,21 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 		auto zspan = ((uint16_t*)zscanline) + tile_x1 * TILE_SIZE;
 		for (int32_t tile_x = tile_x1; tile_x != tile_x2; ++tile_x) {
 			Vec8ib mask = (ix1 <= v_x) & (v_x < ix2);
+			if constexpr (MaskMirror) {
+				// 8 mask bytes for this tile row. Byte load, not a vector
+				// load: the last tile of a span can reach past XRes (the
+				// out-of-span lanes are already masked off, but the READ
+				// would still walk off the final row), so copy only the
+				// bytes that exist and leave the rest 0 (= no mirror).
+				uint8_t mb[8] = {0,0,0,0,0,0,0,0};
+				const int32_t bx = tile_x * TILE_SIZE;
+				const int32_t navail = (bx + 8 <= int32_t(XRes)) ? 8 : (int32_t(XRes) - bx);
+				if (navail > 0)
+					std::memcpy(mb, mmask + size_t(y) * size_t(XRes) + size_t(bx),
+					            size_t(navail));
+				const Vec8i ids(mb[0], mb[1], mb[2], mb[3], mb[4], mb[5], mb[6], mb[7]);
+				mask &= (ids == Vec8i(int32_t(mtag)));
+			}
 			if constexpr (EnableZTest) {
 				Vec8us z_existing_c;
 				z_existing_c.load_a(zspan);
@@ -1421,11 +1447,61 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 template <int Res>
 static inline void SpriterRT(float x, float y, float w, float h, void* txtr,
                              void* vpage, dword Color, dword Z,
-                             float cx1, float cy1, float cx2, float cy2) {
+                             float cx1, float cy1, float cx2, float cy2,
+                             const uint8_t* mmask = nullptr, uint32_t mtag = 0) {
+	// mmask != nullptr ONLY for mirror-clone flares under --mirror_flare_bbox
+	// (see SpriteMirrorMask). Every other caller takes the identical two
+	// instantiations it always took.
+	if (mmask) {
+		if (fds::g_hdrActive)
+			Spriter<Res, true, true,  true>(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2, mmask, mtag);
+		else
+			Spriter<Res, true, false, true>(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2, mmask, mtag);
+		return;
+	}
 	if (fds::g_hdrActive)
 		Spriter<Res, true, true >(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2);
 	else
 		Spriter<Res, true, false>(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2);
+}
+
+// ── --mirror_flare_bbox: the clone-flare mirror gate ─────────────────────────
+//
+// A mirror-clone flare is a SPRITE with real screen extent (greets' lamps and
+// fountain's `ImageSize 10.0` sprites are tens to hundreds of pixels across).
+// The legacy gate sampled the mask at the sprite's CENTRE pixel and dropped the
+// whole sprite on a mismatch, so a flare drifting toward a mirror's edge
+// vanished in one frame while most of its disc was still over the mirror —
+// "flares rendering in mirrors should be decided by their bbox, no center
+// point". The replacement is two-part and strictly tighter than a plain widen:
+//   * ADMISSION  — the sprite's screen bbox vs the mirror's stamped footprint
+//     bbox (fds::MirrorMaskScreenBBox, built by StampMirrorMasks from the same
+//     clipped wall polygons). O(1), and only a reject-early optimisation.
+//   * THE DECISION — per pixel, in Spriter's MaskMirror lane test. This is what
+//     keeps the original defects dead: a clone whose reflected world position
+//     happens to pass a plain z-test inside ANOTHER mirror's footprint, or out
+//     in the open room, still paints nothing, because those pixels do not carry
+//     its tag. Widening the gate WITHOUT the per-pixel clip would resurrect
+//     "omni shows twice in the mirror" / "flare through walls"; that is why the
+//     two go in together.
+// Returns the mask plane for a clone flare when the flag is on, else nullptr
+// (which takes SpriterRT's original instantiation → byte-identical).
+static inline const uint8_t* SpriteMirrorMask(const Face* F) {
+	if (!F || F->mirrorMaskTag == 0) return nullptr;
+	if (!fds::FeatureFlags::mirror_flare_bbox()) return nullptr;
+	if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return nullptr;
+	return g_gbuffer->mirrorMask.data();
+}
+
+// Admission test for a clone flare of half-extent `halfExt` centred at (px,py).
+// True = "may reach this mirror's footprint"; the per-pixel clip decides the
+// rest. Also the gate that keeps a mirror which did not stamp this frame
+// (inactive, viewer behind the plane) from drawing its flares at all.
+static inline bool SpriteTouchesMirror(const Face* F, float px, float py, float halfExt) {
+	const fds::MirrorMaskBBox &bb = fds::MirrorMaskScreenBBox(F->mirrorMaskTag);
+	if (!bb.valid) return false;
+	return !(px + halfExt < float(bb.x0) || px - halfExt > float(bb.x1) ||
+	         py + halfExt < float(bb.y0) || py - halfExt > float(bb.y1));
 }
 
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
@@ -1458,14 +1534,21 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	// ("omni shows twice in the mirror") or in open rooms ("flare
 	// through walls"). Center-point test, consistent with the sprite's
 	// Face_PointZTest behavior.
+	// --mirror_flare_bbox: bbox admission + a per-pixel clip in the blit
+	// instead of the centre sample. See SpriteMirrorMask above.
+	const uint8_t* const mflMask = SpriteMirrorMask(F);
 	if (F->mirrorMaskTag != 0) {
 		if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return;
-		int32_t mx = int32_t(_A->PX);
-		int32_t my = int32_t(_A->PY);
-		if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-		if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-		if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
-		    != F->mirrorMaskTag) return;
+		if (mflMask) {
+			if (!SpriteTouchesMirror(F, _A->PX, _A->PY, 2.0f * Size)) return;
+		} else {
+			int32_t mx = int32_t(_A->PX);
+			int32_t my = int32_t(_A->PY);
+			if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+			if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+			if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+			    != F->mirrorMaskTag) return;
+		}
 	}
 
 	if (Size<=0) return;
@@ -1496,7 +1579,14 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 			Z = 1;
 
 		// Z compare on center only.
-		if (F->Flags & Face_PointZTest)
+		// Skipped for a mirror-clone flare under --mirror_flare_bbox for the
+		// same reason the centre MASK sample is: it is a whole-sprite verdict
+		// read off one pixel, and at a mirror edge that pixel is the WALL
+		// beside the mirror, which occludes and kills a sprite that is mostly
+		// over the (farther) reflection. Spriter's per-pixel z test is exact
+		// and already runs (EnableZTest=true), so nothing is lost but the
+		// early-out. Non-clone flares are untouched.
+		if ((F->Flags & Face_PointZTest) && !mflMask)
 		{
 			int32_t x = _A->PX;
 			if (x<0) x=0;
@@ -1506,7 +1596,8 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 			if (y>YRes-1) y=YRes-1;
 			if (Z <= ZPage16[XRes*y+x]) return;
 		}
-		SpriterRT<256>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes);
+		SpriterRT<256>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes,
+		               mflMask, F->mirrorMaskTag);
 		//CSeven_UP_MMX(_A->PX,_A->PY,edgeLen,edgeLen,F->Txtr->Txtr->Data,VPage, Col, Z);
 		//CSeven_UP(_A->PX,_A->PY,Size<<1,Size<<1,F->Txtr->Txtr->Data,VPage);
 	}
@@ -1897,14 +1988,21 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	// inserts here, so it's valid at insert time. Without this, a TBR
 	// scene with mirrors (greets) re-grows the "clone flare through
 	// walls / in other mirrors" family the immediate path already fixed.
+	// --mirror_flare_bbox: admission by the sprite's screen bbox instead of
+	// its centre pixel; the per-pixel clip happens at blit time in TBR_Render
+	// / drawSprite (which re-derive the mask from the Face).
 	if (F->mirrorMaskTag != 0) {
 		if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return;
-		int32_t mx = int32_t(_A->PX);
-		int32_t my = int32_t(_A->PY);
-		if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-		if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-		if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
-		    != F->mirrorMaskTag) return;
+		if (SpriteMirrorMask(F)) {
+			if (!SpriteTouchesMirror(F, _A->PX, _A->PY, 2.0f * Size)) return;
+		} else {
+			int32_t mx = int32_t(_A->PX);
+			int32_t my = int32_t(_A->PY);
+			if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+			if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+			if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+			    != F->mirrorMaskTag) return;
+		}
 	}
 
 	if (Size<=0) return;
@@ -2008,14 +2106,16 @@ static void drawSprite(Face* F, float clipY1, float clipY2) {
 	Vertex* V = F->A;
 	float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
 	dword Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
+	// nullptr for everything but a mirror-clone flare under --mirror_flare_bbox.
+	const uint8_t* const mm = SpriteMirrorMask(F);
 	if (F->Txtr->Txtr->SizeX == 256) {
 		SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage,
-		               0xFFFFFF, Z, 0, clipY1, XRes, clipY2);
+		               0xFFFFFF, Z, 0, clipY1, XRes, clipY2, mm, F->mirrorMaskTag);
 	} else {
 		dword R = V->LR, G = V->LG, B = V->LB;
 		dword Color = (R << 16) + (G << 8) + B;
 		SpriterRT<32>(V->PX, V->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage,
-		              Color, Z, 0, clipY1, XRes, clipY2);
+		              Color, Z, 0, clipY1, XRes, clipY2, mm, F->mirrorMaskTag);
 	}
 }
 
@@ -2355,8 +2455,11 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 							Col = iFog + (iFog << 8) + (iFog << 16);
 						}
 						// Center-point occlusion reject (Face_PointZTest), as
-						// in the immediate path.
-						if (F->Flags & Face_PointZTest) {
+						// in the immediate path. Skipped for a mirror-clone
+						// flare under --mirror_flare_bbox — see the note on
+						// the same test in The_MMX_Scalar.
+						const uint8_t* const mm = SpriteMirrorMask(F);
+						if ((F->Flags & Face_PointZTest) && !mm) {
 							int32_t cx = int32_t(V->PX);
 							if (cx < 0) cx = 0; else if (cx > XRes-1) cx = XRes-1;
 							int32_t cy = int32_t(V->PY);
@@ -2365,13 +2468,15 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 						}
 						SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen,
 							F->Txtr->Txtr->Data, VPage, Col, Z,
-							0, spriteClipY1, XRes, spriteClipY2);
+							0, spriteClipY1, XRes, spriteClipY2,
+							mm, F->mirrorMaskTag);
 					} else {
 						dword R = V->LR, G = V->LG, B = V->LB;
 						dword Color = (R << 16) + (G << 8) + B;
 						SpriterRT<32>(V->PX, V->PY, edgeLen, edgeLen,
 							F->Txtr->Txtr->Data, VPage, Color, Z,
-							0, spriteClipY1, XRes, spriteClipY2);
+							0, spriteClipY1, XRes, spriteClipY2,
+							SpriteMirrorMask(F), F->mirrorMaskTag);
 					}
 					continue;
 				}
