@@ -163,6 +163,15 @@ struct DeferredOptions {
     const LoadOptions *loadOpt = nullptr;   // needed to Reanimate per frame
     int   dumpCube = -1;
     std::string dumpCubePath;
+    // DIAGNOSTIC (--dump_env_cube). Read every baked ENVIRONMENT probe cube
+    // back to the CPU, print a per-face radiance census and write a 3x2 face
+    // atlas PPM per probe. The counterpart of FDS's FDS_ENVBAKE_DUMP
+    // [ENVBAKE-FACE] census, printed on the SAME 0-255 radiance scale (the
+    // stored RGBA16Float linear radiance x255), so the two arms' probe CONTENT
+    // can be compared face by face instead of inferred from a lit frame.
+    // Forces Shared storage on the env cubes, so never a timing run.
+    bool  dumpEnvCube = false;
+    std::string dumpEnvCubeDir = "/tmp";
     // GROUND-TRUTH PROBE. For one WORLD point, print for every cube light:
     //   (a) the true nearest shadow-casting triangle between light and point,
     //       found by ray-casting the SAME triangles the bake rasterised, with

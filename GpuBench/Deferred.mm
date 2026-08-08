@@ -703,7 +703,10 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                                                 size:NSUInteger(envRes)
                                            mipmapped:YES];
             td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-            td.storageMode = MTLStorageModePrivate;
+            // Private for measurement; --dump_env_cube needs CPU-visible
+            // storage and is never a timing run (same rule as --dump_cube).
+            td.storageMode = opt.dumpEnvCube ? MTLStorageModeShared
+                                             : MTLStorageModePrivate;
             envCubes.push_back([dev newTextureWithDescriptor:td]);
         }
         eAlbedo = mkSquare(MTLPixelFormatRGBA8Unorm,   envRes);
@@ -2642,6 +2645,78 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                          i + 1, scene.envProbes[size_t(i)].material.c_str(),
                          scene.envProbes[size_t(i)].pos[0], scene.envProbes[size_t(i)].pos[1],
                          scene.envProbes[size_t(i)].pos[2], scene.envProbes[size_t(i)].users);
+
+        // ---- --dump_env_cube: read the baked probe content back and LOOK ---
+        // The CPU arm's probes are 8-bit LDR VPage faces; this arm's are
+        // RGBA16Float LINEAR radiance on the 0-1 scale. To compare CONTENT the
+        // two must be expressed in the same units: the whole GPU frame is the
+        // CPU frame / 255 (docs/SHADING_CONTRACT.md §1), so every number below
+        // is the stored radiance x255 — directly against FDS's
+        // [ENVBAKE-FACE] census.
+        if (opt.dumpEnvCube) {
+            static const char *fnames[6] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
+            std::vector<uint16_t> face(size_t(envRes) * size_t(envRes) * 4);
+            auto h2f = [](uint16_t h) -> float {
+                const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+                uint32_t bits;
+                if (e == 0)        bits = m ? ((s << 31) | ((127 - 15 + 1) << 23) | (m << 13)) : (s << 31);
+                else if (e == 31)  bits = (s << 31) | (0xFFu << 23) | (m << 13);
+                else               bits = (s << 31) | ((e + 127 - 15) << 23) | (m << 13);
+                float f; std::memcpy(&f, &bits, 4); return f;
+            };
+            for (int p = 0; p < nProbes; ++p) {
+                std::string safe = scene.envProbes[size_t(p)].material;
+                for (char &c : safe) if (!std::isalnum((unsigned char)c)) c = '_';
+                std::vector<uint8_t> atlas(size_t(envRes) * 3 * size_t(envRes) * 2 * 3, 0);
+                const size_t aw = size_t(envRes) * 3;
+                for (int f = 0; f < 6; ++f) {
+                    [envCubes[size_t(p)] getBytes:face.data()
+                                      bytesPerRow:NSUInteger(envRes) * 8
+                                    bytesPerImage:face.size() * sizeof(uint16_t)
+                                       fromRegion:MTLRegionMake2D(0, 0, NSUInteger(envRes), NSUInteger(envRes))
+                                      mipmapLevel:0
+                                            slice:NSUInteger(f)];
+                    double sB = 0, sG = 0, sR = 0, sY = 0;
+                    std::vector<float> ys; ys.reserve(size_t(envRes) * envRes);
+                    for (int i = 0; i < envRes * envRes; ++i) {
+                        const float R = h2f(face[size_t(i) * 4 + 0]) * 255.0f;
+                        const float G = h2f(face[size_t(i) * 4 + 1]) * 255.0f;
+                        const float B = h2f(face[size_t(i) * 4 + 2]) * 255.0f;
+                        const float Y = 0.299f * R + 0.587f * G + 0.114f * B;
+                        sB += B; sG += G; sR += R; sY += Y;
+                        ys.push_back(Y);
+                        const int ax = (f % 3) * envRes + (i % envRes);
+                        const int ay = (f / 3) * envRes + (i / envRes);
+                        // sqrt encode for the atlas ONLY (the census above is
+                        // linear) so a linear probe is viewable next to the
+                        // CPU's gamma-ish LDR one without crushing to black.
+                        auto enc = [](float v) -> uint8_t {
+                            float t = std::sqrt(std::max(v, 0.0f) / 255.0f) * 255.0f;
+                            return uint8_t(t < 0 ? 0 : (t > 255 ? 255 : t));
+                        };
+                        const size_t o = (size_t(ay) * aw + size_t(ax)) * 3;
+                        atlas[o + 0] = enc(R); atlas[o + 1] = enc(G); atlas[o + 2] = enc(B);
+                    }
+                    std::sort(ys.begin(), ys.end());
+                    const double n = double(envRes) * envRes;
+                    std::fprintf(stderr, "[ENVBAKE-FACE] '%s' face %d %s res %d  "
+                        "meanBGR %.2f/%.2f/%.2f  meanY %.2f  p50 %.1f p95 %.1f max %.1f "
+                        " (x255 linear)\n",
+                        scene.envProbes[size_t(p)].material.c_str(), f, fnames[f], envRes,
+                        sB / n, sG / n, sR / n, sY / n,
+                        double(ys[size_t(0.50 * (n - 1))]), double(ys[size_t(0.95 * (n - 1))]),
+                        double(ys.back()));
+                }
+                const std::string path = opt.dumpEnvCubeDir + "/gpuenv_" + safe + ".ppm";
+                if (FILE *fp = std::fopen(path.c_str(), "wb")) {
+                    std::fprintf(fp, "P6\n%zu %d\n255\n", aw, envRes * 2);
+                    std::fwrite(atlas.data(), 1, atlas.size(), fp);
+                    std::fclose(fp);
+                    std::fprintf(stderr, "[ENVBAKE-FACE] wrote %s (%zux%d atlas, sqrt-encoded)\n",
+                                 path.c_str(), aw, envRes * 2);
+                }
+            }
+        }
     }
 
     // ---- --anim_probe: the window's per-frame refresh, OFFSCREEN ------------

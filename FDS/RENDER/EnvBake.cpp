@@ -1,5 +1,6 @@
 #include "EnvBake.h"
 #include "EnvCube.h"
+#include "Hdr.h"
 #include "OffscreenView.h"
 #include "WorldAabb.h"
 
@@ -17,6 +18,7 @@
 #include <FILLERS/Mekalele.h> // g_gbuffer->mirrorMask neutralization (bake)
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -366,6 +368,31 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                     kCubeFaces[i].fwd.x, kCubeFaces[i].fwd.y, kCubeFaces[i].fwd.z);
             }
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
+            // --env_bake_linear: replace the LDR VPage capture with the
+            // kernel's own LINEAR radiance for this face. The bake's nested
+            // renderFrame already called Hdr_BeginFrame at the FACE res
+            // (RENDER.CPP:648 runs inside this Render()), so g_hdrBuf holds
+            // this face's linear radiance on the 0-255 scale — the same scale
+            // EnvSpecComposeScalar adds the store into. Storing it in the same
+            // 8-bit face buffer keeps every consumer unchanged. h[3] is the
+            // kernel's coverage flag: uncovered texels (sky / void / forward
+            // content the deferred kernel never wrote) keep the LDR value.
+            if (fds::FeatureFlags::env_bake_linear()
+                && fds::Hdr_WritableFor(res, res)) {
+                uint32_t* dstf = faces[i].data();
+                const fds::hdrf* hb = fds::g_hdrBuf.data();
+                for (size_t k = 0; k < size_t(res) * res; ++k) {
+                    const fds::hdrf* h = hb + k * 4;
+                    if (float(h[3]) <= 0.0f) continue;      // no coverage
+                    auto q = [](float v) -> uint32_t {
+                        if (!(v > 0.0f)) return 0u;
+                        return v >= 255.0f ? 255u : uint32_t(v + 0.5f);
+                    };
+                    dstf[k] = 0xFF000000u | (q(float(h[2])) << 16)
+                                          | (q(float(h[1])) <<  8)
+                                          |  q(float(h[0]));
+                }
+            }
             if (facesZOut) {
                 const word* zp = reinterpret_cast<const word*>(surf.Z16);
                 facesZOut[i].assign(zp, zp + size_t(res) * res);
@@ -735,6 +762,65 @@ bool renderCubeFacesMajor(Scene* sc, const Vector& center,
     return true;
 }
 
+// ── Per-probe FACE CENSUS + atlas dump (FDS_ENVBAKE_DUMP=1) ───────────────
+// The pre-existing dump inside renderCubeFacesMajor writes ONE fixed path, so
+// with six probes in flight the file that survives is whichever baked last —
+// useless for comparing a NAMED probe against the GPU arm's same-named one.
+// This writes `/tmp/envbake_<material>.ppm` (3x2 face atlas, face order
+// +X -X +Y -Y +Z -Z) and prints a per-face census so the comparison can be
+// made from the log alone. The store's texels are the LDR VPage the bake
+// render produced, i.e. the SAME 0-255 scale the kernel's env compose adds
+// into sB — so these numbers are directly comparable to any other arm's probe
+// content expressed on the 0-255 radiance scale.
+void dumpCubeStoreCensus(const char* matName,
+                         const std::vector<uint32_t>& level0, int fr) {
+    if (!std::getenv("FDS_ENVBAKE_DUMP")) return;
+    if (fr <= 0 || level0.size() < size_t(6) * fr * fr) return;
+    std::string safe = matName ? matName : "unnamed";
+    for (char& c : safe) if (!std::isalnum((unsigned char)c)) c = '_';
+    static const char* kFaceName[6] = { "+X", "-X", "+Y", "-Y", "+Z", "-Z" };
+    for (int f = 0; f < 6; ++f) {
+        const uint32_t* p = level0.data() + size_t(f) * fr * fr;
+        double sB = 0, sG = 0, sR = 0, sY = 0;
+        std::vector<float> ys; ys.reserve(size_t(fr) * fr);
+        size_t nonVoid = 0;
+        for (int i = 0; i < fr * fr; ++i) {
+            const float B = float(p[i] & 0xFF), G = float((p[i] >> 8) & 0xFF),
+                        R = float((p[i] >> 16) & 0xFF);
+            const float Y = 0.299f * R + 0.587f * G + 0.114f * B;
+            sB += B; sG += G; sR += R; sY += Y;
+            ys.push_back(Y);
+            if (p[i] & 0x00FFFFFFu) ++nonVoid;
+        }
+        std::sort(ys.begin(), ys.end());
+        const double n = double(fr) * fr;
+        std::fprintf(stderr, "[ENVBAKE-FACE] '%s' face %d %s res %d  "
+            "meanBGR %.2f/%.2f/%.2f  meanY %.2f  p50 %.1f p95 %.1f max %.1f  "
+            "nonvoid %.1f%%\n", matName ? matName : "?", f, kFaceName[f], fr,
+            sB / n, sG / n, sR / n, sY / n,
+            double(ys[size_t(0.50 * (n - 1))]), double(ys[size_t(0.95 * (n - 1))]),
+            double(ys.back()), 100.0 * double(nonVoid) / n);
+    }
+    const std::string path = "/tmp/envbake_" + safe + ".ppm";
+    if (FILE* fp = std::fopen(path.c_str(), "wb")) {
+        const int gw = fr * 3, gh = fr * 2;
+        std::fprintf(fp, "P6\n%d %d\n255\n", gw, gh);
+        for (int y = 0; y < gh; ++y)
+            for (int x = 0; x < gw; ++x) {
+                const int f = (y / fr) * 3 + (x / fr);
+                const uint32_t p = level0[size_t(f) * fr * fr
+                                          + size_t(y % fr) * fr + (x % fr)];
+                unsigned char rgb[3] = { (unsigned char)((p >> 16) & 0xFF),
+                                         (unsigned char)((p >> 8) & 0xFF),
+                                         (unsigned char)(p & 0xFF) };
+                std::fwrite(rgb, 1, 3, fp);
+            }
+        std::fclose(fp);
+        std::fprintf(stderr, "[ENVBAKE-FACE] wrote %s (%dx%d atlas)\n",
+                     path.c_str(), gw, gh);
+    }
+}
+
 // World-space centroid of every face using material M. False if none found
 // (material exists but no faces reference it — nothing to reflect anyway).
 // excludeRadius (out, optional): how far around the probe the bake's
@@ -965,6 +1051,8 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
             store->envDynamic = true;
             store->staticColorMaster = store->levels[0];
         }
+        dumpCubeStoreCensus(skipMat ? skipMat->Name : nullptr,
+                            store->levels[0], faceRes);
         int fr = faceRes;
         for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
             boxDownsampleCube(store->levels[k-1], fr, store->levels[k]);
@@ -1174,8 +1262,23 @@ bool EnvReflection_FramePrep(Scene* sc) {
                               store->staticColorMaster.size() * sizeof(uint32_t)) / 1024);
             static const bool sGrid = std::getenv("FDS_ENV_GRID") != nullptr;
             if (sGrid) fillEnvDebugGrid(*store);
-            std::fprintf(stderr, "[ENVREFL] baked %dx%d pano (+%d mips) for '%s' at its centroid (%.1f %.1f %.1f)\n",
-                         store->view.W, store->view.H, store->view.numMips - 1,
+            // Say WHICH STORAGE was baked. The old wording ("baked NxN pano")
+            // read as "equirect panorama" for every store, including the six
+            // padded CUBE faces --env_cube (default ON) actually produces —
+            // and two investigations chased a lat-long/cubemap mismatch that
+            // did not exist because of this line.
+            std::fprintf(stderr, "[ENVREFL] baked %s for '%s' at its centroid (%.1f %.1f %.1f)\n",
+                         store->view.isCube
+                            ? (std::string("6 padded CUBE faces of ")
+                               + std::to_string(store->view.W) + "x"
+                               + std::to_string(store->view.H) + " (+"
+                               + std::to_string(store->view.numMips - 1)
+                               + " mips)").c_str()
+                            : (std::string("a ") + std::to_string(store->view.W)
+                               + "x" + std::to_string(store->view.H)
+                               + " EQUIRECT pano (+"
+                               + std::to_string(store->view.numMips - 1)
+                               + " mips)").c_str(),
                          M->Name ? M->Name : "?", c.x, c.y, c.z);
             env.stores.push_back(std::move(store));
             idx = int(env.stores.size()) - 1;

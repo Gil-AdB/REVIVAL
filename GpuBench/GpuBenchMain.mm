@@ -139,6 +139,14 @@ const char *kUsage =
     "                    cleared / min-max / decoded world distance) and write a 3x2 face\n"
     "                    atlas PPM. Forces Shared storage on the cubes, so never a timing run.\n"
     "  --dump_cube_out=PATH  where the atlas goes (default gpubench_cube.ppm)\n"
+    "  --dump_env_cube   deferred only, DIAGNOSTIC: read every baked ENVIRONMENT probe\n"
+    "                    cube back and print a per-face radiance census (mean B/G/R,\n"
+    "                    mean/p50/p95/max luma) on the CPU's 0-255 radiance scale, plus a\n"
+    "                    3x2 face atlas PPM per probe. The counterpart of FDS's\n"
+    "                    FDS_ENVBAKE_DUMP=1 [ENVBAKE-FACE] census, so probe CONTENT can be\n"
+    "                    compared face by face instead of inferred from a lit frame.\n"
+    "                    Forces Shared storage on the env cubes: never a timing run.\n"
+    "  --dump_env_cube_dir=DIR  where those atlases go (default /tmp)\n"
     "  --probe=x,y,z     GROUND TRUTH for one world point: ray-cast the same casting\n"
     "                    triangles the bake rasterised (naming the nearest hit's mesh +\n"
     "                    material) AND replicate the shader's cube tap on the host, side\n"
@@ -272,6 +280,8 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--exposure=")) dopt.exposure = float(std::atof(v));
         else if (const char *v = val("--dump_cube=")) dopt.dumpCube = std::atoi(v);
         else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
+        else if (a == "--dump_env_cube")                  dopt.dumpEnvCube = true;
+        else if (const char *v = val("--dump_env_cube_dir=")) dopt.dumpEnvCubeDir = v;
         else if (const char *v = val("--probe_px=")) {
             if (std::sscanf(v, "%d,%d", &dopt.probePxXY[0], &dopt.probePxXY[1]) == 2)
                 dopt.probePx = true;
