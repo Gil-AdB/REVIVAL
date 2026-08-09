@@ -48,14 +48,27 @@ struct FrameUniforms {
     // sd > 0.05 face gate the CPU's BuildMirror clone applies. Disabled when
     // xyz == 0 (the main pass).
     float4 clipPlane;
-    // Number of live reflection textures in the MAIN lighting pass (0 inside a
-    // reflection pass — no second bounce, stated in the plan).
+    // Number of live reflection textures in this lighting pass. The MAIN pass
+    // sets it to the mirror count; a FIRST-ORDER reflection pass sets it too
+    // when --mirror2 is on (that is what puts a mirror inside a mirror); a
+    // SECOND-ORDER pass always sets 0 — order 2 is the ceiling, exactly as the
+    // CPU caps it by hiding every clone mesh inside an RTT bake
+    // (docs/MIRROR_RECURSION_PLAN.md:18-22).
     uint   mirrorCount;
     // Environment reflection. envReflGain is FeatureFlags env_refl_gain (1.0);
     // the AABB is the scene bound the parallax correction uses; envProbePos
     // carries each probe's bake point, needed to re-aim the lookup after the
     // parallax hit is found.
     float  envReflGain;
+    // 1/width, 1/height OF THIS PASS's own render target, set only when the
+    // bound reflTex is a different size (the order-2 targets, which render at
+    // --mirror2_scale). position.xy * reflUv is then the [0,1] screen
+    // coordinate and the sampler resolves the size difference. Zero means
+    // "same size as this pass" and the composite stays an integer same-pixel
+    // read(), so the main view is bit-for-bit what it was before order 2
+    // existed. Occupies the two floats that used to be explicit padding here,
+    // so the struct layout does not move.
+    float2 reflUv;
     float4 aabbMin, aabbMax;
     float4 envProbePos[8];
     // CONDUCTOR PARITY DIALS, measurement only (Deferred.h): .x = 1 keeps the
@@ -794,10 +807,26 @@ fragment float4 fs_lighting(FsQuadOut in [[stage_in]],
     // point on the plane projects to the SAME pixel in the reflection render
     // (rows reflected, position mirrored, same projection), so the composite
     // is a same-pixel read, no reprojection.
+    //
+    // SECOND ORDER. Inside a first-order reflection this same branch is what
+    // makes a mirror-in-a-mirror show content instead of bare emissive: the
+    // host binds, at 37.., the view from the DOUBLY reflected camera
+    // reflect_B(reflect_A(eye)) and sets mirrorCount, and `mirEnc.x` is the
+    // panel id the reflection view's own G-buffer already wrote. The
+    // same-pixel invariant composes: each planar reflection keeps the
+    // projection and only moves the basis, so B's panel lands on the same
+    // pixel in A's view as its doubly-reflected content does. When those
+    // targets are rendered smaller than this pass (--mirror2_scale), reflUv
+    // carries their texel size and the fetch becomes a normalised bilinear
+    // sample; at reflUv == 0 it stays the exact integer read.
     if (u.mirrorCount > 0u) {
         const uint mid = mirEnc.x;
-        if (mid > 0u && mid <= u.mirrorCount)
-            radiance += reflTex[mid - 1u].read(px).rgb * 0.5f;
+        if (mid > 0u && mid <= u.mirrorCount) {
+            const float3 r = (u.reflUv.x > 0.0f)
+                ? reflTex[mid - 1u].sample(envSamp, in.position.xy * u.reflUv).rgb
+                : reflTex[mid - 1u].read(px).rgb;
+            radiance += r * 0.5f;
+        }
     }
 
     return float4(radiance, 1.0f);

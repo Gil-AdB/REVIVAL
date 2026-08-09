@@ -325,6 +325,29 @@ struct DeferredOptions {
     // the thin residual crack that survives a correct factor record — it is a
     // property of the MESH (per-face UVs), not of the tessellator.
     bool  tessSeamAudit = false;
+
+    // ---- SECOND-ORDER MIRRORS (mirror inside a mirror) ---------------------
+    // The CPU's --mirror_rtt order-2 slots, done the GPU way. For each ordered
+    // pair (A, B) of mirror panels where B is on the reflective side of A's
+    // reflected eye, the scene is rendered from the DOUBLY reflected camera
+    // reflect_B(reflect_A(eye)) and composited onto B's panel pixels INSIDE A's
+    // reflection. Same construction as the CPU's bake camera
+    // (FDS/RENDER/GreetsMirror.cpp:2985-2991), and order 2 is the ceiling in
+    // both arms. Default ON: the user asked for it, and the CPU only ships it
+    // off because of a setDefault ordering defect (docs/SETDEFAULT_AUDIT.md).
+    bool  mirror2 = true;
+    // Resolution of the order-2 targets as a fraction of the main framebuffer.
+    // The order-2 content lands on a PANEL, which is a small part of the frame,
+    // so full resolution is wasted; 0.5 is the default and the cost/sharpness
+    // knob. Clamped to [0.125, 1].
+    float mirror2Scale = 0.5f;
+    // Skip an (A,B) pair whose panel B covers fewer than this many pixels in
+    // A's reflection — the CPU's `area <= 1.0f` job-selection gate
+    // (GreetsMirror.cpp:2961), with a larger default because a 4-pixel panel
+    // cannot show a reflection anybody can see.
+    float mirror2MinPx = 16.0f;
+    // Per-frame census of which order-2 pairs rendered and at what size.
+    bool  mirror2Stats = false;
     // CALIBRATION PROBE (0 = off). Force every tessellation factor to this
     // value. Exists to answer two questions no documentation settles for this
     // device: what the hardware's real factor ceiling is, and whether the

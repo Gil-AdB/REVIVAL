@@ -316,6 +316,20 @@ const char *kUsage =
     "                    vertex invocations (one atomic each), boundary segments, and the\n"
     "                    triangle count Euler gives from the two. Also times the factor\n"
     "                    kernel alone. Never present in a timed pipeline.\n"
+    "  --no-mirror2      turn OFF SECOND-ORDER mirrors (a mirror seen inside another\n"
+    "                    mirror). ON by default. For each ordered pair (A,B) of panels\n"
+    "                    where B faces A's reflected eye, the scene is rendered from the\n"
+    "                    DOUBLY reflected camera reflect_B(reflect_A(eye)) and composited\n"
+    "                    onto B's pixels inside A's reflection -- the same virtual eye the\n"
+    "                    CPU's --mirror_rtt order-2 slots use. Order 2 is the ceiling in\n"
+    "                    both arms.\n"
+    "  --mirror2_scale=F order-2 target resolution as a fraction of the frame (default 0.5,\n"
+    "                    clamped to [0.125,1]). The content is only ever seen through a\n"
+    "                    panel, so full resolution is mostly wasted; this is the\n"
+    "                    cost/sharpness knob.\n"
+    "  --mirror2_min_px=F  skip a pair whose panel covers fewer than F pixels in the outer\n"
+    "                    reflection (default 16).\n"
+    "  --mirror2_stats   log every order-2 pair rendered and its scissor.\n"
     "  --tess_seam_audit MEASURE the stone's ATTRIBUTE SEAMS: positions shared by 2+ faces\n"
     "                    that disagree about UV or normal, and the world displacement gap\n"
     "                    that opens there at the current --tess_amp. This is the mechanism\n"
@@ -448,6 +462,11 @@ int main(int argc, const char *argv[]) {
         else if (a == "--tess_back_cull")           dopt.tessBackCull = true;
         else if (a == "--tess_stats")               dopt.tessStats = true;
         else if (a == "--tess_seam_audit")          { dopt.tess = true; dopt.tessSeamAudit = true; }
+        else if (a == "--no-mirror2")               dopt.mirror2 = false;
+        else if (a == "--mirror2")                  dopt.mirror2 = true;
+        else if (const char *v = val("--mirror2_scale="))  dopt.mirror2Scale = float(std::atof(v));
+        else if (const char *v = val("--mirror2_min_px=")) dopt.mirror2MinPx = float(std::atof(v));
+        else if (a == "--mirror2_stats")            dopt.mirror2Stats = true;
         else if (const char *v = val("--tess_uniform=")) { dopt.tess = true; dopt.tessStats = true; dopt.tessUniform = std::atoi(v); }
         else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
         else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;

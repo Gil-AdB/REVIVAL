@@ -57,7 +57,7 @@ struct FrameUniforms {
     float clipPlane[4];         // xyz = N, w = d; all-zero N = disabled
     uint32_t mirrorCount;
     float envReflGain;
-    float pad3[2];
+    float reflUv[2];            // 1/w,1/h of the bound reflTex; 0 = same res (read())
     float aabbMin[4], aabbMax[4];
     float envProbePos[8][4];
     float metalCompat[4];       // .x = D1 dial, .y = D2 dial (see Deferred.h)
@@ -677,6 +677,56 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         mParams = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
         mMirror = mkTarget(MTLPixelFormatRGBA8Uint,    MTLStorageModePrivate);
         mDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
+    }
+
+    // ---- SECOND-ORDER mirror targets ---------------------------------------
+    // A mirror inside a mirror. For an ordered pair (A, B) the content of B's
+    // panel, as seen inside A's reflection, is the scene from the DOUBLY
+    // reflected eye reflect_B(reflect_A(eye)) — the CPU's own order-2 bake
+    // camera (GreetsMirror.cpp:2985-2991).
+    //
+    // WHY ONLY nMirrors TARGETS AND NOT nMirrors^2: the pairs are consumed
+    // immediately. The frame renders, for outer mirror A, every (A, B) into
+    // refl2[B], then A's own G-buffer and A's lighting (which reads refl2),
+    // then moves to A+1 and overwrites them. Metal's hazard tracking already
+    // orders those encoders, which is the same argument that lets the FIRST
+    // order share ONE G-buffer set. The order-2 G-buffer shares that set too:
+    // every (A,B) G-buffer is consumed by its own lighting pass before A's own
+    // G-buffer overwrites it.
+    //
+    // WHY SMALLER: order-2 content is only ever seen through panel B, a small
+    // part of the frame. --mirror2_scale (0.5) is the knob; the composite
+    // switches to a normalised bilinear sample when it is not 1.
+    const bool mirror2On = opt.mirror2 && nMirrors > 1;
+    const float m2Scale = std::min(1.0f, std::max(0.125f, opt.mirror2Scale));
+    const int W2 = std::max(64, int(float(W) * m2Scale));
+    const int H2 = std::max(64, int(float(H) * m2Scale));
+    auto mkTargetWH = [&](MTLPixelFormat fmt, int w, int h) -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                               width:NSUInteger(w)
+                                                              height:NSUInteger(h)
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    std::vector<id<MTLTexture>> refl2;
+    id<MTLTexture> m2Albedo = nil, m2Normal = nil, m2Params = nil, m2Mirror = nil,
+                   m2Depth = nil;
+    if (mirror2On) {
+        for (int i = 0; i < nMirrors; ++i)
+            refl2.push_back(mkTargetWH(MTLPixelFormatRGBA16Float, W2, H2));
+        m2Albedo = mkTargetWH(MTLPixelFormatRGBA8Unorm,   W2, H2);
+        m2Normal = mkTargetWH(MTLPixelFormatRG16Snorm,    W2, H2);
+        m2Params = mkTargetWH(MTLPixelFormatRGBA8Unorm,   W2, H2);
+        m2Mirror = mkTargetWH(MTLPixelFormatRGBA8Uint,    W2, H2);
+        m2Depth  = mkTargetWH(MTLPixelFormatDepth32Float, W2, H2);
+        std::fprintf(stderr,
+            "[MIRROR2] second-order mirrors ON — %d panel(s), up to %d ordered pair(s)/frame,\n"
+            "[MIRROR2]   targets %dx%d (%.2f x main), min panel footprint %.0f px\n",
+            nMirrors, nMirrors * (nMirrors - 1), W2, H2, double(m2Scale),
+            double(opt.mirror2MinPx));
     }
     // ---- ENVIRONMENT PROBE CUBES -------------------------------------------
     // One mipmapped HDR texturecube per probe, baked ONCE from the lit scene
@@ -1492,7 +1542,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         tsSet && [dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary];
 
     // shadow, gbuffer, lighting, tonemap, mirror, tessellation-factor compute
-    const int kPasses = 6;
+    const int kPasses = 7;
     id<MTLCounterSampleBuffer> sampleBuf = nil;
     if (haveStageCounters) {
         MTLCounterSampleBufferDescriptor *d = [MTLCounterSampleBufferDescriptor new];
@@ -2120,7 +2170,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                              id<MTLTexture> tPar, id<MTLTexture> tMir,
                              id<MTLTexture> tDep,
                              void (^counterHook)(MTLRenderPassDescriptor *),
-                             bool mirroredBasis = false) {
+                             bool mirroredBasis = false,
+                             const MTLScissorRect *scissor = nullptr) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = tAlb;
         rp.colorAttachments[1].texture = tNrm;
@@ -2163,6 +2214,13 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                                                                : MTLCullModeFront)
                                               : MTLCullModeNone;
         [enc setCullMode:baseCull];
+        // SCISSOR (second-order mirrors only). The order-2 view is consumed
+        // through ONE panel, so shading the rest of the target is waste; the
+        // clear still covers the whole attachment, which is what keeps a stale
+        // pair's content from being read at a pixel the next pair does not
+        // rewrite. Vertex work is unaffected — this trims fragments, which is
+        // where the pass's cost is.
+        if (scissor) [enc setScissorRect:*scissor];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
         [enc setFragmentSamplerState:samp atIndex:0];
@@ -2990,6 +3048,111 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 if (mirrorActive[i]) { if (firstActive < 0) firstActive = i; lastActive = i; }
             }
         }
+        // The deferred lighting encoder for a REFLECTION target. Shared by the
+        // first-order pass and the second-order pre-pass so the two can never
+        // drift in what they light with (same lights, same world-space shadow
+        // cubes, same env probes); `refl4` is what lands at texture 37..40 and
+        // is the ONLY difference between an order-1 and an order-2 pass.
+        auto encodeReflLight = [&](const FrameUniforms &u, id<MTLTexture> dst,
+                                   id<MTLTexture> tAlb, id<MTLTexture> tNrm,
+                                   id<MTLTexture> tPar, id<MTLTexture> tDep,
+                                   id<MTLTexture> tMir,
+                                   id<MTLTexture> const *refl4,
+                                   const MTLScissorRect *scissor) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = dst;
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:psoLight];
+            if (scissor) [enc setScissorRect:*scissor];
+            [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+            [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+            [enc setFragmentBuffer:shBuf offset:0 atIndex:3];
+            [enc setFragmentTexture:tAlb atIndex:0];
+            [enc setFragmentTexture:tNrm atIndex:1];
+            [enc setFragmentTexture:tPar atIndex:2];
+            [enc setFragmentTexture:tDep atIndex:3];
+            for (int s = 0; s < kMaxShadowCubes; ++s)
+                [enc setFragmentTexture:(s < int(cubes.size()) ? cubes[size_t(s)] : dummyCube)
+                                atIndex:NSUInteger(4 + s)];
+            for (int s = 0; s < kMaxSpotMaps; ++s)
+                [enc setFragmentTexture:(s < int(spots.size()) ? spots[size_t(s)] : dummy2D)
+                                atIndex:NSUInteger(20 + s)];
+            [enc setFragmentTexture:tMir atIndex:36];
+            for (int s = 0; s < 4; ++s)
+                [enc setFragmentTexture:(refl4 && refl4[s] ? refl4[s] : dummyRefl)
+                                atIndex:NSUInteger(37 + s)];
+            for (int s = 0; s < kMaxEnvProbes; ++s)
+                [enc setFragmentTexture:(s < nProbes ? envCubes[size_t(s)] : dummyEnvCube)
+                                atIndex:NSUInteger(41 + s)];
+            [enc setFragmentSamplerState:shadowSamp atIndex:1];
+            [enc setFragmentSamplerState:rawSamp atIndex:2];
+            [enc setFragmentSamplerState:envSamp atIndex:3];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+        };
+
+        // Screen bbox, in a w x h target, of a world AABB under `u`. Used to
+        // decide whether an (A,B) order-2 pair is worth rendering and to scissor
+        // it to the panel.
+        //
+        // The box is CLIPPED TO THE NEAR PLANE along its twelve edges rather
+        // than "any corner behind the eye => claim the whole target". That
+        // fallback is correct but useless: MEASURED at t=6133, three of the five
+        // live pairs straddle the eye plane and took the whole 960x540 target,
+        // which is the entire point of the scissor thrown away. Clipping the
+        // edges keeps those tight and still never under-covers, because the
+        // projection of a convex body clipped to z >= near is contained in the
+        // hull of its clipped edge endpoints.
+        auto projectAabb = [](const FrameUniforms &u, const float bmn[3],
+                              const float bmx[3], int w, int h, float out4[4]) -> bool {
+            auto view = [&](const float p[3], float v[3]) {
+                const float r[3] = {p[0] - u.camSrc[0], p[1] - u.camSrc[1], p[2] - u.camSrc[2]};
+                v[0] = u.camRow0[0]*r[0] + u.camRow0[1]*r[1] + u.camRow0[2]*r[2];
+                v[1] = u.camRow1[0]*r[0] + u.camRow1[1]*r[1] + u.camRow1[2]*r[2];
+                v[2] = u.camRow2[0]*r[0] + u.camRow2[1]*r[1] + u.camRow2[2]*r[2];
+            };
+            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+            bool any = false;
+            auto add = [&](const float v[3]) {
+                const float z = std::max(v[2], u.nearZ);
+                const float nx = (u.sx*v[0] + u.ox*z) / z, ny = (u.sy*v[1] + u.oy*z) / z;
+                const float sx = (nx * 0.5f + 0.5f) * float(w);
+                const float sy = (0.5f - ny * 0.5f) * float(h);
+                x0 = std::min(x0, sx); x1 = std::max(x1, sx);
+                y0 = std::min(y0, sy); y1 = std::max(y1, sy);
+                any = true;
+            };
+            float V[8][3];
+            for (int k = 0; k < 8; ++k) {
+                const float p[3] = {(k & 1) ? bmx[0] : bmn[0],
+                                    (k & 2) ? bmx[1] : bmn[1],
+                                    (k & 4) ? bmx[2] : bmn[2]};
+                view(p, V[k]);
+                if (V[k][2] > u.nearZ) add(V[k]);
+            }
+            for (int a = 0; a < 8; ++a)
+                for (int bit = 1; bit < 8; bit <<= 1) {
+                    const int b = a | bit;
+                    if (b == a) continue;                  // edge, each once
+                    const bool fa = V[a][2] > u.nearZ, fb = V[b][2] > u.nearZ;
+                    if (fa == fb) continue;                // both sides handled above
+                    const float t = (u.nearZ - V[a][2]) / (V[b][2] - V[a][2]);
+                    const float c[3] = {V[a][0] + t*(V[b][0]-V[a][0]),
+                                        V[a][1] + t*(V[b][1]-V[a][1]), u.nearZ};
+                    add(c);
+                }
+            if (!any) return false;
+            out4[0] = std::max(0.0f, x0);      out4[1] = std::max(0.0f, y0);
+            out4[2] = std::min(float(w), x1);  out4[3] = std::min(float(h), y1);
+            return out4[2] > out4[0] && out4[3] > out4[1];
+        };
+
+        int m2Pairs = 0;
+        bool m2Started = false;
+
         for (int i = 0; i < nMirrors; ++i) {
             if (!mirrorActive[i]) continue;
             const auto &m = scene.mirrors[size_t(i)];
@@ -3005,7 +3168,100 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             }
             for (int c = 0; c < 3; ++c) fum.clipPlane[c] = N[c];
             fum.clipPlane[3] = m.d;
-            fum.mirrorCount = 0;   // no recursion
+            fum.mirrorCount = 0;   // set below iff --mirror2 renders a pair for A
+
+            // ---- SECOND ORDER: every (A=i, B=j) pair, before A's own view ----
+            // The eye for pair (A,B) is reflect_B(reflect_A(eye)) — TWO plane
+            // reflections, so the basis determinant is back to +1 and the cull
+            // sense returns to the main view's (mirroredBasis=false). That is
+            // not a detail: with the first-order sense the whole order-2 view
+            // renders inside-out.
+            id<MTLTexture> refl4[4] = {nil, nil, nil, nil};
+            bool anyPair = false;
+            if (mirror2On) {
+                for (int j = 0; j < nMirrors; ++j) {
+                    if (j == i) continue;              // a panel is clipped out of its own view
+                    const auto &mb = scene.mirrors[size_t(j)];
+                    if (!mb.hasBounds()) continue;
+                    // B must face A's reflected eye, the same sd > 0 test the
+                    // first order applies to the real eye.
+                    const float sdB = mb.n[0]*fum.camSrc[0] + mb.n[1]*fum.camSrc[1]
+                                    + mb.n[2]*fum.camSrc[2] + mb.d;
+                    if (sdB <= 0.01f) continue;
+                    // Footprint of panel B inside A's view, in MAIN pixels —
+                    // that is the gate's unit and, scaled, the scissor.
+                    float bx[4];
+                    if (!projectAabb(fum, mb.bmin, mb.bmax, W, H, bx)) continue;
+                    if ((bx[2]-bx[0]) * (bx[3]-bx[1]) < opt.mirror2MinPx) continue;
+
+                    FrameUniforms fu2 = fum;
+                    const float NB[3] = {mb.n[0], mb.n[1], mb.n[2]};
+                    for (int c = 0; c < 3; ++c)
+                        fu2.camSrc[c] = fum.camSrc[c] - 2.0f * sdB * NB[c];
+                    float *r2[3] = {fu2.camRow0, fu2.camRow1, fu2.camRow2};
+                    const float *s2[3] = {fum.camRow0, fum.camRow1, fum.camRow2};
+                    for (int r = 0; r < 3; ++r) {
+                        const float dd = s2[r][0]*NB[0] + s2[r][1]*NB[1] + s2[r][2]*NB[2];
+                        for (int c = 0; c < 3; ++c) r2[r][c] = s2[r][c] - 2.0f * dd * NB[c];
+                    }
+                    for (int c = 0; c < 3; ++c) fu2.clipPlane[c] = NB[c];
+                    fu2.clipPlane[3] = mb.d;
+                    fu2.mirrorCount = 0;      // ORDER 2 IS THE CEILING
+                    fu2.reflUv[0] = fu2.reflUv[1] = 0.0f;
+
+                    const float sc = float(W2) / float(W);
+                    MTLScissorRect srect;
+                    srect.x = NSUInteger(std::max(0.0f, std::floor(bx[0]*sc)));
+                    srect.y = NSUInteger(std::max(0.0f, std::floor(bx[1]*sc)));
+                    srect.width  = NSUInteger(std::min(float(W2) - float(srect.x),
+                                        std::ceil((bx[2]-bx[0])*sc) + 1.0f));
+                    srect.height = NSUInteger(std::min(float(H2) - float(srect.y),
+                                        std::ceil((bx[3]-bx[1])*sc) + 1.0f));
+                    if (srect.width == 0 || srect.height == 0) continue;
+
+                    void (^h2)(MTLRenderPassDescriptor *) = nil;
+                    if (sampleBuf && !m2Started) {
+                        h2 = ^(MTLRenderPassDescriptor *rp) {
+                            rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                            rp.sampleBufferAttachments[0].startOfVertexSampleIndex = 12;
+                            rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = MTLCounterDontSample;
+                            rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                            rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                        };
+                    }
+                    encodeGBuffer(cb, fu2, m2Albedo, m2Normal, m2Params, m2Mirror, m2Depth,
+                                  h2, /*mirroredBasis=*/false, &srect);
+                    encodeReflLight(fu2, refl2[size_t(j)], m2Albedo, m2Normal, m2Params,
+                                    m2Depth, m2Mirror, nullptr, &srect);
+                    refl4[j] = refl2[size_t(j)];
+                    anyPair = true;
+                    m2Started = true;
+                    ++m2Pairs;
+                    if (opt.mirror2Stats)
+                        std::fprintf(stderr,
+                            "[MIRROR2] pair m%d->m%d ('%s' inside '%s') scissor %lux%lu at %lu,%lu\n",
+                            i + 1, j + 1, mb.material.c_str(), m.material.c_str(),
+                            (unsigned long)srect.width, (unsigned long)srect.height,
+                            (unsigned long)srect.x, (unsigned long)srect.y);
+                }
+            }
+            if (anyPair) {
+                // Turn the composite ON inside A's lighting pass, and switch the
+                // fetch from an integer same-pixel read to a normalised sample
+                // because the order-2 targets are smaller than this pass.
+                //
+                // reflUv normalises by THIS PASS's resolution, not the source
+                // texture's: the shader multiplies its own `position.xy`, which
+                // is in reflHdr (full-res) pixels, and the sampler does the
+                // mapping into the smaller texture. Getting this backwards
+                // (1/W2) sends uv up to 2.0, clamp-to-edge pins every fetch to
+                // the black border, and the whole feature silently composites
+                // ZERO — measured exactly that way before this line was right.
+                fum.mirrorCount = uint32_t(nMirrors);
+                fum.reflUv[0] = 1.0f / float(W);
+                fum.reflUv[1] = 1.0f / float(H);
+            }
+
             const bool first = (i == firstActive), last = (i == lastActive);
             void (^hook)(MTLRenderPassDescriptor *) = nil;
             if (sampleBuf && first) {
@@ -3019,39 +3275,12 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             }
             encodeGBuffer(cb, fum, mAlbedo, mNormal, mParams, mMirror, mDepth, hook,
                           /*mirroredBasis=*/true);
-            {   // reflection lighting into reflHdr[i]
-                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-                rp.colorAttachments[0].texture = reflHdr[size_t(i)];
-                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
-                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-                rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-                [enc setRenderPipelineState:psoLight];
-                [enc setFragmentBytes:&fum length:sizeof(fum) atIndex:1];
-                [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
-                [enc setFragmentBuffer:shBuf offset:0 atIndex:3];
-                [enc setFragmentTexture:mAlbedo atIndex:0];
-                [enc setFragmentTexture:mNormal atIndex:1];
-                [enc setFragmentTexture:mParams atIndex:2];
-                [enc setFragmentTexture:mDepth atIndex:3];
-                for (int s = 0; s < kMaxShadowCubes; ++s)
-                    [enc setFragmentTexture:(s < int(cubes.size()) ? cubes[size_t(s)] : dummyCube)
-                                    atIndex:NSUInteger(4 + s)];
-                for (int s = 0; s < kMaxSpotMaps; ++s)
-                    [enc setFragmentTexture:(s < int(spots.size()) ? spots[size_t(s)] : dummy2D)
-                                    atIndex:NSUInteger(20 + s)];
-                [enc setFragmentTexture:mMirror atIndex:36];
-                for (int s = 0; s < 4; ++s)
-                    [enc setFragmentTexture:dummyRefl atIndex:NSUInteger(37 + s)];
-                for (int s = 0; s < kMaxEnvProbes; ++s)
-                    [enc setFragmentTexture:(s < nProbes ? envCubes[size_t(s)] : dummyEnvCube)
-                                    atIndex:NSUInteger(41 + s)];
-                [enc setFragmentSamplerState:shadowSamp atIndex:1];
-                [enc setFragmentSamplerState:rawSamp atIndex:2];
-                [enc setFragmentSamplerState:envSamp atIndex:3];
-                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-                [enc endEncoding];
-            }
+            // First-order lighting into reflHdr[i]. `refl4` is all-nil unless
+            // --mirror2 rendered a pair for this A, in which case those are the
+            // order-2 views and fum.mirrorCount is non-zero — that is the whole
+            // of "a mirror inside a mirror".
+            encodeReflLight(fum, reflHdr[size_t(i)], mAlbedo, mNormal, mParams,
+                            mDepth, mMirror, anyPair ? refl4 : nullptr, nullptr);
             // flare sprites inside the reflection (the CPU draws clone flares
             // in its mirrors); lights behind the plane are clipped.
             {
@@ -3081,6 +3310,25 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 [e endEncoding];
             }
         }
+
+        // Close the order-2 counter interval (pass index 6). It cannot be closed
+        // inside the loop the way the mirror pass is: the last pair is only
+        // known once every outer mirror has been walked.
+        if (sampleBuf && m2Started && !refl2.empty()) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = refl2[0];
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+            rp.sampleBufferAttachments[0].startOfVertexSampleIndex = MTLCounterDontSample;
+            rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = 13;
+            rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+            rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            [e endEncoding];
+        }
+        if (opt.mirror2Stats && mirror2On)
+            std::fprintf(stderr, "[MIRROR2] %d order-2 pair(s) rendered this frame\n", m2Pairs);
 
         tessThisPass = opt.tess;
         // --- pass 0c: TESSELLATION FACTORS (compute) ---
@@ -3648,7 +3896,12 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             int ly = 4;
             std::snprintf(line, sizeof line, "GPU FRAME %6.3F MS   %5.0F FPS", gpuFrameMs, emaFps);
             HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 255, 255); ly += 18;
-            static const char *pn[5] = {"SHADOW BAKE", "GBUFFER", "LIGHTING", "TONEMAP", "MIRROR"};
+            // One entry per kPasses. This array used to have FIVE while the
+            // loop below ran to kPasses (6) — an out-of-bounds read that
+            // printed garbage for the last row; adding order-2 made it 7.
+            static const char *pn[kPasses] = {"SHADOW BAKE", "GBUFFER", "LIGHTING",
+                                              "TONEMAP", "MIRROR", "TESS FACTORS",
+                                              "MIRROR2"};
             for (int p = 0; p < kPasses; ++p) {
                 std::snprintf(line, sizeof line, "  %-12s %6.3F MS", pn[p], perPass[p]);
                 HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 170, 210, 255); ly += 15;
@@ -3914,7 +4167,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     }
 
     const char *passNames[kPasses] = {"shadow-bake", "gbuffer", "lighting",
-                                      "tonemap", "mirror", "tess-factors"};
+                                      "tonemap", "mirror", "tess-factors",
+                                      "mirror2"};
     std::vector<double> frameMs;
     std::vector<std::vector<double>> passMs(kPasses);
 

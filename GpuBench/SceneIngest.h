@@ -75,6 +75,15 @@ struct MirrorInfo {
     float       d = 0.0f;
     std::string material;
     int         panelFaces = 0;
+    // World AABB of the TAGGED panel triangles (the ones that passed the
+    // 30-degree + on-plane test), not of the whole box the panel belongs to.
+    // Second-order mirroring needs a screen footprint for this panel from an
+    // arbitrary camera — to decide whether an (A,B) pair is worth rendering and
+    // how big its target should be — and the plane alone cannot give one. Empty
+    // when no face was tagged (bmin > bmax).
+    float       bmin[3] = { 1e30f,  1e30f,  1e30f};
+    float       bmax[3] = {-1e30f, -1e30f, -1e30f};
+    bool hasBounds() const { return bmin[0] <= bmax[0]; }
 };
 
 // One draw per (mesh x material) run of triangles.

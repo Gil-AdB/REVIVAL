@@ -1478,8 +1478,22 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 // (The screens were already non-casters via the name filter;
                 // this matters for the teleporter, whose base material casts.)
                 b.castsShadow = false;
-                out.mirrors[size_t(mirrorIdx) - 1].panelFaces +=
-                    int((uint32_t(out.verts.size()) - b.firstVertex) / 3);
+                MirrorInfo &mi = out.mirrors[size_t(mirrorIdx) - 1];
+                mi.panelFaces += int((uint32_t(out.verts.size()) - b.firstVertex) / 3);
+                // World AABB of the tagged panel, for the second-order pair
+                // gate and target sizing (see MirrorInfo::bmin). Object ->
+                // world with this batch's own rigid transform, the same
+                // b.rot/b.pos ComputeBatchSphere uses.
+                for (size_t v = b.firstVertex; v < out.verts.size(); ++v) {
+                    const Vertex &V = out.verts[v];
+                    const float o[3] = {V.px, V.py, V.pz};
+                    for (int c = 0; c < 3; ++c) {
+                        const float w = b.rot[c][0]*o[0] + b.rot[c][1]*o[1]
+                                      + b.rot[c][2]*o[2] + b.pos[c];
+                        mi.bmin[c] = std::min(mi.bmin[c], w);
+                        mi.bmax[c] = std::max(mi.bmax[c], w);
+                    }
+                }
             }
             b.vertexCount = uint32_t(out.verts.size()) - b.firstVertex;
             if (b.vertexCount) {
