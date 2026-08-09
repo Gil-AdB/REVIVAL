@@ -1931,3 +1931,356 @@ fragment float4 fs_hud(FsQuadOut in [[stage_in]],
     if (t.a <= 0.0f) discard_fragment();
     return float4(t.rgb, t.a);
 }
+
+// ===========================================================================
+// GPU HARDWARE TESSELLATION — displaced greets stone (`rooms` / `floor`)
+// docs/GPU_BENCHMARK_PLAN.md §6.3
+//
+// THE KNOB is `--tess_px`: the TARGET TRIANGLE EDGE LENGTH IN PIXELS. A patch
+// edge whose projected length is L px asks for round(L / target) segments.
+// That is a SCREEN-SPACE ADAPTIVE rule, so a patch at the far end of the
+// corridor costs a fraction of one at the camera and the count stays sane.
+//
+// CRACK-FREEDOM is structural, not tuned. Every edge factor is derived from
+// THE TWO ENDPOINTS OF THAT EDGE ALONE — never from the patch's centre, its
+// area, or its other two edges — so two patches sharing an edge compute the
+// same number without communicating. The endpoints agree BITWISE because the
+// de-indexed vertex buffer copies them from the same source vertex, and the
+// sub-patch lattice below derives every interior point as an EXACT integer
+// ratio a/P (never 1 - b/P, which is a different float).
+//
+// THE FACTOR-16 CEILING is real: Metal caps maxTessellationFactor at 16, so a
+// single patch cannot subdivide an edge more than 16 ways. Reaching one
+// triangle per pixel on a near wall therefore needs PRE-SUBDIVISION, and this
+// arm does it by INSTANCING: instance s of the draw renders sub-triangle s of
+// a uniform P x P barycentric split of the base triangle, with its own
+// tessellation-factor record (Metal's per-instance factor stride). Effective
+// per-edge subdivision is therefore P x 16, at NO vertex-buffer cost.
+// ===========================================================================
+
+struct TessUniforms {
+    // .x target edge length in PIXELS, .y world displacement amplitude,
+    // .z height-map mean (the CPU bake's mipMean), .w pre-split P
+    float4 k;
+    // .x patch count in this batch, .y frustum-cull enable, .z max hw factor,
+    // .w height mip level
+    float4 k2;
+    // .x viewport W, .y viewport H, .z backface-cull enable, .w edge-slot map
+    float4 k3;
+    // .x UNIFORM FACTOR OVERRIDE (0 = off) — the calibration probe that settles
+    // what the hardware's real ceiling is and whether the post-tessellation
+    // vertex function is invoked once per VERTEX or once per triangle CORNER.
+    // Both questions have to be answered before any triangle count is quoted.
+    float4 k4;
+};
+
+// One sub-triangle of the P x P barycentric split, in LATTICE coordinates.
+// bary(a,b) = ((P-a-b)/P, a/P, b/P) — three exact integer ratios, so a lattice
+// point shared by two sub-triangles (or by two BASE triangles across their
+// common edge) evaluates to the same float on both sides.
+struct SubTri { int a, b, down, pad; };
+
+static inline float3 subBaryCorner(int a, int b, float invP) {
+    return float3(float(a) * invP, float(b) * invP, 0.0f);   // filled by caller
+}
+
+// Global barycentric (w0,w1,w2) of lattice point (a,b) with base P.
+static inline float3 latticeBary(int a, int b, int P) {
+    const float invP = 1.0f / float(P);
+    return float3(float(P - a - b) * invP, float(a) * invP, float(b) * invP);
+}
+
+// The three global-barycentric corners of sub-triangle `st`.
+static inline void subTriCorners(SubTri st, int P, thread float3 *B) {
+    if (st.down == 0) {
+        B[0] = latticeBary(st.a,     st.b,     P);
+        B[1] = latticeBary(st.a + 1, st.b,     P);
+        B[2] = latticeBary(st.a,     st.b + 1, P);
+    } else {
+        B[0] = latticeBary(st.a + 1, st.b,     P);
+        B[1] = latticeBary(st.a + 1, st.b + 1, P);
+        B[2] = latticeBary(st.a,     st.b + 1, P);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Factor kernel. One thread per (base patch, sub-triangle).
+// ---------------------------------------------------------------------------
+
+struct TessVert {          // the ingest's Vertex, read raw (48 B, see SceneIngest.h)
+    packed_float3 pos;
+    packed_float3 nrm;
+    float2        uv;
+    packed_float4 tan;
+};
+
+// Projected pixel position of a world point, and its view z.
+static inline float3 projectPx(constant FrameUniforms &u, constant TessUniforms &tu,
+                               float3 wp) {
+    const float3 rel = wp - u.camSrc;
+    const float3 vp  = rowmul(u.camRow0, u.camRow1, u.camRow2, rel);
+    const float  z   = max(vp.z, 1e-4f);
+    const float  nx  = (u.sx * vp.x + u.ox * vp.z) / z;
+    const float  ny  = (u.sy * vp.y + u.oy * vp.z) / z;
+    return float3(nx * 0.5f * tu.k3.x, ny * 0.5f * tu.k3.y, vp.z);
+}
+
+// THE EDGE RULE — the SPHERE-PROJECTION metric, and the reason it is not the
+// naive screen-space one.
+//
+// The obvious rule, "project both endpoints and measure the pixel distance",
+// is WRONG here and was measured wrong: greets' `rooms` is 196 triangles for
+// a whole room, so a wall patch runs from 0.1 world units in front of the eye
+// to 14 behind it. Projecting an endpoint near the eye plane divides by ~0,
+// which pinned those patches to the maximum factor at EVERY target — the
+// triangle count came out essentially independent of --tess_px (352k at a
+// 32 px target vs 1.16M at 1 px, when a 32x finer target should be ~1000x
+// more), and 99 % of the triangles landed off screen.
+//
+// Instead: take the edge's WORLD length, divide by the distance from the eye
+// to its midpoint, and scale by the projection. That is the pixel length the
+// edge would have if it were perpendicular to the view — an upper bound on
+// its real footprint, well behaved at and behind the eye plane, and (this is
+// the part that matters) still a function of THE TWO ENDPOINTS ALONE. Both
+// `length(a-b)` and `0.5*(a+b)` are exactly symmetric in float, so two patches
+// sharing an edge still derive the same factor with no communication.
+static inline float edgeFactor(float3 wA, float3 wB, float3 eye,
+                               float perspX, float nearZ,
+                               float targetPx, float maxF) {
+    const float wl = length(wA - wB);
+    const float d  = max(length(0.5f * (wA + wB) - eye), nearZ);
+    const float lenPx = wl * perspX / d;
+    return clamp(round(lenPx / max(targetPx, 0.05f)), 1.0f, maxF);
+}
+
+kernel void cs_tess_factors(device half *factors            [[buffer(0)]],
+                            const device TessVert *verts    [[buffer(1)]],
+                            constant FrameUniforms &u       [[buffer(2)]],
+                            constant BatchUniforms &b       [[buffer(3)]],
+                            constant TessUniforms &tu       [[buffer(4)]],
+                            const device SubTri *subs       [[buffer(5)]],
+                            device atomic_uint *stats       [[buffer(6)]],
+                            uint2 gid [[thread_position_in_grid]])
+{
+    const uint  nPatch = uint(tu.k2.x);
+    const int   P      = int(tu.k.w);
+    if (gid.x >= nPatch || gid.y >= uint(P * P)) return;
+
+    const uint  patch = gid.x, sub = gid.y;
+    const float maxF  = tu.k2.z;
+
+    // Base control points, world space.
+    float3 W[3];
+    for (int i = 0; i < 3; ++i) {
+        const float3 op = float3(verts[patch * 3u + uint(i)].pos);
+        W[i] = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, op) + b.objPos;
+    }
+
+    float3 B[3];
+    subTriCorners(subs[sub], P, B);
+
+    float3 wsub[3], px[3];
+    for (int i = 0; i < 3; ++i) {
+        wsub[i] = B[i].x * W[0] + B[i].y * W[1] + B[i].z * W[2];
+        px[i] = projectPx(u, tu, wsub[i]);
+    }
+
+    // Slot 0 of the factor record. `edgeMap` 0 = the OPPOSITE-VERTEX
+    // convention (slot i is the edge NOT touching control point i), which is
+    // what D3D/GL/Metal all document; 1 = the adjacent convention. Which one
+    // this hardware actually implements is settled by LOOKING for cracks,
+    // not by trusting the documentation — see --tess_edge_map.
+    const float amp = abs(tu.k.y);
+    // Displacement can push a patch back on screen after it left, so the
+    // frustum test is widened by the amplitude expressed in pixels at the
+    // nearest corner.
+    float3 lo = px[0], hi = px[0];
+    float  zmin = px[0].z;
+    for (int i = 1; i < 3; ++i) { lo = min(lo, px[i]); hi = max(hi, px[i]); zmin = min(zmin, px[i].z); }
+    float zmax = max(max(px[0].z, px[1].z), px[2].z);
+    bool cull = false;
+    if (tu.k2.y > 0.5f) {
+        // BEHIND THE EYE. Not an optimisation — without it a patch entirely
+        // behind the camera is never frustum-tested (its projection is
+        // meaningless) and, under the old edge rule, was tessellated at the
+        // ceiling and then thrown away by the clipper. greets' floor is 30
+        // room-spanning triangles, so at presplit 32 that was tens of
+        // thousands of full-rate patches rendering nothing.
+        if (zmax < u.nearZ - amp) {
+            cull = true;
+        } else if (zmin > u.nearZ) {
+            // Fully in front: the screen bbox is meaningful. Widen it by the
+            // displacement amplitude expressed in pixels at the nearest corner,
+            // so a patch displacement pushes back on screen is not lost.
+            const float margin = amp * u.sx * 0.5f * tu.k3.x / max(zmin, 1e-3f) + 2.0f;
+            const float halfW = tu.k3.x * 0.5f + margin, halfH = tu.k3.y * 0.5f + margin;
+            if (hi.x < -halfW || lo.x > halfW || hi.y < -halfH || lo.y > halfH) cull = true;
+        }
+        // Straddling the eye plane: never culled. Conservative on purpose.
+    }
+    if (!cull && tu.k3.z > 0.5f) {
+        // Signed screen area of the sub-patch; the main pass keeps FRONT faces
+        // (see Deferred.mm), so a patch of the other sign carries no visible
+        // geometry once displacement is small against the patch.
+        const float2 e1 = px[1].xy - px[0].xy, e2 = px[2].xy - px[0].xy;
+        if (e1.x * e2.y - e1.y * e2.x > 0.0f) cull = true;
+    }
+
+    const uint base = (sub * nPatch + patch) * 4u;
+    if (cull) {
+        // A zero factor tells the tessellator to discard the patch entirely.
+        for (uint i = 0; i < 4u; ++i) factors[base + i] = half(0.0f);
+        return;
+    }
+
+    const float perspX = u.sx * 0.5f * tu.k3.x;      // == Camera::PerspX
+    const float e12 = edgeFactor(wsub[1], wsub[2], u.camSrc, perspX, u.nearZ, tu.k.x, maxF);
+    const float e20 = edgeFactor(wsub[2], wsub[0], u.camSrc, perspX, u.nearZ, tu.k.x, maxF);
+    const float e01 = edgeFactor(wsub[0], wsub[1], u.camSrc, perspX, u.nearZ, tu.k.x, maxF);
+
+    float o0, o1, o2;
+    if (tu.k3.w < 0.5f) { o0 = e12; o1 = e20; o2 = e01; }
+    else                { o0 = e01; o1 = e12; o2 = e20; }
+
+    // The inside factor governs the patch interior only; no neighbour sees it,
+    // so it is free to be the max of the three edges (never LESS than an edge,
+    // or the stitch ring degenerates).
+    const float inner = max(max(o0, o1), o2);
+
+    if (tu.k4.x > 0.5f) { o0 = o1 = o2 = tu.k4.x; }
+    const float innerW = (tu.k4.x > 0.5f) ? tu.k4.x : inner;
+
+    factors[base + 0] = half(o0);
+    factors[base + 1] = half(o1);
+    factors[base + 2] = half(o2);
+    factors[base + 3] = half(innerW);
+
+    if (stats) {
+        // Boundary segment count and live patch count: with the post-tess
+        // VERTEX count these give the EXACT triangle count by Euler
+        // (T = 2V - B - 2 per patch, a triangulated disk). See Deferred.mm.
+        atomic_fetch_add_explicit(&stats[0], uint(o0 + o1 + o2), memory_order_relaxed);
+        atomic_fetch_add_explicit(&stats[1], 1u, memory_order_relaxed);
+        // Predictions to check the MEASURED vertex count against:
+        //   stats[3] = sum of inner factors
+        //   stats[4] = sum of (n+1)(n+2)/2  — vertices if deduplicated
+        //   stats[5] = sum of 3*n^2         — vertices if per triangle CORNER
+        const uint n = uint(innerW);
+        atomic_fetch_add_explicit(&stats[3], n, memory_order_relaxed);
+        atomic_fetch_add_explicit(&stats[4], (n + 1u) * (n + 2u) / 2u, memory_order_relaxed);
+        atomic_fetch_add_explicit(&stats[5], 3u * n * n, memory_order_relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-tessellation vertex function.
+// ---------------------------------------------------------------------------
+
+struct TessCP {
+    float3 pos     [[attribute(0)]];
+    float3 normal  [[attribute(1)]];
+    float2 uv      [[attribute(2)]];
+    float4 tangent [[attribute(3)]];
+};
+
+static inline GBufVertexOut tessShade(patch_control_point<TessCP> cp,
+                                      float3 pc, uint iid,
+                                      constant FrameUniforms &u,
+                                      constant BatchUniforms &b,
+                                      constant TessUniforms &tu,
+                                      const device SubTri *subs,
+                                      texture2d<float> heightTex,
+                                      sampler hsamp)
+{
+    const int P = int(tu.k.w);
+    float3 B[3];
+    subTriCorners(subs[iid], P, B);
+    // Compose: the hardware's barycentric inside the SUB-triangle, mapped back
+    // into the BASE triangle's barycentric.
+    const float3 g = pc.x * B[0] + pc.y * B[1] + pc.z * B[2];
+
+    float3 op = g.x * cp[0].pos     + g.y * cp[1].pos     + g.z * cp[2].pos;
+    float3 on = g.x * cp[0].normal  + g.y * cp[1].normal  + g.z * cp[2].normal;
+    float2 uv = g.x * cp[0].uv      + g.y * cp[1].uv      + g.z * cp[2].uv;
+    float4 ot = g.x * cp[0].tangent + g.y * cp[1].tangent + g.z * cp[2].tangent;
+    ot.w = cp[0].tangent.w;          // handedness is per FACE, not interpolable
+
+    const float3 nrm = normalize(on);
+    // THE DISPLACEMENT, term for term the CPU bake's:
+    //   offset = amp * (h - mean) along the (interpolated) vertex normal.
+    // `mean` is the height map's own average, the analogue of the CPU bake's
+    // mipMean, so the surface swings both ways about the authored plane
+    // instead of only protruding.
+    const float h = heightTex.sample(hsamp, uv, level(tu.k2.w)).r;
+    op += nrm * (tu.k.y * (h - tu.k.z));
+
+    const float3 wp  = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, op) + b.objPos;
+    const float3 rel = wp - u.camSrc;
+    const float3 vp  = rowmul(u.camRow0, u.camRow1, u.camRow2, rel);
+
+    GBufVertexOut o;
+    o.position = float4(u.sx * vp.x + u.ox * vp.z,
+                        u.sy * vp.y + u.oy * vp.z,
+                        u.dza * vp.z + u.dzb,
+                        vp.z);
+    o.uv = uv;
+    const float3 wn = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, nrm);
+    o.viewNormal = rowmul(u.camRow0, u.camRow1, u.camRow2, wn);
+    const float3 wt = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, ot.xyz);
+    o.viewTangent = float4(rowmul(u.camRow0, u.camRow1, u.camRow2, wt), ot.w);
+    o.viewPos  = vp;
+    o.worldPos = wp;
+    return o;
+}
+
+[[patch(triangle, 3)]]
+vertex GBufVertexOut vs_gbuffer_tess(patch_control_point<TessCP> cp [[stage_in]],
+                                     float3 pc [[position_in_patch]],
+                                     uint iid  [[instance_id]],
+                                     constant FrameUniforms &u  [[buffer(1)]],
+                                     constant BatchUniforms &b  [[buffer(2)]],
+                                     constant TessUniforms &tu  [[buffer(3)]],
+                                     const device SubTri *subs  [[buffer(4)]],
+                                     texture2d<float> heightTex [[texture(0)]],
+                                     sampler hsamp [[sampler(0)]])
+{
+    return tessShade(cp, pc, iid, u, b, tu, subs, heightTex, hsamp);
+}
+
+// STATS variant — one atomic increment per generated vertex. A separate entry
+// point rather than a uniform branch so the timed pipeline carries no trace of
+// it. Never used in a timing run.
+[[patch(triangle, 3)]]
+vertex GBufVertexOut vs_gbuffer_tess_stats(patch_control_point<TessCP> cp [[stage_in]],
+                                           float3 pc [[position_in_patch]],
+                                           uint iid  [[instance_id]],
+                                           constant FrameUniforms &u  [[buffer(1)]],
+                                           constant BatchUniforms &b  [[buffer(2)]],
+                                           constant TessUniforms &tu  [[buffer(3)]],
+                                           const device SubTri *subs  [[buffer(4)]],
+                                           device atomic_uint *stats  [[buffer(5)]],
+                                           texture2d<float> heightTex [[texture(0)]],
+                                           sampler hsamp [[sampler(0)]])
+{
+    atomic_fetch_add_explicit(&stats[2], 1u, memory_order_relaxed);
+    return tessShade(cp, pc, iid, u, b, tu, subs, heightTex, hsamp);
+}
+
+// Fragment shader for the --tess_stats probe ONLY. Counts the fragments the
+// tessellated stone shades, so "triangles per covered pixel" is a measurement
+// rather than an estimate. It writes nothing useful (the stats frame is untimed
+// and is followed by a re-warm), and it carries NO discard_fragment(), so the
+// early-depth test stays enabled and geometry drawn BEFORE the stone rejects
+// its hidden fragments. Geometry drawn AFTER cannot, so the count is an UPPER
+// BOUND on visible stone pixels.
+fragment GBufOut fs_gbuffer_fragcount(GBufVertexOut in [[stage_in]],
+                                      device atomic_uint *stats [[buffer(5)]])
+{
+    atomic_fetch_add_explicit(&stats[6], 1u, memory_order_relaxed);
+    GBufOut o;
+    o.albedo = float4(0.0f);
+    o.normal = float2(0.0f);
+    o.params = float4(0.0f);
+    o.mirror = uint4(0u);
+    return o;
+}

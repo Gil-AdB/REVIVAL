@@ -266,6 +266,65 @@ struct DeferredOptions {
     // "This pixel is not lit by light N" had no answerable form before this.
     bool  probePx = false;
     int   probePxXY[2] = {0, 0};
+    // ---- GPU HARDWARE TESSELLATION (docs/GPU_BENCHMARK_PLAN.md §6.3) -------
+    // Displaces the greets stone (`rooms` + `floor`) with REAL geometry, from
+    // the same height map the CPU bake and the POM march use. DEFAULT OFF, and
+    // byte-null when off: the stone batches take the untessellated pipeline and
+    // every md5 recorded in the plan document is unchanged.
+    //
+    // THE KNOB is `tessTargetPx`: the target triangle EDGE LENGTH IN PIXELS.
+    // A patch edge measuring L pixels on screen asks for round(L/target)
+    // segments, so the rule is screen-space adaptive by construction and a
+    // patch at the far end of the corridor costs a fraction of one at the
+    // camera. `--tess_px=1` is the "one triangle per pixel" ask.
+    //
+    // THE FLOOR IS NOT SET BY THIS KNOB ALONE. Metal caps a pipeline's
+    // maxTessellationFactor at 16, so one patch cannot split an edge more than
+    // 16 ways however small the target. `tessPresplit` (P) is the second half:
+    // instance s of the draw renders sub-triangle s of a uniform PxP
+    // barycentric split of the base triangle, each with its own factor record,
+    // so the effective per-edge subdivision is P x 16 at zero vertex-buffer
+    // cost. Reaching 1 px on the near wall at t=5743 needs P >= 8 — see the
+    // cost curve in the plan document.
+    bool  tess = false;
+    float tessTargetPx = 8.0f;
+    int   tessPresplit = 1;
+    // World displacement amplitude. The CPU bake's --greets_displace_amp,
+    // whose default is 0.3 (FeatureFlags.def:435); the S1d perf table's
+    // "tessellation @0.18" arm runs 0.18 to match the shell arm's world amp.
+    float tessAmp = 0.3f;
+    // Height-map mip the displacement samples, and the mip whose mean is
+    // subtracted. CPU parity: --greets_displace_mip defaults to 2
+    // (FeatureFlags.def:436) and mipMean is that mip's texel average
+    // (MeshOps.cpp:2097-2113).
+    int   tessMip = 2;
+    // Frustum-cull patches by writing a ZERO tessellation factor (the Metal
+    // primitive for discarding a patch), widened by the displacement amplitude
+    // so a patch that displacement pushes back on screen is not lost. ON by
+    // default; --no-tess_cull prices it.
+    bool  tessCull = true;
+    // Backface-cull patches the same way. OFF by default and deliberately so:
+    // a backfacing base patch can still carry visible relief on a displaced
+    // silhouette, which is the whole subject of this arm. The rasterizer's own
+    // backface cull still runs either way.
+    bool  tessBackCull = false;
+    // Which factor slot is which edge. 0 = the OPPOSITE-VERTEX convention
+    // (slot i is the edge not touching control point i), 1 = adjacent. Settled
+    // by looking for cracks, not by trusting documentation.
+    int   tessEdgeMap = 0;
+    // Count the generated geometry EXACTLY: one atomic per post-tessellation
+    // vertex invocation (a separate shader entry point, never in a timed
+    // pipeline) plus the summed boundary segments from the factor kernel.
+    // Triangles then follow from Euler for a triangulated disk,
+    //   T = 2V - B - 2  per patch,
+    // which is exact rather than modelled. Adds an untimed probe frame.
+    bool  tessStats = false;
+    // CALIBRATION PROBE (0 = off). Force every tessellation factor to this
+    // value. Exists to answer two questions no documentation settles for this
+    // device: what the hardware's real factor ceiling is, and whether the
+    // post-tessellation vertex function is invoked once per VERTEX or once per
+    // triangle CORNER — the triangle count depends on both.
+    int   tessUniform = 0;
     std::string outPath;
 };
 
@@ -284,6 +343,15 @@ struct DeferredResult {
     int                     litLights = 0;
     int                     movingCubes = 0;
     double                  staticBakeMs = 0.0;   // one-time cached bake
+    // Tessellation census, from --tess_stats. `tessVerts` is an exact hardware
+    // count (one atomic per post-tessellation vertex invocation); `tessTris`
+    // follows from Euler per patch and is exact given it.
+    long long               tessVerts = 0;
+    long long               tessTris = 0;
+    long long               tessPatchesLive = 0;
+    long long               tessBoundarySegs = 0;
+    int                     tessMaxFactor = 0;
+    double                  tessFactorMs = 0.0;   // the factor compute kernel alone
 };
 
 // Returns false on hard failure. Renders offscreen; never opens a window.

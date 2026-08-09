@@ -290,6 +290,35 @@ const char *kUsage =
     "                    --reanimate render reproducible.\n"
     "  --pcl_image_size=F  override FDS's ImageSize for the sprite half-extent. 0 (the\n"
     "                    default) uses the scene's own — fountain 10.0, FOUNTAIN.CPP:2844.\n"
+    "  --tess            GPU HARDWARE TESSELLATION of the greets stone ('rooms' + 'floor'),\n"
+    "                    displaced by the same height map the CPU --greets_displace bake\n"
+    "                    and the POM march use. DEFAULT OFF and byte-null when off.\n"
+    "  --tess_px=F       THE KNOB: target triangle EDGE LENGTH IN PIXELS (default 8).\n"
+    "                    A patch edge measuring L px asks for round(L/F) segments, so the\n"
+    "                    rule is screen-space adaptive and distance costs nothing. --tess_px=1\n"
+    "                    is the 'one triangle per pixel' ask. Implies --tess.\n"
+    "  --tess_presplit=P Metal caps a pipeline's tessellation factor at 16, so ONE patch\n"
+    "                    cannot split an edge more than 16 ways however small --tess_px is.\n"
+    "                    P pre-splits every base triangle into a PxP barycentric lattice,\n"
+    "                    rendered as P*P INSTANCES each with its own factor record, so the\n"
+    "                    effective per-edge ceiling is P*16 at zero vertex-buffer cost.\n"
+    "                    Default 1. Implies --tess.\n"
+    "  --tess_amp=F      world displacement amplitude (default 0.3 = --greets_displace_amp's\n"
+    "                    own default; the S1d perf table's tessellation arm runs 0.18).\n"
+    "  --tess_mip=N      height mip sampled, and the mip whose mean is subtracted (default 2,\n"
+    "                    = --greets_displace_mip).\n"
+    "  --no-tess_cull    do NOT discard off-screen patches with a zero tessellation factor.\n"
+    "  --tess_back_cull  ALSO discard backfacing patches (off by default: a backfacing base\n"
+    "                    patch can still carry visible relief on a displaced silhouette).\n"
+    "  --tess_edge_map=N which factor slot is which edge: 0 = opposite-vertex (default),\n"
+    "                    1 = adjacent. Settled by looking for cracks.\n"
+    "  --tess_stats      EXACT geometry census in an extra UNTIMED frame: post-tessellation\n"
+    "                    vertex invocations (one atomic each), boundary segments, and the\n"
+    "                    triangle count Euler gives from the two. Also times the factor\n"
+    "                    kernel alone. Never present in a timed pipeline.\n"
+    "  --tess_uniform=F  CALIBRATION: force every tessellation factor to F and report the\n"
+    "                    vertex count against both hypotheses (deduplicated vs per-corner).\n"
+    "                    Settles the hardware's real factor ceiling. Implies --tess_stats.\n"
     "  --help\n";
 
 }  // namespace
@@ -403,6 +432,17 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--pcl_synth=")) pclSynth = v;
         else if (const char *v = val("--pcl_synth_n=")) pclSynthN = std::atoi(v);
         else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);
+        // ---- GPU HARDWARE TESSELLATION (default OFF, byte-null when off) ---
+        else if (a == "--tess")                     dopt.tess = true;
+        else if (const char *v = val("--tess_px="))       { dopt.tess = true; dopt.tessTargetPx = float(std::atof(v)); }
+        else if (const char *v = val("--tess_presplit=")) { dopt.tess = true; dopt.tessPresplit = std::atoi(v); }
+        else if (const char *v = val("--tess_amp="))      dopt.tessAmp = float(std::atof(v));
+        else if (const char *v = val("--tess_mip="))      dopt.tessMip = std::atoi(v);
+        else if (const char *v = val("--tess_edge_map=")) dopt.tessEdgeMap = std::atoi(v);
+        else if (a == "--no-tess_cull")             dopt.tessCull = false;
+        else if (a == "--tess_back_cull")           dopt.tessBackCull = true;
+        else if (a == "--tess_stats")               dopt.tessStats = true;
+        else if (const char *v = val("--tess_uniform=")) { dopt.tess = true; dopt.tessStats = true; dopt.tessUniform = std::atoi(v); }
         else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
         else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;
         else if (a == "--env_bake_skip_animated")   dopt.envSkipAnimated = true;

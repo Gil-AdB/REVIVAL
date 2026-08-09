@@ -1157,6 +1157,205 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             skipped.empty() ? "(none)" : skipped.c_str());
     }
 
+    // =======================================================================
+    // GPU HARDWARE TESSELLATION — setup. See Deferred.h for the knob's units
+    // and docs/GPU_BENCHMARK_PLAN.md §6.3 for the cost curve this produces.
+    //
+    // WHY HARDWARE TESSELLATION AND NOT MESH SHADERS, stated because both are
+    // available on this device: the question being answered is what the CPU
+    // campaign's geometric carve costs on hardware built for it, and the
+    // comparison is only clean if NOTHING ELSE MOVES. Tessellation replaces
+    // exactly one stage — the vertex stage of the stone's draws — and leaves
+    // the vertex format, the per-batch uniform block, the G-buffer fragment
+    // shader and every other pass byte-identical, so the whole delta in the
+    // cost curve is geometry amplification. A mesh-shader path would replace
+    // vertex FETCH as well (hand-rolled index/vertex addressing out of a
+    // threadgroup) and its numbers would mix two changes. Mesh shaders' one
+    // real advantage here is that they have no factor-16 ceiling; the instanced
+    // pre-split below buys the same reach without moving anything else.
+    // =======================================================================
+    struct TessUniformsHost {
+        float k[4];    // targetPx, worldAmp, heightMean, presplit P
+        float k2[4];   // patchCount, cullEnable, maxFactor, heightMip
+        float k3[4];   // viewport W, viewport H, backCull, edgeMap
+        float k4[4];   // uniform-factor override (calibration probe), 0 = off
+    };
+    struct StoneBatch {
+        size_t   bi = 0;
+        uint32_t patchCount = 0;
+        size_t   vertexOff = 0;      // bytes into vb for control point 0
+        size_t   factorOff = 0;      // bytes into tessFactorBuf
+        int      heightTex = -1;
+        float    mean = 0.5f;
+    };
+    std::vector<StoneBatch> stone;
+    id<MTLRenderPipelineState>  psoGBufTess = nil, psoGBufTessStats = nil;
+    id<MTLComputePipelineState> psoTessFactors = nil;
+    id<MTLBuffer> tessFactorBuf = nil, tessSubBuf = nil, tessStatBuf = nil;
+    int tessP = std::max(1, opt.tessPresplit);
+    int tessMaxFactor = 0;
+    if (opt.tess) {
+        // The stone. `rooms` and `floor` are exactly what --greets_stone_tex
+        // overrides and exactly what --greets_displace bakes
+        // (GREETS.CPP:1839-1841 kDisplacedMats), so the two arms displace the
+        // same two materials.
+        auto stripMirUV = [](const std::string &n) {
+            const size_t k = n.rfind("::mirUV");
+            return (k != std::string::npos) ? n.substr(0, k) : n;
+        };
+        for (size_t i = 0; i < scene.batches.size(); ++i) {
+            const Batch &b = scene.batches[i];
+            const std::string m = stripMirUV(b.materialName);
+            if (m != "rooms" && m != "floor") continue;
+            if (b.heightTexIndex < 0) {
+                std::fprintf(stderr, "[TESS] '%s' has NO height map — not tessellated\n",
+                             b.materialName.c_str());
+                continue;
+            }
+            StoneBatch s;
+            s.bi = i;
+            s.patchCount = b.vertexCount / 3;
+            s.vertexOff = size_t(b.firstVertex) * sizeof(Vertex);
+            s.heightTex = b.heightTexIndex;
+            // mipMean, the CPU bake's own quantity (MeshOps.cpp:2097-2113):
+            // the arithmetic mean of every texel of the sampled mip, 0..1. Box
+            // mip reduction preserves the mean exactly on a power-of-two
+            // texture, so the level-0 mean IS the level-`tessMip` mean.
+            const TextureImage &hi = scene.textures[size_t(b.heightTexIndex)];
+            double sum = 0; size_t n = hi.rgba.size() / 4;
+            for (size_t k = 0; k < n; ++k) sum += hi.rgba[k * 4];
+            s.mean = n ? float(sum / double(n) / 255.0) : 0.5f;
+            stone.push_back(s);
+        }
+
+        // The P x P sub-patch lattice, in the order [[instance_id]] indexes.
+        std::vector<int32_t> subs;
+        subs.reserve(size_t(tessP) * size_t(tessP) * 4);
+        for (int a = 0; a < tessP; ++a)
+            for (int b = 0; a + b < tessP; ++b)
+                { subs.push_back(a); subs.push_back(b); subs.push_back(0); subs.push_back(0); }
+        for (int a = 0; a < tessP - 1; ++a)
+            for (int b = 0; a + b < tessP - 1; ++b)
+                { subs.push_back(a); subs.push_back(b); subs.push_back(1); subs.push_back(0); }
+        if (subs.size() != size_t(tessP) * size_t(tessP) * 4) {
+            std::fprintf(stderr, "[TESS] internal: sub-patch table %zu != %d\n",
+                         subs.size() / 4, tessP * tessP);
+            return false;
+        }
+        tessSubBuf = [dev newBufferWithBytes:subs.data()
+                                      length:subs.size() * sizeof(int32_t)
+                                     options:MTLResourceStorageModeShared];
+
+        // One factor record (4 halves) per (sub-patch, patch), per batch,
+        // 256-byte aligned so the per-batch offset is legal for both the
+        // compute bind and setTessellationFactorBuffer:.
+        size_t off = 0;
+        for (auto &s : stone) {
+            s.factorOff = off;
+            const size_t bytes = size_t(tessP) * size_t(tessP) * size_t(s.patchCount) * 8;
+            off += (bytes + 255) & ~size_t(255);
+        }
+        if (off == 0) {
+            std::fprintf(stderr, "[TESS] no stone batches found — --tess is inert\n");
+        } else {
+            tessFactorBuf = [dev newBufferWithLength:off options:MTLResourceStorageModePrivate];
+        }
+        tessStatBuf = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
+
+        // maxTessellationFactor: PROBED, not assumed. Metal documents 16 as the
+        // default; whether this device accepts more is settled by asking it.
+        MTLVertexDescriptor *tvd = [MTLVertexDescriptor vertexDescriptor];
+        tvd.attributes[0].format = MTLVertexFormatFloat3; tvd.attributes[0].offset = 0;  tvd.attributes[0].bufferIndex = 0;
+        tvd.attributes[1].format = MTLVertexFormatFloat3; tvd.attributes[1].offset = 12; tvd.attributes[1].bufferIndex = 0;
+        tvd.attributes[2].format = MTLVertexFormatFloat2; tvd.attributes[2].offset = 24; tvd.attributes[2].bufferIndex = 0;
+        tvd.attributes[3].format = MTLVertexFormatFloat4; tvd.attributes[3].offset = 32; tvd.attributes[3].bufferIndex = 0;
+        tvd.layouts[0].stride = sizeof(Vertex);
+        tvd.layouts[0].stepFunction = MTLVertexStepFunctionPerPatchControlPoint;
+
+        auto makeTessPso = [&](NSString *fn, int maxFactor) -> id<MTLRenderPipelineState> {
+            MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+            p.vertexFunction = fn_(fn);
+            p.fragmentFunction = fn_([fn hasSuffix:@"_stats"] ? @"fs_gbuffer_fragcount"
+                                                              : @"fs_gbuffer");
+            p.vertexDescriptor = tvd;
+            p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            p.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
+            p.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            p.colorAttachments[3].pixelFormat = MTLPixelFormatRGBA8Uint;
+            p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+            p.maxTessellationFactor = NSUInteger(maxFactor);
+            p.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+            p.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+            // MEASURED, not assumed. The main pass culls FRONT faces (FDS builds
+            // plane normals as Cross_Product(V,U), so the engine's visible faces
+            // are Metal's front ones), and with the tessellator emitting
+            // Clockwise the whole stone came out backfacing: at --tess_amp=0 the
+            // floor and half the right wall were simply absent, and --no-cull
+            // brought them back pixel-identical to the flat frame
+            // (mean |d| 0.043/255 over the whole frame). CounterClockwise is
+            // therefore the orientation that preserves the input triangles'
+            // facing through this arm's barycentric sub-patch mapping.
+            p.tessellationOutputWindingOrder = MTLWindingCounterClockwise;
+            p.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+            p.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+            NSError *e = nil;
+            return [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        };
+        for (int cand : {64, 32, 16}) {
+            psoGBufTess = makeTessPso(@"vs_gbuffer_tess", cand);
+            if (psoGBufTess) { tessMaxFactor = cand; break; }
+        }
+        if (!psoGBufTess) {
+            std::fprintf(stderr, "[TESS] no tessellation pipeline would build\n");
+            return false;
+        }
+        psoGBufTessStats = makeTessPso(@"vs_gbuffer_tess_stats", tessMaxFactor);
+
+        NSError *ce = nil;
+        psoTessFactors = [dev newComputePipelineStateWithFunction:fn_(@"cs_tess_factors")
+                                                            error:&ce];
+        if (!psoTessFactors) {
+            std::fprintf(stderr, "[TESS] factor kernel pso: %s\n",
+                         [[ce localizedDescription] UTF8String]);
+            return false;
+        }
+        out.tessMaxFactor = tessMaxFactor;
+        std::fprintf(stderr,
+            "[TESS] ON — target %.2f px/edge, presplit %dx%d, amp %.3f world, mip %d,\n"
+            "[TESS]      max hw factor %d (PROBED: the pipeline accepted %d), so the\n"
+            "[TESS]      effective per-edge ceiling is %d x %d = %d subdivisions.\n",
+            double(opt.tessTargetPx), tessP, tessP, double(opt.tessAmp), opt.tessMip,
+            tessMaxFactor, tessMaxFactor, tessP, tessMaxFactor, tessP * tessMaxFactor);
+        for (const auto &s : stone)
+            std::fprintf(stderr,
+                "[TESS]      '%s': %u base patches, %u sub-patches, height mean %.4f\n",
+                scene.batches[s.bi].materialName.c_str(), s.patchCount,
+                s.patchCount * uint32_t(tessP * tessP), double(s.mean));
+    }
+
+    // Per-batch tessellation uniforms, refreshed with the frame.
+    std::vector<TessUniformsHost> tus(stone.size());
+    auto refreshTessUniforms = [&](float vpW, float vpH) {
+        for (size_t i = 0; i < stone.size(); ++i) {
+            TessUniformsHost &t = tus[i];
+            t.k[0] = opt.tessTargetPx;
+            t.k[1] = opt.tessAmp;
+            t.k[2] = stone[i].mean;
+            t.k[3] = float(tessP);
+            t.k2[0] = float(stone[i].patchCount);
+            t.k2[1] = opt.tessCull ? 1.0f : 0.0f;
+            t.k2[2] = float(tessMaxFactor);
+            t.k2[3] = float(opt.tessMip);
+            t.k3[0] = vpW;
+            t.k3[1] = vpH;
+            t.k3[2] = opt.tessBackCull ? 1.0f : 0.0f;
+            t.k3[3] = float(opt.tessEdgeMap);
+            t.k4[0] = float(opt.tessUniform);
+            t.k4[1] = t.k4[2] = t.k4[3] = 0.0f;
+        }
+    };
+    refreshTessUniforms(float(W), float(H));
+
     // ---- per-pass GPU timestamps -----------------------------------------
     // MEASURED on this device: counterSets == ["timestamp"], and
     // supportsCounterSampling(AtStageBoundary) == YES while AtDrawBoundary ==
@@ -1168,7 +1367,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     const bool haveStageCounters =
         tsSet && [dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary];
 
-    const int kPasses = 5;               // shadow, gbuffer, lighting, tonemap, mirror
+    // shadow, gbuffer, lighting, tonemap, mirror, tessellation-factor compute
+    const int kPasses = 6;
     id<MTLCounterSampleBuffer> sampleBuf = nil;
     if (haveStageCounters) {
         MTLCounterSampleBufferDescriptor *d = [MTLCounterSampleBufferDescriptor new];
@@ -1249,10 +1449,26 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     // 'screen 4' (0x0024) are single-sided on both arms and culling them is
     // correct parity.
     MTLCullMode curCull = MTLCullModeNone;
+    // Set only for the MAIN G-buffer pass. The mirror reflection views and the
+    // shadow / env bakes keep the FLAT stone, and that is CPU PARITY rather
+    // than a shortcut: --greets_displace setDefaults BOTH greets_shadow_proxy
+    // (the displaced stone is rendered only to the main camera) and
+    // greets_displace_flat_mirror (the mirror clones reflect the flat stone)
+    // at GREETS.CPP:1140-1142.
+    bool tessThisPass = false;
+    bool tessStatsArmed = false;      // only inside the untimed --tess_stats probe
     auto drawScene = [&](id<MTLRenderCommandEncoder> enc, bool gbuffer,
                          MTLCullMode baseCull = MTLCullModeNone) {
         [enc setVertexBuffer:vb offset:0 atIndex:0];
         curCull = baseCull;
+        const bool doTess = tessThisPass && gbuffer && psoGBufTess && tessFactorBuf;
+        bool tessPipeBound = false;
+        // Which batch indices take the tessellated pipeline this pass.
+        auto stoneSlot = [&](size_t bi) -> const StoneBatch * {
+            if (!doTess) return nullptr;
+            for (const auto &s : stone) if (s.bi == bi) return &s;
+            return nullptr;
+        };
         for (size_t i = 0; i < scene.batches.size(); ++i) {
             const Batch &b = scene.batches[i];
             if (!envSkipMat.empty() && baseMatName(b.materialName) == envSkipMat) continue;
@@ -1296,6 +1512,41 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 [enc setFragmentTexture:r atIndex:2];
                 [enc setFragmentTexture:ao atIndex:3];
                 [enc setFragmentTexture:mt atIndex:4];
+            }
+            if (const StoneBatch *s = stoneSlot(i)) {
+                // TESSELLATED DRAW. Same fragment shader, same uniforms, same
+                // textures — only the vertex stage differs, which is what makes
+                // the cost curve attributable to geometry and nothing else.
+                if (!tessPipeBound) {
+                    [enc setRenderPipelineState:tessStatsArmed ? psoGBufTessStats
+                                                               : psoGBufTess];
+                    tessPipeBound = true;
+                }
+                const size_t si = size_t(s - stone.data());
+                [enc setVertexBuffer:vb offset:NSUInteger(s->vertexOff) atIndex:0];
+                [enc setVertexBytes:&tus[si] length:sizeof(TessUniformsHost) atIndex:3];
+                [enc setVertexBuffer:tessSubBuf offset:0 atIndex:4];
+                if (tessStatsArmed) {
+                    [enc setVertexBuffer:tessStatBuf offset:0 atIndex:5];
+                    [enc setFragmentBuffer:tessStatBuf offset:0 atIndex:5];
+                }
+                [enc setVertexTexture:texes[size_t(s->heightTex)] atIndex:0];
+                [enc setVertexSamplerState:samp atIndex:0];
+                [enc setTessellationFactorBuffer:tessFactorBuf
+                                          offset:NSUInteger(s->factorOff)
+                                   instanceStride:NSUInteger(s->patchCount) * 8];
+                [enc drawPatches:3
+                      patchStart:0
+                      patchCount:NSUInteger(s->patchCount)
+                patchIndexBuffer:nil
+          patchIndexBufferOffset:0
+                   instanceCount:NSUInteger(tessP * tessP)
+                    baseInstance:0];
+                // Restore for the next ordinary batch.
+                [enc setRenderPipelineState:psoGBuf];
+                [enc setVertexBuffer:vb offset:0 atIndex:0];
+                tessPipeBound = false;
+                continue;
             }
             [enc drawPrimitives:MTLPrimitiveTypeTriangle
                     vertexStart:NSUInteger(b.firstVertex)
@@ -2582,6 +2833,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
 
     auto renderFrame = [&]() -> id<MTLCommandBuffer> {
         id<MTLCommandBuffer> cb = [queue commandBuffer];
+        tessThisPass = false;      // mirrors + bakes take the flat stone
 
         // --- pass 0: per-frame DYNAMIC shadow bake (moving omnis only) ---
         if (opt.shadows) {
@@ -2706,6 +2958,36 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             }
         }
 
+        tessThisPass = opt.tess;
+        // --- pass 0c: TESSELLATION FACTORS (compute) ---
+        // One thread per (base patch, sub-patch). Must run in the same command
+        // buffer, before the G-buffer encoder that consumes the factor buffer.
+        if (tessThisPass && psoTessFactors && tessFactorBuf) {
+            MTLComputePassDescriptor *cpd = [MTLComputePassDescriptor computePassDescriptor];
+            if (sampleBuf) {
+                cpd.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                cpd.sampleBufferAttachments[0].startOfEncoderSampleIndex = 10;
+                cpd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 11;
+            }
+            id<MTLComputeCommandEncoder> ce =
+                [cb computeCommandEncoderWithDescriptor:cpd];
+            [ce setComputePipelineState:psoTessFactors];
+            for (size_t si = 0; si < stone.size(); ++si) {
+                const StoneBatch &s = stone[si];
+                [ce setBuffer:tessFactorBuf offset:NSUInteger(s.factorOff) atIndex:0];
+                [ce setBuffer:vb offset:NSUInteger(s.vertexOff) atIndex:1];
+                [ce setBytes:&fu length:sizeof(fu) atIndex:2];
+                [ce setBytes:&bus[s.bi] length:sizeof(BatchUniforms) atIndex:3];
+                [ce setBytes:&tus[si] length:sizeof(TessUniformsHost) atIndex:4];
+                [ce setBuffer:tessSubBuf offset:0 atIndex:5];
+                [ce setBuffer:tessStatBuf offset:0 atIndex:6];
+                [ce dispatchThreads:MTLSizeMake(s.patchCount, NSUInteger(tessP * tessP), 1)
+                threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(s.patchCount, 32),
+                                                  std::min<NSUInteger>(NSUInteger(tessP * tessP), 8), 1)];
+            }
+            [ce endEncoding];
+        }
+
         // --- pass 1: G-buffer ---
         encodeGBuffer(cb, fu, gAlbedo, gNormal, gParams, gMirror, gDepth,
                       sampleBuf ? ^(MTLRenderPassDescriptor *rp) {
@@ -2715,6 +2997,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                           rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
                           rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
                       } : (void (^)(MTLRenderPassDescriptor *))nil);
+        tessThisPass = false;
 
         // --- pass 2: PBR lighting (or a debug viz) ---
         const bool viz = opt.viz >= 0;
@@ -3415,7 +3698,99 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     std::fprintf(stderr, "[DEFERRED] warmup %d frames…\n", opt.warmup);
     for (int i = 0; i < opt.warmup; ++i) { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
 
-    const char *passNames[kPasses] = {"shadow-bake", "gbuffer", "lighting", "tonemap", "mirror"};
+    // ---- --tess_stats: the EXACT geometry census, in an UNTIMED frame ------
+    // Two independent counts, taken together so neither has to be trusted
+    // alone: the factor kernel accumulates the boundary segment total B and
+    // the live patch count N, and a stats variant of the post-tessellation
+    // vertex function counts every vertex invocation V. For a patch
+    // tessellated into a topological disk, Euler gives T = 2V - B - 2 exactly
+    // (check: uniform level f has V=(f+1)(f+2)/2, B=3f, T=f^2). The stats
+    // pipeline is a SEPARATE entry point, so the timed pipeline carries no
+    // atomic at all.
+    if (opt.tess && opt.tessStats && psoGBufTessStats && tessFactorBuf) {
+        std::memset([tessStatBuf contents], 0, 32);
+        tessStatsArmed = true;
+        { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
+        tessStatsArmed = false;
+        // COPY the counters out before anything else touches the buffer — the
+        // factor-kernel timing loop below dispatches the same kernel 20 more
+        // times and would otherwise inflate every figure read from the live
+        // pointer by 21x. (It did, for one round.)
+        uint32_t st[8];
+        std::memcpy(st, [tessStatBuf contents], sizeof(st) < 32 ? sizeof(st) : 32);
+        out.tessBoundarySegs = st[0];
+        out.tessPatchesLive  = st[1];
+        out.tessVerts        = st[2];
+        // THE TRIANGLE COUNT IS EXACT, AND THE DIVISOR IS MEASURED, NOT ASSUMED.
+        // --tess_uniform=F on 194 live patches at t=5743 gives, per patch:
+        //   F   1     2     3     4     5     8     16     32     64
+        //   V   3     18    39    72    111   288   1152   4608   18432
+        // Metal's triangle-domain tessellator at inner level n builds a ring
+        // between the outer boundary (3n segments) and an inner patch at level
+        // n-2, so T(n) = T(n-2) + 6n - 6 with T(1)=1, T(2)=6 — i.e. T(2k)=6k^2,
+        // about 1.5*n^2 and NOT the n^2 a uniform subdivision would give. Every
+        // measured V above is EXACTLY 3*T(n) from that recursion (F=64: T=6144,
+        // V=18432). So the post-tessellation vertex function is invoked once per
+        // triangle CORNER with no vertex reuse, and
+        //     TRIANGLES = V / 3, exactly.
+        out.tessTris = out.tessVerts / 3;
+
+        // The factor kernel's own cost, alone in a command buffer, so the
+        // curve can say how much of the frame is bookkeeping.
+        {
+            std::vector<double> ms;
+            for (int r = 0; r < 20; ++r) {
+                id<MTLCommandBuffer> cb = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+                [ce setComputePipelineState:psoTessFactors];
+                for (size_t si = 0; si < stone.size(); ++si) {
+                    const StoneBatch &s = stone[si];
+                    [ce setBuffer:tessFactorBuf offset:NSUInteger(s.factorOff) atIndex:0];
+                    [ce setBuffer:vb offset:NSUInteger(s.vertexOff) atIndex:1];
+                    [ce setBytes:&fu length:sizeof(fu) atIndex:2];
+                    [ce setBytes:&bus[s.bi] length:sizeof(BatchUniforms) atIndex:3];
+                    [ce setBytes:&tus[si] length:sizeof(TessUniformsHost) atIndex:4];
+                    [ce setBuffer:tessSubBuf offset:0 atIndex:5];
+                    [ce setBuffer:tessStatBuf offset:0 atIndex:6];
+                    [ce dispatchThreads:MTLSizeMake(s.patchCount, NSUInteger(tessP * tessP), 1)
+                    threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(s.patchCount, 32),
+                                                      std::min<NSUInteger>(NSUInteger(tessP * tessP), 8), 1)];
+                }
+                [ce endEncoding];
+                [cb commit]; [cb waitUntilCompleted];
+                ms.push_back(([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0);
+            }
+            std::sort(ms.begin(), ms.end());
+            out.tessFactorMs = ms.front();
+        }
+        std::fprintf(stderr,
+            "[TESS-STATS] live patches %lld of %lld dispatched  |  boundary segments %lld\n"
+            "[TESS-STATS] post-tess VERTEX invocations %lld (MEASURED, one atomic each)\n"
+            "[TESS-STATS] TRIANGLES %lld  (= V/3; the 3 is MEASURED via --tess_uniform)\n"
+            "[TESS-STATS] factor kernel alone: %.4f ms (min of 20)\n",
+            out.tessPatchesLive,
+            (long long)(stone.empty() ? 0 : [&]{ long long n = 0; for (auto &s : stone) n += s.patchCount; return n; }()) * (long long)(tessP * tessP),
+            out.tessBoundarySegs, out.tessVerts, out.tessTris, out.tessFactorMs);
+        std::fprintf(stderr,
+            "[TESS-STATS] CALIBRATION: sum inner %u | V if DEDUPED %u | "
+            "V if per-CORNER-of-n^2 %u | measured V %lld\n",
+            st[3], st[4], st[5], out.tessVerts);
+        {
+            long long covered = 0;  // pixels the tessellated stone actually covers
+            covered = st[6];
+            std::fprintf(stderr,
+                "[TESS-STATS] %.1f triangles per LIVE PATCH | stone FRAGMENTS shaded %lld "
+                "(%.2f%% of the frame) | TRIANGLES PER COVERED PIXEL %.3f\n",
+                out.tessPatchesLive ? double(out.tessTris) / double(out.tessPatchesLive) : 0.0,
+                covered, 100.0 * double(covered) / (double(W) * double(H)),
+                covered ? double(out.tessTris) / double(covered) : 0.0);
+        }
+        // Re-warm: the stats frame ran a different pipeline.
+        for (int i = 0; i < 10; ++i) { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
+    }
+
+    const char *passNames[kPasses] = {"shadow-bake", "gbuffer", "lighting",
+                                      "tonemap", "mirror", "tess-factors"};
     std::vector<double> frameMs;
     std::vector<std::vector<double>> passMs(kPasses);
 
