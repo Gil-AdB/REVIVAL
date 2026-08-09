@@ -232,6 +232,63 @@ ever matters there.
   depth=0 (the flag off is the gate).
 - G key (cloaktest interactive) prints `Pose{}` lines for break cases.
 
+## "Order-2 changes 0 px on the authored path" — re-tested, and it holds, barely
+
+d055f9e (GpuBench `--mirror2`) recorded that second-order content is **0 px on
+the greets authored camera path** and only appears in free-fly. A user-supplied
+pose looked like a counterexample and is worth writing down, because the answer
+is *not* "the claim was wrong" — it is "the margin is about 2.6 world units".
+
+**The pose.** `pos (-8.6249094, 2.72651696, -53.2339516)`,
+`fwd (0.210607708, 0.0055912463, -0.977554619)`, `t=3122`. GpuBench
+`--mirror2` on vs off there: **9,385 changed px, bbox x 1037..1129 y 501..601**
+(1920×1080, deferred, `--tess --tess_px=8 --tess_presplit=8 --reanimate`). The
+single live pair is `m3->m1` — *'teleporter' seen inside 'screen 4'* — and with
+order-2 off that panel reads near-black; with it on it fills with the room.
+Images: `img/mirror2/m2_t3122_{on,off,diff}_crop6x.png`.
+
+**It is a free-fly pose, not the authored path.** The authored spline at the same
+`t=3122` is `pos (-8.11473465, 2.04659247, -50.6037636)`,
+`fwd (0.0771220699, 0.0055912463, -0.997005939)` — 2.76 units away and 7.8° of
+yaw apart. The giveaway is `fwd.y = 0.0055912463`, *bit-identical* between the
+two: free-fly yaws about Y, which preserves the pitch component exactly, so the
+camera was seeded from the spline at that t and then walked. And the authored
+arm re-measured today is **0 changed px at t = 500, 600, 1500, 2100, 2500, 2841,
+3122, 3500, 4500, 5500, 6500, 7500** — the claim survives.
+
+**Which axis flips it: position, not aim.** Holding t fixed and swapping one
+component at a time —
+
+| camera | changed px |
+|---|---|
+| authored pos + authored fwd | 0 |
+| authored pos + **his** fwd | 0 |
+| **his** pos + authored fwd | 9,393 (bbox x 803..895 y 501..601) |
+| his pos + his fwd | 9,385 (bbox x 1037..1129 y 501..601) |
+
+Yaw only slides the content across the screen; the 2.6-unit walk toward the
+back wall is what creates it.
+
+**Mechanism, and it says the gating is correct rather than lucky.** The pair is
+*live on the authored path too* — `[MIRROR2] pair m3->m1 ('teleporter' inside
+'screen 4') scissor 65x50 at 409,244` at spline t=3122, versus `68x52 at
+514,250` at his pose. Same pair, same size, different place. Because the order-2
+composite is same-pixel (shared projection), that scissor maps to main-frame
+pixels ~x 818..948 / y 488..588 on the authored path — and at those pixels
+**screen 4's panel is not on screen**; a pillar and the green screen are
+(`img/mirror2/m2_t3122_authored_samescreenregion_crop6x.png`). The composite is
+masked by the outer panel's own coverage, so it correctly contributes nothing.
+Walking forward brings the teleporter's reflected image onto the visible part of
+the panel.
+
+**What to take from this.** "0 px on the authored path" is a statement about
+where the camera was parked, not a property of the feature, and it is one small
+step wide. Do not use it to argue the feature is inert; it is one shoulder-check
+away from 9,000 px. Cost is unchanged and stays negligible: `--mirror2` on vs
+off at this pose is **5.689 → 5.634 ms (+0.055)**, and at the heaviest spline
+pose with pixel-level tessellation **8.315 → 8.247 ms (+0.07)** — min of 3
+interleaved reps of the median of 100 frames.
+
 ## Hard-won facts to respect (from the order-2 work)
 
 - Writing `Sc->NZP` alone never moves the near plane — re-stamp via
