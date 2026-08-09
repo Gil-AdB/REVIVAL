@@ -550,6 +550,16 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// material's env probe for the live dynamic-mesh overlay (A2/A3).
 		else if (!std::strcmp(prop, "envDynamic"))
 			M->EnvDynamic = value > 0.5f ? int8_t(1) : int8_t(0);
+		// Authored env-probe CAPTURE-POINT OFFSET, world units, added to
+		// whatever EnvBake's materialCentroid derives (legacy vertex mean or
+		// --env_probe_center's area centroid) — the derivation is a heuristic
+		// over the surface's own geometry and cannot know that a reflector
+		// wants its probe clear of a soffit or a step nose. All three zero =
+		// unset = pure derivation. Persisted via the LWO 'RVSF' sub-chunk
+		// (bit 0x1000, one bit / three floats) -> FLD -> Material::EnvBakeOfs.
+		else if (!std::strcmp(prop, "envBakeOfsX")) M->EnvBakeOfs[0] = value;
+		else if (!std::strcmp(prop, "envBakeOfsY")) M->EnvBakeOfs[1] = value;
+		else if (!std::strcmp(prop, "envBakeOfsZ")) M->EnvBakeOfs[2] = value;
 		// Per-surface smoothing (normal-averaging) angle. Engine-only, no
 		// material field: recorded in the MeshOps registry and consumed when
 		// MakeFacesIndependent rebuilds this surface's vertex normals. That

@@ -110,9 +110,21 @@
 > within the **2× cluster radius the self-exclusion logic already calls
 > "fragments of the probed instance"**, and the capture point is the area
 > centroid of that union. The change simply makes the placement obey a rule the
-> file already states. Genuinely separate instances (the two mummies, 24 u
-> apart) never link and still get a per-instance probe. New stairs capture
-> point: **(42.6, 0.4, −62.1)** — X and Z on the footprint centre.
+> file already states. New stairs capture point: **(42.6, 0.4, −62.1)** — X and
+> Z on the footprint centre.
+>
+> **The separation guard is exercised and it holds — measured on CITY, not
+> asserted from the source comment.** greets turned out to be a bad witness for
+> it: the only multi-cluster materials there are `stairs` and `stairs::mirUV`,
+> and both merge 4-of-4. (The `materialCentroid` comment's example, "the two
+> greets mummies share one material", does not match the scene as it stands —
+> `momy-1` and `momy-2` are *separate* materials with one cluster each, so they
+> never enter this path at all.) City's vehicle glass is the real test, and
+> there the union correctly refuses to swallow the siblings: `cokpit` **1 of 4**
+> clusters, `car 2 glass` **1 of 8**, `ambulans glass` **2 of 5**,
+> `poliece  glass` **2 of 5**, `bike glass` 4 of 4. That the whole city frame
+> then moves by **5 pixels** is the evidence that scattered-instance surfaces
+> keep their per-instance probes.
 >
 > An **UP-FACING-FACES-ONLY** centroid was considered and rejected: three of
 > greets' five flagged probes (`momy-1`, `momy-2`, `screen emiter`) are vertical
@@ -156,7 +168,17 @@
 > the next frame and can be dialled in by eye.
 >
 > Persistence follows the §1a extension idiom: LWO **`RVSF` sub-chunk bit
-> `0x1000`**, carrying **three floats under ONE bit** (X, Y, Z). That deviates
+> `0x1000`**, carrying **three floats under ONE bit** (X, Y, Z). **Proven end to
+> end, not asserted:** `lwopatch` wrote `envBakeOfs = (0, 2.5, 0)` onto `stairs`
+> in a scratch copy of `Authoring/greets/Piramid.lwo`, `lwsread` regenerated the
+> FLD **+12 bytes exactly** (233 621 → 233 633), and the engine — run against a
+> scratch asset root via `--no-chdir_assets`, so nothing under `Runtime/` or
+> `Authoring/` was touched — reported `'stairs': authored probe offset (+0.00
+> +2.50 +0.00) — capture point (45.4 2.3 −54.9) -> (45.4 4.8 −54.9)`, and the
+> `::mirUV` clone inherited it. Inertness is proven too: with nothing authored,
+> the greets regen is byte-identical at the golden `62c68fc9…`, and 300 random
+> writer subsets over the 12 legacy RVSF keys reproduce the pre-change bytes
+> exactly. That deviates
 > from the one-bit-per-scalar convention `tintR/G/B` follows, deliberately: it is
 > one semantic vector, and three bits would have left the u16 with a single free
 > bit. **0x2000/0x4000/0x8000 remain free.** It is a SURFACE property, not an

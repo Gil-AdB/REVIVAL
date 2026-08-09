@@ -59,6 +59,9 @@ CANON_POS = {c: i for i, c in enumerate(CANON)}
 # FLDSAVE SaveMaterial) and the engine (FDS/FLD/FLD_READ.CPP ReadMaterial).
 # Each: (editor-key, mask-bit, struct-format). Carries the engine-only
 # per-material dials that used to live in the .MAT sidecar.
+# ONE bit normally gates ONE field, but a bit MAY gate several CONSECUTIVE
+# fields that form a single semantic value (see envBakeOfs* on 0x1000); those
+# entries must stay adjacent, and the whole group is written/read as a unit.
 RVSF_FIELDS = [
     ("aoStrength",      0x001, ">f"),
     ("parallaxScale",   0x002, ">f"),
@@ -77,12 +80,42 @@ RVSF_FIELDS = [
     # Per-material RESPONSE multipliers. specMul scales the FINAL deferred
     # specular term (analytic + env-specular) — the author-side control for
     # sources whose specular reads wrong (Polyhaven sandstone). 1 = default.
-    # Bits 0x1000/0x2000/0x4000/0x8000 stay FREE for future multiplier
-    # siblings (roughMul/metalMul; aoStrength already covers AO). The map
-    # roles live in RVSM, not here — the RVSF u16 keeps its remaining bits.
+    # The map roles live in RVSM, not here — the RVSF u16 keeps its remaining
+    # bits.
     ("specMul",         0x800, ">f"),   # spec response x -> Material::SpecMul
+    # Env-probe capture-point OFFSET (world units). ONE bit, ONE 12-byte
+    # payload of three floats in X/Y/Z order — a deliberate break from the
+    # one-bit-per-scalar convention used by tintR/tintG/tintB just above,
+    # because this is a single semantic vector and because burning three of
+    # the four remaining mask bits on it would leave the u16 nearly full.
+    # The three entries share bit 0x1000 and MUST stay adjacent and in this
+    # order; set_rev_ext emits them as one unit (missing components as 0).
+    # Bits 0x2000/0x4000/0x8000 stay FREE for future dials.
+    ("envBakeOfsX",     0x1000, ">f"),
+    ("envBakeOfsY",     0x1000, ">f"),
+    ("envBakeOfsZ",     0x1000, ">f"),
 ]
 RVSF_KEYS = {k for (k, _, _) in RVSF_FIELDS}
+
+
+def _rvsf_groups(fields):
+    """RVSF_FIELDS collapsed to [(bit, [(key, fmt), ...])] — one entry per mask
+    bit, in ascending-bit order, each carrying the field(s) that bit gates.
+    Asserts the table invariant the whole format rests on: strictly ascending
+    bits with same-bit fields adjacent (a single desync corrupts the parse)."""
+    groups = []
+    for key, bit, fmt in fields:
+        if groups and groups[-1][0] == bit:
+            groups[-1][1].append((key, fmt))
+        else:
+            groups.append((bit, [(key, fmt)]))
+    bits = [b for (b, _) in groups]
+    assert bits == sorted(set(bits)), \
+        "RVSF_FIELDS: bits must ascend, same-bit fields must be adjacent"
+    return groups
+
+
+RVSF_GROUPS = _rvsf_groups(RVSF_FIELDS)
 
 # Revival per-surface PBR map-SET extension — custom LWO SURF sub-chunk "RVSM"
 # ("ReViVal Surface Maps", docs/SIDECAR_MIGRATION_PLAN.md §1e). LWO1 has no PBR
@@ -165,7 +198,10 @@ class Surf:
         self.set_chunk("TFLG", struct.pack(">H", flags))
 
     def rev_ext(self):
-        """Parse the RVSF sub-chunk into {key: value} (empty dict if none)."""
+        """Parse the RVSF sub-chunk into {key: value} (empty dict if none).
+        Multi-field bits need no special case here: their entries are adjacent
+        in RVSF_FIELDS, so one set bit yields their fields consecutively, in
+        table order (envBakeOfsX/Y/Z on 0x1000 -> three floats in X/Y/Z)."""
         i = self._find("RVSF")
         if i < 0:
             return {}
@@ -186,7 +222,14 @@ class Surf:
         preserving fields the caller didn't touch. A value of None drops that
         field. When the merged set is empty the RVSF sub-chunk is removed (the
         surface reverts to no extension, so the regenerated FLD carries no
-        Surf_RevExt bit — byte-identical to an unauthored surface)."""
+        Surf_RevExt bit — byte-identical to an unauthored surface).
+
+        Multi-field bits (envBakeOfsX/Y/Z on 0x1000) are emitted as ONE unit:
+        the bit is set if ANY component is present and not all of them are
+        zero, and all fields of the group are then written in table order,
+        absent components as 0 — so the byte count always matches what the bit
+        promises. An all-zero (or absent) vector emits nothing at all, which is
+        what keeps an unset field byte-identical to today's files."""
         cur = self.rev_ext()
         for k, v in props.items():
             if k not in RVSF_KEYS:
@@ -201,19 +244,34 @@ class Surf:
                 del self.subchunks[i]
             return
         mask, body = 0, b""
-        for key, bit, fmt in RVSF_FIELDS:
-            if key not in cur:
+        for bit, group in RVSF_GROUPS:
+            if not any(key in cur for (key, _) in group):
+                continue
+            # Grouped bit: drop it entirely when the vector is all zeros (the
+            # unset state). Single-field bits keep their old behavior — an
+            # authored 0 there is a real value (aoStrength=0, envRefl=0).
+            if len(group) > 1 and all(float(cur.get(key, 0.0) or 0.0) == 0.0
+                                      for (key, _) in group):
                 continue
             mask |= bit
-            if fmt == ">B":
-                val = int(round(float(cur[key]))) & 0xFF
-            elif fmt == ">b":
-                val = max(-128, min(127, int(round(float(cur[key])))))
-            elif fmt == ">i":
-                val = int(round(float(cur[key])))
-            else:
-                val = float(cur[key])
-            body += struct.pack(fmt, val)
+            for key, fmt in group:
+                raw = cur.get(key, 0.0)
+                if fmt == ">B":
+                    val = int(round(float(raw))) & 0xFF
+                elif fmt == ">b":
+                    val = max(-128, min(127, int(round(float(raw)))))
+                elif fmt == ">i":
+                    val = int(round(float(raw)))
+                else:
+                    val = float(raw)
+                body += struct.pack(fmt, val)
+        if not mask:
+            # Everything merged away (e.g. only an all-zero grouped vector):
+            # no sub-chunk at all, never an empty mask=0 body — that would set
+            # Surf_RevExt in the regenerated FLD for no payload.
+            if i >= 0:
+                del self.subchunks[i]
+            return
         self.set_chunk("RVSF", struct.pack(">H", mask) + body)
 
     def rev_maps(self):

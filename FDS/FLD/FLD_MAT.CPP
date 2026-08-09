@@ -260,6 +260,13 @@ Material* AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 		if (m & 0x200) candidate.WaterProcMode = OrgMat->WaterProcMode;
 		if (m & 0x400) candidate.EnvDynamic    = OrgMat->EnvDynamic;   // ENVDYN A1
 		if (m & 0x800) candidate.SpecMul       = OrgMat->SpecMul;      // spec response ×
+		// Env-probe capture-point offset (one bit, three floats). Not in
+		// makeKey — it does not need to be: the surface NAME is, and the
+		// offset is authored per surface name, so two surfaces wanting their
+		// probes in different places already differ in the key.
+		if (m & 0x1000) { candidate.EnvBakeOfs[0] = OrgMat->EnvBakeOfsX;
+		                  candidate.EnvBakeOfs[1] = OrgMat->EnvBakeOfsY;
+		                  candidate.EnvBakeOfs[2] = OrgMat->EnvBakeOfsZ; }
 	}
 
 	// Revival per-surface PBR map-role extension (§1e): record the authored role

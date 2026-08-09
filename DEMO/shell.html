@@ -613,7 +613,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b75</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b76</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -724,7 +724,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b75";
+      var REV_BUILD = "b76";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1074,7 +1074,7 @@
       // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
       // per-surface normal-smoothing threshold (native FLD field on city/crash,
       // sidecar on authoring scenes — the server routes it per scene).
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','specMul','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','envBakeRes','waterProcedural','envDynamic','smoothAngle'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','specMul','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','envBakeRes','waterProcedural','envDynamic','envBakeOfsX','envBakeOfsY','envBakeOfsZ','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -3105,6 +3105,30 @@
             dyc.onchange = function(){ setProp(s.name, 'envDynamic', dyc.checked ? 1 : 0); };
             dy.appendChild(dyc);
             el.appendChild(dy);
+            // PROBE OFFSET (X/Y/Z, world units): nudge THIS surface's env
+            // probe away from the point the engine derives from the surface's
+            // own geometry. The derivation is an area centroid over the
+            // reflective footprint and it cannot know that a probe wants to
+            // sit clear of a step nose or under a soffit — this is the
+            // authored last word, added on top of whatever the derivation
+            // produced. All three zero = unset. Live-applies (the store is
+            // dropped and re-baked from the new point on the next frame), so
+            // it can be dialled in by eye; persists via the LWO RVSF
+            // sub-chunk (bit 0x1000, one bit / three floats).
+            var po = document.createElement('div'); po.className = 'prop-row';
+            po.title = 'env-probe capture-point OFFSET for THIS surface, in world units, added to the point the engine derives from the surface geometry (the area centroid of its reflective footprint under the env_probe_center render knob, else the legacy vertex mean). Use it when the derived point sits somewhere the reflection should not be captured from — buried in a step, below a landing, off to one side. 0/0/0 = unset = pure derivation. Re-bakes the probe live; persists in the LWO RVSF sub-chunk (envBakeOfsX/Y/Z).';
+            var pol = document.createElement('label'); pol.textContent = 'probe offset'; po.appendChild(pol);
+            ['X','Y','Z'].forEach(function(ax){
+              var k = 'envBakeOfs' + ax;
+              var inp = document.createElement('input');
+              inp.type = 'number'; inp.step = '0.25';
+              inp.style.width = '46px';
+              inp.title = ax + ' offset (world units)';
+              inp.value = (+s[k] || 0);
+              inp.onchange = function(){ setProp(s.name, k, +inp.value || 0); };
+              po.appendChild(inp);
+            });
+            el.appendChild(po);
           }
         });
         // REFRACTIVE (glass): mark this material as screen-space-refracting

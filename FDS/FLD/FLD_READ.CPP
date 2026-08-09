@@ -213,6 +213,15 @@ void ReadMaterial(FldMat *Mat)
 		if (Mat->RevExtMask & 0x200) fread(&Mat->WaterProcMode,1,1,FLD);
 		if (Mat->RevExtMask & 0x400) fread(&Mat->EnvDynamic,1,1,FLD);
 		if (Mat->RevExtMask & 0x800) fread(&Mat->SpecMul,1,4,FLD);
+		// One bit, three floats (X,Y,Z) — see the FLD_READ.H note. Read as
+		// three separate 4-byte fields, never as one 12-byte struct read: the
+		// wire format is positional, not a memory image.
+		if (Mat->RevExtMask & 0x1000)
+		{
+			fread(&Mat->EnvBakeOfsX,1,4,FLD);
+			fread(&Mat->EnvBakeOfsY,1,4,FLD);
+			fread(&Mat->EnvBakeOfsZ,1,4,FLD);
+		}
 	}
 	// Revival per-surface PBR map-SET extension: a SECOND conditional payload
 	// gated on Surf_RevMaps (0x0800), written AFTER the RVSF numeric payload by

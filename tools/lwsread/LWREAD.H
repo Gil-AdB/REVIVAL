@@ -191,7 +191,15 @@ typedef struct
 	int8_t         WaterProcMode;   // bit 0x200 (-1/0/1)
 	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
 	float          SpecMul;         // bit 0x800 — specular response multiplier
-	// (bits 0x1000..0x8000 free for future response multipliers; maps -> RVSM)
+	// Env-probe capture-point OFFSET (world units). ONE bit gates ONE 12-byte
+	// payload of THREE floats — a deliberate break from the one-bit-per-scalar
+	// convention used by TintR/G/B above: this is a single semantic vector, and
+	// spending three of the four remaining u16 bits on it would leave the mask
+	// nearly full. Reader/writer must move all three as a unit, in X/Y/Z order.
+	float          EnvBakeOfsX;     // bit 0x1000 (one payload with Y,Z)
+	float          EnvBakeOfsY;     // bit 0x1000
+	float          EnvBakeOfsZ;     // bit 0x1000
+	// (bits 0x2000/0x4000/0x8000 free for future response multipliers; maps -> RVSM)
 	// Revival per-surface PBR map-SET extension (custom LWO SURF sub-chunk
 	// "RVSM" -> Surf_RevMaps(0x0800)-gated FLD payload). Directory-per-set:
 	// MapSet names a texture set; the engine resolves TEXTURES/PBR/<set>/

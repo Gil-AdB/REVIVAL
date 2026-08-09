@@ -621,12 +621,24 @@ void ReadSurfaceRevExt(unsigned int EndPos)
 	if (mask & 0x200) { fread(&Surf->WaterProcMode,1,1,LWO); }     // i8
 	if (mask & 0x400) { fread(&Surf->EnvDynamic,1,1,LWO); }        // u8 (ENVDYN A1)
 	if (mask & 0x800) { fread(&Surf->SpecMul,1,4,LWO);       SwapDW(&Surf->SpecMul); }
+	// 0x1000 = env-probe capture-point OFFSET: ONE bit, ONE 12-byte payload of
+	// three big-endian floats in X/Y/Z order (NOT a bit per scalar like TintR/G/B
+	// — one semantic vector, and three bits would nearly fill the u16). All
+	// three move together; a partial read would desync every field after it.
+	if (mask & 0x1000)
+	{
+		fread(&Surf->EnvBakeOfsX,1,4,LWO); SwapDW(&Surf->EnvBakeOfsX);
+		fread(&Surf->EnvBakeOfsY,1,4,LWO); SwapDW(&Surf->EnvBakeOfsY);
+		fread(&Surf->EnvBakeOfsZ,1,4,LWO); SwapDW(&Surf->EnvBakeOfsZ);
+	}
 #ifdef ObjectDebugMode
 	printf("  RVSF mask=%04Xh ao=%.3f par=%.3f tint=%.3f/%.3f/%.3f ior=%.3f "
-	       "refr=%d env=%d bakeRes=%d water=%d envDyn=%d specMul=%.3f\n", mask, Surf->AoStrength,
+	       "refr=%d env=%d bakeRes=%d water=%d envDyn=%d specMul=%.3f "
+	       "envBakeOfs=%.3f/%.3f/%.3f\n", mask, Surf->AoStrength,
 	       Surf->ParallaxScale, Surf->TintR, Surf->TintG, Surf->TintB,
 	       Surf->RefractIor, Surf->Refractive, Surf->EnvReflMode,
-	       Surf->EnvBakeRes, Surf->WaterProcMode, Surf->EnvDynamic, Surf->SpecMul);
+	       Surf->EnvBakeRes, Surf->WaterProcMode, Surf->EnvDynamic, Surf->SpecMul,
+	       Surf->EnvBakeOfsX, Surf->EnvBakeOfsY, Surf->EnvBakeOfsZ);
 #endif
 }
 

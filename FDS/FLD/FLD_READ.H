@@ -67,7 +67,16 @@ typedef struct
 	int8_t         WaterProcMode;   // bit 0x200
 	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
 	float          SpecMul;         // bit 0x800 — specular response multiplier
-	// (bits 0x1000/0x2000/0x4000/0x8000 remain free in the RVSF u16 for future
+	// bit 0x1000 — env-probe capture-point OFFSET, world units, THREE floats
+	// under ONE bit (X,Y,Z). A deliberate deviation from the one-bit-per-scalar
+	// convention tintR/G/B follows: this is one semantic vector, and spending
+	// three of the four remaining mask bits on it would all but fill the u16.
+	// Positional order inside the payload is X then Y then Z; the bit is
+	// written only when at least one component is authored non-zero.
+	float          EnvBakeOfsX;     // bit 0x1000
+	float          EnvBakeOfsY;     // bit 0x1000
+	float          EnvBakeOfsZ;     // bit 0x1000
+	// (bits 0x2000/0x4000/0x8000 remain free in the RVSF u16 for future
 	//  per-material response multipliers — e.g. roughMul/metalMul siblings;
 	//  aoStrength already covers the AO one. Map roles live in RVSM, not here.)
 	// Revival per-surface PBR map-SET extension — Surf_RevMaps(0x0800)-gated

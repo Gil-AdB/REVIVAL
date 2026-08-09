@@ -144,6 +144,12 @@ std::string Editor_GetSurfacesJSON()
 		// editor checkbox near the env probe controls; RVSF sub-chunk bit 0x400
 		// ('envDynamic' in SURF_SIDECAR_KEYS/RVSF_SURF_KEYS).
 		appendNum(out, "envDynamic",   M->EnvDynamic); out += ",";
+		// Authored env-probe capture-point offset, world units — the 'probe
+		// offset X/Y/Z' number boxes beside the probe-res select. RVSF bit
+		// 0x1000 (one bit, three floats). All zero = unset = pure derivation.
+		appendNum(out, "envBakeOfsX",  M->EnvBakeOfs[0]); out += ",";
+		appendNum(out, "envBakeOfsY",  M->EnvBakeOfs[1]); out += ",";
+		appendNum(out, "envBakeOfsZ",  M->EnvBakeOfs[2]); out += ",";
 		// Procedural-water composite override, tri-state like envRefl (-1 off /
 		// 0 auto→global --water_procedural / 1 on); sidecar 'waterProcedural'.
 		// isWater marks the scene's registered water material (the only surface
@@ -506,8 +512,15 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	// envDynamic (ENVDYN A1) also changes what the store must retain (A2's
 	// static Z + colour master) — drop the probe so FramePrep re-bakes it
 	// under the new retention rule.
+	// envBakeOfs* MOVES the capture point, so the store's whole content is
+	// stale — the same targeted drop, and the reason the control is usable
+	// live at all: nudge the offset, see the probe re-bake from the new point
+	// on the next frame.
 	if (any && (!std::strcmp(key, "envRefl") || !std::strcmp(key, "envBakeRes")
-	            || !std::strcmp(key, "envDynamic")))
+	            || !std::strcmp(key, "envDynamic")
+	            || !std::strcmp(key, "envBakeOfsX")
+	            || !std::strcmp(key, "envBakeOfsY")
+	            || !std::strcmp(key, "envBakeOfsZ")))
 		editorInvalidateSurfaceEnv(name);
 	if (any) Editor_MarkDirty();
 	return any;

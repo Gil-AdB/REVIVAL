@@ -125,7 +125,13 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
 # specMul: per-material specular RESPONSE multiplier (scales the final deferred
 # specular incl. env-specular; RVSF bit 0x800 — the author-side dial for
 # sources whose specular reads wrong, e.g. the Polyhaven sandstone).
-SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural", "envDynamic", "specMul"}
+# envBakeOfsX/Y/Z: env-probe capture-point OFFSET in world units. The three
+# share ONE RVSF bit (0x1000) carrying one 12-byte X/Y/Z payload — deliberately
+# not a bit per component like tintR/G/B, since it is a single semantic vector
+# and three bits would nearly fill the u16. Routing needs nothing special: they
+# are ordinary RVSF keys here, and lwopatch.set_rev_ext groups them on the way
+# to disk (all-zero -> no bit, so an untouched surface stays byte-identical).
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural", "envDynamic", "specMul", "envBakeOfsX", "envBakeOfsY", "envBakeOfsZ"}
 # Of those, the ones that migrate to the LWO RVSF sub-chunk (sidecar-elim §1a),
 # for authoring scenes. = SURF_SIDECAR_KEYS minus normalFlip, which pairs with
 # the normal-map assignment (§1e) and stays on the sidecar for now. lwopatch's

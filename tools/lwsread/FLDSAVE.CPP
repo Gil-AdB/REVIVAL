@@ -173,6 +173,16 @@ void SaveMaterial(FldMat *Mat)
 		if (Mat->RevExtMask & 0x200) fwrite(&Mat->WaterProcMode,1,1,FLD);
 		if (Mat->RevExtMask & 0x400) fwrite(&Mat->EnvDynamic,1,1,FLD);   // ENVDYN A1
 		if (Mat->RevExtMask & 0x800) fwrite(&Mat->SpecMul,1,4,FLD);      // spec response ×
+		// 0x1000 = env-probe capture-point OFFSET: ONE bit carrying ONE 12-byte
+		// payload of three floats in X/Y/Z order (not a bit per scalar like the
+		// tint triple — one semantic vector, and three bits would nearly fill
+		// the u16). Native endian, like every other field written here.
+		if (Mat->RevExtMask & 0x1000)
+		{
+			fwrite(&Mat->EnvBakeOfsX,1,4,FLD);
+			fwrite(&Mat->EnvBakeOfsY,1,4,FLD);
+			fwrite(&Mat->EnvBakeOfsZ,1,4,FLD);
+		}
 	}
 	// Revival per-surface PBR map-SET extension (LWO "RVSM" -> Surf_RevMaps
 	// bit): a SECOND conditional payload written ONLY when the material carries
