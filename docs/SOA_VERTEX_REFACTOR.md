@@ -2,6 +2,55 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-08-09 — PHASE 5 IS CLOSED. Re-measured on the current tree, its ceiling is 0.24–0.31 % of frame, and the effort went to a struct 15× bigger.
+
+Phase 5 (`sizeof(Vertex)` 140 → 68 for mesh storage, or §6's interleaved 64-byte
+output array) was re-opened as *"hot-struct bloat cost us once, is there more?"*.
+It was re-measured on today's tree rather than re-argued. **The answer is no, and
+the same question asked of the DOMINANT stage found a struct worth 15× more.**
+
+### The front end today, per scene (`--xfrm_prof`, `--xfrm_par=0` for the buckets)
+
+Serial buckets, so this is the *upper* bound — the shipping path is parallel
+(`--xfrm_par`, default ON) and cheaper. 1920×1080, dummy drivers.
+
+| scene / pose | TOTAL | VERT | FACE | verts | frame ms | VERT as % of frame |
+|---|--:|--:|--:|--:|--:|--:|
+| greets t=5743 | 0.639 (par: 0.433) | **0.345** | 0.254 | 49 401 | 43.5–57.4 | **0.60–0.79 %** |
+| city t=1961 (p50; 2 calls/frame) | 1.178 | **0.611** | 0.539 | 69 287 | 92.6 | **0.66 %** |
+| chase t=400 / 800 / 1200 / 1600 | 0.624 / 0.538 / 0.640 / 0.513 | **0.114–0.158** | 0.354–0.467 | 23 205–30 548 | — | — |
+
+**`VERT` is the only bucket Phase 5 can touch.** Its own §3 slope puts the best
+case at ~40 % of VERT (traffic 284 → 164 B/vert), i.e. **0.14 ms at greets,
+0.24 ms at city, 0.05 ms at chase** — **0.24–0.31 % of frame**, before the fact
+that the shipping path is parallel and greets is LPT-bound on one mirror clone
+(55 % of its verts *and* faces in a single mesh), which caps the realised share
+below that.
+
+Against: 11 files, two alternative transform pipelines (`Reflected_Transform` in
+CITY/CHASE, FOUNTAIN's water/particle projection), the clipper entry, and a
+requirement to find *every* transform writer or the image breaks silently — the
+Phase 6.1/6.2 history is precisely a list of those bugs (`MakeFacesIndependent`,
+`BuildSkyCube`, `tessellateWaterGrid`, `Reflected_Transform`).
+
+**chase reconfirms the doc's own note:** it is FACE-dominated, not VERT-dominated
+(FACE is 2.9–3.3× VERT there). Phase 5 is the wrong lever for chase by shape, not
+just by magnitude.
+
+**Not attempted, and that is the recommendation.** Do it for the one-writer
+contract if that is ever wanted; never for perf.
+
+### Where the same question DID pay: the cube-shadow tap, 15× bigger
+
+The identical mechanism — *how many cache lines does one access touch* — asked of
+the dominant stage instead of the front end. At greets the deferred lighting wave
+is 27.8 ms of a 43.5 ms frame, and **the cube-shadow tap alone is 10.28 ms of it**
+(`--prof_no_cube_tap`, min-of-3: `lighting-w1` 30.518 → 20.238). A PolyId tap
+gathers 32 bytes from **four separate `std::vector<uint16_t>` planes** that sit
+512 KB apart, over two PCF rows = **up to 8 cache lines per tap**. Pair-interleaving
+them (`--shadow_plane_pack`, landed default-OFF) halves that. See
+docs/OPTIMIZATION_BACKLOG.md for the measured table and the shippable follow-up.
+
 ## MEASURED 2026-08-06 (c) — the main-view transform is PARALLEL now (`--xfrm_par`, default ON). Two arms, two DIFFERENT limits, both measured.
 
 Item 2 of §5 below ("parallelise the MAIN-VIEW `Transform_Objects`… this has

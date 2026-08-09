@@ -10,6 +10,138 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-09 — HOT-STRUCT SWEEP: the front end is closed, the SHADOW-TAP planes are the item
+
+Asked as *"trimming hot-struct bloat paid off once — is there more, here or in
+other structs?"*. Three structs were audited against their consumer loops and
+measured. **The winner is not `Vertex` and not `Face`; it is the four shadow-map
+planes, and the mechanism is the same one (`cache LINES touched per access`).**
+
+### 1. `Vertex` 140 → 68 (SoA Phase 5) — **PARKED, re-refuted with fresh numbers**
+
+Full working in docs/SOA_VERTEX_REFACTOR.md (2026-08-09 section). Short version:
+`VERT` is the only bucket it can touch and it is **0.345 ms at greets / 0.611 ms
+p50 at city / 0.114–0.158 ms at chase**; the best case is ~40 % of that =
+**0.24–0.31 % of frame**, for an 11-file refactor across two alternative transform
+pipelines. chase is FACE-dominated (FACE 2.9–3.3× VERT), so it is the wrong lever
+there by shape as well. Not attempted; do it for the one-writer contract if ever,
+not for perf.
+
+### 2. `Face` (162 B, pack(1)) — audited field-by-field; **layout work NOT indicated**
+
+Full consumer audit done (every field × every compiled consumer, `FL.CPP` and
+`3DS/WORLD.CPP` excluded as dead). Two structural facts worth keeping:
+
+* **`alignof(Face) == 1` and the stride is 162, so `gcd(162,64) == 2` — a `Face`
+  in `TriMesh::Faces[]` has 32 distinct cache-line PHASES.** Faces do not start on
+  line boundaries; each spans 3 or 4 lines depending on index. **Any "put the hot
+  fields in line 0" plan is defeated by the phase rotation** unless the struct is
+  also padded to 128/192 or split into parallel arrays. This is the thing that
+  makes `Face` unlike `Vertex`, and it should be checked before anyone proposes a
+  regroup.
+* **24 bytes of the struct are cold and sit in the middle of it.** `EU1..EV3`
+  (offset 72) has exactly one active reader in the built tree —
+  `FRUSTRUM.CPP:1065-1070`, *inside* `if (F->Flags & Face_Reflective)` — and
+  downstream only `TheOtherBarry<…, TEXTURETEXTURE>` consumes it. `ReflectionTexture`
+  (offset 112) is the same reflective-only gate. Together 32 B of a 162 B stride
+  that the FList-build loop and Mekalele's per-face prologue both walk over for
+  nothing. Evicting them to a side table indexed for reflective faces would take
+  `Face` to 130 B.
+
+**But the prize is bounded and was measured at ~zero.** The FACE bucket is only
+0.254 ms (greets) / 0.539 ms (city), and §2 of the SoA doc already measured that
+reducing lines-per-deref does not move it (the accesses are cache-resident). The
+one live cross-core effect found in the audit was tested directly and **also
+measured neutral** — see item 4. **Recommendation: do not spend effort on `Face`
+layout.** The audit is recorded so the next person does not re-derive it.
+
+### 3. Cube-shadow tap: PAIR-INTERLEAVE the four planes — **MEASURED, probe landed OFF, shippable version scoped**
+
+**This is the item.** At greets t=5743 the cube tap is **10.28 ms of a 30.5 ms
+`lighting-w1`** (`--prof_no_cube_tap`, min-of-3: 30.518 → 20.238; `--prof_no_lights`
+→ 11.543 for scale). A PolyId tap needs a texel's `polyId` AND its `depth`, for the
+static pair and the dynamic pair — **four separate `std::vector<uint16_t>` that at
+greets' 512² sit 512 KB apart.** 32 bytes of useful data, gathered from 4 base
+pointers over 2 PCF rows = **up to 8 cache lines (~512 B of line traffic) per tap**;
+the static-lightmap composite path's dynamic-only tap still costs 4.
+
+`--shadow_plane_pack` (LANDED, **default 0 = byte-null**) interleaves them:
+`packSD[i] = depth[i] | (polyId[i] << 16)`, same for the dynamic pair. A texel's
+id+z becomes ONE 32-bit load: **8 lines → 4, and 4 → 2. Total bytes resident are
+unchanged**; only the grouping changes.
+
+Measured, greets t=5743, 1920×1080, dummy drivers, `--deferred_prof=1`, per-frame
+`wall_min`, min-of-6 over interleaved reps, on a QUIET box (1-min load 6.8–11.6):
+
+| arm | `lighting-w1` | `renderFrame` |
+|---|--:|--:|
+| shipping, pack OFF | 27.750 | 43.475 |
+| shipping, pack ON | **27.334** (−0.42) | 43.531 (+0.06, nil) |
+| `--no-shadow_lightmap`, pack OFF | 28.145 | 43.859 |
+| `--no-shadow_lightmap`, pack ON | **27.094** (−1.05) | **42.965** (−0.89) |
+
+An earlier batch on a LOADED box (load 15–29) gave the same shape, larger:
+shipping −0.66, `--no-shadow_lightmap` −1.69 on `lighting-w1`.
+
+**Read the two arms together — that is the evidence.** `--no-shadow_lightmap`
+forces every static omni onto the FULL four-plane tap (8 lines → 4) instead of the
+lightmap + dynamic-only tap (4 → 2). Doubling the leverage roughly doubles the win,
+which is what a lines-touched model predicts and what a noise artifact would not do
+(5/6 reps favour ON in that arm, 4/6 in the shipping arm).
+
+**Byte-null, certified differentially:** greets `778fa6ac…` 3/3, city `3cbe42b1…`,
+fountain `8db68ccb…` — all EXACT, in all three arms (base binary, probe binary
+flag-OFF, probe binary flag-ON). The packed tap is bit-identical by construction
+(`CubeShadow_SamplePacked` replicates the linear tap's projection math verbatim).
+
+**WHY IT SHIPS OFF, and what the real version is.** In probe form the packed planes
+are a DERIVED COPY rebuilt after each bake, so it costs **+159 MB** (76 maps × 512²
+× 4 B × 2) on top of the linear planes, plus the rebuild traffic. **The shippable
+version makes the packed plane the SOURCE OF TRUTH** — replace the four
+`std::vector<uint16_t>` with two `std::vector<uint32_t>` — which costs **zero extra
+memory**, removes the rebuild entirely, and *also* speeds the bake (the shadow
+rasterizer writes depth+polyId to the same texel: 2 arrays → 1). That is ~82 edit
+sites across ~10 files, all mechanical, and the numbers above are its **lower
+bound** (they are paid with the rebuild cost included). **Prize: ≥0.4 ms shipping /
+≥1.0 ms with the full tap, MEASURED, not inferred.**
+
+Orthogonal to `--shadow_swizzle`, which attacks the ROW-STRADDLE axis and measured
+NEGATIVE in all 15 shapes (docs/ARCHITECTURE_NEXT.md). That experiment never
+touched the parallel-plane axis.
+
+### 4. `Face::LastMip` — a dead store from 12 workers into a shared line. **Removed; measured NEUTRAL.**
+
+Found by the `Face` audit: `MiplevelClipper` wrote `F->LastMip` once per face
+**per tile** from every tile worker, gated only on `g_mipLastMipWrite` (true), while
+**both readers are gated on `mip_hysteresis > 0`, which is DEFAULT 0.** So at
+shipping defaults it was a dead store — into byte 136 of a 162-byte `Face`, a line
+shared with `ownerMirrorId` / `behindMirrorMask` / `A_idx..C_idx` / `frame`, all
+read by other hot paths. Now gated on the same `mipHyst > 0` the readers use
+(FRUSTRUM.CPP:784/867). Byte-null by construction.
+
+**Measured NEUTRAL** — matched A/B pair built from ONE tree snapshot (the only
+difference is this diff), greets t=5743, min-of-6, quiet box: `gbuffer` 5.286 →
+5.201 (−0.085), `renderFrame` 43.630 → 43.440 (−0.19), `shadow-bake` 2.480 → 2.477.
+All inside the run-to-run spread.
+
+**That neutral result is itself a finding: it prices Face-tail cross-core line
+contention at ~0 and is the direct evidence behind item 2's "do not do `Face`
+layout work".** Kept because a provably dead store should not be executed, not
+because it bought time.
+
+### Also inventoried, not acted on (ranked by streamed bytes/frame)
+
+| item | traffic/frame | residency | verdict |
+|---|--:|---|---|
+| cube-shadow taps (4 planes × 2×2 PCF + header) | ~1.0 GB of line traffic | 12.6 MB/cube omni ≫ LLC → DRAM | **item 3 above** |
+| `Material` pointer chase | ~796 MB of accesses (6 lines/px: 1 matTable + 5 `Material`) | table ≤ 114 KB → **L2, not DRAM** | `sizeof(Material)` = 455 B, pack(1), no `static_assert`. Per-pixel fields are spread over lines 0/1/3/4/6 and the "hot fields on line 0" comment is **stale** — `TintR/G/B`, `SpecMul`, `AoStrength`, `Roughness/MetallicMap`, `Reflection`, `TbnHandedness` all drifted off it. No `matID` memo anywhere (every kernel re-chases per pixel). A 64-byte hot-fields record per matID (16 KB, L1-resident) collapses 5 lines → 1. **Not measured — candidate, but it is a latency item, not a bandwidth one.** |
+| texture + aux-map point fetches | 130–660 MB | mip chains → DRAM | already measured: the albedo gather is worth only 0.71 ms (PERF_STATE) |
+| `g_hdrBuf` | 166–232 MB (10–14 sweeps × 16.59 MB) | > LLC | `hdrf` is already `__fp16` on arm64 (8 B/px, not the 16 B PERF_STATE still quotes) |
+| opaque G-buffer sweep | 35–44 MB read | sequential | 17 B/px unconditional from **6 separate arrays** = 9 concurrent streams/worker |
+| `Omni` | 60 KB | trivial | `sizeof(Omni)` = **515 B**, not the "[256 Bytes]" its comment claims, and **302 B of it is a `Vertex` + a `Face`** the lighting path never reads. Pure list-walk pollution; harmless at 117 lights. |
+| `TileLights` | 1.55 MiB resident | L1 per tile | `sizeof` = 16 928 B × 96 tiles. Its own comment says "96 KiB total" — **stale by 17×** (8 arrays grew to 33). Not a bandwidth item: ~1.3–3.8 KB touched per tile. |
+| `FListEntry` | — | — | 24 B, not the 16 B its comment claims (bbox fields were added) — 2.67 per line, not 4. |
+
 ## PBR quality series (incremental, one at a time, user reviews each)
 Discussion: engine PBR compositing vs canonical (SESSION_STATE / chat 2026-07-13).
 The engine is standard in the big decisions (additive diffuse+specular, GGX,

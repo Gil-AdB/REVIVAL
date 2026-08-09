@@ -83,6 +83,10 @@ struct CubeAttenFlags {
 	bool      lightmapRecomputeBary;
 	bool      profNoCubeTap;
 	ShadowMode shadowMode;
+	// [experiment: --shadow_plane_pack] read the PolyId tap from the
+	// pair-interleaved planes. Hoisted here with the other flags so the
+	// per-pixel loop pays no flag read.
+	bool      planePack;
 };
 
 static inline float resolveCubeAtten(const PixelLightmap &pl,
@@ -195,6 +199,16 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 		if (caFlags.shadowDynamicOn) {
 			float dynAtten;
 			if (caFlags.shadowMode == ShadowMode::PolyId) {
+				// [--shadow_plane_pack] the packed tap returns <0 when this
+				// map has no packed planes yet; fall through to the linear
+				// one, which is textually unchanged below.
+				const float packed = caFlags.planePack
+				    ? CubeShadow_SamplePacked(cubeIdx,
+				                              sampleWorldX, sampleWorldY, sampleWorldZ,
+				                              vx, vy, vz,
+				                              surfaceMatId, /*dynamicOnly=*/true)
+				    : -1.0f;
+				if (packed >= 0.0f) dynAtten = packed; else
 				dynAtten = CubeShadow_Sample(cubeIdx,
 				                              sampleWorldX, sampleWorldY, sampleWorldZ,
 				                              vx, vy, vz, /*constBias=*/0, /*slopeBias=*/0,
@@ -217,6 +231,14 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 	// depth comparison) — hoist the mode check above the slope-bias
 	// math so PolyId mode pays nothing for slope it never uses.
 	if (caFlags.shadowMode == ShadowMode::PolyId && surfaceMatId >= 0) {
+		// [--shadow_plane_pack] see the composite tap above.
+		if (caFlags.planePack) {
+			const float packed = CubeShadow_SamplePacked(cubeIdx,
+			                          sampleWorldX, sampleWorldY, sampleWorldZ,
+			                          vx, vy, vz,
+			                          surfaceMatId, /*dynamicOnly=*/false);
+			if (packed >= 0.0f) return packed;
+		}
 		return CubeShadow_Sample(cubeIdx,
 		                          sampleWorldX, sampleWorldY, sampleWorldZ,
 		                          vx, vy, vz, /*constBias=*/0, /*slopeBias=*/0,

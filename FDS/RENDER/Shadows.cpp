@@ -198,6 +198,34 @@ static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 	else           { tile(sm.depth,         sm.depthSw);    tile(sm.polyId,         sm.polyIdSw);    }
 }
 
+// [experiment: --shadow_plane_pack] Pair-interleave one map's freshly-baked
+// planes into the packed u32 copies (see ShadowMap::packSD / packDyn).
+// dynPlanes selects which pair this bake wrote, exactly as the swizzle above.
+// Pure memory traffic, which is the cost the experiment weighs against the
+// halved line count of the tap.
+static void ShadowMap_PackPlanes(ShadowMap &sm, bool dynPlanes)
+{
+	auto pack = [&](const std::vector<uint16_t> &z, const std::vector<uint16_t> &id,
+	                std::vector<uint32_t> &dst) {
+		if (z.empty() || id.size() != z.size()) { dst.clear(); return; }
+		const size_t n = z.size();
+		if (dst.size() != n) dst.assign(n, 0u);
+		const uint16_t *zs = z.data();
+		const uint16_t *is = id.data();
+		uint32_t *d = dst.data();
+		for (size_t i = 0; i < n; ++i)
+			d[i] = uint32_t(zs[i]) | (uint32_t(is[i]) << 16);
+	};
+	if (dynPlanes) pack(sm.depth_dynamic, sm.polyId_dynamic, sm.packDyn);
+	else           pack(sm.depth,         sm.polyId,         sm.packSD);
+	// One-shot proof of engagement: without this a "no change" result is
+	// indistinguishable from "the packed path never ran".
+	static std::atomic<int> sLogged{0};
+	if (sLogged.fetch_add(1) == 0)
+		std::fprintf(stderr, "[SHADOW-PACK] engaged: first map %dx%d, packSD=%zu packDyn=%zu u32\n",
+		             sm.xres, sm.yres, sm.packSD.size(), sm.packDyn.size());
+}
+
 void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 {
 	// forceEnable bypasses the global shadows() gate — only ever passed by the
@@ -881,6 +909,8 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	// [experiment: --shadow-swizzle] maps this bake writes → re-tiled after
 	// the raster drain (see below). Filled by the same Phase-B filter.
 	const bool sSwz = fds::FeatureFlags::shadow_swizzle();
+	// [experiment: --shadow_plane_pack] shares the same post-drain map list.
+	const bool sPack = fds::FeatureFlags::shadow_plane_pack();
 	std::vector<size_t> swzMaps;
 	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
 		ShadowMap& sm = g_shadowMaps[lightIdx];
@@ -919,7 +949,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		const int rawTY = (sm.yres + numTY - 1) / numTY;
 		const int tileSizeX = rawTX & ~7;
 		const int tileSizeY = rawTY & ~7;
-		if (sSwz) swzMaps.push_back(lightIdx);
+		if (sSwz || sPack) swzMaps.push_back(lightIdx);
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
@@ -1037,17 +1067,28 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	// get a dynamic-plane bake, so also build their (all-zero) dynamic copies
 	// once — the cube tap only switches a map to the tiled path when all the
 	// planes it needs are tiled.
-	if (sSwz && !swzMaps.empty()) {
+	if ((sSwz || sPack) && !swzMaps.empty()) {
 		const auto tSwzStart = clk::now();
 		{
 			const size_t *maps = swzMaps.data();
 			const bool dynPl = writeDynamicBuf;
+			const bool doSwz = sSwz, doPack = sPack;
 			dispatchIndexed(int(swzMaps.size()), &renderns::shadowDone,
-			                [maps, dynPl](int k) {
+			                [maps, dynPl, doSwz, doPack](int k) {
 				ShadowMap *smp = &g_shadowMaps[maps[k]];
-				ShadowMap_SwizzlePlanes(*smp, dynPl);
-				if (!dynPl && smp->depthDynSw.empty())
-					ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
+				if (doSwz) {
+					ShadowMap_SwizzlePlanes(*smp, dynPl);
+					if (!dynPl && smp->depthDynSw.empty())
+						ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
+				}
+				if (doPack) {
+					ShadowMap_PackPlanes(*smp, dynPl);
+					// A map whose dynamic planes are never baked (moving
+					// omnis) still needs its (all-zero) dynamic pack, because
+					// the packed tap reads packDyn unconditionally.
+					if (!dynPl && smp->packDyn.empty())
+						ShadowMap_PackPlanes(*smp, true);
+				}
 			});
 		}
 		for (size_t k = 0; k < swzMaps.size(); ++k) renderns::shadowDone.acquire();

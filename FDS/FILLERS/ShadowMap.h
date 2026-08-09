@@ -63,6 +63,21 @@ struct ShadowMap {
 	// zero-filled edge padding (reads there = "unwritten" sentinel). Empty
 	// until first swizzle → hot readers fall back to linear when empty.
 	std::vector<uint16_t> depthSw, polyIdSw, depthDynSw, polyIdDynSw;
+
+	// [experiment: --shadow_plane_pack] PAIR-INTERLEAVED copies of the four
+	// planes: packSD[i] = depth[i] | (polyId[i] << 16), packDyn[i] =
+	// depth_dynamic[i] | (polyId_dynamic[i] << 16). Same total bytes, but a
+	// PolyId cube tap reads a texel's id AND its z in ONE 32-bit load instead
+	// of two loads from two arrays 512 KB apart — so a 2x2 PCF footprint
+	// touches 4 cache lines instead of 8 (and the dynamic-only composite tap
+	// 2 instead of 4). Orthogonal to --shadow_swizzle, which attacks the
+	// ROW-straddle axis (and measured negative); this attacks the
+	// PARALLEL-PLANE axis. Rebuilt from the linear planes after each bake
+	// (ShadowMap_PackPlanes, timed separately); the linear planes stay the
+	// source of truth, so every other reader is untouched and the values are
+	// bit-identical by construction. Empty until first packed -> the tap
+	// falls back to the linear planes.
+	std::vector<uint32_t> packSD, packDyn;
 	int    xres = 0;
 	int    yres = 0;
 
@@ -443,6 +458,92 @@ inline float CubeShadow_Sample(int cubeIdx,
         if (biased < closest(zsB[o10], zdB[o10])) occ += w10;
         if (biased < closest(zsB[o01], zdB[o01])) occ += w01;
         if (biased < closest(zsB[o11], zdB[o11])) occ += w11;
+    }
+    return (occ >= 1.0f) ? 0.0f : (1.0f - occ);
+}
+
+// [experiment: --shadow_plane_pack] PolyId-mode cube tap reading the
+// PAIR-INTERLEAVED planes (see ShadowMap::packSD / packDyn).
+//
+// BIT-IDENTICAL to CubeShadow_Sample's PolyId branch by construction: same
+// projection math (copied verbatim, same operation order, so the same
+// -ffp-contract=fast contraction), same closestPoly selection, same PCF
+// weights. The ONLY difference is where the four uint16 values come from —
+// one 32-bit load per texel per pair instead of two 16-bit loads from two
+// arrays half a megabyte apart.
+//
+// The caller must have already established PolyId mode + surfaceMatId >= 0.
+// Returns -1.0f when the packed planes this call needs have not been built
+// (or the map is swizzled), so the caller can fall back to the linear tap.
+inline float CubeShadow_SamplePacked(int cubeIdx,
+                                      float worldX, float worldY, float worldZ,
+                                      float viewX,  float viewY,  float viewZ,
+                                      int   surfaceMatId,
+                                      bool  dynamicOnly)
+{
+    if (cubeIdx < 0 || size_t(cubeIdx) >= g_cubeShadowRefs.size()) return 1.0f;
+    const CubeShadowRef& cr = g_cubeShadowRefs[cubeIdx];
+    const float dwx = worldX - cr.lightISource.x;
+    const float dwy = worldY - cr.lightISource.y;
+    const float dwz = worldZ - cr.lightISource.z;
+    const int face = CubeShadow_SelectFace(dwx, dwy, dwz);
+    const ShadowMap& sm = g_shadowMaps[cr.faceIdx[face]];
+    if (dynamicOnly && !sm.dynBaked) return 1.0f;
+    // Packed planes present? The dynamic pair is always needed; the static
+    // pair only when this is not a dynamic-only composite tap.
+    if (sm.packDyn.empty() || (!dynamicOnly && sm.packSD.empty())) return -1.0f;
+    const float lx = sm.viewToLight[0][0] * viewX + sm.viewToLight[0][1] * viewY +
+                     sm.viewToLight[0][2] * viewZ + sm.viewToLightOffset.x;
+    const float ly = sm.viewToLight[1][0] * viewX + sm.viewToLight[1][1] * viewY +
+                     sm.viewToLight[1][2] * viewZ + sm.viewToLightOffset.y;
+    const float lz = sm.viewToLight[2][0] * viewX + sm.viewToLight[2][1] * viewY +
+                     sm.viewToLight[2][2] * viewZ + sm.viewToLightOffset.z;
+    if (lz <= 0.05f) return 1.0f;
+    constexpr float kFaceFrustumRatio = 1.5f;
+    if (lx >  kFaceFrustumRatio * lz || lx < -kFaceFrustumRatio * lz) return 1.0f;
+    if (ly >  kFaceFrustumRatio * lz || ly < -kFaceFrustumRatio * lz) return 1.0f;
+    const float invLZ = 1.0f / lz;
+    const float smX = sm.cntrX + sm.perspX * lx * invLZ;
+    const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+    const int iX = int(smX);
+    const int iY = int(smY);
+    if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
+    const size_t o00 = size_t(iY) * size_t(sm.xres) + size_t(iX);
+    const size_t o10 = o00 + 1;
+    const size_t o01 = o00 + size_t(sm.xres);
+    const size_t o11 = o01 + 1;
+    const float fx = smX - float(iX);
+    const float fy = smY - float(iY);
+    const float w00 = (1.0f - fx) * (1.0f - fy);
+    const float w10 =         fx  * (1.0f - fy);
+    const float w01 = (1.0f - fx) *         fy;
+    const float w11 =         fx  *         fy;
+    const uint32_t *pD = sm.packDyn.data();
+    const uint32_t *pS = dynamicOnly ? nullptr : sm.packSD.data();
+    const uint16_t receiverId = uint16_t(surfaceMatId);
+    // One 32-bit load yields BOTH the id and the z of a texel.
+    auto closestPacked = [&](size_t o) -> uint16_t {
+        const uint32_t d  = pD[o];
+        const uint16_t dId = uint16_t(d >> 16);
+        const uint32_t s  = pS ? pS[o] : 0u;
+        const uint16_t sId = uint16_t(s >> 16);
+        if (sId == 0) return dId;
+        if (dId == 0) return sId;
+        return (uint16_t(d & 0xFFFFu) > uint16_t(s & 0xFFFFu)) ? dId : sId;
+    };
+    float occ = 0.0f;
+    if (fds::FeatureFlags::shadow_polyid_no_pcf()) {
+        const uint16_t c = closestPacked(o00);
+        if (c != 0 && c != receiverId) occ = 1.0f;
+    } else {
+        const uint16_t c00 = closestPacked(o00);
+        const uint16_t c10 = closestPacked(o10);
+        const uint16_t c01 = closestPacked(o01);
+        const uint16_t c11 = closestPacked(o11);
+        if (c00 != 0 && c00 != receiverId) occ += w00;
+        if (c10 != 0 && c10 != receiverId) occ += w10;
+        if (c01 != 0 && c01 != receiverId) occ += w01;
+        if (c11 != 0 && c11 != receiverId) occ += w11;
     }
     return (occ >= 1.0f) ? 0.0f : (1.0f - occ);
 }

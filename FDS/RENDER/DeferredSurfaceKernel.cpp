@@ -1644,6 +1644,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	    /*lightmapRecomputeBary*/ fds::FeatureFlags::shadow_lightmap_recompute_at_bary(),
 	    /*profNoCubeTap        */ fds::FeatureFlags::prof_no_cube_tap(),
 	    /*shadowMode           */ g_shadowMode.load(std::memory_order_relaxed),
+	    /*planePack            */ fds::FeatureFlags::shadow_plane_pack(),
 	};
 
 	// [DIAG] FDS_CONTRIB_CULL: per-light MAX linear diffuse contribution over this
