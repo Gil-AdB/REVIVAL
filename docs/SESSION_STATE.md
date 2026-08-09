@@ -1,5 +1,102 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-09 — HIS 12-14 FPS, EXPLAINED: THE SCENE RENDERS DEFERRED BUT WAS BUILT AS IF IT WOULD NOT
+>
+> User, interactive, `./DEMO --greets-displace`, window 1512×848, facing the
+> mirror wall (`FDS_GREETS_CAM="-8.6249094,2.72651696,-53.2339516,0.210607708,
+> 0.0055912463,-0.977554619"`, t=3122): **12-14 fps**, remembered "a lot better"
+> (20-30). The bench said 54.7 ms at 1920×1080, which at 0.63× the pixels should
+> be comfortably above 18 fps. The gap is real and it is **22.7 ms**, all of it
+> from ONE root cause with two heads.
+>
+> **THE RENDER PATH IS NOT `FeatureFlags::deferred()`.** `RENDER.CPP:356`
+> `deferredEnabled()` ORs five flags — `deferred || hdr || deferred_quarter ||
+> deferred_checkerboard || shard_deferred` — and greets sets three of them, then
+> additionally forces `Render(RenderPath::ForceDeferred)` whenever
+> `greets_mirror` is on (`GREETS.CPP:3943`, and `greets_mirror` is
+> `setDefault(true)` at `:1088`). So a plain `./DEMO --greets-displace` **renders
+> a deferred frame**. But two SCENE-BUILD/TICK decisions ask the bare flag, which
+> is still 0, and they get the opposite answer:
+>
+> | reader | what it does when it wrongly thinks "forward" | measured cost |
+> |---|---|--:|
+> | `GREETS.CPP:2414` | skips the Piramid chunk split entirely → the 59 556 displaced faces the chunk pass marks `NoShadowCast` stay casters, and the wall stays one room-sized mesh | **15.10 ms** (BAKE 3.9 → 16.0) |
+> | `GREETS.CPP:3849` | runs the forward vertex `Lighting(GreetSc)` pass every frame, whose only consumer is the mirror-RTT offscreen pass | **6.49 ms** (LGHT 0.00 → 6.49) |
+>
+> **MEASURED**, `--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848`,
+> min-of-6, load 9-15:
+>
+> | arm | fmin | BAKE | LGHT |
+> |---|--:|--:|--:|
+> | A — his line, `--greets_displace` | **68.49** | 16.02 | 6.49 |
+> | B — A + `--deferred` | **44.69** | 3.88 | 0.00 |
+> | C — B + `--greets_piramid_chunk_grid=0` | 59.79 | 16.27 | — |
+> | flat, no `--deferred` | 45.31 | 3.71 | — |
+>
+> C isolates it: chunk split = B−C = **15.10 ms**, the rest = A−C = 8.70 ms, of
+> which `Lighting()` is 6.49. The flat row is the tell — **the penalty needs the
+> displaced geometry**; flat without `--deferred` costs the same as with it.
+>
+> **THE ARITHMETIC TO 12-14 FPS.** `DEMO/SDL2.cpp:622-626` creates the renderer
+> with `SDL_RENDERER_PRESENTVSYNC` unless `--no_vsync` (default 0), so present
+> quantises to the refresh. At 60 Hz:
+>
+> | render | intervals | presented | fps |
+> |---|--:|--:|--:|
+> | his line, 68.5 ms | 5 | 83.3 ms | **12.0** |
+> | fixed, 44.7 ms | 3 | 50.0 ms | **20.0** |
+>
+> 12.0 is exactly what he reports; 20.0 is exactly the bottom of what he
+> remembers. The quantisation is why it reads as a cliff rather than a slope —
+> 68.5 and 44.7 straddle two whole steps. *Code-verified + arithmetic; the 60 Hz
+> refresh is assumed, not measured, and I never opened a window.*
+>
+> **FIXED HERE (FDS half):** `fds::DeferredPathEnabled()`, declared in
+> `RENDER/ChunkOcclusion.h`, defined in `RENDER.CPP` next to `deferredEnabled()`
+> — one predicate, one definition, callable at init. Purely additive; nothing
+> calls it yet, and all three pins + render_gate are unmoved.
+>
+> **HANDOFF (DEMO/GREETS.CPP is another agent's lane right now):**
+> 1. `:2414` — `&& fds::FeatureFlags::deferred()` → `&& fds::DeferredPathEnabled()`
+> 2. `:3849` — `!fds::FeatureFlags::deferred() ||` → `!fds::DeferredPathEnabled() ||`
+> 3. move `setDefault(mirror_rtt, true)` and `setDefault(mirror_rtt_density, 1024.0f)`
+>    out of `GreetsApplyRunDefaults` into `GreetsApplyInitDefaults`
+>    (docs/SETDEFAULT_AUDIT.md §4.1/§4.3, recommended there and still unfixed).
+>
+> **DO NOT "fix" this with `setDefault(deferred, true)`.**
+> `GreetsApplyInitDefaults` runs FIRST in the t1 init chain, so that would force
+> city/chase/fountain/crash onto the deferred path — the exact `shard_deferred`
+> leak recorded as §5 L1 in the audit.
+>
+> **The fix is a LOOK change, and needs his eye + a re-pin decision:** at his
+> pose, A vs B differs by **557 589 px (26.9 %)**, mean Δ-sum 18.79/765 — a broad
+> low-amplitude shading shift on the ceiling and right-hand wall (the chunk split
+> moves per-chunk culling and lighting). Nothing is missing or broken in either.
+> Strip: `docs/img/fogwt/deferred_flag_look_t3122.png`.
+>
+> **HYPOTHESES THAT DIED ON MEASUREMENT, with numbers:**
+> * *Pose-dependent mirror/RTT cost.* No. The RTT bake DOES apply the flat-proxy
+>   substitution — it takes `OffscreenViewScope` (`GreetsMirror.cpp:3067`) →
+>   `g_offscreenViewDepth` → `_offscreenPass` (`Transform.cpp:1180`) →
+>   `Face_MainOnly` skipped at `:2429`, proxy admitted at `:1432`. With all 7
+>   slots live the displaced-vs-flat delta is **+3.05 ms**. Building the slots at
+>   all costs +3.67 ms (tess) / +2.11 ms (flat).
+> * *Tessellation is expensive at this pose.* The opposite: at t=3122, 1920×1080,
+>   flat and tess are **70.93 vs 70.93 ms** — identical, min-of-6.
+> * *Hyphen spelling.* `FeatureFlags.cpp:276-284` normalises dash→underscore
+>   after the leading `--`. `--greets-displace --mirror-rtt --strict_flags` runs
+>   with 0 unknown flags and the `[STONE]` line fires. Nothing to fix.
+> * *Resolution scaling anomaly.* None: 1920×1080 → 1512×848 is 70.93 → 45.80
+>   (0.646×) against a pixel ratio of 0.63. Pixel-bound, as expected.
+>
+> **E, the user's counterexample, upheld:** `--mirror-rtt` changes **9 471 px
+> (0.457 %), max Δ 175/255** at his pose, because on the default path the RTT
+> slots are *never built* — `mirror_rtt`'s setDefault lands in the RUN block,
+> after `Initialize_Greets` has already decided (`GreetsMirror.cpp:1401`). A
+> default run logs `0 first-order RTT` and zero `[MIRROR-RTT] slot` lines;
+> `--mirror_rtt` logs seven. The "0 px on the authored path" generalization is
+> retired in `docs/SETDEFAULT_AUDIT.md`.
+
 > ## 2026-08-09 — THE TWO REPORTED `--greets_displace` REGRESSIONS: NEITHER IS ONE, AND THE REAL COST IS 19.4 GB
 >
 > User: *"tessellation is costing us now half the fps"* and *"tessellation bake

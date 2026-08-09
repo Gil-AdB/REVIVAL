@@ -247,6 +247,32 @@ review poses (`t=5780` scene camera; `t=6133` review cam) the delta is 43 px and
 px respectively — the second-order panels are simply not in shot there, which is why
 this never showed up in the displacement campaign's pose set.
 
+**CONFIRMED AGAIN 2026-08-09 AT THE USER'S OWN POSE, and the "0 px on the
+authored path" generalization is retired.** The user reported `--mirror-rtt`
+visibly changing his frame; an earlier GPU-side note had generalized the t=100
+row above into "CPU `--mirror_rtt` changes 0 px on the authored path". It does
+not. At his live pose — `FDS_GREETS_CAM="-8.6249094,2.72651696,-53.2339516,
+0.210607708,0.0055912463,-0.977554619"`, `t=3122`, `--greets_displace` — default
+vs `--mirror_rtt` differs by **9 471 px (0.457 %), max channel Δ 175/255, mean
+Δ-sum 207/765 on the changed pixels** (and 9 473 px with `--deferred` added, so
+the two bugs are independent). The init log is the direct proof: a default run
+prints `3 mirrors + 0 first-order RTT` and **no** `[MIRROR-RTT] slot` lines at
+all, while `--mirror_rtt` prints **seven** (`m1->m2`, `m1->m3`, `m1->m4`,
+`m2->m1`, `m2->m3`, `m2->m4`, `m3->m2`, each 512×512). 0 px is what you measure
+at a pose where no RTT panel is in shot; it is not a property of the flag.
+
+**PERF, now measured** (the §4.1 row above says "NOT MEASURED"): greets t=3122,
+1512×848, min-of-6, `--deferred --greets_displace`, load 9–15 — building the 7
+slots costs **+3.67 ms** (47.29 → 50.96 ms) and the flat arm **+2.11 ms**
+(45.80 → 47.91). Also measured: the RTT bake DOES honour the
+`--greets_shadow_proxy` substitution, so it does not rasterise the displaced
+wall per slot — it takes `OffscreenViewScope` (`GreetsMirror.cpp:3067`), which
+raises `g_offscreenViewDepth`, which is half of Transform.cpp's
+`_offscreenPass` predicate (`:1180`), so `Face_MainOnly` is skipped at `:2429`
+and the flat proxy mesh is admitted at `:1432`. The displaced-vs-flat delta with
+all 7 slots live is +3.05 ms, not the hundreds a per-slot full-wall raster would
+cost.
+
 * **Recommended fix:** move both `mirror_rtt` and `mirror_rtt_density` from
   `GreetsApplyRunDefaults` into `GreetsApplyInitDefaults` (before `GREETS.CPP:2905`).
   Both are `[greets]`-category and read by no other scene, so the leak argument that

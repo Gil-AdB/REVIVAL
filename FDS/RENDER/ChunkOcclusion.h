@@ -34,6 +34,35 @@ struct Scene;
 
 namespace fds {
 
+// ── "will this frame render deferred?", answerable AT INIT TIME ─────────────
+// The render path is NOT `FeatureFlags::deferred()`. RENDER.CPP's
+// renderns::deferredEnabled() ORs five flags — deferred, hdr, deferred_quarter,
+// deferred_checkerboard, shard_deferred — because the last four are meaningless
+// without the deferred kernel. Every SCENE-BUILD decision that depends on "am I
+// a deferred frame" must ask the same question the renderer will ask, and until
+// this accessor existed the predicate was private to RENDER.CPP, so callers
+// reached for the bare `deferred()` flag and silently got a DIFFERENT answer.
+//
+// THE BUG THAT MOTIVATED EXPORTING IT (measured, greets t=3122, 1512x848,
+// min-of-6): DEMO/GREETS.CPP's Piramid chunk split was gated on
+// `FeatureFlags::deferred()` alone. greets renders deferred regardless — it sets
+// shard_deferred/hdr/deferred_checkerboard and additionally forces
+// RenderPath::ForceDeferred whenever greets_mirror is on — so a plain
+// `./DEMO --greets-displace` rendered a deferred frame whose geometry had never
+// been chunked. Cost: the 59 556 displaced faces the chunk pass marks
+// NoShadowCast stayed casters, and the per-frame shadow bake went 3.9 -> 16.0 ms;
+// whole frame 44.7 -> 68.5 ms. NOTE the fix is this predicate and NOT
+// `setDefault(deferred, true)`: GreetsApplyInitDefaults runs FIRST in the init
+// chain, so setting the flag there would force city/chase/fountain/crash onto
+// the deferred path too (the docs/SETDEFAULT_AUDIT.md L1 leak, already recorded
+// against shard_deferred).
+//
+// Startup-safe: reads flags only, no render state, so an init-time caller gets
+// the same answer the first frame will — provided the flags it ORs are set by
+// then (greets sets shard_deferred in GreetsApplyInitDefaults, before any scene
+// build decision).
+bool DeferredPathEnabled();
+
 // Per-frame vis-stats accounting (docs/VISIBILITY_PLAN.md instrumentation).
 // Written by Transform.cpp (main-view meshes) + the cull; reported in
 // EndFrame when --vis_stats. Cheap when off (guarded by g_visStatsActive).

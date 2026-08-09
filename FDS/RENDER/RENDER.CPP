@@ -29,6 +29,7 @@
 #include "DeferredCommon.h"   // DeferredLightingCtx (owned by renderFrame, threaded to all passes)
 #include "EnvBake.h"          // --env_refl: per-scene panorama bake + registry
 #include "OffscreenView.h"    // g_offscreenViewDepth (env_refl bake gate)
+#include "ChunkOcclusion.h"   // fds::DeferredPathEnabled is declared there
 #include "VizCycle.h"         // VizCycle_Overlay (--wire_viz + the X-key cycle)
 #include "TailProf.h"         // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "RenderPipeline.h"
@@ -367,6 +368,16 @@ bool deferredEnabled() {
 	    || fds::FeatureFlags::deferred_checkerboard()
 	    || fds::FeatureFlags::shard_deferred();
 }
+
+namespace fds {
+// Public form of deferredEnabled() for SCENE-BUILD code that must know, AT INIT
+// TIME, whether the frames it is preparing geometry for will run the deferred
+// kernel. Declared in RENDER/ChunkOcclusion.h; the block comment there records
+// the greets chunk-split bug that made a file-private predicate a correctness
+// problem. One definition, one predicate — a caller that re-derives the OR by
+// hand is exactly the failure mode this exists to remove.
+bool DeferredPathEnabled() { return deferredEnabled(); }
+}  // namespace fds
 
 // Per-scene matID for the water material — when this matches the
 // G-buffer mat32 at a pixel, the deferred lighting compositor blends
