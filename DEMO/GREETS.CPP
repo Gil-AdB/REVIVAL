@@ -1548,12 +1548,14 @@ static void FinalizeStoneProxy(Scene *Sc, TriMesh *proxy) {
 
 void Initialize_Greets()
 {
+	InitTimelineMark("greets: Initialize_Greets begin");
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
 	// --pom_rebuild (editor): defer a requested --pom_shell past init so the
 	// pristine snapshot taken at the end of this function is genuinely pristine.
 	// No-op without the flag (the shipping demo path is untouched).
 	rev::DisplaceRebuild_BeginInit();
 	GreetSc = loadSceneAligned("SCENES/GREETS.FLD");
+	InitTimelineMark("greets: LoadFLD end");
 
 	gg = new GreetsGenerator;
 
@@ -1684,6 +1686,7 @@ void Initialize_Greets()
 	}
 
 	Preprocess_Scene(GreetSc, "GREETS");
+	InitTimelineMark("greets: Preprocess_Scene end (textures loaded)");
 
 	// S1c layout check, now that Unify_Textures has actually LOADED the albedo
 	// (before Preprocess the stone materials still point at their old 256²
@@ -1806,6 +1809,7 @@ void Initialize_Greets()
 	// Defaults (subdiv 0, displace 0) = neither call runs (byte-identical).
 	// S1 offscreen shadow proxy: captured here (rooms/floor still FLAT), built
 	// after the displace/smooth passes below, finalized after the clustering.
+	InitTimelineMark("greets: displace block begin");
 	StoneProxySnapshot g_stoneProxySnap;
 	TriMesh *g_stoneProxyMesh = nullptr;
 	{
@@ -1868,7 +1872,9 @@ void Initialize_Greets()
 
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
+	InitTimelineMark("greets: DisplaceStoneSubdiv block end");
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
+	InitTimelineMark("greets: MakeFacesIndependentByAngle end");
 
 	// Displaced stone: re-SMOOTH the displaced surface normals. The pass above
 	// (MakeFacesIndependentByAngle, 30°) facets the new relief — adjacent cell
@@ -2660,6 +2666,7 @@ void Initialize_Greets()
 	}
 	// Split mirrored-UV faces onto handedness clones (after all robot/face
 	// retargeting, before the matID rebuild so the clones get IDs).
+	InitTimelineMark("greets: chunking/clustering end");
 	GreetsFixBitangentHandedness(GreetSc);
 	// ── S1d-3 PRISM (--pom_prism, default 0 = OFF) ── BEGIN
 	// Here, and not next to PomShell_Build, for two reasons: the ::mirUV split
@@ -2692,6 +2699,7 @@ void Initialize_Greets()
 	// mirror build (the teleporter mirror clones the ball; its 2-key
 	// Pos spline marks it dynamic → re-mirrored per frame).
 	fds::BuildDiscoBall(GreetSc);
+	InitTimelineMark("greets: BuildDiscoBall end");
 
 	// Blaster-bolt test harness (--greets-blasters): build the bolt texture.
 	if (fds::FeatureFlags::greets_blasters())
@@ -2863,8 +2871,11 @@ void Initialize_Greets()
 			    "(moving = per-frame full re-bake; no static bake or lightmap)\n",
 			    markedStatic, omniCubeRes, markedMoving, movingOmniRes, totalOmnis);
 		}
+		InitTimelineMark("greets: shadow-map block begin");
 		ShadowMaps_Rebuild(GreetSc, 1024);
+		InitTimelineMark("greets: ShadowMaps_Rebuild end");
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
+		InitTimelineMark("greets: CubeShadowMaps_Rebuild end");
 		// Force the static occluder bake even when --shadows isn't set yet:
 		// greets turns --shadows on at RUN (GreetsApplyRunDefaults), AFTER this
 		// init bake, so under bare --deferred shadows() is still off here. The
@@ -2873,7 +2884,9 @@ void Initialize_Greets()
 		// maps stay empty and every lightmap texel bakes 100% lit (no static
 		// shadows). Same condition as bakeForce so the two stay in lockstep.
 		ShadowMaps_BakeStatic(GreetSc, /*forceEnable=*/!GreetsScenePreempted());
+		InitTimelineMark("greets: ShadowMaps_BakeStatic end");
 		fds::LightmapStampOrigBary(GreetSc);
+		InitTimelineMark("greets: LightmapStampOrigBary end");
 		// NOTE: the lightmap bake thread is spawned LATER (after the mirror /
 		// shatter setup below), not here — LightmapBake_Static reads Materials,
 		// and BuildMirrorsByTextureName / BuildGreetsShatter rewrite the
@@ -2888,6 +2901,7 @@ void Initialize_Greets()
 	// reflection shows at each pixel. Mirror-in-mirror (two facing)
 	// would currently produce empty recursion past depth 1; if greets
 	// ever needs that we'll add a depth cap.
+	InitTimelineMark("greets: mirror build begin");
 	if (fds::FeatureFlags::greets_mirror()) {
 		g_greetsMirrors.clear();
 		// One mirror per material name, plus one mirror per coplanar
@@ -2954,6 +2968,7 @@ void Initialize_Greets()
 	// Unconditional (matches the prior behaviour); LightmapBake_Static no-ops
 	// fast when --shadow-lightmap is off.
 	{
+		InitTimelineMark("greets: shadow/env bake end — spawning lightmap thread");
 		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
 		const auto bakeSpawnT = std::chrono::steady_clock::now();
 		Scene * const greetScForBake = GreetSc;
@@ -2980,6 +2995,7 @@ void Initialize_Greets()
 	// No-op without the flag. Last thing in init so the snapshot sees exactly
 	// the vertices the rasterizer will read.
 	rev::DisplaceRebuild_EndInit(GreetSc);
+	InitTimelineMark("greets: Initialize_Greets END");
 }
 
 //void MMXClear(void *Page, dword Len)
@@ -4332,8 +4348,10 @@ void Greets_JoinBakeThread()
 
 void Run_Greets()
 {
+	InitTimelineMark("Run_Greets: begin (joining lightmap bake)");
 	Greets_JoinBakeThread();
 	auto scene = createGreetsScene();
+	InitTimelineMark("Run_Greets: scene driver ready");
 	runSceneBlocking(*scene);
 }
 

@@ -21,6 +21,17 @@
 // set it while a worker thread reads it.
 extern std::atomic<bool> g_shouldQuit;
 
+// --init_timeline (default OFF, byte-null, stderr only): stamp one startup
+// milestone. Prints "[INIT-T] +<abs ms> (dt <ms>) [t<n>] <label>", where <abs>
+// is measured from the FIRST mark of the run and <dt> from the previous mark on
+// ANY thread — the init chain runs on the t1 worker while Run_Glato plays on the
+// demo thread, so the marks legitimately interleave and only the absolute column
+// is ordered. Exists because "the tessellation bake hangs the intro" is a
+// DURATION question, not a threading one (Initialize_Greets already runs
+// concurrently with the intro; it only stalls the demo if it outlasts it), and
+// the two cannot be told apart without per-phase timestamps.
+void InitTimelineMark(const char *label);
+
 // Per-scene "skip to next" flag. Set by Backspace keydown. Cleared by
 // runSceneBlocking() once it observes the flag and breaks out of the tick
 // loop, so the next scene starts clean. Distinct from g_shouldQuit so that

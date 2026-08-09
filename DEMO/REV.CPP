@@ -482,6 +482,10 @@ material global ID or ptr
 #include <csignal>
 #include <utility>
 #include <iostream>
+#include <mutex>        // InitTimelineMark
+#include <chrono>       // InitTimelineMark
+#include <thread>       // InitTimelineMark
+#include <vector>       // InitTimelineMark
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include "MainLoop.h"
@@ -589,6 +593,31 @@ std::atomic<bool> g_shiftHeld{false};
 // g_forceMipLevel / g_vizMipLevel are defined in FDS/RENDER/DeferredLighting.cpp
 // (so the FDS library doesn't have an unresolved symbol from DEMO/).
 // Declared in Rev.h.
+
+// --init_timeline. See Rev.h. The mutex is only taken when the flag is on, so
+// the shipping path pays one relaxed bool load per mark and nothing else.
+// Thread ids are interned in first-seen order (t0 = whoever marked first,
+// normally the demo director) so the log reads without 64-bit hashes in it.
+void InitTimelineMark(const char *label)
+{
+	if (!fds::FeatureFlags::init_timeline()) return;
+	static std::mutex             s_mtx;
+	static std::chrono::steady_clock::time_point s_t0, s_prev;
+	static bool                   s_started = false;
+	static std::vector<std::thread::id> s_tids;
+	std::lock_guard<std::mutex> lk(s_mtx);
+	const auto now = std::chrono::steady_clock::now();
+	if (!s_started) { s_t0 = s_prev = now; s_started = true; }
+	const auto id  = std::this_thread::get_id();
+	size_t slot = 0;
+	for (; slot < s_tids.size(); ++slot) if (s_tids[slot] == id) break;
+	if (slot == s_tids.size()) s_tids.push_back(id);
+	const double abs_ms = std::chrono::duration<double, std::milli>(now - s_t0).count();
+	const double dt_ms  = std::chrono::duration<double, std::milli>(now - s_prev).count();
+	s_prev = now;
+	std::fprintf(stderr, "[INIT-T] %9.1f (dt %8.1f) [t%zu] %s\n",
+	             abs_ms, dt_ms, slot, label);
+}
 
 float dTime;
 
@@ -1156,10 +1185,13 @@ void CodeEntry(void *var)
 
 	// return;
 
+	InitTimelineMark("CodeEntry: begin");
 	Initialize_Glato(); //9.3
+	InitTimelineMark("Initialize_Glato: end");
 	//Initialize_Nova();
 
 	std::thread t1([]() {
+		InitTimelineMark("t1: begin");
 		InitPolyStats(200);
 		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
 		FPU_LPrecision();
@@ -1172,10 +1204,15 @@ void CodeEntry(void *var)
 		// concurrent LoadFLD calls would race + corrupt the version
 		// check and exit(1).
 		Initialize_Greets(); //5.6
+		InitTimelineMark("t1: Initialize_Greets end");
 		Initialize_City();
+		InitTimelineMark("t1: Initialize_City end");
 		Initialize_Chase();
+		InitTimelineMark("t1: Initialize_Chase end");
 		Initialize_Fountain(); //8.3
+		InitTimelineMark("t1: Initialize_Fountain end");
 		Initialize_Crash();
+		InitTimelineMark("t1: Initialize_Crash end (t1 done)");
 	});// (); //9.3
 
 //	Initialize_Koch();
@@ -1256,13 +1293,18 @@ void CodeEntry(void *var)
 	// intro is ~150s of wall time). No effect on a normal run. Inlined
 	// (no local) so it doesn't cross the earlier goto demo_exit jumps.
 	if (!skipToFountain && std::getenv("FDS_SKIP_INTRO") == nullptr) {
+	InitTimelineMark("Run_Glato: begin");
 	Run_Glato();
+	InitTimelineMark("Run_Glato: end — now joining t1");
 
 	t1.join();
+	InitTimelineMark("t1.join: returned (THE STALL, if any, is this dt)");
 
 	while (Timer<4000) { if (g_shouldQuit.load()) goto demo_exit; }
+	InitTimelineMark("Timer>=4000 gate passed — City starts");
 	} else {
 	t1.join();
+	InitTimelineMark("t1.join: returned (FDS_SKIP_INTRO path)");
 	}
 
 
