@@ -781,7 +781,18 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 			}
 			if (mip < 0) mip = 0;
 			if (mip > L) mip = L;
-			if (g_mipLastMipWrite) F->LastMip = uint8_t(mip);
+			// Only MAINTAIN the history when something will READ it. Both
+			// readers (here and in the fast-uniform branch below) are gated
+			// on `mipHyst > 0`, which is DEFAULT 0 — so at shipping defaults
+			// this was a dead store, executed once per face PER TILE from
+			// every one of the 12 tile workers, into byte 136 of a 162-byte
+			// Face. That byte shares its cache line with ownerMirrorId,
+			// behindMirrorMask, A_idx/B_idx/C_idx and frame, all of which
+			// other hot paths read — so the dead store was also dirtying a
+			// shared line across cores. Byte-null by construction: nothing
+			// reads LastMip when mipHyst == 0, and when it is > 0 the write
+			// happens exactly as before.
+			if (mipHyst > 0.0f && g_mipLastMipWrite) F->LastMip = uint8_t(mip);
 			g_MipLevel = mip;
 			// Trilinear fraction toward mip+1 (int32_t(mipF) truncates, so
 			// level L is active for mipF ∈ [L, L+1)). Clamped in the filler.
@@ -864,7 +875,8 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 			if (iml < 0) iml = 0;
 			if (iml > L) iml = L;
 		}
-		if (g_mipLastMipWrite) F->LastMip = uint8_t(iml);
+		// See the small-face branch: dead store unless hysteresis is on.
+		if (mipHyst > 0.0f && g_mipLastMipWrite) F->LastMip = uint8_t(iml);
 		g_MipLevel = iml;
 		if (g_MipLevel < 0) g_MipLevel = 0;
 		// Trilinear fraction toward mip+1. Level L is active for the
