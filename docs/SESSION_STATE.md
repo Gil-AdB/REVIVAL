@@ -1,5 +1,128 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-10 — "I CAN'T SEE THE MECH IN THE UP-LOOKING BAKE": HIS OFFSET HYPOTHESIS IS RIGHT, AND IT IS 8 UNITS
+>
+> User: *"I can't see the mech in the up-looking dynamic bake, even when the mech
+> is directly above the stairs — I think the camera is offset to one of the
+> stairs' side."* **Confirmed, measured, and the offset is nearly the whole
+> half-extent of the surface.**
+>
+> **THE NUMBERS.** `materialCentroid` (`FDS/RENDER/EnvBake.cpp`) derives a
+> probe's capture point as the mean world position of **every vertex** of every
+> face using the material, then — for a multi-instance surface — greedy-clusters
+> at an **8-world-unit** radius and re-centroids on the **heaviest** cluster.
+> greets `stairs` is **one pair of flights 9.5 u long**, and 9.5 > 8, so each
+> flight splinters into a top cluster (n=22) and a bottom cluster (n=8). The
+> function's own comment already concedes this — *"the greedy clustering
+> splinters a single statue into several"* — but only in the self-exclusion
+> logic, not in the probe placement. "Heaviest" then parks the probe on the top
+> landing END:
+>
+> | | value |
+> |---|---|
+> | capture point (shipped) | **(45.4, 2.3, −54.9)** |
+> | owner-faces AABB | [35.9, 0.0, −70.9] .. [49.1, 3.8, −54.8] |
+> | footprint centre | (42.5, 1.9, −62.85) |
+> | offset from centre | (+2.9, +0.4, **+7.95**) on a 16.2 u Z extent |
+>
+> The probe sits at **z = −54.9 against a −54.8 boundary** — literally on the
+> z-extreme face of its own footprint. The mech ends its walk at
+> **(44.4, 4.7, −62.2)**, directly over that footprint centre. From the shipped
+> probe its direction is (−1.0, +2.4, −7.3) = **72° off vertical**, so it lands
+> in the **−Z** cube face and +Y never sees it. From the footprint centre the
+> same mech is **36° off vertical** — inside +Y.
+>
+> **THE DRAW SET IS NOT THE PROBLEM, and this was checked first.** Both
+> mechanisms were tested. The mech IS a mover (`WorldAabb_MeshIsDynamic`), the
+> store IS retained, and `[ENVDYN-WHY]` reports `'stairs' (store 1): OK —
+> overlaid the mech into 3 touched face(s), **1754 mech texel(s)** composited
+> over static`, every frame. The overlay is drawing the mech into this probe
+> continuously; it is just drawing it into the wrong faces. `--env_bake_include_animated`
+> (static-bake inclusion) is a separate mechanism and is not implicated.
+>
+> **THE PROOF PAIR** — the live post-overlay +Y face of the same probe, same
+> pose (`--repro=greets@t=7100 --env_dynamic`), via the new `--env_dyn_dump`:
+> * `docs/img/envmap/stairs_pY_before.png` — empty room, **no mech**
+> * `docs/img/envmap/stairs_pY_after.png` — **the mech, dead centre**
+> * `docs/img/envmap/stairs_mZ_before.png` — where it actually was: small, low,
+>   near the edge of the −Z face, exactly as 72° predicts
+> * whole cubes: `docs/img/envmap/stairs_atlas_before_half.png` /
+>   `docs/img/envmap/stairs_atlas_after_half.png`
+>
+> **THE FIX — `--env_probe_center`, and it is general, not a stairs special-case.**
+> Two changes inside `materialCentroid`: (1) **AREA weighting** — each face
+> contributes its own centroid weighted by its world area, so the point stops
+> being a function of tessellation density; (2) **INSTANCE-GROUP UNION** — the
+> greedy clustering is left bit-identical (instance *detection* is untouched),
+> but the heaviest cluster is then unioned transitively with every cluster
+> within the **2× cluster radius the self-exclusion logic already calls
+> "fragments of the probed instance"**, and the capture point is the area
+> centroid of that union. The change simply makes the placement obey a rule the
+> file already states. Genuinely separate instances (the two mummies, 24 u
+> apart) never link and still get a per-instance probe. New stairs capture
+> point: **(42.6, 0.4, −62.1)** — X and Z on the footprint centre.
+>
+> An **UP-FACING-FACES-ONLY** centroid was considered and rejected: three of
+> greets' five flagged probes (`momy-1`, `momy-2`, `screen emiter`) are vertical
+> reflectors with no up-facing faces at all, so the restriction is undefined
+> exactly where it would have to be general.
+>
+> **DEFAULT OFF, AND THE FLIP WANTS HIS EYE.** Certified DIFFERENTIALLY (one
+> binary, flag on vs off — the only valid method in a shared tree):
+>
+> | gate | flag OFF | flag ON |
+> |---|---|---|
+> | greets (pin recipe, `--no-env_refl`) | `778fa6ac…` ✅ unmoved | `778fa6ac…` **identical** |
+> | fountain | `8db68ccb…` ✅ unmoved | `8db68ccb…` **identical** |
+> | city | `3cbe42b1…` ✅ unmoved | `3c64e012…` **MOVES** — 5 px, max Δ 4/255 |
+> | greets WITH env_refl (t=1588) | `e5f38b40…` | `757cae6d…` **MOVES** — 343 157 px (16.5 %), max Δ 102, but mean Δ-sum 3.3/765 and only 3 715 px > 10 luma |
+>
+> All four stable 2/2. The recorded greets pin recipe carries `--no-env_refl`,
+> so it is blind to this by construction — the `greets WITH env_refl` row is the
+> honest measurement and is why the flag ships OFF. Look pairs for his eye:
+> `docs/img/envmap/greets_stairs_view_pair.png` (a camera on the stairs with the
+> mech above them — the clearest one) and
+> `docs/img/envmap/greets_t1588_probecentre_pair.png` (the pin pose).
+>
+> **BAKE COST: NO INCREASE, MEASURED.** greets bakes **one fewer probe** with the
+> flag on (7 → 6): the new `stairs` and `stairs::mirUV` capture points land 2.2 u
+> apart and fall inside the existing 4-unit store-sharing radius, so the two
+> collapse onto one store — one 512² cube bake saved. Min-of-5 wall on the greets
+> snapshot 1 813 ms OFF vs **1 792 ms** ON (load 8.9–13.4; the −21 ms is inside
+> the noise of a 1.8 s run, so the claim is *no measured increase*, not a win).
+> The derivation itself adds one cross product + sqrt per face *that uses the
+> material*, inside a mesh walk that already happens.
+>
+> **THE AUTHORED OVERRIDE — `Material::EnvBakeOfs`, editor "probe offset X/Y/Z".**
+> A derivation over a surface's own geometry cannot know that a probe wants to
+> sit clear of a step nose or below a soffit, so the automated point is not the
+> last word. Three floats, world units, **added on top of whichever derivation
+> ran** (verified live: `'stairs': authored probe offset (+0.00 +3.00 +0.00) —
+> capture point (42.6 0.4 −62.1) -> (42.6 3.4 −62.1)`). All zero = unset =
+> byte-null. Live-applies — the edit drops just that store
+> (`EnvReflection_InvalidateSurface`) so the probe re-bakes from the new point on
+> the next frame and can be dialled in by eye.
+>
+> Persistence follows the §1a extension idiom: LWO **`RVSF` sub-chunk bit
+> `0x1000`**, carrying **three floats under ONE bit** (X, Y, Z). That deviates
+> from the one-bit-per-scalar convention `tintR/G/B` follows, deliberately: it is
+> one semantic vector, and three bits would have left the u16 with a single free
+> bit. **0x2000/0x4000/0x8000 remain free.** It is a SURFACE property, not an
+> object one, because a probe's identity in `EnvBake` *is* its material
+> (`env.byMat`, one store per material-centroid group) — a per-object value would
+> have had no probe to attach to, and §1d's `Object_FdsExt` path is unimplemented.
+>
+> **NEW INSTRUMENT: `--env_dyn_dump=N`** (1-based store index, the `--env_map_probe`
+> numbering) writes the **live, post-overlay** mip-0 cube of probe N to
+> `/tmp/envdyn_<material>.ppm` as the standard 3×2 atlas. `FDS_ENVBAKE_DUMP` can
+> only show the STATIC capture, which by construction contains no mover — so it
+> could not have answered this question. Default 0, byte-null.
+>
+> **PROCESS NOTE, for the record:** the two `FeatureFlags.def` entries for this
+> work were swept into commit `5079f6e` (`--shadow_plane_pack`) by a concurrent
+> agent holding the shared tree. The content is correct and in HEAD; the
+> attribution is wrong. Same hazard class as the 2026-08-09 note below.
+
 > ## 2026-08-09 — HIS 12-14 FPS, EXPLAINED: THE SCENE RENDERS DEFERRED BUT WAS BUILT AS IF IT WOULD NOT
 >
 > User, interactive, `./DEMO --greets-displace`, window 1512×848, facing the

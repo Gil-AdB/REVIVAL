@@ -380,6 +380,22 @@ struct Material
     // workstream is inert (byte-null). Consumed by EnvBake.cpp (store
     // retention A2 + the overlay pass A3), never by the static bake.
     int8_t                EnvDynamic             = 0;
+
+    // Authored per-surface ENV-PROBE CAPTURE-POINT OFFSET, world units, added
+    // to whatever EnvBake.cpp's materialCentroid derives (legacy vertex mean
+    // or --env_probe_center's area centroid). THE OVERRIDE WINS: the derived
+    // point is a heuristic over the surface's geometry and cannot know that a
+    // reflector wants its probe a metre off the floor, or clear of a soffit.
+    // All three zero = unset = pure derivation, so the field is byte-null
+    // until somebody authors it.
+    //
+    // Set from the editor's Surface panel ("probe offset X/Y/Z"), which
+    // targets the SURFACE because a probe's identity in EnvBake is its
+    // material, not its object (env.byMat, one store per material-centroid
+    // group) — a per-object value would have no probe to attach to. Authored
+    // in the LWO 'RVSF' SURF sub-chunk (bit 0x1000, a 3-float payload) → FLD
+    // Surf_RevExt → here.
+    float                 EnvBakeOfs[3]          = { 0.0f, 0.0f, 0.0f };
 };
 
 #pragma pack(pop)

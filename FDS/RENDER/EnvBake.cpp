@@ -839,13 +839,22 @@ bool renderCubeFacesMajor(Scene* sc, const Vector& center,
 // render produced, i.e. the SAME 0-255 scale the kernel's env compose adds
 // into sB — so these numbers are directly comparable to any other arm's probe
 // content expressed on the 0-255 radiance scale.
+//
+// `tag` names the population: "envbake" = the STATIC capture (the historical
+// FDS_ENVBAKE_DUMP=1 path), "envdyn" = the LIVE store after --env_dynamic's
+// overlay composited the movers into it (--env_dyn_dump=N). The static dump
+// has no mover in it by construction, so it cannot answer "is the mech in
+// this probe's up-looking face" — only the live one can.
 void dumpCubeStoreCensus(const char* matName,
-                         const std::vector<uint32_t>& level0, int fr) {
-    if (!std::getenv("FDS_ENVBAKE_DUMP")) return;
+                         const std::vector<uint32_t>& level0, int fr,
+                         const char* tag = "envbake") {
+    if (!std::strcmp(tag, "envbake") && !std::getenv("FDS_ENVBAKE_DUMP")) return;
     if (fr <= 0 || level0.size() < size_t(6) * fr * fr) return;
     std::string safe = matName ? matName : "unnamed";
     for (char& c : safe) if (!std::isalnum((unsigned char)c)) c = '_';
     static const char* kFaceName[6] = { "+X", "-X", "+Y", "-Y", "+Z", "-Z" };
+    std::string tagUp = tag;
+    for (char& c : tagUp) c = char(std::toupper((unsigned char)c));
     for (int f = 0; f < 6; ++f) {
         const uint32_t* p = level0.data() + size_t(f) * fr * fr;
         double sB = 0, sG = 0, sR = 0, sY = 0;
@@ -861,14 +870,14 @@ void dumpCubeStoreCensus(const char* matName,
         }
         std::sort(ys.begin(), ys.end());
         const double n = double(fr) * fr;
-        std::fprintf(stderr, "[ENVBAKE-FACE] '%s' face %d %s res %d  "
+        std::fprintf(stderr, "[%s-FACE] '%s' face %d %s res %d  "
             "meanBGR %.2f/%.2f/%.2f  meanY %.2f  p50 %.1f p95 %.1f max %.1f  "
-            "nonvoid %.1f%%\n", matName ? matName : "?", f, kFaceName[f], fr,
+            "nonvoid %.1f%%\n", tagUp.c_str(), matName ? matName : "?", f, kFaceName[f], fr,
             sB / n, sG / n, sR / n, sY / n,
             double(ys[size_t(0.50 * (n - 1))]), double(ys[size_t(0.95 * (n - 1))]),
             double(ys.back()), 100.0 * double(nonVoid) / n);
     }
-    const std::string path = "/tmp/envbake_" + safe + ".ppm";
+    const std::string path = std::string("/tmp/") + tag + "_" + safe + ".ppm";
     if (FILE* fp = std::fopen(path.c_str(), "wb")) {
         const int gw = fr * 3, gh = fr * 2;
         std::fprintf(fp, "P6\n%d %d\n255\n", gw, gh);
@@ -883,8 +892,8 @@ void dumpCubeStoreCensus(const char* matName,
                 std::fwrite(rgb, 1, 3, fp);
             }
         std::fclose(fp);
-        std::fprintf(stderr, "[ENVBAKE-FACE] wrote %s (%dx%d atlas)\n",
-                     path.c_str(), gw, gh);
+        std::fprintf(stderr, "[%s-FACE] wrote %s (%dx%d atlas)\n",
+                     tagUp.c_str(), path.c_str(), gw, gh);
     }
 }
 
@@ -899,9 +908,34 @@ void dumpCubeStoreCensus(const char* matName,
 // sibling, and the exclusion stops just under halfway to it (0.45×). A
 // heuristic — the editor's split-instances gives exact per-instance
 // materials and doesn't rely on it.
+// --env_probe_center: world AREA of one face, and its own centroid. The
+// AREA weight is the whole point — the legacy accumulator below adds one
+// sample per VERTEX, so a surface's capture point is dragged wherever its
+// mesh happens to be finely tessellated rather than to where its reflective
+// surface actually is.
+inline float faceAreaAndCentroid(const TriMesh* T, const Face& F, Vector& c) {
+    const Vertex* vs[3] = { F.A, F.B, F.C };
+    Vector w[3];
+    for (int k = 0; k < 3; ++k) {
+        if (!vs[k]) return 0.0f;
+        MatrixXVector(T->RotMat, const_cast<Vector*>(&vs[k]->Pos), &w[k]);
+        Vector_SelfAdd(&w[k], &T->IPos);
+    }
+    const float ux = w[1].x - w[0].x, uy = w[1].y - w[0].y, uz = w[1].z - w[0].z;
+    const float vx = w[2].x - w[0].x, vy = w[2].y - w[0].y, vz = w[2].z - w[0].z;
+    const float nx = uy * vz - uz * vy;
+    const float ny = uz * vx - ux * vz;
+    const float nz = ux * vy - uy * vx;
+    c = { (w[0].x + w[1].x + w[2].x) * (1.0f / 3.0f),
+          (w[0].y + w[1].y + w[2].y) * (1.0f / 3.0f),
+          (w[0].z + w[1].z + w[2].z) * (1.0f / 3.0f) };
+    return 0.5f * std::sqrt(nx * nx + ny * ny + nz * nz);
+}
+
 bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                       float* excludeRadius = nullptr) {
     if (excludeRadius) *excludeRadius = 0.0f;
+    const bool areaMode = fds::FeatureFlags::env_probe_center();
     // Mirror-clone meshes reference the ORIGINAL materials — without this
     // skip the instance clustering below counts the mirrored copies as
     // extra instances and can put the probe in the mirrored half-space
@@ -912,13 +946,22 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
         return std::find(cloneMeshes.begin(), cloneMeshes.end(), T)
                != cloneMeshes.end();
     };
-    double sx = 0, sy = 0, sz = 0;
+    double sx = 0, sy = 0, sz = 0;          // vertex-mean accumulator (legacy)
+    double ax = 0, ay = 0, az = 0, aw = 0;  // area-weighted accumulator
     long n = 0;
     for (TriMesh* T = sc->TriMeshHead; T; T = T->Next) {
         if (isClone(T)) continue;
         for (DWord i = 0; i < T->FIndex; ++i) {
             const Face& F = T->Faces[i];
             if (F.Txtr != M) continue;
+            if (areaMode) {
+                Vector fc;
+                const float a = faceAreaAndCentroid(T, F, fc);
+                if (a > 0.0f) {
+                    ax += double(a) * fc.x; ay += double(a) * fc.y;
+                    az += double(a) * fc.z; aw += a;
+                }
+            }
             const Vertex* vs[3] = { F.A, F.B, F.C };
             for (int k = 0; k < 3; ++k) {
                 if (!vs[k]) continue;
@@ -931,7 +974,12 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
         }
     }
     if (!n) return false;
-    out = { float(sx / n), float(sy / n), float(sz / n) };
+    // Zero total area (every face degenerate) falls back to the vertex mean
+    // rather than dividing by zero — "I could not measure it" must never
+    // become a probe at the origin.
+    out = (areaMode && aw > 0.0)
+        ? Vector{ float(ax / aw), float(ay / aw), float(az / aw) }
+        : Vector{ float(sx / n),  float(sy / n),  float(sz / n)  };
     // Multi-instance surfaces (the two greets mummies share one material):
     // the global mean sits in the EMPTY SPACE BETWEEN instances — a probe
     // from nowhere. Greedy-cluster the vertices by distance to the running
@@ -939,7 +987,11 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
     // at least correct for one instance (per-instance correctness needs the
     // editor's "split instances", which gives each its own material+probe).
     {
-        struct Cl { double sx, sy, sz; long n; };
+        // Cl::sx/sy/sz/n are the CLUSTERING accumulator and stay vertex-keyed
+        // in both modes, so cluster membership — i.e. instance DETECTION — is
+        // bit-identical under --env_probe_center. ax/ay/az/aw are the parallel
+        // AREA accumulator the new capture point is read from.
+        struct Cl { double sx, sy, sz; long n; double ax, ay, az, aw; };
         std::vector<Cl> cls;
         const float kR2 = 8.0f * 8.0f;
         for (TriMesh* T = sc->TriMeshHead; T; T = T->Next) {
@@ -956,8 +1008,16 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                                 dz = float(c.sz / c.n) - w.z;
                     if (dx*dx + dy*dy + dz*dz < kR2) { best = &c; break; }
                 }
-                if (!best) { cls.push_back({0, 0, 0, 0}); best = &cls.back(); }
+                if (!best) { cls.push_back({0, 0, 0, 0, 0, 0, 0, 0}); best = &cls.back(); }
                 best->sx += w.x; best->sy += w.y; best->sz += w.z; ++best->n;
+                if (areaMode) {
+                    Vector fc;
+                    const float a = faceAreaAndCentroid(T, F, fc);
+                    if (a > 0.0f) {
+                        best->ax += double(a) * fc.x; best->ay += double(a) * fc.y;
+                        best->az += double(a) * fc.z; best->aw += a;
+                    }
+                }
             }
         }
         if (cls.size() > 1) {
@@ -965,6 +1025,59 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
             for (const Cl& c : cls) if (c.n > heavy->n) heavy = &c;
             out = { float(heavy->sx / heavy->n), float(heavy->sy / heavy->n),
                     float(heavy->sz / heavy->n) };
+            // ── --env_probe_center: THE INSTANCE-GROUP UNION ──────────────
+            // The heaviest cluster is not an instance, it is whatever fragment
+            // of one the 8-unit greedy pass happened to close last. greets
+            // 'stairs' is a single 9.5-u flight and 9.5 > 8, so it splinters
+            // into a top (n=22) and a bottom (n=8) cluster and "heaviest"
+            // parks the probe on the top landing END of its own footprint.
+            //
+            // The exclusion logic just below ALREADY states the right rule —
+            // clusters within 2xkR are "fragments of the probed instance",
+            // only what lies BEYOND that is a sibling. This makes the capture
+            // point obey the same statement instead of contradicting it:
+            // grow the group transitively from the heaviest cluster over the
+            // same 2xkR link distance, then take the AREA centroid of the
+            // union. Genuinely separate instances (the two greets mummies,
+            // 24 u apart) never link, so they still get a per-instance probe.
+            std::vector<char> inGroup(cls.size(), 0);
+            if (areaMode) {
+                const float kLink2 = 16.0f * 16.0f;   // (2×kR)²
+                inGroup[size_t(heavy - cls.data())] = 1;
+                for (bool grew = true; grew; ) {
+                    grew = false;
+                    for (size_t i = 0; i < cls.size(); ++i) {
+                        if (inGroup[i]) continue;
+                        const float ix = float(cls[i].sx / cls[i].n);
+                        const float iy = float(cls[i].sy / cls[i].n);
+                        const float iz = float(cls[i].sz / cls[i].n);
+                        for (size_t j = 0; j < cls.size(); ++j) {
+                            if (!inGroup[j]) continue;
+                            const float dx = ix - float(cls[j].sx / cls[j].n);
+                            const float dy = iy - float(cls[j].sy / cls[j].n);
+                            const float dz = iz - float(cls[j].sz / cls[j].n);
+                            if (dx*dx + dy*dy + dz*dz <= kLink2) {
+                                inGroup[i] = 1; grew = true; break;
+                            }
+                        }
+                    }
+                }
+                double gx = 0, gy = 0, gz = 0, gw = 0;
+                long gn = 0; size_t gc = 0;
+                for (size_t i = 0; i < cls.size(); ++i) {
+                    if (!inGroup[i]) continue;
+                    gx += cls[i].ax; gy += cls[i].ay; gz += cls[i].az; gw += cls[i].aw;
+                    gn += cls[i].n; ++gc;
+                }
+                if (gw > 0.0) {
+                    out = { float(gx / gw), float(gy / gw), float(gz / gw) };
+                    std::fprintf(stderr, "[ENVREFL] '%s': --env_probe_center — %zu of"
+                        " %zu cluster(s) are ONE instance (%ld verts, area %.1f);"
+                        " capture point at their AREA centroid (%.1f %.1f %.1f)\n",
+                        M->Name ? M->Name : "?", gc, cls.size(), gn, gw,
+                        out.x, out.y, out.z);
+                }
+            }
             if (excludeRadius) {
                 // Nearest cluster mean beyond 2×kR of the probe = the nearest
                 // SIBLING instance (nearer clusters are fragments of the
@@ -972,12 +1085,22 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                 // statue into several). Exclude out to just under halfway.
                 const float kGroup2 = 16.0f * 16.0f;   // (2×kR)²
                 float nearFar2 = 1e30f;
-                for (const Cl& c : cls) {
+                for (size_t ci = 0; ci < cls.size(); ++ci) {
+                    const Cl& c = cls[ci];
+                    // --env_probe_center: "sibling" is now decided by the
+                    // group membership computed above, not by a fresh
+                    // distance test against a capture point that has since
+                    // MOVED to the group's area centroid — a re-test from
+                    // there can call the group's own far end a sibling and
+                    // leave the reflector's own geometry in its reflection.
+                    if (areaMode ? bool(inGroup[ci])
+                                 : false) continue;
                     const float dx = float(c.sx / c.n) - out.x;
                     const float dy = float(c.sy / c.n) - out.y;
                     const float dz = float(c.sz / c.n) - out.z;
                     const float d2 = dx*dx + dy*dy + dz*dz;
-                    if (d2 > kGroup2 && d2 < nearFar2) nearFar2 = d2;
+                    if (areaMode) { if (d2 < nearFar2) nearFar2 = d2; }
+                    else if (d2 > kGroup2 && d2 < nearFar2) nearFar2 = d2;
                 }
                 if (nearFar2 < 1e30f)
                     *excludeRadius = 0.45f * std::sqrt(nearFar2);
@@ -1281,6 +1404,20 @@ bool EnvReflection_FramePrep(Scene* sc) {
         Vector c;
         float excludeR = 0.0f;
         if (!materialCentroid(sc, M, c, &excludeR)) { env.byMat[M] = -1; continue; }
+        // Authored per-surface capture-point offset (Material::EnvBakeOfs,
+        // the editor's "probe offset"). Applied on TOP of whichever
+        // derivation ran, so the two compose and the authored value always
+        // wins the last word. All-zero = unset → byte-null.
+        if (M->EnvBakeOfs[0] != 0.0f || M->EnvBakeOfs[1] != 0.0f
+            || M->EnvBakeOfs[2] != 0.0f) {
+            std::fprintf(stderr, "[ENVREFL] '%s': authored probe offset "
+                "(%+.2f %+.2f %+.2f) — capture point (%.1f %.1f %.1f) -> "
+                "(%.1f %.1f %.1f)\n", M->Name ? M->Name : "?",
+                M->EnvBakeOfs[0], M->EnvBakeOfs[1], M->EnvBakeOfs[2],
+                c.x, c.y, c.z, c.x + M->EnvBakeOfs[0], c.y + M->EnvBakeOfs[1],
+                c.z + M->EnvBakeOfs[2]);
+            c.x += M->EnvBakeOfs[0]; c.y += M->EnvBakeOfs[1]; c.z += M->EnvBakeOfs[2];
+        }
         if (std::getenv("ENVDBG"))
             std::fprintf(stderr, "[ENVDBG] mat '%s' id=%u refl=%.0f metal=%d envDyn=%d reflMode=%d effMode=%d centroid (%.1f %.1f %.1f)\n",
                          M->Name ? M->Name : "?", (unsigned)M->ID, M->Reflection, M->MetallicMap ? 1 : 0,
@@ -1735,6 +1872,18 @@ int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
     return mechTexels;
 }
 
+// --env_dyn_dump=N (1-based store index): write the LIVE, post-overlay mip-0
+// cube of store N as the standard 3x2 atlas. Separate from the composite
+// itself so the caller owns the index test and this stays a pure reader.
+void dumpLiveStore(const EnvPanoStore& S, size_t storeIdx) {
+    const int want = fds::FeatureFlags::env_dyn_dump();
+    if (want <= 0 || size_t(want - 1) != storeIdx) return;
+    if (!S.view.isCube || S.levels[0].empty()) return;
+    dumpCubeStoreCensus(S.bakedSkipMat && S.bakedSkipMat->Name
+                            ? S.bakedSkipMat->Name : "unnamed",
+                        S.levels[0], S.view.W, "envdyn");
+}
+
 }  // namespace
 
 void EnvDynamic_Overlay(Scene* sc) {
@@ -1946,6 +2095,7 @@ void EnvDynamic_Overlay(Scene* sc) {
             if (c.touched > remaining) continue;
             EnvPanoStore& S = *env.stores[c.si];
             const int mechTexels = overlayComposite(sc, S, c.mask);
+            dumpLiveStore(S, c.si);
             remaining -= c.touched;
             ++processed;
             facesTotal += c.touched;
@@ -2067,6 +2217,7 @@ void EnvDynamic_Overlay(Scene* sc) {
             continue;
         }
         const int mechTexels = overlayComposite(sc, S, faceMask);
+        dumpLiveStore(S, si);
         ++processed;
         int nf = 0; for (int f = 0; f < 6; ++f) nf += faceMask[f] ? 1 : 0;
         facesTotal += nf;
