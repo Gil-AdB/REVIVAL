@@ -316,6 +316,11 @@ const char *kUsage =
     "                    vertex invocations (one atomic each), boundary segments, and the\n"
     "                    triangle count Euler gives from the two. Also times the factor\n"
     "                    kernel alone. Never present in a timed pipeline.\n"
+    "  --tess_seam_audit MEASURE the stone's ATTRIBUTE SEAMS: positions shared by 2+ faces\n"
+    "                    that disagree about UV or normal, and the world displacement gap\n"
+    "                    that opens there at the current --tess_amp. This is the mechanism\n"
+    "                    of the thin residual crack a CORRECT factor record still leaves —\n"
+    "                    a mesh property (per-face UVs), not a tessellator one.\n"
     "  --tess_uniform=F  CALIBRATION: force every tessellation factor to F and report the\n"
     "                    vertex count against both hypotheses (deduplicated vs per-corner).\n"
     "                    Settles the hardware's real factor ceiling. Implies --tess_stats.\n"
@@ -442,6 +447,7 @@ int main(int argc, const char *argv[]) {
         else if (a == "--no-tess_cull")             dopt.tessCull = false;
         else if (a == "--tess_back_cull")           dopt.tessBackCull = true;
         else if (a == "--tess_stats")               dopt.tessStats = true;
+        else if (a == "--tess_seam_audit")          { dopt.tess = true; dopt.tessSeamAudit = true; }
         else if (const char *v = val("--tess_uniform=")) { dopt.tess = true; dopt.tessStats = true; dopt.tessUniform = std::atoi(v); }
         else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
         else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;

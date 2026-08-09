@@ -319,6 +319,12 @@ struct DeferredOptions {
     //   T = 2V - B - 2  per patch,
     // which is exact rather than modelled. Adds an untimed probe frame.
     bool  tessStats = false;
+    // Measure the ATTRIBUTE SEAMS of the stone: how many positions shared by
+    // 2+ faces disagree about UV or normal, and the world-space displacement
+    // gap that disagreement opens at the current amp. This is the mechanism of
+    // the thin residual crack that survives a correct factor record — it is a
+    // property of the MESH (per-face UVs), not of the tessellator.
+    bool  tessSeamAudit = false;
     // CALIBRATION PROBE (0 = off). Force every tessellation factor to this
     // value. Exists to answer two questions no documentation settles for this
     // device: what the hardware's real factor ceiling is, and whether the

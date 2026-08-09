@@ -1941,21 +1941,40 @@ fragment float4 fs_hud(FsQuadOut in [[stage_in]],
 // That is a SCREEN-SPACE ADAPTIVE rule, so a patch at the far end of the
 // corridor costs a fraction of one at the camera and the count stays sane.
 //
-// CRACK-FREEDOM is structural, not tuned. Every edge factor is derived from
-// THE TWO ENDPOINTS OF THAT EDGE ALONE — never from the patch's centre, its
-// area, or its other two edges — so two patches sharing an edge compute the
-// same number without communicating. The endpoints agree BITWISE because the
-// de-indexed vertex buffer copies them from the same source vertex, and the
-// sub-patch lattice below derives every interior point as an EXACT integer
-// ratio a/P (never 1 - b/P, which is a different float).
+// CRACK-FREEDOM of the FACTORS is structural, not tuned. Every edge factor is
+// derived from THE TWO ENDPOINTS OF THAT EDGE ALONE — never from the patch's
+// centre, its area, or its other two edges — so two patches sharing an edge
+// compute the same number without communicating. The endpoints agree BITWISE
+// because the de-indexed vertex buffer copies them from the same source vertex,
+// and the sub-patch lattice below derives every interior point as an EXACT
+// integer ratio a/P (never 1 - b/P, which is a different float).
 //
-// THE FACTOR-16 CEILING is real: Metal caps maxTessellationFactor at 16, so a
-// single patch cannot subdivide an edge more than 16 ways. Reaching one
-// triangle per pixel on a near wall therefore needs PRE-SUBDIVISION, and this
-// arm does it by INSTANCING: instance s of the draw renders sub-triangle s of
-// a uniform P x P barycentric split of the base triangle, with its own
-// tessellation-factor record (Metal's per-instance factor stride). Effective
-// per-edge subdivision is therefore P x 16, at NO vertex-buffer cost.
+// THAT ARGUMENT WAS TRUE AND STILL SHIPPED CRACKS, because the factors were
+// never delivered. The pipeline asked for MTLTessellationFactorStepFunction-
+// PerPatch, under which the record address is a function of the patch index
+// ALONE and the instanceStride is required to be ZERO — so all P*P sub-patch
+// instances read the record written for SUB-PATCH 0. Whole base triangles
+// vanished when sub-patch 0 frustum-culled (MEASURED t=5743 px=8 P=8: 290,756
+// background pixels where the flat frame has stone), and the survivors carried
+// a neighbour-inconsistent factor. The step function is now PerPatchAndPer-
+// Instance, which addresses offset + instanceID*stride + patch*8 — the layout
+// cs_tess_factors actually writes. See Deferred.mm's makeTessPso.
+//
+// THE ONLY CRACK LEFT is a MESH property and is measured by --tess_seam_audit:
+// the buffer is de-indexed per face with PER-FACE UVs, so 103 of the 155
+// positions two stone faces share disagree about UV (115 about the normal),
+// and amp*(h(uv)-mean) along the normal then sends that one point to two
+// different places — up to 0.112 world units apart at amp 0.3. No factor rule
+// can close that; only a welded parameterisation or a position-based height
+// lookup can, and both change the displaced LOOK.
+//
+// PRE-SUBDIVISION: Metal DEFAULTS maxTessellationFactor to 16, and this M2 Max
+// accepts and honours 64 when asked (probed in makeTessPso). Either way one
+// patch has a ceiling, so reaching one triangle per pixel on a near wall needs
+// PRE-SUBDIVISION, and this arm does it by INSTANCING: instance s of the draw
+// renders sub-triangle s of a uniform P x P barycentric split of the base
+// triangle, with its own tessellation-factor record. Effective per-edge
+// subdivision is P x maxFactor, at NO vertex-buffer cost.
 // ===========================================================================
 
 struct TessUniforms {
@@ -2088,8 +2107,11 @@ kernel void cs_tess_factors(device half *factors            [[buffer(0)]],
     // Slot 0 of the factor record. `edgeMap` 0 = the OPPOSITE-VERTEX
     // convention (slot i is the edge NOT touching control point i), which is
     // what D3D/GL/Metal all document; 1 = the adjacent convention. Which one
-    // this hardware actually implements is settled by LOOKING for cracks,
-    // not by trusting the documentation — see --tess_edge_map.
+    // this hardware actually implements is settled by LOOKING for cracks, not
+    // by trusting the documentation — see --tess_edge_map. NOW SETTLED, and
+    // only settleable once the factor records were actually delivered per
+    // instance: t=5743 px=8 P=8 --tess_amp=0 gives ZERO crack pixels at
+    // edgeMap 0 and 15 at edgeMap 1. The documented convention is the real one.
     const float amp = abs(tu.k.y);
     // Displacement can push a patch back on screen after it left, so the
     // frustum test is widened by the amplitude expressed in pixels at the
@@ -2122,8 +2144,19 @@ kernel void cs_tess_factors(device half *factors            [[buffer(0)]],
         // Signed screen area of the sub-patch; the main pass keeps FRONT faces
         // (see Deferred.mm), so a patch of the other sign carries no visible
         // geometry once displacement is small against the patch.
+        //
+        // THE SIGN IS MEASURED, and it used to be the wrong one. With `> 0`
+        // this test discarded the VISIBLE half: --tess_back_cull at t=5743
+        // px=8 P=8 --tess_amp=0 left 1,162,395 background pixels where the flat
+        // frame has stone. With `< 0` the same arm leaves ZERO — identical to
+        // not back-culling at all, which is what a correct backface reject must
+        // produce when displacement is off. (The wrong sign was invisible until
+        // the factor-record bug above was fixed, because most patches were
+        // being dropped for the other reason anyway.) Still OFF by default: a
+        // backfacing BASE patch can carry visible relief on a displaced
+        // silhouette, so this is a priced choice, not a free one.
         const float2 e1 = px[1].xy - px[0].xy, e2 = px[2].xy - px[0].xy;
-        if (e1.x * e2.y - e1.y * e2.x > 0.0f) cull = true;
+        if (e1.x * e2.y - e1.y * e2.x < 0.0f) cull = true;
     }
 
     const uint base = (sub * nPatch + patch) * 4u;

@@ -1228,6 +1228,103 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             stone.push_back(s);
         }
 
+        // ---- --tess_seam_audit: WHY A DISPLACED SEAM CRACKS AT ALL ---------
+        // After the factor-record bug is fixed, a THIN residual crack survives
+        // along some base-triangle edges, and it is amp-proportional and
+        // P-INVARIANT — so it is not a tessellation factor mismatch. This
+        // measures the only other thing it can be: the stone's vertex buffer is
+        // de-indexed per FACE and carries PER-FACE UVs (SceneIngest.cpp:1438),
+        // so two faces meeting at a shared POSITION can disagree about the UV
+        // there. The displacement is amp*(h(uv)-mean) along the normal, so a UV
+        // disagreement is a WORLD-SPACE disagreement about where that shared
+        // point goes, and the surface pulls apart by exactly that much.
+        // Reported: how many shared positions disagree on UV, on NORMAL, and
+        // the world gap each implies at the current --tess_amp.
+        if (opt.tessSeamAudit) {
+            struct Key { float x, y, z; };
+            struct KeyHash {
+                size_t operator()(const Key &k) const {
+                    uint32_t a, b, c;
+                    std::memcpy(&a, &k.x, 4); std::memcpy(&b, &k.y, 4); std::memcpy(&c, &k.z, 4);
+                    return size_t(a) * 0x9E3779B1u ^ size_t(b) * 0x85EBCA77u ^ size_t(c) * 0xC2B2AE3Du;
+                }
+            };
+            struct KeyEq {
+                bool operator()(const Key &p, const Key &q) const {
+                    return !std::memcmp(&p, &q, sizeof(Key));
+                }
+            };
+            struct Att { float u, v, nx, ny, nz, h; };
+            std::unordered_map<Key, std::vector<Att>, KeyHash, KeyEq> shared;
+            // Bilinear fetch of the RED channel at the mip --tess_mip, built by
+            // box reduction — the same reduction the GPU mip chain uses, so this
+            // is the value vs_gbuffer_tess samples with level(tessMip).
+            auto sampleH = [&](const TextureImage &t, int mip, float u, float v) -> float {
+                int w = std::max(1, t.w >> mip), h2 = std::max(1, t.h >> mip);
+                const int step = 1 << mip;
+                auto tex = [&](int x, int y) -> float {
+                    // box-average the step x step block of level 0
+                    double s = 0; int n2 = 0;
+                    for (int dy = 0; dy < step; ++dy)
+                        for (int dx = 0; dx < step; ++dx) {
+                            int sx = (x * step + dx) % t.w, sy = (y * step + dy) % t.h;
+                            s += t.rgba[(size_t(sy) * size_t(t.w) + size_t(sx)) * 4]; ++n2;
+                        }
+                    return float(s / double(n2) / 255.0);
+                };
+                float fx = u * float(w) - 0.5f, fy = v * float(h2) - 0.5f;
+                int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
+                float ax = fx - float(x0), ay = fy - float(y0);
+                auto wrap = [](int a, int n2) { a %= n2; return a < 0 ? a + n2 : a; };
+                const float h00 = tex(wrap(x0, w), wrap(y0, h2)), h10 = tex(wrap(x0 + 1, w), wrap(y0, h2));
+                const float h01 = tex(wrap(x0, w), wrap(y0 + 1, h2)), h11 = tex(wrap(x0 + 1, w), wrap(y0 + 1, h2));
+                return (h00 * (1 - ax) + h10 * ax) * (1 - ay) + (h01 * (1 - ax) + h11 * ax) * ay;
+            };
+            for (const auto &s : stone) {
+                const Batch &bb = scene.batches[s.bi];
+                const TextureImage &ht = scene.textures[size_t(s.heightTex)];
+                for (uint32_t k = 0; k < bb.vertexCount; ++k) {
+                    const Vertex &v = scene.verts[size_t(bb.firstVertex) + k];
+                    Att a{v.u, v.v, v.nx, v.ny, v.nz,
+                          sampleH(ht, opt.tessMip, v.u, v.v) - s.mean};
+                    shared[Key{v.px, v.py, v.pz}].push_back(a);
+                }
+            }
+            size_t nPos = 0, nUvSplit = 0, nNrmSplit = 0, nGap = 0;
+            double maxGap = 0, sumGap = 0;
+            for (const auto &kv : shared) {
+                if (kv.second.size() < 2) continue;
+                ++nPos;
+                bool uvSplit = false, nrmSplit = false;
+                double lo3[3] = {1e30, 1e30, 1e30}, hi3[3] = {-1e30, -1e30, -1e30};
+                for (const Att &a : kv.second) {
+                    const Att &f = kv.second.front();
+                    if (std::fabs(a.u - f.u) > 1e-6f || std::fabs(a.v - f.v) > 1e-6f) uvSplit = true;
+                    if (std::fabs(a.nx - f.nx) > 1e-4f || std::fabs(a.ny - f.ny) > 1e-4f ||
+                        std::fabs(a.nz - f.nz) > 1e-4f) nrmSplit = true;
+                    const double d[3] = {double(a.nx) * a.h, double(a.ny) * a.h, double(a.nz) * a.h};
+                    for (int c = 0; c < 3; ++c) { lo3[c] = std::min(lo3[c], d[c]); hi3[c] = std::max(hi3[c], d[c]); }
+                }
+                nUvSplit += uvSplit ? 1 : 0;
+                nNrmSplit += nrmSplit ? 1 : 0;
+                const double g = std::sqrt((hi3[0]-lo3[0])*(hi3[0]-lo3[0]) + (hi3[1]-lo3[1])*(hi3[1]-lo3[1]) +
+                                           (hi3[2]-lo3[2])*(hi3[2]-lo3[2])) * double(std::fabs(opt.tessAmp));
+                if (g > 1e-5) { ++nGap; sumGap += g; maxGap = std::max(maxGap, g); }
+            }
+            std::fprintf(stderr,
+                "[TESS-SEAM] %zu distinct corner positions in the stone; %zu are shared "
+                "by 2+ faces.\n",
+                shared.size(), nPos);
+            std::fprintf(stderr,
+                "[TESS-SEAM] of the %zu shared:\n"
+                "[TESS-SEAM]   UV disagrees at %zu of them (%.1f%%), NORMAL at %zu (%.1f%%).\n"
+                "[TESS-SEAM]   world displacement gap at amp %.3f: %zu positions open, "
+                "mean %.4f, MAX %.4f units.\n",
+                nPos, nUvSplit, nPos ? 100.0 * double(nUvSplit) / double(nPos) : 0.0,
+                nNrmSplit, nPos ? 100.0 * double(nNrmSplit) / double(nPos) : 0.0,
+                double(opt.tessAmp), nGap, nGap ? sumGap / double(nGap) : 0.0, maxGap);
+        }
+
         // The P x P sub-patch lattice, in the order [[instance_id]] indexes.
         std::vector<int32_t> subs;
         subs.reserve(size_t(tessP) * size_t(tessP) * 4);
@@ -1284,7 +1381,34 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             p.colorAttachments[3].pixelFormat = MTLPixelFormatRGBA8Uint;
             p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
             p.maxTessellationFactor = NSUInteger(maxFactor);
-            p.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+            // PerPatchAndPerInstance, NOT PerPatch. This is the crack bug, and
+            // the Metal API VALIDATION LAYER states it outright:
+            //
+            //   validateCommonTessellationErrors:481: failed assertion
+            //   `for MTLTessellationFactorStepFunctionConstant and
+            //    MTLTessellationFactorStepFunctionPerPatch
+            //    tessellationFactorBufferInstanceStride(1568) must be zero.'
+            //
+            // Under PerPatch the factor-record address is a function of the
+            // PATCH INDEX ALONE — the instanceStride passed to
+            // setTessellationFactorBuffer: is required to be zero and is
+            // otherwise IGNORED. So all P*P sub-patch instances of base patch p
+            // read record p, which cs_tess_factors wrote for SUB-PATCH 0. Two
+            // consequences, both MEASURED at t=5743 px=8 P=8:
+            //   * if sub-patch 0 of a base triangle frustum-culls (factor 0),
+            //     ALL 64 sub-patches vanish -> whole-base-triangle holes,
+            //     290,756 background pixels where the flat frame has stone;
+            //   * where it survives, all 64 sub-patches inherit sub-patch 0's
+            //     edge factors, which do not match what the NEIGHBOURING base
+            //     triangle derives for the shared edge -> hairline cracks.
+            // P=1 was clean only because instanceCount is then 1 and the record
+            // it wrongly shares is its own.
+            // PerPatchAndPerInstance addresses
+            //   offset + instanceID*instanceStride + patchIndex*8,
+            // which is exactly the (sub * nPatch + patch) layout the kernel
+            // writes.
+            p.tessellationFactorStepFunction =
+                MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
             p.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
             // MEASURED, not assumed. The main pass culls FRONT faces (FDS builds
             // plane normals as Cross_Product(V,U), so the engine's visible faces
