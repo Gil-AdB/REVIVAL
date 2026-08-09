@@ -1,5 +1,57 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-09 — THE SHIPPING GREETS ARM BAKED A 5.61 GB LIGHTMAP AND NEVER READ IT
+>
+> Follow-up to the `--greets_displace` 19.4 GB finding below: the user approved
+> extending `--shadow_lightmap_texel_density=14.2` to the SHIPPING arm, so the
+> `setDefault` moved out of the `if (greets_displace())` branch into the main
+> `GreetsApplyInitDefaults` block. `--greets_displace` now advertises **two**
+> companions, not three.
+>
+> **THE WIN, flat arm, greets `t=5743`, same binary, `…density=0` vs default:**
+>
+> | | legacy | default 14.2 |
+> |---|--:|--:|
+> | atlas store (`[LM]` line) | 5.61 GB | **0.09 GB** |
+> | peak footprint (`/usr/bin/time -l`) | 7.44 GB | **1.50 GB** |
+> | static bake, min-of-9 interleaved, load 11–17 | 1104 ms | **54 ms** |
+> | greets-entry join wait (`[GREETS-BAKE] waited`), load 31 | 3497 ms | **221 ms** |
+> | frame ms `t=5743`, min-of-15 interleaved | 49.39 | 49.47 |
+> | frame ms `t=5780`, min-of-15 interleaved | 51.84 | **50.08** |
+>
+> 347 of the 370 baked meshes fall under the 128 cap (mean face edge 1.303 world
+> → res 19); the 23 that keep it are the big authored quads. Per-frame is
+> neutral at `t=5743` (+0.08 ms, inside a several-ms run-to-run spread) and
+> −1.76 ms at `t=5780`; the bake and the 5.94 GB are the certain wins.
+>
+> **THE LOOK MOVED NOTHING, and that is measured, not assumed.** Byte-identical
+> at all 16 poses of `docs/greets_review_poses.txt` and at the pin pose — so
+> **the greets pin `778fa6acd85a69cf241babefcdaf598e` did NOT move (4/4)**, city
+> `3cbe42b166847e40f7071eedb48d613c` and fountain `8db68ccb59416e9a44037e9f387b7bd9`
+> 4/4 each, `render_gate` 3/3. Images: `docs/img/fogwt/lmdensity_flat_*`.
+> Two poses show 2–7 px at ≤15/255 — **that is the scene's own run-to-run
+> nondeterminism, not the change**: same-arm reruns of `t=5773` differ by 6 px
+> at max 15, i.e. more than the cross-arm diff.
+>
+> **WHY it is null, and the bigger finding underneath.** The shipping arm never
+> SAMPLES the atlas. `DeferredSurfaceKernel.cpp:1619` gates the lightmap path on
+> `lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic()`; greets defaults
+> `shadow_dynamic` ON and `shadow_lm_dynamic` is compile-default 0, so every
+> pixel takes the per-pixel cube tap instead. MEASURED, not inferred:
+> `--no-shadow_lightmap` renders **byte-identical** frames at `t=5743` and
+> `t=6097`, and re-running the whole 16-pose battery under `--shadow_lm_dynamic`
+> (atlas live) is byte-identical between the two densities as well. So greets
+> spends a 1.1 s startup bake and 5.6 GB producing an array nothing reads. This
+> commit makes that 54 ms and 0.09 GB; **skipping the bake outright when
+> `shadow_dynamic && !shadow_lm_dynamic` is the real fix and is NOT done here**
+> (FDS/RENDER, and the opposite call — defaulting `--shadow_lm_dynamic` ON — is
+> a look decision for the user). Recorded in `docs/OPTIMIZATION_BACKLOG.md`.
+>
+> Revert: `--shadow_lightmap_texel_density=0` (verified — reproduces the pin
+> 4/4). Stale comment left behind on purpose (lane discipline, another agent
+> owns FDS/RENDER this session): `FDS/RENDER/LightmapBake.cpp:330-336` still
+> claims the flat path never enters the density branch.
+
 > ## 2026-08-10 — "I CAN'T SEE THE MECH IN THE UP-LOOKING BAKE": HIS OFFSET HYPOTHESIS IS RIGHT, AND IT IS 8 UNITS
 >
 > User: *"I can't see the mech in the up-looking dynamic bake, even when the mech
@@ -1108,7 +1160,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | gate | recipe | pin |
 |---|---|---|
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **⚠ THIS PIN IS CONDITIONAL ON THE ENV CUBE ON DISK — check `md5 Runtime/cache/city_envmap_cube.bin` BEFORE calling a mismatch a regression.** The cache key ignores FeatureFlags, so the cube is a hidden input the recipe does not state (full analysis + 2×2 matrix in the dated note above). `d1d67f0f84fb4af3713e15a64a1b827b` = pre-flip bake → the pins below hold. `63978a18ed31837348598014716f9932` = cold/current bake (mips ON) → **`5476be8c43864c761b94e2dd83f86aa8`** default and **`b88ecb7bbd0340145e35a80bc7a82f6b`** under the control; both are correct-for-that-cube, NOT drift. A **fresh worktree always cold-bakes**, so it lands in the second column unless you copy the cube in. Also: `DEMO` chdirs to its OWN directory (`ChdirToAssetRoot`, `DEMO/REV.CPP:503`) — launching a worktree binary from the main `Runtime/` does **not** render the main tree's assets or its cube. **Pending decision:** adopting the flip properly means `rm Runtime/cache/city_envmap_cube.bin` and re-pinning to `5476be8c…`; held for the user's eye on `docs/img/mipsel/city_t1961_envbake_crop.png` (max Δ 6/255, glass only). — **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2, pre-flip cube). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix` **on the pre-flip cube** (on a cold-baked cube that control arm is invalid — it measures a mips-ON bake under a mips-OFF frame). Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
-| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-09 (`hull`/`cockpit` removed from the Sobel normal-map name gate, `DEMO/GREETS.CPP:1951`; docs/SHADING_CONTRACT.md §11 row E8): `9eeaf860cb5a7f124884a89e0fc3ff5b`** (stable 3/3, across two binary revisions). REASON: `BakeNormalMapFromDiffuse` was Sobelling MECH_HUL.JPG / MECH_COK.JPG — camouflage PAINT — into geometric relief; the user compared the mech against the standalone Metal arm (which bakes no such map) and preferred the GPU's. Only four materials ever hit the gate (`!M->NormalMap` guard); `hull`, `hull not smooth` and `cockpit` are gone, `siling` remains. **AT THIS PIN POSE THE CHANGE IS 1 PIXEL AT 1 LSB** (702,172) — t=1588 barely shows the mech, so the pin move is not the measurement. The measurement is at the §11 mech pose (t=4871): **179 829 px (8.67 %), max channel Δ 164, 11 677 px > 10 luma**, hull pixel (767,723) Y **131.2 → 44.9** against the GPU's 41.0, canopy pixel (760,620) 146.4 → 157.4 against 161.4. Crop: `/tmp/fogwt/task1_mech_strip.png`. city `e1221676…` and fountain `8db68ccb…` do NOT move (greets-only, guarded on `M->RelScene != GreetSc`); fountain re-verified. Prior pin `6780642b30430efa4fd2f87810b2dfdb` reproduces by re-adding the two `strstr` terms. Preceding that: **RE-VERIFIED 2026-08-09c, 3/3 EACH, on a settled tree at HEAD `4f60493`** — these supersede every pin value recorded earlier today, several of which were taken while other agents held uncommitted work in the shared tree and are therefore not reproducible:
+| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **CURRENT, measured on the settled tree at `7b5f1f8`+: `778fa6acd85a69cf241babefcdaf598e`.** Verified 4/4 before the `--shadow_lightmap_texel_density` flat-arm default, 4/4 after it, and 4/4 with the revert flag `--shadow_lightmap_texel_density=0` — **12 runs, one value; that change does not move this pin** (it is look-null at all 16 review poses too, see the dated block at the top). fountain `8db68ccb59416e9a44037e9f387b7bd9` 4/4 and city `3cbe42b166847e40f7071eedb48d613c` 4/4 alongside it, `render_gate` 3/3. NOTE for whoever reads the history below: the hashes in the older entries (`9eeaf860…`, `6ed5462e…`, `91ec081a…`) do **not** reproduce at HEAD — they were taken while other agents held uncommitted work in the shared tree, exactly the hazard the `2026-08-09c` note warns about. Trust the settled-tree value above. — history: **RE-PINNED 2026-08-09 (`hull`/`cockpit` removed from the Sobel normal-map name gate, `DEMO/GREETS.CPP:1951`; docs/SHADING_CONTRACT.md §11 row E8): `9eeaf860cb5a7f124884a89e0fc3ff5b`** (stable 3/3, across two binary revisions). REASON: `BakeNormalMapFromDiffuse` was Sobelling MECH_HUL.JPG / MECH_COK.JPG — camouflage PAINT — into geometric relief; the user compared the mech against the standalone Metal arm (which bakes no such map) and preferred the GPU's. Only four materials ever hit the gate (`!M->NormalMap` guard); `hull`, `hull not smooth` and `cockpit` are gone, `siling` remains. **AT THIS PIN POSE THE CHANGE IS 1 PIXEL AT 1 LSB** (702,172) — t=1588 barely shows the mech, so the pin move is not the measurement. The measurement is at the §11 mech pose (t=4871): **179 829 px (8.67 %), max channel Δ 164, 11 677 px > 10 luma**, hull pixel (767,723) Y **131.2 → 44.9** against the GPU's 41.0, canopy pixel (760,620) 146.4 → 157.4 against 161.4. Crop: `/tmp/fogwt/task1_mech_strip.png`. city `e1221676…` and fountain `8db68ccb…` do NOT move (greets-only, guarded on `M->RelScene != GreetSc`); fountain re-verified. Prior pin `6780642b30430efa4fd2f87810b2dfdb` reproduces by re-adding the two `strstr` terms. Preceding that: **RE-VERIFIED 2026-08-09c, 3/3 EACH, on a settled tree at HEAD `4f60493`** — these supersede every pin value recorded earlier today, several of which were taken while other agents held uncommitted work in the shared tree and are therefore not reproducible:
 > * greets   `778fa6acd85a69cf241babefcdaf598e`
 > * fountain `8db68ccb59416e9a44037e9f387b7bd9`  (the ONLY pin that held all day)
 > * city     `3cbe42b166847e40f7071eedb48d613c`

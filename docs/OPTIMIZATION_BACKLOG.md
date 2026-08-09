@@ -731,13 +731,44 @@ quantity the moment anything is tessellated.
   density), 8, shadow_lightmap_res)`; capped, so it can only reduce. Look cost in
   the displaced arm: **byte-identical at t=1588 / 2845 / 4871 / 6097, and 3 px at
   1 LSB at t=5743** — the 19.2 GB it removes was buying nothing.
-- **TODO — the FLAT arm still carries 5.61 GB of the same waste.** Its faces are
-  the authored quads plus the mummies/screens, and 457 of greets' 460 meshes fall
-  below the 128 cap at the same density, so the identical rule would take the
-  shipping arm to well under 1 GB and its 1.08 s startup bake with it. NOT DONE
-  because it moves the byte-pinned greets pin (`778fa6ac…`) — it needs a look
-  review and a re-pin, not a silent flip. Same for city/fountain if they ever
-  raise `shadow_lightmap_res` off its default of 16.
+- **DONE for the FLAT (shipping) arm too — 2026-08-09, at the user's
+  instruction.** `setDefault(shadow_lightmap_texel_density, 14.2)` moved out of
+  the `--greets_displace` branch and into the main `GreetsApplyInitDefaults`
+  block, so both arms get it. **347 of the 370 baked meshes** fall under the 128
+  cap (mean face edge 1.303 world → res 19); the 23 that keep the cap are the
+  big authored quads. MEASURED on the flat arm at `t=5743`:
+
+  | | legacy (`…density=0`) | default 14.2 |
+  |---|--:|--:|
+  | atlas store | 5.61 GB | **0.09 GB** |
+  | peak footprint (`/usr/bin/time -l`) | 7.44 GB | **1.50 GB** |
+  | static bake (min-of-9 interleaved, load 11–17) | 1104 ms | **54 ms** |
+  | greets-entry join wait (load 31) | 3497 ms | **221 ms** |
+  | frame ms `t=5743` / `t=5780` (min-of-15 interleaved) | 49.39 / 51.84 | 49.47 / **50.08** |
+
+  **LOOK: NULL, and measured as such** — byte-identical at all 16 poses of
+  `docs/greets_review_poses.txt` and at the pin pose, so the greets pin
+  `778fa6ac…` did **not** move (4/4); city `3cbe42b1…` and fountain `8db68ccb…`
+  4/4 each; `render_gate` 3/3. Revert flag `--shadow_lightmap_texel_density=0`
+  reproduces the pin 4/4.
+- **NEW, and bigger than the above: the shipping greets arm BAKES the atlas AND
+  NEVER READS IT.** `DeferredSurfaceKernel.cpp:1619`
+  `lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic()`; greets defaults
+  `shadow_dynamic` ON and `shadow_lm_dynamic` is compile-default 0, so every
+  pixel takes the cube tap. MEASURED: `--no-shadow_lightmap` renders
+  **byte-identical** frames at t=5743 and t=6097, and forcing the atlas live
+  with `--shadow_lm_dynamic` is byte-identical to the shipping frame as well.
+  So the remaining 0.09 GB + 54 ms bake is *still* pure waste on the default
+  path — the whole `LightmapBake_Static` call could be skipped when
+  `shadow_dynamic && !shadow_lm_dynamic`. Not done here: it is an FDS/RENDER
+  change, and someone may want `--shadow_lm_dynamic` to become the default
+  instead (which is the opposite fix, and a look call).
+- Stale comment left behind, worth a one-line fix by whoever next touches the
+  file: `FDS/RENDER/LightmapBake.cpp:330-336` still says greets turns the
+  density on "only under `--greets_displace`… so the byte-pinned FLAT path never
+  takes this branch at all". Both halves are now false.
+- Same for city/fountain if they ever raise `shadow_lightmap_res` off its
+  default of 16.
 - Related: the atlas is sampled per pixel by the deferred kernel
   (`DeferredShadowSampling.h` `resolvePixelLightmap` → `sampleBilinear`), so its
   size is a per-frame cache/TLB question as well as a startup one. On a 64 GB box

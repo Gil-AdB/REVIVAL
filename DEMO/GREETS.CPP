@@ -1109,6 +1109,42 @@ static void GreetsApplyInitDefaults()
 	FF::setDefault(FF::IntId::shadow_lightmap_res,      128);
 	FF::setDefault(FF::BoolId::shadow_lightmap_planar,  true);
 	FF::setDefault(FF::BoolId::shadow_skip_animated,    true);
+	// ATLAS SIZING, BOTH ARMS (2026-08-09, at the user's instruction). The line
+	// above sizes EVERY face's lightmap patch at 128², so the store is
+	// numFaces * res² * numOmnis BYTES and allocate() touches all of it: the
+	// SHIPPING flat arm was paying 5.61 GB for 33 396 faces and a 1.13 s startup
+	// bake, and it scales with FACE COUNT while the surface it describes does
+	// not grow at all (--greets_displace made that absurd, at 19.36 GB, which is
+	// where the flag came from). --shadow_lightmap_texel_density sizes each
+	// MESH's atlas from its mean face AREA instead —
+	// res = clamp(ceil(sqrt(meanFaceArea) * density), 8, shadow_lightmap_res) —
+	// capped by the line above, so it can only ever REDUCE, never sharpen. The
+	// unit is texels per WORLD UNIT: 14.2 is calibrated to leave the authored
+	// wall quads at the 128 cap, so a surface keeps the shadow resolution per
+	// world unit the flat wall already shipped with, whatever it is tessellated
+	// into. 347 of the flat arm's 370 baked meshes fall under the cap at 14.2
+	// (mean face edge 1.303 world -> res 19); the 23 that keep it are the big
+	// authored quads, which is why nothing the review poses look at changes.
+	// MEASURED on the FLAT arm, greets t=5743, 2026-08-09: atlas 5.61 -> 0.09 GB,
+	// static bake 1104 -> 54 ms (min-of-9 interleaved, load 11-17), peak
+	// footprint 7.44 -> 1.50 GB (/usr/bin/time -l), greets-entry join wait
+	// 3497 -> 221 ms at load 31. Per-frame: t=5743 49.39 -> 49.47 ms and t=5780
+	// 51.84 -> 50.08 ms (min-of-15 interleaved) — neutral to slightly better.
+	// LOOK: NULL, measured, not assumed. Byte-identical at all 16 poses of
+	// docs/greets_review_poses.txt AND at the pin pose, so the greets pin
+	// 778fa6acd85a69cf241babefcdaf598e does NOT move (4/4); city and fountain
+	// likewise (4/4 each). It is null because the shipping arm never SAMPLES the
+	// atlas: DeferredSurfaceKernel.cpp's lmKernelEnabled is
+	// `!shadow_dynamic() || shadow_lm_dynamic()`, greets sets shadow_dynamic and
+	// shadow_lm_dynamic defaults 0, so every pixel takes the cube tap and
+	// --no-shadow_lightmap renders byte-identical frames. Forcing the atlas live
+	// with --shadow_lm_dynamic is ALSO byte-identical at all 16 poses, so the
+	// resolution drop is invisible on the live path too. That the flat arm bakes
+	// a 5.61 GB array it then never reads is a separate, bigger finding —
+	// docs/OPTIMIZATION_BACKLOG.md.
+	// --shadow_lightmap_texel_density=0 is the one-flag revert to the legacy
+	// fixed-128 atlas (verified: reproduces the pin 4/4).
+	FF::setDefault(FF::FloatId::shadow_lightmap_texel_density, 14.2f);
 	// TESSELLATION ERGONOMICS (2026-08-06). --greets_displace alone paid a
 	// per-frame shadow re-raster (and an env/lightmap bake) over ~87 k displaced
 	// faces to produce relief that a PolyId cube map cannot resolve anyway. The
@@ -1137,39 +1173,27 @@ static void GreetsApplyInitDefaults()
 	// poses (t=6133, t=6293); at t=5743 it moves 2 990 px >12/255 (0.14 % of the
 	// frame, inside the mirror window) and the two frames are indistinguishable
 	// side by side. Needs the proxy, which the line above just defaulted on.
-	// The THIRD companion, and the largest of the three by resource: the static
-	// shadow lightmap's per-face atlas. `shadow_lightmap_res` is 128 two lines
-	// above, which is right for the AUTHORED wall quads and absurd once
-	// DisplaceStoneSubdiv replaces each of them with ~300 cells — the store is
-	// numFaces * res² * numOmnis BYTES and is fully touched at bake time, so it
-	// scales with FACE COUNT while the surface it describes has not grown at
-	// all. MEASURED at greets t=5743 with /usr/bin/time -l, peak footprint
-	// 6.93 GB flat (33 396 baked faces) against 21.41 GB under --greets_displace
-	// (115 346 faces) on a 64 GB box — max RSS 14.0 GB, i.e. the OS was already
-	// compressing it — and the bake 1.2 s -> 7.1-11.7 s. That bake is on the
-	// startup path (Greets_JoinBakeThread) and the array is then sampled per
-	// pixel by the deferred kernel, so the waste is paid at both ends.
-	// --shadow_lightmap_texel_density sizes each mesh's atlas from its MEAN FACE
-	// AREA instead, capped at shadow_lightmap_res, so it can only ever REDUCE.
-	// 14.2 texels/world-unit is calibrated to leave the flat wall's own quads at
-	// the 128 cap: it gives the tessellated stone the SAME shadow resolution per
-	// world unit that the shipping flat arm already renders with, rather than
-	// ~300x it. Inert without --greets_displace (the flag stays 0), so the
-	// byte-pinned flat path never enters the branch and the greets pin cannot
-	// move on it.
+	// A THIRD companion used to be defaulted here — the static shadow lightmap's
+	// per-face atlas, which the displaced arm blew up to 19.36 GB / 115 346 faces
+	// against the flat arm's 5.61 GB / 33 396 (peak footprint 22.97 vs 6.93 GB,
+	// bake 6.2-11.7 s vs 1.13 s, /usr/bin/time -l on a 64 GB box). It is no
+	// longer companion-scoped: --shadow_lightmap_texel_density=14.2 is now a
+	// PLAIN GREETS DEFAULT, set unconditionally ~50 lines above, because the flat
+	// arm was carrying the same waste in kind. The displaced arm still gets it —
+	// it just gets it the same way the shipping arm does. Both arms revert with
+	// --shadow_lightmap_texel_density=0.
 	if (FF::greets_displace()) {
 		FF::setDefault(FF::BoolId::greets_shadow_proxy, true);
 		FF::setDefault(FF::BoolId::greets_displace_flat_mirror, true);
-		FF::setDefault(FF::FloatId::shadow_lightmap_texel_density, 14.2f);
-		std::fprintf(stderr, "[STONE] --greets_displace defaults its three perf "
+		std::fprintf(stderr, "[STONE] --greets_displace defaults its two perf "
 			"companions ON: --greets_shadow_proxy=%d (offscreen passes rasterise "
 			"the flat stone, -5.9 ms, DOES move shadow occlusion at wall "
-			"junctions), --greets_displace_flat_mirror=%d (reflections source "
+			"junctions) and --greets_displace_flat_mirror=%d (reflections source "
 			"the flat stone, -5.9 ms, byte-identical at both mirror review "
-			"poses) and --shadow_lightmap_texel_density=%.1f (per-mesh lightmap "
-			"atlas sized by face AREA, not face COUNT: 21.4 GB -> see the [LM] "
-			"line, and the startup bake 11 s -> ~1 s). Use --no-<flag> / "
-			"--shadow_lightmap_texel_density=0 to compare any one.\n",
+			"poses). Use --no-<flag> to compare either. The lightmap atlas rule "
+			"--shadow_lightmap_texel_density=%.1f is no longer a companion: it is "
+			"a greets default on BOTH arms now (see the [LM] line); "
+			"--shadow_lightmap_texel_density=0 restores the fixed-128 atlas.\n",
 			FF::greets_shadow_proxy() ? 1 : 0,
 			FF::greets_displace_flat_mirror() ? 1 : 0,
 			FF::shadow_lightmap_texel_density());
