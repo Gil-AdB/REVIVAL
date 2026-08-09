@@ -373,12 +373,42 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 	}
 }
 
+// ── refined 8-wide reciprocal / reciprocal-sqrt ───────────────────────────
+// Estimate + one Newton-Raphson step. The BARE _mm256_rcp_ps/_mm256_rsqrt_ps
+// are ~12-bit on x86, and simde lowers them to vrecpeq/vrsqrteq on arm64 —
+// COARSER still. That precision difference is not cosmetic in a GGX lobe: the
+// D term divides by (NdotH²(a²-1)+1)², which at low roughness is a small
+// number squared, so the relative error compounds. Measured (audit a1b2408,
+// greets t=4871, --deferred_vec vs scalar): rough 0.2 -> mean |dY| 8.379,
+// max 178, 5 091 px >10 luma; rough 0.5 -> 0.421; rough 1.0 -> 0.374, where
+// the denominator is exactly 1 and the gap vanishes into the float floor.
+// Since --deferred_vec defaults ON for x86 and OFF for arm64, that made the
+// two architectures ship DIFFERENT IMAGES.
+//
+// rsqrt8_nr already existed further down this file (the OuterVec normal
+// decode, with a comment naming this exact failure); it is hoisted here so
+// the GGX loop can use it too, and rcp8_nr is its missing twin.
+static inline __m256 rsqrt8_nr(__m256 x)
+{
+	__m256 e = _mm256_rsqrt_ps(x);
+	const __m256 xe2 = _mm256_mul_ps(_mm256_mul_ps(x, e), e);
+	return _mm256_mul_ps(e, _mm256_fnmadd_ps(_mm256_set1_ps(0.5f), xe2,
+	                                          _mm256_set1_ps(1.5f)));
+}
+// r1 = r0·(2 - x·r0), the standard NR step for 1/x.
+static inline __m256 rcp8_nr(__m256 x)
+{
+	__m256 r = _mm256_rcp_ps(x);
+	return _mm256_mul_ps(r, _mm256_fnmadd_ps(x, r, _mm256_set1_ps(2.0f)));
+}
+
 // --pbr TEST: Cook-Torrance microfacet specular (GGX NDF + Smith-Schlick
 // geometry + Schlick Fresnel), 8 lights wide, replacing the Blinn-Phong
 // run_vec_spec_loop. This is a COST/quality probe — wired into the vec path so
 // we can measure SIMD PBR per-light against the existing Blinn-Phong term.
-// Divides use _mm256_rcp_ps (fast approx, matches the engine's rcp/rsqrt
-// style). roughness ∈ (0,1], F0 = dielectric 0.04 (metallic workflow TBD).
+// Divides go through rcp8_nr/rsqrt8_nr under --vec_ggx_refine (default ON);
+// see that flag for why the bare estimates were an architecture-visible bug.
+// roughness ∈ (0,1], F0 = dielectric 0.04 (metallic workflow TBD).
 // Specular only — diffuse is accumulated by the caller's existing loop.
 static inline void run_vec_ggx_loop(const TileLights &tl,
                                      float x, float y, float z,
@@ -388,6 +418,9 @@ static inline void run_vec_ggx_loop(const TileLights &tl,
                                      uint32_t pmid,
                                      const float *coneShadowAtten,
                                      float &sB, float &sG, float &sR) {
+	// --vec_ggx_refine: one NR step on every reciprocal in the lobe. Read once
+	// here — it is a flag, not a per-light decision.
+	const bool ggxRefine = fds::FeatureFlags::vec_ggx_refine();
 	const __m256 vx_v  = _mm256_set1_ps(x),  vy_v = _mm256_set1_ps(y),  vz_v = _mm256_set1_ps(z);
 	const __m256 vnx_v = _mm256_set1_ps(nx), vny_v = _mm256_set1_ps(ny), vnz_v = _mm256_set1_ps(nz);
 	const __m256 vvx_v = _mm256_set1_ps(vx), vvy_v = _mm256_set1_ps(vy), vvz_v = _mm256_set1_ps(vz);
@@ -420,7 +453,7 @@ static inline void run_vec_ggx_loop(const TileLights &tl,
 		               _mm256_and_ps(_mm256_cmp_ps(dot, vZero, _CMP_GT_OQ),
 		                _mm256_and_ps(_mm256_cmp_ps(len2, vZero, _CMP_GT_OQ), mirrorMask)));
 		__m256 safe_len2 = _mm256_blendv_ps(vOne, len2, mask);
-		__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
+		__m256 lenInv = ggxRefine ? rsqrt8_nr(safe_len2) : _mm256_rsqrt_ps(safe_len2);
 		__m256 dist   = _mm256_mul_ps(safe_len2, lenInv);
 		__m256 falloff = _mm256_sub_ps(vOne, _mm256_mul_ps(dist, lrr));
 
@@ -429,7 +462,8 @@ static inline void run_vec_ggx_loop(const TileLights &tl,
 		// Half vector, normalized.
 		__m256 hx = _mm256_add_ps(ldx, vvx_v), hy = _mm256_add_ps(ldy, vvy_v), hz = _mm256_add_ps(ldz, vvz_v);
 		__m256 hLen2 = _mm256_fmadd_ps(hx, hx, _mm256_fmadd_ps(hy, hy, _mm256_mul_ps(hz, hz)));
-		__m256 hInv = _mm256_rsqrt_ps(_mm256_max_ps(hLen2, _mm256_set1_ps(1e-12f)));
+		const __m256 hL2s = _mm256_max_ps(hLen2, _mm256_set1_ps(1e-12f));
+		__m256 hInv = ggxRefine ? rsqrt8_nr(hL2s) : _mm256_rsqrt_ps(hL2s);
 		__m256 NdotH = _mm256_mul_ps(_mm256_fmadd_ps(hx, vnx_v, _mm256_fmadd_ps(hy, vny_v, _mm256_mul_ps(hz, vnz_v))), hInv);
 		__m256 VdotH = _mm256_mul_ps(_mm256_fmadd_ps(hx, vvx_v, _mm256_fmadd_ps(hy, vvy_v, _mm256_mul_ps(hz, vvz_v))), hInv);
 		NdotH = _mm256_max_ps(NdotH, vZero);
@@ -439,12 +473,15 @@ static inline void run_vec_ggx_loop(const TileLights &tl,
 		__m256 nh2 = _mm256_mul_ps(NdotH, NdotH);
 		__m256 denomD = _mm256_fmadd_ps(nh2, _mm256_sub_ps(va2, vOne), vOne);   // NdotH²(a²-1)+1
 		denomD = _mm256_mul_ps(denomD, denomD);                                 // squared
-		__m256 D = _mm256_mul_ps(_mm256_mul_ps(va2, vInvPi), _mm256_rcp_ps(_mm256_max_ps(denomD, _mm256_set1_ps(1e-6f))));
+		const __m256 dD = _mm256_max_ps(denomD, _mm256_set1_ps(1e-6f));
+		__m256 D = _mm256_mul_ps(_mm256_mul_ps(va2, vInvPi), ggxRefine ? rcp8_nr(dD) : _mm256_rcp_ps(dD));
 
 		// G (Smith, Schlick-GGX): Gv·Gl, Gx = Ndotx / (Ndotx·(1-k)+k)
 		__m256 oneMinusK = _mm256_sub_ps(vOne, vk);
-		__m256 Gv = _mm256_mul_ps(vNdotV, _mm256_rcp_ps(_mm256_fmadd_ps(vNdotV, oneMinusK, vk)));
-		__m256 Gl = _mm256_mul_ps(NdotL,  _mm256_rcp_ps(_mm256_fmadd_ps(NdotL,  oneMinusK, vk)));
+		const __m256 dGv = _mm256_fmadd_ps(vNdotV, oneMinusK, vk);
+		__m256 Gv = _mm256_mul_ps(vNdotV, ggxRefine ? rcp8_nr(dGv) : _mm256_rcp_ps(dGv));
+		const __m256 dGl = _mm256_fmadd_ps(NdotL, oneMinusK, vk);
+		__m256 Gl = _mm256_mul_ps(NdotL, ggxRefine ? rcp8_nr(dGl) : _mm256_rcp_ps(dGl));
 		__m256 G  = _mm256_mul_ps(Gv, Gl);
 
 		// F (Schlick): F0 + (1-F0)·(1-VdotH)^5
@@ -456,7 +493,7 @@ static inline void run_vec_ggx_loop(const TileLights &tl,
 		// spec = D·G·F / (4·NdotV·NdotL) · NdotL (radiance) = D·G·F/(4·NdotV)
 		__m256 specBRDF = _mm256_mul_ps(_mm256_mul_ps(D, G), F);
 		__m256 denom = _mm256_mul_ps(_mm256_set1_ps(4.0f), vNdotV);
-		__m256 spec = _mm256_mul_ps(specBRDF, _mm256_rcp_ps(denom));   // ·NdotL folded out (radiance) and NdotL/NdotL cancels one
+		__m256 spec = _mm256_mul_ps(specBRDF, ggxRefine ? rcp8_nr(denom) : _mm256_rcp_ps(denom));   // ·NdotL folded out (radiance) and NdotL/NdotL cancels one
 		// spot-cone × cube-shadow attenuation (shared from the diffuse loop).
 		__m256 csa = _mm256_load_ps(coneShadowAtten + slot);
 		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff), csa);
@@ -4035,14 +4072,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 // accumulate, saturate, modulate — runs 8-wide. Specular and water
 // fall back to scalar tail when needed; checkerboard is handled by
 // dropping odd lanes via the alive mask.
-// 8-wide rsqrt matching fast_rsqrt's shape (estimate + one Newton-Raphson).
-static inline __m256 rsqrt8_nr(__m256 x)
-{
-	__m256 e = _mm256_rsqrt_ps(x);
-	const __m256 xe2 = _mm256_mul_ps(_mm256_mul_ps(x, e), e);
-	return _mm256_mul_ps(e, _mm256_fnmadd_ps(_mm256_set1_ps(0.5f), xe2,
-	                                          _mm256_set1_ps(1.5f)));
-}
+// (rsqrt8_nr lives beside rcp8_nr further up, so the GGX loop shares it.)
 
 // 8-wide front-end of the env-specular compose for the OuterVec env-only
 // lanes — the CITY city_env_pixel case only: one UNIFORM cube store across
