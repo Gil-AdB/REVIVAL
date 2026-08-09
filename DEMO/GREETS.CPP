@@ -1137,18 +1137,42 @@ static void GreetsApplyInitDefaults()
 	// poses (t=6133, t=6293); at t=5743 it moves 2 990 px >12/255 (0.14 % of the
 	// frame, inside the mirror window) and the two frames are indistinguishable
 	// side by side. Needs the proxy, which the line above just defaulted on.
+	// The THIRD companion, and the largest of the three by resource: the static
+	// shadow lightmap's per-face atlas. `shadow_lightmap_res` is 128 two lines
+	// above, which is right for the AUTHORED wall quads and absurd once
+	// DisplaceStoneSubdiv replaces each of them with ~300 cells — the store is
+	// numFaces * res² * numOmnis BYTES and is fully touched at bake time, so it
+	// scales with FACE COUNT while the surface it describes has not grown at
+	// all. MEASURED at greets t=5743 with /usr/bin/time -l, peak footprint
+	// 6.93 GB flat (33 396 baked faces) against 21.41 GB under --greets_displace
+	// (115 346 faces) on a 64 GB box — max RSS 14.0 GB, i.e. the OS was already
+	// compressing it — and the bake 1.2 s -> 7.1-11.7 s. That bake is on the
+	// startup path (Greets_JoinBakeThread) and the array is then sampled per
+	// pixel by the deferred kernel, so the waste is paid at both ends.
+	// --shadow_lightmap_texel_density sizes each mesh's atlas from its MEAN FACE
+	// AREA instead, capped at shadow_lightmap_res, so it can only ever REDUCE.
+	// 14.2 texels/world-unit is calibrated to leave the flat wall's own quads at
+	// the 128 cap: it gives the tessellated stone the SAME shadow resolution per
+	// world unit that the shipping flat arm already renders with, rather than
+	// ~300x it. Inert without --greets_displace (the flag stays 0), so the
+	// byte-pinned flat path never enters the branch and the greets pin cannot
+	// move on it.
 	if (FF::greets_displace()) {
 		FF::setDefault(FF::BoolId::greets_shadow_proxy, true);
 		FF::setDefault(FF::BoolId::greets_displace_flat_mirror, true);
-		std::fprintf(stderr, "[STONE] --greets_displace defaults its two perf "
+		FF::setDefault(FF::FloatId::shadow_lightmap_texel_density, 14.2f);
+		std::fprintf(stderr, "[STONE] --greets_displace defaults its three perf "
 			"companions ON: --greets_shadow_proxy=%d (offscreen passes rasterise "
 			"the flat stone, -5.9 ms, DOES move shadow occlusion at wall "
-			"junctions) and --greets_displace_flat_mirror=%d (reflections source "
+			"junctions), --greets_displace_flat_mirror=%d (reflections source "
 			"the flat stone, -5.9 ms, byte-identical at both mirror review "
-			"poses). Together 61.8 -> 55.9 ms at t=5780. Use --no-<flag> to "
-			"compare either one.\n",
+			"poses) and --shadow_lightmap_texel_density=%.1f (per-mesh lightmap "
+			"atlas sized by face AREA, not face COUNT: 21.4 GB -> see the [LM] "
+			"line, and the startup bake 11 s -> ~1 s). Use --no-<flag> / "
+			"--shadow_lightmap_texel_density=0 to compare any one.\n",
 			FF::greets_shadow_proxy() ? 1 : 0,
-			FF::greets_displace_flat_mirror() ? 1 : 0);
+			FF::greets_displace_flat_mirror() ? 1 : 0,
+			FF::shadow_lightmap_texel_density());
 	}
 	// --greets_displace_flat_mirror sources the reflection's stone from the flat
 	// proxy; without a proxy there is nothing to source and the reflection would

@@ -224,6 +224,14 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
     }
 
     const int lmRes = std::max(2, fds::FeatureFlags::shadow_lightmap_res());
+    // --shadow_lightmap_texel_density: 0 = OFF (every mesh gets lmRes, the
+    // historical behaviour, byte-null). > 0 = derive each mesh's atlas edge
+    // from its MEAN FACE AREA at this many texels per world unit, capped at
+    // lmRes. See the block comment at the allocation site.
+    const float lmDensity  = fds::FeatureFlags::shadow_lightmap_texel_density();
+    size_t densityShrunk   = 0;      // meshes the density rule pulled below lmRes
+    double densityEdgeSum  = 0.0;    // Σ sqrt(mean face area) over those meshes
+    size_t atlasBytes      = 0;      // total bytes StaticShadowLightmap::data holds
     const int constBias    = fds::FeatureFlags::shadow_bias();
     const int slopeBiasInt = fds::FeatureFlags::shadow_slope_bias();  // applied as constant; no per-texel slope yet
 
@@ -302,11 +310,66 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
             continue;
         }
 
+        // ── PER-MESH ATLAS RESOLUTION BY TEXEL DENSITY ────────────────────
+        // The atlas is `numFaces * res² * numOmnis` BYTES, allocated and
+        // touched (filled with 255) per mesh — so a FIXED per-face res makes
+        // the store scale with FACE COUNT and not with surface AREA. greets
+        // sets res=128 (GREETS.CPP GreetsApplyInitDefaults) which is right for
+        // its authored wall quads and catastrophic once those quads are
+        // tessellated: MEASURED at greets t=5743, peak footprint 6.93 GB flat
+        // (33 396 faces) vs 21.41 GB under --greets_displace (115 346 faces),
+        // with the bake going 1.2 s -> 7.1-11.7 s. The displaced cells are
+        // ~1/300 the area of the quad they replace, so each was carrying ~300x
+        // the shadow texels per world unit that the FLAT wall ships with.
+        //
+        // With --shadow_lightmap_texel_density > 0 the mesh's res is derived
+        // from its MEAN FACE AREA instead: res = clamp(ceil(sqrt(meanArea) *
+        // density), kMinRes, lmRes). Density is texels per WORLD UNIT, so a
+        // tessellated surface keeps the same shadow resolution per unit as the
+        // untessellated one and the store stops tracking face count. The cap
+        // at lmRes means the flag can only ever REDUCE, never sharpen.
+        //
+        // DEFAULT 0 = OFF = byte-null everywhere. greets turns it on only
+        // under --greets_displace (the same companion-default pattern as
+        // --greets_shadow_proxy / --greets_displace_flat_mirror), so the
+        // byte-pinned FLAT path never takes this branch at all.
+        int meshRes = lmRes;
+        if (lmDensity > 0.0f && T->FIndex > 0) {
+            constexpr int kMinRes = 8;   // keep bilinear + a usable gradient
+            double sumArea = 0.0;
+            size_t areaFaces = 0;
+            for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                const Face &F = T->Faces[fi];
+                if (!F.A || !F.B || !F.C) continue;
+                Vector a, b, c;
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&F.A->Pos), &a);
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&F.B->Pos), &b);
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&F.C->Pos), &c);
+                const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                const float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+                const float cx = uy * vz - uz * vy;
+                const float cy = uz * vx - ux * vz;
+                const float cz = ux * vy - uy * vx;
+                sumArea += 0.5 * std::sqrt(double(cx) * cx + double(cy) * cy + double(cz) * cz);
+                ++areaFaces;
+            }
+            if (areaFaces > 0 && sumArea > 0.0) {
+                const double meanEdge = std::sqrt(sumArea / double(areaFaces));
+                int r = int(std::ceil(meanEdge * double(lmDensity)));
+                if (r < kMinRes) r = kMinRes;
+                if (r > lmRes)   r = lmRes;
+                meshRes = r;
+                if (r < lmRes) { ++densityShrunk; densityEdgeSum += meanEdge; }
+            }
+        }
+
         // Allocate / reset lightmap on this mesh.
         if (T->staticShadowLM) { T->staticShadowLM->clear(); }
         else                   { T->staticShadowLM = new StaticShadowLightmap(); }
         StaticShadowLightmap &lm = *T->staticShadowLM;
-        lm.allocate(int(T->FIndex), numCubeOmnis, lmRes);
+        lm.allocate(int(T->FIndex), numCubeOmnis, meshRes);
+        atlasBytes += size_t(T->FIndex) * size_t(meshRes) * size_t(meshRes)
+                    * size_t(numCubeOmnis);
         for (int oi = 0; oi < numCubeOmnis; ++oi) lm.omniSceneIdx[oi] = oi;
 
         // Assign this mesh's lightmap-table index (1-based; 0 = none).
@@ -469,7 +532,12 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
                 // pre-computed (uMin + s*uExt, vMin + t*vExt); the third
                 // coordinate is solved from the face plane equation
                 // (N·P = -NormProd, world-space, using wN computed above).
-                const float invN1 = 1.0f / float(lmRes - 1);
+                // Per-MESH resolution (see the texel-density block above);
+                // lm.lmRes is what allocate() stamped and what the runtime
+                // sampler reads, so the bake loop must agree with IT, not
+                // with the global flag.
+                const int   mRes  = lm.lmRes;
+                const float invN1 = 1.0f / float(mRes - 1);
                 // Pre-solve world-space plane offset once per face: N·P = -d.
                 const float planeD = -(wN.x * wA.x + wN.y * wA.y + wN.z * wA.z);
                 const float invDomN = planar
@@ -477,9 +545,9 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
                        : domAxis == 1 ? (std::fabs(wN.y) > 1.0e-6f ? 1.0f / wN.y : 0.0f)
                                       : (std::fabs(wN.z) > 1.0e-6f ? 1.0f / wN.z : 0.0f))
                     : 0.0f;
-                for (int ty = 0; ty < lmRes; ++ty) {
+                for (int ty = 0; ty < mRes; ++ty) {
                     float t = float(ty) * invN1;
-                    for (int tx = 0; tx < lmRes; ++tx) {
+                    for (int tx = 0; tx < mRes; ++tx) {
                         float s = float(tx) * invN1;
                         Vector wp;
                         if (planar) {
@@ -564,6 +632,19 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
         texelsBaked.load(), texelsCovered.load(),
         texelsBaked.load() ? 100.0 * double(texelsCovered.load()) / double(texelsBaked.load()) : 0.0,
         ms);
+    // The atlas store is the process's largest single allocation and it is
+    // fully touched (allocate() fills 255), so print it unconditionally —
+    // "21.4 GB resident" is not something a run should have to be asked for.
+    std::fprintf(stderr,
+        "[LM] atlas store %.2f GB (%zu meshes)%s\n",
+        double(atlasBytes) / 1073741824.0, meshCount,
+        lmDensity > 0.0f ? "" : "  [--shadow_lightmap_texel_density=0: fixed per-face res]");
+    if (lmDensity > 0.0f)
+        std::fprintf(stderr,
+            "[LM] texel density %.2f texels/world-unit: %zu of %zu meshes below "
+            "res %d (mean face edge %.3f world) — the rest kept the cap\n",
+            lmDensity, densityShrunk, meshCount, lmRes,
+            densityShrunk ? densityEdgeSum / double(densityShrunk) : 0.0);
 }
 
 // Availability probes for the runtime viz cycle (FDS/RENDER/VizCycle.cpp).

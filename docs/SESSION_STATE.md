@@ -1,5 +1,113 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-09 — THE TWO REPORTED `--greets_displace` REGRESSIONS: NEITHER IS ONE, AND THE REAL COST IS 19.4 GB
+>
+> User: *"tessellation is costing us now half the fps"* and *"tessellation bake
+> seems to hang the starting scenes for quite a lot of time — this should be
+> done concurrently — what changed?"*, with *"did we change some
+> tessellation/vis params?"*.
+>
+> **PARAMS: NOTHING CHANGED. Not one.** Every flag in the displace family has
+> the identical compile-time default at `HEAD` and at `1a91ed5` — `greets_displace`,
+> `_amp` 0.3, `_mip` 2, `_adapt` 1.0, `_cpb` 1.0, `_edge`, `_seam_union`,
+> `_fold_relax`, `_shadow_planes`, `_line_height`, `_smooth` 80, `_neighbor_pin`,
+> `greets_stone_subdiv` 0, `greets_shadow_proxy`, `greets_displace_flat_mirror`,
+> `displace_viz`, `chunk_occl_res`, `tile_bbox_cull`. Of the 40 `setDefault` calls
+> in `GREETS.CPP`, exactly ONE moved: `greets_omni_default_range` 30.0 was DELETED
+> (`00f7820`, ranges now authored per light in the LWS) — and it acts on both arms
+> equally. `DisplaceTest.cpp`'s setDefaults are identical. `DisplaceStoneSubdiv`
+> itself (`MeshOps.cpp:1970`) is **untouched**: every one of the +1082 lines in
+> that file since `1a91ed5` is above line 4154, i.e. `PomShell_*` / prism, and
+> `--pom_shell` is still default 0 (no shell/prism log fires in a displace run).
+> `pom_shell_weld` 0→1 is real but inert here for the same reason.
+>
+> **SYMPTOM 1 (per-frame) DOES NOT REPRODUCE.** `--bench=scene@scene=greets,
+> t=5743,iters=20`, 5 arms interleaved, min-of-6, load 8.8–13.1:
+>
+> | arm | fmin min | Δ flat, same tree |
+> |---|--:|--:|
+> | `1a91ed5` flat | 50.61 | — |
+> | `1a91ed5` tess | 57.15 | **+6.54** |
+> | HEAD flat | 53.62 | — |
+> | HEAD tess (pre-fix) | 55.55 | **+1.93** |
+> | HEAD tess (post-fix) | 54.72 | +1.10 |
+>
+> The tessellation delta did not grow, it **shrank**. What grew is the BASE cost
+> of *both* arms: HEAD's flat arm is +3.0 ms over `1a91ed5`'s, which is the nine
+> flags defaulted ON in `1782351` + `bd6e806` — they cost on every path and
+> therefore cannot move a tess-vs-flat delta. A second batch at load 20–54 put the
+> delta at +5.47 (HEAD) vs +5.44 (`1a91ed5`) — again equal. A whole-timeline sweep
+> (`t=200..7000`, 137 frames, min-of-4) gives HEAD +3.9 ms on a 63.4 ms mean.
+> **The delta measures 2–13 % depending on batch and load. Never 2×.**
+>
+> **The prime suspect died on measurement.** `704a5a8` does NOT touch
+> `GreetsMirror.cpp`, and the flat-mirror clone is intact at HEAD: the displace
+> run clones **9 198 / 9 166 faces** per mirror, exactly the documented figure, not
+> the 42 870 of the pre-companion arm. The shatter scoping still reads
+> 450 / 450 / 2 886 (flat / displace / displace with the scope off), reproducing
+> `704a5a8`'s published table byte for byte.
+>
+> **SYMPTOM 2: THE BAKE IS ALREADY CONCURRENT, AND IT DID NOT GET SLOWER.** New
+> `--init_timeline` (default OFF, byte-null) stamps every init milestone. Full
+> demo path, dummy drivers:
+>
+> | mark | flat | `--greets_displace` |
+> |---|--:|--:|
+> | `Initialize_Greets` | 1 379 ms | 2 469 ms |
+> | ├ `DisplaceStoneSubdiv` block | 0 ms | 573 ms |
+> | t1 chain done (all five scenes) | 4 672 ms | 5 116 ms |
+> | `Run_Glato` ends | 41 878 ms | 43 380 ms |
+> | **`t1.join()` returns** | **+0.1 ms** | **+0.0 ms** |
+> | City starts | 47 451 ms | 49 298 ms |
+>
+> The join is instantaneous in both arms — the 42 s intro absorbs the whole init.
+> There is no stall on the demo path. What DOES block is the greets-ENTRY path
+> (`--scene-greets`, `--snapshot=greets`, `--bench=scene@scene=greets`): those join
+> `Greets_JoinBakeThread` immediately after init with nothing in between, so the
+> lightmap bake is 100 % blocking wait — and `join_wait_ms == bake_ms` to the
+> millisecond, measured. **That was equally true at `1a91ed5`:** bake 10 684 ms
+> there vs 10 895 ms at HEAD (flat 1 341 vs 1 365). Nothing regressed.
+>
+> **WHAT IS ACTUALLY WRONG, and it is big.** `StaticShadowLightmap::data` is
+> `numFaces * lmRes² * numOmnis` BYTES and `allocate()` fills it with 255, so every
+> byte is touched and resident. greets sets `shadow_lightmap_res = 128`. That is
+> calibrated for the authored wall quads and scales with **face count**, so
+> tessellation multiplies it directly. `/usr/bin/time -l`, greets t=5743, 64 GB box:
+>
+> | arm | baked faces | atlas store | peak footprint | max RSS | bake |
+> |---|--:|--:|--:|--:|--:|
+> | flat | 33 396 | 5.61 GB | 6.93 GB | 7.44 GB | 1.08 s |
+> | `--greets_displace` before | 115 346 | **19.36 GB** | **22.97 GB** | 14.05 GB | 6.2–11.7 s |
+> | `--greets_displace` after | 115 346 | **0.14 GB** | **2.35 GB** | 2.36 GB | **0.09 s** |
+>
+> Max RSS *below* peak footprint is the OS already compressing it. A displaced
+> cell is ~1/300 the AREA of the quad it replaces, so each was carrying ~300× the
+> shadow texels per world unit that the FLAT wall ships with.
+>
+> **FIXED behind `--shadow_lightmap_texel_density`** (default 0 = OFF = byte-null;
+> `--greets_displace` defaults it to 14.2 texels/world-unit as its **third** perf
+> companion, named in the `[STONE]` line). Per-mesh
+> `res = clamp(ceil(sqrt(meanFaceArea) * density), 8, shadow_lightmap_res)` —
+> capped, so it can only reduce; the runtime sampler was already per-mesh
+> (`StaticShadowLightmap::lmRes` is a member). **Look cost in the displaced arm:
+> byte-identical at t=1588 / 2845 / 4871 / 6097 and 3 px at 1 LSB at t=5743.** The
+> 19.2 GB was buying nothing. Per-frame effect at t=5743 is within noise (55.07 →
+> 54.82 min-of-6); the certain wins are the bake (114×) and the memory.
+>
+> **PINS UNMOVED, all three, on this build:** greets `778fa6acd85a69cf241babefcdaf598e`
+> (4/4), fountain `8db68ccb59416e9a44037e9f387b7bd9` (3/3), city
+> `3cbe42b166847e40f7071eedb48d613c` (3/3). The flat path never enters the branch.
+>
+> **INFERENCE, stated as inference:** the user's "half the fps" is most consistent
+> with the 23 GB footprint meeting a machine that also has other agents on it —
+> the arm's cost becomes a function of memory pressure, which is exactly why it
+> measured +5.5 ms at load 20–54 and +1.9 ms at load 9–13 in the same session. Not
+> proven; the direct A/B on a memory-pressured box was not run.
+>
+> Evidence: `docs/img/fogwt/lm_atlas_density.png`,
+> `docs/img/fogwt/shatter_wall_recheck_t6133.png`,
+> `docs/img/fogwt/shatter_matscope_diff_t6133.png`.
+
 > ## 2026-08-09 — THE CHECKERBOARD LATTICE IS A SECOND BRDF, NOT A RECONSTRUCTION BLUR
 >
 > The user pushed back on "half-rate shading is a third of the CPU's canopy

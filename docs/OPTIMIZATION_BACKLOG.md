@@ -577,6 +577,43 @@ Also newly visible and previously unattributed (all `docs/PERF_STATE.md` §0):
 - **the mirror clone costs ~3.4 ms of G-buffer raster** on greets t=5743 (5.69 ms with
   `--greets_mirror`, 2.30 without).
 
+## Static shadow lightmap: the atlas is sized by FACE COUNT, not area (2026-08-09)
+
+`StaticShadowLightmap::data` is `numFaces * lmRes² * numOmnis` **bytes**, and
+`allocate()` fills it with 255 — so every byte is touched, resident and counted.
+greets sets `shadow_lightmap_res = 128` (`GREETS.CPP` `GreetsApplyInitDefaults`),
+which is calibrated for its authored wall quads and scales with the wrong
+quantity the moment anything is tessellated.
+
+**MEASURED** (greets `t=5743`, `/usr/bin/time -l` peak footprint, 64 GB box):
+
+| arm | baked faces | atlas store | peak footprint | bake |
+|---|--:|--:|--:|--:|
+| flat | 33 396 | 5.61 GB | 6.93 GB | 1.08 s |
+| `--greets_displace`, before | 115 346 | 19.36 GB | 22.97 GB | 6.2–11.7 s |
+| `--greets_displace`, after | 115 346 | **0.14 GB** | **2.35 GB** | **0.09 s** |
+
+- **DONE for the displaced arm** — `--shadow_lightmap_texel_density` (default 0 =
+  OFF = byte-null), defaulted to 14.2 texels/world-unit by `--greets_displace` as
+  its third perf companion. Per-mesh res = `clamp(ceil(sqrt(meanFaceArea) *
+  density), 8, shadow_lightmap_res)`; capped, so it can only reduce. Look cost in
+  the displaced arm: **byte-identical at t=1588 / 2845 / 4871 / 6097, and 3 px at
+  1 LSB at t=5743** — the 19.2 GB it removes was buying nothing.
+- **TODO — the FLAT arm still carries 5.61 GB of the same waste.** Its faces are
+  the authored quads plus the mummies/screens, and 457 of greets' 460 meshes fall
+  below the 128 cap at the same density, so the identical rule would take the
+  shipping arm to well under 1 GB and its 1.08 s startup bake with it. NOT DONE
+  because it moves the byte-pinned greets pin (`778fa6ac…`) — it needs a look
+  review and a re-pin, not a silent flip. Same for city/fountain if they ever
+  raise `shadow_lightmap_res` off its default of 16.
+- Related: the atlas is sampled per pixel by the deferred kernel
+  (`DeferredShadowSampling.h` `resolvePixelLightmap` → `sampleBilinear`), so its
+  size is a per-frame cache/TLB question as well as a startup one. On a 64 GB box
+  with the array resident the per-frame difference at t=5743 measured **within
+  noise** (min-of-6: 55.07 ms before vs 54.82 after); the cost that IS certain is
+  the startup bake and the 20 GB of resident pages every other process has to
+  live around.
+
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,
 where in code, expected cost/benefit). Mark DONE with the commit + measured
