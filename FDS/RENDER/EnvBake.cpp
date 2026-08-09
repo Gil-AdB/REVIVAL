@@ -556,6 +556,16 @@ struct EnvPanoStore {
     WorldAabb             ownerFaceAabb;
     bool                  ownerFaceAabbDone = false;
 
+    // ── ENVDYN perf: the REFLECTED-HEMISPHERE face mask ───────────────────
+    // Which of the six cube faces a reflection off THIS probe's own owner
+    // surface can ever sample, for ANY eye position. Static (owner geometry is
+    // static), so it is computed once. See reflectedFaceReach() for the proof;
+    // all-true when the owner is closed/two-sided, which makes the cull a
+    // no-op rather than a risk. `viewerFaceCount` is the instrument.
+    bool                  reflFaceMask[6] = { true, true, true, true, true, true };
+    bool                  reflFaceMaskDone = false;
+    int                   reflFaceCount = 6;
+
     // ── ENVDYN A4: screen-priority scheduling + the interval instrument ───
     // lastOverlay is the SceneEnv::dynFrame index of the last composite; the
     // scheduler's ageing term and the --env_dyn_stats histogram both read it.
@@ -1432,6 +1442,110 @@ WorldAabb materialFaceAabb(Scene* sc, const Material* M) {
     return out;
 }
 
+// ── ENVDYN perf: the REFLECTED-HEMISPHERE face cull ───────────────────────
+// THE PROPERTY (the user's: "the env map won't show any dynamic data from the
+// camera pos"). A probe is only ever READ through its owner surface, by the
+// deferred kernel's env lookup at pixels of that surface. So a cube face no
+// reflection off that surface can reach is a face whose dynamic overlay
+// NOBODY CAN SEE, and rendering the mech into it is pure cost.
+//
+// THE BOUND, and it is exact and camera-INDEPENDENT. Let n be a surface
+// normal and v the unit vector from the surface point to the eye. The pixel is
+// only shaded at all if the face is front-facing, i.e. n·v > 0. The reflected
+// direction is r = 2(n·v)n - v, so
+//
+//        n·r = 2(n·v) - (n·v) = n·v > 0.
+//
+// EVERY reflected direction lies in the OPEN HEMISPHERE on the outward side of
+// its own normal, for every eye position there is. No camera term, so nothing
+// here can pop when the camera moves — which is the failure mode a
+// camera-dependent cull has to be defended against and this one cannot have.
+//
+// Face f covers the direction set { fwd + a*right + b*up : |a|,|b| <= pad }
+// (unnormalised; normalising cannot change a sign). So SOME direction of face
+// f satisfies n·d > 0 iff
+//
+//        n·fwd + pad*(|n·right| + |n·up|) > 0,
+//
+// three dots and two abs per (normal, face). The mask is the OR over every
+// owner normal, so a curved or two-sided owner simply reaches everything and
+// the cull becomes a no-op — the safe direction.
+//
+// THE SLACK, and why it is not optional. Two things sit between r and the
+// direction actually used:
+//   (1) PARALLAX. The kernel does not index with r; it indexes with
+//       (hit - B), hit = P + t*r, P the pixel's world position on the owner,
+//       B the store's bake point. n·(hit - B) = n·(P - B) + t*(n·r). For a
+//       PLANAR owner B is on the plane and n·(P-B) = 0, so the sign carries
+//       over exactly. For a non-planar owner it does not, and the error is
+//       bounded by the owner's own extent over the parallax hit distance.
+//   (2) --env_live_water tilts the direction by at most `amp`.
+// Both are angular, so both are absorbed by widening the normal cone by
+// env_dyn_face_cull_slack degrees. The widened test admits a normal n' within
+// sigma of n, and max|d(value)/d(n')| <= sqrt(1 + 2*pad^2), giving the
+// threshold below. Default 15 degrees, which on greets covers the momy panels'
+// curvature (measured owner extents are a few units against parallax hit
+// distances of tens).
+void reflectedFaceReach(Scene* sc, const SceneEnv& env, int storeIdx,
+                        EnvPanoStore& S) {
+    if (S.reflFaceMaskDone) return;
+    S.reflFaceMaskDone = true;
+    for (int f = 0; f < 6; ++f) S.reflFaceMask[f] = false;
+
+    const float sigma = fds::FeatureFlags::env_dyn_face_cull_slack()
+                      * 3.14159265358979323846f / 180.0f;
+    const float grad  = std::sqrt(1.0f + 2.0f * kEnvCubePad * kEnvCubePad);
+    const float thresh = -std::sin(sigma < 0.0f ? 0.0f : sigma) * grad;
+
+    std::vector<const TriMesh*> cloneMeshes;
+    collectMirrorCloneMeshes(sc, cloneMeshes);
+    long nNormals = 0;
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next) {
+        if (std::find(cloneMeshes.begin(), cloneMeshes.end(), T)
+            != cloneMeshes.end()) continue;
+        for (DWord i = 0; i < T->FIndex; ++i) {
+            const Face& F = T->Faces[i];
+            // EVERY material mapped to this store, not just bakedSkipMat:
+            // ::mirUV clones and co-located panels share one store (the 4-unit
+            // dedup), and a mask built from one of them would be a mask for
+            // the wrong geometry.
+            auto jt = env.byMat.find(F.Txtr);
+            if (jt == env.byMat.end() || jt->second != storeIdx) continue;
+            Vector n;
+            MatrixXVector(T->RotMat, const_cast<Vector*>(&F.N), &n);   // rotation only
+            const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+            if (len < 1e-12f) continue;
+            const float inv = 1.0f / len;
+            const float nx = n.x * inv, ny = n.y * inv, nz = n.z * inv;
+            ++nNormals;
+            for (int f = 0; f < 6; ++f) {
+                if (S.reflFaceMask[f]) continue;
+                const EnvCubeBasisT& B = EnvCube_Basis(f);
+                const float df = nx * B.fwd[0]   + ny * B.fwd[1]   + nz * B.fwd[2];
+                const float dr = nx * B.right[0] + ny * B.right[1] + nz * B.right[2];
+                const float du = nx * B.up[0]    + ny * B.up[1]    + nz * B.up[2];
+                if (df + kEnvCubePad * (std::fabs(dr) + std::fabs(du)) > thresh)
+                    S.reflFaceMask[f] = true;
+            }
+        }
+    }
+    // No owner geometry found at all (a material with no live faces): reach
+    // everything. "I could not measure it" must never become "cull it".
+    if (nNormals == 0) for (int f = 0; f < 6; ++f) S.reflFaceMask[f] = true;
+    S.reflFaceCount = 0;
+    for (int f = 0; f < 6; ++f) S.reflFaceCount += S.reflFaceMask[f] ? 1 : 0;
+    static const char* kFN[6] = { "+X", "-X", "+Y", "-Y", "+Z", "-Z" };
+    char reach[32] = {}; size_t p = 0;
+    for (int f = 0; f < 6; ++f)
+        if (S.reflFaceMask[f] && p + 3 < sizeof reach)
+            p += size_t(std::snprintf(reach + p, sizeof reach - p, "%s%s", p ? " " : "", kFN[f]));
+    std::fprintf(stderr, "[ENVDYN-CULL] store %d '%s': %ld owner normal(s) -> "
+                 "%d/6 face(s) a reflection off it can EVER reach {%s}, slack %.1f deg\n",
+                 storeIdx, S.bakedSkipMat && S.bakedSkipMat->Name ? S.bakedSkipMat->Name : "?",
+                 nNormals, S.reflFaceCount, p ? reach : "none",
+                 double(fds::FeatureFlags::env_dyn_face_cull_slack()));
+}
+
 // ENVDYN A4 — the scheduler's PRIORITY INPUT: how much of the screen the
 // probe's owner covers. Projects the owner faces' world AABB through the MAIN
 // camera (the same 8-corner projection --draw_aabbs uses, so no new pass and
@@ -1718,6 +1832,7 @@ void EnvDynamic_Overlay(Scene* sc) {
     ++env.dynFrame;
     const int  sched     = fds::FeatureFlags::env_dyn_sched();
     const int  statEvery = fds::FeatureFlags::env_dyn_stats();
+    const bool faceCull  = fds::FeatureFlags::env_dyn_face_cull();
 
     static int cursor = 0;   // round-robin start so >budget probes share frames
     const size_t N = env.stores.size();
@@ -1761,7 +1876,12 @@ void EnvDynamic_Overlay(Scene* sc) {
             // Mover relevance + touched faces. A probe no mover reaches has
             // nothing to overlay, so it is not a candidate at any priority.
             Cand c{}; c.si = si; c.onScreen = onScreen;
+            // The reflected-hemisphere mask ANDs into the mover mask: a face
+            // no reflection off this owner can reach is a face nobody can see
+            // the overlay in. Camera-independent, so no pop.
+            if (faceCull) reflectedFaceReach(sc, env, int(si), S);
             for (int f = 0; f < 6; ++f) {
+                if (faceCull && !S.reflFaceMask[f]) continue;
                 const Frustum fp = fds::Frustum_FromProbeFace(
                     (const float[3]){ S.view.bakeX, S.view.bakeY, S.view.bakeZ }, f, range);
                 for (const auto& m : movers)
@@ -1907,7 +2027,9 @@ void EnvDynamic_Overlay(Scene* sc) {
         // pyramid cull, Foundation F).
         const float bake[3] = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
         bool faceMask[6] = {}; bool anyTouch = false;
+        if (faceCull) reflectedFaceReach(sc, env, int(si), S);
         for (int f = 0; f < 6; ++f) {
+            if (faceCull && !S.reflFaceMask[f]) continue;
             const Frustum fp = fds::Frustum_FromProbeFace(bake, f, range);
             for (const auto& m : movers)
                 if (!fds::Frustum_CullsSphere(fp, m.c, m.r)) {
