@@ -925,6 +925,27 @@ so the lever is again instruction count — cone count, march steps, or early-ou
 not memory. Any city optimisation aimed at the lighting kernel is aimed at 15 %
 of the frame.
 
+### 5. Allocation audit — two leads, neither yet triaged
+
+`scratchpad/hwprof_alloc.sh` (the CLT stand-in for Instruments' Allocations
+template) on greets t=5743, live snapshot 14 s in, load 5.5. Physical footprint
+**1.4 GB**; peak RSS 1.51 GB; MALLOC_LARGE 956 MB + MALLOC_SMALL 515 MB.
+Biggest attributed live stacks:
+
+| bytes | calls | stack |
+|--:|--:|---|
+| 117.5 MB | 5 | `Initialize_Greets` → `MaterialImport_ApplyRevMaps` → `loadRoleMapCached` → `Load_Texture` → `LoadPNG` |
+| 99.4 MB | 370 | `Initialize_Greets::$_7` thread → `LightmapBake_Static` |
+
+**LEAD, not a claim:** `leaks` reports **9 383 leaks / 387.9 MB** unreferenced at
+the snapshot. C++ interior pointers and pointer-tagging (e.g. the packed
+`Material*|skip-bit` cache in `Shadow_MaterialSkipsCasting`) are classic
+false-positive sources for `leaks`, so this needs triage before it means
+anything — but 388 MB against a 1.4 GB footprint is too large to leave
+unexamined. Cross-read it with `--mem_census`'s UNCENSUSED RESIDUAL line: if the
+census accounts for everything and `leaks` still says 388 MB, it is false
+positives; if the residual is the same order, it is real.
+
 ### Method note that generalises
 
 During this work the box went from load 13 to load 33 mid-session. Across that,

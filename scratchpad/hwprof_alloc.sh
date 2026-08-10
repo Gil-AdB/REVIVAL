@@ -27,7 +27,7 @@ mkdir -p $OUT
 print -r -- "# load: $(uptime | sed 's/.*averages: //')"
 
 # ── peak footprint + page faults for the whole run (cheap, no stack logging) ──
-print -r -- "\n# ---- /usr/bin/time -l : peak RSS, faults, context switches ----"
+print; print -r -- "# ---- /usr/bin/time -l : peak RSS, faults, context switches ----"
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy /usr/bin/time -l "$BIN" \
   --bench=scene@scene=$SCENE,t=$POSE,iters=8 \
   --deferred --texture_filter=1 --strict_flags >/dev/null 2>$OUT/time.txt
@@ -37,7 +37,7 @@ grep -E "maximum resident|page reclaims|page faults|involuntary|voluntary|peak m
 # ── live snapshot with stack logging on ─────────────────────────────────────
 # MallocStackLogging makes every live allocation carry its call stack, which is
 # what turns "0.5 GB resident" into "0.5 GB FROM HERE".
-print -r -- "\n# ---- live snapshot after ${SETTLE}s (past init + first-frame bakes) ----"
+print; print -r -- "# ---- live snapshot after ${SETTLE}s (past init + first-frame bakes) ----"
 MallocStackLogging=1 MallocStackLoggingNoCompact=1 \
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$BIN" \
   --bench=scene@scene=$SCENE,t=$POSE,iters=400 \
@@ -57,17 +57,17 @@ fi
 /usr/bin/leaks $PID                     > $OUT/leaks.txt 2>&1
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
-print -r -- "\n# ---- vmmap: biggest regions ----"
+print; print -r -- "# ---- vmmap: biggest regions ----"
 grep -E "^(Physical footprint|MALLOC_|VM_ALLOCATE|__DATA|Dirty Size)" $OUT/vmmap_summary.txt | head -20
 awk '/REGION TYPE/,/^$/' $OUT/vmmap_summary.txt | head -25
 
-print -r -- "\n# ---- heap: largest malloc classes ----"
+print; print -r -- "# ---- heap: largest malloc classes ----"
 head -18 $OUT/heap.txt
 
-print -r -- "\n# ---- malloc_history: biggest live allocation stacks ----"
+print; print -r -- "# ---- malloc_history: biggest live allocation stacks ----"
 head -40 $OUT/malloc_bysize.txt
 
-print -r -- "\n# ---- leaks ----"
+print; print -r -- "# ---- leaks ----"
 grep -E "total leaked|leaks for" $OUT/leaks.txt | head -5
 
-print -r -- "\n# full reports in $OUT/"
+print; print -r -- "# full reports in $OUT/"

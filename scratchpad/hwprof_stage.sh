@@ -29,7 +29,7 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$BIN" \
 # ── symbol attribution for the same workload ────────────────────────────────
 # `sample` needs the process alive, so launch, let it get past init + the lazy
 # first-frame bakes, then sample the steady state.
-print -r -- "\n# ---- sample(1) symbol profile, steady state ----"
+print; print -r -- "# ---- sample(1) symbol profile, steady state ----"
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$BIN" \
   --bench=scene@scene=$SCENE,t=$POSE,iters=$(( ITERS * 12 )) \
   --deferred --texture_filter=1 --deferred_prof=1 --strict_flags "$@" \
@@ -41,7 +41,7 @@ kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 print -r -- "# heaviest leaf symbols (self time):"
 awk '/^ *Sort by top of stack/,/^$/' $OUT/${SCENE}_${POSE}_sample.txt | head -25
-print -r -- "\n# full table: $OUT/${SCENE}_${POSE}_sample.txt"
+print; print -r -- "# full table: $OUT/${SCENE}_${POSE}_sample.txt"
 print -r -- "# NOTE: sample attributes WALL time on sampled stacks, not cycles or"
 print -r -- "# misses. Cross-read it with the IPC column above: a symbol that is hot"
 print -r -- "# in sample AND sits in a low-IPC phase is the memory-bound one."
