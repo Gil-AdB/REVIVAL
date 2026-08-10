@@ -609,6 +609,33 @@ struct SceneEnv {
     uint32_t statFrom = 0;
     double   statMs = 0.0;
 
+    // ── --env_probe_follow_owner: OWNER-TRANSFORM DIRTY TRACKING ───────────
+    // A probe's capture point is derived from its OWNER SURFACE's geometry
+    // ONCE, at bake time, and byMat then makes FramePrep skip that material
+    // for ever (`if (env.byMat.count(M)) continue;`). Move the owner — in the
+    // editor, or because it is a spline-animated mesh — and the store keeps
+    // capturing from where the owner USED to be. The dynamic overlay inherits
+    // the same staleness: overlayComposite renders the movers from
+    // S.view.bake*, the STATIC bake point, so it re-renders the mech every
+    // frame from a viewpoint that is no longer on the reflector.
+    //
+    // Tracked per MATERIAL, not per store, so the record survives the store
+    // drop the re-bake goes through (EnvReflection_InvalidateSurface erases
+    // stores, not this map).
+    struct OwnerTrack {
+        std::vector<const TriMesh*> meshes;   // meshes carrying a face of M
+        bool     meshesDone   = false;
+        bool     splineAnim   = false;  // any owner mesh is spline-animated
+        uint64_t sig          = 0;      // owner transform signature, last seen
+        bool     sigValid     = false;
+        uint32_t lastFollow   = 0;      // followFrame of the last re-bake
+        bool     everFollowed = false;
+        uint32_t stalledSince = 0;      // followFrame the drift was first seen
+        uint32_t lastMove     = 0;      // followFrame the owner last drifted
+        bool     dirty        = false;  // drift > eps, waiting for the budget
+    };
+    std::map<const Material*, OwnerTrack> ownerTrack;
+    uint32_t followFrame = 0;
 };
 std::map<Scene*, SceneEnv> g_envByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
@@ -1337,10 +1364,24 @@ static void fillEnvDebugGrid(EnvPanoStore& S) {
     }
 }
 
+// --env_probe_follow_owner (defined below, next to the scheduler inputs it
+// reuses): detect probe owners whose transform has changed since their store
+// was baked and DROP the stale stores, so the loop below re-derives their
+// capture point and re-bakes them. Forward-declared because it needs
+// ownerScreenAreaFrac / materialFaceAabb, which live with the overlay.
+namespace { void envFollowOwnerMoves(Scene* sc, SceneEnv& env); }
+
 bool EnvReflection_FramePrep(Scene* sc) {
     if (!sc || g_envBakeInProgress) return false;
     SceneEnv& env = g_envByScene[sc];
     bool bakedAny = false;
+    // BEFORE the bake loop: a probe whose owner has MOVED holds a store baked
+    // from where the owner used to be. Dropping it here (the same targeted
+    // drop the editor's probe-offset boxes use) is all that is needed — the
+    // loop below then misses in byMat, re-runs materialCentroid + the authored
+    // EnvBakeOfs, and re-bakes from the CURRENT point. No-op, and not even
+    // evaluated, unless --env_probe_follow_owner.
+    if (fds::FeatureFlags::env_probe_follow_owner()) envFollowOwnerMoves(sc, env);
     // ── --env_bake_sh_first ────────────────────────────────────────────────
     // WHAT AMBIENT DOES A REFLECTION PROBE CONTAIN? By default: the FLAT
     // Sc->Ambient constant, because renderFrame calls this function
@@ -1768,6 +1809,210 @@ float ownerScreenAreaFrac(Scene* sc, const WorldAabb& b) {
     const float w = x1 - x0, h = y1 - y0;
     if (w <= 0.0f || h <= 0.0f) return 0.0f;
     return (w * h) / (float(XRes) * float(YRes));
+}
+
+// ── --env_probe_follow_owner: PROBES WHOSE OWNER MOVED ────────────────────
+// THE DEFECT (the user: "env dynamic bakes don't take into account that the
+// object itself can move — the static meshes need to be re-baked, where the
+// dynamic not (?)"). Half right, and the half that is wrong is the expensive
+// one. A probe's capture point is derived from its owner surface's geometry
+// ONCE (materialCentroid + the authored EnvBakeOfs), and FramePrep's
+// `if (env.byMat.count(M)) continue;` then never looks at that material again.
+// So:
+//   • the STATIC cube keeps the room as seen from where the owner used to be;
+//   • the DYNAMIC overlay is NOT exempt — overlayComposite renders the movers
+//     from S.view.bake*, the same frozen point, so it faithfully re-renders
+//     the mech every frame into a cube captured from the wrong place.
+// Both halves want the same fix, and it is the one the editor's probe-offset
+// boxes already use: drop the store, let FramePrep re-derive and re-bake.
+//
+// TWO-STAGE DIRTY TEST, cheap first. Stage 1 is a transform SIGNATURE over the
+// owner meshes' RotMat+IPos (12 floats each, a handful of meshes) — nothing
+// happens on a frame where nothing moved. Only when that changes does stage 2
+// re-run materialCentroid (an O(faces-of-this-material) walk) and compare the
+// new capture point against the one the live store actually holds. A re-bake
+// is requested only past env_probe_follow_eps world units of DRIFT, because
+// the cost being throttled is a full cube bake, not a comparison.
+//
+// EDITOR MOVES ARE IMMEDIATE, RUNTIME MOVERS ARE THROTTLED, and the
+// discriminator is the engine's existing one: WorldAabb_MeshIsDynamic, the
+// same predicate the overlay uses to decide what a "mover" is. An owner no
+// spline animates can only have been moved by a person, once, and waiting a
+// frame to show them the result would be a worse tool. An owner that is
+// spline-animated moves every frame and is throttled by
+// env_probe_follow_budget re-bakes per frame, ordered by the SAME priority the
+// --env_dyn_sched=1 scheduler uses so there is one notion of "which probe
+// matters most" in the file and not two: tier 0 = never followed yet, then
+// visible ordered by ownerScreenAreaFrac × wait, then off-screen by wait.
+uint64_t ownerXformSig(const SceneEnv::OwnerTrack& t) {
+    // FNV-1a over the raw bits of each owner mesh's rotation + position. A
+    // HASH, not a comparison: the point is to notice a change, and any change
+    // of any owner's transform changes it.
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](float f) {
+        uint32_t u; std::memcpy(&u, &f, 4);
+        for (int b = 0; b < 4; ++b) {
+            h ^= uint64_t((u >> (b * 8)) & 0xFF);
+            h *= 1099511628211ull;
+        }
+    };
+    for (const TriMesh* T : t.meshes) {
+        if (!T) continue;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) mix(T->RotMat[r][c]);
+        mix(T->IPos.x); mix(T->IPos.y); mix(T->IPos.z);
+    }
+    return h;
+}
+
+// Which meshes carry a face of M, and is any of them spline-animated? Mirror
+// clones excluded — the bake and materialCentroid exclude them too, so a
+// clone's transform must not be able to dirty a probe. Cached: the owner mesh
+// SET is topology, which the editor's own paths already invalidate.
+void collectOwnerMeshes(Scene* sc, const Material* M, SceneEnv::OwnerTrack& t) {
+    if (t.meshesDone) return;
+    t.meshesDone = true;
+    t.meshes.clear();
+    t.splineAnim = false;
+    std::vector<const TriMesh*> cloneMeshes;
+    collectMirrorCloneMeshes(sc, cloneMeshes);
+    for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh* T = (TriMesh*)Obj->Data;
+        if (!T || T->FIndex == 0) continue;
+        if (std::find(cloneMeshes.begin(), cloneMeshes.end(), T) != cloneMeshes.end())
+            continue;
+        bool uses = false;
+        for (DWord i = 0; i < T->FIndex && !uses; ++i)
+            if (T->Faces[i].Txtr == M) uses = true;
+        if (!uses) continue;
+        t.meshes.push_back(T);
+        if (fds::WorldAabb_MeshIsDynamic(Obj)) t.splineAnim = true;
+    }
+}
+
+void envFollowOwnerMoves(Scene* sc, SceneEnv& env) {
+    if (!sc || env.stores.empty()) return;
+    ++env.followFrame;
+    const float eps    = fds::FeatureFlags::env_probe_follow_eps();
+    const int   budget = fds::FeatureFlags::env_probe_follow_budget();
+    static const bool sProf = std::getenv("FDS_ENVDYN_PROF") != nullptr;
+
+    struct Moved {
+        const Material* M;
+        int      si;
+        bool     animated;
+        int      tier;
+        float    key;
+        float    drift;
+        Vector   want;
+    };
+    std::vector<Moved> moved;
+
+    for (auto& [M, si] : env.byMat) {
+        if (si < 0 || size_t(si) >= env.stores.size()) continue;
+        EnvPanoStore& S = *env.stores[size_t(si)];
+        // Imported stores (CITY's per-building cube faces) carry their own
+        // bake point from the registration side and cannot be re-baked here.
+        if (S.imported || !S.bakedSkipMat) continue;
+        // One record per STORE, kept on the store's OWN material: a sharing
+        // group (::mirUV clones, co-located panels) re-bakes as a unit, and
+        // tracking each member would ask the same question several times.
+        if (M != S.bakedSkipMat) continue;
+        SceneEnv::OwnerTrack& t = env.ownerTrack[M];
+        collectOwnerMeshes(sc, M, t);
+        if (t.meshes.empty()) continue;
+        const uint64_t sig = ownerXformSig(t);
+        if (!t.sigValid) { t.sig = sig; t.sigValid = true; continue; }
+        if (sig == t.sig && !t.dirty) continue;      // stage 1: nothing moved
+        t.sig = sig;
+        // Stage 2: has the CAPTURE POINT actually drifted? Re-derive exactly
+        // as the bake would — the active derivation plus the authored offset —
+        // and compare against the point the live store was baked from.
+        Vector c;
+        if (!materialCentroid(sc, M, c, nullptr, -1, /*quiet=*/true)) continue;
+        c.x += M->EnvBakeOfs[0]; c.y += M->EnvBakeOfs[1]; c.z += M->EnvBakeOfs[2];
+        const float dx = c.x - S.view.bakeX, dy = c.y - S.view.bakeY,
+                    dz = c.z - S.view.bakeZ;
+        const float drift = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (drift <= eps) { t.dirty = false; continue; }
+        if (!t.dirty) { t.dirty = true; t.stalledSince = env.followFrame; }
+        // ── EDITOR MOVE vs RUNTIME MOVER, and why it takes TWO tests ───────
+        // WorldAabb_MeshIsDynamic reads the object's Pos/Rotate SPLINE keys.
+        // That is the engine's own definition of a mover and it is correct for
+        // everything measured here (the greets mech, all five city vehicle
+        // glass probes). It is not, however, EXHAUSTIVE: nothing stops scene
+        // code from writing IPos directly on a spline-less object, and such an
+        // owner would be classified an "editor move" and re-bake UNCAPPED
+        // every frame — the exact cost blow-up the budget exists to prevent.
+        // The second test closes that by construction and needs no predicate:
+        // something that also moved on the PREVIOUS follow frame is still
+        // moving, whatever its splines say. An editor nudge is a one-shot — it
+        // moves once and stops — so it keeps its immediate, uncapped re-bake,
+        // which is the whole point of the distinction. The FIRST movement of a
+        // runtime mover is immediate too, and that is correct: tier 0 (never
+        // followed) outranks everything anyway.
+        const bool stillMoving = t.lastMove != 0 && t.lastMove + 1 >= env.followFrame;
+        t.lastMove = env.followFrame;
+        Moved mv{};
+        mv.M = M; mv.si = si; mv.animated = t.splineAnim || stillMoving;
+        mv.drift = drift; mv.want = c;
+        // The owner MOVED, so its cached face AABB is stale — recompute it
+        // before it is used as a priority input (and clear the flag so the
+        // overlay's own gate recomputes it too).
+        S.ownerFaceAabb = materialFaceAabb(sc, M);
+        S.ownerFaceAabbDone = true;
+        S.reflFaceMaskDone = false;
+        const bool onScreen = S.ownerFaceAabb.valid;
+        const float area = onScreen ? ownerScreenAreaFrac(sc, S.ownerFaceAabb) : 0.0f;
+        const uint32_t wait = env.followFrame - t.stalledSince + 1u;
+        if (!t.everFollowed)      { mv.tier = 0; mv.key = 0.0f; }
+        else if (area > 0.0f)     { mv.tier = 2; mv.key = area * float(wait); }
+        else                      { mv.tier = 3; mv.key = float(wait); }
+        moved.push_back(mv);
+        if (sProf)
+            std::fprintf(stderr, "[ENVFOLLOW] '%s' (store %d): owner %s, capture "
+                "point drifted %.2f u — (%.1f %.1f %.1f) -> (%.1f %.1f %.1f), "
+                "tier %d key %.6f area %.5f wait %u\n",
+                M->Name ? M->Name : "?", si,
+                t.splineAnim ? "SPLINE-ANIMATED" : stillMoving ? "STILL-MOVING"
+                                                              : "moved once (editor)",
+                double(drift), S.view.bakeX, S.view.bakeY, S.view.bakeZ,
+                c.x, c.y, c.z, mv.tier, double(mv.key), double(area), wait);
+    }
+    if (moved.empty()) return;
+
+    // Editor moves first and ALL of them (a person is waiting), then the
+    // spline-animated ones by the shared priority, capped by the budget.
+    std::stable_sort(moved.begin(), moved.end(), [](const Moved& a, const Moved& b) {
+        if (a.animated != b.animated) return !a.animated;
+        if (a.tier != b.tier) return a.tier < b.tier;
+        return a.key > b.key;
+    });
+    int spent = 0;
+    for (const Moved& mv : moved) {
+        if (mv.animated && budget > 0 && spent >= budget) {
+            if (sProf) std::fprintf(stderr, "[ENVFOLLOW] '%s': BUDGET-DEFERRED "
+                "(%d/frame already re-baked; stays dirty, re-ranked next frame)\n",
+                mv.M->Name ? mv.M->Name : "?", budget);
+            continue;
+        }
+        if (mv.animated && budget <= 0) continue;
+        SceneEnv::OwnerTrack& t = env.ownerTrack[mv.M];
+        t.dirty = false;
+        t.everFollowed = true;
+        t.lastFollow = env.followFrame;
+        std::fprintf(stderr, "[ENVFOLLOW] '%s': %s owner moved %.2f u past the "
+            "%.2f u threshold — dropping its store and re-baking from "
+            "(%.1f %.1f %.1f)\n", mv.M->Name ? mv.M->Name : "?",
+            mv.animated ? "RUNTIME" : "EDITOR", double(mv.drift), double(eps),
+            mv.want.x, mv.want.y, mv.want.z);
+        // The SAME targeted drop the editor's probe-offset boxes use: the
+        // whole sharing group leaves byMat, the store is erased, and the bake
+        // loop that follows re-derives and re-bakes it from the current point.
+        if (mv.animated) ++spent;
+        fds::EnvReflection_InvalidateSurface(sc, mv.M);
+    }
 }
 
 // ENVDYN A4 — the deliverable's own instrument (--env_dyn_stats=N). "Jumpy" is
