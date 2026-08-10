@@ -1,5 +1,65 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-10 — HIS 12-14 FPS: THE WIN IS 17 ms, BUT ONLY ON A LINE THAT OMITS `--deferred`
+>
+> Follow-up to `f4088a9` (`fds::DeferredPathEnabled()`). Three GREETS.CPP sites
+> corrected: the Piramid chunk split (`:2427`) and the forward `Lighting()` gate
+> (`:3867`) now ask `DeferredPathEnabled()` instead of `FeatureFlags::deferred()`,
+> and `mirror_rtt` / `mirror_rtt_density` move from `GreetsApplyRunDefaults` to
+> `GreetsApplyInitDefaults` — GreetsMirror's `wantRtt` (`:1401`) is evaluated
+> during `Initialize_Greets`, so a run-phase default arrived **after** the
+> decision and was inert (measured: `0 first-order RTT` slots, no `[MIRROR-RTT]
+> slot` lines at all).
+>
+> **MEASURED at HEAD `af1f8f8`, his pose/res** (`t=3122`, 1512×848,
+> `--greets_displace --texture_filter=1`, min-of-6 interleaved, run 1 discarded,
+> load 7.2–8.3), two binaries from one tree differing only in GREETS.CPP:
+>
+> | | before | after |
+> |---|--:|--:|
+> | frame ms | 66.14 | **49.07** (−17.07, −25.8 %) |
+> | BAKE | 15.54–16.41 | **3.22–3.61** |
+> | LGHT | 6.38–6.45 | **0.91–0.95** |
+> | RNDR | ~41.6 | ~41.3 |
+>
+> **THE FLAG THAT DECIDES THE SIGN.** The same A/B **with `--deferred` passed
+> explicitly** measures **45.70 → 49.53 ms, i.e. +3.83 ms SLOWER**: there
+> `FeatureFlags::deferred()` was already true, both predicate fixes are no-ops,
+> and all that is left is the RTT slot build the `mirror_rtt` move switches on.
+> So this change is a large win on **his** line and a small cost on any line that
+> spells `--deferred` out — which includes the pin recipe and the render gates.
+> A bench that passes `--deferred` cannot see this fix at all; the first batch
+> here did exactly that and reported the wrong sign.
+>
+> **LOOK: this one MOVES, broadly.** 83–99.5 % of pixels change at every one of
+> the 16 review poses (1920×1080; note `--repro_xres/--repro_yres` are read only
+> by the `--repro` harness, `ReproHarness.cpp:240`, and are INERT on `--snapshot`),
+> mean |Δ| 3.6–6.7/255, max ~200 — a broad, essentially zero-mean shift
+> (mean luma +0.02 to +0.47), not a darkening. At his own pose it is 38.8 % of
+> pixels and it **removes a defect**: near-black pixels (luma < 8) go
+> **2 350 → 4** — the black gash on the right wall in
+> `docs/img/fogwt/deferredfix_t3122_before.png` is gone in `_after.png`.
+> Mechanism: the chunk split was never happening on his line, so the per-cube-face
+> bsphere cull had nothing to reject and 59 556 displaced faces never got
+> `NoShadowCast`. Contact sheet (all 17 poses, before | after):
+> `docs/img/fogwt/deferredfix_contactsheet.png`.
+>
+> **PINS DO NOT MOVE — and that is a warning, not a comfort.** greets
+> `778fa6acd85a69cf241babefcdaf598e` 4/4 on **both** arms, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9` 4/4, city `3cbe42b166847e40f7071eedb48d613c`
+> 4/4, `render_gate` 3/3. The greets pin is **blind** to this change: its recipe
+> passes `--deferred` (so the predicate fixes are inert) and `t=1588` shows no
+> RTT panel. A byte gate that spells the flag out cannot certify a fix about the
+> flag being absent.
+>
+> **CORRECTION to the block below (same session, better data).** The lightmap
+> density per-frame delta was re-measured at HEAD on a quiet box (load 3.2–7.9,
+> min-of-6 interleaved): `t=5743` 49.17 → 49.33 and `t=5780` 48.70 → 48.84 —
+> **neutral at both poses, +0.15 ms, inside the run-to-run spread**. The −1.76 ms
+> at `t=5780` recorded below was measured at load 11–30 and was noise. The bake
+> and the memory reproduce exactly: atlas 5.61 → 0.09 GB, peak footprint
+> 7.46 → 1.53 GB, `[GREETS-BAKE] waited` 1050.2 → 53.6 ms.
+
 > ## 2026-08-09 — THE SHIPPING GREETS ARM BAKED A 5.61 GB LIGHTMAP AND NEVER READ IT
 >
 > Follow-up to the `--greets_displace` 19.4 GB finding below: the user approved

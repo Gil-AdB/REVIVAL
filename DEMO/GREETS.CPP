@@ -1099,6 +1099,15 @@ static void GreetsApplyInitDefaults()
 	// here and unconditionally flattened all ten authored ranges.
 	FF::setDefault(FF::BoolId::shard_deferred,          true);
 	FF::setDefault(FF::IntId::greets_shard_res,         64);
+	// Mirror RTT slot build. MUST be here, not in GreetsApplyRunDefaults:
+	// GreetsMirror.cpp's `wantRtt = rttSlots && (mirror_rtt() || recurse)`
+	// (:1401) is evaluated during Initialize_Greets, so a run-phase default
+	// arrives after the decision and is INERT — measured, 0 RTT slots ever
+	// built on the default path. Moving it here is what makes the reflections
+	// (and second-order mirrors) actually default ON, at the cost of building
+	// the slots: +3.67 ms under --greets_displace, +2.11 ms flat.
+	FF::setDefault(FF::BoolId::mirror_rtt,              true);
+	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
 	// Lightmap bake atlas params (LightmapBake_Static reads these). NOT
 	// shadow_lightmap itself: that's the per-pixel SAMPLE gate the deferred
 	// kernel reads for EVERY scene, so it leaks if set during the shared init
@@ -1264,9 +1273,11 @@ static void GreetsApplyRunDefaults()
 	FF::setDefault(FF::FloatId::cone_strength,          2.0f);
 	FF::setDefault(FF::BoolId::cone_fine_tiles,         true);
 	FF::setDefault(FF::FloatId::disco_bloom,            0.0f);
-	// Mirror RTT (per-frame) + shatter feel.
-	FF::setDefault(FF::BoolId::mirror_rtt,              true);
-	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
+	// Shatter feel. mirror_rtt / mirror_rtt_density USED to be set here and
+	// were inert: GreetsMirror.cpp's `wantRtt` decision runs during
+	// Initialize_Greets, i.e. BEFORE this run-phase block, so the default never
+	// reached it and 0 RTT slots were ever built. They now live in
+	// GreetsApplyInitDefaults, next to the other build/bake flags.
 	FF::setDefault(FF::FloatId::greets_shard_fall_speed, 0.8f);
 	FF::setDefault(FF::FloatId::greets_shard_randomness, 0.8f);
 	// Pin greets' own exposure so it doesn't inherit a leaked --cinematic value
@@ -2424,7 +2435,13 @@ void Initialize_Greets()
 		// reproduces at grid≥4 on greets fwd (2026-05-30). Until
 		// Lighting() is rewritten to use per-face ambient, skip chunking
 		// entirely in forward mode.
-		if ((chunkGrid > 0 || chunkSize > 0.0f) && fds::FeatureFlags::deferred()) {
+		// fds::DeferredPathEnabled(), NOT FeatureFlags::deferred(): the user's
+		// interactive greets run reaches the deferred kernel via ForceDeferred /
+		// shard_deferred without the bare --deferred flag ever being set, so this
+		// test answered "forward" and skipped the split on the very path that
+		// needs it — 59 556 displaced faces never got NoShadowCast, i.e. 15.10 ms
+		// of shadow bake per frame. One predicate, defined once in RENDER.CPP.
+		if ((chunkGrid > 0 || chunkSize > 0.0f) && fds::DeferredPathEnabled()) {
 			// Find Piramid.lwo
 			Object *piramidObj = nullptr;
 			TriMesh *piramid = nullptr;
@@ -3858,8 +3875,13 @@ struct GreetsScene : SceneDriver {
 		// read next frame either — skip the ~4ms pass. The first
 		// frame a panel becomes visible again renders from colors at
 		// most one skip stale, same staleness class as the design.
+		// Same predicate correction as the chunk split above: with the bare
+		// --deferred flag unset but the deferred path live (ForceDeferred /
+		// shard_deferred), this read "forward" and ran the full forward
+		// Lighting() pass every frame — 6.49 ms whose only consumer is the RTT
+		// bake, which was not even running.
 		const bool lightingConsumed =
-		    !fds::FeatureFlags::deferred() ||
+		    !fds::DeferredPathEnabled() ||
 		    !fds::FeatureFlags::mirror_rtt() ||
 		    fds::g_rttJobsLastFrame > 0;
 		if (lightingConsumed)

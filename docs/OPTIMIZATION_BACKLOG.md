@@ -769,7 +769,11 @@ quantity the moment anything is tessellated.
   | peak footprint (`/usr/bin/time -l`) | 7.44 GB | **1.50 GB** |
   | static bake (min-of-9 interleaved, load 11–17) | 1104 ms | **54 ms** |
   | greets-entry join wait (load 31) | 3497 ms | **221 ms** |
-  | frame ms `t=5743` / `t=5780` (min-of-15 interleaved) | 49.39 / 51.84 | 49.47 / **50.08** |
+  | frame ms `t=5743` / `t=5780` (min-of-6, HEAD `af1f8f8`, load 3.2–7.9) | 49.17 / 48.70 | 49.33 / 48.84 |
+
+  Per-frame is **neutral** (+0.15 ms both poses, inside the spread). An earlier
+  batch at load 11–30 read −1.76 ms at `t=5780`; that was noise — the quiet-box
+  re-measure above supersedes it. The bake and the memory are the real wins.
 
   **LOOK: NULL, and measured as such** — byte-identical at all 16 poses of
   `docs/greets_review_poses.txt` and at the pin pose, so the greets pin
