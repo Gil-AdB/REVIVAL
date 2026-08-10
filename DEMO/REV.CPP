@@ -2036,7 +2036,7 @@ int main(int argc, const char *argv[])
 				} else if (event.key.keysym.scancode == SDL_SCANCODE_T) {
 					// Toggle per-frame staleness tracker for the dynamic
 					// cube buffers. When on, logs every 60 frames any
-					// shadow maps whose polyId_dynamic hash hasn't changed
+					// shadow maps whose dynamic polyId hash hasn't changed
 					// since the last check — those are the ones whose
 					// dynamic bake isn't actually writing fresh content
 					// (the "frozen at t=0" symptom).

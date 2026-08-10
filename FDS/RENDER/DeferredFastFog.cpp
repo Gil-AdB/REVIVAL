@@ -352,11 +352,11 @@ static inline float volSpotShadow(int smIdx, float x, float y, float z, int pcf)
 	const int cY = int(sm.cntrY - sm.perspY * ly * invLZ);
 	if (cX < 0 || cX >= sm.xres || cY < 0 || cY >= sm.yres) return 1.0f;
 	const int pixZ = (0xFF80 - int(lz * sm.zScale)) + 80;   // +kVolShadowBias
-	const bool hasDyn = !sm.depth_dynamic.empty();
+	const bool hasDyn = !sm.packDyn.empty();
 	if (pcf <= 0) {
 		const size_t idx = size_t(cY) * size_t(sm.xres) + size_t(cX);
-		uint16_t occ = sm.depth[idx];
-		if (hasDyn) occ = std::max(occ, sm.depth_dynamic[idx]);
+		uint16_t occ = ShadowTexZ(sm.packSD[idx]);
+		if (hasDyn) occ = std::max(occ, ShadowTexZ(sm.packDyn[idx]));
 		return (pixZ < int(occ)) ? 0.0f : 1.0f;
 	}
 	int lit = 0, total = 0;
@@ -368,8 +368,8 @@ static inline float volSpotShadow(int smIdx, float x, float y, float z, int pcf)
 			const int sx = cX + dx;
 			if (sx < 0 || sx >= sm.xres) continue;
 			const size_t idx = row + size_t(sx);
-			uint16_t occ = sm.depth[idx];
-			if (hasDyn) occ = std::max(occ, sm.depth_dynamic[idx]);
+			uint16_t occ = ShadowTexZ(sm.packSD[idx]);
+			if (hasDyn) occ = std::max(occ, ShadowTexZ(sm.packDyn[idx]));
 			lit += (pixZ < int(occ)) ? 0 : 1;
 			++total;
 		}

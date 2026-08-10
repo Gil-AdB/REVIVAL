@@ -55,59 +55,84 @@ one live cross-core effect found in the audit was tested directly and **also
 measured neutral** — see item 4. **Recommendation: do not spend effort on `Face`
 layout.** The audit is recorded so the next person does not re-derive it.
 
-### 3. Cube-shadow tap: PAIR-INTERLEAVE the four planes — **MEASURED, probe landed OFF, shippable version scoped**
+### 3. Cube-shadow tap: the packed plane is now the SOURCE OF TRUTH — **DONE, shipped ON, byte-null**
 
-**This is the item.** At greets t=5743 the cube tap is **10.28 ms of a 30.5 ms
-`lighting-w1`** (`--prof_no_cube_tap`, min-of-3: 30.518 → 20.238; `--prof_no_lights`
-→ 11.543 for scale). A PolyId tap needs a texel's `polyId` AND its `depth`, for the
-static pair and the dynamic pair — **four separate `std::vector<uint16_t>` that at
-greets' 512² sit 512 KB apart.** 32 bytes of useful data, gathered from 4 base
-pointers over 2 PCF rows = **up to 8 cache lines (~512 B of line traffic) per tap**;
-the static-lightmap composite path's dynamic-only tap still costs 4.
+**This was the item, and it landed.** At greets t=5743 the cube tap was **10.28 ms
+of a 30.5 ms `lighting-w1`** (`--prof_no_cube_tap`, min-of-3: 30.518 → 20.238;
+`--prof_no_lights` → 11.543 for scale). A PolyId tap needs a texel's `polyId` AND
+its `depth`, for the static pair and the dynamic pair — and those were **four
+separate `std::vector<uint16_t>` that at greets' 512² sit 512 KB apart.** 32 bytes
+of useful data, gathered from 4 base pointers over 2 PCF rows = **up to 8 cache
+lines (~512 B of line traffic) per tap**; the static-lightmap composite path's
+dynamic-only tap still cost 4.
 
-`--shadow_plane_pack` (LANDED, **default 0 = byte-null**) interleaves them:
-`packSD[i] = depth[i] | (polyId[i] << 16)`, same for the dynamic pair. A texel's
-id+z becomes ONE 32-bit load: **8 lines → 4, and 4 → 2. Total bytes resident are
-unchanged**; only the grouping changes.
+`ShadowMap` now holds **two `std::vector<uint32_t>`** — `packSD` and `packDyn`,
+each texel `z | (ShadowMatID << 16)` — and they are the ONLY representation.
+A texel's id+z is ONE 32-bit load: **8 lines → 4, and 4 → 2.** Bytes resident are
+unchanged (4 × u16 either way); only the grouping changed. `ShadowTexZ` /
+`ShadowTexId` / `ShadowTexPack` (FDS/FILLERS/ShadowMap.h) are the accessors.
+
+The probe flag `--shadow_plane_pack` and `CubeShadow_SamplePacked` are **deleted**:
+with the packed plane as the source of truth there is nothing left to A/B.
 
 Measured, greets t=5743, 1920×1080, dummy drivers, `--deferred_prof=1`, per-frame
-`wall_min`, min-of-6 over interleaved reps, on a QUIET box (1-min load 6.8–11.6):
+`wall_min`, **min over 11 interleaved rounds** (batch 1 = 6 rounds, load 6.2–8.9;
+batch 2 = 5 rounds, load 9.5–12.3, arm order alternated). Matched pair from ONE
+tree snapshot at `63bdc85`, base = the four-u16 tree, so the only difference is
+this diff. The first round after each rebuild was discarded.
 
-| arm | `lighting-w1` | `renderFrame` |
-|---|--:|--:|
-| shipping, pack OFF | 27.750 | 43.475 |
-| shipping, pack ON | **27.334** (−0.42) | 43.531 (+0.06, nil) |
-| `--no-shadow_lightmap`, pack OFF | 28.145 | 43.859 |
-| `--no-shadow_lightmap`, pack ON | **27.094** (−1.05) | **42.965** (−0.89) |
+| arm | `lighting-w1` | `renderFrame` | `shadow-bake` |
+|---|--:|--:|--:|
+| shipping, four u16 planes | 27.620 | 44.730 | 2.474 |
+| shipping, **packed** | **26.423** (−1.20) | **43.720** (−1.01) | **2.307** (−0.17) |
+| `--no-shadow_lightmap`, four u16 planes | 27.696 | 44.832 | 2.488 |
+| `--no-shadow_lightmap`, **packed** | **26.439** (−1.26) | **43.840** (−0.99) | **2.295** (−0.19) |
 
-An earlier batch on a LOADED box (load 15–29) gave the same shape, larger:
-shipping −0.66, `--no-shadow_lightmap` −1.69 on `lighting-w1`.
+**Both arms beat the derived-copy probe's numbers, which is the prediction.** The
+probe measured −0.42 shipping / −1.05 full-tap on `lighting-w1` while *also* paying
+a per-bake rebuild of 144 MB; removing the rebuild and keeping the layout gives
+−1.20 / −1.26. The probe's numbers were correctly called a lower bound.
 
-**Read the two arms together — that is the evidence.** `--no-shadow_lightmap`
-forces every static omni onto the FULL four-plane tap (8 lines → 4) instead of the
-lightmap + dynamic-only tap (4 → 2). Doubling the leverage roughly doubles the win,
-which is what a lines-touched model predicts and what a noise artifact would not do
-(5/6 reps favour ON in that arm, 4/6 in the shipping arm).
+**The `shadow-bake` win is the cleanest signal in the table**: 11 of the 12 packed
+bake samples sit below the *minimum* of the 12 base samples (packed 2.295–2.495,
+base 2.474–2.671). Mechanism, and it is not the tap: the per-frame dynamic bake
+clears ONE plane instead of two arrays over the same bytes, and `ShadowBarry`'s
+masked store writes z+id in one 32-bit `select` instead of a `blendv` on the z
+array plus a per-lane scalar scatter into the id array.
 
-**Byte-null, certified differentially:** greets `778fa6ac…` 3/3, city `3cbe42b1…`,
-fountain `8db68ccb…` — all EXACT, in all three arms (base binary, probe binary
-flag-OFF, probe binary flag-ON). The packed tap is bit-identical by construction
-(`CubeShadow_SamplePacked` replicates the linear tap's projection math verbatim).
+**A caveat measured and reported, not hidden:** `--no-shadow_lightmap` no longer
+doubles the win the way it did for the probe (−1.26 vs −1.20, not 2×). The
+lines-touched model predicts a bigger spread; the honest reading is that at
+min-of-11 both arms are near the same floor and the extra leverage is being
+absorbed elsewhere in `lighting-w1`. The per-round record is what carries the full
+tap: with the arm order alternated, the `--no-shadow_lightmap` arm favours packed
+**5/5**, and the shipping arm 3/5. In the fixed-order batch the last arm in each
+round absorbed the round's load drift — a positional bias worth remembering when
+reading any interleaved A/B here.
 
-**WHY IT SHIPS OFF, and what the real version is.** In probe form the packed planes
-are a DERIVED COPY rebuilt after each bake, so it costs **+159 MB** (76 maps × 512²
-× 4 B × 2) on top of the linear planes, plus the rebuild traffic. **The shippable
-version makes the packed plane the SOURCE OF TRUTH** — replace the four
-`std::vector<uint16_t>` with two `std::vector<uint32_t>` — which costs **zero extra
-memory**, removes the rebuild entirely, and *also* speeds the bake (the shadow
-rasterizer writes depth+polyId to the same texel: 2 arrays → 1). That is ~82 edit
-sites across ~10 files, all mechanical, and the numbers above are its **lower
-bound** (they are paid with the rebuild cost included). **Prize: ≥0.4 ms shipping /
-≥1.0 ms with the full tap, MEASURED, not inferred.**
+**Cold readers pay nothing, and that was checked.** The static-lightmap bake and
+the fog/volumetric spot taps read only ONE half of a texel, so they now pull a 4 B
+word where they used to pull 2 B. That is 2× the bytes but the SAME number of cache
+lines per tap, and it measures nil: `[LM] LightmapBake_Static` 53.7 ms base vs
+54.0 ms packed (min-of-11), inside the spread.
+
+**Byte-null, certified differentially** — matched base-vs-packed pair from one tree
+snapshot, 3 runs each, interleaved so the tree's concurrent authoring edits land on
+both arms: greets `778fa6ac…`, city `3cbe42b1…`, fountain `8db68ccb…`, chase
+t100 `76e7cf68…` t400 `d458e82b…` t800 `c145c7a5…` t1200 `31aa5203…` t1600
+`1544b0e7…`. **48 hashes, 24 matched pairs, zero differences**, and every one also
+equals the recorded absolute pin.
+
+**Memory: neutral, which is the point.** The probe form cost **+144 MB** of derived
+copy (greets carries 11 cube maps × 6 faces at 512² plus 10 spot maps at 256²;
+66 × 512² × 4 B × 2 + 10 × 256² × 4 B × 2 = 143.7 MB). Source-of-truth costs zero:
+peak footprint min-of-3 **1420.0 MB base vs 1415.6 MB packed**, i.e. equal within a
+±5 MB run-to-run spread. There is no rebuild pass left to time.
 
 Orthogonal to `--shadow_swizzle`, which attacks the ROW-STRADDLE axis and measured
 NEGATIVE in all 15 shapes (docs/ARCHITECTURE_NEXT.md). That experiment never
-touched the parallel-plane axis.
+touched the parallel-plane axis; it survives, retargeted at the two packed planes
+(`packSDSw` / `packDynSw`, two derived copies instead of four).
 
 ### 4. `Face::LastMip` — a dead store from 12 workers into a shared line. **Removed; measured NEUTRAL.**
 
@@ -133,7 +158,7 @@ because it bought time.
 
 | item | traffic/frame | residency | verdict |
 |---|--:|---|---|
-| cube-shadow taps (4 planes × 2×2 PCF + header) | ~1.0 GB of line traffic | 12.6 MB/cube omni ≫ LLC → DRAM | **item 3 above** |
+| cube-shadow taps (2 packed planes × 2×2 PCF + header) | ~0.5 GB of line traffic | 12.6 MB/cube omni ≫ LLC → DRAM | **item 3 above — DONE, halved** |
 | `Material` pointer chase | ~796 MB of accesses (6 lines/px: 1 matTable + 5 `Material`) | table ≤ 114 KB → **L2, not DRAM** | `sizeof(Material)` = 455 B, pack(1), no `static_assert`. Per-pixel fields are spread over lines 0/1/3/4/6 and the "hot fields on line 0" comment is **stale** — `TintR/G/B`, `SpecMul`, `AoStrength`, `Roughness/MetallicMap`, `Reflection`, `TbnHandedness` all drifted off it. No `matID` memo anywhere (every kernel re-chases per pixel). A 64-byte hot-fields record per matID (16 KB, L1-resident) collapses 5 lines → 1. **Not measured — candidate, but it is a latency item, not a bandwidth one.** |
 | texture + aux-map point fetches | 130–660 MB | mip chains → DRAM | already measured: the albedo gather is worth only 0.71 ms (PERF_STATE) |
 | `g_hdrBuf` | 166–232 MB (10–14 sweeps × 16.59 MB) | > LLC | `hdrf` is already `__fp16` on arm64 (8 B/px, not the 16 B PERF_STATE still quotes) |

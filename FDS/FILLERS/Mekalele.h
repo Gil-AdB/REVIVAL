@@ -111,7 +111,7 @@ struct GBuffer {
 	std::vector<u16> tangent;
 	// packed: miplevel:4 | matID:8 | swizzled UV:20.
 	// The matID byte doubles as the per-pixel surface ID for poly-ID
-	// shadow mode (compared against ShadowMap::polyId, which stores
+	// shadow mode (compared against the ShadowMap texel's id half, which stores
 	// matID+1 of the closest occluder).
 	std::vector<u32> txtr;
 	// Per-pixel FILTERED diffuse albedo (BGRA8), sampled at RASTER time

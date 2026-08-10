@@ -41,12 +41,13 @@ namespace {
 // ─── World-space static-cube sampler ─────────────────────────────────────
 // Bake-time parallel to CubeShadow_Sample (FDS/FILLERS/ShadowMap.h), but
 // takes a world-space sample point instead of view-space. Reads only the
-// static-occluder buffer (sm.depth or sm.polyId depending on mode), since
+// static-occluder plane (sm.packSD — its z half or its id half depending
+// on mode), since
 // the lightmap caches the static-scene contribution. Returns shadow factor
 // in [0, 255] where 255 is fully lit and 0 is fully shadowed.
 //
-// `surfaceMatId`: -1 = legacy Depth mode (biased z-compare against sm.depth).
-//                 0..255 = PolyId mode (identity test against sm.polyId,
+// `surfaceMatId`: -1 = legacy Depth mode (biased z-compare against the z half).
+//                 0..255 = PolyId mode (identity test against the id half,
 //                          same convention as runtime CubeShadow_Sample).
 //                          Bias arguments ignored in PolyId mode.
 uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
@@ -89,18 +90,19 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
 
     float occ = 0.0f;
     if (surfaceMatId >= 0) {
-        // PolyId mode: identity test against sm.polyId. Matches the
+        // PolyId mode: identity test against the texel's id half. Matches the
         // runtime CubeShadow_Sample PolyId branch (ShadowMap.h). 0
         // sentinel = "no occluder wrote here." Receiver's matID+1 means
         // "this texel was written by my own (or a same-matID) face" =
         // not occluded. Anything else nonzero = occluder of a different
         // material = occluded. No bias needed.
-        const uint16_t *p0 = sm.polyId.data() + rowOfs;
-        const uint16_t *p1 = p0 + sm.xres;
+        const uint32_t *p0 = sm.packSD.data() + rowOfs;
+        const uint32_t *p1 = p0 + sm.xres;
         // 16-bit ShadowMatID direct compare (no +1 offset added here;
         // bake-time caller resolves Material::ShadowMatID upstream).
         const uint16_t receiverId = uint16_t(surfaceMatId);
-        auto isOccluded = [&](uint16_t v) -> bool {
+        auto isOccluded = [&](uint32_t t) -> bool {
+            const uint16_t v = ShadowTexId(t);
             return v != 0 && v != receiverId;
         };
         if (isOccluded(p0[iX  ])) occ += w00;
@@ -110,16 +112,16 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     } else {
         // Depth mode: biased z-compare. slopeBiasInt computed by caller
         // from this texel's (N · L) so grazing-angle faces don't acne.
-        const uint16_t *z0 = sm.depth.data() + rowOfs;
-        const uint16_t *z1 = z0 + sm.xres;
+        const uint32_t *z0 = sm.packSD.data() + rowOfs;
+        const uint32_t *z1 = z0 + sm.xres;
         int pixZenc = 0xFF80 - int(lz * sm.zScale);
         if (pixZenc < 0) pixZenc = 0;
         if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
         const int biased = pixZenc + constBias + slopeBiasInt;
-        if (biased < int(z0[iX  ])) occ += w00;
-        if (biased < int(z0[iX+1])) occ += w10;
-        if (biased < int(z1[iX  ])) occ += w01;
-        if (biased < int(z1[iX+1])) occ += w11;
+        if (biased < int(ShadowTexZ(z0[iX  ]))) occ += w00;
+        if (biased < int(ShadowTexZ(z0[iX+1]))) occ += w10;
+        if (biased < int(ShadowTexZ(z1[iX  ]))) occ += w01;
+        if (biased < int(ShadowTexZ(z1[iX+1]))) occ += w11;
     }
 
     const float lit = 1.0f - occ;

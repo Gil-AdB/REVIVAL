@@ -46,10 +46,10 @@ The identical mechanism — *how many cache lines does one access touch* — ask
 the dominant stage instead of the front end. At greets the deferred lighting wave
 is 27.8 ms of a 43.5 ms frame, and **the cube-shadow tap alone is 10.28 ms of it**
 (`--prof_no_cube_tap`, min-of-3: `lighting-w1` 30.518 → 20.238). A PolyId tap
-gathers 32 bytes from **four separate `std::vector<uint16_t>` planes** that sit
+gathered 32 bytes from **four separate `std::vector<uint16_t>` planes** that sat
 512 KB apart, over two PCF rows = **up to 8 cache lines per tap**. Pair-interleaving
-them (`--shadow_plane_pack`, landed default-OFF) halves that. See
-docs/OPTIMIZATION_BACKLOG.md for the measured table and the shippable follow-up.
+them into two `std::vector<uint32_t>` planes (now the SOURCE OF TRUTH, shipped ON)
+halves that. See docs/OPTIMIZATION_BACKLOG.md item 3 for the measured table.
 
 ## MEASURED 2026-08-06 (c) — the main-view transform is PARALLEL now (`--xfrm_par`, default ON). Two arms, two DIFFERENT limits, both measured.
 

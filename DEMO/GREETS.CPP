@@ -4299,7 +4299,8 @@ struct GreetsScene : SceneDriver {
 			// the actual data each frame.
 			uint16_t zMin = 0xFFFF, zMax = 0;
 			if (!sVizPolyId) {
-				for (uint16_t e : sm.depth) {
+				for (uint32_t t : sm.packSD) {
+					const uint16_t e = ShadowTexZ(t);
 					if (e == 0) continue;  // skip unwritten
 					if (e < zMin) zMin = e;
 					if (e > zMax) zMax = e;
@@ -4310,13 +4311,12 @@ struct GreetsScene : SceneDriver {
 			dword *out = (dword*)VPage;
 			for (int py = 0; py < YRes; ++py) {
 				const int smY = (py * sm.yres) / YRes;
-				const uint16_t *zRow = sm.depth.data() + size_t(smY) * size_t(sm.xres);
-				const uint16_t *idRow = sm.polyId.data() + size_t(smY) * size_t(sm.xres);
+				const uint32_t *pRow = sm.packSD.data() + size_t(smY) * size_t(sm.xres);
 				for (int px = 0; px < XRes; ++px) {
 					const int smX = (px * sm.xres) / XRes;
 					uint32_t pixel;
 					if (sVizPolyId) {
-						const uint32_t v = idRow[smX];
+						const uint32_t v = ShadowTexId(pRow[smX]);
 						if (v == 0) {
 							pixel = 0xFF000000u;
 						} else {
@@ -4328,7 +4328,7 @@ struct GreetsScene : SceneDriver {
 							      | (uint32_t(r) << 16) | 0xFF000000u;
 						}
 					} else {
-						const uint16_t z = zRow[smX];
+						const uint16_t z = ShadowTexZ(pRow[smX]);
 						uint8_t g;
 						if (z == 0) {
 							g = 0;

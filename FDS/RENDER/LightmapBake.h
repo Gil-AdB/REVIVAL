@@ -12,7 +12,7 @@
 // and is read at runtime by the deferred kernel to skip the per-pixel cube
 // tap on static geometry.
 //
-// Call AFTER ShadowMaps_BakeStatic — the bake reads sm.depth (static occluder
+// Call AFTER ShadowMaps_BakeStatic — the bake reads sm.packSD (static occluder
 // depth) populated by that pass.
 //
 // No-op when --shadow-lightmap is off, when the scene has zero cube shadow

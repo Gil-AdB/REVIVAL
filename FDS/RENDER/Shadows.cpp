@@ -78,8 +78,8 @@ uint32_t g_shadowBakeGen = 0;
 
 // True only inside Render_DeferredShadowMaps_Dynamic's per-frame bake.
 // Inverts the Transform_Objects mesh filter (keep animated, skip static)
-// and routes MekaleleShadowDepth writes to sm.depth_dynamic / polyId_dynamic
-// instead of the static buffers.
+// and routes MekaleleShadowDepth writes to sm.packDyn instead of the
+// static plane.
 thread_local bool g_inDynamicShadowBake = false;
 
 // Per-frame depth pre-pass over every Omni_CastsShadow light. For each
@@ -163,13 +163,13 @@ bool Shadow_MaterialSkipsCasting(const Material *m) {
 }
 
 
-// [experiment: --shadow-swizzle] Re-tile one map's freshly-baked planes into
-// the 8×8-tiled *Sw copies (see ShadowSwzOffset). dynPlanes selects which pair
-// this bake wrote: static (depth/polyId — StaticOnce + DynOmnis) or dynamic
-// (depth_dynamic/polyId_dynamic — DynMeshes). Linear planes stay the source
-// of truth; this is a derived copy. Row-of-tile copies are 8×u16 = 16 B →
-// one 128-bit load/store each; the pass is pure memory traffic, which is
-// exactly the cost the experiment wants to weigh against the PCF read gain.
+// [experiment: --shadow-swizzle] Re-tile one map's freshly-baked plane into
+// the 8×8-tiled *Sw copy (see ShadowSwzOffset). dynPlanes selects which plane
+// this bake wrote: static (packSD — StaticOnce + DynOmnis) or dynamic
+// (packDyn — DynMeshes). Linear planes stay the source of truth; this is a
+// derived copy. Row-of-tile copies are 8×u32 = 32 B → one 256-bit
+// load/store each; the pass is pure memory traffic, which is exactly the
+// cost the experiment wants to weigh against the PCF read gain.
 static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 {
 	const ShadowSwzShape &shp = ShadowSwzGetShape();
@@ -178,52 +178,24 @@ static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 	const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
 	const int trs = (sm.yres + shp.maskY) >> shp.b;
 	const size_t n = size_t(tpr) * size_t(trs) * size_t(tileSz);
-	auto tile = [&](const std::vector<uint16_t> &src, std::vector<uint16_t> &dst) {
+	auto tile = [&](const std::vector<uint32_t> &src, std::vector<uint32_t> &dst) {
 		if (src.empty()) { dst.clear(); return; }
-		if (dst.size() != n) dst.assign(n, 0);   // zero pad = "unwritten" sentinel
-		const uint16_t *s = src.data();
-		uint16_t *d = dst.data();
+		if (dst.size() != n) dst.assign(n, 0u);  // zero pad = "unwritten" sentinel
+		const uint32_t *s = src.data();
+		uint32_t *d = dst.data();
 		for (int y = 0; y < sm.yres; ++y) {
-			const uint16_t *srow = s + size_t(y) * size_t(sm.xres);
+			const uint32_t *srow = s + size_t(y) * size_t(sm.xres);
 			// row-of-tile runs: tw consecutive texels per tile share y.
-			uint16_t *drow = d + (size_t(y >> shp.b) * size_t(tpr)) * size_t(tileSz)
+			uint32_t *drow = d + (size_t(y >> shp.b) * size_t(tpr)) * size_t(tileSz)
 			                   + (size_t(y & shp.maskY) << shp.a);
 			int x = 0;
 			for (int t = 0; t < tpr; ++t, x += tw)
 				std::memcpy(drow + size_t(t) * size_t(tileSz), srow + x,
-				            size_t(std::min(tw, sm.xres - x)) * sizeof(uint16_t));
+				            size_t(std::min(tw, sm.xres - x)) * sizeof(uint32_t));
 		}
 	};
-	if (dynPlanes) { tile(sm.depth_dynamic, sm.depthDynSw); tile(sm.polyId_dynamic, sm.polyIdDynSw); }
-	else           { tile(sm.depth,         sm.depthSw);    tile(sm.polyId,         sm.polyIdSw);    }
-}
-
-// [experiment: --shadow_plane_pack] Pair-interleave one map's freshly-baked
-// planes into the packed u32 copies (see ShadowMap::packSD / packDyn).
-// dynPlanes selects which pair this bake wrote, exactly as the swizzle above.
-// Pure memory traffic, which is the cost the experiment weighs against the
-// halved line count of the tap.
-static void ShadowMap_PackPlanes(ShadowMap &sm, bool dynPlanes)
-{
-	auto pack = [&](const std::vector<uint16_t> &z, const std::vector<uint16_t> &id,
-	                std::vector<uint32_t> &dst) {
-		if (z.empty() || id.size() != z.size()) { dst.clear(); return; }
-		const size_t n = z.size();
-		if (dst.size() != n) dst.assign(n, 0u);
-		const uint16_t *zs = z.data();
-		const uint16_t *is = id.data();
-		uint32_t *d = dst.data();
-		for (size_t i = 0; i < n; ++i)
-			d[i] = uint32_t(zs[i]) | (uint32_t(is[i]) << 16);
-	};
-	if (dynPlanes) pack(sm.depth_dynamic, sm.polyId_dynamic, sm.packDyn);
-	else           pack(sm.depth,         sm.polyId,         sm.packSD);
-	// One-shot proof of engagement: without this a "no change" result is
-	// indistinguishable from "the packed path never ran".
-	static std::atomic<int> sLogged{0};
-	if (sLogged.fetch_add(1) == 0)
-		std::fprintf(stderr, "[SHADOW-PACK] engaged: first map %dx%d, packSD=%zu packDyn=%zu u32\n",
-		             sm.xres, sm.yres, sm.packSD.size(), sm.packDyn.size());
+	if (dynPlanes) tile(sm.packDyn, sm.packDynSw);
+	else           tile(sm.packSD,  sm.packSDSw);
 }
 
 void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
@@ -469,24 +441,23 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		fds::CameraContext *const ctxPtr = J.ctx;
 		fds::FaceListContext *const facesPtr = J.faces;
 		fds::VertexScratch *const scratchPtr = J.scratch;
-				// Clear THIS light's depth/polyId planes here, on the
-				// worker, instead of serially on the tick thread while
-				// building the job list. The clear is per-map private
-				// (nothing else touches smPtr's planes until phase B,
-				// which is behind the shadowDone barrier), so moving it
-				// inside the phase-A task is order-equivalent and spreads
-				// ~res^2*3 bytes per enqueued map across the pool instead
+				// Clear THIS light's packed plane here, on the worker,
+				// instead of serially on the tick thread while building
+				// the job list. The clear is per-map private (nothing
+				// else touches smPtr's planes until phase B, which is
+				// behind the shadowDone barrier), so moving it inside the
+				// phase-A task is order-equivalent and spreads
+				// ~res^2*4 bytes per enqueued map across the pool instead
 				// of paying it single-threaded. Buffer CONTENTS are
-				// identical either way.
+				// identical either way. One packed plane = ONE fill pass;
+				// the two-array layout needed two over the same bytes.
 #ifdef FDS_SHADOW_CLEAR_CENSUS
 				const auto tClr0 = clk::now();
 #endif
 				if (dynBakeForLambda) {
-					std::fill(smPtr->depth_dynamic.begin(),  smPtr->depth_dynamic.end(),  uint16_t(0));
-					std::fill(smPtr->polyId_dynamic.begin(), smPtr->polyId_dynamic.end(), uint8_t(0));
+					std::fill(smPtr->packDyn.begin(), smPtr->packDyn.end(), uint32_t(0));
 				} else {
-					std::fill(smPtr->depth.begin(),  smPtr->depth.end(),  uint16_t(0));
-					std::fill(smPtr->polyId.begin(), smPtr->polyId.end(), uint8_t(0));
+					std::fill(smPtr->packSD.begin(),  smPtr->packSD.end(),  uint32_t(0));
 				}
 #ifdef FDS_SHADOW_CLEAR_CENSUS
 				g_shadowClearCoreUs.fetch_add(
@@ -909,8 +880,6 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	// [experiment: --shadow-swizzle] maps this bake writes → re-tiled after
 	// the raster drain (see below). Filled by the same Phase-B filter.
 	const bool sSwz = fds::FeatureFlags::shadow_swizzle();
-	// [experiment: --shadow_plane_pack] shares the same post-drain map list.
-	const bool sPack = fds::FeatureFlags::shadow_plane_pack();
 	std::vector<size_t> swzMaps;
 	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
 		ShadowMap& sm = g_shadowMaps[lightIdx];
@@ -949,7 +918,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		const int rawTY = (sm.yres + numTY - 1) / numTY;
 		const int tileSizeX = rawTX & ~7;
 		const int tileSizeY = rawTY & ~7;
-		if (sSwz || sPack) swzMaps.push_back(lightIdx);
+		if (sSwz) swzMaps.push_back(lightIdx);
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
@@ -988,16 +957,16 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 			if (!O || !(O->Flags & Omni_Active)) continue;
 			const bool isStaticP = (O->Flags & Omni_StaticShadow) != 0;
 			if (isStaticP != wantStaticOmnis) continue;
-			const auto &buf = writeDynamicBuf ? sm.depth_dynamic : sm.depth;
+			const auto &buf = writeDynamicBuf ? sm.packDyn : sm.packSD;
 			std::array<int,16> occ{};
 			const int tw = sm.xres / 4, th = sm.yres / 4;
 			for (int ty = 0; ty < 4; ++ty)
 				for (int tx = 0; tx < 4; ++tx) {
 					int n = 0;
 					for (int y = ty*th; y < (ty+1)*th; y += 4) {
-						const uint16_t *row = buf.data() + size_t(y)*sm.xres;
+						const uint32_t *row = buf.data() + size_t(y)*sm.xres;
 						for (int x = tx*tw; x < (tx+1)*tw; x += 4)
-							if (row[x]) ++n;
+							if (ShadowTexZ(row[x])) ++n;
 					}
 					occ[ty*4+tx] = n;
 				}
@@ -1016,12 +985,12 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 			// prev/now PGMs of the first two changes for texel diffing.
 			{
 				static std::vector<uint64_t> sHash;
-				static std::vector<uint16_t> sPrevBuf;
+				static std::vector<uint32_t> sPrevBuf;
 				if (sHash.size() != g_shadowMaps.size())
 					sHash.assign(g_shadowMaps.size(), 0);
 				uint64_t h = 0xcbf29ce484222325ull;
 				const uint8_t *bp = (const uint8_t*)buf.data();
-				for (size_t k = 0; k < buf.size() * 2; k += 7) {
+				for (size_t k = 0; k < buf.size() * 4; k += 7) {
 					h ^= bp[k]; h *= 0x100000001b3ull;
 				}
 				const char *dl = std::getenv("FDS_SHADOW_DUMP_LIGHT");
@@ -1042,7 +1011,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 								    li, dumpN, which ? "now" : "prev");
 								FILE *fp = std::fopen(fn, "wb");
 								if (fp) {
-									std::fwrite(b2.data(), 2, b2.size(), fp);
+									std::fwrite(b2.data(), 4, b2.size(), fp);
 									std::fclose(fp);
 								}
 							}
@@ -1067,28 +1036,17 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	// get a dynamic-plane bake, so also build their (all-zero) dynamic copies
 	// once — the cube tap only switches a map to the tiled path when all the
 	// planes it needs are tiled.
-	if ((sSwz || sPack) && !swzMaps.empty()) {
+	if (sSwz && !swzMaps.empty()) {
 		const auto tSwzStart = clk::now();
 		{
 			const size_t *maps = swzMaps.data();
 			const bool dynPl = writeDynamicBuf;
-			const bool doSwz = sSwz, doPack = sPack;
 			dispatchIndexed(int(swzMaps.size()), &renderns::shadowDone,
-			                [maps, dynPl, doSwz, doPack](int k) {
+			                [maps, dynPl](int k) {
 				ShadowMap *smp = &g_shadowMaps[maps[k]];
-				if (doSwz) {
-					ShadowMap_SwizzlePlanes(*smp, dynPl);
-					if (!dynPl && smp->depthDynSw.empty())
-						ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
-				}
-				if (doPack) {
-					ShadowMap_PackPlanes(*smp, dynPl);
-					// A map whose dynamic planes are never baked (moving
-					// omnis) still needs its (all-zero) dynamic pack, because
-					// the packed tap reads packDyn unconditionally.
-					if (!dynPl && smp->packDyn.empty())
-						ShadowMap_PackPlanes(*smp, true);
-				}
+				ShadowMap_SwizzlePlanes(*smp, dynPl);
+				if (!dynPl && smp->packDynSw.empty())
+					ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
 			});
 		}
 		for (size_t k = 0; k < swzMaps.size(); ++k) renderns::shadowDone.acquire();
@@ -1227,11 +1185,11 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 			FILE *f = std::fopen(path, "wb");
 			if (!f) continue;
 			std::fprintf(f, "P5\n%d %d\n255\n", sm.xres, sm.yres);
-			for (uint16_t e : sm.depth) {
-				// e in [0..0xFFFF]; 0 = empty, 0xFFFF = closest. Scale
+			for (uint32_t t : sm.packSD) {
+				// z in [0..0xFFFF]; 0 = empty, 0xFFFF = closest. Scale
 				// to 0..255 for the PGM viewer. Empty/background pixels
 				// render as black.
-				uint8_t b = uint8_t(e >> 8);
+				uint8_t b = uint8_t(ShadowTexZ(t) >> 8);
 				std::fwrite(&b, 1, 1, f);
 			}
 			std::fclose(f);

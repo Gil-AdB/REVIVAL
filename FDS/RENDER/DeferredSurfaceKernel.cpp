@@ -633,7 +633,8 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 			const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
 			if (iX >= 0 && iX < sm.xres && iY >= 0 && iY < sm.yres) {
 				const size_t o = size_t(iY) * size_t(sm.xres) + size_t(iX);
-				const uint16_t zS = std::max(sm.depth[o], sm.depth_dynamic[o]);
+				const uint16_t zS = std::max(ShadowTexZ(sm.packSD[o]),
+				                             ShadowTexZ(sm.packDyn[o]));
 				int pixZ = 0xFF80 - int(lz * sm.zScale);
 				if (pixZ < 0) pixZ = 0;
 				if (clampBounce) {
@@ -699,10 +700,9 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 				// to linear when the tiled copies aren't built — both layouts
 				// hold identical values.
 				const bool swz = fds::FeatureFlags::shadow_swizzle()
-				              && !sm.depthSw.empty() && !sm.depthDynSw.empty()
-				              && !sm.polyIdSw.empty();
+				              && !sm.packSDSw.empty() && !sm.packDynSw.empty();
 				size_t o00, o10, o01, o11;
-				const uint16_t *zsB, *zdB, *idB;
+				const uint32_t *psB, *pdB;
 				if (swz) {
 					const ShadowSwzShape &shp = ShadowSwzGetShape();
 					const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
@@ -710,28 +710,27 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 					o10 = ShadowSwzOffset(iX + 1, iY,     tpr, shp);
 					o01 = ShadowSwzOffset(iX,     iY + 1, tpr, shp);
 					o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr, shp);
-					zsB = sm.depthSw.data(); zdB = sm.depthDynSw.data();
-					idB = sm.polyIdSw.data();
+					psB = sm.packSDSw.data(); pdB = sm.packDynSw.data();
 				} else {
 					const size_t rowOfs = size_t(iY) * size_t(sm.xres);
 					o00 = rowOfs + size_t(iX);   o10 = o00 + 1;
 					o01 = o00 + size_t(sm.xres); o11 = o01 + 1;
-					zsB = sm.depth.data(); zdB = sm.depth_dynamic.data();
-					idB = sm.polyId.data();
+					psB = sm.packSD.data(); pdB = sm.packDyn.data();
 				}
-				// Per-tap closest-occluder. Static buffer holds the once-baked
+				// Per-tap closest-occluder. Static plane holds the once-baked
 				// statics; dynamic holds animated meshes (zero when off).
-				// max() wins on whichever caster is closer.
-				const uint16_t z00 = std::max(zsB[o00], zdB[o00]);
-				const uint16_t z10 = std::max(zsB[o10], zdB[o10]);
-				const uint16_t z01 = std::max(zsB[o01], zdB[o01]);
-				const uint16_t z11 = std::max(zsB[o11], zdB[o11]);
+				// max() wins on whichever caster is closer. One 32-bit load
+				// per texel per plane yields both halves.
+				const uint16_t z00 = std::max(ShadowTexZ(psB[o00]), ShadowTexZ(pdB[o00]));
+				const uint16_t z10 = std::max(ShadowTexZ(psB[o10]), ShadowTexZ(pdB[o10]));
+				const uint16_t z01 = std::max(ShadowTexZ(psB[o01]), ShadowTexZ(pdB[o01]));
+				const uint16_t z11 = std::max(ShadowTexZ(psB[o11]), ShadowTexZ(pdB[o11]));
 				if (profShadowCache) {
 					// One PCF check = one tracked sample. Use the (00) tap's
 					// cache-line address — adjacent shadow checks on the same
 					// thread that share this line are hits.
 					const uintptr_t line =
-						reinterpret_cast<uintptr_t>(&zsB[o00]) >> 6;
+						reinterpret_cast<uintptr_t>(&psB[o00]) >> 6;
 					if (s_shadowProfLastLine != line) {
 						g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
 						s_shadowProfLastLine = line;
@@ -756,10 +755,14 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 					// comparison uses the same offset, and 0 stays as the
 					// "no occluder" sentinel.
 					const uint16_t surfaceId = uint16_t(surfaceShadowId);
-					if (idB[o00] != surfaceId && idB[o00] != 0) occ += w00;
-					if (idB[o10] != surfaceId && idB[o10] != 0) occ += w10;
-					if (idB[o01] != surfaceId && idB[o01] != 0) occ += w01;
-					if (idB[o11] != surfaceId && idB[o11] != 0) occ += w11;
+					const uint16_t i00 = ShadowTexId(psB[o00]);
+					const uint16_t i10 = ShadowTexId(psB[o10]);
+					const uint16_t i01 = ShadowTexId(psB[o01]);
+					const uint16_t i11 = ShadowTexId(psB[o11]);
+					if (i00 != surfaceId && i00 != 0) occ += w00;
+					if (i10 != surfaceId && i10 != 0) occ += w10;
+					if (i01 != surfaceId && i01 != 0) occ += w01;
+					if (i11 != surfaceId && i11 != 0) occ += w11;
 				} else {
 					int pixZenc = 0xFF80 - int(lz * sm.zScale);
 					if (pixZenc < 0) pixZenc = 0;
@@ -1644,7 +1647,6 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	    /*lightmapRecomputeBary*/ fds::FeatureFlags::shadow_lightmap_recompute_at_bary(),
 	    /*profNoCubeTap        */ fds::FeatureFlags::prof_no_cube_tap(),
 	    /*shadowMode           */ g_shadowMode.load(std::memory_order_relaxed),
-	    /*planePack            */ fds::FeatureFlags::shadow_plane_pack(),
 	};
 
 	// [DIAG] FDS_CONTRIB_CULL: per-light MAX linear diffuse contribution over this

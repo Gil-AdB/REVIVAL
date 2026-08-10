@@ -833,7 +833,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     float sm_m20=0, sm_m21=0, sm_m22=0, sm_oz=0;
                     float sm_cntrX=0, sm_cntrY=0, sm_perspX=0, sm_perspY=0;
                     float sm_zScale=0;
-                    const uint16_t *sm_depth = nullptr;
+                    const uint32_t *sm_pack = nullptr;
                     int sm_xres=0, sm_yres=0;
                     if (sm) {
                         sm_m00=sm->viewToLight[0][0]; sm_m01=sm->viewToLight[0][1]; sm_m02=sm->viewToLight[0][2]; sm_ox=sm->viewToLightOffset.x;
@@ -842,7 +842,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         sm_cntrX=sm->cntrX; sm_cntrY=sm->cntrY;
                         sm_perspX=sm->perspX; sm_perspY=sm->perspY;
                         sm_zScale=sm->zScale;
-                        sm_depth=sm->depth.data();
+                        sm_pack=sm->packSD.data();
                         sm_xres=sm->xres; sm_yres=sm->yres;
                     }
 
@@ -1068,7 +1068,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                             uint32_t(iY) >= uint32_t(sm_yres)) continue;
                                         const size_t o2 = size_t(iY) * size_t(sm_xres) + size_t(iX);
                                         const uint16_t zS = std::max(
-                                            sm->depth[o2], sm->depth_dynamic[o2]);
+                                            ShadowTexZ(sm->packSD[o2]),
+                                            ShadowTexZ(sm->packDyn[o2]));
                                         int pixZ = 0xFF80 - int(lz * sm_zScale);
                                         if (pixZ < 0) pixZ = 0;
                                         if (pixZ + 128 < int(zS)) shA[ln] = 0.0f;
@@ -1249,8 +1250,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 if (pixZ < 0) pixZ = 0;
                                 if (pixZ > 0xFFFF) pixZ = 0xFFFF;
                                 const int biased = pixZ + 128;
-                                const uint16_t shadowZ =
-                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                const uint16_t shadowZ = ShadowTexZ(
+                                    sm_pack[size_t(iY) * size_t(sm_xres) + size_t(iX)]);
                                 if (biased < int(shadowZ)) shadowMul_s[lane] = 0.0f;
                             }
                             const __m256 vShad_s = _mm256_load_ps(shadowMul_s);
@@ -1354,8 +1355,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 if (pixZ < 0) pixZ = 0;
                                 if (pixZ > 0xFFFF) pixZ = 0xFFFF;
                                 const int biased = pixZ + 128;
-                                const uint16_t shadowZ =
-                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                const uint16_t shadowZ = ShadowTexZ(
+                                    sm_pack[size_t(iY) * size_t(sm_xres) + size_t(iX)]);
                                 if (biased < int(shadowZ)) shadowMul[lane] = 0.0f;
                             }
                             const __m256 vShad = _mm256_load_ps(shadowMul);
@@ -1635,7 +1636,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 float sm_m20=0, sm_m21=0, sm_m22=0, sm_oz=0;
                 float sm_cntrX=0, sm_cntrY=0, sm_perspX=0, sm_perspY=0;
                 float sm_zScale=0;
-                const uint16_t *sm_depth = nullptr;
+                const uint32_t *sm_pack = nullptr;
                 int sm_xres=0, sm_yres=0;
                 if (sm) {
                     sm_m00=sm->viewToLight[0][0]; sm_m01=sm->viewToLight[0][1]; sm_m02=sm->viewToLight[0][2]; sm_ox=sm->viewToLightOffset.x;
@@ -1644,7 +1645,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     sm_cntrX=sm->cntrX; sm_cntrY=sm->cntrY;
                     sm_perspX=sm->perspX; sm_perspY=sm->perspY;
                     sm_zScale=sm->zScale;
-                    sm_depth=sm->depth.data();
+                    sm_pack=sm->packSD.data();
                     sm_xres=sm->xres; sm_yres=sm->yres;
                 }
                 const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
@@ -1705,8 +1706,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 if (pixZ < 0) pixZ = 0;
                                 if (pixZ > 0xFFFF) pixZ = 0xFFFF;
                                 const int biased = pixZ + 128;
-                                const uint16_t shadowZ =
-                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                const uint16_t shadowZ = ShadowTexZ(
+                                    sm_pack[size_t(iY) * size_t(sm_xres) + size_t(iX)]);
                                 if (biased < int(shadowZ)) continue;  // shadowed
                             }
                         }
