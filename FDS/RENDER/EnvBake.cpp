@@ -608,6 +608,7 @@ struct SceneEnv {
     uint32_t dynFrame = 0;
     uint32_t statFrom = 0;
     double   statMs = 0.0;
+
 };
 std::map<Scene*, SceneEnv> g_envByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
@@ -932,10 +933,19 @@ inline float faceAreaAndCentroid(const TriMesh* T, const Face& F, Vector& c) {
     return 0.5f * std::sqrt(nx * nx + ny * ny + nz * nz);
 }
 
+// areaModeOverride: -1 (default) = read --env_probe_center, 0/1 = force the
+// legacy vertex-mean / the area+instance-union derivation regardless of the
+// flag. The AUTO-CENTER button (EnvReflection_AutoCenterOffset) needs BOTH
+// answers in one frame to compute their difference, and a probe query must
+// not be able to move a rendered pixel, so `quiet` also silences the two
+// per-call [ENVREFL] lines — a query is not a bake.
 bool materialCentroid(Scene* sc, const Material* M, Vector& out,
-                      float* excludeRadius = nullptr) {
+                      float* excludeRadius = nullptr,
+                      int areaModeOverride = -1, bool quiet = false) {
     if (excludeRadius) *excludeRadius = 0.0f;
-    const bool areaMode = fds::FeatureFlags::env_probe_center();
+    const bool areaMode = areaModeOverride >= 0
+                        ? (areaModeOverride != 0)
+                        : fds::FeatureFlags::env_probe_center();
     // Mirror-clone meshes reference the ORIGINAL materials — without this
     // skip the instance clustering below counts the mirrored copies as
     // extra instances and can put the probe in the mirrored half-space
@@ -1071,6 +1081,7 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                 }
                 if (gw > 0.0) {
                     out = { float(gx / gw), float(gy / gw), float(gz / gw) };
+                    if (!quiet)
                     std::fprintf(stderr, "[ENVREFL] '%s': --env_probe_center — %zu of"
                         " %zu cluster(s) are ONE instance (%ld verts, area %.1f);"
                         " capture point at their AREA centroid (%.1f %.1f %.1f)\n",
@@ -1105,12 +1116,13 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                 if (nearFar2 < 1e30f)
                     *excludeRadius = 0.45f * std::sqrt(nearFar2);
             }
+            if (!quiet)
             std::fprintf(stderr, "[ENVREFL] '%s': %zu instance clusters — probe at the"
                 " largest (%.1f %.1f %.1f), self-exclusion radius %.1f (0 = whole"
                 " surface); use split-instances for per-instance probes\n",
                 M->Name ? M->Name : "?", cls.size(), out.x, out.y, out.z,
                 excludeRadius ? *excludeRadius : 0.0f);
-            if (std::getenv("ENVDBG"))
+            if (!quiet && std::getenv("ENVDBG"))
                 for (size_t ci = 0; ci < cls.size(); ++ci)
                     std::fprintf(stderr, "[ENVDBG]   '%s' cluster %zu: n=%ld centroid"
                         " (%.1f %.1f %.1f)%s\n", M->Name ? M->Name : "?", ci,
@@ -1404,6 +1416,7 @@ bool EnvReflection_FramePrep(Scene* sc) {
         Vector c;
         float excludeR = 0.0f;
         if (!materialCentroid(sc, M, c, &excludeR)) { env.byMat[M] = -1; continue; }
+        sceneAABB(sc, env);
         // Authored per-surface capture-point offset (Material::EnvBakeOfs,
         // the editor's "probe offset"). Applied on TOP of whichever
         // derivation ran, so the two compose and the authored value always
@@ -1417,13 +1430,50 @@ bool EnvReflection_FramePrep(Scene* sc) {
                 c.x, c.y, c.z, c.x + M->EnvBakeOfs[0], c.y + M->EnvBakeOfs[1],
                 c.z + M->EnvBakeOfs[2]);
             c.x += M->EnvBakeOfs[0]; c.y += M->EnvBakeOfs[1]; c.z += M->EnvBakeOfs[2];
+            // ── "the bake got borked" ─────────────────────────────────────
+            // The offset itself is never wrong — it is three floats added to
+            // a point, and the sign is carried correctly by every stage (the
+            // editor box, the RVSF write/read, the FLD, this add). What GOES
+            // wrong is where the point LANDS. A derived capture point sits on
+            // the reflector, and a reflector usually sits on the floor, so
+            // there is far less room BELOW it than above: on greets 'stairs'
+            // the point is at y=2.3 with the room floor at y=0, and any
+            // downward offset past 2.3 puts the camera UNDER THE WORLD. The
+            // resulting cube is not corrupt, it is a faithful photograph of
+            // the outside of the level — the -Y face comes back 100% clear
+            // colour and +Y is the underside of the floor. That reads as
+            // "the bake got borked" and is impossible to diagnose from the
+            // picture, so SAY IT, on the frame it happens, naming the axis
+            // and the distance. stderr only; nothing rendered changes.
+            const float lo[3] = { env.boxMin[0], env.boxMin[1], env.boxMin[2] };
+            const float hi[3] = { env.boxMax[0], env.boxMax[1], env.boxMax[2] };
+            const float p[3]  = { c.x, c.y, c.z };
+            static const char* kAx = "XYZ";
+            char why[192]; size_t wp = 0;
+            for (int a = 0; a < 3 && env.boxValid; ++a) {
+                float d = 0.0f;
+                if (p[a] < lo[a]) d = lo[a] - p[a];
+                else if (p[a] > hi[a]) d = p[a] - hi[a];
+                if (d > 0.0f && wp + 40 < sizeof why)
+                    wp += size_t(std::snprintf(why + wp, sizeof why - wp,
+                        "%s%c by %.2f u (scene %c is %.1f..%.1f)", wp ? ", " : "",
+                        kAx[a], double(d), kAx[a], double(lo[a]), double(hi[a])));
+            }
+            if (wp)
+                std::fprintf(stderr, "[ENVREFL] WARNING: '%s' probe offset puts "
+                    "the capture point OUTSIDE the scene bounds — %s. The bake "
+                    "will succeed and look empty/black: the camera is outside "
+                    "the level looking in, so faces pointing away come back as "
+                    "flat clear colour. This is a BAD VIEWPOINT, not a corrupt "
+                    "bake — shrink the offset (a probe derived on the floor has "
+                    "much less room below it than above).\n",
+                    M->Name ? M->Name : "?", why);
         }
         if (std::getenv("ENVDBG"))
             std::fprintf(stderr, "[ENVDBG] mat '%s' id=%u refl=%.0f metal=%d envDyn=%d reflMode=%d effMode=%d centroid (%.1f %.1f %.1f)\n",
                          M->Name ? M->Name : "?", (unsigned)M->ID, M->Reflection, M->MetallicMap ? 1 : 0,
                          (int)M->EnvDynamic, (int)M->EnvReflMode, envEffModeFor(M),
                          c.x, c.y, c.z);
-        sceneAABB(sc, env);
         // Per-surface face-res wish (Material::EnvBakeRes, else the explicit
         // global env_bake_res; 0 = legacy sizing inside bakeStore). Cap it to
         // the editor/wasm ceiling BEFORE the largest-wins comparison below:
@@ -3190,6 +3240,39 @@ bool SHAmbient_EnsureBaked(Scene* sc) {
                  " %.0f/%.0f/%.0f)\n", center.x, center.y, center.z, res,
                  p.c[0], p.c[9], p.c[18],
                  (double)sc->Ambient.B, (double)sc->Ambient.G, (double)sc->Ambient.R);
+    return true;
+}
+
+// ── THE AUTO-CENTER BUTTON ────────────────────────────────────────────────
+// out = (--env_probe_center's corrected point) - (the point the derivation
+// that is ACTUALLY RUNNING right now produces). Written into
+// Material::EnvBakeOfs — which the bake adds on top of whichever derivation
+// ran — that difference lands the capture point on the corrected point in
+// BOTH flag states, which is the whole reason it is a difference and not the
+// corrected point itself: with --env_probe_center already on, the two
+// derivations agree and the button correctly writes (0,0,0).
+//
+// It DELIBERATELY does not read the live store's bake point. The store may be
+// shared, may have been baked at a different flag state, and may not exist
+// yet; the geometry is the ground truth in every one of those cases.
+bool EnvReflection_AutoCenterOffset(Scene* sc, const Material* M, float out[3]) {
+    if (!sc || !M || !out) return false;
+    Vector corrected, active;
+    if (!materialCentroid(sc, M, corrected, nullptr, /*areaMode=*/1, /*quiet=*/true))
+        return false;
+    if (!materialCentroid(sc, M, active,    nullptr, /*areaMode=*/-1, /*quiet=*/true))
+        return false;
+    out[0] = corrected.x - active.x;
+    out[1] = corrected.y - active.y;
+    out[2] = corrected.z - active.z;
+    std::fprintf(stderr, "[ENVREFL] '%s': auto-center — active derivation "
+        "(%.2f %.2f %.2f), corrected (%.2f %.2f %.2f) -> probe offset "
+        "(%+.2f %+.2f %+.2f)%s\n", M->Name ? M->Name : "?",
+        active.x, active.y, active.z, corrected.x, corrected.y, corrected.z,
+        out[0], out[1], out[2],
+        fds::FeatureFlags::env_probe_center()
+            ? "  (--env_probe_center is ON, so the derivation already lands there)"
+            : "");
     return true;
 }
 

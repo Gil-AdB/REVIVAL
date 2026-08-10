@@ -150,6 +150,23 @@ void EnvReflection_Invalidate(Scene* sc);
 // re-bakes — the "metallic has no effect" fix is preserved.
 void EnvReflection_InvalidateSurface(Scene* sc, const Material* M);
 
+// ── THE "AUTO-CENTER" BUTTON (editor Surface panel, beside "probe offset") ──
+// Fill out[3] with the offset that moves M's probe from the point the
+// CURRENTLY ACTIVE derivation produces to the --env_probe_center CORRECTED
+// one, i.e. out = corrected - active. Both points come from the same
+// materialCentroid, called twice with the area/instance-union mode forced on
+// and forced to the live flag state, so the answer COMPOSES: written into
+// Material::EnvBakeOfs (which the bake adds on top of whichever derivation
+// ran) it lands the capture point on the corrected point whether
+// --env_probe_center is on (out = 0, nothing to fix) or off. Returns false
+// when M has no faces (no centroid to derive) — out is then untouched.
+//
+// Reads geometry only; bakes nothing and drops nothing. The caller (the
+// editor button) writes the three floats through the normal envBakeOfs*
+// property path, which is what triggers the targeted store drop + re-bake and
+// what persists them in the LWO RVSF sub-chunk (bit 0x1000).
+bool EnvReflection_AutoCenterOffset(Scene* sc, const Material* M, float out[3]);
+
 // --env_refl_viz=N: blit the Nth (1-based) baked panorama's mip 0 over the
 // frame's top-right corner (downscaled to fit) — post-tonemap debug viewer.
 // N beyond the store count clamps to the last one; 0 = off (no-op).

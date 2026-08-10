@@ -526,6 +526,53 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	return any;
 }
 
+// ── "auto-center" (the button beside the probe-offset boxes) ───────────────
+// One click instead of three number boxes and arithmetic. The offset written
+// is a DIFFERENCE — corrected point minus the point the derivation that is
+// actually running produces — which is what makes it compose with the global
+// --env_probe_center knob instead of fighting it: flag off, it carries the
+// whole correction; flag on, the derivation already lands there and the button
+// writes (0,0,0), i.e. "nothing to fix", rather than applying the correction a
+// second time. Everything downstream is the EXISTING path: the three
+// Editor_SetSurfaceProp calls drop the store (targeted, not whole-scene) so
+// the probe re-bakes from the new point on the next frame, and Save persists
+// them through LWO RVSF bit 0x1000 with no format change at all.
+std::string Editor_AutoCenterProbe(const char* surface)
+{
+	if (!surface || !*surface || !CurScene)
+		return "{\"ok\":0,\"why\":\"no surface / no scene\"}";
+	// Derive from the BASE material (Name == the surface name), falling back to
+	// the first name-matching material: a ::mirUV clone has its own geometry and
+	// its own centroid, but envBakeOfs is a per-SURFACE value that every clone
+	// inherits, so the base material is the one that must define it.
+	Material* base = nullptr;
+	for (Material* M = MatLib; M; M = M->Next) {
+		if (M->RelScene != CurScene || !M->Name) continue;
+		if (Editor_BaseSurfName(M->Name) != surface) continue;
+		if (!base) base = M;
+		if (!std::strcmp(M->Name, surface)) { base = M; break; }
+	}
+	if (!base) return "{\"ok\":0,\"why\":\"no such surface in this scene\"}";
+	float ofs[3] = { 0.0f, 0.0f, 0.0f };
+	if (!fds::EnvReflection_AutoCenterOffset(CurScene, base, ofs))
+		return "{\"ok\":0,\"why\":\"no faces use this surface — no centroid to derive\"}";
+	// Through the ORDINARY property path: same setter, same targeted probe
+	// invalidate, same dirty marking, same Save. Three calls (one per
+	// component) is deliberate — it is exactly what typing in the three boxes
+	// does, so there is one code path to reason about. The 2nd and 3rd
+	// invalidates are no-ops (the store is already dropped).
+	static const char* kKey[3] = { "envBakeOfsX", "envBakeOfsY", "envBakeOfsZ" };
+	bool any = false;
+	for (int a = 0; a < 3; ++a)
+		if (Editor_SetSurfaceProp(surface, kKey[a], ofs[a])) any = true;
+	if (!any) return "{\"ok\":0,\"why\":\"property set rejected\"}";
+	char buf[512];
+	std::snprintf(buf, sizeof buf,
+	  "{\"ok\":1,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"from\":\"%s\"}",
+	  ofs[0], ofs[1], ofs[2], base->Name ? base->Name : surface);
+	return buf;
+}
+
 // LIVE per-surface smoothing-angle edit (slider drag). Registers the override
 // AND re-smooths the current mesh normals so the shading updates next frame —
 // the reason this exists separate from the generic setSurfaceProp path, which
@@ -2000,6 +2047,13 @@ bool js_editorSetSurfaceProp(std::string name, std::string key, float value)
 {
 	return rev::Editor_SetSurfaceProp(name.c_str(), key.c_str(), value);
 }
+// "auto-center" button beside the probe-offset boxes: writes the composed
+// correction through the same envBakeOfs* setter the boxes use and returns the
+// three floats as JSON so the panel can refresh them.
+std::string js_editorAutoCenterProbe(std::string name)
+{
+	return rev::Editor_AutoCenterProbe(name.c_str());
+}
 // Live normal re-smooth for the smoothAngle slider (register + re-smooth +
 // dirty). Save still persists via editorSetSurfaceProp/the sidecar.
 void js_editorSetSmoothAngleLive(std::string name, float angleDeg)
@@ -2312,6 +2366,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorGetSurfaces",    &js_editorGetSurfaces);
 	emscripten::function("editorGetObjects",     &js_editorGetObjects);
 	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
+	emscripten::function("editorAutoCenterProbe", &js_editorAutoCenterProbe);
 	emscripten::function("editorSetSmoothAngleLive", &js_editorSetSmoothAngleLive);
 	emscripten::function("editorImportTexture",  &js_editorImportTexture);
 	emscripten::function("editorClearMap",       &js_editorClearMap);

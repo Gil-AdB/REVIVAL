@@ -62,6 +62,22 @@ int Editor_SetObjectScale(const char *objName, float scale);
 // A successful edit marks the view dirty (see below).
 bool Editor_SetSurfaceProp(const char* name, const char* key, float value);
 
+// AUTO-CENTER the env probe of `surface` — the one-click button beside the
+// "probe offset X/Y/Z" boxes. Computes the offset that moves this probe's
+// capture point from wherever the CURRENTLY ACTIVE derivation puts it to the
+// --env_probe_center corrected point (area-weighted centroid over the whole
+// instance group), and writes it through the ordinary envBakeOfs* property
+// path — so it live re-bakes through the same targeted store drop the boxes
+// use, and persists through the same LWO RVSF bit 0x1000, unchanged. Because
+// it is a DIFFERENCE it composes: with --env_probe_center already on it
+// correctly writes (0,0,0) rather than double-applying the correction.
+//
+// Returns a JSON object the panel can read back into its three boxes:
+// {"ok":1,"x":..,"y":..,"z":..,"from":"<material>","active":[..],"corrected":[..]}
+// or {"ok":0,"why":"..."}. Derives from the BASE material of the surface; the
+// ::mirUV clone inherits the value, exactly as a hand-typed offset does.
+std::string Editor_AutoCenterProbe(const char* surface);
+
 // LIVE per-surface normal-smoothing-angle edit (0=faceted .. 180=fully smooth).
 // Registers the override (so it round-trips + persists on Save) AND re-smooths
 // the current mesh normals so the shading changes on the NEXT frame — no scene

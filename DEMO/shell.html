@@ -613,7 +613,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b76</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b77</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -724,7 +724,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b76";
+      var REV_BUILD = "b77";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -3118,16 +3118,52 @@
             var po = document.createElement('div'); po.className = 'prop-row';
             po.title = 'env-probe capture-point OFFSET for THIS surface, in world units, added to the point the engine derives from the surface geometry (the area centroid of its reflective footprint under the env_probe_center render knob, else the legacy vertex mean). Use it when the derived point sits somewhere the reflection should not be captured from — buried in a step, below a landing, off to one side. 0/0/0 = unset = pure derivation. Re-bakes the probe live; persists in the LWO RVSF sub-chunk (envBakeOfsX/Y/Z).';
             var pol = document.createElement('label'); pol.textContent = 'probe offset'; po.appendChild(pol);
+            var poBoxes = {};
             ['X','Y','Z'].forEach(function(ax){
               var k = 'envBakeOfs' + ax;
               var inp = document.createElement('input');
               inp.type = 'number'; inp.step = '0.25';
               inp.style.width = '46px';
-              inp.title = ax + ' offset (world units)';
+              inp.title = ax + ' offset (world units) — NEGATIVE values are fine (type "-2.5")';
               inp.value = (+s[k] || 0);
               inp.onchange = function(){ setProp(s.name, k, +inp.value || 0); };
+              poBoxes[ax] = inp;
               po.appendChild(inp);
             });
+            // AUTO-CENTER: one click instead of dialling the three boxes by
+            // eye. Asks the engine for the offset that moves THIS probe from
+            // wherever the derivation currently running puts it to the
+            // area-weighted, whole-instance corrected point (the
+            // --env_probe_center derivation), and writes it through the same
+            // three properties — so it re-bakes live and saves identically.
+            // Because it is a DIFFERENCE it composes with the global knob: with
+            // env_probe_center already ON it writes 0/0/0, which is the honest
+            // answer ("the derivation already lands there"), not a no-op bug.
+            var pab = document.createElement('button');
+            pab.textContent = 'auto';
+            pab.style.marginLeft = '4px';
+            pab.title = 'AUTO-CENTER this probe: compute the area-weighted centroid of the whole reflective instance (the --env_probe_center derivation) and set the offset boxes to the difference between it and the point the derivation currently running produces. Composes with the env_probe_center render knob — with the knob ON the difference is 0/0/0 because the derivation already lands there. Re-bakes the probe live and persists exactly like a hand-typed offset. Derived from the base surface; ::mirUV clones inherit it.';
+            pab.onclick = function(){
+              var r;
+              try { r = JSON.parse(Module.editorAutoCenterProbe(s.name)); }
+              catch(e){ editorStatus('auto-center failed: ' + e); return; }
+              if (!r || !r.ok) { editorStatus('auto-center: ' + ((r && r.why) || 'failed')); return; }
+              // Keep the JS model + the boxes in sync (the native call went
+              // through Editor_SetSurfaceProp directly, not through setProp).
+              var vals = { X: r.x, Y: r.y, Z: r.z };
+              editSurfNames(s.name).forEach(function(n){
+                var t = editorSurfaces.find(function(x){ return x.name === n; });
+                if (!t) return;
+                t.envBakeOfsX = r.x; t.envBakeOfsY = r.y; t.envBakeOfsZ = r.z;
+              });
+              ['X','Y','Z'].forEach(function(ax){ if (poBoxes[ax]) poBoxes[ax].value = vals[ax].toFixed(2); });
+              updateSaveButton();
+              editorStatus('auto-centered "' + s.name + '" probe offset -> ' +
+                           r.x.toFixed(2) + ' / ' + r.y.toFixed(2) + ' / ' + r.z.toFixed(2) +
+                           (r.x === 0 && r.y === 0 && r.z === 0
+                              ? '  (env_probe_center is on — derivation already centred)' : ''));
+            };
+            po.appendChild(pab);
             el.appendChild(po);
           }
         });

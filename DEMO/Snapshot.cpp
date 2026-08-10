@@ -480,6 +480,61 @@ static void RunUVTestHook() {
     std::fprintf(stderr, "[UVTEST] %s -> %s\n", surf, r.c_str());
 }
 
+// SURF_TEST=surface:key:value[;...] — exercise the RUNTIME surface-property
+// edit path (rev::Editor_SetSurfaceProp — the browser editor's number boxes /
+// checkboxes / selects) natively, headless. Same idiom and same purpose as
+// LIGHT_TEST above: the browser editor's own code, without the browser. Values
+// go through strtof, so NEGATIVES ('-2.5') and exponents parse. Needed because
+// the env-probe controls (envBakeOfs*, envRefl, envBakeRes, envDynamic) only
+// live-apply through this path — their invalidate + re-bake is invisible to the
+// CLI/init-time sidecar route.
+//
+// SURF_TEST_AFTER=N (default 0): hold the edits until N ticks have run, so the
+// probes are BAKED before the edit lands and the log shows the targeted
+// invalidate + re-bake rather than a first-time bake. Mirrors IMPORT_TEST_AFTER.
+//
+// Special key 'envBakeOfsAuto': no value — calls rev::Editor_AutoCenterProbe,
+// the "auto-center" button, so the button is testable headless too.
+static void RunSurfTestHook() {
+    const char *spec = std::getenv("SURF_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    static int calls = 0;
+    const char *afterEnv = std::getenv("SURF_TEST_AFTER");
+    const int after = afterEnv ? std::atoi(afterEnv) : 0;
+    if (calls++ < after) return;
+    done = true;
+    std::string all = spec, s;
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t semi = all.find(';', pos);
+        if (semi == std::string::npos) semi = all.size();
+        s = all.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (s.empty()) continue;
+        // Split from the RIGHT: surface names legitimately contain colons
+        // ("Hull.lwo::cockpit_upper", "stairs::mirUV"), so a left-to-right
+        // split cuts the surface name in half and silently edits nothing.
+        const size_t cLast = s.rfind(':');
+        if (cLast == std::string::npos) { std::fprintf(stderr, "[SURFTEST] want surface:key[:value]\n"); continue; }
+        if (s.compare(cLast + 1, std::string::npos, "envBakeOfsAuto") == 0) {
+            const std::string surf = s.substr(0, cLast);
+            const std::string r = rev::Editor_AutoCenterProbe(surf.c_str());
+            std::fprintf(stderr, "[SURFTEST] %s auto-center -> %s\n", surf.c_str(), r.c_str());
+            continue;
+        }
+        const size_t cKey = s.rfind(':', cLast - 1);
+        if (cKey == std::string::npos) { std::fprintf(stderr, "[SURFTEST] want surface:key:value\n"); continue; }
+        const std::string surf = s.substr(0, cKey);
+        const std::string key  = s.substr(cKey + 1, cLast - cKey - 1);
+        const float val = std::strtof(s.c_str() + cLast + 1, nullptr);
+        const bool ok = rev::Editor_SetSurfaceProp(surf.c_str(), key.c_str(), val);
+        std::fprintf(stderr, "[SURFTEST] %s %s = %g: %s\n", surf.c_str(), key.c_str(),
+                     (double)val, ok ? "ok" : "FAILED");
+    }
+}
+
 int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -571,6 +626,7 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         RunImportTestHook();
         RunLightTestHook();
         RunUVTestHook();
+        RunSurfTestHook();
 
         // FDS_DUMP_TXTR: arm the per-pixel parallax-UV recorder for this tick so
         // the rasterizer records where the march landed each covered pixel.
