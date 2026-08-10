@@ -1,5 +1,187 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-10 — `--shadow_lm_dynamic` IS A NO-OP, AND OPENING ITS GATE COSTS 1.7 ms FOR NO VISIBLE GAIN
+>
+> User: *"regarding `--shadow_lm_dynamic` — what would that give us? perf/looks/
+> neither? can you show me? and will a longer/more complex bake give better
+> results?"* **Answer: neither, because as shipped the flag does nothing at all;
+> and when its second gate is forced open the lightmap path is 1.7 ms/frame
+> SLOWER with a sub-visible look change that a richer bake cannot improve.**
+> All numbers below measured on an isolated worktree built at HEAD `7953bab`
+> (`/Users/gil-ad/work/rev-lmdyn`) so concurrent agents' uncommitted
+> `FDS/RENDER` work could not contaminate them; run against the main tree's
+> `Runtime/`. **No default was changed.**
+>
+> ### 1. THE FLAG IS INERT — THERE ARE TWO GATES AND IT ONLY OPENS ONE
+>
+> `--shadow_lm_dynamic` is **byte-identical to the shipping frame at all 18
+> poses** (the 16 of `docs/greets_review_poses.txt` + his two new ones,
+> `t=5967` / `t=5987`), **0 px, flat arm and `--greets_displace` arm alike**.
+> Not "look-neutral" — *inert*. The scene is fully deterministic here (two A-vs-A
+> reruns: 0 px), so 0 is a real zero.
+>
+> **The second gate is the G-buffer plane allocation, and greets closes it.**
+> `resolvePixelLightmap` (`DeferredShadowSampling.h:52`) returns null unless
+> `gb.lightmapMF` is non-empty, and that plane is allocated **only** by
+> `EngineGBuffer_Resize` (`Mekalele.cpp:85`) under `FeatureFlags::shadow_lightmap()`.
+> Greets sets `shadow_lightmap` in **`GreetsApplyRunDefaults`** (`GREETS.CPP:1228`),
+> which runs at `createGreetsScene` (`:4393`) — *after* every resize call site
+> (`Snapshot.cpp:153`, `SDL2.cpp:433` at boot, `ReproHarness.cpp:130`). So the
+> planes are never allocated, every pixel's `pl.lm` is null, and no value of
+> `shadow_lm_dynamic` can matter. **This is the same defect class as `mirror_rtt`,
+> fixed 90 lines away in `7953bab`.**
+>
+> **MEASURED, the positive control that proves it is the allocation and not
+> something else** (t=5743, one binary, only the flag set changes):
+>
+> | arm | vs shipping default |
+> |---|--:|
+> | `--shadow_lm_dynamic` | **0 px** |
+> | `--shadow_lm_dynamic --shadow_lightmap_texel_density=1` (atlas crippled 4.5x coarser) | **0 px** |
+> | `--shadow_lightmap` alone (planes allocated, `lmKernelEnabled` still false) | **0 px** |
+> | `--shadow_lightmap --shadow_lm_dynamic` | **868 274 px (41.87 %)** |
+>
+> A deliberately crippled atlas changing nothing is the proof the atlas is not
+> being read. Corroborated on the `--repro` (real per-frame) path: A-vs-B there
+> is 1 444 px against that harness's own **1 051 px** A-vs-A noise floor of
+> identical signature (all >32/255, mean |Δ| 124) — i.e. indistinguishable —
+> while A-vs-C is 870 433 px.
+>
+> **Consequence: `shadow_lightmap` is read by NOTHING after init.** Its only
+> readers are allocation sites (`Mekalele.cpp:85`, `GreetsMirror.cpp:3051`,
+> `MirrorShatter.cpp:655/940`) and `LightmapStampOrigBary` / `LightmapBake_Static`
+> (both force-enabled for greets). It is **not** a per-pixel sample gate — the
+> comment at `GREETS.CPP:1112-1117` justifying its run-phase placement ("it's the
+> per-pixel SAMPLE gate the deferred kernel reads for EVERY scene") is factually
+> wrong, and is what put it on the wrong side of the resize.
+>
+> ### 2. WITH THE GATE FORCED OPEN: PERF IS WORSE, NOT BETTER
+>
+> `--bench=scene@scene=greets,t=T,iters=20 --deferred_prof=1`, **min-of-6
+> interleaved**, run 1 after build discarded, load **9.8–11.6** throughout,
+> 1920×1080, 12 workers. Arm A = shipping default, arm C = `--shadow_lightmap
+> --shadow_lm_dynamic`.
+>
+> | | t=5743 | t=5780 | t=5814 |
+> |---|--:|--:|--:|
+> | frame ms A → C | 49.90 → **51.70** | 50.05 → **51.80** | 48.49 → **50.14** |
+> | **Δ frame** | **+1.80** | **+1.75** | **+1.65** |
+> | `gbuffer` wall (raster) | +0.17 | +0.23 | +0.22 |
+> | `gbuffer` thrsum (core-ms) | +3.52 | +1.94 | +3.41 |
+> | `lighting-w1` wall | +1.19 | +1.85 | +1.15 |
+> | `lighting-w1` thrsum (core-ms) | **+25.49** | +13.73 | +6.84 |
+> | `lighting-w2` wall | +0.02 | −0.02 | −0.02 |
+> | static bake ms | 55.1 / 54.9 | 54.3 / 55.6 | 54.2 / 54.7 |
+>
+> **Same sign at all three poses, on the two phases the mechanism predicts.**
+> The hypothesis under test — *"lm ON means cube taps only test movers
+> (dynamic-only tap = 2 cache lines not 4 since `af1f8f8`), so lighting should
+> get cheaper"* — **is refuted by measurement.** The saving is real but smaller
+> than what replaces it, and there are two costs, both visible in the table:
+> 1. **Raster:** the lightmap arm allocates and *writes* two extra G-buffer
+>    planes (`lightmapMF` u32 + `lightmapST` u16 = 6 B/px = 12.4 MB at 1080p)
+>    in Mekalele's hot loop → `gbuffer` +0.2 ms wall / +2–3.5 core-ms.
+> 2. **Lighting:** `sampleBilinearPlanar` costs *more* than the tap it replaces —
+>    a world-space projection onto the face's dominant cardinal plane, a bbox
+>    map, and a bilinear gather from a 0.09 GB atlas of per-face mini-atlases
+>    with far worse locality than the shadow cube — **and it still pays the
+>    dynamic-only tap** on every face where `dynBaked` is true.
+>
+> The flag's own doc already said "MEASURED NEUTRAL-to-NEGATIVE… planar sampler
+> +0.8 ms w1"; this is the same sign, roughly double the magnitude, and now with
+> the raster half attributed too.
+>
+> ### 3. LOOKS: SUB-VISIBLE, AND IT IS 95 % A ONE-LSB SHIFT
+>
+> Contact sheet, all 18 poses, before | after | diff:
+> `docs/img/fogwt/lmdyn_contactsheet.png`. Tight 4x crops at the four
+> highest-amplitude poses: `lmdyn_t5743_tight.png`, `lmdyn_t5773_tight.png`,
+> `lmdyn_t5814_tight.png`, `lmdyn_t5958a_tight.png`; displace arm:
+> `lmdyn_disp_t5743_tight.png`, `lmdyn_disp_t5814_tight.png`.
+>
+> A-vs-C moves 17–55 % of pixels at every pose, which sounds enormous and is
+> not. **Delta histogram at t=5743 (868 274 changed px):**
+>
+> | \|Δ\| | px | % of frame |
+> |---|--:|--:|
+> | **exactly 1** | **827 485** | **39.91** |
+> | 2 | 19 463 | 0.94 |
+> | 3–4 | 9 203 | 0.44 |
+> | 5–8 | 5 511 | 0.27 |
+> | 9–16 | 3 937 | 0.19 |
+> | 17–32 | 2 221 | 0.11 |
+> | 33–64 | 449 | 0.022 |
+> | 65–255 | **5** | 0.000 |
+>
+> **95.3 % of all changed pixels differ by exactly one LSB**, and the shift is
+> directional: **98.1 % of them get BRIGHTER**, signed mean +0.37 B / +0.21 G /
+> −0.00 R over the whole frame. The lightmap composite very slightly
+> *under*-shadows relative to the per-pixel reference, in the blue-green of the
+> corridor lamps. The genuinely visible residual is a few hundred to a few
+> thousand pixels on thin geometry silhouettes — the lintel top edge, the far
+> lattice, column edges. Side by side the two frames are indistinguishable.
+> `--greets_displace` behaves the same (t=5743 45.3 %, t=5814 41.2 %, t=6097
+> 26.3 % — mean |Δ| 0.55–0.63, max 138/96/7).
+>
+> ### 4. "WILL A LONGER / MORE COMPLEX BAKE HELP?" — NO, AND THAT IS MEASURED
+>
+> The atlas is per-mesh `res = clamp(ceil(sqrt(meanFaceArea) x density), 8, 128)`.
+> Swept the **cap and the density together** (so every mesh actually sharpens),
+> comparing each against the per-pixel cube tap as reference at three poses:
+>
+> | | atlas | bake | t=5743 >12 / max | t=5773 >12 / max | t=5814 >12 / max |
+> |---|--:|--:|--:|--:|--:|
+> | cap 128 / density 14.2 (default) | 0.09 GB | 54 ms | 4 248 / 138 | 3 852 / 70 | 893 / 96 |
+> | cap 256 / density 28.4 | 0.32 GB | 191 ms | 3 925 / 138 | 3 304 / 69 | 822 / 96 |
+> | cap 512 / density 56.8 | **1.28 GB** | **670 ms** | 3 917 / **138** | 2 835 / **69** | 748 / **96** |
+>
+> **A 14x atlas and a 12x bake buys an 8–26 % reduction in an already-sub-visible
+> population and moves the max channel delta by 0 or 1.** The 40 % one-LSB field
+> does not move at all. Picture: `docs/img/fogwt/lmdyn_bakeres_t5773.png`
+> (reference | cap 128 | cap 512 | residual — the three renders are
+> indistinguishable and the residual is unchanged).
+>
+> **So visible quality is NOT bake-limited.** The residual is invariant under
+> spatial resolution because it is not spatial: **inferred** mechanism is the
+> atlas's **8-bit quantisation of the shadow factor** plus **double filtering**
+> (a 4-tap bilinear PCF at bake time, quantised to a byte, then bilinearly
+> re-interpolated at sample time) against the runtime's single 4-tap PCF
+> evaluated at the pixel's own world position. More texels do not add bit depth,
+> and no amount of them makes a bake-time evaluation land on the render-time
+> sample point. Raising resolution is the one lever that was tested and it is
+> the wrong lever.
+>
+> **What a richer bake could add, with honest estimates — all `inferred`:**
+>
+> | item | what it buys | effort | verdict |
+> |---|---|---|---|
+> | higher res where visible | measured above: ~nothing, at 14x the store | done | **no** |
+> | more bits per texel (u16 factor) | would remove the 1-LSB field, which is invisible anyway | medium (format + sampler + 2x store) | **no** |
+> | baked PCF / soft edges | bake already does a 4-tap PCF; wider kernel = softer than the runtime reference, i.e. a *different* look, not a truer one | small | only as a look choice |
+> | baked penumbra (area light) | genuinely impossible at runtime today — real soft shadows. This is the ONLY item that buys something the cube tap cannot | large (multi-sample light, bake time x N) | the only interesting one, and it is a look project, not a perf one |
+> | drop the 3 moving-omni slots | `allocate()` takes `numCubeOmnis` = **11** (`LightmapBake.cpp:373`) but the bake `continue`s on any omni without `Omni_StaticShadow` (`:487`) and the kernel's `cubeOmniStatic` gate can never read them — **3/11 = 27 % of the atlas is allocated, touched at 255, never written, never read** | small | free win *if* the path is ever used |
+>
+> ### 5. VERDICT
+>
+> **Neither perf nor looks — and as shipped, not even that: nothing.** Ranked:
+> 1. **Best value, and it needs no look decision:** greets pays a **54 ms startup
+>    bake and 0.09 GB** for an atlas that is provably never read. Skipping
+>    `LightmapBake_Static` when the planes will not exist is pure win. Already on
+>    the backlog; still not done.
+> 2. **If you want the lightmap path evaluated for real**, the `shadow_lightmap`
+>    `setDefault` has to move from `GreetsApplyRunDefaults` to
+>    `GreetsApplyInitDefaults` (with the leak-onto-other-scenes concern the old
+>    comment raised re-checked, since the flag is allocation-scoped, not
+>    per-pixel). Until then `--shadow_lm_dynamic` cannot be evaluated by flag
+>    alone, and **any past measurement of it that did not also pass
+>    `--shadow_lightmap` measured nothing** — see the correction in
+>    `docs/OPTIMIZATION_BACKLOG.md`.
+> 3. **Do not default `--shadow_lm_dynamic` ON.** Even with the gate opened it is
+>    +1.7 ms/frame (+3.5 %) for a change no one can see.
+>
+> Full 18-pose x 3-arm PPM set and the bench logs are on disk at `/tmp/lmdyn/`
+> (untracked, ~2 GB); the committed evidence is the contact sheet + the six crops.
+
 > ## 2026-08-10 — HIS 12-14 FPS: THE WIN IS 17 ms, BUT ONLY ON A LINE THAT OMITS `--deferred`
 >
 > Follow-up to `f4088a9` (`fds::DeferredPathEnabled()`). Three GREETS.CPP sites

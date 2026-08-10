@@ -943,6 +943,42 @@ quantity the moment anything is tessellated.
   `shadow_dynamic && !shadow_lm_dynamic`. Not done here: it is an FDS/RENDER
   change, and someone may want `--shadow_lm_dynamic` to become the default
   instead (which is the opposite fix, and a look call).
+- **CORRECTION, 2026-08-10 — "forcing the atlas live with `--shadow_lm_dynamic`"
+  ABOVE DID NOT FORCE ANYTHING LIVE.** That sentence read a null result as
+  "the lightmap gives the same answer as the cube tap". It does not: the flag
+  is **inert on greets**, because there is a SECOND gate it does not touch.
+  `resolvePixelLightmap` (`DeferredShadowSampling.h:52`) needs `gb.lightmapMF`,
+  which only `EngineGBuffer_Resize` (`Mekalele.cpp:85`) allocates, under
+  `shadow_lightmap()` — and greets sets that flag in `GreetsApplyRunDefaults`
+  (`GREETS.CPP:1228`, at `createGreetsScene` `:4393`), i.e. **after** every
+  resize call site (`Snapshot.cpp:153`, `SDL2.cpp:433`, `ReproHarness.cpp:130`).
+  Planes never exist → `pl.lm` is null on every pixel → `shadow_lm_dynamic`
+  cannot matter. Same defect class as `mirror_rtt`, fixed in `7953bab`.
+  **Positive control (t=5743, one binary):** `--shadow_lm_dynamic` **0 px**;
+  `--shadow_lm_dynamic --shadow_lightmap_texel_density=1` (atlas crippled)
+  **0 px** — a crippled atlas changing nothing is the proof it is unread;
+  `--shadow_lightmap --shadow_lm_dynamic` **868 274 px (41.87 %)**.
+  So the bake-skip above is even more clearly right, and it is now known what
+  the opposite fix would cost: with both gates open, **+1.7 ms/frame**
+  (min-of-6 interleaved at t=5743/5780/5814, load 9.8–11.6) for a change that
+  is **95 % one-LSB** and invisible. Also note `shadow_lightmap` is read by
+  nothing after init — it is an allocation-time flag, not the per-pixel sample
+  gate `GREETS.CPP:1112-1117` claims it is. Full write-up + evidence:
+  `docs/SESSION_STATE.md` 2026-08-10 and `docs/img/fogwt/lmdyn_*`.
+- **Bake-resolution question, settled by measurement (2026-08-10):** a richer
+  bake does **not** improve the lightmap path. Cap+density swept together to
+  256/28.4 (0.32 GB, 191 ms bake) and 512/56.8 (**1.28 GB, 670 ms**): the
+  >12/255 population falls only 8–26 % and the max channel delta moves by 0–1
+  (138→138, 70→69, 96→96). The residual is not spatial — **inferred**: 8-bit
+  quantisation of the shadow factor plus double filtering (4-tap PCF at bake,
+  quantised, then bilinear at sample) vs the runtime's PCF at the pixel's own
+  world position. Picture: `docs/img/fogwt/lmdyn_bakeres_t5773.png`.
+- **Cheap unrelated win found while there:** `lm.allocate(faces, numCubeOmnis, res)`
+  (`LightmapBake.cpp:373`) sizes K from **all 11** cube omnis, but the bake
+  `continue`s on any omni lacking `Omni_StaticShadow` (`:487`) and the kernel's
+  `cubeOmniStatic` gate can never read those slots. greets has 8 static + 3
+  moving → **3/11 = 27 % of the atlas is allocated, touched at 255, never
+  written and never read.** Only worth doing if the lightmap path is ever used.
 - Stale comment left behind, worth a one-line fix by whoever next touches the
   file: `FDS/RENDER/LightmapBake.cpp:330-336` still says greets turns the
   density on "only under `--greets_displace`… so the byte-pinned FLAT path never

@@ -32,5 +32,9 @@
 5814  11.5895805,3.20128727,-55.6406746,-0.478447258,-0.114726782,0.870589495    # worst measured unresolved/magenta: 52k px at cap64 x32
 5854  13.3876753,3.20487022,-56.7713051,-0.62756604,-0.103757285,0.771618664     # near-corner grazing, wide clamp-to-flat band
 
+# --- 2026-08-10 review: two poses he supplied with the --shadow_lm_dynamic ask ---
+5967  18.752037,3.21019745,-58.8513527,-0.892443955,-0.0741753578,0.445018977    # near-corner, wall panels
+5987  19.7497902,3.21076035,-59.0800819,-0.918940723,-0.0697668344,0.388175935
+
 # Campaign synthetic benches (keep, but they are NOT review poses):
 #   t=5780 wall+statues bench, t=4200 wide vista, t=1867/2145 look poses.
