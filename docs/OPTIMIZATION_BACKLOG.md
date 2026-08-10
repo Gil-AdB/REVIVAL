@@ -159,7 +159,7 @@ because it bought time.
 | item | traffic/frame | residency | verdict |
 |---|--:|---|---|
 | cube-shadow taps (2 packed planes × 2×2 PCF + header) | ~0.5 GB of line traffic | 12.6 MB/cube omni ≫ LLC → DRAM | **item 3 above — DONE, halved** |
-| `Material` pointer chase | ~796 MB of accesses (6 lines/px: 1 matTable + 5 `Material`) | table ≤ 114 KB → **L2, not DRAM** | `sizeof(Material)` = 455 B, pack(1), no `static_assert`. Per-pixel fields are spread over lines 0/1/3/4/6 and the "hot fields on line 0" comment is **stale** — `TintR/G/B`, `SpecMul`, `AoStrength`, `Roughness/MetallicMap`, `Reflection`, `TbnHandedness` all drifted off it. No `matID` memo anywhere (every kernel re-chases per pixel). A 64-byte hot-fields record per matID (16 KB, L1-resident) collapses 5 lines → 1. **Not measured — candidate, but it is a latency item, not a bandwidth one.** |
+| `Material` pointer chase | ~796 MB of accesses (6 lines/px: 1 matTable + 5 `Material`) | table ≤ 114 KB → **L2, not DRAM** | `sizeof(Material)` = **467 B** (was 455 before `EnvBakeOfs[3]` landed in 63bdc85), pack(1), no `static_assert`. Per-pixel fields are spread over lines 0/1/3/4/6 and the "hot fields on line 0" comment is **stale** — `TintR/G/B`, `SpecMul`, `AoStrength`, `Roughness/MetallicMap`, `Reflection`, `TbnHandedness` all drifted off it. No `matID` memo anywhere (every kernel re-chases per pixel). A 64-byte hot-fields record per matID (16 KB, L1-resident) collapses 5 lines → 1. **PARKED — now MEASURED, and refuted as a latency item: see §"2026-08-10 — hardware counters" item 2. Bound on the win is ≲0.1 ms/frame.** |
 | texture + aux-map point fetches | 130–660 MB | mip chains → DRAM | already measured: the albedo gather is worth only 0.71 ms (PERF_STATE) |
 | `g_hdrBuf` | 166–232 MB (10–14 sweeps × 16.59 MB) | > LLC | `hdrf` is already `__fp16` on arm64 (8 B/px, not the 16 B PERF_STATE still quotes) |
 | opaque G-buffer sweep | 35–44 MB read | sequential | 17 B/px unconditional from **6 separate arrays** = 9 concurrent streams/worker |
@@ -805,6 +805,133 @@ quantity the moment anything is tessellated.
   noise** (min-of-6: 55.07 ms before vs 54.82 after); the cost that IS certain is
   the startup bake and the 20 GB of resident pages every other process has to
   live around.
+
+## 2026-08-10 — HARDWARE COUNTERS: THE LIGHTING STAGE IS COMPUTE-BOUND, NOT MEMORY-BOUND
+
+Instrument: `--hw_prof` (adds task-wide retired-instruction / core-cycle / IPC
+columns to the `--deferred_prof` table). Method, boundaries and the IPC
+calibration ladder for this box: **docs/HW_PROFILING.md**. Cache-miss counters
+are unreachable without root on Apple silicon, so IPC is the stall proxy
+throughout — sound for before/after on one kernel, not an absolute score across
+different code.
+
+Reference anchors measured on this M2 Max: compute-bound (no memory traffic)
+IPC 2.42; L1-latency chase 0.96; L2 0.14; DRAM 0.01.
+
+### 1. The packed shadow plane (af1f8f8) — **CONFIRMED, and the mechanism is now measured**
+
+`af1f8f8` claimed −1.0/−1.2 ms/frame from collapsing 4 u16 shadow planes into 2
+u32 (8 cache lines per PolyId tap → 4). It shipped on a wall-clock argument. The
+counters were re-run against it: matched pair, both arms built from ONE tree with
+the same instrumentation applied, run from ONE `Runtime/` (af1f8f8 touches no
+asset), greets t=5743, 1920×1080, dummy drivers, iters=20, **8 interleaved ABBA
+rounds at load 13.7–18.8**, wall = min over rounds, counters = median.
+
+| phase | wall A→B | Ginstr/f | Gcyc/f | IPC |
+|---|--:|--:|--:|--:|
+| **lighting-w1** | 27.72 → **26.53 ms (−4.3 %)** | 3.4965 → 3.4360 (**−1.7 %**) | 0.9875 → 0.9125 (**−7.6 %**) | 3.543 → 3.768 (**+6.3 %**) |
+| DeferredLighting-call | 32.71 → 31.52 (−3.6 %) | −1.5 % | −7.6 % | +6.5 % |
+| renderFrame | 45.35 → 44.19 (−2.6 %) | −1.1 % | −6.5 % | +5.8 % |
+| shadow-bake | 2.41 → 2.35 (−2.7 %) | −0.5 % | −1.5 % | +0.7 % |
+| gbuffer *(control)* | 6.70 → 6.77 (+1.1 %) | **±0.0 %** | −0.5 % | +0.5 % |
+| lighting-w2 / cones / bloom / tonemap / TBR *(controls)* | — | ≤ +0.8 % | ≤ +3.6 % | \|Δ\| ≤ 0.7 % |
+
+The −1.19 ms lands exactly on the claim. **The counters add what wall clock could
+not: cycles fell 4.5× harder than instructions did** (−7.6 % vs −1.7 %). The work
+did not change; the machine stopped waiting for it. That is a memory-side win by
+construction, and it is confined to the two stages that tap the shadow map —
+every control phase moved under 1 % in IPC, and `gbuffer` retired a byte-identical
+3 significant figures of instructions in both arms. IPC sample sets barely
+overlap (A 3.164–3.691, B 3.354–3.806).
+
+### 2. The `Material` hot-record — **PARKED, refuted with numbers (bound ≲0.1 ms)**
+
+The parked item above proposed a 64-byte L1-resident hot record per matID to
+collapse the deferred kernel's 5-lines-per-pixel `Material` walk, and flagged
+itself "latency not bandwidth, likely less than byte count suggests". Measured at
+greets t=5743, lighting-w1 (post-pack arm):
+
+* **1 657 retired instructions per pixel**, **440 core-cycles per pixel**
+  (3.436 G instr and 0.9125 G cycles over 1920×1080), **IPC 3.77**.
+* An IPC of 3.77 is incompatible with domination by serialised loads — the L2
+  chase anchor on this box is IPC 0.14. The ROB is not starved.
+* Arithmetic bound: the `Material` table is ≤ 114 KB, so a miss is an L2 hit at
+  **30.6 ns ≈ 87 cycles** (measured). Six serialised L2 round-trips per pixel
+  would be **~525 cycles/px — more than the entire measured 440-cycle pixel
+  budget**. The walk therefore cannot be missing; those lines are being hit and
+  overlapped.
+* Upside ceiling: the record removes ~5 loads of the 1 657 instructions/px =
+  **0.30 % of instructions**, so at unchanged IPC **≲0.1 ms/frame** of the
+  26.5 ms wave.
+
+**Verdict: not worth the invasiveness.** Caveat, stated plainly: this is a bound
+from aggregate counters plus a latency anchor, *not* an isolation experiment — no
+build was made with the walk removed. It rules out the large win the byte count
+suggested; it does not measure the small one.
+
+### 3. Where the greets lighting stage actually goes — **compute-bound; the lever is instructions/pixel**
+
+lighting-w1 IPC **3.77**, against a compute anchor of 2.42 and an L1-latency
+anchor of 0.96. The stage is issue/throughput-limited, not stalled. `gbuf-clear`
+in the same table reads IPC **0.555** on both greets and city — the one phase
+that genuinely is bandwidth-bound, which is a useful check that the instrument
+discriminates rather than reporting ~3.5 everywhere.
+
+`sample(1)` self-time over the same workload, DEMO symbols only (~50 090 samples
+total; ~38 788 land in the lighting stage):
+
+| symbol | samples | share of lighting stage |
+|---|--:|--:|
+| `Render_DeferredLighting_Tile` | 18 493 | 48 % |
+| `CubeShadow_Sample` | 8 695 | **22 %** |
+| `Render_DeferredLighting_TileFill` | 3 547 | 9 % |
+| `resolveCubeAtten` | 2 898 | 7 % |
+| `computeMapShadowAtten` | 2 518 | 6 % |
+| `Shadow_MaterialSkipsCasting` | 1 479 | 4 % |
+
+**Shadow sampling is ~40 % of the lighting stage** (15 590 samples across the
+four shadow symbols) — the largest single sub-cost, and the same place af1f8f8
+already took 7.6 % of cycles out of. That is where the remaining headroom is, and
+it should be attacked as *instruction count* (fewer taps, cheaper tap, wider
+SIMD), not as cache layout: at IPC 3.77 there are no stalls left to reclaim.
+
+**TODO — new, actionable:** `Shadow_MaterialSkipsCasting` (Shadows.cpp:186) is
+called **per pixel** from DeferredSurfaceKernel.cpp:1775 under
+`--shadow_noncaster_depth`, and costs 4 % of the lighting stage. Its result
+depends only on `Mat` — a material property, constant for every pixel of a given
+matID — yet each call hashes the pointer and does a relaxed atomic load on a
+shared 256-entry table. Hoist it to a per-tile lookup keyed by matID (the tile
+kernel already hoists ~50 FeatureFlags reads out of the pixel loop for exactly
+this reason). Expected ~0.5–1 ms/frame at greets t=5743. Not yet attempted.
+
+### 4. city t=1961 — **the frame is volumetric cones, not lighting**
+
+Same instrument, city t=1961, load 21.7 (ms inflated by load; the counter columns
+and the *shape* are what to read). `renderFrame` runs **2×/frame** on city.
+
+| phase | wall_min | Ginstr/f | IPC |
+|---|--:|--:|--:|
+| renderFrame (×2) | 70.47 | 8.344 | 3.72 |
+| **cones-call** (×1) | **30.50 (43 % of frame)** | **4.150 (50 % of ALL instructions)** | 3.95 |
+| gbuffer | 10.31 | 0.891 | 3.04 |
+| DeferredLighting-call | 10.43 | 1.243 | 4.12 |
+| fastfog | 9.25 | 1.093 | 3.62 |
+| TBR-render | 7.11 | 0.847 | 3.54 |
+
+**Anomaly worth flagging:** city's profile is nothing like greets'. Half of every
+instruction the city frame retires is spent in the volumetric cone pass, which
+runs once while the rest of the frame runs twice. It is compute-bound (IPC 3.95),
+so the lever is again instruction count — cone count, march steps, or early-out —
+not memory. Any city optimisation aimed at the lighting kernel is aimed at 15 %
+of the frame.
+
+### Method note that generalises
+
+During this work the box went from load 13 to load 33 mid-session. Across that,
+greets `renderFrame` **wall_min inflated 45.3 → 96.4 ms (+113 %)** while
+**Ginstr/f moved 5.251 → 5.257 (+0.1 %)**. Retired-instruction count is very
+nearly load-invariant, and IPC nearly so. On a shared machine, prefer them; quote
+ms only with the load that produced it.
 
 ## How this list is maintained
 Add an entry the moment an optimization is deferred (with: what, why deferred,

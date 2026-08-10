@@ -62,6 +62,12 @@
 
 #include <Base/FeatureFlags.h>
 
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <unistd.h>
+#include <os/signpost.h>
+#endif
+
 namespace TailProf {
 
 // One-shot table mode (--deferred_prof) vs the legacy rolling prints
@@ -82,6 +88,77 @@ inline long long nowNs() {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+// ─── --hw_prof: hardware counters + os_signpost on the SAME phase boundaries ─
+//
+// WHY THIS AND NOT INSTRUMENTS: `xctrace` ships with Xcode.app, which is not
+// installed on this box (Command Line Tools only), and configuring the PMU
+// directly (the `kpc.*` sysctls behind kperf.framework) requires root — writing
+// `kpc.counting` returns EPERM. What IS reachable unprivileged is the kernel's
+// per-task PMU accounting: proc_pid_rusage(RUSAGE_INFO_V4+) exposes
+// ri_instructions and ri_cycles, both hardware counters, and it is LIVE — a
+// mid-flight read of a task with 4 spinning threads returns ~4 core-seconds per
+// wall-second, so a read pair around a parallel wave captures every worker's
+// work, not just the tick thread's. That is exactly the attribution the phase
+// table needs. Cache-miss counters are NOT reachable this way and no
+// unprivileged substitute exists; see docs/HW_PROFILING.md for what IPC can and
+// cannot stand in for.
+//
+// COST, measured with 12 threads spinning: proc_pid_rusage = 808 ns/call,
+// thread_selfcounts = 256 ns/call. At ~40 phase boundaries x 2 reads that is
+// 0.065 ms/frame, ~0.07% of a 90 ms greets frame. Default OFF = not one read.
+//
+// The counters are TASK-wide, so a phase's delta includes anything else the
+// process did concurrently. With dummy SDL drivers the only other threads are
+// idle, but a phase measured while a bake runs on a pool worker will over-count;
+// the `calls/f` and effPar columns are what expose that.
+inline bool hwEnabled() {
+	static const bool h = fds::FeatureFlags::hw_prof();
+	return h;
+}
+
+// Task-wide retired instructions + core cycles. Both are PMU-derived.
+inline void hwRead(unsigned long long& instr, unsigned long long& cyc) {
+#if defined(__APPLE__)
+	struct rusage_info_v4 ri;
+	if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t*)&ri) == 0) {
+		instr = ri.ri_instructions;
+		cyc   = ri.ri_cycles;
+		return;
+	}
+#endif
+	instr = 0; cyc = 0;
+}
+
+#if defined(__APPLE__)
+// One process-wide log handle on the Points-of-Interest category, so Instruments
+// picks the intervals up on its own track if this tree is ever opened on a box
+// that has Xcode. Headless, `log show --signpost` reads the same records.
+inline os_log_t spLog() {
+	static os_log_t l = os_log_create("com.revival.fds", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+	return l;
+}
+// os_signpost requires the interval NAME to be a compile-time literal, and every
+// phase name here is a runtime `const char*` — so all intervals share the literal
+// "phase" and carry the real name as the message. Instruments groups by message;
+// `log show --signpost` prints it verbatim.
+inline os_signpost_id_t spBegin(const char* name) {
+	if (!hwEnabled()) return OS_SIGNPOST_ID_NULL;
+	os_log_t l = spLog();
+	if (!os_signpost_enabled(l)) return OS_SIGNPOST_ID_NULL;
+	os_signpost_id_t sid = os_signpost_id_generate(l);
+	os_signpost_interval_begin(l, sid, "phase", "%{public}s", name);
+	return sid;
+}
+inline void spEnd(os_signpost_id_t sid, const char* name) {
+	if (sid == OS_SIGNPOST_ID_NULL) return;
+	os_signpost_interval_end(spLog(), sid, "phase", "%{public}s", name);
+}
+#else
+using os_signpost_id_t = unsigned long long;
+inline os_signpost_id_t spBegin(const char*) { return 0; }
+inline void spEnd(os_signpost_id_t, const char*) {}
+#endif
 
 // Pool-worker count. Mirrors ThreadPool::init (Threads.h:42): one worker per
 // hardware thread, with FDS_THREADS clamping it DOWN. Printed as the reference
@@ -116,7 +193,10 @@ inline int workers() {
 // "frame-prep" phase that does not exist. --deferred_prof=<N> excludes the first
 // N frames; the warmup buckets are kept (not discarded) so a run too short to
 // have any steady frame still reports, loudly labelled.
-struct Bucket { double wall = 0, busy = 0; long long calls = 0; };
+// instr/cyc are populated only under --hw_prof; 0 otherwise (and 0 for phases
+// booked through mark()/addMs(), which have no counter stamp to difference
+// against — those rows print "-" rather than a wrong number).
+struct Bucket { double wall = 0, busy = 0; long long calls = 0; double instr = 0, cyc = 0; };
 struct Acc {
 	Bucket    b[4];
 	int       lastN = 0;      // tiles in the most recent wave
@@ -236,7 +316,8 @@ inline void NewFrame() {
 // Record a completed phase. wallNs is elapsed; busyNs is Σ per-task time (0 =
 // not instrumented). Prints the legacy rolling line when not in one-shot mode.
 inline void record(const char* name, long long wallNs, double busyMs,
-                   int depth, bool isWave, int nTiles) {
+                   int depth, bool isWave, int nTiles,
+                   double dInstr = 0.0, double dCyc = 0.0) {
 	const double wallMs = double(wallNs) / 1e6;
 	bool     print = false;
 	double   pw = 0, pb = 0; int pf = 0, pn = 0;
@@ -256,6 +337,8 @@ inline void record(const char* name, long long wallNs, double busyMs,
 		Bucket& b = a.b[bi];
 		b.wall += wallMs;
 		b.busy += busyMs;
+		b.instr += dInstr;
+		b.cyc   += dCyc;
 		++b.calls;
 		if (bi == 0) {   // steady main-view: feeds the per-frame min
 			a.curWall += wallMs; a.curBusy += busyMs; ++a.curCalls;
@@ -301,16 +384,50 @@ inline void addBusy(long long startNs) {
 }
 
 // RAII timer for a phase / serial glue step. depth: see the header comment.
+// Under --hw_prof it additionally brackets the phase with a task-wide counter
+// pair and an os_signpost interval. Both are exact here: the scope's lifetime IS
+// the phase (unlike a wave, whose work starts at the dispatch, not at the drain).
 struct ScopeTimer {
-	const char* name;
-	int         depth;
-	long long   t0;
+	const char*        name;
+	int                depth;
+	long long          t0;
+	unsigned long long i0 = 0, c0 = 0;
+	os_signpost_id_t   sid = 0;
 	explicit ScopeTimer(const char* n, int d = 2)
-		: name(n), depth(d), t0(enabled() ? nowNs() : 0) {}
+		: name(n), depth(d), t0(enabled() ? nowNs() : 0) {
+		if (hwEnabled()) { hwRead(i0, c0); sid = spBegin(name); }
+	}
 	~ScopeTimer() {
 		if (!enabled()) return;
-		record(name, nowNs() - t0, 0.0, depth, false, 0);
+		double di = 0, dc = 0;
+		if (hwEnabled()) {
+			unsigned long long i1 = 0, c1 = 0;
+			hwRead(i1, c1);
+			di = double(i1 - i0); dc = double(c1 - c0);
+			spEnd(sid, name);
+		}
+		record(name, nowNs() - t0, 0.0, depth, false, 0, di, dc);
 	}
+};
+
+// A phase-start stamp for a PARALLEL WAVE. The wave's work begins at the
+// dispatch, not at the drain — TailProf.h's drain() contract already says the ns
+// stamp must be taken before the enqueue, and the counter stamp and the signpost
+// interval have exactly the same requirement, so all three are taken together
+// here. Implicitly converts to `long long` so the existing `mark(name, stamp)`
+// call sites keep compiling unchanged.
+struct Stamp {
+	long long          ns    = 0;
+	unsigned long long instr = 0, cyc = 0;
+	os_signpost_id_t   sid   = 0;
+	const char*        name  = nullptr;
+	Stamp() = default;
+	explicit Stamp(const char* n) : name(n) {
+		if (!enabled()) return;
+		ns = nowNs();
+		if (hwEnabled()) { hwRead(instr, cyc); sid = spBegin(n); }
+	}
+	operator long long() const { return ns; }
 };
 
 // Manual serial-region mark (for regions that can't be a clean RAII scope
@@ -351,7 +468,7 @@ struct PassScope {
 // carrying 67 core-ms of work. Passing 0 keeps the old (wrong) behaviour and is
 // only there so an un-updated call site still compiles.
 inline void drain(std::counting_semaphore<INT_MAX>& sem, int n, const char* wave,
-                  int depth = 2, long long startNs = 0) {
+                  int depth = 2, long long startNs = 0, const Stamp* st = nullptr) {
 	if (!enabled() || n <= 0) {
 		for (int i = 0; i < n; ++i) sem.acquire();
 		return;
@@ -368,7 +485,21 @@ inline void drain(std::counting_semaphore<INT_MAX>& sem, int n, const char* wave
 	}
 	busyN().store(0, std::memory_order_relaxed);
 	const double busyMs = busyAcc().exchange(0, std::memory_order_relaxed) / 1e6;
-	record(wave, tLast - t0, busyMs, depth, true, n);
+	double di = 0, dc = 0;
+	if (hwEnabled() && st) {
+		unsigned long long i1 = 0, c1 = 0;
+		hwRead(i1, c1);
+		di = double(i1 - st->instr); dc = double(c1 - st->cyc);
+		spEnd(st->sid, wave);
+	}
+	record(wave, tLast - t0, busyMs, depth, true, n, di, dc);
+}
+
+// Wave form: the stamp carries the pre-dispatch ns AND counter reads, so the
+// wave's instructions/cycles cover every worker from the enqueue onward.
+inline void drain(std::counting_semaphore<INT_MAX>& sem, int n, const char* wave,
+                  int depth, const Stamp& st) {
+	drain(sem, n, wave, depth, st.ns, &st);
 }
 
 // ─── the one-shot table ────────────────────────────────────────────────────
@@ -397,10 +528,16 @@ inline void Report(const char* label) {
 	std::fprintf(stderr,
 		"[DPROF] steady main-view frames=%lld (warmup %lld excluded)   pool workers=%d"
 		"   all times ms PER FRAME\n", steady, warm, workers());
-	std::fprintf(stderr,
-		"[DPROF] %-24s %7s %9s %9s %9s %7s | %7s %9s\n",
-		"phase", "calls/f", "wall_min", "wall_avg", "thrsum_avg", "effPar",
-		"off c/f", "off wall");
+	if (hwEnabled())
+		std::fprintf(stderr,
+			"[DPROF] %-24s %7s %9s %9s %9s %7s | %10s %8s %8s\n",
+			"phase", "calls/f", "wall_min", "wall_avg", "thrsum_avg", "effPar",
+			"Ginstr/f", "Gcyc/f", "IPC");
+	else
+		std::fprintf(stderr,
+			"[DPROF] %-24s %7s %9s %9s %9s %7s | %7s %9s\n",
+			"phase", "calls/f", "wall_min", "wall_avg", "thrsum_avg", "effPar",
+			"off c/f", "off wall");
 
 	// Close the frame in flight so its samples reach the min (nothing calls
 	// NewFrame after the last tick).
@@ -431,8 +568,21 @@ inline void Report(const char* label) {
 				double(mainB.calls) / f, mn, mainB.wall / f);
 			if (mainB.busy > 0.0) std::fprintf(stderr, "%9.3f %7.1f", mainB.busy / f, effPar);
 			else                  std::fprintf(stderr, "%9s %7s", "-", "-");
-			if (offB.calls) std::fprintf(stderr, " | %7.2f %9.3f",
-				double(offB.calls) / f, offB.wall / f);
+			if (hwEnabled()) {
+				// Ratios (IPC) are the load-robust number here: a descheduled
+				// worker costs wall time but retires no instructions and burns
+				// no cycles, so instr/cyc is far steadier under machine load
+				// than any ms column. Blank for phases with no counter stamp.
+				if (mainB.cyc > 0.0)
+					std::fprintf(stderr, " | %10.3f %8.3f %8.3f",
+						mainB.instr / f / 1e9, mainB.cyc / f / 1e9,
+						mainB.instr / mainB.cyc);
+				else
+					std::fprintf(stderr, " | %10s %8s %8s", "-", "-", "-");
+			} else if (offB.calls) {
+				std::fprintf(stderr, " | %7.2f %9.3f",
+					double(offB.calls) / f, offB.wall / f);
+			}
 			std::fprintf(stderr, "\n");
 		}
 		if (d == 1 && depth0 > 0.0) {
@@ -453,6 +603,18 @@ inline void Report(const char* label) {
 		" wall_avg = mean, inflated by machine load.\n"
 		"[DPROF] Each phase's min is taken over its OWN best frame, so Σ mins ≤ the"
 		" frame min; OTHER's min column is that residual, not a measured minimum.\n");
+	if (hwEnabled())
+		std::fprintf(stderr,
+			"[DPROF] --hw_prof: Ginstr/Gcyc = TASK-WIDE hardware retired-instruction and"
+			" core-cycle counts (proc_pid_rusage), billions per frame, summed over ALL"
+			" threads — so a wave's counters cover every worker, like thrsum and unlike"
+			" wall.\n"
+			"[DPROF] IPC = instr/cyc is the LOAD-ROBUST column: compare IPC across arms,"
+			" not ms. Calibrated on this box (docs/HW_PROFILING.md): ~2.4 = compute-bound,"
+			" ~1.0 = L1-latency, ~0.14 = L2-latency, <0.05 = DRAM-latency.\n"
+			"[DPROF] Cache-miss counters are NOT reachable unprivileged on Apple silicon"
+			" (kpc.* sysctls are root-only); IPC is the substitute, and it is a ratio of"
+			" two real PMU counters, not a model.\n");
 	std::fflush(stderr);
 }
 

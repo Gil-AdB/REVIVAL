@@ -6255,7 +6255,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	const bool useOuterVec = deferredLightingOuterVecEnabled();
 	const bool inlineDispatch = ov && ov->inlineDispatch;
 	if (!inlineDispatch) renderns::tileCounter = 0;
-	const long long _w1q = TailProf::nowNs();
+	const TailProf::Stamp _w1q("lighting-w1");
 	constexpr int nTiles = DEFERRED_NUM_TILES;
 	auto tileBounds = [tileSizeX, tileSizeY, XRes, YRes](int t, int &x1, int &y1, int &x2, int &y2) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
@@ -6302,7 +6302,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			}
 		} else {
 			// Same dispatchIndexed shape as wave 1 (see above).
-			const long long _w2q = TailProf::enabled() ? TailProf::nowNs() : 0;
+			const TailProf::Stamp _w2q("lighting-w2");
 			dispatchIndexed(nTiles, nullptr, [&ctx, tileBounds](int t) {
 				int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
 				const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;

@@ -620,7 +620,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// Work-stealing chunk dispatch — one enqueue per worker instead of per
 	// tile (the per-enqueue mutex+notify cost was ~12 us serial on the tick
 	// thread; see dispatchIndexed). Tile kernels release tileDone per tile.
-	const long long _profGbuf = TailProf::enabled() ? TailProf::nowNs() : 0;
+	const TailProf::Stamp _profGbuf("gbuffer");
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
 	    [&fctx, deferred, tileSizeX, tileSizeY](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
@@ -867,7 +867,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				    tbY0[tileIdx] >= tbY1[tileIdx]) continue;   // no face in this tile
 				tileList[enq++] = tileIdx;
 			}
-			const long long _profPost = TailProf::enabled() ? TailProf::nowNs() : 0;
+			const TailProf::Stamp _profPost("postlight");
 			dispatchIndexed(enq, nullptr,
 			                [&tbX0, &tbY0, &tbX1, &tbY1, &tileList, workFn](int k) {
 				const int tileIdx = tileList[k];

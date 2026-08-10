@@ -934,7 +934,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		}
 	}
 	// Same thread_local capture trap as Phase A: snapshot data() by value.
-	const long long _profShadowB = TailProf::enabled() ? TailProf::nowNs() : 0;
+	const TailProf::Stamp _profShadowB("shadow-bake");
 	{
 		const PhaseBJob *const bJobs = sPhaseBJobs.data();
 		dispatchIndexed((int)sPhaseBJobs.size(), nullptr,
