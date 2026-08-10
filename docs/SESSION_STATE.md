@@ -1,5 +1,91 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-10 — THE MIRROR-BREAK POP: THE SHARDS SHOW HALF THE REFLECTION THE INTACT SCREEN SHOWED, IN ONE FRAME
+>
+> His long-standing report ("the look before/after the break start is not
+> consistent"). Bracketed on the REAL per-frame path: `--repro=greets@t=3122
+> --repro_from=3112 --repro_settle=0` puts the auto-shatter exactly ONE frame
+> before the dump, and the paused scrub freezes scene time — so pre-break and
+> break+1 are the same scene time, same camera, **zero motion between them**.
+> Camera square-on to the shatter screen (`P_TEXT.JPG#6`, area 172.5, plane
+> x=48.795, the one `BuildGreetsShatter` picks):
+> `FDS_GREETS_CAM="28.8,10.8,-62.85,1,0,0"`.
+>
+> **THE POP, QUANTIFIED** over the panel region (1289x873 px):
+>
+> | | mean \|d\| (sum3) | px>30 |
+> |---|--:|--:|
+> | baseline frame-to-frame motion, pre-break (4 pairs, 10 ticks apart) | 2.37 / 2.98 / 3.45 / 4.72 | 2.0-3.7 % |
+> | **the break** (pre -> break+1, same t) | **135.25** | **86.8 %** |
+>
+> **~40x the scene's own motion**, and panel luma **78.81 -> 34.94 (-56 %) in one
+> frame**.
+>
+> **ROOT CAUSE — `ApplyShardSilverGlaze` halved the reflection unconditionally**
+> (`r = sr + (r >> 1)`, `MirrorShatter.cpp:94`). Ground truth: the main deferred
+> pass rendered FROM the shard's own reflected eye
+> (`FDS_GREETS_CAM="68.79,10.8,-62.85,-1,0,0"`) measures **73.75** luma over the
+> panel window; the intact half-silvered panel shows **78.81**, i.e. essentially
+> ALL of it; the halved shards showed **34.94 ~= 73.75/2**. The comment justified
+> the halving as matching the screen's `litRGB + dst/2` — measurement says the
+> screen it replaces does not halve.
+>
+> **Fix: `--greets_shard_refl_gain` (float, default 1.0; 0.5 = legacy).** The
+> halving became a multiply in the same loop. Applied before the text composite,
+> so text still rides on top at full strength.
+>
+> | gain | panel luma | mean \|d\| vs pre-break | px>30 |
+> |---|--:|--:|--:|
+> | 0.5 (legacy) | 34.94 | 134.40 | 86.9 % |
+> | 0.8 | 48.55 | 101.29 | 80.6 % |
+> | **1.0 (new default)** | **60.34** | **83.03** | **61.9 %** |
+> | 1.2 | 72.20 | 88.33 | 68.2 % |
+>
+> 1.0 is both the principled value (no attenuation) and the per-pixel optimum —
+> 1.2 gets closer on mean luma but WORSE on \|d\|, because the shards' own
+> edge-on faces and crack lines cap what the panel can reach. **The pop drops
+> 38 %** (135.25 -> 83.03) and the one-frame luma step goes -56 % -> -23 %.
+> At the true break instant (shards still at rest, `--snapshot` + `FDS_GREETS_SHATTER=1`)
+> the mosaic now reproduces the room: **60.38 vs 76.65**.
+> Strips: `docs/img/fogwt/shardpop_t3122_bracket.png`,
+> `shardpop_t3122_zoom.png`, `shardpop_t3122_atrest.png`.
+>
+> **FOUR CANDIDATES MEASURED AND OVERTURNED** (all at break+1, panel luma; the
+> brief's leading suspect was the first one):
+>
+> | term | luma | verdict |
+> |---|--:|---|
+> | `--greets_shard_res` 64 -> 256 / 512 | 36.00 | **null** (+1.06) — resolution is NOT the pop |
+> | `--greets_mirror_tint=0` (silver glaze) | 34.94 | **exactly null** — `sv` only scales the ADDED cast; it never gated the halving, which is why this looked like a dead end |
+> | shard reflection camera basis (panel axes vs the shard's own jittered edges) | 35.01 | **null** (+0.07); tried and reverted. The edge basis is non-orthonormal (the two edges are not perpendicular) so the per-shard view matrix is sheared — real, but it moves no pixels here |
+> | `--no-greets_displace_flat_mirror` | 77.97 pre-break | **null** — the intact mirror is not reflecting a different (flat) proxy |
+>
+> **`--no-shard_deferred` IS NOT THE ANSWER, AND ITS FLAG DOC IS BACKWARDS.** It
+> does brighten the shards (34.94 -> 55.90) — but MEASURED with
+> `FDS_SHARD_REFL_PROF=1`, min-of-27 frames, run 1 discarded, load 4.3-8.6:
+> the forward bake costs **188.3 ms** against the deferred bake's **20.4 ms**.
+> The flag's own text claims "~20ms vs ~6ms forward"; it is wrong by ~30x in the
+> other direction. Left alone.
+>
+> **RESIDUAL, NOT FIXED.** Even at gain 1.0 the shard bake sits below the intact
+> panel. The offscreen deferred bake at 64² is ~21 luma darker than the FORWARD
+> bake of the same shards (55.90 vs 34.94 pre-fix), and `--no-shadows` /
+> `--no-shadow_lightmap` / `--no-ssao` / `--hdr` / `--no-pbr` / `--no-env_refl`
+> are all null against it; `--no-mips` recovers 4.4. Cause unidentified — the
+> offscreen deferred path being dimmer than the main deferred pass at the same
+> eye is its own bug and wants its own session.
+>
+> **PINS: unchanged, certified DIFFERENTIALLY** (default vs
+> `--greets_shard_refl_gain=0.5`, identical to each other AND to the recorded
+> values): greets `778fa6acd85a69cf241babefcdaf598e`, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9`, city `3cbe42b166847e40f7071eedb48d613c`,
+> `render_gate.sh` ALL PASS (mirrortest `4ac809e5…`, conetest `b41894f9…`,
+> halotest `166fa25a…`). **BUT SAY WHAT THAT DOES AND DOES NOT MEAN:** no pin
+> recipe ever triggers the shatter, so the glaze never runs in any of them.
+> The pins certify NO COLLATERAL DAMAGE; they are blind to the fix itself.
+> Cost: min-of-3 shard-pass 21.1/21.9 ms (legacy) vs 21.2/22.9 (new), run 1
+> discarded — inside the run-to-run spread at load 5-9.
+
 > ## 2026-08-10 — THE CORNER HE WANTS TO SEE THROUGH HAS NO HOLE IN IT: 723 600 px OF DEPTH SAY THE WALL IS SOLID
 >
 > Report: at `FDS_GREETS_CAM="18.752037,3.21019745,-58.8513527,-0.892443955,

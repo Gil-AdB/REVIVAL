@@ -91,27 +91,37 @@ namespace {
 // reads as silver rather than washing to white (the earlier additive-veil
 // bug). sv from --greets-shard-silver; 0 = untouched mirror, 1 = full
 // cool-silver glass. Re-baked every frame, so the console drives it live.
-inline void ApplyShardSilverGlaze(uint32_t* px, int count, float sv) {
+inline void ApplyShardSilverGlaze(uint32_t* px, int count, float sv, float refl) {
 	if (sv < 0.0f) sv = 0.0f;
 	if (sv > 1.0f) sv = 1.0f;
-	// The half-silvered look (#2) is a DIMMED WARM reflection, NOT an added
-	// silver colour. So ALWAYS halve the reflection (out = ... + dst/2), and
-	// only ADD silver*sv on top — sv=0 leaves the warm reflection at half
-	// brightness (matches #2's `litRGB + dst/2` with no extra cast); raise sv
-	// for an optional cool cast. (Earlier the silver was added at full strength
-	// and the reflection wasn't halved, so the shards read bright/cool/white
-	// while #2 reads dim/warm.) FDS_TINT_RED swaps the silver for red to verify.
+	// Half-silvered look: an optional cool silver cast (silver*sv) ADDED over
+	// the reflection scaled by `refl` (--greets_shard_refl_gain).
+	//
+	// `refl` used to be a hardcoded >>1 on the reasoning that the intact screen
+	// reads `litRGB + dst/2`. MEASURED against the screen it replaces, that
+	// halving IS the break's brightness pop: at the break frame the shards are
+	// still coplanar and cover the panel exactly, and the panel window measures
+	// 73.75 luma of reflection in the main deferred pass from the shard's own
+	// reflected eye — the intact half-silvered panel shows 78.81 of it, i.e.
+	// essentially ALL of it, while the halved shards show 34.94. One frame,
+	// -56% brightness, ~40x the scene's own frame-to-frame motion.
+	// Note the halving ran regardless of sv, so --greets_mirror_tint=0 measured
+	// dead null and hid this for a long time.
+	// 0.5 reproduces the legacy look exactly.
 	static const bool kRed = std::getenv("FDS_TINT_RED") != nullptr;
 	const int sr = int(float(kRed ? 255 : 150) * sv);   // optional cast = silver * sv
 	const int sg = int(float(kRed ?   0 : 170) * sv);
 	const int sb = int(float(kRed ?   0 : 215) * sv);
+	if (refl < 0.0f) refl = 0.0f;
+	if (refl > 4.0f) refl = 4.0f;
+	const uint32_t rq = uint32_t(refl * 256.0f);
 	for (int i = 0; i < count; ++i) {
 		const uint32_t c = px[i];
-		int b = int(c & 0xFF), g = int((c >> 8) & 0xFF), r = int((c >> 16) & 0xFF);
-		r = sr + (r >> 1); if (r > 255) r = 255;    // silver*sv + reflection/2
-		g = sg + (g >> 1); if (g > 255) g = 255;
-		b = sb + (b >> 1); if (b > 255) b = 255;
-		px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
+		uint32_t b = c & 0xFF, g = (c >> 8) & 0xFF, r = (c >> 16) & 0xFF;
+		r = uint32_t(sr) + ((r * rq) >> 8); if (r > 255) r = 255;   // silver*sv + reflection*refl
+		g = uint32_t(sg) + ((g * rq) >> 8); if (g > 255) g = 255;
+		b = uint32_t(sb) + ((b * rq) >> 8); if (b > 255) b = 255;
+		px[i] = b | (g << 8) | (r << 16) | 0xFF000000u;
 	}
 }
 }  // namespace
@@ -832,7 +842,8 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 
 			// Silver half-silvered glaze (#3) — desaturate toward cool silver.
 			ApplyShardSilverGlaze((uint32_t*)reflSurf_->Data, texRes_ * texRes_,
-			                      fds::FeatureFlags::greets_mirror_tint());
+			                      fds::FeatureFlags::greets_mirror_tint(),
+	                      fds::FeatureFlags::greets_shard_refl_gain());
 
 			// Composite the shard's fixed text fragment over its reflection,
 			// half-silvered: out = text + reflection*gain (text rides on top).
@@ -1207,7 +1218,8 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 
 	// Silver half-silvered glaze (#3) — desaturate toward cool silver.
 	ApplyShardSilverGlaze((uint32_t*)w.surf.Data, texRes_ * texRes_,
-	                      fds::FeatureFlags::greets_mirror_tint());
+	                      fds::FeatureFlags::greets_mirror_tint(),
+	                      fds::FeatureFlags::greets_shard_refl_gain());
 
 	// Half-silvered text composite (text + reflection*gain), same affine the
 	// serial path uses (world plane-coords → fixed per-corner text UVs).
