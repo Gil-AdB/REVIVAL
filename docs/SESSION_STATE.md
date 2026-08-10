@@ -1,5 +1,88 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-10 — THE CORNER HE WANTS TO SEE THROUGH HAS NO HOLE IN IT: 723 600 px OF DEPTH SAY THE WALL IS SOLID
+>
+> Report: at `FDS_GREETS_CAM="18.752037,3.21019745,-58.8513527,-0.892443955,
+> -0.0741753578,0.445018977"` t=5967 and `"19.7497902,3.21076035,-59.0800819,
+> -0.918940723,-0.0697668344,0.388175935"` t=5987, under `--greets_displace`, a
+> gap between two bricks that should be see-through renders closed; "gpu also has
+> the same issue, even worse". His F9 dumps: `/tmp/greets_dump_0_t5967.ppm`,
+> `/tmp/greets_dump_1_t5987.ppm`. Reproduced at both poses (his dump and the
+> `--snapshot` frame are the same picture — left two panels of
+> `docs/img/fogwt/gapwt_t5967_corner_strip.png`).
+>
+> **THE TWO NOMINATED SUSPECTS ARE BOTH BYTE-NULL AT BOTH POSES.** `--no-greets_
+> displace_seam_union` and `--no-greets_displace_neighbor_pin`, each alone:
+> t=5967 all three md5 `c0beec384141e4f18525a84e6b07a9bc`, t=5987 all three
+> `4a12c7c358840bb30118518a2454924d`. Not "small" — **0 of 2 073 600 pixels**.
+> The flags DID take: the seam-union arm's `[STONE]` census reads `faces 68149,
+> 455 T-junction pins, … (heal-only: 0 splits)` against the default's `68513,
+> 214, … (union-welded: 539 splits)`. So no weld is bridging anything here.
+>
+> **MEASURED — THERE IS NOTHING BEHIND THAT WALL TO SEE.** `FDS_SNAPSHOT_ZDUMP`,
+> the region right of the wall-end silhouette (x ≥ 1250, 723 600 px), at BOTH
+> poses and on BOTH arms: **zero pixels farther than 4 world units.** Flat-arm
+> depth range 1.107–3.170 u (t=5967) and 2.103–2.740 u (t=5987) — one continuous
+> solid surface. The far wall behind is at 15.4 u; not one pixel of it shows.
+> Picture: `docs/img/fogwt/gapwt_t5967_solidproof.png`.
+>
+> **WHAT HE IS LOOKING AT IS A CONVEX CORNER OF ONE SOLID WALL, NOT TWO PANELS.**
+> `FDS_SNAPSHOT_GBUFDUMP`: every pixel from x=1100 to 1920 is the single material
+> `rooms::mirUV`. The two faces meet at an authored edge at x=1520 with
+> **continuous depth** in the flat arm (64959 → 64959 at y=400) — no slot, no
+> sliver, nothing to weld shut. `--wire_viz=2/3` shows the same: two big quads,
+> and the entire brick/mortar pattern is TEXTURE. Cross-section:
+> `docs/img/fogwt/gapwt_t5967_corner_crosssection.png`.
+>
+> **VERDICT: this is an authoring question, not a renderer bug.** The relief is a
+> scalar heightfield (`TEXTURES/greets_wall_h.png`, 1024², 8-bit L, min 0 max 172
+> mean 140). A heightfield can recess a surface; it cannot open a hole through
+> one — no discard, no alpha, no authored void. To see through between two bricks
+> there has to BE a hole: either a real opening cut in the LWO, or an alpha-tested
+> mortar material. Neither exists today. `docs/img/fogwt/gapwt_heightmap.png`.
+>
+> **THE GPU IS NOT DOING IT EITHER — ITS "GAP" IS A CRACK.** GpuBench `--tess`
+> at the same cam: silhouette x per row wanders over a **238 px** span
+> (std 13.54) against CPU `--greets_displace` **24 px** (std 3.90); both flat arms
+> agree exactly (GPU 1157–1165, CPU 1157–1164 — a clean cross-validation of the
+> two renderers' geometry). The GPU's extra motion is a torn ribbon plus a void
+> at the corner (panel 4 of the strip) — and that void sits at x≈1500–1540 where
+> the depth scan found nothing beyond 4 u, i.e. it exposes the same wall's own
+> interior, not the outside. Tessellation crack, not a revealed opening.
+>
+> **TWO REAL SHORTFALLS FOUND ON THE WAY — both make the relief read shallower**
+> **than the map, and both are separable from the verdict above:**
+>
+> 1. **`--greets_displace_mip=2` gives the mortar no floor.** The bake census at
+>    the shipping default reads `plat/step/floor cells 8236/28168/0` — **ZERO
+>    groove-floor cells**: the tessellation cuts a V and never a U, so a mortar
+>    joint never reaches a flat bottom. At `--greets_displace_mip=0` the same wall
+>    gets **15 438** floor cells and deeper relief (`[-0.153..+0.033]` vs
+>    `[-0.131..+0.033]`), at 105 130 faces against 68 513. Visible: panel 6 of the
+>    strip, and `docs/img/fogwt/gapwt_t{5967,5987}_cpu_mip0.png`. Cost not measured.
+> 2. **The authored patch border is pinned to exactly zero displacement**
+>    (`DEMO/MeshOps.cpp:2552`, `:2571`, `:3358` — `pinnedZero`), so the last cell
+>    before every border carries no relief. Measured along y=400 approaching the
+>    corner edge: Δdepth (displaced − flat) **−0.068 u at x=1440 → −0.053 →
+>    −0.025 → −0.010 → +0.000 exactly at x=1520**, a linear ramp to nothing. That
+>    is why the corner reads as a smooth sealed edge rather than a toothed one.
+>    It is crack safety, so removing it is not free — untested here.
+>
+> **TOOL TRAP for the next agent: `--displace_viz` is BLIND to the `::mirUV`
+> split.** Both modes draw nothing at all over the wall in these poses even though
+> that wall *is* displaced (ON/OFF depth differs by up to 0.11 u). `DisplaceViz_
+> Record` (`MeshOps.cpp:3538`) keys on ONE `targetMat` pointer, and the
+> negative-handedness clone `rooms::mirUV` (`GREETS.CPP:1427`) is created AFTER
+> the bake, so those faces stop matching. Do not read an empty overlay as "not
+> displaced" — I nearly did.
+>
+> Images (all 1920×1080 unless noted, `--deferred --profiler=0`):
+> `docs/img/fogwt/gapwt_t5967_{cpu_disp,cpu_flat,gpu_tess,gpu_flat,cpu_mip0}.png`,
+> `gapwt_t5987_{cpu_disp,cpu_flat,gpu_tess,gpu_flat,cpu_mip0}.png`,
+> `gapwt_t{5967,5987}_corner_strip.png`, `gapwt_t5967_solidproof.png`,
+> `gapwt_t5967_corner_crosssection.png`, `gapwt_heightmap.png`.
+> No code changed; no pin moved.
+
 > ## 2026-08-10 — `--shadow_lm_dynamic` IS A NO-OP, AND OPENING ITS GATE COSTS 1.7 ms FOR NO VISIBLE GAIN
 >
 > User: *"regarding `--shadow_lm_dynamic` — what would that give us? perf/looks/
