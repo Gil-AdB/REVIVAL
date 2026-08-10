@@ -14,6 +14,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"  // MatrixXVector template
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "Base/Scene.h"
 #include "Base/StaticShadowLightmap.h"
 #include "Base/TriMesh.h"
@@ -904,3 +905,42 @@ void Render_NormalViz(Scene *Sc)
 }
 
 }  // namespace fds
+
+// ── --mem_census: the static shadow-lightmap atlases ───────────────────────
+// This is the buffer whose formula was the whole reason the census exists
+// (943d644): `numFaces × lmRes² × numOmnis` BYTES, fully touched at bake
+// (allocate() fills 255). The per-mesh breakdown below prints faces, lmRes and
+// omnis SEPARATELY on purpose — the defect was never visible in the product,
+// only in the fact that the product had a FACE COUNT in it where it wanted an
+// area. Any future mesh whose lmRes stayed at the cap while its face count
+// exploded shows up here as one fat row.
+static void MemCensus_StaticLightmaps() {
+    if (!CurScene || !CurScene->staticLMTable) return;
+    const auto &table = *CurScene->staticLMTable;
+    size_t total = 0, aux = 0, meshes = 0, faces = 0;
+    int minRes = 1 << 30, maxRes = 0, omnis = 0;
+    size_t biggest = 0; int biggestRes = 0; uint32_t biggestFaces = 0;
+    for (size_t i = 1; i < table.size(); ++i) {
+        TriMesh *T = table[i];
+        if (!T || !T->staticShadowLM) continue;
+        const StaticShadowLightmap &lm = *T->staticShadowLM;
+        const size_t b = lm.data.capacity();
+        total += b;
+        aux   += lm.planarBases.capacity() * sizeof(FacePlanarBasis)
+               + lm.coverageBits.capacity() + lm.omniSceneIdx.capacity() * sizeof(int);
+        ++meshes; faces += size_t(lm.numFaces);
+        minRes = std::min(minRes, lm.lmRes); maxRes = std::max(maxRes, lm.lmRes);
+        omnis  = std::max(omnis, lm.numOmnis);
+        if (b > biggest) { biggest = b;
+                           biggestRes = lm.lmRes; biggestFaces = uint32_t(lm.numFaces); }
+    }
+    if (!meshes) return;
+    fds::MemCensus::add("lightmap", "static shadow atlas", total, true,
+        "SUM over %zu meshes of faces x lmRes^2 x omnis x u8(1); %zu faces total, "
+        "lmRes %d..%d, omnis %d; worst single mesh %u faces x %d^2 = %.1f MiB",
+        meshes, faces, minRes, maxRes, omnis, biggestFaces,
+        biggestRes, double(biggest) / (1024.0 * 1024.0));
+    fds::MemCensus::add("lightmap", "coverage bits + planar bases + omni map", aux,
+        true, "per-mesh side tables: faces x omnis bits, faces x FacePlanarBasis(20)");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_StaticLightmaps);

@@ -12,7 +12,17 @@ namespace fds {
 // to the Face* so the radix sort doesn't have to dereference Face* to
 // fetch SortZ.DW — that pointer-chase was a cache miss per comparison
 // on the legacy `Face**` layout. With sortKey co-located, each sort
-// iteration reads contiguous 16-byte slots (2 per 32-byte cacheline).
+// iteration reads contiguous slots.
+//
+// SIZE, kept honest because two audits mis-priced this list from the stale
+// figure that used to be here ("16-byte slots, 2 per 32-byte cacheline"):
+// sizeof(FListEntry) is 24 B — sortKey(4) + 4 B of PADDING + face(8) +
+// bbox(8) — since the bbox fields were added. Reordering does not recover the
+// padding (8+4+8 = 20 still rounds to 24 at alignof(Face*) = 8); only shrinking
+// `face` to a 32-bit index would. That matters because the list is allocated
+// TWICE per context (fStorage + sStorage) and once per SHADOW MAP: see the
+// --mem_census row `shadow.scratch/per-light FList`, which is 83 MiB on greets
+// and 403 MiB with --greets_displace, filled to 2.3 % of capacity.
 //
 // sortKey is a copy of Face::SortZ.DW (the 32-bit IEEE float bit pattern
 // — the radix sort treats it as an unsigned integer key, which works

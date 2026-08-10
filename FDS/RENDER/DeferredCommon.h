@@ -45,7 +45,8 @@ constexpr int DEFERRED_MAX_LIGHTS = 128;
 // multiply the scene total (greets: 15 source × (1 + #mirrors)) but the
 // per-tile mirror-footprint cull keeps each TILE's list small — so the
 // scene array must hold them all while TileLights stays at 128.
-// ViewLightsSoA is ~33 arrays of 4 bytes → 256 entries ≈ 34 KB, trivial.
+// ViewLightsSoA is 41 arrays of 4 bytes → 256 entries ≈ 41 KB, trivial.
+// (Said "~33 arrays ≈ 34 KB" until --mem_census counted them.)
 constexpr int DEFERRED_MAX_VIEW_LIGHTS = 256;
 constexpr int DEFERRED_NUM_TILES_X = 12;
 constexpr int DEFERRED_NUM_TILES_Y = 8;
@@ -156,8 +157,17 @@ struct ViewLightsSoA {
 // single `load_a` pull 8 omnis with one 32-byte aligned read instead
 // of building a Vec4f via four `ld1.s {v}[lane]` scalar gathers.
 //
-// Memory: 24 tiles × 8 arrays × 128 floats × 4 bytes = 96 KiB total.
-// Easily fits in L2; per-tile slice stays warm in L1 across pixels.
+// Memory: this said "24 tiles × 8 arrays × 128 floats × 4 bytes = 96 KiB
+// total" for a long time and was stale by ~25 arrays and 72 tiles — the number
+// it quoted is why nobody looked. MEASURED by --mem_census: sizeof(TileLights)
+// is 16 928 B (33 arrays × DEFERRED_MAX_LIGHTS=128 × 4 B), so
+// s_tileLights[DEFERRED_NUM_TILES=96] is 1.55 MiB and
+// g_stripLights[DEFERRED_MAX_STRIPS=512] (DeferredLightLists.cpp) is 8.27 MiB.
+// Both are BSS sized by the CAP, not by the scene: at 1080p only 135 of the 512
+// strips are ever written, so most of the 8.27 MiB stays untouched (address
+// space, not RSS) — but it is 8.27 MiB of the binary's BSS either way, and a
+// per-tile slice is no longer the "easily fits in L1" object this claimed.
+// Keep this figure honest: run `--mem_census` if you change the array count.
 struct TileLights {
 	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
 	alignas(32) float posY[DEFERRED_MAX_LIGHTS];

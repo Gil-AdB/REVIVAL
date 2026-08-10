@@ -1,6 +1,7 @@
 #include "Mekalele.h"
 
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 
 namespace meka {
 // See TheOtherBarry.h fwd-decl. Defined here where GBuffer is complete.
@@ -36,6 +37,9 @@ meka::GBuffer       s_engineGBufferTransparentBack;
 std::vector<uint16_t> s_engineXparZ;
 std::vector<uint16_t> s_engineXparZBack;
 std::vector<uint16_t> s_engineXparPeelFloor;
+// Dimensions the planes above were last sized for — recorded so --mem_census
+// can print the formula's variables and not just its product.
+int s_engineGBufW = 0, s_engineGBufH = 0;
 } // namespace
 
 meka::GBuffer *g_gbuffer                = nullptr;
@@ -70,6 +74,7 @@ bool EngineGBuffer_HasNormalPlane() { return !s_engineGBuffer.normal.empty(); }
 
 void EngineGBuffer_Resize(int X, int Y) {
     size_t numPixels = size_t(X) * size_t(Y);
+    s_engineGBufW = X; s_engineGBufH = Y;
     s_engineGBuffer.normal.assign(numPixels, 0);
     s_engineGBuffer.tangent.assign(numPixels, 0);
     s_engineGBuffer.txtr.assign(numPixels, 0);
@@ -142,3 +147,39 @@ void EngineGBuffer_Resize(int X, int Y) {
     g_xparPeelFloor = s_engineXparPeelFloor.data();
     g_xparZCount = int(numPixels);
 }
+
+// ── --mem_census: the three G-buffers and the transparent Z/peel planes ────
+// Every one of these is W*H elements and every one is `assign`-ed, i.e. fully
+// TOUCHED at resize. The interesting column is the per-pixel byte total: the
+// planes are the reason a 1920x1080 deferred frame carries tens of MB before
+// a single triangle is drawn, and several of them are allocated
+// UNCONDITIONALLY for scenes that never read them.
+static void MemCensus_GBuffers() {
+    const size_t n = s_engineGBuffer.normal.capacity();
+    if (!n) return;
+    const int X = s_engineGBufW, Y = s_engineGBufH;
+    auto plane = [&](const char *sub, const char *nm, size_t cap, size_t elem,
+                     const char *what) {
+        fds::MemCensus::add(sub, nm, cap * elem, cap != 0,
+                            "W*H=%d*%d px x %zu B/px (%s)", X, Y, elem, what);
+    };
+    plane("gbuf.opaque", "normal",      s_engineGBuffer.normal.capacity(),      4, "oct16.16 shading normal");
+    plane("gbuf.opaque", "tangent",     s_engineGBuffer.tangent.capacity(),     2, "oct tangent, read ONLY by normal-mapped materials");
+    plane("gbuf.opaque", "txtr",        s_engineGBuffer.txtr.capacity(),        4, "mip|matID|swizzled UV");
+    plane("gbuf.opaque", "albedo",      s_engineGBuffer.albedo.capacity(),      4, "filtered albedo; only if texture_filter>0 || poly_viz || viz_arm");
+    plane("gbuf.opaque", "lightmapMF",  s_engineGBuffer.lightmapMF.capacity(),  4, "static-LM mesh|face; only if shadow_lightmap");
+    plane("gbuf.opaque", "lightmapST",  s_engineGBuffer.lightmapST.capacity(),  2, "static-LM barycentric; only if shadow_lightmap");
+    plane("gbuf.opaque", "shadowMatID", s_engineGBuffer.shadowMatID.capacity(), 2, "receiver id, allocated UNCONDITIONALLY");
+    plane("gbuf.opaque", "faceId",      s_engineGBuffer.faceId.capacity(),      4, "diagnostic; only if face_id_dump");
+    plane("gbuf.opaque", "mirrorId",    s_engineGBuffer.mirrorId.capacity(),    1, "per-pixel mirror ownership; empty on mirrorless scenes");
+    plane("gbuf.opaque", "mirrorMask",  s_engineGBuffer.mirrorMask.capacity(),  1, "immutable mirror gate");
+    plane("gbuf.opaque", "mirrorMaskZ", s_engineGBuffer.mirrorMaskZ.capacity(), 2, "mirror wall depth");
+    plane("gbuf.xpar",   "front.normal", s_engineGBufferTransparent.normal.capacity(), 4, "UNCONDITIONAL, even with no transparent geometry");
+    plane("gbuf.xpar",   "front.txtr",   s_engineGBufferTransparent.txtr.capacity(),   4, "UNCONDITIONAL");
+    plane("gbuf.xpar",   "back.normal",  s_engineGBufferTransparentBack.normal.capacity(), 4, "UNCONDITIONAL, 2-deep peel back layer");
+    plane("gbuf.xpar",   "back.txtr",    s_engineGBufferTransparentBack.txtr.capacity(),   4, "UNCONDITIONAL");
+    plane("gbuf.xpar",   "z.front",      s_engineXparZ.capacity(),          2, "UNCONDITIONAL");
+    plane("gbuf.xpar",   "z.back",       s_engineXparZBack.capacity(),      2, "UNCONDITIONAL");
+    plane("gbuf.xpar",   "peelFloor",    s_engineXparPeelFloor.capacity(),  2, "depth-peel floor; K>1 only, allocated UNCONDITIONALLY");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_GBuffers);

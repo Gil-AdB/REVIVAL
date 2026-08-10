@@ -8,6 +8,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "F4Vec.h"
 #include "TheOtherBarry.h"
 #include "ClipperTileRect.h"
@@ -996,3 +997,35 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 // Mekalele's packed format: miplevel(4) | matID(8) | swizzled_uv(20).
 // Defined here so the kernel can compare against shadow buffer matIDs.
 // matID maps to the +1-shifted value we wrote into the texel's id half.
+
+// ── --mem_census: the shadow-map planes ────────────────────────────────────
+// The formula is `res² × 4 B × 2 planes × (6 per cube omni + 1 per spot)`,
+// and it scales with LIGHT COUNT — greets carries 21 shadow-casting omnis.
+// Both planes are `assign`-ed, so every byte is touched at rebuild; packDyn
+// is additionally re-filled per frame for any map a dynamic mesh reaches.
+// --shadow_swizzle keeps two further derived copies, doubling the total.
+static void MemCensus_ShadowMaps() {
+    if (g_shadowMaps.empty()) return;
+    size_t sd = 0, dyn = 0, sw = 0, texels = 0;
+    size_t nCubeFaces = 0, nSpot = 0;
+    int    minRes = 1 << 30, maxRes = 0;
+    for (const ShadowMap &sm : g_shadowMaps) {
+        sd     += sm.packSD.capacity()  * sizeof(uint32_t);
+        dyn    += sm.packDyn.capacity() * sizeof(uint32_t);
+        sw     += (sm.packSDSw.capacity() + sm.packDynSw.capacity()) * sizeof(uint32_t);
+        texels += size_t(sm.xres) * size_t(sm.yres);
+        if (sm.cubeFace >= 0) ++nCubeFaces; else ++nSpot;
+        minRes = std::min(minRes, sm.xres);
+        maxRes = std::max(maxRes, sm.xres);
+    }
+    const size_t nCubes = g_cubeShadowRefs.size();
+    fds::MemCensus::add("shadow", "packSD (static z|id)", sd, true,
+        "%zu maps = %zu cubes x 6 + %zu spots; res %d..%d; %zu texels x u32(4)",
+        g_shadowMaps.size(), nCubes, nSpot, minRes, maxRes, texels);
+    fds::MemCensus::add("shadow", "packDyn (dynamic z|id)", dyn, true,
+        "same shape as packSD — allocated for EVERY map whether or not a "
+        "dynamic mesh ever reaches it; %zu texels x u32(4)", texels);
+    fds::MemCensus::add("shadow", "packSDSw+packDynSw (--shadow_swizzle)", sw, sw != 0,
+        "derived 8x8-tiled COPIES of both planes; 0 unless --shadow_swizzle");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_ShadowMaps);

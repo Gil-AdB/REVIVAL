@@ -28,6 +28,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "Base/Scene.h"
 #include "Base/Omni.h"
 #include "Base/Camera.h"
@@ -4104,3 +4105,29 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
         }
     }
 }
+
+// ── --mem_census: the froxel volume ───────────────────────────────────────
+// Scales with the GRID (nx x ny x nz), not with resolution — so a froxel
+// tweak is the one fog knob that moves memory. gFrSct is double-buffered
+// float4 (temporal history), which is 8 of the 12 floats per froxel.
+static void MemCensus_Froxels() {
+	const size_t n = size_t(gFrX) * size_t(gFrY) * size_t(gFrZ);
+	const size_t acc = (gFrAccR.capacity() + gFrAccG.capacity()
+	                  + gFrAccB.capacity() + gFrT.capacity()) * sizeof(float);
+	const size_t sct = (gFrSct[0].capacity() + gFrSct[1].capacity()) * sizeof(float);
+	fds::MemCensus::add("fog.froxel", "integrated R/G/B/T planes", acc, true,
+		"4 parallel float planes x nx*ny*nz = %d*%d*%d = %zu froxels",
+		gFrX, gFrY, gFrZ, n);
+	fds::MemCensus::add("fog.froxel", "scatter history (ping-pong float4)", sct, true,
+		"2 buffers x 4 floats x %zu froxels — temporal reprojection history", n);
+	fds::MemCensus::add("fog.froxel", "coarse glow grid", gGlow.capacity() * sizeof(float),
+		true, "%d*%d columns x nz=%d x RGB float", gGlX, gGlY, gFrZ);
+	fds::MemCensus::add("fog.halfres", "coarse fog planes (5 parallel)", 
+		(gFogAmt.capacity() + gFogZ.capacity() + gFogGR.capacity()
+		 + gFogGG.capacity() + gFogGB.capacity()) * sizeof(float), true,
+		"amt/z/glowR/glowG/glowB, each %d*%d floats — 5 base pointers for one "
+		"logical coarse sample", gFogHW, gFogHH);
+	fds::MemCensus::add("fog.froxel", "1/z LUT", gFrIzLUT.capacity(), true,
+		"fixed 65536 x u8");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_Froxels);

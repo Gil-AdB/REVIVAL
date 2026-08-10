@@ -1,6 +1,7 @@
 #include "FrameProfiler.h"
 #include <Base/FeatureFlags.h>
 #include <RENDER/TailProf.h>   // --deferred_prof: per-frame normaliser
+#include <Base/MemCensus.h>    // --mem_census: one-shot allocation walk
 #include "Rev.h"
 
 #include <Base/FDS_DECS.H>
@@ -84,6 +85,10 @@ extern int32_t g_FrameTime;
 void FrameProfiler::endFrame() {
     auto now = clock::now();
     ++numFrames_;
+
+    // --mem_census: one-shot allocation walk at the END of tick N (default 1),
+    // i.e. after the first frame's lazy bakes have allocated. No-op when off.
+    fds::MemCensus::tick();
 
     std::int64_t frameTotal = 0;
     for (int i = 0; i < PROF_NUM; ++i) {

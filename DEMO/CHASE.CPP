@@ -162,7 +162,11 @@ static float RflSurfOfs = 0;
 static float g_chaseWaterMinX = 0, g_chaseWaterMaxX = 0,
              g_chaseWaterMinZ = 0, g_chaseWaterMaxZ = 0, g_chaseWaterY = 0;
 
-static DWord WaterBuf[65536 * 4];
+// 256x256 DWord snapshot of the water texture. Was `[65536 * 4]` — a BYTE count
+// used as an ELEMENT count (same defect as CITY.CPP's copy of this), so the
+// array was 4x what the memcpy below writes. Byte-null: the memcpy still copies
+// 65536*4 BYTES, which now exactly fills it.
+static DWord WaterBuf[65536];
 
 static void Setup_Water_Distort()
 {

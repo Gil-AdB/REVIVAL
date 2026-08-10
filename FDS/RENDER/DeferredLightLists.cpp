@@ -18,6 +18,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "RENDER/DeferredCommon.h"
 
 // Zero a TileLights' padding slots (count..8-rounded) so the vec light
@@ -487,3 +488,20 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
 	}
 	g_numStripLights = numStrips;
 }
+
+// ── --mem_census: the per-strip light lists ───────────────────────────────
+// Fixed-size BSS: DEFERRED_MAX_STRIPS entries of a struct that is 33 SoA
+// arrays x DEFERRED_MAX_LIGHTS x 4 B. It is sized by the CAP, not by the
+// scene — a 10-light scene reserves the same bytes as a 128-light one, and
+// only the first `numStrips` entries are ever written (so most of it stays
+// untouched BSS rather than RSS). The comment in DeferredCommon.h claiming
+// "96 KiB total" predates ~25 of those arrays.
+static void MemCensus_StripLights() {
+	fds::MemCensus::add("lightlist", "g_stripLights (BSS)",
+		sizeof(g_stripLights), false,
+		"DEFERRED_MAX_STRIPS=%d x sizeof(TileLights)=%zu (33 SoA arrays x "
+		"DEFERRED_MAX_LIGHTS=%d x 4 B); %d strips actually populated",
+		DEFERRED_MAX_STRIPS, sizeof(TileLights), DEFERRED_MAX_LIGHTS,
+		g_numStripLights);
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_StripLights);

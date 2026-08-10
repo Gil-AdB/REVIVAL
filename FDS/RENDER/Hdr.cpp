@@ -7,6 +7,7 @@
 #include "Base/Scene.h"           // CurScene->FZP for DoF range normalization
 #include "Base/Camera.h"          // View->ITarget for DoF camera-target auto-focus
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "Threads.h"             // ThreadPool — tile the tonemap across the pool
 
 #include <algorithm>
@@ -106,6 +107,16 @@ void Hdr_ActivateNoFog() {
 // into its own working buffer. Built only when a consumer is active.
 static std::vector<float> g_brightPass;   // g_bpBW*g_bpBH*3
 static int g_bpBW = 0, g_bpBH = 0;
+
+// Two post-chain scratch buffers hoisted from function-local statics to file
+// scope so --mem_census can see them (same lifetime and reuse either way).
+// They are the two BIG ones in the chain: the DoF source is a full-res f16→f32
+// EXPANSION of g_hdrBuf (4 floats/px, i.e. 2× the buffer it copies), and the CA
+// source is a full-res VPage copy. The remaining post scratch (bloom /
+// anamorphic / ghost pyramids, the reduced-res DoF planes) is quarter-res or
+// smaller and stays function-local — it lands in the census's residual.
+static std::vector<float> g_dofSrcF32;    // W*H*4 floats, full-res DoF source
+static std::vector<dword> g_caSrcLdr;     // W*H dwords, chromatic-aberration source
 
 // The DS=4 soft-knee downsample loop (parallel over rows; scalar inner — it's
 // memory-bound, so avoiding the 2 redundant streams matters more than SIMD).
@@ -577,9 +588,8 @@ void Render_DoFPass() {
         return;
     }
 
-    static std::vector<float> s_src;
-    s_src.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
-    const float* const SRC = s_src.data();
+    g_dofSrcF32.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
+    const float* const SRC = g_dofSrcF32.data();
     hdrf* const DST = g_hdrBuf.data();
 
     hdrDispatchRows(H, [=](int y1, int y2) {
@@ -711,9 +721,8 @@ void Render_LensPostPass() {
     const float cx = W * 0.5f, cy = H * 0.5f;
     const float invMaxR = 1.0f / std::sqrt(cx*cx + cy*cy);
     // CA reads offset neighbours → needs an unmodified source copy.
-    static std::vector<dword> s_src;
     const dword* src = nullptr;
-    if (doCA) { s_src.assign(size_t(W) * size_t(H), 0u); std::copy(vp, vp + size_t(W)*size_t(H), s_src.data()); src = s_src.data(); }
+    if (doCA) { g_caSrcLdr.assign(size_t(W) * size_t(H), 0u); std::copy(vp, vp + size_t(W)*size_t(H), g_caSrcLdr.data()); src = g_caSrcLdr.data(); }
     hdrDispatchRows(H, [=](int y1, int y2) {
         for (int y = y1; y < y2; ++y) {
             dword* row = vp + size_t(y) * size_t(W);
@@ -869,5 +878,32 @@ void Render_TonemapToVPage() {
         });
     for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
+
+// ── --mem_census: the HDR buffer and the two big post-chain scratch copies ─
+// g_hdrBuf is 4 components per pixel — B,G,R,coverage — at 2 B each on arm64
+// (__fp16 storage) or 4 B under FDS_HDR_F32. Everything downstream of it that
+// needs a stable source keeps a FULL-RES COPY: the glass-refraction snapshot
+// keeps two (HDR + LDR), DoF keeps an f32 EXPANSION (2× the buffer it copies
+// from), CA keeps a VPage copy. So --hdr's real cost is not one buffer.
+static void MemCensus_Hdr() {
+    const int W = g_hdrBufW, H = g_hdrBufH;
+    MemCensus::add("hdr", "g_hdrBuf", g_hdrBuf.capacity() * sizeof(hdrf),
+        !g_hdrBuf.empty(), "W*H=%d*%d px x 4 comp x %zu B (%s)", W, H,
+        sizeof(hdrf), sizeof(hdrf) == 2 ? "f16 storage" : "f32 storage");
+    MemCensus::add("hdr", "g_glassRefrHdr", g_glassRefrHdr.capacity() * sizeof(hdrf),
+        !g_glassRefrHdr.empty(), "full-res HDR snapshot for --glass_refract; "
+        "W*H x 4 comp x %zu B", sizeof(hdrf));
+    MemCensus::add("hdr", "g_glassRefrLdr", g_glassRefrLdr.capacity() * sizeof(uint32_t),
+        !g_glassRefrLdr.empty(), "full-res VPage snapshot for --glass_refract; W*H x u32(4)");
+    MemCensus::add("hdr", "brightPass pyramid", g_brightPass.capacity() * sizeof(float),
+        !g_brightPass.empty(), "DS=4 downsample %d*%d x 3 float(4); shared by "
+        "bloom/anamorphic/ghost", g_bpBW, g_bpBH);
+    MemCensus::add("hdr", "DoF source (f32 expansion)", g_dofSrcF32.capacity() * sizeof(float),
+        !g_dofSrcF32.empty(), "FULL-RES W*H x 4 x float(4) — an f16->f32 copy of "
+        "g_hdrBuf, so 2x g_hdrBuf; --dof_downscale>1 skips it entirely");
+    MemCensus::add("hdr", "CA source (VPage copy)", g_caSrcLdr.capacity() * sizeof(dword),
+        !g_caSrcLdr.empty(), "full-res W*H x u32(4); only under --chromatic");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_Hdr);
 
 } // namespace fds

@@ -48,6 +48,7 @@
 
 #include "Base/FDS_VARS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "FILLERS/Mekalele.h"
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/Hdr.h"
@@ -863,3 +864,19 @@ void Render_SSAO() {
 		}
 	}
 }
+
+// ── --mem_census: the SSAO low-res planes ─────────────────────────────────
+// Everything here is (XRes/down) x (YRes/down), so --ssao_downscale is a
+// quadratic lever on both the taps and the bytes.
+static void MemCensus_SSAO() {
+	const size_t p = (g_aoRaw.capacity() + g_aoBlur.capacity() + g_aoZ.capacity())
+	               * sizeof(float);
+	size_t hist = 0;
+	for (int i = 0; i < 2; ++i)
+		hist += (g_aoHistBuf[i].capacity() + g_aoHistZBuf[i].capacity()) * sizeof(float);
+	fds::MemCensus::add("ssao", "raw/blur/z planes", p, false,
+		"3 parallel float planes x lowW*lowH (= W*H / ssao_downscale^2)");
+	fds::MemCensus::add("ssao", "temporal history (ping-pong ao + z)", hist, false,
+		"2 x (ao + viewZ) float planes at lowW*lowH; 0 unless --ssao_temporal");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_SSAO);

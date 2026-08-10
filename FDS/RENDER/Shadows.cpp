@@ -30,6 +30,8 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
+#include "Base/FrameState.h"   // g_mainFaces — censused below
 #include "Base/Scene.h"
 #include "Base/Camera.h"
 #include "Base/Omni.h"
@@ -63,6 +65,49 @@ namespace renderns {
 	extern std::atomic<int>          tileCounter;
 	extern std::condition_variable   condition;
 }
+
+// ── Per-shadow-map render scratch, one set per SHADOW MAP per thread ───────
+// One FaceListContext + VertexScratch + Camera + CameraContext per shadow-
+// casting light-face. Kept across frames so the per-vertex clone arrays + face
+// buffers stay warm — Transform_Objects rewrites the projected fields in place
+// each frame instead of reallocating.
+//
+// SIZE, AND WHY IT IS WORTH KNOWING: `faces[i]` is resized to `Polys` — the
+// WHOLE SCENE's face count — for every entry, and each entry costs
+// 2 x Polys x sizeof(FListEntry). `scratch[i]` lazily clones the Vertex[] and
+// Face[] of every mesh that light-face rasterizes. The vector is indexed by
+// g_shadowMaps.size(), which on a cube-shadow scene is 6 x the omni count
+// (greets: 21 shadow-casting omnis -> 126 entries). --mem_census walks it.
+//
+// Was four function-local `static thread_local` vectors; hoisted to file scope
+// (identical lifetime) so a census can reach them, and self-registered in a
+// process-wide list so the report covers EVERY thread that ever built one, not
+// just whichever thread happens to be reporting.
+namespace {
+struct ShadowScratchTLS {
+	std::vector<fds::FaceListContext> faces;
+	std::vector<fds::VertexScratch>   scratch;
+	std::vector<Camera>               cam;
+	std::vector<fds::CameraContext>   ctx;
+};
+std::mutex                     &shadowScratchMtx() { static std::mutex m; return m; }
+std::vector<ShadowScratchTLS*> &shadowScratchAll() {
+	static std::vector<ShadowScratchTLS*> v; return v;
+}
+// Heap-allocated and deliberately never freed: the registry below outlives any
+// worker thread, and a `static thread_local` object would leave a dangling
+// entry there the moment a thread exited. The pool is process-lifetime, so
+// nothing is retained that the old form would have released in practice.
+ShadowScratchTLS &shadowScratch() {
+	static thread_local ShadowScratchTLS *s = [] {
+		auto *p = new ShadowScratchTLS();
+		std::lock_guard<std::mutex> lk(shadowScratchMtx());
+		shadowScratchAll().push_back(p);
+		return p;
+	}();
+	return *s;
+}
+} // namespace
 
 // Set by the shadow orchestrator around each per-light Transform_Objects
 // so the mesh-bsphere-vs-cone cull in Transform.cpp can read the active
@@ -267,10 +312,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	// Transform_Objects rewrites the projected fields in place each
 	// frame instead of reallocating. Sizing once per frame (in case
 	// the shadow-map set grew).
-	static thread_local std::vector<fds::FaceListContext> perLightFaces;
-	static thread_local std::vector<fds::VertexScratch>   perLightScratch;
-	static thread_local std::vector<Camera>               perLightCam;
-	static thread_local std::vector<fds::CameraContext>   perLightCtx;
+	// (Hoisted to file scope as ShadowScratchTLS so --mem_census can walk it —
+	// same thread_local lifetime and reuse as the four function-statics it
+	// replaces. It is the largest per-light allocation in the engine and was
+	// previously invisible to any instrument.)
+	ShadowScratchTLS &sscratch = shadowScratch();
+	auto &perLightFaces   = sscratch.faces;
+	auto &perLightScratch = sscratch.scratch;
+	auto &perLightCam     = sscratch.cam;
+	auto &perLightCtx     = sscratch.ctx;
 	if (perLightFaces.size() != g_shadowMaps.size()) {
 		perLightFaces.resize(g_shadowMaps.size());
 		perLightScratch.resize(g_shadowMaps.size());
@@ -1236,3 +1286,71 @@ void ShadowBake_JoinPending() {
 		if (g_shadowBakeThread.joinable()) g_shadowBakeThread.join();
 	}
 }
+
+// ── --mem_census: the per-shadow-map render scratch ────────────────────────
+// The formula to read here is the INDEX, not the element: both vectors are
+// sized by g_shadowMaps.size() = 6 x cube omnis + spots, while what actually
+// needs to exist at once is bounded by how many light passes run CONCURRENTLY
+// (the pool size). Every entry's FList is sized to the whole scene's Polys,
+// and every entry's VertexScratch holds full Vertex[]/Face[] clones of each
+// mesh that light-face rasterized.
+static void MemCensus_ShadowScratch() {
+	std::lock_guard<std::mutex> lk(shadowScratchMtx());
+	auto &all = shadowScratchAll();
+	if (all.empty()) return;
+	size_t flistB = 0, cloneVertB = 0, cloneFaceB = 0, cloneFrameB = 0;
+	size_t slots = 0, liveSlots = 0, cloneCount = 0, flistCap = 0;
+	size_t usedSum = 0, usedMax = 0;
+	for (const ShadowScratchTLS *S : all) {
+		slots += S->faces.size();
+		for (const fds::FaceListContext &f : S->faces) {
+			const size_t b = (f.fStorage.capacity() + f.sStorage.capacity())
+			               * sizeof(fds::FListEntry);
+			flistB += b;
+			if (b) { ++liveSlots; flistCap = std::max(flistCap, f.fStorage.capacity()); }
+			// What the light-face actually FILLED last frame — the number the
+			// capacity should be compared against.
+			const size_t used = size_t(f.cAll < 0 ? 0 : f.cAll);
+			usedSum += used;
+			usedMax = std::max(usedMax, used);
+		}
+		for (const fds::VertexScratch &vs : S->scratch)
+			for (const auto &kv : vs.clones) {
+				const fds::PerTriMeshClone &c = kv.second;
+				cloneVertB  += c.verts.capacity() * sizeof(Vertex);
+				cloneFaceB  += c.faces.capacity() * sizeof(Face);
+				cloneFrameB += size_t(c.frame.capacity) * 72u;
+				++cloneCount;
+			}
+	}
+	// TOUCHED: FaceListContext::resize uses vector::resize, which VALUE-
+	// initializes every FListEntry — its bbMin/bbMax NSDMIs mean a real
+	// per-element constructor run, so every page is written even though only
+	// `cAll` entries carry real work.
+	fds::MemCensus::add("shadow.scratch", "per-light FList + radix scratch", flistB, true,
+		"%zu threads x %zu maps = %zu slots (%zu sized) x 2 x Polys=%zu x "
+		"FListEntry(%zu). ACTUALLY FILLED: max %zu, mean %zu per map = %.1f%% of "
+		"capacity — the capacity is the WHOLE SCENE's face count, per light-face",
+		all.size(), all.empty() ? 0 : all[0]->faces.size(), slots, liveSlots,
+		flistCap, sizeof(fds::FListEntry), usedMax,
+		liveSlots ? usedSum / liveSlots : 0,
+		(flistCap && liveSlots) ? 100.0 * double(usedSum) / double(liveSlots) / double(flistCap) : 0.0);
+	fds::MemCensus::add("shadow.scratch", "per-light mesh clones (Vertex[])", cloneVertB, true,
+		"%zu live (shadow map x mesh) clones x VIndex x sizeof(Vertex)=%zu",
+		cloneCount, sizeof(Vertex));
+	fds::MemCensus::add("shadow.scratch", "per-light mesh clones (Face[])", cloneFaceB, true,
+		"same %zu clones x FIndex x sizeof(Face)=%zu", cloneCount, sizeof(Face));
+	fds::MemCensus::add("shadow.scratch", "per-light clone VertexFrame SoA", cloneFrameB, true,
+		"same %zu clones x ceil8(VIndex) x 72 B (16 float + 2 u32 fields)", cloneCount);
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_ShadowScratch);
+
+// ── --mem_census: the MAIN-pass face list ─────────────────────────────────
+static void MemCensus_MainFaceList() {
+	const size_t b = (fds::g_mainFaces.fStorage.capacity()
+	                + fds::g_mainFaces.sStorage.capacity()) * sizeof(fds::FListEntry);
+	fds::MemCensus::add("facelist", "g_mainFaces (FList + radix scratch)", b, false,
+		"2 x Polys=%zu x FListEntry(%zu) = sortKey(4)+pad(4)+Face*(8)+bbox(8)",
+		fds::g_mainFaces.fStorage.capacity(), sizeof(fds::FListEntry));
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_MainFaceList);

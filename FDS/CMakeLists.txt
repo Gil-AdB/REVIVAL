@@ -42,6 +42,8 @@ set(Base
     Base/KeyFrame.h
     Base/Material.h
     Base/Matrix.h
+    Base/MemCensus.cpp
+    Base/MemCensus.h
     Base/Object.h
     Base/Omni.h
     Base/Quaternion.h
@@ -154,6 +156,7 @@ set(RENDER
     RENDER/Hdr.cpp
     RENDER/Hdr.h
     RENDER/Lighting.cpp
+    RENDER/MemCensusScene.cpp
     RENDER/OffscreenView.cpp
     RENDER/OffscreenView.h
     RENDER/LightmapBake.cpp

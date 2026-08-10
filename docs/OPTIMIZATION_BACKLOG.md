@@ -10,6 +10,157 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-10 — MEMORY-SIZE SWEEP: `--mem_census`, and the per-shadow-map FList (403 MiB at 0.5 % fill)
+
+Asked as *"the lightmap defect and the shadow-plane defect had shapes — sweep
+the engine for more of both"*. The two shapes:
+
+1. **Wrong-variable scaling** (`943d644`) — an allocation whose size is a
+   product of counts, where one of the counts is the wrong thing to scale with.
+   The static lightmap was `numFaces × lmRes² × numOmnis` bytes fully touched at
+   init: it scaled with FACE COUNT at a flat 128²/face instead of with SURFACE
+   AREA, so tessellation multiplied it ~300× for nothing (19.4 GB displaced).
+2. **Scatter** (`af1f8f8`) — one logical datum split across parallel arrays that
+   a hot loop always reads together. Four u16 shadow planes 512 KB apart =
+   8 cache lines per tap; packing to one u32 plane bought −1.0 ms, byte-null.
+
+**The instrument shipped first, and it is the durable part of this work:
+`--mem_census`** (`FDS/Base/MemCensus.h`, default off, byte-null — it reads
+sizes and writes stderr). It walks every large allocation and prints resident
+bytes, whether every byte is TOUCHED, and **the formula it scales with**. That
+last column is the whole point: `0.5 GB` is not actionable, `0.5 GB BECAUSE it
+scales with the whole scene's face count, per light-face` is. It also prints the
+process `phys_footprint` and the UNCENSUSED RESIDUAL, so a subsystem nobody has
+taught it about shows up as a gap rather than as silence. **Adding a subsystem
+is one function plus one line** (`FDS_MEMCENSUS_REPORTER`). Cross-checked against
+`/usr/bin/time -l`: census-reported footprint 2.17 GiB vs `peak memory footprint`
+2 334 362 264 B on the same run.
+
+### Per-scene totals (1920×1080, dummy drivers, `--mem_census`, end of tick 1)
+
+| scene / arm | censused | of which TOUCHED | `phys_footprint` | uncensused residual |
+|---|--:|--:|--:|--:|
+| greets (pin recipe) | 738.68 MiB | 726.51 | 1.36 GiB | 655 MiB |
+| greets `--greets_displace` | **1.46 GiB** | 1.43 GiB | **2.17 GiB** | 734 MiB |
+| city (pin recipe) | 760.44 MiB | 744.87 | 1.19 GiB | 459 MiB |
+| fountain (pin recipe) | 249.33 MiB | 237.92 | 1.07 GiB | 847 MiB |
+| chase t=800 | 125.20 MiB | 110.06 | 197.02 MiB | 72 MiB |
+
+Caveat when reading the `texture/*` rows: `MatLib` is process-global and every
+scene is initialised at startup, so those rows are the WHOLE DEMO's texture set,
+not the current scene's. The `geometry/*` and `shadow*` rows are `CurScene`-only.
+That is also most of why fountain shows an 847 MiB residual on a 249 MiB census.
+
+### THE RANKED TABLE
+
+Sizes are measured (census + `time -l`). Every *win* is labelled measured or
+inferred; none of the unlanded items has been built, so none has a measured win.
+
+| # | finding | measured size | formula | should scale with | waste | fix shape | expected win |
+|---|---|--:|---|---|--:|---|---|
+| **1** | **per-shadow-map FList + radix scratch** `FDS/RENDER/Shadows.cpp` (`perLightFaces[i].resize(Polys)`) | greets **83.27 MiB**, displaced **403.10 MiB** | `numShadowMaps × 2 × Polys × sizeof(FListEntry)=24`; numShadowMaps = 6×cubeOmnis + spots = **76** at greets | the faces ONE LIGHT-FACE actually sees | **97.7 % / 99.5 %** — measured fill mean **856 of 37 173** (flat) and **881 of 182 350** (displaced), max 5 560 / 5 564 | high-water-mark sizing: the `resize` already runs on the tick thread before the Phase-A dispatch, so growth there is safe; keep a per-map high-water + slack, grow-only, with an overflow guard in the fill | **inferred** −81 MiB greets / **−395 MiB** displaced RSS + the first-touch cost at init. No frame-time claim. |
+| **2** | **city env paraboloid hemi sheets** `DEMO/CITY.CPP:2724` (`Materialize(sheet, kSheetRes, kSheetRes)`) | **355.00 MiB** (355 sheets) | `6 sheets × kSheetRes(512)² × 4 B × numBuildings` | the building's reflective footprint / screen size | fixed 512² for every building regardless of size | per-building sheet res from bounding radius or authored importance; or 256² globally | **inferred** −266 MiB at 256². **LOOK CHANGE — needs his eye before anything is built.** |
+| **3** | **per-shadow-map mesh clones** `FDS/Base/VertexScratch.*` | greets **178.16 MiB** (93.43 Vertex + 36.04 Face + 48.69 VertexFrame), displaced **440.86 MiB** | `Σ over (shadow map × mesh it rasterised) of VIndex×140 + FIndex×162 + ceil8(VIndex)×72`; **2 445 clones** flat, 1 360 displaced | concurrent light passes — but see below | the VertexFrame slab clones all **18** SoA fields when the depth-only shadow pass needs a handful | (a) a shadow-only VertexFrame with the fields the depth pass reads; (b) merge Phase A/B per light so a scratch can be recycled | **inferred** up to −48.69 MiB greets / −119 MiB displaced from (a) alone |
+| **4** | **env probe cube stores** `FDS/RENDER/EnvBake.cpp` | city **155.39 MiB** | `stores(78) × 6 faces × res(256)² × 4 B × mipchain(1.328)` | probe count × res², both authored | 78 probes at a uniform res | dedup near-coincident probes; per-probe `storeRes` from footprint | **inferred**, unquantified |
+| **5** | **static shadow lightmap atlas** (the `943d644` item, capped but not closed) | greets **88.51 MiB**, displaced **147.38 MiB** | `Σ per mesh of faces × lmRes² × omnis × 1 B`; lmRes 8..128, omnis 11, 115 346 faces displaced | surface area (now partly does, via `--shadow_lightmap_texel_density`) | still linear in FACE COUNT below the density cap | lower the `shadow_lightmap_res` cap, or make the density the only knob | **inferred**, small next to 1–3 |
+| **6** | **`ShadowMap::packDyn`** `FDS/FILLERS/ShadowMap.cpp:411` | greets **51.62 MiB** (= packSD exactly) | `res² × 4 B × (6×cubeOmnis + spots)` | the maps a dynamic mesh actually reaches | allocated for EVERY map; `hasDynMeshVisible` typically true for 1–2 of 6 cube faces | allocate on first dynamic hit and keep (the per-frame bit churns, so don't key on it) | **inferred** −30..45 MiB greets |
+| **7** | **transparent G-buffer planes, unconditional** `FDS/FILLERS/Mekalele.cpp:125-141` | **45.6 MiB** on EVERY scene (front 16.6 + back 16.6 + z.front/z.back 8.3 + peelFloor 4.15) | `W*H × (4+4+4+4+2+2+2)` | whether the scene has transparent geometry at all | chase and city pay the back layer and the K>1 peel floor for nothing | allocate on first transparent commit | **inferred** −20 MiB on xpar-free scenes. NOT byte-null-trivial: the rasterizer reads the raw pointers. |
+| **8** | **`g_stripLights[512]`** `FDS/RENDER/DeferredLightLists.cpp:397` | **8.27 MiB** BSS | `DEFERRED_MAX_STRIPS(512) × sizeof(TileLights)=16 928` | `YRes/8` — **135** strips at 1080p | sized by the CAP; ~74 % never written, so address space rather than RSS | size at resize like every other screen-derived array | low; named because the header claimed "96 KiB" (see below) |
+| **9** | **DoF full-res source** `FDS/RENDER/Hdr.cpp` (`g_dofSrcF32`) | **33.2 MiB** when `--dof` runs full-res (0 in the pin arms) | `W*H × 4 × sizeof(float)` — an f16→f32 EXPANSION, i.e. 2× `g_hdrBuf` | the buffer it copies | the copy widens 2 B → 4 B for no stated reason | keep it `hdrf`, or require `--dof_downscale>1` (which skips it entirely) | **inferred** −16.6 MiB |
+| **10** | **`WaterBuf[65536*4]`** CITY + CHASE | 1 MiB each, **¾ never touched** | a BYTE count used as an ELEMENT count | 65536 DWords (256×256) | 4× | one-token fix | **LANDED** (see below) |
+
+**Two stale comments were load-bearing** — they are why items 1 and 8 were
+invisible, and both are corrected in this changeset:
+`DeferredCommon.h` claimed TileLights was *"24 tiles × 8 arrays × 128 floats =
+96 KiB total"* (actual: 96 tiles × 33 arrays, `sizeof` 16 928 → 1.55 MiB for
+`s_tileLights` and 8.27 MiB for `g_stripLights`), and `FaceListContext.h`
+claimed *"contiguous 16-byte slots"* (actual `sizeof(FListEntry)` is 24 —
+sortKey(4) + 4 B PADDING + face(8) + bbox(8); reordering does not recover the
+padding, only a 32-bit face index would). Two independent audits mis-priced
+those lists straight from the stale figures.
+
+### The signature to remember, from item 1
+
+Between the flat and displaced greets arms `Polys` went **37 173 → 182 350**
+(4.9×) and the FList capacity went with it, **83 → 403 MiB**. The number of
+faces a light-face actually filled went **5 560 → 5 564**. The capacity tracked
+tessellation; the demand did not — because the tessellated geometry sits behind
+`--greets_shadow_proxy` and never enters a shadow FList at all. That is the
+wrong-variable shape in its purest form, and it is exactly what the census's
+formula column is for.
+
+### Shape 2 (scatter): the surviving candidates, ranked by base pointers × hotness
+
+`docs/OPTIMIZATION_BACKLOG.md` already inventoried the opaque G-buffer sweep
+(§"17 B/px unconditional from 6 separate arrays") and scored it *sequential*.
+That judgement priced the BANDWIDTH, not the lines / TLB entries / prefetch
+streams per access — which is the axis the `af1f8f8` fix actually moved. Re-open
+with that in mind:
+
+* **The wave-1 deferred kernel** (`DeferredSurfaceKernel.cpp:1666`) reads **8
+  distinct base pointers for the same pixel index `i`**: `ZPage16`,
+  `gb.mirrorId`, `gb.txtr`, `gb.shadowMatID`, `gb.albedo`, `gb.normal`,
+  `gb.tangent`, plus `lightmapMF`+`lightmapST`. Planes are 2–8 MB apart, each
+  its own `malloc`. Same shape at `:4326` (OuterVec, 6 bases), `:3226`
+  (transparent, 6), `:5180` (wave-2 TileFill, 3 bases × 5 pixels).
+* **The cleanest pair in the tree**: `lightmapMF` (u32) + `lightmapST` (u16) —
+  one logical datum (`meshLMId | faceIdx | s | t` = 6 B that fits one u64), read
+  by `resolvePixelLightmap` (`DeferredShadowSampling.h:47`) as two planes 4 MB
+  apart, every pixel, whenever `--shadow_lightmap` is on. **This is the closest
+  structural analogue to the shadow-plane fix that is still open.**
+* **The second-cleanest**: `mirrorMask` (u8) + `mirrorMaskZ` (u16) — allocated
+  together (`GreetsMirror.cpp:1171`), written together, read together twice per
+  rasterizer row (`Mekalele.h:1456` and `:1510`), and the code already asserts
+  they are inseparable (`if (zplane.size() < plane.size()) return; // sized
+  together`). 3 B across two allocations 2 MB apart.
+* **Half-res fog** (`DeferredFastFog.cpp:902`): `gFogAmt/gFogZ/gFogGR/gFogGG/
+  gFogGB` — five parallel `vector<float>`, all five read at the same index, 4
+  taps → **20 addresses from 5 bases per pixel** in the bilateral compositor
+  (`:1002`). One logical record = 20 B that fits one 32-B struct.
+* **SSAO** (`DeferredSSAO.cpp:145`): `aoZ` then `aoRaw` at the same index, 16 box
+  taps in the blur and 4 in the apply. 2 bases, always together.
+* **EdgeAA** (`DeferredEdgeAA.cpp:99`): `ZPage16` + `gb.normal`, 5-tap stencil
+  over 3 rows = ~6 lines from 2 far-apart bases per pixel.
+* **`TileLights` scalar per-light loop** (`DeferredSurfaceKernel.cpp:2504`):
+  ~22–25 base pointers per light per pixel, consecutive arrays 512 B apart. This
+  is the path every normal-mapped pixel takes. **Caveat for judgement:** 16.9 KB
+  per tile is L1/L2-resident, so this is a latency/µop item, not a DRAM one.
+* **NEGATIVE RESULT, reported not buried:** the froxel accumulation planes
+  (`gFrAccR/G/B/T` + `gFrSct`, 5 bases × 8 gathers per pixel) look like a prime
+  candidate, but `DeferredFastFog.cpp:2528` records that **an AoS repack of the
+  froxel arrays moved nothing**. Read that before spending time there. It may
+  have been measured against the uniform-group fast path at `:2486` that already
+  collapses the common case — worth confirming, not worth assuming.
+
+### Landed in this changeset (byte-null, gated)
+
+* `--mem_census` + `--mem_census_frame` and reporters for: the three G-buffers
+  and their optional planes, the xpar Z/peel planes, cube+2D shadow maps and
+  their swizzle copies, the per-shadow-map FList and mesh clones, the main face
+  list, the static lightmap atlases, the HDR buffer and post chain, the
+  glass-refraction snapshots, froxel + half-res fog, SSAO, the strip light
+  lists, scene geometry (with mirror/proxy clones broken out), texture pixel
+  data + mip chains by role, env probe stores, and the framebuffer + Z-buffer.
+* `WaterBuf[65536*4]` → `[65536]` in CITY and CHASE (item 10). Write-only in
+  live code; the `memcpy` of `65536*4` BYTES now exactly fills it.
+* The two stale size comments above.
+
+**Gate: differential, on ONE tree snapshot** (other agents held uncommitted work
+in the shared tree, which makes an absolute pin meaningless — see the
+2026-08-09c hazard note in `docs/SESSION_STATE.md`). Two binaries, `DEMO_memA`
+(with this diff) and `DEMO_memB` (my hunks reverted, everyone else's kept),
+3 runs each after discarding run 1: **identical, and equal to the recorded pins**
+— greets `778fa6acd85a69cf241babefcdaf598e`, fountain
+`8db68ccb59416e9a44037e9f387b7bd9`, city `3cbe42b166847e40f7071eedb48d613c`,
+chase t100/400/800/1200/1600 `76e7cf68…` `d458e82b…` `c145c7a5…` `31aa5203…`
+`1544b0e7…`. 24 runs, one value per cell.
+
+### Not re-litigated
+
+`Vertex` 140→68 and `Face` layout are refuted in
+`docs/SOA_VERTEX_REFACTOR.md` (2026-08-09) and §2 below; the census reports
+their bytes but this sweep does not reopen them.
+
 ## 2026-08-09 — HOT-STRUCT SWEEP: the front end is closed, the SHADOW-TAP planes are the item
 
 Asked as *"trimming hot-struct bloat paid off once — is there more, here or in

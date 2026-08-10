@@ -106,7 +106,13 @@ void Calc_CTable()
 }
 
 DWord *DistBuf,*DistPage;
-DWord WaterBuf[65536*4];
+// 256x256 DWord snapshot of the water texture. Was `[65536*4]` — a BYTE count
+// used as an ELEMENT count, so the array was 4x the 256 KB the memcpy below
+// writes and 3/4 of it was never touched by anything. Found by --mem_census's
+// sweep for sizes that are products of the wrong unit (FDS/Base/MemCensus.h).
+// Byte-null: the memcpy still copies 65536*4 BYTES, which now exactly fills it,
+// and the only reader is inside Water_Distort's commented-out body.
+DWord WaterBuf[65536];
 
 void Setup_Water_Distort()
 {
