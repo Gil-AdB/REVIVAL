@@ -2560,6 +2560,23 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// pinning it buys nothing and costs the relief exactly where the eye
 		// reads it, on the silhouette. Those edges displace with the rest of the
 		// patch; every edge that DOES have a far side keeps the pin.
+		//
+		// TWO CONSTRAINTS ON A FREED BORDER (2026-08-12, user: "it makes most of
+		// the sites better, but for the specific pose I sent you, it adds a bulge
+		// similar to the gpu one — which is less than optimal").
+		//
+		// RECESS-ONLY: the convention is zero-mean, d = amp*(h − mipMean), so
+		// freeing a border lets it swing BOTH ways and a stone plateau (h > mean)
+		// can push it OUTWARD — the bulge GpuBench had before --tess_border_ramp.
+		// A freed border keeps the pin's ceiling (d ≤ 0) and drops only its floor.
+		// HONEST SIZE, because this was the first hypothesis and it was WRONG as
+		// a diagnosis: only 134 of 1594 freed 'rooms' verts were ever positive,
+		// and clamping them alone left every row above 687 at t=5967 BYTE-
+		// IDENTICAL — it does not touch the jamb. It is kept because it cannot
+		// cost anything, not because it is the fix.
+		//
+		// NO SLIDE ALONG THE BORDER is the fix; see the block at the displacement
+		// loop for the measurement that identified it.
 		const bool freeEdge = fds::FeatureFlags::greets_displace_free_edge();
 		std::unordered_map<uint64_t,int> posEdgeCount;   // position-edge -> distinct index-edges
 		if (freeEdge) {
@@ -2591,6 +2608,17 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (borderPin && it != origEdgeUse.end() && it->second == 1
 			    && !isFreeBorderEdge(x, y)) return true;      // used by exactly one target face
 			return isSeamBorderEdge(x, y);                                 // coincident with a non-displaced edge
+		};
+		// EXACTLY the edges the free-edge rule took OUT of isBorderEdge — the
+		// ones that would be pinned but for `freeEdge`. Their subdivision verts
+		// get the recess-only clamp below; nothing else changes, so with the flag
+		// off this is empty and the arm is byte-identical by construction.
+		auto isFreedBorderEdge = [&](uint32_t x, uint32_t y) -> bool {
+			if (!freeEdge || !borderPin) return false;
+			auto it = origEdgeUse.find({std::min(x,y),std::max(x,y)});
+			if (it == origEdgeUse.end() || it->second != 1) return false;
+			if (isSeamBorderEdge(x, y)) return false;   // still pinned by the neighbour rule
+			return isFreeBorderEdge(x, y);
 		};
 
 		// ── JUNCTION CENSUS (--greets_displace_junction_census, DIAGNOSTIC) ──
@@ -2837,6 +2865,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// ── build the subdivided mesh ──
 		std::vector<Vertex> verts(oldV, oldV + nOrig);   // originals kept in place
 		std::vector<char>   pinnedZero(nOrig, 0);        // authored-border verts
+		std::vector<char>   recessOnly(nOrig, 0);        // freed border verts: d <= 0
+		std::vector<Vector> freeEdgeDir(nOrig, Vector{0.0f,0.0f,0.0f});  // their border line
 		for (uint32_t i = 0; i < nOrig; ++i)
 			if (origNonTargetVert[i] || coincidentOrig[i]) pinnedZero[i] = 1;
 		// canonical shared edge vertex (keyed by min-corner, max-corner, param bits)
@@ -2856,6 +2886,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			const uint32_t id = uint32_t(verts.size()); verts.push_back(m);
 			edgeVertMap[key] = id;
 			if (isBorderEdge(lo, hi)) { if (id >= pinnedZero.size()) pinnedZero.resize(id+1,0); pinnedZero[id] = 1; }
+			else if (isFreedBorderEdge(lo, hi)) {
+				if (id >= recessOnly.size()) recessOnly.resize(id+1,0);
+				recessOnly[id] = 1;                  // may carve inward, never outward
+				if (id >= freeEdgeDir.size()) freeEdgeDir.resize(id+1, Vector{0.0f,0.0f,0.0f});
+				freeEdgeDir[id] = Vector{ B.x-A.x, B.y-A.y, B.z-A.z };   // the border line
+			}
 			return id;
 		};
 		auto newInterior = [&](const Vector &pos, const Vector &nrm) -> uint32_t {
@@ -3542,6 +3578,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// pushed along the vertex normal; authored-border verts pinned to zero) ──
 		const uint32_t nV = uint32_t(verts.size());
 		if (pinnedZero.size() < nV) pinnedZero.resize(nV, 0);
+		if (recessOnly.size() < nV) recessOnly.resize(nV, 0);
+		if (freeEdgeDir.size() < nV) freeEdgeDir.resize(nV, Vector{0.0f,0.0f,0.0f});
+		// Per-vert displacement direction override; zero = keep the vertex normal.
+		std::vector<Vector> freeDispDir(nV, Vector{0.0f,0.0f,0.0f});
 		std::vector<float> hSum(nV, 0.0f); std::vector<int> hCnt(nV, 0);
 		auto isTargetNew=[&](const Face &F){ return F.Txtr && F.Txtr->Name && !std::strcmp(F.Txtr->Name,matName); };
 		// ── per-LINE height override (--greets_displace_line_height): a vertex
@@ -3641,6 +3681,45 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		std::vector<Vector> basePos(nV);
 		for (uint32_t i=0;i<nV;++i) basePos[i]=verts[i].Pos;
 		int nMoved=0, nLineSnap=0, nPlatPin=0; float dMin=1e30f,dMax=-1e30f;
+		int nFreeVerts=0, nFreeClamped=0, nFreeDeslid=0; float freeDeepest=0.0f, freeSlideMax=0.0f;
+		// ── NO SLIDE ALONG A FREED BORDER ────────────────────────────────────
+		// The displacement rides the SMOOTHED vertex normal, and at a patch border
+		// that normal is averaged with whatever else the authored mesh joins there.
+		// MEASURED at the greets doorway jamb (--greets_displace_free_edge
+		// --greets_displace_junction_census, [STONE-FREEV]): the freed verts on the
+		// wall plane x=17.898 carry N ~ (+0.894,+0.419,-0.155) — 26.5 deg out of
+		// their own plane, and the tilt is mostly DOWN THE EDGE (the border runs in
+		// y). So a pure RECESS of -0.10 still slid the vertex ~0.045 world units
+		// down its own border line. That slide is what swelled the doorway reveal
+		// and raised the tab at the lintel — not the sign: 178 of the 183 freed
+		// verts in the jamb box already displaced NEGATIVE, which is why the sign
+		// clamp alone left the silhouette untouched (byte-identical above row 687).
+		//
+		// The fix removes exactly the ALONG-EDGE component and nothing else: a
+		// freed border vertex may move across its border line (that is the relief),
+		// but it may not travel along it, so the border stays where it was authored
+		// and only its profile changes. Removing the whole tangential component
+		// instead — riding the face plane normal — was tried and REJECTED on
+		// measurement: it tears the border off neighbours that share its position
+		// without sharing an edge, 1 408 background pixels at t=5967 against 46.
+		for (uint32_t i=0;i<nV;++i){
+			if (!recessOnly[i] || i >= freeEdgeDir.size()) continue;
+			const Vector &E = freeEdgeDir[i];
+			const float el = std::sqrt(E.x*E.x+E.y*E.y+E.z*E.z);
+			if (el < 1e-6f) continue;
+			const float ex=E.x/el, ey=E.y/el, ez=E.z/el;
+			Vector &N = verts[i].N;
+			const float nl0 = std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
+			if (nl0 < 1e-6f) continue;
+			float nx=N.x/nl0, ny=N.y/nl0, nz=N.z/nl0;
+			const float along = nx*ex + ny*ey + nz*ez;
+			nx -= along*ex; ny -= along*ey; nz -= along*ez;
+			const float l2 = std::sqrt(nx*nx+ny*ny+nz*nz);
+			if (l2 < 0.25f) continue;              // degenerate: keep the authored normal
+			if (std::fabs(along) > freeSlideMax) freeSlideMax = std::fabs(along);
+			++nFreeDeslid;
+			freeDispDir[i] = Vector{ nx/l2, ny/l2, nz/l2 };
+		}
 		for (uint32_t i=0;i<nV;++i){
 			if (pinnedZero[i]||hCnt[i]==0) continue;
 			const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
@@ -3658,9 +3737,44 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				}
 			}
 			float dsp=amp*(h-mipMean);
-			verts[i].Pos.x+=N.x/nl*dsp; verts[i].Pos.y+=N.y/nl*dsp; verts[i].Pos.z+=N.z/nl*dsp;
+			// Direction the vertex rides. Interior verts keep the smoothed vertex
+			// normal (unchanged); a FREED border vert takes the de-slid direction
+			// computed above (its normal with the along-border component removed).
+			float dx = N.x/nl, dy = N.y/nl, dz = N.z/nl;
+			// RECESS-ONLY on a FREED border (see the free-edge block above): the
+			// pin's ceiling is kept, its floor is dropped. A groove (h < mean)
+			// carves the silhouette open; a stone plateau (h > mean) stays on the
+			// authored plane instead of bulging out of it.
+			if (recessOnly[i]) {
+				++nFreeVerts;
+				const Vector &D = freeDispDir[i];
+				if (D.x != 0.0f || D.y != 0.0f || D.z != 0.0f) { dx=D.x; dy=D.y; dz=D.z; }
+				// DIAGNOSTIC (census flag): what a freed vert actually does at the
+				// jamb — position, the normal it rides, and the signed amount.
+				// The clamp only sees the SIGN of dsp; if the visible motion is a
+				// NEGATIVE dsp along a normal that leans out of the wall plane,
+				// no sign clamp can touch it, and this print says so.
+				if (fds::FeatureFlags::greets_displace_junction_census()) {
+					const Vector &P = verts[i].Pos;
+					if (P.x > 17.4f && P.x < 18.4f && P.z > -63.5f && P.z < -57.5f)
+						std::fprintf(stderr, "[STONE-FREEV] '%s' pos(%.3f,%.3f,%.3f) "
+							"N(%+.3f,%+.3f,%+.3f) dsp %+.4f\n", matName,
+							double(P.x), double(P.y), double(P.z),
+							double(N.x/nl), double(N.y/nl), double(N.z/nl), double(dsp));
+				}
+				if (dsp > 0.0f) { dsp = 0.0f; ++nFreeClamped; }
+				else if (dsp < freeDeepest) freeDeepest = dsp;
+			}
+			verts[i].Pos.x+=dx*dsp; verts[i].Pos.y+=dy*dsp; verts[i].Pos.z+=dz*dsp;
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
 		}
+		if (nFreeVerts)
+			std::fprintf(stderr, "[STONE-FREE] '%s': %d freed border verts, %d "
+				"clamped to 0 (would have bulged outward), deepest carve %.4f u; %d "
+				"had an ALONG-EDGE slide removed from their direction (worst |cos| "
+				"with the border line %.4f)\n",
+				matName, nFreeVerts, nFreeClamped, double(freeDeepest), nFreeDeslid,
+				double(freeSlideMax));
 		if (lineHeight)
 			std::fprintf(stderr, "[STONE-LINE] '%s': %d of %d displaced verts "
 				"snapped to their groove line's rep (edge path); %d fallback-path "
