@@ -161,6 +161,42 @@
 > `hdr=true` via `setDefault`, so `--hdr` is a no-op there; the toggle that
 > moves it is `--no-hdr`.
 >
+> **WHILE IN HERE: the offscreen G-buffers stopped allocating lightmap planes
+> nothing can read** (handoff from the setDefault audit, `0b466b7`). That commit
+> established the atlas has ONE reader and TWO gates: `shadow_lightmap()`
+> allocates the `lightmapMF`/`ST` planes, and
+> `lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic()` decides whether a
+> pixel ever samples them — greets keeps the second one shut. The MAIN G-buffer
+> escapes because `EngineGBuffer_Resize` runs at BOOT, before greets turns
+> `shadow_lightmap` on. **The three OFFSCREEN builders do not** — the RTT slot
+> (`GreetsMirror.cpp`) and the shard bake's serial + per-worker buffers
+> (`MirrorShatter.cpp`) build LAZILY, after `GreetsApplyRunDefaults`, so they
+> really were allocating, and Mekalele really was storing into them (`wantLm`
+> gates on the plane pointers, `Mekalele.h:1320`). All three now use one shared
+> predicate, `DeferredLightmapPlanesReadable()` (`DeferredCommon.h`), so they
+> cannot drift from the kernel's gate.
+>
+> | | |
+> |---|--:|
+> | RTT slot `s_rttGB` (512² × 6 B) | 1.50 MiB |
+> | shard per-worker (12 × 64² × 6 B) | 288 KiB |
+> | shard serial `reflGB_` (64² × 6 B) | 24 KiB |
+> | **total no longer allocated or written** | **1.80 MiB** |
+>
+> **Time: NULL, and said so.** Shard bake `FDS_SHARD_REFL_PROF` min-of-6
+> interleaved against a control binary built with the old gate, load 18.9:
+> planes-on 14.2 ms vs planes-off 14.3 ms — indistinguishable. The win here is
+> the allocation, not the per-pixel store.
+>
+> **NOT ENTANGLED WITH THE DIMMING, and that is measured, not argued.** The
+> shatter frame is **byte-identical** across this change (`2e63ef6f…` both
+> ways) — removing the planes outright moved zero pixels, which is the direct
+> proof that nothing was reading them and that a half-written plane could not
+> have been feeding the composite. Positive control the other way: the
+> force-open arm `--shadow_lightmap --shadow_lm_dynamic` still gets its planes
+> and still diverges from the shipping arm (mean |d| 6.79, 7.6 % of px > 30
+> over the panel window), so the gate opens when it should.
+>
 > **PINS: unchanged and re-verified** — greets `778fa6acd85a69cf241babefcdaf598e`,
 > fountain `8db68ccb59416e9a44037e9f387b7bd9`, city `3cbe42b166847e40f7071eedb48d613c`,
 > `render_gate.sh` ALL PASS (mirrortest `4ac809e5…`, conetest `b41894f9…`,

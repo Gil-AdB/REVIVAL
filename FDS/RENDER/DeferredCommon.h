@@ -39,6 +39,30 @@ struct Scene;
 extern std::vector<uint8_t> g_ssrPrevColor;
 extern int g_ssrPrevW, g_ssrPrevH;
 
+// Does anything in this process configuration READ the lightmapMF/ST G-buffer
+// planes? Two independent gates must both be open (0b466b7, and the
+// --shadow_lightmap flag row):
+//   1. shadow_lightmap()  — the ALLOCATION gate. EngineGBuffer_Resize consults
+//      it at BOOT for the main G-buffer; the OFFSCREEN G-buffer builders (the
+//      mirror RTT slot, the shard bake's serial + per-worker buffers) consult
+//      it whenever they lazily build, which for greets is AFTER
+//      GreetsApplyRunDefaults has turned it on — so they, unlike the main
+//      buffer, really did allocate.
+//   2. lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic() — the
+//      per-pixel SAMPLE gate (DeferredSurfaceKernel.cpp, resolveCubeAtten).
+// greets ships with shadow_dynamic ON and shadow_lm_dynamic OFF, so gate 2 is
+// shut and every texel those offscreen planes cost — 6 B/px of store plus
+// Mekalele's per-pixel writes into them — was unreadable. Allocating on gate 1
+// alone is what made that dead weight; the offscreen builders use THIS, so
+// they cannot drift from the kernel. `--shadow_lightmap --shadow_lm_dynamic`
+// (the only arm that can sample the atlas) still opens both and still gets its
+// planes, bit-for-bit.
+inline bool DeferredLightmapPlanesReadable() {
+	return fds::FeatureFlags::shadow_lightmap()
+	    && (!fds::FeatureFlags::shadow_dynamic()
+	        || fds::FeatureFlags::shadow_lm_dynamic());
+}
+
 constexpr int DEFERRED_MAX_LIGHTS = 128;
 // Scene-wide light capacity (ViewLightsSoA + the halo/volumetric index
 // scratch), decoupled from the per-tile cap above. Mirror-cloned omnis

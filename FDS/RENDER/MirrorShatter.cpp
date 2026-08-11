@@ -662,7 +662,8 @@ void MirrorShatter::prepareReflectionAtlas(Scene* sc, int texRes) {
 			if (!xpar) {
 				g->tangent.assign(np, 0);
 				g->shadowMatID.assign(np, 0);
-				if (fds::FeatureFlags::shadow_lightmap()) {
+				// Same reader gate as the per-worker buffers below.
+				if (DeferredLightmapPlanesReadable()) {
 					g->lightmapMF.assign(np, 0);
 					g->lightmapST.assign(np, 0);
 				}
@@ -952,7 +953,11 @@ void MirrorShatter::ensureReflWorkers() {
 			w.gb.txtr.assign(np, 0xFFFFFFFFu);
 			w.gb.tangent.assign(np, 0);
 			w.gb.shadowMatID.assign(np, 0);
-			if (fds::FeatureFlags::shadow_lightmap()) {
+			// Only when a reader exists — see DeferredLightmapPlanesReadable.
+			// These per-worker buffers build at shatter time, long after
+			// GreetsApplyRunDefaults opens shadow_lightmap, so the old gate
+			// allocated planes the kernel's sample gate never lets it read.
+			if (DeferredLightmapPlanesReadable()) {
 				w.gb.lightmapMF.assign(np, 0);
 				w.gb.lightmapST.assign(np, 0);
 			}

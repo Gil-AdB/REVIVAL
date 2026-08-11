@@ -3048,7 +3048,12 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         s_rttGB.txtr.assign(kRttTexels, 0xFFFFFFFFu);
         s_rttGB.tangent.assign(kRttTexels, 0);
         s_rttGB.shadowMatID.assign(kRttTexels, 0);
-        if (fds::FeatureFlags::shadow_lightmap()) {
+        // Lightmap planes only when something can READ them (see
+        // DeferredLightmapPlanesReadable). This slot builds LAZILY, i.e. after
+        // GreetsApplyRunDefaults has switched shadow_lightmap on, so gating on
+        // the allocation flag alone bought 6 B/px of store plus Mekalele's
+        // per-pixel writes into planes the kernel's sample gate keeps shut.
+        if (DeferredLightmapPlanesReadable()) {
             s_rttGB.lightmapMF.assign(kRttTexels, 0);
             s_rttGB.lightmapST.assign(kRttTexels, 0);
         }
