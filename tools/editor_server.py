@@ -32,6 +32,7 @@ import hashlib
 import http.server
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -864,23 +865,78 @@ def save_objects_to_sidecar(scene, objects, warnings):
 
 
 LIGHT_KEYS = {"r", "g", "b", "intensity", "range"}
-# Per-light engine extensions authored as LWS keywords INSIDE the light's
+# Per-light props written as ONE scalar keyword line inside the light's
 # AddLight block (the FdsFlareScale precedent — the whole FLD light-flag +
 # conditional-payload + engine path already exists: Light_FlareScale bit 4096
 # in tools/lwsread + FDS/FLD/FLD_READ.CPP → Omni::FlareScale). Migrated OFF the
 # sidecar (sidecar-elimination, docs/SIDECAR_MIGRATION_PLAN.md §1c). key -> LWS
-# keyword name. See pop_light_lws_keys / patch_lws_light_ext.
-LIGHT_LWS_KEYS = {"flareScale": "FdsFlareScale"}
+# keyword name. See pop_light_keys / patch_lws_light_ext.
+#
+# Registry additions 2026-08 (the spotlight editor). Each row below was checked
+# END TO END — the keyword is in tools/lwsread's dispatch table (LWSREAD.CPP
+# ~line 705), FLDSAVE.CPP serializes it, and FDS/FLD/FLD_CONV.CPP lands it on
+# the Omni — because a keyword the reader ignores is a slider that pretends to
+# save. Keys that failed that check are in LIGHT_LIVE_ONLY_KEYS, not here.
+LIGHT_LWS_KEYS = {
+    "flareScale":   "FdsFlareScale",
+    # LightType 1 = point, 2 = spot (ReadLightType → Light_Point 64 /
+    # Light_Spot 128 → FLD_CONV's `if (Src->Flags & Light_Spot)`). Never
+    # delete-on-identity: ConvertFLD admits a light only when it carries
+    # Light_Point|Light_Spot (FLD_CONV.CPP:710), so dropping the LightType
+    # line would drop the LIGHT.
+    "type":         "LightType",
+    # HALF-angle from the cone AXIS, in degrees. FLD_CONV.CPP:608 is
+    # `FallOff = cos(ConeAngle)` — no /2 on the way in, so none on the way
+    # out either (Omni.h documents FallOff as cos(outer half-angle) and
+    # SpotlightCones.cpp takes fallOuterDeg the same way).
+    "coneAngle":    "ConeAngle",
+    # Per-light volumetric beam opt-in + gain (Light_VolumetricCone 2048 →
+    # Omni_ForceVolCone / Omni::VolBeamGain).
+    "forceVolCone": "VolumetricLight",
+    "volBeamGain":  "VolumetricLightIntensity",
+}
+# Editor value -> LWS value, where the two spaces differ. `type` is
+# Omni::Type in the JSON (0 = Light_Omni, 1 = Light_SpotLight) but 1/2 in the
+# LWS (LightWave's distant=0/point=1/spot=2).
+LIGHT_LWS_TO_LWS = {"type": lambda v: 2.0 if float(v) > 0.5 else 1.0}
 # Per key: the value that means "authored default / unset". Writing it DELETES
 # the keyword instead of emitting it, so a light dialed back to default
 # regenerates a byte-identical FLD (no flag bit, no payload). FlareScale 0/1
 # both mean 1.0 in the engine (Omni::FlareScale sentinel); 1.0 is the editor's
-# neutral, so treat it as unset.
-LIGHT_LWS_IDENTITY = {"flareScale": 1.0}
+# neutral, so treat it as unset. Same 0-sentinel story for VolBeamGain.
+# forceVolCone 0 drops the flag keyword outright. type/coneAngle have NO
+# identity entry — they are always emitted (see the LightType note above).
+LIGHT_LWS_IDENTITY = {"flareScale": 1.0, "forceVolCone": 0.0, "volBeamGain": 1.0}
+# The spot's cone AXIS. Not a keyword: the aim is authored as the light's
+# LightMotion rotation keys (H/P/B), which FLD_CONV.CPP:614-628 turns into
+# IDir via Euler_Angles + column 2. Sent as a group of three (a single
+# component cannot be converted to H/P on its own) — see patch_lws_light_dir.
+LIGHT_DIR_KEYS = ("dirX", "dirY", "dirZ")
+# Keys the editor exposes LIVE but that have NO authoring home in this
+# toolchain. They are popped out of the save payload, and reported back in the
+# response's `lightsUnsaved` so the FE keeps them dirty and the panel can label
+# them — the alternative (writing a keyword nothing reads) is exactly the
+# silent-success bug this registry note exists to prevent.
+LIGHT_LIVE_ONLY_KEYS = {
+    "innerAngle":
+        "the FLD carries ONE cone angle: FLD_CONV.CPP:609 DERIVES the hotspot "
+        "as cos(ConeAngle/2). Independent authoring needs a new FdsConeInner "
+        "keyword + light-flag bit (SIDECAR_MIGRATION_PLAN §1c shape)",
+    "shadow":
+        "Omni_CastsShadow never comes from the FLD — every caster is flagged "
+        "by the scene's own C++ (GREETS.CPP:673, CITY.CPP:3087). The authored "
+        "LWS 'ShadowType' line is not in tools/lwsread's keyword table, so "
+        "writing it would change nothing",
+    "shadowMapRes":
+        "same: Omni::shadowMapRes is set by scene C++ only, and it is consumed "
+        "once by ShadowMaps_Rebuild at scene init",
+}
 # Non-authoring fallback (dead: every scene is source-authored now — see the
 # plan §2) has no LWS to write, so it still peels engine-only light keys to the
-# sidecar. Only reached when a scene has no authoring sources.
-LIGHT_SIDECAR_KEYS = set(LIGHT_LWS_KEYS)
+# sidecar. Only reached when a scene has no authoring sources. flareScale ONLY:
+# it is the one key the retired MaterialImport_ApplySidecar reader ever knew,
+# and the spotlight keys added above have no sidecar reader to come back from.
+LIGHT_SIDECAR_KEYS = {"flareScale"}
 
 
 def note_unsaved(unsaved, warnings, idx, keys, why):
@@ -897,7 +953,7 @@ def note_unsaved(unsaved, warnings, idx, keys, why):
 def split_light_sidecar_keys(scene, lights, warnings):
     """Strip engine-only light keys to sidecar light: lines — ONLY for the dead
     non-authoring fallback. Authoring scenes route them to LWS keywords instead
-    (pop_light_lws_keys / patch_lws_light_ext), so nothing is stripped there.
+    (pop_light_keys / patch_lws_light_ext), so nothing is stripped there.
     Mutates `lights` (drops entries that become empty). Returns a summary list."""
     if not lights:
         return []
@@ -923,30 +979,41 @@ def split_light_sidecar_keys(scene, lights, warnings):
     return saved
 
 
-def pop_light_lws_keys(lights):
-    """Pull LWS-keyword light props (flareScale) out of the light dicts so
-    patch_lws_lights (native AddLight-block fields only) doesn't reject them as
-    unknown. Mutates `lights` (drops entries that become empty). Returns
-    {idx_str: {key: value}} for patch_lws_light_ext."""
+def pop_light_keys(lights, keys):
+    """Pull a named key set out of the per-light prop dicts so the writer that
+    owns it gets them and patch_lws_lights (native AddLight-block fields only)
+    doesn't see them as unknown. Mutates `lights` (drops entries that become
+    empty). Returns {idx_str: {key: value}}."""
     out = {}
     for idx_s in list(lights):
         props = lights[idx_s]
         if not isinstance(props, dict):
             continue
-        ext = {k: props.pop(k) for k in list(props) if k in LIGHT_LWS_KEYS}
-        if ext:
-            out[idx_s] = ext
+        taken = {k: props.pop(k) for k in list(props) if k in keys}
+        if taken:
+            out[idx_s] = taken
         if not props:
             del lights[idx_s]
     return out
 
 
+def pop_light_live_only_keys(lights, warnings, unsaved):
+    """Peel LIGHT_LIVE_ONLY_KEYS off the payload and report each one with the
+    reason it has no authoring home. These reach the running engine through
+    Editor_SetLightProp and stop there — no file on disk carries them."""
+    for idx_s, props in pop_light_keys(lights, LIGHT_LIVE_ONLY_KEYS).items():
+        for key in sorted(props):
+            note_unsaved(unsaved, warnings, int(idx_s), [key],
+                         LIGHT_LIVE_ONLY_KEYS[key])
+
+
 def patch_lws_light_ext(scene, light_ext, warnings):
-    """{idx_str: {flareScale: v}} -> per-light LWS keyword lines inside the
-    light's AddLight block (e.g. 'FdsFlareScale 0.15'). A value equal to the
-    key's LIGHT_LWS_IDENTITY DELETES the keyword (keeps the regenerated FLD
-    byte-identical to an unauthored light). Returns [{index, keys, file,
-    backup}]; writes + backs up the LWS only if something changed.
+    """{idx_str: {flareScale|type|coneAngle|...: v}} -> one scalar keyword line
+    per key inside the light's AddLight block (e.g. 'FdsFlareScale 0.15',
+    'LightType 2'). A value equal to the key's LIGHT_LWS_IDENTITY DELETES the
+    keyword (keeps the regenerated FLD byte-identical to an unauthored light);
+    a key with no identity entry is always emitted. Returns [{index, keys,
+    file, backup}]; writes + backs up the LWS only if something changed.
 
     Processes light blocks HIGHEST index first so an insert (a light that had
     no such keyword yet) never shifts a lower block's precomputed span."""
@@ -973,13 +1040,18 @@ def patch_lws_light_ext(scene, light_ext, warnings):
             except (TypeError, ValueError):
                 warnings.append(f"light {idx}.{key}: bad value {val!r} — skipped")
                 continue
+            xf = LIGHT_LWS_TO_LWS.get(key)
+            if xf:
+                fv = xf(fv)
+            ident = LIGHT_LWS_IDENTITY.get(key)
             fi = next((i for i in range(lo, hi)
                        if lines[i].split(None, 1)[:1] == [kw]), None)
-            if abs(fv - LIGHT_LWS_IDENTITY[key]) < 1e-6:   # back to default → drop
+            if ident is not None and abs(fv - ident) < 1e-6:   # back to default → drop
                 if fi is not None:
                     SAVELOG.change("light(s)", f"light {idx} · {key}: "
                                    f"{_fmtv(_kwval(lines[fi]))} → — ({kw} dropped)")
                     del lines[fi]
+                    hi -= 1      # this block just got a line shorter
                     done.append(key)
                 continue
             newline = f"{kw} {fv:.6g}"
@@ -990,14 +1062,19 @@ def patch_lws_light_ext(scene, light_ext, warnings):
                     lines[fi] = newline
                     done.append(key)
             else:
-                # Insert after LgtIntensity (present in every AddLight block),
-                # else right after the AddLight line — the parser only needs the
-                # keyword somewhere inside the light section (sets CurLight).
-                at = next((i for i in range(lo, hi)
-                           if lines[i].split(None, 1)[:1] == ["LgtIntensity"]), lo)
+                # Insert on the line straight after `AddLight`. The old anchor
+                # was "after LgtIntensity", which is safe only while that field
+                # is the scalar form: an ANIMATED light writes
+                # "LgtIntensity  (envelope)" followed by a channel count, a key
+                # count and two lines per key (LWSREAD.CPP ReadEnvelope), and a
+                # keyword dropped in there is read as the channel count and
+                # desyncs the rest of the parse. `AddLight` itself takes no
+                # arguments and the reader is a keyword-dispatch loop with no
+                # ordering rule inside a block, so lo+1 is unconditionally safe.
                 SAVELOG.change("light(s)", f"light {idx} · {key}: — → {_fmtv(fv)} "
                                            f"({kw} inserted)")
-                lines.insert(at + 1, newline)
+                lines.insert(lo + 1, newline)
+                hi += 1      # keep the span honest for this light's next key
                 done.append(key)
         if done:
             patched.append({"index": idx, "keys": sorted(done)})
@@ -1016,6 +1093,136 @@ def patch_lws_light_ext(scene, light_ext, warnings):
             patched = []
             SAVELOG.note(f"{lws_name}: light keywords already at those values "
                          "— not written")
+    return patched
+
+
+def _dir_to_heading_pitch(x, y, z):
+    """Engine IDir -> the LWS motion key's (H, P) in degrees, bank fixed at 0.
+
+    FLD_CONV.CPP:614-628 builds a spot's IDir from the FIRST motion key:
+    Euler_Angles(rm, -P·k, -H·k, -B·k) with k = PI/180 (the misnamed Rad2Deg),
+    then takes matrix column 2 — the world direction of the light's local +Z.
+    Expanding Euler_Angles (MATH.CPP:338) with B = 0 collapses to
+
+        IDir = ( sin H, -sin P · cos H, cos P · cos H )
+
+    which inverts cleanly. Bank is written as 0 because with B free the same
+    IDir has infinitely many (H,P,B) solutions and bank means nothing else on
+    a light. H = ±90 is the degenerate aim (±X): cos H = 0 kills the azimuth,
+    so P is pinned to 0 there."""
+    n = math.sqrt(x * x + y * y + z * z)
+    if n < 1e-9:
+        return None
+    x, y, z = x / n, y / n, z / n
+    h = math.degrees(math.asin(max(-1.0, min(1.0, x))))
+    ch = math.sqrt(max(0.0, 1.0 - x * x))
+    p = 0.0 if ch < 1e-6 else math.degrees(math.atan2(-y, z))
+    return h, p
+
+
+def patch_lws_light_dir(scene, light_dirs, warnings, unsaved=None):
+    """{idx_str: {dirX,dirY,dirZ}} -> the light's LightMotion rotation channels.
+
+    A spot's aim has no keyword: it IS the light's rotation (see
+    _dir_to_heading_pitch). Only motion key 0 is rewritten — that is the only
+    key the converter reads for IDir — so an animated light keeps its path.
+
+    Refused, and reported, for a PARENTED light: Transform.cpp:882-899 rewrites
+    a parented spot's IDir every frame from the parent's rotation column 2, so
+    an authored aim there would save and then never be seen."""
+    if not light_dirs:
+        return []
+    lws_name = SCENES[scene]["lws"]
+    path = os.path.join(scene_authoring_dir(scene), lws_name)
+    orig = open(path, encoding="latin-1").read()
+    lines = orig.split("\n")
+    starts = [i for i, l in enumerate(lines) if l.strip() == "AddLight"]
+    patched = []
+    for idx_s in sorted(light_dirs, key=lambda s: int(s)):
+        idx = int(idx_s)
+        props = light_dirs[idx_s]
+        keys = sorted(props)
+        if idx < 0 or idx >= len(starts):
+            note_unsaved(unsaved, warnings, idx, keys,
+                         f"LWS has only {len(starts)} AddLight blocks")
+            continue
+        if len(props) != 3:
+            note_unsaved(unsaved, warnings, idx, keys,
+                         "the aim converts to H/P as a UNIT — send dirX, dirY "
+                         "and dirZ together, not one component")
+            continue
+        lo = starts[idx]
+        hi = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        if any(lines[i].split(None, 1)[:1] == ["ParentObject"] for i in range(lo, hi)):
+            note_unsaved(unsaved, warnings, idx, keys,
+                         "parented spot — Transform.cpp recomputes IDir from the "
+                         "parent's rotation every frame, so an authored aim on "
+                         "this light would never be read back")
+            continue
+        hp = _dir_to_heading_pitch(float(props["dirX"]), float(props["dirY"]),
+                                   float(props["dirZ"]))
+        if hp is None:
+            note_unsaved(unsaved, warnings, idx, keys,
+                         "zero-length aim — a spot with IDir (0,0,0) NaNs the "
+                         "cone test (Vector_Norm, MATH.CPP:99)")
+            continue
+        mi = next((i for i in range(lo, hi)
+                   if lines[i].split(None, 1)[:1] == ["LightMotion"]), None)
+        if mi is None:
+            note_unsaved(unsaved, warnings, idx, keys,
+                         "no LightMotion block in this light's AddLight span")
+            continue
+        # LightMotion layout (ReadLightMotion): channel count, key count, then
+        # TWO lines per key — 9 channel values (x y z h p b sx sy sz) and 5
+        # spline values (frame, linear, tension, continuity, bias).
+        body = [i for i in range(mi + 1, hi) if lines[i].strip()]
+        if len(body) < 3:
+            note_unsaved(unsaved, warnings, idx, keys, "truncated LightMotion block")
+            continue
+        try:
+            nchan = int(float(lines[body[0]].split()[0]))
+            nkeys = int(float(lines[body[1]].split()[0]))
+        except (ValueError, IndexError):
+            note_unsaved(unsaved, warnings, idx, keys, "unparsable LightMotion header")
+            continue
+        ki = body[2]
+        fields = lines[ki].split()
+        if nchan != 9 or len(fields) != 9:
+            note_unsaved(unsaved, warnings, idx, keys,
+                         f"LightMotion has {nchan} channels / {len(fields)} values "
+                         "on key 0, expected 9 — not touching it")
+            continue
+        if nkeys > 1:
+            warnings.append(f"light {idx}: {nkeys} motion keys — aimed key 0 only "
+                            "(the converter reads key 0 for IDir; the path is intact)")
+        indent = lines[ki][:len(lines[ki]) - len(lines[ki].lstrip())]
+        old = (fields[3], fields[4], fields[5])
+        fields[3] = f"{hp[0]:.6g}"      # H
+        fields[4] = f"{hp[1]:.6g}"      # P
+        fields[5] = "0"                 # B — canonicalized, see the helper
+        new_line = indent + " ".join(fields)
+        if new_line != lines[ki]:
+            SAVELOG.change("light(s)",
+                           f"light {idx} · aim: H/P/B {'/'.join(old)} → "
+                           f"{fields[3]}/{fields[4]}/{fields[5]}  "
+                           f"(IDir {props['dirX']:.3f},{props['dirY']:.3f},"
+                           f"{props['dirZ']:.3f})")
+            lines[ki] = new_line
+            patched.append({"index": idx, "keys": keys})
+    if patched:
+        new = "\n".join(lines)
+        if new != orig:
+            before = os.path.getsize(path)
+            bak = lwopatch.backup(path, scene_backup_dir(scene))
+            with open(path, "w", encoding="latin-1") as f:
+                f.write(new)
+            SAVELOG.wrote(path, before, f"backup {os.path.relpath(bak, REPO)}")
+            for p in patched:
+                p["file"] = lws_name
+                p["backup"] = os.path.relpath(bak, REPO)
+        else:
+            patched = []
+            SAVELOG.note(f"{lws_name}: light aims already at those angles — not written")
     return patched
 
 
@@ -1384,14 +1591,21 @@ def do_save_main(scene, payload):
     if saved_surf_side:
         warnings.append(f"{len(saved_surf_side)} surface key(s) (normalFlip) → .MAT — NOT loaded (reader retired; normalFlip's RVSM write-back is unimplemented, SIDECAR_MIGRATION_PLAN §1e)")
     uv_by_name = pop_uv_props(surfaces, warnings)
-    # Every light key the writers below decline to put on disk lands here and
-    # goes back to the browser as `lightsUnsaved`.
+    # Light keys with no home on disk at all — peeled for BOTH scene paths, so
+    # a live-only edit can never 400 a save that also carried real edits.
     light_unsaved = []
+    pop_light_live_only_keys(lights, warnings, light_unsaved)
 
     if not SCENES[scene]["authoring"]:
         if scene_env:
             warnings.append("sceneEnv: scene has no authoring sources — scene "
                             "env defaults need LWS write-back, skipped")
+        # The FLD binary patcher knows the native light record only; the LWS
+        # keyword / motion-key destinations do not exist without sources.
+        for i, props in pop_light_keys(lights, set(LIGHT_LWS_KEYS) | set(LIGHT_DIR_KEYS)).items():
+            note_unsaved(light_unsaved, warnings, int(i), sorted(props),
+                         "scene has no authoring sources — these keys are written "
+                         "into the LWS, and fldpatch has no equivalent")
         code, resp = do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
         if isinstance(resp, dict):
             resp["lightsUnsaved"] = light_unsaved
@@ -1401,12 +1615,17 @@ def do_save_main(scene, payload):
     # refractive/envRefl/envBakeRes/waterProcedural) → LWO RVSF sub-chunk,
     # popped BEFORE the ALLOWED_PROPS resolution (sidecar-elim §1a).
     rev_ext_by_name = pop_rev_ext_props(surfaces)
-    # Engine-only per-light keys (flareScale) → LWS keywords in the light block,
-    # popped BEFORE patch_lws_lights so it doesn't reject them (sidecar-elim §1c).
-    light_ext = pop_light_lws_keys(lights)
+    # Per-light keys with a home OUTSIDE the native AddLight scalars, popped
+    # BEFORE patch_lws_lights so it doesn't see them as unknown: engine/LW
+    # keyword lines (flareScale, type, coneAngle, VolumetricLight*) and the
+    # cone aim (the light's motion rotation keys). Live-only keys were peeled
+    # above — they reach the engine and stop there.
+    light_dir = pop_light_keys(lights, LIGHT_DIR_KEYS)
+    light_ext = pop_light_keys(lights, LIGHT_LWS_KEYS)
     patched_scene_env = patch_lws_scene_env(scene, scene_env, warnings)
     patched_lights = patch_lws_lights(scene, lights, warnings, light_unsaved)
     patched_lights += patch_lws_light_ext(scene, light_ext, warnings)
+    patched_lights += patch_lws_light_dir(scene, light_dir, warnings, light_unsaved)
     if not surfaces and not uv_by_name and not rev_ext_by_name and not map_rvsm:
         if patched_lights or patched_scene_env:
             # Lights / scene env defaults changed -> the FLD must be
