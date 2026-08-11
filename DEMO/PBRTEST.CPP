@@ -38,6 +38,13 @@ void Initialize_PBRTest()
 	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
 	// reader is retired, sidecar-elim endgame). No-op when none are authored.
 	fds::MaterialImport_ApplyRevMaps(PbrSc, "pbrtest");
+	// CLI `--material-import=<material>:<dir>` overrides, same call GREETS.CPP
+	// makes after its own RevMaps pass. Without this, the ONE scene built to be
+	// a material lab was the one scene where --material-import silently did
+	// nothing: the flag parsed, the spec landed in g_specs, and no scene ever
+	// consumed it. Byte-null when no --material-import= is on the command line
+	// (MaterialImport_Apply early-returns on an empty spec list).
+	fds::MaterialImport_Apply(PbrSc, "pbrtest");
 }
 
 namespace {
