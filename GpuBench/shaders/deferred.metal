@@ -2015,7 +2015,10 @@ struct TessUniforms {
     float4 k2;
     // .x viewport W, .y viewport H, .z backface-cull enable, .w edge-slot map
     float4 k3;
-    // .x UNIFORM FACTOR OVERRIDE (0 = off) — the calibration probe that settles
+    // .x UNIFORM FACTOR OVERRIDE (0 = off), .y AUTHORED-BORDER PIN RAMP
+    // (--tess_border_ramp; the fraction of the base patch over which the
+    // displacement fades to zero approaching an edge used by exactly one face
+    // of the material — the CPU bake's pin, 0 = off). The .x probe settles
     // what the hardware's real ceiling is and whether the post-tessellation
     // vertex function is invoked once per VERTEX or once per triangle CORNER.
     // Both questions have to be answered before any triangle count is quoted.
@@ -2245,14 +2248,16 @@ struct TessCP {
     float4 tangent [[attribute(3)]];
 };
 
-static inline GBufVertexOut tessShade(patch_control_point<TessCP> cp,
+static inline GBufVertexOut tessShade(uint pid,
+                                      patch_control_point<TessCP> cp,
                                       float3 pc, uint iid,
                                       constant FrameUniforms &u,
                                       constant BatchUniforms &b,
                                       constant TessUniforms &tu,
                                       const device SubTri *subs,
                                       texture2d<float> heightTex,
-                                      sampler hsamp)
+                                      sampler hsamp,
+                                      const device uint *borderMask)
 {
     const int P = int(tu.k.w);
     float3 B[3];
@@ -2274,7 +2279,26 @@ static inline GBufVertexOut tessShade(patch_control_point<TessCP> cp,
     // mipMean, so the surface swings both ways about the authored plane
     // instead of only protruding.
     const float h = heightTex.sample(hsamp, uv, level(tu.k2.w)).r;
-    op += nrm * (tu.k.y * (h - tu.k.z));
+    // AUTHORED-BORDER PIN (--tess_border_ramp). The CPU bake holds every
+    // subdivision vertex on an edge used by exactly ONE face of the material at
+    // EXACTLY zero displacement — crack safety against a neighbour subdivided
+    // differently — and this arm did not, which is why it pushed the greets
+    // doorway jamb OUT where the CPU held it flat. `g` IS the point's
+    // barycentric in the BASE patch, and barycentric i is the distance to the
+    // edge opposite control point i, so the same three numbers that place the
+    // point also measure how far it is from each edge. Fade over `ramp` (a
+    // fraction of the patch), the analogue of the CPU's one-cell fade; ramp 0
+    // restores the un-pinned behaviour. Nothing else about the displacement
+    // changes: the reference convention already matched term for term.
+    float att = 1.0f;
+    const float ramp = tu.k4.y;
+    if (ramp > 0.0f) {
+        const uint m = borderMask[pid];
+        if (m & 1u) att = min(att, saturate(g.x / ramp));
+        if (m & 2u) att = min(att, saturate(g.y / ramp));
+        if (m & 4u) att = min(att, saturate(g.z / ramp));
+    }
+    op += nrm * (tu.k.y * (h - tu.k.z) * att);
 
     const float3 wp  = rowmul(b.rotRow0, b.rotRow1, b.rotRow2, op) + b.objPos;
     const float3 rel = wp - u.camSrc;
@@ -2299,14 +2323,16 @@ static inline GBufVertexOut tessShade(patch_control_point<TessCP> cp,
 vertex GBufVertexOut vs_gbuffer_tess(patch_control_point<TessCP> cp [[stage_in]],
                                      float3 pc [[position_in_patch]],
                                      uint iid  [[instance_id]],
+                                     uint pid  [[patch_id]],
                                      constant FrameUniforms &u  [[buffer(1)]],
                                      constant BatchUniforms &b  [[buffer(2)]],
                                      constant TessUniforms &tu  [[buffer(3)]],
                                      const device SubTri *subs  [[buffer(4)]],
+                                     const device uint *borderMask [[buffer(6)]],
                                      texture2d<float> heightTex [[texture(0)]],
                                      sampler hsamp [[sampler(0)]])
 {
-    return tessShade(cp, pc, iid, u, b, tu, subs, heightTex, hsamp);
+    return tessShade(pid, cp, pc, iid, u, b, tu, subs, heightTex, hsamp, borderMask);
 }
 
 // STATS variant — one atomic increment per generated vertex. A separate entry
@@ -2316,16 +2342,18 @@ vertex GBufVertexOut vs_gbuffer_tess(patch_control_point<TessCP> cp [[stage_in]]
 vertex GBufVertexOut vs_gbuffer_tess_stats(patch_control_point<TessCP> cp [[stage_in]],
                                            float3 pc [[position_in_patch]],
                                            uint iid  [[instance_id]],
+                                           uint pid  [[patch_id]],
                                            constant FrameUniforms &u  [[buffer(1)]],
                                            constant BatchUniforms &b  [[buffer(2)]],
                                            constant TessUniforms &tu  [[buffer(3)]],
                                            const device SubTri *subs  [[buffer(4)]],
                                            device atomic_uint *stats  [[buffer(5)]],
+                                           const device uint *borderMask [[buffer(6)]],
                                            texture2d<float> heightTex [[texture(0)]],
                                            sampler hsamp [[sampler(0)]])
 {
     atomic_fetch_add_explicit(&stats[2], 1u, memory_order_relaxed);
-    return tessShade(cp, pc, iid, u, b, tu, subs, heightTex, hsamp);
+    return tessShade(pid, cp, pc, iid, u, b, tu, subs, heightTex, hsamp, borderMask);
 }
 
 // Fragment shader for the --tess_stats probe ONLY. Counts the fragments the

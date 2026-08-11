@@ -308,6 +308,17 @@ struct DeferredOptions {
     // silhouette, which is the whole subject of this arm. The rasterizer's own
     // backface cull still runs either way.
     bool  tessBackCull = false;
+    // AUTHORED-BORDER PIN, the CPU bake's crack safety, ported to this arm.
+    // DisplaceStoneSubdiv holds every subdivision vertex on an authored patch
+    // border (an edge used by exactly ONE face of the material) at EXACTLY zero
+    // displacement; without it the GPU pushes the greets doorway jamb out by up
+    // to +0.035 world units where the CPU pushes it 0 - the reported bulge. This
+    // is the width, as a fraction of the base patch (barycentric), over which the
+    // displacement fades to zero approaching such an edge. The CPU's own fade is
+    // one subdivision CELL, which is block-scale rather than a single row, so a
+    // non-zero width is the faithful analogue; 0 disables the pin entirely (the
+    // pre-2026-08-11 behaviour).
+    float tessBorderRamp = 0.15f;
     // Which factor slot is which edge. 0 = the OPPOSITE-VERTEX convention
     // (slot i is the edge not touching control point i), 1 = adjacent. Settled
     // by looking for cracks, not by trusting documentation.

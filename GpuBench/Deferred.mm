@@ -1237,11 +1237,13 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         size_t   factorOff = 0;      // bytes into tessFactorBuf
         int      heightTex = -1;
         float    mean = 0.5f;
+        size_t   borderOff = 0;      // bytes into tessBorderBuf
     };
     std::vector<StoneBatch> stone;
     id<MTLRenderPipelineState>  psoGBufTess = nil, psoGBufTessStats = nil;
     id<MTLComputePipelineState> psoTessFactors = nil;
     id<MTLBuffer> tessFactorBuf = nil, tessSubBuf = nil, tessStatBuf = nil;
+    id<MTLBuffer> tessBorderBuf = nil;
     int tessP = std::max(1, opt.tessPresplit);
     int tessMaxFactor = 0;
     if (opt.tess) {
@@ -1276,6 +1278,87 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             for (size_t k = 0; k < n; ++k) sum += hi.rgba[k * 4];
             s.mean = n ? float(sum / double(n) / 255.0) : 0.5f;
             stone.push_back(s);
+        }
+
+        // ---- AUTHORED-BORDER CLASSIFICATION (the CPU bake's pin) -----------
+        // MEASURED 2026-08-11: the two arms' displacement reference conventions
+        // are IDENTICAL — same formula amp*(h-mean) along the normal, same amp
+        // (0.300), same mip (2), and the same mean to four decimals (GpuBench
+        // reports 0.5491 for `rooms`; the CPU bake's mipMean over
+        // greets_wall_h.png is 0.549053, and a box reduction preserves it
+        // exactly at every level). So the user's "the GPU bulges the mesh
+        // there" is NOT a convention mismatch. What the GPU is missing is the
+        // CPU's PIN: DisplaceStoneSubdiv holds every subdivision vertex on an
+        // AUTHORED PATCH BORDER at exactly zero displacement, and the GPU
+        // displaced those points like any other. At the greets doorway jamb the
+        // CPU value is 0 and the GPU's is amp*(h-mean), which for a brick texel
+        // (h up to 0.665) is +0.035 world units OUTWARD — the bulge.
+        //
+        // Same rule, same definition: an edge used by exactly ONE triangle of
+        // the material is an authored border. The stone's vertex buffer is
+        // DE-INDEXED per face, so the edge identity has to come from POSITION,
+        // quantised to a grid the way the CPU's seamKey does. Classification is
+        // over every batch of the same (mirUV-stripped) material, so a material
+        // split across batches still sees its own topology.
+        {
+            auto qkey = [](float x, float y, float z) {
+                auto q = [](float v) { return int64_t(std::llround(double(v) * 4096.0)); };
+                const int64_t a = q(x), b2 = q(y), c = q(z);
+                return (uint64_t(a) * 0x9E3779B97F4A7C15ull)
+                     ^ (uint64_t(b2) * 0xC2B2AE3D27D4EB4Full)
+                     ^ (uint64_t(c) * 0x165667B19E3779F9ull);
+            };
+            // material name -> edge key -> use count
+            // Ordered PAIR of endpoint keys, not their XOR: an XOR key collides
+            // freely on a lattice-aligned mesh (measured — it classified 12 of
+            // 678 edges as borders where the CPU census finds ~210).
+            using EKey = std::pair<uint64_t,uint64_t>;
+            auto mkEdge = [](uint64_t a, uint64_t b) {
+                return a < b ? EKey{a,b} : EKey{b,a};
+            };
+            std::unordered_map<std::string, std::map<EKey,int>> edgeUse;
+            for (const auto &s : stone) {
+                const Batch &b = scene.batches[s.bi];
+                const std::string m = stripMirUV(b.materialName);
+                auto &eu = edgeUse[m];
+                for (uint32_t p = 0; p < s.patchCount; ++p) {
+                    const Vertex *V = &scene.verts[size_t(b.firstVertex) + size_t(p)*3];
+                    for (int e = 0; e < 3; ++e) {
+                        const Vertex &A = V[(e+1)%3], &B = V[(e+2)%3];   // edge OPPOSITE corner e
+                        eu[mkEdge(qkey(A.px,A.py,A.pz), qkey(B.px,B.py,B.pz))] += 1;
+                    }
+                }
+            }
+            std::vector<uint32_t> masks;
+            size_t off = 0; int nBorder = 0, nEdges = 0;
+            for (auto &s : stone) {
+                const Batch &b = scene.batches[s.bi];
+                const auto &eu = edgeUse[stripMirUV(b.materialName)];
+                s.borderOff = off * sizeof(uint32_t);
+                for (uint32_t p = 0; p < s.patchCount; ++p) {
+                    const Vertex *V = &scene.verts[size_t(b.firstVertex) + size_t(p)*3];
+                    uint32_t m = 0;
+                    for (int e = 0; e < 3; ++e) {
+                        const Vertex &A = V[(e+1)%3], &B = V[(e+2)%3];
+                        auto it = eu.find(mkEdge(qkey(A.px,A.py,A.pz), qkey(B.px,B.py,B.pz)));
+                        ++nEdges;
+                        if (it != eu.end() && it->second == 1) { m |= (1u << e); ++nBorder; }
+                    }
+                    masks.push_back(m);
+                    ++off;
+                }
+            }
+            if (!masks.empty()) {
+                tessBorderBuf = [dev newBufferWithBytes:masks.data()
+                                                 length:masks.size()*sizeof(uint32_t)
+                                                options:MTLResourceStorageModeShared];
+                std::fprintf(stderr,
+                    "[TESS] authored-border classification: %d of %d patch edges are "
+                    "single-use borders (the CPU bake pins these to ZERO; "
+                    "--tess_border_ramp=%.3f fades the GPU displacement to zero over "
+                    "that fraction of the patch, 0 = no pin)\n",
+                    nBorder, nEdges, double(opt.tessBorderRamp));
+            }
         }
 
         // ---- --tess_seam_audit: WHY A DISPLACED SEAM CRACKS AT ALL ---------
@@ -1525,7 +1608,8 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             t.k3[2] = opt.tessBackCull ? 1.0f : 0.0f;
             t.k3[3] = float(opt.tessEdgeMap);
             t.k4[0] = float(opt.tessUniform);
-            t.k4[1] = t.k4[2] = t.k4[3] = 0.0f;
+            t.k4[1] = opt.tessBorderRamp;   // authored-border pin fade width (barycentric)
+            t.k4[2] = t.k4[3] = 0.0f;
         }
     };
     refreshTessUniforms(float(W), float(H));
@@ -1700,6 +1784,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                 [enc setVertexBuffer:vb offset:NSUInteger(s->vertexOff) atIndex:0];
                 [enc setVertexBytes:&tus[si] length:sizeof(TessUniformsHost) atIndex:3];
                 [enc setVertexBuffer:tessSubBuf offset:0 atIndex:4];
+                [enc setVertexBuffer:tessBorderBuf offset:NSUInteger(s->borderOff) atIndex:6];
                 if (tessStatsArmed) {
                     [enc setVertexBuffer:tessStatBuf offset:0 atIndex:5];
                     [enc setFragmentBuffer:tessStatBuf offset:0 atIndex:5];

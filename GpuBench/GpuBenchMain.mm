@@ -303,6 +303,13 @@ const char *kUsage =
     "                    rendered as P*P INSTANCES each with its own factor record, so the\n"
     "                    effective per-edge ceiling is P*16 at zero vertex-buffer cost.\n"
     "                    Default 1. Implies --tess.\n"
+    "  --tess_border_ramp=F  AUTHORED-BORDER PIN (default 0.15, 0 = off). The CPU bake pins\n"
+    "                    every subdivision vertex on an edge used by exactly ONE face of the\n"
+    "                    material to EXACTLY zero displacement; without it this arm pushes the\n"
+    "                    greets doorway jamb OUT by up to +0.035 world units where the CPU\n"
+    "                    pushes it 0 - the reported bulge. F is the fade width as a fraction\n"
+    "                    of the base patch. The conventions themselves already MATCH: same\n"
+    "                    amp*(h-mean) along the normal, amp 0.300, mip 2, mean 0.5491 both.\n"
     "  --tess_amp=F      world displacement amplitude (default 0.3 = --greets_displace_amp's\n"
     "                    own default; the S1d perf table's tessellation arm runs 0.18).\n"
     "  --tess_mip=N      height mip sampled, and the mip whose mean is subtracted (default 2,\n"
@@ -456,6 +463,7 @@ int main(int argc, const char *argv[]) {
         else if (const char *v = val("--tess_px="))       { dopt.tess = true; dopt.tessTargetPx = float(std::atof(v)); }
         else if (const char *v = val("--tess_presplit=")) { dopt.tess = true; dopt.tessPresplit = std::atoi(v); }
         else if (const char *v = val("--tess_amp="))      dopt.tessAmp = float(std::atof(v));
+        else if (const char *v = val("--tess_border_ramp=")) dopt.tessBorderRamp = float(std::atof(v));
         else if (const char *v = val("--tess_mip="))      dopt.tessMip = std::atoi(v);
         else if (const char *v = val("--tess_edge_map=")) dopt.tessEdgeMap = std::atoi(v);
         else if (a == "--no-tess_cull")             dopt.tessCull = false;
