@@ -763,6 +763,11 @@ const char *MaterialImport_ClassifyRole(const char *filename) {
 		case Role::Roughness: return "roughness";
 		case Role::Ao:        return "ao";
 		case Role::Metallic:  return "metallic";
+		// A packed ORM/ARM/RMA is not a slot — it FILLS three. There is no
+		// single role to hand back, so callers that assign one map to one slot
+		// must not treat it as one; they get a distinct token rather than "",
+		// so "this is a packed set" can be told apart from "unrecognised".
+		case Role::PackedOrm: return "packed_orm";
 		default:              return "";   // Skip / None — nothing to apply
 	}
 }
