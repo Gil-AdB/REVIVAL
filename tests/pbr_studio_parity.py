@@ -161,7 +161,15 @@ def render(demo, runtime, outdir):
     env["SDL_VIDEODRIVER"] = "dummy"      # never pop a window
     env["SDL_AUDIODRIVER"] = "dummy"
     env["FDS_PBRTEST_CAM"] = CAM
-    cmd = [demo, "--snapshot=pbrtest@t=100", "--out=" + outdir,
+    # --no-chdir_assets is NOT optional here. DEMO normally chdirs to an asset
+    # root derived from the BINARY's own path (REV.CPP ChdirToAssetRoot: exe
+    # dir, then ../Runtime, then ../../Runtime), which SILENTLY OVERRIDES the
+    # cwd set below. With the usual build/DEMO/DEMO layout both happen to
+    # resolve to the same Runtime, so the test would pass while measuring a
+    # directory it was not pointed at — and would quietly measure the WRONG
+    # tree the moment the binary is installed or copied elsewhere. Disabling
+    # the chdir makes --runtime authoritative and the measurement honest.
+    cmd = [demo, "--no-chdir_assets", "--snapshot=pbrtest@t=100", "--out=" + outdir,
            "--material-import=%s:%s" % (TARGET_SURFACE, MATERIAL),
            "--pbrtest_studio=1"]
     r = subprocess.run(cmd, cwd=runtime, env=env, stdout=subprocess.PIPE,
