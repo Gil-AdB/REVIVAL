@@ -1,5 +1,64 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-12 — THE MECH IS IN THE STAIRS PROBE AND IN THE STAIRS' REFLECTION; IT IS ~2 ORDERS OF MAGNITUDE BELOW ONE LSB
+>
+> User: *"env probe center still doesn't show the mech on the stairs."* His line:
+> `./DEMO --greets-displace --scene-greets --env_probe_center --env-dynamic`.
+> **The observation is real. Every stage the suspicion pointed at is not.**
+> Measured on his line, greets, `--greets-displace` throughout.
+>
+> **1. THE CAPTURE POINT IS FIXED, AND THE +Y FACE DOES GET THE MECH.** Same
+> frame, same mech pose (43.1 4.5 -62.1), `stairs` static cube vs live cube,
+> per-face texel diff:
+>
+> | arm | stairs capture point | mech texels in +Y | where they land |
+> |---|---|---|---|
+> | shipping | (45.4 2.3 -54.9) | **0** | 2026, all in -Z |
+> | `--env_probe_center` | (42.6 0.4 -62.1) | **12442 (4.75 %)** | +Y 12442, +X 1413 |
+>
+> `docs/img/envmap/stairs_upface_probe_center_pair.png`. e0abd02 reproduces.
+> The MERGE picks the first material in MatLib order, so the shared store sits on
+> `stairs` (42.6 0.4 -62.1), not on `stairs::mirUV` (43.4 1.9 -63.5) and not on
+> their area-weighted union (43.0 1.2 -62.9) — order-dependent, worth knowing,
+> and **not** the defect: the union point is 1.5 u HIGHER, which would drop the
+> overhead mech from 54 deg elevation to 40 deg, i.e. OUT of +Y.
+>
+> **2. THE OVERLAY ROUTES IT, EVERY SCHEDULED FRAME.** Across t=6000..7100 the
+> `stairs` store took 338 / 1042 / 1407 / 3138 / 33045 / 13855 mech texels into
+> 2-6 touched faces. Not starvation: the legacy scheduler skipped it on 5 of 12
+> frames (OWNER-OFFSCREEN) but never on a frame where the stairs were on screen.
+>
+> **3. THE STAIRS READ THAT STORE, IN THE SAME FRAME.** `EnvDynamic_Overlay` runs
+> pre-Transform (GREETS.CPP:3969), so the composite is visible to the kernel that
+> frame. Proof rather than code-reading: under `FDS_ENV_GRID=1` — where an
+> overlaid face reverts from synthetic grid to real room, a huge colour move —
+> toggling `--env-dynamic` changes **86.8 % of 1 935 277 `stairs::mirUV` pixels**
+> and 100 % of `stairs`.
+>
+> **4. AND YET THE MECH MOVES EXACTLY ZERO PIXELS.** Real content, `--env-dynamic`
+> on vs off, HUD excluded: **0 of 614 461** stairs pixels at t=6800 (natural
+> camera), **0 of 1 937 404** at a pinned steep top-down pose over the stairs at
+> t=6900. Same runs, `--no-env_refl` moves 100 % of them, so the env term is
+> live and large: mean |dRGB| **40.8** (`stairs`) / **47.7** (`stairs::mirUV`) out
+> of 765. The mech's share of that is below one LSB.
+>
+> **THE ARITHMETIC.** The mech is 0.2-2 % of the cube's texels, box-filtered into
+> the mips a rough surface samples, weighted by the surface's env term (~14 LSB
+> per channel): 0.03-0.3 LSB. It cannot survive 8-bit output. Compounding it at
+> the natural pose, the visible stairs reflect SIDEWAYS, not up — per-face
+> classification of the env term at t=6800: `stairs` **87.7 % +X, 8.9 % -Z,
+> 0.0 % (1 px) +Y**; `stairs::mirUV` **52.0 % -Z, 27.9 % +X, 1.6 % +Y** — while
+> the mech sits in +Y/-X. A floor viewed at a grazing angle reflects the horizon,
+> not what is above it. But that is secondary: the steep pose reads +Y heavily and
+> still moves 0 pixels, so MAGNITUDE is the binding constraint.
+>
+> **NOT FIXED, AND DELIBERATELY.** Nothing here is a wiring bug to repair — the
+> levers are look calls that are his: make the mech brighter in the probe (it is a
+> dark silhouette on a dark wall), raise the stairs' reflectance/`hdr_refl_gain`,
+> or lower their roughness so they sample a sharper mip. Recorded so the next
+> agent does not re-derive the four stages.
+
+
 > ## 2026-08-11 — THE ANGLE RULE IS REAL AND MEASURED (WELDED 0-90.00 deg, SPLIT 91.10 deg), BUT THE CORNER HE POINTED AT IS A THIRD CLASS: A DOORWAY JAMB
 >
 > User: *"the original mesh doesn't have a gap, but similar places in the texture
