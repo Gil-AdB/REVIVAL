@@ -48,6 +48,40 @@ namespace fds {
 // reflection at wherever it happened to stand on bake frame.
 bool g_envBakeSkipDynamic = false;
 
+// ── THE PROBE THAT RIDES ITS OWN SUBJECT ──────────────────────────────────
+// True only while baking a probe whose OWNER IS ITSELF A MOVER and which
+// --env_probe_follow_owner is keeping glued to that owner. It forces the
+// animated-mesh skip above ON for this one bake, even when
+// --env_bake_include_animated (default ON) would otherwise let the movers in.
+//
+// WHY, and it is the user's "--env_probe_follow_owner fucks up the env bake
+// for the mech — random polys rendered". env_bake_include_animated's whole
+// justification is written down in its own flag help: letting the mech into
+// its own canopy probe "is correct for the MECH'S OWN geometry in the MECH'S
+// OWN probe (the 'cockpit' probe sits at the mech's centroid, so the hull/
+// barrels/legs do not move relative to it)". That sentence is true about the
+// RELATIVE POSE and silently false about the DISTANCE. The capture point is
+// the owner surface's own AREA CENTROID — a point ON the canopy — so the hull
+// it is bolted to, the barrels and the legs sit at ~0 world units from the
+// camera. Rendered from there they are near-plane-clipped slabs that fill
+// every face of the cube. FROZEN, that was one stale ghost baked at init and
+// left behind as the mech walked off. FOLLOWED, the point rides the mech, so
+// the mech's own limbs are re-burnt point-blank at EVERY re-bake and the
+// canopy reflects a fresh handful of giant polygons each time.
+//
+// MEASURED, not inferred. Same run, same followed capture point
+// (44.3 5.0 -62.2) at greets t=7100: with the movers in, all six faces are
+// slabs; with them out, all six are the clean room. And it is NOT A RACE —
+// 24/24 runs of the live cube md5 to one value (1bbd0ba0…), so the "random"
+// is deterministic self-geometry, not torn shared vertex state.
+//
+// The movers are not lost, they are handed to the pass that owns them: under
+// --env_dynamic the overlay re-renders them live over this static master
+// every frame at their CURRENT pose, which is exactly why the master is
+// retained separately. Gated on env_probe_follow_owner, so every shipping arm
+// stays byte-null.
+bool g_envBakeSkipAnimatedForce = false;
+
 // ENVDYN A3: the INVERSE filter — read by Transform_Objects while the dynamic-
 // mesh env overlay renders. True → static meshes are skipped and ONLY dynamic
 // meshes (the mech) are submitted, so the overlay draws just the movers over
@@ -1195,7 +1229,13 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         Material* skipMat = nullptr,
                                         float skipRadius = 0.0f,
                                         int faceResWant = 0,
-                                        bool retainStatic = false) {
+                                        bool retainStatic = false,
+                                        bool skipAnimatedForce = false) {
+    // skipAnimatedForce: this probe RIDES A MOVER (--env_probe_follow_owner
+    // keeps it glued to a spline-animated owner), so the movers — the owner's
+    // own hull/limbs first among them — must stay out of the static capture
+    // whatever --env_bake_include_animated says. See the global's comment at
+    // the top of this file for the measurement. Default false = byte-null.
     // retainStatic (ENVDYN A2): keep a pristine static colour master + the
     // per-face depth for the dynamic-mesh overlay (A3). Cube stores only;
     // ignored for the legacy equirect path (the overlay renders cube faces).
@@ -1240,6 +1280,7 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
     auto store = std::make_unique<EnvPanoStore>();
     EnvPanoLinear& v = store->view;
     g_envBakeInProgress = true;
+    g_envBakeSkipAnimatedForce = skipAnimatedForce;
     // HACK (accepted, documented): a metal surface whose OWN store hasn't
     // been baked/tabled yet renders BLACK inside another surface's probe —
     // metalness kills its diffuse and its env-specular term needs a pano the
@@ -1270,6 +1311,7 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                                           : nullptr);
         restoreMetal();
         g_envBakeInProgress = false;
+        g_envBakeSkipAnimatedForce = false;
         if (!ok) return nullptr;
         v.isCube = true;
         v.W = v.H = faceRes;
@@ -1299,6 +1341,7 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         /*publishProj=*/fix);
     restoreMetal();
     g_envBakeInProgress = false;
+    g_envBakeSkipAnimatedForce = false;
     if (!ok) return nullptr;
     v.W = params.panoWidth;
     v.H = params.panoHeight;
@@ -1370,6 +1413,23 @@ static void fillEnvDebugGrid(EnvPanoStore& S) {
 // capture point and re-bakes them. Forward-declared because it needs
 // ownerScreenAreaFrac / materialFaceAabb, which live with the overlay.
 namespace { void envFollowOwnerMoves(Scene* sc, SceneEnv& env); }
+// Same reason: the bake loop needs to know whether THIS probe's owner is a
+// spline-animated mover, because a probe that rides one must keep the movers
+// out of its own static capture (see g_envBakeSkipAnimatedForce).
+namespace { void collectOwnerMeshes(Scene* sc, const Material* M,
+                                    SceneEnv::OwnerTrack& t); }
+
+// Does the probe on material M ride a MOVER? Only asked when
+// --env_probe_follow_owner is on — that is the flag that glues the capture
+// point onto the owner and so creates the point-blank self-geometry this
+// answer suppresses. Cached in the same OwnerTrack the follow pass uses, so
+// the mesh walk happens once per material, not once per bake.
+static bool envProbeOwnerIsMover(Scene* sc, SceneEnv& env, const Material* M) {
+    if (!fds::FeatureFlags::env_probe_follow_owner()) return false;
+    SceneEnv::OwnerTrack& t = env.ownerTrack[M];
+    collectOwnerMeshes(sc, M, t);
+    return t.splineAnim;
+}
 
 bool EnvReflection_FramePrep(Scene* sc) {
     if (!sc || g_envBakeInProgress) return false;
@@ -1543,7 +1603,9 @@ bool EnvReflection_FramePrep(Scene* sc) {
                 // (S already flagged, or M flags it now). (ENVDYN A2)
                 auto bigger = bakeStore(sc, env, bc, S.bakedSkipMat,
                                         S.bakedSkipR, wantFace,
-                                        S.envDynamic || envDynamicForMat(M));
+                                        S.envDynamic || envDynamicForMat(M),
+                                        envProbeOwnerIsMover(sc, env,
+                                                             S.bakedSkipMat));
                 if (bigger) {
                     bigger->bakedSkipMat = S.bakedSkipMat;
                     bigger->bakedSkipR   = S.bakedSkipR;
@@ -1568,9 +1630,21 @@ bool EnvReflection_FramePrep(Scene* sc) {
             }
         }
         if (idx < 0) {
+            // The last argument is the "this probe rides a mover" answer: a
+            // followed probe's capture point sits ON its owner, so the movers
+            // (its own hull first) must stay out of the static capture and
+            // come from --env_dynamic's live overlay instead.
+            const bool ownerMoves = envProbeOwnerIsMover(sc, env, M);
             auto store = bakeStore(sc, env, c, M, excludeR, wantFace,
-                                   envDynamicForMat(M));   // ENVDYN A2 retention
+                                   envDynamicForMat(M),   // ENVDYN A2 retention
+                                   ownerMoves);
             if (!store) { env.byMat[M] = -1; continue; }
+            if (ownerMoves)
+                std::fprintf(stderr, "[ENVFOLLOW] '%s': probe rides a "
+                    "SPLINE-ANIMATED owner — movers kept OUT of its static "
+                    "capture (they would render point-blank from a capture "
+                    "point on the owner itself); --env_dynamic's overlay "
+                    "supplies them live\n", M->Name ? M->Name : "?");
             store->bakedSkipMat = M;
             store->bakedSkipR   = excludeR;
             if (store->envDynamic)

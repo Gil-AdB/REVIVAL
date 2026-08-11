@@ -1105,6 +1105,9 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 namespace fds { extern int  g_offscreenViewDepth;   // >0 inside a mirror RTT /
                     // env-probe / disco / shatter offscreen render (OffscreenView.cpp)
                 extern bool g_envBakeSkipDynamic;
+                extern bool g_envBakeSkipAnimatedForce;   // probe rides a mover:
+                    // keep the movers out of ITS static capture regardless of
+                    // --env_bake_include_animated (EnvBake.cpp's global comment)
                 extern bool g_envBakeSkipMirrorClones;
                 extern bool g_envOverlayDynamicOnly;   // ENVDYN A3: invert the
                     // static-only env bake — render DYNAMIC meshes only, static
@@ -1274,13 +1277,24 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// and clearing it lets a reflector's own canopy glass into its own probe
 	// (measured on greets' `cockpit`: +Y face 91 % VOID, probe mean 100.31 →
 	// 49.11). This is the animated-mesh rule and nothing else.
+	//
+	// …EXCEPT for the one probe the flag's own justification does not cover:
+	// one that RIDES a mover. env_bake_include_animated argues the mech
+	// belongs in the mech's own canopy probe because "the hull/barrels/legs do
+	// not move relative to it" — true of the pose, false of the DISTANCE once
+	// --env_probe_follow_owner glues the capture point onto the canopy itself.
+	// From there the owner's own limbs are near-plane-clipped slabs filling
+	// every cube face (the user's "random polys"). g_envBakeSkipAnimatedForce
+	// is set only for those bakes and only under that flag, and the movers are
+	// not lost — --env_dynamic's overlay draws them live at the current pose.
 	const bool inStaticBake = (g_inShadowPass
 		&& g_currentShadowOmni
 		&& (g_currentShadowOmni->Flags & Omni_StaticShadow)
 		&& !g_inDynamicShadowBake
 		&& fds::FeatureFlags::shadow_skip_animated())
 		|| (fds::g_envBakeSkipDynamic
-		    && !fds::FeatureFlags::env_bake_include_animated());
+		    && (!fds::FeatureFlags::env_bake_include_animated()
+		        || fds::g_envBakeSkipAnimatedForce));
 	// inDynamicBake keeps DYNAMIC meshes only, skipping static ones. The
 	// shadow dynamic bake sets it via g_inDynamicShadowBake; the ENVDYN env
 	// overlay (A3) sets it via g_envOverlayDynamicOnly (not a shadow pass, so
