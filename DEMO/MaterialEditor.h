@@ -144,6 +144,14 @@ std::string Editor_SetUVMapping(const char *name, int proj,
 // omni's flare sprite at a texture baked for the new color), intensity, range
 // (splines — every key set), flareScale (sprite size multiplier on top of
 // intensity; 0 = legacy).
+// Spot keys: type (0 = Light_Omni, 1 = Light_SpotLight — flipping to spot
+// seeds a valid aim + cone, see editorSeedSpotDefaults), coneAngle /
+// innerAngle (HALF-angles in DEGREES from the cone axis, the same units the
+// LWS "ConeAngle" carries), dirX/dirY/dirZ (cone axis; an edit that would
+// leave it (0,0,0) is REFUSED — a zero aim NaNs the kernel's Vector_Norm),
+// volBeamGain + forceVolCone (per-light volumetric beam), shadow (live in the
+// OFF direction only — turning it on needs a ShadowMaps_Rebuild) and
+// shadowMapRes (recorded; read once by ShadowMaps_Rebuild at scene init).
 bool Editor_SetLightProp(int index, const char *key, float value);
 
 // JSON array of the scene's AUTHORED lights (mirror-clone omnis excluded —
@@ -152,7 +160,9 @@ bool Editor_SetLightProp(int index, const char *key, float value);
 // fields: i (authored index — Editor_SetLightProp / LWS write-back space),
 // rawI (position in the legacy unfiltered Omni_SceneAuthored walk — the index
 // MainLoop's editorFocusLight still counts), r/g/b, intensity, range,
-// flareScale, x/y/z, type, shadow, posKeys/sizeKeys/rangeKeys.
+// flareScale, x/y/z, type, shadow, posKeys/sizeKeys/rangeKeys, plus the spot
+// set: coneAngle/innerAngle (HALF-angles, degrees), volBeamGain,
+// forceVolCone, shadowMapRes, dirX/dirY/dirZ.
 std::string Editor_GetLightsJSON();
 
 // Resolve the surface under a click. (u,v) normalized [0,1] over the engine

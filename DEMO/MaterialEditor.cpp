@@ -72,6 +72,7 @@ static void editorRunClearMapTestHook();  // defined next to the split hook
 static void editorRunFocusTestHook();  // defined below the focus core
 static void editorRunObjScaleTestHook();  // defined below Editor_SetObjectScale
 static void editorRunLightGroupTestHook();  // defined below Editor_GetLightsJSON
+static void editorRunSpotEditTestHook();    // ditto — spotlight editor path
 #endif
 
 std::string Editor_GetSurfacesJSON()
@@ -93,6 +94,9 @@ std::string Editor_GetSurfacesJSON()
 	editorRunObjScaleTestHook();
 	// LIGHTGROUP_TEST=<object> validates light→object grouping + group edit.
 	editorRunLightGroupTestHook();
+	// SPOTEDIT_TEST=<light index> validates the spot editor path (aim seeding,
+	// half-angle round-trip, zero-aim refusal).
+	editorRunSpotEditTestHook();
 #endif
 	std::string out = "[";
 	std::unordered_set<std::string> seen;
@@ -1076,6 +1080,59 @@ std::string Editor_SetUVMapping(const char *name, int proj, float sx, float sy, 
 	return buf;
 }
 
+// ── Spot-cone angle convention ──────────────────────────────────────────────
+// Omni::HotSpot / Omni::FallOff are cos(HALF-angle), measured from the cone
+// AXIS — the lighting kernel's only operation on them is dot(aim, L) compared
+// against the cosine, so a half-angle is the only thing that can be stored.
+// Both producers agree: SpotlightCones.cpp:54-55 takes hotInnerDeg /
+// fallOuterDeg and does cos(deg·PI/180), and FLD_CONV.CPP:608 converts the
+// authored LWS "ConeAngle 9" to cos(9°) with no halving anywhere. So the
+// editor stores and displays the SAME number the LWS carries: a light authored
+// at ConeAngle 30 reads 30 in the panel, and typing 30 writes 30 back.
+static const float kDegToRad = 3.14159265f / 180.0f;
+static const float kRadToDeg = 180.0f / 3.14159265f;
+
+// cos(half-angle) -> degrees. The "unset" test is `<= 0`, not `< -1`: a light
+// authored as a POINT carries FallOff/HotSpot 0 (memset, never filled by
+// ConvertOmni), and acos(0) would report a nonsense 90 deg cone that then
+// disagrees with what a type flip actually seeds. Same predicate as
+// editorSeedSpotDefaults, so panel and flip agree. The cost is that a cone
+// half-angle of 90 deg or wider cannot be DISPLAYED — no authored content has
+// one (chase's spots are 9 and 28) and the panel's slider stops at 89.
+static float editorConeDeg(float cosHalf, float fallbackDeg)
+{
+	return (cosHalf > 0.0f && cosHalf < 1.0f)
+	     ? std::acos(cosHalf) * kRadToDeg : fallbackDeg;
+}
+
+static float editorDirLen2(const Vector &v)
+{
+	return v.x * v.x + v.y * v.y + v.z * v.z;
+}
+
+// A light flipped to spotlight in the editor must reach the renderer VALID.
+// Every point light carries IDir (0,0,0) and FallOff/HotSpot 0 (memset at
+// creation, and ConvertOmni only fills them under `Flags & Light_Spot`), and
+// both are lethal to the spot path:
+//   * IDir — the deferred kernel rotates the aim into view space and calls
+//     Vector_Norm (DeferredSurfaceKernel.cpp:5910-5911), which is
+//     Vector_Scale(V, 1/Vector_Length(V)) (MATH.CPP:99). Length 0 makes that
+//     0 * inf = NaN, every cone comparison then goes false, and the light
+//     silently stops lighting anything.
+//   * FallOff 0 is cos(90°) — a legal but unauthored 90° cone.
+// Seed the values an unrotated AUTHORED spot imports as, so a type flip agrees
+// with what the same light looks like after save + reload: FLD_CONV's
+// else-branch aims local +Z, i.e. (0,0,1) — NOT (0,-1,0) — and its unauthored
+// cone default is 30° outer with the hotspot at half (FLD_CONV.CPP:604-612).
+static void editorSeedSpotDefaults(Omni *O)
+{
+	if (editorDirLen2(O->IDir) < 1e-12f) Vector_Form(&O->IDir, 0.0f, 0.0f, 1.0f);
+	if (!(O->FallOff > 0.0f && O->FallOff < 1.0f)) {
+		O->FallOff = std::cos(30.0f * kDegToRad);
+		O->HotSpot = std::cos(15.0f * kDegToRad);
+	}
+}
+
 bool Editor_SetLightProp(int index, const char *key, float value)
 {
 	Omni *O = lightByIndex(index);
@@ -1086,12 +1143,54 @@ bool Editor_SetLightProp(int index, const char *key, float value)
 	else if (!std::strcmp(key, "intensity")) {
 		// Set every key so animated envelopes take the value uniformly (greets
 		// lights are all single-key; multi-key edits flatten the curve — the
-		// panel shows the key count so that's not a surprise).
+		// panel shows the key count so that's not a surprise). ISize too: a
+		// light with NO Size keys is never re-interpolated by Animate_Objects,
+		// so the spline write alone would leave its slider inert.
 		for (dword k = 0; k < O->Size.NumKeys; ++k) O->Size.Keys[k].Pos.x = value;
+		O->ISize = value;
 	} else if (!std::strcmp(key, "range")) {
 		for (dword k = 0; k < O->Range.NumKeys; ++k) O->Range.Keys[k].Pos.x = value;
+		O->IRange = value;
+		O->rRange = (value != 0.0f) ? 1.0f / value : 0.0f;
 	} else if (!std::strcmp(key, "flareScale")) {
 		O->FlareScale = value;   // 0 = legacy (track intensity 1:1)
+	} else if (!std::strcmp(key, "type")) {
+		// Seed BEFORE the type flips: the render thread reads Type to decide
+		// whether to touch IDir/HotSpot/FallOff at all.
+		if (value > 0.5f) {
+			editorSeedSpotDefaults(O);
+			O->Type = Light_SpotLight;
+		} else {
+			O->Type = Light_Omni;
+		}
+	} else if (!std::strcmp(key, "coneAngle")) {
+		O->FallOff = std::cos(value * kDegToRad);       // HALF-angle, see above
+	} else if (!std::strcmp(key, "innerAngle")) {
+		O->HotSpot = std::cos(value * kDegToRad);       // HALF-angle, see above
+	} else if (!std::strcmp(key, "volBeamGain")) {
+		O->VolBeamGain = value;  // 0 = unset → 1.0 at consumption
+	} else if (!std::strcmp(key, "forceVolCone")) {
+		if (value > 0.5f) O->Flags |= Omni_ForceVolCone;
+		else              O->Flags &= ~(DWord)Omni_ForceVolCone;
+	} else if (!std::strcmp(key, "shadow")) {
+		// LIVE, and only honestly so in one direction: clearing the bit drops
+		// the light's shadow on the next frame, but SETTING it finds no entry
+		// in g_shadowMaps (ShadowMaps_Rebuild runs once at scene init) so the
+		// kernel's smIdx stays -1 and nothing changes. The panel says so.
+		if (value > 0.5f) O->Flags |= Omni_CastsShadow;
+		else              O->Flags &= ~(DWord)Omni_CastsShadow;
+	} else if (!std::strcmp(key, "shadowMapRes")) {
+		O->shadowMapRes = (dword)value;
+	} else if (!std::strcmp(key, "dirX") || !std::strcmp(key, "dirY") ||
+	           !std::strcmp(key, "dirZ")) {
+		// Reject rather than accept an aim that would NaN the cone (see
+		// editorSeedSpotDefaults) — the editor's own zero-IDir guard.
+		Vector d = O->IDir;
+		if      (key[3] == 'X') d.x = value;
+		else if (key[3] == 'Y') d.y = value;
+		else                    d.z = value;
+		if (editorDirLen2(d) < 1e-12f) return false;
+		O->IDir = d;
 	} else return false;
 	Editor_MarkDirty();
 	return true;
@@ -1138,19 +1237,32 @@ std::string Editor_GetLightsJSON()
 		if (W && W->Name) name = W->Name;
 		if (W && W->Parent && W->Parent->Name)
 			parent = Editor_ChunkBaseObjName(W->Parent->Name);
-		char buf[380];
+		// Cone angles go out as HALF-angles in degrees — the same number the
+		// LWS "ConeAngle" carries (editorConeDeg / the convention note above).
+		// The fallbacks are FLD_CONV's unauthored-spot defaults (30 outer,
+		// hotspot at half), so a POINT light's inert cone fields read as the
+		// cone it would actually get if it were flipped to spot.
+		const float outerDeg = editorConeDeg(O->FallOff, 30.0f);
+		const float innerDeg = editorConeDeg(O->HotSpot, 15.0f);
+		char buf[560];
 		std::snprintf(buf, sizeof buf,
 		  "%s{\"i\":%d,\"rawI\":%d,\"r\":%.0f,\"g\":%.0f,\"b\":%.0f,"
 		  "\"intensity\":%.4g,\"range\":%.4g,\"flareScale\":%.4g,"
 		  "\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,"
-		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u,",
+		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u,"
+		  "\"coneAngle\":%.4g,\"innerAngle\":%.4g,\"volBeamGain\":%.4g,"
+		  "\"forceVolCone\":%d,\"shadowMapRes\":%u,"
+		  "\"dirX\":%.4f,\"dirY\":%.4f,\"dirZ\":%.4f,",
 		  i ? "," : "", i, rawIdx, O->L.R, O->L.G, O->L.B,
-		  O->Size.NumKeys ? O->Size.Keys[0].Pos.x : 0.0f,
-		  O->Range.NumKeys ? O->Range.Keys[0].Pos.x : 0.0f,
+		  O->Size.NumKeys ? O->Size.Keys[0].Pos.x : O->ISize,
+		  O->Range.NumKeys ? O->Range.Keys[0].Pos.x : O->IRange,
 		  O->FlareScale > 0.0f ? O->FlareScale : 1.0f,
 		  O->IPos.x, O->IPos.y, O->IPos.z,
 		  int(O->Type), (O->Flags & Omni_CastsShadow) ? 1 : 0,
-		  (unsigned)O->Pos.NumKeys, (unsigned)O->Size.NumKeys, (unsigned)O->Range.NumKeys);
+		  (unsigned)O->Pos.NumKeys, (unsigned)O->Size.NumKeys, (unsigned)O->Range.NumKeys,
+		  outerDeg, innerDeg, O->VolBeamGain > 0.0f ? O->VolBeamGain : 1.0f,
+		  (O->Flags & Omni_ForceVolCone) ? 1 : 0, (unsigned)O->shadowMapRes,
+		  O->IDir.x, O->IDir.y, O->IDir.z);
 		out += buf;
 		out += "\"name\":\"";
 		jsonEscape(out, name.c_str());
@@ -1230,6 +1342,82 @@ static void editorRunLightGroupTestHook()
 	}
 	std::fprintf(stderr, "[LIGHTGROUP] group edit r=255: %d/%d reflected — %s\n",
 	             ok, n, ok == n ? "PASS" : "FAIL");
+}
+
+// Pull one numeric field of light `i` out of an Editor_GetLightsJSON string.
+// Same flat-scan idiom LIGHTGROUP uses: the entries are one line, one object,
+// and the probe pins the search to the right light before the field lookup.
+static double editorLightJsonNum(const std::string &lj, int i, const char *field)
+{
+	char probe[32];
+	std::snprintf(probe, sizeof probe, "{\"i\":%d,", i);
+	const size_t at = lj.find(probe);
+	if (at == std::string::npos) return -1e30;
+	const size_t end = lj.find('}', at);
+	const std::string key = std::string("\"") + field + "\":";
+	const size_t f = lj.find(key, at);
+	if (f == std::string::npos || f > end) return -1e30;
+	return std::atof(lj.c_str() + f + key.size());
+}
+
+// SPOTEDIT_TEST=<authored light index> — native validation for the spotlight
+// editor path (PICK_TEST convention; rides the DUMP_SURFACES hook). Every
+// check goes through the same Editor_SetLightProp / Editor_GetLightsJSON pair
+// the browser calls, so it validates the wiring and not just the fields:
+//   1. type 1 -> 0 -> 1 must leave a USABLE spot. A light authored as a point
+//      carries IDir (0,0,0); the deferred kernel's Vector_Norm turns that into
+//      0 * inf = NaN and the cone then rejects every pixel, so the flip has to
+//      seed the aim the LWS import gives an unrotated spot, (0,0,1).
+//   2. coneAngle is a HALF-angle and round-trips 1:1 — write 33.5, read 33.5.
+//      A writer that stored cos(deg/2) would read back 67 here.
+//   3. an aim edit that would zero IDir is REFUSED, and leaves IDir alone.
+static void editorRunSpotEditTestHook()
+{
+	const char *spec = std::getenv("SPOTEDIT_TEST");
+	if (!spec || !*spec || !CurScene) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+	const int i = std::atoi(spec);
+	int pass = 0, total = 3;
+
+	// 1. Force the zero aim every point light imports with, then flip to spot.
+	Omni *O = lightByIndex(i);
+	if (!O) { std::fprintf(stderr, "[SPOTEDIT] no light %d — FAIL\n", i); return; }
+	Editor_SetLightProp(i, "type", 0.0f);
+	Vector_Form(&O->IDir, 0.0f, 0.0f, 0.0f);
+	O->FallOff = O->HotSpot = 0.0f;
+	Editor_SetLightProp(i, "type", 1.0f);
+	std::string lj = Editor_GetLightsJSON();
+	const double dx = editorLightJsonNum(lj, i, "dirX");
+	const double dy = editorLightJsonNum(lj, i, "dirY");
+	const double dz = editorLightJsonNum(lj, i, "dirZ");
+	const double len2 = dx * dx + dy * dy + dz * dz;
+	const bool seeded = (len2 > 0.9 && len2 < 1.1) && dz > 0.99;
+	std::fprintf(stderr, "[SPOTEDIT] flip to spot from zero IDir -> (%.3f,%.3f,%.3f) "
+	                     "|d|^2=%.3f — %s\n", dx, dy, dz, len2, seeded ? "PASS" : "FAIL");
+	if (seeded) ++pass;
+
+	Editor_SetLightProp(i, "coneAngle", 33.5f);
+	lj = Editor_GetLightsJSON();
+	const double cone = editorLightJsonNum(lj, i, "coneAngle");
+	const bool half = std::fabs(cone - 33.5) < 0.05;
+	std::fprintf(stderr, "[SPOTEDIT] coneAngle 33.5 written -> %.4g read back — %s "
+	                     "(a full-angle convention would show 67)\n",
+	             cone, half ? "PASS" : "FAIL");
+	if (half) ++pass;
+
+	// 3. From the seeded (0,0,1): an edit that would zero the aim is refused
+	//    and must not have moved IDir on the way to saying no.
+	const bool refused = !Editor_SetLightProp(i, "dirZ", 0.0f);
+	const bool kept = (O->IDir.x != 0.0f || O->IDir.y != 0.0f || O->IDir.z != 0.0f);
+	std::fprintf(stderr, "[SPOTEDIT] zero-aim edit refused=%d, IDir kept=%d (%.3f,%.3f,%.3f)"
+	                     " — %s\n", int(refused), int(kept),
+	             O->IDir.x, O->IDir.y, O->IDir.z, (refused && kept) ? "PASS" : "FAIL");
+	if (refused && kept) ++pass;
+
+	std::fprintf(stderr, "[SPOTEDIT] light %d: %d/%d — %s\n",
+	             i, pass, total, pass == total ? "PASS" : "FAIL");
 }
 #endif // !__EMSCRIPTEN__
 
