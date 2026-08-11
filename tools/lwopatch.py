@@ -197,6 +197,22 @@ class Surf:
         flags = (flags & ~0x7) | (int(axis) & 0x7)
         self.set_chunk("TFLG", struct.pack(">H", flags))
 
+    def uv_mapping(self):
+        """(proj, sx, sy, sz, axis) as it stands on disk, or None when the
+        surface carries no projection. Read-side counterpart of
+        set_uv_mapping — the editor backend's save log reports old -> new, and
+        only the file knows the old. proj is -1 for a CTEX naming a projection
+        this table doesn't list."""
+        ci, ti = self._find("CTEX"), self._find("TSIZ")
+        if ci < 0 or ti < 0 or len(self.subchunks[ti][1]) < 12:
+            return None
+        name = self.subchunks[ci][1].split(b"\x00", 1)[0].decode("latin-1")
+        proj = self.UV_PROJ_NAMES.index(name) if name in self.UV_PROJ_NAMES else -1
+        sx, sy, sz = struct.unpack(">3f", self.subchunks[ti][1][:12])
+        fi = self._find("TFLG")
+        axis = (struct.unpack(">H", self.subchunks[fi][1][:2])[0] & 0x7) if fi >= 0 else 0
+        return (proj, sx, sy, sz, axis)
+
     def rev_ext(self):
         """Parse the RVSF sub-chunk into {key: value} (empty dict if none).
         Multi-field bits need no special case here: their entries are adjacent
@@ -216,6 +232,16 @@ class Surf:
                 out[key] = v
                 p += struct.calcsize(fmt)
         return out
+
+    def rev_ext_mask(self):
+        """The RVSF mask word exactly as it stands on this surface (0 = no
+        sub-chunk at all). Reported by the editor backend's save log because
+        the mask is the on-disk truth and is NOT derivable from the keys the
+        editor sent: set_rev_ext merges with what was already there, and drops
+        an all-zero grouped vector rather than setting its bit."""
+        i = self._find("RVSF")
+        body = self.subchunks[i][1] if i >= 0 else b""
+        return struct.unpack_from(">H", body, 0)[0] if len(body) >= 2 else 0
 
     def set_rev_ext(self, props):
         """Merge {key: value} RVSF props into this surface's RVSF sub-chunk,
@@ -326,6 +352,39 @@ class Surf:
             else:
                 body += str(cur[key]).encode("latin-1") + b"\x00"
         self.set_chunk("RVSM", struct.pack(">H", mask) + body)
+
+    def get_prop(self, prop):
+        """Current on-disk value of a set_prop key, in the SAME engine scale
+        set_prop accepts, or None when the surface carries no such chunk.
+        Read-side counterpart of set_prop, for the editor backend's save log:
+        the FE can only report the browser's idea of the old value, the file
+        is the authority on what the write is actually replacing."""
+        if prop == "smoothAngle":
+            i = self._find("SMAN")                      # radians on disk
+            if i < 0 or len(self.subchunks[i][1]) < 4:
+                return None
+            return struct.unpack(">f", self.subchunks[i][1][:4])[0] * 180.0 / math.pi
+        if prop in VALUE_PROPS:
+            ichunk, fchunk, div = VALUE_PROPS[prop]
+            i = self._find(fchunk)                      # the float chunk wins
+            if i >= 0 and len(self.subchunks[i][1]) >= 4:
+                return struct.unpack(">f", self.subchunks[i][1][:4])[0] * div
+            i = self._find(ichunk)                      # else the u16 fraction
+            if i >= 0 and len(self.subchunks[i][1]) >= 2:
+                return struct.unpack(">H", self.subchunks[i][1][:2])[0] / 256.0 * div
+            return None
+        if prop == "glossiness":
+            i = self._find("GLOS")
+            if i < 0 or len(self.subchunks[i][1]) < 2:
+                return None
+            return struct.unpack(">H", self.subchunks[i][1][:2])[0]
+        if prop in ("baseR", "baseG", "baseB"):
+            i = self._find("COLR")
+            comp = "baseRbaseGbaseB".index(prop) // 5
+            if i < 0 or len(self.subchunks[i][1]) <= comp:
+                return None
+            return self.subchunks[i][1][comp]
+        raise ValueError(f"unknown prop '{prop}'")
 
     def set_prop(self, prop, value):
         if prop == "smoothAngle":

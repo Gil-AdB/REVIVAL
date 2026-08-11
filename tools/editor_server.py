@@ -28,6 +28,7 @@ Then:   http://localhost:<port>/DEMO.html?editor
 
 import argparse
 import base64
+import hashlib
 import http.server
 import io
 import json
@@ -38,6 +39,7 @@ import socketserver
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 
 try:                     # optional (thumbnails + tif/jpg -> png conversion for
@@ -100,6 +102,155 @@ def scene_fld(scene):
 def scene_sidecar(scene):
     return os.path.join(RUNTIME, "SCENES", scene.upper() + ".MAT")
 
+
+# ── Backend save log ────────────────────────────────────────────────────────
+# The FE already prints a "what changed" receipt (shell.html buildSaveDiff /
+# renderSaveReceipt, editor b66): the diff the BROWSER intended to save, built
+# from its dirty collections and its own pristine baselines. This is the other
+# half — what actually HIT DISK, emitted by the writer itself, on SAVE rather
+# than on edit. It sees what the FE structurally cannot:
+#   * a save POSTed by a script, a second tab, or a stale page;
+#   * a surface name that resolved onto MORE .lwo files than the editor showed;
+#   * an edit whose value was already on disk, so no bytes moved at all;
+#   * the real file size deltas, the RVSF mask transition, the FLD md5.
+#
+# The line format deliberately mirrors the receipt so the two read as one
+# stream: the same group headers ("3 surface(s)"), the same
+# "<name> · <key>: <old> → <new>" items with the same number formatting
+# (editorFmtV), and a "wrote:" footer where the receipt shows 'server wrote:'.
+# Only the tag differs — FE console lines are '[editor]', these are
+# '[editor-be]' — so grep separates the halves.
+#
+# Unconditional, matching the FE (whose receipt is not flag-gated either): a
+# save is rare and user-triggered, and the save whose log was switched off is
+# exactly the one you later wish you had a record of. Cost is a getsize per
+# written file plus one md5 of the regenerated FLD.
+BE_TAG = "[editor-be]"
+
+
+def _fmtv(v):
+    """Value formatter mirroring shell.html editorFmtV: None -> em dash,
+    near-integers bare, everything else three decimals."""
+    if v is None:
+        return "—"
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if n != n or n in (float("inf"), float("-inf")):
+        return str(v)
+    return str(int(round(n))) if abs(n - round(n)) < 1e-6 else f"{n:.3f}"
+
+
+def _fmt_uv(uv):
+    """(proj, sx, sy, sz, axis) -> 'planar 2/2/2 axis Y' for the save log."""
+    if not uv:
+        return "—"
+    proj, sx, sy, sz, axis = uv
+    names = ["planar", "cylindrical", "spherical", "cubic"]
+    pn = names[int(proj)] if 0 <= int(proj) < len(names) else f"proj{proj}"
+    ax = {1: "X", 2: "Y", 4: "Z"}.get(int(axis) & 0x7, str(int(axis) & 0x7))
+    return f"{pn} {_fmtv(sx)}/{_fmtv(sy)}/{_fmtv(sz)} axis {ax}"
+
+
+def _kwval(line):
+    """Second token of an LWS 'Keyword value' line, or None."""
+    t = (line or "").split()
+    return t[1] if len(t) > 1 else None
+
+
+def _probe(fn, *a):
+    """Read an OLD value for the log. A logging read must never be the thing
+    that fails a save, so an absent or malformed chunk degrades to '—'."""
+    try:
+        return fn(*a)
+    except Exception:
+        return None
+
+
+def _md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+class SaveLog:
+    """Per-save accumulator, flushed when the save returns. Saves are
+    serialized by save_lock, so ONE module-global instance is enough and no
+    write site needs a new parameter threaded through it.
+
+    Group titles ending in '(s)' get their item count prefixed at flush time,
+    which is what reproduces the FE receipt's '3 surface(s)' headers while
+    still letting two call sites (e.g. both LWS light patchers) contribute to
+    one group."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.what = None
+        self.scene = None
+        self.groups = []        # [(title, [item, ...])], first-seen order
+        self.writes = []        # "<relpath>  <a> → <b> B  (<delta>)  <extra>"
+        self.notes = []
+        self.t0 = 0.0
+
+    def begin(self, scene, what):
+        self.reset()
+        self.scene, self.what, self.t0 = scene, what, time.time()
+
+    def change(self, title, item):
+        for t, items in self.groups:
+            if t == title:
+                items.append(item)
+                return
+        self.groups.append((title, [item]))
+
+    def note(self, text):
+        """Something the FE would report as saved that did NOT move bytes."""
+        self.notes.append(text)
+
+    def wrote(self, path, before, extra=""):
+        """Record a file that just hit disk. `before` is its size prior to the
+        write (0 = created). The AFTER size is read back FROM DISK, so the log
+        reports what the filesystem has, not what the writer believed."""
+        try:
+            after = os.path.getsize(path)
+        except OSError:
+            after = 0
+        self.writes.append(f"{os.path.relpath(path, REPO)}  {before} → {after} B  "
+                           f"({after - before:+d})" + (f"  {extra}" if extra else ""))
+
+    def flush(self, code=None):
+        if self.what is None:                 # begin() never ran — nothing to say
+            return
+        n = sum(len(items) for _, items in self.groups)
+        if n or self.writes or self.notes:
+            print(f"{BE_TAG} {self.scene} {self.what} — what hit disk:")
+            for title, items in self.groups:
+                head = f"{len(items)} {title}" if title.endswith("(s)") else title
+                print(f"{BE_TAG}   {head}")
+                for it in items:
+                    print(f"{BE_TAG}     {it}")
+            if self.writes:
+                print(f"{BE_TAG}   wrote:")
+                for w in self.writes:
+                    print(f"{BE_TAG}     {w}")
+            for t in self.notes:
+                print(f"{BE_TAG}   note: {t}")
+        print(f"{BE_TAG} {self.scene} {self.what} — {n} change(s), "
+              f"{len(self.writes)} file(s), {time.time() - self.t0:.2f}s, "
+              + (f"HTTP {code}" if code is not None else "RAISED before returning"))
+        sys.stdout.flush()
+        self.reset()
+
+
+SAVELOG = SaveLog()
+
 ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
                  "glossiness", "luminosity", "transparency", "reflection",
                  # smoothAngle is a NATIVE LWO/FLD field (MaxSmoothingAngle +
@@ -137,6 +288,8 @@ SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tint
 # the normal-map assignment (§1e) and stays on the sidecar for now. lwopatch's
 # RVSF_FIELDS is the on-disk field table this maps onto.
 RVSF_SURF_KEYS = SURF_SIDECAR_KEYS - {"normalFlip"}
+# key -> RVSF mask bit, for the save log (which bit a write actually lit).
+RVSF_BIT = {k: bit for (k, bit, _) in lwopatch.RVSF_FIELDS}
 # smoothAngle has no LWO surface chunk the lwopatch understands, so on AUTHORING
 # scenes it can't take the native FLD path (lwopatch.set_prop would raise). It
 # persists to the sidecar there instead: the engine honors a
@@ -362,9 +515,14 @@ def bake_splits(scene, payload, warnings):
                                 "landed on the right instances")
         res = lwo.commit_split(analysis, mapping)
         path = os.path.join(adir, fname)
+        before = os.path.getsize(path)
         bak = lwopatch.backup(path, scene_backup_dir(scene))
         with open(path, "wb") as f:
             f.write(lwo.serialize())
+        SAVELOG.change("split(s)", f"{base}: {len(analysis['clusters'])} part(s) → "
+                       + "/".join(res["parts"][k] for k in sorted(res["parts"]))
+                       + f" baked as real surfaces in {fname}")
+        SAVELOG.wrote(path, before, f"backup {os.path.relpath(bak, REPO)}")
         baked.append({"file": fname, "surface": base, "parts": res["parts"],
                       "polys": res["polys"],
                       "backup": os.path.relpath(bak, REPO)})
@@ -497,8 +655,20 @@ def write_sidecar(path, entries):
              "# Format: surface|prop|value  /  obj:<name>|scale|value", ""]
     for (surface, key), value in sorted(entries.items()):
         lines.append(f"{surface}|{key}|{value}")
+    # Save log: diff what is on disk against what we are about to write. This
+    # is the one choke point every sidecar writer funnels through (maps, object
+    # scale, normalFlip, the dead non-authoring props), so instrumenting it
+    # here covers them all without touching a single caller.
+    was = read_sidecar(path)
+    before = os.path.getsize(path) if os.path.exists(path) else 0
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+    for k in sorted(set(was) | set(entries)):
+        if was.get(k) != entries.get(k):
+            SAVELOG.change("sidecar key(s)",
+                           f"{k[0]} · {k[1]}: {_fmtv(was.get(k))} → {_fmtv(entries.get(k))}")
+    SAVELOG.wrote(path, before, f"{len(entries)} key(s) — NOTE: the .MAT reader "
+                                "is retired, the engine does not load this")
 
 
 # PBR map SET layout (sidecar-elim §1e, USER DESIGN 2026-07-31): a texture set
@@ -537,9 +707,13 @@ def save_maps_setdirs(scene, maps, warnings):
                 warnings.append(f"maps['{surface}']['{role}']: unknown role — skipped")
                 continue
             dst = os.path.join(setdir, role + ".png")
+            rel = f"TEXTURES/PBR/{st}/{role}.png"
             if spec is None:                       # editor "reset map"
                 if os.path.exists(dst):
+                    gone = os.path.getsize(dst)
                     os.remove(dst)
+                    SAVELOG.change("map(s)", f"{surface} · {role}: {rel} → — "
+                                             f"(deleted, {gone} B freed)")
                     written.append({"surface": surface, "set": st, "role": role, "deleted": True})
                 continue
             data = base64.b64decode(spec.get("data") or "")
@@ -547,8 +721,12 @@ def save_maps_setdirs(scene, maps, warnings):
                 warnings.append(f"maps['{surface}']['{role}']: empty data — skipped")
                 continue
             os.makedirs(setdir, exist_ok=True)
+            before = os.path.getsize(dst) if os.path.exists(dst) else 0
             with open(dst, "wb") as f:
                 f.write(data)
+            SAVELOG.change("map(s)", f"{surface} · {role}: "
+                                     f"{'—' if not before else str(before) + ' B'} → {rel}")
+            SAVELOG.wrote(dst, before)
             written.append({"surface": surface, "set": st, "role": role,
                             "path": f"TEXTURES/PBR/{st}/{role}.png", "bytes": len(data)})
         # RVSM: point the surface at its set, or clear it if the set dir is now
@@ -581,6 +759,9 @@ def save_maps(scene, maps, warnings):
                 # load keeps the authored default. The PBR file (if any) stays
                 # on disk — unreferenced, and a later re-import overwrites it.
                 if (surface, role) in entries:
+                    SAVELOG.change("map(s)", f"{surface} · {role}: "
+                                             f"{entries[(surface, role)]} → — "
+                                             "(sidecar line dropped; the PBR file stays)")
                     del entries[(surface, role)]
                     written.append({"surface": surface, "role": role, "deleted": True})
                 continue
@@ -595,9 +776,14 @@ def save_maps(scene, maps, warnings):
             stem = f"{surface}_{role}" if scene == "greets" else f"{scene}_{surface}_{role}"
             safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem + ext)
             os.makedirs(PBR_DIR, exist_ok=True)
-            with open(os.path.join(PBR_DIR, safe), "wb") as f:
+            dst = os.path.join(PBR_DIR, safe)
+            before = os.path.getsize(dst) if os.path.exists(dst) else 0
+            with open(dst, "wb") as f:
                 f.write(data)
             rel = f"TEXTURES/PBR/{safe}"
+            SAVELOG.change("map(s)", f"{surface} · {role}: "
+                                     f"{_fmtv(entries.get((surface, role)))} → {rel}")
+            SAVELOG.wrote(dst, before)
             entries[(surface, role)] = rel
             written.append({"surface": surface, "role": role, "path": rel,
                             "bytes": len(data), "original": fname})
@@ -774,12 +960,16 @@ def patch_lws_light_ext(scene, light_ext, warnings):
                        if lines[i].split(None, 1)[:1] == [kw]), None)
             if abs(fv - LIGHT_LWS_IDENTITY[key]) < 1e-6:   # back to default → drop
                 if fi is not None:
+                    SAVELOG.change("light(s)", f"light {idx} · {key}: "
+                                   f"{_fmtv(_kwval(lines[fi]))} → — ({kw} dropped)")
                     del lines[fi]
                     done.append(key)
                 continue
             newline = f"{kw} {fv:.6g}"
             if fi is not None:
                 if lines[fi] != newline:
+                    SAVELOG.change("light(s)", f"light {idx} · {key}: "
+                                   f"{_fmtv(_kwval(lines[fi]))} → {_fmtv(fv)}")
                     lines[fi] = newline
                     done.append(key)
             else:
@@ -788,6 +978,8 @@ def patch_lws_light_ext(scene, light_ext, warnings):
                 # keyword somewhere inside the light section (sets CurLight).
                 at = next((i for i in range(lo, hi)
                            if lines[i].split(None, 1)[:1] == ["LgtIntensity"]), lo)
+                SAVELOG.change("light(s)", f"light {idx} · {key}: — → {_fmtv(fv)} "
+                                           f"({kw} inserted)")
                 lines.insert(at + 1, newline)
                 done.append(key)
         if done:
@@ -795,14 +987,18 @@ def patch_lws_light_ext(scene, light_ext, warnings):
     if patched:
         new = "\n".join(lines)
         if new != orig:
+            before = os.path.getsize(path)
             bak = lwopatch.backup(path, scene_backup_dir(scene))
             with open(path, "w", encoding="latin-1") as f:
                 f.write(new)
+            SAVELOG.wrote(path, before, f"backup {os.path.relpath(bak, REPO)}")
             for p in patched:
                 p["file"] = lws_name
                 p["backup"] = os.path.relpath(bak, REPO)
         else:
             patched = []
+            SAVELOG.note(f"{lws_name}: light keywords already at those values "
+                         "— not written")
     return patched
 
 
@@ -840,12 +1036,20 @@ def patch_lws_lights(scene, lights, warnings):
                 r = int(round(float(props.get("r", old[1]))))
                 g = int(round(float(props.get("g", old[2]))))
                 b = int(round(float(props.get("b", old[3]))))
+                for ci, c in ((1, "r"), (2, "g"), (3, "b")):
+                    if c in props:
+                        SAVELOG.change("light(s)", f"light {idx} · {c}: "
+                                       f"{_fmtv(old[ci])} → {_fmtv(props[c])}")
                 lines[i] = f"LightColor {r} {g} {b}"
                 done |= {"r", "g", "b"} & set(props)
             elif stripped.startswith("LgtIntensity ") and "intensity" in props:
+                SAVELOG.change("light(s)", f"light {idx} · intensity: "
+                               f"{_fmtv(_kwval(stripped))} → {_fmtv(props['intensity'])}")
                 lines[i] = f"LgtIntensity {float(props['intensity']):.6f}"
                 done.add("intensity")
             elif stripped.startswith("LightRange ") and "range" in props:
+                SAVELOG.change("light(s)", f"light {idx} · range: "
+                               f"{_fmtv(_kwval(stripped))} → {_fmtv(props['range'])}")
                 lines[i] = f"LightRange {float(props['range']):.6f}"
                 done.add("range")
         missing = set(props) - done
@@ -857,14 +1061,17 @@ def patch_lws_lights(scene, lights, warnings):
     if patched:
         new = "\n".join(lines)
         if new != open(path, encoding="latin-1").read():
+            before = os.path.getsize(path)
             bak = lwopatch.backup(path, scene_backup_dir(scene))
             with open(path, "w", encoding="latin-1") as f:
                 f.write(new)
+            SAVELOG.wrote(path, before, f"backup {os.path.relpath(bak, REPO)}")
             for p in patched:
                 p["file"] = lws_name
                 p["backup"] = os.path.relpath(bak, REPO)
         else:
             patched = []   # values identical — nothing actually changed
+            SAVELOG.note(f"{lws_name}: light values identical — not written")
     return patched
 
 
@@ -910,12 +1117,16 @@ def patch_lws_scene_env(scene, scene_env, warnings):
                     if ln.split(None, 1)[:1] == [kw]), None)
         if val == 0:
             if idx is not None:
+                SAVELOG.change("scene env defaults",
+                               f"{key}: {_fmtv(_kwval(lines[idx]))} → — ({kw} dropped)")
                 del lines[idx]
                 patched.append(key)
             continue
         newline = f"{kw} {val}"
         if idx is not None:
             if lines[idx] != newline:
+                SAVELOG.change("scene env defaults",
+                               f"{key}: {_fmtv(_kwval(lines[idx]))} → {_fmtv(val)}")
                 lines[idx] = newline
                 patched.append(key)
         else:
@@ -924,12 +1135,16 @@ def patch_lws_scene_env(scene, scene_env, warnings):
             at = next((i for i, ln in enumerate(lines)
                        if ln.split(None, 1)[:1] == ["FramesPerSecond"]),
                       len(lines) - 1) + 1
+            SAVELOG.change("scene env defaults",
+                           f"{key}: — → {_fmtv(val)} ({kw} inserted)")
             lines.insert(at, newline)
             patched.append(key)
     if patched:
+        before = os.path.getsize(path)
         bak = lwopatch.backup(path, scene_backup_dir(scene))
         with open(path, "w", encoding="latin-1", newline="") as f:
             f.write(nl.join(lines) + nl)
+        SAVELOG.wrote(path, before, f"backup {os.path.relpath(bak, REPO)}")
         warnings.append(f"scene env defaults -> {os.path.basename(path)} "
                         f"({', '.join(patched)}; backup "
                         f"{os.path.relpath(bak, REPO)})")
@@ -948,7 +1163,15 @@ def regen_fld(scene, patched):
         return 500, {"ok": False, "error": "lwsread failed",
                      "stderr": (r.stderr or r.stdout)[-2000:], "patched": patched}
     fld_install = scene_fld(scene)
+    before = os.path.getsize(fld_install) if os.path.exists(fld_install) else 0
     shutil.move(tmp_fld, fld_install)
+    # The md5 is the log's most useful field: this project gates regressions on
+    # golden FLD hashes, so a save that should have been inert is caught here
+    # rather than three steps later.
+    nlwo = sum(1 for f in os.listdir(adir) if f.lower().endswith(".lwo"))
+    SAVELOG.wrote(fld_install, before,
+                  f"md5 {_md5(fld_install)}  ← {SCENES[scene]['lws']} + {nlwo} .lwo "
+                  f"({os.path.basename(scene_lwsread(scene))})")
     return 200, {"ok": True, "patched": patched,
                  "fld": os.path.relpath(fld_install, REPO),
                  "fld_bytes": os.path.getsize(fld_install)}
@@ -994,16 +1217,27 @@ def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
         except ValueError as e:
             warnings.append(f"light {idx_s}: {e}")
 
+    for p in patched_surfaces:
+        SAVELOG.change("surface(s)", f"{os.path.basename(fld_path)}:{p['surface']} · "
+                                     f"{', '.join(p['props'])} → patched in "
+                                     f"{p['records']} record(s)")
+    for p in patched_lights:
+        SAVELOG.change("light(s)", f"light {p['index']} · {', '.join(p['keys'])} "
+                                   f"→ patched in {os.path.basename(fld_path)}")
     wrote = None
     if patched_surfaces or patched_lights:
         if bytes(fld.data) != open(fld_path, "rb").read():
+            before = os.path.getsize(fld_path)
             bak = lwopatch.backup(fld_path, FLD_BACKUPS)
             fld.save(fld_path)
+            SAVELOG.wrote(fld_path, before, f"md5 {_md5(fld_path)}  "
+                                            f"backup {os.path.relpath(bak, REPO)}")
             wrote = {"file": os.path.basename(fld_path),
                      "surfaces": [p["surface"] for p in patched_surfaces],
                      "backup": os.path.relpath(bak, REPO)}
         else:
             warnings.append("values identical to the FLD — nothing written")
+            SAVELOG.note(f"{os.path.basename(fld_path)}: values identical — not written")
 
     # Migrate superseded sidecar prop lines out (map lines stay).
     if patched_surfaces:
@@ -1029,6 +1263,19 @@ def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
 
 
 def do_save(scene, payload):
+    """Bracket the save with the backend write log (SaveLog), then delegate.
+    The try/finally matters: a save that raises part-way has still written
+    whatever it wrote, and that is exactly the case the log exists for."""
+    SAVELOG.begin(scene, "save")
+    code = None
+    try:
+        code, resp = _do_save(scene, payload)
+        return code, resp
+    finally:
+        SAVELOG.flush(code)
+
+
+def _do_save(scene, payload):
     """Apply {"surfaces": {...}, "maps": {...}, "lights": {...},
     "objects": {...}, "splits": {...}}. Object props (scale) go to the
     sidecar for every scene type; splits are BAKED into the .lwo sources
@@ -1228,8 +1475,16 @@ def do_save_main(scene, payload):
             continue
         for key in targets:
             uv_targets[key] = uv
+    # Save log group for everything surface-shaped below. Counted AFTER name
+    # resolution — one entry per (.lwo, surface) the editor's names actually
+    # landed on, which is the number the FE cannot know (a bare FLD name can
+    # resolve into several .lwo files).
+    G_SURF = "surface(s)"
     for (fname, surf), uv in sorted(uv_targets.items()):
-        lwos[fname].surface(surf).set_uv_mapping(*uv)
+        s = lwos[fname].surface(surf)
+        SAVELOG.change(G_SURF, f"{fname}:{surf} · uv: "
+                               f"{_fmt_uv(_probe(s.uv_mapping))} → {_fmt_uv(uv)}")
+        s.set_uv_mapping(*uv)
 
     if not per_file and not uv_targets and not per_file_ext and not per_file_rvsm:
         if saved_maps or patched_lights or patched_scene_env:
@@ -1248,21 +1503,42 @@ def do_save_main(scene, payload):
     # Patch + write (backup first), only files that actually change.
     patched = []
     for (fname, surf), props in sorted(per_file.items()):
+        s = lwos[fname].surface(surf)
         for p, v in props.items():
-            lwos[fname].surface(surf).set_prop(p, v)
+            SAVELOG.change(G_SURF, f"{fname}:{surf} · {p}: "
+                                   f"{_fmtv(_probe(s.get_prop, p))} → {_fmtv(v)}")
+            s.set_prop(p, v)
     for (fname, surf), props in sorted(per_file_ext.items()):
-        lwos[fname].surface(surf).set_rev_ext(props)   # RVSF sub-chunk (§1a)
+        s = lwos[fname].surface(surf)
+        was, mask0 = _probe(s.rev_ext) or {}, _probe(s.rev_ext_mask) or 0
+        s.set_rev_ext(props)   # RVSF sub-chunk (§1a)
+        for p in sorted(props):
+            SAVELOG.change(G_SURF, f"{fname}:{surf} · {p}: {_fmtv(was.get(p))} → "
+                                   f"{_fmtv(props[p])}  (RVSF {RVSF_BIT.get(p, 0):#06x})")
+        mask1 = _probe(s.rev_ext_mask) or 0
+        if mask1 != mask0:
+            SAVELOG.change(G_SURF, f"{fname}:{surf} · RVSF mask: "
+                                   f"{mask0:#06x} → {mask1:#06x}")
     for (fname, surf), st in sorted(per_file_rvsm.items()):
-        lwos[fname].surface(surf).set_rev_maps({"set": st})  # RVSM sub-chunk (§1e)
+        s = lwos[fname].surface(surf)
+        was = (_probe(s.rev_maps) or {}).get("set")
+        s.set_rev_maps({"set": st})  # RVSM sub-chunk (§1e)
+        SAVELOG.change(G_SURF, f"{fname}:{surf} · RVSM set: {was or '—'} → "
+                               f"{st or '— (cleared)'}  (RVSM 0x0001)")
     for fname in sorted({f for (f, _) in per_file} | {f for (f, _) in uv_targets}
                         | {f for (f, _) in per_file_ext} | {f for (f, _) in per_file_rvsm}):
         path = os.path.join(adir, fname)
         new = lwos[fname].serialize()
-        if new == open(path, "rb").read():
+        cur = open(path, "rb").read()
+        if new == cur:
+            # The FE's receipt says "saved"; no byte moved. Only the writer can
+            # know that, which is the whole reason this log exists.
+            SAVELOG.note(f"{fname}: serialized bytes identical — not written")
             continue
         bak = lwopatch.backup(path, scene_backup_dir(scene))
         with open(path, "wb") as f:
             f.write(new)
+        SAVELOG.wrote(path, len(cur), f"backup {os.path.relpath(bak, REPO)}")
         patched.append({"file": fname,
                         "surfaces": sorted({s for (f, s) in per_file if f == fname}
                                            | {s for (f, s) in uv_targets if f == fname}
@@ -1315,6 +1591,19 @@ def list_backups(scene="greets"):
 
 
 def do_restore(scene, payload):
+    """Bracket the restore with the backend write log — a restore overwrites an
+    authoring source and regenerates the FLD, so it hits disk exactly as hard
+    as a save and belongs in the same stream."""
+    SAVELOG.begin(scene, "restore")
+    code = None
+    try:
+        code, resp = _do_restore(scene, payload)
+        return code, resp
+    finally:
+        SAVELOG.flush(code)
+
+
+def _do_restore(scene, payload):
     """Restore one backup over its target (backing up the CURRENT file first,
     so a restore is itself undoable). greets targets an authoring LWO/LWS and
     regenerates the FLD; FLD scenes restore the FLD directly."""
@@ -1332,8 +1621,11 @@ def do_restore(scene, payload):
     if open(src, "rb").read() == open(target, "rb").read():
         return 200, {"ok": True, "restored": None,
                      "note": "backup is identical to the current file — nothing to do"}
+    before = os.path.getsize(target)
     pre = lwopatch.backup(target, bdir)
     shutil.copy2(src, target)
+    SAVELOG.change("restore", f"{entry['target']} ← {name} (taken {entry['when']})")
+    SAVELOG.wrote(target, before, f"pre-restore backup {os.path.relpath(pre, REPO)}")
     info = [{"file": entry["target"], "restored_from": name,
              "pre_restore_backup": os.path.relpath(pre, REPO)}]
     if authoring:
