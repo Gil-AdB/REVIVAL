@@ -86,20 +86,49 @@ bool tokenHas(const std::string &stem, const char *tok) {
 	return false;
 }
 
-enum class Role { None, Albedo, Normal, Height, Roughness, Ao, Metallic, Skip };
+// PackedOrm = one file carrying THREE scalar maps in its channels (the ORM /
+// ARM / RMA convention: R occlusion, G roughness, B metallic). It is not a
+// slot, it FILLS three slots — see the dir scan in MaterialImport_Apply.
+enum class Role { None, Albedo, Normal, Height, Roughness, Ao, Metallic, PackedOrm, Skip };
 
+// Guess a map's role from its filename stem.
+//
+// ORDER IS THE WHOLE DESIGN, and it is: an EXPLICIT role token always beats a
+// guess made from the asset-family name. Vendors name the family and the role
+// in the same stem ("blue_metal_plate_arm_1k", "chipped-paint-metal-rough2"),
+// so a rule that reads any part of the stem in isolation gets hijacked by the
+// family. Two consequences worth stating, because both were live bugs:
+//
+//   * `ao` is tested BEFORE `metal`. "old-metal-slats1_ao" is an OCCLUSION map
+//     belonging to a metal-named family; testing `metal` first read 66 of the
+//     library's AO maps as metalness images.
+//   * PackedOrm is tested LAST. `arm` is a real English word and a real object
+//     name -- "mech_arm_albedo", "left_arm_rough" -- so a stem that names a
+//     single role explicitly is that role, and only a stem that names NO role
+//     is treated as a packed set.
 Role classify(const std::string &stem) {
 	if (tokenHas(stem,"preview") || tokenHas(stem,"thumb") || tokenHas(stem,"thumbnail")
 	    || tokenHas(stem,"sphere") || tokenHas(stem,"render")) return Role::Skip;
-	// Order matters: specific tokens first.
+	// Explicit single-role tokens, most specific spelling first. `diff`/`col`
+	// are the PolyHaven/FreePBR abbreviations ("*_diff_1k", "LAP_COL").
 	if (tokenHas(stem,"basecolor")||tokenHas(stem,"base_color")||tokenHas(stem,"base-color")
-	    ||tokenHas(stem,"albedo")||tokenHas(stem,"diffuse")||tokenHas(stem,"color")) return Role::Albedo;
+	    ||tokenHas(stem,"albedo")||tokenHas(stem,"diffuse")||tokenHas(stem,"diff")
+	    ||tokenHas(stem,"color")||tokenHas(stem,"col")) return Role::Albedo;
 	if (tokenHas(stem,"normal")||tokenHas(stem,"nrm")||tokenHas(stem,"nor")) return Role::Normal;
 	if (tokenHas(stem,"roughness")||tokenHas(stem,"rough")||tokenHas(stem,"rgh")) return Role::Roughness;
 	if (tokenHas(stem,"height")||tokenHas(stem,"disp")||tokenHas(stem,"displacement")
 	    ||tokenHas(stem,"bump")) return Role::Height;
-	if (tokenHas(stem,"metallic")||tokenHas(stem,"metalness")||tokenHas(stem,"metal")) return Role::Metallic;
 	if (tokenHas(stem,"ao")||tokenHas(stem,"occlusion")||tokenHas(stem,"ambientocclusion")) return Role::Ao;
+	// Bare "metal" is also how families are named, so it only means "metalness
+	// map" when the stem carries no packed-set token — otherwise
+	// "blue_metal_plate_arm_1k" reads as a metalness image instead of the ARM
+	// map it is. The explicit spellings need no such guard.
+	if (tokenHas(stem,"metallic")||tokenHas(stem,"metalness")
+	    || (tokenHas(stem,"metal") && !tokenHas(stem,"arm") && !tokenHas(stem,"orm")
+	        && !tokenHas(stem,"rma") && !tokenHas(stem,"mra"))) return Role::Metallic;
+	// Named no single role and carries a packed-set token ⇒ packed.
+	if (tokenHas(stem,"orm")||tokenHas(stem,"arm")||tokenHas(stem,"rma")
+	    ||tokenHas(stem,"mra")) return Role::PackedOrm;
 	return Role::None;
 }
 
@@ -349,7 +378,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			continue;
 		}
 		// Scan the directory and bucket files by detected role (first match wins).
-		std::string albedo, normal, height, rough, ao, metallic;
+		std::string albedo, normal, height, rough, ao, metallic, packed;
 		DIR *d = opendir(spec.dir.c_str());
 		if (!d) { std::fprintf(stderr, "[MAT-IMPORT] cannot open dir '%s'\n", spec.dir.c_str()); continue; }
 		for (struct dirent *e; (e = readdir(d)); ) {
@@ -365,11 +394,35 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 				case Role::Roughness: slot = &rough;    break;
 				case Role::Ao:        slot = &ao;       break;
 				case Role::Metallic:  slot = &metallic; break;
+				// Remembered, NOT applied here: a packed map is a FALLBACK for
+				// the three slots it covers, and readdir order is arbitrary, so
+				// filling them mid-scan would let the packed file beat a
+				// dedicated one that simply came later in the directory.
+				case Role::PackedOrm: slot = &packed;   break;
 				default: continue;
 			}
 			if (slot->empty()) *slot = full;   // first match wins
 		}
 		closedir(d);
+
+		// A packed ORM/ARM/RMA fills the three slots it covers — but only the
+		// ones no DEDICATED file claimed, so a set that ships both (common:
+		// "*_arm_1k.png" plus a finer "*_rough_1k.png") keeps the dedicated
+		// map and uses the packed one only for what is missing. Same path
+		// three times, three roles: loadRoleMapCached keys on the role, so
+		// each pulls its own channel out (R/G/B) into its own 8-bit texture.
+		if (!packed.empty()) {
+			const bool usedAo = ao.empty(), usedR = rough.empty(), usedM = metallic.empty();
+			if (usedAo) ao       = packed;
+			if (usedR)  rough    = packed;
+			if (usedM)  metallic = packed;
+			std::fprintf(stderr, "    [packed] %s -> %s%s%s\n", packed.c_str(),
+			             usedAo ? "ao(R) " : "", usedR ? "roughness(G) " : "",
+			             usedM ? "metallic(B)" : "");
+			if (!usedAo && !usedR && !usedM)
+				std::fprintf(stderr, "    [packed] (all three slots already had "
+				             "dedicated maps — packed file unused)\n");
+		}
 
 		std::fprintf(stderr, "[MAT-IMPORT] %s: material '%s' <- %s\n",
 		             sceneName ? sceneName : "?", spec.matName.c_str(), spec.dir.c_str());
