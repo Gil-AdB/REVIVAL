@@ -973,6 +973,36 @@ quantity the moment anything is tessellated.
   quantisation of the shadow factor plus double filtering (4-tap PCF at bake,
   quantised, then bilinear at sample) vs the runtime's PCF at the pixel's own
   world position. Picture: `docs/img/fogwt/lmdyn_bakeres_t5773.png`.
+- **DONE 2026-08-10 — the bake is now SKIPPED when the atlas has no reader.**
+  `Initialize_Greets` evaluates `FeatureFlags::shadow_lightmap()` at the bake
+  spawn point (where only CLI/env can have set it, since `GreetsApplyRunDefaults`
+  has not run — so it is exactly the value `EngineGBuffer_Resize` already saw at
+  boot) and, when it is off, skips `LightmapBake_Static` **and** the atlas
+  allocation entirely. Keyed on the plane-allocation gate alone, deliberately:
+  it is the conservative half, so `--shadow_lightmap` still bakes and the
+  `--shadow_lightmap --shadow_lm_dynamic` arm is bit-for-bit unchanged (verified,
+  matched pair: `fe61ae5c673fb56907eb79d071a7bfb6` both arms).
+  **MEASURED:** static bake 55.8–78.3 ms → 0.1 ms (the stamp below); greets-entry
+  join wait → gone with the thread; `--mem_census` loses the two lightmap rows,
+  **−89.21 MiB** of allocated-and-TOUCHED store (censused total 750.94 → 661.73
+  MiB, 41 → 39 buffers); process peak `phys_footprint` −20 to −24 MB (smaller
+  than the census because `allocate()`'s uniform 255 fill compresses — *inferred*).
+  Frame ms neutral (min-of-6 interleaved, load 7.6–12.9: t=5743 51.89 → 51.47,
+  t=5780 50.55 → 50.88, both inside a ~7 ms spread).
+  Pins unmoved 3/3 each: greets `778fa6ac…`, fountain `8db68ccb…`, city
+  `3cbe42b1…`, `render_gate` 3/3 on both arms.
+  **THE SIDE EFFECT THAT HAD TO BE KEPT, and it is not hypothetical:**
+  `LightmapBake_Static` also stamps `Face::MeshFaceIdx`, whose *second* consumer
+  is `tbrXparOrderLess` (`FILLERS.CPP:1876`) — the camera-independent tie-break
+  of the per-strip transparent sort, live every frame and nothing to do with
+  lightmaps. Split out as `LightmapStampFaceIndices` and still called on the skip
+  path. **Proof it is load-bearing:** a control binary with only that call removed
+  moves the greets pin to `76ff35370495cbd67c221fb899a7833b` (stable 2/2) — 1 px,
+  max channel Δ 24/255, the exact coplanar-tie signature. Every *other* side
+  effect (`staticLMTable`, `staticLMMeshId`, `staticShadowLM`, `omniSceneIdx`,
+  `coverageBits`, `planarBases`) is reachable only through `resolvePixelLightmap`
+  → `resolveCubeAtten`'s `useLightmap && pl.lm` branch, plus two diagnostics
+  (`LightmapViz_Available`, the `--mem_census` row) — all dead on the shipping arm.
 - **Cheap unrelated win found while there:** `lm.allocate(faces, numCubeOmnis, res)`
   (`LightmapBake.cpp:373`) sizes K from **all 11** cube omnis, but the bake
   `continue`s on any omni lacking `Omni_StaticShadow` (`:487`) and the kernel's

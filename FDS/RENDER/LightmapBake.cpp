@@ -193,7 +193,47 @@ bool isMeshDynamic(Object *obj, char *reasonOut = nullptr, size_t reasonCap = 0)
     return false;
 }
 
+// Stamp each face's own index into Face::MeshFaceIdx. Split out of
+// LightmapBake_Static's mesh loop so the two callers below cannot drift:
+// the bake calls it per kept mesh, LightmapStampFaceIndices calls it over
+// the same mesh SET when the bake is skipped. See that function's comment
+// for why the stamp must survive a skipped bake.
+inline void stampMeshFaceIndices(TriMesh *T)
+{
+    for (DWord fi = 0; fi < T->FIndex && fi <= 0xFFFF; ++fi) {
+        T->Faces[fi].MeshFaceIdx = uint16_t(fi);
+    }
+}
+
 }  // namespace
+
+// ── Face::MeshFaceIdx, which is NOT a lightmap side effect ────────────────
+// LightmapBake_Static stamps Face::MeshFaceIdx as a convenience (the atlas
+// sampler needs to recover a face's index from an FList clone). But that
+// field has a SECOND consumer that has nothing to do with lightmaps and is
+// live on every frame of every scene: tbrXparOrderLess (FILLERS.CPP:1876),
+// the final tie-break of the per-strip transparent sort. When two fragments
+// land at the same renderZ and the same facing rank — a thin glass panel's
+// front/back pair, stacked decals, greets' coplanar mirror panels — that
+// comparator falls back to MeshFaceIdx to impose a camera-INDEPENDENT total
+// order. Leave the field at its 0 initialiser and the tie-break degenerates
+// to std::stable_sort's input order, which is the view-dependent FList
+// insertion order the comparator exists to remove.
+//
+// So a scene that skips the bake must still run THIS loop, over exactly the
+// mesh set the bake would have kept (same isMeshDynamic predicate — dynamic
+// meshes keep MeshFaceIdx == 0 today and must keep it).
+void LightmapStampFaceIndices(Scene *Sc)
+{
+    if (!Sc) return;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh *T = (TriMesh *)Obj->Data;
+        if (!T || T->FIndex == 0) continue;
+        if (isMeshDynamic(Obj, nullptr, 0)) continue;
+        stampMeshFaceIndices(T);
+    }
+}
 
 void LightmapStampOrigBary(Scene *Sc)
 {
@@ -332,10 +372,16 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
         // untessellated one and the store stops tracking face count. The cap
         // at lmRes means the flag can only ever REDUCE, never sharpen.
         //
-        // DEFAULT 0 = OFF = byte-null everywhere. greets turns it on only
-        // under --greets_displace (the same companion-default pattern as
-        // --greets_shadow_proxy / --greets_displace_flat_mirror), so the
-        // byte-pinned FLAT path never takes this branch at all.
+        // DEFAULT 0 = OFF = byte-null everywhere. CORRECTED 2026-08-10 (both
+        // halves of the old text were stale): greets turns the density on
+        // UNCONDITIONALLY, not "only under --greets_displace" — it moved out of
+        // the companion block into the main GreetsApplyInitDefaults body on
+        // 2026-08-09 — and the byte-pinned flat path therefore DOES take this
+        // branch whenever the bake runs at all (verified byte-null: the pin
+        // reproduces 4/4 with and without it). Since 2026-08-10 the shipping
+        // greets arm does not run the bake at all — the atlas has no reader, so
+        // Initialize_Greets skips it — which makes this branch live only under
+        // an explicit --shadow_lightmap.
         int meshRes = lmRes;
         if (lmDensity > 0.0f && T->FIndex > 0) {
             constexpr int kMinRes = 8;   // keep bilinear + a usable gradient
@@ -387,9 +433,9 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
 
         // Stamp the face's own index so Mekalele can recover it from
         // FList (where Face pointers no longer point into T->Faces).
-        for (DWord fi = 0; fi < T->FIndex && fi <= 0xFFFF; ++fi) {
-            T->Faces[fi].MeshFaceIdx = uint16_t(fi);
-        }
+        // Shared with LightmapStampFaceIndices — a caller that SKIPS this
+        // bake must still stamp, see that function.
+        stampMeshFaceIndices(T);
 
         ++meshCount;
         const Vector &IP = T->IPos;

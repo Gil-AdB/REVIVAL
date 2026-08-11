@@ -1109,12 +1109,37 @@ static void GreetsApplyInitDefaults()
 	FF::setDefault(FF::BoolId::mirror_rtt,              true);
 	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
 	// Lightmap bake atlas params (LightmapBake_Static reads these). NOT
-	// shadow_lightmap itself: that's the per-pixel SAMPLE gate the deferred
-	// kernel reads for EVERY scene, so it leaks if set during the shared init
-	// phase — it lives in GreetsApplyRunDefaults instead, and the bake is
-	// force-enabled at spawn so it still runs here. res/planar/skip_animated
-	// only matter while sampling (shadow_lightmap on), so they're inert on
-	// other scenes and safe to leave at init.
+	// shadow_lightmap itself — which stays in GreetsApplyRunDefaults, but NOT
+	// for the reason this comment used to give.
+	//
+	// CORRECTED 2026-08-10 (measured, SESSION_STATE 2026-08-10 §1). The old
+	// text called shadow_lightmap "the per-pixel SAMPLE gate the deferred
+	// kernel reads for EVERY scene". It is not a per-pixel gate and the
+	// kernel never reads it. The per-pixel gate is
+	//   lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic()
+	// (DeferredSurfaceKernel.cpp:1622). shadow_lightmap's only readers are
+	// ALLOCATION sites — EngineGBuffer_Resize (Mekalele.cpp:85, which runs at
+	// BOOT, before every scene init), GreetsMirror.cpp:3051 and
+	// MirrorShatter.cpp:655/940 (offscreen G-buffers) — plus the two bake
+	// entry points in LightmapBake.cpp. That misreading is what put the flag
+	// on the wrong side of the resize: the run-phase write lands AFTER
+	// EngineGBuffer_Resize has already decided not to allocate lightmapMF/ST,
+	// so the planes never exist and `--shadow_lm_dynamic` alone is inert
+	// (0 px at 18 poses, measured).
+	//
+	// It is NOT moved to this init block, and that is deliberate: moving it
+	// would not fix the boot-time consumer either (EngineGBuffer_Resize runs
+	// before ALL scene inits, not just before greets'), while it WOULD switch
+	// on real work — LightmapStampOrigBary, the offscreen lightmap planes, and
+	// the 54 ms atlas bake — to feed a path that measures +1.7 ms/frame for a
+	// 95 %-one-LSB look change. Opening that gate is a look/perf decision, not
+	// a placement fix; `--shadow_lightmap --shadow_lm_dynamic` is how to
+	// evaluate it. What the run-phase placement DOES still buy is scope: the
+	// flag is process-global and Initialize_Greets runs first natively, so an
+	// init-phase write would allocate those planes for city/chase/fountain too.
+	//
+	// res/planar/skip_animated only matter while sampling (shadow_lightmap on),
+	// so they're inert on other scenes and safe to leave at init.
 	FF::setDefault(FF::IntId::shadow_lightmap_res,      128);
 	FF::setDefault(FF::BoolId::shadow_lightmap_planar,  true);
 	FF::setDefault(FF::BoolId::shadow_skip_animated,    true);
@@ -1153,6 +1178,12 @@ static void GreetsApplyInitDefaults()
 	// docs/OPTIMIZATION_BACKLOG.md.
 	// --shadow_lightmap_texel_density=0 is the one-flag revert to the legacy
 	// fixed-128 atlas (verified: reproduces the pin 4/4).
+	// SUPERSEDED 2026-08-10 for the DEFAULT arm: "that the flat arm bakes an
+	// array it never reads is a separate, bigger finding" is now closed — the
+	// bake is skipped outright when the atlas has no reader (Initialize_Greets),
+	// so on a default run there is no atlas, no [LM] line, and this density
+	// value is inert. It still governs the sizing whenever the bake DOES run
+	// (--shadow_lightmap), which is the only arm that can sample it.
 	FF::setDefault(FF::FloatId::shadow_lightmap_texel_density, 14.2f);
 	// TESSELLATION ERGONOMICS (2026-08-06). --greets_displace alone paid a
 	// per-frame shadow re-raster (and an env/lightmap bake) over ~87 k displaced
@@ -1223,8 +1254,16 @@ static void GreetsApplyRunDefaults()
 	// Shadow sampling / dynamic bake (greets tick + deferred kernel).
 	FF::setDefault(FF::BoolId::shadows,                 true);
 	FF::setDefault(FF::BoolId::shadow_dynamic,          true);
-	// Per-pixel lightmap SAMPLE gate — set at RUN (not init) so it doesn't
-	// leak onto earlier scenes; the bake itself was force-enabled at init.
+	// Static-lightmap ALLOCATION gate (not, as this comment used to say, a
+	// per-pixel sample gate — see the corrected block in
+	// GreetsApplyInitDefaults). Kept at RUN so the two lightmap G-buffer
+	// planes are not allocated for city/chase/fountain. It arrives after the
+	// only consumer that matters (EngineGBuffer_Resize, at BOOT), so on the
+	// shipping arm it is close to inert: what it still reaches are the
+	// lazily-built offscreen G-buffers (GreetsMirror RTT, MirrorShatter
+	// workers), which get lightmap planes they then never sample because
+	// lmKernelEnabled is false. As of the same change the greets atlas bake is
+	// skipped entirely when this flag is off at init — see Initialize_Greets.
 	FF::setDefault(FF::BoolId::shadow_lightmap,         true);
 	// PBR shading stack (deferred surface kernel, global render path). This is
 	// the set the user launches greets with every time; making them scene
@@ -3030,28 +3069,84 @@ void Initialize_Greets()
 	// thread reads Materials, so starting it earlier raced the read against
 	// those writes (TSan: LightmapBake_Static vs Scene_RebuildMatTable). The
 	// bake is still background — joined in Run_Greets before the first frame.
-	// Unconditional (matches the prior behaviour); LightmapBake_Static no-ops
-	// fast when --shadow-lightmap is off.
+	//
+	// … AND IT IS ONLY SPAWNED WHEN THE ATLAS CAN BE READ. See the block
+	// comment on lmAtlasReachable below: on the shipping arm it cannot, and
+	// the bake was 54 ms of startup and 0.09 GB of fully-touched store for a
+	// buffer no pixel ever samples.
 	{
 		InitTimelineMark("greets: shadow/env bake end — spawning lightmap thread");
-		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
-		const auto bakeSpawnT = std::chrono::steady_clock::now();
 		Scene * const greetScForBake = GreetSc;
+		// ── WILL ANY PIXEL EVER READ THE ATLAS? ───────────────────────────
+		// The atlas has exactly one runtime reader: resolveCubeAtten's
+		// `useLightmap && pl.lm` branch (DeferredShadowSampling.h:120), fed by
+		// resolvePixelLightmap (:47). That needs BOTH of:
+		//   (a) the lightmapMF/ST G-buffer planes to exist. They are allocated
+		//       only by EngineGBuffer_Resize (Mekalele.cpp:85) under
+		//       FeatureFlags::shadow_lightmap(), and every resize call site
+		//       (SDL2.cpp:433/441 at boot, Snapshot.cpp:153,
+		//       ReproHarness.cpp:130) runs BEFORE any scene init. So the flag's
+		//       value HERE — where only the CLI/env can have set it, since
+		//       GreetsApplyRunDefaults has not run yet — is exactly the value
+		//       the resize already saw. It is the plane-allocation gate, read
+		//       one phase late but with the same answer.
+		//   (b) lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic()
+		//       (DeferredSurfaceKernel.cpp:1622). Greets defaults
+		//       shadow_dynamic ON and shadow_lm_dynamic OFF, so this is false
+		//       on the shipping arm too — a second, independent closed gate.
+		// We key on (a) alone, deliberately: it is knowable here without
+		// guessing at run-phase defaults, and it is the CONSERVATIVE half —
+		// `--shadow_lightmap` on the command line still bakes, so the
+		// `--shadow_lightmap --shadow_lm_dynamic` arm (the only combination
+		// that has ever sampled the atlas: 41.9 % of pixels moved, +1.7 ms,
+		// SESSION_STATE 2026-08-10) is bit-for-bit what it was.
+		// MEASURED for the shipping arm: --no-shadow_lightmap is byte-identical
+		// (e61a8f1), and a deliberately crippled atlas is byte-identical
+		// (4e8a76c) — the atlas is not being read, twice proven.
+		const bool lmAtlasReachable = fds::FeatureFlags::shadow_lightmap();
 		// Force the bake on: greets wants lightmaps, but the global
-		// shadow_lightmap SAMPLE flag is now set at greets-RUN (so it doesn't
-		// leak onto city/fountain), so the bake's own gate would otherwise
-		// no-op here. Skip the force when greets won't render (preempted by
-		// another --scene-X) — then the bake no-ops fast as before.
-		const bool bakeForce = !GreetsScenePreempted();
-		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT, bakeForce]() {
-			fds::LightmapBake_Static(greetScForBake, bakeForce);
-			const auto bakeDoneT = std::chrono::steady_clock::now();
-			const double ms = std::chrono::duration<double, std::milli>(
-				bakeDoneT - bakeSpawnT).count();
+		// shadow_lightmap flag is set at greets-RUN (so it doesn't leak onto
+		// city/fountain), so the bake's own gate would otherwise no-op here.
+		// Skip the force when greets won't render (preempted by another
+		// --scene-X) — then the bake no-ops fast as before.
+		const bool notPreempted = !GreetsScenePreempted();
+		const bool bakeForce    = notPreempted && lmAtlasReachable;
+		// LightmapBake_Static's own gate is `forceEnable || shadow_lightmap()`,
+		// and bakeForce implies shadow_lightmap() — so lmAtlasReachable is
+		// exactly "spawning the thread would do work". When it would not, the
+		// only thing lost is the stamp below, and only for the arm that used to
+		// get it (bakeForce true before this change, i.e. not preempted).
+		// A preempted greets stamped nothing before and stamps nothing now.
+		if (!lmAtlasReachable && notPreempted) {
+			// SKIPPING — but not skipping the bake's one side effect that is
+			// NOT about lightmaps. Face::MeshFaceIdx is read by
+			// tbrXparOrderLess (FILLERS.CPP:1876), the camera-independent
+			// tie-break of the per-strip transparent sort, which greets' glass
+			// panels exercise on every frame. Stamping is O(faces) of stores
+			// and costs microseconds; the atlas is what cost 54 ms.
+			// Synchronous rather than threaded: nothing else is left to
+			// overlap, and it removes the join.
+			fds::LightmapStampFaceIndices(greetScForBake);
 			std::fprintf(stderr,
-				"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
-				ms);
-		});
+				"[GREETS-BAKE] static lightmap bake SKIPPED — the atlas has no "
+				"reader (--shadow_lightmap off at G-buffer resize, so the "
+				"lightmapMF/ST planes do not exist). Face indices stamped "
+				"anyway (transparent-sort tie-break). Pass --shadow_lightmap "
+				"to bake; --shadow_lightmap --shadow_lm_dynamic to sample it.\n");
+			InitTimelineMark("greets: lightmap bake skipped (atlas unreadable)");
+		} else {
+			std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
+			const auto bakeSpawnT = std::chrono::steady_clock::now();
+			g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT, bakeForce]() {
+				fds::LightmapBake_Static(greetScForBake, bakeForce);
+				const auto bakeDoneT = std::chrono::steady_clock::now();
+				const double ms = std::chrono::duration<double, std::milli>(
+					bakeDoneT - bakeSpawnT).count();
+				std::fprintf(stderr,
+					"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
+					ms);
+			});
+		}
 	}
 
 	// --pom_rebuild (editor): snapshot the stone's PRISTINE geometry on the

@@ -30,6 +30,15 @@ namespace fds {
 // scene actually renders — keeps the flag from leaking onto other scenes.
 void LightmapBake_Static(Scene *Sc, bool forceEnable = false);
 
+// The one side effect of LightmapBake_Static that is NOT about lightmaps, so
+// that a scene which SKIPS the bake can still pay for it (it is microseconds).
+// Stamps Face::MeshFaceIdx over exactly the mesh set the bake would keep.
+// MeshFaceIdx's second consumer is tbrXparOrderLess (FILLERS.CPP:1876) — the
+// camera-independent tie-break of the per-strip transparent sort — which is
+// live on every frame whether or not any lightmap exists. Full rationale at
+// the definition. Idempotent; safe to call alongside a bake that also stamps.
+void LightmapStampFaceIndices(Scene *Sc);
+
 // Stamp every static-mesh face's (A, B, C) vertices with their object-
 // space barycentric weight on the face itself: A→(0,0), B→(1,0), C→(0,1).
 // The clipper then interpolates these perspective-correctly to any
