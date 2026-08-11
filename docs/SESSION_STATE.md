@@ -58,6 +58,130 @@
 > or lower their roughness so they sample a sharper mip. Recorded so the next
 > agent does not re-derive the four stages.
 
+> ## 2026-08-12 — THE FREE-EDGE BULGE IS A SLIDE, NOT A SIGN; AND THE >90 deg SEAM IS NOT FLAT, IT IS CRACKED OPEN
+>
+> Two directives. **(1)** *"--greets_displace_free_edge - it makes most of the
+> sites better, but for the specific pose I sent you, it adds a bulge similar to
+> the gpu one - which is less than optimal."* **(2)** *"the >90 deg flattening is
+> still an issue - the height map from the texture actually means that there
+> should be a gap there ... I think we still should support this scenario."*
+>
+> ### (1) THE SIGN CLAMP WAS THE OBVIOUS FIX AND THE MEASUREMENT KILLED IT
+>
+> The hypothesis handed down was that the freed border swings both ways, so a
+> stone plateau (h > mean) pushes it OUTWARD — the bulge GpuBench had before
+> `--tess_border_ramp`. Implemented as a d <= 0 clamp on freed borders, then
+> measured: it moved **134 of 1594** freed `rooms` verts, and at t=5967 it left
+> **every row above 687 byte-identical** to the old arm. It never touched the
+> jamb.
+>
+> **WHAT DOES.** A dump of every freed vert in the jamb box (`[STONE-FREEV]`,
+> behind `--greets_displace_junction_census`) shows **178 of 183 already
+> displaced NEGATIVE** — there was no outward push to clamp. What they carry is
+> a DIRECTION: the displacement rides the SMOOTHED vertex normal, which at a
+> patch border is averaged with whatever else the authored mesh joins there. The
+> verts on the wall plane x=17.898 ride **N ~ (+0.894,+0.419,-0.155)** — 26.5 deg
+> out of their own plane, tilted mostly DOWN THE EDGE, and the border runs in y.
+> So a pure recess of -0.10 slid the vertex **~0.045 world units ALONG its own
+> border line**. That slide is the swollen doorway reveal and the tab at the
+> lintel. Mesh-wide: **1579 of 1594** freed `rooms` verts were sliding, the worst
+> at **|cos| 0.968** against its own edge — 97% slide, 3% relief.
+>
+> **THE FIX, folded into `--greets_displace_free_edge` (SEMANTICS CHANGED — the
+> flag now means free + no-slide + recess-only).** A freed border vertex may move
+> ACROSS its border line, never along it. Recess-only is kept as a second,
+> smaller constraint because it cannot cost anything.
+>
+> **REJECTED ON MEASUREMENT.** Removing the WHOLE tangential component (riding
+> the face plane normal) tears the border off neighbours that share its position
+> without sharing an edge: **1408 background pixels at t=5967 against 46**. A
+> coplanarity gate does not save it — all 1594 verts pass it, because their faces
+> ARE coplanar; it is the authored vertex NORMAL that is skewed.
+>
+> **BACKGROUND (z==0) PIXELS, old free arm -> new**, his five poses: t=5799
+> 41 -> 27, t=5869 7 -> 8, t=5929 0 -> 0, t=5967 75 -> 46, t=5987 0 -> 0. Figures:
+> `docs/img/fogwt/freewt_t5967_slide_before_after.png`,
+> `freewt_t5987_slide_before_after.png`,
+> `freewt_t5869_goodgrooves_preserved.png` (his grooves untouched),
+> `freewt_t5869_floorborder_before_after.png` (the floor's freed border stops
+> warping the tile grid at the wall base, which the old arm did).
+>
+> **HONEST CAVEAT, NEW AND POSE-DEPENDENT.** free_edge's crack cost is far larger
+> away from his five poses. At the corridor poses used for directive (2) its OWN
+> contribution is **868 px** (pose A) and **702** (pose B) — against 46 at t=5967.
+> The old arm was worse at the same poses (1270 and 1125), so this change reduces
+> it by a third, but the flag is not cheap everywhere.
+>
+> **GPU PARITY: `--tess_border_ramp` does NOT need the recess-only treatment.**
+> Re-measured at HEAD, silhouette x per row, rows 500-640: t=5967 CPU oracle
+> median **1516** / GPU ramp=0.15 **1520** (4 px) / GPU ramp=0 **1424**; t=5987
+> CPU oracle **1172** / GPU ramp=0.15 **1174** (2 px) / GPU ramp=0 **1157**. The
+> ramp drives the whole displacement to zero at the border — both signs — so it
+> already subsumes a sign clamp, and it is slide-free for the same reason. The
+> ramp arm is the analogue of the CPU's PINNED arm and still tracks it. What has
+> NO GPU counterpart is the CPU's new free_edge arm (t=5967 CPU free median
+> **1475**, 41 px off the oracle by design — that is the jamb opening; t=5987
+> **1170**, and std 7.55 against the pinned arm's 8.36, i.e. straighter than the
+> pin while carrying relief). Porting it needs ramp=0 on FREE edges only plus the
+> de-slide; not built.
+>
+> ### (2) THE >90 deg SEAM IS A HOLE, AND `--greets_displace_seam_weld` CLOSES IT
+>
+> The 12 split-vertex seams sit on two vertical 91.10 deg corners at
+> **x = +-2.469, z = -4.937**, each cut into three segments (mid y 1.265 / 3.765 /
+> 6.233). Poses that put one in profile: `FDS_GREETS_CAM=
+> "-1.5,3.2,-8.5,0.743,-0.037,0.667"` (A) and `"1.5,3.2,-8.5,-0.743,-0.037,0.667"`
+> (B), t=5967.
+>
+> **THE SHIPPING ARM DOES NOT FLATTEN THAT CORNER — IT TEARS IT OPEN.** Under
+> `--greets_displace` the pinned seam shows a see-through gash running down the
+> corner: **1992 background pixels at pose A, 1948 at pose B** (0 at his five
+> review poses, which is why it had never surfaced).
+> `docs/img/fogwt/seamwt_t5967_poseA_crack_closed.png`,
+> `seamwt_t5967_poseB_crack_closed.png` (holes painted red),
+> `seamwt_t5967_poseA_corner_zoom.png`.
+>
+> MECHANISM: the border pin holds the SUBDIVISION verts on each side at zero, but
+> the two coincident ORIGINAL corner verts are NOT pinned (`pinnedZero` over
+> originals covers only non-target incidence and cross-material coincidence), so
+> they displace along their own distinct vertex normals and separate.
+>
+> **`--greets_displace_seam_weld` closes it: 1992 -> 14, 1948 -> 2.** It merges 4
+> target-only verts, converting 2 of the 6 seam segments to index-interior
+> (`rooms` 211 -> 213 welded interior edges, 12 -> 8 split edge entries). It is
+> byte-identical to shipping at 4 of his 5 review poses (5869, 5929, 5967, 5987);
+> only t=5799 moves.
+>
+> **T-JUNCTION SAFETY IS NOT THE BLOCKER — it is already solved.** The newly
+> interior seam edges go straight through the existing S4a seam-union / heal
+> machinery: fan<->edge seam-hole sides **25 -> 27**, union-welded splits
+> **539 -> 565**. No matched-tessellation work is needed first.
+>
+> **BUT THE NOTCH DOES NOT OPEN AT FULL DEPTH.** Corner-apex depth down the seam
+> (pose A, rows 300-890, world units): welded minus pinned is **+0.0000 to
+> +0.0253**, with no per-mortar-row oscillation, against **0.13 u** grooves on the
+> flat wall. Two measured reasons:
+> * **Only 2 of the 6 segments weld.** The census under `--greets_displace_seam_weld`
+>   lists exactly the BOTTOM (mid y 1.265, floor end) and TOP (mid y 6.233,
+>   far-side `siling`) segments as still split at both corners; only the MIDDLE
+>   ones (mid y 3.765) merged. The weld excludes any vertex incident to a
+>   non-target face, on purpose, to protect the cross-material neighbour pin.
+> * **Along the welded segments only 14 verts were freed** (displaced verts
+>   30472 -> 30486), and they ride the 45.55 deg bisector, so they project
+>   cos(45.55) = **0.70** of their depth onto either wall.
+>
+> **VERDICT: SUPPORTED, PARTIAL, AND WORTH TURNING ON ANYWAY** — it fixes a real
+> hole regardless of the notch. Full notch support needs the weld to take verts
+> shared with `floor`/`siling` too. Merging position-coincident verts MOVES
+> nothing (identical positions); it re-indexes and averages normals, and the
+> averaged normal would then be seen by the floor/ceiling faces as well. The
+> identified next step is to remap only the TARGET faces onto the canonical
+> vertex and leave non-target faces on their own copy — NOT built, NOT measured.
+>
+> **COMPOSITION.** seam_weld and free_edge are independent populations and
+> compose: at the seam poses weld+free gives 882/704/255/3 background px, which
+> is free_edge's own cost (868/702/255/3) with the seam crack removed.
+
 
 > ## 2026-08-11 — THE ANGLE RULE IS REAL AND MEASURED (WELDED 0-90.00 deg, SPLIT 91.10 deg), BUT THE CORNER HE POINTED AT IS A THIRD CLASS: A DOORWAY JAMB
 >
