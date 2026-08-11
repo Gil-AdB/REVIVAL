@@ -883,6 +883,17 @@ LIGHT_LWS_IDENTITY = {"flareScale": 1.0}
 LIGHT_SIDECAR_KEYS = set(LIGHT_LWS_KEYS)
 
 
+def note_unsaved(unsaved, warnings, idx, keys, why):
+    """Record light keys that did NOT reach disk. Both halves matter: the
+    warning is what the human reads, `unsaved` is what the FE consumes to keep
+    those keys dirty instead of adopting them as the new pristine baseline."""
+    if not keys:
+        return
+    warnings.append(f"light {idx}: {sorted(keys)} NOT persisted — {why}")
+    if unsaved is not None:
+        unsaved.append({"index": int(idx), "keys": sorted(keys), "why": why})
+
+
 def split_light_sidecar_keys(scene, lights, warnings):
     """Strip engine-only light keys to sidecar light: lines — ONLY for the dead
     non-authoring fallback. Authoring scenes route them to LWS keywords instead
@@ -1008,12 +1019,16 @@ def patch_lws_light_ext(scene, light_ext, warnings):
     return patched
 
 
-def patch_lws_lights(scene, lights, warnings):
+def patch_lws_lights(scene, lights, warnings, unsaved=None):
     """{"<index>": {r,g,b,intensity,range}} -> patch the i-th AddLight block of
     the scene's LWS (LWSC v1 is line-based text: LightColor R G B /
     LgtIntensity F / LightRange F). Index order == the engine's
     Omni_SceneAuthored order == AddLight file order. Returns list of patched
-    entries; writes + backs up the LWS only if something changed."""
+    entries; writes + backs up the LWS only if something changed.
+
+    `unsaved` (optional list) collects {index, keys, why} for every key this
+    writer did NOT put on disk — see note_unsaved. The caller ships it back to
+    the browser so the FE can keep those keys dirty."""
     if not lights:
         return []
     lws_name = SCENES[scene]["lws"]
@@ -1027,11 +1042,21 @@ def patch_lws_lights(scene, lights, warnings):
         idx = int(idx_s)
         if idx < 0 or idx >= len(starts):
             warnings.append(f"light {idx}: LWS has {len(starts)} AddLight blocks — skipped")
+            note_unsaved(unsaved, warnings, idx, sorted(props),
+                         f"LWS has only {len(starts)} AddLight blocks")
             continue
-        bad = set(props) - LIGHT_KEYS
+        # Skip granularity: an unknown key drops ITSELF, not the whole light.
+        # Until 2026-08 a `continue` here threw the entire light away — save
+        # {intensity, coneAngle} and the intensity edit vanished too, while the
+        # response still said ok:true and the FE cleared its dirty flag. Every
+        # key this writer knows is still written; the rest is reported.
+        bad = sorted(set(props) - LIGHT_KEYS)
         if bad:
-            warnings.append(f"light {idx}: unknown keys {sorted(bad)} — skipped")
-            continue
+            note_unsaved(unsaved, warnings, idx, bad,
+                         "not a native AddLight scalar field this writer knows")
+            props = {k: v for k, v in props.items() if k in LIGHT_KEYS}
+            if not props:
+                continue
         lo = starts[idx]
         hi = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
         done = set()
@@ -1058,10 +1083,10 @@ def patch_lws_lights(scene, lights, warnings):
                                f"{_fmtv(_kwval(stripped))} → {_fmtv(props['range'])}")
                 lines[i] = f"LightRange {float(props['range']):.6f}"
                 done.add("range")
-        missing = set(props) - done
+        missing = sorted(set(props) - done)
         if missing:
-            warnings.append(f"light {idx}: keys {sorted(missing)} not found in its "
-                            f"AddLight block (envelope-animated?) — skipped those")
+            note_unsaved(unsaved, warnings, idx, missing,
+                         "no such line in its AddLight block (envelope-animated?)")
         if done:
             patched.append({"index": idx, "keys": sorted(done)})
     if patched:
@@ -1359,12 +1384,18 @@ def do_save_main(scene, payload):
     if saved_surf_side:
         warnings.append(f"{len(saved_surf_side)} surface key(s) (normalFlip) → .MAT — NOT loaded (reader retired; normalFlip's RVSM write-back is unimplemented, SIDECAR_MIGRATION_PLAN §1e)")
     uv_by_name = pop_uv_props(surfaces, warnings)
+    # Every light key the writers below decline to put on disk lands here and
+    # goes back to the browser as `lightsUnsaved`.
+    light_unsaved = []
 
     if not SCENES[scene]["authoring"]:
         if scene_env:
             warnings.append("sceneEnv: scene has no authoring sources — scene "
                             "env defaults need LWS write-back, skipped")
-        return do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
+        code, resp = do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
+        if isinstance(resp, dict):
+            resp["lightsUnsaved"] = light_unsaved
+        return code, resp
 
     # Engine-only per-surface keys (aoStrength/parallaxScale/tint/refractIor/
     # refractive/envRefl/envBakeRes/waterProcedural) → LWO RVSF sub-chunk,
@@ -1374,7 +1405,7 @@ def do_save_main(scene, payload):
     # popped BEFORE patch_lws_lights so it doesn't reject them (sidecar-elim §1c).
     light_ext = pop_light_lws_keys(lights)
     patched_scene_env = patch_lws_scene_env(scene, scene_env, warnings)
-    patched_lights = patch_lws_lights(scene, lights, warnings)
+    patched_lights = patch_lws_lights(scene, lights, warnings, light_unsaved)
     patched_lights += patch_lws_light_ext(scene, light_ext, warnings)
     if not surfaces and not uv_by_name and not rev_ext_by_name and not map_rvsm:
         if patched_lights or patched_scene_env:
@@ -1384,11 +1415,13 @@ def do_save_main(scene, payload):
             if code != 200:
                 return code, resp
             resp.update({"maps": saved_maps, "lights": patched_lights,
+                         "lightsUnsaved": light_unsaved,
                          "sceneEnv": patched_scene_env, "warnings": warnings})
             return 200, resp
         # Nothing for the LWO/FLD (non-authoring maps went to the sidecar, or
         # the payload had nothing map/surface-shaped): no FLD regen.
         return 200, {"ok": True, "patched": [], "maps": saved_maps,
+                     "lightsUnsaved": light_unsaved,
                      "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                      "warnings": warnings}
 
@@ -1500,6 +1533,7 @@ def do_save_main(scene, payload):
             if code != 200:
                 return code, resp
             resp.update({"maps": saved_maps, "lights": patched_lights,
+                         "lightsUnsaved": light_unsaved,
                          "sceneEnv": patched_scene_env,
                          "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                          "warnings": warnings})
@@ -1557,6 +1591,7 @@ def do_save_main(scene, payload):
     if code != 200:
         return code, resp
     resp.update({"maps": saved_maps, "lights": patched_lights,
+                 "lightsUnsaved": light_unsaved,
                  "sceneEnv": patched_scene_env,
                  "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                  "warnings": warnings})

@@ -2457,6 +2457,13 @@
             if (!res.ok) { window.editorLastSave = '✕ failed'; editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); renderSaveReceipt(saveDiff, [], true); return; }
             var bits = (res.patched || []).map(function(p){ return p.file; });
             if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
+            // Keys the writer refused or had nowhere to put. Counted into the
+            // status line so a partly-dropped save cannot read as a clean one.
+            if (res.lightsUnsaved && res.lightsUnsaved.length) {
+              console.warn('[editor] light keys NOT persisted:', res.lightsUnsaved);
+              bits.push(res.lightsUnsaved.reduce(function(n, u){ return n + (u.keys || []).length; }, 0) +
+                        ' light key(s) NOT saved (see console)');
+            }
             if (res.fld) bits.push(res.fld.split('/').pop());
             if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → sidecar');
             if (res.objects && res.objects.length) bits.push(res.objects.length + ' object(s) → sidecar');
@@ -2486,9 +2493,25 @@
               var s = editorSurfaces.find(function(x){ return x.name === n; });
               if (s) editorPristine[n] = JSON.parse(JSON.stringify(s));
             });
+            // Adopt the just-saved light values as the new baseline — EXCEPT
+            // the keys the writer reports it did not put on disk. Adopting
+            // those too is what made a dropped edit look saved: the Save
+            // button went quiet and the value came back on the next reload.
+            var lightUnsaved = {};
+            (res.lightsUnsaved || []).forEach(function(u){
+              (u.keys || []).forEach(function(k){
+                (lightUnsaved[String(u.index)] = lightUnsaved[String(u.index)] || {})[k] = u.why || 'not persisted';
+              });
+            });
             lightIdx.forEach(function(i){
               var l = editorLights.find(function(x){ return String(x.i) === String(i); });
-              if (l) editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l));
+              if (!l) return;
+              var was = editorLightsPristine[l.i] || {};
+              var now = JSON.parse(JSON.stringify(l));
+              Object.keys(lightUnsaved[String(i)] || {}).forEach(function(k){
+                if (k in was) now[k] = was[k];   // still dirty — it never landed
+              });
+              editorLightsPristine[l.i] = now;
             });
             objNames.forEach(function(n){ editorObjPristine[n] = dirtyObjects[n].scale; });
             // Scene env defaults: adopt the just-saved values as the new
