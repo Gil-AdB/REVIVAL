@@ -412,16 +412,26 @@ static inline size_t SwizzledOffset(int x, int y, int blockSizeX, int blockSizeY
 	       + size_t(j) * BX + k;
 }
 
-// Pack a 32-bit (BGRA, tiled+mipmapped) grayscale texture down to an 8-bit
+// Pack ONE CHANNEL of a 32-bit (BGRA, tiled+mipmapped) texture down to an 8-bit
 // SINGLE-CHANNEL copy with the IDENTICAL block-tile + mip layout — so the same
 // swizzled texel index the rasterizer computes for the 32-bit albedo also
 // indexes this (just 1 byte/texel instead of 4 → ¼ the memory + cache). The
 // mip chain is one contiguous block (Generate_Mipmaps; Mipmap[i] point into
-// Data), so a flat low-byte copy preserves the layout exactly, and each mip's
+// Data), so a flat per-texel copy preserves the layout exactly, and each mip's
 // byte offset == its texel offset in the source. This is the variable-texel-
-// size pilot (parallax height is the low-blast-radius first consumer: a new
+// size pilot (parallax height was the low-blast-radius first consumer: a new
 // texture, point-sampled, one reader). Returns a new Texture (BPP=8); caller owns.
-Texture *MakeHeight8(Texture *src) {
+//
+// `channel` is 0=Red, 1=Green, 2=Blue, 3=Alpha, matching the engine's 0xAARRGGBB
+// texel packing — the same unpack the deferred kernel does on an albedo texel
+// (DeferredSurfaceKernel.cpp: `texB = texel & 0xFF`, `texG = (texel>>8) & 0xFF`,
+// `texR = (texel>>16) & 0xFF`). WHY IT IS A PARAMETER: a PACKED PBR map (ORM /
+// ARM / RMA) carries three DIFFERENT scalar maps in three channels — R occlusion,
+// G roughness, B metallic — so "convert to 8-bit" is not well defined without
+// saying which one. The old fixed `& 0xFF` took BLUE unconditionally, which is
+// right only for the metallic lane and silently wrong for the other two.
+// Out-of-range values clamp to Red rather than reading garbage.
+Texture *MakeChannel8(Texture *src, int channel) {
 	if (!src || src->BPP != 32 || !src->Mipmap[0] || src->numMipmaps == 0) return nullptr;
 	const int blockX = src->blockSizeX, blockY = src->blockSizeY;
 	const int BX = 1 << blockX, BY = 1 << blockY;
@@ -440,7 +450,9 @@ Texture *MakeHeight8(Texture *src) {
 	byte *dst = (byte *)getAlignedBlock(total);
 	h->Data = dst;
 	const uint32_t *s0 = reinterpret_cast<const uint32_t *>(src->Mipmap[0]);
-	for (size_t t = 0; t < total; ++t) dst[t] = byte(s0[t] & 0xFFu);   // low byte = gray
+	const uint32_t shift = (channel == 1) ? 8u : (channel == 2) ? 0u
+	                     : (channel == 3) ? 24u : 16u;   // default/0 = Red
+	for (size_t t = 0; t < total; ++t) dst[t] = byte((s0[t] >> shift) & 0xFFu);
 	// Per-mip byte offset in the u8 buffer == the source's per-mip texel offset.
 	for (dword i = 0; i < src->numMipmaps; ++i) {
 		const size_t texelOff = size_t(reinterpret_cast<const uint32_t *>(src->Mipmap[i]) - s0);
@@ -448,6 +460,20 @@ Texture *MakeHeight8(Texture *src) {
 	}
 	return h;
 }
+
+// Back-compat spelling for the height/AO consumers that predate the packed-map
+// work (GREETS.CPP's roughness + parallax height, DisplaceTest). Reads RED.
+//
+// THIS CHANGED CHANNEL: it used to read BLUE (the old `& 0xFF`). Red is the
+// correct lane for a height/AO/occlusion map, and for a GRAYSCALE source the
+// two are the same byte. MEASURED byte-null on everything that ships: all 148
+// roughness/metallic/ao/height maps under Runtime/TEXTURES were scanned for
+// channel spread and exactly ONE is not perfectly grayscale
+// (PBR/sandstone_blocks_05/ao.png, max |R-B| = 3 of 255), and that set is
+// referenced by no scene and no code. greets' own four maps
+// (greets_wall_h/_r, greets_floor_h/_r) are spread 0. Scene pins were run
+// before and after and did not move — see the commit message.
+Texture *MakeHeight8(Texture *src) { return MakeChannel8(src, 0); }
 
 // Tier-2 cone-step POM: bake a conservative cone-step map from an 8-bit height
 // texture. Same tiled+mip layout as the source (so ONE swizzled address indexes

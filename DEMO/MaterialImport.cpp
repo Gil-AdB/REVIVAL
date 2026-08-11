@@ -204,8 +204,13 @@ std::unordered_map<std::string, Texture*> g_importCache;
 
 // Load + role-convert a map, deduped by (path, role, flip, targetW, targetH).
 // Returns the shared, ready-to-assign Texture: albedo -> tiled 32bpp; normal ->
-// +MakeNormal16 when nmap_16bit; height/roughness/ao/metallic -> +MakeHeight8
-// (falls back to the 32bpp texture if MakeHeight8 can't allocate).
+// +MakeNormal16 when nmap_16bit; height/roughness/ao/metallic -> +MakeChannel8
+// on the channel that role lives in (falls back to the 32bpp texture if the
+// 8-bit pack can't allocate).
+//
+// The ROLE PICKS THE CHANNEL, and the role is part of the cache key, so one
+// PACKED file (ORM/ARM/RMA) asked for as three roles yields three distinct
+// single-channel textures — that is what makes a packed map work at all.
 Texture *loadRoleMapCached(const std::string &path, const char *role,
                            bool flipGreen, int targetW, int targetH) {
 	char suffix[96];
@@ -224,8 +229,16 @@ Texture *loadRoleMapCached(const std::string &path, const char *role,
 	if (!std::strcmp(role, "normal")) {
 		if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
 	} else if (std::strcmp(role, "albedo") != 0) {
-		// height / roughness / ao / metallic -> single-channel 8-bit.
-		if (Texture *t8 = MakeHeight8(t)) t = t8;
+		// height / roughness / ao / metallic -> single-channel 8-bit, from the
+		// channel the ORM/ARM convention puts that role in: R=occlusion(+height,
+		// which is authored grayscale), G=roughness, B=metallic. A separate
+		// grayscale file per role reads identically on any channel, so this only
+		// CHANGES anything for a packed source — where the old fixed blue-byte
+		// read handed the roughness slot the metalness image.
+		int ch = 0;                                          // ao / height -> R
+		if      (!std::strcmp(role, "roughness")) ch = 1;    //           -> G
+		else if (!std::strcmp(role, "metallic"))  ch = 2;    //           -> B
+		if (Texture *t8 = MakeChannel8(t, ch)) t = t8;
 	}
 	g_importCache[key] = t;
 	std::fprintf(stderr, "    [load] %s (%s) decoded + cached\n", path.c_str(), role);

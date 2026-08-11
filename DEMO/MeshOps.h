@@ -41,9 +41,13 @@ struct PomHorizonMap;
 Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
                                 bool buildMips);
 
-// Pack a 32-bit tiled+mipmapped grayscale texture to an 8-bit single-channel
-// copy with the IDENTICAL layout (same swizzled index works; ¼ the memory).
-// Used for parallax height maps — the variable-texel-size pilot. Caller owns.
+// Pack ONE CHANNEL of a 32-bit tiled+mipmapped texture to an 8-bit single-
+// channel copy with the IDENTICAL layout (same swizzled index works; ¼ the
+// memory). channel: 0=Red, 1=Green, 2=Blue, 3=Alpha, matching the engine's
+// 0xAARRGGBB texel packing. Needed because a PACKED PBR map (ORM/ARM/RMA)
+// holds three different scalar maps in R/G/B. Caller owns.
+Texture *MakeChannel8(Texture *src, int channel = 0);
+// Back-compat spelling — reads RED (see MeshOps.cpp for the channel-change note).
 Texture *MakeHeight8(Texture *src);
 
 // Estimate the dominant BLOCK PITCH (mortar-to-mortar period, TEXELS at `mip`,
