@@ -12,6 +12,211 @@ changed look first.
 Everything labelled **MEASURED** was produced by the runs listed in §7. Everything
 else is labelled **INFERRED** (read from source, not run) or **UNKNOWN**.
 
+> **SUPERSEDED IN PART — read §0 first.** Two of this document's headline rows do
+> not survive re-measurement at HEAD, and three more have been fixed since it was
+> written. §0 (2026-08-11) is the current verdict table for every run-phase
+> `setDefault`; where it disagrees with §3/§4 below, §0 wins.
+
+---
+
+## 0. RE-AUDIT 2026-08-11 — every run-phase `setDefault`, and two retractions
+
+**Tree:** `fog-wt` at `0b466b7`. Built and measured in an isolated worktree so
+concurrent agents' uncommitted work could not contaminate it; all runs headless
+(`SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`), 1920×1080, every flag its own
+argv word.
+
+### 0.1 What changed since 2026-08-08
+
+| Row | Then | Now |
+|---|---|---|
+| §4.1 `mirror_rtt` | DROPPED (biggest look row) | **FIXED** — moved to `GreetsApplyInitDefaults` in `7953bab` |
+| §4.3 `mirror_rtt_density` | DROPPED | **FIXED** — moved alongside it in `7953bab` |
+| §4.2 `shadow_lightmap` | DROPPED, "fix is to move it to Init" | **RESOLVED DIFFERENTLY — see §0.3.** Moving it is the *wrong* fix. Comment corrected + the dead bake removed in `0b466b7` |
+| §4.5 `--cinematic` city `shadows` | DROPPED, MEASURED ~2 000 px | **RETRACTED — see §0.4.** Not dropped, and the measurement was noise |
+| §4.4 `greets_shard_randomness` | DROPPED | **STILL INERT, PARKED — see §0.5** |
+| — | not audited | **NEW: `bolt_flash_range` is read at init — §0.6** |
+
+### 0.2 The verdict table
+
+Every flag written by a **run-phase** block (one that executes after all
+`Initialize_*`). "Init/boot readers" lists only readers that run BEFORE the
+write; a flag with none is correctly placed by construction.
+
+**S2 — `GreetsApplyRunDefaults`** (`DEMO/GREETS.CPP`, runs at `createGreetsScene`)
+
+| Flag | Init/boot readers | Verdict |
+|---|---|---|
+| `shadows` | `CITY.CPP:3126` — but inside `if (city_test_spots())`, **default 0**, so dead by default | correctly-placed\* (greets compensates anyway: `ShadowMaps_BakeStatic(…, forceEnable)` `GREETS.CPP:2990`) |
+| `shadow_dynamic` | none (`CITY.CPP:3515` is inside `struct CityScene`, per-frame) | correctly-placed |
+| `shadow_lightmap` | **`Mekalele.cpp:85` (BOOT)**, `MirrorShatter.cpp:655` (init), `LightmapBake.cpp:200/222` (init), `GreetsMirror.cpp:3051` + `MirrorShatter.cpp:940` (lazy-run) | **INERT for the boot reader — and unfixable by moving.** §0.3 |
+| `pbr` | `CITY.CPP:2592` (init — env-cube cache-key salt) | correctly-placed **today**; latent coupling, §0.7 |
+| `env_brdf_analytic` / `pbr_multiscatter` / `diffuse_energy` | none (kernel only) | correctly-placed |
+| `sh_ambient` | none (`RENDER.CPP:520` is lazy *inside* `renderFrame`) | correctly-placed |
+| `hdr` / `hdr_linear` | none | correctly-placed |
+| `deferred_checkerboard` | none (`RENDER.CPP:368` `deferredEnabled()` is per-frame; greets' init-time `DeferredPathEnabled()` at `GREETS.CPP:2477` is already true via `shard_deferred`, set in the **Init** block) | correctly-placed |
+| `bloom` / `bloom_intensity` / `hdr_refl_gain` / `hdr_exposure` | none (`Hdr.cpp` 172/206/212/78/822, all per-frame) | correctly-placed |
+| `cone_strength` / `cone_fine_tiles` / `disco_bloom` | none | correctly-placed |
+| `greets_shard_fall_speed` | none (`MirrorShatter.cpp:369`, `update`, per-frame) | correctly-placed |
+| `greets_shard_randomness` | **`MirrorShatter.cpp:225`** (`MirrorShatter::build` ← `BuildGreetsShatter` ← `Initialize_Greets`) | **INERT** — parked, §0.5 |
+| `anamorphic`/`chromatic`/`vignette`/`grade`/`grain` (`--cinematic`) | none | correctly-placed |
+
+**S4 — `ApplyCinematicProfile`** (`DEMO/SceneTick.h`; city/chase/fountain/crash)
+
+| Flag | Init/boot readers | Verdict |
+|---|---|---|
+| `shadows` | `CITY.CPP:3126`, dead behind `city_test_spots` (default 0) | **correctly-placed** — §4.5 RETRACTED, §0.4 |
+| `bolt_flash_range` | **`FOUNTAIN.CPP:1195`** (inside `Initialize_Fountain`, 1020–) | **partially-inert (vacuous today)** — §0.6 |
+| `bolt_flash_peak` | none (`FOUNTAIN.CPP:2971`, per-frame) | correctly-placed |
+| `rain`, `fast_fog`, `fast_fog_froxel`, `fast_fog_xpar`, `fast_fog_worley`, `fast_fog_*` floats | none (`DeferredFastFog.cpp` only, per-frame) | correctly-placed |
+| `anamorphic*`, `chromatic*`, `vignette*`, `grade`, `grain`, `bloom*`, `hdr*`, `hdr_glow_scale`, `cone_strength`, `xpar_peel_passes` | none | correctly-placed |
+
+**S5/S6/S7/S10 — the scene factories**
+
+| Source | Flag | Init/boot readers | Verdict |
+|---|---|---|---|
+| `createCityScene` / `createChaseScene` / `RunCitySnapshot` | `water_procedural` | `CITY.CPP:2550` (init) | correctly-placed\* — already worked around in place via `isSet()` (`CITY.CPP:2549-2551`) |
+| `createCityScene` / `createChaseScene` | `water_fresnel_composite` | none | correctly-placed |
+| `createChaseScene` | `water_variation` | none (`CHASE.CPP:1417` is inside `struct ChaseScene`, 939–1463) | correctly-placed |
+| `createChaseScene` | `blaster_light_range` / `_intensity` | none (`BlasterBolts.cpp:216-217`, per-frame) | correctly-placed |
+| `createPBRTestScene` | `deferred` | none (`RENDER.CPP:365`, per-frame) | correctly-placed |
+
+**Net: of ~60 run-phase writes, exactly two are inert** — `shadow_lightmap`
+(addressed, not by moving) and `greets_shard_randomness` (parked) — plus one
+latent trap (`bolt_flash_range`). Everything else is read per-frame and the
+write always lands first.
+
+### 0.3 `shadow_lightmap` — moving it is the wrong fix, and it is now moot
+
+The 2026-08-08 recommendation was "move it to `GreetsApplyInitDefaults`". That
+would not work and is not wanted:
+
+* **It cannot fix the reader that matters.** `EngineGBuffer_Resize`
+  (`Mekalele.cpp:85`) runs at **boot** — `SDL2.cpp:433/441`, `Snapshot.cpp:153`,
+  `ReproHarness.cpp:130` — i.e. before *every* scene init, not just before
+  greets'. An init-block write is still too late.
+* **It would switch on real work to feed a dead path.** Moving it enables
+  `LightmapStampOrigBary`, the offscreen lightmap planes, and (before `0b466b7`)
+  a 54 ms atlas bake — all to feed `resolveCubeAtten`'s lightmap branch, which is
+  independently gated shut by `lmKernelEnabled = !shadow_dynamic() ||
+  shadow_lm_dynamic()` (`DeferredSurfaceKernel.cpp:1622`). Opening *that* gate is
+  MEASURED at **+1.7 ms/frame for a 95 %-one-LSB change** (SESSION_STATE
+  2026-08-10). That is a look/perf decision, not a placement fix.
+* **The run-phase placement does still buy something**, just not what its comment
+  claimed: scope. `Initialize_Greets` runs first natively, so an init-block write
+  would allocate the two planes for city/chase/fountain as well.
+
+**Applied instead (`0b466b7`):** the false comment is corrected in both
+`GREETS.CPP` blocks and in the `FeatureFlags.def` row — `shadow_lightmap` is an
+**allocation** gate read at boot, never the "per-pixel SAMPLE gate the deferred
+kernel reads for EVERY scene" — and greets now skips the bake and the 0.09 GB
+atlas outright when the flag is off at init.
+
+**Residual, reported not fixed:** the run-phase write *does* still reach two
+lazily-built offscreen G-buffers (`GreetsMirror.cpp:3051` RTT,
+`MirrorShatter.cpp:940` shard workers), which therefore allocate `lightmapMF` +
+`lightmapST` (6 B/px each) and pay Mekalele's per-pixel write into them, for
+planes `lmKernelEnabled` guarantees nobody reads. Both files are other agents'
+active surface right now, so this is a note, not a patch.
+
+### 0.4 RETRACTION — `--cinematic` city shadows is NOT a dropped row
+
+§4.5 claims `cine::kCity.shadows = true` never reaches its init consumer, and
+prices the loss at ~2 000 px/frame. **Both halves fail at HEAD.**
+
+1. **The consumer is dead by default.** `CITY.CPP:3126`'s
+   `if (shadows()) { ShadowMaps_Rebuild; CubeShadowMaps_Rebuild;
+   ShadowMaps_BakeStatic; }` is nested inside
+   `if (fds::FeatureFlags::city_test_spots())` (`CITY.CPP:3027`), whose
+   `.def` default is **0** — "Install 6 test spotlights in city for cone-overlay
+   experimentation". Production city installs no shadow-casting spot at all, so
+   there is nothing for the ordering to drop. §4.5 read the inner `if` without
+   the outer one.
+2. **The measurement was the scene's own nondeterminism.** MEASURED at HEAD,
+   `--snapshot=city@t=1401,1961,2521 --deferred`:
+
+   | pose | `--cinematic` vs `--cinematic --shadows` | **`--cinematic` vs itself (A-vs-A, ×2)** |
+   |---|--:|--:|
+   | t=1401 | 0 px | 0 px / 0 px |
+   | t=1961 | 1 357 px | **1 465 px / 1 683 px** |
+   | t=2521 | 1 738 px | **1 418 px / 1 390 px** |
+
+   The "effect" is inside its own noise floor, at the same poses, with the same
+   small-area/saturating-amplitude signature. `cine::kCity.rain = true` and the
+   lightning strike is stochastic. Note also that in the city snapshot path
+   `g_shadowMaps` is **empty in both arms** (no `[SHADOW]` line in either
+   stderr, and the two init logs are otherwise byte-identical) — there is no
+   mechanism for the flag to change a pixel there.
+
+   **Lesson for the campaign, not just this row: §4.5, §4.1's sweep and §5 L2
+   were all taken on `--cinematic` city/greets arms with no A-vs-A control.**
+   Any of those numbers below ~2 000 px on a rain-enabled scene should be
+   re-taken against a control before being believed.
+
+**No action.** `shadows` is read per-frame (`DeferredSurfaceKernel.cpp:5933/
+5959/5978`) and the profile write lands before every frame. §4.6 (chase) is
+unchanged in status: chase allocates no shadow maps anywhere, so its
+`kChase.shadows = true` samples whatever the previous scene left — still
+**Group D, investigate**, and still not an ordering bug.
+
+### 0.5 `greets_shard_randomness` — genuinely inert, deliberately PARKED
+
+Confirmed at HEAD: the only reader is `MirrorShatter.cpp:225`, inside
+`MirrorShatter::build`, reached from `Initialize_Greets` — so the run-phase
+`setDefault(0.8)` never lands and the shards are built at the compile default
+**1.0**. A move to `GreetsApplyInitDefaults` is leak-free (the flag is
+`[greets]`-category, no other scene reads it).
+
+Parked on purpose, for three reasons:
+1. **It is a look change to shard SHAPES**, and §4.4's own reading stands — 1.0
+   may be the look he prefers, in which case the correct fix is to change the
+   intent line to 1.0, not to move it. Wrong-intent and wrong-order are equally
+   likely and only he can tell them apart.
+2. **It is not evaluable headlessly.** The shatter only exists after the `Y`
+   key; there is no flag that arms it at init (checked), so no snapshot or bench
+   recipe can produce a before/after image.
+3. `FDS/RENDER/MirrorShatter.cpp` is another agent's live surface this session
+   (`983cdb4`, the shard-reflection fix). Measuring shard geometry against a
+   moving target would produce a number nobody could reproduce.
+
+**To land it later:** move the line, then compare interactively (press `Y`)
+against `--greets_shard_randomness=1.0`, which reproduces today's build exactly.
+
+### 0.6 NEW — `bolt_flash_range` is read during `Initialize_Fountain`
+
+`ApplyCinematicProfile` writes `bolt_flash_range` (`SceneTick.h`), but
+`FOUNTAIN.CPP:1195` reads it inside `Initialize_Fountain` (1020–) to size the
+strike-flash omni at creation:
+
+```cpp
+g_BoltFlashOmni = AppendFountainOmni(FntSc, FntHead, …,
+                                     fds::FeatureFlags::bolt_flash_range());
+```
+
+Every `create*Scene` runs after every `Initialize_*`, so this reader can never
+see a profile value. **Vacuous today**: the consumer belongs to fountain, and
+`cine::kFountain` leaves `boltFlashRange` at the `CinematicProfile` member
+default `500.0f`, which is also the `.def` default (`FeatureFlags.def:306`) — so
+the value it reads is the value the profile wants. `kCity`/`kChase` ask for
+600.0f, but they own no bolt-flash omni; that write reaches nothing.
+
+**Not fixed** — there is no bug to fix today, and the move is impossible anyway
+(the profile is scene-scoped; hoisting it before `Initialize_Fountain` would
+apply *city's* whole cinematic profile globally, the §6.3 / §5 L1 trap). It is
+recorded because it is a **latent trap**: change `kFountain.boltFlashRange` and
+it will silently not take, with no diagnostic. The `--strict_setdefault`
+detector in §6.1 is what catches this class.
+
+### 0.7 `pbr` and the city env-cube cache key — latent, not broken
+
+`Initialize_City` folds `FF::pbr()` into `bakeFlagSalt` (`CITY.CPP:2592`), the
+key for the 426 MiB env cube on disk. `GreetsApplyRunDefaults` sets `pbr = true`
+— but at `Run_Greets`, i.e. after `Run_City`, so city both bakes and renders at
+the compile default `0` and the key is self-consistent. **Correct today by
+ordering luck.** Anything that moves `setDefault(pbr, …)` earlier — into an
+Init block, or a future scene that runs before city — silently re-keys and
+re-bakes that artifact. Worth a comment at the salt site if anyone touches it.
+
 ---
 
 ## 1. The mechanism, and the two ways it fails
@@ -294,6 +499,11 @@ cost.
 
 ### 4.2 `shadow_lightmap` — the flag is set too late for three consumers, and one of them is at BOOT
 
+> **SUPERSEDED by §0.3.** The diagnosis below is right; the recommended fix
+> ("move it to the Init block") is wrong — an Init-block write is still after the
+> BOOT reader, and it would switch on work to feed a path a second gate keeps shut.
+> Resolved in `0b466b7` by correcting the comment and deleting the dead bake.
+
 * **Intent:** `GREETS.CPP:1142` `setDefault(shadow_lightmap, true)`, deliberately in
   the Run block (`:1140-1141`: "set at RUN (not init) so it doesn't leak onto earlier
   scenes; the bake itself was force-enabled at init").
@@ -385,6 +595,11 @@ cost.
 ---
 
 ### 4.5 `--cinematic` city: shadows are requested and never allocated
+
+> **RETRACTED — see §0.4.** The init consumer cited below sits inside
+> `if (city_test_spots())` (default 0), so it is dead by default; and the measured
+> delta reproduces as the scene's own rain/lightning nondeterminism against an
+> A-vs-A control. No action.
 
 * **Intent:** `SceneTick.h:199` `setDefault(shadows, p.shadows)` with
   `cine::kCity.shadows = true` (`SceneTick.h:222`).
