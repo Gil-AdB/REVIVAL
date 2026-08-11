@@ -900,6 +900,34 @@ static inline int envMipChainDepth(int realMips) {
 	return v > 16 ? 16 : v;
 }
 
+// --env_metal_tint_linear, GATED ON THE FRAME'S OWN COMPOSITE.
+//
+// The flag squares the conductor's albedo before using it as a reflectance on
+// the env lobe. The reason it is right is that the --hdr_linear composite
+// squares the albedo everywhere else (`rlB = aB*aB*lB + sB`) while this lobe's
+// output lands in sB UNSQUARED — so in a linear frame a gamma reflectance is a
+// per-channel error. That argument is entirely conditional on the frame being
+// linear, and the flag did not carry the condition: it squared unconditionally,
+// including in the GAMMA composite every scene but greets runs
+// (GREETS.CPP setDefaults hdr_linear; the global default is 0).
+//
+// The standalone Metal oracle — the thing this flag was validated against —
+// carries the condition explicitly: `S.baseColor = (u.hdrMode.x > 0.5) ?
+// alb*alb : alb` (GpuBench/shaders/deferred.metal:456), and its conductor tint
+// is `mix(1, S.baseColor, metal)` (:751). hdrMode.x IS hdr_linear
+// (GpuBench/Deferred.mm:934). So gating here moves the CPU TOWARD the oracle in
+// gamma frames and leaves the linear frame — greets, where the parity was
+// measured (saturation 0.687 -> 0.840, the Metal arm's value exactly, commit
+// 1782351) — bit-for-bit unchanged.
+//
+// One helper, three call sites (wave-1 scalar, outer-vec, tile fill) so they
+// cannot drift apart.
+static inline bool MetalTintLinearActive(const DeferredLightingCtx &ctx) {
+	return fds::FeatureFlags::env_metal_tint_linear()
+	    && fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres)
+	    && fds::FeatureFlags::hdr_linear();
+}
+
 static inline void EnvSpecComposeScalar(
 	const DeferredLightingCtx &ctx, const fds::EnvPanoLinear *envP,
 	const Material *Mat, uint32_t miplevel, uint32_t swizzledUV,
@@ -1599,8 +1627,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  multiScatterG   = fds::FeatureFlags::pbr_multiscatter();
 	// --env_metal_tint_linear: the ENV lobe's conductor tint as a LINEAR
-	// reflectance (contract §8 row S-d). Default OFF = byte-null.
-	const bool  metalTintLinG   = fds::FeatureFlags::env_metal_tint_linear();
+	// reflectance (contract §8 row S-d), active only in a LINEAR frame —
+	// see MetalTintLinearActive.
+	const bool  metalTintLinG   = MetalTintLinearActive(ctx);
 	// --shadow_noncaster_depth: PolyId's identity test is unsatisfiable for a
 	// receiver that is excluded from the CASTER set. Default OFF = byte-null.
 	const bool  noncasterDepthG = fds::FeatureFlags::shadow_noncaster_depth();
@@ -4242,7 +4271,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  multiScatterG  = fds::FeatureFlags::pbr_multiscatter();
-	const bool  metalTintLinG  = fds::FeatureFlags::env_metal_tint_linear();
+	const bool  metalTintLinG  = MetalTintLinearActive(ctx);   // linear frame only
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
 	const float roughStrengthG = fds::FeatureFlags::roughness_strength();  // redo-lane rough attenuation (see wave-1)
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
@@ -5132,7 +5161,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  multiScatterG  = fds::FeatureFlags::pbr_multiscatter();
-	const bool  metalTintLinG  = fds::FeatureFlags::env_metal_tint_linear();
+	const bool  metalTintLinG  = MetalTintLinearActive(ctx);   // linear frame only
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked).
