@@ -1,5 +1,73 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-11 — THE ANGLE RULE IS REAL AND MEASURED (WELDED 0-90.00 deg, SPLIT 91.10 deg), BUT THE CORNER HE POINTED AT IS A THIRD CLASS: A DOORWAY JAMB
+>
+> User: *"the original mesh doesn't have a gap, but similar places in the texture
+> in other faces does generate gaps, and in the pose I gave you it doesn't -
+> prolly due to the angle between the two adjacent faces"*, then *"for the wall it
+> flips where the angle between the walls jumps to > 90 degrees (or even more)"*.
+> Positive sites he supplied (gap shows, looks right): t=5799, t=5869, t=5929.
+> Negative: t=5967, t=5987 (the round-1 poses). All five are one continuous walk.
+>
+> **HIS RULE IS A REAL PROPERTY OF THIS MESH, AND THE NUMBER IS EXACT.** New
+> `--greets_displace_junction_census` walks the ORIGINAL stone at bake time and
+> classifies every edge. For `rooms`: **211 WELDED interior edges, dihedral
+> 0.00-90.00 deg** (the two faces share vertex INDICES, so the junction displaces
+> and the groove carries across) and **12 SPLIT-VERTEX seam edges, dihedral
+> 91.10 deg — min = max, nothing in between** (the two faces meet at the same
+> POSITION with distinct indices, so BOTH sides present as single-use edges, both
+> classify as authored borders, and both pin to exactly zero). The topology flip
+> in this mesh sits precisely at >90 deg, which is what his eye read. `floor`:
+> 23 welded, 2 split, all at 0 deg. Plus 154 genuinely OPEN borders on `rooms`.
+>
+> **THE MECHANISM IS THE AUTHORED-BORDER ZERO-PIN, PROVEN BY A/B.** `MeshOps.cpp`
+> `isBorderEdge` -> `pinnedZero` on every subdivision vertex along the edge: a
+> line held at zero cannot be cut by a mortar groove, so the junction reads as a
+> smooth sealed edge. New `--no-greets_displace_border_pin` prices it: at t=5967
+> **387 635 px change (18.69%)**, at t=5987 **271 734 px (13.10%)**, concentrated
+> in the corner columns, and the jamb silhouette goes from dead straight to
+> wandering. Default arm reproduces round 1 byte for byte (t=5967
+> `c0beec384141e4f18525a84e6b07a9bc`, t=5987 `4a12c7c358840bb30118518a2454924d`).
+>
+> **BUT THE CORNER IN HIS TWO POSES IS NOT A >90 deg JUNCTION AT ALL — IT IS A**
+> **DOORWAY JAMB.** The census localises it: the wall plane at x=17.898 carries
+> vertical OPEN borders at z=-58.014 and z=-62.952 (mid y 2.469, len 4.937) and a
+> lintel at (17.898, 4.937, -60.483) len 4.937 — a 4.94-wide, 4.94-high opening,
+> and the camera at (18.752, 3.210, -58.851) is standing in it. A jamb has NO
+> second target face on the far side, so it is pinned by the same rule for a
+> third reason. The 12 split-vertex seams all sit near z=-4.937, nowhere near
+> these poses — confirmed by `--greets_displace_seam_weld` (merges them; **byte-
+> identical at t=5869/5929/5967/5987**, only t=5799 moves).
+>
+> **THE FIX, IMPLEMENTED AND MEASURED, DEFAULT OFF — HIS CALL.**
+> `--greets_displace_free_edge`: the pin's job is to stop a T-junction opening
+> against a neighbour subdivided differently, and that argument needs a
+> neighbour. A single-use target edge with NOTHING on its far side (no coincident
+> non-displaced edge, no position-coincident target edge) is a FREE SILHOUETTE
+> edge and cannot crack against anything, so it displaces. Measured at his five
+> poses: **the jamb opens** (`docs/img/fogwt/juncwt_t5967_pin_vs_free.png`,
+> `juncwt_t5987_pin_vs_free.png`) and **the good sites are preserved** — the deep
+> dark mortar groove at t=5869 is unchanged to the eye
+> (`juncwt_t5869_goodsite_preserved.png`).
+>
+> **TWO HONEST CAVEATS ON THAT FIX.** (1) It is not free: new background (z==0)
+> pixels appear — **75 px at t=5967, 41 at t=5799, 7 at t=5869**, zero at the
+> other two — so a small crack does open. (2) The silhouette it produces is a
+> COARSE WANDER, not the crisp per-stone notch the positive sites show; the jamb
+> leans in and out over its height rather than stepping at each mortar row. So it
+> answers "why is this corner different" and it does unseal the corner, but
+> whether it is the LOOK he wants is his call, not a measurement.
+>
+> **WHAT THE GAP HE LIKES ACTUALLY IS (measured, t=5869).** Not a hole: the
+> `FDS_SNAPSHOT_ZDUMP` across it is continuous (7.651 -> 7.861 world u over 26 px,
+> zero background pixels). It is a deep dark mortar groove whose depth-residual
+> shows a real recess of about 0.04 u against the local plane
+> (`juncwt_t5869_depth_residual.png`, `juncwt_t5869_the_gap_he_likes.png`). The
+> welded 27-32 deg junctions of the curved wall at x=5.5..12.7, z=-49..-59 are
+> what let it read that deep.
+>
+> All four new flags are default-off / no-op; the shipping arm is byte-identical.
+
 > ## 2026-08-11 — THE SHARDS WERE NOT DIM, THEY WERE EMPTY: A PER-VERTEX CONE CULL DECIDING FACE VISIBILITY
 >
 > Sent to root-cause the residual the mirror-break commit (`983cdb4`) left

@@ -2404,6 +2404,93 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			else { u = F.U3; v = F.V3; }
 		};
 
+		// ── SPLIT-SEAM WELD (--greets_displace_seam_weld) ────────────────────
+		// The consistency fix for "the mortar groove opens a gap where two wall
+		// faces meet at a shallow angle and seals where they meet at a sharp
+		// one". The bake's border rule is topological: an edge used by exactly
+		// ONE target face is an authored patch border and every subdivision
+		// vertex along it pins to zero, so no groove can cut through it. Whether
+		// a junction between two faces OF THE SAME MATERIAL presents as one
+		// shared edge or as two single-use ones is a property of the AUTHORED
+		// MESH, and in greets' stone it correlates exactly with the dihedral:
+		// every junction at or below 90.00 deg shares its vertex indices (and
+		// displaces, so the groove carries across and the silhouette tooths),
+		// while every junction above it is split into two coincident-but-distinct
+		// vertex sets (and pins, so the junction seals). Measured with
+		// --greets_displace_junction_census; see docs/SESSION_STATE.md.
+		//
+		// This pass removes the inconsistency at its source: BEFORE any topology
+		// is derived, position-coincident ORIGINAL vertices that are used only by
+		// TARGET faces are merged onto one canonical vertex, with the vertex
+		// normal re-derived as the (normalised) mean of the merged normals. The
+		// junction then IS an interior edge and takes the same path the shallow
+		// ones already take — no new machinery, no new crack class: the two sides
+		// now share one vertex, so they cannot separate. The hard shading crease
+		// is NOT lost: MakeFacesIndependentByAngle (30 deg) runs after the bake
+		// and re-splits anything creased, and the 80 deg re-smooth keeps hard
+		// creases and material borders.
+		//
+		// Restricted to verts touched ONLY by target faces, so non-target
+		// geometry and cross-material seams are untouched (those keep the
+		// neighbour pin). Duplicate vertices are left in place, orphaned.
+		if (fds::FeatureFlags::greets_displace_seam_weld()) {
+			std::vector<char> onlyTarget(nOrig, 1);
+			std::vector<char> anyTarget(nOrig, 0);
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				const Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C) continue;
+				const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+				if (a >= nOrig || b >= nOrig || c >= nOrig) continue;
+				const bool tgt = isTarget(&F);
+				for (uint32_t v : {a,b,c}) { if (tgt) anyTarget[v] = 1; else onlyTarget[v] = 0; }
+			}
+			std::unordered_map<uint64_t, uint32_t> canon;   // position -> canonical vert
+			std::vector<uint32_t> remap(nOrig);
+			for (uint32_t i = 0; i < nOrig; ++i) remap[i] = i;
+			int nGroups = 0, nMerged = 0;
+			for (uint32_t i = 0; i < nOrig; ++i) {
+				if (!anyTarget[i] || !onlyTarget[i]) continue;
+				const uint64_t k = seamKey(oldV[i].Pos);
+				auto it = canon.find(k);
+				if (it == canon.end()) { canon.emplace(k, i); continue; }
+				remap[i] = it->second; ++nMerged;
+			}
+			if (nMerged) {
+				// Mean normal per canonical vertex (the merged sides' normals).
+				std::unordered_map<uint32_t, Vector> nsum;
+				std::unordered_map<uint32_t, int>    ncnt;
+				for (uint32_t i = 0; i < nOrig; ++i) {
+					if (remap[i] == i && canon.find(seamKey(oldV[i].Pos)) == canon.end()) continue;
+					const uint32_t c = remap[i];
+					if (c == i && ncnt.find(c) == ncnt.end()) { nsum[c] = oldV[i].N; ncnt[c] = 1; continue; }
+					if (c == i) continue;
+					Vector &s = nsum[c]; s.x += oldV[i].N.x; s.y += oldV[i].N.y; s.z += oldV[i].N.z;
+					ncnt[c] += 1;
+				}
+				for (auto &kv : nsum) {
+					if (ncnt[kv.first] < 2) continue;
+					++nGroups;
+					Vector n = kv.second;
+					const float l = std::sqrt(n.x*n.x + n.y*n.y + n.z*n.z);
+					if (l > 1e-6f) { oldV[kv.first].N.x = n.x/l; oldV[kv.first].N.y = n.y/l; oldV[kv.first].N.z = n.z/l; }
+				}
+				for (int32_t i = 0; i < T->FIndex; ++i) {
+					Face &F = T->Faces[i];
+					if (!F.A || !F.B || !F.C) continue;
+					const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+					if (a >= nOrig || b >= nOrig || c >= nOrig) continue;
+					if (remap[a] != a) F.A = oldV + remap[a];
+					if (remap[b] != b) F.B = oldV + remap[b];
+					if (remap[c] != c) F.C = oldV + remap[c];
+				}
+				std::fprintf(stderr,
+					"[STONE-WELD] '%s': %d target-only vertices merged onto %d shared "
+					"positions — those junctions are now index-INTERIOR and displace "
+					"like the shallow ones instead of pinning to zero\n",
+					matName, nMerged, nGroups);
+			}
+		}
+
 		// ── original-mesh topology: edge-use over target faces + non-target
 		// incidence (the AUTHORED patch boundary — unaffected by subdivision) ──
 		std::map<std::pair<uint32_t,uint32_t>, int> origEdgeUse;   // target faces only
@@ -2431,11 +2518,185 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (!seamPin || ndEdge.empty() || x >= nOrig || y >= nOrig) return false;
 			return ndEdge.count(edgeKey(oldV[x].Pos, oldV[y].Pos)) != 0;
 		};
+		// --no-greets_displace_border_pin: A/B the AUTHORED-BORDER half of the
+		// pin (the single-target-face rule) while leaving the cross-material
+		// neighbour pin alone. Diagnostic — it is what makes a junction seal, so
+		// turning it off prices the crack safety it buys.
+		const bool borderPin = fds::FeatureFlags::greets_displace_border_pin();
+
+		// ── FREE SILHOUETTE EDGES (--greets_displace_free_edge) ──────────────
+		// The pin's JOB is to stop a T-junction opening against a neighbour that
+		// is NOT subdivided the same way. That argument needs a neighbour. A
+		// single-use target edge with NOTHING on its far side — no coincident
+		// non-displaced edge, no position-coincident target edge — is a FREE
+		// SILHOUETTE edge (a doorway jamb, an arch reveal, the open end of a
+		// wall patch): there is no second surface for it to crack against, so
+		// pinning it buys nothing and costs the relief exactly where the eye
+		// reads it, on the silhouette. Those edges displace with the rest of the
+		// patch; every edge that DOES have a far side keeps the pin.
+		const bool freeEdge = fds::FeatureFlags::greets_displace_free_edge();
+		std::unordered_map<uint64_t,int> posEdgeCount;   // position-edge -> distinct index-edges
+		if (freeEdge) {
+			std::set<std::pair<uint64_t,uint64_t>> seen;   // (poskey, indexkey)
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				const Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+				const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+				if (a >= nOrig || b >= nOrig || c >= nOrig) continue;
+				auto add = [&](uint32_t x, uint32_t y){
+					const uint32_t lo = std::min(x,y), hi = std::max(x,y);
+					const uint64_t pk = edgeKey(oldV[lo].Pos, oldV[hi].Pos);
+					const uint64_t ik = (uint64_t(lo)<<32) | hi;
+					if (seen.insert({pk,ik}).second) posEdgeCount[pk] += 1;
+				};
+				add(a,b); add(b,c); add(c,a);
+			}
+		}
+		auto isFreeBorderEdge = [&](uint32_t x, uint32_t y) -> bool {
+			if (!freeEdge || x >= nOrig || y >= nOrig) return false;
+			const uint64_t pk = edgeKey(oldV[x].Pos, oldV[y].Pos);
+			if (ndEdge.count(pk)) return false;               // non-displaced geometry shares it
+			auto it = posEdgeCount.find(pk);
+			if (it != posEdgeCount.end() && it->second > 1) return false;   // split-vertex seam
+			return true;
+		};
 		auto isBorderEdge = [&](uint32_t x, uint32_t y) {
 			auto it = origEdgeUse.find({std::min(x,y),std::max(x,y)});
-			if (it != origEdgeUse.end() && it->second == 1) return true;   // used by exactly one target face
+			if (borderPin && it != origEdgeUse.end() && it->second == 1
+			    && !isFreeBorderEdge(x, y)) return true;      // used by exactly one target face
 			return isSeamBorderEdge(x, y);                                 // coincident with a non-displaced edge
 		};
+
+		// ── JUNCTION CENSUS (--greets_displace_junction_census, DIAGNOSTIC) ──
+		// The classifier above is PURELY TOPOLOGICAL: an edge used by exactly one
+		// target face is an authored border and both endpoints pin to zero. It
+		// cannot see an angle. But the eye reports an ANGLE rule ("the gap flips
+		// where the angle between the walls jumps past 90°"), so the two must be
+		// linked by the MESH: a junction whose two faces SHARE VERTEX INDICES is
+		// index-interior and displaces freely (the groove carries across and the
+		// silhouette tooths), while a junction whose two faces meet at the same
+		// POSITION with DISTINCT indices — a split-vertex seam — presents as TWO
+		// single-use edges, so BOTH sides pin and the junction seals. This census
+		// separates those three populations and histograms each by the dihedral
+		// angle between the two faces' normals.
+		if (fds::FeatureFlags::greets_displace_junction_census()) {
+			std::map<std::pair<uint32_t,uint32_t>, std::vector<int32_t>> eFaces;
+			std::unordered_map<uint64_t, std::vector<std::pair<uint64_t,int32_t>>> posEdge;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				const Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+				const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+				if (a >= nOrig || b >= nOrig || c >= nOrig) continue;
+				auto add = [&](uint32_t x, uint32_t y){
+					const uint32_t lo = std::min(x,y), hi = std::max(x,y);
+					eFaces[{lo,hi}].push_back(i);
+					const uint64_t pk = edgeKey(oldV[lo].Pos, oldV[hi].Pos);
+					posEdge[pk].push_back({ (uint64_t(lo)<<32) | hi, i });
+				};
+				add(a,b); add(b,c); add(c,a);
+			}
+			auto edgeLenSq2 = [](const Vector &p, const Vector &q) {
+				return (p.x-q.x)*(p.x-q.x)+(p.y-q.y)*(p.y-q.y)+(p.z-q.z)*(p.z-q.z);
+			};
+			auto dihedral = [&](int32_t f, int32_t g) -> float {
+				const Vector &A = T->Faces[f].N, &B = T->Faces[g].N;
+				const float la = std::sqrt(A.x*A.x+A.y*A.y+A.z*A.z);
+				const float lb = std::sqrt(B.x*B.x+B.y*B.y+B.z*B.z);
+				if (la < 1e-9f || lb < 1e-9f) return -1.0f;
+				float d = (A.x*B.x + A.y*B.y + A.z*B.z) / (la*lb);
+				d = std::max(-1.0f, std::min(1.0f, d));
+				return std::acos(d) * (180.0f / 3.14159265358979f);
+			};
+			// 0..180° in 10° buckets, per population.
+			int hWeld[19] = {0}, hSplit[19] = {0};
+			int nWeld = 0, nSplit = 0, nOpen = 0, nNonManifold = 0;
+			float splitMinAng = 1e30f, splitMaxAng = -1e30f;
+			float weldMinAng = 1e30f, weldMaxAng = -1e30f;
+			auto bucket = [&](int *h, float ang){ int b = int(ang/10.0f); if (b<0) b=0; if (b>18) b=18; ++h[b]; };
+			for (auto &kv : eFaces) {
+				const size_t use = kv.second.size();
+				if (use >= 2) {
+					++nWeld;
+					if (use > 2) { ++nNonManifold; continue; }
+					const float ang = dihedral(kv.second[0], kv.second[1]);
+					if (ang >= 0.0f) { bucket(hWeld, ang);
+						weldMinAng = std::min(weldMinAng, ang); weldMaxAng = std::max(weldMaxAng, ang); }
+					continue;
+				}
+				// single-use: open border, or one half of a split-vertex seam?
+				const uint64_t pk = edgeKey(oldV[kv.first.first].Pos, oldV[kv.first.second].Pos);
+				auto pit = posEdge.find(pk);
+				const uint64_t self = (uint64_t(kv.first.first)<<32) | kv.first.second;
+				int32_t other = -1;
+				if (pit != posEdge.end())
+					for (const auto &pe : pit->second)
+						if (pe.first != self) { other = pe.second; break; }
+				if (other < 0) { ++nOpen; continue; }
+				++nSplit;
+				const float ang = dihedral(kv.second[0], other);
+				if (ang >= 0.0f) { bucket(hSplit, ang);
+					splitMinAng = std::min(splitMinAng, ang); splitMaxAng = std::max(splitMaxAng, ang); }
+			}
+			auto histStr = [](const int *h) {
+				std::string s;
+				for (int b = 0; b < 19; ++b) if (h[b]) {
+					char t[48]; std::snprintf(t, sizeof(t), "%s%d-%d:%d", s.empty()?"":" ", b*10, b*10+10, h[b]);
+					s += t;
+				}
+				return s.empty() ? std::string("(none)") : s;
+			};
+			std::fprintf(stderr,
+				"[STONE-JUNC] '%s': %d WELDED interior edges (shared indices -> both faces "
+				"displace, groove carries across; dihedral %.1f..%.1f deg) | %d SPLIT-VERTEX "
+				"seam edges (position-coincident, index-distinct -> BOTH sides read as "
+				"single-use borders and BOTH pin to zero; dihedral %.1f..%.1f deg) | %d "
+				"genuinely OPEN borders (no target face opposite) | %d non-manifold\n",
+				matName, nWeld, double(nWeld?weldMinAng:0.0f), double(nWeld?weldMaxAng:0.0f),
+				nSplit, double(nSplit?splitMinAng:0.0f), double(nSplit?splitMaxAng:0.0f),
+				nOpen, nNonManifold);
+			std::fprintf(stderr, "[STONE-JUNC] '%s': welded-edge dihedral histogram: %s\n",
+			             matName, histStr(hWeld).c_str());
+			std::fprintf(stderr, "[STONE-JUNC] '%s': split-seam dihedral histogram: %s\n",
+			             matName, histStr(hSplit).c_str());
+			// Localisation: every CREASED junction (dihedral >= 15 deg) with its
+			// world midpoint and its class, so a junction seen in a review pose
+			// can be identified by position rather than guessed at. The original
+			// stone is a couple of hundred faces, so this list stays short.
+			for (auto &kv : eFaces) {
+				const size_t use = kv.second.size();
+				const Vector &PA = oldV[kv.first.first].Pos, &PB = oldV[kv.first.second].Pos;
+				float ang = -1.0f; const char *cls = nullptr;
+				if (use == 2) { ang = dihedral(kv.second[0], kv.second[1]); cls = "WELD-interior(displaces)"; }
+				else if (use == 1) {
+					const uint64_t pk = edgeKey(PA, PB);
+					auto pit = posEdge.find(pk);
+					const uint64_t self = (uint64_t(kv.first.first)<<32) | kv.first.second;
+					int32_t other = -1;
+					if (pit != posEdge.end())
+						for (const auto &pe : pit->second)
+							if (pe.first != self) { other = pe.second; break; }
+					if (other >= 0) { ang = dihedral(kv.second[0], other); cls = "SPLIT-seam(BOTH pin)"; }
+					else { cls = "OPEN-border(pins)"; ang = 999.0f; }   // always listed
+				}
+				if (!cls || ang < 15.0f) continue;
+				// What is on the far side of a border? An edge shared with
+				// NON-DISPLACED geometry names its neighbour material; that
+				// distinguishes "this patch ends against another material"
+				// (the pin is load-bearing) from "this patch just ends".
+				const char *nbMat = "-";
+				if (use == 1) {
+					auto nv = ndVertMat.find(seamKey(PA));
+					if (nv == ndVertMat.end()) nv = ndVertMat.find(seamKey(PB));
+					if (nv != ndVertMat.end() && nv->second) nbMat = nv->second;
+					else if (ndEdge.count(edgeKey(PA, PB))) nbMat = "(non-displaced edge)";
+				}
+				std::fprintf(stderr,
+					"[STONE-JUNC] '%s': %-24s dihedral %6.2f deg  mid(%.3f,%.3f,%.3f) "
+					"len %.3f  far-side:%s\n", matName, cls, double(ang),
+					double(0.5f*(PA.x+PB.x)), double(0.5f*(PA.y+PB.y)), double(0.5f*(PA.z+PB.z)),
+					double(std::sqrt(edgeLenSq2(PA,PB))), nbMat);
+			}
+		}
 
 		// AUDIT (init-time census): the population the position-coincidence
 		// border classification adds over the OLD index/single-target-face rule.
