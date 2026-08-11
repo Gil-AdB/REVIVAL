@@ -213,11 +213,21 @@ static bool pumpEvents()
 			// X = next viz, Shift+X = previous. X is deliberately NOT added to
 			// translateScancode — the cycle is driven from the event, not from
 			// a Keyboard[] poll, so it needs no legacy slot.
+			// Editor_MarkDirty on BOTH: the editor renders only when marked
+			// dirty (editorTick's Editor_ConsumeDirty gate) and otherwise
+			// re-presents the last frame. A viz change is a render-state
+			// change with no camera or edit behind it, so without this the
+			// paused frame keeps showing the PREVIOUS mode and the key reads
+			// as dead — you press X, stderr announces the new mode, and the
+			// picture does not move until something else happens to mark the
+			// frame dirty. Cheap and unconditional: outside editor mode
+			// nothing consumes the flag.
 			if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
 			    event.key.keysym.scancode == SDL_SCANCODE_X) {
 				const bool back =
 				    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
 				fds::VizCycle_Step(back ? -1 : +1);
+				rev::Editor_MarkDirty();
 			}
 			// ENV-MAP INSPECTOR probe paging, same binding as the native pump:
 			// F = next probe, Shift+F = previous. Like X, F is deliberately
@@ -227,6 +237,7 @@ static bool pumpEvents()
 				const bool back =
 				    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
 				fds::EnvMap_StepProbe(back ? -1 : +1);
+				rev::Editor_MarkDirty();
 			}
 			if (event.type == SDL_KEYDOWN) g_userGesture.store(true);
 			break;

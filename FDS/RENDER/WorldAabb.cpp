@@ -817,6 +817,11 @@ void wireDimFrame(float keep) {
 
 }  // namespace
 
+// Mirror-clone object predicate ("__mirrorClone_*"), defined in EnvBake.cpp.
+// Declared locally rather than via a header, the same way Transform.cpp does
+// it — EnvBake.h does not export it.
+bool EnvBake_IsMirrorCloneObj(const Object* O);
+
 void WireViz_DrawOverlay(Scene* sc) {
     const int mode = FeatureFlags::wire_viz();
     if (mode <= 0) return;
@@ -833,7 +838,7 @@ void WireViz_DrawOverlay(Scene* sc) {
     // by one of each ends up green: only edges that are back-facing on BOTH
     // sides stay red, which is exactly the inverted-normal / open-shell signal.
     const int passes = (mode == 4) ? 2 : 1;
-    long tris = 0, lines = 0;
+    long tris = 0, lines = 0, skipClone = 0, skipProxy = 0;
     static bool once = false;
     const std::chrono::steady_clock::time_point t0 =
         once ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now();
@@ -845,6 +850,27 @@ void WireViz_DrawOverlay(Scene* sc) {
         TriMesh* T = (TriMesh*)Obj->Data;
         if (!T || T->FIndex == 0 || !T->Faces || !T->Verts) continue;
         if (T->Flags & Tri_Invisible) continue;
+        // DRAW WHAT THE MAIN PASS COMPOSITES. Two whole-mesh populations sit
+        // in the scene object list as full geometry duplicates, and drawing
+        // them put a SECOND copy of the scene on screen — measured at greets
+        // t=2095: 4 clone meshes / 15.11 MiB (--mem_census), showing up as a
+        // phantom second robot floating through the corridor wall.
+        //
+        //  • Tri_OffscreenProxy — the flat --greets_shadow_proxy stand-in for
+        //    the displaced stone. Transform.cpp skips it outright in the main
+        //    view (`!_offscreenPass && (T->Flags & Tri_OffscreenProxy)`), so
+        //    it contributes no main-view pixel and must contribute no edge.
+        //  • "__mirrorClone_*" — GreetsMirror clones the ENTIRE scene per
+        //    mirror as ordinary main-view geometry. The main pass does raster
+        //    those faces, but commits a pixel only where the per-lane
+        //    bit[pixelMirrorId] mask says the mirror surface was rasterised
+        //    there (Mekalele.h), i.e. inside a mirror WINDOW that measures
+        //    0.04-3.9% of the screen. A wireframe cannot reproduce a per-pixel
+        //    mask, so the choice is a phantom scene over the whole frame or no
+        //    reflection wireframe inside a few percent of it. The counts go in
+        //    the census line below rather than being dropped silently.
+        if (T->Flags & Tri_OffscreenProxy)  { ++skipProxy; continue; }
+        if (EnvBake_IsMirrorCloneObj(Obj))  { ++skipClone; continue; }
         // Cheap whole-mesh reject (the same conservative AABB test the cull
         // uses). Meshes without a valid box are kept — never silently dropped.
         if (T->WorldAabbValid) {
@@ -898,7 +924,12 @@ void WireViz_DrawOverlay(Scene* sc) {
         std::fprintf(stderr, "[WIRE-VIZ] mode %d: %ld triangles / %ld line "
             "sub-segments in %.1f ms this frame (depth-tested, %s)\n",
             mode, tris, lines, ms,
-            mode >= 2 ? "over the dimmed frame" : "over the image"); }
+            mode >= 2 ? "over the dimmed frame" : "over the image");
+        if (skipClone || skipProxy)
+            std::fprintf(stderr, "[WIRE-VIZ] skipped %ld mirror-clone + %ld "
+                "offscreen-proxy mesh(es): duplicate populations the main view "
+                "does not composite here (clones are masked to the mirror "
+                "window, proxies are offscreen-only)\n", skipClone, skipProxy); }
 }
 
 // ── On-screen legends for this file's three vizzes (VizLegend.h) ───────────
