@@ -1081,7 +1081,18 @@
       // Scene lights (Omni_SceneAuthored — index order maps 1:1 onto the LWS
       // AddLight blocks, which is what the server patches on Save).
       var editorLights = [], editorLightsPristine = {}, editorSelectedLight = null;
-      var EDITOR_LIGHT_PROPS = ['r','g','b','intensity','range','flareScale'];
+      // The ONE light-prop list — the panel rows, the dirty test and the save
+      // payload all read it, so a key missing here has no UI no matter how
+      // well the engine and the server handle it (which is what left
+      // dirX/dirY/dirZ invisible when the spot set first landed).
+      var EDITOR_LIGHT_PROPS = ['r','g','b','intensity','range','flareScale',
+                                'type','coneAngle','innerAngle','volBeamGain',
+                                'forceVolCone','shadow','shadowMapRes',
+                                'dirX','dirY','dirZ'];
+      // The cone AIM converts to the LWS motion key's heading/pitch as a unit
+      // (tools/editor_server.py _dir_to_heading_pitch), so one dirty component
+      // ships all three — the same grouped-edit rule EDITOR_UV_PROPS uses.
+      var EDITOR_LIGHT_DIR_PROPS = ['dirX','dirY','dirZ'];
       function lightDirty(l){
         var p = editorLightsPristine[l.i]; if (!p) return false;
         return EDITOR_LIGHT_PROPS.some(function(k){ return Math.abs((+l[k]) - (+p[k])) > 1e-6; });
@@ -1093,6 +1104,8 @@
           EDITOR_LIGHT_PROPS.forEach(function(k){
             if (Math.abs((+l[k]) - (+p[k])) > 1e-6) (out[l.i] = out[l.i] || {})[k] = +l[k];
           });
+          if (out[l.i] && EDITOR_LIGHT_DIR_PROPS.some(function(k){ return k in out[l.i]; }))
+            EDITOR_LIGHT_DIR_PROPS.forEach(function(k){ out[l.i][k] = +l[k]; });
         });
         return out;
       }
@@ -1261,11 +1274,43 @@
       }
       // flareScale multiplies the flare SPRITE size on top of intensity
       // (engine: F.FlareSize = ISize × flareScale) — decouples "how bright
-      // the light is" from "how big the flare draws". Persists via the scene
-      // sidecar (no LWS/FLD field for it).
+      // the light is" from "how big the flare draws". Persists as the LWS
+      // keyword FdsFlareScale inside the light's AddLight block.
+      // intensity/range/flareScale ceilings widened 2026-08 (4→10, 100→200,
+      // 4→5): scene authoring kept running into the top of the slider, and the
+      // engine has no clamp at the old numbers. Defaults and every authored
+      // value are unchanged — this only lets the handle travel further.
       var EDITOR_LIGHT_RANGES = { r:[0,255,1], g:[0,255,1], b:[0,255,1],
-                                  intensity:[0,4,0.01], range:[0,100,0.5],
-                                  flareScale:[0.05,4,0.01] };
+                                  intensity:[0,10,0.01], range:[0,200,0.5],
+                                  flareScale:[0.05,5,0.01],
+                                  type:[0,1,1],
+                                  // HALF-angles from the cone axis, degrees —
+                                  // the same units the LWS ConeAngle carries
+                                  // (FDS/FLD/FLD_CONV.CPP:608). No 2x.
+                                  coneAngle:[1,89,0.5], innerAngle:[0.5,89,0.5],
+                                  volBeamGain:[0,20,0.1], forceVolCone:[0,1,1],
+                                  shadow:[0,1,1], shadowMapRes:[0,2048,128],
+                                  dirX:[-1,1,0.01], dirY:[-1,1,0.01], dirZ:[-1,1,0.01] };
+      // Where each light key actually goes, shown on the row. The panel is the
+      // only place a user can learn that a slider is live-only, so every key
+      // whose value does NOT survive a save says so here rather than moving,
+      // reporting "saved" and reverting on the next reload.
+      var EDITOR_LIGHT_NOTES = {
+        type:         'saved · LWS LightType (1 point / 2 spot)',
+        coneAngle:    'HALF-angle from the axis, deg · saved · LWS ConeAngle',
+        innerAngle:   'LIVE ONLY — the converter derives it as coneAngle/2; no authoring slot',
+        volBeamGain:  'saved · LWS VolumetricLightIntensity',
+        forceVolCone: 'saved · LWS VolumetricLight',
+        shadow:       'LIVE, OFF ONLY — switching it ON needs a shadow-map rebuild (scene init). Not saved.',
+        shadowMapRes: 'READ-ONLY — ShadowMaps_Rebuild reads it once at scene init. Not saved.',
+        dirX:         'cone aim · saved into the light’s LWS rotation keys (unparented spots)',
+        dirY:         'cone aim · saved into the light’s LWS rotation keys (unparented spots)',
+        dirZ:         'cone aim · saved into the light’s LWS rotation keys (unparented spots)'
+      };
+      // Keys with no live effect at all: shown (the authored value is worth
+      // seeing) but not editable, because a control that moves and does
+      // nothing is worse than one that plainly cannot move.
+      var EDITOR_LIGHT_READONLY = { shadowMapRes: 1 };
       // `group` (optional) = every light the sliders apply to; length > 1 means
       // a multi-selection group edit. ABSOLUTE semantics: a slider sets the
       // same value on every member (stated in the panel title); values shown
@@ -1290,6 +1335,7 @@
           ls.forEach(function(g){
             var p = editorLightsPristine[g.i]; if (!p) return;
             EDITOR_LIGHT_PROPS.forEach(function(k){
+              if (EDITOR_LIGHT_READONLY[k]) return;
               if (Math.abs((+g[k]) - (+p[k])) > 1e-9) setLightProp(g, k, +p[k]);
             });
           });
@@ -1298,17 +1344,37 @@
         h.appendChild(rst); el.appendChild(h);
         EDITOR_LIGHT_PROPS.forEach(function(k){
           var rg = EDITOR_LIGHT_RANGES[k];
+          var note = EDITOR_LIGHT_NOTES[k], ro = !!EDITOR_LIGHT_READONLY[k];
           var row = document.createElement('div'); row.className = 'prop-row';
-          var lab = document.createElement('label'); lab.textContent = k; row.appendChild(lab);
+          if (note) row.title = k + ' — ' + note;
+          var lab = document.createElement('label'); lab.textContent = k;
+          // Mark the rows that do not persist, right on the label: LIVE (the
+          // engine takes it, nothing on disk does) and RO (no live effect at
+          // all). Anything unmarked survives Save → reload.
+          if (note && note.indexOf('LIVE ONLY') === 0) { lab.textContent = k + ' ·live'; lab.style.color = '#c96'; }
+          else if (note && note.indexOf('LIVE,') === 0) { lab.textContent = k + ' ·live'; lab.style.color = '#c96'; }
+          else if (ro) { lab.textContent = k + ' ·ro'; lab.style.color = '#888'; }
+          row.appendChild(lab);
           var r = document.createElement('input'); r.type = 'range';
           r.min = rg[0]; r.max = rg[1]; r.step = rg[2]; r.value = l[k];
           var val = document.createElement('input'); val.type = 'number'; val.step = rg[2];
           val.value = +(+l[k]).toFixed(3);
           val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          if (ro) {
+            r.disabled = true; val.disabled = true;
+            r.style.opacity = '0.4'; val.style.opacity = '0.5'; val.style.color = '#888';
+            row.appendChild(r); row.appendChild(val); el.appendChild(row);
+            return;
+          }
           function applyAll(v){
             ls.forEach(function(g){ setLightProp(g, k, v); });
             if (ls.length > 1)
               editorStatus('set ' + k + ' = ' + (+v).toFixed(2) + ' on ' + ls.length + ' lights (absolute)');
+            // Turning shadows ON has no live path (the kernel looks this omni
+            // up in g_shadowMaps, which ShadowMaps_Rebuild filled once at
+            // scene init) — say it instead of letting the toggle look applied.
+            if (k === 'shadow' && v > 0.5)
+              editorStatus('shadow ON recorded — no live effect until a shadow-map rebuild (scene init)');
             renderLightList();
           }
           r.oninput = function(){
