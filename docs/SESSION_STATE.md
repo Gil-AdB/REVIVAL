@@ -67,6 +67,27 @@
 > what let it read that deep.
 >
 > All four new flags are default-off / no-op; the shipping arm is byte-identical.
+>
+> **THE GPU BULGE IS THE SAME MECHANISM, AND THE CONVENTION HYPOTHESIS IS DEAD.**
+> He also reported *"if you look in the gpu renderer - it's actually bulges the
+> mesh there"*, and the standing hypothesis was that GpuBench displaces against a
+> different reference. MEASURED: the two arms agree term for term — both compute
+> `amp*(h-mean)` along the interpolated vertex normal, both at amp 0.300 and mip
+> 2, and the mean is the SAME NUMBER (GpuBench reports `rooms` height mean
+> **0.5491**; the CPU's mipMean over `greets_wall_h.png` is **0.549053**, and a box
+> reduction preserves it exactly at mips 0/1/2/3). Textures are RGBA8Unorm, so no
+> sRGB decode either. What GpuBench was missing is the CPU's PIN: it displaced the
+> authored patch borders that `DisplaceStoneSubdiv` holds at zero, so at the jamb
+> the CPU's value is 0 and the GPU's is up to **+0.035 world units outward**.
+> Ported (`--tess_border_ramp`, default 0.15; 196 of 678 patch edges classify as
+> borders). Silhouette x per row, same extraction on all three arms — t=5967 rows
+> 500-640: GPU no pin span **203 px** std 62.68 median 1463 -> GPU pinned span
+> **78 px** std 7.08 median **1520**, against the CPU oracle span 72 px std 16.40
+> median **1516**. t=5987: 233/64.12/1228 -> 125/40.33/**1174** against
+> 123/21.25/**1172**. Within 4 px and 2 px of the oracle.
+> `docs/img/gputess/borderpin_t5967_before_after_cpu.png`,
+> `borderpin_t5987_before_after_cpu.png`. (These absolutes are NOT comparable to
+> round 1's 238/24 px — the extraction method differs.)
 
 > ## 2026-08-11 — THE SHARDS WERE NOT DIM, THEY WERE EMPTY: A PER-VERTEX CONE CULL DECIDING FACE VISIBILITY
 >
