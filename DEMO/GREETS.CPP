@@ -1322,6 +1322,49 @@ static void GreetsApplyRunDefaults()
 	// Pin greets' own exposure so it doesn't inherit a leaked --cinematic value
 	// from the prior scene (crash sets one via setDefault; greets runs after it).
 	FF::setDefault(FF::FloatId::hdr_exposure,           cine::kGreetsExposure);
+	// ── --env-dynamic IMPLIES --env_probe_follow_owner ────────────────────
+	// He ran `--greets-displace --scene-greets --env_probe_center
+	// --env-dynamic` and reported "the hull bake is still static (apart from
+	// the rotating disco ball)"; when told the follow flag exists: "annoying.
+	// I ran it with env dynamic." He is right that the two belong together,
+	// and the reason is mechanical, not ergonomic: a probe's capture point is
+	// derived from its owner's geometry ONCE and EnvReflection_FramePrep's
+	// `if (env.byMat.count(M)) continue;` never revisits it, and
+	// overlayComposite renders the movers from S.view.bake* — that SAME frozen
+	// point. So --env_dynamic alone re-renders the mech faithfully, every
+	// frame, into a cube captured from where the mech used to stand: measured
+	// on this scene, the canopy probe stayed at (10.8 2.3 -55.8) while its
+	// owner walked to (44.4 4.7 -62.2). The dynamic half cannot fix itself.
+	//
+	// SCOPE. env_dynamic is compile-default OFF and no scene turns it on, so
+	// this fires only when he asked for it; GreetsApplyRunDefaults is the
+	// greets-exclusive entry (createGreetsScene), so city/chase/fountain never
+	// see it; and setDefault means an explicit --no-env_probe_follow_owner
+	// still wins. Every recorded pin is therefore byte-null by construction —
+	// none of them passes --env-dynamic — and that was run, not assumed.
+	//
+	// PLACEMENT IS RUN-PHASE, AND VERIFIED RATHER THAN ARGUED (the setDefault
+	// audit found writes that were inert because their reader ran at BOOT).
+	// The only reader is EnvReflection_FramePrep, which renderFrame calls
+	// EVERY FRAME — after this block, since createGreetsScene runs before the
+	// first tick. The init-phase probe bakes do run earlier and see it OFF,
+	// which is correct and free: the tracker only records a transform
+	// signature on first sight and cannot act before the following frame.
+	// PROVED FROM THE TRACE, not the code — with --env-dynamic and no follow
+	// flag, [ENVFOLLOW] re-bakes the canopy probe at (24.5 2.2 -59.7),
+	// (31.4 2.2 -60.4), (34.4 2.3 -60.8), (40.1 4.0 -61.6), (43.0 4.7 -62.1),
+	// (44.3 5.0 -62.2) — it follows.
+	//
+	// COST is bounded by env_probe_follow_budget (1 spline-animated re-bake
+	// per frame) and greets has exactly one such owner, so the worst case is
+	// one 256² cube bake on a frame where the mech has drifted past
+	// env_probe_follow_eps (1.0 u). MEASURED over the 7-frame walk
+	// t=6000..7100, which fires 5 re-bakes, min-of-6 interleaved wall:
+	// 2844 ms off vs 2967 ms on = +123 ms / 5 = ~25 ms per re-bake. Machine
+	// load 15.05, so read that as tens of ms, not three digits. Frames where
+	// nothing drifted pay only the FNV transform signature (stage 1).
+	if (FF::env_dynamic())
+		FF::setDefault(FF::BoolId::env_probe_follow_owner, true);
 	// --cinematic: greets keeps its own hotter HDR/bloom (set above) but gains
 	// the same filmic post stack as the other scenes. The disco ball + omnis are
 	// the brightest sources in the demo, so anamorphic streaks earn their keep.
