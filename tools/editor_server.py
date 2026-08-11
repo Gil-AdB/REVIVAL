@@ -838,12 +838,18 @@ def save_objects_to_sidecar(scene, objects, warnings):
             continue
         for k, v in props.items():
             key = (f"obj:{name}", k)
+            # Absent override == authored default 1, the same baseline the FE
+            # receipt assumes (editorObjPristine[n] ?? 1).
+            old = entries.get(key, "1" if k == "scale" else None)
             if k == "scale" and abs(float(v) - 1.0) < 1e-6:
                 if key in entries:      # back to authored — drop the override
+                    SAVELOG.change("object(s)", f"{name} · {k}: {_fmtv(old)} → 1 "
+                                                "(override dropped)")
                     del entries[key]
                     changed = True
                     saved.append({"object": name, "key": k, "deleted": True})
                 continue
+            SAVELOG.change("object(s)", f"{name} · {k}: {_fmtv(old)} → {_fmtv(v)}")
             entries[key] = f"{float(v):.6g}"
             changed = True
             saved.append({"object": name, "key": k})
