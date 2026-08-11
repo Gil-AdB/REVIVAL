@@ -10,6 +10,40 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-11 — TODO: a PER-TARGET HDR buffer, so an offscreen bake tonemaps like the frame it feeds
+
+**The defect.** `g_hdrBuf` is a single global sized by `Hdr_BeginFrame()` to the
+MAIN view, and every HDR write in the deferred kernel gates on
+`Hdr_WritableFor(ctx.xres, ctx.yres)` — the CURRENT pass's dims. So an offscreen
+bake at any other resolution silently falls through to the LDR combine
+(`texel*light/256 + spec`) while the main frame renders linear radiance through
+exposure → ACES → sqrt. The two are different transfer functions, so an
+offscreen bake cannot match the frame it is composited into, at any gain.
+
+**Who is affected.** The **mirror-shard bake** (`MirrorShatter.cpp`) — measured
+2026-08-11 at the greets shatter screen: with the coverage bug fixed the shard
+mosaic reads **86.37** panel-window luma against the **73.86** the main deferred
+pass renders from the same reflected eye (**+12.5, brighter**), and under
+`--no-hdr` — where the main pass loses ACES+sqrt and falls to 43.28 — the mosaic
+barely moves (79.05), which is the signature of a pass ignoring the frame's
+transfer function. The **mirror RTT is NOT affected**: it already brackets its
+bake with `Hdr_BeginFramePass(texW,texH)` / `Hdr_ActivateNoFog()` /
+`Render_TonemapToVPage()` (`GreetsMirror.cpp:3273-3286`), which is exactly the
+right shape — and is the reference implementation for this item.
+
+**Why the RTT's fix does not port as-is.** The RTT bake is serial, so it can own
+the global for the duration. The shard bake fans N shards across the worker pool
+concurrently (`renderShardIntoCell`), so `Hdr_BeginFramePass` cannot be called
+per worker without racing. The fix is to thread an HDR target through
+`DeferredOverride` (alongside `gb` / `vpage` / `zpage16`) so each worker
+accumulates into its own float buffer and tonemaps it, instead of every pass
+reaching for one global. That also removes the `Hdr_WritableFor` dims check as
+the de-facto "am I the main pass?" test, which is what makes the failure silent.
+
+**Priced before starting:** the shard bake pass is 14.5 ms (min-of-6, load 12.8);
+a per-worker `texRes²×4` float buffer is 64 KB at res 64 — the cost is the extra
+tonemap sweep, not the memory. STATUS: TODO.
+
 ## 2026-08-10 — MEMORY-SIZE SWEEP: `--mem_census`, and the per-shadow-map FList (403 MiB at 0.5 % fill)
 
 Asked as *"the lightmap defect and the shadow-plane defect had shapes — sweep

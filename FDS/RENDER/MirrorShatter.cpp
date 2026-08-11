@@ -792,7 +792,11 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 			g_reflConeApex = Er;
 			g_reflConeDir  = N;
 			g_reflConeTan2 = coneTan2 * 1.3f + 1e-3f;   // margin for edge pixels
-			g_reflVertCull = true;
+			// --shard_cone_cull, default OFF: the per-VERTEX form of this test
+			// decided FACE visibility and ate the reflection (see the flag's
+			// own text, and renderShardIntoCell below). The mesh-level off-axis
+			// bounding-sphere cull inside Transform_Objects is the cull now.
+			g_reflVertCull = fds::FeatureFlags::shard_cone_cull();
 			g_offAxisFrustumCull = true;
 			Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
 			g_offAxisFrustumCull = false;
@@ -1148,7 +1152,17 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 	g_reflConeApex = Er;
 	g_reflConeDir  = Nn;
 	g_reflConeTan2 = coneTan2 * 1.3f + 1e-3f;
-	g_reflVertCull = true;
+	// --shard_cone_cull, DEFAULT OFF since 2026-08-11. The cone above is ~1°
+	// wide and the room's wall quads are metres across, so the per-VERTEX cone
+	// test rejected every corner of a quad whose interior covered the entire
+	// shard view — the bake drew almost nothing (panel window 24.74 luma vs the
+	// 73.86 the main deferred pass renders from the same reflected eye), and
+	// the quads that did survive rasterized through the fake positions the
+	// rejected corners were stamped with. Deciding face visibility per vertex
+	// is only sound for faces small against the cone. Left readable as a
+	// perf/A-B lever; the sound cull is the mesh-level off-axis bounding-sphere
+	// frustum test that Transform_Objects already runs.
+	g_reflVertCull = fds::FeatureFlags::shard_cone_cull();
 	g_offAxisFrustumCull = true;
 	Transform_Objects(sc, w.camCtx, w.faces, texRes_, texRes_, &w.scratch);
 	g_offAxisFrustumCull = false;

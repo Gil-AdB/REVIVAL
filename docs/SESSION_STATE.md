@@ -1,5 +1,106 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-11 — THE SHARDS WERE NOT DIM, THEY WERE EMPTY: A PER-VERTEX CONE CULL DECIDING FACE VISIBILITY
+>
+> Sent to root-cause the residual the mirror-break commit (`983cdb4`) left
+> open — "the offscreen deferred bake at 64² is ~21 luma darker than the
+> forward bake, cause unidentified". **The premise was wrong in both direction
+> and size.** The shard reflection was not being shaded too dark; **two thirds
+> of it was never drawn at all**, in the forward bake and the deferred bake
+> alike, and once drawn the offscreen bake reads BRIGHTER than the main pass,
+> not darker.
+>
+> **THE MEASUREMENT** — same bracket the previous commit used
+> (`--repro=greets@t=3122 --repro_from=3112 --repro_settle=0`,
+> `FDS_GREETS_CAM="28.8,10.8,-62.85,1,0,0"`, square-on to the shatter screen),
+> over a 1258×767 panel window derived as the intersection of the
+> mirror-on/mirror-off and shards-on/shards-black change masks:
+>
+> | | panel-window luma |
+> |---|--:|
+> | pre-break, intact half-silvered mirror | 73.07 |
+> | MAIN deferred pass from the shard's own reflected eye (`FDS_GREETS_CAM="68.79,10.8,-62.85,-1,0,0"`) | 73.86 |
+> | **break+1, shipped (cull on)** | **24.74** |
+> | **break+1, fixed (cull off)** | **86.37** |
+>
+> The reflection ATLAS itself goes **21.65 → 69.66** mean luma. Look at the
+> cells and it is not a brightness story at all: before, each 64² cell is
+> black with a few flat untextured quads; after, each cell holds the reflected
+> room with its brick texture. Strips:
+> `docs/img/fogwt/shardcull_t3122_bracket.png`,
+> `shardcull_t3122_zoom.png`, `shardcull_t3122_atlas.png`.
+>
+> **ROOT CAUSE — `Transform.cpp`'s `g_reflVertCull` block decides FACE
+> visibility from VERTEX positions.** Each shard bakes through a very narrow
+> off-axis cone: the window is one 1/238th fragment of the panel seen from
+> ~20 units, so the half-angle is ~1°. The cull rejected every vertex outside
+> that cone, stamping it `TPos=(0,0,1)`, `PX=PY=-1` with all frustum-out bits
+> set so its faces would cull. greets's room is wall/floor/ceiling QUADS whose
+> corners sit metres off the axis — so a quad whose INTERIOR covered the
+> entire shard view had all three corners rejected and vanished. The quads
+> that did survive (one corner in, two out) rasterized THROUGH the fake corner
+> positions, which is the flat stretched look in the BEFORE zoom. The test is
+> only sound when faces are small against the cone, and nothing in greets is.
+>
+> **FIX: `--shard_cone_cull`, default 0.** The sound cull was already there and
+> still runs — the mesh-level off-axis bounding-sphere frustum test inside
+> `Transform_Objects` (`g_offAxisFrustumCull`), which rejects whole objects
+> conservatively. `1` restores the legacy behaviour exactly (24.74, verified).
+>
+> **TRIED AND REVERTED — the conservative per-vertex variant.** Widening the
+> cone by the mesh's world DIAMETER (no face can reach further from its own
+> vertex than that, so no covering face can have all corners rejected) is
+> correct about the *culling* and still measured only **58.37**: it does
+> nothing about the straddlers, whose rejected corners keep their fake
+> positions. Per-vertex marking cannot be made sound here. The correct
+> accelerator is a per-FACE test (face bounding sphere vs cone); nobody has
+> written it, and this records why it is the shape needed.
+>
+> **COST OF CORRECTNESS.** `FDS_SHARD_REFL_PROF`, min-of-6 interleaved, run 1
+> discarded, load 12.8: the shard bake goes **4.0 ms → 14.5 ms**. The cull's
+> speed was the speed of drawing almost nothing. Note this also corrects the
+> record in `983cdb4`: its "deferred bake 20.4 ms vs forward 188.3 ms" was
+> timed with the cull eating the geometry.
+>
+> **BLAST RADIUS: THE SHARD BAKE ONLY.** `g_reflVertCull` is set at exactly two
+> call sites, both in `MirrorShatter.cpp`; the mirror RTT panels
+> (`GreetsMirror.cpp`) set only `g_offAxisFrustumCull` and never took this
+> path. Measured, not just read: a NON-shatter greets frame is **byte-identical**
+> under `--shard_cone_cull` and the default (`d689b64b…` both ways), and
+> `render_gate.sh`'s `mirrortest` — which covers the RTT — PASSes unchanged.
+>
+> **THE RESIDUAL, ROOT-CAUSED AND NOT FIXED: the offscreen shard bake never
+> runs the HDR round-trip, so it is on a different transfer function from the
+> frame it must match.** greets defaults `--hdr --hdr_linear`, so the main pass
+> writes linear radiance and `Render_TonemapToVPage` applies exposure → ACES →
+> sqrt encode. `Hdr_WritableFor` gates every `g_hdrBuf` write on the CURRENT
+> dims matching, so at 64² the shard bake silently takes the LDR combine
+> instead. The mirror RTT does NOT have this problem — it brackets its bake
+> with `Hdr_BeginFramePass(texW,texH)` / `Hdr_ActivateNoFog()` /
+> `Render_TonemapToVPage()` (`GreetsMirror.cpp:3273-3286`); `MirrorShatter` has
+> no such bracket. Priced: fixed mosaic **86.37** vs the main pass's **73.86**
+> from the same eye, i.e. **+12.5 luma, the offscreen bake is BRIGHTER**; under
+> `--no-hdr`, where the main pass loses ACES+sqrt and drops to 43.28, the
+> mosaic barely moves (79.05) — which is the signature of a pass that is not
+> following the frame's transfer function at all. NOT fixed here because
+> `g_hdrBuf` is a single global and the shard bake runs N shards concurrently
+> across the worker pool, so `Hdr_BeginFramePass` cannot be called per worker;
+> the fix is a per-target HDR buffer threaded through `DeferredOverride`.
+> Logged in `docs/OPTIMIZATION_BACKLOG.md`.
+>
+> **NOTE ON `--hdr` AS A NULL RESULT.** `983cdb4` lists `--hdr` among the
+> toggles that measured null against the deficit. greets already sets
+> `hdr=true` via `setDefault`, so `--hdr` is a no-op there; the toggle that
+> moves it is `--no-hdr`.
+>
+> **PINS: unchanged and re-verified** — greets `778fa6acd85a69cf241babefcdaf598e`,
+> fountain `8db68ccb59416e9a44037e9f387b7bd9`, city `3cbe42b166847e40f7071eedb48d613c`,
+> `render_gate.sh` ALL PASS (mirrortest `4ac809e5…`, conetest `b41894f9…`,
+> halotest `166fa25a…`). **What that does and does not certify:** no pin recipe
+> triggers the shatter, so none of them exercises the changed line. They certify
+> no collateral damage; the fix itself is certified by the non-shatter
+> byte-null above and by the measurements in this entry.
+
 > ## 2026-08-10 — THE MIRROR-BREAK POP: THE SHARDS SHOW HALF THE REFLECTION THE INTACT SCREEN SHOWED, IN ONE FRAME
 >
 > His long-standing report ("the look before/after the break start is not
