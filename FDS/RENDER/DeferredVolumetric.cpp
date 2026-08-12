@@ -78,6 +78,42 @@ static std::atomic<int> g_coneRaymarchHits{0};
 #ifndef FDS_CONE_SOLVE_APPROX
 #define FDS_CONE_SOLVE_APPROX 0
 #endif
+// Ablation ladder for the SECOND round of the cone-cost campaign (the first
+// round's ladder was ad-hoc and not committed; this one is, because the split
+// has to be re-derived every time the pass changes shape). COMPILE-TIME only:
+// build the TU with -DFDS_CONE_ABLATE=n and the per-spot loop `continue`s at
+// staged depth n, so the Ginstr/f difference between two builds prices exactly
+// one stage. n=0 (shipping) emits literally nothing.
+//
+//   1  cut at the top of the per-spot loop      -> per-batch floor
+//   2  keep the per-spot scalar prologue
+//   3  keep + the 8-wide cone-interval solve
+//   4  keep + the scalar per-lane dz/fade loop
+//   5  keep + the broadcasts and the integration body (cut before accumulate)
+//   0  full pass
+//
+// Each cut sinks the values it retains into a per-TILE vector accumulator
+// (one volatile store per tile call, so no false sharing and no perturbation
+// of the composite's `accB<=0` skip) — otherwise the retained work is dead and
+// the compiler deletes exactly what we are trying to price. Sink cost is 2-7
+// instructions per (batch x spot); quantified where it matters.
+#ifndef FDS_CONE_ABLATE
+#define FDS_CONE_ABLATE 0
+#endif
+#if FDS_CONE_ABLATE
+static volatile float g_ablSink = 0.0f;
+// NB: no do/while(0) wrapper — the `continue` has to reach the per-spot
+// `for`, and a do/while would swallow it.
+#define CONE_ABL_CUT(stage, expr) \
+    if constexpr ((FDS_CONE_ABLATE) == (stage)) { \
+        ablSinkV = _mm256_add_ps(ablSinkV, (expr)); continue; }
+#define CONE_ABL_CUT_BARE(stage) \
+    if constexpr ((FDS_CONE_ABLATE) == (stage)) { continue; }
+#else
+#define CONE_ABL_CUT(stage, expr)  ((void)0)
+#define CONE_ABL_CUT_BARE(stage)   ((void)0)
+#endif
+
 static constexpr bool g_coneDiag = (FDS_CONE_DIAG != 0);
 static std::atomic<long long> g_dPairs{0};   // batch x spot pairs entering the scalar solve
 static std::atomic<long long> g_dSegPair{0}; // ...of which take the 8-segment hybrid
@@ -580,9 +616,17 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
     const bool vecPath = fds::FeatureFlags::vol_vec();
+#if FDS_CONE_ABLATE
+    // Per-tile ablation sink (see the ladder note at FDS_CONE_ABLATE).
+    __m256 ablSinkV = _mm256_setzero_ps();
+#endif
     // 8-wide cone-interval solve (see the transcript note at the loop).
     // Read once per tile call — the branch never enters the per-spot loop.
     const bool coneSolveVec = fds::FeatureFlags::vol_cone_solve_vec();
+    // The two leftover SCALAR per-lane loops (dz/fade window, colour
+    // accumulate) 8 lanes wide. Read once per tile, same as above.
+    const bool laneVec = fds::FeatureFlags::vol_cone_lane_vec();
+    const __m256 vDensity_v = _mm256_set1_ps(density);
     const bool analyticCone = fds::FeatureFlags::vol_cone_analytic();
     // Path-counter bump — once per tile call, not per (spot × batch).
     // useAnalytic is constant within a call (depends only on the cone-
@@ -670,8 +714,17 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 if (!anyAlive) continue;
 
                 alignas(32) float accB[8] = {}, accG[8] = {}, accR[8] = {};
+                // 8-wide colour accumulators — see the accumulate note at
+                // the bottom of the per-spot loop. Live in REGISTERS across
+                // the whole spot loop under --vol_cone_lane_vec; drained to
+                // accB/accG/accR once per batch, so the composite loop
+                // below is untouched.
+                __m256 vAccB = _mm256_setzero_ps();
+                __m256 vAccG = _mm256_setzero_ps();
+                __m256 vAccR = _mm256_setzero_ps();
 
                 for (int s = 0; s < spotCount; ++s) {
+                    CONE_ABL_CUT_BARE(1);   // ablation: per-batch floor
                     const int li = spotIdx[s];
                     // Per-batch rect cull: skip if the 8-pixel batch
                     // (per-batch rect-cull experiment was reverted —
@@ -731,6 +784,10 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
                     const float c2   = cosO * cosO;
                     const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
+                    // ablation: keep the per-spot scalar prologue only.
+                    CONE_ABL_CUT(2, _mm256_set1_ps(DP + PP + c2 +
+                                                   inv_cosI_minus_cosO +
+                                                   r2 + rr + inv_nSamp));
 
                     alignas(32) float zLoArr[8] = {};
                     alignas(32) float zHiArr[8] = {};
@@ -1108,6 +1165,10 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         g_dDead.fetch_add(1, std::memory_order_relaxed);
                     }
                     if (!spotAlive) continue;
+                    // ablation: keep the 8-wide cone-interval solve.
+                    CONE_ABL_CUT(3, _mm256_add_ps(_mm256_load_ps(zLoArr),
+                                    _mm256_add_ps(_mm256_load_ps(zHiArr),
+                                                  _mm256_load_ps(aliveLane))));
 
                     // Clone AND bounce spots have no own map (smIdx=-1)
                     // but carry the SOURCE's map: visibility of a sample
@@ -1159,6 +1220,48 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     }
 
                     alignas(32) float dzArr[8] = {}, invDzArr[8] = {}, fadeStartArr[8] = {};
+                    // ─── dz / surface-fade window, 8 lanes at a time ──
+                    // The scalar loop below is 0.270 Ginstr/f of this
+                    // pass — 9.4% — measured by the round-2 ablation
+                    // ladder (FDS_CONE_ABLATE). It is the SAME shape of
+                    // defect the 8-wide solve fixed in 7e34645: a scalar
+                    // per-lane loop sandwiched between an 8-wide producer
+                    // (the solve, which just wrote zLoArr/zHiArr) and an
+                    // 8-wide consumer (the integration body, which loads
+                    // dzArr/invDzArr/fadeStartArr straight back as
+                    // __m256). Every lane therefore pays a store and a
+                    // reload it never needed: the disassembly of the
+                    // shipping kernel is 894 ldr + 583 str out of 4475
+                    // instructions (33%), and this loop is one of the two
+                    // places that traffic comes from.
+                    // BIT-EXACT, and cheaply so — there is no fma in it,
+                    // so no contraction map to reproduce. The only two
+                    // spellings that matter: std::max(d, fwMin) is
+                    // (d < fwMin) ? fwMin : d transcribed as cmp+blend,
+                    // NOT _mm256_max_ps (NEON FMAX resolves NaN and -0
+                    // the opposite way from the scalar FCSEL — the trap
+                    // 7e34645 documents); and `if (alive == 0) continue`
+                    // negates to the UNORDERED _CMP_NEQ_UQ. 12.0f*invZScale
+                    // is loop-invariant, so hoisting it is the identical
+                    // product, not a re-association.
+                    if (laneVec) {
+                        const __m256 vZeroL  = _mm256_setzero_ps();
+                        const __m256 mLive   = _mm256_cmp_ps(
+                                               _mm256_load_ps(aliveLane),
+                                               vZeroL, _CMP_NEQ_UQ);
+                        const __m256 vD      = _mm256_mul_ps(
+                                               _mm256_sub_ps(_mm256_load_ps(zHiArr),
+                                                             _mm256_load_ps(zLoArr)),
+                                               _mm256_set1_ps(inv_nSamp));
+                        const __m256 vFwMin  = _mm256_set1_ps(12.0f * invZScale);
+                        const __m256 vFadeW  = _mm256_blendv_ps(vD, vFwMin,
+                                               _mm256_cmp_ps(vD, vFwMin, _CMP_LT_OQ));
+                        const __m256 vInvFw  = _mm256_div_ps(_mm256_set1_ps(1.0f), vFadeW);
+                        const __m256 vFadeS  = _mm256_sub_ps(_mm256_load_ps(zMaxArr), vFadeW);
+                        _mm256_store_ps(dzArr,        _mm256_blendv_ps(vZeroL, vD,     mLive));
+                        _mm256_store_ps(invDzArr,     _mm256_blendv_ps(vZeroL, vInvFw, mLive));
+                        _mm256_store_ps(fadeStartArr, _mm256_blendv_ps(vZeroL, vFadeS, mLive));
+                    } else {
                     for (int lane = 0; lane < 8; ++lane) {
                         if (aliveLane[lane] == 0.0f) continue;
                         const float d = (zHiArr[lane] - zLoArr[lane]) * inv_nSamp;
@@ -1172,6 +1275,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         invDzArr[lane]     = 1.0f / fadeW;
                         fadeStartArr[lane] = zMaxArr[lane] - fadeW;
                     }
+                    }
+
+                    // ablation: keep the scalar per-lane dz/fade loop.
+                    CONE_ABL_CUT(4, _mm256_add_ps(_mm256_load_ps(dzArr),
+                                    _mm256_add_ps(_mm256_load_ps(invDzArr),
+                                                  _mm256_load_ps(fadeStartArr))));
 
                     const __m256 vX_v        = _mm256_load_ps(Xarr);
                     const __m256 vY_v        = _mm256_set1_ps(Y);
@@ -1255,6 +1364,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                                 _mm256_fmadd_ps(vTwoA, vZHi_v, vBeta));
                         const __m256 vArgLo   = _mm256_mul_ps(vInvD,
                                                 _mm256_fmadd_ps(vTwoA, vZLo_v, vBeta));
+                        // ablation: keep through vArgHi/vArgLo (pre-atan).
+                        CONE_ABL_CUT(6, _mm256_add_ps(vInvD,
+                                        _mm256_add_ps(vArgHi, vArgLo)));
                         // atan(u) − atan(v) computed DIRECTLY via the
                         // identity atan((u−v)/(1+uv)) (+π when uv<−1;
                         // u>v always since zHi>zLo): near the ray-
@@ -1419,6 +1531,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                         _mm256_add_ps(vInvD, vInvD), vSum);
                         }
 
+                        // ablation: keep through vIntegral (atanDiff done).
+                        CONE_ABL_CUT(7, vIntegral);
                         // Midpoint sample: cosT_mid and surfaceFade_mid
                         // approximate the otherwise-z-dependent factors.
                         const __m256 vZMid    = _mm256_mul_ps(
@@ -1468,6 +1582,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 surfaceFade_m = segPath
                             ? vOne_v
                             : _mm256_blendv_ps(vOne_v, fadeVal_m, mFade_m);
+                        // ablation: keep through the midpoint block.
+                        CONE_ABL_CUT(8, _mm256_add_ps(coneAtten_m,
+                                        _mm256_add_ps(surfaceFade_m, softEdge_m)));
 
                         // Match ray-march brightness scaling: N × mean.
                         const __m256 vIntervalLen = _mm256_sub_ps(vZHi_v, vZLo_v);
@@ -1503,6 +1620,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // stochastic sample offsets produce inter-pixel
                         // variation) without sacrificing the analytic
                         // smoothness. Hash from existing pxHashArr.
+                        // ablation: keep through vAcc incl. fog (pre-noise).
+                        CONE_ABL_CUT(9, vAcc);
                         if (noiseStrength > 0.0f) {
                             alignas(32) float noiseBuf[8];
                             for (int lane = 0; lane < 8; ++lane) {
@@ -1516,6 +1635,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         }
                         // Mask out lanes where: discQ<=0, cone-axis test
                         // fails (cosT<cosO at midpoint), or lane dead.
+                        // ablation: keep through the noise multiply.
+                        CONE_ABL_CUT(10, vAcc);
                         const __m256 mAng = _mm256_cmp_ps(cosT_m, vCosO_v, _CMP_GE_OQ);
                         __m256 m          = _mm256_and_ps(mAlive,
                                             _mm256_and_ps(mDisc, mAng));
@@ -1693,9 +1814,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         accV = _mm256_add_ps(accV, contrib);
                     }
                     }
+                    // ablation: keep the broadcasts + the integration body,
+                    // cut before the per-lane colour accumulate.
+                    CONE_ABL_CUT(5, accV);
 
                     alignas(32) float accArr[8];
-                    _mm256_store_ps(accArr, accV);
+                    if (!laneVec) _mm256_store_ps(accArr, accV);
                     const float colB = lights->colB[li];
                     const float colG = lights->colG[li];
                     const float colR = lights->colR[li];
@@ -1714,6 +1838,42 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // identical). Applied as a trailing factor so gain-free
                     // lights evaluate the identical expression as before.
                     const float coneGain = lights->coneGain[li];
+                    // ─── colour accumulate, 8 lanes at a time ─────────
+                    // The scalar loop below is 0.301 Ginstr/f — 10.5% of
+                    // the pass (round-2 ablation ladder). It is the OTHER
+                    // end of the same defect as the dz/fade loop: accV is
+                    // already an __m256 and gets spilled to accArr purely
+                    // so eight scalar iterations can read it back, each
+                    // then doing a load-modify-store on three more stack
+                    // arrays — 8x(1+3 loads + 3 stores) per (batch x spot)
+                    // where three register FMAs would do. Holding the
+                    // accumulators in __m256 across the spot loop deletes
+                    // that traffic entirely; they are drained to
+                    // accB/accG/accR once per BATCH, so the composite loop
+                    // that follows never learns the difference.
+                    // BIT-EXACT. Two things to get right and both are in
+                    // 7e34645's list: `if (acc <= 0) continue` negates to
+                    // the UNORDERED _CMP_NLE_UQ (an ordered predicate
+                    // would silently drop a NaN lane the scalar arm
+                    // propagates); and the multiply ORDER is preserved
+                    // exactly as ((acc*density)*nNorm)*coneGain rather
+                    // than folded into one scalar factor, which would be a
+                    // re-association and would move the pin. The trailing
+                    // `accB += w*colB` is spelled as an explicit FMA
+                    // because that is what the compiler contracted it to
+                    // under the tree-wide -ffp-contract=fast (verified
+                    // against the city pin, which does not move).
+                    if (laneVec) {
+                        const __m256 mPos = _mm256_cmp_ps(accV, _mm256_setzero_ps(),
+                                                          _CMP_NLE_UQ);
+                        __m256 w = _mm256_mul_ps(accV, vDensity_v);
+                        w = _mm256_mul_ps(w, _mm256_set1_ps(nNorm));
+                        w = _mm256_mul_ps(w, _mm256_set1_ps(coneGain));
+                        w = _mm256_and_ps(w, mPos);
+                        vAccB = _mm256_fmadd_ps(w, _mm256_set1_ps(colB), vAccB);
+                        vAccG = _mm256_fmadd_ps(w, _mm256_set1_ps(colG), vAccG);
+                        vAccR = _mm256_fmadd_ps(w, _mm256_set1_ps(colR), vAccR);
+                    } else {
                     for (int lane = 0; lane < 8; ++lane) {
                         if (accArr[lane] <= 0.0f) continue;
                         const float w = accArr[lane] * density * nNorm * coneGain;
@@ -1721,6 +1881,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         accG[lane] += w * colG;
                         accR[lane] += w * colR;
                     }
+                    }
+                }
+                if (laneVec) {
+                    _mm256_store_ps(accB, vAccB);
+                    _mm256_store_ps(accG, vAccG);
+                    _mm256_store_ps(accR, vAccR);
                 }
 
                 for (int lane = 0; lane < laneCount; ++lane) {
@@ -2053,6 +2219,16 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
         }
         }
     }
+#if FDS_CONE_ABLATE
+    // Drain the ablation sink once per TILE CALL: keeps the retained work
+    // alive against DCE without a per-batch store (which would false-share
+    // across the 12 workers and pollute the cycle column).
+    {
+        alignas(32) float t[8];
+        _mm256_store_ps(t, ablSinkV);
+        g_ablSink = t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];
+    }
+#endif
 }
 
 // Volumetric-pass timing accumulators — struct + RAII scope live in

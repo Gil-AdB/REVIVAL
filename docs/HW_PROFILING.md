@@ -505,3 +505,206 @@ SIMD body + shadow taps + accumulate is now the majority of it (~1.52 of 2.89 G
 lever inside this pass is the integration body, not the prologue, and the next
 person here should re-run the a16567b ablation against the new arm before
 believing that split.
+
+---
+
+## 10. Worked example round 2 — re-ablating the cone pass, 2026-08-12c
+
+§9 closed with an instruction: *the untouched integration body is now the
+majority of the pass (~1.52 of 2.89 G — **inferred** by holding a16567b's split,
+not re-measured); re-run the ablation against the new arm before believing that
+split.* This section is that re-run. **The inference was wrong in both
+directions, and it was blind to a fifth of the pass.**
+
+### The ladder is now committed, not ad-hoc
+
+`-DFDS_CONE_ABLATE=n` in `FDS/RENDER/DeferredVolumetric.cpp` (compile-time only,
+`n=0` emits nothing) puts a staged `continue` in the per-spot loop:
+
+| n | what is KEPT |
+|---|---|
+| 1 | cut at the top of the per-spot loop — the per-batch floor |
+| 2 | + the per-spot scalar prologue |
+| 3 | + the 8-wide cone-interval solve |
+| 4 | + the scalar per-lane dz/fade loop |
+| 5 | + the broadcasts and the whole integration body |
+| 0 | the full pass |
+
+Each cut sinks what it retains into a **per-tile** `__m256` accumulator drained
+by one `volatile` store per tile call. That detail is not decoration: sinking
+per *batch* would false-share one cache line across 12 workers and wreck the
+cycle column, and *not* sinking lets the compiler delete exactly the work you
+are trying to price. Sink cost is 2–7 instructions per (batch × spot).
+`scratchpad/cone_ablate.sh` drives it — rewrite the define, rebuild the one TU,
+relink, bench, discard run 1.
+
+### The re-measured split — city t=1961, shipping (8-wide-solve) arm
+
+Two independent sessions, agreeing to **0.3 %** (2.869 / 2.866 G total):
+
+| slice | Ginstr/f | share |
+|---|--:|--:|
+| per-batch floor (prologue + composite, no spot loop) | 0.047 | 1.6 % |
+| per-spot loop + scalar prologue | 0.167 | 5.8 % |
+| **the 8-wide cone-interval SOLVE** | **0.992** | **34.6 %** |
+| **scalar per-lane dz / fade-window loop** | **0.270** | **9.4 %** |
+| **broadcasts + integration BODY** | **1.089** | **38.0 %** |
+| **per-lane colour ACCUMULATE** (incl. the composite write) | **0.301** | **10.5 %** |
+| total | 2.866 | 100 % |
+
+**What the inference got wrong.** It predicted solve 1.37 G and body ~1.52 G.
+Measured: solve **0.992**, body **1.089**. And the number that matters — the old
+split had a single bucket called *"SIMD body + shadow taps + accumulate"*, so it
+could not see that **0.571 G (19.9 % of the pass) sits in two SCALAR per-lane
+loops**, one on each side of the 8-wide body. Holding an old ratio over a
+changed kernel is not a measurement; this is why §9 said to re-run it.
+
+**The body sub-ladder (stages 6–10, cutting inside the analytic branch) is NOT
+trustworthy and is recorded here only so nobody repeats it.** It came out
+non-monotonic — stage 8 (2.092 G) reads *lower* than stage 7 (2.185 G) while
+keeping strictly more source. Cutting inside a single basic block lets the
+compiler re-schedule and re-DCE around the sink, so the increments stop being
+differences of nested supersets. Ablation is reliable at *statement-group*
+granularity, where each cut removes a whole dependency chain; it is not reliable
+at expression granularity. One thing did survive it, as a **kill**: the per-lane
+`noiseBuf` loop measures **+0.015 G**, i.e. ~4.7 instructions per (batch × spot)
+against the ~64 an un-hoisted scalar loop would cost — the compiler already
+hoists it out of the per-spot loop (it depends only on `pxHashArr`, which is
+per-batch). *Do not "fix" the noise loop; it is already fixed.*
+
+### The lever taken — `--vol_cone_lane_vec`, both leftover loops 8 wide
+
+Same defect at both ends of the body, and it is **memory traffic, not
+arithmetic**: the solve writes `zLoArr`/`zHiArr` as vectors, a scalar loop reads
+them back a lane at a time to write three more stack arrays, and the 8-wide body
+immediately reloads those as `__m256`; symmetrically `accV` is already an
+`__m256` and gets spilled to `accArr` purely so eight scalar iterations can
+load-modify-store three more arrays that the composite then reloads. The colour
+accumulators now live in **registers across the whole per-spot loop** and drain
+to `accB/accG/accR` once per batch, so the composite loop is untouched.
+
+**MEASURED — AGAINST A REAL PARENT-COMMIT BINARY, NOT AGAINST THE OFF ARM.**
+city t=1961, `iters=6`, three binaries/arms interleaved round-robin min-of-6,
+load 16–22. The parent binary is `7e34645` built in the same worktree against the
+same asset tree:
+
+| cones @ t=1961 | wall_min | Ginstr/f | Gcyc/f | IPC |
+|---|--:|--:|--:|--:|
+| parent `7e34645` | 21.387 ms | 2.866 | 0.701 | 4.006 |
+| new, flag OFF | 24.576 ms | 2.941 | 0.808 | 3.566 |
+| **new, flag ON (ships)** | **17.145 ms** | **2.390** | **0.555** | **4.192** |
+
+**Achieved vs the parent commit: cones −19.8 % wall (−4.24 ms), −16.6 %
+instructions, −20.8 % cycles; `renderFrame` 62.269 → 58.911 ms (−3.36 ms,
+−5.4 %), 7.063 → 6.587 Ginstr/f.** The frame instruction saving (−0.476 G) and
+the cones instruction saving (−0.476 G) agree exactly — the attribution check.
+
+### The OFF arm is NOT a stand-in for the parent, and that is a method finding
+
+The one-binary ABBA A/B — the format §9 used — reads **−30.8 % wall / −18.8 %
+instructions**. That **overstates the shipped gain**, because its baseline is
+this binary's OFF arm, which is itself **+2.6 % instructions and +15.3 % cycles
+worse than the parent, with IPC collapsing 4.006 → 3.566**. Merely compiling the
+vector path in alongside it degrades the scalar path's register allocation and
+scheduling.
+
+It is specifically the *scalar* path that suffers: a control build with
+`laneVec` folded to a compile-time `true` (scalar arm dead-coded away) measures
+the **shipping** arm at 2.371 G vs 2.390 G — a dual-arm tax of only **+0.8 %
+instructions, cycles within noise**. So the fallback costs the shipping arm
+essentially nothing and stays in for A/B, but *it must not be used as the
+baseline*.
+
+Against the ablation's prediction: the two loops were 0.571 G and the measured
+removal is **0.476 G, i.e. 83 % of them** — the vector replacements cost ~0.095 G,
+not the ~0.02 G a naive reading of the one-binary A/B (−0.552 G) would suggest.
+
+> **Carry this forward.** A one-binary flag A/B prices *the flag*, not *the
+> commit*. When the change adds a second code path to a hot function, confirm
+> against a binary built from the parent commit before quoting a delta. **§9's
+> own headline numbers for `--vol_cone_solve_vec` were taken in the one-binary
+> format and have not been re-checked this way** — that is flagged as an open
+> item, not as a claim that they are wrong.
+
+**This one is a different mechanism from the 8-wide solve, and the counters say
+so.** The solve was pure instruction count: IPC stayed flat at 3.9 and cycles
+fell in step with instructions. Here, parent → shipping, **cycles fall 20.8 %
+against instructions 16.6 %, and IPC rises 4.006 → 4.192** — so the loads and
+stores were *stalling* as well as retiring, though only modestly. (Measured
+against the OFF arm the same effect reads far bigger — cycles −30 % vs
+instructions −19 %, IPC 3.49 → 4.10 — but that is mostly the OFF arm's own
+IPC collapse, which is why the parent-relative numbers are the ones quoted.) A static histogram of the shipping kernel is **894 `ldr` +
+583 `str` of 4475 instructions (33 %)**, which is what pointed at the two loops
+in the first place; but note the static count barely moves after the fix (both
+arms are still compiled in), so **the static histogram is a hypothesis
+generator, not the evidence.** The evidence is the cycle/IPC split above.
+
+**IT IS BIT-EXACT, and unlike the solve it cost nothing to make so.** Neither
+loop contains an `a*b + c` that `-ffp-contract=fast` could fuse ambiguously, so
+there was no contraction map to read off the disassembly this time. Only three
+of the spellings §9 catalogued mattered, and following them worked first try:
+`std::max(d, fwMin)` as cmp+blend rather than `_mm256_max_ps`; the **unordered**
+predicates `_CMP_NEQ_UQ` / `_CMP_NLE_UQ` as the exact negations of
+`if (alive == 0) continue` and `if (acc <= 0) continue`; and the multiply order
+kept as `((acc*density)*nNorm)*coneGain` instead of folding the three scalars
+into one factor, which would be a re-association.
+
+### Greets needs NO gate here, and that is a measurement
+
+§9's headline caution was that a per-lane→wide port is not uniformly a win
+across call sites, and the 8-wide *solve* had to be gated `!segPath` because
+greets regressed on cycles and wall. **That gate is not needed for this change,
+and greets was measured rather than assumed** — interleaved min-of-6 at the pin
+pose:
+
+| greets t=1588 | scalar | 8-wide |
+|---|--:|--:|
+| cones wall_min | 7.995 ms | 7.640 ms (**−4.4 %**) |
+| cones Ginstr/f | 1.165 | 1.143 (−1.9 %) |
+| cones Gcyc/f | 0.255 | 0.249 (−2.4 %) |
+
+All three counters move the same direction. The mechanism is why: the solve's
+ungated regression came from the wide arm computing both `a`-sign branches and
+the whole tail **for dead lanes** that the scalar arm bailed on early. Neither
+of these two loops speculates on dead lanes — they do the same per-lane work as
+before and only delete the stack round-trip — so there is no dead-lane tax to
+repay on the segmented-cone branch. *Same technique, opposite gating answer,
+because the mechanism differs.*
+
+### City t-sweep, interleaved, 2 rounds
+
+| city `t` | cones Ginstr/f | | cones wall_min | | share of frame |
+|---|--:|--:|--:|--:|--:|
+| | scalar | 8-wide | scalar | 8-wide | scalar → 8-wide |
+| 400  | 2.071 | 1.815 (−12.4 %) | 16.9 ms | 13.1 ms (−22.5 %) | 38 % → 35 % |
+| 900  | 2.007 | 1.734 (−13.6 %) | 16.2 ms | 12.4 ms (−23.6 %) | 34 % → 30 % |
+| 1400 | 1.188 | 1.017 (−14.4 %) | 9.9 ms | 8.1 ms (−18.3 %) | 27 % → 24 % |
+| **1961** | **2.941** | **2.391 (−18.7 %)** | 24.6 ms | **17.4 ms (−29.2 %)** | **41 % → 36 %** |
+| 2400 | 1.506 | 1.298 (−13.8 %) | 12.3 ms | 9.8 ms (−20.2 %) | 40 % → 37 % |
+
+Wall falls 18–29 % at every pose, instructions 12–19 %.
+
+### Where the pass stands now, and the next lever
+
+At t=1961 cones is **2.390 of 6.588 Ginstr/f** — still the biggest single item
+(`DeferredLighting` 1.247, `fastfog` 1.092, `gbuffer` 0.891, `TBR-render`
+0.846), but it is now **36 % of the frame's instructions instead of 41 %**, and
+against the parent commit its wall is 21.4 → 17.1 ms. Across the campaign's two
+rounds the pass has gone 4.217 → 2.390 Ginstr/f, a **43 % cut**, measured
+consistently at the same pose.
+
+Scaling the ladder to the new arm, the remaining composition is roughly: the
+**integration body ~1.09 G** (now clearly the largest slice, and already 8-wide),
+the **solve ~0.99 G**, the per-spot prologue 0.17 G, the floor 0.05 G. Two
+things a next round should know:
+
+* **The body is the target, and the sub-ladder above cannot resolve it.** It
+  needs a different instrument than staged `continue`s — source-line sampling,
+  or splitting the body into real functions so per-symbol attribution works.
+* **Levers already dead, with numbers, do not re-try them:** the per-lane noise
+  loop (+0.015 G, already hoisted by the compiler); per-spot invariant
+  broadcasts (the disassembly carries only **37 `dup.4s` in the entire
+  function** against the ~25 `_mm256_set1_ps` written per (batch × spot) in the
+  source — the compiler already hoists them out of the loop); and from §9, the
+  range-sphere early-out, raw `rcp`/`rsqrt`, relaxed FP association, finer cone
+  tiles, and the `1/uV` hoist.
