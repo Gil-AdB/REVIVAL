@@ -94,6 +94,20 @@ extern thread_local double   g_phRaster;
 extern thread_local double   g_phFill;
 extern thread_local double   g_phLight;
 extern thread_local double   g_phCone;
+#if FDS_SHARD_BAKE_LAB
+// Sub-split of g_phLight — where Render_DeferredLighting's per-INVOCATION time
+// goes when the target is a 64² shard cell. LAB ONLY: these clocks sit in a
+// shared hot function and adding calls there is the exact hazard 5adcae12
+// bisected (a call, not a branch, moves the pins under -ffp-contract), so they
+// are preprocessed out of the shipping build.
+extern thread_local double   g_phDlLights;  // ViewLightsSoA memset + omni loop
+extern thread_local double   g_phDlDepth;   // computeTileDepthBounds
+extern thread_local double   g_phDlBin;     // buildTileLightLists
+extern thread_local double   g_phDlCtx;     // ctx fill (matTable, shadowSkipMask…)
+extern thread_local double   g_phDlTiles;   // the tile-kernel loop itself
+extern thread_local uint64_t g_phDlCalls;   // invocations
+extern thread_local uint64_t g_phDlLightN;  // Σ numLights over invocations
+#endif
 
 // Snapshot of the current main-pass render target globals (VPage,
 // ZPage16, XRes, YRes, VESA_BPSL, g_gbuffer*, g_xparZ*) into a

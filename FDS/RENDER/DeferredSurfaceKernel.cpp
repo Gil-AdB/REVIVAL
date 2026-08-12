@@ -3057,7 +3057,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	}
 
 	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
-	renderns::tileDone.release();
+	// SKIPPED for an INLINE (offscreen-bake) dispatch: the calling thread would
+	// immediately re-acquire its own permit, and that shared semaphore is
+	// contended by every pool thread — 3.4-4.0 us of CORE time per round trip
+	// at 12 threads, paid 96x per 64x64 shard cell. See
+	// DeferredLightingCtx::inlineDispatch.
+	if (!ctx.inlineDispatch) renderns::tileDone.release();
 }
 
 // Per-pixel deferred lighting for transparent (front-facing) surfaces.
@@ -5137,7 +5142,12 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	}
 
 	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
-	renderns::tileDone.release();
+	// SKIPPED for an INLINE (offscreen-bake) dispatch: the calling thread would
+	// immediately re-acquire its own permit, and that shared semaphore is
+	// contended by every pool thread — 3.4-4.0 us of CORE time per round trip
+	// at 12 threads, paid 96x per 64x64 shard cell. See
+	// DeferredLightingCtx::inlineDispatch.
+	if (!ctx.inlineDispatch) renderns::tileDone.release();
 }
 
 // Race-free because wave-2 reads only what wave-1 wrote; tile-job
@@ -5809,7 +5819,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	}
 
 	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
-	renderns::tileDone.release();
+	// SKIPPED for an INLINE (offscreen-bake) dispatch: the calling thread would
+	// immediately re-acquire its own permit, and that shared semaphore is
+	// contended by every pool thread — 3.4-4.0 us of CORE time per round trip
+	// at 12 threads, paid 96x per 64x64 shard cell. See
+	// DeferredLightingCtx::inlineDispatch.
+	if (!ctx.inlineDispatch) renderns::tileDone.release();
 }
 
 // Per-frame setup + dispatch tile jobs across the ThreadPool. Same 6×4
@@ -5846,6 +5861,23 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	Scene *Sc = CurScene;
 	if (!Sc) return;
 
+#if FDS_SHARD_BAKE_LAB
+	// LAB-ONLY sub-attribution of this call, for the offscreen (ov) path only:
+	// which part of the per-INVOCATION work dominates when the target is a 64²
+	// shard cell. See FrameState.h for why it is compile-time gated.
+	static const bool sDlProf = (std::getenv("FDS_SHARD_REFL_PROF") != nullptr);
+	const bool dlProf = sDlProf && ov;
+	auto dlNow = [&]() {
+		return dlProf ? std::chrono::steady_clock::now()
+		              : std::chrono::steady_clock::time_point{};
+	};
+	auto dlAdd = [&](double &acc, const std::chrono::steady_clock::time_point &a,
+	                 const std::chrono::steady_clock::time_point &b) {
+		if (dlProf) acc += std::chrono::duration<double, std::milli>(b - a).count();
+	};
+	if (dlProf) ++fds::g_phDlCalls;
+	auto _dlA = dlNow();
+#endif
 	MatTable matTable = Scene_GetMatTable(Sc);
 	if (!matTable.data || matTable.count == 0) return;
 
@@ -6071,9 +6103,28 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		++numLights;
 	}
 	TailProf::mark("light-list", _llist);   // SoA build: per-light xform + linear shadow-map scans
+#if FDS_SHARD_BAKE_LAB
+	{ const auto _b = dlNow(); dlAdd(fds::g_phDlLights, _dlA, _b); _dlA = _b;
+	  if (dlProf) fds::g_phDlLightN += uint64_t(numLights); }
+#endif
 
-	constexpr int numTilesX = DEFERRED_NUM_TILES_X;
-	constexpr int numTilesY = DEFERRED_NUM_TILES_Y;
+	// Tile grid. The main frame keeps the engine-wide 12×8. An OFFSCREEN target
+	// (ov) sizes its grid to ITSELF: 12×8 over a 64² shard cell means 8×8-pixel
+	// tiles — 96 tile-kernel invocations for 4 096 pixels, 32 of them entirely
+	// off the right edge — and the per-tile fixed cost is then a third of the
+	// whole pass. --deferred_offscreen_tile_px is the minimum tile edge in
+	// pixels (0 = legacy: use the main grid offscreen too). See the flag text
+	// for the measured sweep; the reflection atlas is byte-identical at every
+	// grid tried, 12×8 through 1×1.
+	int numTilesX = DEFERRED_NUM_TILES_X;
+	int numTilesY = DEFERRED_NUM_TILES_Y;
+	if (ov) {
+		const int minPx = fds::FeatureFlags::deferred_offscreen_tile_px();
+		if (minPx > 0) {
+			numTilesX = std::clamp(XRes / minPx, 1, DEFERRED_NUM_TILES_X);
+			numTilesY = std::clamp(YRes / minPx, 1, DEFERRED_NUM_TILES_Y);
+		}
+	}
 	// Round tileSizeX up to the next multiple of 8 so the OuterVec
 	// kernel's 8-wide vec loop sees aligned tiles for all-but-the-last
 	// tile column. The last tile width can still be unaligned at non-
@@ -6096,6 +6147,9 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	                       tileSizeX, tileSizeY, XRes, YRes,
 	                       invZScale, reinterpret_cast<const uint16_t*>(ZPage16));
 	TailProf::mark("depth-bounds", _lsetup);   // per-tile z-buffer scan (par-able)
+#if FDS_SHARD_BAKE_LAB
+	{ const auto _b = dlNow(); dlAdd(fds::g_phDlDepth, _dlA, _b); _dlA = _b; }
+#endif
 	// Mirror-footprint presence per tile/strip, for the clone-light
 	// cull in the list builders. Only computed when a scene actually
 	// activated the mask plane (GreetsMirror::BuildMirror).
@@ -6121,6 +6175,9 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	                    tileSizeX, tileSizeY, XRes, YRes,
 	                    lights, numLights, tilePresence, camCtx);
 	TailProf::mark("tile-cull", _tcull);       // light-major append (harder to par)
+#if FDS_SHARD_BAKE_LAB
+	{ const auto _b = dlNow(); dlAdd(fds::g_phDlBin, _dlA, _b); _dlA = _b; }
+#endif
 
 	// Diagnostic (FDS_TILE_LIGHT_PROF=1): avg/max surviving lights per tile
 	// after the cone cull, main frame only. Decides whether the deferred-kernel
@@ -6299,14 +6356,26 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// Dispatch: main frame tiles across the pool; an offscreen bake
 	// (ov->inlineDispatch) runs the tiles on the calling worker thread (it is
 	// itself a pool thread doing a WHOLE render — no nested enqueue). The tile
-	// kernel releases renderns::tileDone at its end, so the inline path drains
-	// it per tile to stay net-zero on the shared semaphore.
+	// kernel posts a renderns::tileDone permit at its end for the POOL path; on
+	// the inline path it posts none and nothing is drained, because the poster
+	// and the taker would be the same thread and that semaphore is shared with
+	// every other worker (--deferred_inline_tile_sem restores the round trip).
+#if FDS_SHARD_BAKE_LAB
+	{ const auto _b = dlNow(); dlAdd(fds::g_phDlCtx, _dlA, _b); _dlA = _b; }
+#endif
 	const bool useOuterVec = deferredLightingOuterVecEnabled();
 	const bool inlineDispatch = ov && ov->inlineDispatch;
+	// The tile kernels read this to decide whether to post a tileDone permit.
+	// Inline = this thread runs the tiles itself, so the permit would come
+	// straight back — and the semaphore is shared with every pool thread.
+	// --deferred_inline_tile_sem=1 restores the legacy round trip (revert
+	// lever + A/B arm); see the flag's own text for the measurement.
+	const bool legacyTileSem = fds::FeatureFlags::deferred_inline_tile_sem();
+	ctx.inlineDispatch = inlineDispatch && !legacyTileSem;
 	if (!inlineDispatch) renderns::tileCounter = 0;
 	const TailProf::Stamp _w1q("lighting-w1");
-	constexpr int nTiles = DEFERRED_NUM_TILES;
-	auto tileBounds = [tileSizeX, tileSizeY, XRes, YRes](int t, int &x1, int &y1, int &x2, int &y2) {
+	const int nTiles = numTilesX * numTilesY;
+	auto tileBounds = [tileSizeX, tileSizeY, XRes, YRes, numTilesX](int t, int &x1, int &y1, int &x2, int &y2) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
 		y1 = tileSizeY * j; y2 = std::min(y1 + tileSizeY, YRes);
 		x1 = tileSizeX * i; x2 = std::min(x1 + tileSizeX, XRes);
@@ -6316,7 +6385,9 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
 			if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
 			else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
-			renderns::tileDone.acquire();
+			// Acquire ONLY under the legacy arm — with ctx.inlineDispatch the
+			// kernel posted no permit, so there is nothing to drain.
+			if (legacyTileSem) renderns::tileDone.acquire();
 		}
 	} else {
 		// Work-stealing chunk dispatch via dispatchIndexed (the tile kernel
@@ -6347,7 +6418,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			for (int t = 0; t < nTiles; ++t) {
 				int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
 				Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
-				renderns::tileDone.acquire();
+				if (legacyTileSem) renderns::tileDone.acquire();   // see wave 1
 			}
 		} else {
 			// Same dispatchIndexed shape as wave 1 (see above).
@@ -6372,6 +6443,9 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			"[SHADOW-CACHE] samples=%llu line-transitions=%llu (%.2f%%)\n",
 			(unsigned long long)s, (unsigned long long)t, pct);
 	}
+#if FDS_SHARD_BAKE_LAB
+	dlAdd(fds::g_phDlTiles, _dlA, dlNow());
+#endif
 }
 
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────

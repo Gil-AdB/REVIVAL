@@ -1,5 +1,152 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-12d — THE SHARD BAKE'S "FIXED WORK PAID 238 TIMES" IS REAL, BUT IT IS A CONTENDED SEMAPHORE AND 96 TILES OVER 4 096 PIXELS — NOT LIGHT SETUP. −23 % OF THE PASS, BYTE-NULL
+>
+> `5adcae12` closed with the item: *"`Render_DeferredLighting` runs 238 times per
+> shatter frame on a 64² target and is 78 % of the pass. Its per-invocation fixed
+> work — light binning into tiles, the tile-light lists, the shadow-atlas setup —
+> is being paid 238 times for 4 096 pixels each."* **The diagnosis was half
+> right and named the wrong suspects.** Measured first, restructured second.
+>
+> ### STEP 1 — WHERE THE PER-INVOCATION TIME ACTUALLY GOES
+>
+> New `[SHARD-DL]` sub-attribution inside `Render_DeferredLighting`, offscreen
+> path only, compile-time gated (`-DFDS_SHARD_BAKE_LAB=ON`) for exactly the
+> reason `5adcae12` records — clocks in a shared hot function move pins.
+> At HEAD, at the bracket, of **124.7 core-ms** of `Render_DeferredLighting`:
+>
+> | component | core-ms | share |
+> |---|--:|--:|
+> | the orchestrator prologue the item named (light SoA + depth bounds + tile binning + ctx) | 11–13 | **9–10 %** |
+> | per-tile `renderns::tileDone` release+acquire, 22 848 of them | ~16 | **13 %** |
+> | per-tile kernel prologue, 22 848 invocations | ~11 | **9 %** |
+> | the actual per-pixel shading of 975 000 pixels | ~85 | **68 %** |
+>
+> **The named suspect is 9 %.** The real fixed work is *per TILE*, not per
+> invocation: the tile grid is engine-global at 12×8, so a 64×64 shard cell
+> walks the same 96 tiles a 1920×1080 frame does — 8×8-pixel tiles, and **32 of
+> the 96 lie entirely off the right edge** (12 columns × 8 px = 96 px of a 64 px
+> image) and shade nothing at all. 96 × 238 shards = **22 848 tile invocations
+> per shatter frame.**
+>
+> ### THE SEMAPHORE, MEASURED STANDALONE
+>
+> Each tile kernel ends with `renderns::tileDone.release()` and the inline
+> dispatch loop immediately `acquire()`s it back — "net-zero on the shared
+> semaphore". It is not free, because it is *shared*: all 12 shard workers hit
+> the same `std::counting_semaphore` at once. Standalone microbenchmark on this
+> box (M2 Max, `/tmp/shardamort/sem2.cpp`):
+>
+> | | per release+acquire pair |
+> |---|--:|
+> | uncontended, 1 thread | **34.5 ns** |
+> | 12 threads on ONE semaphore | **3.4–4.0 µs of CORE time** |
+>
+> A 100× contention penalty, paid 22 848 times a frame. On the inline path the
+> permit is pure ceremony — the thread that posts it is the thread that takes it
+> back.
+>
+> ### STEP 2 — THE SHAPE CHOSEN, AND THE LOSER'S NUMBERS
+>
+> **Shape (a), "light the ATLAS, not the cells", was rejected on measurement,
+> not on the structural objection.** The structural objection is real (each cell
+> has its OWN reflected camera, so view-space reconstruction differs per cell and
+> the kernel would need per-tile camera indirection) — but the decisive point is
+> that after step 1 there is nothing left for it to amortize: the only cost that
+> is genuinely *per invocation* rather than per tile or per pixel is the
+> orchestrator prologue, **11 core-ms of 124.7**, and it is now 2.6.
+>
+> **What shipped is two independent fixes, both byte-null:**
+>
+> 1. `--deferred_inline_tile_sem` (default 0 = fixed). An inline dispatch posts
+>    no permit and drains none. `DeferredLightingCtx::inlineDispatch` carries the
+>    mode; the main frame is untouched (`ov == nullptr`).
+> 2. `--deferred_offscreen_tile_px` (default 32). An offscreen target sizes its
+>    tile grid to ITSELF: `clamp(xres/32,1,12) × clamp(yres/32,1,8)`, so a 64²
+>    cell gets 2×2 and everything ≥ 384 px wide keeps the full 12×8. The main
+>    frame keeps 12×8 unconditionally.
+>
+> Grid sweep, semaphore fix already on, `Render_DeferredLighting` core-ms /
+> wall ms, min-of-6 interleaved: **12×8 = 113.7 / 13.7 · 8×8 = 115.2 / 13.9 ·
+> 4×4 = 97.9 / 11.6 · 2×2 = 94.0 / 11.6 · 1×1 = 96.6 / 11.5.** The optimum is
+> broad and flat from 2×2 down to 1×1 — which says the win is *fewer tile
+> prologues*, not better culling: 1×1 hands every pixel the union of all lights
+> and still ties. The per-tile light cull buys almost nothing at this narrow
+> off-axis FOV.
+>
+> ### STEP 5 — WHAT IT BUYS
+>
+> **Min-of-8 paired reps, interleaved, one binary, the two flags the only
+> difference** (`--repro=greets@t=3122 --repro_from=3112 --repro_settle=0`,
+> `FDS_GREETS_SHATTER=1`, `FDS_GREETS_CAM="28.8,10.8,-62.85,1,0,0"`, the SECOND
+> shatter frame — frame 1 is the cold bake):
+>
+> | | HEAD | fixed | Δ |
+> |---|--:|--:|--:|
+> | `Render_DeferredLighting` core-ms | 121.7 | **93.6** | **−23 %** |
+> | shard-bake wall ms | 13.6 | **11.6** | **−15 %** |
+> | fixed-work share of the pass (`[SHARD-DL]`) | ~32 % | **3 %** | |
+>
+> Every one of the 8 paired reps favours the fix (HEAD 13.6–16.6 ms, fixed
+> 11.6–13.6). Ablation, min-of-6: semaphore alone 128.5 → 109.0, grid alone
+> → 92.5, both → 95.5 — **the two overlap**, because at 2×2 there are only 4
+> tiles per call and the semaphore traffic is already 96× smaller. Both ship:
+> the semaphore fix is the one that generalizes to any offscreen inline
+> dispatch, the grid fix is the one that removes the tile prologues.
+>
+> **The break frame the user actually feels**, `--bench=scene@scene=greets,t=3122,iters=1`
+> (one break frame, 1920×1080, cold bake), min-of-6 interleaved:
+> **46.25 → 43.88 ms**, with the bake inside it 16.4 → 14.0 ms. −2.4 ms, −5.1 %
+> of the frame.
+>
+> ### GATES — BYTE-NULL EVERYWHERE, INCLUDING THE SHATTER FRAME
+>
+> * **1024² reflection atlas**, break+1: `95a760c42203b411370a00a4872440c7` on
+>   ALL FOUR arms (legacy / semaphore-only / grid-only / both). A coarser tile's
+>   light list is a SUPERSET of a finer one's *in the same global light order*,
+>   and the extra lights fail the per-pixel `len2 <= range2` mask → exact `0.0f`.
+> * **The break+1 FRAME itself**: `280cf102ddd5775ee0ef06bbbb20fdbe`, **6 runs on
+>   each arm, one value**. Note this contradicts `5adcae12`'s "the shatter frame
+>   is nondeterministic at HEAD, 1 600 of 2 073 600 px run-to-run" — at this
+>   commit, on this bracket, it is stable 12/12. Whatever produced that spread is
+>   not present here; not chased.
+> * **Pins**: greets `778fa6acd85a69cf241babefcdaf598e`, fountain
+>   `8db68ccb59416e9a44037e9f387b7bd9`, city `3cbe42b166847e40f7071eedb48d613c`
+>   — 2/2 each with the fix ON, and 2/2 again with both revert levers set.
+> * **`render_gate.sh` 3/3 PASS** (`4ac809e5` / `b41894f9` / `166fa25a`) —
+>   `mirrortest` is what covers the mirror RTT, the other `DeferredOverride` user.
+>
+> Images: `docs/img/fogwt/shardtile_t3122_bytenull.png` (mosaic + atlas),
+> `docs/img/fogwt/shardtile_t3122_atlascells.png` (cell zoom).
+>
+> ### TWO METHOD TRAPS, RECORDED SO THE NEXT AGENT DOES NOT PAY THEM
+>
+> 1. **zsh does not word-split unquoted parameters.** An A/B loop that builds an
+>    arm as `E="--flag_a=1 --flag_b=0"` and passes bare `$E` sends ONE argv token
+>    under zsh — and this binary's flag parser drops a token containing a space
+>    *silently* (a genuinely unknown flag is reported and fatal; this is not).
+>    The revert arm then measures the DEFAULT and the A/B reads "no difference".
+>    It cost a full round of measurements here. Use bash + an array
+>    (`ARM=(--a --b)` … `"${ARM[@]}"`), which is what `tools/`-style scripts do.
+> 2. **`--bench=scene@...,iters=N` is not an A/B harness for the shatter past
+>    iteration 1.** The shard poses advance by WALL-CLOCK dt, so the face count
+>    per iteration is non-monotonic and the two arms diverge into different
+>    poses. `iters=1` (one break frame) and the frozen `--repro` bracket are the
+>    comparable measurements.
+>
+> ### WHAT IS LEFT, HONESTLY
+>
+> After this, **97 % of the pass is the per-pixel shading of 974 848 pixels**
+> (238 cells × 64²) at ~96 ns/px with ~10–18 lights surviving the tile cull per
+> tile. That is real work, not overhead: it is roughly half a 1080p frame's worth
+> of deferred shading, and the shards cover about that much screen at the break.
+> The remaining levers are all *rate or resolution* reductions — checkerboard /
+> quarter-rate for the offscreen bake (the wave-2 `TileFill` machinery already
+> exists and is per-target selectable), or a smaller `texRes_` — and every one of
+> them is a LOOK change on a surface the user gates by eye, so none was taken
+> unilaterally. The per-target HDR item below is still open and still lands in
+> this same call.
+
 > ## 2026-08-12c — THE CONE SOLVE IS 8 LANES WIDE NOW, −9.4 ms/FRAME ON CITY, AND NOT ONE PIN MOVED
 >
 > The standing biggest perf item in the tree, closed. `a16567b` had located it

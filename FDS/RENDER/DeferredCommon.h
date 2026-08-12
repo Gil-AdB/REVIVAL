@@ -317,6 +317,16 @@ struct DeferredLightingCtx {
 	// Render_DeferredLighting; matID is 8-bit so 256 bits covers the table.
 	// Bit set == skips casting. Byte-identical: same predicate, same Material*.
 	uint64_t             shadowSkipMask[4];
+	// True when the tile kernels run INLINE on the calling thread (an
+	// offscreen bake: DeferredOverride::inlineDispatch). Then the kernel must
+	// NOT release renderns::tileDone and the dispatch loop must not acquire
+	// it: the permit would go straight back to the thread that posted it, and
+	// that shared semaphore is the one every pool thread uses. MEASURED: 12
+	// threads round-tripping ONE std::counting_semaphore cost 3.4-4.0 us per
+	// release+acquire pair in CORE time against 34 ns uncontended, and the
+	// mirror-shard bake was paying 96 tiles x 238 shards = 22 848 of them per
+	// shatter frame. Pixel values do not depend on this flag.
+	bool                 inlineDispatch = false;
 };
 
 

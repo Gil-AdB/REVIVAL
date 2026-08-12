@@ -58,6 +58,15 @@ thread_local double   g_phRaster = 0.0;
 thread_local double   g_phFill = 0.0;
 thread_local double   g_phLight = 0.0;
 thread_local double   g_phCone = 0.0;
+#if FDS_SHARD_BAKE_LAB
+thread_local double   g_phDlLights = 0.0;
+thread_local double   g_phDlDepth  = 0.0;
+thread_local double   g_phDlBin    = 0.0;
+thread_local double   g_phDlCtx    = 0.0;
+thread_local double   g_phDlTiles  = 0.0;
+thread_local uint64_t g_phDlCalls  = 0;
+thread_local uint64_t g_phDlLightN = 0;
+#endif
 
 // Legacy struct kept while phase 2 lands. Its fields are no longer the
 // canonical home for the per-frame state — they're transitional and

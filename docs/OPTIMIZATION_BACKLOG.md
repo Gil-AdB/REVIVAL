@@ -90,9 +90,25 @@ gate rather than a re-pin: **0.1 ms is not worth three pins.**
 `Render_DeferredLighting` runs **238 times per shatter frame on a 64² target**
 and is 78 % of the pass. Its per-invocation fixed work — light binning into
 tiles, the tile-light lists, the shadow-atlas setup — is being paid 238 times
-for 4 096 pixels each. STATUS: **TODO**, and it is the item that would actually
-move this pass. Note it composes with the per-target-HDR item below, which
-touches the same call.
+for 4 096 pixels each. STATUS: **DONE 2026-08-12, and the diagnosis above named
+the wrong suspects** — see the dated block at the top of `docs/SESSION_STATE.md`.
+Measured, the orchestrator prologue this paragraph blames is **9–10 %** of the
+pass. The fixed work is per **TILE**, not per invocation: the tile grid was
+engine-global at 12×8, so a 64² cell walked 96 tiles (32 of them entirely off
+the right edge, shading nothing) = 22 848 tile invocations per shatter frame,
+each paying a kernel prologue **and** a `renderns::tileDone` release+acquire on
+a semaphore all 12 workers share — **3.4–4.0 µs of core time per pair contended,
+against 34.5 ns uncontended**. Two flags, both default-on, both byte-null:
+`--deferred_inline_tile_sem` (inline dispatch posts no permit) and
+`--deferred_offscreen_tile_px` (offscreen targets size the grid to themselves).
+`Render_DeferredLighting` 121.7 → 93.6 core-ms, bake wall 13.6 → 11.6 ms, fixed-
+work share 32 % → 3 %, break frame 46.25 → 43.88 ms. Atlas, break+1 frame, all
+three pins and `render_gate` byte-identical. **What is left is not overhead:**
+97 % of the pass is now the per-pixel shading of 974 848 pixels, and the only
+remaining levers are rate/resolution reductions (offscreen checkerboard or
+quarter-rate — the wave-2 `TileFill` machinery is already per-target selectable
+— or a smaller `texRes_`), every one of which is a LOOK change on a surface the
+user gates by eye. Note the per-target-HDR item below still touches this call.
 
 **STATUS of the cull itself: PARKED — built, measured byte-identical, measured
 not-worth.** Reproduce with `cmake -S . -B build-lab -G Ninja

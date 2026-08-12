@@ -1101,19 +1101,33 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 	// folds its own totals in once, at the end of its whole run.
 	std::atomic<uint64_t> ccTested{0}, ccCulled{0}, ccDrawn{0};
 	double gPhS=0, gPhX=0, gPhR=0, gPhF=0, gPhL=0, gPhC=0;
+#if FDS_SHARD_BAKE_LAB
+	double gDlLi=0, gDlDe=0, gDlBi=0, gDlCx=0, gDlTi=0; uint64_t gDlN=0, gDlLN=0;
+#endif
 	auto runWorker = [&](ReflWorker& w) {
 		fds::g_reflFaceTested = 0;
 		fds::g_reflFaceCulled = 0;
 		fds::g_reflFaceDrawn  = 0;
 		fds::g_phSetup = fds::g_phXform = fds::g_phRaster = 0.0;
 		fds::g_phFill = fds::g_phLight = fds::g_phCone = 0.0;
+#if FDS_SHARD_BAKE_LAB
+		fds::g_phDlLights = fds::g_phDlDepth = fds::g_phDlBin = 0.0;
+		fds::g_phDlCtx = fds::g_phDlTiles = 0.0;
+		fds::g_phDlCalls = fds::g_phDlLightN = 0;
+#endif
 		int si;
 		while ((si = cursor.fetch_add(1, std::memory_order_relaxed)) < N)
 			renderShardIntoCell(sc, si, w, E, aw, ah);
 		ccTested.fetch_add(fds::g_reflFaceTested, std::memory_order_relaxed);
 		ccCulled.fetch_add(fds::g_reflFaceCulled, std::memory_order_relaxed);
 		ccDrawn.fetch_add(fds::g_reflFaceDrawn, std::memory_order_relaxed);
-		{ static std::mutex mu; std::lock_guard<std::mutex> lk(mu); gPhS+=fds::g_phSetup; gPhX+=fds::g_phXform; gPhR+=fds::g_phRaster; gPhF+=fds::g_phFill; gPhL+=fds::g_phLight; gPhC+=fds::g_phCone; }
+		{ static std::mutex mu; std::lock_guard<std::mutex> lk(mu); gPhS+=fds::g_phSetup; gPhX+=fds::g_phXform; gPhR+=fds::g_phRaster; gPhF+=fds::g_phFill; gPhL+=fds::g_phLight; gPhC+=fds::g_phCone;
+#if FDS_SHARD_BAKE_LAB
+		  gDlLi+=fds::g_phDlLights; gDlDe+=fds::g_phDlDepth; gDlBi+=fds::g_phDlBin;
+		  gDlCx+=fds::g_phDlCtx; gDlTi+=fds::g_phDlTiles;
+		  gDlN+=fds::g_phDlCalls; gDlLN+=fds::g_phDlLightN;
+#endif
+		}
 		done.release();
 	};
 	for (size_t t = 1; t < P; ++t) {
@@ -1136,6 +1150,15 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 		    ct ? 100.0 * double(cc) / double(ct) : 0.0,
 		    (unsigned long long)cd);
 		std::fprintf(stderr, "[SHARD-PHASE] core-ms setup=%.1f xform=%.1f raster=%.1f (gbufferfill=%.1f deferredlight=%.1f cones=%.1f)\n", gPhS, gPhX, gPhR, gPhF, gPhL, gPhC);
+#if FDS_SHARD_BAKE_LAB
+		std::fprintf(stderr,
+		    "[SHARD-DL] %llu calls, avg %.1f lights: lightsoa=%.1f depthbounds=%.1f "
+		    "tilebin=%.1f ctx=%.1f tilekernels=%.1f  (fixed=%.1f of %.1f = %.0f%%)\n",
+		    (unsigned long long)gDlN, gDlN ? double(gDlLN)/double(gDlN) : 0.0,
+		    gDlLi, gDlDe, gDlBi, gDlCx, gDlTi,
+		    gDlLi+gDlDe+gDlBi+gDlCx, gPhL,
+		    gPhL > 0.0 ? 100.0*(gDlLi+gDlDe+gDlBi+gDlCx)/gPhL : 0.0);
+#endif
 	}
 
 	// FDS_SHARD_ATLAS_DUMP=<path>: de-tile + write the whole reflection atlas to
