@@ -1109,6 +1109,7 @@ namespace fds { extern int  g_offscreenViewDepth;   // >0 inside a mirror RTT /
                     // keep the movers out of ITS static capture regardless of
                     // --env_bake_include_animated (EnvBake.cpp's global comment)
                 extern bool g_envBakeSkipMirrorClones;
+                void EnvBake_NoteMoverInStaticCapture(const char* name, int faces);
                 extern bool g_envOverlayDynamicOnly;   // ENVDYN A3: invert the
                     // static-only env bake — render DYNAMIC meshes only, static
                     // skipped (mirrors g_inDynamicShadowBake for the env overlay)
@@ -1598,6 +1599,16 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 					unsigned(T->Rotate.NumKeys), unsigned(T->FIndex));
 			}
 		}
+		// THE INVARIANT CENSUS (EnvBake.cpp). Any mesh the dynamic predicate
+		// calls a MOVER that survives this far in an ENV static capture is
+		// content frozen at bake time. Harmless for a legacy (non-overlaid)
+		// probe; a duplicate of the live copy, and the user-visible "some mech
+		// parts do not change height", for one --env_dynamic overlays. Counted
+		// here rather than asserted, so the bake can NAME what it kept.
+		// Env static bakes only — g_envBakeSkipDynamic is false in the shadow
+		// bakes and in the dynamic-only overlay.
+		if (fds::g_envBakeSkipDynamic && meshDynForBake())
+			fds::EnvBake_NoteMoverInStaticCapture(Obj->Name, int(T->FIndex));
 
 		// Mesh-bsphere-vs-cone cull during shadow-pass Transform_Objects.
 		// Cheap pre-test that lets us skip the matrix work + vertex

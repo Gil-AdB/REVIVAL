@@ -18,6 +18,7 @@
 #include <FILLERS/Mekalele.h> // g_gbuffer->mirrorMask neutralization (bake)
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <climits>
@@ -81,6 +82,76 @@ bool g_envBakeSkipDynamic = false;
 // retained separately. Gated on env_probe_follow_owner, so every shipping arm
 // stays byte-null.
 bool g_envBakeSkipAnimatedForce = false;
+
+// ── THE INVARIANT CENSUS: no mover may land in an OVERLAID static capture ────
+// The rule this file now enforces (see envProbeStaticMustExcludeMovers) is a
+// one-liner — with --env_dynamic the LIVE OVERLAY owns the movers, so a mover
+// baked into the same probe's static master is a DUPLICATE frozen at bake
+// time — and a one-liner is exactly the kind of claim that rots silently. So
+// the static bake COUNTS what it kept: every mesh Transform_Objects submits
+// into an env static capture that the engine's own dynamic predicate calls a
+// mover. Reported per bake, and asserted to be ZERO for every overlaid probe.
+//
+// Summed over the six cube faces (each face re-runs the mesh loop), so the
+// face count is submissions, not distinct faces; the NAMES are the useful
+// part and they are what the classification table is built from. Atomics
+// because the mesh loop can sherd across workers, even though every env-probe
+// re-entry is serial today (Transform.cpp:1139).
+std::atomic<int> g_envBakeMoverMeshHits{0};   // mesh submissions
+std::atomic<int> g_envBakeMoverFaceHits{0};   // Σ faces of those meshes
+static const char* g_envBakeMoverNames[8];
+static std::atomic<int> g_envBakeMoverNameCount{0};
+
+void EnvBake_NoteMoverInStaticCapture(const char* name, int faces) {
+    g_envBakeMoverMeshHits.fetch_add(1, std::memory_order_relaxed);
+    g_envBakeMoverFaceHits.fetch_add(faces, std::memory_order_relaxed);
+    // Dedup by NAME POINTER (Object::Name is stable for the scene's life).
+    const int n = g_envBakeMoverNameCount.load(std::memory_order_relaxed);
+    for (int i = 0; i < n && i < 8; ++i)
+        if (g_envBakeMoverNames[i] == name) return;
+    if (n < 8) {
+        g_envBakeMoverNames[n] = name;
+        g_envBakeMoverNameCount.store(n + 1, std::memory_order_relaxed);
+    }
+}
+
+static void envBakeMoverCensusReset() {
+    g_envBakeMoverMeshHits.store(0, std::memory_order_relaxed);
+    g_envBakeMoverFaceHits.store(0, std::memory_order_relaxed);
+    g_envBakeMoverNameCount.store(0, std::memory_order_relaxed);
+}
+
+// `overlaid` = this store retains a static master that --env_dynamic's overlay
+// will composite movers onto. For those, a non-zero count is a BUG, and it is
+// printed as one rather than left for a reader to notice.
+static void envBakeMoverCensusReport(const char* matName, bool overlaid) {
+    const int meshes = g_envBakeMoverMeshHits.load(std::memory_order_relaxed);
+    const int faces  = g_envBakeMoverFaceHits.load(std::memory_order_relaxed);
+    const int n      = g_envBakeMoverNameCount.load(std::memory_order_relaxed);
+    if (!overlaid && meshes == 0) return;   // nothing to say about legacy bakes
+    char names[256]; names[0] = '\0';
+    for (int i = 0; i < n && i < 8; ++i) {
+        std::strncat(names, i ? ", " : "", sizeof(names) - std::strlen(names) - 1);
+        std::strncat(names, g_envBakeMoverNames[i] ? g_envBakeMoverNames[i] : "?",
+                     sizeof(names) - std::strlen(names) - 1);
+    }
+    if (overlaid && meshes == 0) {
+        std::fprintf(stderr, "[ENVDYN-CENSUS] '%s': 0 mover meshes in the static "
+                     "capture — the overlay is the sole source of movers (invariant OK)\n",
+                     matName ? matName : "?");
+    } else if (overlaid) {
+        std::fprintf(stderr, "[ENVDYN-CENSUS] '%s': INVARIANT VIOLATED — %d mover "
+                     "mesh submission(s), %d face(s), from {%s} baked into a static "
+                     "capture the overlay also draws live: that content is FROZEN at "
+                     "bake time and duplicates the live copy\n",
+                     matName ? matName : "?", meshes, faces, names);
+    } else {
+        std::fprintf(stderr, "[ENVDYN-CENSUS] '%s': %d mover mesh submission(s), %d "
+                     "face(s), from {%s} in a NON-overlaid static capture (legacy "
+                     "--env_bake_include_animated behaviour, frozen by design)\n",
+                     matName ? matName : "?", meshes, faces, names);
+    }
+}
 
 // ENVDYN A3: the INVERSE filter — read by Transform_Objects while the dynamic-
 // mesh env overlay renders. True → static meshes are skipped and ONLY dynamic
@@ -1281,6 +1352,7 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
     EnvPanoLinear& v = store->view;
     g_envBakeInProgress = true;
     g_envBakeSkipAnimatedForce = skipAnimatedForce;
+    envBakeMoverCensusReset();
     // HACK (accepted, documented): a metal surface whose OWN store hasn't
     // been baked/tabled yet renders BLACK inside another surface's probe —
     // metalness kills its diffuse and its env-specular term needs a pano the
@@ -1312,6 +1384,7 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
         restoreMetal();
         g_envBakeInProgress = false;
         g_envBakeSkipAnimatedForce = false;
+        envBakeMoverCensusReport(skipMat ? skipMat->Name : nullptr, retainStatic);
         if (!ok) return nullptr;
         v.isCube = true;
         v.W = v.H = faceRes;
@@ -1429,6 +1502,44 @@ static bool envProbeOwnerIsMover(Scene* sc, SceneEnv& env, const Material* M) {
     SceneEnv::OwnerTrack& t = env.ownerTrack[M];
     collectOwnerMeshes(sc, M, t);
     return t.splineAnim;
+}
+
+// ── MUST THIS PROBE'S STATIC CAPTURE EXCLUDE THE MOVERS? ────────────────────
+// ONE RULE, and it is about POPULATIONS, not about ownership: a mover belongs
+// to EXACTLY ONE of a probe's two contents. Where --env_dynamic is live, the
+// per-frame overlay is the one that owns it — that is the entire reason the
+// pristine static master is retained separately (A2) and re-composited every
+// frame. A mover ALSO baked into that master is a second copy of the same
+// object, frozen at bake time, sitting in the same cube.
+//
+// It is not a cosmetic duplicate, because the composite is a DEPTH test
+// (overlayComposite: `win = rendered && mZ >= sZ`). The frozen copy contributes
+// its own depth to sZ, so wherever it is nearer the probe than the live copy it
+// WINS and the live mech is discarded behind its own ghost. That is the user's
+// report in one sentence: "only some mech parts are actually changing the
+// height — I see some mech parts changing height, while some don't." The parts
+// that don't are the frozen copy showing through.
+//
+// MEASURED on the greets 'stairs' probe, 60 overlays across t=7000..7060, his
+// exact line: the live mech rasterises 688,339 texels either way, of which
+// 54,104 lose the depth test with the movers in the static capture and 5,899
+// with them out. 48,205 texels of live mech hidden behind its own ghost.
+//
+// env_probe_follow_owner's own narrower rule (ece0dc27: a probe that RIDES a
+// mover keeps the movers out, because from a capture point ON the owner they
+// are near-plane slabs) stays — it is the same principle applied for a
+// different reason, and it must hold even when the overlay is off.
+//
+// SCOPE / byte-null: env_dynamic is compile-default OFF and only greets turns
+// it on, and the term is ANDed with the store's own retention flag, so no
+// existing bake in city/fountain/chase changes. --no-env_dyn_static_exclude
+// restores the duplicate for A/B.
+static bool envProbeStaticMustExcludeMovers(Scene* sc, SceneEnv& env,
+                                            const Material* M, bool retainStatic) {
+    if (envProbeOwnerIsMover(sc, env, M)) return true;
+    return retainStatic
+        && fds::FeatureFlags::env_dynamic()
+        && fds::FeatureFlags::env_dyn_static_exclude();
 }
 
 bool EnvReflection_FramePrep(Scene* sc) {
@@ -1601,11 +1712,11 @@ bool EnvReflection_FramePrep(Scene* sc) {
                 const Vector bc = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
                 // Preserve the group's dynamic retention across the res upgrade
                 // (S already flagged, or M flags it now). (ENVDYN A2)
+                const bool retain = S.envDynamic || envDynamicForMat(M);
                 auto bigger = bakeStore(sc, env, bc, S.bakedSkipMat,
-                                        S.bakedSkipR, wantFace,
-                                        S.envDynamic || envDynamicForMat(M),
-                                        envProbeOwnerIsMover(sc, env,
-                                                             S.bakedSkipMat));
+                                        S.bakedSkipR, wantFace, retain,
+                                        envProbeStaticMustExcludeMovers(
+                                            sc, env, S.bakedSkipMat, retain));
                 if (bigger) {
                     bigger->bakedSkipMat = S.bakedSkipMat;
                     bigger->bakedSkipR   = S.bakedSkipR;
@@ -1634,10 +1745,11 @@ bool EnvReflection_FramePrep(Scene* sc) {
             // followed probe's capture point sits ON its owner, so the movers
             // (its own hull first) must stay out of the static capture and
             // come from --env_dynamic's live overlay instead.
+            const bool retain     = envDynamicForMat(M);   // ENVDYN A2 retention
             const bool ownerMoves = envProbeOwnerIsMover(sc, env, M);
-            auto store = bakeStore(sc, env, c, M, excludeR, wantFace,
-                                   envDynamicForMat(M),   // ENVDYN A2 retention
-                                   ownerMoves);
+            auto store = bakeStore(sc, env, c, M, excludeR, wantFace, retain,
+                                   envProbeStaticMustExcludeMovers(sc, env, M,
+                                                                   retain));
             if (!store) { env.byMat[M] = -1; continue; }
             if (ownerMoves)
                 std::fprintf(stderr, "[ENVFOLLOW] '%s': probe rides a "

@@ -1,5 +1,109 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-12b — EVERY OVERLAID PROBE HELD THE MECH TWICE: ONE COPY LIVE, ONE FROZEN AT BAKE TIME
+>
+> User: *"for the mech dynamic env bake - you forgot to move the camera - only
+> some of the mech parts are actually changing the height - I see some mech parts
+> changing height, while some don't."* His line:
+> `./DEMO --greets-displace --scene-greets --env_probe_center --env-dynamic`.
+>
+> **THE HANDED-DOWN HYPOTHESIS IS DEAD, and it is dead by census, not by
+> argument.** The suspicion was partial mover classification — that the mech is a
+> multi-submesh assembly and the submeshes not carrying their own spline stay in
+> the followed canopy probe's static capture. They do not. `isDynamicForBake`
+> walks the PARENT CHAIN, and greets parents the whole mech under one null:
+> `mech null → Hull2.lwo → {Hull.lwo, L_leg1 → L_leg2, R_leg1 → R_leg2}`. All six
+> meshes classify as movers, all six were already excluded (ece0dc27), and the new
+> `[ENVDYN-CENSUS]` reports **0 mover meshes in `Hull.lwo::cockpit_upper`'s static
+> capture** in every arm. The 0.55 % that *does* differ between
+> `--env_bake_include_animated` arms is 2 147 texels on the DOWN face only — the
+> reflective floor, whose own probe carried the ghost: 1-bounce inter-reflection,
+> not misclassification.
+>
+> **WHAT IT IS.** `--env_bake_include_animated` (default **ON** since 2026-08-09)
+> lets the movers into ordinary probe bakes. `--env_dynamic`'s overlay then draws
+> those same movers live over the retained static master, every frame. So each
+> flagged probe holds the mech **twice**, and the second copy is frozen at bake
+> time. `envProbeOwnerIsMover` (ece0dc27) exempted exactly one probe — the one
+> that *rides* the owner — and left the other four.
+>
+> It is not a cosmetic duplicate: `overlayComposite` resolves the two by DEPTH
+> (`win = rendered && mZ >= sZ`). The frozen copy contributes its own depth to
+> `sZ`, so wherever the ghost is nearer the probe it **wins and the live mech is
+> discarded behind it**. That is his sentence: the parts that do not change height
+> are the ghost showing through.
+>
+> **THE CENSUS**, his line, t=7000..7060. `[ENVDYN-CENSUS]` counts what each
+> static capture kept and names it. Movers = 6 mech meshes + `__discoBall`:
+>
+> | probe | overlaid? | mover meshes in the static capture — BEFORE | AFTER |
+> |---|---|---|---|
+> | `Hull.lwo::cockpit_upper` | yes (followed) | **0** (already fixed, ece0dc27) | **0** |
+> | `momy-1` | yes | 7 meshes, 22 032 faces | **0** |
+> | `momy-2` | yes | 7 meshes, 22 032 faces | **0** |
+> | `stairs` | yes | 7 meshes, 22 032 faces | **0** |
+> | `screen emiter` | yes | 7 meshes, 22 032 faces | **0** |
+> | `amudim` | **no** | 7 meshes, 22 032 faces | 7 meshes (unchanged — legacy, by design) |
+>
+> **THE DEPTH TEST, MEASURED**, `stairs`, 60 overlays: the live mech rasterises
+> **688 339** texels in BOTH arms — same live population, which is the control —
+> of which **54 104 lose the depth test with the duplicate in and 5 899 with it
+> out**. 48 205 texels of live mech were hidden behind its own ghost; survivors
+> 1 283 120 → 1 384 120.
+>
+> **THE FROZEN POPULATION, MEASURED** — texels covered by mech at t=7020/7040/7060
+> *and* pixel-identical across all three (`stairs` cube, one bake point):
+>
+> | arm | mech-covered at some t | covered at all 3 | **FROZEN** |
+> |---|---|---|---|
+> | before | 66 785 | 34 949 | **26 905 = 40.3 % of the mech** |
+> | after | 44 182 | 3 218 | **345 = 0.8 %** |
+>
+> Control: the CANOPY probe, which this change does not touch, is **0.3 %** frozen
+> over one bake interval — it never had the defect, which is the second thing that
+> kills the handed-down hypothesis.
+>
+> `docs/img/envmap/envdyn_ghost_stairs_upface_strip.png` — the up-looking face
+> across the walk, before/after: a stationary mass of black limbs plus a moving
+> mech, then one mech that moves.
+> `docs/img/envmap/envdyn_ghost_stairs_atlas_strip.png` — the whole cube.
+>
+> **THE FIX: `--env_dyn_static_exclude` (default 1).** One rule, about
+> POPULATIONS rather than ownership — *where the overlay is live it is the SOLE
+> source of movers, so no mover may be baked into a master the overlay composites
+> onto.* `envProbeStaticMustExcludeMovers` ORs the new term beside
+> `envProbeOwnerIsMover`, which stays (it must hold even with the overlay off).
+>
+> **MAGNITUDE — READ THIS BEFORE EXPECTING A BIG PICTURE.** The duplicate is large
+> in the PROBE and small on SCREEN at every pose measured: **221 px > 12/765 over
+> 16 frames** at the scripted pose (max Δ 153), and **0 px** at the momy pose
+> (`FDS_GREETS_CAM="-12.1,3.2,-27,0,-0.06,-1"`). That is consistent with the
+> 2026-08-12 entry below, which priced the mech's share of the stairs' env term at
+> 0.03-0.3 LSB. **Trap for the next agent: a first pass measured "max Δ 617, mean
+> 440" at the momy pose and it was the PROFILER HUD digits, which differ run to
+> run — always `--profiler=0` for an A/B on frames.** So: the wiring defect is
+> real, measured, and fixed; whether it is the thing his eye caught is his call,
+> and `--no-env_dyn_static_exclude` restores the old behaviour for a live A/B.
+>
+> **NOT FIXED, RECORDED.** The followed canopy probe's overlay draws the owner's
+> own assembly from a capture point glued to that owner: the mech covers **23.9 %
+> of its own cube** (9-72 % per frame), and at each re-bake the point snaps ~1 u
+> and the coverage jumps in one frame (36 864 → 98 222 texels). Coherent within a
+> bake interval (0.3 % pinned), so it is a POP, not a frozen population — a
+> separate look call, not this bug.
+>
+> **GATES.** Pins run as a DIFFERENTIAL against a control binary built from the
+> parent commit in the same worktree (shared `Runtime/`, so the city cube is a
+> common input), run 1 discarded: greets `778fa6acd85a69cf241babefcdaf598e`,
+> greets+env_refl `e5f38b40179fad4d3705dd84d816e155`, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9`, city `3cbe42b166847e40f7071eedb48d613c` —
+> **all four byte-identical before vs after, 2/2 each, and all four match the
+> recorded table.** Byte-null holds because the term is ANDed with `--env_dynamic`
+> (compile-default OFF, greets-only). Determinism, 24 runs each on the walk
+> t=7000..7060: `stairs` live cube **24/24 `4b90d0ce3a10f406b1913606f9c2e9bb`**,
+> canopy live cube **24/24 `a93e8bfcda64647dbb4109135aaf3874`** — one value each,
+> so the new exclusion is deterministic and did not open a race.
+
 > ## 2026-08-12 — THE MECH IS IN THE STAIRS PROBE AND IN THE STAIRS' REFLECTION; IT IS ~2 ORDERS OF MAGNITUDE BELOW ONE LSB
 >
 > User: *"env probe center still doesn't show the mech on the stairs."* His line:
