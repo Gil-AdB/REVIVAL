@@ -332,6 +332,18 @@ inline float CubeShadow_Sample(int cubeIdx,
     // matrix itself is broken (e.g. a per-frame bake desynced).
     // Threshold deliberately loose (16× face size) to ignore face-
     // seam edge cases and only catch genuinely-broken upstream.
+    //
+    // FDS_DEV ONLY. Its cost is not the ~12 compare/fabs instructions it
+    // looks like: the abort branch keeps dwx/dwy/dwz, viewX/Y/Z, all three
+    // cr.lightISource components, viewToLight row 0, the offset and lz LIVE
+    // across the whole body just to print them, and that register pressure is
+    // what forces the 304-byte frame and the 10 stp/ldp callee-save pairs in
+    // this function's prologue/epilogue — paid on EVERY tap, ~1.4 M taps per
+    // greets frame. It is also redundant for memory safety: the iX/iY range
+    // check immediately below rejects anything off the map, and fcvtzs maps
+    // NaN to 0, so a broken matrix reads texel 0 rather than walking memory.
+    // The ship build drops it; dev builds keep the tripwire.
+#if FDS_DEV
     const float kSaneAbs = 16.0f * float(sm.xres > sm.yres ? sm.xres : sm.yres);
     if (!std::isfinite(smX) || !std::isfinite(smY) ||
         std::fabs(smX) > kSaneAbs || std::fabs(smY) > kSaneAbs) {
@@ -352,6 +364,7 @@ inline float CubeShadow_Sample(int cubeIdx,
         }
         std::abort();
     }
+#endif  // FDS_DEV
     const int iX = int(smX);
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
