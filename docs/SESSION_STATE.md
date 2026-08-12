@@ -1,5 +1,201 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-12 — THE JAMB DOES NOT BOW BECAUSE OF THE NORMAL; THE PINNED BORDER STANDS PROUD OF ITS OWN WALL
+>
+> His report at t=5998 (`/tmp/greets_dump_0_t5998.ppm`): the doorway jamb "still
+> bulges", the face rounding outward approaching the edge, plus faint blue dotted
+> vertical artifacts. His instinct was that this is the POM edge disease again —
+> smoothed normals off the surface plane. **It is not. Two hypotheses died on
+> measurement and the surviving mechanism is a LEVEL, not a DIRECTION.**
+>
+> ### THE MECHANISM, MEASURED
+>
+> `--greets_displace_junction_census` on the jamb plane x=17.898 (133 displaced
+> verts, binned by distance from the border line z=-58.014):
+>
+> | dist into wall (u) | n | angle(ride, plane normal) | out-of-plane (u) |
+> |---|---|---|---|
+> | 0.05–0.10 | 4 | 23.55° | −0.05657 |
+> | 0.35–0.60 | 4 | 24.49° | −0.07127 |
+> | 1.0–1.6 | 16 | 30.83° | −0.06255 |
+> | 2.5–4.0 | 33 | 42.02° | −0.05208 |
+> | 4.0–6.0 | 48 | 54.22° | −0.04372 |
+>
+> **DEAD HYPOTHESIS 1 — "the smoothed normal is contaminated NEAR the corner."**
+> The opposite is true by a factor of 2.3: the ride direction is *closest* to the
+> wall's own normal at the border (23.6°) and *furthest* from it in the far field
+> (54.2°). Whatever tilts the normals, it is not the jamb's return face reaching
+> in from the edge.
+>
+> **THE LIVE MECHANISM.** The border is pinned at displacement exactly 0 while the
+> wall it bounds sits ~0.055–0.077 u *behind* its authored plane (the convention is
+> zero-mean against the WHOLE height map, `d = amp*(h − 0.5491)`, and this wall's
+> window is not that mean). So the authored border line stands PROUD of the surface
+> it bounds and the last band ramps outward to meet it. As one number — near-edge
+> (0–40 px) minus far-field (350–800 px) out-of-plane offset from the z16 dump —
+> **bow −0.01912 u at t=5998 and −0.01858 u at t=5987.** That is the rounding-out.
+>
+> ### DEAD HYPOTHESIS 2 — RIDING THE PATCH-PLANE NORMAL MAKES IT WORSE, NOT BETTER
+>
+> `--greets_displace_plane_normal` (new, default OFF) rides each vertex's own
+> coplanar-fan normal instead of the smoothed one, guarded on coplanarity within
+> 2° and on having no position twin. It is the direct analogue of the POM per-face
+> fix, and **it is the worst arm measured**: at t=5998 silhouette std **16.49 px**
+> (span 59) against the shipping arm's 3.23 and the authored geometry's 1.73, and
+> it opens **797 background px** where the shipping arm opens 0. At t=5967 it is
+> std 27.82, span 95. Composed with the mean fix it is still bad (std 8.68, 5 612
+> background px). **Kept as a flag only so the refutation is reproducible.**
+>
+> ### THE FIX: A BORDER LEVEL, NOT A BORDER DIRECTION
+>
+> `--greets_displace_border_mean` (INT, default 0 = OFF, byte-null) holds every
+> FREED border vert at ONE CONSTANT displacement instead of at zero, so the border
+> stays a straight line by construction and only its depth is chosen.
+>
+> * **mode 1 — one constant per MATERIAL.** Straightest silhouette in the campaign
+>   (std **1.37**, span 4, better than the authored geometry) but the depth is
+>   wrong: bow flips −0.01912 → **+0.02226**.
+> * **mode 2 — one constant per authored PLANE** (canonical quantised plane hash,
+>   sign-folded on the dominant component; 1 594/1 594 freed border verts of
+>   `rooms` bind to their own plane, 0 fall back). Straightness holds and improves
+>   (std **1.35**) — but **THE PREDECESSOR'S PREMISE WAS WRONG**: per-material was
+>   never the reason mode 1 over-recessed. The per-plane means are **−0.0765 to
+>   −0.0781** against the material's −0.0715 — agreement to 8% — so mode 2 goes
+>   *deeper*, bow **+0.02521**. Per-plane is the right structure for a different
+>   reason (it is a per-wall level, not a per-room one) but it did not move the
+>   number that was wrong.
+>
+> **WHAT WAS ACTUALLY WRONG: THE ARITHMETIC MEAN IS NOT THE VISIBLE LEVEL.** At the
+> grazing angles where this defect is visible the rendered surface is the relief's
+> UPPER ENVELOPE, not its mean — the peaks occlude the valleys. Measured: vertex
+> mean −0.0765 u, rendered far-field level only **0.0248 u**, a factor of **3.1**.
+> Pinning the border to the full vertex mean therefore overshoots and the bow just
+> changes sign. `--greets_displace_border_mean_scale` prices it, and the bow is
+> **linear in the scale to three figures**:
+>
+> | scale | bow t=5998 | sil std | bow t=5987 | sil std |
+> |---|---|---|---|---|
+> | 0.00 (= the shipping zero-pin, reproduced exactly) | −0.01912 | 3.23 | −0.01858 | 6.63 |
+> | 0.20 | −0.00921 | 2.04 | −0.00741 | 4.65 |
+> | 0.30 | −0.00425 | 1.66 | −0.00241 | 3.70 |
+> | **0.40** | **+0.00047** | **1.61** | **+0.00228** | **2.82** |
+> | 0.50 | +0.00499 | 1.55 | +0.00673 | 2.40 |
+> | 0.80 | +0.01754 | 1.45 | +0.01886 | 2.27 |
+> | 1.00 | +0.02521 | 1.35 | +0.02615 | 2.16 |
+>
+> Fits: `bow = 0.0443*scale − 0.0179` (t=5998) and `0.0442*scale − 0.0164`
+> (t=5987) → **zero crossings 0.405 and 0.372, mean 0.39.** Default set to **0.40**
+> as a MEASURED calibration constant. At 0.40 the bow is 40× smaller than the
+> shipping arm's and the silhouette std is **1.61 — straighter than the authored
+> geometry itself (1.73)**. Note the two objectives do not peak together:
+> straightness keeps improving past 0.40 while flushness degrades, which is why
+> this is a knob and why 0.40 is the flushness point.
+>
+> ### WHAT IT COSTS — STATED LOUDLY, AND IT IS NOT FREE
+>
+> Background (z==0) pixels over the 18 poses of `docs/greets_review_poses.txt`:
+>
+> | arm | total bg px |
+> |---|---|
+> | shipping `--greets_displace` | **157** |
+> | `+ --greets_displace_free_edge` | **3 626** |
+> | `+ --greets_displace_border_mean=2` (scale 0.40) | **6 338** |
+>
+> **The holes are overwhelmingly the free-edge arm's** (157 → 3 626, ×23); the
+> border level roughly doubles them again. Worst poses t=5743 (3 → 1 380) and
+> t=6133 (4 → 901). Mechanism: a freed border no longer meets the *other
+> material's* face across a T-junction whose far side is not vertex-coincident, so
+> the constant offset opens a slit. **This needs his eye before it goes anywhere
+> near a default.** At the two >90° seam-corner poses the picture reverses once
+> `--greets_displace_seam_weld` is added: shipping 1 992/1 948 → fix+weld
+> **1 434/1 255**, i.e. better than shipping.
+>
+> ### THE DOTTED BLUE ARTIFACT IS NOT OURS
+>
+> Isolated blue-excess pixels at t=5998: flat **2 037**, shipping displaced
+> **1 939**, free-edge **1 956** — the undisplaced arm has the *most*. The vertical
+> dotted column he saw is at x≈979–981 and is the **lamp/torch stem**, a ~1 px-wide
+> post under the blue key light, rasterised with alternating coverage so it reads
+> as a dotted line (`/tmp/dot_x980.png`). Present identically without any
+> displacement. Not a displacement artifact; a thin-geometry rasterisation one.
+>
+> ### CRISP-PER-STONE NOTCH: NO ARM HAS ONE
+>
+> Silhouette profile over rows 150–950 at t=5998, transitions and run lengths:
+> flat 6 steps / 7 runs / median run 132 rows; shipping 13 / 14 / 79; free-edge
+> **29 / 30 / 3**; mode 1 4 / 5 / 168; mode 2 **4 / 5 / 173**. **Every transition
+> in every arm is exactly 1 px (count of |Δ|≥2 is zero everywhere).** So nothing
+> here notches per stone course: the pinned and mean arms make the border a
+> straight line — mode 2 most of all — and the free-edge arm's 29 steps are
+> per-vertex *wander* (median run 3 rows), not stone-aligned notching. If he wants
+> a crenellated doorway edge, none of these arms is the tool; the mortar structure
+> is not recoverable from the 62 px strip this pose leaves, so that measurement is
+> owed at a face-on pose.
+>
+> ### THE GPU ARM HAS THE SAME DEFECT BY CONSTRUCTION — READ FROM SOURCE, NOT RENDERED
+>
+> `GpuBench/shaders/deferred.metal` `tessShade()` computes
+> `op += nrm * (tu.k.y * (h - tu.k.z) * att)` with `nrm = normalize(on)`, the
+> **interpolated (smoothed) vertex normal** — term for term the CPU bake's
+> convention. `--tess_border_ramp` fades `att` to **zero** approaching a
+> one-face edge, which is the GPU's analogue of the CPU zero-pin and therefore
+> carries the *same* proud-border defect, spread over the ramp width instead of
+> concentrated at the last cell. **NOT MEASURED HERE**: GpuBench writes a colour
+> PPM only (no depth dump), and it is not built in this worktree, so a 0.02 u bow
+> is not recoverable from its output. The aligned change would be to fade `att`
+> toward the plane's mean level × 0.40 rather than toward 0, which needs a
+> per-patch mean uploaded alongside `borderMask`. **Owed work, not done.**
+>
+> ### GATES
+>
+> All new flags default OFF / byte-null. Shipping displaced arm at t=5967
+> **`c0beec384141e4f18525a84e6b07a9bc`, byte-identical** before and after (checked
+> twice, either side of the flag-type change). greets pin
+> `778fa6acd85a69cf241babefcdaf598e` **4/4**, fountain `8db68ccb…` 2/2 after
+> discarding run 1 (run 1 was `b91cb2ba…` — the documented post-rebuild cache
+> write), city `3cbe42b166847e40f7071eedb48d613c` 3/3, `render_gate` **3/3 PASS**.
+>
+> ### STEP 0 — THE GREETS PIN ADJUDICATION IS SETTLED, AND THE LOSER IS A RECIPE BUG
+>
+> Two agents reported contradictory greets pins. **Winner:
+> `778fa6acd85a69cf241babefcdaf598e`, 16 runs across FOUR content/code
+> configurations at origin tip `3b00bbc7`, one value every time:**
+>
+> | arm | tree | greets pin |
+> |---|---|---|
+> | A | worktree at tip, COMMITTED `GREETS.FLD` (`62c68fc9…`) | `778fa6ac…` 4/4 |
+> | B | same binary, Runtime seeded with the USER'S dirty `GREETS.FLD` (`89c4ec35…`) | `778fa6ac…` 4/4 |
+> | C | independent worktree + own build, user's `GREETS.FLD` + `Hull.lwo` | `778fa6ac…` 4/4 |
+> | D | fresh build with the main tree's parent-commit control revert of `0b466b77` applied, user's content | `778fa6ac…` 4/4 |
+>
+> **THE PIN DOES NOT DEPEND ON THE USER'S UNCOMMITTED AUTHORING FILES.** His
+> `GREETS.FLD` edit is invisible at t=1588 (arm A ≡ arm B, same binary). The note
+> in `tools/render_gate.sh` saying greets is gated out-of-band "because its pin
+> depends on the user's UNCOMMITTED authoring files" is **measurably wrong** and
+> should be corrected when someone touches that file.
+>
+> **THE LOSER, `2e96e91d9ce0188981cd71c3fdebb954`, IS REPRODUCIBLE ON DEMAND: it
+> is the pin recipe run WITHOUT the `FDS_GREETS_CAM=` prefix** — the scene's own
+> scripted camera at t=1588 instead of the pinned one. Verified exactly, first try.
+> Its "parent-commit control" was internally consistent because *both* of its arms
+> dropped the same prefix — **a differential control cannot detect a recipe
+> transcription error**, which is the lesson worth keeping. Recipe perturbations
+> that do NOT produce it, for the record: `--env_refl` on `e5f38b40…`, no
+> `--glass*` `42be82c8…`, `+--greets_displace` `0d05726a…`, bare `--deferred`
+> `8ba504ae…`, dropping `--hdr` reproduces the pin exactly.
+>
+> ### FLAGS ADDED (all default OFF / byte-null)
+>
+> * `--greets_displace_border_mean` INT 0/1/2 — the fix, mode 2 recommended
+> * `--greets_displace_border_mean_scale` FLOAT, default **0.40** (measured)
+> * `--greets_displace_plane_normal` — the refuted direction arm, kept for repro
+> * `--greets_displace_junction_census` gains `[STONE-BOW]` / `[STONE-BMEANP]`
+>
+> Recommended arm for his eye:
+> `--greets_displace --greets_displace_free_edge --greets_displace_border_mean=2
+> --greets_displace_seam_weld`. Before/after strips at all 8 of his poses:
+> `docs/img/fogwt/bmeanwt_p{1..8}_*_before_after.png`.
+>
 > ## 2026-08-12b — EVERY OVERLAID PROBE HELD THE MECH TWICE: ONE COPY LIVE, ONE FROZEN AT BAKE TIME
 >
 > User: *"for the mech dynamic env bake - you forgot to move the camera - only
@@ -2106,7 +2302,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | gate | recipe | pin |
 |---|---|---|
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **⚠ THIS PIN IS CONDITIONAL ON THE ENV CUBE ON DISK — check `md5 Runtime/cache/city_envmap_cube.bin` BEFORE calling a mismatch a regression.** The cache key ignores FeatureFlags, so the cube is a hidden input the recipe does not state (full analysis + 2×2 matrix in the dated note above). `d1d67f0f84fb4af3713e15a64a1b827b` = pre-flip bake → the pins below hold. `63978a18ed31837348598014716f9932` = cold/current bake (mips ON) → **`5476be8c43864c761b94e2dd83f86aa8`** default and **`b88ecb7bbd0340145e35a80bc7a82f6b`** under the control; both are correct-for-that-cube, NOT drift. A **fresh worktree always cold-bakes**, so it lands in the second column unless you copy the cube in. Also: `DEMO` chdirs to its OWN directory (`ChdirToAssetRoot`, `DEMO/REV.CPP:503`) — launching a worktree binary from the main `Runtime/` does **not** render the main tree's assets or its cube. **Pending decision:** adopting the flip properly means `rm Runtime/cache/city_envmap_cube.bin` and re-pinning to `5476be8c…`; held for the user's eye on `docs/img/mipsel/city_t1961_envbake_crop.png` (max Δ 6/255, glass only). — **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2, pre-flip cube). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix` **on the pre-flip cube** (on a cold-baked cube that control arm is invalid — it measures a mips-ON bake under a mips-OFF frame). Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
-| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **CURRENT, measured on the settled tree at `7b5f1f8`+: `778fa6acd85a69cf241babefcdaf598e`.** Verified 4/4 before the `--shadow_lightmap_texel_density` flat-arm default, 4/4 after it, and 4/4 with the revert flag `--shadow_lightmap_texel_density=0` — **12 runs, one value; that change does not move this pin** (it is look-null at all 16 review poses too, see the dated block at the top). fountain `8db68ccb59416e9a44037e9f387b7bd9` 4/4 and city `3cbe42b166847e40f7071eedb48d613c` 4/4 alongside it, `render_gate` 3/3. NOTE for whoever reads the history below: the hashes in the older entries (`9eeaf860…`, `6ed5462e…`, `91ec081a…`) do **not** reproduce at HEAD — they were taken while other agents held uncommitted work in the shared tree, exactly the hazard the `2026-08-09c` note warns about. Trust the settled-tree value above. — history: **RE-PINNED 2026-08-09 (`hull`/`cockpit` removed from the Sobel normal-map name gate, `DEMO/GREETS.CPP:1951`; docs/SHADING_CONTRACT.md §11 row E8): `9eeaf860cb5a7f124884a89e0fc3ff5b`** (stable 3/3, across two binary revisions). REASON: `BakeNormalMapFromDiffuse` was Sobelling MECH_HUL.JPG / MECH_COK.JPG — camouflage PAINT — into geometric relief; the user compared the mech against the standalone Metal arm (which bakes no such map) and preferred the GPU's. Only four materials ever hit the gate (`!M->NormalMap` guard); `hull`, `hull not smooth` and `cockpit` are gone, `siling` remains. **AT THIS PIN POSE THE CHANGE IS 1 PIXEL AT 1 LSB** (702,172) — t=1588 barely shows the mech, so the pin move is not the measurement. The measurement is at the §11 mech pose (t=4871): **179 829 px (8.67 %), max channel Δ 164, 11 677 px > 10 luma**, hull pixel (767,723) Y **131.2 → 44.9** against the GPU's 41.0, canopy pixel (760,620) 146.4 → 157.4 against 161.4. Crop: `/tmp/fogwt/task1_mech_strip.png`. city `e1221676…` and fountain `8db68ccb…` do NOT move (greets-only, guarded on `M->RelScene != GreetSc`); fountain re-verified. Prior pin `6780642b30430efa4fd2f87810b2dfdb` reproduces by re-adding the two `strstr` terms. Preceding that: **RE-VERIFIED 2026-08-09c, 3/3 EACH, on a settled tree at HEAD `4f60493`** — these supersede every pin value recorded earlier today, several of which were taken while other agents held uncommitted work in the shared tree and are therefore not reproducible:
+| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **CURRENT, RE-ADJUDICATED 2026-08-12 at origin tip `3b00bbc7`: `778fa6acd85a69cf241babefcdaf598e` — 16 runs across FOUR content/code configurations (committed `GREETS.FLD`; the user's dirty `GREETS.FLD` under the same binary; an independent worktree+build with his content; and a build carrying the parent-commit control revert of `0b466b77`), ONE VALUE EVERY TIME. The pin is INVARIANT to his uncommitted authoring files at this pose. The rival value `2e96e91d9ce0188981cd71c3fdebb954` is this exact recipe run WITHOUT the `FDS_GREETS_CAM=` prefix (reproduced first try) — a recipe transcription error, not tree drift. Full adjudication in the 2026-08-12 block above.** Previously measured on the settled tree at `7b5f1f8`+ as the same value. Verified 4/4 before the `--shadow_lightmap_texel_density` flat-arm default, 4/4 after it, and 4/4 with the revert flag `--shadow_lightmap_texel_density=0` — **12 runs, one value; that change does not move this pin** (it is look-null at all 16 review poses too, see the dated block at the top). fountain `8db68ccb59416e9a44037e9f387b7bd9` 4/4 and city `3cbe42b166847e40f7071eedb48d613c` 4/4 alongside it, `render_gate` 3/3. NOTE for whoever reads the history below: the hashes in the older entries (`9eeaf860…`, `6ed5462e…`, `91ec081a…`) do **not** reproduce at HEAD — they were taken while other agents held uncommitted work in the shared tree, exactly the hazard the `2026-08-09c` note warns about. Trust the settled-tree value above. — history: **RE-PINNED 2026-08-09 (`hull`/`cockpit` removed from the Sobel normal-map name gate, `DEMO/GREETS.CPP:1951`; docs/SHADING_CONTRACT.md §11 row E8): `9eeaf860cb5a7f124884a89e0fc3ff5b`** (stable 3/3, across two binary revisions). REASON: `BakeNormalMapFromDiffuse` was Sobelling MECH_HUL.JPG / MECH_COK.JPG — camouflage PAINT — into geometric relief; the user compared the mech against the standalone Metal arm (which bakes no such map) and preferred the GPU's. Only four materials ever hit the gate (`!M->NormalMap` guard); `hull`, `hull not smooth` and `cockpit` are gone, `siling` remains. **AT THIS PIN POSE THE CHANGE IS 1 PIXEL AT 1 LSB** (702,172) — t=1588 barely shows the mech, so the pin move is not the measurement. The measurement is at the §11 mech pose (t=4871): **179 829 px (8.67 %), max channel Δ 164, 11 677 px > 10 luma**, hull pixel (767,723) Y **131.2 → 44.9** against the GPU's 41.0, canopy pixel (760,620) 146.4 → 157.4 against 161.4. Crop: `/tmp/fogwt/task1_mech_strip.png`. city `e1221676…` and fountain `8db68ccb…` do NOT move (greets-only, guarded on `M->RelScene != GreetSc`); fountain re-verified. Prior pin `6780642b30430efa4fd2f87810b2dfdb` reproduces by re-adding the two `strstr` terms. Preceding that: **RE-VERIFIED 2026-08-09c, 3/3 EACH, on a settled tree at HEAD `4f60493`** — these supersede every pin value recorded earlier today, several of which were taken while other agents held uncommitted work in the shared tree and are therefore not reproducible:
 > * greets   `778fa6acd85a69cf241babefcdaf598e`
 > * fountain `8db68ccb59416e9a44037e9f387b7bd9`  (the ONLY pin that held all day)
 > * city     `3cbe42b166847e40f7071eedb48d613c`
