@@ -107,10 +107,19 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 	// lightmap path — their cube is re-baked every frame from current
 	// IPos, so the t=0 static lightmap is invalid. Fall through to the
 	// per-pixel cube tap below, which reads the freshly-baked cube.
-	const bool cubeOmniStatic = (cubeIdx >= 0
-	    && size_t(cubeIdx) < g_cubeShadowRefs.size()
-	    && g_cubeShadowRefs[cubeIdx].omni
-	    && (g_cubeShadowRefs[cubeIdx].omni->Flags & Omni_StaticShadow));
+	//
+	// Evaluated LAZILY, inside the guard below, rather than eagerly here.
+	// `g_cubeShadowRefs.size()` on a 48-byte element type is a magic-constant
+	// multiply (~9 instructions), and the two `.omni` derefs that follow are a
+	// dependent pointer chase — all of it dead on any pixel WITHOUT a lightmap
+	// address, which on greets is most of them. Pure && reordering of
+	// side-effect-free tests: byte-identical.
+	auto cubeOmniStatic = [&]() -> bool {
+		return (cubeIdx >= 0
+		    && size_t(cubeIdx) < g_cubeShadowRefs.size()
+		    && g_cubeShadowRefs[cubeIdx].omni
+		    && (g_cubeShadowRefs[cubeIdx].omni->Flags & Omni_StaticShadow));
+	};
 	// surfaceMatId < 0 = "this receiver has no shadow identity" (the caller
 	// resolved it as a NON-CASTER under --shadow_noncaster_depth). It must skip
 	// the lightmap too: the atlas was baked through the same PolyId identity
@@ -118,8 +127,8 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 	// biased depth tap at the bottom. Byte-null while the flag is off, because
 	// every other caller resolves surfaceMatId from a uint16 plane and can
 	// never pass a negative.
-	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis && cubeOmniStatic
-	    && surfaceMatId >= 0) {
+	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis
+	    && surfaceMatId >= 0 && cubeOmniStatic()) {
 		// Debug: --shadow-lightmap-recompute-bake replaces the atlas
 		// bilinear lookup with a fresh per-pixel call to the bake-time
 		// sampler (SampleStaticCubeAtWorld). Same flow as the bake, but
