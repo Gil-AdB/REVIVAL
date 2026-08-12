@@ -196,6 +196,90 @@
 > --greets_displace_seam_weld`. Before/after strips at all 8 of his poses:
 > `docs/img/fogwt/bmeanwt_p{1..8}_*_before_after.png`.
 >
+> ## 2026-08-12c — FADING THE FOLLOW SNAP: THE OBVIOUS SHAPE LOST, BECAUSE THE SNAP IS THE WHOLE CUBE
+>
+> User: *"the mech pop - let's fade the snap."* Two shapes were on the table and
+> the brief said to pick by measurement. **The cheap, obvious one lost.**
+>
+> **THE POP.** A followed capture point is budgeted (1 re-bake/frame) and
+> thresholded (`--env_probe_follow_eps` 1 u): it sits still while its owner walks
+> away, then jumps the whole accumulated drift in one frame. On his line the
+> greets canopy re-bakes at **t=7029**; across that frame the live cube's mean
+> |dRGB| against the previous overlay goes **1.80 → 18.54**, and the mech's own
+> coverage of its own cube steps **36 864 → 98 222** texels.
+>
+> **(a) GLIDE THE POINT — LOST.** Render the movers from a point that smoothsteps
+> to the new one. It does its own job: the own-assembly coverage step falls from
+> **+61 358 to +1 272** texels (N=8). Its price is bounded and decays to zero —
+> overlay-vs-base misregistration max **0.988 u** at N=8 (mean 0.069, 3 frames in
+> 30) to max **1.029 u** at N=32 (mean 0.275, 14 in 30).
+>
+> **AND IT STILL LEAVES MOST OF THE POP STANDING, for a structural reason worth
+> keeping written down: A RE-BAKE RE-CAPTURES THE WHOLE CUBE — the room, not just
+> the movers — from a point 1 u away, so all six faces jump at once, and moving
+> the overlay's camera cannot reach any of it.** Mean |dRGB summed over channels|
+> per face, at the snap frame:
+>
+> | arm | +X | -X | +Y | -Y | +Z | -Z | whole-cube pop |
+> |---|---|---|---|---|---|---|---|
+> | legacy snap | 76.2 | 35.2 | 34.5 | 87.6 | 49.8 | 50.4 | **18.54** |
+> | (a) glide | 43.5 | 29.9 | 32.8 | 76.5 | 41.7 | 42.6 | **14.83** |
+> | (b) dissolve | 0.9 | 1.6 | 1.4 | 1.6 | 1.6 | 1.5 | **0.48** |
+>
+> Glide halves the +X face (the one the mech fills, 76.2 → 43.5) and leaves every
+> other face essentially untouched. That is the whole story in one row.
+>
+> **(b) CROSS-DISSOLVE THE CUBE — SHIPPED (`--env_dyn_fade_mode=1`, default).**
+> Keep the pre-snap cube, blend it into the post-snap one, leave the point alone;
+> every frame is then one coherent cube. **38× less change at the snap frame.**
+> `docs/img/envmap/envfade_snap_vs_dissolve_strip.png` — the +X face across the
+> re-bake: a hard cut (hull → room in one frame) against a ramp.
+>
+> **FADE LENGTH, `--env_dyn_fade`, DEFAULT 16 BY MEASUREMENT.** Peak
+> consecutive-overlay change inside the fade window: N=4 **13.58** (a SPIKE —
+> a fade this short is worse than none at that frame), N=8 10.03, N=16 10.09,
+> N=32 **5.03**. Over the five overlays after the snap, N=16 gives
+> 0.50/1.41/2.90/4.22/5.60 against the **~6.2 the scene moves by itself** in those
+> same frames — the ramp stays under the motion already there. NO NEW POP AT THE
+> END: the N=16 tail (5.60/7.62/8.71/10.09) converges onto the legacy arm's own
+> values for those frames (6.36/7.85/8.66/10.03), i.e. what is left is the
+> content's motion, not the fade's. N=32 is smoother still if the ramp ever reads.
+> The fade is indexed on `dynFrame`, never wall-clock — a wall-clock fade would
+> make the determinism gate red by construction.
+>
+> **COST — CAVEATED, because the box was not mine.** Other agents held the machine
+> at load **13→55** throughout. An interleaved min-of-6 was attempted and
+> ABANDONED: round 1 alone spread 931–5519 ms across arms. Least-contaminated
+> sample (per-arm min-of-6, total overlay ms across the 61-frame walk): off
+> **919.29**, glide16 **917.47** (inside noise — gliding is free), dissolve16
+> **928.32** → **+9.03 ms over ~8 fading overlays, ≈1.1 ms each**. Treat that as
+> an order of magnitude, not a number. Load-independent and exact: the blend
+> touches 6·256² = **393 216 texels**, and the refilter widens from the ~2.7
+> touched faces to all six (**58 061 → 129 024** texels). Memory **1.57 MB** per
+> fading probe, freed when the fade ends.
+>
+> **GATES.** Pins, same worktree whose control binary reproduced all four exactly
+> earlier today, run 1 discarded: greets `778fa6ac…`, greets+env_refl
+> `e5f38b40…`, fountain `8db68ccb…`, city `3cbe42b1…` — **4/4 byte-identical,
+> 2/2 each**. Determinism **24/24 on one value**
+> (`9a30e9dc549c8167d6fadc71f576fed0`), so the ramp replays exactly.
+>
+> **TWO TRAPS, both of which silently produced a clean-looking wrong answer.**
+> (1) **zsh does not word-split an unquoted `$VAR`**: `EX="--a=1 --b=2"; ./DEMO
+> $EX` passes ONE argv token, both flags are lost, and `--strict_flags` did not
+> catch it — a whole arm of the first A/B was measuring defaults while printing a
+> plausible trace. Use `EX=(--a=1 --b=2); "${EX[@]}"`. (2) The snap is at TICK 29,
+> not overlay 14: the canopy is SCHEDULED (~1 overlay per 2 ticks), so an
+> overlay-indexed event is at ~2× that tick. The first pop measurement sampled
+> t=7011..7022, returned all four arms **byte-identical**, and nearly bought the
+> conclusion "the fade does nothing".
+>
+> **TOOL.** `--env_dyn_dump_seq` writes a frame-indexed copy of the selected
+> store's live cube. Judging anything TEMPORAL used to cost one process per frame,
+> each replaying the walk from its start — MEASURED at ~60 s/frame here, ~40
+> minutes for one 13-frame strip. It is now one run, and that is the only reason
+> the shapes could be compared at all.
+
 > ## 2026-08-12b — EVERY OVERLAID PROBE HELD THE MECH TWICE: ONE COPY LIVE, ONE FROZEN AT BAKE TIME
 >
 > User: *"for the mech dynamic env bake - you forgot to move the camera - only

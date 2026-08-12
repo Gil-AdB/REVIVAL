@@ -650,6 +650,30 @@ struct EnvPanoStore {
     std::vector<uint32_t> staticColorMaster;   // 6·faceRes² (cube stores)
     std::vector<uint16_t> staticFaceZ;         // 6·faceRes² (cube stores)
 
+    // ── --env_dyn_fade: FADING THE FOLLOW SNAP ────────────────────────────
+    // A followed probe's capture point is BUDGETED: it sits still while its
+    // owner walks away from it, then jumps the whole accumulated drift
+    // (env_probe_follow_eps, 1 u) in one frame at the re-bake. For a probe
+    // whose capture point rides its owner, the owner's own assembly is at ~0
+    // distance, so that 1 u is the difference between two very different
+    // projections of it: MEASURED on the greets canopy at t=7013, the mech's
+    // own coverage of its own cube goes 36 864 -> 98 222 texels in ONE frame.
+    // The user: "the mech pop - let's fade the snap."
+    //
+    // fadeFrom* is the point the overlay was rendering from at the instant the
+    // old store was dropped (which is itself a faded point when re-bakes come
+    // faster than the fade — so fades CHAIN instead of restarting from a stale
+    // anchor), and fadeStart is the SceneEnv::dynFrame the new store began at.
+    // Frame-indexed, never wall-clock: the fade has to be a pure function of
+    // the frame or the 24-run determinism gate would go red by construction.
+    float    fadeFromX = 0.0f, fadeFromY = 0.0f, fadeFromZ = 0.0f;
+    uint32_t fadeStart  = 0;
+    bool     fadeActive = false;
+    // Shape (b) only: the whole pre-snap cube, cross-dissolved into the new
+    // one. Empty in shape (a), which is the shipping shape — see the flag help
+    // for why (b) lost.
+    std::vector<uint32_t> fadeFromColor;
+
     // ── ENVDYN A3 owner-visibility gate fix ───────────────────────────────
     // Tight world AABB of bakedSkipMat's OWN faces — NOT the whole-MESH union
     // WorldAabb_ForMaterial returns. Greets merges every reflective surface
@@ -741,6 +765,25 @@ struct SceneEnv {
     };
     std::map<const Material*, OwnerTrack> ownerTrack;
     uint32_t followFrame = 0;
+
+    // ── --env_dyn_fade handoff across the store drop ──────────────────────
+    // A followed re-bake ERASES the store and lets the bake loop build a new
+    // one (EnvReflection_InvalidateSurface — indices shift, the object is
+    // gone), so the fade anchor cannot ride the store across the drop. It is
+    // parked here for the rest of THIS FramePrep and claimed by the new store.
+    //
+    // Matched by PROXIMITY, not by material, and that is deliberate: the group
+    // that re-bakes together is the store's SHARING group ('cockpit_upper' +
+    // 'cockpit_body' on the mech), and which member the MatLib walk reaches
+    // first is not something this code should have to depend on. Same 4-unit
+    // radius the store dedup itself uses, widened by the drift that triggered
+    // the re-bake. A missed match costs a fade, never correctness.
+    struct PendingFade {
+        Vector   from;                     // point the overlay was rendering from
+        std::vector<uint32_t> color;       // shape (b): the whole pre-snap cube
+        bool     claimed = false;
+    };
+    std::vector<PendingFade> pendingFades;
 };
 std::map<Scene*, SceneEnv> g_envByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
@@ -1759,6 +1802,37 @@ bool EnvReflection_FramePrep(Scene* sc) {
                     "supplies them live\n", M->Name ? M->Name : "?");
             store->bakedSkipMat = M;
             store->bakedSkipR   = excludeR;
+            // --env_dyn_fade: claim the anchor the follow pass parked when it
+            // dropped the store this one replaces (proximity match — see
+            // SceneEnv::PendingFade). fadeStart is a FRAME index, so the ramp
+            // replays identically run to run.
+            if (const int fadeN = fds::FeatureFlags::env_dyn_fade();
+                fadeN > 0 && store->envDynamic && store->view.isCube) {
+                const float r = 4.0f + fds::FeatureFlags::env_probe_follow_eps();
+                for (auto& pf : env.pendingFades) {
+                    if (pf.claimed) continue;
+                    const float dx = pf.from.x - c.x, dy = pf.from.y - c.y,
+                                dz = pf.from.z - c.z;
+                    if (dx*dx + dy*dy + dz*dz > r * r) continue;
+                    pf.claimed = true;
+                    store->fadeFromX = pf.from.x;
+                    store->fadeFromY = pf.from.y;
+                    store->fadeFromZ = pf.from.z;
+                    store->fadeStart = env.dynFrame;
+                    store->fadeActive = true;
+                    if (!pf.color.empty() && pf.color.size() == store->levels[0].size())
+                        store->fadeFromColor = std::move(pf.color);
+                    std::fprintf(stderr, "[ENVFADE] '%s': snap (%.2f %.2f %.2f)"
+                        " -> (%.2f %.2f %.2f), %.2f u, faded over %d frame(s)"
+                        " (mode %d = %s)\n", M->Name ? M->Name : "?",
+                        pf.from.x, pf.from.y, pf.from.z, c.x, c.y, c.z,
+                        std::sqrt(dx*dx + dy*dy + dz*dz), fadeN,
+                        fds::FeatureFlags::env_dyn_fade_mode(),
+                        fds::FeatureFlags::env_dyn_fade_mode() == 0
+                            ? "glide the point" : "cross-dissolve the cube");
+                    break;
+                }
+            }
             if (store->envDynamic)
                 std::fprintf(stderr, "[ENVDYN] retained static Z+colour master "
                              "for flagged probe '%s' (%zu KB)\n",
@@ -1798,6 +1872,11 @@ bool EnvReflection_FramePrep(Scene* sc) {
         if (fds::FeatureFlags::env_bake_fix() && idx >= 0 && M->ID < 256)
             env.table[M->ID] = &env.stores[size_t(idx)]->view;
     }
+    // --env_dyn_fade: anchors are valid for THIS FramePrep only. An unclaimed
+    // one means its store did not come back this round (res change, material
+    // gone) — dropping it degrades to the legacy snap, which is the right
+    // failure. Freed here so shape (b)'s retained cube cannot leak.
+    env.pendingFades.clear();
     // Refresh the matID table (IDs move when the editor rebuilds the table).
     // Effective mode < 0 (forced off per-surface OR by the scene-wide
     // default) never publishes — even when a stale store for this material
@@ -2030,6 +2109,11 @@ float ownerScreenAreaFrac(Scene* sc, const WorldAabb& b) {
 // --env_dyn_sched=1 scheduler uses so there is one notion of "which probe
 // matters most" in the file and not two: tier 0 = never followed yet, then
 // visible ordered by ownerScreenAreaFrac × wait, then off-screen by wait.
+// --env_dyn_fade: defined with the overlay (they are its readers), needed here
+// because the fade is ARMED at the moment the follow pass drops the store.
+static float  envFadeT(const SceneEnv& env, const EnvPanoStore& S);
+static Vector envOverlayPoint(const SceneEnv& env, const EnvPanoStore& S);
+
 uint64_t ownerXformSig(const SceneEnv::OwnerTrack& t) {
     // FNV-1a over the raw bits of each owner mesh's rotation + position. A
     // HASH, not a comparison: the point is to notice a change, and any change
@@ -2193,6 +2277,26 @@ void envFollowOwnerMoves(Scene* sc, SceneEnv& env) {
             "(%.1f %.1f %.1f)\n", mv.M->Name ? mv.M->Name : "?",
             mv.animated ? "RUNTIME" : "EDITOR", double(mv.drift), double(eps),
             mv.want.x, mv.want.y, mv.want.z);
+        // ── --env_dyn_fade: ARM THE FADE, before the store is destroyed ────
+        // The anchor is the point the overlay is rendering from RIGHT NOW,
+        // which is itself a faded point when re-bakes arrive faster than the
+        // fade completes — so successive fades CHAIN off each other's current
+        // position instead of each one restarting from a stale bake point and
+        // re-introducing the very step it exists to remove.
+        if (const int fadeN = fds::FeatureFlags::env_dyn_fade(); fadeN > 0) {
+            auto st = env.byMat.find(mv.M);
+            if (st != env.byMat.end() && st->second >= 0
+                && size_t(st->second) < env.stores.size()) {
+                EnvPanoStore& S = *env.stores[size_t(st->second)];
+                if (S.envDynamic && S.view.isCube && !S.levels[0].empty()) {
+                    SceneEnv::PendingFade pf;
+                    pf.from = envOverlayPoint(env, S);
+                    if (fds::FeatureFlags::env_dyn_fade_mode() != 0)
+                        pf.color = S.levels[0];      // shape (b): keep the cube
+                    env.pendingFades.push_back(std::move(pf));
+                }
+            }
+        }
         // The SAME targeted drop the editor's probe-offset boxes use: the
         // whole sharing group leaves byMat, the store is erased, and the bake
         // loop that follows re-derives and re-bakes it from the current point.
@@ -2261,9 +2365,41 @@ void envDynStatsMaybeReport(SceneEnv& env,
 // Returns the count of texels where the live mech won the depth compare and
 // was composited over the static master — the headless "is the mech actually
 // in the reflection now?" metric (0 = nothing composited).
-int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
-    const int fr = S.view.W;
+// ── --env_dyn_fade: where the overlay renders from THIS frame ───────────────
+// Returns the fade parameter in [0,1] (1 = fully snapped / no fade running)
+// and writes the point. Pure function of dynFrame, so it replays identically.
+//
+// SHAPE (a), the shipping one: the point itself glides. The static base has
+// already snapped to the new bake point, so for the fade's duration the movers
+// are drawn from a point up to `fadeFrom - bake` away from the one the room was
+// captured from. That MISREGISTRATION is the price, and it is bounded by
+// env_probe_follow_eps (1 u) — see the flag help for what it measures out at.
+// Shape (b) leaves the point alone and dissolves the CONTENT instead.
+static float envFadeT(const SceneEnv& env, const EnvPanoStore& S) {
+    const int N = fds::FeatureFlags::env_dyn_fade();
+    if (N <= 0 || !S.fadeActive) return 1.0f;
+    const uint32_t age = env.dynFrame - S.fadeStart;
+    if (age >= uint32_t(N)) return 1.0f;
+    const float u = float(age) / float(N);
+    return u * u * (3.0f - 2.0f * u);      // smoothstep: no velocity step at
+                                           // either end, which is what stops
+                                           // the fade END from being a second
+                                           // (smaller) pop of its own.
+}
+
+static Vector envOverlayPoint(const SceneEnv& env, const EnvPanoStore& S) {
     const Vector bake = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
+    if (fds::FeatureFlags::env_dyn_fade_mode() != 0) return bake;   // shape (b)
+    const float t = envFadeT(env, S);
+    if (t >= 1.0f) return bake;
+    return { S.fadeFromX + (bake.x - S.fadeFromX) * t,
+             S.fadeFromY + (bake.y - S.fadeFromY) * t,
+             S.fadeFromZ + (bake.z - S.fadeFromZ) * t };
+}
+
+int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6],
+                     const Vector& bake, float fadeT) {
+    const int fr = S.view.W;
     std::vector<uint32_t> mech[6];
     std::vector<uint16_t> mechZ[6];
     // g_envBakeInProgress: block any re-entrant FramePrep/SH bake while the
@@ -2320,6 +2456,58 @@ int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
     // 0.34 ms per probe update — real, but note it does NOT make the refilter
     // the dominant cost: at 2.7 faces per update the face RENDER is, which is
     // why the scheduler's budget is a FACE budget.
+    // ── SHAPE 1 (DEFAULT): CROSS-DISSOLVE THE WHOLE CUBE ──────────────────
+    // Blend the pre-snap cube into the post-snap one over the fade. This is the
+    // MEASURED winner over gliding the capture point, and the reason is
+    // structural rather than a matter of degree: a re-bake re-captures the
+    // WHOLE cube — the room, not only the movers — from a point 1 u away, so
+    // all six faces jump at once. Moving the overlay's camera (shape 0) cannot
+    // reach any of that; only a content fade can. At the snap frame, mean
+    // |dRGB| between consecutive overlays: 18.54 legacy, 14.83 gliding, 0.48
+    // dissolving. Per face the legacy jump is 34.5-87.6 and gliding leaves
+    // 29.9-76.5 of it standing, against 0.9-1.6 here.
+    //
+    // The retained cube is a SNAPSHOT, so its movers are stale — but as a
+    // decaying WEIGHT, not as the hard depth-tested duplicate that
+    // --env_dyn_static_exclude removed one commit ago. It reads as a brief
+    // temporal smear and it is gone when the weight reaches 1.
+    bool refilterMask[6];
+    for (int f = 0; f < 6; ++f) refilterMask[f] = faceMask[f];
+    if (!S.fadeFromColor.empty()) {
+        if (fadeT >= 1.0f || S.fadeFromColor.size() != S.levels[0].size()) {
+            S.fadeFromColor.clear();
+            S.fadeFromColor.shrink_to_fit();
+            S.fadeActive = false;
+        } else {
+            // The blend's "new" side must be this frame's content on EVERY
+            // face, not just the touched ones — an untouched face still holds
+            // last frame's BLEND, and blending that again would compound the
+            // dissolve into a slow smear instead of an N-frame ramp. Restore
+            // the untouched faces from the static master first.
+            for (int f = 0; f < 6; ++f) {
+                if (faceMask[f]) continue;
+                std::memcpy(S.levels[0].data() + size_t(f) * fr * fr,
+                            S.staticColorMaster.data() + size_t(f) * fr * fr,
+                            size_t(fr) * fr * sizeof(uint32_t));
+            }
+            const uint32_t wNew = uint32_t(fadeT * 256.0f + 0.5f);   // 0..256
+            const uint32_t wOld = 256u - wNew;
+            uint32_t* dst = S.levels[0].data();
+            const uint32_t* old = S.fadeFromColor.data();
+            const size_t n = S.levels[0].size();
+            for (size_t i = 0; i < n; ++i) {
+                const uint32_t a = old[i], b = dst[i];
+                uint32_t out = 0xFF000000u;
+                for (int sh8 = 0; sh8 < 24; sh8 += 8) {
+                    const uint32_t v = (((a >> sh8) & 0xFF) * wOld
+                                      + ((b >> sh8) & 0xFF) * wNew) >> 8;
+                    out |= (v > 255u ? 255u : v) << sh8;
+                }
+                dst[i] = out;
+            }
+            for (int f = 0; f < 6; ++f) refilterMask[f] = true;   // all faces moved
+        }
+    }
     {
         int frl = fr;
         for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
@@ -2327,7 +2515,7 @@ int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
             if (S.levels[k].size() != size_t(6) * dfr * dfr)
                 S.levels[k].assign(size_t(6) * dfr * dfr, 0);
             for (int f = 0; f < 6; ++f) {
-                if (!faceMask[f]) continue;
+                if (!refilterMask[f]) continue;
                 const uint32_t* sp = S.levels[k-1].data() + size_t(f) * frl * frl;
                 uint32_t* dp = S.levels[k].data() + size_t(f) * dfr * dfr;
                 for (int y = 0; y < dfr; ++y)
@@ -2356,13 +2544,44 @@ int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
 // --env_dyn_dump=N (1-based store index): write the LIVE, post-overlay mip-0
 // cube of store N as the standard 3x2 atlas. Separate from the composite
 // itself so the caller owns the index test and this stays a pure reader.
-void dumpLiveStore(const EnvPanoStore& S, size_t storeIdx) {
+void dumpLiveStore(const EnvPanoStore& S, size_t storeIdx, uint32_t dynFrame) {
     const int want = fds::FeatureFlags::env_dyn_dump();
     if (want <= 0 || size_t(want - 1) != storeIdx) return;
     if (!S.view.isCube || S.levels[0].empty()) return;
     dumpCubeStoreCensus(S.bakedSkipMat && S.bakedSkipMat->Name
                             ? S.bakedSkipMat->Name : "unnamed",
                         S.levels[0], S.view.W, "envdyn");
+    // --env_dyn_dump_seq: keep a FRAME-INDEXED copy beside the stable path.
+    // The stable path is overwritten every overlay, so building a strip across
+    // a transition (which is how anything TEMPORAL gets judged here — a snap, a
+    // fade, a scheduler change) otherwise costs one whole process per frame,
+    // each replaying the walk from its start. That was measured at ~60 s per
+    // frame on the greets mech walk; this turns a 39-process, 40-minute strip
+    // into one run. Diagnostic only, off by default, writes nothing unless
+    // --env_dyn_dump already selected this store.
+    if (!fds::FeatureFlags::env_dyn_dump_seq()) return;
+    std::string safe = S.bakedSkipMat && S.bakedSkipMat->Name
+                           ? S.bakedSkipMat->Name : "unnamed";
+    for (char& c : safe) if (!std::isalnum((unsigned char)c)) c = '_';
+    char path[320];
+    std::snprintf(path, sizeof(path), "/tmp/envdynseq_%s_f%05u.ppm",
+                  safe.c_str(), unsigned(dynFrame));
+    const int fr = S.view.W;
+    if (FILE* fp = std::fopen(path, "wb")) {
+        const int gw = fr * 3, gh = fr * 2;
+        std::fprintf(fp, "P6\n%d %d\n255\n", gw, gh);
+        for (int y = 0; y < gh; ++y)
+            for (int x = 0; x < gw; ++x) {
+                const int f = (y / fr) * 3 + (x / fr);
+                const uint32_t p = S.levels[0][size_t(f) * fr * fr
+                                               + size_t(y % fr) * fr + (x % fr)];
+                unsigned char rgb[3] = { (unsigned char)((p >> 16) & 0xFF),
+                                         (unsigned char)((p >> 8) & 0xFF),
+                                         (unsigned char)(p & 0xFF) };
+                std::fwrite(rgb, 1, 3, fp);
+            }
+        std::fclose(fp);
+    }
 }
 
 }  // namespace
@@ -2512,8 +2731,9 @@ void EnvDynamic_Overlay(Scene* sc) {
             if (faceCull) reflectedFaceReach(sc, env, int(si), S);
             for (int f = 0; f < 6; ++f) {
                 if (faceCull && !S.reflFaceMask[f]) continue;
+                const Vector op = envOverlayPoint(env, S);
                 const Frustum fp = fds::Frustum_FromProbeFace(
-                    (const float[3]){ S.view.bakeX, S.view.bakeY, S.view.bakeZ }, f, range);
+                    (const float[3]){ op.x, op.y, op.z }, f, range);
                 for (const auto& m : movers)
                     if (!fds::Frustum_CullsSphere(fp, m.c, m.r)) {
                         c.mask[f] = true; ++c.touched; break;
@@ -2575,8 +2795,10 @@ void EnvDynamic_Overlay(Scene* sc) {
             // default face budget, so the top-priority probe is never truncated.
             if (c.touched > remaining) continue;
             EnvPanoStore& S = *env.stores[c.si];
-            const int mechTexels = overlayComposite(sc, S, c.mask);
-            dumpLiveStore(S, c.si);
+            const int mechTexels = overlayComposite(sc, S, c.mask,
+                                                    envOverlayPoint(env, S),
+                                                    envFadeT(env, S));
+            dumpLiveStore(S, c.si, env.dynFrame);
             remaining -= c.touched;
             ++processed;
             facesTotal += c.touched;
@@ -2656,7 +2878,8 @@ void EnvDynamic_Overlay(Scene* sc) {
 
         // (2) mech relevance + which cube faces the movers touch (padded-face
         // pyramid cull, Foundation F).
-        const float bake[3] = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
+        const Vector opv = envOverlayPoint(env, S);
+        const float bake[3] = { opv.x, opv.y, opv.z };
         bool faceMask[6] = {}; bool anyTouch = false;
         if (faceCull) reflectedFaceReach(sc, env, int(si), S);
         for (int f = 0; f < 6; ++f) {
@@ -2697,8 +2920,9 @@ void EnvDynamic_Overlay(Scene* sc) {
                 S.stVisStale = S.stVisStreak;
             continue;
         }
-        const int mechTexels = overlayComposite(sc, S, faceMask);
-        dumpLiveStore(S, si);
+        const int mechTexels = overlayComposite(sc, S, faceMask, opv,
+                                                envFadeT(env, S));
+        dumpLiveStore(S, si, env.dynFrame);
         ++processed;
         int nf = 0; for (int f = 0; f < 6; ++f) nf += faceMask[f] ? 1 : 0;
         facesTotal += nf;
@@ -2715,10 +2939,22 @@ void EnvDynamic_Overlay(Scene* sc) {
         }
         S.lastOverlay  = env.dynFrame;
         S.everOverlaid = true;
-        if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): OK — "
-            "overlaid the mech into %d touched face(s), %d mech texel(s) "
-            "composited over static%s\n", nm, si, nf, mechTexels,
-            mechTexels == 0 ? " (mech occluded / off-probe — nothing visible)" : "");
+        if (sProf) {
+            // --env_dyn_fade: the MISREGISTRATION, printed rather than argued.
+            // `lag` is how far the point the movers were drawn from sits from
+            // the point the static base was captured from. It is the whole
+            // price of shape 0, it is bounded by the drift that triggered the
+            // snap, and it decays to 0 when the fade completes.
+            const float lx = opv.x - S.view.bakeX, ly = opv.y - S.view.bakeY,
+                        lz = opv.z - S.view.bakeZ;
+            std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): OK — "
+                "overlaid the mech into %d touched face(s), %d mech texel(s) "
+                "composited over static%s [fade t=%.3f lag %.3f u]\n",
+                nm, si, nf, mechTexels,
+                mechTexels == 0 ? " (mech occluded / off-probe — nothing visible)" : "",
+                double(envFadeT(env, S)),
+                double(std::sqrt(lx*lx + ly*ly + lz*lz)));
+        }
     }
     if (N) cursor = int((size_t(cursor) + size_t(processed) + 1) % N);
 
