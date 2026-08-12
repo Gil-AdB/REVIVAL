@@ -306,6 +306,17 @@ struct DeferredLightingCtx {
 	meka::GBuffer       *gbXpar;       // transparent front layer
 	word                *xparZ;        // transparent front depth
 	word                *xparZBack;    // transparent back depth
+	// Per-matID bitmask of Shadow_MaterialSkipsCasting(matTable.data[matID])
+	// — "this material was excluded from the shadow BAKE", which under
+	// --shadow_noncaster_depth resolves the receiver to the -1 (force-Depth)
+	// sentinel. The predicate depends ONLY on the Material*, and matID selects
+	// that from matTable, so it is constant for the whole frame; it was being
+	// re-evaluated once per shaded PIXEL through an out-of-line call with a
+	// function-local atomic cache (measured 3.44 % of all steady-state samples
+	// on greets t=5743 — 5.5 % of the lighting stage). Filled once per frame in
+	// Render_DeferredLighting; matID is 8-bit so 256 bits covers the table.
+	// Bit set == skips casting. Byte-identical: same predicate, same Material*.
+	uint64_t             shadowSkipMask[4];
 };
 
 

@@ -1801,7 +1801,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			int surfaceShadowId = gb.shadowMatID.empty()
 			    ? int(matID + 1)
 			    : int(gb.shadowMatID[i]);
-			if (noncasterDepthG && Shadow_MaterialSkipsCasting(Mat))
+			// Per-frame hoist: the predicate depends only on the Material*,
+			// which matID selects, so it is read from ctx.shadowSkipMask (one
+			// load + shift + test) instead of an out-of-line call whose
+			// function-local atomic cache cost 3.44 % of steady-state samples.
+			if (noncasterDepthG
+			    && ((ctx.shadowSkipMask[matID >> 6] >> (matID & 63)) & 1u))
 				surfaceShadowId = -1;
 
 			// Texture sample: Mekalele's apply_exact already wrote a
@@ -6183,6 +6188,21 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	ctx.matTable   = matTable;
 	ctx.lights     = &lights;
 	ctx.numLights  = numLights;
+	// Hoist the per-PIXEL Shadow_MaterialSkipsCasting call to one pass over the
+	// material table per frame (see DeferredLightingCtx::shadowSkipMask). The
+	// kernel's per-pixel guard is `matID >= matTable.count -> continue` and
+	// `!Mat -> continue`, both of which run BEFORE the predicate, so entries
+	// this loop cannot reach (or that are null) are never consulted — the
+	// mask reproduces the old call's answer for every pixel that asks.
+	std::memset(ctx.shadowSkipMask, 0, sizeof(ctx.shadowSkipMask));
+	{
+		const dword nMat = matTable.count < 256u ? matTable.count : 256u;
+		for (dword mi = 0; mi < nMat; ++mi) {
+			Material *M = matTable.data[mi];
+			if (M && Shadow_MaterialSkipsCasting(M))
+				ctx.shadowSkipMask[mi >> 6] |= (uint64_t(1) << (mi & 63));
+		}
+	}
 	ctx.tileLights = tileLights;
 	ctx.hasMirrorPresence = (tilePresence != nullptr);
 	if (tilePresence)
