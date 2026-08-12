@@ -54,6 +54,24 @@ namespace renderns {
 static std::atomic<int> g_coneAnalyticHits{0};
 static std::atomic<int> g_coneRaymarchHits{0};
 
+// Cone-cost diagnostic scaffold: counts the (8px-batch x spot) iteration
+// volume of the vec path and how much of it dies in the scalar prologue.
+// COMPILE-TIME gated so the shipping build pays literally nothing — this
+// sits in the hottest loop in the codebase (37.5% of all running CPU on
+// city t=1961), where even a well-predicted branch is not free.
+// Re-derive the census with:  cmake -B build -DCMAKE_CXX_FLAGS=-DFDS_CONE_DIAG=1
+// then run with FDS_CONE_ATTR=1.  See docs/HW_PROFILING.md sections 9-10 for
+// the numbers this produced (the solve is 63.6% of the pass) and for the
+// xctrace recipe that found the pass in the first place.
+#ifndef FDS_CONE_DIAG
+#define FDS_CONE_DIAG 0
+#endif
+static constexpr bool g_coneDiag = (FDS_CONE_DIAG != 0);
+static std::atomic<long long> g_dPairs{0};   // batch x spot pairs entering the scalar solve
+static std::atomic<long long> g_dSegPair{0}; // ...of which take the 8-segment hybrid
+static std::atomic<long long> g_dDead{0};    // ...of which had ZERO alive lanes (wasted prologue)
+static std::atomic<long long> g_dLanes{0};   // alive (lane x spot) pairs reaching integration
+
 // OR of the mirror-footprint presence bits (ctx.tileMirrorPresence,
 // LIGHTING-tile geometry: 8-rounded X over the 12x8 grid) across every
 // lighting tile overlapping the given pixel rect. Used by the cone and
@@ -692,6 +710,10 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     alignas(32) float zHiArr[8] = {};
                     alignas(32) float aliveLane[8] = {};
                     bool spotAlive = false;
+                    if (g_coneDiag) {
+                        g_dPairs.fetch_add(1, std::memory_order_relaxed);
+                        if (segPath) g_dSegPair.fetch_add(1, std::memory_order_relaxed);
+                    }
                     for (int lane = 0; lane < laneCount; ++lane) {
                         if (zMaxArr[lane] <= 0.0f) continue;
                         const float X = Xarr[lane];
@@ -794,7 +816,10 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         zHiArr[lane]    = zHi;
                         aliveLane[lane] = 1.0f;
                         spotAlive = true;
+                        if (g_coneDiag) g_dLanes.fetch_add(1, std::memory_order_relaxed);
                     }
+                    if (g_coneDiag && !spotAlive)
+                        g_dDead.fetch_add(1, std::memory_order_relaxed);
                     if (!spotAlive) continue;
 
                     // Clone AND bounce spots have no own map (smIdx=-1)
@@ -2038,6 +2063,30 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         fprintf(stderr, "[CONE-ATTR] spots real=%d bounce=%d clone=%d | "
                 "tile-entries real=%d bounce=%d clone=%d\n",
                 nReal, nBounce, nClone, eReal, eBounce, eClone);
+    }
+
+    if (g_coneDiag && !inlineDispatch) {
+        // Per-spot shape census: which spots take the 8-segment hybrid, and
+        // which carry a shadow map (8 scalar taps/lane on that path).
+        int nNarrow = 0, nShadow = 0;
+        for (int s = 0; s < spotCount; ++s) {
+            const int li = spotIdx[s];
+            if (lights->cosOuter[li] > 0.985f) ++nNarrow;
+            if (lights->shadowMapIdx[li] >= 0 ||
+                lights->srcShadowMapIdx[li] >= 0) ++nShadow;
+        }
+        const long long P = g_dPairs.load(), D = g_dDead.load();
+        const long long S = g_dSegPair.load(), L = g_dLanes.load();
+        fprintf(stderr,
+            "[CONE-DIAG] spots=%d narrow(seg8)=%d shadowed=%d | "
+            "batchxspot=%lld dead=%lld (%.1f%%) seg=%lld (%.1f%%) | "
+            "alive lanexspot=%lld (%.2f per pair, %.1f%% of 8)\n",
+            spotCount, nNarrow, nShadow, P, D,
+            P ? 100.0 * double(D) / double(P) : 0.0,
+            S, P ? 100.0 * double(S) / double(P) : 0.0,
+            L, P ? double(L) / double(P) : 0.0,
+            P ? 100.0 * double(L) / (8.0 * double(P)) : 0.0);
+        g_dPairs = 0; g_dDead = 0; g_dSegPair = 0; g_dLanes = 0;
     }
 
     if (!inlineDispatch) renderns::tileCounter = 0;

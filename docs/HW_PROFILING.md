@@ -33,65 +33,17 @@ Measured 2026-08-10 on the M2 Max, macOS 26.5, SIP enabled, no sudo.
 substitute on Apple silicon. §6 is about what to use instead, and what that
 substitute can and cannot prove.
 
-### 1a. Instruments / xctrace — reachable, but NOT via `xcrun`
-
-Xcode 26.6 is installed in `/Applications`. The 2026-08-10 row above was correct
-*when written* and is now stale in its conclusion but still correct in its
-diagnosis: **`xcrun xctrace` fails**, because `xcode-select -p` still points at
-`/Library/Developer/CommandLineTools`, and flipping it needs `sudo`. `xcrun`
-resolves tools only inside the *selected* developer dir, and `xctrace` ships
-only inside `Xcode.app` — so `xcrun` can never find it while CLT is selected.
-
-Call it by absolute path instead. No sudo, no `xcode-select` change:
-
-```sh
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-X=/Applications/Xcode.app/Contents/Developer/usr/bin/xctrace
-$X version          # -> xctrace version 16.0 (17F113)
-$X list templates   # Time Profiler, CPU Counters, System Trace, Allocations, ...
-```
-
-**Recording a headless bench** (`--env` per variable; the target must exit or
-hit `--time-limit`, and traces belong in a scratch dir, never the repo):
-
-```sh
-cd Runtime
-$X record --template 'Time Profiler' --output /tmp/greets_tp.trace \
-   --time-limit 25s --no-prompt --target-stdout /dev/null \
-   --env SDL_VIDEODRIVER=dummy --env SDL_AUDIODRIVER=dummy \
-   --launch -- $PWD/DEMO --bench=scene@scene=greets,t=5743,iters=200 \
-        --deferred --texture_filter=1 --profiler=1 --strict_flags
-```
-
-**Reading it back without the GUI.** `--toc` lists the tables; the one worth
-having is `time-profile`. Export it to XML and aggregate:
-
-```sh
-$X export --input /tmp/greets_tp.trace --toc                     # find the table
-$X export --input /tmp/greets_tp.trace --output /tmp/tp.xml \
-   --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]'
-```
-
-Two traps in that XML, both of which silently yield an EMPTY profile:
-
-1. The stack is under `<tagged-backtrace><backtrace><frame>`, **not** `<row>
-   <backtrace>`. A parser that looks for `backtrace` directly under `row`
-   finds nothing and reports zero samples for every symbol.
-2. Everything is id/ref deduplicated — `<frame ref="165"/>`,
-   `<tagged-backtrace ref="227"/>`. You must cache `id -> value` on first sight
-   and resolve `ref` against that cache, or most rows resolve to `?`.
-
-Filter by `sample-time` to drop process init (asset load, PNG decode, mip
-generation) — on a greets bench that is the first ~12 s and it will otherwise
-dominate the leaf table with `stbi__do_zlib` and `MipmapXY`.
-
-**What this buys over `/usr/bin/sample`:** real per-symbol *self* vs *inclusive*
-attribution over ~78 k steady-state samples rather than a handful of stack
-snapshots, so a leaf worth 3 % of the process is visible and trustworthy. It
-does **not** lift the root-only PMU restriction — the CPU Counters template can
-select events, but the counters this repo can read per phase are still the two
-in §1. Cross-read Instruments for *which symbol*, `--hw_prof` for *how many
-instructions*.
+One loose end, recorded so nobody re-derives it from scratch: §1a is right that
+the CPU Counters template does not lift the root-only PMU restriction *for what
+this repo can read per phase*, but the template itself **does record
+successfully unprivileged** (verified 2026-08-12, `rc=0` launching DEMO
+headless), and its `.trace` carries a `pmc-events` array per sample plus a
+topdown metric set whose own legend reads *Cycles / Instruction Delivery
+Bottleneck / Discarded Bottleneck / Instruction Processing Bottleneck / Useful*.
+**Nobody has decoded that array into named events** — 12 slots, the trailing
+ones constant-looking, unmapped. So a stall-*class* breakdown may be reachable
+through Instruments; a per-event miss rate is still unproven. Do not cite this
+as a miss rate until someone decodes it.
 
 ### The counter backbone, and why it is trustworthy
 
@@ -280,3 +232,115 @@ Signposts are skipped entirely unless a tracing tool is attached
   cache, so the first run after resigning is slower. Discard it.
 * **`--snapshot` cannot give a phase breakdown** — it is all warmup. Use
   `--bench=scene@scene=<s>,t=<t>,iters=N`.
+
+---
+
+## 9. Worked example — the cones call, 2026-08-12
+
+Recorded and exported exactly as §1a describes; that section owns the
+mechanics (`DEVELOPER_DIR`, `xctrace record`, the XML id/ref trap). This
+section is only the result, because it is the largest single perf finding
+in the tree and the reasoning is worth keeping.
+
+
+The pass the whole campaign was aimed at, at city `t=1961`, 1920×1080, 12 workers.
+
+**Per-symbol (Time Profiler, running-state samples, steady-state window):**
+
+| symbol | self | 
+|---|---|
+| `Render_VolumetricCones_Tile` | **37.5 %** |
+| `Render_DeferredLighting_Tile_OuterVec` | 15.1 % |
+| everything else | < 5 % each |
+
+Cones is ~100 % *self* time — the kernel is one fully-inlined monolith, so the
+call tree bottoms out there and per-symbol profiling cannot go deeper. To go
+deeper you need either source-line attribution or ablation (below).
+
+**The arithmetic (via `FDS_CONE_ATTR=1` and a `-DFDS_CONE_DIAG=1` build):**
+
+```
+46 spots -> 1187 tile-entries over 96 cone tiles (12x8) = 12.4 spots/tile
+1187 tile-entries x 21600 px/tile = 3.20 M (8px-batch x spot) pairs/frame
+                                  = 25.6 M (lane x spot) scalar solves/frame
+```
+
+**Splitting the instruction budget by ablation** — keep the scalar prologue,
+`continue` before everything downstream, sink the result so it is not
+dead-coded, and diff `Ginstr/f`. Instruction counts are *deterministic*
+(identical to 4 significant figures across runs) and immune to the load that
+makes wall times useless here:
+
+| arm | Ginstr/f | share |
+|---|---|---|
+| full cones pass | 4.217 | 100 % |
+| scalar per-lane quadratic solve only | **2.681** | **63.6 %** |
+| SIMD body + shadow taps + accumulate | 1.536 | 36.4 % |
+
+**Conclusion: the cost is not the integral, it is the prologue.** The per-lane
+quadratic solve is scalar, sits inside the per-spot loop, and runs 25.6 M times
+a frame at ~105 instructions each (~165 per *alive* lane) — 64 % of the pass,
+~24 % of every instruction the frame retires, feeding a SIMD body that is 8-wide.
+
+**IPC on the cones phase is 4.0–4.2**, so this is a pure instruction-*count*
+problem: the loop is not stalling, not memory-bound, and there is nothing for a
+cache-miss rate to explain. Do not go looking for one here.
+
+### The t-sweep — this is not a `t=1961` anomaly
+
+`t=1961` is the worst *frame*, but the cones share is a property of the whole
+city scene. `Ginstr/f` for the `cones` phase against `renderFrame`'s, 6 iters
+each (instruction ratios, because wall was useless at load average 30):
+
+| city `t` | cones Ginstr/f | renderFrame Ginstr/f | **cones share** | IPC | cones wall_min |
+|---|---|---|---|---|---|
+| 400  | 2.822 | 6.372 | 44 % | 4.00 | 21.2 ms |
+| 900  | 2.717 | 6.609 | 41 % | 4.00 | 22.1 ms |
+| 1400 | 1.547 | 5.147 | **30 %** | 3.96 | 12.5 ms |
+| **1961** | **4.150** | **8.615** | **48 %** | 4.03 | 31.6 ms |
+| 2400 | 2.137 | 4.501 | 47 % | 3.51 | 29.3 ms |
+
+**30–48 % of every instruction the frame retires, everywhere in the scene.** The
+original campaign figure ("~50 % of every instruction retired" at `t=1961`)
+reproduces at 48 % and is not a pose artifact. IPC stays 3.5–4.0 across the
+sweep, so no pose turns this into a memory-bound problem either.
+
+### Hypotheses this killed, with numbers
+
+* **"the narrow-cone 8-segment hybrid dominates"** — no: `narrow(seg8)=0`. All
+  46 city headlights are wide cones and take the *cheapest* closed-form branch.
+* **"scalar per-lane shadow taps dominate"** — no: `shadowed=0` in city. Not one
+  headlight casts.
+* **"finer cone tiles would tighten the cull"** — weak, and it is the *cull*
+  that is weak, not the tiling: 6x4 -> 12x8 moves total (px x spot) only
+  29.2 M -> 25.6 M, and disabling `spot_cone_cull` entirely at 12x8 moves
+  tile-entries just 1187 -> 1384. The cone-vs-tile test rejects **14 %**; the
+  range-sphere screen rect before it already did the heavy lifting
+  (46x96 = 4416 -> 1384). Headlight cones genuinely cover large screen area.
+* **"hoist the redundant `1.0f/uV` divide out of the per-spot loop"** — `uV`
+  depends only on the pixel, so this looked like ~20 M free divides. Measured
+  **instruction-neutral, in fact +0.4 % (4.276 -> 4.294 Ginstr/f)**, byte-null
+  but worthless; the compiler was already handling it and the explicit array
+  added stores. Reverted. *This is why levers get measured before they get
+  believed.*
+* **"cull the dead pairs"** — capped low. 39.9 % of (batch x spot) pairs have
+  zero alive lanes, but those lanes bail at the cheap sphere test long before
+  the divides, so they are not where the 2.681 G sits.
+
+### The lever that is left, and its measured ceiling
+
+Vectorize the per-lane quadratic solve to 8 wide. It is the only lever with real
+headroom: **2.681 G of 4.217 G instructions**, currently at 1 lane per iteration
+feeding a body that is already 8-wide. The standing comment in the source
+(*"the a-sign branching is too hairy to vectorize cleanly"*) is the reason it was
+never done, and the three-way sign branch on `a` is genuinely the hard part —
+but both live arms compute the same `disc`/`sqrt`/`1/(2a)` shape and differ only
+in which root interval they take, which is a blend.
+
+**The risk that decides it is bit-exactness, not correctness.** The city pin
+`3cbe42b166847e40f7071eedb48d613c` is a byte gate, and `-ffp-contract` means the
+scalar arm's `Dx*X + Dy*Y + Dz` may already be an FMA; an 8-wide port has to
+reproduce the compiler's contraction choices per lane or the pin moves. Use
+`_mm256_sqrt_ps` / `_mm256_div_ps` (IEEE-exact, unlike the `rsqrt`/`rcp`+NR
+approximations used elsewhere in this file) and verify against the pin, not
+against a screenshot.
