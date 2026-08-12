@@ -474,8 +474,11 @@ static inline bool lightRayClip(const ViewLightsSoA* L, int li, float X, float Y
 //     taken at the segment's closest-approach point z* = clamp(VP/uV, zA, zB),
 //     where the integrand peaks. Finite and smooth → no disc.
 //   • Shadow-casting spots: the per-point shadow tap can't be integrated in
-//     closed form (same reason vol_cone_analytic ray-marches shadowed spots), so
-//     fall back to ns stratified samples with the shadow tap per sample.
+//     closed form, so fall back to ns stratified samples with the shadow tap
+//     per sample. (This per-spot `shadowed` branch is LOCAL TO THIS PASS —
+//     the parenthetical that used to sit here claimed vol_cone_analytic does
+//     the same and it does not: the cone pass has no per-spot fallback at all.
+//     Corrected 2026-08-12.)
 static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
                                        float zA, float zB, float jitter,
                                        float& gR, float& gG, float& gB)
