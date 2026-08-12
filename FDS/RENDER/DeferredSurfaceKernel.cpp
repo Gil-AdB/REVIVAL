@@ -6358,9 +6358,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// byte-identical. Offscreen: the override's own (per-worker) buffer, which
 	// is what lets a shard bake tonemap like the frame it is composited into
 	// instead of falling through to the LDR combine.
-	ctx.hdrBuf = ov ? ov->hdr
-	                : (fds::Hdr_WritableFor(XRes, YRes) ? fds::g_hdrBuf.data()
-	                                                    : nullptr);
+	// An override that brings its OWN buffer wins; everything else falls back to
+	// the old predicate EVALUATED ON THIS PASS'S DIMS, which is what keeps the
+	// mirror RTT working: it brackets its bake with Hdr_BeginFramePass(texW,texH),
+	// so g_hdrBuf really is sized for it and Hdr_WritableFor(XRes,YRes) is true —
+	// reading `ov ? ov->hdr : …` instead would have silently dropped the RTT off
+	// the HDR path. The shard bake with --shard_hdr off lands on nullptr the same
+	// way it always did (nothing sized g_hdrBuf to 64²).
+	ctx.hdrBuf = (ov && ov->hdr)
+	               ? ov->hdr
+	               : (fds::Hdr_WritableFor(XRes, YRes) ? fds::g_hdrBuf.data()
+	                                                   : nullptr);
 
 	// Wave 1: shade even cells (full deferred kernel). When checkerboard
 	// is off, this is the entire pass and odd-cell skip is a no-op.
