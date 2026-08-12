@@ -924,7 +924,7 @@ static inline int envMipChainDepth(int realMips) {
 // cannot drift apart.
 static inline bool MetalTintLinearActive(const DeferredLightingCtx &ctx) {
 	return fds::FeatureFlags::env_metal_tint_linear()
-	    && fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres)
+	    && fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr
 	    && fds::FeatureFlags::hdr_linear();
 }
 
@@ -1551,11 +1551,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// than lifting the already-clamped VPage. Gated on hdr(): when off, no write,
 	// LDR byte-identical; when on but the froxel composite doesn't run, g_hdrActive
 	// stays false and the tonemap no-ops, so the buffer is harmlessly ignored.
-	// Hdr_WritableFor: only the MAIN pass (g_hdrBuf sized for these dims) may
-	// write it — the order-2 mirror RTT calls this kernel directly with its own
-	// (smaller) dims and never ran Hdr_BeginFrame, so g_hdrBuf is unsized there
-	// (writing it = null deref / wrong-res index).
-	const bool hdrWrite = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);
+	// ctx.hdrBuf is THIS pass's radiance target (null = no HDR write). It used
+	// to be `Hdr_WritableFor(ctx.xres, ctx.yres)` — "g_hdrBuf happens to be
+	// sized like me" standing in for "am I the main pass?" — which silently sent
+	// every offscreen bake at another resolution down the LDR combine, onto a
+	// different transfer function from the frame it feeds. The orchestrator now
+	// hands each pass its own buffer (main: g_hdrBuf under exactly the old
+	// predicate; shard bake: the calling worker's own).
+	const bool hdrWrite = fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr;
 	// HDR Phase 3 B2: when --hdr_linear, do the lighting math in LINEAR space —
 	// square the (normalized) albedo and let light enter at power 1 (B1/gamma
 	// effectively squares the light too). Store the result re-encoded to gamma
@@ -2916,7 +2919,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// VPage. The froxel composite reads h[3] to take the scene from here
 			// (opaque) vs the VPage (sky/forward content the kernel never wrote).
 			if (hdrWrite) {
-				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = ctx.hdrBuf + i * 4;
 				if (hdrLinear) {
 					// B2 + full coherence: linear lighting. albedo² (gamma-2.0
 					// decode) × light at power 1; specular is reflected light → a
@@ -4297,7 +4300,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	// buffer FROM that); radiance > 255 on PreferOuterVec scenes needs the
 	// scalar kernel. Lifting the cap here still recovers the 250→255 band
 	// and keeps vec/scalar lit math consistent pre-pack.
-	const bool  hdrWrite = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);
+	const bool  hdrWrite = fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr;
 	const TileLights &tl = ctx.tileLights[tileIndex];
 	const float  ambB_sc = float(ctx.Sc->Ambient.B);
 	const float  ambG_sc = float(ctx.Sc->Ambient.G);
@@ -5197,7 +5200,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const bool checkerEdgeFullG = (checker || quarter)
 	    && fds::FeatureFlags::deferred_checker_edge_full()
 	    && !deferredLightingOuterVecEnabled();
-	const bool hdrWrite     = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);   // HDR B1: see main kernel
+	const bool hdrWrite     = fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr;   // HDR B1: see main kernel
 	const bool hdrLinear    = hdrWrite && fds::FeatureFlags::hdr_linear();  // HDR B2
 	// Normal-similarity threshold for the quarter fill predicate. matID
 	// equality alone is too loose — same hull material on a curved
@@ -5372,7 +5375,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					const fds::hdrf* nh = hdrWrite ? (ctx.hdrBuf + nidx[k]*4) : nullptr;
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr;
@@ -5422,7 +5425,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
 					}
 					if (hdrWrite) {
-						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+						fds::hdrf* h = ctx.hdrBuf + i*4;
 						if (haveOwn && nsharp > 0) {
 							const float invn = 1.0f / float(nsharp);
 							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
@@ -5462,7 +5465,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					const fds::hdrf* nh = hdrWrite ? (ctx.hdrBuf + nidx[k]*4) : nullptr;
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr, nrB, nrG, nrR;
@@ -5498,7 +5501,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
 					}
 					if (hdrWrite) {   // HDR float-radiance average (see quarter path)
-						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+						fds::hdrf* h = ctx.hdrBuf + i*4;
 						if (haveOwn && nsharp > 0) {
 							const float invn = 1.0f / float(nsharp);
 							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
@@ -5792,7 +5795,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				hR += float(rR) * 0.5f;
 			}
 			if (hdrWrite) {
-				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = ctx.hdrBuf + i * 4;
 				if (hdrLinear) {            // B2 + full coherence — see main kernel
 					const float kN = 1.0f / 255.0f;
 					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
@@ -6350,6 +6353,14 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	ctx.gbXpar     = g_gbufferTransparent;
 	ctx.xparZ      = g_xparZ;
 	ctx.xparZBack  = g_xparZBack;
+	// HDR radiance target for this pass. Main frame: the global under EXACTLY
+	// the predicate the kernels used to evaluate themselves, so it is
+	// byte-identical. Offscreen: the override's own (per-worker) buffer, which
+	// is what lets a shard bake tonemap like the frame it is composited into
+	// instead of falling through to the LDR combine.
+	ctx.hdrBuf = ov ? ov->hdr
+	                : (fds::Hdr_WritableFor(XRes, YRes) ? fds::g_hdrBuf.data()
+	                                                    : nullptr);
 
 	// Wave 1: shade even cells (full deferred kernel). When checkerboard
 	// is off, this is the entire pass and odd-cell skip is a no-op.

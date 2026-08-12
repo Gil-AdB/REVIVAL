@@ -811,6 +811,57 @@ void Render_GradeGrainPass() {
     });
 }
 
+// Per-target inline twins — see Hdr.h for why they exist. Deliberately written
+// as the same arithmetic as the global forms, not a refactor of them: the
+// globals are on the main frame's byte-exact path and are left untouched.
+void Hdr_ActivateNoFogInline(hdrf *hdr, uint32_t *vpage, int stride, int w, int h) {
+    if (!hdr || !vpage || w <= 0 || h <= 0) return;
+    const bool  linear = FeatureFlags::hdr_linear();
+    const float kInv   = 1.0f / 255.0f;
+    for (int y = 0; y < h; ++y) {
+        const uint32_t *row = vpage + size_t(y) * size_t(stride);
+        hdrf           *hb  = hdr   + size_t(y) * size_t(w) * 4;
+        for (int x = 0; x < w; ++x) {
+            if (hb[x*4+3] != 0.0f) continue;   // covered: kernel already wrote radiance
+            const uint32_t p = row[x];
+            float b = float(p & 0xFFu), g = float((p >> 8) & 0xFFu), r = float((p >> 16) & 0xFFu);
+            if (linear) { b = b*b*kInv; g = g*g*kInv; r = r*r*kInv; }  // gamma-2.0 -> linear scale
+            hb[x*4+0] = HdrClamp(b); hb[x*4+1] = HdrClamp(g); hb[x*4+2] = HdrClamp(r);
+        }
+    }
+}
+
+void Render_TonemapToVPageInline(const hdrf *hdr, uint32_t *vpage, int stride,
+                                 int w, int h) {
+    if (!hdr || !vpage || w <= 0 || h <= 0) return;
+    const float exposure = FeatureFlags::hdr_exposure();
+    const float sat      = FeatureFlags::hdr_white();
+    const bool  linear   = FeatureFlags::hdr_linear();
+    const float kE       = exposure * (1.0f / 255.0f);
+    auto aces = [](float x) -> float {
+        x = (x * (2.51f*x + 0.03f)) / (x * (2.43f*x + 0.59f) + 0.14f);
+        return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+    };
+    auto q = [](float c){ int v = int(c*255.0f+0.5f); return uint32_t(v<0?0:(v>255?255:v)); };
+    for (int y = 0; y < h; ++y) {
+        uint32_t   *row = vpage + size_t(y) * size_t(stride);
+        const hdrf *hb  = hdr   + size_t(y) * size_t(w) * 4;
+        for (int x = 0; x < w; ++x) {
+            float b = aces(hb[x*4+0]*kE), g = aces(hb[x*4+1]*kE), r = aces(hb[x*4+2]*kE);
+            if (sat != 1.0f) {
+                const float L = 0.0722f*b + 0.7152f*g + 0.2126f*r;
+                b = L + (b - L)*sat; g = L + (g - L)*sat; r = L + (r - L)*sat;
+            }
+            if (linear) {
+                b = b > 0.0f ? std::sqrt(b) : 0.0f;
+                g = g > 0.0f ? std::sqrt(g) : 0.0f;
+                r = r > 0.0f ? std::sqrt(r) : 0.0f;
+            }
+            row[x] = q(b) | (q(g) << 8) | (q(r) << 16) | 0xFF000000u;
+        }
+    }
+}
+
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();
     const size_t px = size_t(rt.xres) * size_t(rt.yres);

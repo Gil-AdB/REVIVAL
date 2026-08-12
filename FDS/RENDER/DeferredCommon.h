@@ -24,6 +24,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "RENDER/Hdr.h"   // fds::hdrf — the per-target HDR radiance element
 #include "Base/CameraContext.h"   // fds::CameraContext (light-list builders)
 
 namespace meka { struct GBuffer; }
@@ -327,6 +328,17 @@ struct DeferredLightingCtx {
 	// mirror-shard bake was paying 96 tiles x 238 shards = 22 848 of them per
 	// shatter frame. Pixel values do not depend on this flag.
 	bool                 inlineDispatch = false;
+	// HDR radiance target for THIS pass (B,G,R,coverage ×4 per pixel, xres×yres),
+	// or nullptr when this pass writes no HDR. Replaces the kernels' old
+	// `Hdr_WritableFor(ctx.xres, ctx.yres)` test, which used "g_hdrBuf happens to
+	// be sized like me" as a de-facto "am I the main pass?" — so any offscreen
+	// bake at another resolution silently fell through to the LDR combine and
+	// ended up on a DIFFERENT TRANSFER FUNCTION from the frame it feeds. Main
+	// frame: g_hdrBuf.data() under exactly the old predicate (byte-identical).
+	// Offscreen: DeferredOverride::hdr, which for the shard bake is the calling
+	// worker's OWN buffer — the bakes run N-concurrent, so this cannot be a
+	// global the way the serial mirror RTT's Hdr_BeginFramePass is.
+	fds::hdrf           *hdrBuf = nullptr;
 };
 
 
@@ -350,6 +362,10 @@ struct DeferredOverride {
     word                 *xparZ      = nullptr;
     word                 *xparZBack  = nullptr;
     bool                  inlineDispatch = false;
+    // Per-target HDR radiance buffer (xres*yres*4 hdrf), or null for an LDR
+    // bake. Per WORKER, not per scene: N shard bakes run concurrently, which is
+    // why the mirror RTT's serial Hdr_BeginFramePass(w,h) shape does not port.
+    fds::hdrf            *hdr        = nullptr;
 };
 
 // Deferred opaque lighting pass. ov=nullptr → main frame (engine globals,

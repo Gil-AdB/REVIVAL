@@ -144,8 +144,37 @@
 > quarter-rate for the offscreen bake (the wave-2 `TileFill` machinery already
 > exists and is per-target selectable), or a smaller `texRes_` — and every one of
 > them is a LOOK change on a surface the user gates by eye, so none was taken
-> unilaterally. The per-target HDR item below is still open and still lands in
-> this same call.
+> unilaterally. The per-target HDR item below lands in this same call, and the
+> addendum is what happened to it.
+>
+> ### ADDENDUM, SAME DAY — THE PER-TARGET HDR ITEM: BUILT, MEASURED, AND OVERTURNED
+>
+> The backlog's designed fix (per-worker HDR buffer through `DeferredOverride`,
+> activate + tonemap after the kernel) is written as `--shard_hdr`. **It makes
+> the residual four times worse**, so it ships default OFF as a measured arm.
+> Panel-window luma at the bracket, against the MAIN deferred pass from the
+> shard's own reflected eye (`FDS_GREETS_CAM="68.79,10.8,-62.85,-1,0,0"`):
+> reference **74.78**; shipping **87.31 (+12.53** — reproducing `ddb1d15`'s
+> recorded +12.5 to two decimals, so the harness is right); `--shard_hdr`
+> **129.79 (+55.01)**.
+>
+> **The atlas is an ALBEDO TEXTURE, not a finished image.** The shards are
+> ordinary opaque geometry, so the main frame's deferred kernel samples the
+> atlas as a texel, lights it, and tonemaps it with everything else. One A/B
+> settles it: with the flag OFF, sweeping the **frame's** `--hdr_exposure`
+> 1.0 → 2.0 moves the mosaic **87.31 → 130.78**. Tonemapping the cell as well
+> applies the transfer function twice — and `--shard_hdr` at exposure 1.0
+> landing on legacy-at-exposure-2.0 is exactly that signature. The mirror RTT
+> is not a counterexample but the clue: it keeps FLOAT radiance in `hdrRefl`
+> and hands *that* to the frame. **The real remedy is an HDR atlas, and it is
+> not started.**
+>
+> **What shipped from it anyway, byte-null:** `DeferredLightingCtx::hdrBuf`
+> carries each pass's own HDR target, replacing the kernels'
+> `Hdr_WritableFor(ctx.xres, ctx.yres)` — "the global happens to be sized like
+> me" as a proxy for "am I the main pass?", which is what made the failure
+> silent. Pins 2/2 ×3, `render_gate` 3/3, shatter frame `280cf102…` unchanged.
+> Image: `docs/img/fogwt/shardhdr_t3122_doubletonemap.png`.
 
 > ## 2026-08-12c — THE CONE SOLVE IS 8 LANES WIDE NOW, −9.4 ms/FRAME ON CITY, AND NOT ONE PIN MOVED
 >

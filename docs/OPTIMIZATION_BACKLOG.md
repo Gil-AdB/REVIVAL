@@ -146,7 +146,43 @@ the de-facto "am I the main pass?" test, which is what makes the failure silent.
 
 **Priced before starting:** the shard bake pass is 14.5 ms (min-of-6, load 12.8);
 a per-worker `texRes²×4` float buffer is 64 KB at res 64 — the cost is the extra
-tonemap sweep, not the memory. STATUS: TODO.
+tonemap sweep, not the memory. STATUS: **BUILT 2026-08-12, MEASURED, AND
+OVERTURNED. The diagnosis above is right; the remedy is wrong.**
+
+`--shard_hdr` (default **0**) is that fix, exactly as designed: a per-worker HDR
+buffer through `DeferredOverride`, `Hdr_ActivateNoFogInline` +
+`Render_TonemapToVPageInline` after the kernel. It makes the residual **four
+times worse.** Panel-window luma at the shatter bracket, against the MAIN
+deferred pass from the shard's own reflected eye as ground truth:
+
+| | luma | vs reference |
+|---|--:|--:|
+| reference (main pass, reflected eye) | 74.78 | — |
+| shipping, `--no-shard_hdr` | 87.31 | **+12.53** (reproduces `ddb1d15`'s +12.5) |
+| `--shard_hdr` | 129.79 | **+55.01** |
+
+**Why: the shard atlas is an ALBEDO TEXTURE, not a finished image.** The shards
+are ordinary opaque scene geometry, so the MAIN frame's deferred kernel samples
+the atlas as a texel, lights it, writes linear radiance to `g_hdrBuf` and
+tonemaps it with everything else. One A/B proves it: with the flag OFF, sweeping
+the **frame's** `--hdr_exposure` 1.0 → 2.0 moves the mosaic **87.31 → 130.78**.
+The frame's tonemap already owns those pixels; tonemapping the cell as well
+applies the transfer function twice — and `--shard_hdr` at exposure 1.0 (129.79)
+landing on legacy-at-exposure-2.0 (130.78) is that doubling's signature.
+
+**The mirror RTT is not a counterexample, it is the clue.** It keeps the FLOAT
+radiance in the material's `hdrRefl` and hands *that* to the frame
+(`GreetsMirror.cpp`); its `Render_TonemapToVPage` onto the 8-bit RTT surface is
+only the LDR fallback. So the real remedy for the +12.5 is an **HDR atlas** —
+shard cells carrying linear radiance into the frame through an `hdrRefl`-shaped
+path — not a tonemapped 8-bit cell. **STATUS of that: TODO, not started.**
+
+**What DID ship from this, unconditionally and byte-null:** the plumbing.
+`DeferredLightingCtx::hdrBuf` now carries each pass's own HDR target, replacing
+the kernels' `Hdr_WritableFor(ctx.xres, ctx.yres)` test — "the global happens to
+be sized like me" standing in for "am I the main pass?", which is what made the
+failure silent in the first place. Main frame identical (all three pins,
+`render_gate` 3/3); it is the prerequisite the HDR-atlas fix will need.
 
 ## 2026-08-10 — MEMORY-SIZE SWEEP: `--mem_census`, and the per-shadow-map FList (403 MiB at 0.5 % fill)
 

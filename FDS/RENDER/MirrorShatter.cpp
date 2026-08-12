@@ -20,6 +20,7 @@
 #include <FILLERS/Mekalele.h>    // meka::GBuffer + g_gbuffer globals (deferred bake)
 #include <FILLERS/TheOtherBarry.h> // PickFillerForMaterial (canonical filler picker)
 #include <RENDER/DeferredCommon.h> // ViewLightsSoA/TileLights/DeferredOverride + Render_DeferredLighting
+#include <RENDER/Hdr.h>            // per-target HDR round trip for the shard bake (--shard_hdr)
 #include <Base/FeatureFlags.h>
 #include <Threads.h>             // ThreadPool — fan shards across cores
 
@@ -594,6 +595,11 @@ struct MirrorShatter::ReflWorker {
 	meka::GBuffer            gb{};
 	ViewLightsSoA            lights{};
 	std::vector<TileLights>  tileLights;   // sized DEFERRED_NUM_TILES
+	// Per-WORKER HDR radiance target (texRes²×4), --shard_hdr. It has to be per
+	// worker and not the g_hdrBuf global the serial mirror RTT borrows through
+	// Hdr_BeginFramePass: N shard bakes run concurrently on the pool, so a
+	// global would race on both the buffer and g_hdrBufW/H.
+	std::vector<fds::hdrf>   hdr;
 	bool                     gbInit = false;
 };
 struct MirrorShatter::ReflPool {
@@ -1055,6 +1061,10 @@ void MirrorShatter::ensureReflWorkers() {
 				w.gb.lightmapST.assign(np, 0);
 			}
 			w.tileLights.resize(DEFERRED_NUM_TILES);
+			// --shard_hdr: this worker's own radiance buffer. 64² × 4 × 2 B
+			// (f16 storage) = 32 KB per worker — the cost of this feature is
+			// the extra activate+tonemap sweep, not the memory.
+			if (fds::FeatureFlags::shard_hdr()) w.hdr.assign(np * 4, fds::hdrf(0.0f));
 			w.gbInit = true;
 		}
 	}
@@ -1412,7 +1422,31 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 			ov.xres       = texRes_;
 			ov.yres       = texRes_;
 			ov.inlineDispatch = true;
+			// --shard_hdr: give this pass its own HDR target so the reflection
+			// runs the SAME transfer function as the frame it is composited
+			// into. Without it the kernel's `ctx.hdrBuf != nullptr` gate is
+			// false at 64² and the bake silently takes the LDR combine
+			// (texel*light/256 + spec) while the frame renders linear radiance
+			// through exposure → ACES → sqrt — measured +12.5 panel-window
+			// luma, and near-immune to --no-hdr, which is the signature of a
+			// pass ignoring the frame's tonemap (ddb1d15's open residual).
+			const bool hdrBake = !w.hdr.empty();
+			if (hdrBake) std::fill(w.hdr.begin(), w.hdr.end(), fds::hdrf(0.0f));
+			ov.hdr = hdrBake ? w.hdr.data() : nullptr;
 			Render_DeferredLighting(dctx, &ov);
+			if (hdrBake) {
+				// Same bracket the mirror RTT uses (GreetsMirror.cpp), in its
+				// inline per-worker form: lift the pixels the kernel never
+				// covered (background clear, forward/reflective faces drawn
+				// straight to the page) out of the 8-bit surface into the
+				// radiance buffer, then tonemap the whole cell back onto it.
+				// The cone pass below then adds its beams to the tonemapped
+				// 8-bit cell exactly as it did before this change.
+				fds::Hdr_ActivateNoFogInline(w.hdr.data(), (uint32_t*)w.surf.Data,
+				                             w.surf.BPSL / 4, texRes_, texRes_);
+				fds::Render_TonemapToVPageInline(w.hdr.data(), (uint32_t*)w.surf.Data,
+				                                 w.surf.BPSL / 4, texRes_, texRes_);
+			}
 			const auto _tF2 = phClock();
 			phAdd(fds::g_phLight, _tF1, _tF2);
 			// Disco-ball / spotlight volumetric cones in the reflection where
