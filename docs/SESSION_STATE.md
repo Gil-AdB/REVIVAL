@@ -1,5 +1,118 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+
+> ## 2026-08-12c — THE CONE SOLVE IS 8 LANES WIDE NOW, −9.4 ms/FRAME ON CITY, AND NOT ONE PIN MOVED
+>
+> The standing biggest perf item in the tree, closed. `a16567b` had located it
+> and left the lever: `Render_VolumetricCones_Tile` is **37.5 % of all running
+> CPU** at city t=1961, and **63.6 % of that pass (2.681 of 4.217 Ginstr/f)** was
+> ONE SCALAR LOOP — 25.6 M per-lane quadratic solves a frame, ~105 instructions
+> each, sitting inside the per-spot loop and feeding a body that was already
+> 8-wide. IPC 4.0–4.2, so it was instruction COUNT, not stalls. Now widened,
+> default ON as `--vol_cone_solve_vec`.
+>
+> **MEASURED, city t=1961, interleaved ABBA min-of-6 on one binary (the flag is
+> the only difference between arms), load 15–20:**
+>
+> | | scalar | 8-wide | |
+> |---|--:|--:|--:|
+> | cones wall_min | 30.764 ms | **21.406 ms** | **−9.36 ms, −30.4 %** |
+> | cones Ginstr/f | 4.091 | **2.868** | −29.9 % |
+> | cones Gcyc/f | 1.020 | **0.718** | −29.6 % |
+> | renderFrame wall_min | 71.753 ms | **62.309 ms** | **−9.44 ms, −13.2 %** |
+> | renderFrame Ginstr/f | 8.288 | 7.067 | −14.7 % |
+>
+> The −9.44 ms frame saving and the −9.36 ms cones saving agree, which is the
+> internal check that the attribution is real. IPC is flat (3.91 → 3.94) — the
+> win is removed instructions, not unblocked stalls, exactly as diagnosed.
+> Across the city t-sweep the pass drops **24–31 % at every pose** and its share
+> of frame instructions goes **32–50 % → 27–41 %** (full table in
+> docs/HW_PROFILING.md §9).
+>
+> **NOT ONE PIN MOVED — the port is BIT-EXACT.** city
+> `3cbe42b166847e40f7071eedb48d613c` 2/2 with the flag ON *and* 2/2 with it OFF
+> (which is what proves the scalar arm is untouched), greets
+> `778fa6acd85a69cf241babefcdaf598e` 2/2, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9` 2/2, `render_gate` 3/3 PASS (mirrortest
+> `4ac809e5`, conetest `b41894f9`, halotest `166fa25a`). **You waived
+> byte-exactness for this task and it turned out not to need waiving** — so
+> there is nothing here for your eye to countersign, and the frame is unchanged
+> to the last bit: `docs/img/fogwt/conevec_t1961_city.png` is what both arms
+> render.
+>
+> **HOW THE BIT-EXACTNESS WAS GOT: read the compiler's FMA contraction map off
+> the DISASSEMBLY, not off the source.** Under the tree-wide
+> `-ffp-contract=fast` the compiler picks, for each `a*b + c*d`, which product to
+> fuse and which to round, **and its picks do not follow source order** — it
+> compiles `Dx*Px + Dy*Py + Dz*Pz` into `fma(Pz,Dz, fma(Px,Dx, fl(Py*Dy)))`.
+> Release is thin-LTO so the `.o` files are bitcode: disassemble the LINKED
+> binary. The map it had chosen, reproduced per lane, is in §9; in every pair it
+> is the SECOND product that ends up rounded. Two traps worth carrying forward:
+> **simde does not give you the fused op you asked for** (`_mm256_fmadd_ps` →
+> `vfmaq_f32`, but `_mm256_fmsub_ps`/`_mm256_fnmadd_ps` → `sub(mul(a,b),c)`,
+> handing the choice back to the compiler — spell every `a*b - c` as
+> `fma(a,b,NEG(c))` with an explicit sign-bit xor, since an FMA intrinsic's
+> operand is a barrier it will not re-contract across); and **`std::min`/`max`
+> are not `_mm256_min_ps`/`_mm256_max_ps`** (NEON `FMIN` resolves NaN and −0 the
+> opposite way from the scalar `FCSEL`) — transcribe as cmp + blend, and use the
+> unordered compare predicates wherever the scalar reads `if (x < y) continue;`.
+>
+> **ACHIEVED vs CEILING, honestly.** The solve went **2.65 → 1.37 Ginstr/f, a
+> 1.94×**, not the 8× the lane count suggests: **55 % of a perfect 8-wide port,
+> 64 % of the realistic floor.** Two reasons, and the second generalises: on
+> arm64 there is no 8-wide unit — simde emulates every `__m256` op with TWO
+> 128-bit NEON ops, so a `_mm256_`-spelled port cannot beat ¼ of scalar; and the
+> wide arm computes both `a`-sign branches and the whole tail for all eight lanes
+> where the scalar arm's dead lanes bail early.
+>
+> **THREE VARIANTS BUILT, MEASURED AND REJECTED** (each benched in the same
+> interleaved session as the arm it is compared against; `Ginstr/f` reproduces to
+> 0.3 % for a fixed binary+arm, so a 1.5–2 % move is a real effect):
+>
+> * **Range-sphere early-out** — trying to buy back exactly the dead-lane
+>   overhead named above. **+2.0 % instructions.** The premise ("39.9 % of pairs
+>   have zero alive lanes") is what is wrong: the branch only fires when ALL
+>   EIGHT lanes miss the sphere, and most dead pairs lose their lanes later.
+>   Kept compiled out at its site as `FDS_CONE_SOLVE_EARLYOUT`.
+> * **Raw `rcp`/`rsqrt` instead of true div/sqrt** — **+1.6 % instructions,
+>   −1.7 % cycles, −1.0 % wall: nothing.** The loop is instruction-bound (IPC
+>   3.9), and NEON's `vrecpe`/`vrsqrte` are **8-bit** estimates, half what the
+>   x86 intrinsic names imply, so usable accuracy needs NR steps costing more
+>   than the divide they replace. Raw is the FASTEST that family can be, so one
+>   build closes the whole family — the cheap discriminator. **Your read on the
+>   numerical rule was right and is now measured:** this consumer is not the
+>   `vec_ggx` case at all — the raw-estimate build moved city by **200 px of
+>   2 073 600, every one at 1 LSB**
+>   (`docs/img/fogwt/conevec_t1961_rejected_approx_diff.png`). Approximation is
+>   harmless here; it just does not pay. Kept as `FDS_CONE_SOLVE_APPROX`.
+> * **Relaxed FP association** (`_mm256_min_ps`/`_mm256_fmsub_ps` instead of the
+>   exactness-preserving spellings) — **−0.5 % instructions**, and it moves the
+>   city pin by **3 px at 1 LSB**. Half a percent is not worth a byte gate.
+>
+> **GREETS IS WHY THE WIDE ARM IS GATED TO NON-SEGMENTED CONES.** Cones DO run in
+> greets (1.18 Ginstr/f) — the greets pin is not vacuous coverage — but ungated
+> there the wide arm reads **instructions −3.8 % yet cycles +3.6 % and wall
+> +1.4 %** (7.63 → 7.73 ms), reproduced in two independent min-of-6 sessions.
+> Greets' cones are the narrow disco beams on the 8-segment hybrid body, where
+> the solve is a minor share and the dead-lane work is not repaid. With
+> `!segPath` in the gate greets is neutral (1.184 → 1.183, wall −1.6 %) and city
+> keeps the whole win, since every city headlight is a wide cone. Both arms are
+> bit-identical so the gate is byte-null. **The general lesson: a
+> per-lane→wide port is not uniformly a win across call sites with different
+> bodies — measure the second scene before defaulting it on.** Fountain runs no
+> cones at all (0.000 Ginstr/f, 0.003 ms); its pin is a no-regression control
+> only, and saying so is the honest version of "three pins held".
+>
+> **WHAT IS NEXT IN THIS PASS.** Cones is STILL the biggest single item in the
+> frame — 2.868 of 7.067 Ginstr/f, against DeferredLighting 1.247, fastfog
+> 1.092, gbuffer 0.891, TBR-render 0.846 — but it is down from 49 % of frame
+> instructions to 41 %, and what it is made of has flipped: the untouched SIMD
+> body + shadow taps + accumulate is now the majority of it (~1.52 of 2.87 G,
+> **inferred** by holding a16567b's ablation split, not re-measured). The next
+> lever inside this pass is the integration body, not the prologue — and whoever
+> takes it should re-run the a16567b ablation against the new arm first rather
+> than trust that inference.
+
 > ## 2026-08-12 — THE JAMB DOES NOT BOW BECAUSE OF THE NORMAL; THE PINNED BORDER STANDS PROUD OF ITS OWN WALL
 >
 > His report at t=5998 (`/tmp/greets_dump_0_t5998.ppm`): the doorway jamb "still

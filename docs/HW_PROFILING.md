@@ -327,20 +327,181 @@ sweep, so no pose turns this into a memory-bound problem either.
   zero alive lanes, but those lanes bail at the cheap sphere test long before
   the divides, so they are not where the 2.681 G sits.
 
-### The lever that is left, and its measured ceiling
+### The lever that was left — TAKEN, 2026-08-12b, `--vol_cone_solve_vec`
 
-Vectorize the per-lane quadratic solve to 8 wide. It is the only lever with real
-headroom: **2.681 G of 4.217 G instructions**, currently at 1 lane per iteration
-feeding a body that is already 8-wide. The standing comment in the source
-(*"the a-sign branching is too hairy to vectorize cleanly"*) is the reason it was
-never done, and the three-way sign branch on `a` is genuinely the hard part —
-but both live arms compute the same `disc`/`sqrt`/`1/(2a)` shape and differ only
-in which root interval they take, which is a blend.
+Vectorize the per-lane quadratic solve to 8 wide: **2.681 G of 4.217 G
+instructions**, one lane per iteration feeding a body that was already 8-wide.
+The standing comment in the source (*"the a-sign branching is too hairy to
+vectorize cleanly"*) was the reason it was never done, and the three-way sign
+branch on `a` is genuinely the hard part — but both live arms compute the same
+`disc`/`sqrt`/`1/(2a)` shape and differ only in which root interval they take,
+which is a blend. Done, default ON, **and the city pin did not move.**
 
-**The risk that decides it is bit-exactness, not correctness.** The city pin
-`3cbe42b166847e40f7071eedb48d613c` is a byte gate, and `-ffp-contract` means the
-scalar arm's `Dx*X + Dy*Y + Dz` may already be an FMA; an 8-wide port has to
-reproduce the compiler's contraction choices per lane or the pin moves. Use
-`_mm256_sqrt_ps` / `_mm256_div_ps` (IEEE-exact, unlike the `rsqrt`/`rcp`+NR
-approximations used elsewhere in this file) and verify against the pin, not
-against a screenshot.
+**The shipping arm, `city t=1961`, `iters=6`, interleaved ABBA min-of-6 on one
+binary (the flag is the only difference between arms):**
+
+| | scalar solve | 8-wide | |
+|---|--:|--:|--:|
+| cones wall_min | 30.764 ms | **21.406 ms** | **−9.36 ms, −30.4 %** |
+| cones Ginstr/f | 4.091 | **2.868** | −29.9 % |
+| cones Gcyc/f | 1.020 | **0.718** | −29.6 % |
+| renderFrame wall_min | 71.753 ms | **62.309 ms** | **−9.44 ms, −13.2 %** |
+| renderFrame Ginstr/f | 8.288 | 7.067 | −14.7 % |
+| renderFrame Gcyc/f | 2.199 | 1.918 | −12.8 % |
+
+The frame saving (−9.44 ms) and the cones saving (−9.36 ms) agree, which is the
+internal check that the phase attribution is real. IPC is flat (3.91 → 3.94),
+which is the *point*: this removed instructions from an instruction-bound loop,
+exactly as the diagnosis said it would, rather than unblocking a stall.
+
+**The variant comparison** below was run on the pre-gate build as a matched
+4-arm A/B (one binary set, one asset tree, 6 rounds with the arm order rotating
+each round, load 12.5 → 18.9). City's cones are all wide, so the later
+segmented-cone gate does not move these numbers — the shipping arm reads 2.886
+there against 2.868 above, inside the counter's reproducibility.
+
+| arm | cones wall_min | cones Ginstr/f | cones Gcyc/f | IPC |
+|---|--:|--:|--:|--:|
+| scalar solve | 34.694 ms | 4.167 | 1.024 | 3.96 |
+| **8-wide, bit-exact (SHIPS)** | **25.410 ms** | **2.886** | **0.722** | 3.90 |
+| 8-wide + range-sphere early-out | 26.340 ms | 2.944 | 0.717 | 3.98 |
+| 8-wide, relaxed FP association | 25.449 ms | 2.871 | 0.714 | 3.94 |
+
+**Achieved against ceiling, stated honestly.** Holding the ablation's split
+(the SIMD body is untouched, so ~1.52 G of the 4.167 G baseline), the solve went
+**2.65 → 1.37 Ginstr/f, a 1.94×**, not the 8× the lane count suggests. Two
+reasons, and the second is the one that generalises:
+
+* A perfect 8-wide port would remove 2.32 G; this removed 1.28 G, **55 % of
+  that ideal**. But on arm64 there is no 8-wide unit — simde emulates every
+  `__m256` op with **two** 128-bit NEON ops, so the floor for a `_mm256_`-spelled
+  port is ¼ of scalar, not ⅛. Against that realistic floor the port achieves
+  **64 %**.
+* The rest is the early-out the scalar arm gets for free: its dead lanes
+  `continue` at the cheap sphere test, while the wide arm computes both `a`-sign
+  branches and the whole tail for all eight. **Reclaiming it was tried and it
+  does not work** — see the rejected arms below.
+
+### Three variants built, measured and rejected — with their numbers
+
+Each was a real build, benched in the same interleaved session as the arm it is
+compared against, so the comparison is matched rather than cross-session. For
+scale: `Ginstr/f` reproduces to **0.3 %** for a fixed binary+arm across sessions
+(the shipping arm read 2.886 / 2.891 / 2.894 in three), so a 1.5–2 % move is a
+real effect, not noise.
+
+* **Range-sphere early-out** (`FDS_CONE_SOLVE_EARLYOUT`, compiled out in place).
+  `movemask` the alive mask right after the sphere test and `continue` when no
+  lane survives. Premise: 39.9 % of (8px-batch × spot) pairs have zero alive
+  lanes. **Measured +2.0 % instructions (2.886 → 2.944) — it costs.** The
+  premise is what is wrong: the branch only fires when *all eight* lanes miss
+  the sphere, and most dead pairs lose their lanes later (a-sign, or `zHi<=zLo`
+  in the tail), so it fires too rarely to pay for the test.
+* **Raw `rcp`/`rsqrt` instead of true div/sqrt** (`FDS_CONE_SOLVE_APPROX`,
+  compiled out in place). The solve has the only non-pipelined ops in the loop —
+  3 divides + 2 square roots per (8px-batch × spot). **Measured +1.6 %
+  instructions (2.891 → 2.936), −1.7 % cycles, −1.0 % wall: no win.** Two
+  reasons. The loop is instruction-bound (IPC 3.9), not latency-bound; and on
+  NEON `vrecpe`/`vrsqrte` are **8-bit** estimates, half the 12 bits the x86
+  intrinsic names imply, so anything usable needs Newton-Raphson steps that cost
+  *more* instructions than the divide they replace. Raw is the fastest this
+  family can be, so measuring raw closes the whole family in one build — and it
+  is the cheap discriminator to reach for first. (Its output was also nearly
+  harmless: **200 px of 2 073 600 at 1 LSB**. So the `vec_ggx` plateau argument
+  never had to be litigated here — a volumetric integrand really does tolerate
+  approximation far better than a `reflect()` direction. Approximation simply
+  does not pay in this loop.)
+* **Relaxed FP association** — `_mm256_min_ps`/`_mm256_max_ps` and
+  `_mm256_fmsub_ps` instead of the exactness-preserving spellings. **Measured
+  −0.5 % instructions (2.886 → 2.871)**, and it moves the city pin: **3 px at
+  1 LSB**. Half a percent is not worth giving up a byte gate.
+
+### The reusable technique: read the contraction map off the disassembly
+
+This is the part worth keeping. Under the tree-wide `-ffp-contract=fast` the
+compiler decides, for each `a*b + c*d`, **which product gets fused and which gets
+rounded**, and *its choice does not follow the source order.* Reasoning from the
+source will not reproduce it. Read it off the binary:
+
+```sh
+nm -n build/DEMO/DEMO | grep VolumetricCones_Tile        # addr + the next symbol
+objdump -d --start-address=0x… --stop-address=0x… --no-show-raw-insn build/DEMO/DEMO
+```
+
+Release is thin-LTO, so the `.o` files are bitcode — **disassemble the linked
+binary, not the object.** On arm64 read `FMADD Sd,Sn,Sm,Sa` as `Sa + Sn*Sm` and
+`FNMSUB Sd,Sn,Sm,Sa` as `Sn*Sm - Sa`; a bare `FMUL` feeding an `FADD`/`FSUB` is a
+product the compiler chose to **round**. The map it had chosen here, which the
+source does not suggest anywhere:
+
+```
+DP  = fma(Pz,Dz, fma(Px,Dx, fl(Py*Dy)))       from  Dx*Px + Dy*Py + Dz*Pz
+VP  = fl( Pz + fma(Px, X, fl(Y*Py)) )          Y*Py hoisted per (row × spot)
+DV  = fl( Dz + fma(Dx, X, fl(Y*Dy)) )
+sD  = fma(VP,VP, -fl(sphereC*uV))
+a   = fma(DV,DV, -fl(c2*uV))
+b   = t+t,  t = fma(c2,VP, -fl(DP*DV))
+disc= fma(b,b, fl(cq * fl(a * -4)))            note -4, not "4·a·cq" subtracted
+```
+
+In every pair it is the **second** product that ends up rounded. Two traps when
+transcribing that into intrinsics:
+
+* **simde does not give you the fused op you asked for.** `_mm256_fmadd_ps`
+  lowers to `vfmaq_f32` (a true FMA), but `_mm256_fmsub_ps` and
+  `_mm256_fnmadd_ps` lower to `sub(mul(a,b), c)` — which hands the fusion choice
+  straight back to the compiler. Spell every `a*b - c` as `fma(a, b, NEG(c))`
+  with `NEG` an explicit sign-bit xor: an operand of an FMA *intrinsic* is a
+  barrier the compiler will not re-contract across, so the rounded product is
+  pinned by construction.
+* **`std::min`/`std::max` are not `_mm256_min_ps`/`_mm256_max_ps`.** NEON `FMIN`
+  resolves NaN and signed zero the opposite way from the scalar `FCSEL` the
+  compiler emits. Transcribe them as cmp + blend. Likewise use the *unordered*
+  compare predicates (`_CMP_NLT_UQ`, `_CMP_NLE_UQ`) wherever the scalar reads
+  `if (x < y) continue;` — that is its exact negation, NaN included.
+
+Verified end to end: `city 3cbe42b1…` 2/2 with the flag on **and** 2/2 with it
+off, `greets 778fa6ac…` 2/2, `fountain 8db68ccb…` 2/2, `render_gate` 3/3 PASS.
+
+### Where cones run, and the t-sweep after
+
+The pass is **not** in every pinned scene, so say which pin proves what:
+
+| scene | cones Ginstr/f | what its pin proves here |
+|---|--:|---|
+| city t=1961 | 4.09 → 2.87 | the change itself |
+| greets t=1588 | 1.18 → 1.18 | cones DO run, on the segmented branch — gated out, see below |
+| fountain t=2500 | 0.000 (0.003 ms) | no cones — a no-regression control only |
+
+**Greets is why the wide arm is gated to non-segmented cones.** Ungated at the
+greets pin pose the 8-wide solve reads **instructions −3.8 % but cycles +3.6 %
+and wall +1.4 %** (7.63 → 7.73 ms), and that reversal reproduced in two
+independent interleaved min-of-6 sessions, so it is not noise. The mechanism:
+greets' cones are the narrow disco beams, which take the 8-segment hybrid body —
+the solve is a minor share of that phase, and the wide arm's unconditional work
+on dead lanes is not repaid there. With `!segPath` in the gate greets is neutral
+(1.184 → 1.183 Ginstr/f, wall −1.6 %) and city keeps the entire win, because
+every city headlight is a wide cone. Both arms are bit-identical, so the gate
+costs nothing to get wrong in the other direction. **The general lesson: a
+per-lane→wide port is not uniformly a win across call sites with different
+bodies — measure the second scene before defaulting it on.**
+
+City t-sweep, same poses as the sweep above, interleaved, 2 rounds (load 27–32):
+
+| city `t` | cones Ginstr/f | | cones wall_min | | cones share of frame |
+|---|--:|--:|--:|--:|--:|
+| | scalar | 8-wide | scalar | 8-wide | scalar → 8-wide |
+| 400  | 2.823 | 2.061 (−27.0 %) | 28.8 ms | 22.2 ms | 46 % → 38 % |
+| 900  | 2.729 | 1.992 (−27.0 %) | 23.9 ms | 17.7 ms | 41 % → 33 % |
+| 1400 | 1.554 | 1.181 (−24.0 %) | 16.6 ms | 12.5 ms | 32 % → 27 % |
+| **1961** | **4.170** | **2.894 (−30.6 %)** | 38.0 ms | 30.8 ms | **50 % → 41 %** |
+| 2400 | 2.144 | 1.499 (−30.1 %) | 19.4 ms | 13.7 ms | 49 % → 40 % |
+
+**Cones is still the biggest single item in the frame** — 2.886 of 7.090
+Ginstr/f at t=1961, against `DeferredLighting` 1.247, `fastfog` 1.092, `gbuffer`
+0.891, `TBR-render` 0.846. What changed is what it is *made of*: the untouched
+SIMD body + shadow taps + accumulate is now the majority of it (~1.52 of 2.89 G
+— **inferred** by holding the ablation's split, not re-measured). So the next
+lever inside this pass is the integration body, not the prologue, and the next
+person here should re-run the a16567b ablation against the new arm before
+believing that split.

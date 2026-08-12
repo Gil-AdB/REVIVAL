@@ -10,6 +10,37 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-12 — TODO: the cone INTEGRATION BODY is now the majority of the cone pass
+
+The per-lane quadratic solve is **DONE** (`--vol_cone_solve_vec`, default ON,
+bit-exact, −9.4 ms/frame on city t=1961; docs/HW_PROFILING.md §9). That moves
+the cone pass from 4.09 → 2.87 Ginstr/f, and it is *still* the biggest single
+item in the frame (2.87 of 7.07, against DeferredLighting 1.25, fastfog 1.09,
+gbuffer 0.89, TBR-render 0.85) — but its composition has flipped. The untouched
+SIMD body + shadow taps + accumulate is now **~1.52 of 2.87 G, i.e. the
+majority**, so the next lever inside this pass is the integrand, not the
+prologue.
+
+**That ~1.52 G is INFERRED**, by holding a16567b's 63.6/36.4 ablation split and
+assuming the body is unchanged (its code is). It has not been re-measured on the
+new arm. **First step for whoever takes this: re-run the a16567b ablation
+against the vectorized arm** (keep the prologue, `continue` before the
+integration, sink the result, diff `Ginstr/f`) and get the real split before
+believing anything downstream of it.
+
+Two things already known about that body, from this work:
+
+* It is the `useAnalytic` closed form for wide cones (city) and the 8-segment
+  hybrid for narrow/turbulent ones (greets). Those are different cost shapes and
+  will need separate numbers — the solve port itself won on one and lost on the
+  other, which is why it is gated on `!segPath`.
+* Its `rsqrt_nr_x8` / `_mm256_rcp_ps`+NR chains are *not* obviously safe to
+  cheapen. The approximation family measured a dead loss in the SOLVE (raw
+  estimates: +1.6 % instructions, −1.0 % wall — NEON estimates are 8-bit, so
+  usable accuracy costs more than the divide), but the body's arithmetic mix is
+  different and the question is open there. Measure raw-vs-NR first; it closes
+  the family in one build.
+
 ## 2026-08-11 — TODO: a PER-TARGET HDR buffer, so an offscreen bake tonemaps like the frame it feeds
 
 **The defect.** `g_hdrBuf` is a single global sized by `Hdr_BeginFrame()` to the
