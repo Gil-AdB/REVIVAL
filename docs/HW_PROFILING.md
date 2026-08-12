@@ -18,7 +18,7 @@ Measured 2026-08-10 on the M2 Max, macOS 26.5, SIP enabled, no sudo.
 
 | capability | status | evidence |
 |---|---|---|
-| `xctrace` / Instruments templates (Time Profiler, CPU Counters, Allocations, System Trace, VM Tracker) | **UNREACHABLE** | `xcrun xctrace` → *"unable to find utility"*. `xcode-select -p` = `/Library/Developer/CommandLineTools`; there is no `Xcode.app` in `/Applications`. `xctrace` ships only inside Xcode.app. |
+| `xctrace` / Instruments templates (Time Profiler, CPU Counters, Allocations, System Trace, VM Tracker) | **REACHABLE since 2026-08-12** — see §1a | Xcode 26.6 is now installed. `xcrun xctrace` still fails, but that is a *selection* problem, not an availability one (§1a). |
 | PMU event selection (L1D/L2 misses, stalls, branch mispredicts) via `kperf`/`kpc` | **UNREACHABLE without root** | `kperf.framework` and `kperfdata.framework` are present, and `sysctl kpc.pc_capture_supported` = 1 — but `sysctl -w kpc.counting=1` → **`Operation not permitted`**. Counter *configuration* is root-only. |
 | `powermetrics` | root-only | needs sudo; **a user-run option**, not an agent-run one |
 | `dtrace` | effectively unreachable | SIP enabled + root required |
@@ -32,6 +32,66 @@ Measured 2026-08-10 on the M2 Max, macOS 26.5, SIP enabled, no sudo.
 **The one thing you cannot have is a cache-miss rate.** There is no unprivileged
 substitute on Apple silicon. §6 is about what to use instead, and what that
 substitute can and cannot prove.
+
+### 1a. Instruments / xctrace — reachable, but NOT via `xcrun`
+
+Xcode 26.6 is installed in `/Applications`. The 2026-08-10 row above was correct
+*when written* and is now stale in its conclusion but still correct in its
+diagnosis: **`xcrun xctrace` fails**, because `xcode-select -p` still points at
+`/Library/Developer/CommandLineTools`, and flipping it needs `sudo`. `xcrun`
+resolves tools only inside the *selected* developer dir, and `xctrace` ships
+only inside `Xcode.app` — so `xcrun` can never find it while CLT is selected.
+
+Call it by absolute path instead. No sudo, no `xcode-select` change:
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+X=/Applications/Xcode.app/Contents/Developer/usr/bin/xctrace
+$X version          # -> xctrace version 16.0 (17F113)
+$X list templates   # Time Profiler, CPU Counters, System Trace, Allocations, ...
+```
+
+**Recording a headless bench** (`--env` per variable; the target must exit or
+hit `--time-limit`, and traces belong in a scratch dir, never the repo):
+
+```sh
+cd Runtime
+$X record --template 'Time Profiler' --output /tmp/greets_tp.trace \
+   --time-limit 25s --no-prompt --target-stdout /dev/null \
+   --env SDL_VIDEODRIVER=dummy --env SDL_AUDIODRIVER=dummy \
+   --launch -- $PWD/DEMO --bench=scene@scene=greets,t=5743,iters=200 \
+        --deferred --texture_filter=1 --profiler=1 --strict_flags
+```
+
+**Reading it back without the GUI.** `--toc` lists the tables; the one worth
+having is `time-profile`. Export it to XML and aggregate:
+
+```sh
+$X export --input /tmp/greets_tp.trace --toc                     # find the table
+$X export --input /tmp/greets_tp.trace --output /tmp/tp.xml \
+   --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]'
+```
+
+Two traps in that XML, both of which silently yield an EMPTY profile:
+
+1. The stack is under `<tagged-backtrace><backtrace><frame>`, **not** `<row>
+   <backtrace>`. A parser that looks for `backtrace` directly under `row`
+   finds nothing and reports zero samples for every symbol.
+2. Everything is id/ref deduplicated — `<frame ref="165"/>`,
+   `<tagged-backtrace ref="227"/>`. You must cache `id -> value` on first sight
+   and resolve `ref` against that cache, or most rows resolve to `?`.
+
+Filter by `sample-time` to drop process init (asset load, PNG decode, mip
+generation) — on a greets bench that is the first ~12 s and it will otherwise
+dominate the leaf table with `stbi__do_zlib` and `MipmapXY`.
+
+**What this buys over `/usr/bin/sample`:** real per-symbol *self* vs *inclusive*
+attribution over ~78 k steady-state samples rather than a handful of stack
+snapshots, so a leaf worth 3 % of the process is visible and trustworthy. It
+does **not** lift the root-only PMU restriction — the CPU Counters template can
+select events, but the counters this repo can read per phase are still the two
+in §1. Cross-read Instruments for *which symbol*, `--hw_prof` for *how many
+instructions*.
 
 ### The counter backbone, and why it is trustworthy
 
