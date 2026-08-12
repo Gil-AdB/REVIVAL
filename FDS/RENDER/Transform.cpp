@@ -1116,7 +1116,13 @@ namespace fds { extern int  g_offscreenViewDepth;   // >0 inside a mirror RTT /
                 bool EnvBake_HasSkipFaces();
                 bool EnvBake_FaceExcluded(const Face* F, TriMesh* T);
                 bool EnvBake_LegacyMeshExcluded(TriMesh* T);
-                bool EnvBake_IsMirrorCloneObj(const Object* O); }
+                bool EnvBake_IsMirrorCloneObj(const Object* O);
+#if FDS_SHARD_BAKE_LAB
+                void ReflFaceCull_Mark(const TriMesh* T, const Face* tFaces,
+                                       const Vertex* tVerts, const Vector& AP,
+                                       bool offscreenPass, const uint8_t*& keepOut);
+#endif
+                }
 
 // ── --xfrm_par: mesh-sharded main-view Transform_Objects ─────────────────
 // The whole reason this exists: the per-vertex loop is pinned at ONE core's
@@ -1675,6 +1681,9 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			tVerts = T->Verts;
 			tFaces = T->Faces;
 		}
+#if FDS_SHARD_BAKE_LAB
+		const uint8_t *fcKeep = nullptr;
+#endif
 
 		// SoA Phase 2a: resolve the VertexFrame here (after the culls, before
 		// the per-vertex loops) so the loops can store straight into it. Same
@@ -2441,6 +2450,17 @@ AfterXForm:
 		if (v >  32767.0f) return  32767;
 		return int16_t(v);
 	};
+#if FDS_SHARD_BAKE_LAB
+	// --shard_cone_cull=2: build this mesh's per-face keep mask for the
+	// mirror-shard reflection bake, out of line (RENDER/ReflFaceCull.cpp).
+	// COMPILE-TIME gated, and the gate is the point: the cull's OUTPUT is
+	// byte-identical to no cull, but merely carrying this CALL inside the
+	// per-mesh body moved all three scene pins through -ffp-contract=fast, on
+	// frames that never shatter a mirror. Bisected — the face-loop branch
+	// below is byte-null on its own; the call is not, at either site tried.
+	if (fds::g_reflFaceCull)
+		fds::ReflFaceCull_Mark(T, tFaces, tVerts, AP, _offscreenPass, fcKeep);
+#endif
 	// Ablation 32 (--xfrm_ablate=32): skip the per-face loop entirely.
 	if (!xabNoFace)
 	for (F=tFaces;F<FEnd;F++) {
@@ -2453,6 +2473,12 @@ AfterXForm:
 		// --greets_displace tagged them.
 		if (_offscreenPass && (F->Flags & Face_MainOnly)) continue;
 		if (envFaceSkip && fds::EnvBake_FaceExcluded(F, T)) continue;
+#if FDS_SHARD_BAKE_LAB
+		// --shard_cone_cull=2: this face's world bounding sphere missed the
+		// shard's reflection cone, so it cannot paint a pixel of this bake.
+		// Decided in world space by ReflFaceCull_Mark before this loop.
+		if (fcKeep && !fcKeep[F - tFaces]) continue;
+#endif
 		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
 			const char* mn = F->Txtr->Name;
 			if (hideInner && std::strstr(mn, "in shpere")) continue;

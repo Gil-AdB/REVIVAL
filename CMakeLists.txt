@@ -75,6 +75,30 @@ if(FDS_VIS_CENSUS)
     add_compile_definitions(FDS_VIS_CENSUS=1)
 endif()
 
+# The mirror-shard reflection bake's PER-FACE cone cull (--shard_cone_cull=2,
+# FDS/RENDER/ReflFaceCull.cpp). COMPILE-TIME gated for exactly the reason above,
+# and the reason is measured, not assumed: the cull itself is byte-identical to
+# no cull (verified on the shard atlas AND the break+1 frame), but merely
+# CARRYING its never-taken call inside Transform_Objects' per-mesh body moved
+# ALL THREE scene pins — greets 778fa6ac→7a6370a1, fountain 8db68ccb→eebf68e6,
+# city 3cbe42b1→80583b85 — on snapshots that never shatter a mirror. Bisected:
+# the branch it adds to the face loop is byte-null, the CALL is not, at either
+# call site tried. And it is not worth a re-pin: measured min-of-6 interleaved,
+# the cull removes 12.5%% of the bake's face-list pushes and 0.1 ms of its
+# 14-15 ms, because the bake is 77%% deferred lighting of the reflection's own
+# pixels and only 4.5%% geometry front-end (see docs/OPTIMIZATION_BACKLOG.md).
+# The same gate carries the [SHARD-PHASE] per-phase attribution that PROVED
+# the verdict above, for the same reason: with the phase clocks present the
+# shard atlas itself drifts (365 px of 1 048 576, FP-contraction noise, no
+# pin covers it) — so with the gate OFF the whole shard bake is byte-
+# identical to its parent, and with it ON every number in the commit
+# message reproduces.
+# Measure with:  cmake -S . -B build-lab -G Ninja -DFDS_SHARD_BAKE_LAB=ON
+option(FDS_SHARD_BAKE_LAB "Compile the mirror-shard bake laboratory: the per-face cone cull (--shard_cone_cull=2) + the per-phase attribution" OFF)
+if(FDS_SHARD_BAKE_LAB)
+    add_compile_definitions(FDS_SHARD_BAKE_LAB=1)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.

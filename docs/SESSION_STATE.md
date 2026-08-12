@@ -1,6 +1,5 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
-
 > ## 2026-08-12c — THE CONE SOLVE IS 8 LANES WIDE NOW, −9.4 ms/FRAME ON CITY, AND NOT ONE PIN MOVED
 >
 > The standing biggest perf item in the tree, closed. `a16567b` had located it
@@ -112,6 +111,108 @@
 > lever inside this pass is the integration body, not the prologue — and whoever
 > takes it should re-run the a16567b ablation against the new arm first rather
 > than trust that inference.
+> ## 2026-08-12 — THE PER-FACE CONE CULL IS BUILT AND BYTE-IDENTICAL. IT RECOVERS NONE OF THE 10.5 ms, BECAUSE THE SHARD BAKE IS 78 % DEFERRED LIGHTING
+>
+> `ddb1d15` ended with a recorded design: *"The right accelerator is a per-FACE
+> test (face bounding sphere vs cone); nobody has written it."* Sent to write
+> it. **It is written, it is exactly as conservative as claimed, and the thing
+> it was built to accelerate is not there.**
+>
+> ### THE CULL IS CORRECT — 0 PIXELS, NOT "CLOSE"
+>
+> `--shard_cone_cull=2`, `FDS/RENDER/ReflFaceCull.cpp`. Reject a face iff its
+> own world bounding SPHERE lies entirely outside the shard's cone. At the
+> bracket (`--repro=greets@t=3122 --repro_from=3112 --repro_settle=0`,
+> `FDS_GREETS_SHATTER=1`, `FDS_GREETS_CAM="28.8,10.8,-62.85,1,0,0"`):
+>
+> | | result |
+> |---|---|
+> | 1024² reflection atlas, cull ON vs OFF | **0 of 1 048 576 px different** |
+> | face tests rejected | **67 825 of 80 415 (84.3 %)** |
+> | face-list entries | **9 921 → 8 678 (−12.5 %)** |
+>
+> The invariant that buys it: a face whose sphere reaches the cone survives
+> **whole**, and a face that survives is rendered with its vertices
+> **untouched**. No stamped fake positions — which is the entire failure mode of
+> the per-vertex form (mode 1) that ate two thirds of the reflection.
+>
+> **The break+1 FRAME cannot be a gate and that is not the cull's fault:** the
+> shatter frame is nondeterministic run-to-run at HEAD. Base binary, same
+> command twice: **1 600 of 2 073 600 px differ (0.077 %)**. The cull's own
+> arm differs by 1 385 px — *below* that floor. The ATLAS is deterministic
+> (0 px across runs), which is why the gate above is the atlas.
+>
+> ### THE PREMISE IS WRONG: THE BAKE IS NOT GEOMETRY-BOUND
+>
+> New `[SHARD-PHASE]` attribution on `FDS_SHARD_REFL_PROF`. Core-ms summed over
+> 12 workers, min-of-6 interleaved, run 1 discarded, load 10-22:
+>
+> | phase | cull off | per-face cull | legacy per-vertex |
+> |---|--:|--:|--:|
+> | `Transform_Objects` | 6.5 | 7.5 | 6.4 |
+> | G-buffer fill (raster) | 27.4 | 29.7 | 7.6 |
+> | **`Render_DeferredLighting`** | **124.4** | **129.1** | **46.2** |
+> | volumetric cones | 0.2 | 0.3 | 0.1 |
+> | **wall ms** | **14.1** | **14.7** | **6.8** |
+>
+> The geometry front-end is **4 %** of the pass; the deferred shading of the
+> reflection's own pixels is **78 %**. So `ddb1d15`'s 4.0 → 14.5 ms is not lost
+> culling, it is **the reflection appearing**, and no conservative cull can take
+> it back: the 12.5 % of faces this one drops are faces that rasterize zero
+> pixels. Mode 1's 6.8 ms was never the speed of culling either — it is the
+> speed of not drawing.
+>
+> ### IT COSTS ALL THREE PINS MERELY TO CARRY, SO IT SHIPS COMPILE-TIME GATED
+>
+> With the mask pass written inline in `Transform_Objects`, **all three scene
+> pins moved on frames that never shatter a mirror**: greets
+> `778fa6ac→7a6370a1`, fountain `8db68ccb→eebf68e6`, city
+> `3cbe42b1→80583b85`. Bisected under `-ffp-contract=fast`: the *branch* the
+> cull adds to the face loop is byte-null; the *call* is not, at either site
+> tried (before the vertex loops, and after them). Same hazard
+> `docs/VISIBILITY_PLAN.md §8a` records for `--xfrm_pass_prof`, same remedy:
+> `option(FDS_SHARD_BAKE_LAB)`, default OFF, preprocessor-removed. **0.1 ms is
+> not worth three pins.** With the gate off: greets `778fa6ac`, fountain
+> `8db68ccb`, city `3cbe42b1` (2/2 each, matched against a clean worktree at
+> the same commit) and `render_gate.sh` ALL PASS (`4ac809e5` / `b41894f9` /
+> `166fa25a`).
+>
+> **One honest residual.** The `[SHARD-PHASE]` clocks stay compiled in (they are
+> the instrument that settled this) and their presence drifts the shard atlas by
+> **300 of 1 048 576 px (0.029 %, mean |Δ| 4.2 on changed)** against the parent
+> build — FP contraction, no semantic change, and nothing pins the shard bake
+> because no pin recipe shatters a mirror. The pins and the gates, which are
+> what this project gates on, are byte-identical.
+>
+> ### TWO ERRORS IN THE CONE `ddb1d15` DESCRIBED, BOTH CAUGHT BY MEASUREMENT
+>
+> 1. **It is not "~1° wide". It is 17-19°.** The legacy cone is built about the
+>    shard NORMAL, and the reflected eye does not look at its own shard — the
+>    window sits metres off to the side — so the cone has to open that far just
+>    to reach it. A 19° cone culls almost nothing, which is why the first
+>    per-face arm rejected only 39 % and still cost what it saved.
+> 2. **The shard camera's basis is not orthonormal.** Its rows are
+>    `axisU = wc1−wc0`, `axisV = wc3−wc0` and the normal, and a shard quad is
+>    not a rectangle, so reconstructing a window point as
+>    `Er + D·N + du·axisU + dv·axisV` is wrong by the skew — **measured 6.8° of
+>    axis error, four window widths**, and it culled faces sitting in the middle
+>    of the viewport. The shipping construction (`shardFaceCone`) instead
+>    **inverts the actual projection** at the four screen corners (one 3×3
+>    Cramer solve per shard) and assumes nothing.
+>
+> The tell for both was a margin sweep (`--shard_cone_cull_margin`) that never
+> converged to the no-cull image: a cone that is wrong in SHAPE cannot be fixed
+> by widening, only one that is merely narrow can.
+>
+> ### WHERE THE ms ACTUALLY IS
+>
+> `Render_DeferredLighting` is called **238 times per shatter frame on a 64²
+> target** and is 78 % of the pass — its per-invocation fixed work (tile light
+> binning, tile-light lists, shadow-atlas setup) is paid 238 times for 4 096
+> pixels each. Logged in `docs/OPTIMIZATION_BACKLOG.md` as the item that would
+> actually move this pass; it touches the same call as the per-target-HDR item
+> already logged there. Also logged: the greets **shatter frame is
+> nondeterministic** (1 600 px run-to-run), which nobody has chased.
 
 > ## 2026-08-12 — THE JAMB DOES NOT BOW BECAUSE OF THE NORMAL; THE PINNED BORDER STANDS PROUD OF ITS OWN WALL
 >

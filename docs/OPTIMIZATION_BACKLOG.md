@@ -40,6 +40,63 @@ Two things already known about that body, from this work:
   usable accuracy costs more than the divide), but the body's arithmetic mix is
   different and the question is open there. Measure raw-vs-NR first; it closes
   the family in one build.
+## 2026-08-12 — PARKED: the mirror-shard PER-FACE cone cull. It works, it is byte-identical, and it recovers none of the 10.5 ms — the bake is 78 % deferred lighting
+
+`ddb1d15` closed with a recorded next step: *"The right accelerator is a
+per-FACE test (face bounding sphere vs cone); nobody has written it."* It is
+written now (`FDS/RENDER/ReflFaceCull.cpp`, `--shard_cone_cull=2`, compile-time
+gated behind `-DFDS_SHARD_BAKE_LAB=ON`). **The test is correct and the premise
+is wrong.**
+
+**IT IS CORRECT — byte-identical, not "close".** At the shatter bracket
+(`--repro=greets@t=3122 --repro_from=3112 --repro_settle=0`,
+`FDS_GREETS_SHATTER=1`, `FDS_GREETS_CAM="28.8,10.8,-62.85,1,0,0"`), the whole
+1024² reflection atlas with the cull on is **0 of 1 048 576 pixels different**
+from the cull off, with **84.3 % of face tests rejected** and the face list
+going **9 921 → 8 678** entries. The invariant that buys that: a face whose
+bounding sphere reaches the cone survives WHOLE, and a face that survives is
+transformed and rasterized with its vertices UNTOUCHED — no stamped fake
+positions, which is the entire failure mode of the per-vertex form.
+
+**THE PREMISE IS WRONG: THE SHARD BAKE IS NOT GEOMETRY-BOUND.** New
+`[SHARD-PHASE]` attribution (on `FDS_SHARD_REFL_PROF`), core-ms summed over 12
+workers, min-of-6 interleaved, same bracket:
+
+| phase | cull off | per-face cull | legacy per-vertex (broken) |
+|---|--:|--:|--:|
+| `Transform_Objects` | 6.5 | 7.5 | 6.4 |
+| G-buffer fill (raster) | 27.4 | 29.7 | 7.6 |
+| **`Render_DeferredLighting`** | **124.4** | **129.1** | **46.2** |
+| volumetric cones | 0.2 | 0.3 | 0.1 |
+| **wall ms** | **14.1** | **14.7** | **6.8** |
+
+The geometry front-end is **4 %** of the pass and the deferred shading of the
+reflection's own pixels is **78 %**. So the 4.0 → 14.5 ms `ddb1d15` priced is
+not culling that was lost, it is **the reflection appearing** — every one of
+those pixels is wanted, and no cull, however conservative or however tight, can
+take them back. The per-face cull's 12.5 % fewer face-list entries are faces
+that rasterize zero pixels; dropping them is free and buys nothing.
+
+**AND IT COSTS ALL THREE SCENE PINS TO CARRY.** Merely having the call inside
+`Transform_Objects`' per-mesh body moves greets `778fa6ac→7a6370a1`, fountain
+`8db68ccb→eebf68e6` and city `3cbe42b1→80583b85` under `-ffp-contract=fast`, on
+snapshots that never shatter a mirror — the same hazard
+`docs/VISIBILITY_PLAN.md §8a` records for `--xfrm_pass_prof`. Bisected: the
+branch it adds to the face loop is byte-null; the CALL is not, at either call
+site tried (before the vertex loops, and after them). Hence the compile-time
+gate rather than a re-pin: **0.1 ms is not worth three pins.**
+
+**WHERE THE NEXT ms ACTUALLY IS, then, and it is a big one:**
+`Render_DeferredLighting` runs **238 times per shatter frame on a 64² target**
+and is 78 % of the pass. Its per-invocation fixed work — light binning into
+tiles, the tile-light lists, the shadow-atlas setup — is being paid 238 times
+for 4 096 pixels each. STATUS: **TODO**, and it is the item that would actually
+move this pass. Note it composes with the per-target-HDR item below, which
+touches the same call.
+
+**STATUS of the cull itself: PARKED — built, measured byte-identical, measured
+not-worth.** Reproduce with `cmake -S . -B build-lab -G Ninja
+-DFDS_SHARD_BAKE_LAB=ON` and `--shard_cone_cull=0|1|2`.
 
 ## 2026-08-11 — TODO: a PER-TARGET HDR buffer, so an offscreen bake tonemaps like the frame it feeds
 

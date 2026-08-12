@@ -168,6 +168,13 @@ set(RENDER
     RENDER/SORTS.H
     RENDER/SQRTTBL.H
     RENDER/Transform.cpp)
+
+# The mirror-shard per-face cone cull is compile-time gated (top-level
+# CMakeLists.txt explains why: carrying its call inside Transform_Objects moves
+# the scene pins through -ffp-contract=fast, and it is measured worth 0.1 ms).
+if(FDS_SHARD_BAKE_LAB)
+    list(APPEND RENDER RENDER/ReflFaceCull.cpp)
+endif()
 source_group("RENDER" FILES ${RENDER})
 
 set(SIMD

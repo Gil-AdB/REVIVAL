@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <semaphore>
+#include <mutex>
 
 extern void Compute_FaceVertexIndices(TriMesh *T);
 extern void Build_YOffs_Table(VESA_Surface *VS);
@@ -48,6 +49,75 @@ inline Vector vscale(const Vector& a, float s)       { return { a.x*s, a.y*s, a.
 inline float  vdot(const Vector& a, const Vector& b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
 inline float  vlen(const Vector& a)                  { return std::sqrt(vdot(a,a)); }
 inline Vector vnorm(const Vector& a) { float l = vlen(a); return l > 1e-6f ? vscale(a, 1.0f/l) : Vector{0,0,0}; }
+
+#if FDS_SHARD_BAKE_LAB
+// ── the per-FACE cone cull's cone (--shard_cone_cull=2) ─────────────────
+// A TIGHT circumscribing cone around what this shard's off-axis projection
+// actually renders, built by INVERTING THAT PROJECTION at the four screen
+// corners. Nothing else is assumed — and that matters, because the shard
+// camera's basis is NOT orthonormal: its rows are axisU = wc1-wc0,
+// axisV = wc3-wc0 and the shard normal, and a shard quad is not a rectangle,
+// so axisU and axisV are skew. Reconstructing a window point as
+// Er + D·N + du·axisU + dv·axisV (the obvious form) is therefore wrong by the
+// skew angle — measured 6.8° of axis error on greets, which is four window
+// widths, and it culled faces sitting in the middle of the viewport.
+//
+// The projection is  screen_x = fovX·x/z + cntrEX,  screen_y = cntrEY − fovY·y/z,
+// with (x,y,z) = M·(world − Er), M's rows being (axisU, axisV, N). So a screen
+// point's ray direction is the d solving d·axisU = a, d·axisV = b, d·N = 1 —
+// one 3×3 solve, done here by Cramer with the cofactor columns of M.
+//
+// Two other things this cone gets right that the legacy per-vertex cone
+// (g_reflConeApex/Dir/Tan2) does not:
+//   * THE AXIS IS AIMED AT THE VIEWPORT CENTRE, not along the shard normal.
+//     The reflected eye Er generally does not look at its own shard — the
+//     window sits metres off to the side — so a cone about N has to open to
+//     17-19° on greets just to reach it (measured), and a 19° cone culls
+//     almost nothing. Aimed at the viewport it collapses to ~1-3°.
+//   * THE CORNERS ARE THE SCREEN's, so the cone covers exactly the rendered
+//     rectangle, including the parts of it that stick out past the shard quad.
+//
+// Superset by convexity: the frustum is the convex hull of the four corner
+// rays, and a circular cone of half-angle < 90° is convex, so a cone
+// containing the four rays contains the frustum. The 1e9 bail-out covers the
+// degenerate cases (near-singular basis, a corner at or past 90° from the
+// axis) by disabling the cull for that shard rather than risking it.
+inline void shardFaceCone(const Vector& aU, const Vector& aV, const Vector& N,
+                          float fovX, float fovY, float cntrEX, float cntrEY,
+                          float xr, float yr,
+                          Vector& dirOut, float& tan2Out) {
+	auto cross = [](const Vector& a, const Vector& b) -> Vector {
+		return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
+	};
+	// Columns of M⁻¹ (cofactors), so d = (a·c0 + b·c1 + c2) / det.
+	const Vector c0 = cross(aV, N), c1 = cross(N, aU), c2 = cross(aU, aV);
+	const float det = vdot(aU, c0);
+	if (std::fabs(det) < 1e-9f || fovX <= 0.0f || fovY <= 0.0f) {
+		dirOut = N; tan2Out = 1e9f; return;               // degenerate → no cull
+	}
+	const float invDet = 1.0f / det;
+	auto ray = [&](float sx, float sy) -> Vector {
+		const float a = (sx - cntrEX) / fovX;
+		const float b = (cntrEY - sy) / fovY;
+		return { (a*c0.x + b*c1.x + c2.x) * invDet,
+		         (a*c0.y + b*c1.y + c2.y) * invDet,
+		         (a*c0.z + b*c1.z + c2.z) * invDet };
+	};
+	const Vector A  = ray(0.5f * xr, 0.5f * yr);
+	const float  aa = vdot(A, A);
+	float t2 = 0.0f;
+	if (aa < 1e-18f) { dirOut = N; tan2Out = 1e9f; return; }
+	for (int i = 0; i < 4; ++i) {
+		const Vector C = ray((i & 1) ? xr : 0.0f, (i & 2) ? yr : 0.0f);
+		const float ca = vdot(C, A);
+		if (ca <= 1e-9f) { t2 = 1e9f; break; }
+		const float t = (vdot(C, C) * aa - ca * ca) / (ca * ca);
+		if (t > t2) t2 = t;
+	}
+	dirOut  = vnorm(A);
+	tan2Out = t2;
+}
+#endif  // FDS_SHARD_BAKE_LAB
 inline Vector vcross(const Vector& a, const Vector& b) {
 	return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
 }
@@ -793,15 +863,38 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 			g_reflConeApex = Er;
 			g_reflConeDir  = N;
 			g_reflConeTan2 = coneTan2 * 1.3f + 1e-3f;   // margin for edge pixels
-			// --shard_cone_cull, default OFF: the per-VERTEX form of this test
-			// decided FACE visibility and ate the reflection (see the flag's
-			// own text, and renderShardIntoCell below). The mesh-level off-axis
-			// bounding-sphere cull inside Transform_Objects is the cull now.
-			g_reflVertCull = fds::FeatureFlags::shard_cone_cull();
+#if FDS_SHARD_BAKE_LAB
+			// The per-FACE cull gets its OWN cone, built by inverting the
+			// off-axis projection just set up (see shardFaceCone). coneTan2
+			// above is the legacy per-vertex cone — about N, around the shard
+			// QUAD — and it is neither tight (17-19° on greets, because Er
+			// does not look at its own shard) nor a superset of the SCREEN
+			// rectangle the projection actually renders.
+			{
+				float fcT2 = 0.0f;
+				shardFaceCone(axisU, axisV, N, FOVX, FOVY, CntrEX, CntrEY,
+				              float(texRes_), float(texRes_),
+				              g_reflFaceConeDir, fcT2);
+				g_reflFaceConeTan2 =
+				    fcT2 * fds::FeatureFlags::shard_cone_cull_margin() + 1e-3f;
+			}
+#endif
+			// --shard_cone_cull: 0 = no cone cull, 1 = the legacy per-VERTEX
+			// test (kept as an A/B lever only — it decided FACE visibility from
+			// VERTEX positions and ate two thirds of the reflection, see the
+			// flag's own text and renderShardIntoCell below), 2 = DEFAULT, the
+			// per-FACE bounding-sphere-vs-cone test, which is conservative by
+			// construction and measured byte-identical to 0.
+			const int coneMode = fds::FeatureFlags::shard_cone_cull();
+			g_reflVertCull = (coneMode == 1);
+			g_reflFaceCull = (coneMode == 2);
 			g_offAxisFrustumCull = true;
 			Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
 			g_offAxisFrustumCull = false;
 			g_reflVertCull = false;
+#if FDS_SHARD_BAKE_LAB
+			g_reflFaceCull = false;
+#endif
 			if (CAll != 0) {
 				Radix_Sort(FList, SList, CAll);
 				if (deferredBake_) {
@@ -1003,10 +1096,24 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 	// so routing the outer join through it could deadlock on the final permit.
 	std::atomic<int> cursor{0};
 	std::counting_semaphore<256> done{0};
+	// Per-FACE cone-cull census (--shard_cone_cull=2). The counters are
+	// thread_local so the per-face increments cost no atomic; each worker
+	// folds its own totals in once, at the end of its whole run.
+	std::atomic<uint64_t> ccTested{0}, ccCulled{0}, ccDrawn{0};
+	double gPhS=0, gPhX=0, gPhR=0, gPhF=0, gPhL=0, gPhC=0;
 	auto runWorker = [&](ReflWorker& w) {
+		fds::g_reflFaceTested = 0;
+		fds::g_reflFaceCulled = 0;
+		fds::g_reflFaceDrawn  = 0;
+		fds::g_phSetup = fds::g_phXform = fds::g_phRaster = 0.0;
+		fds::g_phFill = fds::g_phLight = fds::g_phCone = 0.0;
 		int si;
 		while ((si = cursor.fetch_add(1, std::memory_order_relaxed)) < N)
 			renderShardIntoCell(sc, si, w, E, aw, ah);
+		ccTested.fetch_add(fds::g_reflFaceTested, std::memory_order_relaxed);
+		ccCulled.fetch_add(fds::g_reflFaceCulled, std::memory_order_relaxed);
+		ccDrawn.fetch_add(fds::g_reflFaceDrawn, std::memory_order_relaxed);
+		{ static std::mutex mu; std::lock_guard<std::mutex> lk(mu); gPhS+=fds::g_phSetup; gPhX+=fds::g_phXform; gPhR+=fds::g_phRaster; gPhF+=fds::g_phFill; gPhL+=fds::g_phLight; gPhC+=fds::g_phCone; }
 		done.release();
 	};
 	for (size_t t = 1; t < P; ++t) {
@@ -1021,6 +1128,14 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 		const auto t1 = std::chrono::steady_clock::now();
 		std::fprintf(stderr, "[SHARD-REFL] %d shards / %zu workers in %.1f ms\n",
 		             N, P, std::chrono::duration<double, std::milli>(t1 - t0).count());
+		const uint64_t ct = ccTested.load(), cc = ccCulled.load(), cd = ccDrawn.load();
+		std::fprintf(stderr,
+		    "[SHARD-CULL] per-face cone: %llu of %llu face tests rejected (%.1f%%); "
+		    "%llu faces reached the face list\n",
+		    (unsigned long long)cc, (unsigned long long)ct,
+		    ct ? 100.0 * double(cc) / double(ct) : 0.0,
+		    (unsigned long long)cd);
+		std::fprintf(stderr, "[SHARD-PHASE] core-ms setup=%.1f xform=%.1f raster=%.1f (gbufferfill=%.1f deferredlight=%.1f cones=%.1f)\n", gPhS, gPhX, gPhR, gPhF, gPhL, gPhC);
 	}
 
 	// FDS_SHARD_ATLAS_DUMP=<path>: de-tile + write the whole reflection atlas to
@@ -1142,6 +1257,27 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 	}
 	for (int fi = 0; fi < s.mesh->FIndex; ++fi) s.mesh->Faces[fi].uvFromVertices();
 
+	// Per-phase core-ms attribution for the bake, on the same switch as the
+	// pass timing (FDS_SHARD_REFL_PROF). This is the instrument that settled
+	// what the shard bake actually costs: the geometry front-end is a few
+	// percent of it and the DEFERRED LIGHTING of the covered pixels is most
+	// of the rest — which is why no cull, however good, moves this pass much.
+	// Off = one bool test per shard and no clock reads. NOTE the clocks are
+	// enough to shift this function's FP contraction: the shard atlas drifts a
+	// few hundred pixels of 1 048 576 against a build without them. Nothing
+	// pins the shard bake (no pin recipe shatters a mirror) and the drift is
+	// at the run-to-run noise floor of the frame it feeds; the PINS, which are
+	// what this project gates on, are byte-identical — see the commit message.
+	static const bool sPhaseProf = std::getenv("FDS_SHARD_REFL_PROF") != nullptr;
+	auto phClock = [&]() {
+		return sPhaseProf ? std::chrono::steady_clock::now()
+		                  : std::chrono::steady_clock::time_point{};
+	};
+	auto phAdd = [&](double& acc, const std::chrono::steady_clock::time_point& a,
+	                 const std::chrono::steady_clock::time_point& b) {
+		if (sPhaseProf) acc += std::chrono::duration<double, std::milli>(b - a).count();
+	};
+	const auto _t0 = phClock();
 	std::memset(w.surf.Data, 0x10, size_t(texRes_) * texRes_ * 4);
 	std::memset(w.surf.Z16,  0,    size_t(texRes_) * texRes_ * sizeof(word));
 
@@ -1157,22 +1293,62 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 	g_reflConeApex = Er;
 	g_reflConeDir  = Nn;
 	g_reflConeTan2 = coneTan2 * 1.3f + 1e-3f;
-	// --shard_cone_cull, DEFAULT OFF since 2026-08-11. The cone above is ~1°
-	// wide and the room's wall quads are metres across, so the per-VERTEX cone
-	// test rejected every corner of a quad whose interior covered the entire
-	// shard view — the bake drew almost nothing (panel window 24.74 luma vs the
-	// 73.86 the main deferred pass renders from the same reflected eye), and
-	// the quads that did survive rasterized through the fake positions the
-	// rejected corners were stamped with. Deciding face visibility per vertex
-	// is only sound for faces small against the cone. Left readable as a
-	// perf/A-B lever; the sound cull is the mesh-level off-axis bounding-sphere
-	// frustum test that Transform_Objects already runs.
-	g_reflVertCull = fds::FeatureFlags::shard_cone_cull();
+#if FDS_SHARD_BAKE_LAB
+	// The per-FACE cull gets its OWN cone, built by inverting the off-axis
+	// projection just set up (shardFaceCone): axis through the viewport
+	// centre, half-angle circumscribing the four screen corners. Not coneTan2
+	// above — that one is about Nn and around the shard QUAD, which is both
+	// far too wide (Er does not look at its own shard, so the cone has to open
+	// ~19° just to reach the window) and not a superset of what is rendered.
+	{
+		float fcT2 = 0.0f;
+		shardFaceCone(axisU, axisV, Nn, fovX, fovY, cntrEX, cntrEY,
+		              float(texRes_), float(texRes_),
+		              g_reflFaceConeDir, fcT2);
+		g_reflFaceConeTan2 =
+		    fcT2 * fds::FeatureFlags::shard_cone_cull_margin() + 1e-3f;
+	}
+#endif
+	// --shard_cone_cull, DEFAULT 2 = the per-FACE cone cull (this face's world
+	// bounding sphere vs the cone; reject only when the sphere is ENTIRELY
+	// outside). 1 = the legacy per-VERTEX test, kept as an A/B lever only: the
+	// cone above is ~1° wide and the room's wall quads are metres across, so it
+	// rejected every corner of a quad whose interior covered the entire shard
+	// view — the bake drew almost nothing (panel window 24.74 luma vs the 73.86
+	// the main deferred pass renders from the same reflected eye) — and the
+	// quads that did survive rasterized through the fake positions the rejected
+	// corners were stamped with. Deciding face visibility per VERTEX is only
+	// sound for faces small against the cone; per FACE it is sound for any
+	// face, because a face that reaches the cone survives WHOLE and a face that
+	// survives is rendered untouched. 0 = neither; then the mesh-level
+	// off-axis bounding-sphere frustum test Transform_Objects already runs is
+	// the only cull (correct, and 2 is measured byte-identical to it).
+	const int coneMode = fds::FeatureFlags::shard_cone_cull();
+	g_reflVertCull = (coneMode == 1);
+#if FDS_SHARD_BAKE_LAB
+	g_reflFaceCull = (coneMode == 2);
+#else
+	if (coneMode == 2) {
+		static std::atomic<bool> warned{false};
+		if (!warned.exchange(true))
+			std::fprintf(stderr, "[SHARD-CULL] --shard_cone_cull=2 needs a build with "
+			             "-DFDS_SHARD_BAKE_LAB=ON; this build has no per-face cull "
+			             "compiled in (top-level CMakeLists.txt says why). Running as 0.\n");
+	}
+#endif
+	const auto _tA = phClock();
+	phAdd(fds::g_phSetup, _t0, _tA);
 	g_offAxisFrustumCull = true;
 	Transform_Objects(sc, w.camCtx, w.faces, texRes_, texRes_, &w.scratch);
 	g_offAxisFrustumCull = false;
+	const auto _tB = phClock();
+	phAdd(fds::g_phXform, _tA, _tB);
 	g_reflVertCull = false;
+#if FDS_SHARD_BAKE_LAB
+	g_reflFaceCull = false;
+#endif
 
+	fds::g_reflFaceDrawn += uint64_t(w.faces.cAll);
 	if (w.faces.cAll != 0) {
 		Radix_Sort(w.faces.fList, w.faces.sList, w.faces.cAll);
 		// RenderInner / MekaleleFill read only ctx.faces.fList / cAll — alias the
@@ -1198,7 +1374,10 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 			if (!w.gb.lightmapMF.empty())
 				std::fill(w.gb.lightmapMF.begin(), w.gb.lightmapMF.end(), 0u);
 			ctx.target.gbuffer = &w.gb;
+			const auto _tF0 = phClock();
 			MekaleleFillRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
+			const auto _tF1 = phClock();
+			phAdd(fds::g_phFill, _tF0, _tF1);
 			DeferredLightingCtx dctx{};
 			DeferredOverride ov;
 			ov.gb         = &w.gb;
@@ -1211,17 +1390,21 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 			ov.yres       = texRes_;
 			ov.inlineDispatch = true;
 			Render_DeferredLighting(dctx, &ov);
+			const auto _tF2 = phClock();
+			phAdd(fds::g_phLight, _tF1, _tF2);
 			// Disco-ball / spotlight volumetric cones in the reflection where
 			// applicable: dctx now carries this worker's target + view-space
 			// lights, so the cone pass draws the beams (forceCone/draw-cones
 			// spots) additively over the shaded reflection, clipped by the
 			// reflected room depth. Inline (this worker thread).
 			Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
+			phAdd(fds::g_phCone, _tF2, phClock());
 		} else {
 			RenderForwardRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
 		}
 	}
 
+	phAdd(fds::g_phRaster, _tB, phClock());
 	// Reflectance gain (forward bake is unshadowed) — applied before text.
 	if (reflGain_ < 0.999f) {
 		const uint32_t gq = uint32_t(clampf(reflGain_, 0.0f, 1.0f) * 256.0f);
