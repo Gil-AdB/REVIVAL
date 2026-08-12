@@ -3680,6 +3680,100 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		}
 		std::vector<Vector> basePos(nV);
 		for (uint32_t i=0;i<nV;++i) basePos[i]=verts[i].Pos;
+		// ── PLANE-NORMAL RIDE (--greets_displace_plane_normal, default OFF) ───
+		// The ride direction is the smoothed VERTEX normal, which on this mesh is
+		// averaged across the room's corners and therefore is NOT the normal of
+		// the wall the vertex actually lies in: measured on the jamb plane
+		// x=17.898, a mean 11.25 deg (max 78) out of plane AFTER round 2's
+		// de-slide. That residual tilt has an in-plane part, and the in-plane
+		// part is what walks a vertex sideways along its own wall — which on a
+		// border vertex means the authored border line stops being a line.
+		// Riding the vertex's own PATCH PLANE normal removes the whole in-plane
+		// component at once (the de-slide removed only the along-border half).
+		// SAFETY, both guards measured: only coplanar fans (all incident target
+		// faces within 2 deg) and only verts with NO POSITION TWIN — round 2
+		// proved that handing a position-sharing border its own plane normal
+		// tears it off its twin (1408 background px at t=5967 against 46).
+		std::vector<Vector> planeN;
+		std::vector<uint64_t> planeKey;      // per-vert PATCH identity, for the mean
+		int nPlaneRide = 0, nPlaneSkipCorner = 0, nPlaneSkipTwin = 0;
+		const bool wantPlaneN = fds::FeatureFlags::greets_displace_plane_normal();
+		const int   bmeanMode  = fds::FeatureFlags::greets_displace_border_mean();
+		const float bmeanScale = fds::FeatureFlags::greets_displace_border_mean_scale();
+		const bool  wantBMean  = bmeanMode != 0;
+		// Canonical identity of an authored PLANE: unit normal + offset,
+		// sign-canonicalised on the dominant component (the FLD's windings
+		// disagree, so n and -n must hash the same) and quantised (normal
+		// 1/1024, offset 1/128 world u — coarse enough to absorb the ~1e-5
+		// spread between two triangles' cross products on one wall, fine
+		// enough that two genuinely parallel walls never merge).
+		auto planeKeyOf = [](float nx, float ny, float nz, float d) -> uint64_t {
+			const float ax=std::fabs(nx), ay=std::fabs(ny), az=std::fabs(nz);
+			float s;
+			if (az>=ax && az>=ay)  s = (nz<0.0f)?-1.0f:1.0f;
+			else if (ay>=ax)       s = (ny<0.0f)?-1.0f:1.0f;
+			else                   s = (nx<0.0f)?-1.0f:1.0f;
+			nx*=s; ny*=s; nz*=s; d*=s;
+			auto q = [](double v, double sc, int64_t bias, uint64_t mask) -> uint64_t {
+				int64_t r = int64_t(std::llround(v*sc)) + bias;
+				if (r < 0) r = 0;
+				return uint64_t(r) & mask;
+			};
+			uint64_t k = q(nx,1024.0,2048,0xFFFu);
+			k = (k<<12) | q(ny,1024.0,2048,0xFFFu);
+			k = (k<<12) | q(nz,1024.0,2048,0xFFFu);
+			k = (k<<20) | q(d , 128.0,524288,0xFFFFFu);
+			return k ? k : 1u;                    // 0 is reserved for "no plane"
+		};
+		if (wantPlaneN || wantBMean) {
+			std::vector<Vector> acc(nV, Vector{0.0f,0.0f,0.0f});
+			std::vector<char>   have(nV, 0), corner(nV, 0);
+			for (size_t f=0; f<faces.size(); ++f) {
+				if (!isTargetNew(faces[f])) continue;
+				const uint32_t a=fIdx[f][0], b=fIdx[f][1], c=fIdx[f][2];
+				if (a>=nV||b>=nV||c>=nV) continue;
+				const Vector &A=basePos[a],&B=basePos[b],&C=basePos[c];
+				const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z;
+				const float e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+				float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+				const float gl=std::sqrt(gx*gx+gy*gy+gz*gz);
+				if (gl < 1e-12f) continue;             // degenerate sliver: no plane
+				gx/=gl; gy/=gl; gz/=gl;
+				for (uint32_t v : {a,b,c}) {
+					if (!have[v]) { acc[v]=Vector{gx,gy,gz}; have[v]=1; continue; }
+					// winding-agnostic: the FLD and the test rigs disagree on sign
+					float d = acc[v].x*gx + acc[v].y*gy + acc[v].z*gz;
+					if (d < 0.0f) d = -d;
+					if (d < 0.99939f) corner[v] = 1;   // > 2 deg apart: not one plane
+				}
+			}
+			std::unordered_map<uint64_t,uint32_t> posSeen;
+			std::vector<char> twin(nV, 0);
+			posSeen.reserve(nV*2);
+			for (uint32_t v=0; v<nV; ++v) {
+				auto it = posSeen.emplace(seamKey(basePos[v]), v);
+				if (!it.second) { twin[v] = 1; twin[it.first->second] = 1; }
+			}
+			planeN.assign(nV, Vector{0.0f,0.0f,0.0f});
+			planeKey.assign(nV, 0);
+			for (uint32_t v=0; v<nV; ++v) {
+				if (!have[v] || corner[v]) continue;
+				// The PLANE IDENTITY is deliberately NOT subject to the twin
+				// guard: a twin still lies in a well-defined authored plane, and
+				// the mean is a scalar reference level, not a direction — nothing
+				// can be torn by reading it. Only the RIDE below needs that guard.
+				const Vector &Q = acc[v];
+				planeKey[v] = planeKeyOf(Q.x, Q.y, Q.z,
+					Q.x*basePos[v].x + Q.y*basePos[v].y + Q.z*basePos[v].z);
+			}
+			if (!wantPlaneN) planeN.clear();          // mean-only: leave the ride alone
+			else for (uint32_t v=0; v<nV; ++v) {
+				if (!have[v]) continue;
+				if (corner[v]) { ++nPlaneSkipCorner; continue; }
+				if (twin[v] || (v < nOrig && coincidentOrig[v])) { ++nPlaneSkipTwin; continue; }
+				planeN[v] = acc[v];
+			}
+		}
 		int nMoved=0, nLineSnap=0, nPlatPin=0; float dMin=1e30f,dMax=-1e30f;
 		int nFreeVerts=0, nFreeClamped=0, nFreeDeslid=0; float freeDeepest=0.0f, freeSlideMax=0.0f;
 		// ── NO SLIDE ALONG A FREED BORDER ────────────────────────────────────
@@ -3720,6 +3814,90 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			++nFreeDeslid;
 			freeDispDir[i] = Vector{ nx/l2, ny/l2, nz/l2 };
 		}
+		// ── BOW CENSUS (--greets_displace_junction_census, DIAGNOSTIC) ─────────
+		// Rounds 1-3 blamed the doorway-jamb swell on the DIRECTION the vertex
+		// rides (the smoothed normal leaning out of its own plane). This records
+		// both candidate quantities per vertex so the two can be separated on
+		// measurement: the angle between the ride direction and the vertex's OWN
+		// authored patch plane, and the OUT-OF-PLANE component of the resulting
+		// offset. Binned by distance to the jamb border below.
+		std::vector<float> bowDist, bowAng, bowOut, bowIn;
+		std::vector<char>  bowFree;
+		const bool bowCensus = fds::FeatureFlags::greets_displace_junction_census();
+		// ── PATCH-MEAN BORDER (--greets_displace_border_mean) ─────────────────
+		// The zero-pin holds a border at d=0, but the patch's own realized mean
+		// is not 0 (the zero-mean convention is against the WHOLE height map, not
+		// this wall's window), so the border stands proud of the surface it
+		// bounds and the face rounds outward into it. Pre-pass: the mean d over
+		// this material's INTERIOR displaced verts — the level a freed border
+		// should sit at. Same h resolution as the loop below, counters untouched.
+		// MODE 1 = one mean per MATERIAL. MEASURED AND REJECTED: 'rooms' is a
+		// whole room, so its mean (-0.07148 u) is nothing like the jamb wall's
+		// own level (-0.0248 u) — the border lands 0.022 u TOO DEEP and the face
+		// rounds inward instead of outward (bow -0.01912 -> +0.02226 at t=5998).
+		// MODE 2 = one mean per authored PLANE, which is the level that actually
+		// bounds the border. A border line lies in exactly ONE plane, so a
+		// per-plane constant is still a CONSTANT along it: the straightness that
+		// mode 1 bought is kept by construction, and only the depth is corrected.
+		// Verts whose fan is not coplanar (corners) have no plane, and planes too
+		// small to have a trustworthy mean fall back to the material's.
+		float borderMeanDsp = 0.0f;
+		std::unordered_map<uint64_t, std::pair<double,long long>> planeMeanAcc;
+		std::unordered_map<uint64_t, float> planeMean;
+		const int kPlaneMeanMinVerts = 8;
+		int nBMeanPlane = 0, nBMeanFallback = 0;
+		if (bmeanMode) {
+			double s = 0.0; long long n = 0;
+			for (uint32_t i=0;i<nV;++i){
+				if (pinnedZero[i]||hCnt[i]==0||recessOnly[i]) continue;
+				float h = hSum[i]/float(hCnt[i]);
+				if (lineHeight) {
+					if (edgeOwned[i]) { if (lineRepV[i] < 1e29f) h = lineRepV[i]; }
+					else if (linePlatD[i] < 1e29f) h = linePlatV[i];
+				}
+				const double d = double(amp*(h-mipMean));
+				s += d; ++n;
+				if (bmeanMode >= 2 && i < planeKey.size() && planeKey[i]) {
+					auto &e = planeMeanAcc[planeKey[i]];
+					e.first += d; e.second += 1;
+				}
+			}
+			if (n) borderMeanDsp = float(s/double(n));
+			int nPlanesKept = 0;
+			for (const auto &kv : planeMeanAcc)
+				if (kv.second.second >= kPlaneMeanMinVerts) {
+					planeMean[kv.first] = float(kv.second.first/double(kv.second.second));
+					++nPlanesKept;
+				}
+			std::fprintf(stderr, "[STONE-BMEAN] '%s' mode %d: freed borders leave "
+				"zero for the mean displacement of the surface they bound — "
+				"MATERIAL mean %+.5f u over %lld interior verts%s\n",
+				matName, bmeanMode, double(borderMeanDsp), n,
+				bmeanMode >= 2 ? "; PER-PLANE means below" : "");
+			if (bmeanMode >= 2)
+				std::fprintf(stderr, "[STONE-BMEAN] '%s': %zu authored planes carry "
+					"interior verts, %d of them >= %d verts and so get their own mean "
+					"(the rest fall back to the material's)\n",
+					matName, planeMeanAcc.size(), nPlanesKept, kPlaneMeanMinVerts);
+			// Which plane got which level — the census's way of asking whether a
+			// per-plane mean is actually different from the material's, and by
+			// how much, without inferring it from a rendered bow.
+			if (bmeanMode >= 2 && bowCensus) {
+				std::vector<std::pair<long long,uint64_t>> byN;
+				for (const auto &kv : planeMeanAcc) byN.push_back({kv.second.second, kv.first});
+				std::sort(byN.rbegin(), byN.rend());
+				std::fprintf(stderr, "[STONE-BMEANP] '%s': the 12 biggest planes "
+					"(key, interior verts, own mean displacement u, vs material %+.5f)\n",
+					matName, double(borderMeanDsp));
+				for (size_t k=0; k<byN.size() && k<12; ++k) {
+					const auto &e = planeMeanAcc[byN[k].second];
+					const double m = e.first/double(e.second);
+					std::fprintf(stderr, "[STONE-BMEANP]   %016llx  n=%6lld  mean %+.5f  "
+						"(%+.5f vs material)\n", (unsigned long long)byN[k].second,
+						byN[k].first, m, m - double(borderMeanDsp));
+				}
+			}
+		}
 		for (uint32_t i=0;i<nV;++i){
 			if (pinnedZero[i]||hCnt[i]==0) continue;
 			const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
@@ -3758,15 +3936,76 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const Vector &P = verts[i].Pos;
 					if (P.x > 17.4f && P.x < 18.4f && P.z > -63.5f && P.z < -57.5f)
 						std::fprintf(stderr, "[STONE-FREEV] '%s' pos(%.3f,%.3f,%.3f) "
-							"N(%+.3f,%+.3f,%+.3f) dsp %+.4f\n", matName,
-							double(P.x), double(P.y), double(P.z),
+							"ride(%+.3f,%+.3f,%+.3f) N(%+.3f,%+.3f,%+.3f) dsp %+.4f\n",
+							matName, double(P.x), double(P.y), double(P.z),
+							double(dx), double(dy), double(dz),
 							double(N.x/nl), double(N.y/nl), double(N.z/nl), double(dsp));
 				}
-				if (dsp > 0.0f) { dsp = 0.0f; ++nFreeClamped; }
+				if (bmeanMode) {
+					// One constant along the border, so it stays a straight line.
+					// Mode 2 picks the constant from the border's OWN plane.
+					float m = borderMeanDsp; bool viaPlane = false;
+					if (bmeanMode >= 2 && i < planeKey.size() && planeKey[i]) {
+						auto it = planeMean.find(planeKey[i]);
+						if (it != planeMean.end()) { m = it->second; viaPlane = true; }
+					}
+					if (viaPlane) ++nBMeanPlane; else ++nBMeanFallback;
+					dsp = m * bmeanScale;
+				} else if (dsp > 0.0f) { dsp = 0.0f; ++nFreeClamped; }
 				else if (dsp < freeDeepest) freeDeepest = dsp;
+			}
+			// PLANE-NORMAL RIDE: supersedes both the smoothed normal and the
+			// freed border's de-slide (which removed only the along-border half
+			// of the same tilt). Oriented to the direction the vertex was going
+			// to take, so the sign of the relief is unchanged.
+			if (!planeN.empty()) {
+				const Vector &Q = planeN[i];
+				if (Q.x!=0.0f || Q.y!=0.0f || Q.z!=0.0f) {
+					const float s = (Q.x*dx + Q.y*dy + Q.z*dz) < 0.0f ? -1.0f : 1.0f;
+					dx = s*Q.x; dy = s*Q.y; dz = s*Q.z; ++nPlaneRide;
+				}
+			}
+			// BOW CENSUS: the doorway-jamb wall plane is x=17.898 (normal +x), its
+			// freed border the vertical line z=-58.014. Record every displaced vert
+			// on that plane, away from the lintel and the floor course.
+			if (bowCensus) {
+				const Vector &P0 = basePos[i];
+				if (std::fabs(P0.x-17.898f)<0.02f && P0.y>0.3f && P0.y<4.6f
+				    && P0.z>-58.014f && P0.z<-52.0f) {
+					bowDist.push_back(P0.z+58.014f);            // world u into the wall
+					bowAng .push_back(std::acos(std::min(1.0f,std::fabs(dx)))*57.29578f);
+					bowOut .push_back(dsp*dx);                  // along the plane normal
+					// SIGNED in-plane motion ACROSS the border line (the border runs
+					// in y, so its across-component is z). NEGATIVE = the vertex
+					// travels OUT of the wall, past its authored border, into the
+					// doorway — the swollen silhouette.
+					bowIn  .push_back(dsp*dz);
+					bowFree.push_back(recessOnly[i] ? 1 : 0);
+				}
 			}
 			verts[i].Pos.x+=dx*dsp; verts[i].Pos.y+=dy*dsp; verts[i].Pos.z+=dz*dsp;
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
+		}
+		if (bowCensus && !bowDist.empty()) {
+			static const float ed[] = {0.f,.001f,.05f,.1f,.2f,.35f,.6f,1.f,1.6f,2.5f,4.f,6.f,99.f};
+			std::fprintf(stderr, "[STONE-BOW] '%s' jamb wall plane x=17.898, visible "
+				"side of the border z=-58.014 — n=%zu displaced verts\n"
+				"[STONE-BOW]   dist(u)      n  free   ang(ride,planeN)     out-of-plane      ACROSS-border\n"
+				"[STONE-BOW]                                    deg           (u, -=recess)   (u, -=into doorway)\n",
+				matName, bowDist.size());
+			for (int k=0;k+1<13;++k){
+				double sa=0,so=0,si=0; int n=0,nf=0; double amax=0, imin=0;
+				for (size_t j=0;j<bowDist.size();++j){
+					const float d=bowDist[j];
+					if (d<ed[k]||d>=ed[k+1]) continue;
+					sa+=bowAng[j]; so+=bowOut[j]; si+=bowIn[j]; ++n; nf+=bowFree[j];
+					amax=std::max(amax,double(bowAng[j]));
+					imin=std::min(imin,double(bowIn[j]));
+				}
+				if (!n) continue;
+				std::fprintf(stderr, "[STONE-BOW]  %5.3f-%5.2f %6d %5d   %6.2f (max %5.2f)   %+9.5f   %+9.5f (worst %+.5f)\n",
+					double(ed[k]), double(ed[k+1]), n, nf, sa/n, amax, so/n, si/n, imin);
+			}
 		}
 		if (nFreeVerts)
 			std::fprintf(stderr, "[STONE-FREE] '%s': %d freed border verts, %d "
@@ -3775,6 +4014,18 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				"with the border line %.4f)\n",
 				matName, nFreeVerts, nFreeClamped, double(freeDeepest), nFreeDeslid,
 				double(freeSlideMax));
+		if (nBMeanPlane || nBMeanFallback)
+			std::fprintf(stderr, "[STONE-BMEAN] '%s': %d freed border verts took "
+				"their OWN plane's mean, %d fell back to the material mean (no "
+				"coplanar fan, or a plane with fewer than %d interior verts)\n",
+				matName, nBMeanPlane, nBMeanFallback, kPlaneMeanMinVerts);
+		if (nPlaneRide || nPlaneSkipCorner || nPlaneSkipTwin)
+			std::fprintf(stderr, "[STONE-PLANE] '%s': %d displaced verts ride their "
+				"own PATCH-PLANE normal instead of the smoothed vertex normal; %d "
+				"skipped as CORNER verts (incident target faces >2 deg apart) and %d "
+				"as POSITION TWINS (a second index at the same base position, or "
+				"coincident with non-displaced geometry — the round-2 tear case)\n",
+				matName, nPlaneRide, nPlaneSkipCorner, nPlaneSkipTwin);
 		if (lineHeight)
 			std::fprintf(stderr, "[STONE-LINE] '%s': %d of %d displaced verts "
 				"snapped to their groove line's rep (edge path); %d fallback-path "
