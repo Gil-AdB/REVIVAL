@@ -89,6 +89,24 @@
 > the pass. Outlining the cold arms was already priced at zero cycles by round
 > 3's `HOTONLY`. Full worked example, tables and disassembly: **`docs/HW_PROFILING.md`
 > section 12**.
+>
+> ### ROUND 4b — THE SAME METRIC AGAIN: −2.0 % MORE CYCLES OUT OF THE SOLVE'S ALGEBRA
+>
+> Three spellings in the solve cost an op they need not, all bit-exact to fold:
+> `fma(a,b,NEG(mul(set1(k),v)))` → broadcast `-k` and drop the `fneg.4s`
+> (`fl((-k)*v) == -fl(k*v)` exactly — IEEE negation is exact, rounding is
+> symmetric); `mul(set1(cq), mul(a, set1(-4)))` → `mul(set1(cq*-4), a)` (both
+> inner products are power-of-two scalings, hence exact, so either spelling
+> rounds the same real product once); and `or(mFwd, mBwd)` IS the `mDVBig`
+> the apex cut computes twenty lines later — same mask for every input, NaN and
+> ±0 included — so hoisting it retires a compare and an or. 18 instructions of
+> 4505. **cones 0.559/0.557 → 0.548/0.543 `Gcyc/f` (−2.0 %, −2.5 %), 16.10/16.07
+> → 15.89/15.89 ms**, two independent min-of-6 sessions with the arm order
+> reversed between them. Greets held. Pins 3/3 / 3/3 / 2/2, `render_gate` four
+> rows PASS.
+>
+> **Round 4 cumulative, `67441d86` → here: cones 0.584 → 0.548 `Gcyc/f`
+> (−6.2 %), 16.92 → 15.89 ms (−6.1 %), IPC 4.07 → 4.16 — all of it bit-exact.**
 
 
 > ## 2026-08-13b — THE RTT GATE HOLE IS CLOSED, AND THE ROW IS PROVED IN BOTH DIRECTIONS: `render_gate` NOW FAILS ON `00d28a8b`

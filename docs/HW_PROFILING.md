@@ -1012,3 +1012,34 @@ kernel.
 (perfect scheduling) plus whatever else can be spelled at one NEON op instead of
 two. Everything that reduces instructions on the *other* pipes — spills,
 branches, scalar setup — is free and will keep measuring as zero.
+
+### Round 4b — the same metric, a second time: the solve's algebra
+
+Once vector-ALU op count is the metric, the solve reads differently. Three
+spellings cost an op they need not, and all three are provably bit-exact to fold:
+
+* **`NEG(mul(set1(k), v))`** — three sites (`sSphD`, `sA`, `sBh`) spelled
+  `a*b - c` as `fma(a, b, NEG(c))` per 7e34645's rule that pins the contraction.
+  The `NEG` is a real `fneg.4s`. Broadcasting `-k` instead deletes it:
+  `fl((-k)*v) == -fl(k*v)` exactly, because IEEE negation is exact and
+  round-to-nearest-even is symmetric about zero, so the FMA sees the identical
+  addend.
+* **`mul(set1(cq), mul(sA, set1(-4.0f)))`** — folds to `mul(set1(cq*-4), sA)`.
+  Both inner products are scalings by a power of two, hence exact, so either
+  spelling rounds the same real product exactly once.
+* **`or(mFwd, mBwd)`** — `mFwd = DV > 1e-6`, `mBwd = DV < -1e-6`, and the apex
+  cut computes `mDVBig = |DV| > 1e-6` twenty lines later. Those are the same
+  mask for every input, NaN (all three false) and ±0 included. Hoisting
+  `mDVBig` retires a compare and an or.
+
+18 instructions out of 4505 statically. city t=1961, parent `5b678917` vs new,
+two independent interleaved min-of-6 sessions with the arm order reversed
+between them: cones **0.559 / 0.557 → 0.548 / 0.543 `Gcyc/f`** (−2.0 %, −2.5 %),
+wall **16.102 / 16.069 → 15.890 / 15.885 ms** (−1.3 %, −1.1 %), instructions
+2.347 → 2.302 (−1.9 %). Greets held (+0.4 % cyc / −0.2 % wall, inside noise).
+Bit-exact by construction and in fact: city `3cbe42b1` 3/3, greets `778fa6ac`
+3/3, fountain `8db68ccb` 2/2, `render_gate` all four rows PASS.
+
+Cumulative for round 4, parent `67441d86` → here: cones **0.584 → 0.548
+`Gcyc/f` (−6.2 %)**, **16.92 → 15.89 ms (−6.1 %)**, 2.388 → 2.302 `Ginstr/f`
+(−3.6 %), IPC 4.07 → 4.16 — every bit of it bit-exact.

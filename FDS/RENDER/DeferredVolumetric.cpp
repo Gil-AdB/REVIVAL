@@ -1234,7 +1234,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const float  cq      = std::fma(DP, DP, -(c2 * PP));
                         const __m256 sC2     = _mm256_set1_ps(c2);
                         const __m256 sSphD   = fma_x8(sVP, sVP,
-                            NEG(_mm256_mul_ps(_mm256_set1_ps(sphereC), sUV)));
+                            _mm256_mul_ps(_mm256_set1_ps(-sphereC), sUV));
                         // `if (sphereDisc < 0) continue` — NLT_UQ is the
                         // exact negation (a NaN keeps the lane, as scalar).
                         mAlive = _mm256_and_ps(mAlive,
@@ -1269,13 +1269,16 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
 #endif
 
                         const __m256 sA  = fma_x8(sDV, sDV,
-                            NEG(_mm256_mul_ps(sC2, sUV)));
+                            _mm256_mul_ps(_mm256_set1_ps(-c2), sUV));
                         const __m256 sBh = fma_x8(sC2, sVP,
-                            NEG(_mm256_mul_ps(_mm256_set1_ps(DP), sDV)));
+                            _mm256_mul_ps(_mm256_set1_ps(-DP), sDV));
                         const __m256 sB  = _mm256_add_ps(sBh, sBh);
+                        // fl(cq * fl(a*-4)) == fl(fl(cq*-4) * a): BOTH inner
+                        // products are exact (scaling by a power of two), so
+                        // either spelling rounds the same real product once.
+                        // Folding it into the scalar deletes a whole __m256 mul.
                         const __m256 sDisc = fma_x8(sB, sB,
-                            _mm256_mul_ps(_mm256_set1_ps(cq),
-                                _mm256_mul_ps(sA, _mm256_set1_ps(-4.0f))));
+                            _mm256_mul_ps(_mm256_set1_ps(cq * -4.0f), sA));
 
                         const __m256 sSq    = SQRTV(sDisc);
                         const __m256 sInv2a = RCP(_mm256_add_ps(sA, sA));
@@ -1301,12 +1304,18 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 zHiHit = MINT(rMin, sZMax);
                         const __m256 mFwd = _mm256_cmp_ps(sDV,
                             _mm256_set1_ps(1e-6f), _CMP_GT_OQ);
-                        const __m256 mBwd = _mm256_cmp_ps(sDV,
-                            _mm256_set1_ps(-1e-6f), _CMP_LT_OQ);
+                        // |DV| > 1e-6 IS (DV > 1e-6) | (DV < -1e-6), for every
+                        // input including NaN (all three compares false) and
+                        // +-0 -- so the backward compare and the or below are
+                        // the same mask the apex-plane cut needs later, and one
+                        // fabs+cmp replaces two cmps and an or.
+                        const __m256 mDVBig = _mm256_cmp_ps(
+                            _mm256_andnot_ps(_mm256_set1_ps(-0.0f), sDV),
+                            _mm256_set1_ps(1e-6f), _CMP_GT_OQ);
                         const __m256 zLoRt = _mm256_blendv_ps(sZMin, zLoHit, mFwd);
                         const __m256 zHiRt = _mm256_blendv_ps(zHiHit, sZMax, mFwd);
                         const __m256 mPosOk = _mm256_or_ps(NOT(mDisc),
-                            _mm256_and_ps(_mm256_or_ps(mFwd, mBwd),
+                            _mm256_and_ps(mDVBig,
                                 _mm256_cmp_ps(zHiRt, zLoRt, _CMP_GT_OQ)));
                         const __m256 zLoP = _mm256_blendv_ps(sZMin, zLoRt, mDisc);
                         const __m256 zHiP = _mm256_blendv_ps(sZMax, zHiRt, mDisc);
@@ -1334,9 +1343,6 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         zHi = MINT(zHi, sZMax);
 
                         // Forward-cone cut at the apex plane z = DP/DV.
-                        const __m256 mDVBig = _mm256_cmp_ps(
-                            _mm256_andnot_ps(_mm256_set1_ps(-0.0f), sDV),
-                            _mm256_set1_ps(1e-6f), _CMP_GT_OQ);
 #if FDS_CONE_SOLVE_APPROX
                         const __m256 zFwd = _mm256_mul_ps(
                             _mm256_set1_ps(DP), _mm256_rcp_ps(sDV));
