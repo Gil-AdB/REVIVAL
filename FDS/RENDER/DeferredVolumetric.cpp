@@ -1223,16 +1223,26 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // keep the lane on both arms rather than on one.
                         __m256 mAlive = _mm256_cmp_ps(sZMax, sZero, _CMP_NLE_UQ);
 
-                        const float  YPy = Y * Py_l;
-                        const float  YDy = Y * Dy;
-                        const __m256 sVP = _mm256_add_ps(_mm256_set1_ps(Pz),
-                            fma_x8(_mm256_set1_ps(Px), sX, _mm256_set1_ps(YPy)));
-                        const __m256 sDV = _mm256_add_ps(_mm256_set1_ps(Dz),
-                            fma_x8(_mm256_set1_ps(Dx), sX, _mm256_set1_ps(YDy)));
+                        // VP = X·Px + Y·Py + Pz, DV = X·Dx + Y·Dy + Dz.
+                        // Y·Py + Pz and Y·Dy + Dz are BOTH per-(row × spot)
+                        // scalars, so the whole tail of each dot product folds
+                        // into ONE broadcast: 4 vector-ALU ops per pair
+                        // (dup + copy + two fmla) where the transcript spent 7
+                        // (dup + copy + two fmla + a second dup + two fadd).
+                        // This is the round-4b fold applied to the head of the
+                        // chain, and unlike 4b it is NOT bit-exact — the
+                        // scalar arm rounds Y·Py before adding Pz, this rounds
+                        // the fused Y·Py + Pz once — so it is a judge call on
+                        // the numbers below, not a transcript.
+                        const float  VPk = std::fma(Y, Py_l, Pz);
+                        const float  DVk = std::fma(Y, Dy,   Dz);
+                        const __m256 sVP =
+                            fma_x8(_mm256_set1_ps(Px), sX, _mm256_set1_ps(VPk));
+                        const __m256 sDV =
+                            fma_x8(_mm256_set1_ps(Dx), sX, _mm256_set1_ps(DVk));
 
                         const float  sphereC = PP - r2;
                         const float  cq      = std::fma(DP, DP, -(c2 * PP));
-                        const __m256 sC2     = _mm256_set1_ps(c2);
                         const __m256 sSphD   = fma_x8(sVP, sVP,
                             _mm256_mul_ps(_mm256_set1_ps(-sphereC), sUV));
                         // `if (sphereDisc < 0) continue` — NLT_UQ is the
@@ -1270,9 +1280,13 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
 
                         const __m256 sA  = fma_x8(sDV, sDV,
                             _mm256_mul_ps(_mm256_set1_ps(-c2), sUV));
-                        const __m256 sBh = fma_x8(sC2, sVP,
-                            _mm256_mul_ps(_mm256_set1_ps(-DP), sDV));
-                        const __m256 sB  = _mm256_add_ps(sBh, sBh);
+                        // b = 2·(c2·VP − DP·DV). Scaling by two is exact in
+                        // IEEE, so pushing it into both broadcasts rounds the
+                        // identical real product once and deletes the doubling
+                        // add — the same argument round 4b used for cq·(a·−4).
+                        // Bit-exact by construction.
+                        const __m256 sB  = fma_x8(_mm256_set1_ps(c2 + c2), sVP,
+                            _mm256_mul_ps(_mm256_set1_ps(-(DP + DP)), sDV));
                         // fl(cq * fl(a*-4)) == fl(fl(cq*-4) * a): BOTH inner
                         // products are exact (scaling by a power of two), so
                         // either spelling rounds the same real product once.
