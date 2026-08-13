@@ -184,6 +184,27 @@ be sized like me" standing in for "am I the main pass?", which is what made the
 failure silent in the first place. Main frame identical (all three pins,
 `render_gate` 3/3); it is the prerequisite the HDR-atlas fix will need.
 
+**AND IT SHIPPED A REGRESSION FOR 15 MINUTES — the plumbing's first form,
+`ctx.hdrBuf = ov ? ov->hdr : …`, silently dropped the mirror RTT (the *other*
+`DeferredOverride` user, which brings no `ov->hdr` because it borrows the global
+through `Hdr_BeginFramePass`) off the HDR path.** Fixed in `283b46ca` by making
+the override's buffer an override rather than a mode switch, and verified
+2026-08-13 by **byte-identity with the pre-restructure `5adcae12` binary** —
+frame `4abe5214…`, RTT slot `5199d3d1…`, against the broken tip's `c7ef96f6…` /
+`ab17ac64…`. Cost while broken: 98.9 % of the RTT slot's pixels, −21.0 mean
+luma on the slot, −12.3 on the panel as it appears in the frame. Full analysis
+in `docs/SESSION_STATE.md` (2026-08-13). **The residual +12.5 above is
+untouched by any of this and remains the open item.**
+
+**GATE GAP, STILL OPEN AND WORTH ITS OWN LINE:** `render_gate`'s `mirrortest` is
+cited throughout this campaign as the thing that "covers the mirror RTT". It does
+not. `--scene-mirrortest` never enables `mirror_rtt` (default 0; only
+`GREETS.CPP`'s `setDefault` and the editor turn it on), and measurement confirms
+it: `mirrortest` is byte-identical on the baseline, the broken and the fixed
+binaries — **with `--hdr` as well as without**. The order-2 RTT path has no
+standing gate. A cheap one exists and is not wired: greets t=3122
+`--hdr --deferred` with `FDS_MIRROR_RTT_DUMP=1`, hashing `/tmp/rtt_*.ppm`.
+
 ## 2026-08-10 — MEMORY-SIZE SWEEP: `--mem_census`, and the per-shadow-map FList (403 MiB at 0.5 % fill)
 
 Asked as *"the lightmap defect and the shadow-plane defect had shapes — sweep

@@ -1,5 +1,113 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-13 — THE RTT REGRESSION `00d28a8b` SHIPPED IS REAL AND IS NOW PROVED FIXED BY BYTE-IDENTITY WITH THE PRE-RESTRUCTURE BASELINE
+>
+> `283b46ca` was written as a self-review catch and committed but never pushed
+> (its author stopped mid-task). **It is correct, and this is the independent
+> verification it never got.** Three binaries from three worktrees, one
+> pose, dummy drivers throughout:
+>
+> | binary | greets t=3122 `--hdr --deferred` frame | RTT slot `m4→m1` surface |
+> |---|---|---|
+> | `5adcae12` — *before* the whole restructure | `4abe5214e04a215d8b12b0438c1a0dc6` | `5199d3d1cd84d7d1b54cedb4ccb6afcb` |
+> | `00d28a8b` — origin/fog-wt tip, **broken** | `c7ef96f690126cca2c5297812c52c3bd` | `ab17ac64d35d268e1457c17793accba3` |
+> | `283b46ca` — **the fix** | `4abe5214e04a215d8b12b0438c1a0dc6` | `5199d3d1cd84d7d1b54cedb4ccb6afcb` |
+>
+> **The fix is byte-identical to the pre-restructure baseline** — not "looks
+> right", not "pins still pass": the same bytes `5adcae12` produced. That is the
+> strongest statement available about a restore-the-old-predicate change, and it
+> is what a self-review catch is owed before it ships.
+>
+> **What the regression cost, measured.** The RTT slot surface: **16 207 of
+> 16 384 px differ (98.9 %)**, mean |Δ| 26.7, max 87, mean luma **126.68 → 105.64
+> (−21.0)**. On the 1920×1080 frame the panel is a 24×60 wedge: 785 px, max Δ 76,
+> luma over the changed pixels **118.12 → 105.78 (−12.3)**. Image:
+> `docs/img/fogwt/rtthdr_t3122_regression.png`.
+>
+> **Why the mechanism produces exactly that.** With `ov` non-null and `ov->hdr`
+> null the kernel's `hdrWrite` went false, so nothing wrote radiance and every
+> pixel kept `h[3]==0`. `Hdr_ActivateNoFog()` then lifted the *whole* 8-bit
+> LDR-combined RTT surface into `g_hdrBuf` and `Render_TonemapToVPage()`
+> tonemapped it back down — an ACES curve applied to pixels that had never been
+> linear radiance. The slot did not lose its bracket; it lost the only pass that
+> made the bracket meaningful.
+>
+> **THE GATES WERE BLIND, AND NOW IT IS MEASURED, NOT ASSUMED.** `283b46ca`
+> reasoned that `mirrortest` misses this because it runs without `--hdr`. It is
+> worse than that: `mirrortest` is byte-identical on all three binaries **with
+> `--hdr` too** (`3a91879af8856a4d6a4f9703921455b4` on each) — `--scene-mirrortest`
+> never turns on `mirror_rtt` (default 0; only `GREETS.CPP`'s `setDefault` and the
+> editor do), so `render_gate` has *no* coverage of the order-2 RTT path at all,
+> HDR or not. The greets pin `778fa6ac…` also holds **3/3 on the broken binary**.
+> A gate that cannot fail is not a gate: the RTT's first real coverage is the
+> `4abe5214`/`5199d3d1` pair in the table above.
+>
+> ### THE "TONEMAPS THE SAME PIXELS TWICE" TITLE IS A DIAGNOSIS, NOT A SHIPPED DEFECT
+>
+> Re-measured independently at the bracket, panel window derived the same way
+> (mirror-on/off change mask → bbox **1267×769**, against the recorded 1258×767;
+> the intact-mirror frame reads 73.24 against the recorded 73.07, so the window
+> is the same window):
+>
+> | arm | panel-window luma | vs reference |
+> |---|--:|--:|
+> | pre-break, intact half-silvered mirror | 73.24 | |
+> | **reference** — main deferred pass from the shard's own reflected eye | **73.70** | — |
+> | **shipping defaults (`--shard_hdr` off) — what HEAD renders** | **86.58** | **+12.88** |
+> | `--shard_hdr` on | 128.83 | +55.14 |
+> | shipping, `--hdr_exposure=2.0` | 129.81 | +56.11 |
+>
+> **At HEAD's defaults the shard atlas is tonemapped exactly ONCE**, by the main
+> frame that samples it as a texel. The doubling is what happens *when you turn
+> `--shard_hdr` on*, and the flag ships 0 for that reason — `on`-at-exposure-1.0
+> (128.83) landing on `off`-at-exposure-2.0 (129.81) is the doubling's signature,
+> reproduced. **No second bug to fix.** The +12.88 residual is the ORIGINAL
+> `ddb1d15` item and is still open; the remedy is an HDR atlas
+> (`hdrRefl`-shaped), not a tonemapped 8-bit cell.
+>
+> ### THE HAZARD THE FIX RE-ADMITS, ANALYSED AND DISMISSED WITH THE ORDERING
+>
+> The fix restores `Hdr_WritableFor(XRes,YRes)` as the fallback for override
+> passes — the very "the global happens to be sized like me" predicate `00d28a8b`
+> set out to kill. It is safe, and here is why it is not merely "it was like that
+> before": a **64² RTT slot is reachable** (`mirror_rtt_adaptive` is default **1**
+> and both sizing sites clamp to a floor of 64), so `g_hdrBuf` really can be sized
+> 64² — the shard bake's own dims. If a shard bake then ran while that size stood,
+> all 12 workers would take `g_hdrBuf.data()` and race on one buffer.
+> **The frame order forecloses it**: the shard bake is `GREETS.CPP:3808`, the RTT
+> is `GREETS.CPP:3853` (after it), and `renderFrame`'s `Hdr_BeginFrame()`
+> (`RENDER.CPP:659`, main dims) runs after *both* — so a shard bake always
+> observes `g_hdrBuf` at 1920×1080 and lands on `nullptr`. `XRes,YRes` here are
+> the **pass's** dims (`const int32_t XRes = ov ? ov->xres : ::XRes;`), so the
+> predicate is exactly the one the kernels used to evaluate. Recorded because the
+> guarantee is an *ordering*, and ordering is what changes without anyone noticing.
+>
+> ### GATES, ALL RE-RUN ON THE FIXED BINARY
+>
+> greets `778fa6acd85a69cf241babefcdaf598e` **3/3**, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9` 2/2, city `3cbe42b166847e40f7071eedb48d613c`
+> 3/3, `render_gate` **3/3 PASS ×3**. Shard reflection atlas at break+1
+> `95a760c42203b411370a00a4872440c7` — identical on `5adcae12` / `00d28a8b` /
+> `283b46ca` **and** on all four tile/semaphore arms, six values, one hash. The
+> shatter FRAME was stable 5/5 here at `280cf102ddd5775ee0ef06bbbb20fdbe` (the
+> recorded value), but the **atlas stays the gating surface** — the frame has a
+> recorded ~1 600 px run-to-run history elsewhere and a gate you have to
+> re-litigate is not one.
+>
+> ### THE CAMPAIGN'S HEADLINE NUMBER, FINAL
+>
+> Shard bake at the shatter bracket, **min-of-8 paired interleaved, run 1
+> discarded**, second shatter frame:
+>
+> | arm | bake wall | `Render_DeferredLighting` core-ms |
+> |---|--:|--:|
+> | `5adcae12` binary (the 14.5 ms baseline this campaign started from) | **13.8** (median 14.25) | 118.4 |
+> | fixed binary, legacy levers (`--deferred_offscreen_tile_px=0 --deferred_inline_tile_sem=1`) | 13.7 | 112.9 |
+> | **fixed binary, shipping defaults** | **11.5** | **94.3** |
+>
+> **−16 % of the bake, 8 of 8 pairs favouring the fix on both metrics**, and the
+> shipped-defaults arm is byte-identical to the legacy one on the atlas.
+
 > ## 2026-08-12d — THE SHARD BAKE'S "FIXED WORK PAID 238 TIMES" IS REAL, BUT IT IS A CONTENDED SEMAPHORE AND 96 TILES OVER 4 096 PIXELS — NOT LIGHT SETUP. −23 % OF THE PASS, BYTE-NULL
 >
 > `5adcae12` closed with the item: *"`Render_DeferredLighting` runs 238 times per
