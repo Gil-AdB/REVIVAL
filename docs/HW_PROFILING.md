@@ -760,7 +760,8 @@ the same order, and fusion keeps the *identical* masked `__m256` — the same
 `_mm256_and_ps(zLo, mAlive)` that used to be stored is simply kept. So
 bit-exactness cost nothing and needed no contraction map: all three scene pins
 reproduce **3/3** with the fusion on, first try (city `3cbe42b1…`, greets
-`778fa6ac…`, fountain `8db68ccb…`).
+`778fa6ac…`, fountain `8db68ccb…`), and `render_gate` passes all four rows
+(`mirrortest` / `rttslot` / `conetest` / `halotest`) 3 runs out of 3.
 
 **(c) There ARE two genuine materialization points, and they are why the fusion
 cannot be unconditional.** The **scalar** dz/fade loop reads

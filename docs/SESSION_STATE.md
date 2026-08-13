@@ -246,7 +246,9 @@
 > * **Pins:** nothing moved. city `3cbe42b166847e40f7071eedb48d613c`, greets
 >   `778fa6acd85a69cf241babefcdaf598e`, fountain `8db68ccb59416e9a44037e9f387b7bd9`
 >   — 2/2 each on the shipping tree, and 3/3 each on the *fused* arm too (that is
->   how the bit-exactness is certified). `render_gate` **3/3 PASS**.
+>   how the bit-exactness is certified). `render_gate` **3/3 runs, ALL FOUR
+>   rows PASS** — including `ec9a5716`'s new `rttslot`
+>   `826c09e63217e778cfcef70fe0167279`, re-run after the rebase onto it.
 > * Full write-up, disassembly, sweep tables and the reproduction recipe:
 >   **`docs/HW_PROFILING.md` section 11**.
 
