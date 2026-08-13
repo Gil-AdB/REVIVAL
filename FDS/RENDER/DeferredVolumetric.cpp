@@ -114,6 +114,34 @@ static volatile float g_ablSink = 0.0f;
 #define CONE_ABL_CUT_BARE(stage)   ((void)0)
 #endif
 
+// ─── Compile-time ARM FOLDING — the companion instrument to FDS_CONE_ABLATE ──
+// The ablation ladder prices a STAGE. This prices an ARM. A runtime-flagged
+// function carries every arm in one register allocation, so its disassembly
+// and its register pressure are the union of paths no single frame takes;
+// round 2 needed a build with the flags folded to constants to see the
+// shipping path alone, built one ad hoc, and could only describe it in prose.
+// Committed because round 3's whole question turned out to be "where does the
+// register allocator spend its slots", which a two-arm histogram cannot answer.
+//
+//   0  runtime flags (shipping — folds to the plain flag reads, byte-null)
+//   1  vol_cone_solve_vec and vol_cone_lane_vec folded to compile-time TRUE,
+//      so the scalar fallbacks dead-code away entirely
+#ifndef FDS_CONE_FORCE
+#define FDS_CONE_FORCE 0
+#endif
+
+// ─── FDS_CONE_HOTONLY — prices the arms a scene never executes ──────────────
+// DIAGNOSTIC ONLY, and it is not a correct renderer: it deletes the segmented
+// hybrid, the ray-march fallback and the midpoint shadow tap outright, leaving
+// only the branch city's wide headlights actually take. City is byte-identical
+// under it (it never reaches the deleted arms), which is what makes it a clean
+// measurement of how much of the hot path's cost is INTERFERENCE from code that
+// never runs. Answer, city t=1961: 0.248 Ginstr/f, 10.5% of the pass — and
+// 0.000 Gcyc. See docs/HW_PROFILING.md section 11.
+#ifndef FDS_CONE_HOTONLY
+#define FDS_CONE_HOTONLY 0
+#endif
+
 static constexpr bool g_coneDiag = (FDS_CONE_DIAG != 0);
 static std::atomic<long long> g_dPairs{0};   // batch x spot pairs entering the scalar solve
 static std::atomic<long long> g_dSegPair{0}; // ...of which take the 8-segment hybrid
@@ -622,10 +650,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
 #endif
     // 8-wide cone-interval solve (see the transcript note at the loop).
     // Read once per tile call — the branch never enters the per-spot loop.
-    const bool coneSolveVec = fds::FeatureFlags::vol_cone_solve_vec();
+    const bool coneSolveVec = (FDS_CONE_FORCE != 0)
+                            || fds::FeatureFlags::vol_cone_solve_vec();
     // The two leftover SCALAR per-lane loops (dz/fade window, colour
     // accumulate) 8 lanes wide. Read once per tile, same as above.
-    const bool laneVec = fds::FeatureFlags::vol_cone_lane_vec();
+    const bool laneVec = (FDS_CONE_FORCE != 0)
+                       || fds::FeatureFlags::vol_cone_lane_vec();
     const __m256 vDensity_v = _mm256_set1_ps(density);
     const bool analyticCone = fds::FeatureFlags::vol_cone_analytic();
     // Path-counter bump — once per tile call, not per (spot × batch).
@@ -1325,7 +1355,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     //       at z=zMid. Whole segment in or out (binary).
                     //       Stair-steps at shadow boundaries; tolerable
                     //       because halos are inherently diffuse.
+#if FDS_CONE_HOTONLY
+                    if (true) {
+#else
                     if (useAnalytic) {
+#endif
                         // α z² + β z + γ = rr²·d²(z) + 0.05
                         const __m256 vRR2_v   = _mm256_mul_ps(vRR_v, vRR_v);
                         // Per-lane uV (= X²+Y²+1, varies per pixel).
@@ -1416,13 +1450,21 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             return _mm256_blendv_ps(sm, vOne_v, mIn);
                         };
                         __m256 vIntegral;
+#if FDS_CONE_HOTONLY
+                        if (true) {
+#else
                         if (!segPath) {
+#endif
                             // Wide cones: single closed form. coneAtten
                             // is applied at the midpoint further below.
                             vIntegral = _mm256_mul_ps(
                                         _mm256_add_ps(vInvD, vInvD),
                                         atanDiff(vArgHi, vArgLo));
+#if FDS_CONE_HOTONLY
+                        } else if (false) {
+#else
                         } else {
+#endif
                             // Narrow cones (disco beams): per-segment
                             // hybrid. The pure midpoint coneAtten fans
                             // into stripes (cosT_mid varies violently
@@ -1646,7 +1688,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // shadow boundaries; tolerated because halos
                         // are diffuse. Mirrors the in-loop sm path
                         // above but uses zMid instead of per-sample z.
-                        if (sm && !segPath) {
+                        if (!FDS_CONE_HOTONLY && sm && !segPath) {
                             // (segmented cones fold shadow per segment
                             // in the hybrid above)
                             alignas(32) float maskArr_s[8], zArr_s[8];
@@ -1693,7 +1735,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         }
 
                         accV = _mm256_and_ps(vAcc, m);
+#if FDS_CONE_HOTONLY
+                    } else if (false) {
+#else
                     } else {
+#endif
                     for (int k = 0; k < nSamp; ++k) {
                         alignas(32) float fracBuf[8];
                         for (int lane = 0; lane < 8; ++lane) {

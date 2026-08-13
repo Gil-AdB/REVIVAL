@@ -708,3 +708,160 @@ things a next round should know:
   source — the compiler already hoists them out of the loop); and from §9, the
   range-sphere early-out, raw `rcp`/`rsqrt`, relaxed FP association, finer cone
   tiles, and the `1/uV` hoist.
+
+## 11. Worked example round 3 — the stage round-trip, and the counter that stopped moving, 2026-08-13
+
+Round 3 asked one question, the user's: *"for the scalar→simd→scalar — any way
+to reorder this so we won't need the round-trip?"* Round 2 had widened the two
+scalar per-lane loops but left the **stack arrays** between the stages — the
+8-wide solve ends with three `__m256`, spills them to `zLoArr`/`zHiArr`/
+`aliveLane`, and the next 8-wide stage loads them straight back; symmetrically
+for `dzArr`/`invDzArr`/`fadeStartArr`. The lever was to delete the arrays and
+hand the stages over in registers.
+
+**It was built, it is bit-exact, it does exactly what it claims — and it is
+worth 0.1 %. It is not shipped.** What the round actually found is bigger than
+the lever it was chasing, and it retires the whole *direction*.
+
+### What forces the staging — the three verdicts
+
+**(a) Register pressure, and it is measured, not argued.** The arrays are not a
+buffer, they are a **phi node**: two arms (8-wide solve / per-lane scalar solve)
+converge, and a memory location is the only place a compiler merges a value
+produced element-wise on one path and vector-wise on the other. Deleting them
+works — read it off the disassembly, `FDS_CONE_FORCE=1` builds with the arms
+folded so only the shipping path survives:
+
+```
+pre-fusion, at the solve's tail          fused, same site
+  and.16b v5, v4, v7                       and.16b v19, v4, v18
+  and.16b v6, v3, v16                      and.16b v21, v3, v16
+  str     q6, [sp, #0xaf0]                 and.16b v2,  v4, v17
+  str     q5, [sp, #0xae0]                 and.16b v7,  v3, v7
+  and.16b v5, v4, v10                      ldr     q29, [sp, #0x660]
+  and.16b v6, v3, v19                      and.16b v0,  v4, v29
+  str     q6, [sp, #0xad0]                 str     q0,  [sp, #0x7c0]
+  and.16b v6, v4, v0                       and.16b v0,  v3, v29
+  str     q5, [sp, #0xac0]                 str     q0,  [sp, #0x7b0]
+  and.16b v5, v3, v0                       ldr     q14, [sp, #0x670]
+  str     q5, [sp, #0xab0]                 ldr     q15, [sp, #0x480]
+  str     q6, [sp, #0xaa0]
+```
+
+Six `str q` — three `__m256`, two NEON halves each — become **two**. Four of the
+six really are gone. And look at what sits in the gap: three `ldr q` refilling
+*other* spilled values. Over the whole per-spot loop the net is **stack `str q`
+116 → 115, `ldr q` 248 → 263**. The allocator re-spends every register the
+fusion frees, immediately, on something else. The live set does not fit and did
+not fit before; the arrays were never the reason.
+
+**(b) Loop structure does not force it and FP order is free.** The stages walk
+the same order, and fusion keeps the *identical* masked `__m256` — the same
+`_mm256_and_ps(zLo, mAlive)` that used to be stored is simply kept. So
+bit-exactness cost nothing and needed no contraction map: all three scene pins
+reproduce **3/3** with the fusion on, first try (city `3cbe42b1…`, greets
+`778fa6ac…`, fountain `8db68ccb…`).
+
+**(c) There ARE two genuine materialization points, and they are why the fusion
+cannot be unconditional.** The **scalar** dz/fade loop reads
+`zLoArr`/`zHiArr`/`aliveLane` element-wise, so under `--no-vol_cone_lane_vec`
+the solve must still publish the arrays; and the segmented-hybrid branch's
+per-segment shadow tap reads `aliveLane[ln]`. Fusion is a property of the whole
+chain, not of one stage.
+
+### The measurement, and why it does not ship
+
+Single-arm control builds (`FDS_CONE_FORCE=1`, ±`FDS_CONE_FUSE`), city t=1961,
+interleaved min-of-6, **two independent sessions**:
+
+| cones @ city t=1961 | Ginstr/f | Gcyc/f | IPC |
+|---|--:|--:|--:|
+| unfused (`FUSE=0`) | 2.362 / 2.362 | 0.566 / 0.573 | 4.09 / 4.10 |
+| fused (`FUSE=1`)   | 2.359 / 2.359 | 0.550 / 0.569 | 4.15 / 4.12 |
+
+Instructions reproduce **exactly** — −0.003 G, −0.1 %, both sessions. Cycles
+read −2.8 % then −0.7 %: **the cycle win did not reproduce**, so it is noise, not
+a result. Across the city sweep the fusion is −0.1 % to −0.7 % instructions and
+−0.3 % to −1.6 % cycles at every pose. Greets (the segmented branch) is the best
+case at −1.1 % instructions / −1.2 % cycles / −3.0 % wall, one session.
+
+**And in the binary we actually ship it is a REGRESSION.** The control above is
+a build where the scalar fallbacks do not exist. Ship the fusion into the real
+two-arm structure — the `--vol_cone_solve_vec` / `--vol_cone_lane_vec` arms are
+still there — and the merge points and register variables land on top of a
+function that must still support the array path:
+
+| cones @ city t=1961 | Ginstr/f |
+|---|--:|
+| parent `03ef0ff` | 2.389 / 2.389 / 2.389 / 2.388 |
+| fusion shipped unconditionally | 2.437 / 2.438 / 2.436 / 2.437 |
+
+**+2.0 %, every run.** Wrapping it in a runtime flag is worse still: the OFF arm
+measures +3.5 % instructions against the parent and the ON arm +2.4 % — round
+2's dual-arm tax finding, reproduced at four times the size, because this change
+adds branches *inside* the hot path rather than beside it. So there is no form
+in which this ships: unconditional costs 2 %, flagged costs 2.4 %, and the thing
+it buys is 0.1 %.
+
+> **The answer to the question.** Yes, the stages can be reordered to hand over
+> in registers, and it works. But the round trip was never the cost — the
+> register file is. It spills the same values under a different name.
+
+### THE FINDING THAT MATTERS: the cone pass is no longer instruction-bound
+
+`FDS_CONE_HOTONLY=1` deletes the arms city never executes — the segmented
+hybrid, the ray-march fallback, the midpoint shadow tap — leaving only the
+branch its wide headlights take. **City is byte-identical under it** (city pin
+`3cbe42b1…` reproduces on the diagnostic binary), which is what makes it a clean
+price for *interference from code that never runs*. City t-sweep, min-of-3:
+
+| city `t` | instr, cold arms removed | cycles | wall |
+|---|--:|--:|--:|
+| 400  | **−7.4 %** | −2.0 % | −2.4 % |
+| 900  | **−7.8 %** | −1.4 % | −0.8 % |
+| 1400 | **−8.4 %** | −1.7 % | −0.2 % |
+| 1961 | **−10.5 %** | **+0.5 %** | +1.2 % |
+| 2400 | **−8.0 %** | −0.6 % | +0.9 % |
+
+**8–10 % of every instruction the pass retires is the cost of carrying arms the
+scene never takes** — spill code, hoisted setup, branch tests. And removing them
+buys **zero cycles and zero wall**. IPC just falls, 4.11 → 3.64.
+
+The counter is not broken and this is not a measurement artifact — on the same
+binaries a *known-large* change still moves cycles hard: parent with
+`--no-vol_cone_lane_vec` reads 2.939 G / 0.845 Gcyc against 2.387 G / 0.589 Gcyc,
+i.e. +23 % instructions costing +43 % cycles. **Not all instructions cost the
+same.** Round 2's 0.55 G were dependent scalar load-modify-store chains and cost
+0.26 Gcyc. These 0.25 G are well-scheduled spill and branch code that dual-issues
+into slack and costs nothing.
+
+> **Carry this forward — it retires a direction.** Rounds 1 and 2 worked because
+> the pass was instruction-bound (a16567b measured IPC 4.0–4.2 and called it
+> "instruction COUNT — not stalls, not memory", correctly, *at the time*). After
+> a 4.217 → 2.390 Ginstr/f cut the pass has **crossed over**. Marginal
+> instructions in the current arm are free. **Stop counting instructions on this
+> pass.** The next win has to come from cycles — the dependency structure, the
+> non-pipelined `fdiv`/`fsqrt`, or doing less work (fewer pixels × spots) — and
+> the instrument for it is not `Ginstr/f`.
+
+### The two instruments this round adds, and their cost
+
+Both are compile-time and both emit **literally nothing** at their default 0 —
+verified, not assumed: the shipping binary's cone kernel disassembles to the
+**identical histogram** as the parent's (4538 instructions, 334/210 stack `ldr`/
+`str` q, 479/389 scalar, 210 `fmul.4s`, 114 `fmla.4s`, 39 `dup.4s`) and measures
+2.388–2.390 Ginstr/f against the parent's 2.387–2.390.
+
+* **`-DFDS_CONE_FORCE=1`** — folds `vol_cone_solve_vec` / `vol_cone_lane_vec` to
+  compile-time `true` so the scalar fallbacks dead-code away. A runtime-flagged
+  function carries every arm in **one register allocation**, so its disassembly
+  and its pressure are the union of paths no single frame takes. Round 2 needed
+  this, built it ad hoc, and could only describe it in prose.
+* **`-DFDS_CONE_HOTONLY=1`** — the cold-arm price above. Not a correct renderer;
+  valid only for scenes that never reach the deleted branches (city does not).
+
+The rejected fusion is kept reproducible as `scratchpad/cone_fuse.patch` rather
+than as dead code in the kernel, because unlike `FDS_CONE_SOLVE_EARLYOUT` /
+`FDS_CONE_SOLVE_APPROX` (which are a few lines at one site) it touches eight
+sites across 300 lines, and leaving it in `#if` arms would cost the shipping
+binary the very 2 % that disqualified it.

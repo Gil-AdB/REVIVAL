@@ -191,6 +191,65 @@
 >
 > **−16 % of the bake, 8 of 8 pairs favouring the fix on both metrics**, and the
 > shipped-defaults arm is byte-identical to the legacy one on the atlas.
+> ## 2026-08-13 — THE CONE STAGE ROUND-TRIP: REAL, BIT-EXACT, WORTH 0.1 % — AND THE PASS STOPPED BEING INSTRUCTION-BOUND
+>
+> The user's question was *"for the scalar→simd→scalar — any way to reorder this
+> so we won't need the round-trip?"* Round 2 (`03ef0ff0`) widened the two scalar
+> per-lane loops but left the **stack arrays** between the 8-wide stages: the
+> solve ends with three `__m256`, spills them to `zLoArr`/`zHiArr`/`aliveLane`,
+> and the next stage loads them straight back. So round 3 built the fusion —
+> delete the arrays, hand the stages over in registers.
+>
+> **ANSWER: yes, it reorders, and no, it is not the cost.** The fusion is
+> bit-exact (all three pins **3/3** with it on, first try — no contraction map
+> needed, the same masked `__m256` is simply kept rather than stored) and the
+> disassembly confirms it works: **four of the solve's six `str q` disappear**.
+> It is worth **0.003 Ginstr/f, 0.1 %**. The arrays are not a buffer, they are a
+> **phi node** between the 8-wide and per-lane solve arms — and the register
+> allocator re-spends every register the fusion frees, immediately: net stack
+> `str q` in the per-spot loop 116 → 115, `ldr q` 248 → **263**.
+>
+> **AND IN THE BINARY WE SHIP IT IS A REGRESSION, SO IT IS NOT SHIPPED.** The
+> 0.1 % is measured in a single-arm control build where the scalar fallbacks do
+> not exist. Ship it into the real two-arm structure and it reads **2.437 G vs
+> the parent's 2.389 G — +2.0 %, every run**; behind a runtime flag it is worse
+> still (+3.5 % on the OFF arm, +2.4 % on ON). There is no form in which this
+> ships. Kept reproducible as **`scratchpad/cone_fuse.patch`** rather than as
+> `#if` arms in the kernel, because leaving it in would cost the shipping binary
+> the very 2 % that disqualified it.
+>
+> **THE FINDING THAT MATTERS, AND IT RETIRES A DIRECTION.** New
+> `-DFDS_CONE_HOTONLY=1` deletes the arms city never executes (segmented hybrid,
+> ray-march fallback, midpoint shadow tap); city is **byte-identical** under it,
+> which makes it a clean price for interference from code that never runs.
+> Across the city t-sweep that is **−7.4 % to −10.5 % of the pass's instructions
+> at every pose — and −2.0 % to +0.5 % cycles, i.e. nothing.** IPC just falls,
+> 4.11 → 3.64.
+>
+> The counter is fine: on the same binaries `--no-vol_cone_lane_vec` still reads
+> +23 % instructions for **+43 %** cycles. **Not all instructions cost the same.**
+> Round 2's 0.55 G were dependent scalar load-modify-store chains and bought
+> 0.26 Gcyc; these 0.25 G are well-scheduled spill and branch code that
+> dual-issues into slack and buys nothing. **After a 4.217 → 2.390 Ginstr/f cut
+> across rounds 1–2 the cone pass has crossed from instruction-bound to
+> dependency-bound. Stop counting instructions on it** — the next win has to come
+> from cycles (the dependency structure, the non-pipelined `fdiv`/`fsqrt`) or
+> from doing less work (fewer pixels × spots).
+>
+> * **Ships:** two compile-time instruments only — `-DFDS_CONE_FORCE=1` (folds
+>   the `vol_cone_*` arms so the allocator and the disassembly show one path) and
+>   `-DFDS_CONE_HOTONLY=1` (the cold-arm price). Both emit **literally nothing**
+>   at their default 0, verified rather than assumed: the shipping kernel
+>   disassembles to the **identical histogram** as the parent's (4538 insns,
+>   334/210 stack `ldr`/`str` q, 210 `fmul.4s`, 114 `fmla.4s`, 39 `dup.4s`) and
+>   measures 2.388–2.390 Ginstr/f against the parent's 2.387–2.390.
+> * **Pins:** nothing moved. city `3cbe42b166847e40f7071eedb48d613c`, greets
+>   `778fa6acd85a69cf241babefcdaf598e`, fountain `8db68ccb59416e9a44037e9f387b7bd9`
+>   — 2/2 each on the shipping tree, and 3/3 each on the *fused* arm too (that is
+>   how the bit-exactness is certified). `render_gate` **3/3 PASS**.
+> * Full write-up, disassembly, sweep tables and the reproduction recipe:
+>   **`docs/HW_PROFILING.md` section 11**.
+
 
 > ## 2026-08-12d — THE SHARD BAKE'S "FIXED WORK PAID 238 TIMES" IS REAL, BUT IT IS A CONTENDED SEMAPHORE AND 96 TILES OVER 4 096 PIXELS — NOT LIGHT SETUP. −23 % OF THE PASS, BYTE-NULL
 >
