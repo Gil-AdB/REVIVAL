@@ -1047,3 +1047,244 @@ binary interleaved in one min-of-6 session, not composed across sessions): cones
 `Gcyc/f` and 57.392 → 55.976 ms; the −0.029 `Gcyc` cones saving carries the
 −0.032 `Gcyc` frame saving, which is the attribution check on the counter that
 is not load-sensitive. Every bit of it bit-exact — not one pin moved.
+
+## 13. Worked example round 5 — the systematic SPELLING SWEEP, and where it dries, 2026-08-13d
+
+Round 4 ended with a metric — **vector-ALU op count** — and one worked example
+of it (`FDS_CONE_NEONMINMAX`, 19 min/max sites at two ops each, −4.5 % cycles).
+Round 5 is that metric applied *systematically*: census every op the hot loop
+emits, bucket it by the pipe it issues on, map each bucket back to the source
+or intrinsic that produced it, and hunt every place the kernel spends more
+vector ops than the operation needs.
+
+**The sweep found two things worth landing and then dried, and the reason it
+dried is the round's real result: op count is necessary but not sufficient.
+What moves cycles on this pass is ops ON THE DEPENDENCY CHAIN.**
+
+### The instruments this round adds
+
+* **`scratchpad/cone_census.py`** — buckets a disassembled kernel into
+  arith / logic / blend / cmp / dup-ins / permute / convert / reduce / mov /
+  const, plus divsqrt, vector and scalar memory, scalar FP/int and branch, and
+  prints the per-bucket opcode histogram. The starred buckets are the ones that
+  issue on the four NEON/FP pipes; their sum is the metric.
+* **`scratchpad/cone_loops.py`** — loop-nest census. Back-edges give the loop
+  intervals, so the **per-spot loop** can be separated from the per-tile
+  prologue and the composite. This matters: the whole-function histogram is
+  4487 instructions of which 1117 are vector-ALU, but the loop that runs
+  3.2 M times a frame is only part of it.
+* **`scratchpad/cone_srcmap.py`** — attributes every emitted op to the
+  `.loc` that produced it. Thin-LTO strips the line map from the linked binary
+  and `dsymutil` cannot recover it (`llvm-dwarfdump --lookup` on the `.dSYM`
+  returns nothing for this function), so the tool reads a `clang -S -g` listing
+  of the TU instead — 2673 instructions against the linked control's 2709, and
+  an identical bucket histogram, which is what makes the attribution usable.
+  Inlined intrinsics report the *callee's* file:line, which is exactly what is
+  wanted: it says which simde intrinsic emitted the op.
+* **`scratchpad/cone_census_ladder.sh`** — the round-2 ablation ladder read as
+  a *static* op census (`census(ABLATE=n) − census(ABLATE=n−1)`), compiled to
+  assembly only, so a stage costs ~10 s instead of a full rebuild. Useful for
+  orientation; the increments are contaminated by the code the earlier `continue`
+  lets the compiler compress, so the loop-interval census above is the honest one.
+
+### The census — city's hot path, single-arm control
+
+`-DFDS_CONE_FORCE=1 -DFDS_CONE_HOTONLY=1`, the per-spot loop only:
+
+| bucket | parent | after round 5 | what it is |
+|---|--:|--:|---|
+| **vector-ALU total** | **484** | **461** | the metric |
+| arith (fmul/fmla/fsub/fadd/fmax/fmin/fabs/fneg…) | 246 | 236 | the actual math |
+| cmp | 50 | 50 | branchless predicates |
+| logic (and 32 / bic 13 / orn 2 / mvn 1) | 48 | 48 | mask algebra |
+| blend (bsl 22 / bit 7 / bif 7) | 36 | 36 | selects |
+| **mov (mov.16b 44)** | **49** | **42** | register copies — see below |
+| dup/ins | 23 | 21 | broadcasts |
+| const (movi/fmov) | 17 | 13 | in-loop constant materialisation |
+| permute | 6 | 6 | the z-decode/pack, not the solve |
+| int / other | 9 | 9 | |
+| *(not vector-ALU)* divsqrt | 12 | 12 | 8 `fdiv.4s` + 4 `fsqrt.4s` |
+| *(not vector-ALU)* vector mem | 131 | 124 | spill traffic, free on this pass |
+
+### The `mov.16b` question, answered
+
+139 of the shipping kernel's 4487 instructions were `mov.16b`, unexamined by
+round 4. In the hot loop it is 44. They are **not** simde shuffling 128-bit
+halves — simde's `__m256` is two independent `__m128` and never permutes
+between them; the solve emits **zero** cross-half permutes (all 6 in the kernel
+are the z-decode/pack). They are three things:
+
+1. **Blend-operand copies.** `BSL Vd,Vn,Vm` destroys `Vd`, which holds the
+   **mask**; `BIT`/`BIF` destroy a **data** operand instead. LLVM picks whichever
+   operand is dead — hence the 22/7/7 split — but a select whose mask *and* both
+   data operands stay live has to copy something. `mFwd` feeding two blends is
+   the canonical instance: `mov.16b v7, v8` / `bsl.16b v7, …` / `bsl.16b v8, …`.
+2. **FMA-accumulator copies.** `fmla Vd,Vn,Vm[i]` accumulates into `Vd`, so an
+   `__m256` FMA with a **broadcast addend** needs that broadcast in *both*
+   halves' destinations: one `dup` and one `mov.16b`. This is the one that
+   responds to respelling, and the fold below removes two of them.
+3. **Allocator/phi copies** — the `.loc`-less remainder.
+
+### The known simde 2-for-1 suspects: CHECKED, and already clean
+
+Every one of round 5's named suspects was verified in the disassembly rather
+than assumed, and **none of them is costing an op**:
+
+* **`_mm256_blendv_ps` → one op.** simde's `blendv` normalises the mask with a
+  `cmplt` against zero first, but LLVM folds it away when the mask is already a
+  compare result: **3 `cmlt.4s` survive against 36 blends**.
+* **Unordered `_CMP_NLT_UQ` / `_CMP_NLE_UQ` → one op.** The NaN-correct negation
+  is absorbed into `BIC`/`ORN` by the consumer. The hot loop contains **exactly
+  one `mvn.16b`**. Round 3's careful unordered predicates are free.
+* **`and`/`or` mask chains → already `bic`/`orn`.** No redundant `not`s.
+* **`set1` broadcasts → already by-element.** The kernel emits **54 indexed
+  `fmul.4s`/`fmla.4s`/`fmls.4s`** forms, i.e. LLVM already reads the scalar out
+  of a lane instead of broadcasting it. The 21–23 `dup.4s` that remain feed
+  `fadd`/`fsub`/`fcmp`/`fdiv`/`bsl` — **arm64 has no by-element encoding for
+  those**, which is the whole reason they survive.
+* **Compare-against-zero → already immediate.** 20 `fcm*.4s Vd,Vn,#0.0` forms.
+* **`andnot(-0.0, x)` → `fabs.4s`**, folded.
+* **Conversions**: 4 `ucvtf.4s` (the z-decode). **Horizontal reductions**:
+  exactly one `faddp.2s` in the entire kernel.
+* **`sqrt`/`div`**: true `fdiv.4s`/`fsqrt.4s`, deliberate — round 1 measured the
+  rcp/rsqrt+NR family *slower* than exact here.
+
+The only genuine 2-for-1 the sweep found in an *intrinsic* was the Newton step.
+
+### Landed 1 — `FDS_CONE_NEONSTEP`: the Newton step is one instruction
+
+arm64 has fused step instructions for exactly these recurrences:
+`FRECPS = 2 − Vn·Vm` and `FRSQRTS = (3 − Vn·Vm)/2`, one rounding each. The
+kernel wrote them out longhand and the shipping binary emitted **zero
+`frsqrts.4s`** at three rsqrt-NR sites, spending a constant materialisation, a
+broadcast copy, a multiply and an `fmls` on each. `rcp_step_x8` /
+`rsqrt_step_x8` (DeferredCommon.h) route them through `vrecpsq_f32` /
+`vrsqrtsq_f32`: `frsqrts.4s` 0 → 10, `frecps.4s` 10 → 12, kernel 4487 → 4454
+instructions, hot loop **484 → 469 vector-ALU (−3.1 %)**.
+
+**Bit-exact, checked over 61.4 M inputs** — every 37th representable positive
+float plus 4 M log-uniform draws — **zero** bit differences for `x > 2.4e-38`.
+Below that the *longhand* form is the wrong one (`0.5*x` goes subnormal and
+rounds) and the native step is strictly more accurate; the kernel's arguments
+never reach there.
+
+**And it is worth <0.5 %.** Two independent interleaved sessions: instructions
+reproduce exactly (2.304 → 2.269 `Ginstr/f`, −1.5 %) and wall reproduces
+(−1.2 %), but cycles read 0.542 → 0.542 and then 0.548 → 0.534 — **the cycle
+win does not reproduce**, so the honest label is *free*, not *a win*. Kept
+because it is free, simpler and more accurate. The `NEONSTEP=0` arm is the
+control that the rewrite is the only difference: 4486 instructions / 1118
+vector-ALU against the parent's 4487 / 1117.
+
+### Landed 2 — the dot product's tail is a scalar (−1.8 % cycles)
+
+Round 4b folded three broadcast scalars in the solve's algebra; the same read
+applied to the **head** of the chain finds the largest one left.
+`VP = X·Px + Y·Py + Pz` and `DV = X·Dx + Y·Dy + Dz`, and **`Y·Py + Pz` and
+`Y·Dy + Dz` are both per-(row × spot) scalars** — the entire tail of each dot
+product is one broadcast. The port spelled it as the scalar arm does,
+`add(set1(Pz), fma(set1(Px), sX, set1(Y·Py)))`, at **seven** vector-ALU ops:
+`dup(YPy)`, a `mov.16b` (both halves need the FMA accumulator), two `fmla`,
+`dup(Pz)`, two `fadd`. Folded, it is **four**. Two sites, −6 ops, and it
+deletes an `fadd` from the head of the dependency chain.
+
+Second fold, bit-exact by construction: `b = 2·(c2·VP − DP·DV)` was `sBh` then
+`add(sBh, sBh)`; scaling by two is exact, so broadcasting `2·c2` and `−2·DP`
+rounds the identical real product once and deletes the doubling add. −2 ops.
+
+Hot loop **469 → 461**; cumulative for the round **484 → 461 (−4.8 %)**.
+
+| cones @ city t=1961 | wall_min | `Ginstr/f` | `Gcyc/f` |
+|---|--:|--:|--:|
+| parent `4e643a25` | 16.139 ms | 2.304 | 0.545 |
+| **round 5 (ships)** | **15.802 ms** | **2.239** | **0.535** |
+
+**−1.8 % cycles, −2.1 % wall, −2.8 % instructions**, and the −1.8 % cycle figure
+**reproduces across two independent interleaved sessions** (min-of-6 and
+min-of-8) — unlike the Newton step alone. City t-sweep, min-of-4 per pose:
+t=400 −3.5 % cyc / −6.0 % wall, t=900 −1.8 % / −2.3 %, t=1400 −0.9 % / −2.2 %,
+t=2400 −3.0 % / −3.0 %. **Greets** −2.1 % cyc / +0.4 % wall (its narrow cones
+take the segmented path, so only the Newton step reaches it).
+
+**Bytes — the judge call, with the numbers.** The VP/DV fold is *not*
+bit-exact: the scalar arm rounds `Y·Py` before adding `Pz`, this rounds the
+fused `Y·Py + Pz` once. Measured across the city sweep:
+
+| pose | differing px of 2 073 600 | max \|Δ\| |
+|---|--:|--:|
+| t=400 | 3 (0.0001 %) | 2/255 |
+| t=900 | **byte-identical** | — |
+| t=1400 | **byte-identical** | — |
+| t=1961 | 2 (0.0001 %) | 1/255 |
+| t=2400 | **byte-identical** | — |
+
+Z-buffer identical at every pose; greets and fountain byte-identical. The two
+t=1961 pixels are `(1852,429) (150,93,87)→(151,94,87)` and
+`(1875,435) (104,89,209)→(103,89,209)`. Artifact battery clean: the pixels are
+**isolated**, so there is no striping or banding to have; a NaN is excluded by
+construction at max |Δ| = 2 LSB (a NaN blows out a whole 8-lane batch, it cannot
+show as two pixels one level apart); and there is no temporal structure to
+shimmer when three of five poses are byte-identical. `render_gate` **ALL FOUR
+rows PASS**, including `conetest b41894f9` — direct coverage of this kernel,
+**bit-identical**. Images: `docs/img/conevec/r5_city_t1961_crop_before_after.png`,
+`docs/img/conevec/r5_city_t1961_diff.png`, `docs/img/conevec/r5_city_t400_diff.png`.
+
+**Pin moved, documented:** city `3cbe42b166847e40f7071eedb48d613c` →
+`3f8948232c192a979ffe7f76c4b387ab` (2/2 stable). greets `778fa6ac…` and
+fountain `8db68ccb…` unmoved.
+
+### Killed, with numbers
+
+* **Hoisting `1/uV` out of the spot loop.** `uV = X²+Y²+1` is a property of the
+  8-pixel batch, and the solve appears to divide by it once per (batch × spot).
+  **It does not: LLVM's LICM already hoists it.** The parent's control build
+  divides at batch level (`0x1001e7edc`, right after the `spotCount<=0` guard),
+  spills the result and reloads it inside the loop. Written, built, and the
+  disassembly is unchanged — 10 `fdiv.4s` before and after, same placement.
+  Killed on the census, never benched.
+* **Collapsing the `zLo`/`zHi` select cascade.** `zLoP` re-selects on `mDisc`
+  what `zLoRt` just selected on `mFwd` against the same fallback, so the two
+  collapse into one blend on `mDisc & mFwd` (and `mDisc & ~mFwd` for `zHi`) —
+  bitwise identical, and it takes `zLo`/`zHi` off the discriminant sqrt through
+  **two** serial selects instead of three. This was built as a deliberate test
+  of the round's hypothesis, because it trades op count *against* chain length:
+  the hot loop went **461 → 469 vector-ALU (+8)** — the two new masks cost two
+  `and`/`bic` and, via register pressure, **four more `mov.16b`** — while the
+  chain got shorter. Measured, interleaved min-of-6, city t=1961: **+0.6 %
+  cycles, +1.2 % wall, +0.6 % instructions.** Reverted.
+
+### THE FINDING: op count is necessary, not sufficient — it has to be ON THE CHAIN
+
+Line the round's four results up against the two candidate models:
+
+| change | Δ vector-ALU ops | on the dependency chain? | Δ cycles |
+|---|--:|---|--:|
+| round 4 `NEONMINMAX` | −2/site × 19 sites | **yes** — cmp+blend is a 2-deep serial pair, `fmin` is 1 | **−4.5 %** |
+| round 4b algebra folds | −18 static | **yes** — `fneg`/`mul` sat between the FMAs | **−2.0 %** |
+| round 5 VP/DV fold | −8 (−1.7 %) | **yes** — deletes an `fadd` at the head of the solve | **−1.8 %** |
+| round 5 Newton step | −15 (−3.1 %) | **no** — constants, copies; step depth is unchanged either way | **~0** |
+| round 5 select collapse | **+8 (+1.7 %)** | shortens it by one link | **+0.6 %** |
+
+**The two changes that moved the most cycles removed the FEWEST ops.** Round 4's
+"81 % of the NEON issue ceiling" is real but it is not the whole constraint:
+the solve's long pole is `fma → fma → fma → fsqrt → fsub → fmul → fmin/fmax →
+bsl → bsl → bsl → fmax → fmax`, roughly thirteen links with a ~12-cycle
+`fsqrt` in the middle, which accounts for most of the measured ~63 cycles per
+(batch × spot) on its own. Ops that dual-issue into the slack around that chain
+are free to remove **and free to keep** — which is round 3's finding
+("deleting 7–10 % of instructions moved cycles by zero") reappearing one level
+down, now with a mechanism.
+
+And the last row is the sting: **shortening the chain does not automatically pay
+either**, because the register file is the thing that pushes back — two extra
+live masks bought four `mov.16b`, and the copies cost more than the link saved.
+
+> **Carry forward — this retires the spelling direction.** The named simde
+> 2-for-1 suspects are all verified clean; the one real find (the Newton step)
+> measured free. What is left in the hot loop is 236 arith ops of actual math,
+> 134 ops of branchless mask/select control flow (29 % — that IS the 8-wide
+> algorithm), and 76 ops of copies, broadcasts and constants that are all
+> off-chain by construction and therefore, by this round's evidence, worth
+> approximately nothing. **The next win on this pass is not a spelling. It has
+> to shorten the solve's dependency chain without adding live values, or do
+> less work — and culling is already closed at ~3 % (round 4).**

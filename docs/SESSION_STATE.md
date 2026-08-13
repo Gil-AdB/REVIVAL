@@ -1,5 +1,144 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-13d — ROUND 5, THE SPELLING SWEEP: −1.8 % MORE CYCLES, AND THE METRIC ITSELF GETS CORRECTED — OPS ONLY COUNT WHEN THEY ARE ON THE DEPENDENCY CHAIN
+>
+> Round 4 left a metric — **vector-ALU op count** — and one example of it.
+> Round 5 applied it *systematically*: census every op the hot loop emits,
+> bucket it by the pipe it issues on, map each back to the intrinsic that
+> produced it, and hunt every 2-for-1. Two changes landed, two were killed,
+> and **the sweep is now dry** — but the reason it dried is the round's real
+> result.
+>
+> ### THE CENSUS (single-arm control, the per-spot loop that runs 3.2 M×/frame)
+>
+> 484 vector-ALU ops → **461** after this round (−4.8 %). Composition:
+> arith 246→236, cmp 50, logic 48, blend 36, **mov 49→42**, dup 23→21,
+> const 17→13, permute 6, plus 12 `fdiv`/`fsqrt` and 131→124 vector memory ops
+> that are NOT on the metric. New instruments in `scratchpad/`:
+> `cone_census.py` (bucket + opcode histogram), `cone_loops.py` (loop-nest
+> census — separates the per-spot loop from the per-tile prologue),
+> `cone_srcmap.py` (op → `.loc` attribution; thin-LTO strips the line map and
+> `dsymutil` cannot recover it, so it reads a `clang -S -g` listing instead),
+> `cone_census_ladder.sh`.
+>
+> ### THE `mov.16b` QUESTION, ANSWERED
+>
+> 139 of 4487 statically, 44 in the hot loop. **Not** simde shuffling 128-bit
+> halves — the solve emits ZERO cross-half permutes. Three origins:
+> (1) **blend-operand copies** — `BSL` destroys the mask, `BIT`/`BIF` destroy a
+> data operand, so a select whose mask *and* both data operands stay live must
+> copy; (2) **FMA-accumulator copies** — an `__m256` FMA with a broadcast addend
+> needs it in BOTH halves' destination registers, so `dup` + `mov.16b`; (3)
+> allocator/phi copies. Only (2) responds to respelling, and the fold below
+> removes two.
+>
+> ### THE NAMED SIMDE SUSPECTS: ALL CHECKED IN THE DISASSEMBLY, ALL ALREADY CLEAN
+>
+> `_mm256_blendv_ps` → one `bsl`/`bit`/`bif` (only **3** `cmlt.4s` mask
+> normalisations survive against 36 blends). Unordered `_CMP_NLT_UQ`/`_NLE_UQ`
+> → the NaN-correct negation is absorbed into `BIC`/`ORN`; the hot loop has
+> **exactly one `mvn.16b`**, so round 3's careful predicates are FREE.
+> `and`/`or` chains → already `bic`/`orn`. `set1` broadcasts → **54 by-element
+> (indexed) `fmul`/`fmla`/`fmls`** already emitted; the ~21 surviving `dup.4s`
+> feed `fadd`/`fsub`/`fcmp`/`fdiv`/`bsl`, which arm64 has **no** by-element
+> encoding for. Compare-against-zero → 20 immediate-`#0.0` forms.
+> `andnot(-0.0,x)` → `fabs.4s`. Conversions: 4 `ucvtf.4s`. Horizontal
+> reductions: exactly one `faddp.2s` in the whole kernel.
+>
+> ### LANDED 1 — THE NEWTON STEP IS ONE INSTRUCTION (and is worth <0.5 %)
+>
+> arm64 has `FRECPS` (= 2 − Vn·Vm) and `FRSQRTS` (= (3 − Vn·Vm)/2), fused, one
+> rounding. The kernel wrote both longhand and emitted **zero `frsqrts.4s`** at
+> three sites. `rcp_step_x8`/`rsqrt_step_x8` route them native: `frsqrts.4s`
+> 0→10, `frecps.4s` 10→12, kernel 4487→4454, hot loop **484→469 (−3.1 %)**.
+> **Bit-exact over 61.4 M inputs** (zero differences for x > 2.4e-38; below that
+> the LONGHAND form is the wrong one, `0.5*x` goes subnormal). Instructions and
+> wall reproduce (−1.5 %, −1.2 %) but **cycles do not** (0.542→0.542, then
+> 0.548→0.534) — kept because it is free, simpler and more accurate, not because
+> it is a win.
+>
+> ### LANDED 2 — `Y·Py + Pz` IS A SCALAR: −1.8 % CYCLES, REPRODUCED TWICE
+>
+> `VP = X·Px + Y·Py + Pz`, and **`Y·Py + Pz` is a per-(row × spot) scalar** — the
+> whole tail of the dot product is one broadcast. The port spelled it as the
+> scalar arm does, at **seven** vector-ALU ops (`dup(YPy)`, a `mov.16b` because
+> both halves need the FMA accumulator, two `fmla`, `dup(Pz)`, two `fadd`);
+> folded it is **four**. Two sites. Plus `b = 2·(c2·VP − DP·DV)` folding the
+> doubling into both broadcasts (exact, −2 ops). Hot loop 469 → **461**.
+>
+> | cones @ city t=1961 | wall | `Ginstr/f` | `Gcyc/f` |
+> |---|--:|--:|--:|
+> | parent `4e643a25` | 16.139 ms | 2.304 | 0.545 |
+> | **ships** | **15.802 ms** | **2.239** | **0.535** |
+>
+> **−1.8 % cyc / −2.1 % wall / −2.8 % instr**, the cycle figure reproduced in two
+> independent interleaved sessions. Sweep: t=400 −3.5 %/−6.0 %, t=900
+> −1.8 %/−2.3 %, t=1400 −0.9 %/−2.2 %, t=2400 −3.0 %/−3.0 %. Greets −2.1 % cyc.
+>
+> ### BYTES — JUDGE CALL, LANDED DEFAULT-ON, PIN MOVED
+>
+> The VP/DV fold is NOT bit-exact (the scalar arm rounds `Y·Py` before adding
+> `Pz`; this rounds the fused sum once). Measured: **t=900, t=1400, t=2400
+> byte-identical**; **t=400 3 px of 2 073 600, max |Δ| 2/255**; **t=1961 2 px,
+> max |Δ| 1/255** — `(1852,429) (150,93,87)→(151,94,87)` and `(1875,435)
+> (104,89,209)→(103,89,209)`. Z-buffer identical everywhere; greets and fountain
+> byte-identical. Artifact battery clean: pixels are ISOLATED (no striping/banding
+> possible), NaN excluded by construction at max |Δ| = 2 LSB (a NaN blows out a
+> whole 8-lane batch), no temporal structure when 3 of 5 poses are identical.
+> `render_gate` **ALL FOUR rows PASS** incl. `conetest b41894f9` BIT-IDENTICAL.
+> Images: `docs/img/conevec/r5_city_t1961_crop_before_after.png`,
+> `r5_city_t1961_diff.png`, `r5_city_t400_diff.png`, `r5_city_t1961_after.png`.
+>
+> **PIN MOVED: city `3cbe42b166847e40f7071eedb48d613c` →
+> `3f8948232c192a979ffe7f76c4b387ab`** (2/2 stable, verified again on the
+> rebased tree). greets `778fa6acd85a69cf241babefcdaf598e` and fountain
+> `8db68ccb59416e9a44037e9f387b7bd9` **unmoved**, 2/2 each.
+>
+> ### KILLED, WITH NUMBERS
+>
+> * **Hoisting `1/uV` out of the spot loop** — `uV` is batch-invariant and the
+>   solve looks like it divides per spot. **LLVM's LICM already hoists it**: the
+>   parent's control divides at batch level (`0x1001e7edc`), spills and reloads.
+>   Built; disassembly unchanged, 10 `fdiv.4s` before and after. Killed on the
+>   census, never benched.
+> * **Collapsing the `zLo`/`zHi` select cascade** — `zLoP` re-selects on `mDisc`
+>   what `zLoRt` selected on `mFwd` against the same fallback, so they fold to
+>   one blend on `mDisc & mFwd`; bitwise identical, and it takes `zLo`/`zHi` off
+>   the sqrt through TWO serial selects instead of three. Built deliberately as
+>   a test that trades op count AGAINST chain length: hot loop **461 → 469
+>   (+8)** — two new masks cost two logic ops and, through register pressure,
+>   **four more `mov.16b`** — and it measured **+0.6 % cyc / +1.2 % wall**.
+>   Reverted.
+>
+> ### THE FINDING — THE METRIC NEEDED A QUALIFIER
+>
+> | change | Δ vector-ALU ops | on the chain? | Δ cycles |
+> |---|--:|---|--:|
+> | r4 `NEONMINMAX` | −2 × 19 sites | **yes** | **−4.5 %** |
+> | r4b algebra folds | −18 static | **yes** | **−2.0 %** |
+> | r5 VP/DV fold | −8 (−1.7 %) | **yes** | **−1.8 %** |
+> | r5 Newton step | −15 (−3.1 %) | **no** | **~0** |
+> | r5 select collapse | **+8** | shortens by one link | **+0.6 %** |
+>
+> **The two biggest cycle wins removed the fewest ops.** Round 4's 81 %-of-issue-
+> ceiling number is real but not the whole constraint: the solve's long pole is
+> `fma→fma→fma→fsqrt→fsub→fmul→fmin/fmax→bsl→bsl→bsl→fmax→fmax`, ~13 links with
+> a ~12-cycle `fsqrt` in the middle, which accounts for most of the ~63
+> cycles/pair on its own. Ops that dual-issue into the slack around it are free
+> to remove AND free to keep — round 3's finding again, now with a mechanism.
+> And the last row stings: **shortening the chain does not automatically pay
+> either**, because the register file pushes back.
+>
+> **CONES: I call this done as a spelling problem.** What is left in the hot
+> loop is 236 arith ops of real math, 134 ops of branchless mask/select control
+> flow (29 % — that IS the 8-wide algorithm), and 76 ops of copies, broadcasts
+> and constants that are off-chain by construction and therefore worth ~nothing.
+> The next win has to shorten the solve's dependency chain WITHOUT adding live
+> values, or do less work — and culling is already closed at ~3 % (round 4).
+> Full worked example, census tables and disassembly: **`docs/HW_PROFILING.md`
+> section 13**.
+
+
 > ## 2026-08-13c — THE REGISTER-PRESSURE QUESTION IS ANSWERED NO, WITH THE ARM THAT PROVES IT: RELIEVING IT COSTS +7.5 % CYCLES
 >
 > His question was **"any way to rewrite this while relieving register
