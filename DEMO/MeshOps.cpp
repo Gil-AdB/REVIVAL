@@ -2086,7 +2086,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 	// and the free classifier probes it: a border edge whose interior samples
 	// have any foreign face within kAbutEps stays PINNED. Only ever narrows the
 	// freed set, so flag-off arms are untouched by construction.
-	struct AbutTri { Vector a, b, c; uint64_t ka, kb, kc; const char *mat; };
+	struct AbutTri { Vector a, b, c; uint64_t ka, kb, kc; const char *mat;
+	                 TriMesh *mesh; int32_t faceIdx; };
 	std::vector<AbutTri> abutTris;
 	std::unordered_map<uint64_t, std::vector<uint32_t>> abutGrid;
 	constexpr float kAbutEps  = 0.05f;   // world units: "touching" for authored walls
@@ -2107,6 +2108,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				t.a = F.A->Pos; t.b = F.B->Pos; t.c = F.C->Pos;
 				t.ka = seamKey(t.a); t.kb = seamKey(t.b); t.kc = seamKey(t.c);
 				t.mat = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : nullptr;
+				t.mesh = M; t.faceIdx = i;
 				const uint32_t id = uint32_t(abutTris.size());
 				abutTris.push_back(t);
 				const float x0 = std::min({t.a.x,t.b.x,t.c.x}) - kAbutEps, x1 = std::max({t.a.x,t.b.x,t.c.x}) + kAbutEps;
@@ -3062,6 +3064,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		std::vector<char>   pinnedZero(nOrig, 0);        // authored-border verts
 		std::vector<char>   recessOnly(nOrig, 0);        // freed border verts: d <= 0
 		std::vector<Vector> freeEdgeDir(nOrig, Vector{0.0f,0.0f,0.0f});  // their border line
+		// Authored-edge endpoint keys per freed vert (edge-notch, 2026-08-13):
+		// the profile densification pass below needs the AUTHORED endpoints'
+		// seamKeys to run the abuttal veto at inserted mid-verts (the soup's
+		// own-face exclusion is keyed on authored endpoints), and the comb pass
+		// needs to group dense border verts back to their authored edge.
+		std::vector<uint64_t> freeEdgeKA(nOrig, 0), freeEdgeKB(nOrig, 0);
 		for (uint32_t i = 0; i < nOrig; ++i)
 			if (origNonTargetVert[i] || coincidentOrig[i]) pinnedZero[i] = 1;
 		// canonical shared edge vertex (keyed by min-corner, max-corner, param bits)
@@ -3114,6 +3122,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				recessOnly[id] = 1;                  // may carve inward, never outward
 				if (id >= freeEdgeDir.size()) freeEdgeDir.resize(id+1, Vector{0.0f,0.0f,0.0f});
 				freeEdgeDir[id] = Vector{ B.x-A.x, B.y-A.y, B.z-A.z };   // the border line
+				if (id >= freeEdgeKA.size()) { freeEdgeKA.resize(id+1, 0); freeEdgeKB.resize(id+1, 0); }
+				freeEdgeKA[id] = seamKey(A); freeEdgeKB[id] = seamKey(B);
 			}
 			return id;
 		};
@@ -3797,6 +3807,90 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			}
 		}
 
+		// ── FREED-BORDER PROFILE DENSIFICATION (edge-notch, 2026-08-13) ──────
+		// The silhouette at a freed border is a straight segment between border
+		// verts, and the subdivision leaves them SPARSE there (measured at the
+		// t=5975 doorway jamb: clusters ~0.05 u apart separated by 1.4 u gaps —
+		// two whole stone courses with no vertex, so no notch can exist no
+		// matter how the verts displace). Split every freed-border sub-edge
+		// until it samples the height profile at kProfilePitch, so the border
+		// polyline can follow the mortar rows. Inserted verts inherit the
+		// authored edge's endpoint keys and re-run the per-point abuttal veto
+		// (a mixed span pins exactly where it abuts, as at the 18.5 u corner).
+		// Gated on the same flag as the freed borders themselves; flag-off arms
+		// never reach here with a recessOnly vert, so they are untouched.
+		if (freeEdge) {
+			constexpr float kProfilePitch = 0.08f;   // world units along the border
+			auto faceU = [&](const Face &F, int k) -> float { return k==0?F.U1:(k==1?F.U2:F.U3); };
+			auto faceV = [&](const Face &F, int k) -> float { return k==0?F.V1:(k==1?F.V2:F.V3); };
+			auto setUV = [&](Face &F, int k, float u, float v) {
+				if (k==0){F.U1=u;F.V1=v;} else if (k==1){F.U2=u;F.V2=v;} else {F.U3=u;F.V3=v;} };
+			int nProfSplit = 0, nProfPin = 0;
+			bool didSplit = true;
+			for (int pass = 0; didSplit && pass < 8; ++pass) {
+				didSplit = false;
+				const size_t nf = faces.size();
+				for (size_t i = 0; i < nf; ++i) {
+					if (!(faces[i].Txtr && faces[i].Txtr->Name &&
+					      !std::strcmp(faces[i].Txtr->Name, matName))) continue;
+					for (int k = 0; k < 3; ++k) {
+						const uint32_t a = fIdx[i][k], b = fIdx[i][(k+1)%3];
+						if (a >= recessOnly.size() || b >= recessOnly.size()) continue;
+						if (!recessOnly[a] || !recessOnly[b]) continue;
+						if (a >= freeEdgeKA.size() || b >= freeEdgeKA.size()) continue;
+						if (!freeEdgeKA[a] || freeEdgeKA[a] != freeEdgeKA[b] ||
+						    freeEdgeKB[a] != freeEdgeKB[b]) continue;   // same authored edge only
+						const Vector A = verts[a].Pos, B = verts[b].Pos;
+						const float ex=B.x-A.x, ey=B.y-A.y, ez=B.z-A.z;
+						const float el = std::sqrt(ex*ex+ey*ey+ez*ez);
+						if (el <= kProfilePitch) continue;
+						// midpoint vert (pos/N lerped like edgeVert; UV from THIS face)
+						Vertex m = verts[a];
+						m.Pos.x = 0.5f*(A.x+B.x); m.Pos.y = 0.5f*(A.y+B.y); m.Pos.z = 0.5f*(A.z+B.z);
+						float nx = verts[a].N.x+verts[b].N.x, ny = verts[a].N.y+verts[b].N.y,
+						      nz = verts[a].N.z+verts[b].N.z;
+						const float nl = std::sqrt(nx*nx+ny*ny+nz*nz);
+						if (nl > 1e-6f) { m.N.x=nx/nl; m.N.y=ny/nl; m.N.z=nz/nl; }
+						const uint32_t mid = uint32_t(verts.size());
+						verts.push_back(m);
+						pinnedZero.resize(verts.size(), 0);
+						recessOnly.resize(verts.size(), 0);
+						freeEdgeDir.resize(verts.size(), Vector{0.0f,0.0f,0.0f});
+						freeEdgeKA.resize(verts.size(), 0); freeEdgeKB.resize(verts.size(), 0);
+						// per-point veto at the new position (mixed spans pin here)
+						const Vector fn = faces[i].N;
+						if (abutPointMat(verts[mid].Pos, freeEdgeKA[a], freeEdgeKB[a], &fn)) {
+							pinnedZero[mid] = 1; ++nProfPin;
+						} else {
+							recessOnly[mid] = 1;
+							freeEdgeDir[mid] = freeEdgeDir[a];
+							freeEdgeKA[mid] = freeEdgeKA[a]; freeEdgeKB[mid] = freeEdgeKB[a];
+						}
+						// split face i: (a,b,c) -> (a,m,c) + (m,b,c), UVs per corner
+						const int kc = (k+2)%3;
+						Face nfc = faces[i];
+						const float mu = 0.5f*(faceU(faces[i],k)+faceU(faces[i],(k+1)%3));
+						const float mv = 0.5f*(faceV(faces[i],k)+faceV(faces[i],(k+1)%3));
+						// new face (m,b,c): corner k=m, k+1=b (kept), kc=c (kept)
+						setUV(nfc, k, mu, mv);
+						std::array<uint32_t,3> nidx = fIdx[i];
+						nidx[k] = mid;
+						faces.push_back(nfc);
+						fIdx.push_back(nidx);
+						faceFromEdge.push_back(faceFromEdge[i]);
+						// face i keeps corner k=a, corner k+1 becomes m
+						setUV(faces[i], (k+1)%3, mu, mv);
+						fIdx[i][(k+1)%3] = mid;
+						(void)kc;
+						++nProfSplit; didSplit = true;
+						break;   // face i's edges changed; revisit on the next pass
+					}
+				}
+			}
+			if (nProfSplit)
+				std::fprintf(stderr, "[STONE] '%s' border profile densified: +%d verts "
+					"(%d vetoed to pin) at pitch %.2f\n", matName, nProfSplit, nProfPin, kProfilePitch);
+		}
 		// ── displacement (per-vertex height averaged over incident target faces,
 		// pushed along the vertex normal; authored-border verts pinned to zero) ──
 		const uint32_t nV = uint32_t(verts.size());
@@ -4596,6 +4690,257 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					(double)p05, (double)p50, (double)p95, (double)(p95 - p05),
 					(double)(amp > 0.0f ? 100.0f*(p95-p05)/amp : 0.0f));
 			}
+		}
+		// ── REVEAL COMB (edge-notch stage 2, 2026-08-13) ─────────────────────
+		// A notch must cut BOTH faces of a corner. The freed rooms border now
+		// carries a dense displaced profile (the densification pass above), but
+		// from azimuths where the abutting CONVEX face fronts the camera — the
+		// doorway reveal, usually a NON-target mesh ('siling') — the silhouette
+		// is that face's authored straight boundary, and the rooms displacement
+		// is nearly view-parallel there and moves nothing on screen (measured,
+		// t=5975). This pass cuts the reveal itself: every convex-abutting
+		// rectangular strip along a freed border is rebuilt as a COMB whose
+		// border-side boundary follows the same displaced profile, pulled in
+		// the reveal's own plane. The comb boundary and the rooms border share
+		// positions 1:1, so the corner stays watertight by construction.
+		// Non-rectangular or span-exceeding reveals are left alone and counted.
+		if (freeEdge && !abutTris.empty()) {
+			auto vlen = [](const Vector &v){ return std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z); };
+			auto vdot = [](const Vector &a, const Vector &b){ return a.x*b.x+a.y*b.y+a.z*b.z; };
+			auto vsub = [](const Vector &a, const Vector &b){ return Vector{a.x-b.x,a.y-b.y,a.z-b.z}; };
+			auto vadd = [](const Vector &a, const Vector &b){ return Vector{a.x+b.x,a.y+b.y,a.z+b.z}; };
+			auto vscale = [](const Vector &a, float s){ return Vector{a.x*s,a.y*s,a.z*s}; };
+			std::map<std::pair<uint64_t,uint64_t>, std::vector<uint32_t>> spanOf;
+			for (uint32_t v = 0; v < uint32_t(verts.size()); ++v)
+				if (v < recessOnly.size() && recessOnly[v] &&
+				    v < freeEdgeKA.size() && freeEdgeKA[v])
+					spanOf[{freeEdgeKA[v], freeEdgeKB[v]}].push_back(v);
+			struct MeshPatch { std::vector<int32_t> drop; std::vector<Vertex> nvVerts;
+			                   std::vector<Face> nvFaces; std::vector<std::array<uint32_t,3>> nvIdx; };
+			std::unordered_map<TriMesh*, MeshPatch> patch;
+			int nCombs = 0, nSkipShape = 0, nSkipSpan = 0;
+			for (auto &spn : spanOf) {
+				auto &vl = spn.second;
+				if (vl.size() < 3) continue;
+				Vector D = freeEdgeDir[vl[0]];
+				const float dl = vlen(D); if (dl < 1e-6f) continue;
+				D = vscale(D, 1.0f/dl);
+				const Vector P0 = basePos[vl[0]];
+				std::sort(vl.begin(), vl.end(), [&](uint32_t a, uint32_t b){
+					return vdot(vsub(basePos[a],P0),D) < vdot(vsub(basePos[b],P0),D); });
+				Vector n1{0,0,0};
+				for (uint32_t v : vl)
+					if (v < freeDispDir.size() && vlen(freeDispDir[v]) > 0.5f) { n1 = freeDispDir[v]; break; }
+				if (vlen(n1) < 0.5f) continue;
+				const float t0 = vdot(vsub(basePos[vl.front()],P0),D);
+				const float t1 = vdot(vsub(basePos[vl.back()], P0),D);
+				// convex-abutting foreign tris sampled along the span
+				std::vector<uint32_t> ids;
+				int rjCell=0, rjBoth=0, rjMat=0, rjDist=0, rjCopl=0, rjConc=0, rjSeen=0;
+				for (int s = 1; s <= 7; ++s) {
+					const float tt = t0 + (t1-t0)*float(s)/8.0f;
+					const Vector P = vadd(P0, vscale(D, tt));
+					auto it = abutGrid.find(abutCellKey(std::floor(P.x/kAbutCell)*kAbutCell,
+					                                    std::floor(P.y/kAbutCell)*kAbutCell,
+					                                    std::floor(P.z/kAbutCell)*kAbutCell));
+					if (it == abutGrid.end()) { ++rjCell; continue; }
+					for (uint32_t id : it->second) {
+						const AbutTri &T2 = abutTris[id];
+						const bool hasA = (T2.ka==spn.first.first || T2.kb==spn.first.first || T2.kc==spn.first.first);
+						const bool hasB = (T2.ka==spn.first.second|| T2.kb==spn.first.second|| T2.kc==spn.first.second);
+						if (pointTriDistSq(P, T2.a, T2.b, T2.c) >= kAbutEps*kAbutEps) { ++rjDist; continue; }
+						// NOTE: unlike the veto, the comb does NOT exclude both-endpoint
+						// faces — the doorway reveal is a corner-coincident quad whose
+						// near triangle contains BOTH edge endpoints (measured: rj[both]
+						// ate exactly the reveal at every jamb probe). Self-faces are
+						// excluded by material below; foreign corner-touchers are
+						// filtered by the perpendicularity class.
+						(void)hasA; (void)hasB;
+						if (!T2.mesh) continue;
+						if (T2.mat && !std::strcmp(T2.mat, matName)) { ++rjMat;
+							if (fds::FeatureFlags::greets_displace_junction_census() && P.x > 17.0f) {
+								static int dbgN = 0;
+								if (dbgN < 8) { ++dbgN;
+									std::fprintf(stderr, "[COMB-MATREJ] P(%.2f,%.2f,%.2f) tri a(%.2f,%.2f,%.2f) b(%.2f,%.2f,%.2f) c(%.2f,%.2f,%.2f)\n",
+										(double)P.x,(double)P.y,(double)P.z,
+										(double)T2.a.x,(double)T2.a.y,(double)T2.a.z,
+										(double)T2.b.x,(double)T2.b.y,(double)T2.b.z,
+										(double)T2.c.x,(double)T2.c.y,(double)T2.c.z);
+								}
+							}
+							continue; }   // rooms-rooms corners: seam_weld's domain
+						const float e1x=T2.b.x-T2.a.x, e1y=T2.b.y-T2.a.y, e1z=T2.b.z-T2.a.z;
+						const float e2x=T2.c.x-T2.a.x, e2y=T2.c.y-T2.a.y, e2z=T2.c.z-T2.a.z;
+						float n2x=e1y*e2z-e1z*e2y, n2y=e1z*e2x-e1x*e2z, n2z=e1x*e2y-e1y*e2x;
+						const float l2=std::sqrt(n2x*n2x+n2y*n2y+n2z*n2z); if (l2<1e-12f) continue;
+						n2x/=l2; n2y/=l2; n2z/=l2;
+						// Comb only NEAR-PERPENDICULAR reveals: the profile pull must lie
+						// in the reveal's own plane (|dot(n1,nr)| small). This also drops
+						// spans whose displacement direction is contaminated (wall-bottom
+						// borders average the floor normal in) — their pull would leave
+						// the abutting plane, so they are not combable at all.
+						if (std::fabs(n1.x*n2x+n1.y*n2y+n1.z*n2z) > 0.3f) { ++rjCopl; continue; }
+						const float cx=(T2.a.x+T2.b.x+T2.c.x)/3.0f-P.x;
+						const float cy=(T2.a.y+T2.b.y+T2.c.y)/3.0f-P.y;
+						const float cz=(T2.a.z+T2.b.z+T2.c.z)/3.0f-P.z;
+						if (n1.x*cx+n1.y*cy+n1.z*cz > 0.02f) { ++rjConc; continue; }               // concave class
+						if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+					}
+				}
+				if (fds::FeatureFlags::greets_displace_junction_census())
+					std::fprintf(stderr, "[COMB-DBG] span n=%zu t0=%.2f t1=%.2f P0(%.1f,%.1f,%.1f) "
+						"D(%.2f,%.2f,%.2f) n1(%.2f,%.2f,%.2f) ids=%zu rj[cell%d both%d mat%d dist%d copl%d conc%d]\n",
+						vl.size(), (double)t0, (double)t1,
+						(double)P0.x,(double)P0.y,(double)P0.z,
+						(double)D.x,(double)D.y,(double)D.z,
+						(double)n1.x,(double)n1.y,(double)n1.z, ids.size(),
+						rjCell,rjBoth,rjMat,rjDist,rjCopl,rjConc);
+				if (ids.empty()) continue;
+				// group by mesh (doorway reveals are one strip per mesh per edge)
+				std::unordered_map<TriMesh*, std::vector<uint32_t>> byMesh;
+				for (uint32_t id : ids) byMesh[abutTris[id].mesh].push_back(id);
+				for (auto &g : byMesh) {
+					// distinct corner verts of the group
+					std::vector<Vector> q;
+					for (uint32_t id : g.second)
+						for (const Vector *p : { &abutTris[id].a, &abutTris[id].b, &abutTris[id].c }) {
+							bool dup = false;
+							for (const Vector &e : q)
+								if (vlen(vsub(e,*p)) < 1e-4f) { dup = true; break; }
+							if (!dup) q.push_back(*p);
+						}
+					// frame: width direction/extent off the border line
+					Vector wd{0,0,0}; float W = 0.0f;
+					for (const Vector &p : q) {
+						Vector r = vsub(p, vadd(P0, vscale(D, vdot(vsub(p,P0),D))));
+						const float s = vlen(r);
+						if (s > W) { W = s; wd = vscale(r, 1.0f/s); }
+					}
+					if (W < 0.02f) { ++nSkipShape; continue; }
+					bool rect = true, inSpan = true;
+					for (const Vector &p : q) {
+						const float s = vdot(vsub(p,P0), wd);
+						if (std::fabs(s) > 0.02f && std::fabs(s-W) > 0.02f) rect = false;
+						const float tp = vdot(vsub(p,P0), D);
+						if (tp < t0-0.15f || tp > t1+0.15f) inSpan = false;
+					}
+					if (!rect)   { ++nSkipShape; continue; }
+					if (!inSpan) { ++nSkipSpan;  continue; }
+					// affine UV over the (D,wd) frame from one original tri
+					const AbutTri &R0 = abutTris[g.second[0]];
+					const Face &TF = R0.mesh->Faces[R0.faceIdx];
+					const Vector tp0 = R0.a, tp1 = R0.b, tp2 = R0.c;
+					const float a1 = vdot(vsub(tp1,tp0),D),  b1 = vdot(vsub(tp1,tp0),wd);
+					const float a2 = vdot(vsub(tp2,tp0),D),  b2 = vdot(vsub(tp2,tp0),wd);
+					const float det = a1*b2 - a2*b1;
+					if (std::fabs(det) < 1e-9f) { ++nSkipShape; continue; }
+					const float du1 = TF.U2-TF.U1, dv1 = TF.V2-TF.V1;
+					const float du2 = TF.U3-TF.U1, dv2 = TF.V3-TF.V1;
+					const float t_of0 = vdot(vsub(tp0,P0),D), s_of0 = vdot(vsub(tp0,P0),wd);
+					auto uvAt = [&](float tt, float ss, float &u, float &v){
+						const float lt = tt - t_of0, ls = ss - s_of0;
+						const float l1 = ( lt*b2 - ls*a2)/det;   // barycentric along (tp1-tp0)
+						const float l2v= (-lt*b1 + ls*a1)/det;   // along (tp2-tp0)
+						u = TF.U1 + l1*du1 + l2v*du2;
+						v = TF.V1 + l1*dv1 + l2v*dv2;
+					};
+					// reveal plane (through q[0], normal from tri 0's raw cross for winding)
+					const Vector rc{ (R0.b.y-R0.a.y)*(R0.c.z-R0.a.z)-(R0.b.z-R0.a.z)*(R0.c.y-R0.a.y),
+					                 (R0.b.z-R0.a.z)*(R0.c.x-R0.a.x)-(R0.b.x-R0.a.x)*(R0.c.z-R0.a.z),
+					                 (R0.b.x-R0.a.x)*(R0.c.y-R0.a.y)-(R0.b.y-R0.a.y)*(R0.c.x-R0.a.x) };
+					const float rcl = vlen(rc); if (rcl < 1e-12f) { ++nSkipShape; continue; }
+					const Vector nr = vscale(rc, 1.0f/rcl);
+					MeshPatch &mp = patch[g.first];
+					for (uint32_t id : g.second) mp.drop.push_back(abutTris[id].faceIdx);
+					// comb verts: boundary (displaced, plane-projected) + far edge
+					const uint32_t vBase = uint32_t(mp.nvVerts.size());
+					Vertex tmplV = *TF.A;   // template: copy render fields
+					for (size_t i = 0; i < vl.size(); ++i) {
+						Vector p = verts[vl[i]].Pos;
+						const float off = vdot(vsub(p, R0.a), nr);
+						p = vsub(p, vscale(nr, off));          // keep the comb planar
+						const float tp = vdot(vsub(basePos[vl[i]],P0),D);
+						float u,v2; uvAt(vdot(vsub(p,P0),D), vdot(vsub(p,P0),wd), u, v2);
+						Vertex bv = tmplV; bv.Pos = p; bv.N = nr; bv.U = u; bv.V = v2;
+						mp.nvVerts.push_back(bv);
+						const Vector f = vadd(vadd(P0, vscale(D, tp)), vscale(wd, W));
+						float uf,vf; uvAt(tp, W, uf, vf);
+						Vertex fv = tmplV; fv.Pos = f; fv.N = nr; fv.U = uf; fv.V = vf;
+						mp.nvVerts.push_back(fv);
+					}
+					for (size_t i = 0; i + 1 < vl.size(); ++i) {
+						const uint32_t b0 = vBase + uint32_t(i*2),     f0 = b0 + 1;
+						const uint32_t b1v = vBase + uint32_t(i*2+2),  f1v = b1v + 1;
+						for (int tri = 0; tri < 2; ++tri) {
+							uint32_t ia = b0, ib = tri ? f1v : b1v, ic = tri ? b1v : f0;
+							// orient to the original facing
+							const Vector &A2 = mp.nvVerts[ia].Pos, &B2 = mp.nvVerts[ib].Pos, &C2 = mp.nvVerts[ic].Pos;
+							const Vector cr{ (B2.y-A2.y)*(C2.z-A2.z)-(B2.z-A2.z)*(C2.y-A2.y),
+							                 (B2.z-A2.z)*(C2.x-A2.x)-(B2.x-A2.x)*(C2.z-A2.z),
+							                 (B2.x-A2.x)*(C2.y-A2.y)-(B2.y-A2.y)*(C2.x-A2.x) };
+							if (vdot(cr, rc) < 0.0f) std::swap(ib, ic);
+							Face nfc = TF;
+							nfc.U1 = mp.nvVerts[ia].U; nfc.V1 = mp.nvVerts[ia].V;
+							nfc.U2 = mp.nvVerts[ib].U; nfc.V2 = mp.nvVerts[ib].V;
+							nfc.U3 = mp.nvVerts[ic].U; nfc.V3 = mp.nvVerts[ic].V;
+							mp.nvFaces.push_back(nfc);
+							mp.nvIdx.push_back({ia, ib, ic});
+						}
+					}
+					++nCombs;
+				}
+			}
+			// rebuild each patched foreign mesh
+			for (auto &pm : patch) {
+				TriMesh *M = pm.first; MeshPatch &mp = pm.second;
+				if (mp.nvFaces.empty() || !M->Verts || !M->Faces) continue;
+				std::sort(mp.drop.begin(), mp.drop.end());
+				mp.drop.erase(std::unique(mp.drop.begin(), mp.drop.end()), mp.drop.end());
+				const int32_t oV = M->VIndex, oF = M->FIndex;
+				Vertex *NV = new Vertex[size_t(oV) + mp.nvVerts.size()];
+				std::memcpy(NV, M->Verts, sizeof(Vertex)*size_t(oV));
+				std::memcpy(NV + oV, mp.nvVerts.data(), sizeof(Vertex)*mp.nvVerts.size());
+				Face *NF = new Face[size_t(oF) - mp.drop.size() + mp.nvFaces.size()];
+				int32_t w = 0; size_t di = 0;
+				for (int32_t i = 0; i < oF; ++i) {
+					if (di < mp.drop.size() && mp.drop[di] == i) { ++di; continue; }
+					NF[w] = M->Faces[i];
+					NF[w].A = NV + (M->Faces[i].A - M->Verts);
+					NF[w].B = NV + (M->Faces[i].B - M->Verts);
+					NF[w].C = NV + (M->Faces[i].C - M->Verts);
+					++w;
+				}
+				for (size_t i = 0; i < mp.nvFaces.size(); ++i) {
+					Face &F2 = NF[w];
+					F2 = mp.nvFaces[i];
+					F2.A = NV + oV + mp.nvIdx[i][0];
+					F2.B = NV + oV + mp.nvIdx[i][1];
+					F2.C = NV + oV + mp.nvIdx[i][2];
+					const Vector &A3=F2.A->Pos, &B3=F2.B->Pos, &C3=F2.C->Pos;
+					const float e1x=B3.x-A3.x,e1y=B3.y-A3.y,e1z=B3.z-A3.z;
+					const float e2x=C3.x-A3.x,e2y=C3.y-A3.y,e2z=C3.z-A3.z;
+					float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+					const float gl=std::sqrt(gx*gx+gy*gy+gz*gz);
+					if (gl>1e-6f){ gx/=gl; gy/=gl; gz/=gl; F2.N = Vector{gx,gy,gz}; }
+					F2.NormProd = -(F2.N.x*A3.x + F2.N.y*A3.y + F2.N.z*A3.z);
+					++w;
+				}
+				delete [] M->Verts; delete [] M->Faces;
+				M->Verts = NV; M->VIndex = oV + int32_t(mp.nvVerts.size());
+				M->Faces = NF; M->FIndex = w;
+				Compute_FaceVertexIndices(M);
+				if (M->Flags & Tri_Stationary)
+					M->SL = (Color *)getAlignedBlock(sizeof(Color) * M->VIndex, 16);
+				M->BSphereRadius += amp;
+				M->BSphereRad = M->BSphereRadius * M->BSphereRadius;
+				const char *pn = (M->FIndex && M->Faces[0].Txtr && M->Faces[0].Txtr->Name)
+					? M->Faces[0].Txtr->Name : "?";
+				std::fprintf(stderr, "[STONE] reveal comb: '%s' -%zu +%zu faces, +%zu verts\n",
+					pn, mp.drop.size(), mp.nvFaces.size(), mp.nvVerts.size());
+			}
+			if (nCombs || nSkipShape || nSkipSpan)
+				std::fprintf(stderr, "[STONE] reveal combs: %d built, %d skipped (shape), %d skipped (span)\n",
+					nCombs, nSkipShape, nSkipSpan);
 		}
 		// Commit new arrays.
 		Vertex *nv = new Vertex[verts.size()];
