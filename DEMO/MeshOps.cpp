@@ -2074,6 +2074,129 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 	};
 	std::unordered_set<uint64_t> ndVert, ndEdge;
 	std::unordered_map<uint64_t, const char *> ndVertMat;   // audit: which neighbour
+	// ── ABUTTAL SOUP (--greets_displace_free_edge, 2026-08-13) ───────────────
+	// The free-edge rule's "nothing on the far side" test was VERTEX-coincidence
+	// only, and the user's t=1088 wall corner refutes it: two walls that MEET
+	// geometrically but whose border verts never land on the same positions
+	// (different segmenting along the corner) both classified OPEN, both freed,
+	// both recessed — a full-height slit where the corner used to seal. The far
+	// side of a border is a GEOMETRIC question, not a topological one, so this
+	// collects every face of every mesh (displaced targets included — the walls
+	// at that corner are both 'rooms') into a coarse world grid, PRE-subdivision,
+	// and the free classifier probes it: a border edge whose interior samples
+	// have any foreign face within kAbutEps stays PINNED. Only ever narrows the
+	// freed set, so flag-off arms are untouched by construction.
+	struct AbutTri { Vector a, b, c; uint64_t ka, kb, kc; const char *mat; };
+	std::vector<AbutTri> abutTris;
+	std::unordered_map<uint64_t, std::vector<uint32_t>> abutGrid;
+	constexpr float kAbutEps  = 0.05f;   // world units: "touching" for authored walls
+	constexpr float kAbutCell = 1.0f;
+	auto abutCellKey = [](float x, float y, float z) -> uint64_t {
+		const int64_t xi = int64_t(std::floor(x)), yi = int64_t(std::floor(y)), zi = int64_t(std::floor(z));
+		uint64_t h = 1469598103934665603ull;
+		for (int64_t v : { xi, yi, zi }) { h ^= uint64_t(v); h *= 1099511628211ull; }
+		return h;
+	};
+	if (fds::FeatureFlags::greets_displace_free_edge()) {
+		for (TriMesh *M = Sc->TriMeshHead; M; M = M->Next) {
+			if (M->FIndex == 0 || !M->Faces || !M->Verts) continue;
+			for (int32_t i = 0; i < M->FIndex; ++i) {
+				const Face &F = M->Faces[i];
+				if (!F.A || !F.B || !F.C) continue;
+				AbutTri t;
+				t.a = F.A->Pos; t.b = F.B->Pos; t.c = F.C->Pos;
+				t.ka = seamKey(t.a); t.kb = seamKey(t.b); t.kc = seamKey(t.c);
+				t.mat = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : nullptr;
+				const uint32_t id = uint32_t(abutTris.size());
+				abutTris.push_back(t);
+				const float x0 = std::min({t.a.x,t.b.x,t.c.x}) - kAbutEps, x1 = std::max({t.a.x,t.b.x,t.c.x}) + kAbutEps;
+				const float y0 = std::min({t.a.y,t.b.y,t.c.y}) - kAbutEps, y1 = std::max({t.a.y,t.b.y,t.c.y}) + kAbutEps;
+				const float z0 = std::min({t.a.z,t.b.z,t.c.z}) - kAbutEps, z1 = std::max({t.a.z,t.b.z,t.c.z}) + kAbutEps;
+				for (float gx = std::floor(x0/kAbutCell); gx <= std::floor(x1/kAbutCell); gx += 1.0f)
+				for (float gy = std::floor(y0/kAbutCell); gy <= std::floor(y1/kAbutCell); gy += 1.0f)
+				for (float gz = std::floor(z0/kAbutCell); gz <= std::floor(z1/kAbutCell); gz += 1.0f)
+					abutGrid[abutCellKey(gx*kAbutCell, gy*kAbutCell, gz*kAbutCell)].push_back(id);
+			}
+		}
+	}
+	auto pointTriDistSq = [](const Vector &p, const Vector &a, const Vector &b, const Vector &c) -> float {
+		// Ericson closest-point-on-triangle.
+		const float abx=b.x-a.x, aby=b.y-a.y, abz=b.z-a.z;
+		const float acx=c.x-a.x, acy=c.y-a.y, acz=c.z-a.z;
+		const float apx=p.x-a.x, apy=p.y-a.y, apz=p.z-a.z;
+		const float d1=abx*apx+aby*apy+abz*apz, d2=acx*apx+acy*apy+acz*apz;
+		float qx, qy, qz;
+		if (d1<=0.0f && d2<=0.0f) { qx=a.x; qy=a.y; qz=a.z; }
+		else {
+			const float bpx=p.x-b.x, bpy=p.y-b.y, bpz=p.z-b.z;
+			const float d3=abx*bpx+aby*bpy+abz*bpz, d4=acx*bpx+acy*bpy+acz*bpz;
+			if (d3>=0.0f && d4<=d3) { qx=b.x; qy=b.y; qz=b.z; }
+			else {
+				const float vc=d1*d4-d3*d2;
+				if (vc<=0.0f && d1>=0.0f && d3<=0.0f) {
+					const float v=d1/(d1-d3);
+					qx=a.x+v*abx; qy=a.y+v*aby; qz=a.z+v*abz;
+				} else {
+					const float cpx=p.x-c.x, cpy=p.y-c.y, cpz=p.z-c.z;
+					const float d5=abx*cpx+aby*cpy+abz*cpz, d6=acx*cpx+acy*cpy+acz*cpz;
+					if (d6>=0.0f && d5<=d6) { qx=c.x; qy=c.y; qz=c.z; }
+					else {
+						const float vb=d5*d2-d1*d6;
+						if (vb<=0.0f && d2>=0.0f && d6<=0.0f) {
+							const float w=d2/(d2-d6);
+							qx=a.x+w*acx; qy=a.y+w*acy; qz=a.z+w*acz;
+						} else {
+							const float va=d3*d6-d5*d4;
+							if (va<=0.0f && (d4-d3)>=0.0f && (d5-d6)>=0.0f) {
+								const float w=(d4-d3)/((d4-d3)+(d5-d6));
+								qx=b.x+w*(c.x-b.x); qy=b.y+w*(c.y-b.y); qz=b.z+w*(c.z-b.z);
+							} else {
+								const float den=1.0f/(va+vb+vc);
+								const float v=vb*den, w=vc*den;
+								qx=a.x+abx*v+acx*w; qy=a.y+aby*v+acy*w; qz=a.z+abz*v+acz*w;
+							}
+						}
+					}
+				}
+			}
+		}
+		const float dx=p.x-qx, dy=p.y-qy, dz=p.z-qz;
+		return dx*dx+dy*dy+dz*dz;
+	};
+	// Returns the material name of the first foreign face abutting the edge's
+	// interior, or nullptr if the far side is genuinely empty. "Foreign" = does
+	// not share a vertex position with either endpoint (that excludes the edge's
+	// own face, its patch neighbours, and legitimate corner-touching geometry at
+	// the endpoints themselves).
+	auto edgeAbutMat = [&](const Vector &A, const Vector &B) -> const char * {
+		if (abutTris.empty()) return nullptr;
+		const uint64_t kA = seamKey(A), kB = seamKey(B);
+		for (int s = 0; s < 5; ++s) {
+			const float t = 0.15f + 0.175f*float(s);
+			const Vector P{ A.x+(B.x-A.x)*t, A.y+(B.y-A.y)*t, A.z+(B.z-A.z)*t };
+			auto it = abutGrid.find(abutCellKey(std::floor(P.x/kAbutCell)*kAbutCell,
+			                                    std::floor(P.y/kAbutCell)*kAbutCell,
+			                                    std::floor(P.z/kAbutCell)*kAbutCell));
+			if (it == abutGrid.end()) continue;
+			for (uint32_t id : it->second) {
+				const AbutTri &T2 = abutTris[id];
+				// Exclude only the edge's OWN face(s): both endpoints among the
+				// face's verts. A face sharing just ONE endpoint can still be the
+				// abutting neighbour across the edge's interior — at the t=1088
+				// corner the other wall's face touches the whole border but shares
+				// only the mutual corner vertex, and skipping it blinded the veto.
+				// Interior samples sit >=0.7 u from a shared corner, so coplanar
+				// same-patch continuations (lintel, floor course) stay > eps away
+				// at a genuine jamb and never fire.
+				const bool hasA = (T2.ka==kA || T2.kb==kA || T2.kc==kA);
+				const bool hasB = (T2.ka==kB || T2.kb==kB || T2.kc==kB);
+				if (hasA && hasB) continue;
+				if (pointTriDistSq(P, T2.a, T2.b, T2.c) < kAbutEps*kAbutEps)
+					return T2.mat ? T2.mat : "(unnamed)";
+			}
+		}
+		return nullptr;
+	};
 	if (seamPin) {
 		for (TriMesh *M = Sc->TriMeshHead; M; M = M->Next) {
 			if (M->FIndex == 0 || !M->Faces || !M->Verts) continue;
@@ -2601,6 +2724,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (ndEdge.count(pk)) return false;               // non-displaced geometry shares it
 			auto it = posEdgeCount.find(pk);
 			if (it != posEdgeCount.end() && it->second > 1) return false;   // split-vertex seam
+			// GEOMETRIC ABUTTAL VETO (2026-08-13, the user's t=1088 wall corner):
+			// coincidence tests above are blind to a neighbour that touches this
+			// border without sharing vertex positions (different segmenting along
+			// the corner). If any foreign face passes within kAbutEps of the
+			// edge's interior, there IS a far side — freeing it opens a slit.
+			if (edgeAbutMat(oldV[x].Pos, oldV[y].Pos)) return false;
 			return true;
 		};
 		auto isBorderEdge = [&](uint32_t x, uint32_t y) {
@@ -2743,6 +2872,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					if (nv == ndVertMat.end()) nv = ndVertMat.find(seamKey(PB));
 					if (nv != ndVertMat.end() && nv->second) nbMat = nv->second;
 					else if (ndEdge.count(edgeKey(PA, PB))) nbMat = "(non-displaced edge)";
+					else { const char *am = edgeAbutMat(PA, PB); if (am) nbMat = am; }   // geometric abuttal (needs free_edge)
 				}
 				std::fprintf(stderr,
 					"[STONE-JUNC] '%s': %-24s dihedral %6.2f deg  mid(%.3f,%.3f,%.3f) "
@@ -3942,15 +4072,18 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							double(N.x/nl), double(N.y/nl), double(N.z/nl), double(dsp));
 				}
 				if (bmeanMode) {
-					// One constant along the border, so it stays a straight line.
-					// Mode 2 picks the constant from the border's OWN plane.
-					float m = borderMeanDsp; bool viaPlane = false;
-					if (bmeanMode >= 2 && i < planeKey.size() && planeKey[i]) {
-						auto it = planeMean.find(planeKey[i]);
-						if (it != planeMean.end()) { m = it->second; viaPlane = true; }
-					}
-					if (viaPlane) ++nBMeanPlane; else ++nBMeanFallback;
-					dsp = m * bmeanScale;
+					// 2026-08-13, user: "the shit part is that the displacement
+					// doesn't work at the edge." The straight-line constant that
+					// used to be assigned here discarded the height field on every
+					// FREED border — relief died exactly where the eye reads it,
+					// and the ramp band met full displacement along a visible
+					// transition line. A freed border now keeps the FULL field
+					// (both signs): stones stand proud, grooves notch through,
+					// and the border line crenellates with the relief. The level
+					// constant remains what PINNED borders sit at; it no longer
+					// touches freed ones. (Direction is unchanged: the de-slid /
+					// plane-normal ride below, measured bow ~0 at t=5998.)
+					++nBMeanPlane;   // census: freed verts carrying the field
 				} else if (dsp > 0.0f) { dsp = 0.0f; ++nFreeClamped; }
 				else if (dsp < freeDeepest) freeDeepest = dsp;
 			}
