@@ -2168,32 +2168,78 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 	// not share a vertex position with either endpoint (that excludes the edge's
 	// own face, its patch neighbours, and legitimate corner-touching geometry at
 	// the endpoints themselves).
-	auto edgeAbutMat = [&](const Vector &A, const Vector &B) -> const char * {
+	// ownN: unit-ish normal of the border edge's OWNING target face (its rendered
+	// side), or nullptr for the orientation-blind legacy test. With ownN the veto
+	// distinguishes THREE abutment classes (2026-08-13, the user's t=5928 doorway
+	// jamb, which the orientation-blind veto had re-pinned via its siling reveal):
+	//   * near-COPLANAR continuation (|dot(n1,n2)| > cos 30°): T-junction /
+	//     different-segmentation same-plane wall — PIN, the crack risk is real.
+	//   * CONCAVE abutment (foreign interior on the FRONT side of the owning
+	//     face's plane): an inside wall corner — freeing recesses the two faces
+	//     apart into a visible slit (the t=1088 defect). PIN.
+	//   * CONVEX abutment (foreign interior BEHIND the plane): an outside corner
+	//     — the doorway reveal. The "crack" there is the natural stone edge and
+	//     the relief must carry, so this does NOT veto.
+	// Point form of the veto: does any foreign face abut at P? kA/kB are the
+	// owning edge's endpoint keys (excludes the edge's own faces). ownN (may be
+	// null) is the owning face's RENDERED normal; with it the test distinguishes:
+	//   near-COPLANAR abutment  -> abuts (T-junction/continuation: pin)
+	//   CONCAVE abutment (front)-> abuts (inside corner: freeing opens a slit)
+	//   CONVEX abutment (behind)-> does NOT abut (outside corner/reveal: the
+	//                              relief must carry; t=5928)
+	auto abutPointMat = [&](const Vector &P, uint64_t kA, uint64_t kB,
+	                        const Vector *ownN) -> const char * {
 		if (abutTris.empty()) return nullptr;
+		float n1x=0, n1y=0, n1z=0;
+		if (ownN) {
+			const float l = std::sqrt(ownN->x*ownN->x + ownN->y*ownN->y + ownN->z*ownN->z);
+			if (l > 1e-12f) { n1x = ownN->x/l; n1y = ownN->y/l; n1z = ownN->z/l; }
+			else ownN = nullptr;
+		}
+		auto it = abutGrid.find(abutCellKey(std::floor(P.x/kAbutCell)*kAbutCell,
+		                                    std::floor(P.y/kAbutCell)*kAbutCell,
+		                                    std::floor(P.z/kAbutCell)*kAbutCell));
+		if (it == abutGrid.end()) return nullptr;
+		for (uint32_t id : it->second) {
+			const AbutTri &T2 = abutTris[id];
+			// Exclude only the edge's OWN face(s): both endpoints among the
+			// face's verts. A face sharing just ONE endpoint can still be the
+			// abutting neighbour across the edge's interior — at the t=1088
+			// corner the other wall's face touches the whole border but shares
+			// only the mutual corner vertex, and skipping it blinded the veto.
+			const bool hasA = (T2.ka==kA || T2.kb==kA || T2.kc==kA);
+			const bool hasB = (T2.ka==kB || T2.kb==kB || T2.kc==kB);
+			if (hasA && hasB) continue;
+			if (pointTriDistSq(P, T2.a, T2.b, T2.c) >= kAbutEps*kAbutEps) continue;
+			if (!ownN) return T2.mat ? T2.mat : "(unnamed)";
+			// Orientation of the abutting face relative to the owning plane.
+			const float e1x=T2.b.x-T2.a.x, e1y=T2.b.y-T2.a.y, e1z=T2.b.z-T2.a.z;
+			const float e2x=T2.c.x-T2.a.x, e2y=T2.c.y-T2.a.y, e2z=T2.c.z-T2.a.z;
+			float n2x=e1y*e2z-e1z*e2y, n2y=e1z*e2x-e1x*e2z, n2z=e1x*e2y-e1y*e2x;
+			const float l2 = std::sqrt(n2x*n2x+n2y*n2y+n2z*n2z);
+			if (l2 > 1e-12f) { n2x/=l2; n2y/=l2; n2z/=l2; }
+			const float copl = std::fabs(n1x*n2x + n1y*n2y + n1z*n2z);
+			if (copl > 0.866f)                          // within ~30° of coplanar
+				return T2.mat ? T2.mat : "(unnamed)";
+			// Winding-independent side test: where does the abutting face's
+			// interior sit relative to the owning face's rendered plane?
+			const float cx=(T2.a.x+T2.b.x+T2.c.x)*(1.0f/3.0f) - P.x;
+			const float cy=(T2.a.y+T2.b.y+T2.c.y)*(1.0f/3.0f) - P.y;
+			const float cz=(T2.a.z+T2.b.z+T2.c.z)*(1.0f/3.0f) - P.z;
+			const float side = n1x*cx + n1y*cy + n1z*cz;
+			if (side > 0.02f)                           // in FRONT: concave corner
+				return T2.mat ? T2.mat : "(unnamed)";
+			// behind the plane: convex corner — relief carries, keep scanning.
+		}
+		return nullptr;
+	};
+	auto edgeAbutMat = [&](const Vector &A, const Vector &B,
+	                       const Vector *ownN) -> const char * {
 		const uint64_t kA = seamKey(A), kB = seamKey(B);
 		for (int s = 0; s < 5; ++s) {
 			const float t = 0.15f + 0.175f*float(s);
 			const Vector P{ A.x+(B.x-A.x)*t, A.y+(B.y-A.y)*t, A.z+(B.z-A.z)*t };
-			auto it = abutGrid.find(abutCellKey(std::floor(P.x/kAbutCell)*kAbutCell,
-			                                    std::floor(P.y/kAbutCell)*kAbutCell,
-			                                    std::floor(P.z/kAbutCell)*kAbutCell));
-			if (it == abutGrid.end()) continue;
-			for (uint32_t id : it->second) {
-				const AbutTri &T2 = abutTris[id];
-				// Exclude only the edge's OWN face(s): both endpoints among the
-				// face's verts. A face sharing just ONE endpoint can still be the
-				// abutting neighbour across the edge's interior — at the t=1088
-				// corner the other wall's face touches the whole border but shares
-				// only the mutual corner vertex, and skipping it blinded the veto.
-				// Interior samples sit >=0.7 u from a shared corner, so coplanar
-				// same-patch continuations (lintel, floor course) stay > eps away
-				// at a genuine jamb and never fire.
-				const bool hasA = (T2.ka==kA || T2.kb==kA || T2.kc==kA);
-				const bool hasB = (T2.ka==kB || T2.kb==kB || T2.kc==kB);
-				if (hasA && hasB) continue;
-				if (pointTriDistSq(P, T2.a, T2.b, T2.c) < kAbutEps*kAbutEps)
-					return T2.mat ? T2.mat : "(unnamed)";
-			}
+			if (const char *m = abutPointMat(P, kA, kB, ownN)) return m;
 		}
 		return nullptr;
 	};
@@ -2702,6 +2748,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// loop for the measurement that identified it.
 		const bool freeEdge = fds::FeatureFlags::greets_displace_free_edge();
 		std::unordered_map<uint64_t,int> posEdgeCount;   // position-edge -> distinct index-edges
+		std::unordered_map<uint64_t,Vector> borderEdgeN; // position-edge -> owning face normal (winding cross, summed)
 		if (freeEdge) {
 			std::set<std::pair<uint64_t,uint64_t>> seen;   // (poskey, indexkey)
 			for (int32_t i = 0; i < T->FIndex; ++i) {
@@ -2709,11 +2756,22 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
 				const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
 				if (a >= nOrig || b >= nOrig || c >= nOrig) continue;
+				const Vector &VA = oldV[a].Pos, &VB = oldV[b].Pos, &VC = oldV[c].Pos;
+				// NEGATED cross: the engine's authored winding is clockwise, so
+				// cross(B-A, C-A) points INTO the wall (measured at the t=5928
+				// doorway: the +x-rendered wall summed to n1=(-1,0,0), the floor
+				// to (0,-1,0)). The veto's front/behind test needs the RENDERED
+				// side, so flip here, once, at the source.
+				const Vector fn{ -((VB.y-VA.y)*(VC.z-VA.z)-(VB.z-VA.z)*(VC.y-VA.y)),
+				                 -((VB.z-VA.z)*(VC.x-VA.x)-(VB.x-VA.x)*(VC.z-VA.z)),
+				                 -((VB.x-VA.x)*(VC.y-VA.y)-(VB.y-VA.y)*(VC.x-VA.x)) };
 				auto add = [&](uint32_t x, uint32_t y){
 					const uint32_t lo = std::min(x,y), hi = std::max(x,y);
 					const uint64_t pk = edgeKey(oldV[lo].Pos, oldV[hi].Pos);
 					const uint64_t ik = (uint64_t(lo)<<32) | hi;
 					if (seen.insert({pk,ik}).second) posEdgeCount[pk] += 1;
+					Vector &n = borderEdgeN[pk];
+					n.x += fn.x; n.y += fn.y; n.z += fn.z;
 				};
 				add(a,b); add(b,c); add(c,a);
 			}
@@ -2728,8 +2786,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// coincidence tests above are blind to a neighbour that touches this
 			// border without sharing vertex positions (different segmenting along
 			// the corner). If any foreign face passes within kAbutEps of the
-			// edge's interior, there IS a far side — freeing it opens a slit.
-			if (edgeAbutMat(oldV[x].Pos, oldV[y].Pos)) return false;
+			// edge's interior, there IS a far side — but WHICH side decides
+			// (t=5928): coplanar/concave abutment pins, convex abutment frees.
+			const auto itN = borderEdgeN.find(pk);
+			const Vector *nn = (itN != borderEdgeN.end()) ? &itN->second : nullptr;
+			if (edgeAbutMat(oldV[x].Pos, oldV[y].Pos, nn)) return false;
 			return true;
 		};
 		auto isBorderEdge = [&](uint32_t x, uint32_t y) {
@@ -2859,7 +2920,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						for (const auto &pe : pit->second)
 							if (pe.first != self) { other = pe.second; break; }
 					if (other >= 0) { ang = dihedral(kv.second[0], other); cls = "SPLIT-seam(BOTH pin)"; }
-					else { cls = "OPEN-border(pins)"; ang = 999.0f; }   // always listed
+					else {
+						cls = isFreeBorderEdge(kv.first.first, kv.first.second)
+						      ? "OPEN-border(FREE)" : "OPEN-border(pins)";
+						ang = 999.0f;   // always listed
+					}
 				}
 				if (!cls || ang < 15.0f) continue;
 				// What is on the far side of a border? An edge shared with
@@ -2872,7 +2937,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					if (nv == ndVertMat.end()) nv = ndVertMat.find(seamKey(PB));
 					if (nv != ndVertMat.end() && nv->second) nbMat = nv->second;
 					else if (ndEdge.count(edgeKey(PA, PB))) nbMat = "(non-displaced edge)";
-					else { const char *am = edgeAbutMat(PA, PB); if (am) nbMat = am; }   // geometric abuttal (needs free_edge)
+					else { const char *am = edgeAbutMat(PA, PB, nullptr); if (am) nbMat = am; }   // geometric abuttal label (orientation-blind on purpose: names WHAT abuts)
 				}
 				std::fprintf(stderr,
 					"[STONE-JUNC] '%s': %-24s dihedral %6.2f deg  mid(%.3f,%.3f,%.3f) "
@@ -3015,8 +3080,36 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (nl > 1e-6f) { m.N.x = nx/nl; m.N.y = ny/nl; m.N.z = nz/nl; }
 			const uint32_t id = uint32_t(verts.size()); verts.push_back(m);
 			edgeVertMap[key] = id;
-			if (isBorderEdge(lo, hi)) { if (id >= pinnedZero.size()) pinnedZero.resize(id+1,0); pinnedZero[id] = 1; }
-			else if (isFreedBorderEdge(lo, hi)) {
+			// Border classification, PER SUBVERT for veto-class edges (2026-08-13,
+			// the user's t=5928 doorway): a single authored edge can be genuinely
+			// open along part of its length and abutted along the rest (the 18.5 u
+			// corner: open below the lintel, coplanar wall panel above). Topology
+			// still classifies the EDGE; the geometric abuttal veto decides at
+			// THIS vertex's own position, so a mixed edge pins exactly where it
+			// abuts and carries the field where it is open.
+			bool pinHere = false, freeHere = false;
+			{
+				auto ue = origEdgeUse.find({lo, hi});
+				const bool singleUse = borderPin && ue != origEdgeUse.end() && ue->second == 1;
+				if (singleUse && freeEdge && !isSeamBorderEdge(lo, hi)) {
+					const uint64_t pk = edgeKey(A, B);
+					bool cand = !ndEdge.count(pk);
+					if (cand) {
+						auto pc = posEdgeCount.find(pk);
+						cand = !(pc != posEdgeCount.end() && pc->second > 1);   // split-vertex seam
+					}
+					if (cand) {
+						const auto itN = borderEdgeN.find(pk);
+						const Vector *nn = (itN != borderEdgeN.end()) ? &itN->second : nullptr;
+						if (abutPointMat(m.Pos, seamKey(A), seamKey(B), nn)) pinHere = true;
+						else freeHere = true;
+					} else pinHere = true;
+				}
+				else if (isBorderEdge(lo, hi)) pinHere = true;
+				else if (isFreedBorderEdge(lo, hi)) freeHere = true;
+			}
+			if (pinHere) { if (id >= pinnedZero.size()) pinnedZero.resize(id+1,0); pinnedZero[id] = 1; }
+			else if (freeHere) {
 				if (id >= recessOnly.size()) recessOnly.resize(id+1,0);
 				recessOnly[id] = 1;                  // may carve inward, never outward
 				if (id >= freeEdgeDir.size()) freeEdgeDir.resize(id+1, Vector{0.0f,0.0f,0.0f});
