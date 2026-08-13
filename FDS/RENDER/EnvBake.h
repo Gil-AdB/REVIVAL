@@ -15,6 +15,8 @@
 
 #include <cstdint>
 
+#include "RENDER/EnvCube.h"   // --env_live_water mask: dir -> (face, u, v)
+
 struct Scene;
 struct Vector;
 struct Texture;
@@ -86,6 +88,13 @@ struct EnvPanoLinear {
     float bakeX = 0, bakeY = 0, bakeZ = 0;
     float boxMinX = 0, boxMinY = 0, boxMinZ = 0;
     float boxMaxX = 0, boxMaxY = 0, boxMaxZ = 0;
+    // --env_live_water: per-face WATER COVERAGE of the baked content, 0..255,
+    // face-major waterMaskRes² bytes per face (owned by the EnvPanoStore /
+    // the scene that registered the faces). 255 = every source pixel behind
+    // this texel was an unoccluded hit on the water plane, 0 = none were.
+    // Null when the bake did not produce one — see EnvLiveWater_PerturbDir.
+    const uint8_t* waterMask = nullptr;
+    int            waterMaskRes = 0;
 };
 
 // Per-frame prep, called from renderFrame's MAIN-camera pass (never from a
@@ -218,11 +227,16 @@ int EnvReflection_StoreIndex(Scene* sc, const Material* M);
 // CITY's per-building bake, already disk-cached), box-downsamples to
 // storeRes if smaller, builds the mip chain, marks the store noParallax,
 // and maps M to it (FramePrep then skips M — no redundant centroid bake).
-// Returns the store index for AliasMaterial, or -1 on failure.
+// waterMask (optional) is the bake's per-face water-coverage plane, 6 x
+// maskRes² bytes in the same face order; the store COPIES it (the caller's
+// bake scratch does not outlive init) and --env_live_water gates its tilt on
+// it. Returns the store index for AliasMaterial, or -1 on failure.
 int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                                     const uint32_t* faceMajor, int faceRes,
                                     int storeRes, const Vector& bakePoint,
-                                    float pullOpt = 0.0f);
+                                    float pullOpt = 0.0f,
+                                    const uint8_t* waterMask = nullptr,
+                                    int maskRes = 0);
 
 // Map another material to an existing store (same building, second windows
 // base-mat clone) without duplicating the pixel data.
@@ -251,33 +265,90 @@ struct EnvLiveWaterState {
     float amp = 0.0f;          // direction-perturb amplitude (env_live_water_amp)
     float t = 0.0f;            // wave clock: g_FrameTime * 0.02 * ripple_speed
     float scale = 1.0f;        // wave spatial scale: water_bump_scale
+    // Mask remap (env_live_water_mask_bias), precomputed on the publish side:
+    // w' = clamp((w - bias) * maskGain), maskGain = 1/(1-bias). bias 0 = the
+    // raw bilinear coverage ramp; bias -> 1 = only fully-water texels move.
+    float maskBias = 0.0f;
+    float maskGain = 1.0f;
     void (*slopeFn)(float wx, float wz, float t, float scale,
                     float& sx, float& sz) = nullptr;
 };
 extern EnvLiveWaterState g_envLiveWater;
 
-// Perturb an env lookup direction (world space, any scale) in place when it
-// hits the live-water plane. bakeX/Y/Z = the capture point the content was
-// baked from (EnvPanoLinear::bake* for the deferred stores, the building
-// probe center for the forward sheets). Inline: the callers are per-pixel /
-// per-vertex hot paths and the inactive case must stay a single branch.
+// Bilinear fetch of a baked water-coverage mask, same uv->texel convention as
+// the colour fetch (EnvCubeFetchBil: px = u*res - 0.5, clamp, lerp), so the
+// mask lines up with the texels it gates to within a fraction of a texel.
+// Returns 0..1.
+inline float EnvLiveWater_MaskAt(const uint8_t* mask, int res,
+                                 float dx, float dy, float dz)
+{
+    int face; float u, v;
+    EnvCube_DirToFaceUV(dx, dy, dz, face, u, v);
+    float px = u * float(res) - 0.5f;
+    float py = v * float(res) - 0.5f;
+    if (px < 0.0f) px = 0.0f;
+    if (py < 0.0f) py = 0.0f;
+    int x0 = int(px), y0 = int(py);
+    if (x0 > res - 2) x0 = res - 2;
+    if (y0 > res - 2) y0 = res - 2;
+    const float ax = px - float(x0), ay = py - float(y0);
+    const uint8_t* base = mask + size_t(face) * size_t(res) * size_t(res);
+    const float m00 = float(base[size_t(y0) * res + x0]);
+    const float m10 = float(base[size_t(y0) * res + x0 + 1]);
+    const float m01 = float(base[size_t(y0 + 1) * res + x0]);
+    const float m11 = float(base[size_t(y0 + 1) * res + x0 + 1]);
+    const float t0 = m00 + ax * (m10 - m00);
+    const float t1 = m01 + ax * (m11 - m01);
+    return (t0 + ay * (t1 - t0)) * (1.0f / 255.0f);
+}
+
+// Perturb an env lookup direction (world space, any scale) in place when the
+// content it is about to read is WATER. bakeX/Y/Z = the capture point the
+// content was baked from (EnvPanoLinear::bake* for the deferred stores, the
+// building probe center for the forward sheets); mask/maskRes = that probe's
+// baked water-coverage mask. Inline: the callers are per-pixel / per-vertex
+// hot paths and the inactive case must stay a single branch.
+//
+// WHY THE MASK (the 5d28db7 defect, user: "it perturbs the whole reflection,
+// not just the water part there"): the original gate was `dy < 0` alone —
+// below the horizon, tilt. But a city window at building-mid-height reflects
+// a DOWNWARD hemisphere for any eye above it (r.y = d.y for a horizontal
+// normal), so essentially the WHOLE pane is below the horizon, and the top
+// third of every pane is the reflected far skyline, not water. Measured at
+// the t=1961 pin pose: of 244 945 env pixels, 40 478 read non-water content
+// and 15 945 of those visibly moved between two wave clocks — the reflected
+// buildings rippled like liquid. The horizon is not the water boundary; the
+// only thing that knows where the water ends is the BAKE, which ray-casts
+// every source pixel to the plane and z-tests it against the opaque depth
+// buffer (DEMO/CITY.CPP shadeAndMaskFaceWater — the same test that decides
+// which texels env_live_water_shade re-shades). It stamps that decision into
+// a per-face coverage mask; this reads it back with the UNPERTURBED direction
+// (the perturbed one would be circular) and scales the tilt by it. Coverage
+// is fractional and bilinear, so the waterline is a soft ramp, not a seam.
+//
+// No mask (a bake that never produced one — the legacy equirect city path) =
+// NO perturb. The unmasked version is the defect, so falling back to it would
+// ship the bug; falling back to the static bake is at worst the flag-off look.
 inline void EnvLiveWater_PerturbDir(float bakeX, float bakeY, float bakeZ,
-                                    float& dx, float& dy, float& dz)
+                                    float& dx, float& dy, float& dz,
+                                    const uint8_t* mask, int maskRes)
 {
     const EnvLiveWaterState& lw = g_envLiveWater;
     if (!lw.active) return;
     if (dy >= -1e-6f) return;                       // above horizon
     if (bakeY <= lw.waterY) return;                 // probe under water: n/a
+    if (!mask || maskRes < 2) return;               // no water mask → no tilt
+    float w = EnvLiveWater_MaskAt(mask, maskRes, dx, dy, dz);
+    w = (w - lw.maskBias) * lw.maskGain;
+    if (w <= 0.0f) return;                          // reflected content is not water
+    if (w > 1.0f) w = 1.0f;
     // Plane hit from the bake point — UNBOUNDED, like the main view's
     // dispMap ripple (updateRippleDispMap ray-casts every pixel to the
     // plane with no extent test; the flooded city reads as water in every
-    // below-horizon direction). Baked non-water content below the horizon
-    // (bridges, piers) wobbles too — accepted approximation: the bake has
-    // no depth / water mask to tell them apart, and the wobble amplitude
-    // is a few texels. dx/dy/dz may be UNNORMALIZED (the cube lookup is
-    // scale-invariant): the hit point is scale-invariant (t·d), and the
-    // tilt k = amp·|dy| scales WITH the vector so the angular perturbation
-    // is scale-invariant as well.
+    // below-horizon direction). dx/dy/dz may be UNNORMALIZED (the cube
+    // lookup is scale-invariant): the hit point is scale-invariant (t·d),
+    // and the tilt k = amp·|dy| scales WITH the vector so the angular
+    // perturbation is scale-invariant as well.
     const float t = (lw.waterY - bakeY) / dy;       // dy<0 → t>0
     const float hx = bakeX + t * dx;
     const float hz = bakeZ + t * dz;
@@ -286,8 +357,9 @@ inline void EnvLiveWater_PerturbDir(float bakeX, float bakeY, float bakeZ,
     // Tilt ∝ |dy| so grazing rays (huge t, tiny dy) don't overshoot: the
     // same slope reads as a gentler direction change near the horizon,
     // which also fades the effect exactly where the plane hit is least
-    // certain (occluders far from the probe).
-    const float k = lw.amp * -dy;
+    // certain (occluders far from the probe). × the water coverage w, so
+    // the tilt dies out across the reflected waterline instead of at it.
+    const float k = lw.amp * w * -dy;
     dx += k * sx;
     dz += k * sz;
 }

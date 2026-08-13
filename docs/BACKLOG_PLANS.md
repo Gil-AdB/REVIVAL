@@ -167,6 +167,94 @@ Recommendation: **2d**, with 2e queued if the 4 s init annoys, 2f held as the
 look fallback. Old 2a is superseded (the re-shade is strictly better than
 re-timing the same static composite); old 2c is superseded by the re-shade.
 
+### 2 — 2026-08-13b: the perturb now has a water mask, so 2d is shippable
+
+User report on trying the arm: *"the issue with --env_live_water is that it
+perturbs the whole reflection, not just the water part there…"*. He is right,
+and 2d's own caveat above understated it by an order of magnitude — it read
+"piers, bridge decks wobble a few texels". **It was the whole reflected
+skyline.**
+
+**What the perturb actually did.** `EnvLiveWater_PerturbDir` gated the
+wave-slope tilt on ONE test: `dy < 0`, the lookup direction pointing below the
+horizon. That sounds like a water test and is not one. A city window sits at
+building-mid-height with a HORIZONTAL normal, and mirroring about a horizontal
+normal leaves `r.y = d.y` — so for any eye above the pane, **every** reflected
+ray is below the horizon and the entire pane took the tilt. The top third of a
+pane is the reflected far skyline, and it rippled like liquid.
+
+**Measured, and the instrument is the point.** At the t=1961 pin pose with the
+camera pinned (`CITYSNAP_VIEW="142,423,2123,-0.294,-0.336,0.895,74.3"`), the
+wave clock is moved ALONE by `--water_ripple_speed=1.0` vs `1.6`: at fixed `t`
+that flag reaches the glass only through `lw.t`, so the camera, the animation
+state, the bake and every light are bit-identical between the two. Control:
+with `--no-env_live_water`, changing the clock moves **0 px** inside the
+env-glass region — the region is otherwise perfectly static, so anything that
+moves is the perturb and nothing else.
+
+| arm | env pixels moving | of them, reflected WATER | of them, reflected SKYLINE | skyline mean \|Δ\| / max |
+|---|---|---|---|---|
+| BEFORE (`5d28db7`, horizon gate) | 206 911 | 165 612 | **41 301** (74 % of the reflected-skyline region) | 4.16 / 48 |
+| AFTER (mask-gated tilt) | 141 850 | 141 842 | **8** | 1.12 / **2** |
+| AFTER, `--no-env_live_water_shade` | 148 788 | 148 767 | **21** | 1.14 / 2 |
+
+(Δ summed over BGR, so the after-arm's max 2 is under 1/255 per channel.)
+Water is NOT damped to buy that: over the water region eroded 16 px off its
+boundary, mean \|Δ\| goes 6.36 → 5.98, i.e. **94 % of the motion retained**;
+the loss is entirely the intended ramp across the reflected waterline.
+Evidence (identical frame, wave clock alone changed — red = reflected skyline
+moving, cyan = reflected water moving):
+`/Users/gil-ad/work/revival-fog/docs/img/envmap/envwatermask_t1961_window_before_after.png`
+and `…/envwatermask_t1961_pane_before_after.png`.
+
+**The mechanism, and why the other two lose.** Nothing available at SAMPLE time
+can tell reflected water from reflected facade — both are just texels in a cube
+face. (a) *Direction masking* is what 5d28db7 already did and is the bug: the
+horizon is not the waterline. (c) *Animating the bake-time re-shade's wave
+phase* would be right if the bake were live, but it is one-shot at init and
+costs ~4 s, so it can only produce a slideshow. (b) *Bake-time content mask*
+is the only one with the information: the bake ray-casts every full-res source
+pixel to the water plane and z-tests the hit against its own opaque ZPage16 —
+**the identical test `env_live_water_shade` already used to decide which texels
+to re-shade**. So it now stamps that decision into a coverage plane
+(128²/face, 0..255 box-accumulated from the 1024² decision), the deferred
+`EnvPanoStore` and the forward `TriMesh` both carry it, and the sampler reads
+it bilinearly with the UNPERTURBED direction (the perturbed one is circular)
+before deciding whether to tilt at all. Fractional coverage read bilinearly
+means the tilt fades out ACROSS the waterline rather than stepping at it —
+`--env_live_water_mask_bias` (default 0) is the knob that hardens it.
+The mask against the faces it gates:
+`/Users/gil-ad/work/revival-fog/docs/img/envmap/envwatermask_probe_b2_mask.png`.
+
+**One trap worth keeping.** With `--no-env_live_water_shade` the water MESH is
+still in the bake, so its rasterized depth and this pass's analytic plane hit
+are the same surface and the comparison is decided by 16-bit quantization: the
+mask dumped as horizontal stripes at 15.4 % mean coverage against the
+water-hidden arm's 33.5 %, and the tilt would have strobed along them. Two
+ZPage16 LSBs of bias reconciles them exactly — both arms now produce
+**byte-identical** masks. It moved the shade arm's frame by 108 px, max Δ 7.
+
+**Costs.** Mask memory 6.7 MB for all 71 probes (vs ~426 MiB of colour).
+Per frame, `--snapshot=city@t=1961,iters=60`, interleaved, min-of-10:
+flag off **82.126** ms, masked perturb **82.119** ms, mask-lookup-only
+(`--env_live_water_mask_bias=0.999`) 82.432 ms — free at the noise floor
+(within-arm spread is ±4.6 ms). Init: `--env_live_water` now bypasses the cube
+cache in BOTH arms, not just the shade arm, because the mask is a product of
+the bake's depth buffer and a cache hit restores colour only — it would leave
+the tilt maskless and silently inert. So the perturb-only arm now also pays the
+~4 s fresh bake.
+
+**What this changes above.** 2d's wobble caveat is retired — reflected piers,
+bridge decks and facades are frozen to ≤1 LSB. 2e must now also persist the
+mask plane in any salted cache it adds (colour alone is not enough), and its
+salt must fold `env_live_water_mask_bias` with the other `water_*` floats. 2f
+is unaffected and still the fallback. Gates for the fix itself: city
+`3f8948232c192a979ffe7f76c4b387ab` 2/2, greets `778fa6acd85a69cf241babefcdaf598e`
+2/2, fountain `8db68ccb59416e9a44037e9f387b7bd9` 3/3, forward city
+`8dc44df9e014629d7db2e1567c4c2810` 3/3 (run 1 cold-bakes its own salted cube —
+discard it), `render_gate.sh` ALL PASS. The flag stays default OFF; the
+decision between 2d/2e/2f is still the user's.
+
 ## 3. Forward-path texture filtering (glass/water/additive still point-sampled)
 
 The deferred albedo filtering (e9e60a3) covers Mekalele-rasterized opaque

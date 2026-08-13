@@ -1696,6 +1696,19 @@ constexpr int PANORAMA_YRES = 1024;
 constexpr int CUBE_MAP_XRES = 1024;
 constexpr int CUBE_MAP_YRES = 1024;
 
+// --env_live_water: per-face resolution of the water-coverage mask stamped
+// beside each building's cube bake. 128² is 1/16 the linear rate of the 512²
+// faces on purpose — the mask only has to say WHERE the waterline is, it is
+// read bilinearly (so it is a ramp, not a staircase), and at this rate all 71
+// probes cost 6·128²·71 = 7.0 MB against the ~450 MB of colour they gate.
+constexpr int CITY_ENV_WATERMASK_RES = 128;
+
+// Backing store for TriMesh::EnvWaterMask (the forward reflective path): the
+// `buildings` bake scratch is local to Initialize_City, so the masks the
+// meshes point at have to outlive it. Rebuilt from scratch on every init;
+// released with the scene.
+static std::vector<std::vector<uint8_t>> g_cityEnvWaterMasks;
+
 // Synthetic test panorama: paints quadrant labels + lat/lon gridlines.
 // Decodes which world direction the equirectangular generator maps to
 // which (eu, ev) when overlaid on a real building's reflection.
@@ -1860,7 +1873,23 @@ static void bakeBuildingPanorama(Object* Obj,
 // image lies BEYOND the plane hit along any ray — so exactly the real
 // below-horizon geometry (neighbour building bases, piers) keeps its texels.
 // Row-parallel with disjoint row bands → deterministic output.
-static void reshadeFaceWaterProcedural(const Camera& envCam)
+//
+// SECOND JOB — the --env_live_water COVERAGE MASK (maskFace, maskRes² bytes
+// for this face). The same per-pixel decision this pass makes ("is this texel
+// unoccluded water?") is exactly what the sample-time wave-slope tilt needs
+// in order to leave the reflected skyline alone: 5d28db7 gated the tilt on
+// `below the horizon`, but a window at building-mid-height reflects a wholly
+// below-horizon hemisphere, so the horizon test let the reflected buildings
+// ripple like liquid (user: "it perturbs the whole reflection, not just the
+// water part there"). The mask is box-accumulated from the FULL-RES decision
+// (coverage 0..255 per cell, so the waterline is fractional and the tilt
+// ramps out across it instead of stepping), and it is built whether or not
+// the re-shade itself runs — --no-env_live_water_shade still needs to know
+// where the water is. Bands are split on MASK rows so every cell is written
+// by exactly one thread; the source-row mapping is exact integer division, so
+// no cell is double-counted and the output is thread-count-independent.
+static void shadeAndMaskFaceWater(const Camera& envCam, bool doReshade,
+                                  uint8_t* maskFace, int maskRes)
 {
 	const float ey = envCam.ISource.y;
 	const float wY = g_waterY;
@@ -1884,12 +1913,30 @@ static void reshadeFaceWaterProcedural(const Camera& envCam)
 	const float m02=envCam.Mat[0][2], m12=envCam.Mat[1][2], m22=envCam.Mat[2][2];
 	const float ex=envCam.ISource.x, ez=envCam.ISource.z;
 	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+	// Depth bias on the occlusion test, TWO ZPage16 LSBs of view-z. Needed
+	// because the WATER MESH ITSELF is in the depth buffer whenever the bake
+	// keeps it (--no-env_live_water_shade): its rasterized depth and this
+	// pass's analytic plane hit are the same surface, so the comparison is
+	// decided by 16-bit quantization and the water occludes itself in bands
+	// — the mask dumped as horizontal stripes at ~50% coverage and the tilt
+	// would have strobed along them (measured: 15.4% mean coverage against
+	// the water-hidden arm's 33.5%; with the bias the two agree). A real
+	// occluder stands well clear of the plane, so two LSBs cannot lose one;
+	// it can only reclaim a sub-texel sliver at a silhouette, where the
+	// coverage ramp already blends.
+	const float zBias = 2.0f * invZScale;
 	const float fzp = (CitySc && CitySc->FZP > 0.0f) ? CitySc->FZP : 1e30f;
 	dword* const vp = (dword*)VPage;
 	const uint16_t* const oz = ZPage16;
 	const int xr = XRes;
-	auto band = [=](int y0, int y1) {
-		for (int y = y0; y < y1; ++y) {
+	const int yr = YRes;
+	auto band = [=](int my0, int my1) {
+		std::vector<uint32_t> cnt(static_cast<size_t>(maskRes), 0u);
+		for (int my = my0; my < my1; ++my) {
+		const int ys = int((int64_t)my       * yr / maskRes);
+		const int ye = int((int64_t)(my + 1) * yr / maskRes);
+		std::fill(cnt.begin(), cnt.end(), 0u);
+		for (int y = ys; y < ye; ++y) {
 			dword* row = vp + size_t(y) * size_t(xr);
 			const uint16_t* orow = oz + size_t(y) * size_t(xr);
 			for (int x = 0; x < xr; ++x) {
@@ -1900,7 +1947,11 @@ static void reshadeFaceWaterProcedural(const Camera& envCam)
 				const float sd = (wY - ey) / D;            // view-z of the plane hit
 				if (sd <= 1.0f || sd >= fzp) continue;     // behind eye / past far plane
 				const uint16_t oe = orow[x];               // opaque-Z occlusion
-				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;
+				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd - zBias) continue;
+				// This source pixel IS unoccluded water — the one fact both
+				// the re-shade and the live-water tilt key off.
+				++cnt[size_t((int64_t)x * maskRes / xr)];
+				if (!doReshade) continue;
 				const float dx = m00*xn + m10*yn + m20;    // world ray per view-z
 				const float dz = m02*xn + m12*yn + m22;
 				// Fresnel from the normalized ray vs the +Y plane normal —
@@ -1934,15 +1985,26 @@ static void reshadeFaceWaterProcedural(const Camera& envCam)
 				row[x] = dword(nb) | (dword(ng) << 8) | (dword(nr) << 16) | 0xFF000000u;
 			}
 		}
+		// Cell coverage = water pixels / source pixels in the cell, exact per
+		// column band (integer division, so the columns tile the row without
+		// gap or overlap regardless of xr/maskRes divisibility).
+		uint8_t* mrow = maskFace + size_t(my) * size_t(maskRes);
+		for (int mx = 0; mx < maskRes; ++mx) {
+			const int xs = int((int64_t)mx       * xr / maskRes);
+			const int xe = int((int64_t)(mx + 1) * xr / maskRes);
+			const uint32_t tot = uint32_t((ye - ys) * (xe - xs));
+			mrow[mx] = tot ? uint8_t((cnt[size_t(mx)] * 255u + tot / 2u) / tot) : 0u;
+		}
+		}
 	};
 	auto& tp = ThreadPool::instance();
 	const int nT = (int)tp.size();
-	if (nT < 2 || YRes < 64) { band(0, YRes); return; }
-	const int chunk = (YRes + nT - 1) / nT;
+	if (nT < 2 || maskRes < 8) { band(0, maskRes); return; }
+	const int chunk = (maskRes + nT - 1) / nT;
 	auto remaining = std::make_shared<std::atomic<int>>(0);
 	for (int i = 0; i < nT; ++i) {
-		const int y0 = i * chunk; if (y0 >= YRes) break;
-		const int y1 = std::min(y0 + chunk, YRes);
+		const int y0 = i * chunk; if (y0 >= maskRes) break;
+		const int y1 = std::min(y0 + chunk, maskRes);
 		remaining->fetch_add(1, std::memory_order_relaxed);
 		tp.enqueue([band, y0, y1, remaining]() {
 			band(y0, y1);
@@ -1964,7 +2026,9 @@ static void bakeBuildingCubeFaces(Object* Obj,
                                   const VESA_Surface& tmpSurf,
                                   int faceRes,
                                   std::vector<uint8_t>& rawFaces,
-                                  bool procWaterShade)
+                                  bool procWaterShade,
+                                  std::vector<uint8_t>* waterMaskOut,
+                                  int maskRes)
 {
 	TriMesh* T = (TriMesh*)Obj->Data;
 	const dword flags = T->Flags;
@@ -1982,6 +2046,7 @@ static void bakeBuildingCubeFaces(Object* Obj,
 	}
 
 	rawFaces.assign(size_t(6) * faceRes * faceRes * 4, 0);
+	if (waterMaskOut) waterMaskOut->assign(size_t(6) * maskRes * maskRes, 0);
 	const int ratio = CUBE_MAP_XRES / faceRes;   // 1024/512 = 2
 	const int n = ratio * ratio;
 
@@ -2000,11 +2065,15 @@ static void bakeBuildingCubeFaces(Object* Obj,
 		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
 		if (0 != CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceForward); }
 
-		// env_live_water_shade: the water mesh was hidden for this bake (the
-		// caller cleared HTrack_Visible on RflObj) — re-shade the exposed
-		// mirrored underlay as procedural water before the downsample.
-		if (procWaterShade)
-			reshadeFaceWaterProcedural(envCam);
+		// env_live_water: stamp this face's water-coverage mask, and (when
+		// env_live_water_shade put the water mesh out of the bake) re-shade
+		// the exposed mirrored underlay as procedural water — one full-res
+		// pass over the face, both jobs off the same per-pixel decision.
+		if (waterMaskOut)
+			shadeAndMaskFaceWater(envCam, procWaterShade,
+			                      waterMaskOut->data()
+			                          + size_t(k) * maskRes * maskRes,
+			                      maskRes);
 
 		// Box-downsample CUBE_MAP_XRES² → faceRes², force opaque alpha.
 		const uint32_t* src = (const uint32_t*)tmpSurf.Data;
@@ -2054,6 +2123,29 @@ static void bakeBuildingCubeFaces(Object* Obj,
 					std::fwrite(rgb, 1, 3, fp);
 				}
 			std::fclose(fp);
+		}
+		// ...and the --env_live_water coverage mask beside it, same 3x2 grid,
+		// as a PGM: white = the tilt is at full strength here, black = the
+		// baked content is not water and must not move. Reading this next to
+		// the colour dump is how you tell "the mask is wrong" from "the tilt
+		// is wrong".
+		if (waterMaskOut && !waterMaskOut->empty()) {
+			char mPath[256];
+			std::snprintf(mPath, sizeof(mPath), "%s.watermask.pgm", dumpPath);
+			if (FILE* fp = std::fopen(mPath, "wb")) {
+				const int gw = maskRes * 3, gh = maskRes * 2;
+				std::fprintf(fp, "P5\n%d %d\n255\n", gw, gh);
+				const uint8_t* mm = waterMaskOut->data();
+				for (int y = 0; y < gh; ++y)
+					for (int x = 0; x < gw; ++x) {
+						const int f = (y / maskRes) * 3 + (x / maskRes);
+						const uint8_t v = mm[size_t(f)*maskRes*maskRes
+						                     + size_t(y % maskRes)*maskRes + (x % maskRes)];
+						std::fwrite(&v, 1, 1, fp);
+					}
+				std::fclose(fp);
+				std::fprintf(stderr, "[ENVBAKE-DUMP] water mask -> %s\n", mPath);
+			}
 		}
 	}
 }
@@ -2557,6 +2649,14 @@ void Initialize_City()
 	    && fds::FeatureFlags::env_live_water_shade()
 	    && bakeWaterProcEff
 	    && RflObj && g_waterMaxX > g_waterMinX;
+	// The COVERAGE MASK the sample-time tilt gates on is needed by BOTH
+	// env_live_water arms — --no-env_live_water_shade still has to know where
+	// the reflected water ends, or the perturb goes back to rippling the
+	// reflected skyline. Deliberately a SUPERSET of liveWaterShade (same
+	// water-plane precondition, none of the procedural-water ones) so the
+	// re-shade can never run without the mask pass that carries it.
+	const bool liveWaterMask = fds::FeatureFlags::env_live_water()
+	    && g_waterMaxX > g_waterMinX;
 
 	if ((useCube || cityEnvPixel) && !skipCubeMap) {
 		constexpr int CITY_CUBE_FACE_RES = 512;
@@ -2636,7 +2736,12 @@ void Initialize_City()
 		std::snprintf(cubeCacheName, sizeof cubeCacheName,
 		              "cache/city_envmap_cube_%08x.bin", cubeSalt);
 		const char* kCubeCacheFile = cubeCacheName;
-		const bool cacheOn = fds::FeatureFlags::city_envmap_cache() && !liveWaterShade;
+		// ...and bypassed for the mask arm too: the coverage plane is a
+		// product of the bake's own depth buffer, so a cache hit (which
+		// restores colour only) would leave the tilt maskless and silently
+		// inert. --env_live_water therefore always pays the fresh bake.
+		const bool cacheOn = fds::FeatureFlags::city_envmap_cache()
+		                  && !liveWaterShade && !liveWaterMask;
 		uint64_t ck = 0;
 		if (cacheOn)
 			ck = fds::ComputeCityPanoramaCacheKey("SCENES/CITY.FLD",
@@ -2666,10 +2771,27 @@ void Initialize_City()
 			for (auto& b : buildings) {
 				if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
 				building_count++;
+				b.waterMaskRes = liveWaterMask ? CITY_ENV_WATERMASK_RES : 0;
 				bakeBuildingCubeFaces(b.obj, EnvCam, TmpSurf, CITY_CUBE_FACE_RES,
-				                      b.rawPanorama, liveWaterShade);
+				                      b.rawPanorama, liveWaterShade,
+				                      liveWaterMask ? &b.waterMask : nullptr,
+				                      CITY_ENV_WATERMASK_RES);
 			}
 			if (lwWaterT) lwWaterT->Flags = lwWaterFlags;
+			if (liveWaterMask) {
+				// Census: coverage is the share of the probe sphere the tilt
+				// is allowed to move. Anything near 100 % means the mask is
+				// not discriminating (and the reflected skyline is rippling
+				// again); 0 % means the bake produced no water at all.
+				double sum = 0.0; size_t n = 0;
+				for (const auto& b : buildings)
+					for (uint8_t m : b.waterMask) { sum += m; ++n; }
+				fprintf(stderr, "[CITY] env_live_water: water-coverage masks for "
+				        "%d probes @ %d^2/face (%.1f%% mean coverage, %.1f MB)\n",
+				        building_count, CITY_ENV_WATERMASK_RES,
+				        n ? 100.0 * sum / (255.0 * double(n)) : 0.0,
+				        double(n) / (1024.0 * 1024.0));
+			}
 			if (cacheOn && ck != 0
 			    && !g_shouldQuit.load(std::memory_order_relaxed)
 			    && building_count == int(buildings.size())) {
@@ -2719,9 +2841,20 @@ void Initialize_City()
 							+ uint32_t(fu * CITY_CUBE_FACE_RES);
 					}
 			std::vector<uint32_t> sheet(size_t(kSheetRes) * kSheetRes);
+			g_cityEnvWaterMasks.clear();
+			g_cityEnvWaterMasks.reserve(buildings.size());
 			for (auto& b : buildings) {
 				if (b.rawPanorama.size() != faceBytes) continue;
 				TriMesh* T = (TriMesh*)b.obj->Data;
+				// --env_live_water: hand the forward path this probe's water
+				// mask. Copied into scene-lifetime storage; moving the outer
+				// vector keeps every inner buffer's address, so the mesh
+				// pointers survive the reserve/growth.
+				if (b.waterMaskRes >= 2 && !b.waterMask.empty()) {
+					g_cityEnvWaterMasks.push_back(b.waterMask);
+					T->EnvWaterMask    = g_cityEnvWaterMasks.back().data();
+					T->EnvWaterMaskRes = b.waterMaskRes;
+				}
 				const uint32_t* faces32 = (const uint32_t*)b.rawPanorama.data();
 				for (int k = 0; k < 6; ++k) {
 					const uint32_t* g =
@@ -2893,7 +3026,13 @@ void Initialize_City()
 								// path (authored reflection sweep rate);
 								// the bsphere radius plays the role of
 								// optimalDistFromPlane.
-								BT->BSphereRadius);
+								BT->BSphereRadius,
+								// --env_live_water: the probe's water mask
+								// (the store copies it — rawPanorama and the
+								// mask are both freed right after this).
+								bi->second->waterMaskRes >= 2
+								    ? bi->second->waterMask.data() : nullptr,
+								bi->second->waterMaskRes);
 							storeIdxByObj[Obj] = idx;
 						} else if (si->second >= 0) {
 							fds::EnvReflection_AliasMaterial(CitySc, clone, si->second);
@@ -3168,6 +3307,9 @@ struct CityScene : SceneDriver {
 		// Retract the live-water env state — it points at CITY's water
 		// plane/extent and must not leak into later scenes' env lookups.
 		fds::g_envLiveWater = fds::EnvLiveWaterState{};
+		// ...and the per-building water masks the city meshes point at.
+		g_cityEnvWaterMasks.clear();
+		g_cityEnvWaterMasks.shrink_to_fit();
 		Destroy_Scene(CitySc);
 	}
 
@@ -3450,6 +3592,15 @@ struct CityScene : SceneDriver {
 				lw.t     = (float)g_FrameTime * 0.02f
 				         * fds::FeatureFlags::water_ripple_speed();
 				lw.scale = fds::FeatureFlags::water_bump_scale();
+				// Water-mask remap, resolved once per frame so the per-pixel
+				// path is one subtract + one multiply. bias 1 would divide by
+				// zero, so clamp just under it (bias 1 = "only 100% water
+				// texels", which 0.999 already is at 8-bit coverage).
+				float mb = fds::FeatureFlags::env_live_water_mask_bias();
+				if (mb < 0.0f) mb = 0.0f;
+				if (mb > 0.999f) mb = 0.999f;
+				lw.maskBias = mb;
+				lw.maskGain = 1.0f / (1.0f - mb);
 				lw.slopeFn = &pwater::WaveSlope;
 			}
 		}

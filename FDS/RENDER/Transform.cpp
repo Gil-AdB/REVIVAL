@@ -2574,8 +2574,16 @@ AfterXForm:
 						auto d = wsPos[i] - cv;
 						d -= (d * n) * 2.0f * n;
 						Vector_Norm(&d);
+						// The mask is indexed by DIRECTION (dominant-axis
+						// face), not by the sheet's pinned face k — the
+						// question it answers is "is the content THIS WAY
+						// water", which every face covering the direction
+						// answers the same; the canonical face just holds
+						// it furthest from the padding.
 						fds::EnvLiveWater_PerturbDir(lwPX, lwPY, lwPZ,
-						                             d.x, d.y, d.z);
+						                             d.x, d.y, d.z,
+						                             T->EnvWaterMask,
+						                             T->EnvWaterMaskRes);
 						fds::EnvCube_DirToParaboloidUV(k, d.x, d.y, d.z,
 						                               eu[i], ev[i]);
 					}

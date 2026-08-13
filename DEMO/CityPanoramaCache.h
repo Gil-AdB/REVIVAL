@@ -30,6 +30,14 @@ struct BuildingPanoramaEntry {
     // the texture. Caller fills this from the bake or from the cache,
     // then runs Materialize once to install Obj->Reflection.
     std::vector<uint8_t> rawPanorama;
+    // --env_live_water: per-face water COVERAGE mask of this building's cube
+    // bake (6 x waterMaskRes² bytes, EnvCube face order, 0..255). Produced by
+    // the fresh bake only and deliberately NOT part of the on-disk cache
+    // record: env_live_water bypasses the cube cache anyway (the mode's bake
+    // differs), and adding a plane to the format would invalidate every
+    // existing ~450 MB artifact for a feature that never reads them.
+    std::vector<uint8_t> waterMask;
+    int                  waterMaskRes = 0;
 };
 
 // Compute the cache key from CITY.FLD bytes + panorama/cube dims +

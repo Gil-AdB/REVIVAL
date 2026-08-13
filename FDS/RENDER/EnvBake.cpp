@@ -626,6 +626,10 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
 namespace {
 struct EnvPanoStore {
     std::vector<uint32_t> levels[EnvPanoLinear::kMaxMips];
+    // --env_live_water water-coverage mask backing EnvPanoLinear::waterMask
+    // (6 x waterMaskRes² bytes, face-major). Empty for stores whose bake did
+    // not produce one.
+    std::vector<uint8_t>  waterMask;
     EnvPanoLinear view;
     // Bake provenance, for the largest-wish-wins res upgrade of SHARED
     // stores (FramePrep): the original probe material + self-exclusion
@@ -3687,7 +3691,8 @@ void EnvReflection_DrawViz(Scene* sc) {
 int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                                     const uint32_t* faceMajor, int faceRes,
                                     int storeRes, const Vector& bakePoint,
-                                    float pullOpt) {
+                                    float pullOpt,
+                                    const uint8_t* waterMask, int maskRes) {
     if (!sc || !M || !faceMajor || faceRes < 64) return -1;
     // Res override precedence: the per-surface Material::EnvBakeRes wish,
     // then an explicit global --env-bake-res, then the caller's storeRes
@@ -3747,6 +3752,16 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
     for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
         v.mip[k] = store->levels[k].data();
     v.bakeX = bakePoint.x; v.bakeY = bakePoint.y; v.bakeZ = bakePoint.z;
+    // --env_live_water: own a copy of the bake's water-coverage mask (the
+    // caller's per-building scratch is freed right after registration). Not
+    // mipped — the tilt weight wants the sharpest waterline it has, and the
+    // mask is already the coarse plane.
+    if (waterMask && maskRes >= 2) {
+        store->waterMask.assign(waterMask,
+                                waterMask + size_t(6) * maskRes * maskRes);
+        v.waterMask = store->waterMask.data();
+        v.waterMaskRes = maskRes;
+    }
     {   // measurement content — see fillEnvDebugGrid (city building stores
         // register through HERE, not bakeStore: the panorama cache path).
         static const bool sGrid = std::getenv("FDS_ENV_GRID") != nullptr;
