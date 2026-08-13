@@ -4215,6 +4215,230 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				}
 			}
 		}
+		// ── MATCHED MITRE WELD (--greets_displace_mitre, edge-notch stage 3) ──
+		// The t=5975 corner is two 'rooms' walls meeting OBLIQUE (>90°) along one
+		// line. Both borders are FREED (convex abuttal does not veto), but each
+		// side rides its OWN de-slid direction with its OWN UV phase of the
+		// height field, so the two profiles disagree and neither cuts the corner:
+		// the silhouette line stays straight (1d1c2ce9's diagnosis). The weld:
+		// every freed vert on one corner line — BOTH walls — takes ONE shared
+		// height profile h(s) (s = position along the line; the profile is the
+		// owner side's border field) and rides the corner BISECTOR scaled by
+		// 1/cos(θ/2), so each wall's own plane still sees a full-depth cut. The
+		// two border polylines become re-samplings of the SAME piecewise-linear
+		// curve (linear interpolation of a piecewise-linear function stays on
+		// it), watertight by construction, and the silhouette follows the stone
+		// rows from every azimuth — the acceptance criterion of this round.
+		std::vector<int32_t> mitreOf(nV, -1);
+		struct MitreGroup {
+			Vector dir;      // canonical unit corner-line direction
+			Vector bis;      // outward bisector of the two wall normals (unit)
+			float  cosHalf;  // dot(bis, wall normal), guarded away from 0
+			std::vector<std::pair<float,float>> prof;   // owner side (s, h), sorted
+			int nA, nB;      // population per wall
+		};
+		std::vector<MitreGroup> mitreGroups;
+		int nMitreVerts = 0, nMitreSolo = 0, nMitreApplied = 0;
+		if (freeEdge && fds::FeatureFlags::greets_displace_mitre()) {
+			// Oriented per-vert fan normal for freed verts: raw cross accumulated
+			// over incident target faces, oriented by the smoothed vertex normal
+			// (the ride's own outward convention — winding-agnostic this way).
+			std::unordered_map<uint32_t, Vector> fanN;
+			for (size_t f = 0; f < faces.size(); ++f) {
+				if (!isTargetNew(faces[f])) continue;
+				const uint32_t a=fIdx[f][0], b=fIdx[f][1], c=fIdx[f][2];
+				if (a>=nV||b>=nV||c>=nV) continue;
+				const bool any =
+					(a<recessOnly.size()&&recessOnly[a]) ||
+					(b<recessOnly.size()&&recessOnly[b]) ||
+					(c<recessOnly.size()&&recessOnly[c]);
+				if (!any) continue;
+				const Vector &A=basePos[a], &B=basePos[b], &C=basePos[c];
+				const float e1x=B.x-A.x, e1y=B.y-A.y, e1z=B.z-A.z;
+				const float e2x=C.x-A.x, e2y=C.y-A.y, e2z=C.z-A.z;
+				const float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+				for (uint32_t v : {a,b,c}) {
+					if (v >= recessOnly.size() || !recessOnly[v]) continue;
+					Vector &n = fanN[v];
+					n.x += gx; n.y += gy; n.z += gz;
+				}
+			}
+			// A freed vert is a MITRE candidate when the abuttal soup holds a
+			// CONVEX same-material partner at its position (the corner's other
+			// wall). Returns that wall's rendered plane normal (negated cross:
+			// the authored winding is clockwise — the free-edge block's finding).
+			auto convexPartnerN = [&](const Vector &P, uint64_t kA, uint64_t kB,
+			                          const Vector &ownN, const Vector &smN,
+			                          Vector &out) -> bool {
+				if (abutTris.empty()) return false;
+				auto it = abutGrid.find(abutCellKey(std::floor(P.x/kAbutCell)*kAbutCell,
+				                                    std::floor(P.y/kAbutCell)*kAbutCell,
+				                                    std::floor(P.z/kAbutCell)*kAbutCell));
+				if (it == abutGrid.end()) return false;
+				for (uint32_t id : it->second) {
+					const AbutTri &T2 = abutTris[id];
+					if (!T2.mat || std::strcmp(T2.mat, matName)) continue;  // same-material corners only
+					if (pointTriDistSq(P, T2.a, T2.b, T2.c) >= kAbutEps*kAbutEps) continue;
+					const float e1x=T2.b.x-T2.a.x, e1y=T2.b.y-T2.a.y, e1z=T2.b.z-T2.a.z;
+					const float e2x=T2.c.x-T2.a.x, e2y=T2.c.y-T2.a.y, e2z=T2.c.z-T2.a.z;
+					float n2x=-(e1y*e2z-e1z*e2y), n2y=-(e1z*e2x-e1x*e2z), n2z=-(e1x*e2y-e1y*e2x);
+					const float l2 = std::sqrt(n2x*n2x+n2y*n2y+n2z*n2z);
+					if (l2 < 1e-12f) continue;
+					n2x/=l2; n2y/=l2; n2z/=l2;
+					const float copl = std::fabs(ownN.x*n2x + ownN.y*n2y + ownN.z*n2z);
+					// The edge's OWN faces share both endpoints AND lie (near-)in
+					// its own plane. A both-endpoints tri OBLIQUE to the probing
+					// wall is not "own" — it is the PARTNER: at this corner the
+					// two walls' authored edges coincide endpoint-for-endpoint,
+					// and the position-only exclusion was hiding each wall from
+					// the other (the one-sided-line bug, [MITRE-REJ] 105 verts).
+					const bool hasA = (T2.ka==kA || T2.kb==kA || T2.kc==kA);
+					const bool hasB = (T2.ka==kB || T2.kb==kB || T2.kc==kB);
+					if (copl > 0.866f) continue;   // own face / coplanar continuation: not a corner
+					// Orient the partner normal by the PROBING vert's smoothed
+					// normal: at a corner it averages both walls' FRONT sheets, so
+					// its dot with the partner's front direction is positive on
+					// either wall. Everything else measured unreliable here — the
+					// cross product and Face::N follow the FLD's inconsistent
+					// winding, and the partner's own vertex-normal sum is
+					// dominated by whatever far corner the triangle drags in.
+					if (n2x*smN.x + n2y*smN.y + n2z*smN.z < 0.0f) { n2x=-n2x; n2y=-n2y; n2z=-n2z; }
+					// NO convex/concave test here, deliberately: the t=5975 corner
+					// is an oblique VALLEY (~121°) that reads convex from one wall
+					// and concave from the other — both honestly. Which verts may
+					// move at all was already decided by the veto (t=1088's inside
+					// corner is PINNED and can never reach this loop); a vert that
+					// is FREE with an oblique same-material partner gets welded to
+					// it, whichever side of the valley it stands on.
+					out = Vector{n2x, n2y, n2z};
+					return true;
+				}
+				return false;
+			};
+			struct MCand { uint32_t v; Vector nOwn, nAbut, dir; float s; };
+			std::vector<MCand> mc;
+			for (uint32_t i = 0; i < nV; ++i) {
+				if (i >= recessOnly.size() || !recessOnly[i]) continue;
+				if (i >= freeEdgeKA.size() || !freeEdgeKA[i]) continue;
+				if (hCnt[i] == 0) continue;
+				auto itF = fanN.find(i);
+				if (itF == fanN.end()) continue;
+				Vector nO = itF->second;
+				float l = std::sqrt(nO.x*nO.x + nO.y*nO.y + nO.z*nO.z);
+				if (l < 1e-9f) continue;
+				nO.x/=l; nO.y/=l; nO.z/=l;
+				const Vector &sm = verts[i].N;
+				if (nO.x*sm.x + nO.y*sm.y + nO.z*sm.z < 0.0f) { nO.x=-nO.x; nO.y=-nO.y; nO.z=-nO.z; }
+				Vector nB;
+				if (!convexPartnerN(basePos[i], freeEdgeKA[i], freeEdgeKB[i], nO, sm, nB)) continue;
+				Vector d = freeEdgeDir[i];
+				l = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
+				if (l < 1e-9f) continue;
+				d.x/=l; d.y/=l; d.z/=l;
+				// canonical sign: dominant component positive (both walls' border
+				// edges run the same line with arbitrary winding order).
+				const float ax=std::fabs(d.x), ay=std::fabs(d.y), az=std::fabs(d.z);
+				const float sgn = (az>=ax && az>=ay) ? (d.z<0?-1.f:1.f)
+				                 : (ay>=ax)          ? (d.y<0?-1.f:1.f)
+				                 :                     (d.x<0?-1.f:1.f);
+				d.x*=sgn; d.y*=sgn; d.z*=sgn;
+				const float s = basePos[i].x*d.x + basePos[i].y*d.y + basePos[i].z*d.z;
+				mc.push_back({i, nO, nB, d, s});
+			}
+			// Group by corner LINE: quantised direction + quantised foot point.
+			auto qi = [](float v, float sc) -> int64_t { return int64_t(std::llround(double(v)*sc)); };
+			std::map<std::array<int64_t,6>, std::vector<size_t>> lines;
+			for (size_t k = 0; k < mc.size(); ++k) {
+				const MCand &c = mc[k];
+				const Vector &P = basePos[c.v];
+				const float t = P.x*c.dir.x + P.y*c.dir.y + P.z*c.dir.z;
+				const Vector foot{ P.x - t*c.dir.x, P.y - t*c.dir.y, P.z - t*c.dir.z };
+				lines[{ qi(c.dir.x,128.f), qi(c.dir.y,128.f), qi(c.dir.z,128.f),
+				        qi(foot.x,8.f),    qi(foot.y,8.f),    qi(foot.z,8.f) }].push_back(k);
+			}
+			const bool mitreCensus = fds::FeatureFlags::greets_displace_junction_census();
+			for (auto &kv : lines) {
+				auto &vs = kv.second;
+				if (vs.size() < 2) {
+					nMitreSolo += int(vs.size());
+					if (mitreCensus)
+						std::fprintf(stderr, "[STONE-MITRE-SOLO] '%s' 1-vert line at "
+							"(%.2f,%.2f,%.2f) dir(%+.2f,%+.2f,%+.2f)\n", matName,
+							double(basePos[mc[vs[0]].v].x), double(basePos[mc[vs[0]].v].y),
+							double(basePos[mc[vs[0]].v].z), double(mc[vs[0]].dir.x),
+							double(mc[vs[0]].dir.y), double(mc[vs[0]].dir.z));
+					continue;
+				}
+				// Two wall populations by own-normal clustering. One-sided lines
+				// (the partner wall's border pinned or absent) stay plain-freed:
+				// a lone mitre would pull off its wall against a straight partner.
+				const Vector n0 = mc[vs[0]].nOwn;
+				std::vector<size_t> A, B;
+				for (size_t k : vs) {
+					const Vector &n = mc[k].nOwn;
+					((n.x*n0.x + n.y*n0.y + n.z*n0.z > 0.9f) ? A : B).push_back(k);
+				}
+				if (A.empty() || B.empty()) {
+					nMitreSolo += int(vs.size());
+					if (mitreCensus)
+						std::fprintf(stderr, "[STONE-MITRE-SOLO] '%s' ONE-SIDED line: %zu "
+							"verts at (%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f) dir(%+.2f,%+.2f,%+.2f) "
+							"nOwn(%+.2f,%+.2f,%+.2f)\n", matName, vs.size(),
+							double(basePos[mc[vs.front()].v].x), double(basePos[mc[vs.front()].v].y),
+							double(basePos[mc[vs.front()].v].z),
+							double(basePos[mc[vs.back()].v].x), double(basePos[mc[vs.back()].v].y),
+							double(basePos[mc[vs.back()].v].z),
+							double(mc[vs[0]].dir.x), double(mc[vs[0]].dir.y), double(mc[vs[0]].dir.z),
+							double(n0.x), double(n0.y), double(n0.z));
+					continue;
+				}
+				Vector bis{0,0,0};
+				Vector ref{0,0,0}; bool haveRef = false;
+				for (size_t k : vs) {
+					Vector b{ mc[k].nOwn.x + mc[k].nAbut.x,
+					          mc[k].nOwn.y + mc[k].nAbut.y,
+					          mc[k].nOwn.z + mc[k].nAbut.z };
+					const float l = std::sqrt(b.x*b.x + b.y*b.y + b.z*b.z);
+					if (l < 1e-6f) continue;
+					b.x/=l; b.y/=l; b.z/=l;
+					if (!haveRef) { ref = b; haveRef = true; }
+					else if (b.x*ref.x + b.y*ref.y + b.z*ref.z < 0.0f) { b.x=-b.x; b.y=-b.y; b.z=-b.z; }
+					bis.x += b.x; bis.y += b.y; bis.z += b.z;
+				}
+				const float bl = std::sqrt(bis.x*bis.x + bis.y*bis.y + bis.z*bis.z);
+				if (bl < 1e-6f) { nMitreSolo += int(vs.size()); continue; }
+				bis.x/=bl; bis.y/=bl; bis.z/=bl;
+				float ch = 0.0f;
+				for (size_t k : vs)
+					ch += std::fabs(bis.x*mc[k].nOwn.x + bis.y*mc[k].nOwn.y + bis.z*mc[k].nOwn.z);
+				ch /= float(vs.size());
+				if (ch < 0.35f) ch = 0.35f;   // θ→180° guard: cap the 1/cos blowup at ~2.9×
+				MitreGroup G;
+				G.dir = mc[vs[0]].dir; G.bis = bis; G.cosHalf = ch;
+				G.nA = int(A.size()); G.nB = int(B.size());
+				const std::vector<size_t> &own = (B.size() > A.size()) ? B : A;
+				for (size_t k : own) {
+					const uint32_t v = mc[k].v;
+					float h = hCnt[v] ? hSum[v]/float(hCnt[v]) : mipMean;
+					if (lineHeight) {   // same override the main loop applies
+						if (edgeOwned[v]) { if (lineRepV[v] < 1e29f) h = lineRepV[v]; }
+						else if (linePlatD[v] < 1e29f) h = linePlatV[v];
+					}
+					G.prof.push_back({mc[k].s, h});
+				}
+				std::sort(G.prof.begin(), G.prof.end());
+				if (G.prof.empty()) { nMitreSolo += int(vs.size()); continue; }
+				const int32_t gid = int32_t(mitreGroups.size());
+				if (mitreCensus)
+					std::fprintf(stderr, "[STONE-MITRE] '%s' line %d: dir(%+.2f,%+.2f,%+.2f) "
+						"bis(%+.2f,%+.2f,%+.2f) cosHalf %.3f verts %d+%d span s[%.2f,%.2f]\n",
+						matName, gid, double(G.dir.x), double(G.dir.y), double(G.dir.z),
+						double(bis.x), double(bis.y), double(bis.z), double(ch),
+						G.nA, G.nB, double(G.prof.front().first), double(G.prof.back().first));
+				mitreGroups.push_back(std::move(G));
+				for (size_t k : vs) { mitreOf[mc[k].v] = gid; ++nMitreVerts; }
+			}
+		}
 		for (uint32_t i=0;i<nV;++i){
 			if (pinnedZero[i]||hCnt[i]==0) continue;
 			const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
@@ -4285,6 +4509,30 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					dx = s*Q.x; dy = s*Q.y; dz = s*Q.z; ++nPlaneRide;
 				}
 			}
+			// ── MATCHED MITRE (last word for welded corner verts): the shared
+			// profile h(s) along the corner line, ridden along the group
+			// bisector. Supersedes the de-slide, the recess clamp, the bmean
+			// level and the plane ride — both walls' verts at one s land on the
+			// identical world offset, which IS the weld.
+			if (mitreOf[i] >= 0) {
+				const MitreGroup &G = mitreGroups[size_t(mitreOf[i])];
+				const Vector &P0 = basePos[i];
+				const float s = P0.x*G.dir.x + P0.y*G.dir.y + P0.z*G.dir.z;
+				const auto &PR = G.prof;
+				float hp;
+				if (s <= PR.front().first)      hp = PR.front().second;
+				else if (s >= PR.back().first)  hp = PR.back().second;
+				else {
+					size_t lo = 0, hi = PR.size()-1;
+					while (lo+1 < hi) { const size_t m=(lo+hi)/2; if (PR[m].first <= s) lo=m; else hi=m; }
+					const float dt = PR[hi].first - PR[lo].first;
+					const float t = dt > 1e-9f ? (s - PR[lo].first)/dt : 0.0f;
+					hp = PR[lo].second + (PR[hi].second - PR[lo].second)*t;
+				}
+				dsp = amp*(hp - mipMean)/G.cosHalf;
+				dx = G.bis.x; dy = G.bis.y; dz = G.bis.z;
+				++nMitreApplied;
+			}
 			// BOW CENSUS: the doorway-jamb wall plane is x=17.898 (normal +x), its
 			// freed border the vertical line z=-58.014. Record every displaced vert
 			// on that plane, away from the lintel and the floor course.
@@ -4334,6 +4582,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				"with the border line %.4f)\n",
 				matName, nFreeVerts, nFreeClamped, double(freeDeepest), nFreeDeslid,
 				double(freeSlideMax));
+		if (nMitreVerts || nMitreSolo)
+			std::fprintf(stderr, "[STONE-MITRE] '%s': %d corner verts welded across "
+				"%zu mitre lines (%d applied in the displacement loop); %d candidates "
+				"on one-sided lines left plain-freed\n",
+				matName, nMitreVerts, mitreGroups.size(), nMitreApplied, nMitreSolo);
 		if (nBMeanPlane || nBMeanFallback)
 			std::fprintf(stderr, "[STONE-BMEAN] '%s': %d freed border verts took "
 				"their OWN plane's mean, %d fell back to the material mean (no "
