@@ -105,8 +105,10 @@
 > reversed between them. Greets held. Pins 3/3 / 3/3 / 2/2, `render_gate` four
 > rows PASS.
 >
-> **Round 4 cumulative, `67441d86` → here: cones 0.584 → 0.548 `Gcyc/f`
-> (−6.2 %), 16.92 → 15.89 ms (−6.1 %), IPC 4.07 → 4.16 — all of it bit-exact.**
+> **Round 4 cumulative, measured directly (both binaries interleaved in one
+> min-of-6, not composed across sessions): cones 0.582 → 0.553 `Gcyc/f`
+> (−5.0 %), 16.953 → 15.930 ms (−6.0 %), 2.388 → 2.302 `Ginstr/f` (−3.6 %),
+> IPC 4.073 → 4.157; renderFrame 57.392 → 55.976 ms. All of it bit-exact.**
 
 
 > ## 2026-08-13b — THE RTT GATE HOLE IS CLOSED, AND THE ROW IS PROVED IN BOTH DIRECTIONS: `render_gate` NOW FAILS ON `00d28a8b`

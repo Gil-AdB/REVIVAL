@@ -1040,6 +1040,10 @@ wall **16.102 / 16.069 → 15.890 / 15.885 ms** (−1.3 %, −1.1 %), instructio
 Bit-exact by construction and in fact: city `3cbe42b1` 3/3, greets `778fa6ac`
 3/3, fountain `8db68ccb` 2/2, `render_gate` all four rows PASS.
 
-Cumulative for round 4, parent `67441d86` → here: cones **0.584 → 0.548
-`Gcyc/f` (−6.2 %)**, **16.92 → 15.89 ms (−6.1 %)**, 2.388 → 2.302 `Ginstr/f`
-(−3.6 %), IPC 4.07 → 4.16 — every bit of it bit-exact.
+Cumulative for round 4, measured **directly** (parent `67441d86` and the final
+binary interleaved in one min-of-6 session, not composed across sessions): cones
+**0.582 → 0.553 `Gcyc/f` (−5.0 %)**, **16.953 → 15.930 ms (−6.0 %)**, 2.388 →
+2.302 `Ginstr/f` (−3.6 %), IPC 4.073 → 4.157. renderFrame 1.765 → 1.733
+`Gcyc/f` and 57.392 → 55.976 ms; the −0.029 `Gcyc` cones saving carries the
+−0.032 `Gcyc` frame saving, which is the attribution check on the counter that
+is not load-sensitive. Every bit of it bit-exact — not one pin moved.
