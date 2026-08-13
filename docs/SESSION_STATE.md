@@ -1,5 +1,96 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-13c — THE REGISTER-PRESSURE QUESTION IS ANSWERED NO, WITH THE ARM THAT PROVES IT: RELIEVING IT COSTS +7.5 % CYCLES
+>
+> His question was **"any way to rewrite this while relieving register
+> pressure?"** The premise is exact: arm64 has no 256-bit unit, simde lowers
+> every `__m256` op to two 128-bit NEON ops, so a live `__m256` costs **two** of
+> 32 `v` registers, the file is effectively 16 deep, the cone solve holds ~30
+> live values, and it spills. All true — and the rewrite makes the pass slower.
+>
+> **`FDS_CONE_W4` (in-tree, default 0, emits nothing)** spells the solve as two
+> 4-wide passes. Identical NEON op count by construction, so only the live set
+> moves. Single-arm control builds (`-DFDS_CONE_FORCE=1 -DFDS_CONE_HOTONLY=1`,
+> no dual-arm tax), city t=1961, interleaved min-of-6:
+>
+> | arm | cones wall | `Gcyc/f` | stack `ldr q`/`str q` |
+> |---|---|---|---|
+> | `__m256`, as shipped | 16.673 ms | 0.576 | 89 / 79 |
+> | W4, half loop **unrolled** | 16.618 ms | 0.580 (+0.7 %) | 91 / 82 |
+> | W4, half loop **rolled** | 18.083 ms | **0.619 (+7.5 %)** | **72 / 70** |
+>
+> Rolling is the only spelling that actually halves the live set — left alone the
+> compiler unrolls a trip count of 2 and schedules both halves together, which
+> restores the 8-wide live set exactly (spills go *up*). The build that gets the
+> pressure relief pays **+7.5 % cycles / +8.5 % wall** for it. **The two halves
+> of an `__m256` op are independent NEON chains: the spelling is already
+> unroll-and-jam by 2, and taking it apart costs more than the spills it saves.**
+> Flagged at runtime instead it read −0.1 % instr / +1.2 % cyc / +2.6 % wall, and
+> merely compiling the arm in taxed the OFF path +3.2 % instructions — hence
+> compile-time, not a FeatureFlag.
+>
+> ### WHY, IN ONE NUMBER: 81 % OF THIS CORE'S NEON ALU ISSUE CEILING
+>
+> Round 2's ladder had never been read on the **cycle** column. Read: the solve
+> is **0.250 of the pass's 0.585 `Gcyc/f` — 42.7 %**, its largest bucket. Its
+> disassembly is 251 instructions of which **202 are vector ALU**; the DIAG
+> census gives 3.20 M (batch × spot) pairs; that is **~63 cycles per pair against
+> a ~51-cycle vector-ALU-port floor** on the M2 Max's 4 NEON pipes.
+>
+> That one number explains the whole campaign's recent results: pressure relief
+> cannot pay because the ALU port, not the spill slot, is the constraint; round
+> 3's "deleting 10 % of instructions moved cycles by zero" was scalar and branch
+> work issuing on other pipes into slack; and **more** ILP is capped at −19 % of
+> the solve (−8 % of the pass). **The metric is VECTOR-ALU OP COUNT** — not
+> instructions, not registers.
+>
+> ### WHAT THAT METRIC FOUND, AND IT SHIPS: −4.5 % CYCLES, BIT-EXACT
+>
+> The shipping cone kernel emitted **zero `fmin.4s`/`fmax.4s`** at **19 min/max
+> sites**. Two reasons: the solve and the dz/fade loop spell `std::min`/`max` as
+> cmp+blend (7e34645 needed bit-exactness; NEON `FMIN` resolves NaN and −0 the
+> other way from `FCSEL`), and every `_mm256_max_ps` already in the body ALSO
+> lowers to cmp+blend because `SIMDE_FAST_NANS` is undefined here and simde's
+> NaN-correct fallback is `m = a<b; (a&m)|(b&~m)`. The intrinsic that looks like
+> one op is two. **`FDS_CONE_NEONMINMAX` (default 1) routes all 19 through
+> `vmaxq_f32`/`vminq_f32`.**
+>
+> | | cones wall_min | `Ginstr/f` | `Gcyc/f` | IPC |
+> |---|---|---|---|---|
+> | parent `67441d86` | 16.922 ms | 2.388 | 0.584 | 4.067 |
+> | new tree, `NEONMINMAX=0` | 16.924 ms | 2.387 | 0.581 | 4.074 |
+> | **new tree, default (ships)** | **16.285 ms** | **2.347** | **0.558** | **4.176** |
+>
+> **−4.5 % cycles, −3.8 % wall (−0.64 ms), −1.7 % instructions**; renderFrame
+> 57.143 → 56.423 ms and the −0.72 ms frame saving matches the −0.64 ms cones
+> saving, which is the attribution check. The `NEONMINMAX=0` row is the control
+> proving the compiled-out W4 arm costs the shipping binary nothing. Sweep:
+> −3.2 % to −4.7 % cycles at every city pose. **Greets improves too** (the body's
+> max/min sites are hot on the segmented branch): −3.2 % cyc / −3.5 % wall,
+> 7.595 → 7.330 ms.
+>
+> **Written as a judge call under the standing byte rule, and it turned out
+> BIT-EXACT.** The NaN/±0 tie-break never materialises: city
+> `3cbe42b166847e40f7071eedb48d613c`, greets `778fa6acd85a69cf241babefcdaf598e`,
+> fountain `8db68ccb59416e9a44037e9f387b7bd9` all **3/3** (fountain 2/2), and
+> `render_gate` **ALL FOUR rows PASS** — `mirrortest 4ac809e5`, `rttslot
+> 826c09e6`, `conetest b41894f9` (direct coverage of this kernel), `halotest
+> 166fa25a`.
+>
+> ### LEVERS PRICED AND CLOSED
+>
+> New DIAG counter `sphdead`: of 3 204 900 (batch × spot) pairs, 39.9 % produce
+> zero alive lanes but only **7.7 % lose all eight at the range sphere** — the
+> rest die on the cone-interval and chord tests, which have no cheap conservative
+> screen-space form. That caps every sphere-based cull (finer tiles, per-row
+> X-intervals, the reverted per-batch rect cull, `FDS_CONE_SOLVE_EARLYOUT`) at
+> ~3 % of the pass, and independently reproduces a16567b's tile result and round
+> 1's early-out rejection. Unroll-and-jam beyond the free 2× is capped at ~8 % of
+> the pass. Outlining the cold arms was already priced at zero cycles by round
+> 3's `HOTONLY`. Full worked example, tables and disassembly: **`docs/HW_PROFILING.md`
+> section 12**.
+
+
 > ## 2026-08-13b — THE RTT GATE HOLE IS CLOSED, AND THE ROW IS PROVED IN BOTH DIRECTIONS: `render_gate` NOW FAILS ON `00d28a8b`
 >
 > The entry below leaves one thing undone: a regression that changed 98.9 % of an

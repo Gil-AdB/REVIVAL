@@ -142,11 +142,46 @@ static volatile float g_ablSink = 0.0f;
 #define FDS_CONE_HOTONLY 0
 #endif
 
+// ─── FDS_CONE_W4 — round 4's native-width solve: BUILT, MEASURED, REJECTED ──
+// Spells the 8-wide cone-interval solve as TWO 4-wide passes, so that a live
+// value costs ONE of the 32 NEON registers instead of two. It is bit-exact
+// (city 3cbe42b1 3/3) and it does relieve pressure — and it buys NOTHING,
+// which is the result: at =1 (unrolled, what the compiler does to a trip count
+// of 2) instructions fall 3.7% and cycles move +0.7%; at =2 (half loop kept
+// ROLLED, which is the only spelling that actually halves the live set: stack
+// `str q` 89/79 -> 72/70) cycles go +7.5% and wall +8.5%. __m256 on arm64 is
+// not two wasted registers, it is two INDEPENDENT NEON chains — free 2x
+// unroll-and-jam — and taking them apart costs more than the spills it saves.
+// Kept compiled out rather than behind a FeatureFlag because round 3 priced a
+// live second arm in this kernel at +2.0 to +3.5% instructions, and a measured
+// -0.1% is not worth that. docs/HW_PROFILING.md section 12.
+//   0 = not compiled  1 = W4, half loop unrolled  2 = W4, half loop rolled
+#ifndef FDS_CONE_W4
+#define FDS_CONE_W4 0
+#endif
+
+// ─── FDS_CONE_NEONMINMAX — every min/max in the cone kernel at ONE op ───────
+// See fmin_x8/fmax_x8 for why the shipping binary emits zero fmin.4s/fmax.4s
+// today. 1 = use the NEON instruction; 0 = the byte-exact cmp+blend the port
+// was built with. NOT a FeatureFlag: round 3 priced a live second arm in this
+// kernel at +2.0 to +3.5% instructions, and 19 sites cannot be switched at
+// runtime without putting a branch on each of them.
+// DEFAULT 1 — it ships. city -4.5% cycles / -3.8% wall, greets -3.2% / -3.5%,
+// -3.2 to -4.7% cycles at every pose of the city t-sweep, and it turned out to
+// be BIT-EXACT in practice: city 3cbe42b1, greets 778fa6ac, fountain 8db68ccb
+// all 3/3, render_gate ALL FOUR rows PASS including conetest. Build with
+// -DFDS_CONE_NEONMINMAX=0 to get the cmp+blend spelling back.
+#ifndef FDS_CONE_NEONMINMAX
+#define FDS_CONE_NEONMINMAX 1
+#endif
+
 static constexpr bool g_coneDiag = (FDS_CONE_DIAG != 0);
 static std::atomic<long long> g_dPairs{0};   // batch x spot pairs entering the scalar solve
 static std::atomic<long long> g_dSegPair{0}; // ...of which take the 8-segment hybrid
 static std::atomic<long long> g_dDead{0};    // ...of which had ZERO alive lanes (wasted prologue)
 static std::atomic<long long> g_dLanes{0};   // alive (lane x spot) pairs reaching integration
+static std::atomic<long long> g_dSphDead{0}; // ...pairs whose EIGHT lanes all miss the range sphere
+
 
 // The ONLY fused multiply-add the 8-wide cone solve is allowed to use.
 // simde lowers _mm256_fmadd_ps to vfmaq_f32 on arm64 (a true FMA), but
@@ -158,6 +193,54 @@ static std::atomic<long long> g_dLanes{0};   // alive (lane x spot) pairs reachi
 static inline __m256 fma_x8(const __m256 &a, const __m256 &b, const __m256 &c) {
     return _mm256_fmadd_ps(a, b, c);
 }
+// Same barrier at the machine's NATIVE width (--vol_cone_solve_w4). arm64 has
+// no 256-bit unit: simde lowers every __m256 op to two 128-bit NEON ops, so an
+// __m256 value costs TWO of the 32 v-registers. Spelling the hot chain 4 wide
+// issues the identical NEON ops and halves the register cost of every live
+// value; fma_x4 pins the contraction the same way fma_x8 does.
+static inline __m128 fma_x4(const __m128 &a, const __m128 &b, const __m128 &c) {
+    return _mm_fmadd_ps(a, b, c);
+}
+
+// ─── min/max at ONE instruction instead of two ──────────────────────────────
+// The cone kernel contains ~19 min/max sites and the shipping binary emits
+// ZERO `fmin.4s` / `fmax.4s` for them. Two separate reasons, same cost:
+//   * the solve and the dz/fade loop spell std::min/std::max by hand as
+//     cmp+blend, because 7e34645 found NEON FMIN resolves NaN and -0 the
+//     opposite way from the scalar FCSEL and the port had to be bit-exact;
+//   * every `_mm256_max_ps` already in the kernel ALSO lowers to cmp+blend,
+//     because SIMDE_FAST_NANS is not defined in this build and simde's
+//     NaN-correct fallback is `m = a<b; (a&m)|(b&~m)`, which LLVM folds to
+//     fcmgt+bsl. So the intrinsic that looks like one op is two.
+// Round 4 measured the pass at ~81% of this core's 4-wide NEON ALU issue
+// ceiling (the solve retires ~205 vector-ALU ops in ~63 cycles per
+// (batch x spot)), which makes VECTOR-ALU OP COUNT the metric that moves
+// cycles -- so a systematic 2-ops-to-1 is worth having. vmaxq_f32 is FMAX,
+// not FMAXNM: NaN propagates (matching the simde fallback, which also
+// returns the NaN operand), and only the +0/-0 tie-break differs.
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static inline __m256 fmax_x8(const __m256 &a, const __m256 &b) {
+    simde__m256_private ap = simde__m256_to_private(a),
+                        bp = simde__m256_to_private(b), rp;
+    rp.m128_private[0].neon_f32 = vmaxq_f32(ap.m128_private[0].neon_f32,
+                                            bp.m128_private[0].neon_f32);
+    rp.m128_private[1].neon_f32 = vmaxq_f32(ap.m128_private[1].neon_f32,
+                                            bp.m128_private[1].neon_f32);
+    return simde__m256_from_private(rp);
+}
+static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) {
+    simde__m256_private ap = simde__m256_to_private(a),
+                        bp = simde__m256_to_private(b), rp;
+    rp.m128_private[0].neon_f32 = vminq_f32(ap.m128_private[0].neon_f32,
+                                            bp.m128_private[0].neon_f32);
+    rp.m128_private[1].neon_f32 = vminq_f32(ap.m128_private[1].neon_f32,
+                                            bp.m128_private[1].neon_f32);
+    return simde__m256_from_private(rp);
+}
+#else
+static inline __m256 fmax_x8(const __m256 &a, const __m256 &b) { return _mm256_max_ps(a, b); }
+static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) { return _mm256_min_ps(a, b); }
+#endif
 
 // OR of the mirror-footprint presence bits (ctx.tileMirrorPresence,
 // LIGHTING-tile geometry: 8-rounded X over the 12x8 grid) across every
@@ -656,6 +739,45 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     // accumulate) 8 lanes wide. Read once per tile, same as above.
     const bool laneVec = (FDS_CONE_FORCE != 0)
                        || fds::FeatureFlags::vol_cone_lane_vec();
+    // The same solve at the machine's NATIVE 128-bit width, run twice over the
+    // 8-pixel batch (see FDS_CONE_W4). Compile-time only: at the default 0 the
+    // arm below emits literally nothing and the shipping kernel disassembles to
+    // the parent's histogram.
+    constexpr bool solveW4 = (FDS_CONE_W4 != 0);
+    // min/max, one NEON instruction under FDS_CONE_NEONMINMAX and the
+    // byte-exact cmp+blend transcript otherwise. MAXT/MINT reproduce the
+    // hand-written spelling in the solve and the dz/fade loop
+    // (max = (a<b)?b:a, min = (b<a)?b:a); VMAX/VMIN stand in for the
+    // _mm256_max_ps/_mm256_min_ps calls already in the body, which lower to
+    // the same two ops because SIMDE_FAST_NANS is not defined here.
+    auto MAXT = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmax_x8(a, b);
+#else
+        return _mm256_blendv_ps(a, b, _mm256_cmp_ps(a, b, _CMP_LT_OQ));
+#endif
+    };
+    auto MINT = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmin_x8(a, b);
+#else
+        return _mm256_blendv_ps(a, b, _mm256_cmp_ps(b, a, _CMP_LT_OQ));
+#endif
+    };
+    auto VMAX = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmax_x8(a, b);
+#else
+        return _mm256_max_ps(a, b);
+#endif
+    };
+    auto VMIN = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmin_x8(a, b);
+#else
+        return _mm256_min_ps(a, b);
+#endif
+    };
     const __m256 vDensity_v = _mm256_set1_ps(density);
     const bool analyticCone = fds::FeatureFlags::vol_cone_analytic();
     // Path-counter bump — once per tile call, not per (spot × batch).
@@ -882,7 +1004,168 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // is purely about where the wide arm earns its keep.
                     const bool solveVec = coneSolveVec && omid == 0 && !bounce
                                           && !segPath;
-                    if (solveVec) {
+                    // ─── the same solve at NATIVE 128-bit width ──────
+                    // Two 4-lane passes over the same 8-pixel batch. The
+                    // NEON op count is identical (simde already emits two
+                    // 128-bit ops per __m256 op); what changes is that a
+                    // live value now costs ONE v-register instead of two,
+                    // so the ~30-value live set stops overflowing a
+                    // 32-register file. Aimed at CYCLES, not instructions:
+                    // the round-4 cycle ablation puts this stage at 0.250
+                    // of the pass's 0.585 Gcyc/f (42.7%), and round 3
+                    // established the pass is dependency-bound.
+                    // Transcribed op for op from the 8-wide arm below —
+                    // same contraction map, same cmp+blend spelling of
+                    // std::min/max, same unordered predicates. Xarr/uVarr/
+                    // zMaxArr are alignas(32), so +4 floats is still a
+                    // 16-byte-aligned address.
+                    if (solveVec && solveW4) {
+                        const __m128 qZero = _mm_setzero_ps();
+                        const __m128 qOne  = _mm_set1_ps(1.0f);
+                        const __m128 qZMin = _mm_set1_ps(0.05f);
+                        const __m128 qAll  = _mm_cmp_ps(qZero, qZero, _CMP_EQ_OQ);
+                        auto NEG = [](const __m128 &v) {
+                            return _mm_xor_ps(v, _mm_set1_ps(-0.0f));
+                        };
+                        auto NOT = [&](const __m128 &v) {
+                            return _mm_xor_ps(v, qAll);
+                        };
+                        auto RCP   = [&](const __m128 &v) {
+                            return _mm_div_ps(qOne, v);
+                        };
+                        auto SQRTV = [](const __m128 &v) {
+                            return _mm_sqrt_ps(v);
+                        };
+                        // Scalars the 8-wide arm also computes once per
+                        // (batch × spot); hoisted out of the half loop so
+                        // the halves share them rather than recompute.
+                        const float  YPy     = Y * Py_l;
+                        const float  YDy     = Y * Dy;
+                        const float  sphereC = PP - r2;
+                        const float  cq      = std::fma(DP, DP, -(c2 * PP));
+                        int aliveBits = 0;
+#if FDS_CONE_W4 == 2
+                        // Control build: keep the half loop ROLLED. Left to
+                        // itself the compiler fully unrolls a trip count of 2
+                        // and schedules both halves together, which restores
+                        // exactly the 8-wide live set — so the unrolled W4 arm
+                        // is not a test of register pressure at all. This is.
+                        #pragma clang loop unroll(disable)
+#endif
+                        for (int h = 0; h < 8; h += 4) {
+                            const __m128 sX    = _mm_load_ps(Xarr + h);
+                            const __m128 sUV   = _mm_load_ps(uVarr + h);
+                            const __m128 sZMax = _mm_load_ps(zMaxArr + h);
+
+                            __m128 mAlive = _mm_cmp_ps(sZMax, qZero, _CMP_NLE_UQ);
+
+                            const __m128 sVP = _mm_add_ps(_mm_set1_ps(Pz),
+                                fma_x4(_mm_set1_ps(Px), sX, _mm_set1_ps(YPy)));
+                            const __m128 sDV = _mm_add_ps(_mm_set1_ps(Dz),
+                                fma_x4(_mm_set1_ps(Dx), sX, _mm_set1_ps(YDy)));
+
+                            const __m128 sC2   = _mm_set1_ps(c2);
+                            const __m128 sSphD = fma_x4(sVP, sVP,
+                                NEG(_mm_mul_ps(_mm_set1_ps(sphereC), sUV)));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_cmp_ps(sSphD, qZero, _CMP_NLT_UQ));
+
+                            const __m128 sA  = fma_x4(sDV, sDV,
+                                NEG(_mm_mul_ps(sC2, sUV)));
+                            const __m128 sBh = fma_x4(sC2, sVP,
+                                NEG(_mm_mul_ps(_mm_set1_ps(DP), sDV)));
+                            const __m128 sB  = _mm_add_ps(sBh, sBh);
+                            const __m128 sDisc = fma_x4(sB, sB,
+                                _mm_mul_ps(_mm_set1_ps(cq),
+                                    _mm_mul_ps(sA, _mm_set1_ps(-4.0f))));
+
+                            const __m128 sSq    = SQRTV(sDisc);
+                            const __m128 sInv2a = RCP(_mm_add_ps(sA, sA));
+                            const __m128 sR1 = _mm_mul_ps(sInv2a,
+                                _mm_sub_ps(NEG(sB), sSq));
+                            const __m128 sR2 = _mm_mul_ps(sInv2a,
+                                _mm_sub_ps(sSq, sB));
+                            const __m128 rMin = _mm_blendv_ps(sR1, sR2,
+                                _mm_cmp_ps(sR2, sR1, _CMP_LT_OQ));
+                            const __m128 rMax = _mm_blendv_ps(sR1, sR2,
+                                _mm_cmp_ps(sR1, sR2, _CMP_LT_OQ));
+
+                            const __m128 mDisc = _mm_cmp_ps(sDisc, qZero, _CMP_NLT_UQ);
+                            const __m128 mANeg = _mm_cmp_ps(sA,
+                                _mm_set1_ps(-1e-8f), _CMP_LT_OQ);
+                            const __m128 mAPos = _mm_cmp_ps(sA,
+                                _mm_set1_ps(1e-8f), _CMP_GT_OQ);
+
+                            const __m128 zLoHit = _mm_blendv_ps(rMax, qZMin,
+                                _mm_cmp_ps(rMax, qZMin, _CMP_LT_OQ));
+                            const __m128 zHiHit = _mm_blendv_ps(rMin, sZMax,
+                                _mm_cmp_ps(sZMax, rMin, _CMP_LT_OQ));
+                            const __m128 mFwd = _mm_cmp_ps(sDV,
+                                _mm_set1_ps(1e-6f), _CMP_GT_OQ);
+                            const __m128 mBwd = _mm_cmp_ps(sDV,
+                                _mm_set1_ps(-1e-6f), _CMP_LT_OQ);
+                            const __m128 zLoRt = _mm_blendv_ps(qZMin, zLoHit, mFwd);
+                            const __m128 zHiRt = _mm_blendv_ps(zHiHit, sZMax, mFwd);
+                            const __m128 mPosOk = _mm_or_ps(NOT(mDisc),
+                                _mm_and_ps(_mm_or_ps(mFwd, mBwd),
+                                    _mm_cmp_ps(zHiRt, zLoRt, _CMP_GT_OQ)));
+                            const __m128 zLoP = _mm_blendv_ps(qZMin, zLoRt, mDisc);
+                            const __m128 zHiP = _mm_blendv_ps(sZMax, zHiRt, mDisc);
+
+                            __m128 zLo = _mm_blendv_ps(zLoP, rMin, mANeg);
+                            __m128 zHi = _mm_blendv_ps(zHiP, rMax, mANeg);
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_or_ps(_mm_and_ps(mANeg, mDisc),
+                                          _mm_and_ps(mAPos, mPosOk)));
+
+                            const __m128 sSphSq = SQRTV(sSphD);
+                            const __m128 sInvUV = RCP(sUV);
+                            const __m128 zSphLo = _mm_mul_ps(sInvUV,
+                                _mm_sub_ps(sVP, sSphSq));
+                            const __m128 zSphHi = _mm_mul_ps(sInvUV,
+                                _mm_add_ps(sVP, sSphSq));
+                            zLo = _mm_blendv_ps(zLo, zSphLo,
+                                _mm_cmp_ps(zLo, zSphLo, _CMP_LT_OQ));
+                            zHi = _mm_blendv_ps(zHi, zSphHi,
+                                _mm_cmp_ps(zHi, zSphHi, _CMP_GT_OQ));
+                            zLo = _mm_blendv_ps(zLo, qZMin,
+                                _mm_cmp_ps(zLo, qZMin, _CMP_LT_OQ));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_cmp_ps(zHi, zLo, _CMP_GT_OQ));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_cmp_ps(zLo, sZMax, _CMP_LT_OQ));
+                            zHi = _mm_blendv_ps(zHi, sZMax,
+                                _mm_cmp_ps(zHi, sZMax, _CMP_GT_OQ));
+
+                            const __m128 mDVBig = _mm_cmp_ps(
+                                _mm_andnot_ps(_mm_set1_ps(-0.0f), sDV),
+                                _mm_set1_ps(1e-6f), _CMP_GT_OQ);
+                            const __m128 zFwd = _mm_div_ps(
+                                _mm_set1_ps(DP), sDV);
+                            const __m128 mDVPos = _mm_cmp_ps(sDV, qZero, _CMP_GT_OQ);
+                            zLo = _mm_blendv_ps(zLo, zFwd,
+                                _mm_and_ps(_mm_and_ps(mDVBig, mDVPos),
+                                    _mm_cmp_ps(zLo, zFwd, _CMP_LT_OQ)));
+                            zHi = _mm_blendv_ps(zHi, zFwd,
+                                _mm_and_ps(_mm_andnot_ps(mDVPos, mDVBig),
+                                    _mm_cmp_ps(zHi, zFwd, _CMP_GT_OQ)));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_or_ps(NOT(mDVBig),
+                                    _mm_cmp_ps(zLo, zHi, _CMP_LT_OQ)));
+
+                            _mm_store_ps(zLoArr + h,    _mm_and_ps(zLo, mAlive));
+                            _mm_store_ps(zHiArr + h,    _mm_and_ps(zHi, mAlive));
+                            _mm_store_ps(aliveLane + h, _mm_and_ps(qOne, mAlive));
+                            aliveBits |= _mm_movemask_ps(mAlive) << h;
+                        }
+                        spotAlive = aliveBits != 0;
+                        if (g_coneDiag) {
+                            g_dLanes.fetch_add(__builtin_popcount(unsigned(aliveBits)),
+                                               std::memory_order_relaxed);
+                            if (!spotAlive)
+                                g_dDead.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else if (solveVec) {
                         const __m256 sX    = _mm256_load_ps(Xarr);
                         const __m256 sUV   = _mm256_load_ps(uVarr);
                         const __m256 sZMax = _mm256_load_ps(zMaxArr);
@@ -956,6 +1239,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // exact negation (a NaN keeps the lane, as scalar).
                         mAlive = _mm256_and_ps(mAlive,
                             _mm256_cmp_ps(sSphD, sZero, _CMP_NLT_UQ));
+                        // DIAG-only: how many (batch x spot) pairs lose ALL
+                        // eight lanes at the range sphere? That is the ceiling
+                        // on any cull placed before the solve.
+                        if (g_coneDiag && _mm256_movemask_ps(mAlive) == 0)
+                            g_dSphDead.fetch_add(1, std::memory_order_relaxed);
 #if FDS_CONE_SOLVE_EARLYOUT
                         // Range-sphere early-out — MEASURED AND NOT KEPT
                         // (kept compiled-out as the record of the test).
@@ -998,10 +1286,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // std::min/std::max transcribed as cmp+select so
                         // the NaN/±0 tie-breaks match fcsel rather than
                         // NEON's FMIN (which resolves NaN the other way).
-                        const __m256 rMin = _mm256_blendv_ps(sR1, sR2,
-                            _mm256_cmp_ps(sR2, sR1, _CMP_LT_OQ));
-                        const __m256 rMax = _mm256_blendv_ps(sR1, sR2,
-                            _mm256_cmp_ps(sR1, sR2, _CMP_LT_OQ));
+                        const __m256 rMin = MINT(sR1, sR2);
+                        const __m256 rMax = MAXT(sR1, sR2);
 
                         const __m256 mDisc = _mm256_cmp_ps(sDisc, sZero, _CMP_NLT_UQ);
                         const __m256 mANeg = _mm256_cmp_ps(sA,
@@ -1011,10 +1297,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
 
                         // a > +1e-8: forward/backward half-space pick,
                         // and the disc<0 case that opens the whole ray.
-                        const __m256 zLoHit = _mm256_blendv_ps(rMax, sZMin,
-                            _mm256_cmp_ps(rMax, sZMin, _CMP_LT_OQ));
-                        const __m256 zHiHit = _mm256_blendv_ps(rMin, sZMax,
-                            _mm256_cmp_ps(sZMax, rMin, _CMP_LT_OQ));
+                        const __m256 zLoHit = MAXT(rMax, sZMin);
+                        const __m256 zHiHit = MINT(rMin, sZMax);
                         const __m256 mFwd = _mm256_cmp_ps(sDV,
                             _mm256_set1_ps(1e-6f), _CMP_GT_OQ);
                         const __m256 mBwd = _mm256_cmp_ps(sDV,
@@ -1040,18 +1324,14 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             _mm256_sub_ps(sVP, sSphSq));
                         const __m256 zSphHi = _mm256_mul_ps(sInvUV,
                             _mm256_add_ps(sVP, sSphSq));
-                        zLo = _mm256_blendv_ps(zLo, zSphLo,
-                            _mm256_cmp_ps(zLo, zSphLo, _CMP_LT_OQ));
-                        zHi = _mm256_blendv_ps(zHi, zSphHi,
-                            _mm256_cmp_ps(zHi, zSphHi, _CMP_GT_OQ));
-                        zLo = _mm256_blendv_ps(zLo, sZMin,
-                            _mm256_cmp_ps(zLo, sZMin, _CMP_LT_OQ));
+                        zLo = MAXT(zLo, zSphLo);
+                        zHi = MINT(zHi, zSphHi);
+                        zLo = MAXT(zLo, sZMin);
                         mAlive = _mm256_and_ps(mAlive,
                             _mm256_cmp_ps(zHi, zLo, _CMP_GT_OQ));
                         mAlive = _mm256_and_ps(mAlive,
                             _mm256_cmp_ps(zLo, sZMax, _CMP_LT_OQ));
-                        zHi = _mm256_blendv_ps(zHi, sZMax,
-                            _mm256_cmp_ps(zHi, sZMax, _CMP_GT_OQ));
+                        zHi = MINT(zHi, sZMax);
 
                         // Forward-cone cut at the apex plane z = DP/DV.
                         const __m256 mDVBig = _mm256_cmp_ps(
@@ -1284,8 +1564,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                                              _mm256_load_ps(zLoArr)),
                                                _mm256_set1_ps(inv_nSamp));
                         const __m256 vFwMin  = _mm256_set1_ps(12.0f * invZScale);
-                        const __m256 vFadeW  = _mm256_blendv_ps(vD, vFwMin,
-                                               _mm256_cmp_ps(vD, vFwMin, _CMP_LT_OQ));
+                        const __m256 vFadeW  = MAXT(vD, vFwMin);
                         const __m256 vInvFw  = _mm256_div_ps(_mm256_set1_ps(1.0f), vFadeW);
                         const __m256 vFadeS  = _mm256_sub_ps(_mm256_load_ps(zMaxArr), vFadeW);
                         _mm256_store_ps(dzArr,        _mm256_blendv_ps(vZeroL, vD,     mLive));
@@ -1440,10 +1719,10 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             const __m256 DW = _mm256_fmadd_ps(vDx_v, Wx,
                                               _mm256_fmadd_ps(vDy_v, Wy,
                                                _mm256_mul_ps(vDz_dir_v, Wz)));
-                            const __m256 safeW2 = _mm256_max_ps(W2, _mm256_set1_ps(1e-12f));
+                            const __m256 safeW2 = VMAX(W2, _mm256_set1_ps(1e-12f));
                             const __m256 cosT = _mm256_mul_ps(DW, rsqrt_nr_x8(safeW2));
                             __m256 t = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
-                            t = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t));
+                            t = VMAX(vZero_v, VMIN(vOne_v, t));
                             const __m256 sm = _mm256_mul_ps(_mm256_mul_ps(t, t),
                                               _mm256_sub_ps(vThree_v, _mm256_mul_ps(vTwo_v, t)));
                             const __m256 mIn = _mm256_cmp_ps(cosT, vCosI_v, _CMP_GE_OQ);
@@ -1496,8 +1775,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 // whole-chord z16 sensitivity.
                                 __m256 sf = _mm256_mul_ps(
                                     _mm256_sub_ps(vZMaxFade_v, zm), vInvDz_v);
-                                sf = _mm256_max_ps(vZero_v,
-                                     _mm256_min_ps(vOne_v, sf));
+                                sf = VMAX(vZero_v,
+                                     VMIN(vOne_v, sf));
                                 // Per-segment shadow tap: the single
                                 // whole-chord midpoint tap let beam
                                 // segments BEHIND walls glow whenever
@@ -1601,11 +1880,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 dist_m   = _mm256_mul_ps(W2_m, invLen_m);
                         __m256 softEdge_m     = _mm256_sub_ps(vOne_v,
                                                 _mm256_mul_ps(vRR_v, dist_m));
-                        softEdge_m = _mm256_max_ps(vZero_v, softEdge_m);
+                        softEdge_m = VMAX(vZero_v, softEdge_m);
                         softEdge_m = _mm256_mul_ps(softEdge_m, softEdge_m);
                         // coneAtten at midpoint: smoothstep(cosO→cosI).
                         __m256 t_m = _mm256_mul_ps(_mm256_sub_ps(cosT_m, vCosO_v), vInvCIO_v);
-                        t_m = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t_m));
+                        t_m = VMAX(vZero_v, VMIN(vOne_v, t_m));
                         const __m256 smooth_m = _mm256_mul_ps(
                                                 _mm256_mul_ps(t_m, t_m),
                                                 _mm256_sub_ps(vThree_v,
@@ -1652,7 +1931,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         if (invFogZ > 0.0f) {
                             __m256 fog_m = _mm256_sub_ps(vOne_v,
                                             _mm256_mul_ps(vZMid, vInvFogZ_v));
-                            fog_m = _mm256_max_ps(vZero_v, fog_m);
+                            fog_m = VMAX(vZero_v, fog_m);
                             fog_m = _mm256_mul_ps(fog_m, fog_m);
                             vAcc = _mm256_mul_ps(vAcc, fog_m);
                         }
@@ -1782,7 +2061,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         mask = _mm256_and_ps(mask, _mm256_cmp_ps(cosT, vCosO_v, _CMP_GE_OQ));
 
                         __m256 t_v = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
-                        t_v = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t_v));
+                        t_v = VMAX(vZero_v, VMIN(vOne_v, t_v));
                         const __m256 smooth = _mm256_mul_ps(
                             _mm256_mul_ps(t_v, t_v),
                             _mm256_sub_ps(vThree_v, _mm256_mul_ps(vTwo_v, t_v)));
@@ -1798,7 +2077,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         __m256 fogAtten = vOne_v;
                         if (invFogZ > 0.0f) {
                             fogAtten = _mm256_sub_ps(vOne_v, _mm256_mul_ps(vZ, vInvFogZ_v));
-                            fogAtten = _mm256_max_ps(vZero_v, fogAtten);
+                            fogAtten = VMAX(vZero_v, fogAtten);
                             fogAtten = _mm256_mul_ps(fogAtten, fogAtten);
                         }
 
@@ -2586,16 +2865,18 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         }
         const long long P = g_dPairs.load(), D = g_dDead.load();
         const long long S = g_dSegPair.load(), L = g_dLanes.load();
+        const long long SD = g_dSphDead.load();
         fprintf(stderr,
             "[CONE-DIAG] spots=%d narrow(seg8)=%d shadowed=%d | "
             "batchxspot=%lld dead=%lld (%.1f%%) seg=%lld (%.1f%%) | "
-            "alive lanexspot=%lld (%.2f per pair, %.1f%% of 8)\n",
+            "alive lanexspot=%lld (%.2f per pair, %.1f%% of 8) sphdead=%lld (%.1f%%)\n",
             spotCount, nNarrow, nShadow, P, D,
             P ? 100.0 * double(D) / double(P) : 0.0,
             S, P ? 100.0 * double(S) / double(P) : 0.0,
             L, P ? double(L) / double(P) : 0.0,
-            P ? 100.0 * double(L) / (8.0 * double(P)) : 0.0);
-        g_dPairs = 0; g_dDead = 0; g_dSegPair = 0; g_dLanes = 0;
+            P ? 100.0 * double(L) / (8.0 * double(P)) : 0.0,
+            SD, P ? 100.0 * double(SD) / double(P) : 0.0);
+        g_dPairs = 0; g_dDead = 0; g_dSegPair = 0; g_dLanes = 0; g_dSphDead = 0;
     }
 
     if (!inlineDispatch) renderns::tileCounter = 0;

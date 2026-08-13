@@ -866,3 +866,149 @@ than as dead code in the kernel, because unlike `FDS_CONE_SOLVE_EARLYOUT` /
 `FDS_CONE_SOLVE_APPROX` (which are a few lines at one site) it touches eight
 sites across 300 lines, and leaving it in `#if` arms would cost the shipping
 binary the very 2 % that disqualified it.
+
+## 12. Worked example round 4 — the register-pressure question, answered NO, 2026-08-13c
+
+The user's question was **"any way to rewrite this while relieving register
+pressure?"** The premise is exact and worth stating, because it is the reason
+the answer is interesting: on arm64 there is no 256-bit unit, simde lowers every
+`__m256` op to **two** 128-bit NEON ops, so every live `__m256` value occupies
+**two** of the 32 `v` registers and the file is effectively 16 slots deep. The
+cone solve holds ~30 live values. It spills. All of that is true.
+
+**Relieving the pressure makes the pass slower.** Measured three ways, and the
+mechanism is that the two halves of an `__m256` op are *independent NEON chains*
+— the spelling is already unroll-and-jam by 2, and taking it apart costs more
+than the spills it saves.
+
+### First: re-read the ablation ladder on the CYCLE column
+
+Round 3 ended with "stop counting instructions on this pass; the instrument is
+not `Ginstr/f`" — and then round 2's committed ladder (`-DFDS_CONE_ABLATE=n`,
+`scratchpad/cone_ablate.sh`) had never been read on `Gcyc/f`. It takes five
+minutes. city t=1961, runs=5, run 1 discarded after each rebuild:
+
+| stage kept | cones `Gcyc/f` | increment | % of pass CYCLES | (% of pass instr) |
+|---|---|---|---|---|
+| per-batch floor | 0.012 | 0.012 | 2.1 % | 2.2 % |
+| + per-spot scalar prologue | 0.044 | 0.032 | 5.5 % | 6.8 % |
+| **+ the 8-wide cone-interval SOLVE** | 0.294 | **0.250** | **42.7 %** | 41.6 % |
+| + per-lane dz/fade | 0.317 | 0.023 | 3.9 % | 3.0 % |
+| + body: broadcasts/quadratic/rsqrt-NR/args | 0.396 | 0.079 | 13.5 % | 17.6 % |
+| + body: `atanDiff` | 0.443 | 0.047 | 8.0 % | 6.7 % |
+| + body: midpoint cone/fade/softEdge | 0.447 | 0.004 | 0.7 % | −2.6 % |
+| + body: `vAcc` chain | 0.537 | 0.090 | 15.4 % | 17.9 % |
+| + body: noise / masks / shadow tap | 0.555 | 0.018 | 3.1 % | 1.7 % |
+| + colour accumulate | 0.585 | 0.030 | 5.1 % | 5.2 % |
+
+The solve is the single largest bucket on **both** columns, so it is where a
+pressure rewrite has to be tried.
+
+### The three spellings of the same solve
+
+`FDS_CONE_W4` (in-tree, default 0, emits nothing) spells the solve as two 4-wide
+passes over the same 8-pixel batch. Identical NEON op count by construction —
+simde was already emitting two 128-bit ops per `__m256` op — so only the live-set
+size moves. Priced on **single-arm control builds** (`-DFDS_CONE_FORCE=1
+-DFDS_CONE_HOTONLY=1`, so no dual-arm tax and city-only paths), interleaved
+round-robin min-of-6, city t=1961:
+
+| arm | cones wall_min | `Ginstr/f` | `Gcyc/f` | IPC | stack `ldr q`/`str q` |
+|---|---|---|---|---|---|
+| `__m256`, as shipped | 16.673 ms | 2.114 | 0.576 | 3.651 | 89 / 79 |
+| W4, half loop **unrolled** | 16.618 ms | 2.035 | 0.580 (+0.7 %) | 3.504 | 91 / 82 |
+| W4, half loop **rolled** | 18.083 ms | 2.162 | **0.619 (+7.5 %)** | 3.478 | **72 / 70** |
+
+Read the third row first. **Rolling the half loop is the only spelling that
+actually halves the live set** — left to itself the compiler fully unrolls a trip
+count of 2 and schedules both halves together, which restores exactly the 8-wide
+live set (row 2: spills go *up*, 89/79 → 91/82). The rolled build gets the
+pressure relief the question asks for, `str q` 89/79 → 72/70, and pays **+7.5 %
+cycles / +8.5 % wall** for it. In the shipping two-arm binary the runtime-flagged
+W4 read −0.1 % instructions / +1.2 % cycles / +2.6 % wall, and merely compiling
+the arm in taxed the OFF path **+3.2 % instructions** — which is why it is a
+compile-time instrument and not a FeatureFlag.
+
+### Why: 81 % of this core's NEON ALU issue ceiling
+
+Disassemble the solve in the single-arm control (M2 Max, 4 NEON/FP pipes) and
+classify. 251 instructions in the solve region, of which **202 are vector ALU**
+(78–92 % per 50-instruction bucket), 8 `fsqrt.4s`/`fdiv.4s`, 27 vector
+load/store, 22 everything else. The ladder puts the solve at 0.250 `Gcyc/f` and
+the DIAG census at 3.20 M (batch × spot) pairs → **~63 cycles per pair against a
+~51-cycle vector-ALU-port floor**. The kernel is running at ~81 % of the machine's
+NEON issue ceiling.
+
+That single number explains every result on this pass at once:
+
+* **Pressure relief cannot pay.** Spill loads/stores are not the constraint; the
+  ALU port is. Removing them (rolled W4) while lengthening the dependency chain
+  is a net loss.
+* **Round 3's "deleting 7–10 % of instructions moved cycles by zero"** — those
+  were scalar and branch instructions, which issue on *other* pipes into slack.
+* **More ILP has a small ceiling.** 63 → 51 cycles is −19 % on the solve = −8 % on
+  the pass. Unroll-and-jam beyond the free 2× the `__m256` spelling already
+  provides is worth at most ~1.4 ms, before counting the spills it would add.
+* **The metric is VECTOR-ALU OP COUNT.** Not instructions, not registers.
+
+### What that metric found, and what shipped
+
+Grep the shipping cone kernel for `fmin.4s` / `fmax.4s`: **zero**, at 19 min/max
+sites. Two independent reasons, same cost. The solve and the dz/fade loop spell
+`std::min`/`std::max` by hand as cmp+blend, because 7e34645 needed bit-exactness
+and NEON `FMIN` resolves NaN and −0 the opposite way from the scalar `FCSEL`. And
+every `_mm256_max_ps` *already in the body* also lowers to cmp+blend, because
+`SIMDE_FAST_NANS` is not defined in this build and simde's NaN-correct fallback
+is `m = a<b; (a&m)|(b&~m)`, which LLVM folds to `fcmgt`+`bsl`. The intrinsic that
+looks like one op is two.
+
+**`FDS_CONE_NEONMINMAX` (default 1, ships)** routes all 19 through `vmaxq_f32` /
+`vminq_f32` on both halves. 33 instructions out of 4538 statically; 2 vector-ALU
+ops per site per pair dynamically. Parent-binary vs new-binary, interleaved
+min-of-6:
+
+| | cones wall_min | `Ginstr/f` | `Gcyc/f` | IPC |
+|---|---|---|---|---|
+| parent `67441d86` | 16.922 ms | 2.388 | 0.584 | 4.067 |
+| new tree, `NEONMINMAX=0` | 16.924 ms | 2.387 | 0.581 | 4.074 |
+| **new tree, default (ships)** | **16.285 ms** | **2.347** | **0.558** | **4.176** |
+
+**−4.5 % cycles, −3.8 % wall (−0.64 ms), −1.7 % instructions.** renderFrame
+57.143 → 56.423 ms; the −0.72 ms frame saving matches the −0.64 ms cones saving,
+which is the attribution check. The `NEONMINMAX=0` row is the control that proves
+the compiled-out W4 arm costs the shipping binary nothing (4538 → 4538
+instructions, one `ldr q` of difference).
+
+City t-sweep, min-of-3 per pose: t=400 −4.7 % cyc / −4.4 % wall, t=900 −4.5 % /
+−4.8 %, t=1400 −3.2 % / −4.3 %, t=2400 −4.0 % / −4.5 %. **Greets** (the segmented
+branch, where the body's `_mm256_max_ps` sites are hot) −3.2 % cyc / −3.5 % wall,
+7.595 → 7.330 ms.
+
+**And it is BIT-EXACT in practice**, which was not the expectation — the change
+was written as a judge call under the standing "byte-exactness is not required"
+rule, with the NaN/±0 tie-break as the known risk. It never materialises: city
+`3cbe42b166847e40f7071eedb48d613c`, greets `778fa6acd85a69cf241babefcdaf598e`,
+fountain `8db68ccb59416e9a44037e9f387b7bd9` all **3/3**, and `render_gate` **ALL
+FOUR rows PASS** including `conetest b41894f9`, which is direct coverage of this
+kernel.
+
+### Levers priced and closed this round
+
+* **A pre-solve cull.** New DIAG counter `sphdead`: of 3 204 900 (batch × spot)
+  pairs at city t=1961, 39.9 % produce zero alive lanes but only **7.7 % lose all
+  eight lanes at the range sphere** — the rest die later, on the cone-interval
+  and chord tests, which have no cheap conservative screen-space form. That caps
+  any sphere-based cull (finer tiles, per-row X-intervals, the reverted per-batch
+  rect cull, `FDS_CONE_SOLVE_EARLYOUT`) at ~3 % of the pass, and independently
+  confirms a16567b's 6×4 → 12×8 tile result (29.2 M → 25.6 M) and round 1's
+  early-out rejection.
+* **Unroll-and-jam.** Ceiling ~8 % of the pass (above), and the `__m256` spelling
+  already supplies 2×. Not built.
+* **Outlining the cold arms.** Round 3 already measured the deletion of 10 % of
+  the kernel's instructions (`-DFDS_CONE_HOTONLY=1`) at zero cycles; the mechanism
+  above says why. Not built.
+
+**Carry forward.** The remaining headroom on this pass is ~19 % of the solve
+(perfect scheduling) plus whatever else can be spelled at one NEON op instead of
+two. Everything that reduces instructions on the *other* pipes — spills,
+branches, scalar setup — is free and will keep measuring as zero.
