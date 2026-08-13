@@ -20,9 +20,19 @@
 #          tools/render_gate.sh --update   # reprint current md5s (to re-baseline)
 #
 # Coverage:
-#   mirrortest  — deferred surface kernel + mirror clone + RTT
+#   mirrortest  — deferred surface kernel + mirror clone (NOT the RTT: see below)
 #   conetest    — DeferredVolumetric cones + DeferredFastFog (fog on)
 #   halotest    — DeferredVolumetric omni halos
+#   rttslot     — the ORDER-2 mirror RTT bake, deferred + HDR (2026-08-13)
+#
+# rttslot exists because the mirrortest row's "+ RTT" claim was false and cost a
+# shipped regression. `--scene-mirrortest` alone never enables `mirror_rtt`
+# (default 0; only GREETS.CPP's setDefault and the editor turn it on), so no row
+# here rendered a single RTT slot. `00d28a8b` dropped the RTT off the HDR path
+# (`ctx.hdrBuf = ov ? ov->hdr : …` — the RTT is the DeferredOverride user that
+# brings no ov->hdr), changing 98.9 % of the slot's pixels, and mirrortest was
+# byte-identical on the broken binary WITH --hdr as well as without. Fixed in
+# 283b46ca / verified 6656300b; this row is the coverage that was missing.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,12 +52,45 @@ cd "$RUN" || { echo "no Runtime/ dir at $RUN"; exit 2; }
 BASE_MIRROR="4ac809e5f5323076de1a6d5ef2fb9e92"
 BASE_CONE="b41894f969d1f89dd2d7d794f160e286"
 BASE_HALO="166fa25a846668cc9b2d4dae2d800a7b"
+# rttslot baseline: the 4 order-2 slot surfaces mirrortest bakes over its 8 dump
+# poses (`/tmp/rtt_m1_m2_{0,1,2}.ppm` 512x512 + `/tmp/rtt_m2_m1_3.ppm` 128x512),
+# concatenated. Established 2026-08-13 on 6656300b.
+#
+# ALL THREE FLAGS ARE LOAD-BEARING — each proved necessary by a control that
+# does NOT discriminate 6656300b (fixed) from 00d28a8b (broken):
+#   --mirror_rtt      without it 0 slots are prepared and the hash is the md5 of
+#                     nothing (d41d8cd9…) on every binary
+#   --shard_deferred  without it the slot bakes FORWARD, never touching the
+#                     deferred kernel's ctx.hdrBuf — slots a48afe1b… on both
+#   --hdr             without it the bug is unreachable — slots 09c9d4d8… on both
+# Only the three together separate them: 826c09e6… (fixed) vs 2ecd5e81… (broken),
+# 5/5 stable on each. Signature on the broken binary, same as the greets t=3122
+# regression: 99.95 % of the COVERED texels change, mean |Δ| 28.5/channel, mean
+# luma over the changed texels 157.7 -> 129.9 (−27.8).
+#
+# WHAT THIS ROW CERTIFIES: that an order-2 RTT slot still bakes through the
+# deferred kernel with a live HDR buffer, at mirrortest's two facing mirrors, at
+# the adaptive resolutions its 8 poses pick (512x512 / 128x512).
+# WHAT IT DOES NOT: greets' own slot geometry (7-8 slots against mirrortest's 2)
+# — that stays out-of-band, because a greets row would key on the user's
+# UNCOMMITTED authoring files; the FIRST-order RTT panel path (min_area keeps it
+# empty in both scenes); the panel composite as it lands in the main frame
+# (measured: under --hdr the mirrortest frame is insensitive to slot content —
+# it is byte-identical with the forward and the deferred bake — so the SLOT is
+# the gated surface here, not the frame); and any RTT change that is invisible
+# at these two mirrors, e.g. an adaptive-res policy change that only moves
+# greets' sizes. Note the flip side: this row IS sensitive to the adaptive
+# resolution mirrortest picks, so an intentional sizing change needs --update.
+BASE_RTTSLOT="826c09e63217e778cfcef70fe0167279"
 
 # HEADLESS: every DEMO run uses the SDL dummy driver — no window pops on the
 # desktop (the gate gets run a lot, incl. from bisects). Dummy output differs
 # from windowed output byte-wise but is deterministic run-to-run, which is all
 # a gate needs; the baselines below are DUMMY-mode hashes.
+# Audio is dummied for the same reason (no device grab from a bisect loop);
+# measured not to move any baseline — mirrortest reproduces 4ac809e5… with it.
 export SDL_VIDEODRIVER=dummy
+export SDL_AUDIODRIVER=dummy
 
 md5_of() { ls "$@" 2>/dev/null | sort | xargs cat | md5 -q; }
 
@@ -55,6 +98,17 @@ run_mirror() {
   rm -f /tmp/mt_view_*.ppm
   FDS_MIRRORTEST_MULTI_DUMP=1 ./DEMO --scene-mirrortest >/dev/null 2>&1
   md5_of /tmp/mt_view_*.ppm
+}
+# The order-2 RTT bake. Same scene as run_mirror, but with the three flags that
+# actually reach the path, and the gated surface is the SLOT dump
+# (FDS_MIRROR_RTT_DUMP=1 -> /tmp/rtt_*.ppm, hardcoded in GreetsMirror.cpp), not
+# the frame. MULTI_DUMP is still what makes the driver headless-exit; its
+# mt_view PPMs are written and ignored here (run_mirror clears them itself).
+run_rttslot() {
+  rm -f /tmp/rtt_*.ppm /tmp/mt_view_*.ppm
+  FDS_MIRRORTEST_MULTI_DUMP=1 FDS_MIRROR_RTT_DUMP=1 \
+    ./DEMO --scene-mirrortest --mirror_rtt --shard_deferred --hdr >/dev/null 2>&1
+  md5_of /tmp/rtt_*.ppm
 }
 run_cone() {
   rm -f "$OUT"/conetest_*.ppm
@@ -68,10 +122,11 @@ run_halo() {
   md5_of "$OUT"/halotest_*.ppm
 }
 
-M=$(run_mirror); C=$(run_cone); H=$(run_halo)
+M=$(run_mirror); R=$(run_rttslot); C=$(run_cone); H=$(run_halo)
 
 if [ "${1:-}" = "--update" ]; then
   echo "mirrortest: $M"
+  echo "rttslot:    $R"
   echo "conetest:   $C"
   echo "halotest:   $H"
   exit 0
@@ -84,6 +139,7 @@ chk() { # name actual baseline
 }
 echo "render gate:"
 chk mirrortest "$M" "$BASE_MIRROR"
+chk rttslot    "$R" "$BASE_RTTSLOT"
 chk conetest   "$C" "$BASE_CONE"
 chk halotest   "$H" "$BASE_HALO"
 [ $rc -eq 0 ] && echo "ALL PASS" || echo "GATE FAILED"

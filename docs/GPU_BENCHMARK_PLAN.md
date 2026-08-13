@@ -3311,9 +3311,10 @@ endif()
 - Shaders are `.metal` text files copied next to the binary, compiled at runtime.
 - Run from `Runtime/` like everything else (asset paths are CWD-relative).
 - Gate verification required after any CMake edit: `cmake --build build` unchanged (baseline:
-  **94 `compile_commands.json` entries**, `ninja -n` clean), and `tools/render_gate.sh` 3/3.
-  Note that gate covers `mirrortest` / `conetest` / `halotest` — **not greets**, whose pin depends
-  on the user's uncommitted authoring files and is checked out-of-band via
+  **94 `compile_commands.json` entries**, `ninja -n` clean), and `tools/render_gate.sh` 4/4
+  (it grew an `rttslot` row 2026-08-13 — the order-2 mirror RTT, deferred + HDR).
+  Note that gate covers `mirrortest` / `rttslot` / `conetest` / `halotest` — **not greets**, whose
+  pin depends on the user's uncommitted authoring files and is checked out-of-band via
   `tools/flip_rate.sh -n 24`.
 - Offscreen rendering is the default. **A visible window is only opened on explicit request** —
   per the standing rule that visible runs are the user's to launch.

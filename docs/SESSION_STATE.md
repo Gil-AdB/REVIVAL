@@ -1,5 +1,89 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-13b — THE RTT GATE HOLE IS CLOSED, AND THE ROW IS PROVED IN BOTH DIRECTIONS: `render_gate` NOW FAILS ON `00d28a8b`
+>
+> The entry below leaves one thing undone: a regression that changed 98.9 % of an
+> RTT slot was invisible to every standing gate, and the fix shipped on
+> hand-run byte-identity rather than on anything that would fire again. That hole
+> is now a committed row — `render_gate.sh`'s fourth, **`rttslot`
+> `826c09e63217e778cfcef70fe0167279`**.
+>
+> ```
+> FDS_MIRRORTEST_MULTI_DUMP=1 FDS_MIRROR_RTT_DUMP=1 \
+>   ./DEMO --scene-mirrortest --mirror_rtt --shard_deferred --hdr
+> md5 of the 4 /tmp/rtt_*.ppm slot dumps
+> ```
+>
+> ### IT IS BUILT ON `mirrortest`, NOT ON THE BACKLOG'S GREETS POSE — AND THAT IS DELIBERATE
+>
+> The backlog spec'd greets t=3122 `--hdr --deferred` with
+> `FDS_MIRROR_RTT_DUMP=1`. That recipe is the one that *found* the bug and it
+> stays the out-of-band check, but it cannot be a `render_gate` row: greets is
+> excluded from that script by its own header **because the greets pin keys on
+> the user's UNCOMMITTED authoring files** (`GREETS.FLD`, `Hull.lwo` — both dirty
+> in the main tree right now). A committed hash of a scene the user edits daily
+> is a row that goes red on authoring, i.e. a row that gets ignored.
+>
+> `mirrortest` needs no such compromise: its two mirrors face each other and
+> `MirrorTestDriver.cpp:269` already calls `PrepareSecondOrderMirrorRtt`, so the
+> instant `mirror_rtt` is on it prepares **2 order-2 slots** (`m1→m2` 512×512,
+> `m2→m1`) and bakes 4 dumps across its 8 poses. Same code path, same kernel,
+> committed scene.
+>
+> ### ALL THREE FLAGS ARE LOAD-BEARING, EACH PROVED BY A CONTROL THAT DOES NOT DISCRIMINATE
+>
+> | arm on `mirrortest` | slot hash, `6656300b` | slot hash, `00d28a8b` | discriminates? |
+> |---|---|---|---|
+> | no `--mirror_rtt` (today's row) | `d41d8cd9…` (md5 of nothing — 0 slots) | `d41d8cd9…` | **no** |
+> | `--mirror_rtt --shard_deferred`, no `--hdr` | `09c9d4d8…` | `09c9d4d8…` | **no** |
+> | `--mirror_rtt --hdr`, no `--shard_deferred` (forward bake) | `a48afe1b…` | `a48afe1b…` | **no** |
+> | **`--mirror_rtt --shard_deferred --hdr`** | **`826c09e6…`** | **`2ecd5e81…`** | **YES** |
+>
+> Drop any one flag and the row is vacuous. `mirror_rtt` gates slot creation,
+> `shard_deferred` is what routes the bake through the deferred kernel (`ov` is
+> only constructed there — `GreetsMirror.cpp:3236`), `hdr` is what makes
+> `ctx.hdrBuf` matter at all.
+>
+> ### BOTH DIRECTIONS, MEASURED
+>
+> * **PASS at HEAD (`6656300b`): 3/3** full-gate runs, `ALL PASS` — mirrortest
+>   `4ac809e5…`, rttslot `826c09e6…`, conetest `b41894f9…`, halotest `166fa25a…`.
+> * **FAIL on the broken binary (`00d28a8b`)**, same script, second worktree +
+>   second build dir, 2/2: `FAIL rttslot got 2ecd5e81… want 826c09e6…`, `rc=1`,
+>   **while the other three rows PASS unchanged there** — which is the gate hole
+>   restated as a passing test suite, and the reason this row had to exist.
+> * **Determinism 5/5** on HEAD before the hash was recorded (`826c09e6…` every
+>   run, 4 files every run); 3/3 on the broken binary too, so the FAIL is a
+>   stable FAIL, not a flake.
+> * Regression signature on the slot dumps, matching the greets one: **99.95 % of
+>   the covered texels change** (46 588 of 46 610 on `rtt_m1_m2_0`), mean |Δ|
+>   **28.5**/channel, luma over the changed texels **157.7 → 129.9 (−27.8)** —
+>   against greets t=3122's 98.9 %, 26.7, 126.68 → 105.64 (−21.0). Same mechanism,
+>   same magnitude.
+>
+> ### WHAT THE ROW CERTIFIES, AND WHAT IT STILL DOES NOT
+>
+> **Certifies:** an order-2 RTT slot still bakes through the deferred kernel with
+> a live HDR buffer, at mirrortest's two facing mirrors, at the adaptive
+> resolutions its poses pick — and it fails loudly if the RTT stops producing
+> slots at all (0 files hashes to `d41d8cd9…`, not to the baseline).
+>
+> **Does not:** greets' own slot set (7–8 slots vs mirrortest's 2) — that remains
+> out-of-band via the pin recipe, because of the uncommitted-authoring problem
+> above; the FIRST-order RTT panel path (`greets_mirror_rtt_min_area` keeps it
+> empty in both scenes, so nothing here would notice it breaking); the panel
+> composite as it reaches the main frame — **measured: under `--hdr` the
+> mirrortest FRAME is byte-identical between the forward and the deferred bake
+> (`a5bb109c…` both), so the frame is not a valid surface for slot content here
+> and the SLOT is what is gated**; and any RTT change invisible at these two
+> mirrors, e.g. an adaptive-res policy change that only moves greets' sizes. The
+> flip side of that last one: the row IS sensitive to the sizes mirrortest picks,
+> so an intentional sizing change needs `--update`, not a shrug.
+>
+> One incidental hardening: the script now exports `SDL_AUDIODRIVER=dummy`
+> alongside `SDL_VIDEODRIVER=dummy` (no device grab from a bisect loop). Measured
+> not to move any baseline — mirrortest still reproduces `4ac809e5…`.
+
 > ## 2026-08-13 — THE RTT REGRESSION `00d28a8b` SHIPPED IS REAL AND IS NOW PROVED FIXED BY BYTE-IDENTITY WITH THE PRE-RESTRUCTURE BASELINE
 >
 > `283b46ca` was written as a self-review catch and committed but never pushed

@@ -196,14 +196,26 @@ luma on the slot, −12.3 on the panel as it appears in the frame. Full analysis
 in `docs/SESSION_STATE.md` (2026-08-13). **The residual +12.5 above is
 untouched by any of this and remains the open item.**
 
-**GATE GAP, STILL OPEN AND WORTH ITS OWN LINE:** `render_gate`'s `mirrortest` is
+~~**GATE GAP, STILL OPEN AND WORTH ITS OWN LINE:** `render_gate`'s `mirrortest` is
 cited throughout this campaign as the thing that "covers the mirror RTT". It does
 not. `--scene-mirrortest` never enables `mirror_rtt` (default 0; only
 `GREETS.CPP`'s `setDefault` and the editor turn it on), and measurement confirms
 it: `mirrortest` is byte-identical on the baseline, the broken and the fixed
 binaries — **with `--hdr` as well as without**. The order-2 RTT path has no
 standing gate. A cheap one exists and is not wired: greets t=3122
-`--hdr --deferred` with `FDS_MIRROR_RTT_DUMP=1`, hashing `/tmp/rtt_*.ppm`.
+`--hdr --deferred` with `FDS_MIRROR_RTT_DUMP=1`, hashing `/tmp/rtt_*.ppm`.~~
+**CLOSED 2026-08-13 — `render_gate`'s fourth row, `rttslot`
+`826c09e63217e778cfcef70fe0167279`.** Built on `mirrortest`, not on greets: the
+same scene already prepares two order-2 slots the moment `mirror_rtt` is on
+(its two mirrors face each other, `MirrorTestDriver.cpp:269` calls
+`PrepareSecondOrderMirrorRtt`), and unlike a greets row it does not key on the
+user's uncommitted authoring files — which is exactly why `render_gate`'s own
+header keeps greets out. Recipe `--scene-mirrortest --mirror_rtt
+--shard_deferred --hdr` with `FDS_MIRROR_RTT_DUMP=1`, gated surface the 4
+`/tmp/rtt_*.ppm` slot dumps. Proved in **both** directions: PASS 3/3 on
+`6656300b`, **FAIL on `00d28a8b`** (`2ecd5e81…`) while the other three rows pass
+there unchanged. All three flags shown load-bearing by controls that do not
+discriminate the binaries. Details in `docs/SESSION_STATE.md` (2026-08-13b).
 
 ## 2026-08-10 — MEMORY-SIZE SWEEP: `--mem_census`, and the per-shadow-map FList (403 MiB at 0.5 % fill)
 
