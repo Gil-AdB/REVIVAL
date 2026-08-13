@@ -1670,12 +1670,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // striations across bright narrow cones (the
                         // disco-beam moire). One Newton-Raphson step
                         // (~24-bit) kills it for ~3 fma.
+                        // The step is one FRSQRTS (see rsqrt_step_x8).
                         __m256 vInvD          = _mm256_rsqrt_ps(vSafeDisc);
-                        vInvD = _mm256_mul_ps(vInvD,
-                                _mm256_fnmadd_ps(
-                                    _mm256_mul_ps(_mm256_set1_ps(0.5f), vSafeDisc),
-                                    _mm256_mul_ps(vInvD, vInvD),
-                                    _mm256_set1_ps(1.5f)));
+                        vInvD = rsqrt_step_x8(vSafeDisc, vInvD);
 
                         const __m256 vTwoA    = _mm256_add_ps(vAlpha, vAlpha);
                         const __m256 vZHi_v   = _mm256_load_ps(zHiArr);
@@ -1921,10 +1918,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // contribution per "sample-unit": mean × N ×
                         // coneAtten_mid × surfaceFade_mid.
                         // rcp refined for the same reason as invD.
+                        // The step is one FRECPS (see rcp_step_x8).
                         __m256 vRcpLen = _mm256_rcp_ps(vSafeLen);
-                        vRcpLen = _mm256_mul_ps(vRcpLen,
-                                  _mm256_fnmadd_ps(vSafeLen, vRcpLen,
-                                                   _mm256_set1_ps(2.0f)));
+                        vRcpLen = rcp_step_x8(vSafeLen, vRcpLen);
                         __m256 vAcc = _mm256_mul_ps(vIntegral, vRcpLen);
                         vAcc = _mm256_mul_ps(vAcc, vN);
                         vAcc = _mm256_mul_ps(vAcc, coneAtten_m);

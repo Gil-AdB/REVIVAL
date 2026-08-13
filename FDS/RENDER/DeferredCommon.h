@@ -581,6 +581,64 @@ static inline bool bouncePortalReject(const L &tl, int n,
 	       cz < tl.winMinZ[n] - pad || cz > tl.winMaxZ[n] + pad;
 }
 
+// ─── the Newton-Raphson refinement step at ONE instruction ──────────────────
+// arm64 has dedicated fused step instructions for exactly these two
+// recurrences, and the long-hand spelling below was costing three to five
+// vector-ALU ops for one of them.  Round 4 measured the cone pass at ~81% of
+// this core's 4-wide NEON ALU issue ceiling, which makes VECTOR-ALU OP COUNT
+// the metric that moves cycles (docs/HW_PROFILING.md section 12), so the same
+// 2-ops-to-1 argument that shipped FDS_CONE_NEONMINMAX applies here:
+//
+//   FRECPS  Vd, Vn, Vm  =  2.0 - Vn*Vm          (fused, one rounding)
+//   FRSQRTS Vd, Vn, Vm  = (3.0 - Vn*Vm) / 2     (fused, one rounding)
+//
+// The rcp step is `fnmadd(x, r, 2)` — literally FRECPS.  The rsqrt step is
+// `fnmadd(0.5*x, r*r, 1.5)` = (3 - x*r*r)/2 — literally FRSQRTS, one op in
+// place of a constant materialisation, a broadcast copy, a multiply and an
+// fmls.  Both were checked against the long-hand spelling over 61.4 M inputs
+// (every 37th representable positive float plus 4 M log-uniform draws): ZERO
+// bit differences for x > 2.4e-38.  Below that the long-hand form loses the
+// exponent — `0.5*x` goes subnormal and rounds — and the native step is the
+// MORE accurate of the two; the cone kernel's arguments (discriminants of
+// O(1e-9..1e4), W² floored at 1e-12, interval lengths) never reach there.
+// Build with -DFDS_CONE_NEONSTEP=0 for the long-hand spelling.
+#ifndef FDS_CONE_NEONSTEP
+#define FDS_CONE_NEONSTEP 1
+#endif
+
+#if FDS_CONE_NEONSTEP && (defined(__ARM_NEON) || defined(__aarch64__))
+// r * (2 - x*r) — one FRECPS per 128-bit half.
+static inline __m256 rcp_step_x8(__m256 x, __m256 r) {
+    simde__m256_private xp = simde__m256_to_private(x),
+                        rp = simde__m256_to_private(r), o;
+    for (int h = 0; h < 2; ++h)
+        o.m128_private[h].neon_f32 = vmulq_f32(rp.m128_private[h].neon_f32,
+            vrecpsq_f32(xp.m128_private[h].neon_f32, rp.m128_private[h].neon_f32));
+    return simde__m256_from_private(o);
+}
+// r * (3 - x*r*r)/2 — one FRSQRTS per 128-bit half (plus the r*r it needs).
+static inline __m256 rsqrt_step_x8(__m256 x, __m256 r) {
+    simde__m256_private xp = simde__m256_to_private(x),
+                        rp = simde__m256_to_private(r), o;
+    for (int h = 0; h < 2; ++h) {
+        const float32x4_t rr = vmulq_f32(rp.m128_private[h].neon_f32,
+                                         rp.m128_private[h].neon_f32);
+        o.m128_private[h].neon_f32 = vmulq_f32(rp.m128_private[h].neon_f32,
+            vrsqrtsq_f32(xp.m128_private[h].neon_f32, rr));
+    }
+    return simde__m256_from_private(o);
+}
+#else
+static inline __m256 rcp_step_x8(__m256 x, __m256 r) {
+    return _mm256_mul_ps(r, _mm256_fnmadd_ps(x, r, _mm256_set1_ps(2.0f)));
+}
+static inline __m256 rsqrt_step_x8(__m256 x, __m256 r) {
+    return _mm256_mul_ps(r, _mm256_fnmadd_ps(
+        _mm256_mul_ps(_mm256_set1_ps(0.5f), x),
+        _mm256_mul_ps(r, r), _mm256_set1_ps(1.5f)));
+}
+#endif
+
 // rsqrt + one Newton-Raphson step (~24-bit). The cone passes feed
 // cosT = D·W·rsqrt(W²) into smoothstep((cosT−cosO)/(cosI−cosO)):
 // for NARROW cones the 1/(cosI−cosO) gain is ~350 (1.5°/4.5°), which
@@ -588,10 +646,7 @@ static inline bool bouncePortalReject(const L &tl, int n,
 // attenuation noise — the beam 'fur'/fan-stripe moire family. Wide
 // city cones (gain 2-10) never showed it.
 static inline __m256 rsqrt_nr_x8(__m256 x) {
-    __m256 r = _mm256_rsqrt_ps(x);
-    return _mm256_mul_ps(r, _mm256_fnmadd_ps(
-        _mm256_mul_ps(_mm256_set1_ps(0.5f), x),
-        _mm256_mul_ps(r, r), _mm256_set1_ps(1.5f)));
+    return rsqrt_step_x8(x, _mm256_rsqrt_ps(x));
 }
 
 #endif // FDS_RENDER_DEFERRED_COMMON_H_INCLUDED
