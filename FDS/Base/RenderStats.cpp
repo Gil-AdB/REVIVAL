@@ -65,6 +65,23 @@ struct TlsHolder {
                        cur, cur + c.fillerPixelcount,
                        std::memory_order_relaxed)) {}
         }
+        // The --mip_stats histogram used to be DROPPED here, and that made the
+        // flag print nothing at all under --snapshot: the tile workers exit
+        // (and unregister) during shutdown, so by the time the atexit report
+        // ran the registry was empty and RenderStats_MipReport bailed on
+        // totFaces == 0. Everything a thread still holds has to be merged on
+        // its way out, exactly as Flush would have merged it — Flush zeroes
+        // what it takes, so this cannot double-count.
+        for (int m = 0; m < 16; ++m) {
+            fds_stats::g_mipLevelFaces[m] += c.mipLevelFaces[m]; c.mipLevelFaces[m] = 0;
+            fds_stats::g_mipLevelPix[m]   += c.mipLevelPix[m];   c.mipLevelPix[m]   = 0.0;
+        }
+        fds_stats::g_mipEnteredCum     += c.mipEntered;
+        fds_stats::g_mipFastUniformCum += c.mipFastUniform;
+        fds_stats::g_mipSplitCum       += c.mipSplit;
+        fds_stats::g_mipNomip   += c.mipNomip;    c.mipNomip   = 0;
+        fds_stats::g_mipNegArea += c.mipNegArea;  c.mipNegArea = 0;
+        fds_stats::g_mipBigFace += c.mipBigFace;  c.mipBigFace = 0;
         s_registry.erase(std::remove(s_registry.begin(), s_registry.end(), &c),
                          s_registry.end());
     }

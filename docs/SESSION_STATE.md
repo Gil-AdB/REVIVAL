@@ -1,5 +1,190 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-13e — THE JAMB STRIPING IS ONE 6:1 FACE, `--mip_aniso` FIXES IT, AND THE DEFAULT STAYS OFF BECAUSE THE BLUR IS YOURS TO CALL
+>
+> His report: at `FDS_GREETS_CAM="18.8969765,3.21025538,-58.888485,-0.896694958,-0.0735020638,0.436503887"`
+> t=5970, the grazing doorway jamb shows compressed high-frequency **striping** against
+> the neighbouring wall's coarse look — "a texture discontinuity near the edge".
+> `705b70da` proved it is not displacement (it reproduces bit for bit in the flat arm).
+> This session measured it. **The fix already existed as `--mip_aniso`; what did not
+> exist was any measurement of it, and two of the things its own flag doc asserted
+> turn out to be wrong.**
+>
+> ### THE DEFECT IS ONE FACE, AND THE NUMBER IS 6.0:1
+>
+> New instrument **`--mip_aniso_stats`** (default OFF, changes no pixel): a per-face
+> anisotropy census keyed on `Face*`, area-weighted across the tiles a face is clipped
+> into, printed once at exit. It reports the **singular values** of the UV→screen
+> Jacobian in texels per screen pixel — not the ratio of its two columns, which
+> understates a wall whose compression runs diagonally on screen.
+>
+> The striping face at his pose:
+>
+> | | value |
+> |---|---|
+> | anisotropy (σmax/σmin) | **6.0 : 1** |
+> | σmax / σmin | 1.73 / 0.29 texels per screen px |
+> | legacy geometric-mean LOD | −0.50 → **level 0** |
+> | max-axis LOD | +0.79 → **level 1** |
+> | dLOD | **+1.29** |
+> | undersampling at the chosen level | **1.73× → 0.87×** |
+>
+> With `mip_bias` 0.5 + truncation (= round-to-nearest) the geometric mean lands level 0
+> and the face still samples 1.73 texels per pixel along its worst axis. Point-sampled,
+> **that is the striping**. `--pom_mip_viz` confirms it per pixel: the whole jamb is
+> mip 0 under the legacy metric, and exactly that sliver turns mip 1 under `--mip_aniso`
+> — `docs/img/mipaniso/his_t5970_mipviz_legacy_vs_aniso.png`.
+>
+> **Before/after: `docs/img/mipaniso/his_t5970_sliver_legacy_vs_aniso.png`** (3×) and
+> `docs/img/mipaniso/his_t5970_jamb_wide_legacy_vs_aniso.png`.
+>
+> ### TWO CORRECTIONS TO THE `--mip_aniso` DOC, BOTH MEASURED
+>
+> 1. **"greets' corridor walls run ~16:1" is wrong** as an area-weighted claim. True
+>    area-weighted anisotropy is **1.80:1** at t=5970, **1.91:1** at p1 t=5743,
+>    **1.84:1** at t=5799. Only 18.3 % of covered area is ≥2:1 and 9.2 % ≥4:1.
+>    The first cut of my own census *did* print 16.6 — from one edge-on sliver with
+>    σmin→0 owning the mean. That was a clamping bug in the instrument, and it is
+>    almost certainly where the original 16:1 came from too.
+> 2. **The blurry neighbour is not a mip problem at all.** The wall the eye reads as
+>    "coarse" next to the striping one is at **0.22 texels per pixel — magnified 4.5×**,
+>    at level 0 under both metrics. No mip metric can touch it; that is point
+>    magnification, and only `--texture_filter>=1` (bilinear) would.
+>    **Half the reported discontinuity is therefore out of scope for this fix.**
+>
+> ### WHAT THE FLAG DOES FRAME-WIDE
+>
+> Undersampled area (σmax > 2^level) falls **71.8 % → 44.0 %** at t=5970 (82.4 → 53.6 at
+> p1, 76.1 → 57.0 at t=5799), and area undersampled by **more than 2×** falls
+> **6.3 % → 0.0 %** at every pose measured. Level-0 area 82.6 % → 79.1 %; max level 8
+> either way, so **the G-buffer's `mip:4` field does not overflow**.
+>
+> ### GROUND TRUTH, BECAUSE "SHARPER" AND "MORE CORRECT" ARE DIFFERENT CLAIMS
+>
+> Scored against a **4× supersampled capture** (`--snapshot_ss=4`, box-downsampled):
+>
+> | region | legacy RMSE | aniso RMSE |
+> |---|---|---|
+> | t=5970, the striping sliver | 9.300 | **8.726** (−6.2 %) |
+> | t=5970, whole frame | 6.070 | **6.042** |
+> | **p1 t=5743, whole frame** | **7.070** | 7.156 (+1.2 %) |
+>
+> **GpuBench at the same pose agrees with the supersampled reference and not with the
+> legacy grain** — four-way strip (legacy | aniso | 4× reference | GpuBench):
+> `docs/img/mipaniso/his_t5970_four_way_legacy_aniso_ss4x_gpubench.png`. Two
+> independent second opinions, same direction. Corroboration, not authority.
+>
+> ### THE COST, WHICH IS WHY THE DEFAULT STAYS OFF
+>
+> All 18 poses of `docs/greets_review_poses.txt`, both arms: **0.5 %–7.0 % of pixels
+> change** (p12/p13 at 1 LSB only). Frame-wide gradient energy falls **0–1.1 %**. But
+> the worst 128 px window in the battery loses **23 %** of its gradient energy, and it
+> is a real loss: distant low-contrast stonework flattens —
+> `docs/img/mipaniso/p1_t5743_BLURCOST_legacy_vs_aniso.png` (5×). That is the same pose
+> whose whole-frame ground-truth error gets *worse*. Other pairs:
+> `p1_t5743_floor_*`, `p2_t5773_wall_*`, `p17_t5967_floor_jamb_*`,
+> `t5799_longwall_*`, all in `docs/img/mipaniso/`.
+>
+> **A partial dial would not help and is not worth building.** `lod = lodGeo +
+> k·(lodMax−lodGeo)` only flips the reported face once `k·1.29 ≥ 1.0`, i.e. **k ≥ 0.78**
+> — any setting mild enough to protect the distant stonework leaves his defect exactly
+> as it was. Closed analytically from the census number, no arm built.
+>
+> ### TEMPORAL: IT DOES NOT FLICKER, IT FLICKERS LESS
+>
+> 13-step dolly along the real camera path (t=5967→5987, **identical poses in both
+> arms**, so motion is normalised out). Consecutive-frame mean |d| in the jamb band
+> **14.048 → 13.749 (−2.1 %)**, px>20 **23.26 % → 22.46 % (−3.5 %)**; bit-identical on
+> the walls it does not touch. `--mip_hysteresis` still engages on top of it (0.38 % of
+> pixels under the legacy metric, 0.65 % under this one) — measured through `--repro`
+> with 16 frames of real history, because `--snapshot` cannot express `Face::LastMip`
+> at all. Under `--repro` the flag's effect is 4.97 % vs the cold snapshot's 5.04 %, so
+> **none of this is a single-cold-tick artifact**.
+>
+> ### PERF: IT COSTS, IT DOES NOT PAY FOR ITSELF
+>
+> Interleaved ×6 at t=5970. The box was at **load 18**, so the wall column is not
+> resolvable below ~1 ms and the **hardware counters** are the measurement:
+>
+> | | legacy | aniso |
+> |---|---|---|
+> | renderFrame Ginstr/f | 4.287 | 4.292 (**+0.12 %**) |
+> | gbuffer Ginstr/f | 0.655 | 0.660 (**+0.76 %**) |
+>
+> The whole delta lands in the G-buffer phase, which is where `MiplevelClipper` runs.
+> **Mechanism, both halves:** the 5 extra MACs per fan triangle, *plus* the poly-SPLIT
+> branch firing more often — **166 → 236 invocations** at t=5970, because a higher LOD
+> puts more faces across a level boundary. There is **no** measurable texture-cache win
+> from the coarser mips; "coarser must be cheaper" did not happen.
+>
+> ### KNOCK-ONS CHECKED
+>
+> * **G-buffer `mip:4`** — max level 8 both arms, clamp to `numMipmaps-1` unchanged.
+> * **POM is not entangled with it.** The height march takes the per-face albedo mip
+>   when `--pom_height_mip` is −1, so the metric *does* feed POM's UV offset — but
+>   pinning the height mip to 1 leaves this flag's effect essentially unchanged
+>   (5.04 % of pixels vs 4.91 %). The change is albedo, not re-offset relief. For scale:
+>   `--pom_height_mip=1` **on its own** moves 5.07 % of pixels with 38 280 above 12/255,
+>   nearly 3× this flag's >12 count. That knob is the bigger lever and is untouched here.
+> * **`--mip_hysteresis`** — engages under both metrics, unchanged code path.
+>
+> ### A BUG FIXED ON THE WAY: `--mip_stats` PRINTED NOTHING
+>
+> `--mip_stats` has been **silently dead under `--snapshot`**. `TlsHolder::~TlsHolder`
+> merged `polysRendered` and `fillerPixelcount` on the way out but **dropped the mip
+> histogram**, then unregistered — so the tile workers exiting during shutdown emptied
+> the registry, and the atexit report bailed on `totFaces == 0`. Fixed by merging the
+> histogram and the mip counters in the dtor exactly as `Flush` would (Flush zeroes what
+> it takes, so it cannot double-count). Every `[MIP]` number in this block, and the
+> ability to re-check the `--mips` doc's own figures, depends on that fix.
+>
+> ### GATES — ALL HOLD, FLAGS DEFAULT OFF
+>
+> greets `778fa6acd85a69cf241babefcdaf598e` **3/3**, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9` (run 1 discarded, cold-cache as documented),
+> `render_gate.sh` **ALL FOUR PASS** (`mirrortest 4ac809e5`, `rttslot 826c09e6`,
+> `conetest b41894f9`, `halotest 166fa25a`). Differential byte-null proof: greets
+> t=5970 rendered by the **pre-instrument** binary and by the final one are the same
+> md5 `a1399305b45d0b869939dbba3a318abd`. city cold-bakes its own cube in a fresh
+> worktree (`cache/city_envmap_cube_c0c60ff9.bin`) and reads
+> `3f8948232c192a979ffe7f76c4b387ab` stable 2/2 — correct-for-that-cube, not drift,
+> per the standing city-cube trap.
+>
+> ### THE CALL IS YOURS
+>
+> **`--mip_aniso` stays default 0.** Max-axis *is* the correct metric for a point
+> sampler, every objective score in the defect region agrees, and the GPU and a 4×
+> reference both back it — but there is no aniso-tap filler to win the detail back, so
+> the distant-surface softening is a look decision, not a correctness one, and the
+> battery does show it. One token to look at it:
+>
+> ```sh
+> cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+>   FDS_GREETS_CAM="18.8969765,3.21025538,-58.888485,-0.896694958,-0.0735020638,0.436503887" \
+>   ./DEMO --deferred --mip_aniso --snapshot=greets@t=5970 --out=/tmp/x
+> ```
+>
+> **If you countersign the flip, the pin moves are already measured** — re-verify them
+> in the flipping commit rather than re-deriving:
+>
+> | gate | today (`--mip_aniso` off) | under `--mip_aniso` |
+> |---|---|---|
+> | greets t=1588 | `778fa6acd85a69cf241babefcdaf598e` 3/3 | **`7ac564bc7b3a6c2e0c88975fc9949258`** 3/3 |
+> | fountain t=2500 | `8db68ccb59416e9a44037e9f387b7bd9` 2/2 | **`5ac2f2c8c9cc15818fecdb4aa866ff9c`** 3/3 |
+> | city t=1961 (this worktree's cold cube) | `3f8948232c192a979ffe7f76c4b387ab` 2/2 | **`ee68cb19b0cc20c3cf53b70690b3c052`** 2/2 |
+> | `render_gate.sh` | ALL FOUR PASS | **ALL FOUR PASS, same hashes** |
+>
+> The render_gate rows do **not** move — those scenes carry no minified textured
+> geometry, exactly as the `--mips` doc says; run with `FDS_MIP_ANISO=1` to confirm.
+> Note the fountain row needed 3 consecutive runs: the first fountain run after a
+> different scene has run returns a cold-cache value (`ac38f73d…` here), the same
+> discard-run-1 class already documented under the city cube.
+>
+> **STILL OPEN, and it is the other half of his report:** the neighbouring wall's
+> blockiness is 4.5× point magnification. The fix for that is bilinear
+> (`--texture_filter>=1`), which is default 0 and is a separate, larger decision.
+
+
 > ## 2026-08-13d — ROUND 5, THE SPELLING SWEEP: −1.8 % MORE CYCLES, AND THE METRIC ITSELF GETS CORRECTED — OPS ONLY COUNT WHEN THEY ARE ON THE DEPENDENCY CHAIN
 >
 > Round 4 left a metric — **vector-ALU op count** — and one example of it.

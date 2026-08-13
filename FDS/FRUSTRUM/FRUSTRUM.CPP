@@ -21,6 +21,10 @@
 namespace meka { extern thread_local float g_tlsMipFrac; }
 #include <climits>
 #include <mutex>
+#include <map>
+#include <vector>
+#include <algorithm>
+#include <cmath>
 
 // 4-lane SIMD for FInterpolator's contiguous Vertex-field lerps.
 // Vertex is #pragma pack(1) so the relevant 4-float blocks
@@ -591,6 +595,120 @@ void FrustumClipper::Down()
 
 // CorrectCWOrder moved to header (FRUSTRUM.H) as inline member.
 
+// --mip_aniso_stats: PER-FACE anisotropy census. DIAGNOSTIC ONLY — changes no
+// pixel; the whole thing is behind `if (anisoCensus)` in MiplevelClipper and
+// prints once at exit. Answers "which faces stripe, at what anisotropy, and how
+// far apart are the geometric-mean and max-axis LODs there" with numbers rather
+// than by reading tint chromaticity off --pom_mip_viz.
+//
+// A face is visited once PER TILE with a differently clipped polygon, so every
+// quantity is accumulated AREA-WEIGHTED and keyed on the Face* — the printed row
+// is the whole face as the eye sees it, not one tile's shard.
+namespace {
+
+struct AnisoRec {
+	double area   = 0.0;   // covered screen px (sum of 0.5*|fan sum|)
+	double wRatio = 0.0;   // area-weighted TRUE anisotropy (sigmaMax/sigmaMin)
+	double wLegacy= 0.0;   // area-weighted legacy (geometric-mean) LOD, pre-bias
+	double wAniso = 0.0;   // area-weighted max-axis LOD, pre-bias
+	// EVERY scale quantity is accumulated in LOG2 space. Mixing a linear mean of
+	// sigma with a log mean of the LOD makes the two columns disagree by Jensen
+	// on any face whose tiles span a wide depth range — the first cut of this
+	// census printed sMax 6.45 next to LOD 0.46 on such a face, which is not a
+	// finding, it is two different averages.
+	double wSMax  = 0.0;   // area-weighted log2(sigmaMax): texels/px, worst direction
+	double wSMin  = 0.0;
+	double wCx = 0.0, wCy = 0.0;
+	dword  splits = 0;     // visits that took the poly-split branch
+	dword  visits = 0;
+	const char* tex = nullptr;
+};
+
+std::mutex          g_anisoMx;
+// Keyed by Face* — a raw map keeps the diagnostic self-contained; it is never
+// touched unless the flag is on.
+std::map<const void*, AnisoRec> g_anisoMap;
+
+void AnisoCensus_Report()
+{
+	std::lock_guard<std::mutex> lk(g_anisoMx);
+	if (g_anisoMap.empty()) return;
+	std::vector<std::pair<const void*, AnisoRec>> v(g_anisoMap.begin(), g_anisoMap.end());
+	std::sort(v.begin(), v.end(), [](const std::pair<const void*, AnisoRec>& a,
+	                                 const std::pair<const void*, AnisoRec>& b) {
+		return a.second.area > b.second.area;
+	});
+	// The clipper's own bias, so `lvl` here is the level the frame actually used.
+	const float bias = fds::FeatureFlags::mip_bias();
+	double totArea = 0.0, wRatioAll = 0.0, wDeltaAll = 0.0;
+	// Area FRACTIONS, which is what the eye weighs: how much of the frame is
+	// anisotropic, and how much of it the chosen level still undersamples.
+	double aAniso2 = 0.0, aAniso4 = 0.0, aUnderG = 0.0, aUnderM = 0.0, aUnderG2 = 0.0, aUnderM2 = 0.0;
+	for (auto& e : v) {
+		const AnisoRec& r = e.second;
+		if (r.area <= 0.0) continue;
+		const double ia = 1.0 / r.area;
+		totArea   += r.area;
+		wRatioAll += r.wRatio;                           // already area-weighted
+		wDeltaAll += r.wAniso - r.wLegacy;
+		const double aniso = r.wRatio * ia;              // in log2 units
+		if (aniso >= 1.0) aAniso2 += r.area;             // >= 2:1
+		if (aniso >= 2.0) aAniso4 += r.area;             // >= 4:1
+		const double sM = r.wSMax * ia;                  // log2 texels/px
+		int lvg = int(r.wLegacy * ia + bias); if (lvg < 0) lvg = 0;
+		int lvm = int(r.wAniso  * ia + bias); if (lvm < 0) lvm = 0;
+		if (sM - lvg > 0.0) aUnderG += r.area;
+		if (sM - lvm > 0.0) aUnderM += r.area;
+		if (sM - lvg > 1.0) aUnderG2 += r.area;
+		if (sM - lvm > 1.0) aUnderM2 += r.area;
+	}
+	fprintf(stderr, "[ANISO] per-face census, top 40 by covered area "
+	                "(area-weighted within a face; cumulative over every frame)\n");
+	fprintf(stderr, "[ANISO] sMax/sMin = singular values of the UV->screen Jacobian in TEXELS "
+	                "per screen pixel. undersamp = sMax / 2^level: >1 means the level chosen "
+	                "still skips texels along the worst axis, which is the striping.\n");
+	fprintf(stderr, "[ANISO]   rank |     area px | ctr x,y     |   sMax   sMin | aniso |"
+	                " LOD geo  LOD max   dLOD | lvl g m | undersamp g    m | split | texture\n");
+	const size_t n = v.size() < 40 ? v.size() : 40;
+	for (size_t i = 0; i < n; ++i) {
+		const AnisoRec& r = v[i].second;
+		if (r.area <= 0.0) continue;
+		const double ia = 1.0 / r.area;
+		const double lg = r.wLegacy * ia, la = r.wAniso * ia;
+		const double sM = r.wSMax * ia;
+		int lvg = int(lg + bias); if (lvg < 0) lvg = 0;
+		int lvm = int(la + bias); if (lvm < 0) lvm = 0;
+		fprintf(stderr, "[ANISO] %6zu | %11.0f | %5.0f,%-5.0f   | %6.2f %6.2f | %5.1f |"
+		                " %7.2f %8.2f %+6.2f | %2d %2d  | %8.2f %6.2f | %5.1f%% | %s\n",
+		        i, r.area, r.wCx * ia, r.wCy * ia,
+		        exp2(sM), exp2(r.wSMin * ia), exp2(r.wRatio * ia),
+		        lg, la, la - lg, lvg, lvm,
+		        exp2(sM - lvg), exp2(sM - lvm),
+		        r.visits ? 100.0 * double(r.splits) / double(r.visits) : 0.0,
+		        r.tex ? r.tex : "(none)");
+	}
+	if (totArea > 0.0) {
+		const double it = 100.0 / totArea;
+		fprintf(stderr, "[ANISO] faces=%zu totalArea=%.0f areaWeightedAniso=%.2f:1 "
+		                "areaWeightedDeltaLOD=%+.3f\n",
+		        v.size(), totArea, exp2(wRatioAll / totArea), wDeltaAll / totArea);
+		fprintf(stderr, "[ANISO] area with aniso >=2:1 %.1f%%  >=4:1 %.1f%%   |  "
+		                "UNDERSAMPLED area (sMax > 2^level): geo %.1f%% -> max-axis %.1f%%   "
+		                "(by >2x: geo %.1f%% -> max-axis %.1f%%)\n",
+		        aAniso2 * it, aAniso4 * it,
+		        aUnderG * it, aUnderM * it, aUnderG2 * it, aUnderM2 * it);
+	}
+	fflush(stderr);
+}
+
+void AnisoCensus_ArmAtExit()
+{
+	static std::once_flag once;
+	std::call_once(once, [] { std::atexit(&AnisoCensus_Report); });
+}
+
+}  // namespace
+
 // --mip_stats bookkeeping. `level` is the level ACTUALLY handed to the filler
 // (i.e. after the --mips gate), `pix` the covered screen area in pixels — the
 // caller passes 0.5*|signed fan sum| since the fan sum carries no 0.5 factor.
@@ -677,6 +795,12 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	if (mipStats) fds::RenderStats_MipReportAtExit();
 	// --mip_aniso: max-axis LOD instead of the geometric-mean area ratio.
 	const bool  mipAniso = fds::FeatureFlags::mip_aniso();
+	// --mip_aniso_stats: per-face anisotropy census (diagnostic, no pixel moves).
+	// It needs the same Jacobian --mip_aniso needs, so it also opens the fan
+	// sweep's accumulation below.
+	const bool  anisoCensus = fds::FeatureFlags::mip_aniso_stats();
+	if (anisoCensus) AnisoCensus_ArmAtExit();
+	const bool  wantJacobian = mipAniso || anisoCensus;
 
 	Texture *Tx = F->Txtr->Txtr;
 	int32_t L = Tx->numMipmaps-1; // maximal level	
@@ -704,7 +828,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		pixArea += (C->PX - A->PX) * (B->PY - A->PY) - (B->PX - A->PX) * (C->PY - A->PY);
 		texArea += (C->U  - A->U ) * (B->V  - A->V ) - (B->U  - A->U ) * (C->V  - A->V );
 
-		if (mipAniso) {
+		if (wantJacobian) {
 			const float e1x = B->PX - A->PX, e1y = B->PY - A->PY;
 			const float e2x = C->PX - A->PX, e2y = C->PY - A->PY;
 			const float t1u = B->U  - A->U , t1v = B->V  - A->V ;
@@ -746,6 +870,62 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		return -1.0f;
 	};
 
+	// --mip_aniso_stats only. Files one area-weighted sample for this
+	// (face, tile) visit. Never called with the flag off.
+	auto CensusRecord = [&](bool split) {
+		if (fabs(detS) <= 1e-12f) return;
+		const float rdet = 1.0f / detS;
+		const float ux = nUx * rdet * Tx->SizeX, vx = nVx * rdet * Tx->SizeY;
+		const float uy = nUy * rdet * Tx->SizeX, vy = nVy * rdet * Tx->SizeY;
+		// TRUE anisotropy = the singular values of J = [dUV/dx | dUV/dy], not the
+		// ratio of its two COLUMNS. A wall whose compression direction runs
+		// diagonally across the screen has two similar columns and a large real
+		// anisotropy, so the column ratio would understate it.
+		const double E = double(ux)*ux + double(vx)*vx;
+		const double G = double(uy)*uy + double(vy)*vy;
+		const double Fc= double(ux)*uy + double(vx)*vy;
+		const double disc = sqrt((E-G)*(E-G) + 4.0*Fc*Fc);
+		double s2hi = 0.5*(E+G+disc), s2lo = 0.5*(E+G-disc);
+		if (s2lo < 0.0) s2lo = 0.0;
+		const double lo = sqrt(s2hi), sh = sqrt(s2lo);
+		if (lo <= 1e-10) return;
+		const double area = 0.5 * fabs(pixArea);
+		if (area <= 0.0) return;
+		double cx = 0.0, cy = 0.0;
+		for (mword k = 0; k < C_numVerts; k++) { cx += C_Prim[k]->PX; cy += C_Prim[k]->PY; }
+		cx /= double(C_numVerts); cy /= double(C_numVerts);
+		// The legacy metric IS the geometric mean of the two axis densities, so
+		// quote it in the same closed form the clipper uses rather than
+		// re-deriving it from the Jacobian — that keeps dLOD honest even when
+		// the polygon is degenerate enough that the two disagree.
+		const double lodGeo = 0.5 * log2(fabs(double(texArea) * Tx->SizeX * Tx->SizeY / pixArea));
+		// The max-axis LOD the clipper would use — max of the two Jacobian
+		// COLUMNS, matching AnisoLod() exactly, not the singular value. sMax
+		// below is the honest worst-direction rate and can exceed it by up to
+		// sqrt(2); quoting both is the point.
+		const double lodMax = 0.5 * log2(std::max(E, G));
+		const double lgHi  = log2(lo);
+		// A perfectly edge-on sliver has sigmaMin -> 0 and an unbounded ratio;
+		// clamp the SHORT axis at 2^-12 texels/px so one degenerate face cannot
+		// own the area-weighted mean (the first cut reported 16.6 for a scene
+		// whose top-40 faces are all under 7).
+		const double lgLo  = std::max(log2(std::max(sh, 1.0/4096.0)), -12.0);
+		if (!std::isfinite(lodGeo) || !std::isfinite(lodMax) || !std::isfinite(lgHi)) return;
+		std::lock_guard<std::mutex> lk(g_anisoMx);
+		AnisoRec& r = g_anisoMap[(const void*)F];
+		r.area    += area;
+		r.wRatio  += area * (lgHi - lgLo);
+		r.wLegacy += area * lodGeo;
+		r.wAniso  += area * lodMax;
+		r.wSMax   += area * lgHi;
+		r.wSMin   += area * lgLo;
+		r.wCx     += area * cx;
+		r.wCy     += area * cy;
+		r.visits++;
+		if (split) r.splits++;
+		if (!r.tex) r.tex = Tx->FileName;
+	};
+
 #ifdef ENABLE_PIXELCOUNT
 	FDS_STATS_ADD_PIXELS_S(0.5f * fabs(pixArea));
 #endif
@@ -766,6 +946,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 			g_MipLevel = 0;
 			meka::g_tlsMipFrac = 0.0f;
 		} else {
+			if (anisoCensus) CensusRecord(false);
 			const float anis = mipAniso ? AnisoLod() : -1.0f;
 			const float mipF = (anis >= 0.0f
 			                    ? anis
@@ -858,6 +1039,8 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	if (iMl < 0) iMl = 0;
 	if (iMl > L) iMl = L;
 
+
+	if (anisoCensus) CensusRecord(iml != iMl);
 
 	// simple case (uniform mipmap across polygon)
 	// should also include all polygons with reletively small onscreen area, because
