@@ -3861,7 +3861,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// per-point veto, so the second border's densification and pinning
 			// survive the split. Faces already narrower than 1.6x the band are
 			// left to the recursion unchanged.
-			constexpr float kBandWidth = 0.10f;   // world units, chamfer span
+			constexpr float kBandWidth = 0.02f;   // world units: the RETURN FACE width (rung 2; was 0.10)
 			{
 				int nBand = 0;
 				bool didBand = true;
@@ -4601,8 +4601,39 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							e = std::max(e, G.prof[j2].second);
 						env[i2] = e;
 					}
-					for (size_t i2 = 0; i2 < G.prof.size(); ++i2)
-						G.prof[i2].second = G.prof[i2].second - env[i2];   // deficit ≤ 0
+					// LEVEL FIX (final round), two parts.
+					// 1. The profile used to store the DEFICIT alone, welding the
+					//    corner to the AUTHORED plane while the faces beside it
+					//    stand PROUD at field level -- the stone always overhung
+					//    the corner: the beak/wrap at every jamb, unfixable by
+					//    any band width.
+					// 2. Riding env(s) pointwise traded the beak for an S-curve:
+					//    grazing magnifies the envelope's slow +-0.05 wobble into
+					//    a visibly bowed arris. A masonry corner is a STRAIGHT
+					//    line on the wall's common stone-top plane -- so the
+					//    level is one per-line CONSTANT (the median stone-top),
+					//    and only REAL grooves notch below it.
+					float medEnv = mipMean;
+					{
+						std::vector<float> ecopy(env);
+						std::nth_element(ecopy.begin(), ecopy.begin()+ecopy.size()/2, ecopy.end());
+						medEnv = ecopy[ecopy.size()/2];
+					}
+					const float s0 = G.prof.front().first, s1 = G.prof.back().first;
+					for (size_t i2 = 0; i2 < G.prof.size(); ++i2) {
+						const float deficit = G.prof[i2].second - env[i2];   // pointwise, <= 0
+						constexpr float kWobble = 0.08f;   // stone-band wobble vs real groove
+						const float notch = (deficit < -kWobble) ? deficit : 0.0f;
+						// END TAPER: the line's ends abut CROSS-MATERIAL geometry
+						// (lintel cap, floor course) that never displaces; a proud
+						// level there opens a sliver against the unmoved cap
+						// (measured: 128 blue px at t=6039). Fade the LEVEL to 0
+						// over the last 0.3 u of each end; notches keep cutting.
+						constexpr float kEndTaper = 0.30f;
+						const float dEnd = std::min(G.prof[i2].first - s0, s1 - G.prof[i2].first);
+						const float ramp = std::max(0.0f, std::min(1.0f, dEnd / kEndTaper));
+						G.prof[i2].second = (medEnv - mipMean)*ramp + notch;
+					}
 				}
 				const int32_t gid = int32_t(mitreGroups.size());
 				// SIGN VALIDATION, eye-independent: the bisector must point to the
@@ -4752,7 +4783,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// s, so they cannot shear, and a groove row recesses on BOTH faces —
 			// the user's stated expectation, which is authoritative here.
 			else if (!mitreGroups.empty()) {
-				constexpr float kBlendW = 0.12f;   // band width + weld-miss margin
+				constexpr float kBlendW = 0.06f;   // final: covers the band polyline (0.02) so
+				                                   // its verts land near the weld level — the
+				                                   // pointwise-vs-constant hairline closes —
+				                                   // while full field returns by 0.06 u.  Was:
+				                                   // until kBlendW of the line, then a
+				                                   // steep smoothstep drop to the weld.
+				                                   // The ease WAS the wrap (was 0.12 linear).
 				for (const MitreGroup &G : mitreGroups) {
 					if (G.prof.empty()) continue;
 					const Vector &P0 = basePos[i];
@@ -4775,7 +4812,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						const float t = dt > 1e-9f ? (s - PR[lo].first)/dt : 0.0f;
 						hp = PR[lo].second + (PR[hi].second - PR[lo].second)*t;
 					}
-					const float w    = 1.0f - std::sqrt(d2)/kBlendW;  // 1 at the line
+					float w = 1.0f - std::sqrt(d2)/kBlendW;           // 1 at the line
+					w = w*w*(3.0f - 2.0f*w);                          // smoothstep: C1 at both ends
 					const float dspM = amp*hp/G.cosHalf;
 					const float vx = w*G.bis.x*dspM + (1.0f-w)*dx*dsp;
 					const float vy = w*G.bis.y*dspM + (1.0f-w)*dy*dsp;
