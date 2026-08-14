@@ -4417,24 +4417,73 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				G.dir = mc[vs[0]].dir; G.bis = bis; G.cosHalf = ch;
 				G.nA = int(A.size()); G.nB = int(B.size());
 				const std::vector<size_t> &own = (B.size() > A.size()) ? B : A;
+				// RAW field, then LOCAL UPPER ENVELOPE — two deliberate choices:
+				// 1. NO line-height override (lineRep/linePlat implement the
+				//    face-interior two-population carve; injected into a border
+				//    profile they produce 1.3 u constant bands with ~7 cm cliffs
+				//    — the first form of the user's t=5998 wedge).
+				// 2. The profile stored is the DEFICIT below a rolling local
+				//    upper envelope (±0.30 u), not (h − mipMean). The raw field
+				//    carries low-frequency stone-height BANDS (±0.05 u), and at
+				//    a grazing mitred corner a 2 cm band amplifies into a
+				//    protruding ledge — the second form of the same wedge. What
+				//    the corner physically is: a straight arris along each stone
+				//    face, cut at every joint. Envelope-deficit gives exactly
+				//    that — stones flush at the authored line (deficit ~0),
+				//    grooves notching in (deficit < 0), bulges impossible by
+				//    construction (deficit ≤ 0 always).
 				for (size_t k : own) {
 					const uint32_t v = mc[k].v;
-					float h = hCnt[v] ? hSum[v]/float(hCnt[v]) : mipMean;
-					if (lineHeight) {   // same override the main loop applies
-						if (edgeOwned[v]) { if (lineRepV[v] < 1e29f) h = lineRepV[v]; }
-						else if (linePlatD[v] < 1e29f) h = linePlatV[v];
-					}
+					const float h = hCnt[v] ? hSum[v]/float(hCnt[v]) : mipMean;
 					G.prof.push_back({mc[k].s, h});
 				}
 				std::sort(G.prof.begin(), G.prof.end());
 				if (G.prof.empty()) { nMitreSolo += int(vs.size()); continue; }
+				{
+					const float kEnvWin = 0.30f;   // half-window, world u (< course, > groove)
+					std::vector<float> env(G.prof.size());
+					for (size_t i2 = 0; i2 < G.prof.size(); ++i2) {
+						float e = G.prof[i2].second;
+						for (size_t j2 = i2; j2 > 0 && G.prof[j2-1].first >= G.prof[i2].first - kEnvWin; --j2)
+							e = std::max(e, G.prof[j2-1].second);
+						for (size_t j2 = i2+1; j2 < G.prof.size() && G.prof[j2].first <= G.prof[i2].first + kEnvWin; ++j2)
+							e = std::max(e, G.prof[j2].second);
+						env[i2] = e;
+					}
+					for (size_t i2 = 0; i2 < G.prof.size(); ++i2)
+						G.prof[i2].second = G.prof[i2].second - env[i2];   // deficit ≤ 0
+				}
 				const int32_t gid = int32_t(mitreGroups.size());
-				if (mitreCensus)
+				// SIGN VALIDATION, eye-independent: the bisector must point to the
+				// FRONT of both wall populations — its dot with each population's
+				// average outward normal must be positive (≈ cosHalf). A negative
+				// dot on either side flags an inverted weld before any render.
+				float vA = 0.0f, vB = 0.0f;
+				{
+					Vector aA{0,0,0}, aB{0,0,0};
+					for (size_t k : A) { aA.x+=mc[k].nOwn.x; aA.y+=mc[k].nOwn.y; aA.z+=mc[k].nOwn.z; }
+					for (size_t k : B) { aB.x+=mc[k].nOwn.x; aB.y+=mc[k].nOwn.y; aB.z+=mc[k].nOwn.z; }
+					auto nrm = [](Vector &v){ const float l=std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z);
+						if (l>1e-9f){v.x/=l;v.y/=l;v.z/=l;} };
+					nrm(aA); nrm(aB);
+					vA = bis.x*aA.x + bis.y*aA.y + bis.z*aA.z;
+					vB = bis.x*aB.x + bis.y*aB.y + bis.z*aB.z;
+				}
+				if (mitreCensus || vA < 0.05f || vB < 0.05f) {
 					std::fprintf(stderr, "[STONE-MITRE] '%s' line %d: dir(%+.2f,%+.2f,%+.2f) "
-						"bis(%+.2f,%+.2f,%+.2f) cosHalf %.3f verts %d+%d span s[%.2f,%.2f]\n",
+						"bis(%+.2f,%+.2f,%+.2f) cosHalf %.3f verts %d+%d span s[%.2f,%.2f] "
+						"sign-check A %+.2f B %+.2f %s\n",
 						matName, gid, double(G.dir.x), double(G.dir.y), double(G.dir.z),
 						double(bis.x), double(bis.y), double(bis.z), double(ch),
-						G.nA, G.nB, double(G.prof.front().first), double(G.prof.back().first));
+						G.nA, G.nB, double(G.prof.front().first), double(G.prof.back().first),
+						double(vA), double(vB),
+						(vA > 0.05f && vB > 0.05f) ? "OK" : "INVERTED?");
+					for (size_t k = 0; k < G.prof.size(); k += 6)
+						std::fprintf(stderr, "[STONE-MITRE-PROF] line %d s=%.3f deficit=%.3f "
+							"dsp=%+.4f\n", gid,
+							double(G.prof[k].first), double(G.prof[k].second),
+							double(amp*G.prof[k].second/ch));
+				}
 				mitreGroups.push_back(std::move(G));
 				for (size_t k : vs) { mitreOf[mc[k].v] = gid; ++nMitreVerts; }
 			}
@@ -4529,7 +4578,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const float t = dt > 1e-9f ? (s - PR[lo].first)/dt : 0.0f;
 					hp = PR[lo].second + (PR[hi].second - PR[lo].second)*t;
 				}
-				dsp = amp*(hp - mipMean)/G.cosHalf;
+				dsp = amp*hp/G.cosHalf;   // hp = envelope DEFICIT (<= 0): notch or flush
 				dx = G.bis.x; dy = G.bis.y; dz = G.bis.z;
 				++nMitreApplied;
 			}
