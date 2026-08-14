@@ -1,5 +1,109 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-14b — THE PARKED SHADOW EARLY-OUT, MEASURED: HALF OF EVERY TILE'S LIGHT LIST AT YOUR POSE CANNOT LIGHT ONE PIXEL OF THAT TILE
+>
+> The shadow-diet round parked *"per-tile light/shadow early-outs"* because they
+> change shadow bytes. Measured now, and the two halves split cleanly: one is
+> byte-null and ships default ON, the other is refuted at the tile with numbers.
+> Full write-up + every table in `docs/OPTIMIZATION_BACKLOG.md` (2026-08-14).
+>
+> ### THE DENOMINATOR WAS WRONG BY 2x, SO FIX IT FIRST
+>
+> The parked note said shadow sampling is 48.8 % of the lighting stage. By
+> ablation (`--prof_no_cube_tap`, interleaved min-of-4, greets t=5743): the whole
+> cube tap is **7.269 ms of a 29.710 ms lighting-w1 — 24.5 %**, and 15.8 % of the
+> frame. Every ceiling below is a fraction of 7.27 ms.
+>
+> ### SHIPPED, DEFAULT ON, BYTE-NULL — `--deferred_tile_sphere_cull`
+>
+> The tile light list culled each light against the tile's screen rect **and**,
+> separately, against its z-extent. Two separable projections of a sphere are
+> strictly weaker than the sphere: a light off the **diagonal** corner of a
+> tile's frustum chunk passes both and reaches no pixel. Now the light's range
+> sphere is tested against the tile's chunk sphere — the one `tileChunkSphere()`
+> already builds for the spot-cone cull, reading the **same** `range2` the
+> per-pixel test compares against.
+>
+> New instrument `--shadow_tap_census` is what made this decidable, and at
+> **your pose** (t=3122, 1512x848) it found the thing worth finding:
+>
+> | | greets t=5743 @1920x1080 | **your pose** t=3122 @1512x848 |
+> |---|--:|--:|
+> | lights/tile | 8.72 | **15.14** |
+> | tile-light pairs that light ZERO pixels of their tile | 9.6 % | **52.5 %** |
+> | loop-prologue px/frame spent on them | 0.87 M | **5.17 M** |
+> | after the cull | 0.39 M | **2.50 M** |
+> | cube taps/frame, before AND after | 4.725 M | 0.848 M |
+>
+> **The tap count not moving is the structural proof of byte-nullity** — 397
+> (tile x light) pairs deleted a frame at your pose and not one tap changed.
+>
+> Cost, three arms (parent binary / OFF / ON), one asset tree, interleaved, min
+> over rounds. The box was at load 10-13 from other agents, so read `Ginstr/f`
+> — it reproduces to 0.3 % and a descheduled worker retires no instructions:
+>
+> | | parent | OFF | **ON** |
+> |---|--:|--:|--:|
+> | your pose, lighting-w1 Ginstr/f | 1.998 | 2.001 | **1.935 (-3.3 %)** |
+> | your pose, renderFrame Ginstr/f | 5.163 | 5.168 | **5.097 (-1.4 %)** |
+> | t=5743, lighting-w1 Ginstr/f | 3.296 | 3.296 | **3.278 (-0.55 %)** |
+>
+> **Said plainly: the wall column does not separate the arms at t=5743** (per-round
+> spread +/-1 ms against a 0.5 % delta). At your pose lighting-w1's wall min moves
+> 19.545 -> 18.979. The instruction column is monotone at both poses and the
+> mechanism predicts the size it measures.
+>
+> **GATES, cull ON *and* OFF on the same binary** (differential, so the claim is
+> "this moved nothing" rather than "the hash matches"): greets
+> `778fa6acd85a69cf241babefcdaf598e` 3/3 ON, 2/2 OFF; fountain
+> `8db68ccb59416e9a44037e9f387b7bd9` 2/2 ON (run 1 cold-bake discarded), 3/3 OFF;
+> city `3f8948232c192a979ffe7f76c4b387ab` 2/2 both; `render_gate.sh` **ALL FOUR
+> PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`). The glass paths are
+> covered on purpose — the greets pin runs `--glass-refract=1 --glass-test
+> --xpar-peel-passes=4` — because the chunk sphere spans OPAQUE depth bounds and a
+> transparent pixel in front of `zMin` sits outside it. That exposure is not new
+> (the shipped `deferred_zcull` rejects on the same `zMin`) and it does not fire.
+>
+> ### REFUTED AT THE TILE, AND THE REASON IS GRANULARITY
+>
+> A **perfect oracle** — free, error-free — collapsing every tile-uniform
+> (tile x light) entry to one answer removes 16.8 % of taps at t=5743: a
+> **1.22 ms ceiling**, for a byte-moving change whose errors would land on
+> 160x135 px blocks, the most visible seam size in the frame. Not built.
+>
+> The coherence is real, just not at the tile. `--shadow_tap_census_block=B`,
+> same frame, uniform share of all 4.725 M taps: tile **16.8 %**, 32x32 35.8 %,
+> 16x16 50.9 %, **8x8 76.1 %**, 4x4 89.5 %. So the parked idea had the right
+> instinct and the wrong scale by a factor of ~16. The backlog now carries a
+> **byte-null** 8x8 respecification instead of the byte-moving tile one: in
+> PolyId mode, a block footprint whose cube-face texels all carry one id `c`
+> gives the 2x2 PCF exactly, `occ = (c != 0 && c != receiverId)`, with no tap and
+> no error — it needs per-8x8 depth bounds and an id-uniformity pyramid per cube
+> face. That is a real build, not a tweak, so it is specified rather than started.
+>
+> ### DEAD HYPOTHESES, WITH NUMBERS
+>
+> * *"Taps still run for out-of-range lights."* **False in the shipping kernel** —
+>   the scalar loop tests `len2 > r2` before every tap. The census closes it.
+> * *...but TRUE in the 8-wide `--deferred_vec` kernel*, where an out-of-range lane
+>   gets `safe_len2 = 1` and so `k = dot * (1 - 1/Range) > 0`, passes the
+>   `kArr[lane] <= 0` guard, taps, and has the result blended away. Costs this box
+>   nothing (`FDS_DEFERRED_VEC_DEFAULT` is 0 on arm64); live waste on x86. **Left
+>   alone deliberately — no pin covers that path**, so a "free" fix there would be
+>   an unverifiable one.
+> * *"The tile lists do no range culling."* They do (screen rect, z-extent, cone,
+>   mirror presence). The gap was only that rect AND z is a separable sphere.
+>
+> ### THE INSTRUMENT IS COMPILE-GATED, AND THAT IS ITSELF A MEASUREMENT
+>
+> Never-taken census hooks in the light loop's two innermost bodies still cost
+> **+2.0 % of lighting-w1's instructions** as first written (+0.9 % after moving
+> the block index to the tap site; folding four counter arrays into one did not
+> help). Register pressure, the same mechanism `d9248f6d` found in the cube tap's
+> `FDS_DEV` abort branch. So they are behind `-DFDS_SHADOW_TAP_CENSUS=ON`,
+> default OFF, and the shipping kernel measures **+0.15 %** against its parent —
+> inside the 0.3 % floor. The flag stays registered and prints the rebuild line.
+
 > ## 2026-08-14 — `--env_live_water` STILL MOVED THE WHOLE REFLECTION, BECAUSE 5f1ffa92 MEASURED THE PATH HE DOES NOT RUN
 >
 > His report on a binary rebuilt at `5f1ffa92`: **"--env_live_water still moves the

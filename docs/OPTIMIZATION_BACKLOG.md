@@ -10,6 +10,174 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-14 — the parked per-tile shadow early-out, MEASURED: the byte-null half ships, the byte-affecting half is refuted at the tile and re-specified at 8x8
+
+The shadow-diet round parked *"per-tile light/shadow early-outs — a tile fully
+outside a light's range or fully occluded/unoccluded can skip taps"* because it
+changes shadow bytes. Both halves are now measured rather than argued, with a
+new instrument (`--shadow_tap_census`, and `--shadow_tap_census_block=B` for the
+granularity question). One half shipped; the other is refuted **at the tile**
+and comes back with a specification.
+
+### First, the denominator — it was wrong by 2x
+
+The parked note carried "shadow sampling is 48.8 % of the lighting stage". The
+real number, by ablation (`--prof_no_cube_tap`, one binary, interleaved min-of-4,
+greets t=5743 @1920x1080):
+
+| arm | lighting-w1 | renderFrame |
+|---|--:|--:|
+| shipping | 29.710 ms | 50.054 ms |
+| cube tap short-circuited to 1.0 | 22.441 ms | 42.133 ms |
+| **the whole cube tap** | **7.269 ms (24.5 %)** | **7.921 ms (15.8 %)** |
+
+Every ceiling below is a fraction of **7.27 ms**, not of ~14.5.
+
+### The census, and the two poses that disagree
+
+`--shadow_tap_census` counts, per (tile x light-slot): pixels of the tile for
+which the light survived the per-pixel mirror/dot/range gate, and how each cube
+tap resolved. Main-view tiles only.
+
+| | greets t=5743, 1920x1080 | his pose t=3122, 1512x848 |
+|---|--:|--:|
+| shaded px/frame | 1 043 940 | 643 389 |
+| tile-light entries/frame | 837 (8.72 lights/tile) | 1 453 (15.14 lights/tile) |
+| **DEAD entries** (zero in-range px) | **80 = 9.6 %** (74 carry a cube) | **763 = 52.5 %** (433 carry a cube) |
+| dead loop-prologue px/frame | 0.87 M | **5.17 M** |
+| cube taps/frame | 4.725 M | 0.848 M |
+| tap result | lit 40.8 %, shadowed 54.7 %, partial 4.5 % | lit 98.8 %, shadowed 0.2 % |
+| **tile-uniform taps** | **16.8 %** all-lit, 0.0 % all-shadowed | 91.6 % all-lit |
+
+The two poses are complementary and neither alone would have told the truth:
+t=5743 is tap-heavy and light-list-clean; **his pose is the opposite — half of
+every tile's light list cannot light one pixel of that tile.**
+
+### DONE, shipped default ON, byte-null: `--deferred_tile_sphere_cull`
+
+The tile light list culled a light against the tile's screen rect **and**, 
+separately, against its z-extent. A conjunction of two separable projections of
+a sphere is strictly weaker than the sphere test: a light off the **diagonal**
+corner of a tile's frustum chunk passes both and reaches no pixel. Fixed by
+testing the light's range sphere against the tile's chunk bounding sphere —
+the sphere `tileChunkSphere()` already builds for the spot-cone cull.
+
+Byte-null by construction: it can only drop a pair whose every pixel is farther
+than the light's cull range, i.e. every pixel that would have failed the
+per-pixel `len2 > range2` test anyway, and it reads the **same** `range2` that
+test compares against so a `--deferred_max_range` clamp cannot desynchronise
+them. **The census proves it structurally, not just by hash:** the cull removes
+397 entries per frame at his pose and the cube-tap count does not move by one
+(0.848 M both ways).
+
+| | entries/frame | dead entries | dead prologue px | cube taps |
+|---|--:|--:|--:|--:|
+| t=5743 off / **on** | 837 / **793** | 80 / **36** | 0.87 M / **0.39 M** | 4.725 M / **4.725 M** |
+| his pose off / **on** | 1453 / **1056** | 763 / **366** | 5.17 M / **2.50 M** | 0.848 M / **0.848 M** |
+
+**Cost, three-arm interleaved (parent binary / feature OFF / feature ON), one
+asset tree, min over rounds.** The box carried load 10-13 from other agents, so
+`Ginstr/f` is the column to read — it reproduces to 0.3 % and a descheduled
+worker retires no instructions:
+
+| | parent | OFF | **ON** | ON vs OFF |
+|---|--:|--:|--:|--:|
+| **his pose** lighting-w1 Ginstr/f | 1.998 | 2.001 | **1.935** | **-0.066 (-3.3 %)** |
+| his pose renderFrame Ginstr/f | 5.163 | 5.168 | **5.097** | -0.071 (-1.4 %) |
+| his pose lighting-w1 wall_min | 19.275 | 19.545 | 18.979 | -0.57 ms |
+| **t=5743** lighting-w1 Ginstr/f | 3.296 | 3.296 | **3.278** | **-0.018 (-0.55 %)** |
+| t=5743 renderFrame Ginstr/f | 5.114 | 5.114 | **5.091** | -0.023 (-0.45 %) |
+
+**Stated honestly: the wall column does not separate the arms at t=5743** — the
+per-round spread there is +/-1 ms against a 0.5 % instruction delta. The
+instruction column is monotone in the right direction at both poses and the
+mechanism (2.67 M fewer prologue iterations a frame at his pose, ~18
+instructions each) predicts the size it measures.
+
+GATES, cull ON *and* OFF on the same binary — differential, so the claim is
+"this change moved nothing", not "the hash happens to match":
+
+| pin | ON | OFF |
+|---|---|---|
+| greets `778fa6acd85a69cf241babefcdaf598e` | 3/3 | 2/2 |
+| fountain `8db68ccb59416e9a44037e9f387b7bd9` | 2/2 (run 1 cold-bake discarded) | 3/3 |
+| city `3f8948232c192a979ffe7f76c4b387ab` | 2/2 | 2/2 |
+| `render_gate.sh` | ALL FOUR PASS (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`) | — |
+
+**Residual, named rather than hidden:** the chunk sphere spans the tile's
+*opaque* depth bounds, so a transparent pixel in front of `zMin` is outside it.
+That exposure is not new — the shipped `deferred_zcull` already rejects on the
+same `zMin` — and it does not fire on anything we ship: the greets pin runs
+`--glass-refract=1 --glass-test --xpar-peel-passes=4` and the fountain pin is
+glass-heavy, and both are byte-identical either way. `DeferredVolumetric` is
+structurally immune: it reads only `tileLights[].zMax` / `.hasSky` and iterates
+the frame-global `ViewLightsSoA` for the integration itself, never the per-tile
+entries — which the passing `conetest` / `halotest` rows confirm.
+
+### REFUTED at the tile: uniform shadow classification. And the reason is GRANULARITY, not coherence
+
+A perfect oracle — free classification, zero error — replacing every tap in a
+tile-uniform (tile x light) entry with one answer would remove **16.8 %** of the
+taps at t=5743. Against the measured 7.27 ms that is a **1.22 ms** ceiling, for
+a change that moves bytes, whose real corner-sampling classifier captures only
+part of it, and whose errors land on **160x135 px** blocks — the most visible
+seam size in the frame. Not worth building; not built.
+
+But the parked idea was right that the shadow field is coherent. It was wrong
+about where. `--shadow_tap_census_block=B` asks the same question per BxB block
+(greets t=5743, uniform share of all 4.725 M taps):
+
+| granularity | uniform taps |
+|---|--:|
+| tile (160x135) | 16.8 % |
+| 32x32 | 35.8 % |
+| 16x16 | 50.9 % |
+| 8x8 | **76.1 %** |
+| 4x4 | 89.5 % |
+
+**TODO, re-specified as a BYTE-NULL design at 8x8.** PolyId mode makes an exact
+test available that a corner sample never was: over a block's footprint on the
+cube face, if every texel carries the same id `c`, the 2x2 PCF is exactly
+`occ = (c != 0 && c != receiverId) ? 1 : 0` — one compare per pixel, no taps, no
+error. What it needs: (a) per-8x8 depth bounds (a min/max reduction over
+ZPage16, the shape `computeTileDepthBounds` already has), (b) an id-uniformity
+pyramid per cube face, built once per bake, (c) a per-(block x light)
+classification projecting the block's 8 frustum-cell corners and bailing when
+they straddle two faces. Ceiling: 76 % of 7.27 ms minus the classification, and
+unlike the tile variant it costs no pixel its exactness.
+
+### Dead hypotheses, with their numbers
+
+* **"Cube taps still run for lights the pixel is out of range of."** FALSE in the
+  shipping kernel. The scalar light loop's order is mirror id -> `dot < 0` ->
+  `len2 > r2` -> bounce portal -> cone -> map shadows -> cube tap, so no tap can
+  belong to an out-of-range pair. The census closes it: the sphere cull deletes
+  397 (tile x light) pairs a frame at his pose and the tap count is unchanged.
+* **...except in the 8-wide `--deferred_vec` kernel, where it is REAL.** A lane
+  failing `mask_range` (or the mirror-id match) gets `safe_len2 = 1`, hence
+  `lenInv = 1`, `dist = 1`, `k = dot * (1 - 1/Range)` — which stays **positive**
+  for any front-facing lane, so it passes the `kArr[lane] <= 0` guard and calls
+  `resolveCubeAtten`, whose result the `mask` blend then throws away. It costs
+  this box nothing (`FDS_DEFERRED_VEC_DEFAULT` is 0 on arm64) and is left alone
+  deliberately: no pin covers that path, so a "free" fix there would be an
+  unverifiable one. On an x86 build, where the default is 1, it is live waste.
+* **"The tile light lists do no range culling."** They do — screen rect
+  (`lightSphereScreenRect`), z-extent, spot cone, mirror-footprint presence. The
+  gap was only that rect AND z-extent approximates a sphere separably.
+
+### The instrument had to be compiled out, and that is its own measurement
+
+The census hooks sit in the two innermost bodies of the hottest loop in the
+engine. Never taken, they still cost **+0.040 Ginstr/f (+2.0 %) on lighting-w1**
+as first written; moving the block index out of the per-pixel body and into the
+tap site took that to +0.018 G (+0.9 %); folding four counter arrays into one
+did not help. It is register pressure in the light loop, the same mechanism
+`d9248f6d` measured for the cube tap's `FDS_DEV` abort branch. So the hooks are
+behind a CMake option (`-DFDS_SHADOW_TAP_CENSUS=ON`), default OFF, and the
+shipping kernel measures **+0.003 G (+0.15 %)** against its parent — inside the
+0.3 % reproducibility floor. The flag stays registered and prints the rebuild
+line when it cannot do anything.
+
 ## 2026-08-12 — TODO: the cone INTEGRATION BODY is now the majority of the cone pass
 
 The per-lane quadratic solve is **DONE** (`--vol_cone_solve_vec`, default ON,

@@ -1698,6 +1698,71 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	    ? std::min(ctx.tileLights[tileIndex].count, int(DEFERRED_MAX_LIGHTS)) : 0;
 	for (int ci = 0; ci < contribN; ++ci) contribMax[ci] = 0.0f;
 
+	// ── --shadow_tap_census: the CEILING measurement for per-tile shadow
+	// early-outs (docs/OPTIMIZATION_BACKLOG.md, the parked "per-tile
+	// light/shadow early-out" item). Default OFF, changes no pixel.
+	//
+	// Two numbers, both per (tile × light-slot), aggregated over the run:
+	//   (1) `inRange` — pixels of this tile for which this light survived the
+	//       per-pixel mirror/dot/range gate. An entry with inRange == 0 is a
+	//       light the tile-list builder admitted that CANNOT light one pixel
+	//       of the tile: pure per-pixel loop-prologue waste, and its removal
+	//       is byte-null by construction. This is variant 1's exact ceiling.
+	//   (2) `taps` / `lit` / `shad` — the cube-shadow taps this entry ran and
+	//       how they resolved (1.0 / 0.0 / partial). An entry whose taps are
+	//       ALL lit or ALL shadowed could have been answered once per tile;
+	//       Σtaps over those entries is variant 2's exact ceiling, measured
+	//       with a perfect oracle rather than a corner-test approximation.
+	// Per-tile stack arrays → no cross-thread race (one worker per tile);
+	// atomics aggregate at the end, same shape as FDS_CONTRIB_CULL above.
+	// Scalar path only — which is all of greets (nmap forces scalar).
+	// Main view only: the offscreen bakes (env cube faces, mirror shards, RTT
+	// slots) dispatch the SAME 96-tile grid over a 64x64 or 256x256 target, so
+	// counting them would let hundreds of ~4000-px "frames" swamp the ~1.3 Mpx
+	// one we are measuring. 640 px wide is far above every bake target and far
+	// below every shipping main resolution.
+#if FDS_SHADOW_TAP_CENSUS
+	const bool tapCensus = fds::FeatureFlags::shadow_tap_census() && ctx.xres >= 640;
+#else
+	// Hooks compiled out (CMake option FDS_SHADOW_TAP_CENSUS, default OFF) —
+	// see the comment on that option for the 1 % that buys back. `constexpr`
+	// so every census site below is dead-stripped, not merely never taken.
+	constexpr bool tapCensus = false;
+	if (fds::FeatureFlags::shadow_tap_census()) {
+		static std::atomic<int> warned{0};
+		if (warned.fetch_add(1, std::memory_order_relaxed) == 0)
+			std::fprintf(stderr, "[SHADOW-TAP-CENSUS] this binary was built without the "
+			    "hooks. Rebuild with: cmake -S . -B build-census -G Ninja "
+			    "-DFDS_SHADOW_TAP_CENSUS=ON\n");
+	}
+#endif
+	// ONE base pointer, not four: as four separate arrays the hot loop kept
+	// four extra stack bases live and cost 0.9 % of lighting-w1's instructions
+	// with the census OFF. Lane order per light: 0 inRange, 1 taps, 2 lit, 3 shadowed.
+	alignas(64) uint32_t tcL[DEFERRED_MAX_LIGHTS][4];
+	const int tcN = tapCensus
+	    ? std::min(ctx.tileLights[tileIndex].count, int(DEFERRED_MAX_LIGHTS)) : 0;
+	for (int ci = 0; ci < tcN; ++ci) {
+		tcL[ci][0] = 0; tcL[ci][1] = 0; tcL[ci][2] = 0; tcL[ci][3] = 0;
+	}
+	uint32_t tcPixels = 0;
+	// --shadow_tap_census_block=B: the same uniformity question asked per BxB
+	// pixel block instead of per tile. Heap-backed and per-thread so the block
+	// count can go as fine as B=4 without a 300 KB stack frame; only the
+	// (blocks x lights) prefix actually in use is cleared per tile.
+	const int tcB       = tapCensus ? std::max(0, fds::FeatureFlags::shadow_tap_census_block()) : 0;
+	const int tcBlocksX = tcB > 0 ? ((x2 - x1) + tcB - 1) / tcB : 0;
+	const int tcBlocksY = tcB > 0 ? ((y2 - y1) + tcB - 1) / tcB : 0;
+	const int tcBlocks  = tcBlocksX * tcBlocksY;
+	static thread_local std::vector<uint32_t> tcBlkBuf;
+	uint32_t *tcBlk = nullptr;
+	if (tcBlocks > 0 && tcN > 0) {
+		const size_t need = size_t(tcBlocks) * size_t(tcN) * 3u;
+		if (tcBlkBuf.size() < need) tcBlkBuf.resize(need);
+		tcBlk = tcBlkBuf.data();
+		std::memset(tcBlk, 0, need * sizeof(uint32_t));
+	}
+
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
 			// Wave-1 of checkerboard: skip odd cells (filled by the
@@ -2258,6 +2323,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// with the light) is visible without albedo or ambient hiding it.
 			float hzVizSum = 0.0f, hzVizWeight = 0.0f;
 
+			if (tapCensus) ++tcPixels;
 			if (!isWater && !profNoLights) {
 				if (useVecHere) {
 					// 8-wide SIMD inner loop — written directly against
@@ -2554,6 +2620,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float len2 = wx*wx + wy*wy + wz*wz;
 						const float r2 = tl.range2[n];
 						if (len2 > r2) continue;
+						if (tapCensus) ++tcL[n][0];
 						// Mirror-bounce window portal: a bounce spot's apex
 						// is behind the glass; only light it onto this pixel
 						// if the apex→pixel segment passes through the mirror
@@ -2611,6 +2678,25 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								sampleWorldX, sampleWorldY, sampleWorldZ,
 								x, y, z, kShadowBiasG, kSlopeBiasG,
 								surfaceShadowId);
+							if (tapCensus) {
+								++tcL[n][1];
+								if (cubeAtten >= 1.0f)      ++tcL[n][2];
+								else if (cubeAtten <= 0.0f) ++tcL[n][3];
+								if (tcBlk) {
+									// Block index resolved HERE, not per pixel: two
+									// integer divides by a runtime B at the top of the
+									// pixel body kept tcB/tcBlocksX live across the
+									// whole loop and cost 2 % of lighting-w1's
+									// instructions with the census OFF (measured
+									// parent-vs-instrumented, greets t=3122).
+									const int tcBlkIdx =
+										((py - y1) / tcB) * tcBlocksX + (px - x1) / tcB;
+									uint32_t *b = tcBlk + (size_t(tcBlkIdx) * size_t(tcN) + size_t(n)) * 3u;
+									++b[0];
+									if (cubeAtten >= 1.0f)      ++b[1];
+									else if (cubeAtten <= 0.0f) ++b[2];
+								}
+							}
 							if (cubeAtten <= 0.0f) continue;
 							shadowAtten *= cubeAtten;
 						}
@@ -3035,6 +3121,116 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (outR < 0)   outR = 0;
 
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+		}
+	}
+
+	if (tapCensus) {   // see the declaration block above for what each column means
+		const TileLights &tlc = ctx.tileLights[tileIndex];
+		long long e = 0, eDead = 0, eCube = 0, eCubeDead = 0;
+		long long taps = 0, lit = 0, shad = 0;
+		long long uniLitE = 0, uniShadE = 0, mixedE = 0;
+		long long uniLitT = 0, uniShadT = 0, mixedT = 0;
+		long long deadPx = 0;
+		for (int ci = 0; ci < tcN; ++ci) {
+			++e;
+			const bool hasCube = tlc.cubeShadowIdx[ci] >= 0;
+			if (hasCube) ++eCube;
+			if (tcL[ci][0] == 0) {
+				++eDead;
+				deadPx += tcPixels;          // prologue iterations this entry cost
+				if (hasCube) ++eCubeDead;
+				continue;
+			}
+			taps += tcL[ci][1]; lit += tcL[ci][2]; shad += tcL[ci][3];
+			if (tcL[ci][1] == 0) continue;
+			if (tcL[ci][2] == tcL[ci][1])      { ++uniLitE;  uniLitT  += tcL[ci][1]; }
+			else if (tcL[ci][3] == tcL[ci][1]) { ++uniShadE; uniShadT += tcL[ci][1]; }
+			else                               { ++mixedE;   mixedT   += tcL[ci][1]; }
+		}
+		// Same question at BxB block granularity (--shadow_tap_census_block).
+		long long bUniT = 0, bMixT = 0, bUniB = 0, bMixB = 0;
+		if (tcBlk) {
+			for (int bi = 0; bi < tcBlocks; ++bi) {
+				const uint32_t *b = tcBlk + size_t(bi) * size_t(tcN) * 3u;
+				for (int ci = 0; ci < tcN; ++ci) {
+					const uint32_t tp = b[ci*3+0];
+					if (tp == 0) continue;
+					if (b[ci*3+1] == tp || b[ci*3+2] == tp) { ++bUniB; bUniT += tp; }
+					else                                    { ++bMixB; bMixT += tp; }
+				}
+			}
+		}
+		static std::atomic<long long> aTiles{0}, aPx{0}, aE{0}, aEDead{0}, aECube{0},
+			aECubeDead{0}, aTaps{0}, aLit{0}, aShad{0}, aUniLitE{0}, aUniShadE{0},
+			aMixedE{0}, aUniLitT{0}, aUniShadT{0}, aMixedT{0}, aDeadPx{0},
+			aBUniT{0}, aBMixT{0}, aBUniB{0}, aBMixB{0};
+		const auto ADD = [](std::atomic<long long> &a, long long v) {
+			a.fetch_add(v, std::memory_order_relaxed);
+		};
+		ADD(aPx, tcPixels);   ADD(aE, e);           ADD(aEDead, eDead);
+		ADD(aECube, eCube);   ADD(aECubeDead, eCubeDead);
+		ADD(aTaps, taps);     ADD(aLit, lit);       ADD(aShad, shad);
+		ADD(aUniLitE, uniLitE);   ADD(aUniShadE, uniShadE); ADD(aMixedE, mixedE);
+		ADD(aUniLitT, uniLitT);   ADD(aUniShadT, uniShadT); ADD(aMixedT, mixedT);
+		ADD(aDeadPx, deadPx);
+		ADD(aBUniT, bUniT); ADD(aBMixT, bMixT); ADD(aBUniB, bUniB); ADD(aBMixB, bMixB);
+		const long long t = aTiles.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (t > 0 && (t % (DEFERRED_NUM_TILES * 8)) == 0) {
+			// DELTA since the previous report, not a running mean: the first
+			// main-view frames of a bench carry lazy first-touch work and a
+			// cumulative mean would take the whole run to shed them.
+			static long long pTiles=0, pPx=0, pE=0, pEDead=0, pECube=0, pECubeDead=0,
+				pTaps=0, pLit=0, pShad=0, pUniLitE=0, pUniShadE=0, pMixedE=0,
+				pUniLitT=0, pUniShadT=0, pMixedT=0, pDeadPx=0,
+				pBUniT=0, pBMixT=0, pBUniB=0, pBMixB=0;
+			const auto D = [](std::atomic<long long> &a, long long &prev) {
+				const long long v = a.load(std::memory_order_relaxed);
+				const long long d = v - prev; prev = v; return d;
+			};
+			const long long dTiles=D(aTiles,pTiles);
+			const long long dPx=D(aPx,pPx), dE=D(aE,pE), dEDead=D(aEDead,pEDead);
+			const long long dECube=D(aECube,pECube), dECubeDead=D(aECubeDead,pECubeDead);
+			const long long dTaps=D(aTaps,pTaps), dLit=D(aLit,pLit), dShad=D(aShad,pShad);
+			const long long dUniLitE=D(aUniLitE,pUniLitE), dUniShadE=D(aUniShadE,pUniShadE);
+			const long long dMixedE=D(aMixedE,pMixedE);
+			const long long dUniLitT=D(aUniLitT,pUniLitT), dUniShadT=D(aUniShadT,pUniShadT);
+			const long long dMixedT=D(aMixedT,pMixedT), dDeadPx=D(aDeadPx,pDeadPx);
+			const long long dBUniT=D(aBUniT,pBUniT), dBMixT=D(aBMixT,pBMixT);
+			const long long dBUniB=D(aBUniB,pBUniB), dBMixB=D(aBMixB,pBMixB);
+			(void)dECube;
+			const double f  = std::max(1.0, double(dTiles) / double(DEFERRED_NUM_TILES));
+			const double ee = std::max(1.0, double(dE));
+			const double tt = double(dTaps);
+			std::fprintf(stderr,
+			  "[SHADOW-TAP-CENSUS] %.0f main-view frames (%lld tiles) since last report\n"
+			  "  px/frame            %.0f      tile-light entries/frame %.1f (%.2f lights/tile)\n"
+			  "  DEAD entries        %.1f/frame = %.1f%% of entries   (0 in-range px; %.1f of them carry a cube)\n"
+			  "  dead prologue px    %.2f M/frame  (entries x tile px they were iterated over)\n"
+			  "  cube taps           %.3f M/frame   lit %.1f%%  shadowed %.1f%%  partial %.1f%%\n"
+			  "  tile-UNIFORM taps   all-lit %.3f M (%.1f%%)  all-shadowed %.3f M (%.1f%%)  mixed %.3f M (%.1f%%)\n"
+			  "  entries by class    uni-lit %.1f  uni-shad %.1f  mixed %.1f  per frame\n",
+			  f, dTiles,
+			  double(dPx)/f, ee/f, ee/std::max(1.0, double(dTiles)),
+			  double(dEDead)/f, 100.0*double(dEDead)/ee,
+			  double(dECubeDead)/f,
+			  double(dDeadPx)/f/1e6,
+			  tt/f/1e6,
+			  tt > 0 ? 100.0*double(dLit)/tt : 0.0,
+			  tt > 0 ? 100.0*double(dShad)/tt : 0.0,
+			  tt > 0 ? 100.0*(tt - double(dLit) - double(dShad))/tt : 0.0,
+			  double(dUniLitT)/f/1e6,  tt > 0 ? 100.0*double(dUniLitT)/tt : 0.0,
+			  double(dUniShadT)/f/1e6, tt > 0 ? 100.0*double(dUniShadT)/tt : 0.0,
+			  double(dMixedT)/f/1e6,   tt > 0 ? 100.0*double(dMixedT)/tt : 0.0,
+			  double(dUniLitE)/f, double(dUniShadE)/f, double(dMixedE)/f);
+			if (tcB > 0) {
+				const double bt = double(dBUniT + dBMixT);
+				std::fprintf(stderr,
+				  "  block %dx%d          UNIFORM taps %.3f M (%.1f%%)  mixed %.3f M (%.1f%%)"
+				  "   uniform blocks %.0f%% of (block x light) pairs\n",
+				  tcB, tcB, double(dBUniT)/f/1e6, bt > 0 ? 100.0*double(dBUniT)/bt : 0.0,
+				  double(dBMixT)/f/1e6, bt > 0 ? 100.0*double(dBMixT)/bt : 0.0,
+				  (dBUniB + dBMixB) > 0 ? 100.0*double(dBUniB)/double(dBUniB + dBMixB) : 0.0);
+			}
 		}
 	}
 

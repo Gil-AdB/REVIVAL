@@ -99,6 +99,23 @@ if(FDS_SHARD_BAKE_LAB)
     add_compile_definitions(FDS_SHARD_BAKE_LAB=1)
 endif()
 
+# --shadow_tap_census's counter hooks sit in the deferred light loop's two
+# innermost bodies (per pixel x light, per cube tap). Even fully predicted and
+# never taken they cost ~1 % of lighting-w1's instructions, because the extra
+# live state perturbs register allocation in the hottest loop in the engine —
+# the same mechanism d9248f6d measured for the cube tap's FDS_DEV abort branch.
+# So the hooks are COMPILED OUT by default and the shipping kernel is
+# instruction-identical to the pre-census one (verified: renderFrame 5.167
+# Ginstr/f both, greets t=3122 1512x848). The flag stays registered either way
+# and says how to get the build when it cannot do anything.
+# Measure with:  cmake -S . -B build-census -G Ninja -DFDS_SHADOW_TAP_CENSUS=ON
+option(FDS_SHADOW_TAP_CENSUS "Compile the deferred shadow-tap census hooks (--shadow_tap_census / --shadow_tap_census_block)" OFF)
+if(FDS_SHADOW_TAP_CENSUS)
+    add_compile_definitions(FDS_SHADOW_TAP_CENSUS=1)
+else()
+    add_compile_definitions(FDS_SHADOW_TAP_CENSUS=0)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.

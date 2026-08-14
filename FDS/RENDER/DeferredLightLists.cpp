@@ -233,8 +233,19 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const char *e = std::getenv("FDS_CONTRIB_CULL_THR");
 		return (e && *e) ? float(std::atof(e)) : 0.0f;
 	}();
+	// --deferred_tile_sphere_cull: BYTE-NULL 3-D tightening of the cull above.
+	// The screen-rect test and the z-extent test are each a projection of the
+	// light's range sphere onto one axis set, and a conjunction of two
+	// separable tests is strictly weaker than the 3-D test: a light diagonally
+	// off the corner of a tile's frustum chunk passes both and reaches not one
+	// of its pixels. Measured with --shadow_tap_census (greets t=5743): 9.6 %
+	// of admitted (tile x light) entries have ZERO in-range pixels, and 93 % of
+	// those carry a cube shadow. Removing them cannot move a byte — every pixel
+	// they reach fails the same `len2 > range2` test the per-pixel loop already
+	// applies — so this is the byte-null half of the parked per-tile early-out.
+	const bool sphereCull = fds::FeatureFlags::deferred_tile_sphere_cull();
 	static TileChunkSphere chunk[DEFERRED_NUM_TILES];
-	if (coneCull || sContribThr > 0.0f) {
+	if (coneCull || sphereCull || sContribThr > 0.0f) {
 		for (int j = 0; j < numTilesY; ++j) {
 			for (int i = 0; i < numTilesX; ++i) {
 				const int idx = j * numTilesX + i;
@@ -307,6 +318,20 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 				if (zCullEnabled &&
 				    (vz_plus_r < tl.zMin || vz_minus_r > tl.zMax)) {
 					continue;
+				}
+				// Range sphere vs the tile's pixel chunk sphere (see
+				// sphereCull above). Both radii are the CULL range —
+				// lights.range2 is what the per-pixel test compares against,
+				// so a --deferred_max_range clamp stays consistent between
+				// the two. Rejection is exact: dist(L, chunkCentre) - chunkR
+				// is a lower bound on |L - P| for every P the tile can shade.
+				if (sphereCull && chunk[idx].valid) {
+					const TileChunkSphere &cc = chunk[idx];
+					const float ddx = Lpx - cc.cx;
+					const float ddy = Lpy - cc.cy;
+					const float ddz = Lpz - cc.cz;
+					const float rr  = cc.R + r;
+					if (ddx*ddx + ddy*ddy + ddz*ddz > rr*rr) continue;
 				}
 				// Spot cone cull: the tile's pixel chunk vs the cone.
 				// The chunk's z-range is first clipped to the cone's
