@@ -1,5 +1,134 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-15 — THE OMNI LOOP IS A SHADOW LOOP: 74 % of it is the shadow chain, and 99.5 % of its 2-D-shadow calls compute the constant 1.0f
+>
+> Round 1's #1 item — "deferred omni loop, 19.9 of 47.8 ms at greets t=5743,
+> 2.490 Ginstr/f, compute-bound, never itemized below the tap chain". Now
+> itemized, with a committed ladder and a new per-pixel census. Full write-up +
+> every table in `docs/OPTIMIZATION_BACKLOG.md` (2026-08-15).
+>
+> **-1.75 ms of `lighting-w1` and -1.78 ms of the frame at t=5743, -0.55 ms at
+> his t=3122 pose, -1.05 ms of chase's `lighting-w1`; city and fountain neutral.
+> BIT-EXACT — all eight pins unmoved 3/3, `render_gate` 4/4 PASS, no flag.**
+>
+> ### The instruments
+>
+> `-DFDS_OMNI_ABLATE=n` (12 staged `continue`s in the per-light body, each
+> sinking what it retains) and `--omni_census` / `-DFDS_OMNI_CENSUS=ON` (per
+> (pixel x light): where each light dies, and the live-lights-per-PIXEL
+> histogram the tap census structurally could not produce). Drivers
+> `scratchpad/omni_ablate.sh`, `scratchpad/omni_ladder.py`, `scratchpad/omni_run.py`,
+> `scratchpad/omni_pins.sh`. Both compile out by default and the shipping build
+> measures `lighting-w1` **3.247 Gi/f against the parent's 3.247** at t=5743 and
+> 1.916 vs 1.917 at his pose.
+>
+> **Two independent sessions, separate builds, loads 11-21 apart, agree to
+> <= 0.10 % on every row of the ladder at both poses.** Stage 1 — the loop
+> deleted — is 0.761 Gi/f, reproducing round 1's `--prof_no_lights` remainder
+> (0.801) independently, so the omni loop proper is 2.486 Gi/f against the map's
+> recorded 2.490.
+>
+> ### The split, both sessions (Ginstr/f, w1 Gi/f cumulative)
+>
+> | st | what is KEPT | t5743 A | t5743 B | his A | his B |
+> |---|---|--:|--:|--:|--:|
+> | 1 | loop floor (loop deleted) | 0.761 | 0.761 | 0.472 | 0.472 |
+> | 2 | + mirrorId test | 0.804 | 0.804 | 0.511 | 0.511 |
+> | 3 | + w, N.L dot, dot<0 | 0.916 | 0.916 | 0.556 | 0.556 |
+> | 4 | + len2, range | 0.976 | 0.977 | 0.586 | 0.586 |
+> | 5 | + bounce portal | 1.006 | 1.007 | 0.611 | 0.611 |
+> | 6 | + rsqrt/dist/k | 1.057 | 1.057 | 0.638 | 0.638 |
+> | 7 | + spot cone | 1.063 | 1.063 | 0.640 | 0.640 |
+> | 8 | **+ computeMapShadowAtten** | **1.468** | **1.468** | **1.346** | **1.346** |
+> | 9 | **+ cube tap** | **2.890** | **2.889** | **1.618** | **1.617** |
+> | 10 | + relief horizon | 2.928 | 2.928 | 1.643 | 1.643 |
+> | 11 | + diffuse accumulate | 2.983 | 2.983 | 1.687 | 1.687 |
+> | 0 | **FULL (+ specular lobe)** | **3.247** | **3.247** | **1.916** | **1.917** |
+>
+> Shadow chain = **73.5 %** of the loop at t=5743, **67.7 %** at his pose. The
+> largest NON-shadow item is the specular lobe at 10.6 % / 15.9 %; attenuation,
+> N.L, cone, portal and the accumulate are 12 % / 15 % between them. The thing
+> the round-1 map hoped to find in "the rest of the omni loop" is not there.
+>
+> ### The 24.5 % figure is superseded, and the reason is a measurement artefact
+>
+> Against the same `lighting-w1` denominator the cube tap alone is **43.8 %** at
+> t=5743, not 24.5 %. `--prof_no_cube_tap` short-circuits `resolveCubeAtten` to
+> **1.0f = fully lit**, so the 54.6 % of taps that return 0 stop taking their
+> `continue` and pay diffuse AND specular in the no-tap arm: 2.59 M extra shaded
+> pairs a frame at ~148 instructions = 0.385 Gi of the 1.42 Gi gap. An ablation
+> that makes lights BRIGHTER cannot price what it removed. The ladder cuts
+> downstream in BOTH arms, so it can.
+>
+> ### The per-pixel distribution (`--omni_census`, deterministic frame to frame)
+>
+> | | t=5743 | his t=3122 |
+> |---|--:|--:|
+> | (px x light) pairs / frame | 8.687 M | 7.164 M |
+> | lights entered per shaded px | 8.32 | 11.14 |
+> | **reach the accumulate** | **24.79 %** | **28.50 %** |
+> | **live lights per shaded px** | **2.06** | **3.17** |
+> | dies on mirrorId | 4.79 % | **44.28 %** |
+> | dies on N.L<0 / range / cone | 21.5 / 8.4 / 10.7 % | 10.3 / 3.6 / 5.3 % |
+> | dies on the **cube tap** | **29.77 %** | 0.02 % |
+>
+> Histogram of live lights per shaded pixel, t=5743: 0:6.7 1:20.5 2:39.5 3:26.6
+> 4:6.6 >=5:0.2 %. His pose: 0:1.5 1:6.0 2:21.0 3:17.3 **4:53.7** >=5:0.5 %.
+> **A pixel is lit by two to four lights and the loop walks eight to eleven to
+> find them.** The poses fail in different places — his on the mirror clones,
+> t=5743 on the cube — so no single pose names the lever.
+>
+> ### What shipped
+>
+> `computeMapShadowAtten` is an out-of-line function with a **176-byte frame and
+> ten callee-save pairs**, called once per (pixel x light) past the cone test.
+> All three of its bodies are guarded on an index being `>= 0`, so with all three
+> negative it can only return its `1.0f` initialiser — and the census says
+> **99.50 % of its 4.749 M calls a frame carry none of them** (his pose 32.43 %
+> of 2.615 M). The guard is the function's own three tests hoisted to the call
+> site as one AND (`(smIdx & srcSm & srcCube) >= 0`, since absent indices are -1).
+> Bit-exact by construction. No flag: there is no arm to compare, the skipped
+> calls returned 1.0f.
+>
+> ### Two levers refuted with numbers
+>
+> **Skipping the all-zero dynamic shadow plane** — provably byte-null (`packDyn`
+> is `assign`-ed 0 and written only by a bake reached from two
+> `if (shadow_dynamic())` sites; the two-plane resolve then collapses
+> algebraically) — **costs +12.4 % of `lighting-w1`'s instructions at t=5743 and
+> +10.3 % at his pose, i.e. worse than the parent.** One extra bool in the tap's
+> innermost lambda. That is the THIRD independent measurement of this mechanism
+> (tap-census hooks +2.0 %, `d9248f6d`'s `FDS_DEV` branch). **The cube tap is at
+> its register-allocation limit: it only gets cheaper by being CALLED LESS.**
+>
+> **Passing the pixel's world position into `computeMapShadowAtten`** instead of
+> recomputing it in both mirror-clone branches (9 muls + 9 adds per pair for a
+> per-pixel quantity the caller already hoists): predicted 0.027 Gi, **measured
+> 0.010 Gi (-0.53 % at his pose, 0.000 at t=5743)** — the compiler was already
+> CSE-ing most of it. Not worth a signature change against the pins.
+>
+> ### Gates
+>
+> greets `570a7b443f768393dc6647044a9e67b3`, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9`, city `3f8948232c192a979ffe7f76c4b387ab`,
+> chase t100 `7678a6bc6ea964b3b859ecb11c0673c3` t400 `42d79fadd825a329b36143efe052edfb`
+> t800 `b29c73f1c54f42a02e0dc2484780cc03` t1200 `31aa52039f9b228fa6307c12e14811eb`
+> t1600 `1544b0e775900b099ac9e38d42fd750d` — **3/3 each on the child, 2/2 on the
+> parent in the same worktree** (fountain's run-1 cold bake discarded as
+> documented). `render_gate.sh` 4/4 PASS (`4ac809e5` / `826c09e6` / `b41894f9` /
+> `166fa25a`). No pin value moves; the table is unchanged by this commit.
+>
+> **RE-VERIFIED AFTER REBASE onto `d8fc4978` (cone round 7) — the campaign was
+> measured on `b502c394` and two other agents landed underneath it.** All eight
+> pins reproduce on the NEW parent 2/2 and on the child 3/3, `render_gate` 4/4
+> PASS at the rebased HEAD, and the instruction deltas are unchanged to three
+> decimals: greets t=5743 `lighting-w1` 3.246 -> 2.953 Gi/f, 26.15 -> 24.06 ms,
+> `renderFrame` 41.76 -> 39.62 ms, frame min 48.30 -> **46.26 ms (-2.04)**; his
+> pose 1.916 -> 1.872 Gi/f, frame 43.89 -> 43.68; chase t=800 `lighting-w1`
+> 0.738 -> 0.572 Gi/f and 5.23 -> **3.94 ms**, `renderFrame` 35.47 -> 34.47 ms.
+> The two changes do not interact — cone round 7 is in `DeferredVolumetric.cpp`,
+> this one in the surface kernel's light loop.
+
 > ## 2026-08-15 — ROUND 7: THE CONE KERNEL'S INNERMOST LOOP WAS REBUILDING PER-LIGHT CONSTANTS 10 800 TIMES A TILE. NOT ONE PIXEL MOVES, AND IT IS THE FIRST CONE WIN THAT HELPS ALL THREE SCENES
 >
 > `f1ffc925` §14.7 parked the per-spot scalar prologue as *"bit-exact by

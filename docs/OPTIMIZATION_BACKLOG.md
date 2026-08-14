@@ -10,6 +10,177 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-15 — round-1 item #1, the deferred OMNI LOOP: the shadow chain is 74 % of it, not 24.5 %, and 99.5 % of the 2-D-shadow calls compute the constant 1.0f
+
+**Result: greets t=5743 `lighting-w1` 26.00 -> 24.26 ms (-1.75 ms), `renderFrame` 41.87 -> 40.11 ms, frame min 48.33 -> 46.55 ms; instructions -9.0 % of `lighting-w1`, -6.0 % of `renderFrame`. chase t=800 `lighting-w1` -22.5 % instructions / -1.05 ms. BIT-EXACT: all eight pins unmoved 3/3, `render_gate` 4/4 PASS. No flag — there is nothing to A/B, the skipped calls returned 1.0f.**
+
+### The instrument: a committed staged-continue ladder for the omni loop
+
+`-DFDS_OMNI_ABLATE=n` in `DeferredSurfaceKernel.cpp` — the `FDS_CONE_ABLATE`
+shape aimed at the other ~100 %-self monolith. Twelve stages, each `continue`ing
+at a natural statement group of the per-light body, each sinking what it retains
+into a per-tile accumulator that drains to one volatile store per tile call.
+Driver `scratchpad/omni_ablate.sh`, report `scratchpad/omni_ladder.py`.
+**Two independent build+measure sessions agree to <= 0.10 % on every row at both
+poses.** The shipping build (stage 0, census compiled out) measures
+`lighting-w1` 3.247 Gi/f against the parent's 3.247 at t=5743 and 1.916 vs 1.917
+at t=3122 — the scaffolding costs nothing.
+
+Stage 1 (the loop deleted entirely) is the kernel's non-light remainder and
+independently reproduces round 1's `--prof_no_lights` figure: 0.761 Gi/f vs the
+recorded 0.801. **The omni loop proper is full minus stage 1 = 2.486 Gi/f at
+t=5743**, against the 2.490 the round-1 map carries. The instrument agrees with
+the map it was built to subdivide, to 0.16 %.
+
+### The split (Ginstr/f, session A; session B in docs/SESSION_STATE.md)
+
+| stage | t=5743 dGi | % of loop | t=3122 (his) dGi | % of loop |
+|---|--:|--:|--:|--:|
+| mirrorId test | 0.043 | 1.7 % | 0.039 | 2.7 % |
+| w, N.L dot, dot<0 reject | 0.112 | 4.5 % | 0.045 | 3.1 % |
+| len2 + range reject | 0.060 | 2.4 % | 0.030 | 2.1 % |
+| bounce-window portal | 0.030 | 1.2 % | 0.025 | 1.7 % |
+| rsqrt / dist / attenuation k | 0.051 | 2.1 % | 0.027 | 1.9 % |
+| spot cone + smoothstep | 0.006 | 0.2 % | 0.002 | 0.1 % |
+| **computeMapShadowAtten** | **0.405** | **16.3 %** | **0.706** | **48.9 %** |
+| **resolveCubeAtten (cube tap)** | **1.422** | **57.2 %** | **0.272** | **18.8 %** |
+| relief horizon | 0.038 | 1.5 % | 0.025 | 1.7 % |
+| diffuse accumulate | 0.055 | 2.2 % | 0.044 | 3.0 % |
+| **specular lobe** | **0.264** | **10.6 %** | **0.229** | **15.9 %** |
+| loop total | 2.486 | 100 % | 1.444 | 100 % |
+
+**The shadow chain is 73.5 % of the omni loop at t=5743 and 67.7 % at his
+pose.** The round-1 map's "the tap chain is 24.5 % of the lighting stage" is
+superseded: against the same `lighting-w1` denominator the cube tap alone is
+43.8 % at t=5743. The old figure came from `--prof_no_cube_tap`, which
+short-circuits `resolveCubeAtten` to **1.0f = fully lit** — so every pair whose
+tap would have returned 0 stops taking the `continue` and pays diffuse **and**
+specular instead. `--omni_census` prices that compensation exactly: 54.6 % of
+the 4.74 M taps come back fully shadowed, i.e. 2.59 M pairs a frame that the
+no-tap arm shades and the real kernel does not, at ~148 instructions each =
+0.385 Gi of the 1.42 Gi gap. An ablation that makes a light BRIGHTER cannot
+price the thing it removed.
+
+### The other new instrument: `--omni_census` (per PIXEL x light, `-DFDS_OMNI_CENSUS=ON`)
+
+The tap census (43ac3456) counts per (tile x light) and structurally cannot say
+how many lights a PIXEL accumulates. This does. Deterministic frame to frame.
+
+| | t=5743 @1920x1080 | his pose t=3122 @1512x848 |
+|---|--:|--:|
+| shaded px | 1.044 M | 0.643 M |
+| (px x light) pairs entered | 8.687 M | 7.164 M |
+| lights/px entered | 8.32 | 11.14 |
+| killed: mirrorId | 4.79 % | **44.28 %** |
+| killed: N.L < 0 | 21.49 % | 10.32 % |
+| killed: range | 8.36 % | 3.58 % |
+| killed: spot cone | 10.68 % | 5.32 % |
+| killed: 2-D map shadow | 0.12 % | 7.98 % |
+| killed: **cube tap** | **29.77 %** | 0.02 % |
+| **reach the accumulate** | **24.79 %** | **28.50 %** |
+| **live lights per shaded px** | **2.06** | **3.17** |
+
+Live-lights-per-pixel histogram, t=5743: 0 lights 6.71 %, 1 20.47 %, 2 39.50 %,
+3 26.63 %, 4 6.55 %, >=5 0.15 %. His pose: 0 1.50 %, 1 5.97 %, 2 21.00 %,
+3 17.31 %, **4 53.68 %**, >=5 0.54 %. **A pixel is shaded by two to four lights
+and the loop walks eight to eleven to find them.** The two poses fail in
+different places — his dies on mirrorId (the mirror clones), t=5743 dies on the
+cube tap — so neither pose alone names the lever.
+
+### WHAT SHIPPED: the 2-D-shadow call, skipped when it can only return 1.0f
+
+`computeMapShadowAtten` reads exactly three index planes — the light's own 2-D
+spot map, a mirror clone's SOURCE map, a mirror clone's SOURCE cube — and each
+of its three bodies is guarded on that index being `>= 0`. With all three
+negative it can only return its `1.0f` initialiser. It is nonetheless an
+**out-of-line function with a 176-byte frame and ten callee-save `stp`/`ldp`
+pairs**, invoked once per (pixel x light) that clears the cone test.
+
+The census says **99.50 % of its 4.749 M calls a frame at t=5743 carry none of
+the three** (his pose: 32.43 % of 2.615 M). That whole 0.405 Gi/f stage is a
+constant, computed four and three-quarter million times a frame.
+
+The guard is the function's own three `if`s hoisted to the call site, spelled as
+one AND: `(smIdx & srcSm & srcCube) >= 0` is false iff every index is negative
+(absent = -1, so bit 31 survives the AND only when all three have it). Bit-exact
+by construction — it can only skip calls returning 1.0f, and 1.0f fails the
+`<= 0.0f` test either way. The vec path needs no equivalent; it already tests the
+same planes 8-wide (`anyShadow`) before its lane loop.
+
+Measured (3 arms, one worktree, one asset tree, interleaved min over 7 rounds,
+round 0 discarded, load 4.8-7.7):
+
+| | greets t=5743 | greets t=3122 (his) | chase t=800 | city t=1961 | fountain t=1200 |
+|---|--:|--:|--:|--:|--:|
+| `lighting-w1` Gi/f | 3.246 -> **2.953** (-9.0 %) | 1.916 -> **1.872** (-2.3 %) | 0.738 -> **0.572** (-22.5 %) | 1.146 -> 1.145 | 0.335 -> 0.335 |
+| `lighting-w1` ms | 26.00 -> **24.26** | 15.73 -> 15.53 | 5.07 -> **4.01** | 8.84 -> 8.73 | 2.39 -> 2.40 |
+| `renderFrame` Gi/f | 4.858 -> **4.566** (-6.0 %) | 4.945 -> **4.901** (-0.9 %) | 4.087 -> **3.921** (-4.1 %) | 6.232 -> 6.230 | 1.580 -> 1.580 |
+| `renderFrame` ms | 41.87 -> **40.11** | 37.80 -> **37.41** | 36.73 -> **35.35** | 53.98 -> 54.26 | 13.22 -> 13.13 |
+| frame min ms | 48.33 -> **46.55** | 44.37 -> **43.82** | (snapshot) | 76.15 -> 76.59 | 15.42 -> 15.31 |
+
+The frame-saving-equals-pass-saving check passes at t=5743: `lighting-w1` gives
+back 1.75 ms, `renderFrame` 1.75 ms, the frame 1.78 ms. city and fountain are
+neutral to 0.1 % on instructions (city runs the OuterVec kernel; fountain's whole
+omni loop is 0.1 Gi). chase was not expected to move and moves the most in
+relative terms — its lights carry cubes, not 2-D maps.
+
+### REFUTED, WITH NUMBERS
+
+**(1) Skip the dynamic shadow plane when it was never baked.** `--shadow_dynamic`
+defaults 0 and greets never sets it, so `packDyn` is provably all-zero
+(`assign(n, 0)` at rebuild; written only by the `DynamicMeshesPerFrame` bake,
+reached only from the two `if (FeatureFlags::shadow_dynamic())` sites). With the
+plane zero, PolyId's `closestPacked` collapses **algebraically** to
+`ShadowTexId(psB[o])` and Depth's `closest` to `ShadowTexZ(psB[o])` — four loads,
+four id extracts and eight compares per tap, deletable bit-exactly. Built it
+(one `dynPlaneEmpty` bool through `resolveCubeAtten` into `CubeShadow_Sample`).
+**It costs +12.4 % of `lighting-w1`'s instructions at t=5743 and +10.3 % at his
+pose — worse than the parent** (3.318 vs 3.246 Gi/f, with lever A's -0.293
+already inside it, so the bool alone is +0.365 Gi). Reverted. This is the THIRD
+independent measurement of the same mechanism — the cube tap is at its
+register-allocation limit and *any* new runtime predicate in its innermost body
+costs more than the work it removes (cf. the tap census's +2.0 % hooks,
+d9248f6d's `FDS_DEV` abort branch). **Treat "add a cheap test to the tap" as
+refuted-by-default; the tap only gets cheaper by being CALLED LESS.**
+
+**(2) Pass the pixel's world position into `computeMapShadowAtten`.** Both
+mirror-clone branches recompute `wp = viewToWorld * (x,y,z) + cameraWorld` — 9
+muls + 9 adds, per (pixel x light), for a per-PIXEL quantity the caller already
+hoists as `sampleWorldX/Y/Z` and hands `resolveCubeAtten` one line later. 67.5 %
+of the surviving calls at his pose take one of those branches, so the predicted
+saving was ~0.027 Gi. **Measured 0.010 Gi — `lighting-w1` 1.872 -> 1.862 at his
+pose (-0.53 %) and 2.954 -> 2.954 at t=5743, cycles flat-to-up.** The premise was
+two-thirds wrong: the compiler was already CSE-ing most of it. Not worth a
+signature change with a contraction risk against the pins. Reverted.
+
+### WHAT REMAINS, AND ITS REGIME
+
+After the change the omni loop is ~2.19 Gi/f at t=5743 and ~1.40 at his pose.
+
+1. **The cube tap, 1.42 Gi/f = 65 % of what is left at t=5743.** 4.725 M taps at
+   ~300 instructions each. `CubeShadow_Sample` is 368 static instructions with a
+   144-byte frame and eight callee-save pairs; `resolveCubeAtten` wraps it in 332
+   more with a 208-byte frame and eight more. Refutation (1) says the interior is
+   closed to cheap edits. **The only lever left is fewer taps**, which is
+   byte-moving — the parked 8x8 PolyId id-uniformity pyramid (43ac3456) is the
+   specified form, and the census now gives it a denominator: 76.1 % of taps sit
+   in an 8x8-uniform block.
+2. **`computeMapShadowAtten` at HIS pose, ~0.66 Gi/f.** 1.77 M surviving calls,
+   65 % of them the mirror-clone `srcCube` branch: world pos, mirror reflect,
+   world->view round trip, then a full cube sample. The round trip exists only
+   because `CubeShadow_Sample` wants view space while the reflection happens in
+   world space; a world->light matrix would delete ~15 flops per call but is a
+   re-association, not a hoist. **JUDGE-CALL, not free.**
+3. **The specular lobe, 0.264 / 0.229 Gi/f (10.6 % / 15.9 %).** No
+   transcendentals to remove: `--pbr` is off at greets, so the lobe is
+   `pow_glossClass` = a bit-exact squaring chain for gloss in {48, 64}, ~6 fmuls.
+   The cost is the half-vector, the `rsqrt`, and that it runs for every
+   ACCUMULATED pair. **Nothing cheap here; it is already the cheap form.**
+4. **The reject chain itself, ~0.3 Gi/f.** 8.32 lights entered per pixel to
+   shade 2.06. Halving the list would save ~0.15 Gi — but the tile-sphere cull
+   already took the geometric slack, and the remaining rejects are N.L (21.5 %)
+   and cone (10.7 %), both genuinely per-pixel.
+
 ## 2026-08-14b — fountain's 77 % frame item, closed: the two-layer transparent kernel was scanning 198 M px a frame to shade 0.97 M, and 3 of its 4 peel passes rendered nothing
 
 **Result: fountain t=1200 27.46 -> 15.47 ms frame min (-11.99 ms, -43.7 %), `TBR-render` 20.17 -> 8.17 ms (-59.5 %), instructions -55.0 % of `renderFrame`. Every gate byte-identical. Two flags, both default ON, both byte-null by construction.**

@@ -1515,10 +1515,115 @@ static inline bool fillFallsBackHere(const meka::GBuffer &gb, const word *ZPage1
 	return true;
 }
 
+// ─── Ablation ladder for the deferred OMNI LOOP (the scalar per-light body) ──
+// Same instrument shape as FDS_CONE_ABLATE in DeferredVolumetric.cpp, aimed at
+// the other ~100 %-self monolith: the per-light loop inside
+// Render_DeferredLighting_Tile, which is what greets/fountain/chase actually
+// run (PreferOuterVec is off for them; deferred_vec is off on arm64).
+// COMPILE-TIME only: build the TU with -DFDS_OMNI_ABLATE=n and the per-light
+// loop `continue`s at staged depth n, so the Ginstr/f difference between two
+// builds prices exactly one stage. n=0 (shipping) emits literally nothing.
+//
+//    1  cut at the top of the per-light loop      -> per-pixel loop floor
+//    2  keep + the mirrorId test
+//    3  keep + light vector w, N·L dot, dot<0 reject
+//    4  keep + len2 and the range reject
+//    5  keep + the mirror-bounce window portal test
+//    6  keep + rsqrt/dist/attenuation k
+//    7  keep + the spot-cone test and its smoothstep
+//    8  keep + computeMapShadowAtten (2-D spot maps, clone src map/cube)
+//    9  keep + resolveCubeAtten (the cube tap / shadow lightmap)
+//   10  keep + the POM relief-horizon term
+//   11  keep + the DIFFUSE accumulate  (so full - 11 = the specular lobe)
+//    0  full loop
+//
+// The cut sinks the values it retains into a per-TILE scalar accumulator that
+// drains to one volatile store per tile call — otherwise the retained work is
+// dead and the compiler deletes exactly what we are trying to price. Sink cost
+// is 1-2 instructions per (pixel x light); the shipping build pays none.
+#ifndef FDS_OMNI_ABLATE
+#define FDS_OMNI_ABLATE 0
+#endif
+#if FDS_OMNI_ABLATE
+static volatile float g_omniAblSink = 0.0f;
+// NB: no do/while(0) wrapper — the `continue` has to reach the per-light `for`.
+#define OMNI_ABL_CUT(stage, expr) \
+    if constexpr ((FDS_OMNI_ABLATE) == (stage)) { ablSink += (expr); continue; }
+#define OMNI_ABL_CUT_BARE(stage) \
+    if constexpr ((FDS_OMNI_ABLATE) == (stage)) { continue; }
+#else
+#define OMNI_ABL_CUT(stage, expr)  ((void)0)
+#define OMNI_ABL_CUT_BARE(stage)   ((void)0)
+#endif
+
+// ─── Per-PIXEL live-light census — the companion instrument to the ladder ────
+// The shadow-tap census (43ac3456) counts per (tile x light). This counts per
+// (pixel x light): where in the reject chain each of a tile's lights dies, and
+// the histogram of how many lights actually reach the accumulate for a pixel.
+// Build with -DFDS_OMNI_CENSUS=ON; runtime gate --omni_census.
+#ifndef FDS_OMNI_CENSUS
+#define FDS_OMNI_CENSUS 0
+#endif
+// [0] pairs entered, [1] mirrorId reject, [2] dot<0 reject, [3] range reject,
+// [4] portal reject, [5] cone reject, [6] map-shadow reject, [7] cube reject,
+// [8] horizon reject, [9] reached the accumulate, [10] shaded pixels,
+// [11..11+N] live-light histogram (clamped at the last bucket).
+// Sizes live OUTSIDE the #if so the per-tile counter array declares either way
+// and the hooks dead-strip on `constexpr bool omniCensus = false` instead of
+// needing an #if at every one of the ten call sites.
+// [44] pairs reaching computeMapShadowAtten, [45] .. with smIdx>=0,
+// [46] .. with srcShadowMapIdx>=0, [47] .. with srcCubeShadowIdx>=0,
+// [48] .. with NONE of those three (the call can only return 1.0f),
+// [49] pairs reaching the cube stage with cubeShadowIdx>=0.
+static constexpr int OMNI_CEN_HIST = 33;
+static constexpr int OMNI_CEN_BR   = 11 + OMNI_CEN_HIST;   // = 44
+static constexpr int OMNI_CEN_N    = OMNI_CEN_BR + 6;
+#if FDS_OMNI_CENSUS
+static std::atomic<uint64_t> g_omniCen[OMNI_CEN_N];
+void OmniCensus_Report()
+{
+	uint64_t c[OMNI_CEN_N];
+	for (int i = 0; i < OMNI_CEN_N; ++i) c[i] = g_omniCen[i].load(std::memory_order_relaxed);
+	if (c[0] == 0) return;
+	const double px = double(c[10] ? c[10] : 1);
+	const double pr = double(c[0]);
+	std::fprintf(stderr,
+	    "[OMNI-CENSUS] shaded px %.3f M, (px x light) pairs %.3f M = %.2f lights/px entered\n"
+	    "[OMNI-CENSUS]   mirrorId %.2f%%  N.L<0 %.2f%%  range %.2f%%  portal %.2f%%  cone %.2f%%  "
+	    "mapshadow %.2f%%  cube %.2f%%  horizon %.2f%%  ACCUMULATED %.2f%% (%.2f lights/px)\n",
+	    double(c[10])/1e6, pr/1e6, pr/px,
+	    100.0*double(c[1])/pr, 100.0*double(c[2])/pr, 100.0*double(c[3])/pr,
+	    100.0*double(c[4])/pr, 100.0*double(c[5])/pr, 100.0*double(c[6])/pr,
+	    100.0*double(c[7])/pr, 100.0*double(c[8])/pr,
+	    100.0*double(c[9])/pr, double(c[9])/px);
+	std::fprintf(stderr, "[OMNI-CENSUS]   live-lights/pixel histogram (%% of shaded px):");
+	for (int b = 0; b < OMNI_CEN_HIST; ++b) {
+		const uint64_t v = c[11 + b];
+		if (v == 0) continue;
+		std::fprintf(stderr, " %d:%.2f%%", b, 100.0*double(v)/px);
+	}
+	std::fprintf(stderr, "\n");
+	const double mp = double(c[OMNI_CEN_BR] ? c[OMNI_CEN_BR] : 1);
+	std::fprintf(stderr,
+	    "[OMNI-CENSUS]   computeMapShadowAtten calls %.3f M: smIdx %.2f%%  srcSm %.2f%%  "
+	    "srcCube %.2f%%  NONE-OF-THREE %.2f%% (returns 1.0f for free)\n"
+	    "[OMNI-CENSUS]   cube-stage pairs with cubeShadowIdx>=0: %.3f M\n",
+	    mp/1e6, 100.0*double(c[OMNI_CEN_BR+1])/mp, 100.0*double(c[OMNI_CEN_BR+2])/mp,
+	    100.0*double(c[OMNI_CEN_BR+3])/mp, 100.0*double(c[OMNI_CEN_BR+4])/mp,
+	    double(c[OMNI_CEN_BR+5])/1e6);
+	for (int i = 0; i < OMNI_CEN_N; ++i) g_omniCen[i].store(0, std::memory_order_relaxed);
+}
+#else
+void OmniCensus_Report() {}
+#endif
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
 {
+#if FDS_OMNI_ABLATE
+	float ablSink = 0.0f;
+#endif
 	// Render-target addressing from ctx, not globals (RenderContext
 	// migration). Locals shadow the engine globals so the body is untouched.
 	const int XRes = ctx.xres;
@@ -1762,6 +1867,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 		tcBlk = tcBlkBuf.data();
 		std::memset(tcBlk, 0, need * sizeof(uint32_t));
 	}
+#if FDS_OMNI_CENSUS
+	// Tile-local counters; one atomic drain per tile call. Same reason the tap
+	// census keeps tcL on the stack — an atomic in the innermost body is not a
+	// measurement, it is a different program.
+	const bool omniCensus = fds::FeatureFlags::omni_census() && ctx.xres >= 640;
+#else
+	constexpr bool omniCensus = false;
+	if (fds::FeatureFlags::omni_census()) {
+		static std::atomic<int> warnedOc{0};
+		if (warnedOc.fetch_add(1, std::memory_order_relaxed) == 0)
+			std::fprintf(stderr, "[OMNI-CENSUS] this binary was built without the hooks. "
+			    "Rebuild with: cmake -S . -B build-census -G Ninja -DFDS_OMNI_CENSUS=ON\n");
+	}
+#endif
+	uint64_t ocn[OMNI_CEN_N] = {0};
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -2324,6 +2444,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			float hzVizSum = 0.0f, hzVizWeight = 0.0f;
 
 			if (tapCensus) ++tcPixels;
+			int nLiveOmni = 0;
+			if (omniCensus) ++ocn[10];
 			if (!isWater && !profNoLights) {
 				if (useVecHere) {
 					// 8-wide SIMD inner loop — written directly against
@@ -2608,7 +2730,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// used by cube shadow sampling for any omni with
 					// cubeShadowIdx >= 0.
 					for (int n = 0; n < tl.count; ++n) {
-						if (tl.mirrorId[n] != pmid) continue;
+						if (omniCensus) ++ocn[0];
+						OMNI_ABL_CUT_BARE(1);
+						if (tl.mirrorId[n] != pmid) { if (omniCensus) ++ocn[1]; continue; }
+						OMNI_ABL_CUT(2, 1.0f);
 						const float Lpx = tl.posX[n];
 						const float Lpy = tl.posY[n];
 						const float Lpz = tl.posZ[n];
@@ -2616,10 +2741,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float wy = Lpy - y;
 						const float wz = Lpz - z;
 						const float dot = wx * nx + wy * ny + wz * nz;
-						if (dot < 0.0f) continue;
+						if (dot < 0.0f) { if (omniCensus) ++ocn[2]; continue; }
+						OMNI_ABL_CUT(3, dot);
 						const float len2 = wx*wx + wy*wy + wz*wz;
 						const float r2 = tl.range2[n];
-						if (len2 > r2) continue;
+						if (len2 > r2) { if (omniCensus) ++ocn[3]; continue; }
+						OMNI_ABL_CUT(4, len2);
 						if (tapCensus) ++tcL[n][0];
 						// Mirror-bounce window portal: a bounce spot's apex
 						// is behind the glass; only light it onto this pixel
@@ -2627,21 +2754,35 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// window. Gate keeps non-bounce lights free.
 						if (tl.winMinX[n] <= tl.winMaxX[n] &&
 						    bouncePortalReject(tl, n, sampleWorldX, sampleWorldY, sampleWorldZ))
-							continue;
+							{ if (omniCensus) ++ocn[4]; continue; }
+						OMNI_ABL_CUT(5, dot + len2);
 						const float lenInv = fast_rsqrt(len2);
 						const float dist   = len2 * lenInv;
 						const float rRange = tl.rRange[n];
 						float k = dot * lenInv * (1.0f - dist * rRange);
+						OMNI_ABL_CUT(6, k);
 						// Spot cone: matches the vec body's coneAtten so nmap
 						// pixels (which all flow through this scalar path)
 						// don't render the robot spotlight as an omni.
 						if (tl.isSpot[n]) {
 							const float cosTheta = -(tl.dirX[n]*wx + tl.dirY[n]*wy + tl.dirZ[n]*wz) * lenInv;
-							if (cosTheta <= tl.cosOuter[n]) continue;
+							if (cosTheta <= tl.cosOuter[n]) { if (omniCensus) ++ocn[5]; continue; }
 							if (cosTheta < tl.cosInner[n]) {
 								const float ct = (cosTheta - tl.cosOuter[n]) / (tl.cosInner[n] - tl.cosOuter[n]);
 								k *= ct * ct * (3.0f - 2.0f * ct);
 							}
+						}
+						OMNI_ABL_CUT(7, k);
+						if (omniCensus) {
+							++ocn[OMNI_CEN_BR];
+							const bool a = tl.shadowMapIdx[n]     >= 0;
+							const bool b = tl.srcShadowMapIdx[n]  >= 0;
+							const bool cc = tl.srcCubeShadowIdx[n] >= 0;
+							if (a)  ++ocn[OMNI_CEN_BR+1];
+							if (b)  ++ocn[OMNI_CEN_BR+2];
+							if (cc) ++ocn[OMNI_CEN_BR+3];
+							if (!a && !b && !cc) ++ocn[OMNI_CEN_BR+4];
+							if (tl.cubeShadowIdx[n] >= 0) ++ocn[OMNI_CEN_BR+5];
 						}
 						// Shadow test. Project pixel view-space pos to the
 						// shadow map's screen+depth; attenuate the light
@@ -2657,13 +2798,43 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// polygons that project to a single texel flicker
 						// in/out as the texel-grid shifts under them.
 						// Cost: 4 loads + 4 compares + 4 muls + 4 adds.
-						float shadowAtten = computeMapShadowAtten(
-							tl, n, ctx, x, y, z, wx, wy, wz, lenInv,
-							nGeoX, nGeoY, nGeoZ, surfaceShadowId,
-							kShadowBiasG, kSlopeBiasG, profShadowCache);
-						// Combined srcSm×srcCube×smIdx; 0 = fully shadowed (the
-						// old `if (occ >= 1.0f) continue;` early-out).
-						if (shadowAtten <= 0.0f) continue;
+						// THE CALL IS THE COST, NOT THE MAPS. computeMapShadowAtten
+						// reads exactly three index planes — the light's own 2-D
+						// spot map, a mirror clone's SOURCE map, a mirror clone's
+						// SOURCE cube — and every one of its three bodies is
+						// guarded on that index being >= 0. With all three
+						// negative it can only `return shadowAtten` still holding
+						// its 1.0f initialiser. It is nonetheless an OUT-OF-LINE
+						// function with a 176-byte frame and TEN callee-save
+						// stp/ldp pairs, invoked once per (pixel x light) that
+						// clears the cone test: 4.749 M times a frame at greets
+						// t=5743 — of which --omni_census says **99.50 % carry
+						// none of the three** (his pose t=3122: 32.43 %). Measured
+						// by the FDS_OMNI_ABLATE ladder, that stage is 0.405 Gi/f,
+						// 16.3 % of the whole omni loop, to compute the constant
+						// 1.0f four and a half million times.
+						//
+						// The guard is the same predicate the function's own three
+						// `if`s already form, hoisted to the call site: AND of the
+						// three int32s has bit 31 set iff ALL of them are negative
+						// (absent indices are -1), so `>= 0` means "at least one
+						// index is live, the call can do something". BIT-EXACT by
+						// construction — it can only skip calls whose return value
+						// is 1.0f, and 1.0f fails the `<= 0.0f` test below either
+						// way. The vec path needs no equivalent: it already tests
+						// the same planes 8-wide (`anyShadow`) before its lane loop.
+						float shadowAtten = 1.0f;
+						if ((tl.shadowMapIdx[n] & tl.srcShadowMapIdx[n]
+						                        & tl.srcCubeShadowIdx[n]) >= 0) {
+							shadowAtten = computeMapShadowAtten(
+								tl, n, ctx, x, y, z, wx, wy, wz, lenInv,
+								nGeoX, nGeoY, nGeoZ, surfaceShadowId,
+								kShadowBiasG, kSlopeBiasG, profShadowCache);
+							// Combined srcSm×srcCube×smIdx; 0 = fully shadowed (the
+							// old `if (occ >= 1.0f) continue;` early-out).
+							if (shadowAtten <= 0.0f) { if (omniCensus) ++ocn[6]; continue; }
+						}
+						OMNI_ABL_CUT(8, k + shadowAtten);
 
 						// Cube shadow (omni shadow caster). Two paths:
 						//  - Static-mesh pixel + lightmap baked for this
@@ -2697,9 +2868,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									else if (cubeAtten <= 0.0f) ++b[2];
 								}
 							}
-							if (cubeAtten <= 0.0f) continue;
+							if (cubeAtten <= 0.0f) { if (omniCensus) ++ocn[7]; continue; }
 							shadowAtten *= cubeAtten;
 						}
+						OMNI_ABL_CUT(9, k + shadowAtten);
 						// S1c: relief self-shadow. Take the (already unit-length
 						// after ×lenInv) pixel→light direction into the surface's
 						// tangent frame; its Z is sin(elevation), its XY give the
@@ -2723,7 +2895,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						if (hzTexel) {
 							const float lx = wx * lenInv, ly = wy * lenInv, lzv = wz * lenInv;
 							const float sinElev = lx*nGeoX + ly*nGeoY + lzv*nGeoZ;
-							if (sinElev <= 0.0f) continue;      // below the plane
+							if (sinElev <= 0.0f) { if (omniCensus) ++ocn[8]; continue; }   // below the plane
 							const float ltx = lx*hzTx + ly*hzTy + lzv*hzTz;
 							const float lbv = lx*hzBx + ly*hzBy + lzv*hzBz;
 							const float ax = std::fabs(ltx), ay = std::fabs(lbv);
@@ -2752,8 +2924,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							const float hzAtten = 1.0f - hzStrengthG * (1.0f - vis);
 							if (pomHorizonVizG) { hzVizSum += hzAtten * k; hzVizWeight += k; }
 							shadowAtten *= hzAtten;
-							if (shadowAtten <= 0.0f) continue;
+							if (shadowAtten <= 0.0f) { if (omniCensus) ++ocn[8]; continue; }
 						}
+						OMNI_ABL_CUT(10, k + shadowAtten);
+						if (omniCensus) { ++ocn[9]; ++nLiveOmni; }
 						const float intensity = k * Mat->Diffuse * shadowAtten;
 						const float Lcb = tl.colB[n];
 						const float Lcg = tl.colG[n];
@@ -2769,6 +2943,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							const float cr = aR*aR*intensity*Lcr; if (cr>cc) cc=cr;
 							if (cc > contribMax[n]) contribMax[n] = cc;
 						}
+						OMNI_ABL_CUT_BARE(11);
 
 						if (wantSpecular) {
 							const float ldx = wx * lenInv;
@@ -2844,6 +3019,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					}
 				}
 			}
+
+			if (omniCensus)
+				++ocn[11 + (nLiveOmni < OMNI_CEN_HIST ? nLiveOmni : OMNI_CEN_HIST - 1)];
 
 			// S4b: AO on the FINAL combined diffuse (ambient + direct). Only when
 			// --ao_direct moved it here off the ambient-only term above. Uses its
@@ -3257,6 +3435,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			    double(a1.load())/td, double(a2.load())/td, t);
 		}
 	}
+
+#if FDS_OMNI_CENSUS
+	if (omniCensus) {
+		for (int i = 0; i < OMNI_CEN_N; ++i)
+			if (ocn[i]) g_omniCen[i].fetch_add(ocn[i], std::memory_order_relaxed);
+	}
+#endif
+#if FDS_OMNI_ABLATE
+	g_omniAblSink = ablSink;   // one volatile store per tile call
+#endif
 
 	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
 	// SKIPPED for an INLINE (offscreen-bake) dispatch: the calling thread would
@@ -6852,6 +7040,13 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2", 2, _w2q);
 		}
 	}
+
+#if FDS_OMNI_CENSUS
+	// One line per main-view frame (offscreen bakes never reach the counters —
+	// the per-tile gate is xres >= 640, same rule as the tap census).
+	if (fds::FeatureFlags::omni_census() && !inlineDispatch && ctx.xres >= 640)
+		OmniCensus_Report();
+#endif
 
 	// Dump cache-line transition stats accumulated by shadow sampling
 	// during this frame's tile work. Reset to zero for the next frame.

@@ -116,6 +116,17 @@ else()
     add_compile_definitions(FDS_SHADOW_TAP_CENSUS=0)
 endif()
 
+# --omni_census counts per (pixel x light) instead of per (tile x light): where
+# in the reject chain each light dies, and the live-lights-per-pixel histogram.
+# Same register-pressure reasoning as the tap census above, same default.
+# Measure with:  cmake -S . -B build-census -G Ninja -DFDS_OMNI_CENSUS=ON
+option(FDS_OMNI_CENSUS "Compile the deferred omni-loop per-pixel census hooks (--omni_census)" OFF)
+if(FDS_OMNI_CENSUS)
+    add_compile_definitions(FDS_OMNI_CENSUS=1)
+else()
+    add_compile_definitions(FDS_OMNI_CENSUS=0)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.
