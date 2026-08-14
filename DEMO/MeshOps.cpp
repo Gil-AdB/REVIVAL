@@ -4030,6 +4030,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// Per-vert displacement direction override; zero = keep the vertex normal.
 		std::vector<Vector> freeDispDir(nV, Vector{0.0f,0.0f,0.0f});
 		std::vector<float> hSum(nV, 0.0f); std::vector<int> hCnt(nV, 0);
+		// phase-round census: average sample UV per vert (diagnosis only)
+		std::vector<float> uSum(nV, 0.0f), vSum(nV, 0.0f);
 		auto isTargetNew=[&](const Face &F){ return F.Txtr && F.Txtr->Name && !std::strcmp(F.Txtr->Name,matName); };
 		// ── per-LINE height override (--greets_displace_line_height): a vertex
 		// whose MAP-space position lies ON a detected groove line — or NEAR one,
@@ -4080,6 +4082,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			const float cu2[3]={F.U1,F.U2,F.U3}, cv2[3]={F.V1,F.V2,F.V3};
 			for (int k=0;k<3;++k){ if (vi[k]>=nV||pinnedZero[vi[k]]) continue;
 				hSum[vi[k]]+=SampleHeight8Bilinear(hm,useMip,cu2[k],cv2[k]); hCnt[vi[k]]+=1;
+				uSum[vi[k]]+=cu2[k]; vSum[vi[k]]+=cv2[k];
 				if (!lineHeight) continue;
 				const float mwF = float(useMipW), mhF = float(useMipH);
 				float xm = std::fmod(cu2[k]*mwF, mwF); if (xm < 0.0f) xm += mwF;
@@ -4552,7 +4555,19 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const float t0 = Pf.x*G.dir.x + Pf.y*G.dir.y + Pf.z*G.dir.z;
 					G.foot = Vector{ Pf.x - t0*G.dir.x, Pf.y - t0*G.dir.y, Pf.z - t0*G.dir.z };
 				}
-				const std::vector<size_t> &own = (B.size() > A.size()) ? B : A;
+				// PHASE ROUND 2026-08-14: this sampled only the LARGER side,
+				// forcing that chart's course grid onto the partner. Measured at
+				// the t=6001 corner: the two authored charts' mortar rows
+				// disagree by ~half a course across the arris (flat-arm rows at
+				// px 318/555 vs 425/455), so the owner's carve landed mid-stone
+				// on the partner — the proud "bulb" sheet. The profile now
+				// samples BOTH sides; the envelope-deficit of the union carves
+				// only where the two arts agree and holds a straight arris where
+				// they disagree. Watertight either way (one shared profile), and
+				// bulges stay impossible (deficit <= 0).
+				std::vector<size_t> own; own.reserve(A.size() + B.size());
+				own.insert(own.end(), A.begin(), A.end());
+				own.insert(own.end(), B.begin(), B.end());
 				// RAW field, then LOCAL UPPER ENVELOPE — two deliberate choices:
 				// 1. NO line-height override (lineRep/linePlat implement the
 				//    face-interior two-population carve; injected into a border
@@ -4634,11 +4649,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			//  * fallback-path verts inside a groove's influence zone -> the
 			//    groove's plateau ref (no carve — the zigzag's causal set).
 			float h = hCnt[i] ? hSum[i]/float(hCnt[i]) : mipMean;
+			const float hRaw = h;               // phase-round census
+			char hClass = '-';
 			if (lineHeight) {
 				if (edgeOwned[i]) {
-					if (lineRepV[i] < 1e29f) { h = lineRepV[i]; ++nLineSnap; }
+					if (lineRepV[i] < 1e29f) { h = lineRepV[i]; ++nLineSnap; hClass = 'E'; }
 				} else if (linePlatD[i] < 1e29f) {
-					h = linePlatV[i]; ++nPlatPin;
+					h = linePlatV[i]; ++nPlatPin; hClass = 'P';
 				}
 			}
 			float dsp=amp*(h-mipMean);
@@ -4799,13 +4816,23 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// blend supersedes it (the t=6001 misread).
 			if (fds::FeatureFlags::greets_displace_junction_census()) {
 				const Vector &Pq = basePos[i];
-				if (Pq.x > 17.4f && Pq.x < 18.4f && Pq.z > -63.5f && Pq.z < -57.5f
-				    && Pq.y > 2.9f && Pq.y < 4.9f)
+				// Widened 2026-08-14 (phase round): the old z<-57.5 bound excluded
+				// the PARTNER wall of the t=6001 corner; include both sheets and
+				// print the vert's UV + its own bilinear h so carve-vs-drawn
+				// phase is measurable per vert.
+				if (Pq.x > 16.0f && Pq.x < 19.5f && Pq.z > -63.5f && Pq.z < -54.5f
+				    && Pq.y > 2.9f && Pq.y < 4.9f) {
+					const float uAvg = hCnt[i] ? uSum[i]/float(hCnt[i]) : -1.0f;
+					const float vAvg = hCnt[i] ? vSum[i]/float(hCnt[i]) : -1.0f;
 					std::fprintf(stderr, "[STONE-FINALV] '%s' pos(%.3f,%.3f,%.3f) "
-						"dir(%+.3f,%+.3f,%+.3f) dsp %+.4f%s\n",
+						"dir(%+.3f,%+.3f,%+.3f) dsp %+.4f uv(%.4f,%.4f) hRaw %.3f hEff %.3f "
+						"mean %.3f cls %c%s\n",
 						matName, double(Pq.x), double(Pq.y), double(Pq.z),
 						double(dx), double(dy), double(dz), double(dsp),
+						double(uAvg), double(vAvg),
+						double(hRaw), double(h), double(mipMean), hClass,
 						mitreOf[i] >= 0 ? " WELD" : "");
+				}
 			}
 			verts[i].Pos.x+=dx*dsp; verts[i].Pos.y+=dy*dsp; verts[i].Pos.z+=dz*dsp;
 			// Carved below the reference: record the AUTHORED normal this vert
