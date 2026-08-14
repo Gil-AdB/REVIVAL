@@ -128,20 +128,30 @@ run_halo() {
 # the tileChunkSphere-reads-globals bug corrupted (serial worked by
 # accident; the fan used the main camera's projection → mis-culled spots).
 # Regression guard for commit 54a9d50.
-# NB: the serial leg MUST force FDS_MIRROR_RTT_SERIAL=1 — mirror_rtt_parallel
-# defaults ON since 3cf9456, so a flagless run is parallel and the check
-# would silently compare parallel to parallel.
+# TWO ways this row can go vacuous, both of which it HAS:
+#  1. The serial leg must force FDS_MIRROR_RTT_SERIAL=1 — mirror_rtt_parallel
+#     defaults ON since 3cf9456, so a flagless run is parallel and the check
+#     compares parallel to parallel (6e64abe).
+#  2. It must gate the SLOT DUMPS (/tmp/rtt_*.ppm), not the mt_view frames.
+#     mt_view does not carry RTT slot pixels — the same reason run_rttslot
+#     exists at all. MEASURED 2026-08-14: a deliberate +1 px shift of the
+#     fan's CntrEX leaves every mt_view frame byte-identical and moves the
+#     slot dumps. On mt_view this row could not fail.
+# Verify with FDS_RTT_FAN_PROBE=1: the parallel leg prints [RTT-FAN] per bake,
+# the serial leg prints nothing.
 run_rtt_parallel_invariant() {
   local ser par
-  rm -f /tmp/mt_view_*.ppm
+  rm -f /tmp/rtt_*.ppm /tmp/mt_view_*.ppm
   FDS_MIRROR_RTT_SERIAL=1 FDS_MIRRORTEST_SPOT=1 FDS_MIRRORTEST_MULTI_DUMP=1 \
-    ./DEMO --scene-mirrortest \
+    FDS_MIRROR_RTT_DUMP=1 ./DEMO --scene-mirrortest \
     --mirror-rtt --shard-deferred --hdr >/dev/null 2>&1
-  ser=$(md5_of /tmp/mt_view_*.ppm)
-  rm -f /tmp/mt_view_*.ppm
-  FDS_MIRRORTEST_SPOT=1 FDS_MIRRORTEST_MULTI_DUMP=1 ./DEMO --scene-mirrortest \
+  ser=$(md5_of /tmp/rtt_*.ppm)
+  rm -f /tmp/rtt_*.ppm /tmp/mt_view_*.ppm
+  FDS_MIRRORTEST_SPOT=1 FDS_MIRRORTEST_MULTI_DUMP=1 FDS_MIRROR_RTT_DUMP=1 \
+    ./DEMO --scene-mirrortest \
     --mirror-rtt --shard-deferred --hdr --mirror-rtt-parallel >/dev/null 2>&1
-  par=$(md5_of /tmp/mt_view_*.ppm)
+  par=$(md5_of /tmp/rtt_*.ppm)
+  rm -f /tmp/rtt_*.ppm /tmp/mt_view_*.ppm
   [ "$ser" = "$par" ] && echo "MATCH" || echo "MISMATCH(ser=$ser par=$par)"
 }
 

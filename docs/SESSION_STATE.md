@@ -30,24 +30,40 @@
 > have baked BLACK with nothing to say so. `dctx.Sc = CurScene` added at the
 > call site.
 >
-> **PARKED — the parallel mirror-RTT fan is not in this merge.** soa-vertex
+> **The parallel mirror-RTT fan was re-ported on top of the merge.** soa-vertex
 > restructured the bake into a serial prepass + an `RttWorker` fan (+455/-152,
 > 3 commits); this line restructured the same code into `bakeJob` + the slice-2
-> recursive bake tree (+785/-86, 12 commits). They are not textually
-> reconcilable and the tree is order-dependent (children before parents,
-> siblings stashed/restored), so the fan cannot simply wrap it. This merge
-> takes fog-wt's `GreetsMirror.cpp`. Consequences, both of which need action:
->   - `mirror_rtt_parallel` in `FeatureFlags.def` is now a DEAD FLAG — default
->     ON, documented as shipped, read by nothing.
->   - `render_gate.sh`'s `rtt-parallel` row is therefore VACUOUS: it compares
->     serial to serial and cannot fail. (Same failure mode as `6e64abe`.)
->   The re-port target is the FLAT bake path (`recurseDepth <= 0`, the default),
->   which is a plain loop over independent jobs; leave the recursive tree serial.
->   Recover the prepass + fan from `git show cbc9220 bdeacfe`.
+> recursive bake tree (+785/-86, 12 commits). Rather than interleave them, the
+> merge took fog-wt's `GreetsMirror.cpp` and the fan went back on afterwards:
+>   1. `bakeJob`'s 169-line tail is now a shared `finishSlot(BakeView, ...)`
+>      lambda — dumps/marks, the half-silvered text composite, the HDR
+>      float-radiance capture, the recursive passthrough compensation and the
+>      Sachletz copy. Serial and fanned bakes call the SAME tail, so they
+>      cannot drift. This extraction alone is byte-clean (rttslot hash
+>      unchanged).
+>   2. The fan runs on the FLAT path only (`mirror_recurse_depth <= 0`, the
+>      default). A multi-pass flat run has slots reading each other's textures
+>      within a pass, and the recursive tree is order-dependent by
+>      construction — both stay serial. The flag doc records that scope.
 >
-> Gate on the merged tree: mirrortest / rttslot / conetest / halotest all PASS
-> against the committed baselines (rtt-parallel PASSes vacuously, see above).
-> city / chase / fountain / greets all render headless without crashing.
+> **The `rtt-parallel` gate row had a SECOND way to be vacuous, and it had it.**
+> Fixing the serial leg (6e64abe) was not enough: the row gated the `mt_view`
+> frames, which do not carry RTT slot pixels — the same fact that made
+> `rttslot` necessary in the first place. MEASURED: a deliberate +1 px shift of
+> the fan's `CntrEX` leaves every `mt_view` frame byte-identical. The row now
+> gates the slot dumps (`/tmp/rtt_*.ppm`), and with that perturbation in place
+> it FAILS (and so does `rttslot`) while mirrortest/conetest/halotest correctly
+> stay green. `FDS_RTT_FAN_PROBE=1` prints `[RTT-FAN]` per bake so you can
+> check which path a leg took: 4 on the parallel leg, 0 on the serial one.
+>
+> Fan verification: byte-identical to serial, deterministic over 5 runs, and
+> TSan-clean on `--scene-mirrortest --mirror-rtt --shard-deferred --hdr
+> --mirror-rtt-parallel`.
+>
+> Gate on the merged tree: ALL FIVE rows PASS — mirrortest / rttslot /
+> conetest / halotest against the committed baselines, and rtt-parallel as a
+> row that has been shown to fail. city / chase / fountain / greets all render
+> headless without crashing. STILL OWED: eyes on greets and city live.
 > soa-vertex's own SESSION_STATE narrative is at
 > `git show feature/soa-vertex:docs/SESSION_STATE.md`.
 
