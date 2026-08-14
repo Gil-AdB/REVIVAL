@@ -175,12 +175,35 @@ static volatile float g_ablSink = 0.0f;
 #define FDS_CONE_NEONMINMAX 1
 #endif
 
+// ─── FDS_CONE_QUADEARLYOUT — the early-out at the RIGHT cut point ───────────
+// Round 1 built a range-sphere early-out (FDS_CONE_SOLVE_EARLYOUT, still
+// compiled out below) and it cost +2.0% instructions on city, because a pair
+// is only skipped when all EIGHT lanes miss the range SPHERE and city loses
+// only 7.7% of its pairs there. Chase loses ZERO percent there (DIAG
+// sphdead=0.0% at every pose): its spots are long-range beams whose range
+// sphere covers the whole visible depth, so every dead lane dies on the CONE
+// quadratic instead — 30 lines further down. This cut sits after the
+// a-sign/discriminant mask, which is the first point at which the pair's fate
+// is decided, and skips the range-sphere clamp (a sqrt + a divide), the
+// apex-plane cut (a second divide) and the three stores.
+// BYTE-NULL BY CONSTRUCTION: zLoArr/zHiArr/aliveLane are zero-initialised per
+// pair and `spotAlive` stays false, which is exactly the state the fall-through
+// would leave them in before `if (!spotAlive) continue;`.
+#ifndef FDS_CONE_QUADEARLYOUT
+#define FDS_CONE_QUADEARLYOUT 1
+#endif
+
 static constexpr bool g_coneDiag = (FDS_CONE_DIAG != 0);
 static std::atomic<long long> g_dPairs{0};   // batch x spot pairs entering the scalar solve
 static std::atomic<long long> g_dSegPair{0}; // ...of which take the 8-segment hybrid
 static std::atomic<long long> g_dDead{0};    // ...of which had ZERO alive lanes (wasted prologue)
 static std::atomic<long long> g_dLanes{0};   // alive (lane x spot) pairs reaching integration
 static std::atomic<long long> g_dSphDead{0}; // ...pairs whose EIGHT lanes all miss the range sphere
+static std::atomic<long long> g_dQuadDead{0};// ...pairs whose EIGHT lanes are dead right after the
+                                             //    a-sign/discriminant mask, i.e. BEFORE the sphere
+                                             //    clamp, the apex-plane cut and the three stores.
+                                             //    THIS is the cut point round 1's sphere early-out
+                                             //    (FDS_CONE_SOLVE_EARLYOUT) missed.
 
 
 // The ONLY fused multiply-add the 8-wide cone solve is allowed to use.
@@ -987,23 +1010,40 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // Mirror-clone (omid) and bounce spots keep the
                     // scalar arm: both need per-lane gathers/branches
                     // that aren't worth widening at their frequency.
-                    // So do SEGMENTED cones (narrow disco beams, and any
-                    // turbulent cone) — and that one is a MEASUREMENT, not
-                    // a symmetry. The wide arm always computes both a-sign
-                    // branches, both roots and the whole tail for all eight
-                    // lanes, where the scalar arm's dead lanes bail early;
-                    // that trade wins big when the solve is most of the
-                    // work (city: every headlight is a wide cone on the
-                    // cheap closed form, −30.6% instructions on the pass)
-                    // and stops paying when the body is the 8-segment
-                    // hybrid and the solve is a minor share. Ungated, at
-                    // the greets pin pose: instructions −3.8% but cycles
-                    // +3.6% and wall +1.4% (7.63 → 7.73 ms), reproduced in
-                    // two independent interleaved min-of-6 sessions. Both
-                    // arms are bit-identical, so this gate is byte-null and
-                    // is purely about where the wide arm earns its keep.
-                    const bool solveVec = coneSolveVec && omid == 0 && !bounce
-                                          && !segPath;
+                    // SEGMENTED cones (narrow disco beams, and any
+                    // turbulent cone) USED TO be excluded here as well, on
+                    // round 1's greets measurement — ungated at the greets
+                    // pin pose the wide arm read instructions −3.8% but
+                    // cycles +3.6% and wall +1.4% (7.63 → 7.73 ms), because
+                    // it computes both a-sign branches, both roots and the
+                    // whole tail for all eight lanes where the scalar arm's
+                    // dead lanes bail early, and greets' 8-segment body made
+                    // the solve a minor share.
+                    // THE GATE IS GONE, and that is a measurement too.
+                    // Round 6 profiled CHASE, which was never in the
+                    // campaign: its cone population is 34 spots of which 32
+                    // are narrow (DIAG `narrow(seg8)=32`), so 91 % of its
+                    // (batch × spot) pairs were on the scalar arm this gate
+                    // forced — and the round-2 ablation ladder, re-run on
+                    // chase, put 53.2 % of the whole pass (1.487 of 2.797
+                    // Ginstr/f) in that one scalar solve. What changed since
+                    // round 1 is the KERNEL, not the argument: NEONMINMAX,
+                    // the round-4b/5 algebra folds and the lane_vec loops
+                    // all landed after the gate was set. Re-measured against
+                    // a real parent binary, interleaved min-of-6:
+                    //   chase t=800    cones 18.30 → 14.93 ms, 2.796 →
+                    //                  2.192 Ginstr/f, 0.622 → 0.500 Gcyc/f
+                    //   greets t=1588  cones 7.53 → 7.41 ms  (its own beams
+                    //                  are segmented, and they IMPROVE)
+                    //   city t=1961    0.540 → 0.537 Gcyc/f (all wide; the
+                    //                  term's removal only perturbs codegen)
+                    // Both figures include FDS_CONE_QUADEARLYOUT, which is
+                    // what keeps city whole — see its note at the top.
+                    // NOT byte-null, unlike round 1's version of this arm:
+                    // the wide arm's VP/DV fold (round 5) rounds Y·Py + Pz
+                    // once where the scalar arm rounds Y·Py first, so the
+                    // segmented cones now inherit that judge call.
+                    const bool solveVec = coneSolveVec && omid == 0 && !bounce;
                     // ─── the same solve at NATIVE 128-bit width ──────
                     // Two 4-lane passes over the same 8-pixel batch. The
                     // NEON op count is identical (simde already emits two
@@ -1339,6 +1379,20 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         mAlive = _mm256_and_ps(mAlive,
                             _mm256_or_ps(_mm256_and_ps(mANeg, mDisc),
                                          _mm256_and_ps(mAPos, mPosOk)));
+                        // DIAG-only: pairs already fully dead HERE. Round 1's
+                        // early-out sat 30 lines earlier, at the range sphere,
+                        // and fired on 7.7% of city's pairs; chase's sphere
+                        // rejects 0.0%, so the question is what this later cut
+                        // catches instead.
+                        if (g_coneDiag && _mm256_movemask_ps(mAlive) == 0)
+                            g_dQuadDead.fetch_add(1, std::memory_order_relaxed);
+#if FDS_CONE_QUADEARLYOUT
+                        if (_mm256_movemask_ps(mAlive) == 0) {
+                            if (g_coneDiag)
+                                g_dDead.fetch_add(1, std::memory_order_relaxed);
+                            continue;
+                        }
+#endif
 
                         // Range-sphere clamp + the shared tail.
                         const __m256 sSphSq = SQRTV(sSphD);
@@ -2882,17 +2936,20 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         const long long P = g_dPairs.load(), D = g_dDead.load();
         const long long S = g_dSegPair.load(), L = g_dLanes.load();
         const long long SD = g_dSphDead.load();
+        const long long QD = g_dQuadDead.load();
         fprintf(stderr,
             "[CONE-DIAG] spots=%d narrow(seg8)=%d shadowed=%d | "
             "batchxspot=%lld dead=%lld (%.1f%%) seg=%lld (%.1f%%) | "
-            "alive lanexspot=%lld (%.2f per pair, %.1f%% of 8) sphdead=%lld (%.1f%%)\n",
+            "alive lanexspot=%lld (%.2f per pair, %.1f%% of 8) sphdead=%lld (%.1f%%) quaddead=%lld (%.1f%%)\n",
             spotCount, nNarrow, nShadow, P, D,
             P ? 100.0 * double(D) / double(P) : 0.0,
             S, P ? 100.0 * double(S) / double(P) : 0.0,
             L, P ? double(L) / double(P) : 0.0,
             P ? 100.0 * double(L) / (8.0 * double(P)) : 0.0,
-            SD, P ? 100.0 * double(SD) / double(P) : 0.0);
+            SD, P ? 100.0 * double(SD) / double(P) : 0.0,
+            QD, P ? 100.0 * double(QD) / double(P) : 0.0);
         g_dPairs = 0; g_dDead = 0; g_dSegPair = 0; g_dLanes = 0; g_dSphDead = 0;
+        g_dQuadDead = 0;
     }
 
     if (!inlineDispatch) renderns::tileCounter = 0;

@@ -1288,3 +1288,192 @@ live masks bought four `mov.16b`, and the copies cost more than the link saved.
 > approximately nothing. **The next win on this pass is not a spelling. It has
 > to shorten the solve's dependency chain without adding live values, or do
 > less work — and culling is already closed at ~3 % (round 4).**
+
+---
+
+## 14. Worked example round 6 — the campaign profiled the wrong scene, 2026-08-14
+
+Rounds 1–5 all measured **city**. Round 1's frame-time rebaseline
+(`d9742245`, PERF_STATE §00) then found that the biggest cone bill in the demo
+is **chase**: `Render_VolumetricCones_Tile` is **46.6 % of chase's entire CPU
+self-time**, 21.6 ms of a 46.9 ms `renderFrame`, 2.817 Ginstr/f — and chase had
+never been in the campaign. Round 6 is that scene's first pass, and the first
+thing it establishes is that chase's cones **are not the same code** as city's.
+
+### 14.1 The census, and why it changes the whole answer
+
+`-DFDS_CONE_DIAG=1`, run through the snapshot harness (chase has no `--bench`
+arm). Two counters were added this round: `quaddead`, below, and the scalar
+arm's share of the picture.
+
+| pose | tile-entries | (batch × spot) | **seg %** | dead % | alive lanes/pair | **sphdead** | **quaddead** |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| chase t=100 | 1238 | 3 342 600 | **100.0** | 94.3 | 0.45 (5.6 %) | 0.2 % | **86.2 %** |
+| chase t=400 | 1334 | 3 601 800 | **100.0** | 94.6 | 0.42 (5.2 %) | 0.0 % | **89.4 %** |
+| chase t=800 | 832 | 2 246 400 | **90.9** | 91.9 | 0.63 (7.9 %) | 0.0 % | **83.9 %** |
+| chase t=1200 | 555 | 1 498 500 | 65.6 | 69.0 | 2.46 (30.8 %) | 0.0 % | 63.1 % |
+| chase t=1600 | 96 | 259 200 | 0.0 | 100.0 | 0.00 | 3.4 % | 3.4 % |
+| city t=1961 | — | 3 204 900 | 0.0 | 39.9 | 4.78 (59.8 %) | 7.7 % | 18.8 % |
+| greets t=1588 | — | 2 044 | 100.0 | 80.7 | 1.47 (18.4 %) | 0.0 % | 70.6 % |
+
+Chase carries **34 spots of which 32 are narrow** (`cosOuter > 0.985`), so
+90–100 % of its (batch × spot) pairs take the **8-segment hybrid** — greets'
+branch, not city's. None of them casts (`shadowed=0`), and there are no
+clone/bounce spots (`CONE-ATTR real=34 bounce=0 clone=0`). The city rows
+reproduce `a16567b`'s numbers exactly (39.9 % dead, 7.7 % sphdead), which is
+the instrument's own control.
+
+### 14.2 The ladder, re-run on chase — the solve is back to being the pass
+
+Round 2's `-DFDS_CONE_ABLATE=n` ladder, driven through the snapshot harness by
+the new `scratchpad/chase_ablate.sh`. chase t=800, 8 snapshots, min over runs
+with run 1 discarded:
+
+| what is KEPT | Ginstr/f | Gcyc/f |
+|---|--:|--:|
+| per-batch floor (no spot loop) | 0.105 (3.8 %) | 0.023 (3.7 %) |
+| + per-spot scalar prologue | 0.233 (8.3 %) | 0.045 (7.2 %) |
+| **+ the cone-interval SOLVE** | **1.487 (53.2 %)** | **0.335 (53.7 %)** |
+| + scalar per-lane dz/fade loop | 0.075 (2.7 %) | 0.014 (2.2 %) |
+| + the whole integration BODY | 0.866 (31.0 %) | 0.184 (29.5 %) |
+| + per-lane colour accumulate | 0.031 (1.1 %) | 0.023 (3.7 %) |
+| **total** | **2.797** | **0.624** |
+
+City's solve, after the round-1 port, is 34.6 % of its pass. Chase's is
+**53.2 %** — because on chase it was **still the scalar loop**. The stage 6–10
+sub-ladder inside the body came out non-monotonic again, exactly as round 3
+warns; it is not quoted.
+
+### 14.3 What was gated off, and why the gate was right then and wrong now
+
+`--vol_cone_solve_vec` — the round-1 headline, −30 % of city's pass — carried
+`&& !segPath` in its gate. That term was set on a **greets** measurement:
+ungated at the greets pin pose the wide arm read instructions −3.8 % but
+**cycles +3.6 % and wall +1.4 %**, because the wide arm computes both a-sign
+branches and the whole tail for all eight lanes where the scalar arm's dead
+lanes bail early.
+
+That gate put 91 % of chase's pairs on the scalar arm. **Removing the term is
+worth −11.8 % instructions on chase's pass on its own** — and it now *improves*
+greets too. What changed is the kernel, not the argument: `NEONMINMAX`, the
+round-4b and round-5 algebra folds and the `lane_vec` loops all landed after
+the gate was set.
+
+**The gate must be removed, not flagged.** A three-arm run priced both shapes:
+
+| chase t=800, cones | wall_min | Ginstr/f | Gcyc/f |
+|---|--:|--:|--:|
+| parent | 19.991 | 2.800 | 0.672 |
+| new FeatureFlag, ON | 19.780 | 2.615 | 0.657 |
+| `!segPath` term simply deleted | 19.542 | **2.470** | **0.644** |
+
+The flagged arm is **+5.9 % instructions** against the unconditional one — round
+3's dual-arm tax, at the size round 3 measured it. One extra live bool in this
+kernel costs more than most of the wins the campaign has landed.
+
+### 14.4 `FDS_CONE_QUADEARLYOUT` — round 1's early-out at the right cut point
+
+Round 1 built a range-sphere early-out (`FDS_CONE_SOLVE_EARLYOUT`) and it cost
+**+2.0 %** on city: a pair is only skipped when all EIGHT lanes miss the range
+**sphere**, and city loses only 7.7 % of its pairs there.
+
+**Chase loses 0.0 % there.** Its spots are long-range beams whose range sphere
+covers the whole visible depth — the sphere never rejects, and every dead lane
+dies on the **cone quadratic** instead, thirty lines further down. Moving the
+cut to just after the a-sign/discriminant mask — the first point at which the
+pair's fate is decided — takes the fire rate from 0.0 % to **83.9 %** and skips
+a `sqrt`, two divides, ~22 vector ops and three stores per pair.
+
+It is **byte-null by construction**: `zLoArr`/`zHiArr`/`aliveLane` are
+zero-initialised per pair and `spotAlive` stays false, which is exactly the
+state the fall-through leaves them in before `if (!spotAlive) continue;`.
+
+**And the fire rate is the whole story.** 83.9 % (chase t=800) is a large win;
+18.8 % (city) is break-even on instructions and slightly positive on cycles;
+**3.4 % (chase t=1600) is a 4 % LOSS** — the same shape as round 1's rejection,
+reproduced from the other end. This is the number to check before proposing any
+future cull on this pass.
+
+### 14.5 Measured, three arms, parent binary, interleaved min-of-6
+
+`scratchpad/prof1.py`, per-arm binaries, one asset tree, arm order rotating
+every round, round 0 discarded.
+
+| chase t=800 | cones wall | cones Ginstr/f | cones Gcyc/f | IPC | renderFrame wall |
+|---|--:|--:|--:|--:|--:|
+| parent `43ac3456` | 18.304 | 2.796 | 0.622 | 4.494 | 40.608 |
+| + solve ungated | 17.783 | 2.467 | 0.595 | 4.146 | 39.394 |
+| **+ quad early-out (SHIPS)** | **14.930** | **2.192** | **0.500** | 4.380 | **36.723** |
+| | **−18.4 %** | **−21.6 %** | **−19.6 %** | | **−9.6 %** |
+
+**Attribution check**: the frame's instruction saving is −0.606 G and the cone
+pass's is −0.604 G; the frame's cycle saving is −0.125 G against the pass's
+−0.122 G. The saving is where the timer says it is.
+
+**chase t-sweep** (parent → ships):
+
+| pose | cones wall | cones Ginstr/f | cones Gcyc/f | renderFrame wall |
+|---|--:|--:|--:|--:|
+| t=100 | 23.917 → 18.854 (**−21.2 %**) | 3.748 → 2.844 | 0.847 → 0.676 | 43.687 → 39.014 (−10.7 %) |
+| t=400 | 25.070 → 20.166 (**−19.6 %**) | 3.927 → 3.014 | 0.869 → 0.698 | 43.818 → 38.724 (−11.6 %) |
+| t=800 | 18.304 → 14.930 (**−18.4 %**) | 2.796 → 2.192 | 0.622 → 0.500 | 40.608 → 36.723 (−9.6 %) |
+| t=1200 | 13.167 → 11.923 (−9.4 %) | 1.998 → 1.778 | 0.467 → 0.415 | 39.092 → 37.410 (−4.3 %) |
+| t=1600 | 3.067 → 3.193 (**+4.1 %**) | 0.487 → 0.501 | 0.105 → 0.112 | 19.418 → 19.523 (+0.5 %) |
+
+t=1600 is the pose with **zero** segmented pairs and a 3.4 % early-out fire
+rate — nothing to win and a branch to pay. Its cone pass is 3.1 ms of a 19.4 ms
+frame, so the whole regression is +0.1 ms.
+
+**The other two cone scenes, same protocol:**
+
+| | cones wall | cones Ginstr/f | cones Gcyc/f |
+|---|--:|--:|--:|
+| greets t=1588 (pin pose) | 7.290 → **6.582** (−9.7 %) | 1.122 → 0.994 | 0.240 → 0.217 (−9.6 %) |
+| greets t=3122 (the user's pose) | 6.055 → 6.016 (−0.6 %) | 0.900 → 0.893 | 0.204 → 0.201 (−1.5 %) |
+| city t=1961 | 15.677 → 15.535 (−0.9 %) | 2.240 → 2.266 (+1.2 %) | 0.540 → 0.537 (−0.6 %) |
+
+**greets — the scene the gate was set to protect — improves at both poses.**
+City is all-wide, so the change reaches it only as codegen: instructions +1.2 %,
+cycles −0.6 %, wall −0.9 %. Per round 3, cycles is the column to believe on this
+pass, and city's cycles do not regress. The early-out is what keeps it whole:
+without it, city read +2.0 % cycles.
+
+### 14.6 The byte verdict — a judge call, and a small one
+
+Not byte-null, and the reason is inherited: the wide arm's VP/DV fold (round 5)
+rounds `Y·Py + Pz` once where the scalar arm rounds `Y·Py` first, so the
+segmented cones now take round 5's judge call too.
+
+| pin | before | after | px changed | max \|Δ\| |
+|---|---|---|--:|--:|
+| chase t=100 | `76e7cf68…` | `7678a6bc6ea964b3b859ecb11c0673c3` | 20 of 2 073 600 (0.0010 %) | **2/255** |
+| chase t=400 | `d458e82b…` | `42d79fadd825a329b36143efe052edfb` | 27 (0.0013 %) | **2/255** |
+| chase t=800 | `c145c7a5…` | `b29c73f1c54f42a02e0dc2484780cc03` | 40 (0.0019 %) | **2/255** |
+| chase t=1200 | `31aa5203…` | **unmoved** | 0 | 0 |
+| chase t=1600 | `1544b0e7…` | **unmoved** | 0 | 0 |
+| greets t=1588 | `778fa6ac…` | `570a7b443f768393dc6647044a9e67b3` | 381 (0.0184 %) | **1/255** |
+| city t=1961 | `3f894823…` | **unmoved** | 0 | 0 |
+| fountain t=2500 | `8db68ccb…` | **unmoved** | 0 | 0 |
+
+Not one pixel anywhere moves more than 2/255, and none moves more than 4/255 on
+any channel. `render_gate` all four rows PASS, `conetest b41894f9…`
+byte-identical (its cones are wide). Images:
+`docs/img/chasecone/{chase_t800,chase_t400,chase_t100,greets_t1588}_{where,sbs}.png`.
+
+### 14.7 Carry forward
+
+* **The per-spot scalar prologue is 8.3 % of chase's pass and 7.2 % of its
+  cycles** — 104 instructions per (batch × spot), including a **divide**
+  (`1/(cosI − cosO)`), for values that are per-SPOT invariants recomputed for
+  every batch because the spot loop is innermost. A per-tile precompute of
+  `DP`, `PP`, `c2`, `invCIO` is bit-exact by construction and unattacked.
+* **greets carries `shadowed=51` of 51 spots** — every greets beam casts, so its
+  segmented body pays the per-segment scalar shadow tap (8 taps × alive lanes)
+  that chase pays nothing for. That is a greets-only lever nobody has priced.
+* The 8-segment loop recomputes `W2` and `D·W` from `Wx/Wy/Wz` per segment when
+  both are available in closed form from `uV`, `VP`, `DV` and `PP` — values the
+  solve already produced. ~8 vector ops × 8 segments per alive pair. It is a
+  re-association, so it is a judge call, not a transcript.
+* **Do not price a cull on this pass without its fire rate first.** 14.4 has the
+  same instrument giving 83.9 %, 18.8 % and 3.4 % on three poses of two scenes,
+  and the verdict flips sign across that range.
