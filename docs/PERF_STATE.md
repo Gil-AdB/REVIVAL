@@ -1,11 +1,367 @@
 # PERF_STATE.md — current state of the deferred pipeline (greets, 2026-05)
 
+> **§00 (2026-08-14) is the CURRENT baseline and supersedes §0's numbers.** §0
+> (2026-08-08) is kept because its *ablation method* and its `--texture_filter`
+> adjudication still stand, and because it is the anchor §00 measures drift
+> against. §1–§2 and §9 are 2026-05 estimates, superseded twice over; read them
+> for mechanism only.
+>
 > **§0 below (2026-08-08) supersedes the numbers in §1–§2 and §9.** Those were
 > estimates and partial brackets from 2026-05, before `renderFrame` had any interior
 > instrumentation and before the PBR/mip/env defaults moved. §0 is a measured,
 > self-checking phase split of five poses across three scenes. The rest of the
 > document remains the best description of the *mechanism* (kernel structure, cube
 > tap, sampling modes, flag inventory) — read it for "how", read §0 for "how much".
+
+---
+
+## 00. ROUND-1 REBASELINE — all five scenes, 2026-08-14
+
+Ordered by what a frame-time-reduction campaign should attack next. Everything
+below was measured on `a9ca03dc` in a throwaway worktree, `SDL_VIDEODRIVER=dummy`,
+1920×1080 unless stated, 12 pool workers, **min-of-6 over 7 interleaved rounds
+with round 0 discarded**, arm order rotating every round. Load average is quoted
+per table and ran **2.9–24.6** across the session — so read `Ginstr/f` (which
+reproduces to <0.5 % across loads) whenever a wall figure looks surprising.
+
+Instruments: `--deferred_prof=1 --hw_prof` for the phase/counter tables,
+Instruments Time Profiler for the per-symbol tables, `--prof_*` gates for the
+kernel interior. Drivers are committed: `scratchpad/prof1.py` (interleaved
+multi-arm runner + report; arms are JSON argv **lists**, so the zsh
+word-splitting scar cannot recur), `scratchpad/prof1_arms.py` (the arm matrix),
+`scratchpad/prof1_symbols.py` (xctrace record + the id/ref-resolving export
+parser).
+
+### THE RANKED TABLE
+
+`ms` is that item's own `wall_min` at the named pose. "Bound by" is measured, not
+argued: IPC against the box's ladder (2.42 compute / 0.96 L1 / 0.14 L2), `effPar`
+against 12 workers, and per-symbol self time.
+
+| # | item | scene / pose / arm | ms | Ginstr/f | bound by | achievable (INFERRED) | attack |
+|---|---|---|--:|--:|---|---|---|
+| 1 | **deferred omni loop** (per-light shading + shadow taps) inside `lighting-w1` | greets t=5743 flat | **19.9** of 47.8 `renderFrame` | 2.490 | compute; IPC 3.51, `effPar` 11.4/12 — no idle, no stall | 4–6 ms | the loop is SCALAR per light per pixel. Shadow sampling is 9.1 ms of it (below). The two campaign-shaped levers left: widen the per-light loop (`deferred_vec` is 0 on arm64 — re-price it against today's kernel) and cut lights-per-pixel |
+| 2 | **volumetric cones** | chase t=800 | **21.6** of 46.9 (×2 passes) | 2.817 | compute; IPC 4.34; **46.6 % of chase's entire CPU self-time** | 2–4 ms | chase was never in the 5-round cone campaign — city was. Same kernel, bigger bill. Re-run the `FDS_CONE_ABLATE` ladder **on chase**: its cones may take the *segmented* branch (greets' branch), which never got the wide-solve gate |
+| 3 | **two-layer transparent lighting** (`TBR-render`) | fountain t=1200 | **21.7** of 28.1 (77 %) | 3.032 | compute; IPC 4.19; 86 % of the frame's instructions | 5–8 ms | per-symbol says it is `Render_DeferredTransparentLighting_Tile<0>` **28.2 %** + `<1>` **20.9 %** — the *same* deferred shading kernel run twice over transparent layers. One layer, or a cheaper per-layer light list, is the whole prize |
+| 4 | **volumetric cones** | city t=1961 | **16.6** of 62.7 (×2 passes) | 2.257 | dependency chain, not op count (HW_PROFILING §13) | 1.5–3 ms | closed as a spelling problem. Only "do less work" is left: fewer (px × spot) pairs. Culling is capped at ~3 %, unroll-and-jam at ~8 % |
+| 5 | **cube shadow sampling** inside the omni loop | greets t=5743 flat | **9.1** (6.8 of it the cube tap, 2.1 the 3 extra PCF taps) | 1.159 | compute; per-symbol `CubeShadow_Sample` 16.1 % + `resolveCubeAtten` 6.1 % + `computeMapShadowAtten` 4.0 % = **26 %** of DEMO self-time | 2–3 ms | `--shadow_polyid_no_pcf` already buys 2.14 ms for jagged silhouettes. A 2-tap or a SIMD tap is the shape; the diet (`f481db36`…`a8c9229e`) took the cheap instruction wins already |
+| 6 | **non-light kernel remainder** (G-buffer decode, matID→`Material*`, normal/metal/rough/AO/horizon fetches, ambient+SH, env compose, store) | greets t=5743 flat | **9.9** | 0.801 | compute; IPC ~2.6 in this slice | 1–2 ms | this is the one interior slice that **grew** since 2026-08-08 (8.28 → 9.88 ms). Not root-caused. Bisect it before optimising it |
+| 7 | **water simulation + glints** | chase t=800 / city t=1961 | chase **16.9 % of CPU** (`pwater::RenderGlintsVaried`); city **11.4 %** (`waterWaveSlope` 5.2 + `RenderGlints` 4.4 + `updateRippleDispMap` 1.8) | — | compute, threaded (banded over the pool, `ProceduralWater.cpp:372/472`) | 1–3 ms | **never profiled before this round.** Nothing in any doc prices it. Start with the per-pixel `waterWaveSlope` call count and whether the glint pass can run at half res |
+| 8 | **fastfog** | city t=1961 | **10.0** | 1.105 | compute; IPC 3.51 | 1–2 ms | **never per-symbol profiled before this round.** It resolves: `FastFog_SampleGrid` 4.3 %, `Froxel_CompositePixel` 4.1 %, `vFogNoise` 3.9 %, the three `Render_DeferredFastFog` tile lambdas 5.9 %, `SkyPaint` 1.8 %, `vBlobNoise` 0.7 %. **The noise is the cost** — `vFogNoise`+`vBlobNoise` ≈ 4.6 % of city's CPU |
+| 9 | **G-buffer fill parallelism** | chase t=800 | 11.3 ms at `effPar` **5.5 of 12** | 0.602 | **parallelism**, not compute — half the pool is idle | 3–5 ms | the only item in the survey that is a scheduling problem. fountain t=2500 is `effPar` 5.2, greets 10.2–10.6, city 9.9. Chase/fountain tile balance, not kernel work |
+| 10 | **`lighting-w2`** (checkerboard fill wave 2) | greets t=5743 flat | **3.2** | 0.498 | compute; per-symbol `Render_DeferredLighting_TileFill` 7.3 % | 0.5–1 ms | `TileFill` is always scalar and its fallback replays the full wave-1 kernel. Turning checkerboard OFF costs 53.1 → 79.3 ms — do not propose that |
+| 11 | `shadow-bake` | greets t=5743 | 2.4 | 0.205 | compute, `effPar` 8.3/12 | — | mature |
+| 12 | `bloom-chain` | greets t=5743 | 1.78 | 0.220 | compute, IPC 4.28 | — | unattacked; sat outside every timer until 2026-08 |
+| 13 | mirror `RTT` | greets t=5743 | 1.53 (flat) / 2.09 (displaced) | 0.018 | — | — | 0.00 ms in §0; it is nonzero now because `7953bab5` moved `setDefault(mirror_rtt)` into the INIT block. Expected, priced, not a defect |
+| 14 | `mirror-grid` | greets t=5743 | 0.67 | — | full-res scalar scan of the mirrorMask plane, every frame | 0.3–0.5 ms | still unattacked since the backlog flagged it |
+| 15 | `gbuf-clear` | city t=1961 | 0.75 | 0.009 | **memory** — IPC **0.61**, the one bandwidth-bound phase in the tree | — | the instrument's own control: it proves IPC discriminates rather than reading 3.5 everywhere |
+
+### Per-scene phase tables
+
+**greets t=5743, 1920×1080, load 3.5→18.9.** Arms: flat / `--greets_displace` /
++`--greets_displace_free_edge --greets_displace_border_mean=2 --greets_displace_seam_weld`
+/ + `--mip_aniso --texture_filter=1`.
+
+| phase | flat | disp | dispfull | dispfull+mip |
+|---|--:|--:|--:|--:|
+| **frame min** | **55.59** | **57.99** | **58.69** | **59.94** |
+| `renderFrame` | 48.26 | 49.15 | 49.40 | 50.48 |
+| `gbuffer` | 5.97 | 9.93 | 9.76 | 11.79 |
+| `DeferredLighting-call` | 34.94 | 32.73 | 32.26 | 31.84 |
+| ⤷ `lighting-w1` | 29.35 | 27.55 | 27.22 | 26.63 |
+| ⤷ `lighting-w2` | 3.22 | 3.07 | 3.08 | 3.07 |
+| `cones` | 1.24 | 1.24 | 1.48 | 1.44 |
+| `bloom-chain` | 1.78 | 1.76 | 1.76 | 1.76 |
+| `tonemap-post` | 0.69 | 0.69 | 0.70 | 0.69 |
+| `TBR-render` | 0.58 | 0.49 | 0.51 | 0.48 |
+| `mirror-grid` | 0.67 | 0.71 | 0.71 | 0.70 |
+| `gbuf-clear` | 0.34 | 0.35 | 0.35 | 0.35 |
+| `hdr-begin` | 0.26 | 0.26 | 0.26 | 0.26 |
+| — outside `renderFrame` — | | | | |
+| `shadow-bake` | 2.41 | 2.44 | 2.47 | 2.37 |
+| `RTT` | 1.53 | 2.09 | 2.19 | 2.14 |
+| `Tick-Light` | 0.30 | 0.86 | 0.90 | 0.91 |
+| `Tick-Xfrm` | 0.26 | 0.45 | 0.48 | 0.49 |
+| `Tick-Radix` | 0.07 | 0.28 | 0.30 | 0.30 |
+| `Ginstr/f` (`renderFrame`) | 4.964 | 5.44 | 5.54 | 5.72 |
+| `IPC` (`lighting-w1`) | 3.51 | 3.55 | 3.55 | 3.56 |
+| `effPar` (`lighting-w1`) | 11.4 | 11.4 | 11.5 | 11.4 |
+
+**The displaced arm shades FASTER and rasterises SLOWER.** `gbuffer` +3.96 ms,
+`lighting-w1` −1.80 ms. Displaced stone puts more geometry through the raster and
+changes which materials cover the screen; the net at this pose is +2.40 ms.
+
+**greets t=3122, 1512×848, `FDS_GREETS_CAM="-8.6249094,…"` — the user's real
+workload.** Load 10.4→7.6.
+
+| phase | flat | disp | dispfull | dispfull+mip |
+|---|--:|--:|--:|--:|
+| **frame min** | **50.97** | **54.32** | **54.71** | **54.69** |
+| `renderFrame` | 43.85 | 45.14 | 44.85 | 44.79 |
+| `lighting-w1` | 17.95 | 18.86 | 17.76 | 16.92 |
+| **`cones`** | **7.11** | 7.16 | 6.89 | 6.49 |
+| **`TBR-render`** | **6.15** | 6.25 | 6.93 | 6.44 |
+| `gbuffer` | 4.02 | 4.55 | 4.53 | 5.62 |
+| `RTT` | 2.05 | 2.86 | 2.78 | 2.81 |
+| `lighting-w2` | 1.96 | 2.17 | 1.94 | 2.05 |
+| `bloom-chain` | 1.22 | 1.26 | 1.21 | 1.27 |
+| `Ginstr/f` (`renderFrame`) | 5.074 | 5.116 | 5.116 | 5.210 |
+
+His pose is a **different frame from t=5743**: cones 7.1 ms and TBR 6.2 ms
+(1.185 Ginstr — the shards) are first-class items here and near-zero at t=5743.
+Anyone tuning "the greets frame" against t=5743 alone is tuning the wrong frame
+for him.
+
+**greets t=6001 — the corner pose, where the new band/weld machinery lands.** Load 7.6→8.7.
+
+| phase | flat | disp | dispfull | dispfull+mip |
+|---|--:|--:|--:|--:|
+| **frame min** | **44.74** | **46.89** | **51.24** | **52.28** |
+| `renderFrame` | 39.80 | 41.07 | 45.30 | 46.57 |
+| `gbuffer` | 5.36 | 7.87 | 9.00 | 10.59 |
+| `lighting-w1` | 23.63 | 22.68 | 24.88 | 25.03 |
+| `cones` | 0.02 | 0.02 | 0.20 | 0.20 |
+| `Ginstr/f` (`renderFrame`) | 4.175 | 4.488 | 4.575 | 4.742 |
+
+**city t=1961 / t=2400 / t=400, `--deferred`.** Load 2.9→8.7. `renderFrame` runs
+**twice** per city frame; `cones-call` once.
+
+| phase | t=1961 | t=2400 | t=400 |
+|---|--:|--:|--:|
+| **frame min** | **86.94** | **50.59** | **62.96** |
+| `RNDR` | 72.14 | 44.89 | 55.22 |
+| `renderFrame` (×2) | 62.75 | 36.67 | 46.93 |
+| **`cones-call`** (×1) | **16.65** | 9.05 | 13.20 |
+| `DeferredLighting-call` (×2) | 12.35 | 5.40 | 9.08 |
+| **`fastfog`** (×1) | **9.98** | 5.55 | 6.29 |
+| `gbuffer` (×2) | 9.85 | 5.97 | 5.08 |
+| `TBR-render` (×2) | 7.49 | 5.52 | 7.96 |
+| `gbuf-clear` | 0.75 | 0.72 | 0.72 |
+| `ANIM` | 4.30 | 3.27 | 4.66 |
+| `Ginstr/f` (`renderFrame`) | 6.366 | 3.418 | 4.925 |
+| `Ginstr/f` (`cones-call`) | 2.257 | 1.222 | 1.691 |
+
+> **`--deferred` is REQUIRED to bench city, fountain and chase.** greets forces the
+> deferred path from inside the scene (`greets_mirror` → `Render(ForceDeferred)`);
+> the others do not, so a bench line without the flag silently profiles the
+> **forward** renderer — no cones, no `DeferredLighting`, no `fastfog`. It reads
+> as a 9.3 ms city `renderFrame` and it is not the shipping path. Caught here by
+> the missing phases; recorded so the next round does not lose a batch to it.
+
+**chase t=800 / t=1600, `--deferred`.** chase has **no `--bench=scene` arm**
+("scene 'chase' not supported") and **no `--repro` wiring**, so it is profiled by
+asking the snapshot harness for the same timestamp ten times — the driver
+re-ticks and re-renders each one and `--deferred_prof`'s warmup exclusion drops
+the cold frame exactly as under `--bench`.
+
+| phase | chase t=800 | chase t=1600 | fountain t=2500 | fountain t=1200 |
+|---|--:|--:|--:|--:|
+| **frame min** | — | — | **26.51** | **30.73** |
+| `renderFrame` | 46.88 (×2) | 20.91 (×2) | 23.03 | 28.12 |
+| **`cones-call`** | **21.60** | 3.41 | 0.00 | 0.00 |
+| `gbuffer` | 11.30 | 5.76 | 2.64 | 1.57 |
+| `DeferredLighting-call` | 6.81 | 3.64 | 1.92 | 3.31 |
+| **`TBR-render`** | 2.87 | 5.00 | **16.70** | **21.69** |
+| `gbuf-clear` | 0.73 | 0.75 | 0.36 | 0.35 |
+| `Ginstr/f` (`renderFrame`) | 4.737 | 1.915 | 2.569 | 3.553 |
+| `Ginstr/f` (`TBR-render`) | 0.490 | 0.860 | 2.228 | **3.032** |
+| `IPC` (`TBR-render`) | 5.10 | 5.16 | 4.14 | 4.19 |
+| `effPar` (`gbuffer`) | **5.5** | **5.5** | **5.2** | 9.5 |
+
+chase's historical description as a FACE-dominated front end no longer holds:
+**it is a cone scene**, and its second-largest cost is water glints.
+
+### Per-symbol (Instruments Time Profiler, running samples, self time, DEMO only)
+
+Shares are of DEMO's own running self-time over the whole recorded run, so they
+include init (`stbi__do_zlib`, `stbi__create_png_image_raw`, `Initialize_*` are
+texture load, not frame work). Read the *ratios between frame symbols*.
+
+| greets t=5743 flat | share | city t=1961 | share |
+|---|--:|---|--:|
+| `Render_DeferredLighting_Tile` | **35.0 %** | `Render_VolumetricCones_Tile` | **28.5 %** |
+| `CubeShadow_Sample` | **16.1 %** | `Render_DeferredLighting_Tile_OuterVec` | **15.1 %** |
+| `Render_DeferredLighting_TileFill` | 7.3 % | `meka::TileRasterizer::apply_exact<false>` | 5.3 % |
+| `meka::TileRasterizer::apply_exact<true>` | 7.0 % | **`pwater::waterWaveSlope`** | **5.2 %** |
+| `resolveCubeAtten` | 6.1 % | `FrustumClipper::Render` | 4.5 % |
+| `meka::TileRasterizer::apply_exact<false>` | 4.2 % | **`pwater::RenderGlints` λ** | **4.4 %** |
+| `computeMapShadowAtten` | 4.0 % | `FastFog_SampleGrid` | 4.3 % |
+| bloom `hdrDispatchRows` | 2.1 % | `Render_DeferredTransparentLighting_Tile<0>` | 4.2 % |
+| `Render_VolumetricCones_Tile` | 1.8 % | `Froxel_CompositePixel` | 4.1 % |
+| `Render_TonemapToVPage` λ | 1.4 % | `vFogNoise` | 3.9 % |
+| `MekaleleShadowDepth` | 1.4 % | `Render_DeferredFastFog` λ$_3 / λ$_2 / λ$_1 | 2.9 / 2.0 / 1.0 % |
+| `Transform_Objects` | 1.2 % | `CityScene::updateRippleDispMap` λ | 1.8 % |
+
+| chase t=800 | share | fountain t=1200 | share |
+|---|--:|---|--:|
+| `Render_VolumetricCones_Tile` | **46.6 %** | `Render_DeferredTransparentLighting_Tile<0>` | **28.2 %** |
+| **`pwater::RenderGlintsVaried` λ** | **16.9 %** | `Render_DeferredTransparentLighting_Tile<1>` | **20.9 %** |
+| `Render_DeferredLighting_Tile` | 8.5 % | `meka::TileRasterizer::apply_exact<false>` | 16.6 % |
+| `FrustumClipper::Render` | 5.2 % | `Render_DeferredLighting_Tile_OuterVec` | 11.6 % |
+| `Render_DeferredTransparentLighting_Tile<0>` | 5.1 % | `SpriterRT<32>` | 5.8 % |
+| `meka::TileRasterizer::apply_exact<false>` | 4.4 % | `barry::TileRasterizer<Blend1,Tex0,…>` | 2.0 % |
+| `Render_DeferredFogPass` λ | 2.7 % | `meka::TileRasterizer::apply_exact<true>` | 1.5 % |
+| `computeMapShadowAtten` | 1.8 % | `FrustumClipper::Render` | 1.4 % |
+
+Three of these had never been per-symbol profiled: **city's `fastfog`** (it is
+noise + froxel composite + three tile lambdas, not one kernel), **city's
+`DeferredLighting`** (one `_OuterVec` monolith at ~100 % self — per-symbol
+bottoms out, ablation is the only way inside), and **fountain's `TBR`** (two
+template instantiations of the transparent lighting kernel, one per layer).
+`Shadow_MaterialSkipsCasting`, 4 % of the lighting stage in the 2026-08-10
+profile, is **gone** — `f481db36` hoisted it to a per-matID bitmask and the
+symbol no longer appears.
+
+### Inside the greets lighting wave — ablation re-run on today's tree
+
+greets t=5743 flat, load 12.8→9.8, min-of-6. Same method as §0; the shadow diet
+and the packed planes have landed since, so these supersede §0's split.
+
+| arm | `renderFrame` | `lighting-w1` | `lighting-w1` Ginstr/f |
+|---|--:|--:|--:|
+| base | 47.80 | **29.78** | 3.291 |
+| `--prof_no_lights` | 27.67 | 9.88 | 0.801 |
+| `--no-shadows` | 38.13 | 20.66 | 2.132 |
+| `--prof_no_cube_tap` | 40.65 | 23.00 | 2.380 |
+| `--shadow_polyid_no_pcf` | 45.51 | 27.65 | 3.064 |
+| `--prof_no_spec` | 46.33 | 28.48 | 3.069 |
+| `--prof_no_tex` | 47.46 | 29.27 | 3.271 |
+| `--no-env_refl` | 47.48 | 29.37 | 3.242 |
+
+| component | ms | Ginstr | share of `lighting-w1` | vs §0 (2026-08-08) |
+|---|--:|--:|--:|---|
+| omni loop (whole) | **19.91** | 2.490 | 67 % | 19.0–21.25 → **unchanged** |
+| ⤷ shadow sampling | 9.12 | 1.159 | 31 % | 10.80 → **−1.7 (the diet + packed planes)** |
+| ⤷⤷ cube tap alone | 6.79 | 0.911 | 23 % | 10.28 (2026-08-10) → **−3.5** |
+| ⤷⤷ the 3 extra PCF taps | 2.14 | 0.227 | 7 % | 1.80 → +0.3 |
+| ⤷ specular | 1.30 | 0.222 | 4 % | 3.07 → **−1.8** |
+| non-light remainder | **9.88** | 0.801 | 33 % | 8.26–8.29 → **+1.6, the one interior slice that grew** |
+| albedo gather | 0.52 | 0.020 | 2 % | 0.71 → −0.2 |
+| env reflection | 0.41 | 0.049 | 1 % | not measured before |
+
+### Tessellation / displacement flag costs — per-flag, MEASURED
+
+greets t=5743, one batch, load 8.8→12.8 (so compare **within** the table). The
+instruction column is the load-robust one.
+
+| arm | frame min | `renderFrame` | `renderFrame` Ginstr/f | Δ instr vs `disp` |
+|---|--:|--:|--:|--:|
+| `--greets_displace` | 61.68 | 52.07 | 5.445 | — |
+| + `--greets_displace_free_edge` | 63.13 | 53.13 | 5.521 | **+1.4 %** |
+| + `--greets_displace_border_mean=2` | 62.02 | 52.64 | 5.443 | **0.0 %** |
+| + `--greets_displace_seam_weld` | 61.66 | 52.36 | 5.445 | **0.0 %** |
+| `--no-greets_displace_groove_shade` | 62.06 | 52.63 | 5.426 | −0.3 % |
+| `--no-greets_displace_mitre` | 62.29 | 52.84 | 5.441 | −0.1 % |
+| full (free_edge + bmean=2 + seam_weld) | 63.17 | 53.47 | 5.536 | **+1.7 %** |
+| full + `--mip_aniso` | 63.26 | 53.27 | 5.545 | +1.8 % |
+| full + `--texture_filter=1` | 64.85 | 55.18 | 5.724 | **+5.1 %** |
+
+* **`--greets_displace_free_edge` is the only per-frame cost in the family** —
+  +1.06 ms `renderFrame`, +1.4 % instructions, and it is *geometry*: it frees
+  7 908 border verts and densifies the border profile by +7 017 verts, which the
+  raster then pays for (`gbuffer` +0.36 ms, `cones` +0.15 ms).
+* `border_mean`, `seam_weld`, `groove_shade` and `mitre` are **per-frame free**
+  — they are bake-time shape decisions. The ±0.3 % readings are noise.
+* **`--mip_aniso` is free at this pose** (+0.02 % instructions), consistent with
+  the +0.12 % recorded at t=5970. It costs at the fan-split sites only.
+* **`--texture_filter=1` still costs and still does not pay** — +1.7 ms, +5.1 %
+  instructions, all of it in `gbuffer` (10.59 → 12.33). §0's adjudication holds
+  on today's tree; do not re-propose it as a perf lever.
+* Whole-family cost of tessellation at the three poses, flat → full arm:
+  **t=5743 +3.10 ms, his pose +3.74 ms, t=6001 +6.50 ms.**
+
+### Scene-init cost of the displacement bake — the veto-soup worry, priced
+
+`--init_timeline`, min over 5 rounds, greets-entry path.
+
+| mark | flat | `--greets_displace` | full arm | recorded 2026-08-09 |
+|---|--:|--:|--:|--:|
+| `Initialize_Greets` total | **1 358** | **1 976** | **2 026** | 1 379 flat / 2 469 displaced |
+| ├ `DisplaceStoneSubdiv` block | 0 | **440** | **483** | **573** |
+| ├ `MakeFacesIndependentByAngle` | 4.5 | — | 54 | — |
+| ├ chunking / clustering | 3.6 | — | 77 | — |
+| ├ `ShadowMaps_BakeStatic` | 10.7 | — | 32 | — |
+| └ shadow/env bake | 13.8 | — | 49 | — |
+
+**VERDICT: the init did not regress; it improved.** The subdivision block is
+**483 ms against the 573 ms recorded** before the weld/band/blend/veto machinery
+existed, and `Initialize_Greets` is **2 026 ms against 2 469 ms**. The full
+machinery — free-edge densification, the abuttal veto's scene-wide face soup at
+5 samples per candidate edge, the mitre weld, the corner-band blend — adds
+**+43 ms** over plain `--greets_displace` (440 → 483). The O(edges × faces) fear
+is not borne out at this scene's size. What the displaced arm actually pays at
+init is **downstream** of the subdivision: `MakeFacesIndependentByAngle`
++50 ms, chunking/clustering +74 ms, the static shadow bake +21 ms, the env bake
++35 ms — all of them proportional to the face count the subdivision produced.
+
+### REGRESSION HUNT — a real parent-binary A/B, not a cross-session ms comparison
+
+Parent `a3a72cc5` (2026-08-13 22:25, the tip of cone round 5) against HEAD
+`a9ca03dc`, **both binaries built in one worktree and run against one asset tree**
+(`git diff a3a72cc5 a9ca03dc -- Runtime/` is empty, so this is a pure code A/B),
+interleaved round-robin, min-of-6, load 24.6→13.2. The window spans every
+2026-08-14 landing: the mitre weld, the band pre-split, the corner-band blend,
+groove shading, the edge-notch densification, free_edge rounds 4–5, and the env
+water mask.
+
+| arm | parent frame | HEAD frame | Δ | parent Ginstr/f | HEAD Ginstr/f | Δ instr |
+|---|--:|--:|--:|--:|--:|--:|
+| greets t=5743 flat | 55.47 | 55.50 | **+0.03** | 4.964 | 4.962 | **0.0 %** |
+| greets t=5743 `--greets_displace` | 63.15 | 62.96 | −0.19 | 5.423 | 5.443 | +0.4 % |
+| **greets t=6001 full displace arm** | **43.49** | **50.02** | **+6.53** | **4.455** | **4.577** | **+2.7 %** |
+| greets t=3122 his pose `--greets_displace` | 54.33 | 54.03 | −0.30 | 5.112 | 5.115 | 0.0 % |
+| city t=1961 `--deferred` | 86.10 | 85.08 | −1.02 | 6.365 | 6.370 | 0.0 % |
+
+**One regression, and it is geometry, not code: +6.53 ms at the corner pose in
+the full displacement arm.** `gbuffer` carries it — 7.34 → 8.77 ms wall and
+0.947 → 1.020 Ginstr/f (+7.7 %) — with `lighting-w1` +3.24 ms and `cones`
+0.02 → 0.20 ms behind it. The 08-14 commits generate more geometry at the corner
+than the parent's same flags did, which is what they were written to do; nobody
+priced it. **Everything else in the window is perf-null**, including the flat
+arm, the plain displaced arm, the user's pose and city.
+
+**The shatter bracket does NOT regress.** `--repro=greets@t=3122
+--repro_from=3112 --repro_settle=0`, `FDS_GREETS_SHATTER=1`,
+`FDS_GREETS_CAM="28.8,10.8,-62.85,1,0,0"`, `FDS_SHARD_REFL_PROF=1`, second
+shatter frame, **min-of-8**:
+
+| | parent | HEAD | recorded anchor |
+|---|--:|--:|--:|
+| shard bake wall | 12.0 ms | **11.7 ms** | **11.5 ms** |
+| `Render_DeferredLighting` core-ms | 99.8 | **94.6** | **94.3** |
+
+The anchor reproduces. **Method note that cost me a wrong answer first:** the
+same bracket read **16.5 ms** at min-of-6 in a two-arm batch at load ~8 and
+**11.7 ms** at min-of-8 — this measurement needs 8 rounds, and the campaign that
+set the anchor said so (min-of-8 paired). Do not quote it from 6.
+
+**What is NOT a regression, stated because the raw numbers look like one.**
+greets t=5743 flat `renderFrame` reads **48.3 ms** here against §0's **43.65**,
+and `lighting-w1` **29.4** against **27.32**. That is not code:
+
+* the parent binary reads the **same** 48.4 ms in the A/B above, so nothing in
+  the 08-13→08-14 window did it;
+* `lighting-w1` Ginstr/f is **3.290**, against the **3.271** the shadow diet
+  left it at on 2026-08-12 — the load-robust column says the kernel retires the
+  instructions it is supposed to;
+* cycles read +7 % and wall +7.5 % on flat instructions, which is the signature
+  of a busier machine, not a fatter kernel.
+
+Likewise fountain t=2500 `renderFrame` 23.03 against §0's 20.09 and the shard
+bake's first reading: same shape, same cause. **Cross-session ms comparisons on
+this box are worth less than the Ginstr column; when they disagree, believe the
+counter.**
+
+### Levers this round did NOT find
+
+* No new memory-bound phase. Every hot phase reads IPC 3.5–5.2 against a 2.42
+  compute anchor. `gbuf-clear` (IPC 0.61) and `hdr-begin` (1.12) are the only
+  bandwidth-bound phases and together they are 0.6 ms.
+* No barrier-tail problem in greets: `lighting-w1` `effPar` is 11.4/12.
+* No init regression (above).
+* No trivially-safe one-liner. Nothing in this round is fixable in one line.
+
+---
 
 State of the engine on `feature/static-shadow-lightmaps`, gathered for invasive perf work on
 the deferred kernel. Numbers measured at greets `t=500`, 1920×1080, low-poly Piramid (5.5k
