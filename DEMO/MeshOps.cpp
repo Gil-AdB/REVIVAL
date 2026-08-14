@@ -2115,7 +2115,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		for (int64_t v : { xi, yi, zi }) { h ^= uint64_t(v); h *= 1099511628211ull; }
 		return h;
 	};
-	if (fds::FeatureFlags::greets_displace_free_edge()) {
+	if (fds::FeatureFlags::greets_displace_free_edge() ||
+	    fds::FeatureFlags::greets_displace_plane_normal()) {
 		for (TriMesh *M = Sc->TriMeshHead; M; M = M->Next) {
 			if (M->FIndex == 0 || !M->Faces || !M->Verts) continue;
 			for (int32_t i = 0; i < M->FIndex; ++i) {
@@ -4146,7 +4147,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// tears it off its twin (1408 background px at t=5967 against 46).
 		std::vector<Vector> planeN;
 		std::vector<uint64_t> planeKey;      // per-vert PATCH identity, for the mean
-		int nPlaneRide = 0, nPlaneSkipCorner = 0, nPlaneSkipTwin = 0;
+		int nPlaneRide = 0, nPlaneSkipCorner = 0, nPlaneSkipTwin = 0, nPlaneSkipForeign = 0;
 		const bool wantPlaneN = fds::FeatureFlags::greets_displace_plane_normal();
 		const int   bmeanMode  = fds::FeatureFlags::greets_displace_border_mean();
 		const float bmeanScale = fds::FeatureFlags::greets_displace_border_mean_scale();
@@ -4217,11 +4218,56 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					Q.x*basePos[v].x + Q.y*basePos[v].y + Q.z*basePos[v].z);
 			}
 			if (!wantPlaneN) planeN.clear();          // mean-only: leave the ride alone
-			else for (uint32_t v=0; v<nV; ++v) {
-				if (!have[v]) continue;
-				if (corner[v]) { ++nPlaneSkipCorner; continue; }
-				if (twin[v] || (v < nOrig && coincidentOrig[v])) { ++nPlaneSkipTwin; continue; }
-				planeN[v] = acc[v];
+			else {
+				// CROSS-MATERIAL REGISTRY GUARD (2026-08-15). The twin guard below
+				// sees only THIS bake's vertex array, but the wall-base and
+				// wall-ceiling borders coincide with the floor/siling meshes —
+				// displaced in SEPARATE bake calls. At such a junction the smoothed
+				// vertex normal is the SHARED ride both sides average to; handing
+				// one side its own plane normal makes the two bakes diverge and
+				// opens through-slits along the whole junction (measured on the
+				// walk cameras: +540..+1498 z==0 px at every pose, all along the
+				// wall base). A vert touching any FOREIGN-family face keeps the
+				// shared smoothed ride; same-family contact (rooms vs rooms, the
+				// corner) still rides the plane — that is 483ee71e's look win.
+				auto foreignTouch = [&](const Vector &P, const Vector &ownN) -> bool {
+					if (abutTris.empty()) return false;
+					auto it = abutGrid.find(abutCellKey(std::floor(P.x/kAbutCell)*kAbutCell,
+					                                    std::floor(P.y/kAbutCell)*kAbutCell,
+					                                    std::floor(P.z/kAbutCell)*kAbutCell));
+					if (it == abutGrid.end()) return false;
+					const size_t matLen = matName ? std::strlen(matName) : 0;
+					for (uint32_t id : it->second) {
+						const AbutTri &T2 = abutTris[id];
+						const bool sameFamily = T2.mat && matLen &&
+						    std::strncmp(T2.mat, matName, matLen) == 0;
+						if (pointTriDistSq(P, T2.a, T2.b, T2.c) >= kAbutEps*kAbutEps)
+							continue;
+						if (!sameFamily) return true;    // wall base on the floor etc.
+						// Same family: contact is safe only when COPLANAR (the
+						// wall's own continuation). A face >~30 deg off this
+						// vert's plane is the other wall of a junction whose
+						// subdivision phases differ — near-coincident verts
+						// that are NOT key-equal twins; both riding their own
+						// planes is the residual tear source (t=5967 col-9).
+						const float e1x=T2.b.x-T2.a.x, e1y=T2.b.y-T2.a.y, e1z=T2.b.z-T2.a.z;
+						const float e2x=T2.c.x-T2.a.x, e2y=T2.c.y-T2.a.y, e2z=T2.c.z-T2.a.z;
+						float nx=e1y*e2z-e1z*e2y, ny=e1z*e2x-e1x*e2z, nz=e1x*e2y-e1y*e2x;
+						const float nl=std::sqrt(nx*nx+ny*ny+nz*nz);
+						if (nl < 1e-12f) continue;
+						float d = (ownN.x*nx + ownN.y*ny + ownN.z*nz) / nl;
+						if (d < 0.0f) d = -d;
+						if (d < 0.866f) return true;     // >30 deg: junction contact
+					}
+					return false;
+				};
+				for (uint32_t v=0; v<nV; ++v) {
+					if (!have[v]) continue;
+					if (corner[v]) { ++nPlaneSkipCorner; continue; }
+					if (twin[v] || (v < nOrig && coincidentOrig[v])) { ++nPlaneSkipTwin; continue; }
+					if (foreignTouch(basePos[v], acc[v])) { ++nPlaneSkipForeign; continue; }
+					planeN[v] = acc[v];
+				}
 			}
 		}
 		int nMoved=0, nLineSnap=0, nPlatPin=0; float dMin=1e30f,dMax=-1e30f;
@@ -4929,13 +4975,17 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				"their OWN plane's mean, %d fell back to the material mean (no "
 				"coplanar fan, or a plane with fewer than %d interior verts)\n",
 				matName, nBMeanPlane, nBMeanFallback, kPlaneMeanMinVerts);
-		if (nPlaneRide || nPlaneSkipCorner || nPlaneSkipTwin)
+		if (nPlaneRide || nPlaneSkipCorner || nPlaneSkipTwin || nPlaneSkipForeign)
 			std::fprintf(stderr, "[STONE-PLANE] '%s': %d displaced verts ride their "
 				"own PATCH-PLANE normal instead of the smoothed vertex normal; %d "
-				"skipped as CORNER verts (incident target faces >2 deg apart) and %d "
+				"skipped as CORNER verts (incident target faces >2 deg apart), %d "
 				"as POSITION TWINS (a second index at the same base position, or "
-				"coincident with non-displaced geometry — the round-2 tear case)\n",
-				matName, nPlaneRide, nPlaneSkipCorner, nPlaneSkipTwin);
+				"coincident with non-displaced geometry — the round-2 tear case), "
+				"and %d as FOREIGN-FAMILY CONTACT (touching another material's "
+				"mesh, e.g. the wall base on the floor — the two bakes must share "
+				"the smoothed ride or they tear apart)\n",
+				matName, nPlaneRide, nPlaneSkipCorner, nPlaneSkipTwin,
+				nPlaneSkipForeign);
 		if (lineHeight)
 			std::fprintf(stderr, "[STONE-LINE] '%s': %d of %d displaced verts "
 				"snapped to their groove line's rep (edge path); %d fallback-path "
