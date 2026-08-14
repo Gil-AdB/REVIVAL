@@ -2395,7 +2395,7 @@ LightColor 255 255 0
 LgtIntensity 1.000000
 LightType 1
 LightFalloff 1
-LightRange 3.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -2423,7 +2423,7 @@ LightColor 255 255 0
 LgtIntensity 1.000000
 LightType 1
 LightFalloff 1
-LightRange 3.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -2450,7 +2450,7 @@ LightColor 255 255 0
 LgtIntensity 0.500000
 LightType 1
 LightFalloff 1
-LightRange 10.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -2476,7 +2476,7 @@ LightColor 255 255 0
 LgtIntensity 0.500000
 LightType 1
 LightFalloff 1
-LightRange 10.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -2503,7 +2503,7 @@ LightColor 255 255 0
 LgtIntensity 1.000000
 LightType 1
 LightFalloff 1
-LightRange 7.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -2530,7 +2530,7 @@ LightColor 255 255 0
 LgtIntensity 0.500000
 LightType 1
 LightFalloff 1
-LightRange 20.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -2557,7 +2557,7 @@ LightColor 255 255 0
 LgtIntensity 0.500000
 LightType 1
 LightFalloff 1
-LightRange 20.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -2585,7 +2585,7 @@ LightColor 0 128 255
 LgtIntensity 0.500000
 LightType 1
 LightFalloff 1
-LightRange 2.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.050000
 FlareDissolve 0.000000
@@ -2613,7 +2613,7 @@ LightColor 0 128 255
 LgtIntensity 0.500000
 LightType 1
 LightFalloff 1
-LightRange 2.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.100000
 FlareDissolve 0.000000
@@ -2640,7 +2640,7 @@ LightColor 0 128 255
 LgtIntensity 0.500000
 LightType 1
 LightFalloff 1
-LightRange 2.000000
+LightRange 30.000000
 LensFlare 1
 FlareIntensity 0.100000
 FlareDissolve 0.000000

@@ -1,0 +1,915 @@
+// GpuBenchMain — standalone Metal renderer used as a BENCHMARK and ground-truth
+// instrument. See docs/GPU_BENCHMARK_PLAN.md.
+//
+// Phase 2 scope: load greets through FDS, render its geometry with albedo
+// textures from one review pose, OFFSCREEN, and report GPU frame timing.
+// No scene lighting, no shadows, no HDR.
+//
+// This is NOT a shipping backend and shares nothing with FDS's rasterizer,
+// clipper, or deferred kernel — it only links FDS to load the scene.
+//
+// Renders offscreen by default and writes a PPM; it never opens a window.
+
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+
+#include "SceneIngest.h"
+#include "Deferred.h"
+#include "ParticleReplay.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace {
+
+struct FrameUniforms {
+    float camRow0[4];   // float3 in MSL is 16-byte aligned
+    float camRow1[4];
+    float camRow2[4];
+    float camSrc[4];
+    float sx, ox, sy, oy;
+    float dza, dzb, pad0, pad1;
+};
+
+struct BatchUniforms {
+    float rotRow0[4];
+    float rotRow1[4];
+    float rotRow2[4];
+    float objPos[4];
+    float baseColor[4];
+};
+
+void Die(const char *what, NSError *err) {
+    std::fprintf(stderr, "[GPUBENCH] FATAL: %s%s%s\n", what,
+                 err ? " — " : "",
+                 err ? [[err localizedDescription] UTF8String] : "");
+    std::exit(1);
+}
+
+std::string ReadFile(const char *path) {
+    FILE *f = std::fopen(path, "rb");
+    if (!f) return {};
+    std::fseek(f, 0, SEEK_END);
+    long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    std::string s(size_t(n < 0 ? 0 : n), '\0');
+    if (n > 0 && std::fread(s.data(), 1, size_t(n), f) != size_t(n)) s.clear();
+    std::fclose(f);
+    return s;
+}
+
+bool WritePPM(const char *path, const uint8_t *bgra, int w, int h, size_t rowBytes) {
+    FILE *f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+    std::vector<uint8_t> row(size_t(w) * 3);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t *s = bgra + size_t(y) * rowBytes;
+        for (int x = 0; x < w; ++x) {
+            row[size_t(x) * 3 + 0] = s[size_t(x) * 4 + 2];  // R
+            row[size_t(x) * 3 + 1] = s[size_t(x) * 4 + 1];  // G
+            row[size_t(x) * 3 + 2] = s[size_t(x) * 4 + 0];  // B
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+    return true;
+}
+
+double Percentile(std::vector<double> v, double p) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    const double idx = p * double(v.size() - 1);
+    const size_t lo = size_t(std::floor(idx)), hi = size_t(std::ceil(idx));
+    return v[lo] + (v[hi] - v[lo]) * (idx - double(lo));
+}
+
+const char *kUsage =
+    "GpuBench — standalone Metal deferred-renderer benchmark (Phase 2: geometry + albedo)\n"
+    "\n"
+    "Run from Runtime/ (asset paths are CWD-relative).\n"
+    "\n"
+    "  --fld=PATH        scene file            (default SCENES/GREETS.FLD)\n"
+    "  --t=N             demo-timer pose       (default 5743, see docs/greets_review_poses.txt)\n"
+    "  --cam=\"px,py,pz,fx,fy,fz\"   review pose; same string as FDS_GREETS_CAM\n"
+    "  --xres=N --yres=N resolution            (default 1920x1080)\n"
+    "  --warmup=N        untimed frames        (default 60 — Apple GPUs clock up)\n"
+    "  --iters=N         timed frames          (default 300)\n"
+    "  --out=PATH        write a PPM of the last frame (default gpubench.ppm; '' = none)\n"
+    "  --shaders=DIR     shader source dir     (default alongside the binary, then ./shaders)\n"
+    "  --no-draw         issue zero draws — measures the render-pass FLOOR (clear + store\n"
+    "                    of the target) so the scene number can be reported net of it\n"
+    "  --pass=albedo|deferred    albedo = Phase 2 arm (geometry + albedo, no lighting).\n"
+    "                    deferred = Phase 3: G-buffer -> cube shadows -> PBR lighting ->\n"
+    "                    ACES tonemap, with PER-PASS GPU timestamps. Default albedo.\n"
+    "  --no-shadows      deferred only: skip the cube bake and the per-pixel tap\n"
+    "  --rebake_all      deferred only: re-bake ALL cubes every frame instead of only the\n"
+    "                    moving ones. greets caches static cubes, so this is NOT its policy.\n"
+    "  --stages=1|2|3    deferred only: 1 = G-buffer only, 2 = +lighting, 3 = +tonemap.\n"
+    "                    Per-encoder timestamps OVERLAP and do not sum to the frame; take\n"
+    "                    pass costs from DIFFERENCES of whole-frame totals across stages.\n"
+    "  --shadow_res=N    deferred only: static-omni cube face res (default 512, as greets)\n"
+    "  --exposure=F      deferred only: tonemap exposure (default 1.0)\n"
+    "  --viz=MODE        deferred only, per-stage verification instead of the lit frame:\n"
+    "                    albedo|normal|ao|depth|gloss|shadow|lights|shadowraw|\n"
+    "                    ambient|emissive|direct|direct_noshadow|worldpos|mirror.\n"
+    "                    worldpos decodes as x=R/255*80-20, y=G/255*25, z=B/255*100-80,\n"
+    "                    so a pixel can be turned into a world point for --probe.\n"
+    "                    Every mode shares the LIT FRAME's own kernels, so a mode cannot\n"
+    "                    show a different quantity from the one the frame applies, and no\n"
+    "                    mode encodes 'no data' as a legitimate value: dark RED = no\n"
+    "                    G-buffer, MAGENTA = asked for something that does not exist\n"
+    "                    (unmapped mode, --viz_light out of range, shadowraw on a light\n"
+    "                    with no cube). 'direct' honours --no-shadows; 'direct_noshadow'\n"
+    "                    forces the shadow factor to 1, so direct minus direct_noshadow\n"
+    "                    is exactly what the cube tap removes.\n"
+    "  --viz_light=N     restrict shadow/lights/shadowraw to ONE light (shadowraw REQUIRES\n"
+    "                    it — it used to silently report light 0)\n"
+    "  --light_range_scale=F   deferred only, MEASUREMENT ONLY (changes pixels). greets'\n"
+    "                    authored omni ranges are 3-20 units in a 60+ unit room, so the hard\n"
+    "                    cutoff culls nearly every light for nearly every pixel. Scale up to\n"
+    "                    measure the real per-light cost.\n"
+    "  --dump_cube=N     deferred only, DIAGNOSTIC: read light N's baked shadow cube back\n"
+    "                    to the CPU, print per-face stored-depth statistics (nonfinite /\n"
+    "                    cleared / min-max / decoded world distance) and write a 3x2 face\n"
+    "                    atlas PPM. Forces Shared storage on the cubes, so never a timing run.\n"
+    "  --dump_cube_out=PATH  where the atlas goes (default gpubench_cube.ppm)\n"
+    "  --dump_env_cube   deferred only, DIAGNOSTIC: read every baked ENVIRONMENT probe\n"
+    "                    cube back and print a per-face radiance census (mean B/G/R,\n"
+    "                    mean/p50/p95/max luma) on the CPU's 0-255 radiance scale, plus a\n"
+    "                    3x2 face atlas PPM per probe. The counterpart of FDS's\n"
+    "                    FDS_ENVBAKE_DUMP=1 [ENVBAKE-FACE] census, so probe CONTENT can be\n"
+    "                    compared face by face instead of inferred from a lit frame.\n"
+    "                    Forces Shared storage on the env cubes: never a timing run.\n"
+    "  --dump_env_cube_dir=DIR  where those atlases go (default /tmp)\n"
+    "  --probe=x,y,z     GROUND TRUTH for one world point: ray-cast the same casting\n"
+    "                    triangles the bake rasterised (naming the nearest hit's mesh +\n"
+    "                    material) AND replicate the shader's cube tap on the host, side\n"
+    "                    by side. Combine with --dump_cube=N so the cubes are readable.\n"
+    "  --probe_px=X,Y    same for a SCREEN PIXEL: ray-cast what the camera sees there and\n"
+    "                    replay the lighting pass's per-light gate on it, naming the test\n"
+    "                    that failed (out of range / backfacing / reaches).\n"
+  "  --window          OPEN A REAL WINDOW: SDL2 + CAMetalLayer, the scene ANIMATED\n"
+    "                    through FDS's own Animate_Objects, and the camera driven by\n"
+    "                    FDS's own Dynamic_Camera -- the DisplaceTest / TAB-camera\n"
+    "                    control set, not a scheme invented here. Live per-pass GPU ms\n"
+    "                    overlaid. The full keymap is printed on startup and on F1:\n"
+    "                      W / S,Z fwd,back   A,End / D,PgDn strafe   Q,gray+ / E,gray- up,down\n"
+    "                      arrows look (yaw/pitch)   Home / PgUp roll   mouse-drag look\n"
+    "                      , . translation speed dial     K L rotation speed dial\n"
+    "                      G dump pose   TAB free-fly/authored-spline   SPACE pause\n"
+    "                      [ ] scrub time   ESC or Backspace quit\n"
+    "                    Offscreen remains the default; nothing is displayed without this.\n"
+    "  --anim_probe=T0,T1   OFFSCREEN regression probe for the WINDOW's per-frame refresh:\n"
+    "                    runs Reanimate + the frame/batch/light refreshes at both t and\n"
+    "                    prints the GPU-FACING arrays (GpuLight, BatchUniforms, flare\n"
+    "                    instances). A value that does not change between the two t is a\n"
+    "                    stale per-frame upload -- which is how the frozen mech omnis and\n"
+    "                    their frozen flare sprites were found.\n"
+    "  --cam_track=T0:T1:STEP   OFFSCREEN evidence that the scripted camera INTERPOLATES:\n"
+    "                    re-animate at each demo-t and print the pose in DEMO's own [CAM]\n"
+    "                    format, plus the Source spline's keyframes. No device, no render.\n"
+    "  --win=WxH         window size (default 1280x720)\n"
+    "  --spline          start on the authored camera spline instead of free-fly\n"
+    "  --time_scale=F    demo-timer centiseconds per real second (default 100 = real time)\n"
+    "  --no-bloom / --bloom_intensity=F / --bloom_threshold=F   greets defaults are ON,\n"
+    "                    intensity 2.0, threshold 200 (the CPU's linear 0-255 radiance scale)\n"
+    "  --no-flares / --flare_gain=F   omni flare sprites (the DEMO reference's bright pools)\n"
+    "  --no-cones / --cone_strength=F   VOLUMETRIC SPOT CONES -- the disco beams in the\n"
+    "                    air, the screen-space analytic integral of\n"
+    "                    DeferredVolumetric.cpp with ONE shadow-map tap per segment.\n"
+    "                    greets' cone_strength is 1.2 (GreetsDisco.cpp), not the global\n"
+    "                    0.05, so ON at 1.2 is PARITY.\n"
+    "  --no-xpar / --xpar_peel_passes=K   TRANSPARENT SURFACES. The CPU routes\n"
+    "                    Mat_Transparent / Mat_Additive faces away from the deferred\n"
+    "                    kernel (RenderInner.cpp:294-296) and composites them after the\n"
+    "                    lighting resolve through the FORWARD transparent kernel + a\n"
+    "                    front/back depth peel. ON is parity. K defaults to the scene's\n"
+    "                    own Scene::XparPeelPasses (greets 1, fountain 4), matching the\n"
+    "                    CPU's xparPeelPassesEffective().\n"
+    "  --cpu_metal_diffuse / --cpu_metal_tint   MEASUREMENT ONLY. Switch the GPU's\n"
+    "                    conductor shading to the CPU's HDR-frame semantics so\n"
+    "                    SHADING_CONTRACT.md's D1 / D2 can be priced in pixels:\n"
+    "                    D1 keeps the diffuse lobe on metal (the CPU's metalness kill\n"
+    "                    reaches only the LDR combine, never the HDR frame), D2 tints\n"
+    "                    the highlight by the GAMMA albedo instead of the linear one.\n"
+    "                    Both make this arm LESS physically correct, deliberately.\n"
+    "  --env_bake_skip_animated   MEASUREMENT ONLY. Keep ANIMATED meshes out of the\n"
+    "                    env-reflection probe bakes, which is what the CPU does\n"
+    "                    unconditionally (EnvBake.cpp:311 -> Transform.cpp:1274 ->\n"
+    "                    :1560, predicate isDynamicForBake). On greets that is the\n"
+    "                    WHOLE MECH -- Hull.lwo, Hull2.lwo and the four leg meshes --\n"
+    "                    so the CPU's 'cockpit' probe holds the EMPTY ROOM while this\n"
+    "                    arm's holds the mech's own hull, barrels and legs. ON is CPU\n"
+    "                    parity; OFF (the default) is what every pinned md5 here was\n"
+    "                    recorded with. Prices SHADING_CONTRACT.md row E6.\n"
+    "  --no-disco        do NOT synthesise GreetsDisco.cpp's 10 cone spotlights + glow\n"
+    "                    omni. greets_disco defaults ON in DEMO, so these are PARITY --\n"
+    "                    turning them off makes the arm dimmer than the shipped scene.\n"
+    "  --no-stone_tex    do NOT apply DEMO's greets_stone_tex wall/floor override. The\n"
+    "                    render is then the AUTHORED FLD wall, not the reviewed surface.\n"
+    "  --omni_range=F    force EVERY omni's range to F (rewriting the Range spline\n"
+    "                    keys, matching DEMO's greets_omni_default_range dial). Default\n"
+    "                    0 = the AUTHORED envelope — since commit 00f7820 the LWS/FLD\n"
+    "                    authors LightRange 30 on all ten omnis and DEMO carries no\n"
+    "                    runtime patch, so no-patch IS parity. (--no-range_patch is\n"
+    "                    accepted and now a no-op.)\n"
+    "  --hdr_linear / --no-hdr_linear   which HDR COMPOSITE to build the frame\n"
+    "                    from. hdr_linear defaults 0 in FeatureFlags.def and only greets\n"
+    "                    setDefaults it, so greets runs albedo^2*light + an sqrt encode\n"
+    "                    (DeferredSurfaceKernel.cpp:2618-2631 + Hdr.cpp:847-851) and every\n"
+    "                    other scene runs :2587's gamma composite with NO encode. Derived\n"
+    "                    from the scene; these flags override. Same for --bloom/--no-bloom.\n"
+    "  --no-xpar_merge   do NOT merge peel encoders across screen-DISJOINT clumps. The\n"
+    "                    merge cannot change a pixel (every buffer the peel touches is\n"
+    "                    per-pixel, and merging is restricted to clumps sharing none) but\n"
+    "                    it took fountain from 208 render + 78 blit encoders to 80 + 0 and\n"
+    "                    the peel from 8.84 to 2.34 ms. This restores the old scheduling\n"
+    "                    so the change stays priceable.\n"
+    "  --pcl=PATH        REPLAY a CPU particle dump (fountain's 8,250 water sprays).\n"
+    "                    They are NOT scene data and NOT reachable from FDS -- see\n"
+    "                    GpuBench/ParticleReplay.h for the proof, the file format and the\n"
+    "                    DEMO-side dump this reads. One instanced additive draw, depth-\n"
+    "                    TESTED with no depth write, no peel (additive is order-free).\n"
+    "                    Produce the dump from DEMO: --pcl_dump=PATH[,t0,t1] (default off,\n"
+    "                    byte-null when off; t0/t1 are an inclusive scene-Timer window).\n"
+    "  --reanimate       run the WINDOW's per-frame Reanimate() once before rendering,\n"
+    "                    OFFSCREEN. The window animates every frame; the plain offscreen\n"
+    "                    render never calls Reanimate at all, so a bug that lives in the\n"
+    "                    per-frame refresh rather than in Load is invisible without this.\n"
+    "                    Use it to reproduce a --window report headlessly.\n"
+    "  --dump_meshes     PER-OBJECT census: name, triangle count, world position, and each\n"
+    "                    material's ROUTE (opaque G-buffer / xpar peel / additive / no\n"
+    "                    shadow cast), plus the texture roster. Diff it against the CPU's\n"
+    "                    `DUMP_MESHES=1 ./DEMO --snapshot=<scene>@t=N ...` [MESH] lines to\n"
+    "                    answer 'is geometry missing on this arm' WITHOUT a pose, a render\n"
+    "                    or an argument. Distinguishes 'not ingested' from 'ingested but\n"
+    "                    routed away from the G-buffer'.\n"
+    "  --tex_point       MEASUREMENT ONLY: point-sample textures with no mip filtering,\n"
+    "                    instead of the default trilinear + 8x aniso. The CPU rasterizer\n"
+    "                    point-samples and picks its mip by clipper subdivision, so the\n"
+    "                    two arms resolve different detail on foreshortened surfaces; this\n"
+    "                    prices that. It ALIASES — not a fidelity improvement.\n"
+    "  --pcl_before_xpar draw the spray BEFORE the depth peel (the other bracket). The CPU\n"
+    "                    walks ONE back-to-front list holding both sprites and transparent\n"
+    "                    clumps, so a sprite BEHIND glass is attenuated by it and one IN\n"
+    "                    FRONT is not; a single whole-spray pass cannot be both. Before\n"
+    "                    the peel attenuates EVERY sprite, after attenuates NONE, and the\n"
+    "                    CPU is bracketed by the two. AFTER is the default because it is\n"
+    "                    MEASURED closer at t=1500/2500/3500 (§6.2m); this restores the\n"
+    "                    other bracket so the choice stays priceable. Neither is exact.\n"
+    "  --pcl_synth=PATH [--pcl_synth_n=N]   write a CONFORMING synthetic dump and exit,\n"
+    "                    so the replay path is testable before the DEMO-side writer\n"
+    "                    exists. N defaults to fountain's own 8250.\n"
+    "  --pcl_sim / --no_pcl_sim    SIMULATE the spray on the GPU instead of replaying a\n"
+    "                    dump: DEMO/FOUNTAIN.CPP's Particle_Kinematics motion model as a\n"
+    "                    compute kernel (cs_pcl_sim), stepped on the window's own clock.\n"
+    "                    This is what makes a FREE-FLY window show spray -- a dump only\n"
+    "                    covers the pose it was recorded at, so an interactive session can\n"
+    "                    never have one. DEFAULT: ON for --window on fountain, OFF\n"
+    "                    everywhere else, so every offscreen md5 already recorded stays\n"
+    "                    valid. --pcl_sim forces it on offscreen (use it with --reanimate\n"
+    "                    to render the window's own path headlessly).\n"
+    "                    *** IT IS NOT AN ORACLE. *** It does not reproduce the CPU's\n"
+    "                    RAND_15() history, so individual particles differ from frame one.\n"
+    "                    Shape, spread, density, lifetime, size and colour are ported term\n"
+    "                    for term and are what a by-eye comparison can use; a per-pixel\n"
+    "                    one cannot. For bit-comparable particles use --pcl=PATH. If both\n"
+    "                    are given the DUMP wins. Deterministic within this arm: same seed\n"
+    "                    and same step sequence give the same spray.\n"
+    "  --pcl_sim_warm=S  seconds of scene time to spin the sim through before the first\n"
+    "                    frame (default 5.0 — longer than the longest particle lifetime,\n"
+    "                    so the population is at equilibrium and the rotating emitters\n"
+    "                    carry their real phase history). --pcl_sim_step=S sets the fixed\n"
+    "                    warm-up step (default 1/60); being fixed is what makes a\n"
+    "                    --reanimate render reproducible.\n"
+    "  --pcl_image_size=F  override FDS's ImageSize for the sprite half-extent. 0 (the\n"
+    "                    default) uses the scene's own — fountain 10.0, FOUNTAIN.CPP:2844.\n"
+    "  --tess            GPU HARDWARE TESSELLATION of the greets stone ('rooms' + 'floor'),\n"
+    "                    displaced by the same height map the CPU --greets_displace bake\n"
+    "                    and the POM march use. DEFAULT OFF and byte-null when off.\n"
+    "  --tess_px=F       THE KNOB: target triangle EDGE LENGTH IN PIXELS (default 8).\n"
+    "                    A patch edge measuring L px asks for round(L/F) segments, so the\n"
+    "                    rule is screen-space adaptive and distance costs nothing. --tess_px=1\n"
+    "                    is the 'one triangle per pixel' ask. Implies --tess.\n"
+    "  --tess_presplit=P Metal caps a pipeline's tessellation factor at 16, so ONE patch\n"
+    "                    cannot split an edge more than 16 ways however small --tess_px is.\n"
+    "                    P pre-splits every base triangle into a PxP barycentric lattice,\n"
+    "                    rendered as P*P INSTANCES each with its own factor record, so the\n"
+    "                    effective per-edge ceiling is P*16 at zero vertex-buffer cost.\n"
+    "                    Default 1. Implies --tess.\n"
+    "  --tess_border_ramp=F  AUTHORED-BORDER PIN (default 0.15, 0 = off). The CPU bake pins\n"
+    "                    every subdivision vertex on an edge used by exactly ONE face of the\n"
+    "                    material to EXACTLY zero displacement; without it this arm pushes the\n"
+    "                    greets doorway jamb OUT by up to +0.035 world units where the CPU\n"
+    "                    pushes it 0 - the reported bulge. F is the fade width as a fraction\n"
+    "                    of the base patch. The conventions themselves already MATCH: same\n"
+    "                    amp*(h-mean) along the normal, amp 0.300, mip 2, mean 0.5491 both.\n"
+    "  --tess_amp=F      world displacement amplitude (default 0.3 = --greets_displace_amp's\n"
+    "                    own default; the S1d perf table's tessellation arm runs 0.18).\n"
+    "  --tess_mip=N      height mip sampled, and the mip whose mean is subtracted (default 2,\n"
+    "                    = --greets_displace_mip).\n"
+    "  --no-tess_cull    do NOT discard off-screen patches with a zero tessellation factor.\n"
+    "  --tess_back_cull  ALSO discard backfacing patches (off by default: a backfacing base\n"
+    "                    patch can still carry visible relief on a displaced silhouette).\n"
+    "  --tess_edge_map=N which factor slot is which edge: 0 = opposite-vertex (default),\n"
+    "                    1 = adjacent. Settled by looking for cracks.\n"
+    "  --tess_stats      EXACT geometry census in an extra UNTIMED frame: post-tessellation\n"
+    "                    vertex invocations (one atomic each), boundary segments, and the\n"
+    "                    triangle count Euler gives from the two. Also times the factor\n"
+    "                    kernel alone. Never present in a timed pipeline.\n"
+    "  --no-mirror2      turn OFF SECOND-ORDER mirrors (a mirror seen inside another\n"
+    "                    mirror). ON by default. For each ordered pair (A,B) of panels\n"
+    "                    where B faces A's reflected eye, the scene is rendered from the\n"
+    "                    DOUBLY reflected camera reflect_B(reflect_A(eye)) and composited\n"
+    "                    onto B's pixels inside A's reflection -- the same virtual eye the\n"
+    "                    CPU's --mirror_rtt order-2 slots use. Order 2 is the ceiling in\n"
+    "                    both arms.\n"
+    "  --mirror2_scale=F order-2 target resolution as a fraction of the frame (default 0.5,\n"
+    "                    clamped to [0.125,1]). The content is only ever seen through a\n"
+    "                    panel, so full resolution is mostly wasted; this is the\n"
+    "                    cost/sharpness knob.\n"
+    "  --mirror2_min_px=F  skip a pair whose panel covers fewer than F pixels in the outer\n"
+    "                    reflection (default 16).\n"
+    "  --mirror2_stats   log every order-2 pair rendered and its scissor.\n"
+    "  --tess_seam_audit MEASURE the stone's ATTRIBUTE SEAMS: positions shared by 2+ faces\n"
+    "                    that disagree about UV or normal, and the world displacement gap\n"
+    "                    that opens there at the current --tess_amp. This is the mechanism\n"
+    "                    of the thin residual crack a CORRECT factor record still leaves —\n"
+    "                    a mesh property (per-face UVs), not a tessellator one.\n"
+    "  --tess_uniform=F  CALIBRATION: force every tessellation factor to F and report the\n"
+    "                    vertex count against both hypotheses (deduplicated vs per-corner).\n"
+    "                    Settles the hardware's real factor ceiling. Implies --tess_stats.\n"
+    "  --help\n";
+
+}  // namespace
+
+int main(int argc, const char *argv[]) {
+@autoreleasepool {
+    gpubench::LoadOptions opt;
+    // The primary review pose (docs/greets_review_poses.txt, t=5743 "primary hole repro").
+    opt.camPose = "9.07557869,3.19592357,-52.9277191,-0.20672597,-0.140846997,0.968207836";
+    int warmup = 60, iters = 300;
+    std::string outPath = "gpubench.ppm";
+    std::string shaderDir;
+    bool noDraw = false;
+    std::string passMode = "albedo";
+    bool camExplicit = false;
+    bool doCamTrack = false;
+    // --reanimate: run the WINDOW's per-frame path once, offscreen. The window
+    // loop calls Reanimate(scene, lo, demoT) every frame; the offscreen render
+    // never calls it at all. So any bug that lives in the per-frame refresh
+    // rather than in Load is INVISIBLE offscreen — which is exactly how a
+    // "window shows one spire, offscreen shows six" report ends up with no
+    // headless reproduction. This makes the window's own code path renderable
+    // without a window.
+    bool doReanimate = false;
+    float camTrack[3] = {0, 0, 0};
+    gpubench::DeferredOptions dopt;
+    std::string pclSynth;
+    int pclSynthN = 8250;   // FntInnerPcls*3 + FntOuterPcls + FntSpiralPcls
+
+    for (int i = 1; i < argc; ++i) {
+        std::string a(argv[i]);
+        auto val = [&](const char *k) -> const char * {
+            size_t n = std::strlen(k);
+            // >= so an explicitly EMPTY value (e.g. --out= to suppress output)
+            // still matches instead of falling through to "unknown arg".
+            return (a.size() >= n && a.compare(0, n, k) == 0) ? a.c_str() + n : nullptr;
+        };
+        if (a == "--help" || a == "-h") { std::fputs(kUsage, stdout); return 0; }
+        else if (const char *v = val("--fld="))     { static std::string s; s = v; opt.fldPath = s.c_str(); }
+        else if (const char *v = val("--t="))       { opt.demoT = std::atoi(v); opt.demoTExplicit = true; }
+        else if (const char *v = val("--cam="))     { opt.camPose = v; camExplicit = true; }
+        else if (const char *v = val("--xres="))    opt.xres = std::atoi(v);
+        else if (const char *v = val("--yres="))    opt.yres = std::atoi(v);
+        else if (const char *v = val("--warmup="))  warmup = std::atoi(v);
+        else if (const char *v = val("--iters="))   iters = std::atoi(v);
+        else if (const char *v = val("--out="))     outPath = v;
+        else if (const char *v = val("--shaders=")) shaderDir = v;
+        else if (a == "--no-draw")                  noDraw = true;
+        else if (const char *v = val("--pass="))    passMode = v;
+        else if (a == "--no-shadows")               dopt.shadows = false;
+        else if (a == "--rebake_all")               dopt.rebakeAll = true;
+        else if (const char *v = val("--stages="))   dopt.stages = std::atoi(v);
+        else if (const char *v = val("--light_range_scale=")) dopt.lightRangeScale = float(std::atof(v));
+        else if (const char *v = val("--viz_light="))  dopt.vizLight = std::atoi(v);
+        else if (const char *v = val("--shadow_res=")) dopt.staticShadowRes = std::atoi(v);
+        else if (const char *v = val("--exposure=")) dopt.exposure = float(std::atof(v));
+        else if (const char *v = val("--dump_cube=")) dopt.dumpCube = std::atoi(v);
+        else if (const char *v = val("--dump_cube_out=")) dopt.dumpCubePath = v;
+        else if (a == "--dump_env_cube")                  dopt.dumpEnvCube = true;
+        else if (const char *v = val("--dump_env_cube_dir=")) dopt.dumpEnvCubeDir = v;
+        else if (const char *v = val("--probe_px=")) {
+            if (std::sscanf(v, "%d,%d", &dopt.probePxXY[0], &dopt.probePxXY[1]) == 2)
+                dopt.probePx = true;
+            else { std::fprintf(stderr, "--probe_px wants X,Y\n"); return 2; }
+        }
+        else if (const char *v = val("--probe=")) {
+            if (std::sscanf(v, "%f,%f,%f", &dopt.probePoint[0], &dopt.probePoint[1],
+                            &dopt.probePoint[2]) == 3) dopt.probe = true;
+            else { std::fprintf(stderr, "--probe wants x,y,z\n"); return 2; }
+        }
+        else if (a == "--no-stone_tex")             opt.stoneTex = false;
+        else if (a == "--no-range_patch")           opt.omniDefaultRange = 0.0f;
+        else if (const char *v = val("--omni_range=")) opt.omniDefaultRange = float(std::atof(v));
+        else if (a == "--no-disco")                 opt.disco = false;
+        else if (a == "--no-mirror")                opt.mirrors = false;
+        else if (a == "--no-mirror_face")           opt.mirrorFacing = false;
+        else if (a == "--no-revmaps")               opt.revMaps = false;
+        else if (a == "--no-env_refl")               opt.envRefl = false;
+        else if (const char *v = val("--env_res="))   opt.envRes = std::atoi(v);
+        else if (const char *v = val("--cam_track=")) {
+            if (std::sscanf(v, "%f:%f:%f", &camTrack[0], &camTrack[1], &camTrack[2]) == 3)
+                doCamTrack = true;
+            else { std::fprintf(stderr, "--cam_track wants T0:T1:STEP\n"); return 2; }
+        }
+        else if (a == "--window")                   dopt.interactive = true;
+        else if (const char *v = val("--win="))     { std::sscanf(v, "%dx%d", &dopt.winW, &dopt.winH); }
+        else if (const char *v = val("--time_scale=")) dopt.timeScale = float(std::atof(v));
+        else if (a == "--spline")                   dopt.freeFly = false;
+        else if (const char *v = val("--win_frames=")) dopt.winFrames = std::atoi(v);
+        else if (a == "--no-bloom")                 { dopt.bloom = false; dopt.bloomExplicit = true; }
+        else if (a == "--bloom")                    { dopt.bloom = true;  dopt.bloomExplicit = true; }
+        else if (a == "--no-hdr_linear")            { dopt.hdrLinear = false; dopt.hdrLinearExplicit = true; }
+        else if (a == "--hdr_linear")               { dopt.hdrLinear = true;  dopt.hdrLinearExplicit = true; }
+        else if (const char *v = val("--bloom_intensity=")) dopt.bloomIntensity = float(std::atof(v));
+        else if (const char *v = val("--bloom_threshold=")) dopt.bloomThreshold = float(std::atof(v)) / 255.0f;
+        else if (a == "--no-flares")                dopt.flares = false;
+        else if (a == "--no-cones")                 dopt.cones = false;
+        else if (a == "--no-xpar")                  dopt.xpar = false;
+        else if (a == "--no-xpar_merge")            dopt.xparMerge = false;
+        else if (const char *v = val("--pcl="))     dopt.pclPath = v;
+        else if (a == "--dump_meshes")              opt.dumpMeshes = true;
+        else if (a == "--reanimate")                doReanimate = true;
+        else if (a == "--tex_point")                dopt.texPoint = true;
+        else if (a == "--pcl_after_xpar")           dopt.pclAfterXpar = true;   // the default; accepted for symmetry
+        else if (a == "--pcl_before_xpar")          dopt.pclAfterXpar = false;
+        else if (a == "--pcl_sim")                  dopt.pclSim = 1;
+        else if (a == "--no_pcl_sim" || a == "--no-pcl_sim") dopt.pclSim = 0;
+        else if (const char *v = val("--pcl_sim_warm=")) dopt.pclSimWarm = float(std::atof(v));
+        else if (const char *v = val("--pcl_sim_step=")) dopt.pclSimStep = float(std::atof(v));
+        else if (const char *v = val("--pcl_image_size=")) dopt.pclImageSize = float(std::atof(v));
+        else if (const char *v = val("--pcl_synth=")) pclSynth = v;
+        else if (const char *v = val("--pcl_synth_n=")) pclSynthN = std::atoi(v);
+        else if (const char *v = val("--xpar_peel_passes=")) dopt.xparPeelPasses = std::atoi(v);
+        // ---- GPU HARDWARE TESSELLATION (default OFF, byte-null when off) ---
+        else if (a == "--tess")                     dopt.tess = true;
+        else if (const char *v = val("--tess_px="))       { dopt.tess = true; dopt.tessTargetPx = float(std::atof(v)); }
+        else if (const char *v = val("--tess_presplit=")) { dopt.tess = true; dopt.tessPresplit = std::atoi(v); }
+        else if (const char *v = val("--tess_amp="))      dopt.tessAmp = float(std::atof(v));
+        else if (const char *v = val("--tess_border_ramp=")) dopt.tessBorderRamp = float(std::atof(v));
+        else if (const char *v = val("--tess_mip="))      dopt.tessMip = std::atoi(v);
+        else if (const char *v = val("--tess_edge_map=")) dopt.tessEdgeMap = std::atoi(v);
+        else if (a == "--no-tess_cull")             dopt.tessCull = false;
+        else if (a == "--tess_back_cull")           dopt.tessBackCull = true;
+        else if (a == "--tess_stats")               dopt.tessStats = true;
+        else if (a == "--tess_seam_audit")          { dopt.tess = true; dopt.tessSeamAudit = true; }
+        else if (a == "--no-mirror2")               dopt.mirror2 = false;
+        else if (a == "--mirror2")                  dopt.mirror2 = true;
+        else if (const char *v = val("--mirror2_scale="))  dopt.mirror2Scale = float(std::atof(v));
+        else if (const char *v = val("--mirror2_min_px=")) dopt.mirror2MinPx = float(std::atof(v));
+        else if (a == "--mirror2_stats")            dopt.mirror2Stats = true;
+        else if (const char *v = val("--tess_uniform=")) { dopt.tess = true; dopt.tessStats = true; dopt.tessUniform = std::atoi(v); }
+        else if (a == "--cpu_metal_diffuse")        dopt.cpuMetalDiffuse = true;
+        else if (a == "--cpu_metal_tint")           dopt.cpuMetalTint = true;
+        else if (a == "--env_bake_skip_animated")   dopt.envSkipAnimated = true;
+        else if (const char *v = val("--anim_probe=")) {
+            if (std::sscanf(v, "%d,%d", &dopt.animProbeT[0], &dopt.animProbeT[1]) == 2)
+                dopt.animProbe = true;
+            else { std::fprintf(stderr, "--anim_probe wants T0,T1\n"); return 2; }
+        }
+        else if (const char *v = val("--cone_strength=")) dopt.coneStrength = float(std::atof(v));
+        else if (a == "--no-nmap")                  dopt.nmap = false;
+        else if (const char *v = val("--cpu_prof=")) dopt.cpuProf = std::atoi(v);
+        else if (a == "--no-cull")                  dopt.cull = false;
+        else if (a == "--no-shadow_cull")           dopt.shadowCull = false;
+        else if (const char *v = val("--flare_gain=")) dopt.flareGain = float(std::atof(v));
+        else if (const char *v = val("--viz=")) {
+            const std::string m(v);
+            if      (m == "albedo") dopt.viz = 0;
+            else if (m == "normal") dopt.viz = 1;
+            else if (m == "ao")     dopt.viz = 2;
+            else if (m == "depth")  dopt.viz = 3;
+            else if (m == "gloss")  dopt.viz = 4;
+            else if (m == "shadow") dopt.viz = 5;
+            else if (m == "lights") dopt.viz = 6;
+            else if (m == "shadowraw") dopt.viz = 7;
+            else if (m == "ambient")  dopt.viz = 8;
+            else if (m == "emissive") dopt.viz = 9;
+            else if (m == "direct")   dopt.viz = 10;
+            else if (m == "direct_noshadow") dopt.viz = 11;
+            else if (m == "worldpos") dopt.viz = 12;
+            else if (m == "mirror")   dopt.viz = 13;
+            else { std::fprintf(stderr, "unknown --viz mode: %s\n", v); return 2; }
+        }
+        else { std::fprintf(stderr, "unknown arg: %s\n\n%s", argv[i], kUsage); return 2; }
+    }
+
+    // The built-in default pose is GREETS' primary review pose, and it is
+    // meaningless in any other scene's coordinate system. Applied unconditionally
+    // it put fountain's camera at (9.08, 3.20, -52.93) — INSIDE the fountain
+    // basin, under the water surface, in a scene whose own camera sits ~300
+    // units out. MEASURED: 68 % of the frame had no G-buffer coverage at all and
+    // the render bore no relation to `--snapshot=fountain@t=2500`. Any scene
+    // that is not greets follows its AUTHORED camera spline unless --cam says
+    // otherwise; an explicit --cam still wins everywhere.
+    const bool isGreets = opt.fldPath && std::strstr(opt.fldPath, "GREETS") != nullptr;
+    if (!camExplicit && !isGreets) {
+        opt.camPose.clear();
+        std::fprintf(stderr, "[GPUBENCH] non-greets scene: following the AUTHORED "
+                             "camera spline (the built-in review pose is greets-only; "
+                             "pass --cam=\"px,py,pz,fx,fy,fz\" to pin one)\n");
+    }
+
+    // greets' RUN FLAGS are greets'. `hdr_linear` and `bloom` both default 0
+    // (FeatureFlags.def:343-344) and the only setDefaults in the tree are
+    // GREETS.CPP:1177-1185. fountain's shipping recipe is `--deferred --hdr`
+    // with neither, so carrying greets' stack into it renders a tone curve and
+    // a bloom the reference does not have. An explicit flag still wins.
+    if (!isGreets) {
+        if (!dopt.hdrLinearExplicit) dopt.hdrLinear = false;
+        if (!dopt.bloomExplicit)     dopt.bloom = false;
+        std::fprintf(stderr, "[GPUBENCH] non-greets scene: hdr_linear=%d bloom=%d "
+                             "(both default 0 in FeatureFlags.def; only greets "
+                             "setDefaults them)\n",
+                     dopt.hdrLinear ? 1 : 0, dopt.bloom ? 1 : 0);
+    }
+
+    // --window implies the deferred arm: interactive is only wired there, and a
+    // bare `--window` under the default albedo pass silently rendered offscreen
+    // and exited — the "doesn't open a window" report.
+    if (dopt.interactive) passMode = "deferred";
+
+    // --spline means "follow the AUTHORED camera spline". The default camPose is
+    // the review pose, which PINS the camera — the spline arm showed a frozen
+    // viewpoint until this was cleared. An explicit --cam still wins. Must happen
+    // BEFORE Load, which is what builds the first camera.
+    // NOT gated on --window any more. `--spline` used to be a no-op offscreen,
+    // so `--fld=SCENES/GREETS.FLD --t=N --spline` silently rendered the PINNED
+    // built-in review pose at every t — the [POSE] block now advertises
+    // --spline as the way to get greets onto its authored camera track, and
+    // that advice has to be true in the arm the user can actually run headless.
+    if (!dopt.freeFly && !camExplicit) opt.camPose.clear();
+
+    // --pcl_synth: write a CONFORMING synthetic particle dump and exit. Exists
+    // so the replay reader + instanced additive pass are testable before the
+    // DEMO-side writer specified in ParticleReplay.h lands — and so the format
+    // has an executable definition, not only a comment.
+    if (!pclSynth.empty()) {
+        const float centre[3] = {0.0f, 20.0f, 0.0f};   // fountain head, world
+        return gpubench::PclWriteSynthetic(pclSynth, pclSynthN, centre,
+                                           float(opt.demoT) * 0.26f, 10.0f) ? 0 : 1;
+    }
+
+    // ---- scene ------------------------------------------------------------
+    gpubench::Scene scene;
+    if (!gpubench::Load(scene, opt)) Die("scene ingest failed", nil);
+
+    // THE POSE BLOCK — unconditional, offscreen included. An offscreen render
+    // that does not say where its camera was cannot be checked against a window
+    // report, and asking for the pose after the fact is asking for it to be
+    // re-derived. Printed here (not inside Load) so it sees the camera AFTER
+    // every override in this function has been applied, and so --cam_track /
+    // --dump_meshes runs carry it too. The window loop reprints it live on `G`.
+    // The origin is read off camPose, NOT off camExplicit: greets keeps the
+    // BUILT-IN review pose when no --cam is given, so `--t=N` there pins the
+    // camera and animates only the scene. Deriving this from camExplicit
+    // reported greets as "authored spline" while it returned a byte-identical
+    // pose at t=1588 and t=5743 — measured, and the reason this distinction
+    // exists at all.
+    gpubench::PrintPoseBlock(scene, opt,
+        camExplicit          ? gpubench::PoseOrigin::ExplicitCam
+      : !opt.camPose.empty() ? gpubench::PoseOrigin::DefaultReviewPose
+                             : gpubench::PoseOrigin::Spline,
+        // scene.resolvedDemoT, NOT opt.demoT: when Load substitutes a mid-scene
+        // t for the greets-specific default, the repro lines must name the t
+        // that was actually RENDERED. Printing the requested one produced a
+        // block whose own two numbers disagreed (t=5743 -> CurFrame 650) and
+        // two commands that reproduced a different frame.
+        scene.resolvedDemoT);
+
+    // Replay the window's per-frame animation step before rendering, so the
+    // offscreen image is produced by the SAME code the window runs.
+    if (doReanimate) {
+        gpubench::LoadOptions ro = opt;
+        ro.verbose = false;
+        gpubench::Reanimate(scene, ro, scene.resolvedDemoT);
+        std::fprintf(stderr,
+            "[REANIMATE] replayed the window's per-frame Reanimate() at t=%d "
+            "(CurFrame %.1f): %zu batches, %zu lights\n",
+            opt.demoT, scene.curFrame, scene.batches.size(), scene.lights.size());
+    }
+
+    // --cam_track: a pure CPU-side diagnostic, no device, no render, no window.
+    if (doCamTrack) {
+        gpubench::CameraTrack(scene, opt, camTrack[0], camTrack[1], camTrack[2]);
+        return 0;
+    }
+
+    // ---- device -----------------------------------------------------------
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+    if (!dev) Die("no Metal device", nil);
+    std::fprintf(stderr, "[GPUBENCH] device: %s (unified=%d)\n",
+                 [[dev name] UTF8String], (int)[dev hasUnifiedMemory]);
+
+    // ---- Phase 3: deferred arm --------------------------------------------
+    if (passMode == "deferred") {
+        std::string sp;
+        std::vector<std::string> t;
+        if (!shaderDir.empty()) t.push_back(shaderDir + "/deferred.metal");
+        if (const char *exe = argv[0]) {
+            std::string e(exe);
+            size_t slash = e.find_last_of('/');
+            if (slash != std::string::npos) t.push_back(e.substr(0, slash) + "/shaders/deferred.metal");
+        }
+        t.push_back("shaders/deferred.metal");
+        t.push_back("../GpuBench/shaders/deferred.metal");
+        for (const auto &p : t) if (!ReadFile(p.c_str()).empty()) { sp = p; break; }
+        if (sp.empty()) Die("could not find deferred.metal (use --shaders=DIR)", nil);
+        std::fprintf(stderr, "[GPUBENCH] shaders: %s\n", sp.c_str());
+
+        dopt.warmup = warmup;
+        dopt.iters = iters;
+        dopt.outPath = outPath;
+        gpubench::DeferredResult res;
+        dopt.loadOpt = &opt;
+        if (!gpubench::RunDeferred(scene, dopt, sp, res)) return 3;
+        if (dopt.interactive) return 0;
+
+        std::fprintf(stderr,
+            "\n[GPUBENCH] ===== DEFERRED RESULT =====\n"
+            "[GPUBENCH] scene=%s pose t=%d (CurFrame %.1f) %dx%d MSAA=1x\n"
+            "[GPUBENCH] draws=%zu tris=%u textures=%u lights=%d\n"
+            "[GPUBENCH] shadows: %s — %d cubes / %d faces / %.2f Mtexels (static %d^2, moving %d^2)\n"
+            "[GPUBENCH]   static cubes baked ONCE (Omni_StaticShadow, as greets caches them): %.3f ms\n"
+            "[GPUBENCH]   per-frame re-bake: %d moving cube(s) = %d faces%s\n"
+            "[GPUBENCH] PBR: GGX + Smith-Schlick + Schlick F, Karis split-sum env BRDF,\n"
+            "[GPUBENCH]      Fdez-Aguera multiscatter, (1-F) diffuse energy, L2 SH ambient\n"
+            "[GPUBENCH] GPU ms, median (p5/p95), %d frames after %d warmup:\n",
+            opt.fldPath, opt.demoT, scene.curFrame, scene.xres, scene.yres,
+            scene.batches.size(), scene.faceCount, scene.texturesLoaded, res.litLights,
+            dopt.shadows ? "ON" : "OFF", res.shadowCubes, res.shadowFaces,
+            double(res.shadowTexels) / 1e6, dopt.staticShadowRes, dopt.movingShadowRes,
+            res.staticBakeMs,
+            dopt.rebakeAll ? res.shadowCubes : res.movingCubes,
+            6 * (dopt.rebakeAll ? res.shadowCubes : res.movingCubes),
+            dopt.rebakeAll ? "  [--rebake_all: FULL cold bake, not greets' policy]" : "",
+            iters, warmup);
+        for (const auto &p : res.passes)
+            std::fprintf(stderr, "[GPUBENCH]   %-14s %8.4f  (%.4f / %.4f)\n",
+                         p.name.c_str(), p.median, p.p5, p.p95);
+        std::fprintf(stderr,
+            "[GPUBENCH]   %-14s %8.4f  (%.4f / %.4f)\n"
+            "[GPUBENCH]   => %.1f FPS equivalent\n",
+            "FRAME TOTAL", res.frame.median, res.frame.p5, res.frame.p95,
+            res.frame.median > 0.0 ? 1000.0 / res.frame.median : 0.0);
+        if (dopt.viz >= 0)
+            std::fprintf(stderr, "[GPUBENCH] NOTE: --viz active, the lighting pass was "
+                                 "replaced by a debug output — timings are not the lit path.\n");
+        return 0;
+    }
+
+    // ---- shaders (runtime MSL compile; no offline `metal` on this machine) --
+    std::string src;
+    std::vector<std::string> tries;
+    if (!shaderDir.empty()) tries.push_back(shaderDir + "/albedo.metal");
+    if (const char *exe = argv[0]) {
+        std::string e(exe);
+        size_t slash = e.find_last_of('/');
+        if (slash != std::string::npos)
+            tries.push_back(e.substr(0, slash) + "/shaders/albedo.metal");
+    }
+    tries.push_back("shaders/albedo.metal");
+    tries.push_back("../GpuBench/shaders/albedo.metal");
+    std::string usedPath;
+    for (const auto &p : tries) { src = ReadFile(p.c_str()); if (!src.empty()) { usedPath = p; break; } }
+    if (src.empty()) Die("could not find albedo.metal (use --shaders=DIR)", nil);
+    std::fprintf(stderr, "[GPUBENCH] shaders: %s\n", usedPath.c_str());
+
+    NSError *err = nil;
+    MTLCompileOptions *copts = [MTLCompileOptions new];
+    id<MTLLibrary> lib = [dev newLibraryWithSource:@(src.c_str()) options:copts error:&err];
+    if (!lib) Die("MSL compile failed", err);
+
+    id<MTLFunction> vs = [lib newFunctionWithName:@"vs_albedo"];
+    id<MTLFunction> fs = [lib newFunctionWithName:@"fs_albedo"];
+    if (!vs || !fs) Die("shader entry points missing", nil);
+
+    // ---- pipeline ---------------------------------------------------------
+    MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
+    vd.attributes[0].format = MTLVertexFormatFloat3;  vd.attributes[0].offset = 0;   vd.attributes[0].bufferIndex = 0;
+    vd.attributes[1].format = MTLVertexFormatFloat3;  vd.attributes[1].offset = 12;  vd.attributes[1].bufferIndex = 0;
+    vd.attributes[2].format = MTLVertexFormatFloat2;  vd.attributes[2].offset = 24;  vd.attributes[2].bufferIndex = 0;
+    vd.layouts[0].stride = sizeof(gpubench::Vertex);
+    vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = vs;
+    pd.fragmentFunction = fs;
+    pd.vertexDescriptor = vd;
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    id<MTLRenderPipelineState> pso = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    if (!pso) Die("pipeline creation failed", err);
+
+    // Reversed-Z: ndc 1 at near, 0 at far. Clear to 0, keep the greater value.
+    MTLDepthStencilDescriptor *dsd = [MTLDepthStencilDescriptor new];
+    dsd.depthCompareFunction = MTLCompareFunctionGreater;
+    dsd.depthWriteEnabled = YES;
+    id<MTLDepthStencilState> dss = [dev newDepthStencilStateWithDescriptor:dsd];
+
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+    sd.minFilter = MTLSamplerMinMagFilterLinear;
+    sd.magFilter = MTLSamplerMinMagFilterLinear;
+    // Piramid UVs span roughly U[-561..38] V[-40..562] (measured) — wrap is mandatory.
+    sd.sAddressMode = MTLSamplerAddressModeRepeat;
+    sd.tAddressMode = MTLSamplerAddressModeRepeat;
+    sd.mipFilter = MTLSamplerMipFilterLinear;
+    sd.maxAnisotropy = 1;
+    id<MTLSamplerState> samp = [dev newSamplerStateWithDescriptor:sd];
+
+    // ---- buffers ----------------------------------------------------------
+    const size_t vbBytes = scene.verts.size() * sizeof(gpubench::Vertex);
+    id<MTLBuffer> vb = [dev newBufferWithBytes:scene.verts.data()
+                                        length:vbBytes
+                                       options:MTLResourceStorageModeShared];
+
+    // ---- textures: upload linear data, let the GPU build the mip chain -----
+    std::vector<id<MTLTexture>> texes;
+    texes.reserve(scene.textures.size());
+    id<MTLCommandQueue> queue = [dev newCommandQueue];
+    {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        for (const auto &img : scene.textures) {
+            MTLTextureDescriptor *td =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                  width:NSUInteger(img.w)
+                                                                 height:NSUInteger(img.h)
+                                                              mipmapped:YES];
+            td.usage = MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModeShared;
+            id<MTLTexture> t = [dev newTextureWithDescriptor:td];
+            [t replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(img.w), NSUInteger(img.h))
+                 mipmapLevel:0
+                   withBytes:img.rgba.data()
+                 bytesPerRow:NSUInteger(img.w) * 4];
+            [blit generateMipmapsForTexture:t];
+            texes.push_back(t);
+        }
+        [blit endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+
+    // ---- render targets (offscreen) ---------------------------------------
+    MTLTextureDescriptor *ctd =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                          width:NSUInteger(scene.xres)
+                                                         height:NSUInteger(scene.yres)
+                                                      mipmapped:NO];
+    ctd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    ctd.storageMode = MTLStorageModeShared;
+    id<MTLTexture> colorTex = [dev newTextureWithDescriptor:ctd];
+
+    MTLTextureDescriptor *dtd =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                          width:NSUInteger(scene.xres)
+                                                         height:NSUInteger(scene.yres)
+                                                      mipmapped:NO];
+    dtd.usage = MTLTextureUsageRenderTarget;
+    dtd.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> depthTex = [dev newTextureWithDescriptor:dtd];
+
+    // ---- uniforms ---------------------------------------------------------
+    // Engine pixel mapping (docs/GRAPHICS_PIPELINE.md §5):
+    //   px = cntrEX + (X/Z)*FOVX ,  py = cntrEY - (Y/Z)*FOVY
+    // Metal viewport (upper-left origin):
+    //   px = ( ndc.x*0.5 + 0.5)*W ,  py = (-ndc.y*0.5 + 0.5)*H
+    // Solving for ndc and writing clip = ndc*w with w = Z:
+    const float W = float(scene.xres), H = float(scene.yres);
+    FrameUniforms fu{};
+    for (int c = 0; c < 3; ++c) {
+        fu.camRow0[c] = scene.camera.rot[0][c];
+        fu.camRow1[c] = scene.camera.rot[1][c];
+        fu.camRow2[c] = scene.camera.rot[2][c];
+    }
+    for (int c = 0; c < 3; ++c) fu.camSrc[c] = scene.camera.src[c];
+    fu.sx = 2.0f * scene.camera.perspX / W;
+    fu.ox = 2.0f * scene.camera.cntrEX / W - 1.0f;
+    fu.sy = 2.0f * scene.camera.perspY / H;
+    fu.oy = 1.0f - 2.0f * scene.camera.cntrEY / H;
+    {   // reversed-Z: ndc 1 at near, 0 at far
+        const float n = scene.camera.nearZ, f = scene.camera.farZ;
+        fu.dza = -n / (f - n);
+        fu.dzb = n * f / (f - n);
+    }
+
+    std::vector<BatchUniforms> bus(scene.batches.size());
+    for (size_t i = 0; i < scene.batches.size(); ++i) {
+        const auto &b = scene.batches[i];
+        BatchUniforms &u = bus[i];
+        for (int c = 0; c < 3; ++c) {
+            u.rotRow0[c] = b.rot[0][c];
+            u.rotRow1[c] = b.rot[1][c];
+            u.rotRow2[c] = b.rot[2][c];
+            u.objPos[c] = b.pos[c];
+            u.baseColor[c] = b.baseColor[c];
+        }
+        u.baseColor[3] = (b.textureIndex >= 0) ? 1.0f : 0.0f;
+    }
+
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = colorTex;
+    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0.02, 0.02, 0.04, 1.0);
+    rp.depthAttachment.texture = depthTex;
+    rp.depthAttachment.loadAction = MTLLoadActionClear;
+    rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+    rp.depthAttachment.clearDepth = 0.0;   // reversed-Z
+
+    auto renderOne = [&](void) -> id<MTLCommandBuffer> {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:pso];
+        [enc setDepthStencilState:dss];
+        // Winding: the engine's own backface test lives in Transform_Objects and
+        // is not reproduced here, so cull nothing. Correct with a depth buffer,
+        // just more fragment work — stated in the report rather than hidden.
+        [enc setCullMode:MTLCullModeNone];
+        [enc setVertexBuffer:vb offset:0 atIndex:0];
+        [enc setVertexBytes:&fu length:sizeof(fu) atIndex:1];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        for (size_t i = 0; noDraw ? false : i < scene.batches.size(); ++i) {
+            const auto &b = scene.batches[i];
+            [enc setVertexBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
+            [enc setFragmentBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
+            if (b.textureIndex >= 0 && b.textureIndex < int(texes.size()))
+                [enc setFragmentTexture:texes[size_t(b.textureIndex)] atIndex:0];
+            else if (!texes.empty())
+                [enc setFragmentTexture:texes[0] atIndex:0];   // bound but unused
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:NSUInteger(b.firstVertex)
+                    vertexCount:NSUInteger(b.vertexCount)];
+        }
+        [enc endEncoding];
+        [cb commit];
+        return cb;
+    };
+
+    // ---- warmup + measure --------------------------------------------------
+    std::fprintf(stderr, "[GPUBENCH] warmup %d frames…\n", warmup);
+    for (int i = 0; i < warmup; ++i) { id<MTLCommandBuffer> cb = renderOne(); [cb waitUntilCompleted]; }
+
+    std::vector<double> gpuMs;
+    gpuMs.reserve(size_t(iters));
+    for (int i = 0; i < iters; ++i) {
+        id<MTLCommandBuffer> cb = renderOne();
+        [cb waitUntilCompleted];
+        const double ms = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
+        if (ms > 0.0) gpuMs.push_back(ms);
+    }
+
+    if (gpuMs.empty()) Die("no GPU timestamps captured", nil);
+
+    const double med = Percentile(gpuMs, 0.50);
+    std::fprintf(stderr,
+        "\n[GPUBENCH] ===== RESULT =====\n"
+        "[GPUBENCH] scene=%s pose t=%d (CurFrame %.1f) %dx%d MSAA=1x%s\n"
+        "[GPUBENCH] draws=%zu tris=%u gpuVerts=%zu textures=%u\n"
+        "[GPUBENCH] GPU frame ms over %zu frames (after %d warmup):\n"
+        "[GPUBENCH]   median %.4f   p5 %.4f   p95 %.4f   min %.4f   max %.4f\n"
+        "[GPUBENCH]   => %.1f FPS equivalent\n",
+        opt.fldPath, opt.demoT, scene.curFrame, scene.xres, scene.yres,
+        noDraw ? "  [--no-draw: RENDER-PASS FLOOR, clear+store only]" : "",
+        noDraw ? size_t(0) : scene.batches.size(),
+        noDraw ? 0u : scene.faceCount, scene.verts.size(), scene.texturesLoaded,
+        gpuMs.size(), warmup,
+        med, Percentile(gpuMs, 0.05), Percentile(gpuMs, 0.95),
+        *std::min_element(gpuMs.begin(), gpuMs.end()),
+        *std::max_element(gpuMs.begin(), gpuMs.end()),
+        med > 0.0 ? 1000.0 / med : 0.0);
+
+    // ---- readback ---------------------------------------------------------
+    if (!outPath.empty()) {
+        const size_t rowBytes = size_t(scene.xres) * 4;
+        std::vector<uint8_t> pixels(rowBytes * size_t(scene.yres));
+        [colorTex getBytes:pixels.data()
+              bytesPerRow:rowBytes
+               fromRegion:MTLRegionMake2D(0, 0, NSUInteger(scene.xres), NSUInteger(scene.yres))
+              mipmapLevel:0];
+        if (WritePPM(outPath.c_str(), pixels.data(), scene.xres, scene.yres, rowBytes))
+            std::fprintf(stderr, "[GPUBENCH] wrote %s\n", outPath.c_str());
+        else
+            std::fprintf(stderr, "[GPUBENCH] WARNING: could not write %s\n", outPath.c_str());
+    }
+    return 0;
+}
+}

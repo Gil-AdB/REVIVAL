@@ -16,6 +16,8 @@
 #include "SimdHelpers.h"
 #include "Mekalele.h"  // g_gbuffer — flare filler's mirror-footprint gate
 #include "RENDER/Hdr.h"  // HDR overlay reorg — sprites accumulate into g_hdrBuf
+#include "RENDER/GreetsMirror.h"  // MirrorMaskScreenBBox — --mirror_flare_bbox
+#include "Base/FeatureFlags.h"
 #include <Threads.h>
 // #define SIMDE_ENABLE_NATIVE_ALIASES
 #include "simde/x86/mmx.h"
@@ -1295,8 +1297,17 @@ constexpr uint32_t clog2(uint32_t n)
 }
 
 
-template <int TextureRes = 32, bool EnableZTest = false, bool HDRAccum = false>
-void Spriter(float x, float y, float width, float height, void* txtr, void* vpage, dword Color, dword Z, float spriteClipX1, float spriteClipY1, float spriteClipX2, float spriteClipY2) {
+// MaskMirror: per-pixel planar-mirror clip for MIRROR-CLONE flares
+// (--mirror_flare_bbox). A clone flare may only paint pixels the mask pre-pass
+// stamped with its own mirror's tag; every other lane is killed. This replaces
+// the all-or-nothing CENTRE-pixel gate the clone flares used to take, which
+// deleted an entire sprite the moment its centre crossed the mirror edge even
+// though most of the sprite was still over the mirror. Default false → the
+// instantiation, and its output, are exactly what they were.
+template <int TextureRes = 32, bool EnableZTest = false, bool HDRAccum = false,
+          bool MaskMirror = false>
+void Spriter(float x, float y, float width, float height, void* txtr, void* vpage, dword Color, dword Z, float spriteClipX1, float spriteClipY1, float spriteClipX2, float spriteClipY2,
+             const uint8_t* mmask = nullptr, uint32_t mtag = 0) {
 	float x1, y1, x2, y2;
 	float du, dv;
 	float u0 = 0, v0 = 0;
@@ -1363,6 +1374,21 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 		auto zspan = ((uint16_t*)zscanline) + tile_x1 * TILE_SIZE;
 		for (int32_t tile_x = tile_x1; tile_x != tile_x2; ++tile_x) {
 			Vec8ib mask = (ix1 <= v_x) & (v_x < ix2);
+			if constexpr (MaskMirror) {
+				// 8 mask bytes for this tile row. Byte load, not a vector
+				// load: the last tile of a span can reach past XRes (the
+				// out-of-span lanes are already masked off, but the READ
+				// would still walk off the final row), so copy only the
+				// bytes that exist and leave the rest 0 (= no mirror).
+				uint8_t mb[8] = {0,0,0,0,0,0,0,0};
+				const int32_t bx = tile_x * TILE_SIZE;
+				const int32_t navail = (bx + 8 <= int32_t(XRes)) ? 8 : (int32_t(XRes) - bx);
+				if (navail > 0)
+					std::memcpy(mb, mmask + size_t(y) * size_t(XRes) + size_t(bx),
+					            size_t(navail));
+				const Vec8i ids(mb[0], mb[1], mb[2], mb[3], mb[4], mb[5], mb[6], mb[7]);
+				mask &= (ids == Vec8i(int32_t(mtag)));
+			}
 			if constexpr (EnableZTest) {
 				Vec8us z_existing_c;
 				z_existing_c.load_a(zspan);
@@ -1421,11 +1447,61 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 template <int Res>
 static inline void SpriterRT(float x, float y, float w, float h, void* txtr,
                              void* vpage, dword Color, dword Z,
-                             float cx1, float cy1, float cx2, float cy2) {
+                             float cx1, float cy1, float cx2, float cy2,
+                             const uint8_t* mmask = nullptr, uint32_t mtag = 0) {
+	// mmask != nullptr ONLY for mirror-clone flares under --mirror_flare_bbox
+	// (see SpriteMirrorMask). Every other caller takes the identical two
+	// instantiations it always took.
+	if (mmask) {
+		if (fds::g_hdrActive)
+			Spriter<Res, true, true,  true>(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2, mmask, mtag);
+		else
+			Spriter<Res, true, false, true>(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2, mmask, mtag);
+		return;
+	}
 	if (fds::g_hdrActive)
 		Spriter<Res, true, true >(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2);
 	else
 		Spriter<Res, true, false>(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2);
+}
+
+// ── --mirror_flare_bbox: the clone-flare mirror gate ─────────────────────────
+//
+// A mirror-clone flare is a SPRITE with real screen extent (greets' lamps and
+// fountain's `ImageSize 10.0` sprites are tens to hundreds of pixels across).
+// The legacy gate sampled the mask at the sprite's CENTRE pixel and dropped the
+// whole sprite on a mismatch, so a flare drifting toward a mirror's edge
+// vanished in one frame while most of its disc was still over the mirror —
+// "flares rendering in mirrors should be decided by their bbox, no center
+// point". The replacement is two-part and strictly tighter than a plain widen:
+//   * ADMISSION  — the sprite's screen bbox vs the mirror's stamped footprint
+//     bbox (fds::MirrorMaskScreenBBox, built by StampMirrorMasks from the same
+//     clipped wall polygons). O(1), and only a reject-early optimisation.
+//   * THE DECISION — per pixel, in Spriter's MaskMirror lane test. This is what
+//     keeps the original defects dead: a clone whose reflected world position
+//     happens to pass a plain z-test inside ANOTHER mirror's footprint, or out
+//     in the open room, still paints nothing, because those pixels do not carry
+//     its tag. Widening the gate WITHOUT the per-pixel clip would resurrect
+//     "omni shows twice in the mirror" / "flare through walls"; that is why the
+//     two go in together.
+// Returns the mask plane for a clone flare when the flag is on, else nullptr
+// (which takes SpriterRT's original instantiation → byte-identical).
+static inline const uint8_t* SpriteMirrorMask(const Face* F) {
+	if (!F || F->mirrorMaskTag == 0) return nullptr;
+	if (!fds::FeatureFlags::mirror_flare_bbox()) return nullptr;
+	if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return nullptr;
+	return g_gbuffer->mirrorMask.data();
+}
+
+// Admission test for a clone flare of half-extent `halfExt` centred at (px,py).
+// True = "may reach this mirror's footprint"; the per-pixel clip decides the
+// rest. Also the gate that keeps a mirror which did not stamp this frame
+// (inactive, viewer behind the plane) from drawing its flares at all.
+static inline bool SpriteTouchesMirror(const Face* F, float px, float py, float halfExt) {
+	const fds::MirrorMaskBBox &bb = fds::MirrorMaskScreenBBox(F->mirrorMaskTag);
+	if (!bb.valid) return false;
+	return !(px + halfExt < float(bb.x0) || px - halfExt > float(bb.x1) ||
+	         py + halfExt < float(bb.y0) || py - halfExt > float(bb.y1));
 }
 
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
@@ -1458,14 +1534,21 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	// ("omni shows twice in the mirror") or in open rooms ("flare
 	// through walls"). Center-point test, consistent with the sprite's
 	// Face_PointZTest behavior.
+	// --mirror_flare_bbox: bbox admission + a per-pixel clip in the blit
+	// instead of the centre sample. See SpriteMirrorMask above.
+	const uint8_t* const mflMask = SpriteMirrorMask(F);
 	if (F->mirrorMaskTag != 0) {
 		if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return;
-		int32_t mx = int32_t(_A->PX);
-		int32_t my = int32_t(_A->PY);
-		if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-		if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-		if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
-		    != F->mirrorMaskTag) return;
+		if (mflMask) {
+			if (!SpriteTouchesMirror(F, _A->PX, _A->PY, 2.0f * Size)) return;
+		} else {
+			int32_t mx = int32_t(_A->PX);
+			int32_t my = int32_t(_A->PY);
+			if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+			if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+			if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+			    != F->mirrorMaskTag) return;
+		}
 	}
 
 	if (Size<=0) return;
@@ -1496,7 +1579,14 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 			Z = 1;
 
 		// Z compare on center only.
-		if (F->Flags & Face_PointZTest)
+		// Skipped for a mirror-clone flare under --mirror_flare_bbox for the
+		// same reason the centre MASK sample is: it is a whole-sprite verdict
+		// read off one pixel, and at a mirror edge that pixel is the WALL
+		// beside the mirror, which occludes and kills a sprite that is mostly
+		// over the (farther) reflection. Spriter's per-pixel z test is exact
+		// and already runs (EnableZTest=true), so nothing is lost but the
+		// early-out. Non-clone flares are untouched.
+		if ((F->Flags & Face_PointZTest) && !mflMask)
 		{
 			int32_t x = _A->PX;
 			if (x<0) x=0;
@@ -1506,7 +1596,8 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 			if (y>YRes-1) y=YRes-1;
 			if (Z <= ZPage16[XRes*y+x]) return;
 		}
-		SpriterRT<256>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes);
+		SpriterRT<256>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes,
+		               mflMask, F->mirrorMaskTag);
 		//CSeven_UP_MMX(_A->PX,_A->PY,edgeLen,edgeLen,F->Txtr->Txtr->Data,VPage, Col, Z);
 		//CSeven_UP(_A->PX,_A->PY,Size<<1,Size<<1,F->Txtr->Txtr->Data,VPage);
 	}
@@ -1704,7 +1795,7 @@ bool TBR_MatchesTarget(const Scene *Sc)
 	       Sc->NumTiles == mword((YRes+TILESIZE-1)>>TILELOG);
 }
 
-void InsertSpanToTBR(Face *F, dword tile, float renderZ)
+void InsertSpanToTBR(Face *F, dword tile, float renderZ, uint8_t rank)
 {
 	// SBufferSize is sized from typicalSpans = YRes * 30/1536, an estimate
 	// of the *average* tile-coverage per particle. Particles near the
@@ -1718,6 +1809,7 @@ void InsertSpanToTBR(Face *F, dword tile, float renderZ)
 	CurScene->SBuffer[n].F = F;
 	CurScene->SBuffer[n].next = h;
 	CurScene->SBuffer[n].renderZ = renderZ;
+	CurScene->SBuffer[n].rank = rank;
 	CurScene->SBufferHead[tile] = n;
 	CurScene->SBufferCur++;
 }
@@ -1752,8 +1844,36 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 	const float renderZ = F->A->TPos_AOS.z;
 	for (int i = y1; i <= y2; i++)
 	{
-		InsertSpanToTBR(F, i, renderZ);
+		InsertSpanToTBR(F, i, renderZ, /*rank=*/1);   // sprite
 	}
+}
+
+// Deterministic, camera-INDEPENDENT ordering for the per-strip transparent
+// sort (TBR_Render and the glass-layered scheduler). The primary key is
+// renderZ descending — farthest-first, back-to-front — exactly as before, so
+// every pair with DISTINCT renderZ keeps its former order (byte-identical for
+// well-separated transparents: city beacons, fountain orbs, greets panels away
+// from coplanarity). The addition is the TIE-BREAK: when two fragments land at
+// the SAME renderZ (near-coplanar surfaces — a thin glass panel's front/back
+// faces, stacked decals), std::stable_sort otherwise falls back to the FList
+// insertion order, which is itself a function of the view (the Transform_Objects
+// radix key), so a coplanar front/back pair could swap composite order under a
+// sub-unit camera move. Instead we impose a fixed total order on the tie: back
+// surface before front (preserving the peel's far→near layering, matching the
+// max-Z / min-Z renderZ convention), then MeshFaceIdx — both camera-independent,
+// so a coplanar tie composites identically in every frame. The rank helper
+// derives facing from the same view-space winding the rest of the peel uses.
+static inline bool tbrXparOrderLess(const TBREntry &a, const TBREntry &b)
+{
+	if (a.renderZ != b.renderZ) return a.renderZ > b.renderZ;   // far → near
+	// Tie-break on the PRECOMPUTED entry rank (back 0 < sprite 1 < front 2),
+	// then MeshFaceIdx (load-time constant). No live TPos/frame reads here:
+	// the comparator runs inside per-strip sorts that overlap OTHER strips'
+	// raster/composite work — re-deriving facing from shared vertex data
+	// mid-walk was nondeterministic (greets mirror screens flashed pink,
+	// ~1-in-8 frames at peel>=2; see TBREntry::rank).
+	if (a.rank != b.rank) return a.rank < b.rank;
+	return a.F->MeshFaceIdx < b.F->MeshFaceIdx;
 }
 
 // Insert a transparent face fragment into every Y-strip its screen
@@ -1782,7 +1902,7 @@ void InsertTransparentToTBR(Face *F)
 	// inserted only ABOVE the horizon and vanished from the deferred frame.
 	// Span from PY is only trustworthy when all three verts project;
 	// otherwise insert into every strip and let the per-strip clipper
-	// raster trim exactly.
+	// raster trim exactly. (soa-vertex 9902349 — the chase water dark band.)
 	const float tzA = tpos_z[ai], tzB = tpos_z[bi], tzC = tpos_z[ci];
 	const bool straddlesNear = (tzA < 1.0f) || (tzB < 1.0f) || (tzC < 1.0f);
 
@@ -1848,7 +1968,7 @@ void InsertTransparentToTBR(Face *F)
 	}
 
 	for (int s = s_lo; s <= s_hi; s++) {
-		InsertSpanToTBR(F, s, renderZ);
+		InsertSpanToTBR(F, s, renderZ, front ? uint8_t(2) : uint8_t(0));
 	}
 }
 
@@ -1868,14 +1988,21 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	// inserts here, so it's valid at insert time. Without this, a TBR
 	// scene with mirrors (greets) re-grows the "clone flare through
 	// walls / in other mirrors" family the immediate path already fixed.
+	// --mirror_flare_bbox: admission by the sprite's screen bbox instead of
+	// its centre pixel; the per-pixel clip happens at blit time in TBR_Render
+	// / drawSprite (which re-derive the mask from the Face).
 	if (F->mirrorMaskTag != 0) {
 		if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return;
-		int32_t mx = int32_t(_A->PX);
-		int32_t my = int32_t(_A->PY);
-		if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-		if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-		if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
-		    != F->mirrorMaskTag) return;
+		if (SpriteMirrorMask(F)) {
+			if (!SpriteTouchesMirror(F, _A->PX, _A->PY, 2.0f * Size)) return;
+		} else {
+			int32_t mx = int32_t(_A->PX);
+			int32_t my = int32_t(_A->PY);
+			if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+			if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+			if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+			    != F->mirrorMaskTag) return;
+		}
 	}
 
 	if (Size<=0) return;
@@ -1894,6 +2021,283 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	}
 }
 
+// TBR barrier primitives used by the glass scheduler's drain() (see
+// TBR_Render_GlassLayered). fog-wt's default TBR_Render uses a local
+// counting_semaphore instead, so these are only referenced by the glass path.
+namespace tbr {
+	std::mutex					tileCounterMutex;
+	std::atomic<int>			tileCounter;
+	std::condition_variable		condition;
+}
+
+// ── Barrier-per-layer glass scheduler (--glass_refract) ──────────────────────
+//
+// The default per-strip TBR walk composites each strip's clumps back-to-front
+// on its OWN worker with NO cross-strip coordination. Glass refraction there had
+// to snapshot only the strip's own row band and CLAMP the vertical refracted
+// fetch to that band (else it would read a neighbour strip mid-composite) → an
+// 8-px vertical stair-step on every refracted surface.
+//
+// Glass is a WHOLE-SCREEN effect: a refracted fetch offsets up to glass_refract_max
+// pixels in ANY direction, so it needs a coherent full-frame background. This
+// scheduler hoists the per-strip layer sequencing to a GLOBAL barrier per depth
+// band (same model the legacy per-mesh peel uses — tiled-parallel within a layer,
+// sequenced + snapshotted between layers):
+//
+//   1. PLAN  (parallel per strip): collect + sort the strip's items back-to-front
+//      and segment them into steps (a sprite, or a clump of consecutive
+//      same-(mesh,front) transparent faces — identical to the legacy walk). Glass
+//      steps (refracting transparents) contribute their depth to the band set.
+//   2. BAND thresholds (main thread): the distinct glass depths (deduped within an
+//      epsilon, capped) become the barrier depths T[0] > T[1] > …
+//   3. EXECUTE rounds r = 0..m: every strip composites, IN PARALLEL, all its steps
+//      with renderZ > T[r] (whole steps, never split — a clump's band key is its
+//      farthest face's renderZ). BARRIER (all strips done) → full-frame snapshot of
+//      the now-coherent g_hdrBuf/VPage into g_glassRefr{Hdr,Ldr} → next round.
+//
+// Glass in round r composites AFTER the snapshot taken at the end of round r-1,
+// which holds everything with renderZ > T[r-1] = everything strictly behind it
+// (opaque + fog + every farther transparent/glass layer). It refracts that
+// full-frame snapshot (glassBandOn stays false → the kernel sampler reads
+// g_glassRefr*), so the fetch is whole-screen coherent (no per-strip clamp → NO
+// stair-step) AND correctly layered (inner glass shows through outer). Non-glass
+// steps (sprites / water / mirror clones) compose in their exact back-to-front
+// slot, so their output is byte-identical to the plain walk; only glass pixels
+// change. The snapshot is a main-thread memcpy taken while all strips are drained
+// → race-free and frame-to-frame deterministic (no flicker).
+//
+// FUTURE perf lever (NOT implemented): a per-strip max-displacement cap so strips
+// whose glass can't reach a neighbour's band skip that barrier, and merging
+// screen-disjoint glass layers so non-overlapping objects share one snapshot.
+namespace tbrglass {
+
+struct XparStep {
+	bool               isSprite = false;
+	Face*              spriteF  = nullptr;   // sprite path
+	std::vector<Face*> faces;                // clump path
+	bool               front    = false;
+	bool               isGlass  = false;     // refracting transparent → band depth
+	float              renderZ  = 0.0f;      // band key = farthest entry's renderZ
+};
+struct XparPlan {
+	std::vector<XparStep> steps;
+	size_t                cursor = 0;
+	size_t                roundStart = 0;    // first step index of the current round
+	int                   strip_y = 0, strip_h = 0;
+	float                 clipY1 = 0.0f, clipY2 = 0.0f;
+};
+static std::vector<XparPlan> g_plans;
+
+// Full-frame snapshot of the accumulated background into the stable buffers the
+// refraction sampler reads. Main thread, between round barriers → race-free.
+static void glassSnapshotFull() {
+	const size_t np = size_t(XRes) * size_t(YRes), n4 = np * 4;
+	if (fds::g_hdrActive && fds::g_hdrBuf.size() >= n4) {
+		if (fds::g_glassRefrHdr.size() < n4) fds::g_glassRefrHdr.resize(n4);
+		memcpy(fds::g_glassRefrHdr.data(), fds::g_hdrBuf.data(), n4 * sizeof(fds::hdrf));
+	}
+	if (VPage) {
+		if (fds::g_glassRefrLdr.size() < np) fds::g_glassRefrLdr.resize(np);
+		memcpy(fds::g_glassRefrLdr.data(), VPage, np * 4);
+	}
+}
+
+static void drawSprite(Face* F, float clipY1, float clipY2) {
+	Vertex* V = F->A;
+	float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
+	dword Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
+	// nullptr for everything but a mirror-clone flare under --mirror_flare_bbox.
+	const uint8_t* const mm = SpriteMirrorMask(F);
+	if (F->Txtr->Txtr->SizeX == 256) {
+		SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage,
+		               0xFFFFFF, Z, 0, clipY1, XRes, clipY2, mm, F->mirrorMaskTag);
+	} else {
+		dword R = V->LR, G = V->LG, B = V->LB;
+		dword Color = (R << 16) + (G << 8) + B;
+		SpriterRT<32>(V->PX, V->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage,
+		              Color, Z, 0, clipY1, XRes, clipY2, mm, F->mirrorMaskTag);
+	}
+}
+
+// dctx is threaded from TBR_Render (fog-wt's TBR refactor passes a
+// DeferredLightingCtx to the strip xpar dispatcher). It may be null on a
+// non-deferred TBR frame, in which case no transparent clumps were routed —
+// only sprites compose.
+static inline void composeStep(const DeferredLightingCtx *dctx, XparPlan& p, XparStep& s) {
+	if (s.isSprite) drawSprite(s.spriteF, p.clipY1, p.clipY2);
+	else if (dctx) RenderXparClumpInStrip(*dctx, s.faces.data(), int(s.faces.size()), s.front,
+	                            p.strip_y, p.strip_h, /*bandSnapshot=*/false);
+}
+
+} // namespace tbrglass
+
+static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
+{
+	extern void Xtrace_FrameBegin();   // FDS_XPAR_TRACE dev diagnostic
+	Xtrace_FrameBegin();
+	using namespace tbrglass;
+	const dword numTiles = Sc->NumTiles;
+	if (g_plans.size() < numTiles) g_plans.resize(numTiles);
+
+	auto drain = [&](dword n) {
+		std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+		tbr::condition.wait(lk, [n] { return tbr::tileCounter == (int)n; });
+	};
+
+	// ── Phase 1: plan (parallel per strip) ──
+	tbr::tileCounter = 0;
+	for (mword i = 0; i < numTiles; i++) {
+		ThreadPool::instance().enqueue([i, Sc]() {
+			XparPlan& plan = g_plans[i];
+			plan.steps.clear();
+			plan.cursor = 0;
+			float clipY1 = i << TILELOG, clipY2 = (i + 1) << TILELOG;
+			if (clipY2 > YRes) clipY2 = YRes;
+			plan.clipY1 = clipY1; plan.clipY2 = clipY2;
+			plan.strip_y = int(i) << TILELOG;
+			plan.strip_h = int(clipY2) - plan.strip_y;
+
+			thread_local std::vector<TBREntry> scratch;
+			scratch.clear();
+			sdword n = Sc->SBufferHead[i];
+			while (n != -1) { scratch.push_back(Sc->SBuffer[n]); n = Sc->SBuffer[n].next; }
+			std::stable_sort(scratch.begin(), scratch.end(), tbrXparOrderLess);
+
+			TriMesh* clumpMesh = nullptr; bool clumpFront = false; int openIdx = -1;
+			for (const TBREntry& e : scratch) {
+				Face* F = e.F;
+				if (F->A == F->B) {                 // sprite: closes any open clump
+					openIdx = -1;
+					XparStep s; s.isSprite = true; s.spriteF = F; s.renderZ = e.renderZ;
+					plan.steps.push_back(std::move(s));
+					continue;
+				}
+				TriMesh* meshHere = F->ParentTri;
+				const bool frontHere = (e.rank == 2);   // precomputed at insert (see TBREntry::rank)
+				if (openIdx >= 0 && (meshHere != clumpMesh || frontHere != clumpFront))
+					openIdx = -1;
+				if (openIdx < 0) {
+					clumpMesh = meshHere; clumpFront = frontHere;
+					XparStep s; s.isSprite = false; s.front = frontHere; s.renderZ = e.renderZ;
+					// Refracting glass = a transparent OPT-IN-marked Mat_Refractive
+					// that is NOT a mirror clone (mirrorMaskTag). Only marked glass
+					// (fountain 'mizraka glass' + 'f_sphere' orb shells, greets
+					// 'amudim' panels) becomes a band step that adds a snapshot
+					// barrier; every other transparent (the fiery 'f in shpere' orb
+					// core, additive glows, mirror-mask walls) keeps its exact
+					// composite slot and no barrier — it blends/glows normally,
+					// layered by the peel. F->Txtr is the same Material* the kernel
+					// reads as Mat, so the Mat_Refractive bit matches there.
+				s.isGlass = (F->Txtr && F->mirrorMaskTag == 0 &&
+					             (F->Txtr->Flags & Mat_Refractive) != 0);
+					plan.steps.push_back(std::move(s));
+					openIdx = int(plan.steps.size()) - 1;
+				}
+				plan.steps[openIdx].faces.push_back(F);
+			}
+			Sc->SBufferHead[i] = -1;
+			std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+			++tbr::tileCounter; tbr::condition.notify_one();
+		});
+	}
+	drain(numTiles);
+
+	// ── Phase 2: gather glass depths → dedupe/cap → barrier thresholds ──
+	static std::vector<float> depths; depths.clear();
+	for (mword i = 0; i < numTiles; i++)
+		for (auto& s : g_plans[i].steps)
+			if (s.isGlass) depths.push_back(s.renderZ);
+	static std::vector<float> T; T.clear();
+	if (!depths.empty()) {
+		std::sort(depths.begin(), depths.end(), [](float a, float b) { return a > b; });
+		const int maxBands = 16;
+		float eps = 0.5f;
+		const float range = depths.front() - depths.back();
+		if (range > 0.0f) eps = std::max(eps, range / float(maxBands));
+		for (float z : depths) if (T.empty() || (T.back() - z) > eps) T.push_back(z);
+		if ((int)T.size() > maxBands) {   // safety coarsen (rare)
+			std::vector<float> T2;
+			const int stride = ((int)T.size() + maxBands - 1) / maxBands;
+			for (size_t k = 0; k < T.size(); k += stride) T2.push_back(T[k]);
+			T.swap(T2);
+		}
+	}
+
+	// ── Phase 3: execute rounds, TWO-PHASE within each round ──
+	// Within a round, composite NON-GLASS steps (opaque-behind transparents:
+	// additive glow, plain blends) FIRST, snapshot the now-coherent frame, THEN
+	// composite the round's GLASS steps so each refracts a snapshot that already
+	// contains the same-round transparents behind it. Without this, a glass shell
+	// refracts a snapshot taken before the concentric/co-equatorial additive
+	// near-hemisphere composited, so the glass OVERWRITES that glow with the
+	// refracted opaque box → the additive glow over the box vanishes through the
+	// glass. (Works now that the refractive flag classifies the additive sphere
+	// as NON-glass; when it was wrongly a glass step this split was a no-op.)
+	const size_t m = T.size();
+	for (size_t r = 0; r <= m; r++) {
+		const float low = (r < m) ? T[r] : -3.0e38f;
+		// Phase A: this round's NON-glass steps.
+		tbr::tileCounter = 0;
+		for (mword i = 0; i < numTiles; i++) {
+			ThreadPool::instance().enqueue([i, low, dctx]() {
+				XparPlan& plan = g_plans[i];
+				plan.roundStart = plan.cursor;
+				while (plan.cursor < plan.steps.size() &&
+				       plan.steps[plan.cursor].renderZ > low) {
+					if (!plan.steps[plan.cursor].isGlass)
+						composeStep(dctx, plan, plan.steps[plan.cursor]);
+					plan.cursor++;
+				}
+				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+				++tbr::tileCounter; tbr::condition.notify_one();
+			});
+		}
+		drain(numTiles);
+		// Coherent background (opaque + fog + all farther rounds + this round's
+		// non-glass) for the round's glass to refract.
+		glassSnapshotFull();
+		// Phase B1: this round's BACK-facing glass, refracting the fresh snapshot.
+		// Split by side: a thin glass panel's front and back faces routinely land
+		// in the SAME band round (their clump depths dedupe within the band eps —
+		// which varies with camera range, so whether they split used to FLIP with
+		// sub-unit camera moves). With a single Phase B both faces refracted the
+		// pre-round snapshot, so the FRONT face's refracted background was missing
+		// its own BACK face (the panel's tint + rear text vanished — the greets
+		// screen "face pop"). Composite back glass, re-snapshot, THEN front glass:
+		// the front face always refracts a background containing its back face,
+		// regardless of how the bands fell.
+		tbr::tileCounter = 0;
+		for (mword i = 0; i < numTiles; i++) {
+			ThreadPool::instance().enqueue([i, dctx]() {
+				XparPlan& plan = g_plans[i];
+				for (size_t c = plan.roundStart; c < plan.cursor; c++)
+					if (plan.steps[c].isGlass && !plan.steps[c].front)
+						composeStep(dctx, plan, plan.steps[c]);
+				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+				++tbr::tileCounter; tbr::condition.notify_one();
+			});
+		}
+		drain(numTiles);
+		// Coherent background now includes the round's back glass.
+		glassSnapshotFull();
+		// Phase B2: this round's FRONT-facing glass.
+		tbr::tileCounter = 0;
+		for (mword i = 0; i < numTiles; i++) {
+			ThreadPool::instance().enqueue([i, dctx]() {
+				XparPlan& plan = g_plans[i];
+				for (size_t c = plan.roundStart; c < plan.cursor; c++)
+					if (plan.steps[c].isGlass && plan.steps[c].front)
+						composeStep(dctx, plan, plan.steps[c]);
+				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+				++tbr::tileCounter; tbr::condition.notify_one();
+			});
+		}
+		drain(numTiles);
+	}
+
+	Sc->SBufferCur = 0;
+}
+
 // Execute/Clear sprite buffer
 //
 // Per-strip walk: each Y-strip (8 rows) is processed by one worker
@@ -1903,12 +2307,62 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 // unified, transparent face fragments too). At flush time we collect
 // entries into a scratch array, sort descending by renderZ
 // (back-to-front), and walk the sorted array dispatching each item.
+// FDS_TBR_STATS=1: per-call wall vs summed worker-busy time + strip load
+// stats. The TailProf "serial TBR-render" scope is the orchestrator WALL
+// around this parallel dispatch (and sums both city passes per frame) —
+// these counters say how much actual work hides behind that wall and how
+// well it balances (busy/wall = effective parallelism; maxStrip = the
+// critical path).
+static const bool g_tbrStats = std::getenv("FDS_TBR_STATS") != nullptr;
+static std::atomic<uint64_t> g_tbrBusyNs{0}, g_tbrMaxStripNs{0};
+static std::atomic<uint64_t> g_tbrEntries{0}, g_tbrFlushes{0};
+// Per-material entry census (pointer-keyed open table; names printed).
+static std::atomic<const char*> g_tbrMatName[16];
+static std::atomic<uint64_t>    g_tbrMatCount[16];
+static inline void tbrCensus(const char* name)
+{
+	if (!name) name = "<null>";
+	for (int s = 0; s < 16; ++s) {
+		const char* cur = g_tbrMatName[s].load(std::memory_order_relaxed);
+		if (cur == name) { g_tbrMatCount[s].fetch_add(1, std::memory_order_relaxed); return; }
+		if (!cur) {
+			const char* expect = nullptr;
+			if (g_tbrMatName[s].compare_exchange_strong(expect, name)) {
+				g_tbrMatCount[s].fetch_add(1, std::memory_order_relaxed); return;
+			}
+			if (expect == name) { g_tbrMatCount[s].fetch_add(1, std::memory_order_relaxed); return; }
+		}
+	}
+}
+
 void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 {
+	// Glass refraction on → route through the barrier-per-layer scheduler for
+	// whole-screen-coherent (non-blocky) layered glass. Flag off → the plain
+	// per-strip walk below runs unchanged (byte-identical).
+	if (fds::FeatureFlags::glass_refract() > 0.0f) {
+		TBR_Render_GlassLayered(Sc, dctx);
+		return;
+	}
+
+	extern void Xtrace_FrameBegin();   // FDS_XPAR_TRACE dev diagnostic
+	Xtrace_FrameBegin();
+
 	const int numTiles = int(Sc->NumTiles);
 	std::counting_semaphore<INT_MAX> stripsDone{0};
 
+	const auto tbrWall0 = std::chrono::steady_clock::now();
+	if (g_tbrStats) {
+		g_tbrBusyNs.store(0, std::memory_order_relaxed);
+		g_tbrMaxStripNs.store(0, std::memory_order_relaxed);
+		g_tbrEntries.store(0, std::memory_order_relaxed);
+		g_tbrFlushes.store(0, std::memory_order_relaxed);
+	}
+
 	dispatchIndexed(numTiles, &stripsDone, [Sc, dctx](int ii) {
+			const auto tStrip0 = g_tbrStats
+				? std::chrono::steady_clock::now()
+				: std::chrono::steady_clock::time_point{};
 			const mword i = mword(ii);
 			float spriteClipY1 = i << TILELOG;
 			float spriteClipY2 = (i + 1) << TILELOG;
@@ -1924,11 +2378,9 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 				scratch.push_back(Sc->SBuffer[n]);
 				n = Sc->SBuffer[n].next;
 			}
-			// Descending: largest renderZ (farthest) first.
-			std::stable_sort(scratch.begin(), scratch.end(),
-				[](const TBREntry& a, const TBREntry& b) {
-					return a.renderZ > b.renderZ;
-				});
+			// Descending: largest renderZ (farthest) first, then the
+			// deterministic camera-independent tie-break (see tbrXparOrderLess).
+			std::stable_sort(scratch.begin(), scratch.end(), tbrXparOrderLess);
 
 			// Walk the sorted strip items in back-to-front order. Two
 			// item types share the list:
@@ -1948,24 +2400,9 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			const int strip_y_i  = int(i) << TILELOG;
 			const int strip_h    = int(spriteClipY2) - strip_y_i;
 
-			auto computeFront = [](Face* F) -> bool {
-				// SoA Phase 4: same math as IsFrontFacingInViewSpace,
-				// kept inline here as a hot per-clump helper in the
-				// unified-TBR strip walk.
-				const VertexFrame *ff = F->frame;
-				const float *tx = ff->TPos_x, *ty = ff->TPos_y, *tz = ff->TPos_z;
-				const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
-				const float Ax = tx[ai], Ay = ty[ai], Az = tz[ai];
-				const float ex = tx[bi] - Ax, ey = ty[bi] - Ay, ez = tz[bi] - Az;
-				const float fx = tx[ci] - Ax, fy = ty[ci] - Ay, fz = tz[ci] - Az;
-				const float nx = ey * fz - ez * fy;
-				const float ny = ez * fx - ex * fz;
-				const float nz = ex * fy - ey * fx;
-				const float vd = nx * Ax + ny * Ay + nz * Az;
-				return vd < 0.0f;
-			};
 			auto flushXparClump = [&]() {
 				if (xparClump.empty()) return;
+				if (g_tbrStats) g_tbrFlushes.fetch_add(1, std::memory_order_relaxed);
 				// dctx is null only on a non-deferred TBR frame (forward
 				// fountain fallback) — no transparent faces were routed
 				// into the strips there, so the clump is always empty.
@@ -1980,6 +2417,9 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			for (const TBREntry& e : scratch) {
 				Face*   F = e.F;
 				const bool isSprite = (F->A == F->B);
+				if (g_tbrStats)
+					tbrCensus(isSprite ? "<sprite>"
+					          : (F->Txtr ? F->Txtr->Name : nullptr));
 
 				if (isSprite) {
 					// Flush any open transparent clump first so it
@@ -2015,8 +2455,11 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 							Col = iFog + (iFog << 8) + (iFog << 16);
 						}
 						// Center-point occlusion reject (Face_PointZTest), as
-						// in the immediate path.
-						if (F->Flags & Face_PointZTest) {
+						// in the immediate path. Skipped for a mirror-clone
+						// flare under --mirror_flare_bbox — see the note on
+						// the same test in The_MMX_Scalar.
+						const uint8_t* const mm = SpriteMirrorMask(F);
+						if ((F->Flags & Face_PointZTest) && !mm) {
 							int32_t cx = int32_t(V->PX);
 							if (cx < 0) cx = 0; else if (cx > XRes-1) cx = XRes-1;
 							int32_t cy = int32_t(V->PY);
@@ -2025,13 +2468,15 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 						}
 						SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen,
 							F->Txtr->Txtr->Data, VPage, Col, Z,
-							0, spriteClipY1, XRes, spriteClipY2);
+							0, spriteClipY1, XRes, spriteClipY2,
+							mm, F->mirrorMaskTag);
 					} else {
 						dword R = V->LR, G = V->LG, B = V->LB;
 						dword Color = (R << 16) + (G << 8) + B;
 						SpriterRT<32>(V->PX, V->PY, edgeLen, edgeLen,
 							F->Txtr->Txtr->Data, VPage, Color, Z,
-							0, spriteClipY1, XRes, spriteClipY2);
+							0, spriteClipY1, XRes, spriteClipY2,
+							SpriteMirrorMask(F), F->mirrorMaskTag);
 					}
 					continue;
 				}
@@ -2039,7 +2484,7 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 				// Transparent face. Open / extend / flush+restart a
 				// clump based on (ParentTri, frontFacing).
 				TriMesh*  meshHere = F->ParentTri;
-				const bool frontHere = computeFront(F);
+				const bool frontHere = (e.rank == 2);   // precomputed at insert (see TBREntry::rank)
 				if (!xparClump.empty() &&
 				    (meshHere != clumpMesh || frontHere != clumpFront)) {
 					flushXparClump();
@@ -2053,9 +2498,45 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			// Trailing flush.
 			flushXparClump();
 			Sc->SBufferHead[i] = -1;
+			if (g_tbrStats) {
+				const uint64_t ns = uint64_t(
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::steady_clock::now() - tStrip0).count());
+				g_tbrBusyNs.fetch_add(ns, std::memory_order_relaxed);
+				g_tbrEntries.fetch_add(scratch.size(), std::memory_order_relaxed);
+				uint64_t cur = g_tbrMaxStripNs.load(std::memory_order_relaxed);
+				while (ns > cur &&
+				       !g_tbrMaxStripNs.compare_exchange_weak(cur, ns)) {}
+			}
 	});
 
 	for (int k = 0; k < numTiles; ++k) stripsDone.acquire();
+
+	if (g_tbrStats) {
+		static int sCall = 0;
+		const double wallMs = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - tbrWall0).count();
+		if ((++sCall & 31) < 2) {  // two consecutive calls (= both city passes)
+			std::fprintf(stderr, "[TBR-STATS] call=%d strips=%d wall=%.2fms "
+			    "busy=%.2fms (par=%.1fx) maxStrip=%.2fms entries=%llu flushes=%llu\n",
+			    sCall, numTiles, wallMs,
+			    double(g_tbrBusyNs.load()) / 1e6,
+			    wallMs > 0 ? (double(g_tbrBusyNs.load()) / 1e6) / wallMs : 0.0,
+			    double(g_tbrMaxStripNs.load()) / 1e6,
+			    (unsigned long long)g_tbrEntries.load(),
+			    (unsigned long long)g_tbrFlushes.load());
+			for (int s2 = 0; s2 < 16; ++s2) {
+				const char* nm = g_tbrMatName[s2].load(std::memory_order_relaxed);
+				const uint64_t c = g_tbrMatCount[s2].exchange(0, std::memory_order_relaxed);
+				if (nm && c)
+					std::fprintf(stderr, "[TBR-STATS]   %8llu  %s\n",
+					    (unsigned long long)c, nm);
+			}
+		} else {
+			for (int s2 = 0; s2 < 16; ++s2)
+				g_tbrMatCount[s2].store(0, std::memory_order_relaxed);
+		}
+	}
 
 	Sc->SBufferCur = 0;
 }

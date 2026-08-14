@@ -20,6 +20,41 @@ cp GREETS.FLD ../../Runtime/SCENES/GREETS.FLD
 
 Produces a 233,315-byte, FldVersion-0.113 scene (9 objects, 10 lights).
 
+## Light ranges are authored HERE
+
+Each `AddLight` block in `JENINPYR-new-2.LWS` carries `LightRange <f>`. That is
+the **single source of truth** for the light's radius — it flows
+
+```
+LWS "LightRange"  →  tools/lwsread  →  FLD Range envelope  →  Omni::Range
+                  →  Omni::IRange (evaluated per frame by Animate_Objects)
+```
+
+and nothing in the engine or in `DEMO/GREETS.CPP` rewrites it. To retune a
+light, edit its `LightRange` here and regenerate — that is the whole procedure.
+
+All ten currently author **30**. Until 2026-08-06 they did not: the LWS carried
+the 1998 values `3 / 3 / 10 / 10 / 7 / 20 / 20 / 2 / 2 / 2` and two code-side
+patches sat on top of them, the second undoing the first —
+
+1. `SceneCorrections()` scaled each Range spline by
+   `{2, 2, 2, 2, 2, 1.7, 1.7, 2, 2, 2}` ("a crazy hack used to adjust
+   omnilights in code"), giving `6 / 6 / 20 / 20 / 14 / 34 / 34 / 4 / 4 / 4`;
+2. `Initialize_Greets` then tested `IRange == 0` and overwrote **both**
+   `IRange` and `Range.Keys[0]` with a flat `30`. That test was a bug: at scene
+   init `IRange` is 0 because `Animate_Objects` has not run yet, not because
+   the content lacks a range (see `FDS/FLD/FLD_CONV.CPP`). So it fired on all
+   ten every run and step 1 and the authored numbers were both discarded.
+
+The rendered look was therefore a flat 30, and `30` is what the LWS now says.
+The change is a pure refactor — flat-30 LWS with both patches removed renders
+**byte-identical** to the pin `f1297141611c484bac7cc10a8bdcf630` (3/3 runs).
+The 1998 numbers remain in the read-only reference copy
+`Original/Scenes/CITY/INPYR/JENINPYR-new-2.LWS`.
+
+`FDS_GREETS_OMNI_DEFAULT_RANGE` / `--greets_omni_default_range` survives as a
+tuning dial only: default 0 = inert, `> 0` force-overrides every omni's range.
+
 ## Files
 
 | File | Role |

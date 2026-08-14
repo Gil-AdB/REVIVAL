@@ -500,6 +500,54 @@ void Process_TriMesh(TriMesh *T)
 // > Updated normals and n-prod
 inline float pow2(float x) {return x*x;}
 
+// ===========================================================================
+// DEAD CODE — Reset_XForm is NEVER CALLED. [measured 2026-08-06]
+//
+// It has no declaration in FDS_DECS.H (so it is unreachable from outside this
+// translation unit) and both in-file call sites are commented out — see the
+// `//Reset_XForm(Sc);` lines further down in Scene_Computations. REV.CPP's
+// 1998 dev log records the removal verbatim: "Removed the automatic
+// application of the Reset_XForm function."
+//
+// This matters because the omni loop at the END of this function looks like a
+// live per-scene snapshot of IPos/ISize/IRange for static lights:
+//
+//     for (Om = Sc->OmniHead; Om; Om = Om->Next) {
+//         if (Om->Pos.NumKeys != 1) continue;      // static-position lights
+//         ...
+//         Om->IRange = Om->Range.Keys[0].Pos.x;    // <-- reads as a snapshot
+//     }
+//
+// It is not. It never runs. Two separate readers have mistaken it for either
+// (a) a bug that discards animated Range splines, or (b) a deliberate
+// static-light optimisation that the shadow bake depends on. Neither is true.
+//
+// Where IRange ACTUALLY comes from:
+//   * Animate_Objects (FDS/RENDER/Transform.cpp:816) evaluates EVERY omni's
+//     Range spline EVERY frame, unguarded — `Spline_Calc_1D(&Om->Range, ...)`.
+//     Animated ranges would therefore work; nothing discards them.
+//   * Scene code that assigns IRange directly (CHASE.CPP, CRASH.CPP,
+//     SpotlightCones, BlasterBolts, GreetsDisco, GreetsMirror bounce lights).
+//     Those all either install a matching single-key Range spline so
+//     Animate_Objects reproduces the same value, or re-assign IRange every
+//     frame AFTER Animate_Objects has run.
+//
+// Consequence worth knowing: because this loop never runs, an FLD omni's
+// IRange is still 0 (Omni is memset in FLD_CONV) between ConvertFLD and the
+// first Animate_Objects — even when the FLD carries a perfectly good authored
+// Range envelope. Scene init code that tests `IRange == 0` in that window is
+// therefore testing "Animate_Objects has not run yet", NOT "the content has no
+// authored range". DEMO/GREETS.CPP's greets_omni_default_range patch used to
+// sit in exactly that window and misread it that way; it was removed on
+// 2026-08-06 and greets' ranges are authored in the LWS instead. See the note
+// in FDS/FLD/FLD_CONV.CPP. Nothing tests IRange in that window any more —
+// keep it that way.
+//
+// Content census (all shipping FLDs, 2026-08-06): 145 lights across
+// greets/city/chase/fountain/crash/pbrtest. ZERO have Pos.NumKeys > 1 and ZERO
+// have Range.NumKeys > 1 — every light is static-position with a single-key (or
+// absent) Range envelope. So no shipping content can tell the two paths apart.
+// ===========================================================================
 void Reset_XForm(Scene *Sc)
 {
 	TriMesh *T;
@@ -1123,9 +1171,15 @@ void Assign_Fillers(Scene *Sc)
 	} else {
 		for(O=Sc->OmniHead;O;O=O->Next)
 		{
+			// Spot lights are beams, not flare sprites: keep the no-op
+			// filler AddOmni/MakeSpotLight installed. (The flare pass in
+			// Transform.cpp inserts EVERY omni's F face unconditionally,
+			// so stamping the sprite blitter here would draw a giant
+			// ISize-scaled white blob per authored headlight.)
+			if (O->Type == Light_SpotLight) continue;
 			switch (BPP)
 			{
-			case 32: 
+			case 32:
 				O->F.Filler = &The_MMX_Scalar;
 				break;
 			}

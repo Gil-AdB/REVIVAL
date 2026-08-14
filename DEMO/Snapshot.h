@@ -28,6 +28,7 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg);
 
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres);
 int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres);
+int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres);
 int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres);
 int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres);
 

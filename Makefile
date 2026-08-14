@@ -6,8 +6,8 @@ WASM_BENCH_BUILD_DIR   := build-wasm-bench
 RUNTIME_DIR            := Runtime
 SERVE_PORT             := 8000
 
-.PHONY: help build build-debug install run clean \
-        wasm serve wasm-profile serve-profile \
+.PHONY: help build build-debug install run clean _fix-node-options \
+        wasm serve editor wasm-profile serve-profile \
         snapshot-city snapshot-glat-trace snapshot-filler \
         bench-native bench-wasm \
         bench-variants-native bench-variants-wasm \
@@ -23,7 +23,8 @@ help:
 	@echo "  clean              Remove $(BUILD_DIR) and $(WASM_BUILD_DIR)"
 	@echo ""
 	@echo "  wasm               (Re)configure with emcmake + build wasm artifacts"
-	@echo "  serve              Serve wasm build at http://localhost:$(SERVE_PORT)/DEMO.html"
+	@echo "  serve              Serve wasm build (plain demo) at http://localhost:$(SERVE_PORT)/DEMO.html"
+	@echo "  editor             Serve for the LWO surface EDITOR (editor_server.py: COOP/COEP + save API)"
 	@echo "  wasm-profile       Like wasm, but with -g3 DWARF for Chrome profiling"
 	@echo "  serve-profile      Serve the profiling wasm build"
 	@echo ""
@@ -58,7 +59,19 @@ run: install
 clean:
 	rm -rf $(BUILD_DIR) $(WASM_BUILD_DIR) $(WASM_PROFILE_BUILD_DIR)
 
-wasm:
+# Some session harnesses inject NODE_OPTIONS=--require=<tmp>/restore-node-options.cjs
+# but don't always create that file; a missing --require target makes EVERY
+# `node` invocation (and thus emscripten / `make wasm`) crash with "Cannot find
+# module". Self-heal: if NODE_OPTIONS points --require at a missing file, drop a
+# harmless no-op stub there. No-op when NODE_OPTIONS is unset or the file exists.
+_fix-node-options:
+	@f=$$(printf '%s' "$$NODE_OPTIONS" | sed -n 's/.*--require[= ]\([^ ]*restore-node-options\.cjs\).*/\1/p'); \
+	if [ -n "$$f" ] && [ ! -f "$$f" ]; then \
+		mkdir -p "$$(dirname "$$f")" && : > "$$f" && \
+		echo "[make] created missing NODE_OPTIONS --require stub: $$f"; \
+	fi
+
+wasm: _fix-node-options
 	@command -v emcmake >/dev/null 2>&1 || { \
 		echo "emcmake not on PATH — source your emsdk_env.sh (e.g. 'source /opt/homebrew/Cellar/emscripten/*/libexec/emsdk_env.sh') or 'brew install emscripten'"; \
 		exit 1; \
@@ -69,6 +82,13 @@ wasm:
 serve: wasm
 	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
 	cd $(WASM_BUILD_DIR)/DEMO && python3 $(abspath scripts/serve_nocache.py) $(SERVE_PORT)
+
+# EDITOR server: editor_server.py sends COOP/COEP headers directly (no
+# coi-serviceworker shim) AND handles the POST /api/<scene>/save write-back to
+# the LWO sources. Use this — NOT `serve` — for the ?editor UI, or saves 501.
+editor: wasm
+	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html?editor"
+	python3 $(abspath tools/editor_server.py) --port $(SERVE_PORT)
 
 # Optimized release wasm + full DWARF debug info. Larger binary (~3-5x);
 # use only for profiling sessions, not for shipping.

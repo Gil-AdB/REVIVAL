@@ -1,0 +1,40 @@
+# Greets review poses — the camera/t pairs Gil-Ad actually reviews from.
+#
+# Format: <t> <FDS_GREETS_CAM value> [# note]
+# Use with:  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+#              FDS_GREETS_CAM="<cam>" ./DEMO --snapshot=greets@t=<t> --out=<dir> <flags>
+#
+# These are the poses defects were REPORTED at, not the campaign's synthetic
+# benches. Any displacement arm shown to him must be rendered at all of them.
+# Agents kept re-deriving or failing to find this list; it lives here now.
+
+# --- 2026-08-04 review: black gashes between wall panels; mirror bar (lid shell) ---
+5743  9.07557869,3.19592357,-52.9277191,-0.20672597,-0.140846997,0.968207836      # primary hole repro
+5773  10.0003414,3.19784808,-54.1955376,-0.315401107,-0.127434492,0.94036299
+5813  11.5472488,3.20119762,-55.6090698,-0.474474937,-0.115006588,0.872723877
+5843  12.8759451,3.20390415,-56.4853554,-0.589088559,-0.106763892,0.800984442
+5963  18.5616322,3.21013689,-58.8002586,-0.886640549,-0.0750753954,0.456324756
+6133  27.9341908,3.21640229,-59.6960106,-0.994124591,-0.0584560856,0.0910993442   # mirror panel
+6293  33.4211502,3.17668295,-59.3736916,-0.995452344,-0.0934450254,-0.0185117424  # mirror panel
+
+# --- 2026-08-05 review: grazing smear (recess-only clamp) ---
+5958  11.6648436,2.64180589,-55.9678459,0.0452918001,-0.0762010962,0.996063471    # near-parallel to wall
+5958  12.263032,2.64180589,-55.9950409,0.0452918001,-0.0762010962,0.996063471     # primary smear repro
+5958  12.263032,2.64180589,-55.9950409,-0.308499038,-0.0762010962,0.948167801
+5958  12.9184999,2.8037107,-58.009613,-0.308499038,-0.0762010962,0.948167801
+
+# --- earlier reviews ---
+6097  18.4499683,5.16043377,-57.6482239,-0.824408829,-0.544822097,-0.153357133    # corner / light-bleed pose
+2845  -7.38721609,2.72471762,-50.8239441,0.817980111,-0.113630958,0.563911617     # grazing close-up (zigzag)
+
+# --- 2026-08-06 review: path-viz session (shell recess arm, cap sweep) ---
+5534  8.1065979,3.19413304,-39.0308495,-0.0432227664,-0.188236833,-0.981172085   # corridor, looking BACK — an area no earlier test set covered
+5814  11.5895805,3.20128727,-55.6406746,-0.478447258,-0.114726782,0.870589495    # worst measured unresolved/magenta: 52k px at cap64 x32
+5854  13.3876753,3.20487022,-56.7713051,-0.62756604,-0.103757285,0.771618664     # near-corner grazing, wide clamp-to-flat band
+
+# --- 2026-08-10 review: two poses he supplied with the --shadow_lm_dynamic ask ---
+5967  18.752037,3.21019745,-58.8513527,-0.892443955,-0.0741753578,0.445018977    # near-corner, wall panels
+5987  19.7497902,3.21076035,-59.0800819,-0.918940723,-0.0697668344,0.388175935
+
+# Campaign synthetic benches (keep, but they are NOT review poses):
+#   t=5780 wall+statues bench, t=4200 wide vista, t=1867/2145 look poses.

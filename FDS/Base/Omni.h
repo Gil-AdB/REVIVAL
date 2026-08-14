@@ -90,6 +90,13 @@ struct Omni
 	// sentinel convention as the halo overrides: 0 → legacy 1.0, so the
 	// many memset(0)-initialized Omni creation sites keep their look.
 	float            FlareScale;
+	// Per-light volumetric beam gain (spots with Omni_ForceVolCone):
+	// multiplies the cone pass's global density for THIS light only.
+	// Authored via LWS "VolumetricLightIntensity" → FLD bit-2048 payload
+	// (FLD_CONV.CPP); same 0 → 1.0 sentinel convention as FlareScale /
+	// HaloIntensity, so memset(0) creation sites (greets disco spots,
+	// bounce pool) and GreetsMirror's memcpy clones keep their look.
+	float            VolBeamGain;
 };
 
 #pragma pack(pop)

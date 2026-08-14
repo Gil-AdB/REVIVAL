@@ -527,12 +527,32 @@ static void clampToDemoAR(int winX, int winY, int &outX, int &outY) {
 	}
 }
 
+// rev.cfg HiDPI modes (see REV.CPP window creation):
+//   0 — window in points; engine renders at the window's point size.
+//       macOS scales the backing store (soft look on retina).
+//   1 — ALLOW_HIGHDPI window; engine renders at the FULL backing
+//       resolution (native retina pixels — sharp but ~4x the raster cost).
+//   2 — ALLOW_HIGHDPI window; engine PINNED to rev.cfg ResolutionX/Y and
+//       the GPU stretches the streaming texture to the retina backing at
+//       present (V_Flip's letterboxed RenderCopy). Software cost of mode
+//       0, scaling quality controlled by us instead of the compositor.
+extern int32_t g_hiDPI;
+extern int32_t g_demoXRes, g_demoYRes;
+static inline bool fixedEngineRes() { return g_hiDPI >= 2; }
+
 void SDL2_HandleResize(int newX, int newY)
 {
 	const int rawX = newX;
 	const int rawY = newY;
+	if (fixedEngineRes()) {
+		// HiDPI=2: the engine surface never tracks the window; V_Flip's
+		// letterbox absorbs any window/backing size.
+		newX = g_demoXRes;
+		newY = g_demoYRes;
+	} else {
 	// Letterbox engine surface to the demo's authoring AR before snapping.
 	clampToDemoAR(newX, newY, newX, newY);
+	}
 	newX = snapEngineDim(newX);
 	newY = snapEngineDim(newY);
 	fprintf(stderr, "[RESIZE] window %dx%d → engine %dx%d (AR %.3f), current %dx%d\n",
@@ -611,9 +631,18 @@ dword SDL2_InitDisplay(SDL_Window *window)
 	SDL_GetRendererOutputSize(renderer, &px, &py);
 #endif
 	// Letterbox to demo AR + snap to TILE_SIZE — same as SDL2_HandleResize,
-	// just for the boot path.
+	// just for the boot path. HiDPI=2 pins the engine to the config
+	// resolution instead (GPU upscales at present; see fixedEngineRes).
 	int engX = px, engY = py;
-	clampToDemoAR(px, py, engX, engY);
+	if (fixedEngineRes()) {
+		engX = g_demoXRes;
+		engY = g_demoYRes;
+		// Smooth GPU upscale for the stretched present (default is
+		// nearest). Set before texture creation in V_Create.
+		SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+	} else {
+		clampToDemoAR(px, py, engX, engY);
+	}
 	SDL_MainSurf.X = snapEngineDim(engX);
 	SDL_MainSurf.Y = snapEngineDim(engY);
 

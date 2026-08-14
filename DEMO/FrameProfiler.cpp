@@ -1,5 +1,7 @@
 #include "FrameProfiler.h"
 #include <Base/FeatureFlags.h>
+#include <RENDER/TailProf.h>   // --deferred_prof: per-frame normaliser
+#include <Base/MemCensus.h>    // --mem_census: one-shot allocation walk
 #include "Rev.h"
 
 #include <Base/FDS_DECS.H>
@@ -66,6 +68,11 @@ void FrameProfiler::beginFrame() {
     // mirror it into the legacy global here — the one call every scene
     // makes each frame — so P-key-less toggling works everywhere.
     g_profilerActive = fds::FeatureFlags::profiler();
+    // --deferred_prof: the single per-tick hook the phase table normalises by,
+    // and the point where it learns which thread is the tick thread (so a
+    // renderFrame running on a pool worker — shard / probe bake — can never be
+    // counted as a main-view pass). No-op when the flag is off.
+    TailProf::NewFrame();
     for (int i = 0; i < PROF_NUM; ++i) currentFrame_[i] = 0;
     frameStart_ = clock::now();
 }
@@ -78,6 +85,10 @@ extern int32_t g_FrameTime;
 void FrameProfiler::endFrame() {
     auto now = clock::now();
     ++numFrames_;
+
+    // --mem_census: one-shot allocation walk at the END of tick N (default 1),
+    // i.e. after the first frame's lazy bakes have allocated. No-op when off.
+    fds::MemCensus::tick();
 
     std::int64_t frameTotal = 0;
     for (int i = 0; i < PROF_NUM; ++i) {

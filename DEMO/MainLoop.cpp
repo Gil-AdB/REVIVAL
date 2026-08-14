@@ -4,6 +4,8 @@
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
 #include <Base/Omni.h>
+#include <RENDER/VizCycle.h>   // VizCycle_Step: the X / Shift+X debug-viz cycle
+#include <RENDER/EnvBake.h>    // EnvMap_StepProbe: F / Shift+F probe paging
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -86,6 +88,13 @@ static float  g_camPitch = 0.45f;
 static float  g_camDist  = 48.0f;
 static Vector g_camTarget;               // set in DemoBoot (greets room centre)
 
+// Dynamic_Camera's momentum state + per-scene auto-calibrated base speed
+// (FDS/CAMERAS/CAMERAS.CPP — plain globals, no header declares them). The
+// editor tick zeroes FV/FT each frame so the free-cam responds instantly
+// (see the editor-mode block in editorTick).
+extern Vector FV, FT;
+extern float  Vel_Speed;
+
 // ── Editor scene registry ───────────────────────────────────────────────
 // ?editor&scene=<name> picks which scene the editor boots (default greets).
 // camTarget: fixed default orbit pivot; autoFrame=true computes it from the
@@ -105,6 +114,7 @@ static const EditorSceneDef kEditorScenes[] = {
 	{ "chase",    &Initialize_Chase,    &createChaseScene,    false, true,  0, 0, 0, 48.0f },
 	{ "fountain", &Initialize_Fountain, &createFountainScene, false, true,  0, 0, 0, 48.0f },
 	{ "crash",    &Initialize_Crash,    &createCrashScene,    false, true,  0, 0, 0, 48.0f },
+	{ "pbrtest",  &Initialize_PBRTest,  &createPBRTestScene,  false, true,  0, 0, 0, 48.0f },
 };
 static const EditorSceneDef *g_editorScene = &kEditorScenes[0];
 static std::atomic<bool> g_editorSceneReady{false};
@@ -119,6 +129,12 @@ static int translateScancode(SDL_Scancode sc)
 	case SDL_SCANCODE_ESCAPE:    return ScESC;
 	case SDL_SCANCODE_F1:        return ScF1;
 	case SDL_SCANCODE_F2:        return ScF2;
+	// F3 = greets' shadow-technique toggle (depth <-> poly-ID). It was dead
+	// code under SDL until this table gained the entry; the F4 entry that came
+	// in with it belonged to REV.CPP's TimerProc review scrub, which was
+	// removed 2026-08-06 (it fought SceneDriver for ownership of Timer and
+	// lost), so F4 is untranslated again and free.
+	case SDL_SCANCODE_F3:        return ScF3;
 	case SDL_SCANCODE_F11:       return ScF11;
 	case SDL_SCANCODE_TAB:       return ScTab;
 	case SDL_SCANCODE_SPACE:     return ScSpace;
@@ -187,6 +203,42 @@ static bool pumpEvents()
 		case SDL_KEYUP: {
 			int legacy = translateScancode(event.key.keysym.scancode);
 			if (legacy >= 0) Keyboard[legacy] = (event.type == SDL_KEYDOWN) ? 1 : 0;
+			// SHIFT state for the demo thread (Rev.h g_shiftHeld) — the FAST
+			// arm of SceneDriver's F1/F2 scene-clock scrub. Same store as the
+			// native pump (REV.CPP).
+			g_shiftHeld.store(
+			    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0,
+			    std::memory_order_relaxed);
+			// Debug-viz cycle, same binding as the native pump (REV.CPP):
+			// X = next viz, Shift+X = previous. X is deliberately NOT added to
+			// translateScancode — the cycle is driven from the event, not from
+			// a Keyboard[] poll, so it needs no legacy slot.
+			// Editor_MarkDirty on BOTH: the editor renders only when marked
+			// dirty (editorTick's Editor_ConsumeDirty gate) and otherwise
+			// re-presents the last frame. A viz change is a render-state
+			// change with no camera or edit behind it, so without this the
+			// paused frame keeps showing the PREVIOUS mode and the key reads
+			// as dead — you press X, stderr announces the new mode, and the
+			// picture does not move until something else happens to mark the
+			// frame dirty. Cheap and unconditional: outside editor mode
+			// nothing consumes the flag.
+			if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+			    event.key.keysym.scancode == SDL_SCANCODE_X) {
+				const bool back =
+				    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+				fds::VizCycle_Step(back ? -1 : +1);
+				rev::Editor_MarkDirty();
+			}
+			// ENV-MAP INSPECTOR probe paging, same binding as the native pump:
+			// F = next probe, Shift+F = previous. Like X, F is deliberately
+			// absent from translateScancode.
+			if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+			    event.key.keysym.scancode == SDL_SCANCODE_F) {
+				const bool back =
+				    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+				fds::EnvMap_StepProbe(back ? -1 : +1);
+				rev::Editor_MarkDirty();
+			}
 			if (event.type == SDL_KEYDOWN) g_userGesture.store(true);
 			break;
 		}
@@ -250,7 +302,7 @@ void DemoBoot(ModplayerHandle modHandle)
 		// native-only (reads native FS paths); the browser PBR upload replaces it.
 		static const char *def[] = {
 			"--shadows", "--greets-omni-shadows", "--greets-omni-default-range=30",
-			"--greets-omni-shadow-res=256", "--shadow-skip-animated", "--greets-spots",
+			"--greets-omni-shadow-res=256", "--shadow-skip-animated",
 			"--shadow-dynamic", "--shadow-lightmap-planar", "--shadow-lightmap-res=64",
 			"--shadow-lightmap", "--cone-strength=2", "--bloom", "--disco-bloom=0",
 			"--shard-deferred", "--greets-shard-fall-speed=0.8", "--greets-shard-randomness=0.8",
@@ -267,8 +319,35 @@ void DemoBoot(ModplayerHandle modHandle)
 			// 'reflection' slider works out of the box (the panorama bake
 			// only fires for materials that actually set Reflection > 0 /
 			// carry a metalness map — free otherwise). The demo sequence
-			// keeps the flag's normal default (off).
-			"--env_refl",
+			// keeps the flag's normal default (off). env_bake_fix = the
+			// corrected auto-bake bundle (per-face projection, face-level
+			// self-exclusion, metal neutralization) — kept off in the demo
+			// only to preserve the pinned city baseline.
+			"--env_refl", "--env_bake_fix",
+			// Editor-only default: glass refraction ON so refractive-marked
+			// surfaces (greets screens, fountain glass) show their real look
+			// while editing. The demo keeps the flag's normal default (off).
+			"--glass-refract=1",
+			// Editor-only default: PBR-shaded transparents, so dialing the
+			// transparency slider up on a PBR material keeps its normal-map/
+			// AO/roughness/metallic look instead of degrading to a flat
+			// transparent texture. The demo keeps the flag's default (off).
+			"--xpar-pbr",
+				// Editor-only default: arm the live displacement rebuild, so the
+				// Displacement panel's mode buttons actually take. Without it
+				// --pom_shell and the cone / horizon bake flags are consumed once
+				// at scene init and a live edit changes a bool nothing re-reads.
+				// The flag renders nothing differently on its own: it takes a
+				// PRISTINE snapshot of the stone at the end of init and defers a
+				// requested --pom_shell into the rebuild path, so repeated mode
+				// switches cannot compound the lid offset. The demo keeps it off.
+				"--pom_rebuild",
+			// (city headlights: the front-row pairs are AUTHORED lights now —
+			// 46 parented "city headlight L/R" spots in CITY1.LWS / CITY.FLD,
+			// Omni_SceneAuthored, so they appear in the lights list grouped
+			// under their vehicles and are LWS-persistable. The retired code
+			// schemes remain behind --city-headlights /
+			// --city-headlights-front for A/B comparison.)
 		};
 		for (const char *d : def) args.push_back(d);
 		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8
@@ -294,12 +373,13 @@ void DemoBoot(ModplayerHandle modHandle)
 		for (auto &a : args) argv.push_back(a.c_str());
 		fds::FeatureFlags::parseArgs((int)argv.size(), argv.data());
 		// Mirrors default OFF in the editor (historical wasm-memory caution —
-		// the measured overhead is now ~15 MB, so an EXPLICIT ?editor&greets-mirror
-		// /&mirror-rtt in the URL is honored; without one they stay off).
+		// Editor default: mirrors ON (user request) — the clone/bake overhead is
+		// ~15 MB now, well inside the wasm heap. ?editor&no-greets-mirror /
+		// &no-mirror-rtt in the URL still win (isSet guards both directions).
 		if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::greets_mirror))
-			fds::FeatureFlags::setParamFromText("greets_mirror", "0");
+			fds::FeatureFlags::setParamFromText("greets_mirror", "1");
 		if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::mirror_rtt))
-			fds::FeatureFlags::setParamFromText("mirror_rtt", "0");
+			fds::FeatureFlags::setParamFromText("mirror_rtt", "1");
 		fprintf(stderr, "[EDITOR] %s editor: full native pipeline (%d flags), mirror %s\n",
 		        g_editorScene->name, (int)args.size() - 1,
 		        fds::FeatureFlags::greets_mirror() ? "ON (URL opt-in)" : "off (default)");
@@ -509,6 +589,32 @@ static void editorMaybeSpawnInit()
 	});
 }
 
+// Mirror-clone meshes (GreetsMirror's "__mirrorClone_*" objects) duplicate
+// world geometry MIRRORED BEHIND the glass and reuse the base surface
+// names — any camera math that unions face/vertex positions by name must
+// skip them or the pivot lands between the real object and its phantom
+// reflection ("focus goes somewhere" with ?greets-mirror on).
+static bool editorMeshIsMirrorClone(const TriMesh *T)
+{
+	if (!CurScene) return false;
+	static const TriMesh *sCloneCache[64];
+	static int  sCloneCount = -1;
+	static const Scene *sCloneScene = nullptr;
+	if (sCloneScene != CurScene || sCloneCount < 0) {
+		sCloneScene = CurScene;
+		sCloneCount = 0;
+		for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh || !Obj->Name || !Obj->Data) continue;
+			if (std::strncmp(Obj->Name, "__mirrorClone_", 14) != 0) continue;
+			if (sCloneCount < 64)
+				sCloneCache[sCloneCount++] = (const TriMesh *)Obj->Data;
+		}
+	}
+	for (int i = 0; i < sCloneCount; ++i)
+		if (sCloneCache[i] == T) return true;
+	return false;
+}
+
 // Auto-frame: world bbox of every mesh (RotMat·Pos + IPos — valid after the
 // first tick's Animate) → orbit pivot at the centre, distance to fit. Used by
 // scenes without a hand-tuned default pose (city/chase/fountain).
@@ -518,6 +624,7 @@ static void editorAutoFrame()
 	float lox = 1e30f, loy = 1e30f, loz = 1e30f, hix = -1e30f, hiy = -1e30f, hiz = -1e30f;
 	long n = 0;
 	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		if (editorMeshIsMirrorClone(T)) continue;
 		for (DWord v = 0; v < T->VIndex; ++v) {
 			Vector w;
 			MatrixXVector(T->RotMat, &T->Verts[v].Pos, &w);
@@ -617,7 +724,25 @@ static void editorTick()
 			// (a "milliseconds" value pasted into Timer-tick units) made one
 			// held-arrow frame rotate 0.045*16 ≈ 41°: rotation read as broken.
 			dTime = 0.25f;             // (Timer is frozen → no scene dTime)
+			// EDITOR-ONLY instant response: Dynamic_Camera's exponential
+			// velocity decay carries momentum across frames — fine at demo
+			// frame rates, but under the editor's render-on-demand loop the
+			// leftover FV from the LAST key burst lurches the camera in the
+			// old direction when a new key lands. Zero the carried velocity
+			// (translation FV + angular FT) so each tick's motion is rebuilt
+			// from the CURRENT key state alone, and compensate the lost
+			// steady-state accumulation by boosting the per-key add by
+			// 1/(1-exp(-Vel_FallOff*dTime)) (Vel_FallOff = 5*Vel_Speed inside
+			// Dynamic_Camera) — cruise speed matches the demo free-cam feel,
+			// but direction changes and stops are immediate. The native demo
+			// path (TAB free-cam) is untouched — this only runs in editorTick.
+			FV.x = FV.y = FV.z = 0.0f;
+			FT.x = FT.y = FT.z = 0.0f;
+			const float velSaved = Vel_Speed;
+			const float kDecay = 1.0f - std::exp(-5.0f * Vel_Speed * dTime);
+			if (kDecay > 1e-6f && kDecay < 1.0f) Vel_Speed /= kDecay;
 			Dynamic_Camera();          // keyboard fly + look (the TAB free-cam)
+			Vel_Speed = velSaved;      // boost was for this tick's add only
 			CalcPersp(&FC);
 			View = &FC;
 			syncOrbitFromFC();         // orbit pivot tracks where we flew
@@ -651,7 +776,16 @@ bool DemoTick()
 			if (h) h.remove();
 		});
 		fprintf(stderr, "[DEMO] user gesture observed, starting demo\n");
-		if (g_modHandle) {
+		// Editor mode is silent: it never runs the demo sequence, and starting
+		// the modplayer feeds the SDL AudioWorklet, whose callback locks the
+		// Rust modplayer mutex. Under -sALLOW_MEMORY_GROWTH + -pthread a
+		// memory-growth event (baking env probes in a long editor session)
+		// detaches the worklet thread's SharedArrayBuffer view, so the next
+		// lock traps on an unaligned atomic ("operation does not support
+		// unaligned accesses" in futex Mutex::lock). No music in the editor =
+		// no worklet = no trap. (The comment at DemoBoot already intended
+		// "skip audio" in editor mode; this is where it wasn't honored.)
+		if (g_modHandle && !g_editorMode) {
 			Modplayer_Start(g_modHandle);
 			SDL2_StartMusic(g_modHandle);
 		}
@@ -830,6 +964,21 @@ float editorPlayScene(bool on)
 }
 // Live scene-time readout while playing (g_editorFreezeTimer tracks playback).
 float editorSceneTime() { return (float)g_editorFreezeTimer; }
+// Camera-state dump for headless debugging (focus/orbit investigations).
+std::string editorCamDebug()
+{
+	char buf[512];
+	std::snprintf(buf, sizeof(buf),
+		"{\"target\":[%.2f,%.2f,%.2f],\"yaw\":%.3f,\"pitch\":%.3f,\"dist\":%.2f,"
+		"\"eye\":[%.2f,%.2f,%.2f],\"fwd\":[%.3f,%.3f,%.3f],\"ifov\":%.1f,"
+		"\"viewIsFC\":%d,\"playing\":%d,\"seeded\":%d}",
+		g_camTarget.x, g_camTarget.y, g_camTarget.z,
+		g_camYaw, g_camPitch, g_camDist,
+		FC.ISource.x, FC.ISource.y, FC.ISource.z,
+		FC.Mat[2][0], FC.Mat[2][1], FC.Mat[2][2], FC.IFOV,
+		View == &FC ? 1 : 0, g_editorPlaying ? 1 : 0, g_editorCamSeeded ? 1 : 0);
+	return buf;
+}
 // Absolute seek (the progress-bar drag). Works frozen and mid-playback.
 float editorTimeSet(float t)
 {
@@ -865,115 +1014,54 @@ void editorPan(float dxPixels, float dyPixels)
 	g_camTarget.z += (-dxPixels * FC.Mat[0][2] + dyPixels * FC.Mat[1][2]) * k;
 	rev::Editor_MarkDirty();
 }
-// Frame the orbit on the SELECTED surface: world-space bbox of every face using
-// that material (world = RotMat·Pos + IPos — the real interpolated transform),
-// pivot at its centre, distance sized to fit. This is the "orbit around the
-// actual object" fix — the pivot now tracks geometry, not a fixed guess.
+// After a focus set g_camTarget/g_camDist, aim the orbit FROM THE CURRENT
+// CAMERA POSITION: yaw/pitch face the new target from where you already
+// are, so focusing means "turn toward it and dolly in". Keeping the OLD
+// yaw/pitch teleported the eye to `target + dist·old_direction` — an
+// arbitrary vantage that could sit behind walls or view the object from
+// its far side ("non-centered view from somewhere" until the first
+// play-stop happened to reseed a sensible direction).
+static void orbitFaceTargetFromHere()
+{
+	const float fx = g_camTarget.x - FC.ISource.x;
+	const float fy = g_camTarget.y - FC.ISource.y;
+	const float fz = g_camTarget.z - FC.ISource.z;
+	const float len2 = fx*fx + fy*fy + fz*fz;
+	if (len2 < 1e-4f) return;                 // on top of it — keep direction
+	const float inv = 1.0f / std::sqrt(len2);
+	float sp = -fy * inv;
+	if (sp < -1.0f) sp = -1.0f; if (sp > 1.0f) sp = 1.0f;
+	g_camPitch = std::asin(sp);
+	if (g_camPitch >  1.45f) g_camPitch =  1.45f;
+	if (g_camPitch < -1.45f) g_camPitch = -1.45f;
+	g_camYaw = std::atan2(-fx * inv, -fz * inv);
+}
+// Frame the orbit on the SELECTED surface(s) IN CONTEXT: the shared focus
+// core (rev::Editor_ComputeFocus — face gather + nearest-instance clustering,
+// also exercised natively by the FOCUS_TEST hook) yields the object's world
+// centre + bounding radius; the orbit pivots on the centre and dollies to
+// 2.5× the radius along the direction the camera already was — the object
+// centres at ~1/3 of the view with the rest of the scene still visible
+// (nothing is hidden). `name` may be a ';'-separated list (object selection):
+// clustering applies there too, so a multi-instance object (the city taxis)
+// frames the instance nearest the camera instead of a mid-air union centroid.
 void editorFocusSurface(std::string name)
 {
 	if (!CurScene) return;
-	// `name` may be a ';'-separated list (object selection frames the group).
-	std::vector<std::string> wants;
-	for (size_t pos = 0; pos <= name.size(); ) {
-		size_t semi = name.find(';', pos);
-		if (semi == std::string::npos) semi = name.size();
-		if (semi > pos) wants.push_back(name.substr(pos, semi - pos));
-		pos = semi + 1;
+	Vector c;
+	float r = 0.0f;
+	long used = 0;
+	unsigned long total = 0;
+	if (!rev::Editor_ComputeFocus(name.c_str(), FC.ISource, c, r, &used, &total)) {
+		std::fprintf(stderr, "[EDITOR] focus '%s': no faces\n", name.c_str());
+		return;
 	}
-	// Gather every matching face's world-space bbox + centre. A surface like
-	// "lamp" appears on MANY instances around the room — framing the union of
-	// all of them parks the camera "from afar". So for a SINGLE surface we
-	// cluster the faces around the instance nearest the camera and frame only
-	// that cluster; a group (object) focus keeps the full union (the object is
-	// one connected model, its union is already tight).
-	struct FBox { float lo[3], hi[3], c[3]; };
-	std::vector<FBox> boxes;
-	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
-		for (DWord i = 0; i < T->FIndex; ++i) {
-			Face &F = T->Faces[i];
-			// Base-name match: floor's faces reference the "floor::mirUV"
-			// handedness clone, so an exact compare finds no faces at all.
-			if (!F.Txtr || !F.Txtr->Name) continue;
-			const std::string base = rev::Editor_BaseSurfName(F.Txtr->Name);
-			if (std::find(wants.begin(), wants.end(), base) == wants.end()) continue;
-			FBox b = { { 1e30f, 1e30f, 1e30f }, { -1e30f, -1e30f, -1e30f }, { 0, 0, 0 } };
-			Vertex *vs[3] = { F.A, F.B, F.C };
-			int nv = 0;
-			for (int k = 0; k < 3; ++k) {
-				Vertex *v = vs[k]; if (!v) continue;
-				Vector w; MatrixXVector(T->RotMat, &v->Pos, &w); Vector_SelfAdd(&w, &T->IPos);
-				const float p[3] = { w.x, w.y, w.z };
-				for (int a = 0; a < 3; ++a) {
-					if (p[a] < b.lo[a]) b.lo[a] = p[a];
-					if (p[a] > b.hi[a]) b.hi[a] = p[a];
-					b.c[a] += p[a];
-				}
-				++nv;
-			}
-			if (!nv) continue;
-			for (int a = 0; a < 3; ++a) b.c[a] /= float(nv);
-			boxes.push_back(b);
-		}
-	}
-	if (boxes.empty()) { std::fprintf(stderr, "[EDITOR] focus '%s': no faces\n", name.c_str()); return; }
-
-	// Union bbox (also the cluster threshold scale).
-	float ulo[3] = { 1e30f, 1e30f, 1e30f }, uhi[3] = { -1e30f, -1e30f, -1e30f };
-	for (const FBox &b : boxes)
-		for (int a = 0; a < 3; ++a) {
-			if (b.lo[a] < ulo[a]) ulo[a] = b.lo[a];
-			if (b.hi[a] > uhi[a]) uhi[a] = b.hi[a];
-		}
-	float lo[3], hi[3];
-	long used = long(boxes.size());
-	if (wants.size() > 1) {
-		for (int a = 0; a < 3; ++a) { lo[a] = ulo[a]; hi[a] = uhi[a]; }
-	} else {
-		// Single-linkage growth from the face nearest the camera: include any
-		// face whose centre is within R of the growing cluster bbox. R scales
-		// with the union diagonal so far-apart instances stay separate.
-		const float ud[3] = { uhi[0]-ulo[0], uhi[1]-ulo[1], uhi[2]-ulo[2] };
-		const float uDiag = std::sqrt(ud[0]*ud[0] + ud[1]*ud[1] + ud[2]*ud[2]);
-		const float R = std::max(uDiag * 0.15f, 2.0f), R2 = R * R;
-		size_t seed = 0; float bestD = 1e30f;
-		const float cam[3] = { FC.ISource.x, FC.ISource.y, FC.ISource.z };
-		for (size_t i = 0; i < boxes.size(); ++i) {
-			const float d0 = boxes[i].c[0]-cam[0], d1 = boxes[i].c[1]-cam[1], d2 = boxes[i].c[2]-cam[2];
-			const float d = d0*d0 + d1*d1 + d2*d2;
-			if (d < bestD) { bestD = d; seed = i; }
-		}
-		std::vector<char> in(boxes.size(), 0);
-		in[seed] = 1;
-		for (int a = 0; a < 3; ++a) { lo[a] = boxes[seed].lo[a]; hi[a] = boxes[seed].hi[a]; }
-		for (bool grew = true; grew; ) {
-			grew = false;
-			for (size_t i = 0; i < boxes.size(); ++i) {
-				if (in[i]) continue;
-				float d2sum = 0.0f;
-				for (int a = 0; a < 3; ++a) {
-					const float v = boxes[i].c[a] < lo[a] ? lo[a] - boxes[i].c[a]
-					              : boxes[i].c[a] > hi[a] ? boxes[i].c[a] - hi[a] : 0.0f;
-					d2sum += v * v;
-				}
-				if (d2sum > R2) continue;
-				in[i] = 1; grew = true;
-				for (int a = 0; a < 3; ++a) {
-					if (boxes[i].lo[a] < lo[a]) lo[a] = boxes[i].lo[a];
-					if (boxes[i].hi[a] > hi[a]) hi[a] = boxes[i].hi[a];
-				}
-			}
-		}
-		used = long(std::count(in.begin(), in.end(), 1));
-	}
-	g_camTarget.x = (lo[0] + hi[0]) * 0.5f;
-	g_camTarget.y = (lo[1] + hi[1]) * 0.5f;
-	g_camTarget.z = (lo[2] + hi[2]) * 0.5f;
-	const float dx = hi[0]-lo[0], dy = hi[1]-lo[1], dz = hi[2]-lo[2];
-	const float diag = std::sqrt(dx*dx + dy*dy + dz*dz);
-	g_camDist = diag * 1.3f < 6.0f ? 6.0f : diag * 1.3f;
+	g_camTarget = c;
+	g_camDist = r * 2.5f < 6.0f ? 6.0f : r * 2.5f;
+	orbitFaceTargetFromHere();
 	g_editorCamSeeded = true;   // don't let the first-frame seed override the focus
-	std::fprintf(stderr, "[EDITOR] focus '%s': %ld/%zu faces, centre (%.1f %.1f %.1f) dist %.1f\n",
-	             name.c_str(), used, boxes.size(), g_camTarget.x, g_camTarget.y, g_camTarget.z, g_camDist);
+	std::fprintf(stderr, "[EDITOR] focus '%s': %ld/%lu faces, centre (%.1f %.1f %.1f) radius %.1f dist %.1f\n",
+	             name.c_str(), used, total, c.x, c.y, c.z, r, g_camDist);
 	rev::Editor_MarkDirty();
 }
 // Frame the orbit on a scene-authored light (same index space as
@@ -991,6 +1079,7 @@ void editorFocusLight(int want)
 		g_camDist = range > 1.0f ? range * 0.8f : 12.0f;
 		if (g_camDist < 6.0f)   g_camDist = 6.0f;
 		if (g_camDist > 200.0f) g_camDist = 200.0f;
+		orbitFaceTargetFromHere();
 		g_editorCamSeeded = true;
 		std::fprintf(stderr, "[EDITOR] focus light %d at (%.1f %.1f %.1f) dist %.1f\n",
 		             want, O->IPos.x, O->IPos.y, O->IPos.z, g_camDist);
@@ -1013,6 +1102,7 @@ EMSCRIPTEN_BINDINGS(rev_editor_camera)
 	emscripten::function("editorSceneTime",     &editorSceneTime);
 	emscripten::function("editorTimeSet",       &editorTimeSet);
 	emscripten::function("editorSceneLength",   &editorSceneLength);
+	emscripten::function("editorCamDebug",      &editorCamDebug);
 }
 
 #endif // __EMSCRIPTEN__

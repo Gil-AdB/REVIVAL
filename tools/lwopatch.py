@@ -31,6 +31,7 @@ Usage:
 
 import argparse
 import datetime
+import math
 import os
 import shutil
 import struct
@@ -44,8 +45,102 @@ CANON = ["COLR", "FLAG",
          "RFLT", "RIMG", "RSAN", "RIND", "EDGE", "SMAN",
          "CTEX", "DTEX", "STEX", "RTEX", "TTEX", "BTEX",
          "TIMG", "TFLG", "TSIZ", "TCTR", "TFAL", "TVEL", "TCLR", "TVAL",
-         "TAMP", "TFRQ", "TALP", "TWRP", "TAAS", "TOPC", "TIP0", "TFP0", "TFP1"]
+         "TAMP", "TFRQ", "TALP", "TWRP", "TAAS", "TOPC", "TIP0", "TFP0", "TFP1",
+         # Revival per-surface extensions — appended last (custom sub-chunks;
+         # stock LightWave drops them on re-save, the editor is author of record).
+         # RVSF = numeric dials (§1a); RVSM = PBR map-role paths + normalFlip (§1e).
+         "RVSF", "RVSM"]
 CANON_POS = {c: i for i, c in enumerate(CANON)}
+
+# Revival per-surface extension — custom LWO SURF sub-chunk "RVSF"
+# (docs/SIDECAR_MIGRATION_PLAN.md §1a). Body = u16 RevExtMask + only the
+# authored fields, in ASCENDING mask-bit order, big-endian (LWO IFF). The bit
+# order + field widths MUST match tools/lwsread (LWOREAD ReadSurfaceRevExt,
+# FLDSAVE SaveMaterial) and the engine (FDS/FLD/FLD_READ.CPP ReadMaterial).
+# Each: (editor-key, mask-bit, struct-format). Carries the engine-only
+# per-material dials that used to live in the .MAT sidecar.
+# ONE bit normally gates ONE field, but a bit MAY gate several CONSECUTIVE
+# fields that form a single semantic value (see envBakeOfs* on 0x1000); those
+# entries must stay adjacent, and the whole group is written/read as a unit.
+RVSF_FIELDS = [
+    ("aoStrength",      0x001, ">f"),
+    ("parallaxScale",   0x002, ">f"),
+    ("tintR",           0x004, ">f"),
+    ("tintG",           0x008, ">f"),
+    ("tintB",           0x010, ">f"),
+    ("refractIor",      0x020, ">f"),
+    ("refractive",      0x040, ">B"),   # 0/1 -> Mat_Refractive
+    ("envRefl",         0x080, ">b"),   # -1/0/1
+    ("envBakeRes",      0x100, ">i"),   # pow2 64..1024
+    ("waterProcedural", 0x200, ">b"),   # -1/0/1
+    # 0x400 reserved by ENVDYN Workstream A1 (docs/ENVDYN_DISPLACEMENT_PLAN.md):
+    # per-surface authored flag marking this material's env-reflection probe for
+    # the live dynamic-mesh overlay. Ascending-mask-order convention (§1a).
+    ("envDynamic",      0x400, ">B"),   # 0/1 -> Material::EnvDynamic
+    # Per-material RESPONSE multipliers. specMul scales the FINAL deferred
+    # specular term (analytic + env-specular) — the author-side control for
+    # sources whose specular reads wrong (Polyhaven sandstone). 1 = default.
+    # The map roles live in RVSM, not here — the RVSF u16 keeps its remaining
+    # bits.
+    ("specMul",         0x800, ">f"),   # spec response x -> Material::SpecMul
+    # Env-probe capture-point OFFSET (world units). ONE bit, ONE 12-byte
+    # payload of three floats in X/Y/Z order — a deliberate break from the
+    # one-bit-per-scalar convention used by tintR/tintG/tintB just above,
+    # because this is a single semantic vector and because burning three of
+    # the four remaining mask bits on it would leave the u16 nearly full.
+    # The three entries share bit 0x1000 and MUST stay adjacent and in this
+    # order; set_rev_ext emits them as one unit (missing components as 0).
+    # Bits 0x2000/0x4000/0x8000 stay FREE for future dials.
+    ("envBakeOfsX",     0x1000, ">f"),
+    ("envBakeOfsY",     0x1000, ">f"),
+    ("envBakeOfsZ",     0x1000, ">f"),
+]
+RVSF_KEYS = {k for (k, _, _) in RVSF_FIELDS}
+
+
+def _rvsf_groups(fields):
+    """RVSF_FIELDS collapsed to [(bit, [(key, fmt), ...])] — one entry per mask
+    bit, in ascending-bit order, each carrying the field(s) that bit gates.
+    Asserts the table invariant the whole format rests on: strictly ascending
+    bits with same-bit fields adjacent (a single desync corrupts the parse)."""
+    groups = []
+    for key, bit, fmt in fields:
+        if groups and groups[-1][0] == bit:
+            groups[-1][1].append((key, fmt))
+        else:
+            groups.append((bit, [(key, fmt)]))
+    bits = [b for (b, _) in groups]
+    assert bits == sorted(set(bits)), \
+        "RVSF_FIELDS: bits must ascend, same-bit fields must be adjacent"
+    return groups
+
+
+RVSF_GROUPS = _rvsf_groups(RVSF_FIELDS)
+
+# Revival per-surface PBR map-SET extension — custom LWO SURF sub-chunk "RVSM"
+# ("ReViVal Surface Maps", docs/SIDECAR_MIGRATION_PLAN.md §1e). LWO1 has no PBR
+# map slots, so the editor used to persist role->path assignments in the .MAT
+# sidecar; this carries them in the authoring source instead. USER DESIGN
+# (2026-07-31): a directory-per-set layout — the payload names ONE texture SET,
+# and the engine resolves TEXTURES/PBR/<set>/<role>.png (fixed role filenames:
+# albedo/normal/height/roughness/metallic/ao) and loads whichever roles exist.
+# The set is decoupled from the surface name so sets are shareable assets.
+# Body (LWO, big-endian IFF): u16 mapMask + for each set bit in ASCENDING order
+# the set name (NUL-terminated string) or one byte (normalFlip parity). A
+# SIBLING of RVSF, not folded in: variable-length strings stay apart from the
+# fixed-width, field-order-locked numeric parse (the hottest FLD record). Bit
+# order + kinds MUST match tools/lwsread (LWOREAD ReadSurfaceRevMaps, FLDSAVE
+# SaveMaterial) and the engine (FDS/FLD/FLD_READ.CPP ReadMaterial).
+# Each: (editor-key, mask-bit, kind) where kind is "str" (set name) or "u8".
+RVSM_FIELDS = [
+    ("set",        0x01, "str"),
+    ("normalFlip", 0x40, "u8"),   # 0/1 green-channel convention parity (§1e)
+]
+RVSM_KEYS = {k for (k, _, _) in RVSM_FIELDS}
+# Fixed role filenames inside a set dir (the engine probes these; the editor
+# import normalizes uploaded files to them). Role order = albedo FIRST (sets
+# the aux-map texel layout), then the retired sidecar's alphabetical order.
+RVSM_ROLE_FILES = ["albedo", "ao", "height", "metallic", "normal", "roughness"]
 
 # prop -> (int_chunk, float_chunk, engine->fraction divisor)
 VALUE_PROPS = {
@@ -102,7 +197,207 @@ class Surf:
         flags = (flags & ~0x7) | (int(axis) & 0x7)
         self.set_chunk("TFLG", struct.pack(">H", flags))
 
+    def uv_mapping(self):
+        """(proj, sx, sy, sz, axis) as it stands on disk, or None when the
+        surface carries no projection. Read-side counterpart of
+        set_uv_mapping — the editor backend's save log reports old -> new, and
+        only the file knows the old. proj is -1 for a CTEX naming a projection
+        this table doesn't list."""
+        ci, ti = self._find("CTEX"), self._find("TSIZ")
+        if ci < 0 or ti < 0 or len(self.subchunks[ti][1]) < 12:
+            return None
+        name = self.subchunks[ci][1].split(b"\x00", 1)[0].decode("latin-1")
+        proj = self.UV_PROJ_NAMES.index(name) if name in self.UV_PROJ_NAMES else -1
+        sx, sy, sz = struct.unpack(">3f", self.subchunks[ti][1][:12])
+        fi = self._find("TFLG")
+        axis = (struct.unpack(">H", self.subchunks[fi][1][:2])[0] & 0x7) if fi >= 0 else 0
+        return (proj, sx, sy, sz, axis)
+
+    def rev_ext(self):
+        """Parse the RVSF sub-chunk into {key: value} (empty dict if none).
+        Multi-field bits need no special case here: their entries are adjacent
+        in RVSF_FIELDS, so one set bit yields their fields consecutively, in
+        table order (envBakeOfsX/Y/Z on 0x1000 -> three floats in X/Y/Z)."""
+        i = self._find("RVSF")
+        if i < 0:
+            return {}
+        body = self.subchunks[i][1]
+        if len(body) < 2:
+            return {}
+        mask = struct.unpack_from(">H", body, 0)[0]
+        out, p = {}, 2
+        for key, bit, fmt in RVSF_FIELDS:
+            if mask & bit:
+                (v,) = struct.unpack_from(fmt, body, p)
+                out[key] = v
+                p += struct.calcsize(fmt)
+        return out
+
+    def rev_ext_mask(self):
+        """The RVSF mask word exactly as it stands on this surface (0 = no
+        sub-chunk at all). Reported by the editor backend's save log because
+        the mask is the on-disk truth and is NOT derivable from the keys the
+        editor sent: set_rev_ext merges with what was already there, and drops
+        an all-zero grouped vector rather than setting its bit."""
+        i = self._find("RVSF")
+        body = self.subchunks[i][1] if i >= 0 else b""
+        return struct.unpack_from(">H", body, 0)[0] if len(body) >= 2 else 0
+
+    def set_rev_ext(self, props):
+        """Merge {key: value} RVSF props into this surface's RVSF sub-chunk,
+        preserving fields the caller didn't touch. A value of None drops that
+        field. When the merged set is empty the RVSF sub-chunk is removed (the
+        surface reverts to no extension, so the regenerated FLD carries no
+        Surf_RevExt bit — byte-identical to an unauthored surface).
+
+        Multi-field bits (envBakeOfsX/Y/Z on 0x1000) are emitted as ONE unit:
+        the bit is set if ANY component is present and not all of them are
+        zero, and all fields of the group are then written in table order,
+        absent components as 0 — so the byte count always matches what the bit
+        promises. An all-zero (or absent) vector emits nothing at all, which is
+        what keeps an unset field byte-identical to today's files."""
+        cur = self.rev_ext()
+        for k, v in props.items():
+            if k not in RVSF_KEYS:
+                raise ValueError(f"unknown RVSF key '{k}'")
+            if v is None:
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        i = self._find("RVSF")
+        if not cur:
+            if i >= 0:
+                del self.subchunks[i]
+            return
+        mask, body = 0, b""
+        for bit, group in RVSF_GROUPS:
+            if not any(key in cur for (key, _) in group):
+                continue
+            # Grouped bit: drop it entirely when the vector is all zeros (the
+            # unset state). Single-field bits keep their old behavior — an
+            # authored 0 there is a real value (aoStrength=0, envRefl=0).
+            if len(group) > 1 and all(float(cur.get(key, 0.0) or 0.0) == 0.0
+                                      for (key, _) in group):
+                continue
+            mask |= bit
+            for key, fmt in group:
+                raw = cur.get(key, 0.0)
+                if fmt == ">B":
+                    val = int(round(float(raw))) & 0xFF
+                elif fmt == ">b":
+                    val = max(-128, min(127, int(round(float(raw)))))
+                elif fmt == ">i":
+                    val = int(round(float(raw)))
+                else:
+                    val = float(raw)
+                body += struct.pack(fmt, val)
+        if not mask:
+            # Everything merged away (e.g. only an all-zero grouped vector):
+            # no sub-chunk at all, never an empty mask=0 body — that would set
+            # Surf_RevExt in the regenerated FLD for no payload.
+            if i >= 0:
+                del self.subchunks[i]
+            return
+        self.set_chunk("RVSF", struct.pack(">H", mask) + body)
+
+    def rev_maps(self):
+        """Parse the RVSM sub-chunk into {role: path, 'normalFlip': int}
+        (empty dict if none)."""
+        i = self._find("RVSM")
+        if i < 0:
+            return {}
+        body = self.subchunks[i][1]
+        if len(body) < 2:
+            return {}
+        mask = struct.unpack_from(">H", body, 0)[0]
+        out, p = {}, 2
+        for key, bit, kind in RVSM_FIELDS:
+            if not (mask & bit):
+                continue
+            if kind == "u8":
+                out[key] = body[p]
+                p += 1
+            else:                       # NUL-terminated string
+                z = body.index(b"\x00", p)
+                out[key] = body[p:z].decode("latin-1")
+                p = z + 1
+        return out
+
+    def set_rev_maps(self, props):
+        """Merge {role: path | None, 'normalFlip': 0/1 | None} into this
+        surface's RVSM sub-chunk, preserving untouched fields. A value of None
+        drops that field. An empty merged set removes the RVSM sub-chunk (the
+        regenerated FLD then carries no Surf_RevMaps bit — byte-identical to an
+        unauthored surface). Paths are stored verbatim (relative-to-Runtime)."""
+        cur = self.rev_maps()
+        for k, v in props.items():
+            if k not in RVSM_KEYS:
+                raise ValueError(f"unknown RVSM key '{k}'")
+            if v is None:
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        i = self._find("RVSM")
+        if not cur:
+            if i >= 0:
+                del self.subchunks[i]
+            return
+        mask, body = 0, b""
+        for key, bit, kind in RVSM_FIELDS:
+            if key not in cur:
+                continue
+            mask |= bit
+            if kind == "u8":
+                body += struct.pack(">B", int(round(float(cur[key]))) & 0xFF)
+            else:
+                body += str(cur[key]).encode("latin-1") + b"\x00"
+        self.set_chunk("RVSM", struct.pack(">H", mask) + body)
+
+    def get_prop(self, prop):
+        """Current on-disk value of a set_prop key, in the SAME engine scale
+        set_prop accepts, or None when the surface carries no such chunk.
+        Read-side counterpart of set_prop, for the editor backend's save log:
+        the FE can only report the browser's idea of the old value, the file
+        is the authority on what the write is actually replacing."""
+        if prop == "smoothAngle":
+            i = self._find("SMAN")                      # radians on disk
+            if i < 0 or len(self.subchunks[i][1]) < 4:
+                return None
+            return struct.unpack(">f", self.subchunks[i][1][:4])[0] * 180.0 / math.pi
+        if prop in VALUE_PROPS:
+            ichunk, fchunk, div = VALUE_PROPS[prop]
+            i = self._find(fchunk)                      # the float chunk wins
+            if i >= 0 and len(self.subchunks[i][1]) >= 4:
+                return struct.unpack(">f", self.subchunks[i][1][:4])[0] * div
+            i = self._find(ichunk)                      # else the u16 fraction
+            if i >= 0 and len(self.subchunks[i][1]) >= 2:
+                return struct.unpack(">H", self.subchunks[i][1][:2])[0] / 256.0 * div
+            return None
+        if prop == "glossiness":
+            i = self._find("GLOS")
+            if i < 0 or len(self.subchunks[i][1]) < 2:
+                return None
+            return struct.unpack(">H", self.subchunks[i][1][:2])[0]
+        if prop in ("baseR", "baseG", "baseB"):
+            i = self._find("COLR")
+            comp = "baseRbaseGbaseB".index(prop) // 5
+            if i < 0 or len(self.subchunks[i][1]) <= comp:
+                return None
+            return self.subchunks[i][1][comp]
+        raise ValueError(f"unknown prop '{prop}'")
+
     def set_prop(self, prop, value):
+        if prop == "smoothAngle":
+            # Native LightWave SMAN chunk (MaxSmoothingAngle), stored in RADIANS
+            # on disk; the editor works in degrees (sidecar-elim §1b). Rides the
+            # existing MaxSmoothingAngle FLD field — no new bit. Also SET the
+            # Surf_Smoothing FLAG bit so the engine's authored-smoothing path
+            # honors it (MakeFacesIndependent gates on Surf_Smoothing).
+            self.set_chunk("SMAN", struct.pack(">f", float(value) * math.pi / 180.0))
+            i = self._find("FLAG")
+            flags = struct.unpack(">H", self.subchunks[i][1])[0] if i >= 0 else 0
+            self.set_chunk("FLAG", struct.pack(">H", flags | 0x0004))  # Surf_Smoothing
+            return
         if prop in VALUE_PROPS:
             ichunk, fchunk, div = VALUE_PROPS[prop]
             frac = float(value) / div
@@ -175,6 +470,283 @@ class LwoFile:
                 return s
         return None
 
+    # ── Instance-split bake (SRFS/POLS/PNTS surgery) ──────────────────────
+    # Persist the editor's runtime "split instances" (two mummies share one
+    # 'momy' surface) by making the split REAL in the authoring source: the
+    # polygons of every spatially-separate cluster beyond the primary are
+    # reassigned to a fresh surface (SRFS append + SURF clone of the base),
+    # so the regenerated FLD carries 'momy' + 'momy2' as ordinary authored
+    # surfaces and nothing at runtime needs to re-split.
+    #
+    # The clustering REPLICATES Editor_SplitInstances (DEMO/MaterialEditor
+    # .cpp) at the LWO polygon level: grid single-linkage on poly centroids,
+    # cell size R = 15% of the union-bbox diagonal, primary = biggest cluster
+    # (tie -> the cluster of the earliest poly), other clusters numbered 2..
+    # in first-seen poly order. Since the FLD converter preserves polygon
+    # order and rigid transforms don't change cluster structure, cluster k
+    # here corresponds to the runtime part "<name>#k" (verified empirically
+    # via FOCUS_TEST centroids). Only single-mesh instances split this way —
+    # LWS-instanced copies (two LoadObject lines of one file) present a
+    # single spatial cluster here and return None (live-only split remains).
+
+    def _raw_chunk(self, cid):
+        for i, (c, body) in enumerate(self.chunks):
+            if c == cid and c != "SURF":
+                return i, body
+        return -1, None
+
+    def srfs_names(self):
+        """SRFS surface names in file order (1-based POLS indices)."""
+        _, body = self._raw_chunk("SRFS")
+        if body is None:
+            return []
+        names, p = [], 0
+        while p < len(body):
+            z = body.index(b"\x00", p)
+            names.append(body[p:z].decode("latin-1"))
+            p = z + 1
+            if p % 2:
+                p += 1
+        return names
+
+    def points(self):
+        """PNTS as [(x,y,z)] in raw LWO coordinates (no YZ swap — clustering
+        only needs relative positions, which are swap-invariant)."""
+        _, body = self._raw_chunk("PNTS")
+        if body is None:
+            return []
+        n = len(body) // 12
+        flat = struct.unpack(f">{n * 3}f", body[:n * 12])
+        return [(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]) for i in range(n)]
+
+    def polys(self):
+        """POLS as [(vert_indices, surf_1based, surf_field_offset)] — the
+        offset indexes the u16 surface field inside the POLS body so
+        split_surface can rewrite it in place. Detail polygons (negative
+        surface) are rejected, same as the converter."""
+        _, body = self._raw_chunk("POLS")
+        if body is None:
+            return []
+        out, p = [], 0
+        while p + 4 <= len(body):
+            (nv,) = struct.unpack_from(">H", body, p)
+            p += 2
+            verts = struct.unpack_from(f">{nv}H", body, p)
+            p += 2 * nv
+            (surf,) = struct.unpack_from(">h", body, p)
+            if surf < 0:
+                raise ValueError("detail polygons are not supported")
+            out.append((verts, surf, p))
+            p += 2
+        return out
+
+    @staticmethod
+    def _cluster(cents):
+        """Grid single-linkage union-find, replicating Editor_SplitInstances:
+        returns (roots_per_index, R). Union direction matches the C++
+        (parent[find(i)] = find(cell_rep)) so tie-breaks agree."""
+        n = len(cents)
+        lo = [min(c[a] for c in cents) for a in range(3)]
+        hi = [max(c[a] for c in cents) for a in range(3)]
+        diag = math.sqrt(sum((hi[a] - lo[a]) ** 2 for a in range(3)))
+        R = max(diag * 0.15, 1e-6)
+        parent = list(range(n))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        cell = {}
+        for i, c in enumerate(cents):
+            g = (math.floor(c[0] / R), math.floor(c[1] / R), math.floor(c[2] / R))
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    for oz in (-1, 0, 1):
+                        r = cell.get((g[0] + ox, g[1] + oy, g[2] + oz))
+                        if r is not None:
+                            a, b = find(r), find(i)
+                            if a != b:
+                                parent[b] = a
+            cell[g] = find(i)
+        return [find(i) for i in range(n)], R
+
+    def analyze_split(self, name):
+        """Cluster surface `name`'s polygons WITHOUT touching the file.
+        Returns None when there is nothing to split (surface missing /
+        <2 polys / one spatial cluster — e.g. LWS-instanced copies), else
+          {"clusters": [{"polys": n, "centroid": (x,y,z)} ...],  # first-seen order
+           "radius": R,
+           ...private keys for commit_split...}
+        Centroids are RAW LWO coordinates. Note the FLD converter's SwapYZ is
+        a no-op, so for identity-motion objects these ARE engine world
+        coordinates (plus the object's keyframe-0 offset)."""
+        srfs = self.srfs_names()
+        if name not in srfs:
+            return None
+        si = srfs.index(name) + 1          # POLS surface indices are 1-based
+        pts = self.points()
+        mine = [(verts, off) for (verts, surf, off) in self.polys() if surf == si]
+        if len(mine) < 2:
+            return None
+        cents = []
+        for verts, _ in mine:
+            xs = [pts[v] for v in verts if v < len(pts)]
+            m = len(xs) or 1
+            cents.append((sum(p[0] for p in xs) / m,
+                          sum(p[1] for p in xs) / m,
+                          sum(p[2] for p in xs) / m))
+        roots, R = self._cluster(cents)
+        order = []                          # first-seen cluster order
+        seen = {}
+        for r in roots:
+            if r not in seen:
+                seen[r] = len(order)
+                order.append(r)
+        if len(order) < 2:
+            return None
+        clusters = []
+        for r in order:
+            idxs = [i for i, rr in enumerate(roots) if rr == r]
+            cx = sum(cents[i][0] for i in idxs) / len(idxs)
+            cy = sum(cents[i][1] for i in idxs) / len(idxs)
+            cz = sum(cents[i][2] for i in idxs) / len(idxs)
+            clusters.append({"polys": len(idxs), "centroid": (cx, cy, cz)})
+        return {"clusters": clusters, "radius": R,
+                "_name": name, "_srfs": srfs, "_mine": mine,
+                "_roots": roots, "_order": order}
+
+    def default_split_parts(self, analysis):
+        """The order-based part numbering Editor_SplitInstances uses when no
+        geometric matching is available: part 1 (keeps the base name) = the
+        biggest cluster (tie -> earliest), parts 2.. in first-seen order.
+        Returns {cluster_index: part_number}."""
+        clusters = analysis["clusters"]
+        primary = max(range(len(clusters)),
+                      key=lambda i: (clusters[i]["polys"], -i))
+        parts = {primary: 1}
+        k = 2
+        for i in range(len(clusters)):
+            if i != primary:
+                parts[i] = k
+                k += 1
+        return parts
+
+    def commit_split(self, analysis, parts_by_cluster):
+        """Apply the split: cluster with part number 1 keeps the base name;
+        every other cluster's polygons move to a fresh REAL surface named
+        '<base><k>' ('momy2' — clean authored names, no '#k'), SRFS-appended
+        with a SURF clone of the base. parts_by_cluster maps cluster index
+        (analyze_split order) -> part number. Returns
+          {"parts": {k: surface-name}, "polys": {k: count},
+           "centroids": {k: (x,y,z)}, "radius": R}."""
+        name = analysis["_name"]
+        srfs = analysis["_srfs"]
+        mine = analysis["_mine"]
+        roots = analysis["_roots"]
+        order = analysis["_order"]
+        clusters = analysis["clusters"]
+        primary_ci = next(ci for ci, k in parts_by_cluster.items() if k == 1)
+        # Fresh names, collide-avoided against SRFS.
+        taken = set(srfs)
+        parts = {1: name}
+        polys_per = {1: clusters[primary_ci]["polys"]}
+        centroids = {1: clusters[primary_ci]["centroid"]}
+        new_names = {}                      # part k -> new surface name
+        for ci, k in sorted(parts_by_cluster.items(), key=lambda kv: kv[1]):
+            if k == 1:
+                continue
+            cand = f"{name}{k}"
+            n2 = 2
+            while cand in taken:
+                cand = f"{name}{k}_{n2}"
+                n2 += 1
+            taken.add(cand)
+            new_names[k] = cand
+            parts[k] = cand
+            polys_per[k] = clusters[ci]["polys"]
+            centroids[k] = clusters[ci]["centroid"]
+        # SRFS: append the new names (each NUL-terminated, padded to even) —
+        # existing bytes untouched.
+        srfs_i, srfs_body = self._raw_chunk("SRFS")
+        add = b""
+        for k in sorted(new_names):
+            nb = new_names[k].encode("latin-1") + b"\x00"
+            if len(nb) % 2:
+                nb += b"\x00"
+            add += nb
+        self.chunks[srfs_i] = ("SRFS", srfs_body + add)
+        # SURF: clone the base surface's subchunks under each new name and
+        # append at the end of the file (converters match SURF by name).
+        base_surf = self.surface(name)
+        for k in sorted(new_names):
+            self.chunks.append(("SURF", Surf(new_names[k],
+                                             list(base_surf.subchunks))))
+        # POLS: reassign every non-primary cluster poly to its new surface
+        # index (1-based position in the extended SRFS).
+        pols_i, pols_body = self._raw_chunk("POLS")
+        body = bytearray(pols_body)
+        new_index = {k: len(srfs) + i + 1
+                     for i, k in enumerate(sorted(new_names))}
+        root_part = {order[ci]: k for ci, k in parts_by_cluster.items()}
+        for (verts, off), root in zip(mine, roots):
+            k = root_part[root]
+            if k == 1:
+                continue
+            struct.pack_into(">h", body, off, new_index[k])
+        self.chunks[pols_i] = ("POLS", bytes(body))
+        return {"parts": parts, "polys": polys_per,
+                "centroids": centroids, "radius": analysis["radius"]}
+
+    def split_surface(self, name):
+        """analyze + commit with the default order-based part numbering (the
+        no-live-centroids path; the editor server matches clusters to the
+        live '#k' parts geometrically and calls commit_split itself)."""
+        analysis = self.analyze_split(name)
+        if analysis is None:
+            return None
+        return self.commit_split(analysis, self.default_split_parts(analysis))
+
+    def rename_surface(self, old, new):
+        """Rename a surface end-to-end: the SURF chunk name AND its SRFS entry.
+        POLS surface indices reference the SRFS *position* (1-based), which is
+        preserved — only the name string bytes change — so every polygon keeps
+        its material. The SRFS body is rewritten surgically (only the matching
+        entry's bytes change; every other entry is copied through verbatim), so
+        the on-disk byte-diff is exactly the name change + its NUL/even-pad +
+        the SURF/SRFS/FORM length-field adjustments, nothing else. Raises if
+        `old` is absent or `new` already exists (name collisions break the
+        SURF<->SRFS FindMat match)."""
+        s = self.surface(old)
+        if s is None:
+            raise ValueError(f"no surface '{old}'")
+        if self.surface(new) is not None:
+            raise ValueError(f"surface '{new}' already exists")
+        s.name = new                        # SURF chunk (serialize() re-pads)
+        srfs_i, body = self._raw_chunk("SRFS")
+        if body is None:
+            raise ValueError("no SRFS chunk")
+        out = bytearray()
+        p, replaced = 0, False
+        while p < len(body):
+            z = body.index(b"\x00", p)      # names are NUL-terminated,
+            end = z + 1                      # then even-padded within the chunk
+            if end % 2:
+                end += 1
+            if not replaced and body[p:z].decode("latin-1") == old:
+                nb = new.encode("latin-1") + b"\x00"
+                if len(nb) % 2:
+                    nb += b"\x00"
+                out += nb
+                replaced = True
+            else:
+                out += body[p:end]           # untouched entry: byte-verbatim
+            p = end
+        if not replaced:
+            raise ValueError(f"surface '{old}' not in SRFS")
+        self.chunks[srfs_i] = ("SRFS", bytes(out))
+
     def serialize(self):
         out = b""
         for cid, c in self.chunks:
@@ -206,6 +778,11 @@ def main():
                     metavar="SURF:PROP=VALUE",
                     help="e.g. 'rooms:specular=0.1' (engine scale; repeatable)")
     ap.add_argument("--list", action="store_true", help="list surfaces + values")
+    ap.add_argument("--split", metavar="SURF",
+                    help="bake the spatial instance-split of SURF into the file "
+                         "(new real surfaces '<SURF>2', ... — see split_surface)")
+    ap.add_argument("--rename", action="append", default=[], metavar="OLD=NEW",
+                    help="rename a surface (SURF + SRFS name); repeatable")
     ap.add_argument("--backup-dir", help="copy the original here before writing")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("-o", "--out", help="write to OUT instead of in place")
@@ -228,6 +805,27 @@ def main():
         return
 
     touched = False
+    if args.split:
+        res = lwo.split_surface(args.split)
+        if res is None:
+            sys.exit(f"{args.file}: '{args.split}' has nothing to split "
+                     "(missing surface, <2 polys, or one spatial cluster)")
+        print(f"split '{args.split}': parts={res['parts']} polys={res['polys']} "
+              f"R={res['radius']:.3f}")
+        for k, c in sorted(res["centroids"].items()):
+            print(f"  part {k} ('{res['parts'][k]}') centroid raw-LWO "
+                  f"({c[0]:.2f} {c[1]:.2f} {c[2]:.2f})")
+        touched = True
+    for spec in args.rename:
+        old_name, _, new_name = spec.partition("=")
+        if not old_name or not new_name:
+            sys.exit(f"bad --rename '{spec}' (want OLD=NEW)")
+        try:
+            lwo.rename_surface(old_name, new_name)
+        except ValueError as e:
+            sys.exit(f"{args.file}: {e}")
+        print(f"renamed surface '{old_name}' -> '{new_name}'")
+        touched = True
     for spec in args.set:
         surf_name, _, kv = spec.rpartition(":")
         prop, _, value = kv.partition("=")

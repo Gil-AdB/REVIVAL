@@ -42,6 +42,8 @@ set(Base
     Base/KeyFrame.h
     Base/Material.h
     Base/Matrix.h
+    Base/MemCensus.cpp
+    Base/MemCensus.h
     Base/Object.h
     Base/Omni.h
     Base/Quaternion.h
@@ -97,6 +99,8 @@ source_group("Fillers" FILES ${Fillers})
 set(IMGCODE
     IMGCODE/IMGCODE.CPP
     IMGCODE/QUANTUM.H
+    IMGCODE/TinyTiff.cpp
+    IMGCODE/TinyTiff.h
     IMGCODE/stb_image.h)
 source_group("IMGCODE" FILES ${IMGCODE})
 
@@ -134,6 +138,14 @@ set(RENDER
     RENDER/DeferredVolumetric.cpp
     RENDER/EnvBake.cpp
     RENDER/EnvBake.h
+    RENDER/WorldAabb.cpp
+    RENDER/WorldAabb.h
+    RENDER/VizCycle.cpp
+    RENDER/VizCycle.h
+    RENDER/VizLegend.cpp
+    RENDER/VizLegend.h
+    RENDER/ChunkOcclusion.cpp
+    RENDER/ChunkOcclusion.h
     RENDER/GENERAL.H
     RENDER/GreetsMirror.cpp
     RENDER/GreetsMirror.h
@@ -144,6 +156,7 @@ set(RENDER
     RENDER/Hdr.cpp
     RENDER/Hdr.h
     RENDER/Lighting.cpp
+    RENDER/MemCensusScene.cpp
     RENDER/OffscreenView.cpp
     RENDER/OffscreenView.h
     RENDER/LightmapBake.cpp
@@ -155,6 +168,13 @@ set(RENDER
     RENDER/SORTS.H
     RENDER/SQRTTBL.H
     RENDER/Transform.cpp)
+
+# The mirror-shard per-face cone cull is compile-time gated (top-level
+# CMakeLists.txt explains why: carrying its call inside Transform_Objects moves
+# the scene pins through -ffp-contract=fast, and it is measured worth 0.1 ms).
+if(FDS_SHARD_BAKE_LAB)
+    list(APPEND RENDER RENDER/ReflFaceCull.cpp)
+endif()
 source_group("RENDER" FILES ${RENDER})
 
 set(SIMD

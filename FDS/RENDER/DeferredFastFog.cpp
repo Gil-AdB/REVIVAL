@@ -28,11 +28,13 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "Base/Scene.h"
 #include "Base/Omni.h"
 #include "Base/Camera.h"
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
+#include "TailProf.h"   // FDS_TAIL_PROF: fog sub-phase attribution
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/Hdr.h"
 #include "Threads.h"
@@ -119,6 +121,13 @@ struct FastFogParams {
 	byte *vpage = nullptr;
 	float invFOVX, invFOVY, invZScale;
 	float sigma, fogFar, kHeight, heightBase;
+	// Legacy distance dim (fast_fog_dist_dim): scene *= 1-s+s*sqrt(1-z/FZP).
+	// mat==nullptr or distDim==0 → off. mat points at the G-buffer mat32
+	// plane (sentinel 0xFFFFFFFF = forward pixel, skipped like the legacy
+	// Render_DeferredFogPass).
+	float distDim = 0.0f;
+	float distDimInvFar = 0.0f;   // 1 / (dist_dim_far > 0 ? dist_dim_far : FZP)
+	const uint32_t* mat = nullptr;
 	// viewToWorld rows (rotation): world ray dir = w·(X,Y,1).
 	float w00, w01, w02, w10, w11, w12, w20, w21, w22;
 	float camX, camY, camZ;
@@ -359,11 +368,11 @@ static inline float volSpotShadow(int smIdx, float x, float y, float z, int pcf)
 	const int cY = int(sm.cntrY - sm.perspY * ly * invLZ);
 	if (cX < 0 || cX >= sm.xres || cY < 0 || cY >= sm.yres) return 1.0f;
 	const int pixZ = (0xFF80 - int(lz * sm.zScale)) + 80;   // +kVolShadowBias
-	const bool hasDyn = !sm.depth_dynamic.empty();
+	const bool hasDyn = !sm.packDyn.empty();
 	if (pcf <= 0) {
 		const size_t idx = size_t(cY) * size_t(sm.xres) + size_t(cX);
-		uint16_t occ = sm.depth[idx];
-		if (hasDyn) occ = std::max(occ, sm.depth_dynamic[idx]);
+		uint16_t occ = ShadowTexZ(sm.packSD[idx]);
+		if (hasDyn) occ = std::max(occ, ShadowTexZ(sm.packDyn[idx]));
 		return (pixZ < int(occ)) ? 0.0f : 1.0f;
 	}
 	int lit = 0, total = 0;
@@ -375,8 +384,8 @@ static inline float volSpotShadow(int smIdx, float x, float y, float z, int pcf)
 			const int sx = cX + dx;
 			if (sx < 0 || sx >= sm.xres) continue;
 			const size_t idx = row + size_t(sx);
-			uint16_t occ = sm.depth[idx];
-			if (hasDyn) occ = std::max(occ, sm.depth_dynamic[idx]);
+			uint16_t occ = ShadowTexZ(sm.packSD[idx]);
+			if (hasDyn) occ = std::max(occ, ShadowTexZ(sm.packDyn[idx]));
 			lit += (pixZ < int(occ)) ? 0 : 1;
 			++total;
 		}
@@ -480,8 +489,11 @@ static inline bool lightRayClip(const ViewLightsSoA* L, int li, float X, float Y
 //     taken at the segment's closest-approach point z* = clamp(VP/uV, zA, zB),
 //     where the integrand peaks. Finite and smooth → no disc.
 //   • Shadow-casting spots: the per-point shadow tap can't be integrated in
-//     closed form (same reason vol_cone_analytic ray-marches shadowed spots), so
-//     fall back to ns stratified samples with the shadow tap per sample.
+//     closed form, so fall back to ns stratified samples with the shadow tap
+//     per sample. (This per-spot `shadowed` branch is LOCAL TO THIS PASS —
+//     the parenthetical that used to sit here claimed vol_cone_analytic does
+//     the same and it does not: the cone pass has no per-spot fallback at all.
+//     Corrected 2026-08-12.)
 static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
                                        float zA, float zB, float jitter,
                                        float& gR, float& gG, float& gB)
@@ -1066,6 +1078,15 @@ namespace {
 	// pointer dangling into a freed buffer.
 	const uint16_t* gFrReflZ = nullptr;
 	float           gFrReflWaterY = 0.0f;   // mirror plane height (world Y)
+	// Composite hot-loop LUT: encoded Z → depth-slice index. iz is a pure
+	// function of ze given (near, far, nz, zscale) — building the table with
+	// the composite's EXACT float expression makes the lookup bit-identical
+	// to the per-pixel std::log it replaces (measured there: the log was the
+	// single biggest term in the 8.7ms/f composite). ze==0 entries evaluate
+	// to iz(gFrFar), which is exactly the composite's sky default.
+	std::vector<uint8_t> gFrIzLUT;          // [65536]
+	float gFrLutNear = -1.0f, gFrLutFar = -1.0f, gFrLutInvZ = -1.0f;
+	int   gFrLutNz = -1;
 }
 
 // See gFrReflZ. The city calls this after its dispMap wobble with the
@@ -1239,6 +1260,11 @@ static inline float fogNoiseAt(const FastFogParams& P, float wx, float wy, float
 	return d > 1.0f ? 1.0f : d;
 }
 
+// Halton(2,3) jitter phase tables — shared by the scalar column loop and the
+// vectorized density block (which gathers them by per-slice phase index).
+static const float g_frHalton2[8] = {1/2.f,1/4.f,3/4.f,1/8.f,5/8.f,3/8.f,7/8.f,1/16.f};
+static const float g_frHalton3[8] = {1/3.f,2/3.f,1/9.f,4/9.f,7/9.f,2/9.f,5/9.f,8/9.f};
+
 static inline float froxelDensity(const FastFogParams& P, float wx, float wy, float wz) {
 	if (wy < P.slabY0 || wy > P.slabY1) return 0.0f;     // outside the slab
 	float d = P.blobs ? fogNoiseAt(P, wx, wy, wz, P.cell, P.invCell) : 1.0f;
@@ -1254,6 +1280,250 @@ static inline float froxelDensity(const FastFogParams& P, float wx, float wy, fl
 		d *= lo*lo*(3.0f-2.0f*lo) * hi*hi*(3.0f-2.0f*hi);
 	}
 	return d;
+}
+
+// ── Vectorized pass-1 density (8 slices of one column per step) ────────────
+// Bit-exact mirror of the scalar chain froxelDensity→fogNoiseAt→
+// metaballNoiseAt/blobNoiseAt/fogWarp for the city's config (blobs on,
+// metaball overlap, taps==1). Engaged per column-tile call via
+// froxelDensityVecOK(); FDS_FOG_COLUMNS_VEC=0 opts out. Exactness notes:
+// - cellHash is pure int SIMD (mullo/xor/rot) — exact.
+// - float(uint32) is rebuilt as float(lo16) + float(hi16)*65536 — the mul is
+//   exact, the single add rounds once → identical to the scalar conversion
+//   (fma contraction immaterial: the product is exact either way).
+// - int(std::floor(x)) == cvttps(floor_ps(x)); int(f≥0) == cvttps.
+// - Float expressions mirror the scalar term trees so -ffp-contract fuses
+//   the same sites; masked adds only ever add +0.0 to non-negative sums.
+// - The slab check is subsumed by the feather smoothstep (outside slab →
+//   feather 0 → d*0 = +0 == the scalar early-return 0); an all-lanes-outside
+//   early-out is kept for speed only.
+static inline __m256i vRot13(__m256i h) {
+	return _mm256_or_si256(_mm256_slli_epi32(h,13), _mm256_srli_epi32(h,19));
+}
+static inline __m256i vCellHash(__m256i ix, __m256i iy, __m256i iz) {
+	__m256i h = _mm256_set1_epi32((int)0x9E3779B9u);
+	h=_mm256_xor_si256(h,_mm256_mullo_epi32(ix,_mm256_set1_epi32((int)0x8DA6B343u))); h=vRot13(h);
+	h=_mm256_xor_si256(h,_mm256_mullo_epi32(iy,_mm256_set1_epi32((int)0xD8163841u))); h=vRot13(h);
+	h=_mm256_xor_si256(h,_mm256_mullo_epi32(iz,_mm256_set1_epi32((int)0xCB1AB31Fu))); h=vRot13(h);
+	h=_mm256_xor_si256(h,_mm256_srli_epi32(h,15));
+	h=_mm256_mullo_epi32(h,_mm256_set1_epi32((int)0x2C1B3C6Du));
+	h=_mm256_xor_si256(h,_mm256_srli_epi32(h,12));
+	h=_mm256_mullo_epi32(h,_mm256_set1_epi32((int)0x297A2D39u));
+	h=_mm256_xor_si256(h,_mm256_srli_epi32(h,15));
+	return h;
+}
+// float(uint32) — correctly rounded, matching the scalar cast (see notes).
+static inline __m256 vU32ToF(__m256i h) {
+	const __m256 lo=_mm256_cvtepi32_ps(_mm256_and_si256(h,_mm256_set1_epi32(0xFFFF)));
+	const __m256 hi=_mm256_cvtepi32_ps(_mm256_srli_epi32(h,16));
+	return _mm256_add_ps(lo,_mm256_mul_ps(hi,_mm256_set1_ps(65536.0f)));
+}
+static inline __m256i vFloorI(__m256 x, __m256& xf) {
+	xf=_mm256_floor_ps(x);
+	return _mm256_cvttps_epi32(xf);
+}
+static inline __m256 vFogSin(__m256 x) {
+	__m256 r=_mm256_mul_ps(x,_mm256_set1_ps(1.0f/6.2831853f));
+	r=_mm256_sub_ps(r,_mm256_floor_ps(r));
+	const __m256 f=_mm256_mul_ps(r,_mm256_set1_ps(1024.0f));
+	const __m256i i=_mm256_cvttps_epi32(f);
+	const __m256 s0=_mm256_i32gather_ps(g_fogTrig.s,i,4);
+	const __m256 s1=_mm256_i32gather_ps(g_fogTrig.s,_mm256_add_epi32(i,_mm256_set1_epi32(1)),4);
+	return _mm256_add_ps(s0,_mm256_mul_ps(_mm256_sub_ps(s1,s0),
+	                     _mm256_sub_ps(f,_mm256_cvtepi32_ps(i))));
+}
+static inline __m256 vFogCos(__m256 x) {
+	return vFogSin(_mm256_add_ps(x,_mm256_set1_ps(1.5707963f)));
+}
+// blobNoiseAt (value-noise octave, used as the metaball size modulator).
+static inline __m256 vBlobNoise(__m256 wx, __m256 wy, __m256 wz, float cell, float invCell) {
+	const __m256 vic=_mm256_set1_ps(invCell), vc=_mm256_set1_ps(cell);
+	__m256 fx,fy,fz;
+	const __m256i cx=vFloorI(_mm256_mul_ps(wx,vic),fx);
+	const __m256i cy=vFloorI(_mm256_mul_ps(wy,vic),fy);
+	const __m256i cz=vFloorI(_mm256_mul_ps(wz,vic),fz);
+	const __m256i one=_mm256_set1_epi32(1);
+	const __m256 kInv=_mm256_set1_ps(1.0f/4294967296.0f);
+	auto h01=[&](__m256i x,__m256i y,__m256i z){
+		return _mm256_mul_ps(vU32ToF(vCellHash(x,y,z)),kInv); };
+	const __m256i cx1=_mm256_add_epi32(cx,one), cy1=_mm256_add_epi32(cy,one), cz1=_mm256_add_epi32(cz,one);
+	const __m256 c000=h01(cx,cy,cz),   c100=h01(cx1,cy,cz);
+	const __m256 c010=h01(cx,cy1,cz),  c110=h01(cx1,cy1,cz);
+	const __m256 c001=h01(cx,cy,cz1),  c101=h01(cx1,cy,cz1);
+	const __m256 c011=h01(cx,cy1,cz1), c111=h01(cx1,cy1,cz1);
+	// u = (wx - float(cx)*cell) * invCell, then the quintic fade — mirrored.
+	auto fade=[&](__m256 w,__m256 cf){
+		__m256 u=_mm256_mul_ps(_mm256_sub_ps(w,_mm256_mul_ps(cf,vc)),vic);
+		const __m256 u3=_mm256_mul_ps(_mm256_mul_ps(u,u),u);
+		return _mm256_mul_ps(u3,_mm256_add_ps(_mm256_mul_ps(u,
+		       _mm256_sub_ps(_mm256_mul_ps(u,_mm256_set1_ps(6.f)),_mm256_set1_ps(15.f))),
+		       _mm256_set1_ps(10.f)));
+	};
+	const __m256 u=fade(wx,fx), v=fade(wy,fy), w=fade(wz,fz);
+	auto lp=[&](__m256 a,__m256 b,__m256 t){ return _mm256_add_ps(a,_mm256_mul_ps(_mm256_sub_ps(b,a),t)); };
+	const __m256 x00=lp(c000,c100,u), x01=lp(c001,c101,u);
+	const __m256 x10=lp(c010,c110,u), x11=lp(c011,c111,u);
+	const __m256 y0=lp(x00,x10,v), y1=lp(x01,x11,v);
+	const __m256 val=lp(y0,y1,w);
+	const __m256 d=_mm256_mul_ps(_mm256_sub_ps(val,_mm256_set1_ps(0.45f)),_mm256_set1_ps(1.8f));
+	return _mm256_max_ps(_mm256_min_ps(d,_mm256_set1_ps(1.0f)),_mm256_setzero_ps());
+}
+// metaballNoiseAt — 27-cell additive blob field, one vector iteration per cell.
+static inline __m256 vMetaball(__m256 wx, __m256 wy, __m256 wz, float invCell,
+                               float radius, float thresh, float invT) {
+	const __m256 vic=_mm256_set1_ps(invCell);
+	const __m256 px=_mm256_mul_ps(wx,vic), py=_mm256_mul_ps(wy,vic), pz=_mm256_mul_ps(wz,vic);
+	__m256 fx,fy,fz;
+	const __m256i cx=vFloorI(px,fx), cy=vFloorI(py,fy), cz=vFloorI(pz,fz);
+	const __m256 invR2=_mm256_set1_ps(1.0f/(radius*radius));
+	const __m256 kJ=_mm256_set1_ps(1.0f/1024.0f);
+	const __m256i m10=_mm256_set1_epi32(1023);
+	__m256 sum=_mm256_setzero_ps();
+	for (int dz=-1; dz<=1; ++dz)
+	for (int dy=-1; dy<=1; ++dy)
+	for (int dx=-1; dx<=1; ++dx) {
+		const __m256i gx=_mm256_add_epi32(cx,_mm256_set1_epi32(dx));
+		const __m256i gy=_mm256_add_epi32(cy,_mm256_set1_epi32(dy));
+		const __m256i gz=_mm256_add_epi32(cz,_mm256_set1_epi32(dz));
+		const __m256i h=vCellHash(gx,gy,gz);
+		// float(gx) + float(h&1023)/1024 - px  (mirrored term tree)
+		const __m256 ddx=_mm256_sub_ps(_mm256_add_ps(_mm256_cvtepi32_ps(gx),
+		    _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_and_si256(h,m10)),kJ)),px);
+		const __m256 ddy=_mm256_sub_ps(_mm256_add_ps(_mm256_cvtepi32_ps(gy),
+		    _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(h,10),m10)),kJ)),py);
+		const __m256 ddz=_mm256_sub_ps(_mm256_add_ps(_mm256_cvtepi32_ps(gz),
+		    _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(h,20),m10)),kJ)),pz);
+		const __m256 d2=_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ddx,ddx),
+		                _mm256_mul_ps(ddy,ddy)),_mm256_mul_ps(ddz,ddz));
+		const __m256 t=_mm256_sub_ps(_mm256_set1_ps(1.0f),_mm256_mul_ps(d2,invR2));
+		const __m256 m=_mm256_cmp_ps(t,_mm256_setzero_ps(),_CMP_GT_OQ);
+		// masked add: contributes t*t or +0.0 — bit-safe, sum stays >= +0.
+		sum=_mm256_add_ps(sum,_mm256_and_ps(_mm256_mul_ps(t,t),m));
+	}
+	const __m256 d=_mm256_mul_ps(_mm256_sub_ps(sum,_mm256_set1_ps(thresh)),_mm256_set1_ps(invT));
+	// d<=0 -> 0; else min(d,1)  (scalar: return d>1 ? 1 : d)
+	return _mm256_max_ps(_mm256_min_ps(d,_mm256_set1_ps(1.0f)),_mm256_setzero_ps());
+}
+// fogWarp — drift + curl swirl, mirrored sequencing (wz uses pre-warp x, wy
+// uses pre-warp x and POST-warp wz).
+static inline void vFogWarp(const FastFogParams& P, __m256& wx, __m256& wy, __m256& wz) {
+	wx=_mm256_add_ps(wx,_mm256_set1_ps(P.driftX));
+	wy=_mm256_add_ps(wy,_mm256_set1_ps(P.driftY));
+	wz=_mm256_add_ps(wz,_mm256_set1_ps(P.driftZ));
+	if (P.swirlAmp > 0.0f) {
+		const __m256 amp=_mm256_set1_ps(P.swirlAmp), f=_mm256_set1_ps(P.swirlFreq),
+		             ph=_mm256_set1_ps(P.swirlPhase);
+		const __m256 ox=wx;
+		wx=_mm256_add_ps(wx,_mm256_mul_ps(amp,vFogSin(_mm256_add_ps(_mm256_mul_ps(wz,f),ph))));
+		wz=_mm256_add_ps(wz,_mm256_mul_ps(amp,vFogCos(_mm256_add_ps(_mm256_mul_ps(ox,f),ph))));
+		wy=_mm256_add_ps(wy,_mm256_mul_ps(_mm256_mul_ps(amp,_mm256_set1_ps(0.5f)),
+		     vFogSin(_mm256_add_ps(_mm256_mul_ps(_mm256_mul_ps(_mm256_add_ps(ox,wz),f),
+		                                         _mm256_set1_ps(0.7f)),
+		                           _mm256_mul_ps(ph,_mm256_set1_ps(1.3f))))));
+	}
+}
+// fogNoiseAt for the metaball-overlap config (the only one the vec path takes).
+static inline __m256 vFogNoise(const FastFogParams& P, __m256 wx, __m256 wy, __m256 wz,
+                               float cell, float invCell) {
+	vFogWarp(P,wx,wy,wz);
+	__m256 d=vMetaball(wx,wy,wz,invCell,P.blobOverlap,P.worleyThresh,P.worleyInvT);
+	if (_mm256_movemask_ps(_mm256_cmp_ps(d,_mm256_setzero_ps(),_CMP_GT_OQ)) == 0)
+		return d;   // all lanes <= 0 (exact zeros) — matches scalar early return
+	const float mc=cell*2.7f;
+	const __m256 mod=_mm256_add_ps(_mm256_set1_ps(0.35f),vBlobNoise(wx,wy,wz,mc,1.0f/mc));
+	// scalar: if (d<=0) return 0; d *= mod; clamp 1. Lanes with d==0: 0*mod=+0.
+	d=_mm256_mul_ps(d,mod);
+	return _mm256_min_ps(d,_mm256_set1_ps(1.0f));
+}
+// Config gate for the vectorized density block.
+static inline bool froxelDensityVecOK(const FastFogParams& P, int taps) {
+	static const bool on=[](){ const char* e=getenv("FDS_FOG_COLUMNS_VEC"); return !(e&&e[0]=='0'); }();
+	return on && P.blobs && P.blobOverlap > 0.0f && taps == 1;
+}
+// Pass-1 density for 8 consecutive slices of one column. lodC1 must be the
+// caller's float(XRes)*invNx (the scalar fpXY term is (z*lodC1)*invFOVX).
+static void Froxel_DensityBlock8(const FastFogParams& P, const float* zb, int iz0,
+                                 uint32_t colPhase, float Dxc, float gYc, float Dzc,
+                                 float fpScale, float jcap, bool temporal,
+                                 float invTaps, float lodC1, float* dens)
+{
+	const __m256i lane=_mm256_setr_epi32(0,1,2,3,4,5,6,7);
+	const __m256 zbLo=_mm256_loadu_ps(zb+iz0), zbHi=_mm256_loadu_ps(zb+iz0+1);
+	const __m256 z =_mm256_mul_ps(_mm256_set1_ps(0.5f),_mm256_add_ps(zbLo,zbHi));
+	const __m256 dz=_mm256_sub_ps(zbHi,zbLo);
+	const __m256 fp=_mm256_mul_ps(z,_mm256_set1_ps(fpScale));
+	const __m256 jamp=_mm256_min_ps(fp,_mm256_set1_ps(jcap));
+	__m256 jrx,jry,jrz;
+	if (temporal) {
+		const __m256i k=_mm256_and_si256(_mm256_add_epi32(_mm256_set1_epi32(int(colPhase)),
+		                _mm256_add_epi32(_mm256_set1_epi32(iz0),lane)),_mm256_set1_epi32(7));
+		const __m256 jx=_mm256_sub_ps(_mm256_i32gather_ps(g_frHalton2,k,4),_mm256_set1_ps(0.5f));
+		const __m256 jy=_mm256_sub_ps(_mm256_i32gather_ps(g_frHalton3,k,4),_mm256_set1_ps(0.5f));
+		jrx=_mm256_add_ps(_mm256_mul_ps(jx,_mm256_set1_ps(P.w00)),_mm256_mul_ps(jy,_mm256_set1_ps(P.w01)));
+		jry=_mm256_add_ps(_mm256_mul_ps(jx,_mm256_set1_ps(P.w10)),_mm256_mul_ps(jy,_mm256_set1_ps(P.w11)));
+		jrz=_mm256_add_ps(_mm256_mul_ps(jx,_mm256_set1_ps(P.w20)),_mm256_mul_ps(jy,_mm256_set1_ps(P.w21)));
+	} else {
+		jrx=jry=jrz=_mm256_setzero_ps();
+	}
+	const __m256 wx=_mm256_add_ps(_mm256_add_ps(_mm256_set1_ps(P.camX),
+	                _mm256_mul_ps(z,_mm256_set1_ps(Dxc))),_mm256_mul_ps(jrx,jamp));
+	const __m256 wy=_mm256_add_ps(_mm256_add_ps(_mm256_set1_ps(P.camY),
+	                _mm256_mul_ps(z,_mm256_set1_ps(gYc))),_mm256_mul_ps(jry,jamp));
+	const __m256 wz=_mm256_add_ps(_mm256_add_ps(_mm256_set1_ps(P.camZ),
+	                _mm256_mul_ps(z,_mm256_set1_ps(Dzc))),_mm256_mul_ps(jrz,jamp));
+	// Slab: outside lanes end at exactly 0 via the feather (see notes); a
+	// whole-block miss (sky above the fog top) skips the noise entirely.
+	const __m256 inSlab=_mm256_and_ps(
+		_mm256_cmp_ps(wy,_mm256_set1_ps(P.slabY0),_CMP_GE_OQ),
+		_mm256_cmp_ps(wy,_mm256_set1_ps(P.slabY1),_CMP_LE_OQ));
+	if (_mm256_movemask_ps(inSlab) == 0) {
+		_mm256_storeu_ps(dens+iz0,_mm256_setzero_ps());
+		return;
+	}
+	__m256 dt=vFogNoise(P,wx,wy,wz,P.cell,P.invCell);
+	// Feather — scalar's LEFT-ASSOCIATIVE product mirrored term by term.
+	{
+		__m256 lo=_mm256_mul_ps(_mm256_sub_ps(wy,_mm256_set1_ps(P.slabY0)),_mm256_set1_ps(P.invFeather));
+		__m256 hi=_mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(P.slabY1),wy),_mm256_set1_ps(P.invFeather));
+		lo=_mm256_max_ps(_mm256_min_ps(lo,_mm256_set1_ps(1.f)),_mm256_setzero_ps());
+		hi=_mm256_max_ps(_mm256_min_ps(hi,_mm256_set1_ps(1.f)),_mm256_setzero_ps());
+		__m256 t=_mm256_mul_ps(lo,lo);
+		t=_mm256_mul_ps(t,_mm256_sub_ps(_mm256_set1_ps(3.0f),_mm256_mul_ps(_mm256_set1_ps(2.0f),lo)));
+		t=_mm256_mul_ps(t,hi);
+		t=_mm256_mul_ps(t,hi);
+		t=_mm256_mul_ps(t,_mm256_sub_ps(_mm256_set1_ps(3.0f),_mm256_mul_ps(_mm256_set1_ps(2.0f),hi)));
+		dt=_mm256_mul_ps(dt,t);
+	}
+	// Distance LOD (scalar column-loop block): coarse octave blended by
+	// footprint, only for in-slab lanes with lod > 0.
+	{
+		const __m256 fpXY=_mm256_mul_ps(_mm256_mul_ps(z,_mm256_set1_ps(lodC1)),
+		                                _mm256_set1_ps(P.invFOVX));
+		const __m256 fpL=_mm256_max_ps(dz,fpXY);
+		__m256 lod=_mm256_mul_ps(_mm256_sub_ps(fpL,_mm256_set1_ps(P.cell)),
+		                         _mm256_set1_ps(1.0f/P.cell));
+		lod=_mm256_max_ps(_mm256_min_ps(lod,_mm256_set1_ps(1.f)),_mm256_setzero_ps());
+		const __m256 lodM=_mm256_and_ps(inSlab,
+			_mm256_cmp_ps(lod,_mm256_setzero_ps(),_CMP_GT_OQ));
+		if (_mm256_movemask_ps(lodM) != 0) {
+			const __m256 coarse=vFogNoise(P,wx,wy,wz,P.cell*4.0f,P.invCell*0.25f);
+			// KNOWN ±ulp RESIDUAL (self-test-verified): non-LOD slices are
+			// bit-exact, but `coarse` here can differ from the scalar by a
+			// few ulp — clang inlines fogNoiseAt at the fine and coarse call
+			// sites with DIFFERENT fp-contraction choices, and this code can
+			// only mirror one of them. Net effect after the temporal EMA:
+			// ~2 of 6.2M image channels off by 1 LSB (city t=300). For
+			// byte-exact verification of OTHER changes, run with
+			// FDS_FOG_COLUMNS_VEC=0 (the scalar path is untouched).
+			const __m256 blended=_mm256_add_ps(dt,
+				_mm256_mul_ps(_mm256_sub_ps(coarse,dt),lod));
+			dt=_mm256_blendv_ps(dt,blended,lodM);
+		}
+	}
+	// Out-of-slab lanes must be EXACTLY the scalar's early-return 0 (the
+	// feather already zeroed them, but keep the semantics explicit).
+	dt=_mm256_and_ps(dt,inSlab);
+	_mm256_storeu_ps(dens+iz0,_mm256_mul_ps(dt,_mm256_set1_ps(invTaps)));
 }
 
 // Fused populate + front-to-back integrate, one pass per froxel column (the
@@ -1388,8 +1658,8 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	// coherent 20% shimmer still reads as flicker. Decorrelated phases turn
 	// the same residual into fine spatial noise that the bilinear composite
 	// and the blend average away; the converged mean is identical.
-	static const float h2[8] = {1/2.f,1/4.f,3/4.f,1/8.f,5/8.f,3/8.f,7/8.f,1/16.f};
-	static const float h3[8] = {1/3.f,2/3.f,1/9.f,4/9.f,7/9.f,2/9.f,5/9.f,8/9.f};
+	const float* h2 = g_frHalton2;
+	const float* h3 = g_frHalton3;
 	float dens[kFrMaxNz];
 	float glowR[kFrMaxNz], glowG[kFrMaxNz], glowB[kFrMaxNz];
 	float flashGlowR[kFrMaxNz], flashGlowG[kFrMaxNz], flashGlowB[kFrMaxNz];  // transient (not historied)
@@ -1435,7 +1705,63 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			// doubles convergence for ~2× the noise-field cost.
 			const int taps = gFrTemporal ? P.taps : 1;
 			const float invTaps = taps > 1 ? 0.5f : 1.0f;
-			for (int iz = 0; iz < nz; ++iz) {
+			// Vectorized density: 8 slices per step (bit-exact mirror — see
+			// Froxel_DensityBlock8). Scalar loop covers the tail and any
+			// config the vec path doesn't take (worley-only, taps==2,
+			// FDS_FOG_COLUMNS_VEC=0).
+			int izStart = 0;
+			if (froxelDensityVecOK(P, taps)) {
+				const float lodC1 = float(P.xres) * invNx;   // scalar fpXY's (z*C1)*C2 grouping
+				for (; izStart + 8 <= nz; izStart += 8)
+					Froxel_DensityBlock8(P, zb, izStart, colPhase, Dxc, gYc, Dzc,
+					                     fpScale, jcap, gFrTemporal, invTaps, lodC1, dens);
+				// TEMP exactness harness: recompute the vec range with the
+				// scalar loop below (same generated code — the loop is shared)
+				// and report bit mismatches. FDS_FOG_COLVEC_SELFTEST=1.
+				static const bool sColSelfTest = getenv("FDS_FOG_COLVEC_SELFTEST") != nullptr;
+				if (sColSelfTest && izStart > 0) {
+					float ref[kFrMaxNz];
+					for (int iz = 0; iz < izStart; ++iz) {
+						const float z  = 0.5f * (zb[iz] + zb[iz+1]);
+						const float dz = zb[iz+1] - zb[iz];
+						const float fp = z * fpScale;
+						const float jamp = fp < jcap ? fp : jcap;
+						float jrx = 0.0f, jry = 0.0f, jrz = 0.0f;
+						if (gFrTemporal) {
+							const uint32_t k = (colPhase + uint32_t(iz)) & 7u;
+							const float jx = h2[k] - 0.5f, jy = h3[k] - 0.5f;
+							jrx = jx*P.w00 + jy*P.w01;
+							jry = jx*P.w10 + jy*P.w11;
+							jrz = jx*P.w20 + jy*P.w21;
+						}
+						const float wx = P.camX + z*Dxc + jrx*jamp;
+						const float wy = P.camY + z*gYc + jry*jamp;
+						const float wz = P.camZ + z*Dzc + jrz*jamp;
+						float dt = froxelDensity(P, wx, wy, wz);
+						if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
+							const float fpXY = z * (float(P.xres)*invNx) * P.invFOVX;
+							const float fpL = dz > fpXY ? dz : fpXY;
+							float lod = (fpL - P.cell) * (1.0f/P.cell);
+							lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
+							if (lod > 0.0f) {
+								const float coarse = fogNoiseAt(P, wx, wy, wz, P.cell*4.0f, P.invCell*0.25f);
+								dt += (coarse - dt) * lod;
+							}
+						}
+						ref[iz] = (0.0f + dt) * invTaps;
+						if (memcmp(&ref[iz], &dens[iz], 4) != 0) {
+							static std::atomic<int> sMis{0};
+							if (sMis.fetch_add(1) < 24) {
+								uint32_t rb, vb; memcpy(&rb,&ref[iz],4); memcpy(&vb,&dens[iz],4);
+								fprintf(stderr, "[COLVEC-MISMATCH] ix=%d iy=%d iz=%d "
+								        "ref=%.9g(%08x) vec=%.9g(%08x) wy=%.9g z=%.9g\n",
+								        ix, iy, iz, ref[iz], rb, dens[iz], vb, wy, z);
+							}
+						}
+					}
+				}
+			}
+			for (int iz = izStart; iz < nz; ++iz) {
 				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
 				const float dz = zb[iz+1] - zb[iz];
 				const float fp = z * fpScale;
@@ -1732,6 +2058,28 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	}
 }
 
+// Legacy 1998 distance dim (fast_fog_dist_dim) — see FastFogParams::distDim.
+// Distance is RADIAL (z·|V|, |V|=sqrt(X²+Y²+1)) so the falloff is view-angle
+// independent — pitching the camera doesn't shift where a given world
+// distance dims to. Sky (ze==0) dims at the horizon distance (fogFar): the
+// fogged background must darken WITH the distant buildings, or the horizon
+// stays a bright white wall over a dimmed skyline. (The legacy pass skipped
+// sky because pre-fog sky was a dark starfield; forward pixels dim by their
+// own depth now — no mat-sentinel exclusion.)
+static inline float frDistDim(const FastFogParams& P, int px, int py,
+                              size_t i, uint16_t ze) {
+	(void)i;
+	if (P.distDim <= 0.0f) return 1.0f;
+	const float z = (ze == 0) ? P.fogFar
+	                          : float(0xFF80 - int(ze)) * P.invZScale;
+	const float X = (float(px) - P.cntrEX) * P.invFOVX;
+	const float Y = (P.cntrEY - float(py)) * P.invFOVY;
+	const float vlen = std::sqrt(X*X + Y*Y + 1.0f);
+	float t = 1.0f - (z * vlen) * P.distDimInvFar;
+	if (t < 0.0f) t = 0.0f;
+	return (1.0f - P.distDim) + P.distDim * std::sqrt(t);
+}
+
 // Per-channel TPDF dither (stable per pixel) for the froxel composite.
 static inline float frDither(uint32_t s, float amp) {
 	uint32_t h = s*0x9E3779B9u; h^=h>>15; h*=0x85EBCA6Bu; h^=h>>13;
@@ -1837,8 +2185,15 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 			int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
 			if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 >= nx-1) { ix0 = nx>1?nx-2:0; wx = nx>1?1.0f:0.0f; }
 			const int ix1 = std::min(ix0+1, nx-1);
-			int iz = int(std::log(z * invNear) * invLogFN * float(nz));
-			if (iz < 0) iz = 0; if (iz >= nz) iz = nz-1;
+			// Slice index from the LUT (bit-identical, see build site). Only
+			// the water-reflection branch produces a z the table can't key
+			// (zw is ray-dependent, not ze-dependent) — recompute for those.
+			int iz;
+			if (ze != 0 || z == gFrFar) iz = gFrIzLUT[ze];
+			else {
+				iz = int(std::log(z * invNear) * invLogFN * float(nz));
+				if (iz < 0) iz = 0; if (iz >= nz) iz = nz-1;
+			}
 			const float zb0 = zb[iz], dzSlice = zb[iz+1] - zb0;
 			const float partialDz = z - zb0;
 			// bilinear XY: accPrev(0..2), Tprev(3), accCur(4..6), ext(7)
@@ -1869,6 +2224,7 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				Tpix *= 1.0f - reflAmt2;
 			}
 			const dword pix = out[i];
+			const float dim = frDistDim(P, px, py, i, ze);   // legacy distance dim (1 = off)
 			if (P.hdr) {
 				// HDR: unclamped lit·T + in-scatter → radiance buffer (no dither/
 				// clamp; the tonemap rolls off later). g_hdrBuf is B,G,R,(pad)
@@ -1883,19 +2239,392 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				float scnB, scnG, scnR;
 				if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
 				else { scnR = float((pix>>16)&0xFFu); scnG = float((pix>>8)&0xFFu); scnB = float(pix&0xFFu); }
-				h[2] = fds::HdrClamp(scnR*Tpix + aR);
-				h[1] = fds::HdrClamp(scnG*Tpix + aG);
-				h[0] = fds::HdrClamp(scnB*Tpix + aB);
+				h[2] = fds::HdrClamp((scnR*Tpix + aR)*dim);
+				h[1] = fds::HdrClamp((scnG*Tpix + aG)*dim);
+				h[0] = fds::HdrClamp((scnB*Tpix + aB)*dim);
 			} else {
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
-				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
-			int nG = int(float((pix>> 8)&0xFFu)*Tpix + aG + frDither(sd^0x68E31DA4u, da));
-			int nB = int(float( pix     &0xFFu)*Tpix + aB + frDither(sd^0xB5297A4Du, da));
+				int nR = int((float((pix>>16)&0xFFu)*Tpix + aR)*dim + frDither(sd, da));
+			int nG = int((float((pix>> 8)&0xFFu)*Tpix + aG)*dim + frDither(sd^0x68E31DA4u, da));
+			int nB = int((float( pix     &0xFFu)*Tpix + aB)*dim + frDither(sd^0xB5297A4Du, da));
 				if (nR<0)nR=0; if (nG<0)nG=0; if (nB<0)nB=0;
 			if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
 			out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
 			}
 		}
+	}
+}
+
+// Single-pixel scalar composite — byte-identical to Froxel_CompositeTile's
+// inner body. Used as the fallback for the SIMD path's edge/tail groups and
+// the rare water-reflection lanes. (Recomputes the per-row invariants; only
+// ever runs on a minority of pixels, so the redundant log() is irrelevant.)
+static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P) {
+	const uint16_t* zEnc = P.zpage16;
+	dword* out = reinterpret_cast<dword*>(P.vpage);
+	const int nx = gFrX, ny = gFrY, nz = gFrZ;
+	const float fnx = float(nx)/float(P.xres), fny = float(ny)/float(P.yres);
+	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
+	const float invNear  = 1.0f / gFrNear;
+	const float* zb = gFrZb.data();
+	const float* sctA = gFrSct[gFrCur].data();
+	auto col = [&](int ix, int iy, int iz, float* o) {
+		const size_t ic = (size_t(iy)*nx + ix)*nz + iz;
+		o[4]=gFrAccR[ic]; o[5]=gFrAccG[ic]; o[6]=gFrAccB[ic]; o[7]=sctA[ic*4+3];
+		if (iz > 0) { const size_t ip=ic-1; o[0]=gFrAccR[ip];o[1]=gFrAccG[ip];o[2]=gFrAccB[ip];o[3]=gFrT[ip]; }
+		else { o[0]=o[1]=o[2]=0.0f; o[3]=1.0f; }
+	};
+	const size_t row = size_t(py) * size_t(P.xres);
+	const float fy = (float(py)+0.5f)*fny - 0.5f;
+	int iy0 = int(std::floor(fy)); float wy = fy - float(iy0);
+	if (iy0 < 0) { iy0 = 0; wy = 0.0f; } if (iy0 >= ny-1) { iy0 = ny>1?ny-2:0; wy = ny>1?1.0f:0.0f; }
+	const int iy1 = std::min(iy0+1, ny-1);
+	const size_t i = row + size_t(px);
+	const uint16_t ze = zEnc[i];
+	float z;
+	float reflAmt2 = 0.0f;
+	if (ze == 0) {
+		z = gFrFar;
+		if (gFrReflZ) {
+			const uint16_t zr = gFrReflZ[i];
+			if (zr) {
+				const float zm = float(0xFF80 - int(zr)) * P.invZScale;
+				if (zm > 0.0f && zm < gFrFar) {
+					const float Xc = (float(px) - P.cntrEX) * P.invFOVX;
+					const float Yc = (P.cntrEY - float(py)) * P.invFOVY;
+					const float gY = P.w10*Xc + P.w11*Yc + P.w12;
+					float zw = zm;
+					if (gY < -1e-6f) {
+						const float t = (gFrReflWaterY - P.camY) / gY;
+						if (t > 0.0f && t < zm) zw = t;
+					}
+					z = zw < gFrNear ? gFrNear : zw;
+					const float L = zm - zw;
+					if (L > 0.0f) {
+						const float gYu = -gY;
+						float sB = L;
+						if (gYu > 1e-6f) {
+							const float sExit =
+							    (P.slabY1 - gFrReflWaterY) / gYu;
+							if (sExit < sB) sB = sExit;
+						}
+						if (sB > 0.0f) {
+							const float uV = Xc*Xc + Yc*Yc + 1.0f;
+							const float m  = P.kHeight*gYu + P.invRf;
+							const float hb = (P.kHeight != 0.0f)
+							    ? fastExpNeg(P.kHeight * gFrReflWaterY)
+							    : 1.0f;
+							const float meanD = P.blobs ? 0.22f : 1.0f;
+							const float tau = P.sigma * meanD
+							    * std::sqrt(uV) * hb
+							    * fogAntiderivG(sB, m);
+							reflAmt2 = 1.0f - fastExpNeg(tau);
+							if (reflAmt2 > 1.0f) reflAmt2 = 1.0f;
+							if (reflAmt2 < 0.0f) reflAmt2 = 0.0f;
+						}
+					}
+				}
+			}
+		}
+	} else {
+		const float zSurf = float(0xFF80 - int(ze)) * P.invZScale;
+		z = zSurf > gFrFar ? gFrFar : zSurf;
+	}
+	if (z < gFrNear) z = gFrNear;
+	const float fx = (float(px)+0.5f)*fnx - 0.5f;
+	int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
+	if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 >= nx-1) { ix0 = nx>1?nx-2:0; wx = nx>1?1.0f:0.0f; }
+	const int ix1 = std::min(ix0+1, nx-1);
+	int iz;
+	if (ze != 0 || z == gFrFar) iz = gFrIzLUT[ze];
+	else {
+		iz = int(std::log(z * invNear) * invLogFN * float(nz));
+		if (iz < 0) iz = 0; if (iz >= nz) iz = nz-1;
+	}
+	const float zb0 = zb[iz], dzSlice = zb[iz+1] - zb0;
+	const float partialDz = z - zb0;
+	const float w00=(1-wx)*(1-wy), w10=wx*(1-wy), w01=(1-wx)*wy, w11=wx*wy;
+	float acc[8] = {0,0,0,0,0,0,0,0}, c[8];
+	col(ix0,iy0,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w00;
+	col(ix1,iy0,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w10;
+	col(ix0,iy1,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w01;
+	col(ix1,iy1,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w11;
+	const float ext = acc[7];
+	float aR,aG,aB,Tpix;
+	if (ext > 1e-8f) {
+		const float ToptPart = fastExpNeg(ext * partialDz);
+		const float ToptFull = fastExpNeg(ext * dzSlice);
+		const float denom = 1.0f - ToptFull;
+		const float frac = denom > 1e-6f ? (1.0f - ToptPart) / denom : 0.0f;
+		aR = acc[0] + (acc[4]-acc[0])*frac;
+		aG = acc[1] + (acc[5]-acc[1])*frac;
+		aB = acc[2] + (acc[6]-acc[2])*frac;
+		Tpix = acc[3] * ToptPart;
+	} else { aR=acc[0]; aG=acc[1]; aB=acc[2]; Tpix=acc[3]; }
+	if (reflAmt2 > 0.0f) {
+		aR += Tpix * P.fogR * reflAmt2;
+		aG += Tpix * P.fogG * reflAmt2;
+		aB += Tpix * P.fogB * reflAmt2;
+		Tpix *= 1.0f - reflAmt2;
+	}
+	const dword pix = out[i];
+	const float dim = frDistDim(P, px, py, i, ze);   // legacy distance dim (1 = off)
+	if (P.hdr) {
+		fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+		float scnB, scnG, scnR;
+		if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
+		else { scnR = float((pix>>16)&0xFFu); scnG = float((pix>>8)&0xFFu); scnB = float(pix&0xFFu); }
+		h[2] = fds::HdrClamp((scnR*Tpix + aR)*dim);
+		h[1] = fds::HdrClamp((scnG*Tpix + aG)*dim);
+		h[0] = fds::HdrClamp((scnB*Tpix + aB)*dim);
+	} else {
+		const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
+		int nR = int((float((pix>>16)&0xFFu)*Tpix + aR)*dim + frDither(sd, da));
+		int nG = int((float((pix>> 8)&0xFFu)*Tpix + aG)*dim + frDither(sd^0x68E31DA4u, da));
+		int nB = int((float( pix     &0xFFu)*Tpix + aB)*dim + frDither(sd^0xB5297A4Du, da));
+		if (nR<0)nR=0; if (nG<0)nG=0; if (nB<0)nB=0;
+		if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
+		out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+	}
+}
+
+// SIMD (AVX2 via simde) composite: 8 contiguous pixels per step. Vectorizes
+// the froxel bilinear blend (via emulated gathers) + the Beer-Lambert tail
+// and the dither/pack. iz (uint8 LUT), the zb slice boundaries, fastExpNeg
+// (file-static ExpTable in FRUSTRUM.CPP), and frDither stay scalar-per-lane —
+// they can't vectorize on this NEON target — and are assembled through the
+// stack. HDR runs the vectorized front-end with a scalar-per-lane fp16
+// output stage (see the P.hdr branch); tile-edge partial groups and any
+// group containing a water-reflection lane fall back to Froxel_CompositePixel.
+// Gated behind FDS_FOG_COMPOSITE_VEC; kept bit-identical to the scalar path
+// (matched op order + FMA sites under -ffp-contract=fast).
+static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastFogParams& P) {
+	const uint16_t* zEnc = P.zpage16;
+	dword* out = reinterpret_cast<dword*>(P.vpage);
+	const int nx = gFrX, ny = gFrY, nz = gFrZ;
+	const float fnx = float(nx)/float(P.xres), fny = float(ny)/float(P.yres);
+	const float* zb = gFrZb.data();
+	const float* sctA = gFrSct[gFrCur].data();
+	const float* accRp = gFrAccR.data();
+	const float* accGp = gFrAccG.data();
+	const float* accBp = gFrAccB.data();
+	const float* accTp = gFrT.data();
+	const uint8_t* izLUT = gFrIzLUT.data();
+
+	const __m256 vFar  = _mm256_set1_ps(gFrFar);
+	const __m256 vNear = _mm256_set1_ps(gFrNear);
+	const __m256 vInvZ = _mm256_set1_ps(P.invZScale);
+	const __m256 vHalf = _mm256_set1_ps(0.5f);
+	const __m256 vOne  = _mm256_set1_ps(1.0f);
+	const __m256 vZero = _mm256_setzero_ps();
+	const __m256 vFnx  = _mm256_set1_ps(fnx);
+	const __m256i iZero= _mm256_setzero_si256();
+	const __m256i iOne = _mm256_set1_epi32(1);
+	const __m256i iFF80= _mm256_set1_epi32(0xFF80);
+	const __m256i iNz  = _mm256_set1_epi32(nz);
+	const __m256i iNxm2= _mm256_set1_epi32(nx>1?nx-2:0);
+	const __m256i iNxm1= _mm256_set1_epi32(nx-1);
+	const __m256i i255 = _mm256_set1_epi32(255);
+	const __m256i iFF  = _mm256_set1_epi32(0xFF);
+	const __m256i iAlpha=_mm256_set1_epi32((int)0xFF000000u);
+	const __m256i lane = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+	const float da = P.ditherAmp;
+
+	for (int py = y1; py < y2; ++py) {
+		const size_t row = size_t(py) * size_t(P.xres);
+		const float fy = (float(py)+0.5f)*fny - 0.5f;
+		int iy0 = int(std::floor(fy)); float wy = fy - float(iy0);
+		if (iy0 < 0) { iy0 = 0; wy = 0.0f; } if (iy0 >= ny-1) { iy0 = ny>1?ny-2:0; wy = ny>1?1.0f:0.0f; }
+		const int iy1 = std::min(iy0+1, ny-1);
+		const __m256i vRb0 = _mm256_set1_epi32(iy0*nx);
+		const __m256i vRb1 = _mm256_set1_epi32(iy1*nx);
+		const __m256 vWy  = _mm256_set1_ps(wy);
+		const __m256 vWy1 = _mm256_set1_ps(1.0f - wy);
+		int px = x1;
+		for (; px + 8 <= x2; px += 8) {
+			const size_t i0 = row + size_t(px);
+			// Punt any group holding a water-reflection lane to the scalar path.
+			if (gFrReflZ) {
+				bool punt = false;
+				for (int L=0;L<8;++L) if (zEnc[i0+L]==0 && gFrReflZ[i0+L]!=0){punt=true;break;}
+				if (punt) { for(int L=0;L<8;++L) Froxel_CompositePixel(px+L,py,P); continue; }
+			}
+			// ze, sky mask, z (= max(min(zSurf,far)|far, near))
+			__m256i ze = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)&zEnc[i0]));
+			__m256 skyM = _mm256_castsi256_ps(_mm256_cmpeq_epi32(ze, iZero));
+			__m256 zSurf = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(iFF80, ze)), vInvZ);
+			__m256 z = _mm256_blendv_ps(_mm256_min_ps(zSurf, vFar), vFar, skyM);
+			z = _mm256_max_ps(z, vNear);
+			// bilinear X: ix0, wx (clamp order matches scalar; nx>1 guaranteed)
+			__m256 pxf = _mm256_add_ps(_mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_set1_epi32(px), lane)), vHalf);
+			__m256 fx  = _mm256_sub_ps(_mm256_mul_ps(pxf, vFnx), vHalf);
+			__m256 ix0f= _mm256_floor_ps(fx);
+			__m256 wx  = _mm256_sub_ps(fx, ix0f);
+			__m256i ix0= _mm256_cvttps_epi32(ix0f);
+			__m256 ltz = _mm256_castsi256_ps(_mm256_cmpgt_epi32(iZero, ix0));
+			__m256 gec = _mm256_castsi256_ps(_mm256_cmpgt_epi32(ix0, _mm256_sub_epi32(iNxm1, iOne)));
+			ix0 = _mm256_min_epi32(_mm256_max_epi32(ix0, iZero), iNxm2);
+			wx  = _mm256_blendv_ps(wx, vZero, ltz);
+			wx  = _mm256_blendv_ps(wx, vOne,  gec);
+			__m256i ix1 = _mm256_min_epi32(_mm256_add_epi32(ix0, iOne), iNxm1);
+			// iz (uint8 LUT) + zb slice boundaries — scalar per lane.
+			alignas(32) int zeA[8]; _mm256_store_si256((__m256i*)zeA, ze);
+			alignas(32) int izA[8]; alignas(32) float zb0A[8], dSlA[8];
+			for (int L=0;L<8;++L){ int iz=izLUT[zeA[L]]; izA[L]=iz; float b0=zb[iz]; zb0A[L]=b0; dSlA[L]=zb[iz+1]-b0; }
+			__m256i izv = _mm256_load_si256((const __m256i*)izA);
+			__m256 zb0v = _mm256_load_ps(zb0A);
+			__m256 dSlv = _mm256_load_ps(dSlA);
+			__m256 pDzv = _mm256_sub_ps(z, zb0v);
+			__m256 izPos= _mm256_castsi256_ps(_mm256_cmpgt_epi32(izv, iZero));
+			// column flat indices per corner: ((rowBase+ix)*nz)+iz
+			auto icOf = [&](__m256i ixv, __m256i rbv){
+				return _mm256_add_epi32(_mm256_mullo_epi32(_mm256_add_epi32(rbv, ixv), iNz), izv); };
+			__m256i ic00=icOf(ix0,vRb0), ic10=icOf(ix1,vRb0), ic01=icOf(ix0,vRb1), ic11=icOf(ix1,vRb1);
+			// bilinear weights + fma-chain blend (matches scalar order).
+			__m256 wx1=_mm256_sub_ps(vOne,wx);
+			__m256 w00=_mm256_mul_ps(wx1,vWy1), w10=_mm256_mul_ps(wx,vWy1);
+			__m256 w01=_mm256_mul_ps(wx1,vWy),  w11=_mm256_mul_ps(wx,vWy);
+			auto wsum4=[&](__m256 v00,__m256 v10,__m256 v01,__m256 v11){
+				__m256 a=_mm256_mul_ps(v00,w00);
+				a=_mm256_fmadd_ps(v10,w10,a);
+				a=_mm256_fmadd_ps(v01,w01,a);
+				a=_mm256_fmadd_ps(v11,w11,a);
+				return a; };
+			auto gA=[&](const float* base,__m256i idx){ return _mm256_i32gather_ps(base, idx, 4); };
+			// Uniform-group fast path: when all 8 lanes share (ix0, iz) —
+			// sky and flat/distant surfaces mostly do — every gather in this
+			// group reads the SAME 4 corner froxels, so the 32 emulated
+			// gathers (256 scalar load+insert µops on NEON; measured as this
+			// loop's cost center — an AoS repack of the froxel arrays moved
+			// nothing) collapse to 32 scalar loads + broadcasts. wsum4 op
+			// order and lane values are unchanged (an equal-index gather
+			// returns exactly the broadcast value), so the result stays
+			// bit-identical — including the iz==0 wsum4-of-constants forms
+			// the blendv path would produce.
+			alignas(32) int ix0A[8]; _mm256_store_si256((__m256i*)ix0A, ix0);
+			bool uni = true;
+			for (int L=1;L<8;++L) if (izA[L]!=izA[0] || ix0A[L]!=ix0A[0]) { uni=false; break; }
+			__m256 curR,curG,curB,ext,prevR,prevG,prevB,prevT;
+			if (uni) {
+				const int izs = izA[0], ixs = ix0A[0];
+				const int ix1s = std::min(ixs+1, nx-1);
+				const size_t c00=(size_t(iy0)*nx+ixs )*nz+izs, c10=(size_t(iy0)*nx+ix1s)*nz+izs;
+				const size_t c01=(size_t(iy1)*nx+ixs )*nz+izs, c11=(size_t(iy1)*nx+ix1s)*nz+izs;
+				auto B4=[&](const float* p,size_t a,size_t b,size_t c,size_t d){
+					return wsum4(_mm256_set1_ps(p[a]),_mm256_set1_ps(p[b]),
+					             _mm256_set1_ps(p[c]),_mm256_set1_ps(p[d])); };
+				curR=B4(accRp,c00,c10,c01,c11);
+				curG=B4(accGp,c00,c10,c01,c11);
+				curB=B4(accBp,c00,c10,c01,c11);
+				ext =B4(sctA,c00*4+3,c10*4+3,c01*4+3,c11*4+3);
+				if (izs > 0) {
+					prevR=B4(accRp,c00-1,c10-1,c01-1,c11-1);
+					prevG=B4(accGp,c00-1,c10-1,c01-1,c11-1);
+					prevB=B4(accBp,c00-1,c10-1,c01-1,c11-1);
+					prevT=B4(accTp,c00-1,c10-1,c01-1,c11-1);
+				} else {
+					const __m256 z4 = wsum4(vZero,vZero,vZero,vZero);
+					prevR=z4; prevG=z4; prevB=z4;
+					prevT=wsum4(vOne,vOne,vOne,vOne);
+				}
+			} else {
+			// cur (slice iz): RGB from acc*, ext from sctA[ic*4+3]
+			curR=wsum4(gA(accRp,ic00),gA(accRp,ic10),gA(accRp,ic01),gA(accRp,ic11));
+			curG=wsum4(gA(accGp,ic00),gA(accGp,ic10),gA(accGp,ic01),gA(accGp,ic11));
+			curB=wsum4(gA(accBp,ic00),gA(accBp,ic10),gA(accBp,ic01),gA(accBp,ic11));
+			auto sIdx=[&](__m256i ic){ return _mm256_add_epi32(_mm256_slli_epi32(ic,2), _mm256_set1_epi32(3)); };
+			ext =wsum4(gA(sctA,sIdx(ic00)),gA(sctA,sIdx(ic10)),gA(sctA,sIdx(ic01)),gA(sctA,sIdx(ic11)));
+			// prev (slice iz-1; iz==0 -> RGB 0, T 1). Clamp idx >=0 for safety.
+			auto pIdx=[&](__m256i ic){ return _mm256_max_epi32(_mm256_sub_epi32(ic,iOne), iZero); };
+			__m256i p00=pIdx(ic00),p10=pIdx(ic10),p01=pIdx(ic01),p11=pIdx(ic11);
+			auto prevRGB=[&](const float* base){
+				return wsum4(_mm256_blendv_ps(vZero,gA(base,p00),izPos),
+				             _mm256_blendv_ps(vZero,gA(base,p10),izPos),
+				             _mm256_blendv_ps(vZero,gA(base,p01),izPos),
+				             _mm256_blendv_ps(vZero,gA(base,p11),izPos)); };
+			prevR=prevRGB(accRp); prevG=prevRGB(accGp); prevB=prevRGB(accBp);
+			prevT=wsum4(_mm256_blendv_ps(vOne,gA(accTp,p00),izPos),
+			                   _mm256_blendv_ps(vOne,gA(accTp,p10),izPos),
+			                   _mm256_blendv_ps(vOne,gA(accTp,p01),izPos),
+			                   _mm256_blendv_ps(vOne,gA(accTp,p11),izPos));
+			}
+			// Beer-Lambert tail. exp scalar-per-lane (ExpTable is file-static).
+			__m256 extPos=_mm256_cmp_ps(ext,_mm256_set1_ps(1e-8f),_CMP_GT_OQ);
+			alignas(32) float extA[8],pdA[8],dsA[8],tpA[8],tfA[8];
+			_mm256_store_ps(extA,ext); _mm256_store_ps(pdA,pDzv); _mm256_store_ps(dsA,dSlv);
+			for (int L=0;L<8;++L){ tpA[L]=fastExpNeg(extA[L]*pdA[L]); tfA[L]=fastExpNeg(extA[L]*dsA[L]); }
+			__m256 ToptPart=_mm256_load_ps(tpA), ToptFull=_mm256_load_ps(tfA);
+			__m256 denom=_mm256_sub_ps(vOne,ToptFull);
+			__m256 denomPos=_mm256_cmp_ps(denom,_mm256_set1_ps(1e-6f),_CMP_GT_OQ);
+			__m256 frac=_mm256_blendv_ps(vZero, _mm256_div_ps(_mm256_sub_ps(vOne,ToptPart),denom), denomPos);
+			__m256 aR=_mm256_fmadd_ps(_mm256_sub_ps(curR,prevR),frac,prevR);
+			__m256 aG=_mm256_fmadd_ps(_mm256_sub_ps(curG,prevG),frac,prevG);
+			__m256 aB=_mm256_fmadd_ps(_mm256_sub_ps(curB,prevB),frac,prevB);
+			__m256 Tpix=_mm256_mul_ps(prevT,ToptPart);
+			aR=_mm256_blendv_ps(prevR,aR,extPos);
+			aG=_mm256_blendv_ps(prevG,aG,extPos);
+			aB=_mm256_blendv_ps(prevB,aB,extPos);
+			Tpix=_mm256_blendv_ps(prevT,Tpix,extPos);
+			// Legacy distance dim (frDistDim mirror): sky lanes dim at the
+			// horizon distance; uses the UNCLAMPED zSurf like the scalar.
+			__m256 dimV = vOne;
+			if (P.distDim > 0.0f) {
+				const __m256 zIn=_mm256_blendv_ps(zSurf,vFar,skyM);
+				// Radial distance z*|V| (frDistDim mirror; X from the integer
+				// pixel column like the scalar, no half-texel offset).
+				const __m256 Xd=_mm256_mul_ps(_mm256_sub_ps(
+				      _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_set1_epi32(px),lane)),
+				      _mm256_set1_ps(P.cntrEX)),_mm256_set1_ps(P.invFOVX));
+				const __m256 Yd=_mm256_set1_ps((P.cntrEY - float(py)) * P.invFOVY);
+				const __m256 vl=_mm256_sqrt_ps(_mm256_add_ps(_mm256_add_ps(
+				      _mm256_mul_ps(Xd,Xd),_mm256_mul_ps(Yd,Yd)),vOne));
+				__m256 tt=_mm256_sub_ps(vOne,_mm256_mul_ps(_mm256_mul_ps(zIn,vl),
+				      _mm256_set1_ps(P.distDimInvFar)));
+				tt=_mm256_max_ps(tt,vZero);
+				dimV=_mm256_add_ps(_mm256_set1_ps(1.0f-P.distDim),
+				      _mm256_mul_ps(_mm256_set1_ps(P.distDim),_mm256_sqrt_ps(tt)));
+			}
+			if (P.hdr) {
+				// HDR output stage: the fp16 RMW (coverage-flag select, fma,
+				// HdrClamp, half round-on-store) runs scalar per lane with
+				// the EXACT scalar-path code — bit-identical by construction.
+				// The vectorized front-end above (bilinear gathers + the
+				// Beer-Lambert tail) is where the time was.
+				alignas(32) float aRA[8],aGA[8],aBA[8],TA[8];
+				_mm256_store_ps(aRA,aR); _mm256_store_ps(aGA,aG);
+				_mm256_store_ps(aBA,aB); _mm256_store_ps(TA,Tpix);
+				for (int L=0;L<8;++L) {
+					const size_t i=i0+size_t(L);
+					const dword pix=out[i];
+					const float dimL=frDistDim(P,px+L,py,i,uint16_t(zeA[L]));
+					fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+					float scnB,scnG,scnR;
+					if (h[3] > 0.0f) { scnB=h[0]; scnG=h[1]; scnR=h[2]; }
+					else { scnR=float((pix>>16)&0xFFu); scnG=float((pix>>8)&0xFFu); scnB=float(pix&0xFFu); }
+					h[2]=fds::HdrClamp((scnR*TA[L]+aRA[L])*dimL);
+					h[1]=fds::HdrClamp((scnG*TA[L]+aGA[L])*dimL);
+					h[0]=fds::HdrClamp((scnB*TA[L]+aBA[L])*dimL);
+				}
+				continue;
+			}
+			// dither (scalar hash per lane) + pack.
+			__m256i pix=_mm256_loadu_si256((const __m256i*)&out[i0]);
+			__m256 pr=_mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(pix,16),iFF));
+			__m256 pg=_mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(pix, 8),iFF));
+			__m256 pb=_mm256_cvtepi32_ps(_mm256_and_si256(pix,iFF));
+			alignas(32) float drA[8],dgA[8],dbA[8];
+			for (int L=0;L<8;++L){ uint32_t sd=uint32_t(i0+L);
+				drA[L]=frDither(sd,da); dgA[L]=frDither(sd^0x68E31DA4u,da); dbA[L]=frDither(sd^0xB5297A4Du,da); }
+			__m256 fR=_mm256_add_ps(_mm256_mul_ps(_mm256_fmadd_ps(pr,Tpix,aR),dimV),_mm256_load_ps(drA));
+			__m256 fG=_mm256_add_ps(_mm256_mul_ps(_mm256_fmadd_ps(pg,Tpix,aG),dimV),_mm256_load_ps(dgA));
+			__m256 fB=_mm256_add_ps(_mm256_mul_ps(_mm256_fmadd_ps(pb,Tpix,aB),dimV),_mm256_load_ps(dbA));
+			auto clampByte=[&](__m256 f){ return _mm256_min_epi32(_mm256_max_epi32(_mm256_cvttps_epi32(f),iZero),i255); };
+			__m256i nR=clampByte(fR), nG=clampByte(fG), nB=clampByte(fB);
+			__m256i packed=_mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(nR,16),_mm256_slli_epi32(nG,8)),
+			                               _mm256_or_si256(nB,iAlpha));
+			_mm256_storeu_si256((__m256i*)&out[i0], packed);
+		}
+		for (; px < x2; ++px) Froxel_CompositePixel(px, py, P);
 	}
 }
 
@@ -2013,9 +2742,17 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	const float fth = fds::FeatureFlags::fast_fog_feather();
 	P.feather = (fth > 0.0f) ? fth : 0.2f * (P.slabY1 - P.slabY0);
 	P.invFeather = 1.0f / P.feather;
+	// Legacy distance dim blend (fast_fog_dist_dim, 0 = off).
+	{
+		float s = fds::FeatureFlags::fast_fog_dist_dim();
+		P.distDim = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
+		const float ddf = fds::FeatureFlags::fast_fog_dist_dim_far();
+		P.distDimInvFar = 1.0f / (ddf > 0.0f ? ddf : fogFar);
+		if (P.distDim > 0.0f && dc.gb) P.mat = dc.gb->txtr.data();
+	}
 
-	constexpr int numTilesX = 6;
-	constexpr int numTilesY = 4;
+	constexpr int numTilesX = 12;
+	constexpr int numTilesY = 8;
 
 	auto runTiles = [&](int w, int h, auto&& body) {
 		const int tsx = (w + numTilesX - 1) / numTilesX;
@@ -2064,6 +2801,28 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 			float zbv = gFrNear;
 			for (int k = 0; k <= nz; ++k) { gFrZb[k] = zbv; zbv *= rr; }
 		}
+		// ze → slice-index LUT (see decl): rebuilt only when the mapping's
+		// inputs change. Must mirror Froxel_CompositeTile's expression exactly.
+		if (gFrLutNear != gFrNear || gFrLutFar != gFrFar || gFrLutNz != nz
+		    || gFrLutInvZ != P.invZScale || gFrIzLUT.size() != 65536) {
+			gFrIzLUT.resize(65536);
+			const float invNear  = 1.0f / gFrNear;
+			const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
+			for (int ze = 0; ze < 65536; ++ze) {
+				float z;
+				if (ze == 0) z = gFrFar;   // composite's sky default
+				else {
+					const float zSurf = float(0xFF80 - ze) * P.invZScale;
+					z = zSurf > gFrFar ? gFrFar : zSurf;
+				}
+				if (z < gFrNear) z = gFrNear;
+				int iz = int(std::log(z * invNear) * invLogFN * float(nz));
+				if (iz < 0) iz = 0; if (iz >= nz) iz = nz - 1;
+				gFrIzLUT[ze] = uint8_t(iz);
+			}
+			gFrLutNear = gFrNear; gFrLutFar = gFrFar;
+			gFrLutNz = nz; gFrLutInvZ = P.invZScale;
+		}
 		// Temporal supersampling: Halton(2,3,5) sub-froxel jitter this frame;
 		// after the populate, this frame's camera/rotation + blended grid
 		// become the history the NEXT frame reprojects against.
@@ -2096,10 +2855,18 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 				gGlX = gx; gGlY = gy;
 				gGlow.assign(size_t(gx)*size_t(gy)*size_t(nz)*3, 0.0f);
 			}
-			runTiles(gGlX, gGlY, [&](int a,int b,int c,int d){ Froxel_GlowTile(a,b,c,d,P); });
+			{ TailProf::ScopeTimer _tp("fog-glow");
+			runTiles(gGlX, gGlY, [&](int a,int b,int c,int d){ Froxel_GlowTile(a,b,c,d,P); }); }
 		}
-		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
-		runTiles(ctx.xres, ctx.yres, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		{ TailProf::ScopeTimer _tp("fog-columns");
+		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); }); }
+		{ TailProf::ScopeTimer _tp("fog-composite");
+		// SIMD composite is on by default (bit-identical to scalar; measured
+		// ~0.5 ms/f faster on fog-composite). FDS_FOG_COMPOSITE_VEC=0 opts out.
+		static const bool sFogVec = [](){ const char* e=getenv("FDS_FOG_COMPOSITE_VEC"); return !(e && e[0]=='0'); }();
+		const bool useVec = sFogVec && nx>1 && ny>1;
+		if (useVec) runTiles(ctx.xres, ctx.yres, [&](int a,int b,int c,int d){ Froxel_CompositeTileVec8(a,b,c,d,P); });
+		else        runTiles(ctx.xres, ctx.yres, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); }); }
 		// This is the only path that populates g_hdrBuf; mark it so the tonemap
 		// runs (and doesn't blacken scenes/frames where the froxel composite
 		// never ran — e.g. greets with fog off, which would otherwise tonemap a
@@ -2185,7 +2952,7 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	const uint16_t* zEnc = ctx.zpage16;
 	dword* out = reinterpret_cast<dword*>(ctx.vpage);
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 	const int tsx = (ctx.xres + numTilesX - 1) / numTilesX;
 	const int tsy = (ctx.yres + numTilesY - 1) / numTilesY;
 	{
@@ -2247,6 +3014,56 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	}
 }
 
+// ─── Authored backdrop gradient (sky_gradient) ────────────────────────────
+// Paint the scene's authored vertical sky gradient (LWS ZenithColor/SkyColor/
+// GroundColor/NadirColor → Scene::Sky*) into VOID pixels (zEnc==0, where no
+// geometry drew) BEFORE the fog composite, replacing the black void. Four
+// vertical stops keyed on screen Y: zenith at the top of the frame → sky →
+// ground → nadir at the bottom. Writes VPage only — void pixels carry
+// g_hdrBuf coverage 0, so the fog composite reads this base back from VPage
+// under --hdr (see the composite's h[3]==0 branch) and folds aerial fog on
+// top. Gated at the call site (sky_gradient flag) + HasSkyGradient here, so
+// the untouched path is byte-identical. Tiled 12x8 like the SkyPaint stand-in.
+void Render_DeferredSkyGradient(const DeferredLightingCtx &ctx) {
+	const Scene *Sc = ctx.Sc;
+	if (!Sc || !Sc->HasSkyGradient || !ctx.zpage16 || !ctx.vpage) return;
+	// Four stops top→bottom (QColor holds BGRA bytes).
+	const QColor stop[4] = { Sc->SkyZenith, Sc->SkySky,
+	                         Sc->SkyGround, Sc->SkyNadir };
+	const uint16_t* zEnc = ctx.zpage16;
+	dword* out = reinterpret_cast<dword*>(ctx.vpage);
+	const int xres = ctx.xres, yres = ctx.yres;
+	const float invH = (yres > 1) ? 1.0f / float(yres - 1) : 0.0f;
+
+	constexpr int numTilesX = 12, numTilesY = 8;
+	const int tsx = (xres + numTilesX - 1) / numTilesX;
+	const int tsy = (yres + numTilesY - 1) / numTilesY;
+	constexpr int nJobs = numTilesX * numTilesY;
+	dispatchIndexed(nJobs, &renderns::tileDone, [=](int t) {
+		const int tj = t / numTilesX, ti = t - tj * numTilesX;
+		const int y1 = tsy*tj, y2 = std::min(y1+tsy, yres);
+		const int x1 = tsx*ti, x2 = std::min(x1+tsx, xres);
+		for (int py = y1; py < y2; ++py) {
+			// Vertical 4-stop blend: seg in [0,3), zenith(0)->sky(1)->ground(2)->nadir(3).
+			float seg = float(py) * invH * 3.0f;
+			int k = int(seg); if (k > 2) k = 2; if (k < 0) k = 0;
+			const float f = seg - float(k);
+			const QColor &a = stop[k]; const QColor &b = stop[k+1];
+			const int R = int(float(a.R) + (float(b.R) - float(a.R)) * f + 0.5f);
+			const int G = int(float(a.G) + (float(b.G) - float(a.G)) * f + 0.5f);
+			const int B = int(float(a.B) + (float(b.B) - float(a.B)) * f + 0.5f);
+			const dword pix = 0xFF000000u | (dword(R)<<16) | (dword(G)<<8) | dword(B);
+			const size_t row = size_t(py) * size_t(xres);
+			for (int px = x1; px < x2; ++px) {
+				const size_t i = row + size_t(px);
+				if (zEnc[i] != 0) continue;
+				out[i] = pix;
+			}
+		}
+	});
+	for (int k = 0; k < nJobs; ++k) renderns::tileDone.acquire();
+}
+
 // ─── Screen-space rain ────────────────────────────────────────────────────
 // Procedural streaks as a tile-parallel post pass — no particles, no face
 // list. Three layers at fixed view depths give parallax: each layer is a
@@ -2296,7 +3113,7 @@ void Render_ScreenSpaceRain(const DeferredLightingCtx &ctx) {
 	const uint16_t* zEnc = ctx.zpage16;
 	dword* out = reinterpret_cast<dword*>(ctx.vpage);
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 	const int tsx = (ctx.xres + numTilesX - 1) / numTilesX;
 	const int tsy = (ctx.yres + numTilesY - 1) / numTilesY;
 	{
@@ -3295,8 +4112,8 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
         : 0.0f;
     const float haloDens = fds::FeatureFlags::omni_halo_strength() * 0.001f;
 
-    constexpr int numTilesX = 6;
-    constexpr int numTilesY = 4;
+    constexpr int numTilesX = 12;
+    constexpr int numTilesY = 8;
     const int tileSizeX = (ctx.xres + numTilesX - 1) / numTilesX;
     const int tileSizeY = (ctx.yres + numTilesY - 1) / numTilesY;
 
@@ -3322,3 +4139,29 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
         }
     }
 }
+
+// ── --mem_census: the froxel volume ───────────────────────────────────────
+// Scales with the GRID (nx x ny x nz), not with resolution — so a froxel
+// tweak is the one fog knob that moves memory. gFrSct is double-buffered
+// float4 (temporal history), which is 8 of the 12 floats per froxel.
+static void MemCensus_Froxels() {
+	const size_t n = size_t(gFrX) * size_t(gFrY) * size_t(gFrZ);
+	const size_t acc = (gFrAccR.capacity() + gFrAccG.capacity()
+	                  + gFrAccB.capacity() + gFrT.capacity()) * sizeof(float);
+	const size_t sct = (gFrSct[0].capacity() + gFrSct[1].capacity()) * sizeof(float);
+	fds::MemCensus::add("fog.froxel", "integrated R/G/B/T planes", acc, true,
+		"4 parallel float planes x nx*ny*nz = %d*%d*%d = %zu froxels",
+		gFrX, gFrY, gFrZ, n);
+	fds::MemCensus::add("fog.froxel", "scatter history (ping-pong float4)", sct, true,
+		"2 buffers x 4 floats x %zu froxels — temporal reprojection history", n);
+	fds::MemCensus::add("fog.froxel", "coarse glow grid", gGlow.capacity() * sizeof(float),
+		true, "%d*%d columns x nz=%d x RGB float", gGlX, gGlY, gFrZ);
+	fds::MemCensus::add("fog.halfres", "coarse fog planes (5 parallel)", 
+		(gFogAmt.capacity() + gFogZ.capacity() + gFogGR.capacity()
+		 + gFogGG.capacity() + gFogGB.capacity()) * sizeof(float), true,
+		"amt/z/glowR/glowG/glowB, each %d*%d floats — 5 base pointers for one "
+		"logical coarse sample", gFogHW, gFogHH);
+	fds::MemCensus::add("fog.froxel", "1/z LUT", gFrIzLUT.capacity(), true,
+		"fixed 65536 x u8");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_Froxels);

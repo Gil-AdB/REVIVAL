@@ -56,6 +56,7 @@ FldObject *CurObj;			// Current object
 FldLight	*CurLight;		// Current light
 FldCamera	*Camera;			// Current camera
 char			 ReadNext;
+char			 LastWordTerm;		// char that terminated the last ReadWord (10 = newline)
 
 char 	 *ReadWord(void);		    // Forward declaration
 char 	 *ReadString(void);	    // Forward declaration
@@ -100,6 +101,45 @@ void ReadFPS(void)
 	printf("Frames per second: %f\n",Scene->FramesPerSecond);
 #endif
 }
+
+// Authored SCENE-wide env-reflection defaults — engine-extension top-level
+// LWS keywords, named in the VolumetricLight style:
+//   FdsSceneEnvRefl -1|1     every auto-mode surface skips/bakes an env
+//                            probe by default (0/absent = auto — the
+//                            per-material Reflection>0 || MetallicMap rule;
+//                            per-surface envRefl overrides always win)
+//   FdsSceneEnvBakeRes N     default probe FACE resolution for the scene
+//                            (pow2 64..1024; absent = legacy sizing chain)
+// Serialized as a Scene_EnvDefaults-gated conditional payload in the FLD
+// scene header (see FLDSAVE.CPP SaveGeneralSceneData + LWREAD.H).
+void ReadSceneEnvRefl(void)
+{
+	fscanf(LWS,"%i",&Scene->EnvReflSceneMode);
+	printf("Scene env-refl default: %i\n",Scene->EnvReflSceneMode);
+}
+
+void ReadSceneEnvBakeRes(void)
+{
+	fscanf(LWS,"%i",&Scene->EnvBakeResScene);
+	printf("Scene env bake res default: %i\n",Scene->EnvBakeResScene);
+}
+
+// Authored backdrop GRADIENT colors — standard LightWave backdrop keys
+// (ZenithColor/SkyColor/GroundColor/NadirColor) the 1998 pipeline dropped.
+// Each is "R G B" (0..255). Any one sets SkyColorsSet → the four are
+// serialized as a Scene_SkyColors-gated scene-header payload (FLDSAVE.CPP)
+// and painted by the engine's default-off sky_gradient pass. See LWREAD.H.
+static void ReadColorTriple(FldColor *c)
+{
+	int R, G, B;
+	fscanf(LWS,"%i %i %i",&R,&G,&B);
+	c->Red = R; c->Green = G; c->Blue = B;
+	Scene->SkyColorsSet = 1;
+}
+void ReadZenithColor(void) { ReadColorTriple(&Scene->ZenithColor); }
+void ReadSkyColor(void)    { ReadColorTriple(&Scene->SkyColor); }
+void ReadGroundColor(void) { ReadColorTriple(&Scene->GroundColor); }
+void ReadNadirColor(void)  { ReadColorTriple(&Scene->NadirColor); }
 
 static int objNum = 1;
 static int lightNum = 1;
@@ -511,6 +551,47 @@ int Temp;
 #endif
 }
 
+// Authored volumetric headlight/beam flags — LightWave-style per-light
+// keys ("VolumetricLight 1" / "VolumetricLightIntensity 0.05"). The flag
+// sets FLD light-flag bit 2048 (Light_VolumetricCone — 512 is taken by
+// EndBehavior, see LWREAD.H); the intensity is the per-light beam gain
+// written as a conditional payload gated on that bit (see FLDSAVE.CPP
+// SaveLight). Engine: bit 2048 → Omni_ForceVolCone, gain multiplies the
+// volumetric cone density (0/unset → 1.0).
+void ReadLightVolumetricFlag(void)
+{
+int Temp;
+
+	fscanf(LWS,"%i",&Temp);
+	if (Temp) CurLight->Flags |= Light_VolumetricCone;
+#ifdef SceneDebugMode
+	printf("Light volumetric flag: %i\n",Temp);
+#endif
+}
+
+void ReadLightVolumetricIntensity(void)
+{
+	fscanf(LWS,"%f",&CurLight->VolBeamGain);
+#ifdef SceneDebugMode
+	printf("Light volumetric intensity: %f\n",CurLight->VolBeamGain);
+#endif
+}
+
+// Authored per-light flare-sprite size multiplier — LWS keyword
+// "FdsFlareScale <f>" (named in the VolumetricLight/FdsScene style). Sets FLD
+// light-flag bit 4096 (Light_FlareScale); the multiplier is written as a
+// conditional payload gated on that bit (see FLDSAVE.CPP SaveLight). Engine:
+// bit 4096 → Omni::FlareScale, decoupling the lens-flare sprite size from the
+// light's ISize (F.FlareSize = ISize × FlareScale; 0/unset → 1.0).
+void ReadLightFlareScale(void)
+{
+	fscanf(LWS,"%f",&CurLight->FlareScale);
+	CurLight->Flags |= Light_FlareScale;
+#ifdef SceneDebugMode
+	printf("Light flare scale: %f\n",CurLight->FlareScale);
+#endif
+}
+
 void ReadCameraMotion(void)
 {
 uint32_t      Keys,Channels;
@@ -597,6 +678,12 @@ struct
 #endif
 	{"FrameStep"			 , ReadFrameStep},
 	{"FramesPerSecond" , ReadFPS},
+	{"FdsSceneEnvRefl"	 , ReadSceneEnvRefl},		// engine extension (scene env defaults)
+	{"FdsSceneEnvBakeRes", ReadSceneEnvBakeRes},	// engine extension (scene env defaults)
+	{"ZenithColor"		 , ReadZenithColor},		// authored backdrop gradient (sky_gradient)
+	{"SkyColor"			 , ReadSkyColor},
+	{"GroundColor"		 , ReadGroundColor},
+	{"NadirColor"		 , ReadNadirColor},
 // Object section
 	{"LoadObject"			 , AddObject},
 	{"AddNullObject"   , AddNullObject},
@@ -620,6 +707,9 @@ struct
 	{"ConeAngle"			 , ReadLightConeAngle},    	// Envelope
 	{"LightRange"				, ReadLightRange},    	// Envelope
 	{"LensFlare" 			 , ReadLightLensFlareFlag},
+	{"VolumetricLight"		 , ReadLightVolumetricFlag},
+	{"VolumetricLightIntensity", ReadLightVolumetricIntensity},
+	{"FdsFlareScale"	 , ReadLightFlareScale},		// engine extension (per-light flare sprite size)
 // Camera section
 	{"CameraMotion"		 , ReadCameraMotion},
 	{"ZoomFactor"			 , ReadCameraZoomFactor},   // Envelope
@@ -748,6 +838,7 @@ int   a=0;
 	}
 	Temp[a]=0;
 	Temp[a+1]=ch;
+	LastWordTerm=ch;   // remember whether the word ended at a space or a newline
 	return Temp;
 }
 
@@ -783,7 +874,13 @@ signed int CurFunc;
 			Function[CurFunc].Reader();
 		// Some functions don't require next line reading, i.e. "AddLight"
 		}
-		if (ReadNext && strcmp(ID, "") != 0) NextLine(); else ReadNext = 1;
+		// An UNKNOWN keyword alone on its line (e.g. FDSCORRIDORBEGIN) is fully
+		// consumed by ReadWord — it already ate the trailing newline. Calling
+		// NextLine() here would eat the FOLLOWING line (which silently dropped
+		// the corridor's first LoadObject and mis-assigned its ObjectMotion to
+		// the previous object). Only skip a line when args remain unread.
+		if (CurFunc < 0 && LastWordTerm == 10) ReadNext = 1;
+		else if (ReadNext && strcmp(ID, "") != 0) NextLine(); else ReadNext = 1;
 	}
 	delete(ID);
 }

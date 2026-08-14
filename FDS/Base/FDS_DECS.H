@@ -441,6 +441,12 @@ void RenderForwardRegionInline(const fds::RenderContext& ctx,
 void MekaleleFillRegionInline(const fds::RenderContext& ctx,
                               float x1, float y1, float x2, float y2);
 void SetDeferredWaterMatID(int id);
+// Effective procedural-water state for the CURRENT scene's water material:
+// the material's tri-state WaterProcMode (sidecar 'waterProcedural', -1 off /
+// 0 auto / 1 on) wins; auto falls back to the global --water_procedural flag.
+// The per-surface twin of FeatureFlags::water_procedural() — use this in any
+// water consumer outside the deferred kernel (which resolves via its ctx).
+bool WaterProceduralEffective();
 bool deferredEnabled();
 // Shadow-map depth pre-pass. Walks Omni_CastsShadow lights, builds a
 // temp camera per light, re-transforms the scene into the light's POV,
@@ -456,12 +462,19 @@ bool deferredEnabled();
 // See FILLERS/ShadowMap.h.
 // Bake mode selector. See Shadows.cpp for behavioral details.
 enum class ShadowBakeMode {
-	StaticOnce,           // ShadowMaps_BakeStatic — static omnis + static meshes, write to depth/polyId
-	DynamicOmnisPerFrame, // dynamic omnis + all meshes, write to depth/polyId (legacy per-frame)
-	DynamicMeshesPerFrame // static omnis + dynamic meshes only, write to depth_dynamic/polyId_dynamic
+	StaticOnce,           // ShadowMaps_BakeStatic — static omnis + static meshes, write to packSD
+	DynamicOmnisPerFrame, // dynamic omnis + all meshes, write to packSD (legacy per-frame)
+	DynamicMeshesPerFrame // static omnis + dynamic meshes only, write to packDyn
 };
+// forceEnable: honoured only by the StaticOnce bake. Bypasses the global
+// FeatureFlags::shadows() gate so a scene that turns shadows on at RUN time
+// (e.g. greets, whose GreetsApplyRunDefaults sets --shadows after the init
+// bake window) can still populate its static occluder maps at INIT — the
+// forced static-shadow lightmap bake reads them. Default false: per-frame
+// modes and other scenes keep the flag gate.
 void Render_DeferredShadowMaps(class Scene *Sc,
-                               ShadowBakeMode mode = ShadowBakeMode::DynamicOmnisPerFrame);
+                               ShadowBakeMode mode = ShadowBakeMode::DynamicOmnisPerFrame,
+                               bool forceEnable = false);
 
 // Stage A overlap (docs/THREADING_OVERLAP_PLAN.md). The greets per-frame
 // dynamic shadow bake. With --shadow-gbuffer-overlap, runs the bake(s) on a
@@ -543,7 +556,7 @@ void InsertTransparentToTBR(Face *F);
 // via the existing transparent lighting kernel.
 void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
                             class Face** faces, int count, bool front,
-                             int strip_y, int strip_h);
+                             int strip_y, int strip_h, bool bandSnapshot = true);
 
 bool deferredUnifiedTbrEnabled(const Scene *sc);
 int  xparPeelPassesEffective(const Scene *sc);

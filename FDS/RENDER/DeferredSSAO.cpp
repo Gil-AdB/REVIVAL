@@ -48,6 +48,7 @@
 
 #include "Base/FDS_VARS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "FILLERS/Mekalele.h"
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/Hdr.h"
@@ -195,7 +196,7 @@ void Render_SSAO(const DeferredLightingCtx &ctx) {
 	const float fovX = ctx.fovX, fovY = ctx.fovY;
 	const float cx = ctx.cntrEX, cy = ctx.cntrEY;
 	const word*  zEnc = ctx.zpage16;
-	const meka::u16* nrm = ctx.gb->normal.data();
+	const meka::u32* nrm = ctx.gb->normal.data();
 	const float* kx = g_kx.data(); const float* ky = g_ky.data(); const float* kz = g_kz.data();
 	float* aoRaw  = g_aoRaw.data();
 	float* aoBlur = g_aoBlur.data();
@@ -210,7 +211,7 @@ void Render_SSAO(const DeferredLightingCtx &ctx) {
 	fds::hdrf* hbuf = useHdr ? fds::g_hdrBuf.data() : nullptr;
 	dword* out  = reinterpret_cast<dword*>(ctx.vpage);
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 
 	const bool gtao = fds::FeatureFlags::ssao_gtao();
 
@@ -257,7 +258,7 @@ void Render_SSAO(const DeferredLightingCtx &ctx) {
 						const float Px = (float(px) - cx) * z * invFOVX;
 						const float Py = (cy - float(py)) * z * invFOVY;
 						const float Pz = z;
-						float Nx, Ny, Nz; meka::oct_decode_u16(nrm[i], Nx, Ny, Nz);
+						float Nx, Ny, Nz; meka::oct_decode_u32(nrm[i], Nx, Ny, Nz);
 						if (Nx*Px + Ny*Py + Nz*Pz > 0.0f) { Nx=-Nx; Ny=-Ny; Nz=-Nz; }
 						const float vinv = fast_rsqrt(Px*Px + Py*Py + Pz*Pz + 1e-12f);
 						const float Vx = -Px*vinv, Vy = -Py*vinv, Vz = -Pz*vinv;
@@ -343,7 +344,7 @@ void Render_SSAO(const DeferredLightingCtx &ctx) {
 							const float z = float(0xFF80 - ze) * invZScale;
 							aoZ[lo] = z;
 							const float Px=(float(px)-cx)*z*invFOVX, Py=(cy-float(py))*z*invFOVY, Pz=z;
-							float Nx,Ny,Nz; meka::oct_decode_u16(nrm[i],Nx,Ny,Nz);
+							float Nx,Ny,Nz; meka::oct_decode_u32(nrm[i],Nx,Ny,Nz);
 							if (Nx*Px+Ny*Py+Nz*Pz>0.0f){Nx=-Nx;Ny=-Ny;Nz=-Nz;}
 							const float vinv=fast_rsqrt(Px*Px+Py*Py+Pz*Pz+1e-12f);
 							float sr=radius*fovX/z; if(sr<2.0f)sr=2.0f; else if(sr>256.0f)sr=256.0f;
@@ -482,7 +483,7 @@ void Render_SSAO(const DeferredLightingCtx &ctx) {
 						S.y = (cy - float(py)) * z * invFOVY;
 						aoZ[lo] = z;
 						float nx, ny, nz;
-						meka::oct_decode_u16(nrm[i], nx, ny, nz);
+						meka::oct_decode_u32(nrm[i], nx, ny, nz);
 						if (nx*S.x + ny*S.y + nz*z > 0.0f) { nx = -nx; ny = -ny; nz = -nz; }
 						float hx = 0.0f, hy = 0.0f, hz = 1.0f;
 						if (fabsf(nz) > 0.999f) { hx = 1.0f; hz = 0.0f; }
@@ -870,3 +871,19 @@ void Render_SSAO(const DeferredLightingCtx &ctx) {
 		}
 	}
 }
+
+// ── --mem_census: the SSAO low-res planes ─────────────────────────────────
+// Everything here is (XRes/down) x (YRes/down), so --ssao_downscale is a
+// quadratic lever on both the taps and the bytes.
+static void MemCensus_SSAO() {
+	const size_t p = (g_aoRaw.capacity() + g_aoBlur.capacity() + g_aoZ.capacity())
+	               * sizeof(float);
+	size_t hist = 0;
+	for (int i = 0; i < 2; ++i)
+		hist += (g_aoHistBuf[i].capacity() + g_aoHistZBuf[i].capacity()) * sizeof(float);
+	fds::MemCensus::add("ssao", "raw/blur/z planes", p, false,
+		"3 parallel float planes x lowW*lowH (= W*H / ssao_downscale^2)");
+	fds::MemCensus::add("ssao", "temporal history (ping-pong ao + z)", hist, false,
+		"2 x (ao + viewZ) float planes at lowW*lowH; 0 unless --ssao_temporal");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_SSAO);

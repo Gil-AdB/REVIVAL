@@ -1,5 +1,6 @@
 #include "SceneTick.h"
 #include <Base/ParamScript.h>
+#include <Base/FeatureFlags.h>   // scrub_speed (the Shift multiplier on F1/F2)
 
 #include "Rev.h"
 
@@ -14,6 +15,7 @@
 #include <Base/Material.h>
 #include <Threads.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -89,7 +91,21 @@ int32_t SceneDriver::tickSceneTimer(int32_t &TTrd, bool &pauseMode)
     // Fast forward / rewind: 8× the frame delta in play; in pause dTime is
     // ~0 so fall back to a small per-tick step so F1/F2 still scrubs while
     // paused (fine enough to step single anim frames).
-    const int32_t scrubStep = pauseMode ? 10 : int32_t(dTime * 8.0f);
+    int32_t scrubStep = pauseMode ? 10 : int32_t(dTime * 8.0f);
+    // SHIFT = the FAST arm, --scrub_speed × the base step (default 4). One knob,
+    // two speeds: unmodified F1/F2 keeps exactly the rate it always had, so
+    // nothing that relied on it changes. This is where a scrub HAS to live —
+    // the earlier F3/F4 scrub inside REV.CPP's SDL timer callback incremented
+    // Timer and the `Timer = sceneT` re-pin below silently clobbered it every
+    // frame, which is why it appeared to do nothing (removed 2026-08-06).
+    if (g_shiftHeld.load(std::memory_order_relaxed)) {
+        const int32_t mult = fds::FeatureFlags::scrub_speed();
+        if (mult > 1) scrubStep *= mult;
+    }
+    // A scrub that steps 0 still sets `scrubbed`, which pins Timer — i.e. the
+    // key would FREEZE the clock instead of moving it. dTime is in whole 10 ms
+    // Timer ticks, so above ~100 fps it rounds to 0 and F1/F2 did exactly that.
+    if (scrubStep < 1) scrubStep = 1;
     bool scrubbed = false;
     if (Keyboard[ScF2]) { sceneT += scrubStep; scrubbed = true; }
     if (Keyboard[ScF1]) { sceneT = (scrubStep > sceneT) ? 0 : sceneT - scrubStep; scrubbed = true; }
@@ -99,6 +115,65 @@ int32_t SceneDriver::tickSceneTimer(int32_t &TTrd, bool &pauseMode)
     // Normal play leaves Timer free-running so no wall-clock ticks elapsed
     // during frame processing are dropped.
     if (pauseMode || scrubbed) Timer = sceneT;
+
+    // Smooth scene clock (see g_FrameTimeF). Two measured properties of the
+    // int Timer force this shape:
+    //   1. it resolves whole 10ms ticks → per-frame animation steps
+    //      quantize (30fps: 3,4,3,4);
+    //   2. its CADENCE is load-elastic — SDL_AddTimer callbacks reschedule
+    //      relative, so under render load Timer runs up to ~20% slower
+    //      than wall time (measured: PC-rate fine clock outran Timer ~1
+    //      tick/frame and any anchor snap re-created a sawtooth).
+    // So: advance a float clock by (wall delta × Timer's own average rate),
+    // where the rate is an EMA of dTimer/dWall. Steps are then smooth AND
+    // track the demo's actual (load-elastic) tempo; a gentle anchor plus a
+    // generous snap guard bound the offset without visible correction.
+    {
+        const uint64_t pc = SDL_GetPerformanceCounter();
+        if (pcFreq_ == 0) pcFreq_ = SDL_GetPerformanceFrequency();
+        const bool live = g_fineSceneClock && !pauseMode && !scrubbed;
+        if (live && fineT_ >= 0.0f && pcPrev_ != 0) {
+            const double dWall =
+                double(pc - pcPrev_) * 100.0 / double(pcFreq_);
+            const float dTimer = float(sceneT - lastSceneT_);
+            if (dWall > 0.0 && dWall <= 60.0 && dTimer >= 0.0f && dTimer <= 60.0f) {
+                // Rate = EMA(dTimer)/EMA(dWall) — ratio of MEANS. The old
+                // EMA of the instantaneous ratio was Jensen-biased ~10%
+                // HIGH under spiky frame times, so fineT_ steadily outran
+                // Timer and every hitch discharged the accumulated lead as
+                // a visible jump back (city, ~10 content-frames at t≈240).
+                dTimerEma_ += 0.05f * (dTimer       - dTimerEma_);
+                dWallEma_  += 0.05f * (float(dWall) - dWallEma_);
+                float rate = (dWallEma_ > 1e-3f) ? dTimerEma_ / dWallEma_ : 1.0f;
+                if (rate < 0.2f) rate = 0.2f;
+                if (rate > 3.0f) rate = 3.0f;
+                fineT_ += float(dWall) * rate;
+                // Anchor: gentle 1%/frame normally; firm 10%/frame once the
+                // offset exceeds 8 ticks. Continuous in both regimes — the
+                // offset shrinks across frames, never in one step (a hard
+                // snap here is exactly the sawtooth this clock exists to
+                // remove). A true snap remains only for pathological
+                // divergence (>120 ticks: scene switch / debugger stall).
+                const float off = float(sceneT) - fineT_;
+                fineT_ += (std::fabs(off) > 8.0f ? 0.10f : 0.01f) * off;
+                if (std::fabs(off) > 120.0f)
+                    fineT_ = float(sceneT);
+            } else {
+                // Hitch (>600ms wall stall or timer leap): follow the
+                // integer timer RELATIVELY — the fineT_-vs-sceneT offset is
+                // preserved and bleeds out through the anchor on later
+                // frames. Snapping to sceneT here zeroed the offset in one
+                // frame — the user-visible "camera jumps back". The outlier
+                // deltas also stay OUT of the rate EMAs.
+                if (dTimer > 0.0f) fineT_ += dTimer;
+            }
+        } else {
+            fineT_ = float(sceneT);
+        }
+        pcPrev_ = pc;
+        lastSceneT_ = sceneT;
+        g_FrameTimeF = fineT_;
+    }
 
     g_FrameTime = TTrd = sceneT;
     return sceneT;

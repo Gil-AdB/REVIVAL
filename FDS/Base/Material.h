@@ -5,6 +5,76 @@
 #include "Texture.h"
 #include "Vector.h"
 
+// Tier-2 cone-step POM: the maximum cone ratio a ConeMap byte encodes.
+// A texel storing 255 means cone ratio kPomConeMax (near-flat → the ray can
+// take a near-full step). Shared by the bake (MakeConeMap, DEMO/MeshOps.cpp)
+// and the runtime march (FDS/FILLERS/Mekalele.h) — they MUST agree or the
+// step size is wrong. Cone ratio = horizontal-UV-distance / height-difference
+// to the nearest taller texel; values above ~4 all give near-max steps at the
+// ≤~0.7 tangential ray speeds we hit, so 4 is a safe clamp with byte precision
+// (~0.016) where it matters most (small ratios, near tall features).
+inline constexpr float kPomConeMax = 4.0f;
+
+// --pom_cone_exact (S1 P1): encode ceiling for the EXACT per-texel cone bake
+// (MakeConeMapExact). It is a different number from kPomConeMax because the two
+// bakes produce different distributions and the byte has to resolve the range
+// that actually decides a step.
+//
+// MEASURED, greets 1024² wall map, legacy coarse bake: mean byte 38.6, i.e.
+// mean cone ratio 38.6 × 4/255 = 0.61 BEFORE the ×4 --parallax_pom_relax. The
+// march's competing quantity is dlen = uvAmp × tan(incidence) ≤ ~0.7, so the
+// baked cone is larger than anything it is compared against and the step
+// c·gap/(c+dlen) is a near-full gap almost everywhere — the cone map barely
+// steers the march at all (confirmed: --parallax_pom_relax 1 / 4 / 16 move the
+// t=6097 error by <5 %). That is what max-pooling the height to a 128² grid
+// does: the max over an 8×8 stone block is near 255 nearly everywhere, so there
+// are almost no TALLER cells left to bound the cone with.
+//
+// An exact per-texel cone of a 1024² map lives near 1/1024 UV per unit height
+// (the neighbouring texel, one texel away, half a height range taller), i.e.
+// 0.002..0.05 — two decades BELOW the legacy byte's 4/255 = 0.0157 quantum.
+// 0.5 puts the quantum at 0.00196 = two texels per unit height and still lets a
+// clamped (0.5) cone take ≥42 % of the gap at the steepest incidence the shell
+// cap allows, so the clamp costs steps only in genuinely open relief. Cones
+// BELOW the quantum truncate to 0, which freezes the march — that is what
+// --pom_cone_min_step exists to floor.
+inline constexpr float kPomConeExactMax = 0.5f;
+
+// S1c HORIZON MAP (--pom_horizon, docs/S1_PIXEL_DISPLACEMENT_PLAN.md §S1c):
+// per texel of a height map, the elevation of the relief's own horizon in
+// kPomHorizonAzimuths evenly spaced tangent-space azimuths, stored as
+// u8 sin(horizon). A light whose tangent-space elevation is below the horizon
+// in its azimuth is occluded BY THE RELIEF ITSELF — the light-responsive
+// mortar/block self-shadow that NEITHER the tessellation bake nor the shell
+// march can produce (the PolyId shadow test is identity-only, one id per
+// authored wall plane, so no intra-wall shadow exists in either path).
+//
+// Layout: 8 bytes per texel, mip chain contiguous, in the SAME block-tile order
+// as the source height map — so the swizzled texel index the rasterizer already
+// computed for the albedo indexes this too (mipOfs[mip] + swizzledUV, ×8). The
+// 8 azimuths of one texel are adjacent, so a lookup that needs two neighbouring
+// azimuths touches one cache line, not two.
+inline constexpr int kPomHorizonAzimuths = 8;
+
+struct PomHorizonMap {
+	unsigned char *data = nullptr;      // kPomHorizonAzimuths bytes per texel
+	size_t         mipOfs[16] = {};     // TEXEL offset of each mip (×8 for bytes)
+	unsigned       numMipmaps = 0;
+	size_t         texels = 0;          // total texels across the chain
+	// The bake's "height units per texel of lateral travel" at mip 0 =
+	// (UV amplitude the relief is displaced by) × (texels per UV tile). The
+	// horizon angle is scale-free in world units — worldPerUV cancels between
+	// the height amplitude and the texel pitch — so this one number, plus the
+	// height field, fully determines the bake. Part of the disk-cache key.
+	float          heightScaleTexels = 0.0f;
+	int            radiusTexels = 0;
+	// The SOURCE height map's layout. The kernel addresses this map with the
+	// ALBEDO's swizzled UV + mip (exactly as it does the normal and AO maps),
+	// so these must match the albedo's or the lookup reads the wrong texel —
+	// checked once after the textures are unified, never per pixel.
+	int            sizeX = 0, sizeY = 0, blockSizeX = 0, blockSizeY = 0;
+};
+
 #pragma pack(push, 1)
 
 struct Scene;
@@ -66,10 +136,134 @@ struct Material
     // 1 = full; lower for surfaces where offset-parallax swims (grazing, densely
     // UV-tiled floors). Default 1.
     float                 ParallaxScale          = 1.0f;
+    // Tier-2 cone-step map companion to HeightMap (--parallax_pom). 8-bit
+    // single-channel, IDENTICAL tiled+mip layout to HeightMap so the SAME
+    // swizzled texel address indexes both — each texel stores a conservative
+    // cone ratio (quantized over [0,kPomConeMax]) = how far the view ray can
+    // advance without hitting the height field. Offline-baked once at material
+    // setup (MakeConeMap) only when --parallax_pom is on; null = no cone march.
+    Texture             * ConeMap                = nullptr;
+    // S1c: horizon map for this material's HeightMap (see PomHorizonMap above).
+    // Baked once at scene setup when --pom_horizon is on, disk-cached; null =
+    // no relief self-shadow for this material. PATH-AGNOSTIC: it is a shading
+    // term, so it serves the tessellation bake and the per-pixel shell equally,
+    // and it is baked from the FULL height field in both (under
+    // --greets_displace the POM input becomes the RESIDUAL, but the geometry
+    // still carries the low band, so the shadow term must model the whole
+    // relief — hence the bake runs at height-load time, before the swap).
+    PomHorizonMap       * PomHorizon             = nullptr;
+    // S1b SHELL POM (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md): the
+    // relief slab's amplitude for the full 0..1 height range, in UV UNITS
+    // (= the effective parallax strength the shell was BUILT with, i.e.
+    // parallax_strength × ParallaxScale at build time). > 0 only after
+    // PomShell_Build has pushed this material's geometry out to the lid — each
+    // vertex by (amp × that face's world-per-UV-tile)/2 along its normal, with
+    // Vertex::ShellH stamped to the height it landed at. UV units (not world)
+    // makes it scale- and texel-density-independent: the rasterizer multiplies
+    // by the SAME per-triangle world-per-UV solve the depth write uses, so the
+    // march, the depth and the lid geometry cannot disagree, and the live
+    // --parallax_strength can no longer desync from the built geometry
+    // (strength is consumed once, at build time). 0 = not a shell material →
+    // the legacy centered march runs.
+    float                 PomShellUvAmp          = 0.0f;
+    // S1b P0 (--pom_shell_world_amp, DIAGNOSTIC/OPT-IN, default 0 = OFF): the
+    // slab amplitude authored in WORLD units instead of UV. With PomShellUvAmp
+    // the world depth of the relief is uvAmp x that face's OWN world-per-UV, so
+    // two faces of one material displace by different world distances whenever
+    // their charts differ in scale (measured on greets: x1.26 across 'rooms'
+    // authored planes, and x6.2 between 'rooms' 0.180 and 'floor' 1.113 —
+    // docs/S1_DISCREPANCY_INVENTORY.md S8). When this is > 0 the builder offsets
+    // every lid vertex by exactly WorldAmp/2 and the rasterizer derives each
+    // triangle's UV amplitude as WorldAmp / w, so one authored surface displaces
+    // by ONE world distance and pomDepthWorldAmp is constant. 0 keeps the UV
+    // semantics byte-for-byte.
+    float                 PomShellWorldAmp       = 0.0f;
+    // S1b P0 (--pom_shell_world_amp): per-PATCH UV amplitude, one float per
+    // patch, indexed by Face::PomShellGroup - 1 — worldAmp / that patch's
+    // world-per-UV. A patch is coplanar by construction, so its UV density is a
+    // single number and a per-patch table is exact. Null (the default) = every
+    // face marches with the material's single PomShellUvAmp.
+    float               * PomShellPatchUvAmp     = nullptr;
+    // S1b: per-patch UV domain table for this material, 4 floats per patch
+    // (uMin, uMax, vMin, vMax), indexed by Face::PomShellGroup - 1. Built by
+    // PomShell_Build (union-find over edge-adjacent coplanar target faces);
+    // null = no table, faces fall back to their own UV box.
+    float               * PomShellDomains        = nullptr;
+    unsigned              PomShellDomainCount    = 0;
+    // S1b MULTI-BOX domain (--pom_shell_merge_uv): the patches on the SAME
+    // PLANE whose UV rects abut/overlap are one physical surface even when no
+    // edge joins them (greets' floor is one plane cut into 6 patches by the
+    // doorway thresholds). The domain test is then "inside my own box OR inside
+    // any of my siblings'" — the UNION OF THE BOXES, never their bounding box,
+    // so a genuine opening between two coplanar patches (a doorway in a wall)
+    // still discards. CSR: PomShellSibOfs[g]..[g+1] index quads of
+    // PomShellSibBoxes (uMin,uMax,vMin,vMax), own box excluded (the kernel
+    // tests it first and early-outs). Both null = single-box domains.
+    float               * PomShellSibBoxes       = nullptr;
+    uint32_t            * PomShellSibOfs         = nullptr;
+    // Hot-loop bound on the sibling list (a patch with more coplanar abutting
+    // neighbours than this keeps the first kPomShellMaxSibs — dropping siblings
+    // can only ADD discards, never holes-by-omission of a real box, and the
+    // build prints CLAMPED when it happens so it is never silent).
+    static constexpr unsigned kPomShellMaxSibs = 12;
+    // S1d-2a CLOSED SHELL (--pom_shell_side_faces): the slab's four SIDE FACES,
+    // one per side of the patch's UV box, indexed 4*(PomShellGroup-1) + k with
+    // k = 0 uMin, 1 uMax, 2 vMin, 3 vMax.
+    //   PomShellSideCls  — the dominant boundary class along that side (the
+    //     SeamClass enum: 0 coplanar, 1 angled-in/concave, 2 angled-out/convex,
+    //     3 true boundary, 4 = the side carried no classified boundary at all).
+    //     The terminal action for a ray that leaves through this side is a table
+    //     lookup on it (--pom_shell_side_edge).
+    //   PomShellSideLean — how far the side plane leans OUTWARD per unit of slab
+    //     height below the authored plane, in UV units. At a CONVEX ridge the
+    //     side face is the neighbour's own plane and the solid is the
+    //     INTERSECTION of the half-spaces, so the material extends past the
+    //     ridge line as you go deeper; the vertical UV box cuts it short. 0 =
+    //     the plain vertical extrusion (a true boundary, a concave fold, or a
+    //     side the bake could not attribute).
+    // Both null = no side-face table (the flag was off when the shell was built).
+    uint8_t             * PomShellSideCls        = nullptr;
+    float               * PomShellSideLean       = nullptr;
+    //   PomShellSideTrue — the sub-interval of that side, in the ALONG-SIDE UV
+    //     coordinate (v for a u side, u for a v side), that is a TRUE BOUNDARY:
+    //     2 floats per side, (lo, hi), lo > hi = none. A per-side DOMINANT class
+    //     cannot carry this one: measured on greets, TRUE boundary is 9.875 of
+    //     1847.73 world of 'rooms' patch boundary (0.5 %) yet owns 11.9 % of the
+    //     pixels the march cannot answer, so it is always a minority of whatever
+    //     box side it lands on and the dominant-class lookup never fires.
+    float               * PomShellSideTrue       = nullptr;
+    //   PomShellSidePartner — S1d-9: the CONVEX RIDGE PARTNER's normal for that
+    //     side, 7 floats: (nT, nB, nN) then the along-side sub-interval the side
+    //     is convex over, then the sub-interval it is NOT convex over (which is
+    //     subtracted). Expressed in the owning face's own TANGENT FRAME
+    //     (nT, nB, nN) so the kernel can test it against the per-pixel view
+    //     direction (VtT, VtB, VtN) with no camera and no matrix:
+    //     N_b·V < 0 ⇔ the partner is BACKFACING ⇔ that convex ridge really is
+    //     a silhouette at this pixel. All-zero = no coherent convex partner on
+    //     this side, and the dot is then exactly 0, which never trips < 0 — an
+    //     unknown side falls back to KEEP, the side that cannot punch a gash.
+    //     Read only by --pom_shell_lid_true_edge bit6 (64).
+    float               * PomShellSidePartner    = nullptr;
+    // Applied albedo tint (per-channel multipliers, 1 = untinted). The tint
+    // mutates the shared Texture pixels; these echo the last applied values
+    // for the editor UI + sidecar round-trip (see MaterialImport tintR/G/B).
+    float                 TintR                  = 1.0f;
+    float                 TintG                  = 1.0f;
+    float                 TintB                  = 1.0f;
     // Per-material AO-map strength multiplier (× the global --ao_map_strength),
     // same pattern as ParallaxScale. 1 = full effect; lower to tame an AO map
     // that reads too dark on one surface without dialing the whole scene.
     float                 AoStrength             = 1.0f;
+    // Per-material specular RESPONSE multiplier (RVSF bit 0x800, editor
+    // 'specMul' dial). Scales the FINAL accumulated specular term — analytic
+    // highlights AND the env-specular reflection compose — in the deferred
+    // kernels, applied AFTER the roughness-map/metal modulation so it never
+    // distorts roughness, only the response amplitude. 1 = authored default
+    // (multiplying by 1.0f is an exact float identity → byte-null); 0 kills
+    // the specular response entirely. For sources whose specular reads wrong
+    // on this engine (the Polyhaven sandstone's 'spec' map has no slot here —
+    // this dial is the author-side control instead).
+    float                 SpecMul                = 1.0f;
     // Per-material roughness map (PBR). Grayscale, 8-bit single-channel, same
     // tiled/mip layout as the albedo (sampled at the same swizzled UV/miplevel
     // — incl. the parallax-shifted UV). White = rough → LESS specular. Cheap
@@ -89,6 +283,14 @@ struct Material
     char                * ReflectionImage       = nullptr;
     float                 ReflectionSeamAngle   = 0.0f;
     float                 RefractiveIndex       = 0.0f;
+    // Per-material screen-space glass-refraction IOR override (engine-only,
+    // sidecar-persisted 'refractIor' — no LWO/FLD field; distinct from the
+    // authored RefractiveIndex above, which FLD ships but nothing consumes).
+    // 0 = unset -> the deferred transparent kernel uses the global
+    // FeatureFlags glass_refract_ior; >0 = this material Snell-bends (and
+    // derives its Schlick F0) with THIS value. Read only inside the kernel's
+    // Mat_Refractive glass block, so non-glass materials never pay for it.
+    float                 RefractIor            = 0.0f;
     float                 EdgeTransparency      = 0.0f;
     float                 MaxSmoothingAngle     = 0.0f;
     // ─── COLD: texture filename + projection params (init-time) ──────
@@ -132,6 +334,68 @@ struct Material
     // boundary with positive-det faces. Faces are split onto a handedness=-1
     // material clone so the kernel can flip B per pixel. +1 = normal.
     float                 TbnHandedness          = 1.0f;
+
+    // Tri-state override of the env-reflection probe qualification
+    // (EnvReflection_FramePrep). 0 = auto: bake when Reflection > 0 or a
+    // MetallicMap is present (the historical rule). 1 = force-bake: always
+    // bake + publish a probe (the env term's strength still comes from the
+    // Reflection scalar / metallic map, so forcing a probe on a 0-reflection
+    // dielectric changes nothing visibly until one of those is dialed up).
+    // -1 = off: never bake AND never publish a store for this material, even
+    // with a metallic map. Engine-only (no LWO/FLD field) — persisted via the
+    // scene sidecar as 'envRefl' (see MaterialImport_SetSurfaceProp).
+    int8_t                EnvReflMode            = 0;
+
+    // Tri-state override of the procedural-water composite for THIS surface
+    // (only meaningful on the scene's water material — the matID registered
+    // via SetDeferredWaterMatID). 0 = auto: follow the global
+    // --water_procedural flag (city/chase default it on in their factories).
+    // 1 = force the procedural fresnel/deep-colour composite; -1 = force the
+    // legacy albedo+reflection blend. Engine-only (no LWO/FLD field) —
+    // persisted via the scene sidecar as 'waterProcedural'. Same pattern as
+    // EnvReflMode above; consumed by the deferred transparent kernel's
+    // waterProc hoist and WaterProceduralEffective() (glint/albedo-warp pass).
+    int8_t                WaterProcMode          = 0;
+
+    // Per-surface env-probe bake FACE resolution override. 0 = unset → the
+    // global chain (an EXPLICIT --env-bake-res, else the legacy
+    // env_refl_res/2 probe sizing / the city stores' caller-chosen res).
+    // Engine-only (no LWO/FLD field) — set via the editor's 'probe res'
+    // control / the scene sidecar 'envBakeRes', validated to a power of two
+    // in 64..1024 at set time (MaterialImport_SetSurfaceProp). Read at BAKE
+    // time only (EnvBake.cpp); consumers read dims from the store itself, so
+    // mixed-res stores coexist. Probes are SHARED between materials whose
+    // centroids sit within 4 world units — for a shared store the LARGEST
+    // per-material wish wins (rebake-on-upgrade). City per-building
+    // registered stores size from the FIRST windows clone that registers the
+    // building (materials map n:1 onto them) and cap at their 512² source.
+    int                   EnvBakeRes             = 0;
+
+    // Authored per-surface flag (ENVDYN Workstream A1, docs/
+    // ENVDYN_DISPLACEMENT_PLAN.md): 1 = this material's env-reflection probe
+    // opts into the LIVE dynamic-mesh overlay (the mech reflected in it), 0 =
+    // static probe (default). Authored in the LWO 'RVSF' SURF sub-chunk (bit
+    // 0x400) → FLD Surf_RevExt payload → here; also editor-settable via the
+    // 'envDynamic' Material-panel checkbox. Nothing flagged → the whole
+    // workstream is inert (byte-null). Consumed by EnvBake.cpp (store
+    // retention A2 + the overlay pass A3), never by the static bake.
+    int8_t                EnvDynamic             = 0;
+
+    // Authored per-surface ENV-PROBE CAPTURE-POINT OFFSET, world units, added
+    // to whatever EnvBake.cpp's materialCentroid derives (legacy vertex mean
+    // or --env_probe_center's area centroid). THE OVERRIDE WINS: the derived
+    // point is a heuristic over the surface's geometry and cannot know that a
+    // reflector wants its probe a metre off the floor, or clear of a soffit.
+    // All three zero = unset = pure derivation, so the field is byte-null
+    // until somebody authors it.
+    //
+    // Set from the editor's Surface panel ("probe offset X/Y/Z"), which
+    // targets the SURFACE because a probe's identity in EnvBake is its
+    // material, not its object (env.byMat, one store per material-centroid
+    // group) — a per-object value would have no probe to attach to. Authored
+    // in the LWO 'RVSF' SURF sub-chunk (bit 0x1000, a 3-float payload) → FLD
+    // Surf_RevExt → here.
+    float                 EnvBakeOfs[3]          = { 0.0f, 0.0f, 0.0f };
 };
 
 #pragma pack(pop)

@@ -12,7 +12,7 @@
 // and is read at runtime by the deferred kernel to skip the per-pixel cube
 // tap on static geometry.
 //
-// Call AFTER ShadowMaps_BakeStatic — the bake reads sm.depth (static occluder
+// Call AFTER ShadowMaps_BakeStatic — the bake reads sm.packSD (static occluder
 // depth) populated by that pass.
 //
 // No-op when --shadow-lightmap is off, when the scene has zero cube shadow
@@ -29,6 +29,15 @@ namespace fds {
 // though the per-pixel SAMPLE flag (shadow_lightmap) is left off until that
 // scene actually renders — keeps the flag from leaking onto other scenes.
 void LightmapBake_Static(Scene *Sc, bool forceEnable = false);
+
+// The one side effect of LightmapBake_Static that is NOT about lightmaps, so
+// that a scene which SKIPS the bake can still pay for it (it is microseconds).
+// Stamps Face::MeshFaceIdx over exactly the mesh set the bake would keep.
+// MeshFaceIdx's second consumer is tbrXparOrderLess (FILLERS.CPP:1876) — the
+// camera-independent tie-break of the per-strip transparent sort — which is
+// live on every frame whether or not any lightmap exists. Full rationale at
+// the definition. Idempotent; safe to call alongside a bake that also stamps.
+void LightmapStampFaceIndices(Scene *Sc);
 
 // Stamp every static-mesh face's (A, B, C) vertices with their object-
 // space barycentric weight on the face itself: A→(0,0), B→(1,0), C→(0,1).

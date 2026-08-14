@@ -7,14 +7,19 @@
 #include <Base/FDS_DEFS.H>           // DEFAULT_BLOCKSIZEX/Y, Txtr_Tiled, Mat_AoInAlpha
 #include <Base/Texture.h>
 #include <Base/Material.h>
-#include <Base/Omni.h>               // FlareScale (sidecar light: lines)
 #include <Base/Scene.h>
+#include <Base/Object.h>             // Object tree (editor scale knob)
+#include <Base/TriMesh.h>            // EditorScale (editor scale knob)
 #include <Base/FeatureFlags.h>
+#include <FLD/FLD_READ.H>            // FldRevMap* — LWO/FLD-authored PBR map roles (§1e)
 
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -81,20 +86,49 @@ bool tokenHas(const std::string &stem, const char *tok) {
 	return false;
 }
 
-enum class Role { None, Albedo, Normal, Height, Roughness, Ao, Metallic, Skip };
+// PackedOrm = one file carrying THREE scalar maps in its channels (the ORM /
+// ARM / RMA convention: R occlusion, G roughness, B metallic). It is not a
+// slot, it FILLS three slots — see the dir scan in MaterialImport_Apply.
+enum class Role { None, Albedo, Normal, Height, Roughness, Ao, Metallic, PackedOrm, Skip };
 
+// Guess a map's role from its filename stem.
+//
+// ORDER IS THE WHOLE DESIGN, and it is: an EXPLICIT role token always beats a
+// guess made from the asset-family name. Vendors name the family and the role
+// in the same stem ("blue_metal_plate_arm_1k", "chipped-paint-metal-rough2"),
+// so a rule that reads any part of the stem in isolation gets hijacked by the
+// family. Two consequences worth stating, because both were live bugs:
+//
+//   * `ao` is tested BEFORE `metal`. "old-metal-slats1_ao" is an OCCLUSION map
+//     belonging to a metal-named family; testing `metal` first read 66 of the
+//     library's AO maps as metalness images.
+//   * PackedOrm is tested LAST. `arm` is a real English word and a real object
+//     name -- "mech_arm_albedo", "left_arm_rough" -- so a stem that names a
+//     single role explicitly is that role, and only a stem that names NO role
+//     is treated as a packed set.
 Role classify(const std::string &stem) {
 	if (tokenHas(stem,"preview") || tokenHas(stem,"thumb") || tokenHas(stem,"thumbnail")
 	    || tokenHas(stem,"sphere") || tokenHas(stem,"render")) return Role::Skip;
-	// Order matters: specific tokens first.
+	// Explicit single-role tokens, most specific spelling first. `diff`/`col`
+	// are the PolyHaven/FreePBR abbreviations ("*_diff_1k", "LAP_COL").
 	if (tokenHas(stem,"basecolor")||tokenHas(stem,"base_color")||tokenHas(stem,"base-color")
-	    ||tokenHas(stem,"albedo")||tokenHas(stem,"diffuse")||tokenHas(stem,"color")) return Role::Albedo;
+	    ||tokenHas(stem,"albedo")||tokenHas(stem,"diffuse")||tokenHas(stem,"diff")
+	    ||tokenHas(stem,"color")||tokenHas(stem,"col")) return Role::Albedo;
 	if (tokenHas(stem,"normal")||tokenHas(stem,"nrm")||tokenHas(stem,"nor")) return Role::Normal;
 	if (tokenHas(stem,"roughness")||tokenHas(stem,"rough")||tokenHas(stem,"rgh")) return Role::Roughness;
 	if (tokenHas(stem,"height")||tokenHas(stem,"disp")||tokenHas(stem,"displacement")
 	    ||tokenHas(stem,"bump")) return Role::Height;
-	if (tokenHas(stem,"metallic")||tokenHas(stem,"metalness")||tokenHas(stem,"metal")) return Role::Metallic;
 	if (tokenHas(stem,"ao")||tokenHas(stem,"occlusion")||tokenHas(stem,"ambientocclusion")) return Role::Ao;
+	// Bare "metal" is also how families are named, so it only means "metalness
+	// map" when the stem carries no packed-set token — otherwise
+	// "blue_metal_plate_arm_1k" reads as a metalness image instead of the ARM
+	// map it is. The explicit spellings need no such guard.
+	if (tokenHas(stem,"metallic")||tokenHas(stem,"metalness")
+	    || (tokenHas(stem,"metal") && !tokenHas(stem,"arm") && !tokenHas(stem,"orm")
+	        && !tokenHas(stem,"rma") && !tokenHas(stem,"mra"))) return Role::Metallic;
+	// Named no single role and carries a packed-set token ⇒ packed.
+	if (tokenHas(stem,"orm")||tokenHas(stem,"arm")||tokenHas(stem,"rma")
+	    ||tokenHas(stem,"mra")) return Role::PackedOrm;
 	return Role::None;
 }
 
@@ -175,6 +209,120 @@ Texture *loadTiled(const std::string &path, bool flipGreen,
 	return t;
 }
 
+// ── Imported-texture dedup cache ────────────────────────────────────────────
+// Applying the SAME PBR map to multiple surfaces/objects used to `new Texture` +
+// re-decode the PNG (Load_Texture) + re-tile/mip AND re-run MakeNormal16/
+// MakeHeight8 on EVERY application — pure waste, and each redundant allocation is
+// another chance for a wasm heap-grow to fire mid-atomic and trap ("unaligned
+// memory access", emscripten#17816/#23806, under the editor's -pthread +
+// ALLOW_MEMORY_GROWTH build). Cache the FULLY-PROCESSED texture keyed by every
+// input that changes its decoded bytes: source path + role + green-flip + the
+// target (albedo-matched) dimensions. A second application of the same map to a
+// different surface reuses the cached Texture* — zero decode, zero alloc, and the
+// two surfaces literally share one Texture object (true reuse).
+//
+// LIFETIME: process-global, never freed — matches the existing convention. The
+// editor session is short-lived, Texture blocks aren't refcounted, and
+// re-imports/reset already leak the previous Texture on purpose (see
+// MaterialImport_ClearSurfaceMap). The cached texture is aliased across every
+// surface that imports the same map; the one in-place mutation of a shared
+// imported map is the normalFlip toggle (FlipNormalMapG), whose parity is tracked
+// per-Texture (g_nmapFlipParity) — surfaces sharing one source normal map share
+// its convention, which is correct (convention is a property of the source file).
+std::unordered_map<std::string, Texture*> g_importCache;
+
+// Load + role-convert a map, deduped by (path, role, flip, targetW, targetH).
+// Returns the shared, ready-to-assign Texture: albedo -> tiled 32bpp; normal ->
+// +MakeNormal16 when nmap_16bit; height/roughness/ao/metallic -> +MakeChannel8
+// on the channel that role lives in (falls back to the 32bpp texture if the
+// 8-bit pack can't allocate).
+//
+// The ROLE PICKS THE CHANNEL, and the role is part of the cache key, so one
+// PACKED file (ORM/ARM/RMA) asked for as three roles yields three distinct
+// single-channel textures — that is what makes a packed map work at all.
+Texture *loadRoleMapCached(const std::string &path, const char *role,
+                           bool flipGreen, int targetW, int targetH) {
+	char suffix[96];
+	std::snprintf(suffix, sizeof suffix, "|%s|%d|%dx%d",
+	              role, flipGreen ? 1 : 0, targetW, targetH);
+	const std::string key = path + suffix;
+	auto it = g_importCache.find(key);
+	if (it != g_importCache.end()) {
+		std::fprintf(stderr, "    [reuse] %s (%s%s%s) — cached, no re-decode\n",
+		             path.c_str(), role, flipGreen ? ", flipG" : "",
+		             (targetW > 0 && targetH > 0) ? ", albedo-matched" : "");
+		return it->second;
+	}
+	Texture *t = loadTiled(path, flipGreen, targetW, targetH);
+	if (!t) return nullptr;
+	if (!std::strcmp(role, "normal")) {
+		if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
+	} else if (std::strcmp(role, "albedo") != 0) {
+		// height / roughness / ao / metallic -> single-channel 8-bit, from the
+		// channel the ORM/ARM convention puts that role in: R=occlusion(+height,
+		// which is authored grayscale), G=roughness, B=metallic. A separate
+		// grayscale file per role reads identically on any channel, so this only
+		// CHANGES anything for a packed source — where the old fixed blue-byte
+		// read handed the roughness slot the metalness image.
+		int ch = 0;                                          // ao / height -> R
+		if      (!std::strcmp(role, "roughness")) ch = 1;    //           -> G
+		else if (!std::strcmp(role, "metallic"))  ch = 2;    //           -> B
+		if (Texture *t8 = MakeChannel8(t, ch)) t = t8;
+	}
+	g_importCache[key] = t;
+	std::fprintf(stderr, "    [load] %s (%s) decoded + cached\n", path.c_str(), role);
+	return t;
+}
+
+// Mean roughness (0..1) of a loaded roughness texture's base level: 8-bit
+// single-channel (MakeHeight8) or the 32bpp fallback (low/blue byte — the
+// same byte the kernel's attenuation samples).
+float roughnessMapMean(const Texture *t) {
+	if (!t) return 0.5f;
+	const byte *d = (t->numMipmaps > 0 && t->Mipmap[0]) ? t->Mipmap[0] : t->Data;
+	if (!d) return 0.5f;
+	const size_t n = size_t(t->SizeX) * size_t(t->SizeY);
+	if (!n) return 0.5f;
+	uint64_t sum = 0;
+	if (t->BPP == 8)       for (size_t i = 0; i < n; ++i) sum += d[i];
+	else if (t->BPP == 32) for (size_t i = 0; i < n; ++i) sum += d[i * 4];
+	else return 0.5f;
+	return float(sum) / (255.0f * float(n));
+}
+
+// DIELECTRIC specular seed for a surface whose author left Specular at 0 and
+// that just gained a ROUGHNESS map (both import paths call this). The old
+// blanket Specular=0.5/Glossiness=32 turned every matte surface SHINY the
+// moment a rough dielectric set (Polyhaven sandstone) landed on it — 0.5 is
+// ~12x a dielectric's F0 (4%), and gloss 32 is a tight lobe regardless of how
+// rough the map says the surface is (the map only ATTENUATES intensity in the
+// kernel's cheap tier; under --pbr the GGX lobe derives its roughness from
+// Glossiness, not the map). Seed instead:
+//   Specular   = 0.08  (~2x the 4% dielectric F0 — Blinn's unnormalized lobe
+//                needs a little headroom to read at all; specMul is the dial)
+//   Glossiness = from the MAP's mean roughness via the engine's own
+//                documented mapping (rough = sqrt(2/(gloss+2)), inverted:
+//                gloss = 2/rough^2 - 2), snapped to the nearest vectorized
+//                spec-loop case so a big seeded surface stays on the vec path.
+// Only fires when the author left BOTH at 0 — authored values always win.
+void seedDielectricSpecular(Material *M, const Texture *rough, const char *ctx) {
+	if (M->Specular > 0.0f) return;
+	M->Specular = 0.08f;
+	if (M->Glossiness == 0) {
+		float r = roughnessMapMean(rough);
+		if (r < 0.05f) r = 0.05f;
+		const float g = 2.0f / (r * r) - 2.0f;
+		static const unsigned short kVecCases[] = { 4, 8, 16, 32, 48, 64, 128 };
+		unsigned short best = kVecCases[0];
+		for (unsigned short c : kVecCases)
+			if (std::fabs(float(c) - g) < std::fabs(float(best) - g)) best = c;
+		M->Glossiness = best;
+	}
+	std::fprintf(stderr, "    [spec] roughness map + Specular was 0 -> dielectric "
+	             "seed Specular=%.2f Glossiness=%u (gloss from the map's mean "
+	             "roughness; %s)\n", M->Specular, M->Glossiness, ctx);
+}
+
 } // namespace
 
 void MaterialImport_ParseArgs(int argc, const char *const *argv) {
@@ -230,7 +378,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			continue;
 		}
 		// Scan the directory and bucket files by detected role (first match wins).
-		std::string albedo, normal, height, rough, ao, metallic;
+		std::string albedo, normal, height, rough, ao, metallic, packed;
 		DIR *d = opendir(spec.dir.c_str());
 		if (!d) { std::fprintf(stderr, "[MAT-IMPORT] cannot open dir '%s'\n", spec.dir.c_str()); continue; }
 		for (struct dirent *e; (e = readdir(d)); ) {
@@ -246,17 +394,41 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 				case Role::Roughness: slot = &rough;    break;
 				case Role::Ao:        slot = &ao;       break;
 				case Role::Metallic:  slot = &metallic; break;
+				// Remembered, NOT applied here: a packed map is a FALLBACK for
+				// the three slots it covers, and readdir order is arbitrary, so
+				// filling them mid-scan would let the packed file beat a
+				// dedicated one that simply came later in the directory.
+				case Role::PackedOrm: slot = &packed;   break;
 				default: continue;
 			}
 			if (slot->empty()) *slot = full;   // first match wins
 		}
 		closedir(d);
 
+		// A packed ORM/ARM/RMA fills the three slots it covers — but only the
+		// ones no DEDICATED file claimed, so a set that ships both (common:
+		// "*_arm_1k.png" plus a finer "*_rough_1k.png") keeps the dedicated
+		// map and uses the packed one only for what is missing. Same path
+		// three times, three roles: loadRoleMapCached keys on the role, so
+		// each pulls its own channel out (R/G/B) into its own 8-bit texture.
+		if (!packed.empty()) {
+			const bool usedAo = ao.empty(), usedR = rough.empty(), usedM = metallic.empty();
+			if (usedAo) ao       = packed;
+			if (usedR)  rough    = packed;
+			if (usedM)  metallic = packed;
+			std::fprintf(stderr, "    [packed] %s -> %s%s%s\n", packed.c_str(),
+			             usedAo ? "ao(R) " : "", usedR ? "roughness(G) " : "",
+			             usedM ? "metallic(B)" : "");
+			if (!usedAo && !usedR && !usedM)
+				std::fprintf(stderr, "    [packed] (all three slots already had "
+				             "dedicated maps — packed file unused)\n");
+		}
+
 		std::fprintf(stderr, "[MAT-IMPORT] %s: material '%s' <- %s\n",
 		             sceneName ? sceneName : "?", spec.matName.c_str(), spec.dir.c_str());
 
 		if (!albedo.empty()) {
-			if (Texture *t = loadTiled(albedo, false)) {
+			if (Texture *t = loadRoleMapCached(albedo, "albedo", false, 0, 0)) {
 				for (Material *m : mats) m->Txtr = t;
 				std::fprintf(stderr, "    albedo    %s (%dx%d)\n", albedo.c_str(), t->SizeX, t->SizeY);
 			}
@@ -271,53 +443,51 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			const bool srcOGL = normalSourceIsOGL(stemLower(normal));
 			bool flip = (srcOGL != kEngineExpectsOGL);
 			if (g_forceFlipNormal) flip = !flip;
-			if (Texture *t = loadTiled(normal, flip, aw, ah)) {
-				if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
+			if (Texture *t = loadRoleMapCached(normal, "normal", flip, aw, ah)) {
 				for (Material *m : mats) m->NormalMap = t;
 				std::fprintf(stderr, "    normal    %s (src=%s, flipG=%d%s)\n", normal.c_str(),
 				             srcOGL ? "OGL" : "DX", flip, g_forceFlipNormal ? ", forced" : "");
 			}
 		}
 		if (!rough.empty()) {
-			if (Texture *r32 = loadTiled(rough, false, aw, ah)) {
-				Texture *r8 = MakeHeight8(r32);
-				for (Material *m : mats) m->RoughnessMap = r8 ? r8 : r32;
-				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), r8 ? "8-bit" : "32-bit");
-				// A roughness map implies the surface is meant to be specular, but
-				// many FLD materials (e.g. greets 'momy') ship Specular=0 → the
-				// roughness map would modulate a highlight that never appears. Give
-				// the material a sensible base Specular/Glossiness so the map shows.
-				// Only when the author left them at 0 (don't stomp a tuned value).
-				if (M->Specular <= 0.0f) {
-					M->Specular = 0.5f;
-					if (M->Glossiness == 0) M->Glossiness = 32;
-					std::fprintf(stderr, "    [spec] roughness map present + Specular was 0 -> "
-					             "default Specular=0.5 Glossiness=%u (roughness map modulates it)\n",
-					             M->Glossiness);
-				}
+			if (Texture *t = loadRoleMapCached(rough, "roughness", false, aw, ah)) {
+				for (Material *m : mats) m->RoughnessMap = t;
+				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), t->BPP == 8 ? "8-bit" : "32-bit");
+				// A roughness map implies a specular response, but many FLD
+				// materials ship Specular=0 — seed DIELECTRIC scalars from the
+				// map so the response reads matte-correct (see the helper; the
+				// old 0.5/32 seed made every matte target shiny).
+				seedDielectricSpecular(M, t, "CLI dir-scan import");
 			}
 		}
 		if (!height.empty()) {
-			if (Texture *h32 = loadTiled(height, false, aw, ah)) {
-				Texture *h8 = MakeHeight8(h32);
-				for (Material *m : mats) m->HeightMap = h8 ? h8 : h32;
-				std::fprintf(stderr, "    height    %s (%s)%s\n", height.c_str(), h8 ? "8-bit" : "32-bit",
+			if (Texture *t = loadRoleMapCached(height, "height", false, aw, ah)) {
+				for (Material *m : mats) m->HeightMap = t;
+				std::fprintf(stderr, "    height    %s (%s)%s\n", height.c_str(), t->BPP == 8 ? "8-bit" : "32-bit",
 				             fds::FeatureFlags::parallax() ? "" : "  [--parallax off: loaded but inactive]");
 			}
 		}
 		if (!ao.empty()) {
-			if (Texture *a32 = loadTiled(ao, false, aw, ah)) {
-				Texture *a8 = MakeHeight8(a32);
-				for (Material *m : mats) m->AoMap = a8 ? a8 : a32;
-				std::fprintf(stderr, "    ao        %s (%s, separate AoMap)\n", ao.c_str(), a8 ? "8-bit" : "32-bit");
+			if (Texture *t = loadRoleMapCached(ao, "ao", false, aw, ah)) {
+				for (Material *m : mats) m->AoMap = t;
+				std::fprintf(stderr, "    ao        %s (%s, separate AoMap)\n", ao.c_str(), t->BPP == 8 ? "8-bit" : "32-bit");
 			}
 		}
 		if (!metallic.empty()) {
-			if (Texture *m32 = loadTiled(metallic, false, aw, ah)) {
-				Texture *m8 = MakeHeight8(m32);
-				for (Material *m : mats) m->MetallicMap = m8 ? m8 : m32;
-				std::fprintf(stderr, "    metallic  %s (%s — kills diffuse, tints spec+env by albedo; needs --env_refl for reflections)\n",
-				             metallic.c_str(), m8 ? "8-bit" : "32-bit");
+			if (Texture *t = loadRoleMapCached(metallic, "metallic", false, aw, ah)) {
+				for (Material *m : mats) m->MetallicMap = t;
+				// A metal without env reflections renders as a black hole
+				// (metalness kills diffuse; the env term needs --env_refl).
+				// Auto-default BOTH flags so the import visibly works out of
+				// the box — setDefault never overrides an explicit
+				// --no-env_refl / --no-env_bake_fix.
+				fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_refl, true);
+				fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_bake_fix, true);
+				std::fprintf(stderr, "    metallic  %s (%s — kills diffuse, tints spec+env by albedo; "
+				             "env_refl %s, env_bake_fix %s)\n",
+				             metallic.c_str(), t->BPP == 8 ? "8-bit" : "32-bit",
+				             fds::FeatureFlags::env_refl() ? "on" : "OFF (user override)",
+				             fds::FeatureFlags::env_bake_fix() ? "on" : "OFF (user override)");
 			}
 		}
 
@@ -358,6 +528,22 @@ int MaterialImport_GetNormalFlip(const Material *M) {
 bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
                                    const char *prop, float value) {
 	if (!sc || !surface || !prop) return false;
+	// envBakeRes arrives as any number (sidecar strtof / editor select) but
+	// the env-store mip chain + shift-indexed samplers need a power of two in
+	// 64..1024 — sanitize ONCE up front (clamp + round down to a pow2, same
+	// rule as EnvBake's envBakeResOverride) so every matching material clone
+	// below gets the validated value. <= 0 stays 0 = unset (global chain).
+	if (!std::strcmp(prop, "envBakeRes") && value > 0.0f) {
+		const int want = (int)value;
+		const int clamped = want < 64 ? 64 : (want > 1024 ? 1024 : want);
+		int p2 = 64;
+		while (p2 * 2 <= clamped) p2 <<= 1;
+		if (p2 != want)
+			std::fprintf(stderr, "[MAT-IMPORT] '%s' envBakeRes=%d invalid (want"
+			             " a power of two in 64..1024) — using %d\n",
+			             surface, want, p2);
+		value = (float)p2;
+	}
 	bool any = false;
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != sc) continue;
@@ -380,10 +566,82 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 			else              M->Flags &= ~Mat_Transparent;
 		}
 		else if (!std::strcmp(prop, "reflection"))   M->Reflection = value;
+		else if (!std::strcmp(prop, "refractive")) {
+			// Screen-space glass refraction OPT-IN (Mat_Refractive). Engine-only
+			// per-material flag (no LWO/FLD field) — persisted via the scene
+			// sidecar so glass is editor-settable. Consumed by the deferred
+			// transparent kernel + the TBR glass scheduler under --glass_refract.
+			// >0 marks the surface as refracting glass; 0 clears it.
+			if (value > 0.0f) M->Flags |=  Mat_Refractive;
+			else              M->Flags &= ~Mat_Refractive;
+		}
 		// Engine-only per-material dials (no LWO/FLD field — persist via the
 		// scene sidecar). Both multiply their global FeatureFlags strength.
 		else if (!std::strcmp(prop, "aoStrength"))    M->AoStrength = value;
 		else if (!std::strcmp(prop, "parallaxScale")) M->ParallaxScale = value;
+		// Per-material specular RESPONSE multiplier (RVSF bit 0x800): scales
+		// the deferred kernels' FINAL specular term (analytic + env-specular)
+		// after roughness/metal modulation. 1 = authored default (byte-null);
+		// clamp negatives (a negative response is nonsense).
+		else if (!std::strcmp(prop, "specMul"))       M->SpecMul = value < 0.0f ? 0.0f : value;
+		// Per-material glass-refraction IOR (engine-only, sidecar-persisted).
+		// 0 = unset -> the kernel falls back to the global glass_refract_ior;
+		// >0 = this material's Snell bend + Schlick F0 use this value. Only
+		// meaningful on Mat_Refractive surfaces under --glass_refract.
+		else if (!std::strcmp(prop, "refractIor"))    M->RefractIor = value < 0.0f ? 0.0f : value;
+		// Tri-state env-reflection override (engine-only, sidecar-persisted):
+		// -1 = never bake/publish an env probe for this material, 0 = auto
+		// (the Reflection>0 || MetallicMap rule), 1 = force-bake. Values
+		// arrive as FLOATS here (sidecar lines parse with strtof), so
+		// classify by range instead of exact compare.
+		else if (!std::strcmp(prop, "envRefl"))
+			M->EnvReflMode = value < -0.5f ? int8_t(-1) : value > 0.5f ? int8_t(1) : int8_t(0);
+		// Per-surface env-probe bake FACE resolution (engine-only, sidecar-
+		// persisted; sanitized to a pow2 in 64..1024 above). 0 = unset -> the
+		// global env_bake_res / legacy sizing chain. Read at bake time
+		// (EnvBake.cpp); the live-editor path invalidates the scene's probes
+		// on set so the next FramePrep re-bakes at the new size.
+		else if (!std::strcmp(prop, "envBakeRes"))
+			M->EnvBakeRes = value <= 0.0f ? 0 : (int)value;
+		// Tri-state procedural-water override (engine-only, sidecar-persisted;
+		// same -1/0/1 classification as envRefl). Only meaningful on the
+		// scene's water material (SetDeferredWaterMatID); 0 = auto → the
+		// global --water_procedural flag decides, so a scene with no sidecar
+		// line renders byte-identically.
+		else if (!std::strcmp(prop, "waterProcedural"))
+			M->WaterProcMode = value < -0.5f ? int8_t(-1) : value > 0.5f ? int8_t(1) : int8_t(0);
+		// Authored dynamic-env-reflection flag (ENVDYN Workstream A1). 0/1;
+		// persisted via the LWO 'RVSF' sub-chunk (bit 0x400) → FLD, and set
+		// live here for the editor's Material-panel checkbox. Marks this
+		// material's env probe for the live dynamic-mesh overlay (A2/A3).
+		else if (!std::strcmp(prop, "envDynamic"))
+			M->EnvDynamic = value > 0.5f ? int8_t(1) : int8_t(0);
+		// Authored env-probe CAPTURE-POINT OFFSET, world units, added to
+		// whatever EnvBake's materialCentroid derives (legacy vertex mean or
+		// --env_probe_center's area centroid) — the derivation is a heuristic
+		// over the surface's own geometry and cannot know that a reflector
+		// wants its probe clear of a soffit or a step nose. All three zero =
+		// unset = pure derivation. Persisted via the LWO 'RVSF' sub-chunk
+		// (bit 0x1000, one bit / three floats) -> FLD -> Material::EnvBakeOfs.
+		else if (!std::strcmp(prop, "envBakeOfsX")) M->EnvBakeOfs[0] = value;
+		else if (!std::strcmp(prop, "envBakeOfsY")) M->EnvBakeOfs[1] = value;
+		else if (!std::strcmp(prop, "envBakeOfsZ")) M->EnvBakeOfs[2] = value;
+		// Per-surface smoothing (normal-averaging) angle. Engine-only, no
+		// material field: recorded in the MeshOps registry and consumed when
+		// MakeFacesIndependent rebuilds this surface's vertex normals. That
+		// runs later at scene init (after the sidecar) — 180 = fully smooth,
+		// 0 = faceted. Set live (editor) it registers but needs a scene reload
+		// to re-run the normal build (topology is flattened once at init).
+		else if (!std::strcmp(prop, "smoothAngle")) MeshOps_SetSurfaceSmoothAngle(surface, value);
+		// Albedo tint (engine-only, sidecar-persisted): per-MATERIAL
+		// multipliers applied at the deferred texel fetch — NOT a texture
+		// mutation, since textures are deduped by filename and shared
+		// across DIFFERENT surfaces (MECH_HUL.JPG = hull+canons+legs);
+		// mutating pixels bled one surface's tint into the others.
+		// Lossless/reversible; forward-path surfaces don't see it.
+		else if (!std::strcmp(prop, "tintR")) M->TintR = value < 0.0f ? 0.0f : value;
+		else if (!std::strcmp(prop, "tintG")) M->TintG = value < 0.0f ? 0.0f : value;
+		else if (!std::strcmp(prop, "tintB")) M->TintB = value < 0.0f ? 0.0f : value;
 		else if (!std::strcmp(prop, "normalFlip")) {
 			// Green-channel convention toggle (OGL ↔ DX), value = desired
 			// parity (0/1 vs the file as loaded). The flip mutates the
@@ -403,64 +661,97 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 	return any;
 }
 
-static bool sidecarIsMapRole(const char *role) {
-	return !std::strcmp(role, "albedo") || !std::strcmp(role, "normal")
-	    || !std::strcmp(role, "height") || !std::strcmp(role, "roughness")
-	    || !std::strcmp(role, "ao")     || !std::strcmp(role, "metallic");
-}
-
-// Sidecar light lines: "light:<i>|<key>|<value>" — engine-only per-light
-// extensions with no LWS/FLD field (currently flareScale). <i> indexes the
-// scene-authored omnis in file order, the SAME mapping the editor and the
-// LWS/FLD light patchers use.
-static bool sidecarSetLightProp(Scene *sc, int index, const char *key, float value) {
-	int i = 0;
-	for (Omni *O = sc->OmniHead; O; O = O->Next) {
-		if (!(O->Flags & Omni_SceneAuthored)) continue;
-		if (i++ != index) continue;
-		if (!std::strcmp(key, "flareScale")) { O->FlareScale = value; return true; }
-		return false;   // unknown per-light sidecar key
+// ── Object-level overrides (the editor scale knob) ──────────────────────────
+// Set the per-object uniform scale multiplier on every scene object whose
+// chunk-collapsed name (Editor_ChunkBaseObjName — 'Piramid.lwo:c17' →
+// 'Piramid.lwo') matches `objName`. Multi-instance objects (8 × taxi.lwo) are
+// separate Objects sharing the name — all of them are set. Subtree semantics
+// come free: Animate_Objects composes the parent's (scaled) rotation matrix
+// into children, so scaling a model's ROOT object ('mech  null',
+// 'tra_frnt.lwo') scales the whole assembly around the root's pivot.
+// Returns the number of LIVE meshes set; static-baked (Tri_Possessed) meshes
+// are still stamped but never re-run Animate_Objects, so they're reported on
+// stderr instead of counted (greets' chunked room can't scale live).
+int ObjectImport_SetObjectScale(Scene *sc, const char *objName, float scale) {
+	if (!sc || !objName || !*objName) return 0;
+	if (scale <= 0.0f) scale = 1.0f;
+	const std::string want = objName;
+	int applied = 0, possessed = 0;
+	for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Data || !Obj->Name) continue;
+		if (rev::Editor_ChunkBaseObjName(Obj->Name) != want) continue;
+		TriMesh *T = (TriMesh *)Obj->Data;
+		T->EditorScale = scale;
+		if (T->Flags & Tri_Possessed) ++possessed;
+		else ++applied;
 	}
-	return false;       // index out of range
+	if (possessed)
+		std::fprintf(stderr, "[OBJ-IMPORT] scale '%s'=%.3g: %d static-baked "
+		             "(Tri_Possessed) mesh(es) skip Animate_Objects — live scale "
+		             "can't reach them\n", objName, scale, possessed);
+	return applied;
 }
 
-void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
-	if (!sc || !path) return;
-	FILE *f = std::fopen(path, "r");
-	if (!f) return;   // no sidecar for this scene — fine
-	char line[512];
-	int applied = 0, failed = 0;
-	while (std::fgets(line, sizeof line, f)) {
-		// strip newline / CR; skip blanks + comments
-		line[std::strcspn(line, "\r\n")] = 0;
-		if (!line[0] || line[0] == '#') continue;
-		char *sep1 = std::strchr(line, '|');
-		char *sep2 = sep1 ? std::strchr(sep1 + 1, '|') : nullptr;
-		if (!sep1 || !sep2) {
-			std::fprintf(stderr, "[MAT-SIDECAR] bad line (want surface|key|value): %s\n", line);
+// Read-back for the editor's objects JSON: the object's current scale
+// multiplier (first matching mesh; 0-sentinel resolved to 1.0).
+float ObjectImport_GetObjectScale(Scene *sc, const char *objName) {
+	if (!sc || !objName || !*objName) return 1.0f;
+	const std::string want = objName;
+	for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Data || !Obj->Name) continue;
+		if (rev::Editor_ChunkBaseObjName(Obj->Name) != want) continue;
+		const TriMesh *T = (const TriMesh *)Obj->Data;
+		return T->EditorScale > 0.0f ? T->EditorScale : 1.0f;
+	}
+	return 1.0f;
+}
+
+// True if a file exists + is readable (relative to the demo CWD = Runtime/).
+static bool fileExists(const std::string &path) {
+	if (FILE *f = std::fopen(path.c_str(), "rb")) { std::fclose(f); return true; }
+	return false;
+}
+
+void MaterialImport_ApplyRevMaps(Scene *sc, const char *sceneName) {
+	if (!sc) return;
+	// Directory-per-set (§1e): a material names ONE texture SET; the engine
+	// resolves TEXTURES/PBR/<set>/<role>.png and loads whichever roles exist.
+	// albedo FIRST (it sets the texel layout aux maps resample to, and dropIf
+	// keys off it); the rest in the retired sidecar's stable alphabetical order
+	// so a scene that carried per-file sidecar paths reproduces byte-identically.
+	static const char *const kRoles[] = {
+		"albedo", "ao", "height", "metallic", "normal", "roughness" };
+	const int n = FldRevMapCount();
+	int applied = 0, missing = 0;
+	for (int i = 0; i < n; ++i) {
+		const RevMapAssignment *e = FldRevMapAt(i);
+		if (!e || e->scene != sc || !e->matName || !e->set || !*e->set) continue;
+		const std::string dir = std::string("TEXTURES/PBR/") + e->set;
+		if (!fileExists(dir + "/albedo.png") && !fileExists(dir + "/normal.png")
+		 && !fileExists(dir + "/height.png") && !fileExists(dir + "/roughness.png")
+		 && !fileExists(dir + "/metallic.png") && !fileExists(dir + "/ao.png")) {
+			std::fprintf(stderr, "[MAT-REVMAP] %s: '%s' -> set '%s' has NO role "
+			             "files under %s — nothing applied\n",
+			             sceneName ? sceneName : "?", e->matName, e->set, dir.c_str());
+			++missing;
 			continue;
 		}
-		*sep1 = 0;
-		*sep2 = 0;
-		const char *surface = line, *key = sep1 + 1, *value = sep2 + 1;
-		bool ok;
-		if (!std::strncmp(surface, "light:", 6)) {
-			ok = sidecarSetLightProp(sc, std::atoi(surface + 6), key,
-			                         std::strtof(value, nullptr));
-			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] %s.%s: no such light / key\n",
-			                      surface, key);
-		} else if (sidecarIsMapRole(key)) {
-			ok = MaterialImport_ApplyMapFile(sc, surface, key, value);
-		} else {
-			ok = MaterialImport_SetSurfaceProp(sc, surface, key, std::strtof(value, nullptr));
-			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] '%s'.%s: no match / unknown prop\n",
-			                      surface, key);
+		for (const char *role : kRoles) {
+			const std::string path = dir + "/" + role + ".png";
+			if (fileExists(path)) {
+				MaterialImport_ApplyMapFile(sc, e->matName, role, path.c_str());
+				++applied;
+			}
 		}
-		if (ok) ++applied; else ++failed;
+		// normalFlip AFTER the normal map (it mutates the assigned NormalMap).
+		if (e->normalFlip >= 0)
+			MaterialImport_SetSurfaceProp(sc, e->matName, "normalFlip",
+			                              (float)e->normalFlip);
 	}
-	std::fclose(f);
-	std::fprintf(stderr, "[MAT-SIDECAR] %s: %d entrie(s) applied%s\n",
-	             path, applied, failed ? " (some FAILED, see above)" : "");
+	if (applied || missing)
+		std::fprintf(stderr, "[MAT-REVMAP] %s: %d LWO/FLD-authored map(s) applied"
+		             "%s\n", sceneName ? sceneName : "?", applied,
+		             missing ? " (some sets MISSING, see above)" : "");
 }
 
 const char *MaterialImport_ClassifyRole(const char *filename) {
@@ -472,8 +763,35 @@ const char *MaterialImport_ClassifyRole(const char *filename) {
 		case Role::Roughness: return "roughness";
 		case Role::Ao:        return "ao";
 		case Role::Metallic:  return "metallic";
+		// A packed ORM/ARM/RMA is not a slot — it FILLS three. There is no
+		// single role to hand back, so callers that assign one map to one slot
+		// must not treat it as one; they get a distinct token rather than "",
+		// so "this is a packed set" can be told apart from "unrecognised".
+		case Role::PackedOrm: return "packed_orm";
 		default:              return "";   // Skip / None — nothing to apply
 	}
+}
+
+// Original-slot stash for the editor's "reset map": records a (material, role)
+// slot's texture the FIRST time an import overrides it — whether from a live
+// editor upload or the sidecar apply at scene init — so
+// MaterialImport_ClearSurfaceMap can restore the authored default. emplace()
+// keeps the first (authored) value across repeated re-imports of the slot.
+static std::map<std::pair<Material *, std::string>, Texture *> s_mapOrig;
+static void stashOrigMap(Material *M, const char *role, Texture *cur) {
+	s_mapOrig.emplace(std::make_pair(M, std::string(role)), cur);
+}
+// Pre-import per-vertex tangents, stashed the first time an import triggers
+// Compute_Vertex_Tangents on a mesh. A surface with no authored normal/height
+// map ships with the loader's tangents (zeros); the recompute is one-way, and
+// the glass-refraction path reads the tangent frame even without a map — so a
+// texel-exact "reset map" must restore these, not recompute.
+static std::map<TriMesh *, std::vector<Vector>> s_tanOrig;
+static void stashOrigTangents(TriMesh *T) {
+	auto &orig = s_tanOrig[T];
+	if (!orig.empty() || T->VIndex <= 0) return;   // first import wins
+	orig.resize(T->VIndex);
+	for (int32_t v = 0; v < T->VIndex; ++v) orig[v] = T->Verts[v].Tangent;
 }
 
 bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
@@ -498,8 +816,9 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	if (mats[0]->Txtr) { aw = mats[0]->Txtr->SizeX; ah = mats[0]->Txtr->SizeY; }
 	bool tangentMap = false, ok = false;
 	if (r == "albedo") {
-		if (Texture *t = loadTiled(path, false)) {
+		if (Texture *t = loadRoleMapCached(path, "albedo", false, 0, 0)) {
 			for (Material *M : mats) {
+				stashOrigMap(M, "albedo", M->Txtr);
 				M->Txtr = t;
 				// New albedo = new texel layout. Aux maps sized for the OLD
 				// layout would read scrambled — drop them (re-import from the
@@ -509,6 +828,7 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 					if (slot && (slot->SizeX != t->SizeX || slot->SizeY != t->SizeY)) {
 						std::fprintf(stderr, "    [drop] stale %s map (%dx%d vs new albedo %dx%d)\n",
 						             what, slot->SizeX, slot->SizeY, t->SizeX, t->SizeY);
+						stashOrigMap(M, what, slot);
 						slot = nullptr;
 					}
 				};
@@ -523,35 +843,36 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	} else if (r == "normal") {
 		// No filename convention to sniff here; default to the engine (OGL)
 		// convention, honoring the global --material-import-flip-normal override.
-		if (Texture *t = loadTiled(path, g_forceFlipNormal, aw, ah)) {
-			if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
-			for (Material *M : mats) M->NormalMap = t;
+		if (Texture *t = loadRoleMapCached(path, "normal", g_forceFlipNormal, aw, ah)) {
+			for (Material *M : mats) { stashOrigMap(M, "normal", M->NormalMap); M->NormalMap = t; }
 			tangentMap = true; ok = true;
 		}
 	} else if (r == "height") {
-		if (Texture *h32 = loadTiled(path, false, aw, ah)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
+		if (Texture *t = loadRoleMapCached(path, "height", false, aw, ah)) { for (Material *M : mats) { stashOrigMap(M, "height", M->HeightMap); M->HeightMap = t; } tangentMap = true; ok = true; }
 	} else if (r == "roughness") {
-		if (Texture *r32 = loadTiled(path, false, aw, ah)) {
-			Texture *r8 = MakeHeight8(r32);
+		if (Texture *t = loadRoleMapCached(path, "roughness", false, aw, ah)) {
 			for (Material *M : mats) {
-				M->RoughnessMap = r8 ? r8 : r32;
-				// Same defaulting as the CLI dir-scan path: a roughness map
-				// implies a specular surface, but many FLD materials ship
-				// Specular=0 — the map would modulate a highlight that never
-				// renders. Only when the author left it at 0.
-				if (M->Specular <= 0.0f) {
-					M->Specular = 0.5f;
-					if (M->Glossiness == 0) M->Glossiness = 32;
-					std::fprintf(stderr, "    [spec] roughness map + Specular was 0 -> "
-					             "default Specular=0.5 Glossiness=%u\n", M->Glossiness);
-				}
+				stashOrigMap(M, "roughness", M->RoughnessMap);
+				M->RoughnessMap = t;
+				// Same DIELECTRIC seeding as the CLI dir-scan path (shared
+				// helper): only when the author left Specular at 0.
+				seedDielectricSpecular(M, t, "editor/RVSM apply");
 			}
 			ok = true;
 		}
 	} else if (r == "ao") {
-		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
+		if (Texture *t = loadRoleMapCached(path, "ao", false, aw, ah)) { for (Material *M : mats) { stashOrigMap(M, "ao", M->AoMap); M->AoMap = t; } ok = true; }
 	} else if (r == "metallic") {
-		if (Texture *m32 = loadTiled(path, false, aw, ah)) { Texture *m8 = MakeHeight8(m32); for (Material *M : mats) M->MetallicMap = m8 ? m8 : m32; ok = true; }
+		if (Texture *t = loadRoleMapCached(path, "metallic", false, aw, ah)) {
+			for (Material *M : mats) { stashOrigMap(M, "metallic", M->MetallicMap); M->MetallicMap = t; }
+			// Metal without env reflections = black hole (diffuse killed,
+			// env term needs --env_refl). Auto-default the reflection flags
+			// so a metallic import — editor upload OR sidecar line at scene
+			// init — visibly works; explicit --no-* still wins.
+			fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_refl, true);
+			fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_bake_fix, true);
+			ok = true;
+		}
 	} else {
 		std::fprintf(stderr, "[MAT-IMPORT] unknown role '%s'\n", role); return false;
 	}
@@ -565,10 +886,82 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 			for (int32_t i = 0; i < T->FIndex && !uses; ++i)
 				for (Material *M : mats)
 					if (T->Faces[i].Txtr == M) { uses = true; break; }
-			if (uses) Compute_Vertex_Tangents(T);
+			if (uses) { stashOrigTangents(T); Compute_Vertex_Tangents(T); }
 		}
 	}
 	return ok;
+}
+
+// Editor "reset map": restore a surface's (role) texture slot to what it held
+// BEFORE the first import override this run — the authored default, whether
+// the override came from a live editor upload or the sidecar apply at scene
+// init (the stash records the pre-sidecar value). A surface that was never
+// overridden is a successful no-op ("already default"). The old override
+// Texture is intentionally leaked, same as re-imports — Texture blocks aren't
+// refcounted and a few MB until scene teardown beats a dangling shared ptr
+// (mirUV clones share the Texture*).
+bool MaterialImport_ClearSurfaceMap(Scene *sc, const char *matName,
+                                    const char *role) {
+	if (!sc || !matName || !role) return false;
+	const std::string r = role;
+	auto slotOf = [&r](Material *M) -> Texture ** {
+		if (r == "albedo")    return &M->Txtr;
+		if (r == "normal")    return &M->NormalMap;
+		if (r == "height")    return &M->HeightMap;
+		if (r == "roughness") return &M->RoughnessMap;
+		if (r == "ao")        return &M->AoMap;
+		if (r == "metallic")  return &M->MetallicMap;
+		return nullptr;
+	};
+	// Same material collection as ApplyMapFile: exact name + handedness clones.
+	std::vector<Material *> mats;
+	for (Material *M = MatLib; M; M = M->Next)
+		if (M->RelScene == sc && M->Name &&
+		    (matName == std::string(M->Name) || rev::Editor_BaseSurfName(M->Name) == matName))
+			mats.push_back(M);
+	if (mats.empty()) { std::fprintf(stderr, "[MAT-IMPORT] reset: '%s' not in scene\n", matName); return false; }
+	if (!slotOf(mats[0])) { std::fprintf(stderr, "[MAT-IMPORT] reset: unknown role '%s'\n", role); return false; }
+	int restored = 0;
+	for (Material *M : mats) {
+		auto it = s_mapOrig.find(std::make_pair(M, r));
+		if (it == s_mapOrig.end()) continue;   // never overridden — already default
+		*slotOf(M) = it->second;
+		s_mapOrig.erase(it);
+		++restored;
+	}
+	std::fprintf(stderr, "[MAT-IMPORT] '%s' reset %s map to default (%d of %zu material(s) had an override)\n",
+	             matName, role, restored, mats.size());
+	// Undo the tangent side of the import: if no material on the mesh still
+	// holds a LIVE normal/height override (s_mapOrig entries live until
+	// cleared), restore the stashed pre-import tangents — texel-exact revert
+	// (the glass-refraction frame reads tangents even without a map). If some
+	// other surface on the mesh still has an override, recompute instead.
+	if (restored && (r == "normal" || r == "height")) {
+		for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
+			bool uses = false;
+			for (int32_t i = 0; i < T->FIndex && !uses; ++i)
+				for (Material *M : mats)
+					if (T->Faces[i].Txtr == M) { uses = true; break; }
+			if (!uses) continue;
+			bool otherOverride = false;
+			for (int32_t i = 0; i < T->FIndex && !otherOverride; ++i) {
+				Material *FM = T->Faces[i].Txtr;
+				if (!FM) continue;
+				otherOverride = s_mapOrig.count(std::make_pair(FM, std::string("normal"))) != 0 ||
+				                s_mapOrig.count(std::make_pair(FM, std::string("height"))) != 0;
+			}
+			auto ti = s_tanOrig.find(T);
+			if (!otherOverride && ti != s_tanOrig.end() &&
+			    (int32_t)ti->second.size() == T->VIndex) {
+				for (int32_t v = 0; v < T->VIndex; ++v)
+					T->Verts[v].Tangent = ti->second[v];
+				s_tanOrig.erase(ti);
+			} else {
+				Compute_Vertex_Tangents(T);
+			}
+		}
+	}
+	return true;
 }
 
 } // namespace fds

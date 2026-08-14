@@ -8,6 +8,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "F4Vec.h"
 #include "TheOtherBarry.h"
 #include "ClipperTileRect.h"
@@ -26,9 +27,9 @@ std::vector<CubeShadowRef> g_cubeShadowRefs;
 // Shadow-map debug viewer state. See ShadowMap.h for protocol.
 int g_shadowViewIdx = -1;
 std::atomic<bool> g_shadowFullscreenView{false};
-// 0 = static (sm.polyId / sm.depth), 1 = dynamic (sm.polyId_dynamic /
-// sm.depth_dynamic), 2 = combined (per-texel closest-by-depth pick of
-// the two — matches what CubeShadow_Sample's PolyId path actually reads).
+// 0 = static (sm.packSD), 1 = dynamic (sm.packDyn), 2 = combined
+// (per-texel closest-by-depth pick of the two — matches what
+// CubeShadow_Sample's PolyId path actually reads).
 // Cycled by ShadowMap_ViewModeCycle (bound to B in REV.CPP).
 std::atomic<int> g_shadowViewMode{0};
 
@@ -44,7 +45,7 @@ void ShadowMap_ViewModeCycle()
 }
 
 // Per-frame staleness tracker for the dynamic cube buffers. When on,
-// computes an FNV-1a hash of every shadow map's polyId_dynamic each
+// computes an FNV-1a hash of every shadow map's dynamic polyIds each
 // frame and reports either:
 //   - "alive" indices whose hash changed since last frame, or
 //   - "stale" indices whose hash didn't change (suggests dynamic bake
@@ -74,8 +75,8 @@ void ShadowMap_TickStalenessTracker()
     for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
         const ShadowMap &sm = g_shadowMaps[i];
         uint64_t h = 0xcbf29ce484222325ull;
-        for (uint8_t v : sm.polyId_dynamic) {
-            h ^= v; h *= 0x100000001b3ull;
+        for (uint32_t t : sm.packDyn) {
+            h ^= uint8_t(ShadowTexId(t)); h *= 0x100000001b3ull;
         }
         if (report && h == sLastHash[i]) {
             stale.push_back(int(i));
@@ -159,7 +160,7 @@ void ShadowMap_ViewCycle()
         // STATIC and DYNAMIC buffers so we can spot per-omni issues like
         // "dynamic buffer stuck at t=0" (one omni's dynamic count stays
         // constant while others change across frames).
-        auto polyStats = [](const std::vector<uint16_t> &arr,
+        auto polyStats = [](const std::vector<uint32_t> &arr,
                             size_t &nonZeroOut, int &uniqOut,
                             uint64_t &hashOut) {
             // Switched to 16-bit polyId (Material::ShadowMatID widen).
@@ -167,19 +168,21 @@ void ShadowMap_ViewCycle()
             // enough for the diag.
             nonZeroOut = 0; uniqOut = 0; hashOut = 0xcbf29ce484222325ull;
             bool seen[4096] = {};
-            for (uint16_t p : arr) {
+            for (uint32_t t : arr) {
+                const uint16_t p = ShadowTexId(t);
                 if (p) ++nonZeroOut;
                 const int idx = p & 0xFFF;
                 if (!seen[idx]) { seen[idx] = true; ++uniqOut; }
                 hashOut ^= p; hashOut *= 0x100000001b3ull;
             }
         };
-        auto depthStats = [](const std::vector<uint16_t> &arr,
+        auto depthStats = [](const std::vector<uint32_t> &arr,
                              size_t &nonZeroOut, uint16_t &dminOut,
                              uint16_t &dmaxOut, uint64_t &hashOut) {
             nonZeroOut = 0; dminOut = 0xFFFF; dmaxOut = 0;
             hashOut = 0xcbf29ce484222325ull;
-            for (uint16_t d : arr) {
+            for (uint32_t t : arr) {
+                const uint16_t d = ShadowTexZ(t);
                 if (d) ++nonZeroOut;
                 if (d < dminOut) dminOut = d;
                 if (d > dmaxOut) dmaxOut = d;
@@ -190,11 +193,11 @@ void ShadowMap_ViewCycle()
         int uPs = 0, uPd = 0;
         uint16_t dmin_s = 0, dmax_s = 0, dmin_d = 0, dmax_d = 0;
         uint64_t pHs = 0, pHd = 0, dHs = 0, dHd = 0;
-        polyStats(sm.polyId,         nzPs, uPs, pHs);
-        polyStats(sm.polyId_dynamic, nzPd, uPd, pHd);
-        depthStats(sm.depth,         nzZs, dmin_s, dmax_s, dHs);
-        depthStats(sm.depth_dynamic, nzZd, dmin_d, dmax_d, dHd);
-        const size_t total = sm.polyId.size();
+        polyStats (sm.packSD,  nzPs, uPs, pHs);
+        polyStats (sm.packDyn, nzPd, uPd, pHd);
+        depthStats(sm.packSD,  nzZs, dmin_s, dmax_s, dHs);
+        depthStats(sm.packDyn, nzZd, dmin_d, dmax_d, dHd);
+        const size_t total = sm.packSD.size();
         std::fprintf(stderr,
             "[SHADOW-VIEW] %d / %d  %s  %dx%d  cubeFace=%d\n"
             "  STATIC : polyId %zu/%zu nz (%d uniq) h=%016llx | depth %zu nz [%u..%u] h=%016llx\n"
@@ -220,7 +223,7 @@ void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes)
     if (!vpage || xres <= 0 || yres <= 0 || pitchBytes <= 0) return;
 
     const ShadowMap &sm = g_shadowMaps[g_shadowViewIdx];
-    if (sm.xres <= 0 || sm.yres <= 0 || sm.polyId.empty()) return;
+    if (sm.xres <= 0 || sm.yres <= 0 || sm.packSD.empty()) return;
 
     // Fullscreen mode (greets M-key sets g_shadowFullscreenView): paint
     // the shadow map across the whole framebuffer instead of a corner
@@ -266,32 +269,29 @@ void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes)
     const int mode = g_shadowViewMode.load(std::memory_order_relaxed);
     for (int dy = 0; dy < dstH; ++dy) {
         const int sy = (dy * sm.yres) / dstH;
-        const uint16_t *idS = &sm.polyId[size_t(sy) * size_t(sm.xres)];
-        const uint16_t *idD = sm.polyId_dynamic.empty() ? nullptr
-                            : &sm.polyId_dynamic[size_t(sy) * size_t(sm.xres)];
-        const uint16_t *zS  = &sm.depth[size_t(sy) * size_t(sm.xres)];
-        const uint16_t *zD  = sm.depth_dynamic.empty() ? nullptr
-                           : &sm.depth_dynamic[size_t(sy) * size_t(sm.xres)];
+        const uint32_t *pS = &sm.packSD[size_t(sy) * size_t(sm.xres)];
+        const uint32_t *pD = sm.packDyn.empty() ? nullptr
+                            : &sm.packDyn[size_t(sy) * size_t(sm.xres)];
         dword *dstRow = out + ptrdiff_t(oy + dy) * pitchD + ptrdiff_t(ox);
         for (int dx = 0; dx < dstW; ++dx) {
             const int sx = (dx * sm.xres) / dstW;
             uint16_t pick;
             if (mode == 1) {
-                pick = idD ? idD[sx] : uint16_t(0);
+                pick = pD ? ShadowTexId(pD[sx]) : uint16_t(0);
             } else if (mode == 2) {
-                const uint16_t s = idS[sx];
-                const uint16_t d = idD ? idD[sx] : uint16_t(0);
+                const uint16_t s = ShadowTexId(pS[sx]);
+                const uint16_t d = pD ? ShadowTexId(pD[sx]) : uint16_t(0);
                 if (s == 0) pick = d;
                 else if (d == 0) pick = s;
                 else {
                     // Closest-by-depth (larger zEnc wins; matches the
                     // sampler's logic in ShadowMap.h CubeShadow_Sample).
-                    const uint16_t zs = zS[sx];
-                    const uint16_t zd = zD ? zD[sx] : uint16_t(0);
+                    const uint16_t zs = ShadowTexZ(pS[sx]);
+                    const uint16_t zd = pD ? ShadowTexZ(pD[sx]) : uint16_t(0);
                     pick = (zd > zs) ? d : s;
                 }
             } else {
-                pick = idS[sx];
+                pick = ShadowTexId(pS[sx]);
             }
             // Hash the full 16-bit polyId into RGB for the viz.
             dstRow[dx] = hashPolyColor(uint8_t(pick ^ (pick >> 8)));
@@ -361,10 +361,8 @@ void ShadowMaps_Rebuild(Scene *Sc, int res)
 		sm.xres = lightRes;
 		sm.yres = lightRes;
 		const size_t n = size_t(lightRes) * size_t(lightRes);
-		sm.depth.assign(n, 0);
-		sm.polyId.assign(n, 0);
-		sm.depth_dynamic.assign(n, 0);
-		sm.polyId_dynamic.assign(n, 0);
+		sm.packSD.assign(n, 0u);
+		sm.packDyn.assign(n, 0u);
 		sm.omni = O;
 		// Camera basis + FOV / z-scale are computed each frame in
 		// Render_DeferredShadowMaps from the omni's pose. zScale here
@@ -410,10 +408,8 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 			sm.xres = faceRes;
 			sm.yres = faceRes;
 			const size_t n = size_t(faceRes) * size_t(faceRes);
-			sm.depth.assign(n, 0);
-			sm.polyId.assign(n, 0);
-			sm.depth_dynamic.assign(n, 0);
-			sm.polyId_dynamic.assign(n, 0);
+			sm.packSD.assign(n, 0u);
+			sm.packDyn.assign(n, 0u);
 			sm.omni = O;  // shared across all 6 faces
 			sm.cubeFace = int8_t(f);  // tells render pass which axis to face
 			sm.fzp    = O->IRange * sFzpMult;
@@ -439,16 +435,22 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 }
 
 // Forward decl — defined in RENDER/Shadows.cpp.
-void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode);
+void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable);
 
-void ShadowMaps_BakeStatic(Scene *Sc)
+void ShadowMaps_BakeStatic(Scene *Sc, bool forceEnable)
 {
 	// One-shot: render shadow maps for Omni_StaticShadow lights. After
 	// this returns, Render_DeferredShadowMaps's per-frame skip filter
 	// avoids re-rendering them. Intended to be called from scene init,
 	// hiding inside the existing init bake window (city's Glato cube
 	// bake, etc.) so the demo start time is unaffected.
-	Render_DeferredShadowMaps(Sc, ShadowBakeMode::StaticOnce);
+	//
+	// forceEnable bypasses the global FeatureFlags::shadows() gate for this
+	// one static bake, so a scene that only turns --shadows on at RUN time
+	// (greets) still fills its static occluder maps here at INIT — the
+	// force-enabled static-shadow lightmap bake that runs right after reads
+	// them. Without this the maps stay empty and the lightmap bakes 100% lit.
+	Render_DeferredShadowMaps(Sc, ShadowBakeMode::StaticOnce, forceEnable);
 	int n = 0;
 	for (Omni *O = Sc ? Sc->OmniHead : nullptr; O; O = O->Next) {
 		if ((O->Flags & Omni_CastsShadow) && (O->Flags & Omni_StaticShadow)) ++n;
@@ -461,42 +463,39 @@ void ShadowMaps_BakeStatic(Scene *Sc)
 // 32px) hierarchical coverage culling. Per-tile fast path skips edge
 // mask construction when the tile is fully inside the triangle.
 //
-// Output is just (depth: uint16, polyId: uint8) — none of TheOtherBarry's
-// UV / texture / color / specular machinery. Constructor is no-Txtr.
+// Output is one PACKED uint32 per texel (z | ShadowMatID<<16) — none of
+// TheOtherBarry's UV / texture / color / specular machinery. Constructor
+// is no-Txtr.
 //
 // Encoded Z: `enc = 0xFF80 - round(z * zScale)`. Higher enc = closer
-// to light. PolyId is matID+1 of the writing face; only written under
-// the same Z-pass mask so the closest-occluder polyId wins.
+// to light. The id half is matID+1 of the writing face; because it lives
+// in the SAME word it is written by the same masked store as the z, so the
+// closest-occluder id wins with no second array and no second store.
 struct ShadowBarry {
 	ShadowMap *sm;
-	uint16_t *zArr;   // sm->depth or sm->depth_dynamic
-	uint16_t *idArr;  // sm->polyId or sm->polyId_dynamic (widened to uint16 for ShadowMatID)
-	// Static-z cull source: non-null ONLY when we're writing the dynamic
-	// buffer (so apply_exact can mask out lanes already occluded by closer
-	// static geometry). The runtime cube tap's closestPoly() picks the
-	// buffer with larger zEnc anyway, so any dynamic write where the
-	// static buffer is already closer would be ignored at sample time —
-	// we skip the write here to save the blendv RMW + polyId store.
-	const uint16_t *zStaticArr;
+	uint32_t *pArr;   // sm->packSD or sm->packDyn
+	// Static-plane cull source: non-null ONLY when we're writing the
+	// dynamic plane (so apply_exact can mask out lanes already occluded by
+	// closer static geometry). The runtime cube tap's closestPacked() picks
+	// the plane with larger zEnc anyway, so any dynamic write where the
+	// static plane is already closer would be ignored at sample time —
+	// we skip the write here to save the RMW.
+	const uint32_t *pStaticArr;
 	float drzdx, drzdy;
 	uint16_t idByte;  // legacy name; now a 16-bit ShadowMatID
 	bool g_useFullStore;  // cached once per ShadowBarry, read per row inside apply_exact.
 
 	ShadowBarry(ShadowMap *smIn, uint16_t idIn, bool useDynamic)
 		: sm(smIn),
-		  zArr (useDynamic ? smIn->depth_dynamic.data()  : smIn->depth.data()),
-		  idArr(useDynamic ? smIn->polyId_dynamic.data() : smIn->polyId.data()),
-		  zStaticArr(useDynamic ? smIn->depth.data() : nullptr),
+		  pArr(useDynamic ? smIn->packDyn.data() : smIn->packSD.data()),
+		  pStaticArr(useDynamic ? smIn->packSD.data() : nullptr),
 		  drzdx(0), drzdy(0), idByte(idIn),
 		  g_useFullStore(fds::FeatureFlags::rast_full_store()) {}
 
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
 		const int xres = sm->xres;
-		uint16_t * const zRowBase  = zArr
-			+ size_t(tile.y) * barry::TILE_SIZE * size_t(xres)
-			+ size_t(tile.x) * barry::TILE_SIZE;
-		uint16_t * const idRowBase = idArr
+		uint32_t * const pRowBase = pArr
 			+ size_t(tile.y) * barry::TILE_SIZE * size_t(xres)
 			+ size_t(tile.x) * barry::TILE_SIZE;
 
@@ -514,14 +513,13 @@ struct ShadowBarry {
 		const float zScale = sm->zScale;
 		const Vec8f vZScale(zScale);
 
-		uint16_t *zRow = zRowBase;
-		uint16_t *idRow = idRowBase;
-		const uint16_t * const zStaticRowBase = zStaticArr
-		    ? (zStaticArr + (zRowBase - zArr)) : nullptr;
-		const uint16_t *zStaticRow = zStaticRowBase;
+		uint32_t *pRow = pRowBase;
+		const uint32_t * const pStaticRowBase = pStaticArr
+		    ? (pStaticArr + (pRowBase - pArr)) : nullptr;
+		const uint32_t *pStaticRow = pStaticRowBase;
 		for (int row = 0; row < barry::TILE_SIZE; ++row,
-				zRow += xres, idRow += xres,
-				zStaticRow = zStaticRow ? (zStaticRow + xres) : nullptr) {
+				pRow += xres,
+				pStaticRow = pStaticRow ? (pStaticRow + xres) : nullptr) {
 			Vec8ib p_mask;
 			bool row_has_pixels;
 			if constexpr (Coverage == barry::TCoverage::FULL) {
@@ -537,51 +535,44 @@ struct ShadowBarry {
 				enc = max(enc, Vec8i(0));
 				enc = min(enc, Vec8i(0xFFFF));
 
-				Vec8us z_existing_c;
-				z_existing_c.load(zRow);
-				const Vec8i z_existing = extend(z_existing_c);
+				// ONE 32-bit load per texel yields the existing z AND the
+				// existing id; the z half is the low 16 bits.
+				Vec8ui p_existing;
+				p_existing.load(pRow);
+				const Vec8i z_existing = Vec8i(p_existing & Vec8ui(0xFFFFu));
 				p_mask &= Vec8ib(enc > z_existing);
 
-				// Static-z cull: when writing the dynamic buffer, mask
-				// off lanes where the STATIC buffer already has a closer
-				// occluder (zs > enc). closestPoly() at sample time would
-				// pick the static buffer anyway, so writing them here is
-				// wasted RMW + polyId store. zStaticArr non-null only on
-				// the dynamic write path.
-				if (zStaticArr) {
-					Vec8us zs_existing_c;
-					zs_existing_c.load(zStaticRow);
-					const Vec8i zs_existing = extend(zs_existing_c);
+				// Static-z cull: when writing the dynamic plane, mask
+				// off lanes where the STATIC plane already has a closer
+				// occluder (zs > enc). closestPacked() at sample time would
+				// pick the static plane anyway, so writing them here is
+				// a wasted RMW. pStaticArr non-null only on the dynamic
+				// write path.
+				if (pStaticArr) {
+					Vec8ui ps_existing;
+					ps_existing.load(pStaticRow);
+					const Vec8i zs_existing = Vec8i(ps_existing & Vec8ui(0xFFFFu));
 					p_mask &= Vec8ib(enc > zs_existing);
 				}
 
 				if (barry::any_lane_set(p_mask)) {
+					// The new word: the freshly-encoded z, plus this face's
+					// ShadowMatID in the high half. A face with no material
+					// (idByte == 0) writes z only and PRESERVES the id half —
+					// the historic behaviour when they were two arrays and
+					// the polyId store was gated on `if (idByte)`.
+					const Vec8ui p_new = idByte
+						? (Vec8ui(enc) | Vec8ui(uint32_t(idByte) << 16))
+						: (Vec8ui(enc) | (p_existing & Vec8ui(0xFFFF0000u)));
 					// FULL row: when all 8 lanes survived edge+Z+static-Z,
-					// the blendv RMW is wasted (it overwrites every byte
-					// anyway) and the per-lane polyId scatter collapses to
-					// one broadcast store. Mirrors Mekalele's FULL store
-					// optimization at TileRasterizer::apply_exact. Gated by
-					// FDS_RAST_FULL_STORE since the optimization spans
-					// rasterizers.
+					// the masked select is wasted (it overwrites every lane
+					// anyway). Mirrors Mekalele's FULL store optimization at
+					// TileRasterizer::apply_exact. Gated by FDS_RAST_FULL_STORE
+					// since the optimization spans rasterizers.
 					if (g_useFullStore && barry::all_lanes_set(p_mask)) {
-						compress(Vec8ui(enc)).store(zRow);
-						if (idByte) {
-							_mm_store_si128((__m128i*)idRow,
-								_mm_set1_epi16(int16_t(idByte)));
-						}
+						p_new.store(pRow);
 					} else {
-						*(__m128i*)zRow = _mm_blendv_epi8(
-							*(__m128i*)zRow,
-							compress(Vec8ui(enc)),
-							compress(Vec8ui(Vec8i(p_mask))));
-
-						if (idByte) {
-							alignas(32) int mask_l[8];
-							Vec8i(p_mask).store_a(mask_l);
-							for (int lane = 0; lane < 8; ++lane) {
-								if (mask_l[lane]) idRow[lane] = idByte;
-							}
-						}
+						select(Vec8ib(p_mask), p_new, p_existing).store(pRow);
 					}
 				}
 			}
@@ -820,11 +811,9 @@ static void rasterize_depth_tri(const Vertex& v0, const Vertex& v1, const Vertex
 	const Vec8f vZScale(zScale);
 	const uint16_t idByte = idOverride;  // 16-bit ShadowMatID now
 
-	uint16_t * const zBase  = useDynamic ? sm.depth_dynamic.data()  : sm.depth.data();
-	uint16_t * const idBase = useDynamic ? sm.polyId_dynamic.data() : sm.polyId.data();
+	uint32_t * const pBase = useDynamic ? sm.packDyn.data() : sm.packSD.data();
 	for (int y = iymin; y <= iymax; ++y) {
-		uint16_t *zRow = zBase  + size_t(y) * size_t(sm.xres);
-		uint16_t *idRow = idBase + size_t(y) * size_t(sm.xres);
+		uint32_t *pRow = pBase + size_t(y) * size_t(sm.xres);
 		const float py = float(y) + 0.5f;
 		const float px0 = float(ixmin) + 0.5f;
 		const float w0Row = ((x1 - px0) * (y2 - py) - (x2 - px0) * (y1 - py)) * invArea;
@@ -850,30 +839,19 @@ static void rasterize_depth_tri(const Vertex& v0, const Vertex& v1, const Vertex
 				enc = max(enc, Vec8i(0));
 				enc = min(enc, Vec8i(0xFFFF));
 
-				// Load 8 existing uint16; extend to int32 for compare.
-				Vec8us existing_c;
-				existing_c.load(zRow + x);
-				const Vec8i existing = extend(existing_c);
+				// Load 8 existing packed words; the z half is the low 16.
+				Vec8ui p_existing;
+				p_existing.load(pRow + x);
+				const Vec8i existing = Vec8i(p_existing & Vec8ui(0xFFFFu));
 				Vec8ib pass = enc > existing;
 				pass &= Vec8ib(bary);
 				if (horizontal_or(pass)) {
-					// Store Z under mask. compress() packs 8 int32 → 8
-					// uint16; _mm_blendv_epi8 does masked byte-level
-					// select (each pair of mask bytes gates one uint16).
-					// Same pattern as TheOtherBarry::apply_exact.
-					const __m128i encU16 = compress(Vec8ui(enc));
-					const __m128i maskU16 = compress(Vec8ui(Vec8i(pass)));
-					*(__m128i*)(zRow + x) = _mm_blendv_epi8(
-						*(__m128i*)(zRow + x), encU16, maskU16);
-
-					// PolyId: scalar 8-byte fallback under the same mask.
-					if (idByte) {
-						alignas(32) int mask_l[8];
-						Vec8i(pass).store(mask_l);
-						for (int lane = 0; lane < 8; ++lane) {
-							if (mask_l[lane]) idRow[x + lane] = idByte;
-						}
-					}
+					// One masked 32-bit select writes z AND id together.
+					// idByte == 0 (material-less face) preserves the id half.
+					const Vec8ui p_new = idByte
+						? (Vec8ui(enc) | Vec8ui(uint32_t(idByte) << 16))
+						: (Vec8ui(enc) | (p_existing & Vec8ui(0xFFFF0000u)));
+					select(pass, p_new, p_existing).store(pRow + x);
 				}
 			}
 			vW0 += vDw0dx8;
@@ -892,9 +870,10 @@ static void rasterize_depth_tri(const Vertex& v0, const Vertex& v1, const Vertex
 					if (enc < 0) enc = 0;
 					if (enc > 0xFFFF) enc = 0xFFFF;
 					const uint16_t cand = uint16_t(enc);
-					if (cand > zRow[x]) {
-						zRow[x] = cand;
-						if (idByte) idRow[x] = idByte;
+					if (cand > ShadowTexZ(pRow[x])) {
+						pRow[x] = idByte
+							? ShadowTexPack(cand, idByte)
+							: ShadowTexPack(cand, ShadowTexId(pRow[x]));
 					}
 				}
 			}
@@ -964,12 +943,12 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 
 	// Always write the face's material ID (+1 so the 0-sentinel
 	// "unassigned" stays distinct from matID=0) into the shadow
-	// buffer's polyId attachment, regardless of render mode. The
+	// texel's id half, regardless of render mode. The
 	// lighting kernel decides whether to USE it (PolyId mode) or
 	// ignore it (Depth mode) via g_shadowMode. Unconditional write
 	// lets the M-key viz read polyId even while rendering in Depth.
 	// Resolve the 16-bit ShadowMatID stamp this face writes into
-	// sm.polyId. Priority (high to low):
+	// the packed word's id half. Priority (high to low):
 	//   1. Material::ShadowMatID — scene-init group override (e.g.
 	//      greets's per-wall split assigns a unique ShadowMatID per
 	//      coplanar cluster; hull-merge assigns one shared ShadowMatID
@@ -1017,4 +996,36 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 // Extract the matID byte the lighting kernel reads from gb.txtr packs.
 // Mekalele's packed format: miplevel(4) | matID(8) | swizzled_uv(20).
 // Defined here so the kernel can compare against shadow buffer matIDs.
-// matID maps to the +1-shifted value we wrote into sm.polyId.
+// matID maps to the +1-shifted value we wrote into the texel's id half.
+
+// ── --mem_census: the shadow-map planes ────────────────────────────────────
+// The formula is `res² × 4 B × 2 planes × (6 per cube omni + 1 per spot)`,
+// and it scales with LIGHT COUNT — greets carries 21 shadow-casting omnis.
+// Both planes are `assign`-ed, so every byte is touched at rebuild; packDyn
+// is additionally re-filled per frame for any map a dynamic mesh reaches.
+// --shadow_swizzle keeps two further derived copies, doubling the total.
+static void MemCensus_ShadowMaps() {
+    if (g_shadowMaps.empty()) return;
+    size_t sd = 0, dyn = 0, sw = 0, texels = 0;
+    size_t nCubeFaces = 0, nSpot = 0;
+    int    minRes = 1 << 30, maxRes = 0;
+    for (const ShadowMap &sm : g_shadowMaps) {
+        sd     += sm.packSD.capacity()  * sizeof(uint32_t);
+        dyn    += sm.packDyn.capacity() * sizeof(uint32_t);
+        sw     += (sm.packSDSw.capacity() + sm.packDynSw.capacity()) * sizeof(uint32_t);
+        texels += size_t(sm.xres) * size_t(sm.yres);
+        if (sm.cubeFace >= 0) ++nCubeFaces; else ++nSpot;
+        minRes = std::min(minRes, sm.xres);
+        maxRes = std::max(maxRes, sm.xres);
+    }
+    const size_t nCubes = g_cubeShadowRefs.size();
+    fds::MemCensus::add("shadow", "packSD (static z|id)", sd, true,
+        "%zu maps = %zu cubes x 6 + %zu spots; res %d..%d; %zu texels x u32(4)",
+        g_shadowMaps.size(), nCubes, nSpot, minRes, maxRes, texels);
+    fds::MemCensus::add("shadow", "packDyn (dynamic z|id)", dyn, true,
+        "same shape as packSD — allocated for EVERY map whether or not a "
+        "dynamic mesh ever reaches it; %zu texels x u32(4)", texels);
+    fds::MemCensus::add("shadow", "packSDSw+packDynSw (--shadow_swizzle)", sw, sw != 0,
+        "derived 8x8-tiled COPIES of both planes; 0 unless --shadow_swizzle");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_ShadowMaps);

@@ -47,6 +47,26 @@ struct TriMesh
     float            BSphereRad     = 0.0f; // Bounding Sphere Radius, squared. kept for backward compatibility until pipeline code is updated
     DWord            Flags          = 0;
 
+    // env_cube (forward reflective path): six PARABOLOID hemisphere sheets
+    // (Sachletz-tiled, pow2), one per axis direction, synthesized at init
+    // from the padded cube-face bake. Transform's Face_Reflective block
+    // binds each triangle to the sheet of its PANEL NORMAL's dominant axis
+    // — static for static geometry, so the chart never changes with the
+    // camera (the camera-dependent cube-face pick + wide-span fallback both
+    // popped as charts flipped while moving). Null (default) → the legacy
+    // equirect F->ReflectionTexture path runs unchanged. See RENDER/EnvCube.h.
+    Texture         *EnvHemiSheets[6] = { nullptr, nullptr, nullptr,
+                                          nullptr, nullptr, nullptr };
+
+    // --env_live_water: this mesh's probe bake's per-face WATER COVERAGE
+    // mask (6 x EnvWaterMaskRes² bytes, face-major, EnvCube face order).
+    // The forward reflective path gates its wave-slope tilt on it so only the
+    // reflected water moves, not the reflected skyline. Non-owning: the scene
+    // that baked the faces owns the storage for the scene's lifetime (CITY).
+    // Null → no tilt (see fds::EnvLiveWater_PerturbDir).
+    const uint8_t   *EnvWaterMask    = nullptr;
+    int              EnvWaterMaskRes = 0;
+
     // Per-shadow-bake-call cache. Written SERIALLY by Render_Deferred-
     // ShadowMaps' prime pass before it enqueues the parallel per-face
     // Transform_Objects tasks; the tasks read it only (valid when
@@ -92,6 +112,32 @@ struct TriMesh
     // Transform to wide-SIMD writing only SoA; Phases 4-5 migrate
     // consumers off the AoS Vertex transformed fields.
     VertexFrame     *frame              = nullptr;
+
+    // Editor per-object uniform scale multiplier (browser editor scale knob /
+    // 'obj:<name>|scale|v' sidecar lines — see DEMO/MaterialImport.h). Same
+    // 0-sentinel convention as Omni::FlareScale: 0 = unset → authored 1.0,
+    // so the many memset(0) TriMesh creation sites (FLD convert, mirror
+    // clones, chunk splits) keep their look byte-identically. >0 multiplies
+    // the Scale-spline result in Animate_Objects — the scale pivots on the
+    // object pivot and composes down the parent→child matrix chain exactly
+    // like authored scale. Static (Tri_Possessed) meshes never re-run
+    // Animate_Objects, so the knob cannot affect them (greets' baked room).
+    float            EditorScale        = 0.0f;
+
+    // World-space axis-aligned bounding box (Foundation F, docs/
+    // ENVDYN_DISPLACEMENT_PLAN.md). Maintained by WorldAabb_UpdateScene:
+    // LocalAabb* is the model-space box, computed ONCE from Verts;
+    // WorldAabb* is the posed box. Static meshes compute the world box
+    // once (post first transform); dynamic meshes (isDynamicForBake)
+    // recompute it each frame by transforming the eight LocalAabb corners
+    // through RotMat + IPos (conservative under rotation). Consumed by the
+    // frustum-vs-AABB reject (main camera / probe face pyramid) and the
+    // --draw_aabbs overlay. Zero-init (memset TriMesh sites) leaves both
+    // Valid flags 0 = "not yet computed"; no effect until F/A code reads it.
+    Vector           LocalAabbMin, LocalAabbMax;
+    Vector           WorldAabbMin, WorldAabbMax;
+    uint8_t          LocalAabbValid = 0;   // model-space box computed
+    uint8_t          WorldAabbValid = 0;   // world box valid (static: once)
 
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first

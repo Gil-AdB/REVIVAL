@@ -41,6 +41,20 @@ extern dword g_clipNeed2D;
 extern dword g_mipEntered;
 extern dword g_mipFastUniform;
 extern dword g_mipSplit;
+// --mip_stats histogram: per-selected-miplevel face count and covered
+// screen area, plus the three shape counters that explain WHY a face
+// landed where it did. See RenderStats_MipReport().
+extern dword  g_mipLevelFaces[16];
+extern double g_mipLevelPix[16];
+extern dword  g_mipNomip;      // Txtr_Nomip faces (forced to level 0)
+extern dword  g_mipNegArea;    // faces whose signed pixArea came out < 0
+extern dword  g_mipBigFace;    // faces with |pixArea| >= the 2%-screen threshold
+// Cumulative (never-reset) mirrors of the three branch counters — the bucket
+// totals above are zeroed at the top of each Flush, which discards them before
+// the atexit report runs.
+extern dword  g_mipEnteredCum;
+extern dword  g_mipFastUniformCum;
+extern dword  g_mipSplitCum;
 }
 
 namespace fds {
@@ -57,6 +71,14 @@ struct PerThreadRenderStats {
     dword  mipEntered       = 0;  // entered MiplevelClipper (textured non-shadow)
     dword  mipFastUniform   = 0;  // exited via small-area / uniform-mip fast path
     dword  mipSplit         = 0;  // multi-mip split into sub-polys
+    // --mip_stats: histogram of the level actually handed to the filler,
+    // weighted both per-draw and by covered screen area (the area weight is
+    // what the eye sees; the draw weight is what the texture cache sees).
+    dword  mipLevelFaces[16] = {0};
+    double mipLevelPix[16]   = {0.0};
+    dword  mipNomip          = 0;
+    dword  mipNegArea        = 0;
+    dword  mipBigFace        = 0;
 };
 
 // Returns the calling thread's TLS counter. Registers on first call.
@@ -70,6 +92,13 @@ PerThreadRenderStats& stats_tls();
 // once per scene end before reading the global stats. No-op when
 // FDS_RENDER_STATS_ENABLED is 0.
 void RenderStats_Flush();
+
+// --mip_stats: flush, then print the mip-level histogram (draws + covered
+// screen area per level) and the branch/shape counters to stderr. Registered
+// with atexit() on first MiplevelClipper entry when the flag is set, so it
+// reports once per process without any scene-driver plumbing.
+void RenderStats_MipReport();
+void RenderStats_MipReportAtExit();
 
 // Convenience macros for hot-loop call sites. Expand to nothing when
 // stats are compile-disabled, so the TLS write disappears entirely.

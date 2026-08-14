@@ -53,6 +53,13 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName);
 bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
                                  const char *role, const char *path);
 
+// Editor "reset map": restore the surface's (role) slot to its authored
+// default — the value it held before the first ApplyMapFile override this
+// run (live import or sidecar apply at scene init). Success when the surface
+// exists and the role is known, including the never-overridden no-op case.
+bool MaterialImport_ClearSurfaceMap(Scene *sc, const char *matName,
+                                    const char *role);
+
 // Classify a map filename into its role using the same token rules as the CLI
 // dir scan (see the table above). Returns "albedo" | "normal" | "height" |
 // "roughness" | "ao" | "" (unrecognized / non-image / preview-skip / metallic —
@@ -60,29 +67,20 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 // share the native detection instead of duplicating it in JS.
 const char *MaterialImport_ClassifyRole(const char *filename);
 
-// Sidecar loader — the PERSISTED form of the editor's PBR map assignments
-// (LWO1 has no slot for them, so they can't live in the .lwo like the numeric
-// surface values do) and, for scenes WITHOUT pinned LWO authoring sources
-// (city/chase/fountain), of numeric surface-property overrides too. Line
-// format, paths relative to Runtime/ (the CWD):
-//   # comment / blank lines ignored
-//   surface|role|TEXTURES/PBR/file.png      (role: albedo/normal/height/roughness/ao)
-//   surface|prop|value                      (prop: diffuse/specular/glossiness/
-//                                            luminosity/transparency/reflection/
-//                                            baseR/baseG/baseB — engine scale)
-// '|' separator because surface names contain spaces ("hull not smooth").
-// Map lines go through MaterialImport_ApplyMapFile (same load/convert/assign/
-// tangent-recompute as the CLI path, ::mirUV clones included); prop lines go
-// through MaterialImport_SetSurfaceProp below. Call at scene init after
-// Scene_RebuildMatTable, BEFORE MaterialImport_Apply so explicit
-// --material-import CLI specs still override the sidecar. A missing sidecar is
-// a silent no-op; a bad line inside one logs and skips that line.
-// The editor's dev server (tools/editor_server.py) writes this file on Save.
-void MaterialImport_ApplySidecar(Scene *sc, const char *path);
+// Apply the PBR map-role assignments AUTHORED IN THE LWO/FLD (custom RVSM
+// sub-chunk → Surf_RevMaps FLD payload → FldRevMap* accessors), for materials
+// whose RelScene == `sc`. The source-authored successor (sidecar-elim §1e) to
+// the retired `.MAT` sidecar's `surface|role|path` map lines: same
+// MaterialImport_ApplyMapFile load/convert/assign/tangent path, applied in
+// albedo-first order, with normalFlip applied after the normal map. Call at
+// scene init after Scene_RebuildMatTable, BEFORE MaterialImport_Apply (so a CLI
+// --material-import still wins). No-op when the FLD carried no RVSM payload.
+void MaterialImport_ApplyRevMaps(Scene *sc, const char *sceneName);
 
 // Set one numeric property (engine scale) on every material of `sc` whose
-// base name (::mirUV collapsed) matches `surface`. The shared setter under
-// both the sidecar prop lines and the editor's live Editor_SetSurfaceProp.
+// base name (::mirUV collapsed) matches `surface`. Drives the editor's live
+// Editor_SetSurfaceProp (persisted on Save via the LWO RVSF/RVSM/SMAN sources,
+// not a sidecar); also used by ApplyRevMaps to apply an authored normalFlip.
 bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
                                    const char *prop, float value);
 
@@ -90,6 +88,17 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 // loaded, 1 = flipped). Set via SetSurfaceProp("normalFlip", 0|1); tracked per
 // TEXTURE so shared clones flip once and the editor UI reads a truthful state.
 int MaterialImport_GetNormalFlip(const Material *M);
+
+// Per-object uniform scale multiplier (the editor's objects-panel scale knob).
+// Sets TriMesh::EditorScale
+// on every object whose chunk-collapsed name matches; Animate_Objects folds it
+// into the Scale-spline result, so it pivots on the object pivot and composes
+// down the parent→child chain (scaling a model root scales the assembly).
+// Returns the number of LIVE (non-Tri_Possessed) meshes set — 0 means the
+// object doesn't exist or is fully static-baked (greets' chunked room).
+int   ObjectImport_SetObjectScale(Scene *sc, const char *objName, float scale);
+// Read-back (first matching mesh; unset → 1.0) for the objects JSON.
+float ObjectImport_GetObjectScale(Scene *sc, const char *objName);
 
 } // namespace fds
 

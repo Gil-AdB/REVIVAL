@@ -9,44 +9,61 @@
 #include <vector>
 #include <cstdint>
 
-// Per-shadow-casting-light depth buffer + the light-view transform used
+// Per-shadow-casting-light occluder buffer + the light-view transform used
 // to compute it. The lighting kernel reconstructs each pixel's
 // world-space position from the deferred G-buffer, transforms it into
 // this light's view space using `lightViewMat` + `lightISource`, projects
-// using `perspX`/`perspY`, samples `depth`, and compares against the
+// using `perspX`/`perspY`, samples the plane, and compares against the
 // pixel's view-space z. If pixel.z > sampled.z + bias, the pixel is in
 // shadow for this light.
 //
 // The map's resolution is independent of the framebuffer (typically
 // 512×512). Encoded Z matches Mekalele's: `enc = 0xFF80 - round(z * zScale)`
 // where `zScale = 0xFF00 / (fzp * 1.1f)`. Higher enc = closer.
-struct ShadowMap {
-	// Encoded Z of the closest occluder at each texel (always written by
-	// the shadow rasterizer regardless of mode — it's a real z-buffer).
-	// Depth mode: lighting kernel compares biased pixel-z against this.
-	std::vector<uint16_t> depth;      // size xres*yres; row-major
-	// matID + 1 of the closest occluder (8 bits is enough — matID is
-	// 0-255 in the engine). Parallel to `depth`, populated by the
-	// shadow rasterizer only when running in PolyId mode (zeroed
-	// otherwise). 0 = "unwritten / no occluder" sentinel, so the
-	// engine-side matID is shifted by +1. Lighting kernel reads this
-	// for material equality in PolyId mode; ignored in Depth mode.
-	// Widened to uint16_t so per-Material::ShadowMatID overrides (e.g.
-	// greets wall split) can exceed the 8-bit cap. 0 = "no occluder";
-	// non-zero = ShadowMatID (which itself defaults to `Txtr->ID + 1`
-	// when the Material hasn't been assigned a custom group). Memory:
-	// 2 bytes/texel × 6 cube faces × N omnis, e.g. 10 omnis × 6 × 512² =
-	// 30 MB per buffer pair, still well within budget.
-	std::vector<uint16_t> polyId;
+//
+// ─── One shadow texel = ONE 32-bit word ──────────────────────────────────
+// Low half  = encoded Z of the closest occluder (`enc = 0xFF80 - z*zScale`,
+//             higher = closer to the light; 0 = unwritten).
+// High half = that occluder's 16-bit ShadowMatID (0 = "no occluder"; the
+//             engine matID is stored +1 so 0 stays a free sentinel).
+//
+// WHY THEY ARE ONE WORD AND NOT TWO ARRAYS. A PolyId cube tap needs a
+// texel's id AND its z, for the static pair and the dynamic pair. As four
+// separate std::vector<uint16_t> those sit ~512 KB apart at greets' 512²,
+// so 32 bytes of useful data was gathered from 4 base pointers over 2 PCF
+// rows = up to 8 cache lines (~512 B of line traffic) per tap. Interleaved,
+// a texel's id+z is one 32-bit load: 8 lines → 4, and the static-lightmap
+// composite path's dynamic-only tap 4 → 2. Total bytes resident are
+// unchanged (4 × u16 either way); only the grouping changed. Measured in
+// docs/OPTIMIZATION_BACKLOG.md.
+inline constexpr uint16_t ShadowTexZ (uint32_t t) { return uint16_t(t & 0xFFFFu); }
+inline constexpr uint16_t ShadowTexId(uint32_t t) { return uint16_t(t >> 16); }
+inline constexpr uint32_t ShadowTexPack(uint16_t z, uint16_t id) {
+	return uint32_t(z) | (uint32_t(id) << 16);
+}
 
-	// Parallel buffers populated per-frame by the dynamic-objects bake
-	// (BakeDynamicForStaticOmnis). Only animated meshes are rendered
-	// here. Static-omni lighting samples min(depth, depth_dynamic) so
-	// moving objects cast moving shadows even though the static bake
-	// only fires once. Allocated lazily by ShadowMaps_Rebuild +
-	// CubeShadowMaps_Rebuild — same size as `depth` / `polyId`.
-	std::vector<uint16_t> depth_dynamic;
-	std::vector<uint16_t> polyId_dynamic;
+struct ShadowMap {
+	// STATIC plane: one packed (z | id<<16) word per texel, row-major,
+	// size xres*yres. Written by the once-baked static pass (StaticOnce)
+	// and by the legacy per-frame dynamic-omni pass (DynamicOmnisPerFrame).
+	// The z half is always written (it is a real z-buffer regardless of
+	// render mode); the id half is written under the same z-pass mask, so
+	// the closest occluder's ShadowMatID wins. The id is a 16-bit
+	// ShadowMatID (widened from the old 8-bit matID so per-Material
+	// overrides — e.g. the greets wall split — can exceed 255); it
+	// defaults to `Txtr->ID + 1`. Memory: 4 bytes/texel × 6 cube faces ×
+	// N omnis, e.g. 10 omnis × 6 × 512² = 60 MB for both planes together —
+	// exactly what the four u16 planes cost.
+	std::vector<uint32_t> packSD;
+
+	// DYNAMIC plane, same encoding, populated per-frame by the
+	// dynamic-objects bake (BakeDynamicForStaticOmnis). Only animated
+	// meshes are rendered here. Static-omni lighting takes the
+	// closest-by-z of the two planes so moving objects cast moving
+	// shadows even though the static bake only fires once. Allocated
+	// alongside packSD by ShadowMaps_Rebuild / CubeShadowMaps_Rebuild —
+	// always the same size, so `packDyn.empty() == packSD.empty()`.
+	std::vector<uint32_t> packDyn;
 	// True iff the DynamicMeshesPerFrame bake processed this map THIS frame
 	// (a dynamic mesh was visible in the face pyramid). When false the
 	// dynamic planes are stale/empty and the dynamicOnly tap short-circuits
@@ -55,14 +72,14 @@ struct ShadowMap {
 	// shadowing after the mesh leaves the face.
 	bool dynBaked = false;
 
-	// [experiment: --shadow-swizzle] 8×8-tiled copies of the four planes.
+	// [experiment: --shadow-swizzle] 8×8-tiled copies of the two planes.
 	// Rebuilt from the linear planes after each bake (ShadowMap_SwizzlePlanes,
 	// timed separately so the swizzle overhead is measurable on its own); the
 	// linear planes stay the source of truth for every other reader (viz,
-	// overlay, lightmap bake, clone taps). Sized tilesPerRow*tileRows*64 with
-	// zero-filled edge padding (reads there = "unwritten" sentinel). Empty
-	// until first swizzle → hot readers fall back to linear when empty.
-	std::vector<uint16_t> depthSw, polyIdSw, depthDynSw, polyIdDynSw;
+	// overlay, lightmap bake, clone taps). Sized tilesPerRow*tileRows*tileSz
+	// with zero-filled edge padding (reads there = "unwritten" sentinel).
+	// Empty until first swizzle → hot readers fall back to linear when empty.
+	std::vector<uint32_t> packSDSw, packDynSw;
 	int    xres = 0;
 	int    yres = 0;
 
@@ -104,8 +121,8 @@ struct ShadowMap {
 // Depth-only rasterizer. Same RasterFunc signature as Mekalele, but
 // reads the active shadow map from the thread-local `g_currentShadowMap`
 // pointer set by the orchestrator just before invoking the clipper.
-// Writes only the Z byte to `g_currentShadowMap->depth`; no color, no
-// G-buffer, no texture.
+// Writes only the packed (z | id<<16) word to `g_currentShadowMap->packSD`
+// (or ->packDyn on the dynamic bake); no color, no G-buffer, no texture.
 void MekaleleShadowDepth(Face* F, struct Vertex** V, unsigned int numVerts, unsigned int miplevel,
                           const fds::RenderTarget& rt,
                           const fds::CameraContext& cam);
@@ -149,7 +166,13 @@ void ShadowMaps_Rebuild(struct Scene *Sc, int res);
 //
 // Dynamic lights (no Omni_StaticShadow flag) are unaffected — they
 // continue to rebake every frame via Render_DeferredShadowMaps.
-void ShadowMaps_BakeStatic(struct Scene *Sc);
+//
+// forceEnable (default false): bypass the global FeatureFlags::shadows()
+// gate for this bake. Needed by greets, which turns --shadows on only at
+// RUN time (after this init bake) but force-bakes its static-shadow
+// lightmap here — the lightmap reads these occluder maps, so they must be
+// populated even when shadows() is still off at init.
+void ShadowMaps_BakeStatic(struct Scene *Sc, bool forceEnable = false);
 
 // ─── Cube shadow maps (for Light_Omni shadow casters) ────────────────
 //
@@ -163,8 +186,8 @@ void ShadowMaps_BakeStatic(struct Scene *Sc);
 // Face order (matches sampling axis-select code):
 //   0 = +X    1 = -X    2 = +Y    3 = -Y    4 = +Z    5 = -Z
 //
-// Memory: 6 × res² × (4 depth + 1 polyId) per shadow-casting omni.
-// At 256² per face: ~1.5MB/omni. Fine for handful of static omnis;
+// Memory: 6 × res² × 4 B per plane (static + dynamic) per shadow-casting
+// omni. At 256² per face: ~3MB/omni. Fine for handful of static omnis;
 // don't enable for many dynamic omnis (fountain particles).
 //
 // Per-pixel sampling (in deferred kernel / volumetric pass): take
@@ -242,21 +265,22 @@ inline int CubeShadow_SelectFace(float dx, float dy, float dz)
 // shadow attenuation in [0, 1] — 1.0 fully lit, 0.0 fully shadowed.
 //
 // `surfaceMatId` ∈ [-1, 65535] — the receiver's resolved 16-bit
-// ShadowMatID for direct comparison against sm.polyId (NO +1 offset
-// added inside; callers pass the literal value the bake stamped).
-//   -1 = legacy Depth mode: compare biased pixel-z against sm.depth.
+// ShadowMatID for direct comparison against the texel's id half (NO +1
+// offset added inside; callers pass the literal value the bake stamped).
+//   -1 = legacy Depth mode: compare biased pixel-z against the z half.
 //        constBias + slopeBiasInt control the comparison bias.
-//   0..65535 = PolyId mode: identity test of sm.polyId[texel] against
+//   0..65535 = PolyId mode: identity test of ShadowTexId(texel) against
 //        surfaceMatId. Caller is responsible for resolving the receiver's
 //        ShadowMatID first (Material::ShadowMatID if non-zero, else
 //        fallback uint16_t(matID + 1)). Bias parameters ignored.
 //
-// `dynamicOnly`: when true, only the dynamic buffers (sm.depth_dynamic,
-//   sm.polyId_dynamic) are sampled — the static buffers are ignored.
-//   Used by the static-lightmap composite path: the lightmap atlas
-//   already encodes the static-cube shadow factor for the pixel, so
-//   adding the static buffer here would double-count. dynamicOnly
-//   layers per-frame dynamic-mesh shadows on top of the static atlas.
+// `dynamicOnly`: when true, only the dynamic plane (sm.packDyn) is
+//   sampled — the static plane is ignored. Used by the static-lightmap
+//   composite path: the lightmap atlas already encodes the static-cube
+//   shadow factor for the pixel, so adding the static plane here would
+//   double-count. dynamicOnly layers per-frame dynamic-mesh shadows on
+//   top of the static atlas — and, because id and z now travel together,
+//   it reads HALF the cache lines the full tap does (2 vs 4).
 //
 // Caller computes the world-space sample pos once per pixel.
 inline float CubeShadow_Sample(int cubeIdx,
@@ -308,6 +332,18 @@ inline float CubeShadow_Sample(int cubeIdx,
     // matrix itself is broken (e.g. a per-frame bake desynced).
     // Threshold deliberately loose (16× face size) to ignore face-
     // seam edge cases and only catch genuinely-broken upstream.
+    //
+    // FDS_DEV ONLY. Its cost is not the ~12 compare/fabs instructions it
+    // looks like: the abort branch keeps dwx/dwy/dwz, viewX/Y/Z, all three
+    // cr.lightISource components, viewToLight row 0, the offset and lz LIVE
+    // across the whole body just to print them, and that register pressure is
+    // what forces the 304-byte frame and the 10 stp/ldp callee-save pairs in
+    // this function's prologue/epilogue — paid on EVERY tap, ~1.4 M taps per
+    // greets frame. It is also redundant for memory safety: the iX/iY range
+    // check immediately below rejects anything off the map, and fcvtzs maps
+    // NaN to 0, so a broken matrix reads texel 0 rather than walking memory.
+    // The ship build drops it; dev builds keep the tripwire.
+#if FDS_DEV
     const float kSaneAbs = 16.0f * float(sm.xres > sm.yres ? sm.xres : sm.yres);
     if (!std::isfinite(smX) || !std::isfinite(smY) ||
         std::fabs(smX) > kSaneAbs || std::fabs(smY) > kSaneAbs) {
@@ -328,6 +364,7 @@ inline float CubeShadow_Sample(int cubeIdx,
         }
         std::abort();
     }
+#endif  // FDS_DEV
     const int iX = int(smX);
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
@@ -337,11 +374,9 @@ inline float CubeShadow_Sample(int cubeIdx,
     // copy hasn't been built yet — both layouts hold identical values, so
     // mixing per-map is safe and byte-identical.
     const bool swz = fds::FeatureFlags::shadow_swizzle()
-                  && !sm.depthSw.empty() && !sm.depthDynSw.empty()
-                  && (surfaceMatId < 0 || (!sm.polyIdSw.empty() && !sm.polyIdDynSw.empty()));
+                  && !sm.packSDSw.empty() && !sm.packDynSw.empty();
     size_t o00, o10, o01, o11;
-    const uint16_t *zsB, *zdB;
-    const uint16_t *idsB = nullptr, *iddB = nullptr;
+    const uint32_t *psB, *pdB;
     if (swz) {
         const ShadowSwzShape &shp = ShadowSwzGetShape();
         const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
@@ -349,14 +384,12 @@ inline float CubeShadow_Sample(int cubeIdx,
         o10 = ShadowSwzOffset(iX + 1, iY,     tpr, shp);
         o01 = ShadowSwzOffset(iX,     iY + 1, tpr, shp);
         o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr, shp);
-        zsB = sm.depthSw.data();  zdB = sm.depthDynSw.data();
-        if (surfaceMatId >= 0) { idsB = sm.polyIdSw.data(); iddB = sm.polyIdDynSw.data(); }
+        psB = sm.packSDSw.data();  pdB = sm.packDynSw.data();
     } else {
         const size_t rowOfs = size_t(iY) * size_t(sm.xres);
         o00 = rowOfs + size_t(iX);   o10 = o00 + 1;
         o01 = o00 + size_t(sm.xres); o11 = o01 + 1;
-        zsB = sm.depth.data();  zdB = sm.depth_dynamic.data();
-        if (surfaceMatId >= 0) { idsB = sm.polyId.data(); iddB = sm.polyId_dynamic.data(); }
+        psB = sm.packSD.data();  pdB = sm.packDyn.data();
     }
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
@@ -380,39 +413,35 @@ inline float CubeShadow_Sample(int cubeIdx,
         // static surfaces that were actually closer to the light than
         // the dynamic mesh.
         //
-        // Reads: 4 polyId + 4 depth bytes per buffer (static + dynamic)
-        // = 24 bytes/tap × 4 taps = 96 bytes vs depth-only's 64 bytes.
-        // Slightly more memory than pure depth, but still identity-test
-        // semantics (no bias acne).
+        // Reads: ONE 32-bit word per texel per plane. The full tap is 4
+        // texels × 2 planes = 32 bytes from 2 base pointers (4 lines);
+        // the dynamicOnly composite tap is 16 bytes from 1 (2 lines).
+        // Still identity-test semantics (no bias acne).
         // Direct 16-bit comparison: caller already resolved ShadowMatID.
         const uint16_t receiverId = uint16_t(surfaceMatId);
-        auto closestPoly = [&](uint16_t sId, uint16_t dId,
-                                uint16_t sZ, uint16_t dZ) -> uint16_t {
-            // Empty buffer (id == 0) loses regardless of depth, because
+        // dynamicOnly: treat the static word as 0 so closestPacked always
+        // returns the dynamic id (or 0 if dynamic is also empty) — and
+        // never touches the static plane's cache lines at all.
+        auto closestPacked = [&](size_t o) -> uint16_t {
+            const uint32_t d = pdB[o];
+            const uint32_t s = dynamicOnly ? 0u : psB[o];
+            const uint16_t dId = ShadowTexId(d);
+            const uint16_t sId = ShadowTexId(s);
+            // Empty plane (id == 0) loses regardless of depth, because
             // unwritten texels have zEnc = 0 anyway. Otherwise pick the
             // one whose occluder is closer to the light.
             if (sId == 0) return dId;
             if (dId == 0) return sId;
-            return (dZ > sZ) ? dId : sId;
+            return (ShadowTexZ(d) > ShadowTexZ(s)) ? dId : sId;
         };
-        // dynamicOnly: zero out the static side so closestPoly always
-        // returns the dynamic id (or 0 if dynamic is also empty).
-        const uint16_t s00 = dynamicOnly ? uint16_t(0) : idsB[o00];
-        const uint16_t s10 = dynamicOnly ? uint16_t(0) : idsB[o10];
-        const uint16_t s01 = dynamicOnly ? uint16_t(0) : idsB[o01];
-        const uint16_t s11 = dynamicOnly ? uint16_t(0) : idsB[o11];
-        const uint16_t zs00 = dynamicOnly ? uint16_t(0) : zsB[o00];
-        const uint16_t zs10 = dynamicOnly ? uint16_t(0) : zsB[o10];
-        const uint16_t zs01 = dynamicOnly ? uint16_t(0) : zsB[o01];
-        const uint16_t zs11 = dynamicOnly ? uint16_t(0) : zsB[o11];
         if (fds::FeatureFlags::shadow_polyid_no_pcf()) {
-            const uint16_t c = closestPoly(s00, iddB[o00], zs00, zdB[o00]);
+            const uint16_t c = closestPacked(o00);
             if (c != 0 && c != receiverId) occ = 1.0f;
         } else {
-            const uint16_t c00 = closestPoly(s00, iddB[o00], zs00, zdB[o00]);
-            const uint16_t c10 = closestPoly(s10, iddB[o10], zs10, zdB[o10]);
-            const uint16_t c01 = closestPoly(s01, iddB[o01], zs01, zdB[o01]);
-            const uint16_t c11 = closestPoly(s11, iddB[o11], zs11, zdB[o11]);
+            const uint16_t c00 = closestPacked(o00);
+            const uint16_t c10 = closestPacked(o10);
+            const uint16_t c01 = closestPacked(o01);
+            const uint16_t c11 = closestPacked(o11);
             if (c00 != 0 && c00 != receiverId) occ += w00;
             if (c10 != 0 && c10 != receiverId) occ += w10;
             if (c01 != 0 && c01 != receiverId) occ += w01;
@@ -427,16 +456,17 @@ inline float CubeShadow_Sample(int cubeIdx,
         if (pixZenc < 0) pixZenc = 0;
         if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
         const int biased = pixZenc + constBias + slopeBiasInt;
-        // dynamicOnly: ignore static buffer (its contribution is already
+        // dynamicOnly: ignore static plane (its contribution is already
         // baked into the lightmap atlas the caller multiplied us into).
-        auto closest = [&](uint16_t a, uint16_t b) -> int {
-            return int((dynamicOnly ? uint16_t(0) : a) > b
-                       ? (dynamicOnly ? uint16_t(0) : a) : b);
+        auto closest = [&](size_t o) -> int {
+            const uint16_t a = dynamicOnly ? uint16_t(0) : ShadowTexZ(psB[o]);
+            const uint16_t b = ShadowTexZ(pdB[o]);
+            return int(a > b ? a : b);
         };
-        if (biased < closest(zsB[o00], zdB[o00])) occ += w00;
-        if (biased < closest(zsB[o10], zdB[o10])) occ += w10;
-        if (biased < closest(zsB[o01], zdB[o01])) occ += w01;
-        if (biased < closest(zsB[o11], zdB[o11])) occ += w11;
+        if (biased < closest(o00)) occ += w00;
+        if (biased < closest(o10)) occ += w10;
+        if (biased < closest(o01)) occ += w01;
+        if (biased < closest(o11)) occ += w11;
     }
     return (occ >= 1.0f) ? 0.0f : (1.0f - occ);
 }

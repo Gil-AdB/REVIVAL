@@ -86,6 +86,26 @@ struct Face
 	// distinct clusters greets needs without inflating matTable past
 	// the 8-bit matID cap).
 	uint16_t         ShadowMatID = 0;
+	// S1b SHELL POM (--pom_shell): 1-based index into
+	// Material::PomShellDomains — the UV bounding box of the CONTIGUOUS
+	// COPLANAR PATCH this face belongs to, not of the authored quad. The
+	// march's lateral-exit discard tests against that box, so a ray crossing
+	// into a sibling patch of the same wall (where the height field simply
+	// continues) is NOT a silhouette, while a ray leaving the wall entirely
+	// is. Measured on greets: authored wall quads are only ~0.4-2.1 UV tiles
+	// wide, so per-quad domains discarded mid-wall everywhere. 0 = ungrouped
+	// (the rasterizer falls back to this face's own U1..V3 box).
+	uint16_t         PomShellGroup = 0;
+	// S1d-5 PRISM-CLIPPED MARCH (--pom_prism_march): this face is a PRISM
+	// SIDE QUAD (PomShell_BuildPrism wall geometry), not a lid face. Only
+	// side-quad fragments arm the rasterizer's per-lane SIGNED 1/(V·N)
+	// (they can be seen from behind the owner lid's plane, where the ray
+	// ASCENDS through the slab); lid fragments keep the legacy descending
+	// clamp — at grazing their interpolated V·N dips below 0 on real wall
+	// pixels and the ascent semantics there discard half the wall
+	// (measured: 200k void px over the review poses when applied to lids).
+	// false everywhere unless BuildPrism stamped it, so shipping is inert.
+	bool             PomPrismSide = false;
 	// Planar-mirror identity (DEMO/GreetsMirror.cpp). Per Mirror, a unique
 	// 1..255 id assigned at scene init. Two distinct roles depending on
 	// the face's purpose in the mirror system:
@@ -97,6 +117,15 @@ struct Face
 	//     owning mirror's wall covered.
 	// 0 = not a mirror face, no mask write or check.
 	uint8_t          mirrorMaskTag = 0;
+	// Last mip level MiplevelClipper chose for this face (0xFF = none yet).
+	// Drives --mip-hysteresis: a face whose continuous mip metric sits near
+	// a level boundary otherwise flips levels frame-to-frame — visible
+	// texture-detail flicker, since the point-sampled fillers switch mips
+	// hard. Written from tile workers without synchronization: a lost
+	// update only weakens hysteresis for one frame, never correctness.
+	// (Mirror-clone faces are re-cloned per frame, so their state resets —
+	// their mip pops ride the water distortion anyway.)
+	uint8_t          LastMip = 0xFF;
 	// Per-face mirror identity, written into gb.mirrorId by Mekalele's
 	// commit path for every rasterized pixel (z-correct because the
 	// write only happens past p_mask, which already folds in zmask and

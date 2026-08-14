@@ -2,7 +2,751 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-08-09 — PHASE 5 IS CLOSED. Re-measured on the current tree, its ceiling is 0.24–0.31 % of frame, and the effort went to a struct 15× bigger.
+
+Phase 5 (`sizeof(Vertex)` 140 → 68 for mesh storage, or §6's interleaved 64-byte
+output array) was re-opened as *"hot-struct bloat cost us once, is there more?"*.
+It was re-measured on today's tree rather than re-argued. **The answer is no, and
+the same question asked of the DOMINANT stage found a struct worth 15× more.**
+
+### The front end today, per scene (`--xfrm_prof`, `--xfrm_par=0` for the buckets)
+
+Serial buckets, so this is the *upper* bound — the shipping path is parallel
+(`--xfrm_par`, default ON) and cheaper. 1920×1080, dummy drivers.
+
+| scene / pose | TOTAL | VERT | FACE | verts | frame ms | VERT as % of frame |
+|---|--:|--:|--:|--:|--:|--:|
+| greets t=5743 | 0.639 (par: 0.433) | **0.345** | 0.254 | 49 401 | 43.5–57.4 | **0.60–0.79 %** |
+| city t=1961 (p50; 2 calls/frame) | 1.178 | **0.611** | 0.539 | 69 287 | 92.6 | **0.66 %** |
+| chase t=400 / 800 / 1200 / 1600 | 0.624 / 0.538 / 0.640 / 0.513 | **0.114–0.158** | 0.354–0.467 | 23 205–30 548 | — | — |
+
+**`VERT` is the only bucket Phase 5 can touch.** Its own §3 slope puts the best
+case at ~40 % of VERT (traffic 284 → 164 B/vert), i.e. **0.14 ms at greets,
+0.24 ms at city, 0.05 ms at chase** — **0.24–0.31 % of frame**, before the fact
+that the shipping path is parallel and greets is LPT-bound on one mirror clone
+(55 % of its verts *and* faces in a single mesh), which caps the realised share
+below that.
+
+Against: 11 files, two alternative transform pipelines (`Reflected_Transform` in
+CITY/CHASE, FOUNTAIN's water/particle projection), the clipper entry, and a
+requirement to find *every* transform writer or the image breaks silently — the
+Phase 6.1/6.2 history is precisely a list of those bugs (`MakeFacesIndependent`,
+`BuildSkyCube`, `tessellateWaterGrid`, `Reflected_Transform`).
+
+**chase reconfirms the doc's own note:** it is FACE-dominated, not VERT-dominated
+(FACE is 2.9–3.3× VERT there). Phase 5 is the wrong lever for chase by shape, not
+just by magnitude.
+
+**Not attempted, and that is the recommendation.** Do it for the one-writer
+contract if that is ever wanted; never for perf.
+
+### Where the same question DID pay: the cube-shadow tap, 15× bigger
+
+The identical mechanism — *how many cache lines does one access touch* — asked of
+the dominant stage instead of the front end. At greets the deferred lighting wave
+is 27.8 ms of a 43.5 ms frame, and **the cube-shadow tap alone is 10.28 ms of it**
+(`--prof_no_cube_tap`, min-of-3: `lighting-w1` 30.518 → 20.238). A PolyId tap
+gathered 32 bytes from **four separate `std::vector<uint16_t>` planes** that sat
+512 KB apart, over two PCF rows = **up to 8 cache lines per tap**. Pair-interleaving
+them into two `std::vector<uint32_t>` planes (now the SOURCE OF TRUTH, shipped ON)
+halves that. See docs/OPTIMIZATION_BACKLOG.md item 3 for the measured table.
+
+## MEASURED 2026-08-06 (c) — the main-view transform is PARALLEL now (`--xfrm_par`, default ON). Two arms, two DIFFERENT limits, both measured.
+
+Item 2 of §5 below ("parallelise the MAIN-VIEW `Transform_Objects`… this has
+never been costed") is built, measured, byte-gated and on by default. It should
+have been done before any of the layout work: it is orthogonal to the layout and
+it collects **−1.10 ms of a 1.55 ms phase** in the displaced arm.
+
+### The ceiling, costed BEFORE building anything — and it is not `total / 12`
+
+A mesh is the indivisible unit of this loop: its face loop reads its own
+transformed vertices, so a mesh cannot be split across workers without a
+barrier. The parallel critical path is therefore the **largest single mesh**.
+That falls straight out of the existing `--xfrm_pass_mesh_prof` census, no new
+code — and greets' geometry is dominated by one mirror clone:
+
+| arm (greets, 1920×1080) | main-view verts | largest mesh | share of verts | its faces / tested | share |
+|---|--:|--:|--:|--:|--:|
+| `--greets_displace` t=5780 | 188 941 | `__mirrorClone_teleporter` 26 861 | 14.2 % | 9 198 / 63 290 | 14.5 % |
+| shipping t=5743 | 49 401 | `__mirrorClone_teleporter` 27 370 | **55.4 %** | 9 198 / 16 607 | **55.4 %** |
+
+Against the serial per-bucket split that gives an LPT bound of
+`max(largest-mesh cost, total / nWorkers)`:
+
+| arm | serial TOTAL | VERT | FACE | LPT bound | measured `WORK` |
+|---|--:|--:|--:|--:|--:|
+| displaced | 1.546 | 0.883 | 0.622 | 0.142·0.98 + 0.145·0.71 = **0.240** | 0.411 |
+| shipping | 0.423 | 0.227 | 0.172 | 0.554·(0.227 + 0.172) = **0.221** | 0.246 |
+
+**Read those two rows carefully — they are limited by different things, and both
+are at their own mechanism:**
+
+* **Shipping is at the per-mesh LPT bound** (0.246 measured vs 0.221 predicted,
+  +11 %). One mirror clone is 55 % of the arm's main-view verts *and* 55 % of
+  its faces, so eleven workers finish and wait on one. Nothing short of
+  splitting that mesh moves this arm further.
+* **Displaced is at an AGGREGATE-BANDWIDTH bound, not the LPT bound** (0.411
+  measured against a 0.240 LPT bound). 188 941 verts × ~284 B = 53.7 MB of
+  streamed traffic in 0.411 ms is **~131 GB/s** — about **2×** the 64 GB/s
+  single-core ceiling §4 measures, not 12×. Confirmed by elimination: raising
+  the block count from 12 to 24/26/52/104 (finer work-stealing, i.e. better
+  balance) moves `WORK` 0.49 → 0.41 and then flattens, so the residual is not
+  imbalance.
+
+**That is the important architectural consequence of this whole exercise:** the
+loop was bandwidth-bound on one core, and after parallelising it is
+bandwidth-bound on the socket. So the ONLY remaining lever that can move the
+displaced arm is **bytes per vertex** — lever 1 in §5 / §6 below (the
+interleaved 64-byte output array, ~284 → ~164 B/vert). More threads cannot;
+more SIMD never could.
+
+### Measured
+
+`--xfrm_par=N`: `-1` (default) = 2 blocks per worker, `0` = the old serial path,
+`N>0` = exactly N blocks. Per-frame **min over 24 frames**, min-of-arm over 3
+interleaved reps, 1920×1080, `SDL_VIDEODRIVER=dummy`, box shared with 3 other
+agents (per-run 1-min load 14–23).
+
+| arm | serial (`par=0`) | default (`par=-1`, 26 blocks) | delta |
+|---|--:|--:|--:|
+| `--greets_displace` t=5780 | **1.546** | **0.449** (PLAN 0.006 / WORK 0.411 / COMPACT 0.026 / EPI 0.004) | **−1.10 ms, 3.4×** |
+| shipping t=5743 | **0.423** | **0.261** (PLAN 0.005 / WORK 0.246 / COMPACT 0.006 / EPI 0.003) | **−0.16 ms, 1.6×** |
+
+**The load did not bias this**, which is worth stating because the box was
+shared throughout. An orphaned process of the harness's own making (an
+interactive `--scene-mirrortest` launched without `FDS_MIRRORTEST_MULTI_DUMP`
+under a dummy driver, so nothing could ever press ESC) sat at ~3.5 cores
+through every row above. Re-measured after killing it, on a genuinely quiet
+box (1-min load 5.5–11), min-of-arm over 2 interleaved reps: displaced
+**1.490 → 0.461** (3.2×), shipping **0.421 → 0.269** (1.6×). The parallel arm
+is unchanged to within run-to-run spread — if anything marginally slower on the
+quiet box — so the per-frame **min over 24** absorbed the background load, as
+intended. Prefer these figures; the difference from the table above is noise.
+
+Block-count sweep (same binary, min-of-arm over 2 reps, `WORK` only):
+
+| blocks | 1 | 12 | 24 | 26 | 52 | 104 |
+|---|--:|--:|--:|--:|--:|--:|
+| displaced | 1.630 | 0.491 | 0.433 | 0.411 | 0.423 | 0.430 |
+| shipping | 0.425 | 0.225 | 0.246 | 0.246 | 0.252 | 0.238 |
+
+Three things to read off these:
+
+1. **The `blocks=1` control is the honest overhead number.** Its `WORK` equals
+   the serial `TOTAL` to within noise in both arms, so the entire machinery
+   (mesh-sequence counter, segment reservation, compaction, epilogue re-entry)
+   costs `PLAN + COMPACT + EPI` ≈ **10–35 µs**. The dispatch round-trip that
+   Threads.h's "~12 µs per enqueue" comment implies did NOT materialise — the
+   enqueues and the drain live inside `WORK`, and `WORK` lands on the predicted
+   bound.
+2. **`COMPACT` is 5–26 µs**: the price of determinism is ~2–6 % of the phase.
+   36 147 × 16 B of `memmove`.
+3. **Block count must exceed worker count.** The cost model can only see
+   `VIndex`/`FIndex`; it cannot see which meshes the frustum + occlusion culls
+   will discard, and most are discarded (greets: 471 TriMesh objects on the
+   object list, **108** reach a vertex loop). One block per worker with a static
+   assignment left ~15 % on the table (`WORK` 0.508 vs 0.411).
+
+### DETERMINISM: reserved segments, not a bump allocator
+
+The one thing that would make this useless is an FList whose ORDER depends on
+which worker finished first — a different image run to run, which destroys every
+byte gate in the project and is not a trade anyone can evaluate by eye. So:
+
+* Each block appends into a segment of the shared FList **reserved in MESH
+  ORDER** — the prefix sum of per-mesh `FIndex`, an exact upper bound on what a
+  block can push (a mesh cannot emit more FList entries than it has faces).
+* `COMPACT` then slides the runs down **in block order**. Destination never
+  exceeds source and blocks are walked in increasing order, so it is a safe
+  in-place compaction and the surviving order is exactly the serial insertion
+  order.
+* **Execution order is free; output position is pinned.** That separation is why
+  blocks can be work-stolen off a shared cursor (and why the block count can be
+  tuned for balance) without touching determinism.
+* Cheapest way to see the property hold: **the block COUNT does not move the
+  image.** `par=0 / 5 / 7 / 8 / 12 / 24 / 52 / 104` all hash the same.
+
+Shared mutable state, enumerated and handled:
+
+| thing | how |
+|---|---|
+| the FList append cursor (`Ins++`) | per-block reserved segment (above) |
+| the tile-bbox stamp (`--tile_bbox_cull`) | written into the block's own `FListEntry` |
+| the radix sort | consumes the compacted, mesh-ordered list — unchanged |
+| per-vertex / per-face writes | into the mesh's own `Vertex`/`Face` arrays; blocks are disjoint mesh sets |
+| `T->frame` lazy `new VertexFrame()` | per-mesh, and a mesh belongs to exactly one block |
+| `T->BSphereScreenPos` | same — one owner per mesh |
+| `g_inShadowPass`, `g_inDynamicShadowBake`, `g_currentShadowOmni`, `g_currentShadowMap`, `g_offAxisFrustumCull` | all `thread_local`; the worker task sets the main-view values explicitly, so a pool thread that last ran a shadow or mirror-shard task cannot leak state in |
+| `g_chunkVisStats`, `g_xprof`, the `FDS_VIS_CENSUS` accumulators | plain counters — suppressed inside blocks; the driver has its own `[XFRM-PAR]` dump under `--xfrm_prof` instead |
+| the omni + particle epilogue | mutates `Omni::V` / `Particle::V` in place and is not per-mesh work — runs exactly once, after COMPACT, in its own re-entry |
+| two Objects sharing one TriMesh | would be a genuine race (the serial path merely gets an order-dependent answer). Audited once per `Scene` pointer; the driver shouts on stderr and falls back to 1 block. No scene in the demo trips it. |
+| `FInterpolator` | not touched by `Transform_Objects` (clipper-side) |
+
+The mesh-loop block test is an **unconditional counter + compare** (serial takes
+`lo=0, hi=INT_MAX`), deliberately not a flag-predicated branch — a never-taken
+`if (flag)` inside this `-ffp-contract=fast` function is not byte-null
+(docs/VISIBILITY_PLAN.md 8a: 216 bytes on city, max |Δ| 44). The driver's own
+timers live in the cold driver function for the same reason.
+
+**Gates**, run twice (once on the static-assignment build, once on the shipped
+work-stealing default-ON build); every OFF-vs-ON pair identical, dummy drivers,
+1-min load 11–30:
+
+* render_gate **3/3 PASS in BOTH arms** — mirrortest `4ac809e5`, conetest
+  `b41894f9`, halotest `166fa25a`.
+* city **`37e62845` PIN EXACT** off and on (env cache warmed once, held fixed
+  across arms; on-arm run twice, same hash).
+* fountain **`51fff7cd` PIN EXACT** off and on.
+* greets t=1588 off == on (`f1297141`). This differs from the SESSION_STATE pin
+  `f5778c7b` — it moved *identically in both arms*, which is the concurrent
+  greets overlay work, not this change.
+* chase 5-pose: t100/t400/t800/t1200 EXACT to their pins; t1600 differs from the
+  pin in BOTH arms (`c8c93b88` vs `7265d785`) — the documented pre-existing
+  effect of the uncommitted CHASE.FLD/.lwo. chase cinematic: same shape.
+* greets t=5780 `--greets_displace`: one hash across every block count tried.
+* **Nondeterminism gate: 24 sequential runs of the greets pin recipe with the
+  parallel path on → 1 distinct hash, 0 flips** (`tools/flip_rate.sh -n 24`;
+  95 % upper bound on the flip rate 0.117), and that hash equals the flag-OFF
+  hash.
+
+### What is LEFT, and what it would cost
+
+* **Displaced arm: nothing more from threads.** It is at ~131 GB/s aggregate.
+  The lever is bytes/vertex — §6's interleaved 64-byte output array
+  (~284 → ~164 B/vert) should now move it roughly proportionally, and it is the
+  only thing that can.
+* **Shipping arm: the lever is the dominant mesh.** 55 % of its work is one
+  mirror clone. Either split a mesh's vertex loop across workers (needs a
+  vertex-phase/face-phase barrier, because a face reads vertices from ranges
+  other workers own — a real refactor of the function), or shrink the clone: the
+  mirror-clone spatial split already tracked in docs/VISIBILITY_PLAN.md §8e
+  would cut the critical path here AND improve the serial arm.
+
+---
+
+## MEASURED 2026-08-06 (b) — the mechanism, nailed with a controlled experiment: `sizeof(Vertex)` is the ONLY variable this loop responds to. Read this before Phase 5.
+
+Everything below this section reasons about the per-vertex loop being
+"cache-line-bound" from *ablations*, which are confounded (they change the
+arithmetic and the bytes together). This section changes one variable at a time
+and gets a clean answer. Two of this doc's own predictions are refuted by it.
+
+### Regime + instrument (all numbers in this section)
+
+`./DEMO --bench=scene@scene=greets,t=5780,iters=24 --deferred --greets_displace
+--xfrm_prof=24`, 1920×1080, `SDL_VIDEODRIVER=dummy`, per-frame **MIN** over 24
+frames, box shared with other agents (1-min load quoted per run, 11–17
+throughout). Main-view `Transform_Objects` sees **108 meshes / 253 280 verts
+(inside 70 607 / ahead 166 647 / regular 16 026) / 63 290 faces tested / 36 147
+pushed**.
+
+> **The 958 204-vert figure this doc is built on no longer exists.** `9d`'s
+> faceless-mesh cull plus the GREETS.CPP work on `fog-wt` took the displaced
+> main-view count to 253 280. `--greets_displace` is still the largest available
+> regime and is what everything here is measured in; the *ratios* below are the
+> transferable part, not the absolute ms.
+
+### 1. The dead `UZ`/`VZ` stores — deleted, and NEUTRAL (`fdc7a07`)
+
+`FrustumClipper::Render` overwrites `A/B/C->UZ/VZ` unconditionally at entry, so
+the transform's stores could never be read (full audit in the commit message and
+in the note above the vertex loops in `Transform.cpp`). Removing 10 sites / 19
+lines drops 2 loads, 2 muls and 2 stores per vertex per pass:
+
+| arm | VERT | FACE | TOTAL |
+|---|--:|--:|--:|
+| base | 1.186 / 1.176 | 0.612 / 0.592 | 1.834 / 1.805 |
+| deleted | 1.160 / 1.181 | 0.584 / 0.592 | 1.785 / 1.807 |
+
+**Neutral** (|ΔVERT| ≤ 0.026 ms against a ~0.05 ms spread). Landed anyway: it is
+byte-null at every gate, and it is what makes the untouched tail contiguous.
+
+### 2. Field REORDER — +2.6 % on VERT, and it REFUTES the face-loop theory
+
+`Vertex` regrouped (see the block comment in `FDS/Base/Vertex.h`) so that
+**PX, PY, Flags, TPos_AOS.z sit in 24 contiguous bytes at offset 0** and
+everything the per-vertex loop touches fits in **bytes 0..87**, with the
+transform-untouched 52 bytes (BGRA, UZ/VZ, EUZ/EVZ, U/V, EU/EV, i, OrigBary,
+ShellH) as a contiguous tail at 88..139. `FInterpolator` retuned to the new runs
+(2-wide PX/PY, UZ/VZ, EUZ/EVZ, TTangent.y/z; 4-wide TN.x..TTangent.x) — same
+`a + t*(b-a)` per lane, so bit-identical.
+
+| arm | VERT min | FACE min | TOTAL min |
+|---|--:|--:|--:|
+| base | 1.156 / 1.193 | 0.583 / 0.604 | 1.775 / 1.846 |
+| reordered | 1.135 / 1.155 | 0.588 / 0.606 | 1.763 / 1.835 |
+
+**VERT −2.6 % (min) / −2.9 % (p50), same sign in both interleaved pairs.
+FACE 0.**
+
+### 2b. Secondary arm — the SHIPPING/flat regime gains MORE, not less
+
+Both landed changes together (dead UZ/VZ + reorder) vs the tree before them,
+greets **t=5743, `--parallax_pom=128`** (the review-pose shipping recipe, NOT
+`--greets_displace`): 83 meshes / **49 447 verts** (in 8 285 / ahead 41 057 /
+regular 105) / 16 607 faces tested / 7 916 pushed — the same census
+docs/VISIBILITY_PLAN.md §9 reports. Per-frame min over 24, interleaved:
+
+| arm | VERT | FACE | TOTAL |
+|---|--:|--:|--:|
+| base | 0.241 / 0.232 | 0.171 / 0.167 | 0.441 / 0.417 |
+| HEAD | 0.227 / 0.225 | 0.165 / 0.166 | 0.411 / 0.412 |
+
+**VERT −4.4 %, FACE −2.1 %, TOTAL −4.1 %**, same sign in both pairs — and the
+second HEAD run was taken at load 29.98 against base's 12.18 and still won.
+
+Note the inversion versus the displaced arm (−2.6 % VERT there, −4.4 % here):
+at 49 447 verts over 83 meshes a mesh is ~596 verts ≈ 83 KB, which **fits L1**,
+so this regime is instruction-bound rather than DRAM-bound and the removed
+loads/muls/stores actually pay. At 253 280 verts over 108 meshes a mesh is
+~2 345 verts ≈ 328 KB and the loop is at the bandwidth ceiling in §4, where
+instruction count is free and only bytes matter. Two different regimes, two
+different binding constraints — which is exactly why a single "the transform is
+X % of frame" verdict has been misleading this campaign in both directions.
+
+That FACE zero is the finding. The reorder cuts the *predicted* cache lines per
+random 3-vertex deref from ~2.88 to ~1.56 (−46 %) — the exact win the
+"§per-face visibility test = 73 % of FACE, read it from SoA instead" item in
+docs/OPTIMIZATION_BACKLOG.md is priced on — **and FACE did not move.** The three
+`F->A/B/C` derefs are already cache-resident (a face's vertex indices are
+spatially coherent, so the lines are still hot from the previous face). So:
+
+* **The per-face cost is NOT vertex line traffic.** Migrating `Flags`/`PX`/`PY`
+  to 4-byte-stride SoA arrays will not buy the FACE bucket back, and it does not
+  need the `A/B/C_idx`-trust invariant that item was blocked on. Repricing:
+  whatever the 73 % is, it is the branch chain + the per-face `F->Txtr->Flags`
+  chase + the Face stream, not the vertex reads.
+* By symmetry it also explains why the reorder gave VERT only 2.6 %: the
+  per-vertex walk is **sequential**, and at a 140-byte stride a 52-byte gap can
+  never skip a whole 64-byte line. The line-span arithmetic only ever applied to
+  random access, and the only random access here turned out to be cached.
+
+### 3. The controlled experiment: `-DFDS_VERTEX_PAD_BYTES=N`
+
+Dead tail padding inflates `sizeof(Vertex)` and changes **not one instruction**
+in any loop. Same tree (reordered), same scene, fresh build dir per arm,
+`pad=0` run first AND last as drift control:
+
+| `sizeof(Vertex)` | VERT min | ns/vert | vs 140 | FACE min |
+|---|--:|--:|--:|--:|
+| **140** (control ×2) | **1.118 / 1.123** | 4.41 | — | 0.575 / 0.579 |
+| 204 | 1.203 | 4.75 | **+7.6 %** | 0.617 |
+| 268 | **2.315** | 9.14 | **+107 %** | 0.724 |
+
+Drift between the two controls is 0.005 ms, so both steps are real. Per-vertex
+time is a **steep, super-linear function of the struct's stride**, with a cliff
+between 204 and 268 bytes (consistent with the hardware stride prefetcher giving
+up past ~256 B — past that every vertex is a demand miss and the loop doubles).
+
+### 4. Bandwidth: the loop is at a SINGLE-CORE streaming ceiling (~62–64 GB/s)
+
+Per vertex the reordered walk pulls the lines covering bytes 0..87 at a 140-byte
+stride (≈2.375 lines = 152 B), writes back the dirty lines covering 0..51
+(≈1.81 lines = 116 B) and stores 16 B into the SoA arrays ⇒ **~284 B/vert**.
+At 4.41 ns/vert that is **64.4 GB/s on ONE core** (main-view `Transform_Objects`
+runs on the tick thread — `RENDER.CPP:479/493` and each scene's own call site;
+`Shadows.cpp:422` is the only threaded caller).
+
+Two independent cross-checks from this doc's own 2026-08-05 numbers, at 958 204
+verts and the pre-reorder layout (touched span 4..123, i.e. effectively every
+line: 140 B read + 140 B written back + 16 B SoA):
+
+| loop | ms | bytes/vert | GB/s |
+|---|--:|--:|--:|
+| VERT (`--xfrm_soa_inline` on) | 4.41 | 296 | **64.3** |
+| `VertexFrame_DumpFromAoS` sweep — 4 loads, 4 stores, ZERO arithmetic | 2.40 | 156 | **62.3** |
+| VERT, this section, 253 280 verts | 1.118 | 284 | **64.4** |
+
+Three unrelated loops pinned at 62–64 GB/s is a ceiling, not a coincidence. It
+is the single explanation for every wash this campaign has recorded: Vec8f
+across 8 verts, the reciprocal estimate, the single-precision divide, dropping
+2 of 3 mat-vecs, and now the field reorder. **Nothing inside the loop can move a
+loop that is waiting on DRAM; only bytes/vertex and more cores can.**
+
+### 5. What follows, ranked
+
+1. **Shrink the mesh-side struct — the interleaved-output design in the
+   2026-08-06 (a) section below is CONFIRMED, and its ceiling is bigger than
+   that section claims.** Mesh-side inputs 140 → 68 B (clean, no write-back),
+   outputs to a separate 64 B/vert array (one full line, write-allocate
+   elidable): streamed traffic **~284 → ~132 B/vert**. Against the measured
+   slope in §3 that is worth on the order of **2× VERT**, not the −26 % / −45 %
+   this doc argues about. The reorder already parked the split line: bytes
+   88..139 are exactly the fields that do not belong on the transform's side.
+   Cost is unchanged and still the real blocker — it needs `Vertex` to split
+   into mesh storage vs the clipper's transient `C_Verts` type (every
+   `RasterFunc` takes `Vertex**`), i.e. the "Phase 6.3, 2–3 days" work.
+2. ~~**NEW — parallelise the MAIN-VIEW `Transform_Objects`.**~~ **DONE
+   2026-08-06 — `--xfrm_par`, default ON. See the 2026-08-06 (c) section at the
+   top of this file.** Displaced 1.546 → 0.449 ms (3.4×), shipping 0.423 →
+   0.261 (1.6×); byte-identical on every gate, 24/24 one hash. Two corrections
+   this delivered to the reasoning below:
+   * "the chip's aggregate bandwidth is several times 64 GB/s" — **measured at
+     ~131 GB/s for THIS access pattern, i.e. ~2×, not 12×.** The displaced arm
+     is now bandwidth-bound at the socket instead of at one core.
+   * That makes item 1 (bytes/vertex) the **only** remaining lever on the
+     displaced arm, and raises its priority rather than lowering it.
+3. **Do NOT spend the migration's budget on the FACE bucket** — §2 measured that
+   win as zero.
+
+### 6. Lever 1 without the type split — the version to actually build
+
+The "2–3 days / Phase 6.3" cost estimate below exists because everyone assumed
+the traffic cut requires `sizeof(Vertex)` itself to shrink, which forces `Vertex`
+to split into mesh-storage vs the clipper's transient type, which forces every
+`RasterFunc(Face*, Vertex**, …)` and both clippers to change. **That assumption
+is wrong.** The traffic the loop pays is not `sizeof(Vertex)`; it is *the lines
+the per-vertex loop touches and dirties*. So:
+
+**Keep `Vertex` exactly as it is (140 B, one type, no filler or clipper
+signature changes). Just stop the transform from WRITING into it.**
+
+* Per mesh, add an interleaved output array, one 64-byte record per vertex:
+  `TPos×3, TN×3, TTangent×3, PX, PY, RZ, Flags, BGRA, EUZ, EVZ` = 64 B exactly
+  (the layout the 2026-08-06 (a) section derived; `UZ`/`VZ` are correctly absent
+  — `fdc7a07` proved they are clipper-owned).
+* The per-vertex loop then **reads** only `Pos`/`N`/`Tangent` — bytes 52..87 of
+  the reordered struct, a 36-byte span ⇒ ~1.56 lines ≈ 100 B — and **writes
+  nothing** into the mesh array, so the ~116 B/vert of dirty write-back
+  disappears. It writes one aligned 64-byte record instead (a full line ⇒ the
+  write-allocate read is elidable).
+* **Traffic: ~284 → ~164 B/vert (−42 %)** with `sizeof(Vertex)` untouched.
+  Against §3's slope that is the bulk of lever 1's prize, for a fraction of the
+  work.
+* Follow-on, if it measures: a compact per-mesh *transform input* array
+  (`Pos`/`N`/`Tangent`, 36 B/vert, contiguous) drops the read side to ~40–64 B
+  and takes traffic to ~104–128 B/vert (−55…−63 %). It duplicates 36 B/vert and
+  needs a re-sync wherever `Pos` changes (displacement, tessellation, water), so
+  land the cheap half first.
+
+The clipper entry keeps `*A = *F->A` for the INPUT fields (that memcpy is the
+access pattern — see "Naming" below) and then overwrites the out fields from the
+record. That is precisely the Phase 6.1/6.2 "override" this doc records as
+BLOCKED — and **both of its blockers now have clean answers**:
+
+* *"`F->A/B/C_idx` isn't trustworthy on every mesh"* — don't trust it. Store the
+  vertex-array base alongside the record array and derive `idx = F->A - base`.
+  Exact by construction, no per-mesh invariant, and it fixes the same hazard the
+  tile-bbox comment in `Transform.cpp` documents (the conetest quad).
+* *"stale frame after `Reflected_Transform`"* — that is now a hard requirement
+  rather than a latent trap: with the out fields no longer in the `Vertex`, every
+  alternative transform path (CITY/CHASE `Reflected_Transform`, FOUNTAIN's
+  water/particle projection) **must** write the record array, and the compiler
+  finds them if the field is renamed first (the rename-first technique below).
+  `VertexFrame_DumpFromAoS` already exists as the vehicle.
+
+Migration surface is the same 11 files inventoried below, but the *type* stays
+put, so no rasterizer, no `FInterpolator`, no `C_Verts`, no `_2DClipper`, and no
+hand-built sprite/water quad in DEMO has to change. Hottest new reader is
+`RenderInner`'s per-tile `A->Flags & B->Flags & C->Flags` — §2 measured those
+three derefs as cache-resident, so the extra indirection there should be cheap,
+but measure it rather than assume.
+
+---
+
+## MEASURED 2026-08-06 (a) — the whole geometry front end is now ~1.5–3 % of a greets frame, and Phase 5's real ceiling is HALF what this doc claims. Read this before starting Phase 4/5.
+
+Two things changed since the 2026-08-05 section below, and both cut the prize:
+
+1. **The 7.92 ms premise is retired geometry.** That number is the main-view
+   `Transform_Objects` under `--greets_displace` at 958 k verts. Tessellation is
+   retired (docs/SESSION_STATE.md) and `799c808`/`9d`'s faceless-mesh cull landed.
+2. **`--shadow_prof`'s "xform" bucket was not all transform** — see §"the phase-A
+   clear" below.
+
+### The front end, measured in WALL time (1920×1080, greets t=5743, shipping arm)
+
+`./DEMO --bench=scene@scene=greets,t=5743,iters=24 --deferred --xfrm_prof=24
+--shadow_prof --shadow_bake_time`, `FDS_SHADOW_PROF_INTERVAL=8`, load 9.4–11.5,
+frame mean 78.9–109 ms depending on box load.
+
+| stage | wall ms/frame | instrument |
+|---|--:|---|
+| MAIN `Transform_Objects` | **0.449–0.468** (min) / 0.485–0.503 (p50) | `--xfrm_prof` |
+| — of which SETUP / VERT / SOA / FACE | 0.004 / 0.244–0.257 / 0.001 / 0.176–0.185 | " |
+| SHADOW phase A, DynOmnis bake (28 maps) | 0.55–1.44 | `[SHADOW-CLEAR]` census |
+| SHADOW phase A, DynMeshes bake (14 maps) | 0.19–0.63 | " |
+| OFFSCREEN (env / SH probes) | not re-measured; §9d put it at 1.18 **core**-ms | `--xfrm_pass_prof` |
+| **whole front end** | **≈1.2–2.6 ms of a ~79 ms frame = 1.5–3.3 %** | |
+
+Main-view verts are **49 447** (in 8 285 / ahead 41 057 / regular 105), fTested
+16 607, fPushed 7 916. The frame profiler independently rows XFRM at **0.5 %**.
+
+**So: the transform phase is no longer a big chunk of the budget.** Anything left
+inside it is worth at most a few tenths of a ms. That is the number any further
+work here has to be justified against.
+
+### The phase-A "clear" — LANDED, and it is why the shadow xform bucket looked big
+
+`Render_DeferredShadowMaps` cleared each light's `depth`/`polyId` planes with a
+serial `std::fill` on the tick thread, *inside* the window `--shadow_prof` reports
+as `xform=`. Census build (`-DFDS_SHADOW_CLEAR_CENSUS`), greets t=5743, 12 frames:
+
+| bake | maps | bytes cleared | clear core-ms | phase-A wall |
+|---|--:|--:|--:|--:|
+| DynMeshes | 14 | 10.50 MB | 0.19–0.40 | 0.19–0.63 |
+| DynOmnis | 28 | 2.72 MB | 0.02–0.11 | 0.55–1.44 |
+
+For the DynMeshes bake the clear was **most of the bucket** — in several frames the
+summed clear core-time now EXCEEDS the whole phase-A wall, which is only possible
+because it is spread across the pool. Fixed by clearing inside `runPhaseAXform`
+(the clear is per-map private; nothing reads a map's planes before phase B, which
+is behind the `shadowDone` barrier). Byte-null: greets t=1588 `06e1d4d1` (3/3 runs,
+HEAD == FIX), all 5 chase poses HEAD == FIX, fountain `51fff7cd` == pin,
+render_gate 3/3.
+
+### Consumer inventory of the per-frame AoS fields (the Phase 4/5 surface)
+
+`sizeof(Vertex)` **= 140** (verified, `pack(1)`), with these offsets:
+
+```
+0   BGRA/LB,LG,LR,LA   4      out
+4   PX                 4      out      24  Pos        12   IN
+8   PY                 4      out      48  N          12   IN
+12  UZ                 4      out      72  Tangent    12   IN
+16  VZ                 4      out      104 U,V         8   IN
+20  RZ                 4      out      112 EU,EV       8   IN
+36  TPos_AOS          12      out      124 i           4   IN
+60  TN                12      out      128 OrigBaryB/C 8   IN
+84  TTangent          12      out      136 ShellH      4   IN
+96  EUZ,EVZ            8      out
+120 Flags              4      out
+```
+
+**out = 72 bytes, IN = 68 bytes.** Phase 5's target is therefore
+`sizeof(Vertex) == 68` for MESH storage. (The per-vertex loop touches 104 of the
+140 bytes and they span offsets 4..123 — every cache line — which is why field
+REORDERING is worth ~0: with a 140-byte stride the 36 untouched bytes never form
+a whole line. Only shrinking helps.)
+
+Readers of the `out` fields, in the built tree (`FL.CPP` is **not** in
+CMakeLists — dead), split by which vertex they hold:
+
+* **Transient / clipper-owned vertices (NOT mesh storage) — no migration needed.**
+  `FrustumClipper::C_Verts[48]`, `Omni::V`, `Particle::V`. Everything in
+  `FILLERS/FILLERS.CPP` (86 PX / 91 PY / 54 RZ / 33 UZ / 33 VZ),
+  `FILLERS/TheOtherBarry.h`, `Mekalele.h`, `FILLERS/ShadowMap.cpp`,
+  `Clipper.cpp`, and the bulk of `FRUSTRUM/FRUSTRUM.CPP` reads these.
+  **Verified: every rasterized face reaches a filler through
+  `FrustumClipper::Render`** (`RenderInner.cpp` 145/147/209/212/214/316/318/320/
+  394/402 are the only raster entries) — so no rasterizer ever reads a mesh
+  Vertex's `out` fields.
+* **Reads `out` through a MESH vertex — this is the whole migration surface:**
+  | site | fields | note |
+  |---|---|---|
+  | `FRUSTRUM.CPP:904` `*A = *F->A` ×3 + `A->RZ` | all | the entry copy; becomes IN-copy + one `out` read |
+  | `Transform.cpp:2352` `F->VisibilityFlagsAll()` | Flags | 73 % of the FACE bucket |
+  | `Transform.cpp:2606+` tile-bbox stamp | PX, PY, TPos.z | deliberately pointer-based (wrong `A_idx` on the conetest quad) |
+  | `RenderInner.cpp:137,308` mirror centroid gate | PX, PY | |
+  | `RENDER.CPP:1202` | TPos.z | (1420–1422 already read `ff->PX[ai]` — the precedent) |
+  | `CAMERAS/CAMERAS.CPP:124–134` | TPos | plane/portal test |
+  | `DEMO/CITY.CPP` (75 TPos / 51 RZ / 23 PX / 23 PY) | all | `Reflected_Transform`, already dual-writes `frame` |
+  | `DEMO/CHASE.CPP:562–571` | Flags, TPos.z | its own face loop |
+  | `DEMO/FOUNTAIN.CPP` (68 TPos / 14 PX) | TPos, PX, PY | water / particle projection |
+  | `DEMO/Raytracer.cpp:93–103` | LR/LG/LB (the BGRA union) | |
+  | `MISC/PREPROC.CPP`, `RADIO/RADIO.CPP`, `DEMO/Snapshot.cpp`, `DEMO/FillerTest.cpp` | 1–4 refs each | diagnostics / legacy |
+  Migration vehicle stays the rename-first technique; `A_idx` trust is avoidable
+  entirely by deriving the index as `F->A - tVerts` (exact, no invariant needed).
+
+### CORRECTION: 13 SoA arrays is the WRONG output layout for this loop
+
+This doc plans the `out` fields as 13+ separate `VertexFrame` arrays. Against the
+measured mechanism (line-bound, not arithmetic-bound) that costs most of the win
+back, and the evidence is already in the 2026-08-05 section:
+
+* Today's inline store writes **4** streams (TPos_x/y/z + PY = 16 B/vert) and
+  that alone measured **+0.4 ms** of VERT at 958 k verts. Phase 5 needs all 13
+  (PX, PY, RZ, TPos×3, TN×3, TTangent×3, Flags ≈ 52 B/vert) — ~3× the streams
+  and ~3× the store bytes.
+* Net traffic: AoS walk 140 → 68 B/vert (−72) but SoA stores 16 → 52 B/vert
+  (+36) = **−26 %**, not the "~45 % of VERT" this doc claims. Plus 13 concurrent
+  write streams of DRAM page pressure.
+* The per-face loop wants 4 fields of the SAME vertex (Flags, PX, PY, TPos.z).
+  In 13-array SoA that is up to **4 cache lines per vertex**; interleaved it is 1.
+
+**Recommended layout instead: keep inputs AoS (68 B) and make the outputs a
+SECOND AoS array, one cache line per vertex.** `TPos×3 + TN×3 + TTangent×3 + PX
++ PY + RZ + Flags + BGRA = 56 B`, + `EUZ/EVZ` = **64 B exactly**. `UZ`/`VZ` do
+not need to be in it at all: `FRUSTRUM.CPP:905–920` **unconditionally overwrites**
+`A/B/C->UZ/VZ` from `F->U1..V3 * RZ` at clipper entry, so the transform's UZ/VZ
+stores are dead for every rasterized face (`EUZ/EVZ` are overwritten too, but only
+`if (F->Flags & Face_Reflective)` — those need care).
+
+Then the loop is **2 sequential streams**: read 68 B, write 64 B (a full aligned
+line, so the write-allocate read can be elided) versus today's ~280 B of
+read+write-back per cold vertex — a ~50 % traffic cut with 1 write stream instead
+of 13. The existing 13-array `VertexFrame` stays only for the few consumers that
+want ONE field across many vertices (`SortZ`, `IsFrontFacingInViewSpace`,
+`QuadAwareMaxViewZ`, `RENDER.CPP:1420`), or those move to the interleaved array too.
+
+### Recommendation
+
+Against a 1.2–2.6 ms front end, a ~50 % cut of the VERT portion is **~0.15–0.4 ms
+of a ~79 ms frame (0.2–0.5 %)** for a refactor touching ~11 files including two
+alternative transform pipelines (`Reflected_Transform` in CITY/CHASE, FOUNTAIN's
+water/particle projection) and the clipper entry. **Do not start it as a perf
+item.** If it is done, do it for the cleanliness/correctness reasons in this doc
+(one transform-writer contract instead of three) and use the interleaved 64-byte
+output layout, not 13 SoA arrays.
+
+## MEASURED 2026-08-05 — the June verdict was measured in the WRONG REGIME. Read this first.
+
+The June entry below ("Phase 2 washes; the transform is only ~0.35 ms; STOP") is correct
+**for the flat greets scene** and wrong as a general statement. It was taken at ~16 k verts,
+where the whole mesh is L2-resident. Under `--greets_displace` the main-view transform sees
+**958 k verts/frame** and the front-end costs **7.9 ms**, not 0.35.
+
+New instrument (default OFF, byte-null): **`--xfrm_prof=N`** — a per-frame breakdown of the
+MAIN-VIEW `Transform_Objects` call, printed to stderr every N frames as per-frame MIN and p50.
+Companion **`--xfrm_ablate=<bitmask>`** (diagnostic ablations, changes pixels; see
+FeatureFlags.def). Harness: `./DEMO --bench=scene@scene=greets,t=<T>,iters=24`.
+
+### The breakdown (1920×1080, this machine, per-frame MIN over 24 frames)
+
+Box was shared with two other agents' renders throughout; 1-min load average is quoted per
+run in the raw logs and ran 14–61. The MIN column is the least-contended frame — that is the
+number to reason with; p50 is 5–10 % higher and tracks the load.
+
+| scene / pose | TOTAL | SETUP | VERT | SOA | FACE | verts | facesTested | facesPushed |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| greets t=5780 `--greets_displace` | **7.92** | 0.01 | **4.01** | **2.40** | **1.45** | 958,204 | 144,982 | 74,962 |
+| greets t=6097 `--greets_displace` | 6.04 | 0.01 | 3.45 | 2.14 | 0.40 | 887,573 | 52,570 | 16,551 |
+| greets t=5780 flat (no displace) | 0.68 | 0.00 | 0.36 | 0.14 | 0.16 | 82,975 | 16,719 | 7,549 |
+| city t=1961 (p50; 2 calls/frame) | 1.23 | 0.00 | 0.45 | 0.27 | 0.49 | 69,287 | 26,490 | 10,210 |
+| chase t=800 (single frame) | 0.57 | 0.01 | 0.15 | 0.06 | 0.40 | 30,548 | 54,950 | 25,829 |
+
+- **SETUP** = per-mesh matrix/bsphere/frustum work for meshes that survive to the vertex loop.
+- **VERT** = the Inside/Ahead/Regular per-vertex loops.
+- **SOA** = the Phase-1 `VertexFrame_DumpFromAoS` AoS→SoA post-pass sweep.
+- **FACE** = the per-face visibility + reflective + SortZ + FList push + tile-bbox stamp loop.
+- The flat row reproduces the June measurement; it is the same engine, a different regime.
+- city's MIN is meaningless (city makes two main-view-classified `Transform_Objects` calls per
+  frame and one is nearly empty, so the min picks that one); its p50 is quoted instead.
+- chase has no `--bench=scene` driver (that harness only supports city and greets), so its row
+  is a single snapshot frame at `--xfrm_prof=1`, not a distribution. Its whole front-end is
+  0.35–0.64 ms across t=100..1600 and it is **FACE-dominated, not VERT-dominated** — ~1.8
+  faces per vertex (shared verts, ~50 k faces over ~25 k verts) inverts the greets profile.
+  Chase is not a front-end target; the SoA-inline win there is inside single-frame noise.
+
+### The Phase-1 dual write is 30 % of the front-end
+
+`VertexFrame_DumpFromAoS` is a SECOND full walk of the mesh's `Vertex` array that re-reads 16
+of the 136(140) bytes per vertex the transform loop had just written. Measured **2.40 ms at
+t=5780 / 2.14 ms at t=6097** — 30 % / 35 % of the whole main-view front-end, for zero
+arithmetic. Cross-checked by ablation (`--xfrm_ablate=4`, sweep off): TOTAL 6.035 → 3.990 at
+t=6097, i.e. −2.05 ms against a 2.14 ms bucket — the bucket is real, not a timer artifact.
+
+**Fix landed: `--xfrm_soa_inline` (Phase 2a, DEFAULT ON).** Each per-vertex loop stores
+TPos_x/y/z + PY into the SoA arrays as it goes; the sweep is skipped. **Bit-exact by
+construction** — same values, same source, stored one loop earlier.
+
+Measured, interleaved off/on/off/on inside one script, per-frame MIN over 24 frames:
+
+| pose | OFF (TOTAL / VERT / SOA) | ON (TOTAL / VERT / SOA) | ΔTOTAL |
+|---|--:|--:|--:|
+| greets t=5780 displaced | 7.94 / 4.03 / 2.39<br>7.92 / 3.98 / 2.38<br>7.87 / 4.00 / 2.37 | 5.98 / 4.41 / 0.00<br>5.94 / 4.41 / 0.00<br>5.83 / 4.31 / 0.00 | **−2.00 ms (−25 %)** |
+| greets t=6097 displaced | 6.41 / 3.61 / 2.23<br>6.36 / 3.60 / 2.28 | 4.35 / 3.90 / 0.00<br>4.50 / 4.04 / 0.00 | **−1.96 ms (−31 %)** |
+| greets t=5780 flat | 0.696 / 0.366 / 0.142 | 0.574 / 0.379 / 0.001 | −0.12 ms (−18 %) |
+| city t=1961 (p50) | 1.28 / 0.45 / 0.29<br>1.21 / 0.44 / 0.26 | 1.14 / 0.60 / 0.00<br>1.13 / 0.61 / 0.00 | −0.11 ms (−9 %) |
+
+The mechanism is visible in the split: SOA goes to zero and VERT rises by ~0.4 ms (the inline
+stores — 4 stores × 958 k verts ≈ 15 MB to four streams, i.e. store-throughput-limited and
+about as cheap as it can be). Net −2 ms.
+
+Byte evidence: city pin `37e62845` exact, fountain pin `51fff7cd` exact, greets t=1588 pin
+recipe off==on, chase 5-pose + cinematic 2-pose lists off==on (and t100/400/800/1200 match the
+committed pins), greets displaced t=5780 off==on over 6 runs, and `--soa-verify` (which
+compares the inline stores against the AoS the sweep would have copied, bit-for-bit) reports
+0 mismatches on greets/city/fountain/chase. `--no-xfrm_soa_inline` restores the sweep.
+
+### Rejected after measuring: a cheaper reciprocal (`--xfrm_rcp`, default 0)
+
+Since the projection's `1/z` is the only divide in the loop, both a single-precision divide
+(the Ahead/Regular loops write `1.0/z`, which promotes the float to DOUBLE) and a NEON
+reciprocal estimate + one Newton step were built and measured. greets t=5780 displaced,
+per-frame MIN, interleaved with a repeated control:
+
+| mode | VERT | TOTAL | pixels changed vs mode 0 | max abs Δ |
+|---|--:|--:|--:|--:|
+| 0 — today's arithmetic (control ×2) | 4.238 / 4.450 | 5.725 / 6.013 | — | — |
+| 1 — single-precision divide everywhere | 4.369 | 5.917 | **0 / 2,073,600** | 0 |
+| 2 — recip estimate + 1 Newton step | 4.731 | 6.257 | 697 / 2,073,600 (0.034 %) | 103/255 |
+| 2 — same, city t=1961 | — | — | 76 / 2,073,600 (0.004 %) | 141/255 |
+
+**Both are rejected on PERF, not on bytes.** Mode 2 is 0.3–0.5 ms SLOWER than the plain
+divide, and mode 1 is inside the control's own spread. Apple's FDIV is fast and fully
+pipelined, the estimate+Newton is three dependent ops plus scalar vector↔GPR moves, and the
+loop is waiting on the 140-byte `Vertex` stride either way — so there is no divide latency to
+hide. There is no perf/divergence trade to put to a reviewer here: the approximation costs
+0.034 % of the frame's pixels (max |Δ| ≈ 100–140, i.e. edge pixels flipping surface, not a
+shading nudge) and buys negative time. Kept in-tree behind the flag as the measured record.
+
+### Why widening the SIMD did not and will not help (the June wash, explained)
+
+`Vertex` is `pack(1)`, 140 bytes, and the fields the per-frame loop touches span offsets
+4..123 — i.e. **every cache line of the struct**. At 958 k verts that is ~134 MB of lines
+pulled per frame plus the write-back. Two measurements say the loop is line/bandwidth-bound,
+not arithmetic-bound:
+
+- `--xfrm_ablate=1` removes the TN **and** TTangent mat-vecs — 2 of the 3 per-vertex
+  matrix-vector products, 24 B of loads and 24 B of stores per vertex, 34 % of the struct.
+  VERT moves 4.009 → 3.661 ms: **−8.7 %**, not −34 %. The lines come in either way; only the
+  stores were saved.
+- `--xfrm_ablate=2` removes the whole projection block (1/z + PX/PY/UZ/VZ): 4.009 → 3.464 ms,
+  **−0.55 ms**.
+- The SoA sweep, which does *no* arithmetic at all — 4 loads + 4 stores per vertex — costs
+  60 % of what the entire transform loop costs.
+
+So the lever is **bytes touched per vertex**, not lanes per instruction. Ranked:
+1. ~~kill the redundant second pass~~ — DONE (`--xfrm_soa_inline`).
+2. **Phase 5 (shrink `Vertex`)** is now the real perf item, not just a cleanliness one:
+   moving the per-frame-written outputs out of the AoS struct cuts the stride the transform
+   walks. Its ceiling is proportional to the byte reduction, ~45 % of VERT at best.
+3. Phase 2 (Vec8f across 8 verts) remains a wash and should stay parked — an 8-vertex gather
+   out of a 140-byte stride buys nothing when the stride is the problem.
+
+### Where the 958 k verts come from (a bigger, separate lever)
+
+The displaced Piramid is 261,768 verts. The main view transforms 958,204. The greets mirror
+system clones the whole scene per mirror (`[MIRROR 'teleporter'] cloned 534,356 verts /
+90,890 faces`, and again for `P_TEXT.JPG#6`), and those clone meshes are ordinary scene
+meshes gated only by `HTrack_Visible`. **Most of the displaced front-end at t=5780 is
+mirror-clone geometry, not the wall the camera is looking at.** Culling/LOD-ing the clones is
+worth more than anything left inside `Transform_Objects`; it belongs to `GreetsMirror.cpp`,
+not to this refactor. See docs/OPTIMIZATION_BACKLOG.md.
+
+### The per-face loop
+
+At t=6097 (the pose where the ablation arms are internally consistent — at t=5780 the face
+ablations delete ~60 % of the frame's raster work and the cache state at Transform time is no
+longer comparable):
+
+| arm | FACE |
+|---|--:|
+| base (test + SortZ + FList push + tile bbox) | 0.395 |
+| `--xfrm_ablate=8` (visibility/backface test only, never push) | 0.322 |
+| `--xfrm_ablate=16` (loop + Face walk only) | 0.032 |
+
+**The visibility/backface TEST is ~73 % of the per-face cost**, the accepted-face work
+(SortZ + push + bbox for 16.5 k of 52.5 k faces) only ~0.07 ms. `Face::VisibilityFlagsAll()`
+is `A->Flags & B->Flags & C->Flags` — three pointer chases into 140-byte `Vertex` structs, and
+the tile-bbox stamp chases the same three again for PX/PY/TPos_z. Same mechanism as above:
+the cost is the AoS walk. Reading those from the SoA arrays instead (4-byte stride) is the
+obvious follow-up, but it needs `F->A/B/C_idx` to be trustworthy on every mesh — the
+tile-bbox comment in Transform.cpp records meshes where they are not (the conetest quad), and
+a wrong bbox DROPS a face where a wrong SortZ was harmless. Not attempted here.
+
+### Note: `--greets_displace` at t=6097 is NONDETERMINISTIC
+
+6 runs (3 flags-off, 3 flags-on) produced **6 distinct hashes** at t=6097 while t=5780 was
+byte-stable 6/6 in both arms. This is pre-existing (it reproduces with all new flags off) and
+unrelated to the SoA work, but it means **t=6097 cannot be used as a byte gate** and the
+"greets is deterministic again" claim in SESSION_STATE should be read as scoped to the
+non-displaced pin recipe.
+
 ## MEASURED 2026-06-19 — Phase 2 WASHES; the transform is only ~0.35 ms. STOP.
+## (correct for the FLAT scene only — superseded by the section above)
 
 Built the Vec8f-across-8-verts Inside loop (gated `--soa-wide-xform`, FMA association
 matched → byte-identical to the scalar path: flag-off == flag-on confirmed). **Result on

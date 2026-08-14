@@ -138,6 +138,7 @@ enum SceneFlags
 #define Mat_HdrReflection 0x0200  // panel shows float reflection radiance (Material::hdrRefl); the transparent kernel samples it emissively into g_hdrBuf so reflected highlights bloom (HDR mirror RTT)
 #define Mat_HdrEmissive   0x0400  // forward env/reflective surface (e.g. disco ball) that should over-bloom: the filler stamps a distinct G-buffer sentinel so the HDR lift boosts it by hdr_refl_gain past 255
 #define Mat_AoInAlpha     0x0800  // PBR: the albedo texture's ALPHA channel holds a baked ambient-occlusion map. The deferred kernel reads it from the already-fetched albedo texel (free) and multiplies the ambient term. Only set on materials that don't use albedo-alpha for cutout.
+#define Mat_Refractive    0x1000  // Screen-space glass refraction OPT-IN. Under --glass_refract, ONLY materials carrying this bit refract the opaque background behind them; every other transparent composites/blends normally (glows, layered by the peel exactly as with --glass-refract=0). Consumed by the deferred transparent kernel (glassRefrPx: Mat->Flags) and the TBR glass scheduler (isGlass: F->Txtr->Flags — same Material*). Set at scene init on real glass only (fountain 'mizraka glass' centre sphere + 'f_sphere' spire-orb shells; greets transparent display-glass panels 'screen 4'/'screen2' + 'lamp light'). The fountain fiery 'f in shpere' orb core is intentionally NOT marked so it glows rather than refracting the box behind it.
 
 #define DEFAULT_BLOCKSIZEX 2
 #define DEFAULT_BLOCKSIZEY 2
@@ -176,6 +177,15 @@ enum TrimeshFlags
 	// disco ball, whose facets would throw a hard blob instead of reading as a
 	// reflective ball). Gated in Transform_Objects on g_inShadowPass.
 	Tri_NoShadowCast	= 1 << 15,
+
+	// S1 offscreen proxy (docs/ENVDYN_DISPLACEMENT_PLAN.md): this mesh renders
+	// ONLY in offscreen/bake passes (shadow bake, mirror RTT, env probe) and is
+	// skipped from the main camera. The flat pre-displacement stand-in for the
+	// greets stone walls: the mortar relief is invisible in cast shadows and
+	// sub-texel in reflections, so offscreen consumers rasterise the ~226 flat
+	// faces instead of the ~81k displaced detail. Gated in Transform_Objects on
+	// the offscreen predicate (g_inShadowPass || g_offscreenViewDepth > 0).
+	Tri_OffscreenProxy	= 1 << 16,
 };
 
 enum SortPriority
@@ -210,6 +220,14 @@ enum SortPriority
 #define Face_Transparent 0x0010
 #define Face_PointZTest  0x0020
 #define Face_Reflective  0x0040
+// S1 offscreen proxy (docs/ENVDYN_DISPLACEMENT_PLAN.md): this face is the
+// DISPLACED stone detail — it renders ONLY in the main camera pass and is
+// skipped from every offscreen/bake pass (shadow, mirror RTT, env probe),
+// where the flat Tri_OffscreenProxy stand-in casts instead. Set on the
+// greets 'rooms'/'floor' displaced faces; survives the chunk split (copied by
+// the per-face struct copy). Gated in Transform_Objects on the offscreen
+// predicate (g_inShadowPass || g_offscreenViewDepth > 0).
+#define Face_MainOnly    0x0080
 
 // Camera Flags.
 #define Cam_Euler        0x0001

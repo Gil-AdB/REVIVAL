@@ -14,6 +14,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"  // MatrixXVector template
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
 #include "Base/Scene.h"
 #include "Base/StaticShadowLightmap.h"
 #include "Base/TriMesh.h"
@@ -41,12 +42,13 @@ namespace {
 // ─── World-space static-cube sampler ─────────────────────────────────────
 // Bake-time parallel to CubeShadow_Sample (FDS/FILLERS/ShadowMap.h), but
 // takes a world-space sample point instead of view-space. Reads only the
-// static-occluder buffer (sm.depth or sm.polyId depending on mode), since
+// static-occluder plane (sm.packSD — its z half or its id half depending
+// on mode), since
 // the lightmap caches the static-scene contribution. Returns shadow factor
 // in [0, 255] where 255 is fully lit and 0 is fully shadowed.
 //
-// `surfaceMatId`: -1 = legacy Depth mode (biased z-compare against sm.depth).
-//                 0..255 = PolyId mode (identity test against sm.polyId,
+// `surfaceMatId`: -1 = legacy Depth mode (biased z-compare against the z half).
+//                 0..255 = PolyId mode (identity test against the id half,
 //                          same convention as runtime CubeShadow_Sample).
 //                          Bias arguments ignored in PolyId mode.
 uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
@@ -89,18 +91,19 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
 
     float occ = 0.0f;
     if (surfaceMatId >= 0) {
-        // PolyId mode: identity test against sm.polyId. Matches the
+        // PolyId mode: identity test against the texel's id half. Matches the
         // runtime CubeShadow_Sample PolyId branch (ShadowMap.h). 0
         // sentinel = "no occluder wrote here." Receiver's matID+1 means
         // "this texel was written by my own (or a same-matID) face" =
         // not occluded. Anything else nonzero = occluder of a different
         // material = occluded. No bias needed.
-        const uint16_t *p0 = sm.polyId.data() + rowOfs;
-        const uint16_t *p1 = p0 + sm.xres;
+        const uint32_t *p0 = sm.packSD.data() + rowOfs;
+        const uint32_t *p1 = p0 + sm.xres;
         // 16-bit ShadowMatID direct compare (no +1 offset added here;
         // bake-time caller resolves Material::ShadowMatID upstream).
         const uint16_t receiverId = uint16_t(surfaceMatId);
-        auto isOccluded = [&](uint16_t v) -> bool {
+        auto isOccluded = [&](uint32_t t) -> bool {
+            const uint16_t v = ShadowTexId(t);
             return v != 0 && v != receiverId;
         };
         if (isOccluded(p0[iX  ])) occ += w00;
@@ -110,16 +113,16 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     } else {
         // Depth mode: biased z-compare. slopeBiasInt computed by caller
         // from this texel's (N · L) so grazing-angle faces don't acne.
-        const uint16_t *z0 = sm.depth.data() + rowOfs;
-        const uint16_t *z1 = z0 + sm.xres;
+        const uint32_t *z0 = sm.packSD.data() + rowOfs;
+        const uint32_t *z1 = z0 + sm.xres;
         int pixZenc = 0xFF80 - int(lz * sm.zScale);
         if (pixZenc < 0) pixZenc = 0;
         if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
         const int biased = pixZenc + constBias + slopeBiasInt;
-        if (biased < int(z0[iX  ])) occ += w00;
-        if (biased < int(z0[iX+1])) occ += w10;
-        if (biased < int(z1[iX  ])) occ += w01;
-        if (biased < int(z1[iX+1])) occ += w11;
+        if (biased < int(ShadowTexZ(z0[iX  ]))) occ += w00;
+        if (biased < int(ShadowTexZ(z0[iX+1]))) occ += w10;
+        if (biased < int(ShadowTexZ(z1[iX  ]))) occ += w01;
+        if (biased < int(ShadowTexZ(z1[iX+1]))) occ += w11;
     }
 
     const float lit = 1.0f - occ;
@@ -190,7 +193,47 @@ bool isMeshDynamic(Object *obj, char *reasonOut = nullptr, size_t reasonCap = 0)
     return false;
 }
 
+// Stamp each face's own index into Face::MeshFaceIdx. Split out of
+// LightmapBake_Static's mesh loop so the two callers below cannot drift:
+// the bake calls it per kept mesh, LightmapStampFaceIndices calls it over
+// the same mesh SET when the bake is skipped. See that function's comment
+// for why the stamp must survive a skipped bake.
+inline void stampMeshFaceIndices(TriMesh *T)
+{
+    for (DWord fi = 0; fi < T->FIndex && fi <= 0xFFFF; ++fi) {
+        T->Faces[fi].MeshFaceIdx = uint16_t(fi);
+    }
+}
+
 }  // namespace
+
+// ── Face::MeshFaceIdx, which is NOT a lightmap side effect ────────────────
+// LightmapBake_Static stamps Face::MeshFaceIdx as a convenience (the atlas
+// sampler needs to recover a face's index from an FList clone). But that
+// field has a SECOND consumer that has nothing to do with lightmaps and is
+// live on every frame of every scene: tbrXparOrderLess (FILLERS.CPP:1876),
+// the final tie-break of the per-strip transparent sort. When two fragments
+// land at the same renderZ and the same facing rank — a thin glass panel's
+// front/back pair, stacked decals, greets' coplanar mirror panels — that
+// comparator falls back to MeshFaceIdx to impose a camera-INDEPENDENT total
+// order. Leave the field at its 0 initialiser and the tie-break degenerates
+// to std::stable_sort's input order, which is the view-dependent FList
+// insertion order the comparator exists to remove.
+//
+// So a scene that skips the bake must still run THIS loop, over exactly the
+// mesh set the bake would have kept (same isMeshDynamic predicate — dynamic
+// meshes keep MeshFaceIdx == 0 today and must keep it).
+void LightmapStampFaceIndices(Scene *Sc)
+{
+    if (!Sc) return;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh *T = (TriMesh *)Obj->Data;
+        if (!T || T->FIndex == 0) continue;
+        if (isMeshDynamic(Obj, nullptr, 0)) continue;
+        stampMeshFaceIndices(T);
+    }
+}
 
 void LightmapStampOrigBary(Scene *Sc)
 {
@@ -224,6 +267,14 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
     }
 
     const int lmRes = std::max(2, fds::FeatureFlags::shadow_lightmap_res());
+    // --shadow_lightmap_texel_density: 0 = OFF (every mesh gets lmRes, the
+    // historical behaviour, byte-null). > 0 = derive each mesh's atlas edge
+    // from its MEAN FACE AREA at this many texels per world unit, capped at
+    // lmRes. See the block comment at the allocation site.
+    const float lmDensity  = fds::FeatureFlags::shadow_lightmap_texel_density();
+    size_t densityShrunk   = 0;      // meshes the density rule pulled below lmRes
+    double densityEdgeSum  = 0.0;    // Σ sqrt(mean face area) over those meshes
+    size_t atlasBytes      = 0;      // total bytes StaticShadowLightmap::data holds
     const int constBias    = fds::FeatureFlags::shadow_bias();
     const int slopeBiasInt = fds::FeatureFlags::shadow_slope_bias();  // applied as constant; no per-texel slope yet
 
@@ -302,11 +353,72 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
             continue;
         }
 
+        // ── PER-MESH ATLAS RESOLUTION BY TEXEL DENSITY ────────────────────
+        // The atlas is `numFaces * res² * numOmnis` BYTES, allocated and
+        // touched (filled with 255) per mesh — so a FIXED per-face res makes
+        // the store scale with FACE COUNT and not with surface AREA. greets
+        // sets res=128 (GREETS.CPP GreetsApplyInitDefaults) which is right for
+        // its authored wall quads and catastrophic once those quads are
+        // tessellated: MEASURED at greets t=5743, peak footprint 6.93 GB flat
+        // (33 396 faces) vs 21.41 GB under --greets_displace (115 346 faces),
+        // with the bake going 1.2 s -> 7.1-11.7 s. The displaced cells are
+        // ~1/300 the area of the quad they replace, so each was carrying ~300x
+        // the shadow texels per world unit that the FLAT wall ships with.
+        //
+        // With --shadow_lightmap_texel_density > 0 the mesh's res is derived
+        // from its MEAN FACE AREA instead: res = clamp(ceil(sqrt(meanArea) *
+        // density), kMinRes, lmRes). Density is texels per WORLD UNIT, so a
+        // tessellated surface keeps the same shadow resolution per unit as the
+        // untessellated one and the store stops tracking face count. The cap
+        // at lmRes means the flag can only ever REDUCE, never sharpen.
+        //
+        // DEFAULT 0 = OFF = byte-null everywhere. CORRECTED 2026-08-10 (both
+        // halves of the old text were stale): greets turns the density on
+        // UNCONDITIONALLY, not "only under --greets_displace" — it moved out of
+        // the companion block into the main GreetsApplyInitDefaults body on
+        // 2026-08-09 — and the byte-pinned flat path therefore DOES take this
+        // branch whenever the bake runs at all (verified byte-null: the pin
+        // reproduces 4/4 with and without it). Since 2026-08-10 the shipping
+        // greets arm does not run the bake at all — the atlas has no reader, so
+        // Initialize_Greets skips it — which makes this branch live only under
+        // an explicit --shadow_lightmap.
+        int meshRes = lmRes;
+        if (lmDensity > 0.0f && T->FIndex > 0) {
+            constexpr int kMinRes = 8;   // keep bilinear + a usable gradient
+            double sumArea = 0.0;
+            size_t areaFaces = 0;
+            for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                const Face &F = T->Faces[fi];
+                if (!F.A || !F.B || !F.C) continue;
+                Vector a, b, c;
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&F.A->Pos), &a);
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&F.B->Pos), &b);
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&F.C->Pos), &c);
+                const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                const float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+                const float cx = uy * vz - uz * vy;
+                const float cy = uz * vx - ux * vz;
+                const float cz = ux * vy - uy * vx;
+                sumArea += 0.5 * std::sqrt(double(cx) * cx + double(cy) * cy + double(cz) * cz);
+                ++areaFaces;
+            }
+            if (areaFaces > 0 && sumArea > 0.0) {
+                const double meanEdge = std::sqrt(sumArea / double(areaFaces));
+                int r = int(std::ceil(meanEdge * double(lmDensity)));
+                if (r < kMinRes) r = kMinRes;
+                if (r > lmRes)   r = lmRes;
+                meshRes = r;
+                if (r < lmRes) { ++densityShrunk; densityEdgeSum += meanEdge; }
+            }
+        }
+
         // Allocate / reset lightmap on this mesh.
         if (T->staticShadowLM) { T->staticShadowLM->clear(); }
         else                   { T->staticShadowLM = new StaticShadowLightmap(); }
         StaticShadowLightmap &lm = *T->staticShadowLM;
-        lm.allocate(int(T->FIndex), numCubeOmnis, lmRes);
+        lm.allocate(int(T->FIndex), numCubeOmnis, meshRes);
+        atlasBytes += size_t(T->FIndex) * size_t(meshRes) * size_t(meshRes)
+                    * size_t(numCubeOmnis);
         for (int oi = 0; oi < numCubeOmnis; ++oi) lm.omniSceneIdx[oi] = oi;
 
         // Assign this mesh's lightmap-table index (1-based; 0 = none).
@@ -321,9 +433,9 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
 
         // Stamp the face's own index so Mekalele can recover it from
         // FList (where Face pointers no longer point into T->Faces).
-        for (DWord fi = 0; fi < T->FIndex && fi <= 0xFFFF; ++fi) {
-            T->Faces[fi].MeshFaceIdx = uint16_t(fi);
-        }
+        // Shared with LightmapStampFaceIndices — a caller that SKIPS this
+        // bake must still stamp, see that function.
+        stampMeshFaceIndices(T);
 
         ++meshCount;
         const Vector &IP = T->IPos;
@@ -469,7 +581,12 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
                 // pre-computed (uMin + s*uExt, vMin + t*vExt); the third
                 // coordinate is solved from the face plane equation
                 // (N·P = -NormProd, world-space, using wN computed above).
-                const float invN1 = 1.0f / float(lmRes - 1);
+                // Per-MESH resolution (see the texel-density block above);
+                // lm.lmRes is what allocate() stamped and what the runtime
+                // sampler reads, so the bake loop must agree with IT, not
+                // with the global flag.
+                const int   mRes  = lm.lmRes;
+                const float invN1 = 1.0f / float(mRes - 1);
                 // Pre-solve world-space plane offset once per face: N·P = -d.
                 const float planeD = -(wN.x * wA.x + wN.y * wA.y + wN.z * wA.z);
                 const float invDomN = planar
@@ -477,9 +594,9 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
                        : domAxis == 1 ? (std::fabs(wN.y) > 1.0e-6f ? 1.0f / wN.y : 0.0f)
                                       : (std::fabs(wN.z) > 1.0e-6f ? 1.0f / wN.z : 0.0f))
                     : 0.0f;
-                for (int ty = 0; ty < lmRes; ++ty) {
+                for (int ty = 0; ty < mRes; ++ty) {
                     float t = float(ty) * invN1;
-                    for (int tx = 0; tx < lmRes; ++tx) {
+                    for (int tx = 0; tx < mRes; ++tx) {
                         float s = float(tx) * invN1;
                         Vector wp;
                         if (planar) {
@@ -564,6 +681,39 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
         texelsBaked.load(), texelsCovered.load(),
         texelsBaked.load() ? 100.0 * double(texelsCovered.load()) / double(texelsBaked.load()) : 0.0,
         ms);
+    // The atlas store is the process's largest single allocation and it is
+    // fully touched (allocate() fills 255), so print it unconditionally —
+    // "21.4 GB resident" is not something a run should have to be asked for.
+    std::fprintf(stderr,
+        "[LM] atlas store %.2f GB (%zu meshes)%s\n",
+        double(atlasBytes) / 1073741824.0, meshCount,
+        lmDensity > 0.0f ? "" : "  [--shadow_lightmap_texel_density=0: fixed per-face res]");
+    if (lmDensity > 0.0f)
+        std::fprintf(stderr,
+            "[LM] texel density %.2f texels/world-unit: %zu of %zu meshes below "
+            "res %d (mean face edge %.3f world) — the rest kept the cap\n",
+            lmDensity, densityShrunk, meshCount, lmRes,
+            densityShrunk ? densityEdgeSum / double(densityShrunk) : 0.0);
+}
+
+// Availability probes for the runtime viz cycle (FDS/RENDER/VizCycle.cpp).
+// They mirror the two viz functions' OWN early-outs, deliberately: probing the
+// flag alone was wrong — with --shadow_lightmap on but no static lightmap baked,
+// --shadow_lightmap_viz=1 renders a byte-identical frame (measured), and the
+// cycle must not offer a mode that does nothing. Keep these in lockstep with
+// the guards below.
+bool LightmapViz_Available()
+{
+    if (!CurScene || !CurScene->staticLMTable) return false;
+    const meka::GBuffer *gb = g_gbuffer;
+    return gb && !gb->lightmapMF.empty() && !gb->lightmapST.empty();
+}
+
+bool NormalViz_Available()
+{
+    if (!CurScene) return false;
+    const meka::GBuffer *gb = g_gbuffer;
+    return gb && !gb->normal.empty() && !gb->txtr.empty();
 }
 
 void Render_LightmapViz(Scene *Sc)
@@ -725,10 +875,10 @@ void Render_NormalViz(Scene *Sc)
     uint32_t *out = reinterpret_cast<uint32_t *>(VPage);
     const size_t n = std::min(size_t(XRes) * size_t(YRes), gb->normal.size());
     for (size_t i = 0; i < n; ++i) {
-        const meka::u16 packedN = gb->normal[i];
+        const meka::u32 packedN = gb->normal[i];
         if (packedN == 0) { out[i] = 0xFF101010u; continue; }   // sentinel / sky
         float nx, ny, nz;
-        meka::oct_decode_u16(packedN, nx, ny, nz);
+        meka::oct_decode_u32(packedN, nx, ny, nz);
 
         const uint32_t mat32 = gb->txtr[i];
         const uint32_t matId = (mat32 >> 20) & 0xFF;
@@ -801,3 +951,42 @@ void Render_NormalViz(Scene *Sc)
 }
 
 }  // namespace fds
+
+// ── --mem_census: the static shadow-lightmap atlases ───────────────────────
+// This is the buffer whose formula was the whole reason the census exists
+// (943d644): `numFaces × lmRes² × numOmnis` BYTES, fully touched at bake
+// (allocate() fills 255). The per-mesh breakdown below prints faces, lmRes and
+// omnis SEPARATELY on purpose — the defect was never visible in the product,
+// only in the fact that the product had a FACE COUNT in it where it wanted an
+// area. Any future mesh whose lmRes stayed at the cap while its face count
+// exploded shows up here as one fat row.
+static void MemCensus_StaticLightmaps() {
+    if (!CurScene || !CurScene->staticLMTable) return;
+    const auto &table = *CurScene->staticLMTable;
+    size_t total = 0, aux = 0, meshes = 0, faces = 0;
+    int minRes = 1 << 30, maxRes = 0, omnis = 0;
+    size_t biggest = 0; int biggestRes = 0; uint32_t biggestFaces = 0;
+    for (size_t i = 1; i < table.size(); ++i) {
+        TriMesh *T = table[i];
+        if (!T || !T->staticShadowLM) continue;
+        const StaticShadowLightmap &lm = *T->staticShadowLM;
+        const size_t b = lm.data.capacity();
+        total += b;
+        aux   += lm.planarBases.capacity() * sizeof(FacePlanarBasis)
+               + lm.coverageBits.capacity() + lm.omniSceneIdx.capacity() * sizeof(int);
+        ++meshes; faces += size_t(lm.numFaces);
+        minRes = std::min(minRes, lm.lmRes); maxRes = std::max(maxRes, lm.lmRes);
+        omnis  = std::max(omnis, lm.numOmnis);
+        if (b > biggest) { biggest = b;
+                           biggestRes = lm.lmRes; biggestFaces = uint32_t(lm.numFaces); }
+    }
+    if (!meshes) return;
+    fds::MemCensus::add("lightmap", "static shadow atlas", total, true,
+        "SUM over %zu meshes of faces x lmRes^2 x omnis x u8(1); %zu faces total, "
+        "lmRes %d..%d, omnis %d; worst single mesh %u faces x %d^2 = %.1f MiB",
+        meshes, faces, minRes, maxRes, omnis, biggestFaces,
+        biggestRes, double(biggest) / (1024.0 * 1024.0));
+    fds::MemCensus::add("lightmap", "coverage bits + planar bases + omni map", aux,
+        true, "per-mesh side tables: faces x omnis bits, faces x FacePlanarBasis(20)");
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_StaticLightmaps);

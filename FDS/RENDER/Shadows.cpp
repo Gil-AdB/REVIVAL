@@ -30,6 +30,8 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/MemCensus.h"
+#include "Base/FrameState.h"   // g_mainFaces — censused below
 #include "Base/Scene.h"
 #include "Base/Camera.h"
 #include "Base/Omni.h"
@@ -41,6 +43,14 @@
 #include "TailProf.h"     // phase-1 barrier instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "Base/VertexScratch.h"
+
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+#include <atomic>
+// Census-build only: core-us spent inside the phase-A per-map depth/polyId
+// clears, summed across workers. Measures what the old serial-on-tick-thread
+// clear loop cost, without depending on whole-phase wall-clock under load.
+static std::atomic<int64_t> g_shadowClearCoreUs{0};
+#endif
 #include "FRUSTRUM.H"
 #include "Threads.h"
 
@@ -56,6 +66,49 @@ namespace renderns {
 	extern std::condition_variable   condition;
 }
 
+// ── Per-shadow-map render scratch, one set per SHADOW MAP per thread ───────
+// One FaceListContext + VertexScratch + Camera + CameraContext per shadow-
+// casting light-face. Kept across frames so the per-vertex clone arrays + face
+// buffers stay warm — Transform_Objects rewrites the projected fields in place
+// each frame instead of reallocating.
+//
+// SIZE, AND WHY IT IS WORTH KNOWING: `faces[i]` is resized to `Polys` — the
+// WHOLE SCENE's face count — for every entry, and each entry costs
+// 2 x Polys x sizeof(FListEntry). `scratch[i]` lazily clones the Vertex[] and
+// Face[] of every mesh that light-face rasterizes. The vector is indexed by
+// g_shadowMaps.size(), which on a cube-shadow scene is 6 x the omni count
+// (greets: 21 shadow-casting omnis -> 126 entries). --mem_census walks it.
+//
+// Was four function-local `static thread_local` vectors; hoisted to file scope
+// (identical lifetime) so a census can reach them, and self-registered in a
+// process-wide list so the report covers EVERY thread that ever built one, not
+// just whichever thread happens to be reporting.
+namespace {
+struct ShadowScratchTLS {
+	std::vector<fds::FaceListContext> faces;
+	std::vector<fds::VertexScratch>   scratch;
+	std::vector<Camera>               cam;
+	std::vector<fds::CameraContext>   ctx;
+};
+std::mutex                     &shadowScratchMtx() { static std::mutex m; return m; }
+std::vector<ShadowScratchTLS*> &shadowScratchAll() {
+	static std::vector<ShadowScratchTLS*> v; return v;
+}
+// Heap-allocated and deliberately never freed: the registry below outlives any
+// worker thread, and a `static thread_local` object would leave a dangling
+// entry there the moment a thread exited. The pool is process-lifetime, so
+// nothing is retained that the old form would have released in practice.
+ShadowScratchTLS &shadowScratch() {
+	static thread_local ShadowScratchTLS *s = [] {
+		auto *p = new ShadowScratchTLS();
+		std::lock_guard<std::mutex> lk(shadowScratchMtx());
+		shadowScratchAll().push_back(p);
+		return p;
+	}();
+	return *s;
+}
+} // namespace
+
 // Set by the shadow orchestrator around each per-light Transform_Objects
 // so the mesh-bsphere-vs-cone cull in Transform.cpp can read the active
 // light's pose without an explicit parameter. nullptr outside the
@@ -70,8 +123,8 @@ uint32_t g_shadowBakeGen = 0;
 
 // True only inside Render_DeferredShadowMaps_Dynamic's per-frame bake.
 // Inverts the Transform_Objects mesh filter (keep animated, skip static)
-// and routes MekaleleShadowDepth writes to sm.depth_dynamic / polyId_dynamic
-// instead of the static buffers.
+// and routes MekaleleShadowDepth writes to sm.packDyn instead of the
+// static plane.
 thread_local bool g_inDynamicShadowBake = false;
 
 // Per-frame depth pre-pass over every Omni_CastsShadow light. For each
@@ -97,17 +150,71 @@ static bool shadowsEnabled() {
 thread_local bool g_inShadowPass = false;
 
 // PolyId is the production default. F3 still toggles at runtime.
+//
+// TRAP, MEASURED 2026-08-08: this is a NAMESPACE-SCOPE dynamic initialiser, so
+// it reads shadow_polyid() BEFORE main() parses argv. `--no-shadow_polyid` on
+// the command line therefore does NOTHING to g_shadowMode (only the F3 toggle
+// or the ENV form FDS_SHADOW_POLYID=0, which the flag table's eager env scan
+// does see, can move it). An investigation concluded "--no-shadow_polyid
+// changes nothing, so PolyId is not the cause" from exactly this; with the env
+// form the same experiment recovers 100 % of the projector's direct term.
 std::atomic<ShadowMode> g_shadowMode{
 	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
 
+// ── the shadow CASTER predicate — one definition ────────────────────────────
+// Which materials are excluded from the shadow bake. The long rationale (why
+// the name heuristic exists, why Surf_Luminous is not a substitute, and why
+// 'lamp' is the load-bearing case) lives at the call site in the bake loop
+// below. Hoisted to file scope because the DEFERRED KERNEL needs the same
+// answer at RECEIVE time: under ShadowMode::PolyId a tap is "occluded" iff the
+// stored id is non-zero and differs from the receiver's own id — an identity
+// test that a material excluded from the CASTER set can never satisfy, since it
+// never wrote its id into the cube. Whatever the bake did rasterise along that
+// ray (the room BEHIND the surface, typically) then reads as an occluder and
+// the surface is shadowed for ever. See --shadow_noncaster_depth.
+static bool shadowLooksEmissive(const char *n) {
+	if (!n) return false;
+	for (const char *p = n; *p; ++p) {
+		if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
+		    (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
+		if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
+		    (p[2]=='i'||p[2]=='I')) return true;  // emit/emiter/emitter
+	}
+	return false;
+}
 
-// [experiment: --shadow-swizzle] Re-tile one map's freshly-baked planes into
-// the 8×8-tiled *Sw copies (see ShadowSwzOffset). dynPlanes selects which pair
-// this bake wrote: static (depth/polyId — StaticOnce + DynOmnis) or dynamic
-// (depth_dynamic/polyId_dynamic — DynMeshes). Linear planes stay the source
-// of truth; this is a derived copy. Row-of-tile copies are 8×u16 = 16 B →
-// one 128-bit load/store each; the pass is pure memory traffic, which is
-// exactly the cost the experiment wants to weigh against the PCF read gain.
+bool Shadow_MaterialSkipsCasting(const Material *m) {
+	// Pack (material pointer | skip-bit) into ONE atomic so the pointer-match
+	// and the skip flag are read/written together, atomically. Two separate
+	// atomics (mat[k] + skip[k]) tore under thread contention: a reader could
+	// match mat[k] yet read a STALE skip[k] left by a different material that
+	// previously occupied slot k (pointers collide mod 256). That gave a
+	// load-dependent wrong skip decision, which dropped/added shadow polygons
+	// frame-to-frame — THE shadow tile flicker. TSan never caught it because
+	// data races on atomics are not reported. Material is >=2-aligned, so bit 0
+	// of the pointer is free for the flag.
+	struct MatShadowCache { std::atomic<uintptr_t> entry[256] = {}; };
+	static MatShadowCache sCache;
+	if (!m) return true;
+	const uintptr_t k = (uintptr_t(m) >> 4) & 255;
+	const uintptr_t mbits = uintptr_t(m);  // bit0 = 0 (aligned)
+	const uintptr_t e = sCache.entry[k].load(std::memory_order_relaxed);
+	if ((e & ~uintptr_t(1)) == mbits) return (e & 1) != 0;
+	const bool skip = (m->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
+	                 || shadowLooksEmissive(m->Name);
+	sCache.entry[k].store(mbits | (skip ? uintptr_t(1) : uintptr_t(0)),
+	                      std::memory_order_relaxed);
+	return skip;
+}
+
+
+// [experiment: --shadow-swizzle] Re-tile one map's freshly-baked plane into
+// the 8×8-tiled *Sw copy (see ShadowSwzOffset). dynPlanes selects which plane
+// this bake wrote: static (packSD — StaticOnce + DynOmnis) or dynamic
+// (packDyn — DynMeshes). Linear planes stay the source of truth; this is a
+// derived copy. Row-of-tile copies are 8×u32 = 32 B → one 256-bit
+// load/store each; the pass is pure memory traffic, which is exactly the
+// cost the experiment wants to weigh against the PCF read gain.
 static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 {
 	const ShadowSwzShape &shp = ShadowSwzGetShape();
@@ -116,29 +223,33 @@ static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 	const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
 	const int trs = (sm.yres + shp.maskY) >> shp.b;
 	const size_t n = size_t(tpr) * size_t(trs) * size_t(tileSz);
-	auto tile = [&](const std::vector<uint16_t> &src, std::vector<uint16_t> &dst) {
+	auto tile = [&](const std::vector<uint32_t> &src, std::vector<uint32_t> &dst) {
 		if (src.empty()) { dst.clear(); return; }
-		if (dst.size() != n) dst.assign(n, 0);   // zero pad = "unwritten" sentinel
-		const uint16_t *s = src.data();
-		uint16_t *d = dst.data();
+		if (dst.size() != n) dst.assign(n, 0u);  // zero pad = "unwritten" sentinel
+		const uint32_t *s = src.data();
+		uint32_t *d = dst.data();
 		for (int y = 0; y < sm.yres; ++y) {
-			const uint16_t *srow = s + size_t(y) * size_t(sm.xres);
+			const uint32_t *srow = s + size_t(y) * size_t(sm.xres);
 			// row-of-tile runs: tw consecutive texels per tile share y.
-			uint16_t *drow = d + (size_t(y >> shp.b) * size_t(tpr)) * size_t(tileSz)
+			uint32_t *drow = d + (size_t(y >> shp.b) * size_t(tpr)) * size_t(tileSz)
 			                   + (size_t(y & shp.maskY) << shp.a);
 			int x = 0;
 			for (int t = 0; t < tpr; ++t, x += tw)
 				std::memcpy(drow + size_t(t) * size_t(tileSz), srow + x,
-				            size_t(std::min(tw, sm.xres - x)) * sizeof(uint16_t));
+				            size_t(std::min(tw, sm.xres - x)) * sizeof(uint32_t));
 		}
 	};
-	if (dynPlanes) { tile(sm.depth_dynamic, sm.depthDynSw); tile(sm.polyId_dynamic, sm.polyIdDynSw); }
-	else           { tile(sm.depth,         sm.depthSw);    tile(sm.polyId,         sm.polyIdSw);    }
+	if (dynPlanes) tile(sm.packDyn, sm.packDynSw);
+	else           tile(sm.packSD,  sm.packSDSw);
 }
 
-void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
+void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 {
-	if (!shadowsEnabled()) return;
+	// forceEnable bypasses the global shadows() gate — only ever passed by the
+	// StaticOnce init bake (ShadowMaps_BakeStatic) for scenes that enable
+	// --shadows at RUN time but must fill static occluder maps at INIT. All
+	// per-frame callers leave it false, so the flag still gates the hot path.
+	if (!forceEnable && !shadowsEnabled()) return;
 	if (!Sc || g_shadowMaps.empty()) return;
 
 	// --shadow_bake_time: total wall-clock of the DYNAMIC bake stage (this whole
@@ -201,10 +312,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	// Transform_Objects rewrites the projected fields in place each
 	// frame instead of reallocating. Sizing once per frame (in case
 	// the shadow-map set grew).
-	static thread_local std::vector<fds::FaceListContext> perLightFaces;
-	static thread_local std::vector<fds::VertexScratch>   perLightScratch;
-	static thread_local std::vector<Camera>               perLightCam;
-	static thread_local std::vector<fds::CameraContext>   perLightCtx;
+	// (Hoisted to file scope as ShadowScratchTLS so --mem_census can walk it —
+	// same thread_local lifetime and reuse as the four function-statics it
+	// replaces. It is the largest per-light allocation in the engine and was
+	// previously invisible to any instrument.)
+	ShadowScratchTLS &sscratch = shadowScratch();
+	auto &perLightFaces   = sscratch.faces;
+	auto &perLightScratch = sscratch.scratch;
+	auto &perLightCam     = sscratch.cam;
+	auto &perLightCtx     = sscratch.ctx;
 	if (perLightFaces.size() != g_shadowMaps.size()) {
 		perLightFaces.resize(g_shadowMaps.size());
 		perLightScratch.resize(g_shadowMaps.size());
@@ -375,6 +491,29 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		fds::CameraContext *const ctxPtr = J.ctx;
 		fds::FaceListContext *const facesPtr = J.faces;
 		fds::VertexScratch *const scratchPtr = J.scratch;
+				// Clear THIS light's packed plane here, on the worker,
+				// instead of serially on the tick thread while building
+				// the job list. The clear is per-map private (nothing
+				// else touches smPtr's planes until phase B, which is
+				// behind the shadowDone barrier), so moving it inside the
+				// phase-A task is order-equivalent and spreads
+				// ~res^2*4 bytes per enqueued map across the pool instead
+				// of paying it single-threaded. Buffer CONTENTS are
+				// identical either way. One packed plane = ONE fill pass;
+				// the two-array layout needed two over the same bytes.
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+				const auto tClr0 = clk::now();
+#endif
+				if (dynBakeForLambda) {
+					std::fill(smPtr->packDyn.begin(), smPtr->packDyn.end(), uint32_t(0));
+				} else {
+					std::fill(smPtr->packSD.begin(),  smPtr->packSD.end(),  uint32_t(0));
+				}
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+				g_shadowClearCoreUs.fetch_add(
+					int64_t(std::chrono::duration<double, std::micro>(clk::now() - tClr0).count()),
+					std::memory_order_relaxed);
+#endif
 				g_inShadowPass = true;
 				g_inDynamicShadowBake = dynBakeForLambda;
 				g_currentShadowOmni = smPtr->omni;
@@ -515,14 +654,9 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		lightCtx.zScale     = sm.zScale;
 		lightCtx.zScale256  = sm.zScale / 256.0f;
 
-		// Clear the buffer we're about to write into.
-		if (writeDynamicBuf) {
-			std::fill(sm.depth_dynamic.begin(),  sm.depth_dynamic.end(),  uint16_t(0));
-			std::fill(sm.polyId_dynamic.begin(), sm.polyId_dynamic.end(), uint8_t(0));
-		} else {
-			std::fill(sm.depth.begin(),  sm.depth.end(),  uint16_t(0));
-			std::fill(sm.polyId.begin(), sm.polyId.end(), uint8_t(0));
-		}
+		// Clear of the buffer we're about to write into now happens inside
+		// runPhaseAXform (on the worker that owns this light), not here on
+		// the tick thread — see the comment there.
 
 		// Size this light's FList to match the main-pass capacity. Polys
 		// is the worst case (every mesh face + every omni + every
@@ -542,6 +676,9 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		++xformsEnqueued;
 		sPhaseAJobs.push_back({ScPtr, smPtr, ctxPtr, facesPtr, scratchPtr});
 	}
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+	g_shadowClearCoreUs.store(0, std::memory_order_relaxed);
+#endif
 	// NOTE: sPhaseAJobs is thread_local — a [&] lambda does NOT capture
 	// thread_locals, it re-resolves them on the EXECUTING worker thread
 	// (empty vector there). Snapshot the caller's data() by value.
@@ -554,6 +691,21 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		renderns::shadowDone.acquire();
 	}
 	const auto tXformEnd = clk::now();
+#ifdef FDS_SHADOW_CLEAR_CENSUS
+	{
+		size_t clrBytes = 0;
+		for (const auto &J : sPhaseAJobs)
+			clrBytes += size_t(J.sm->xres) * size_t(J.sm->yres) * 3;
+		std::fprintf(stderr,
+			"[SHADOW-CLEAR] mode=%s maps=%zu bytes=%.2f MB clearCore=%.3f ms phaseAwall=%.3f ms\n",
+			mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" :
+			(mode == ShadowBakeMode::DynamicOmnisPerFrame ? "DynOmnis" : "StaticOnce"),
+			sPhaseAJobs.size(), double(clrBytes) / (1024.0 * 1024.0),
+			double(g_shadowClearCoreUs.load(std::memory_order_relaxed)) / 1000.0,
+			std::chrono::duration<double, std::milli>(tXformEnd - tXformStart).count());
+		std::fflush(stderr);
+	}
+#endif
 	if (sProfShadow) {
 		sXformAcc[sProfMi] += std::chrono::duration<double, std::milli>(tXformEnd - tXformStart).count();
 		sLightCount[sProfMi] += xformsEnqueued;
@@ -634,44 +786,71 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 						// thereafter. Bounded LRU is overkill — scenes
 						// have O(50) distinct materials; a flat 256-entry
 						// hash-keyed-by-pointer is plenty.
-						struct MatShadowCache {
-							// Pack (material pointer | skip-bit) into ONE atomic
-							// so the pointer-match and the skip flag are read/
-							// written together, atomically. Two separate atomics
-							// (mat[k] + skip[k]) tore under thread contention: a
-							// reader could match mat[k] yet read a STALE skip[k]
-							// left by a different material that previously
-							// occupied slot k (pointers collide mod 256). That
-							// gave a load-dependent wrong skip decision, which
-							// dropped/added shadow polygons frame-to-frame — THE
-							// shadow tile flicker. TSan never caught it because
-							// data races on atomics are not reported. Material is
-							// ≥2-aligned, so bit 0 of the pointer is free for the
-							// flag.
-							std::atomic<uintptr_t> entry[256] = {};
-						};
-						static MatShadowCache sCache;
-						auto looksEmissive = [](const char *n) -> bool {
-							if (!n) return false;
-							for (const char *p = n; *p; ++p) {
-								if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
-								    (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
-								if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
-								    (p[2]=='i'||p[2]=='I')) return true;  // emit/emiter/emitter
-							}
-							return false;
-						};
-						auto shouldSkip = [&](Material *m) -> bool {
-							if (!m) return true;
-							const uintptr_t k = (uintptr_t(m) >> 4) & 255;
-							const uintptr_t mbits = uintptr_t(m);  // bit0 = 0 (aligned)
-							const uintptr_t e = sCache.entry[k].load(std::memory_order_relaxed);
-							if ((e & ~uintptr_t(1)) == mbits) return (e & 1) != 0;
-							const bool skip = (m->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
-							                 || looksEmissive(m->Name);
-							sCache.entry[k].store(mbits | (skip ? uintptr_t(1) : uintptr_t(0)),
-							                      std::memory_order_relaxed);
-							return skip;
+						// ---- Why this is still a NAME match [measured 2026-08-06] ----
+						// The obvious fix is "use the authored cast/receive shadow
+						// flags instead". They were checked. They do not work, for two
+						// independent reasons:
+						//
+						// 1. LWS ShadowOptions / ShadowType carry NO signal. Across all
+						//    six authoring scenes -- 316 object blocks, 145 lights
+						//    (greets/city/chase/fountain/crash/pbrtest) -- ShadowOptions
+						//    is 7 on EVERY object and ShadowType is 1 on EVERY light.
+						//    Zero variance: those are just LightWave's defaults
+						//    (self|cast|receive all on) written out by the exporter.
+						//    tools/lwsread does not parse either field, and parsing them
+						//    would buy nothing. They are also the WRONG GRANULARITY --
+						//    ShadowOptions is per-OBJECT, and greets' entire room
+						//    (walls, floor, lamps, screens) is ONE object, Piramid.lwo.
+						//    It cannot express "this surface".
+						//
+						// 2. Surf_Luminous IS authored per-surface and IS already here
+						//    (FLD_MAT.CPP copies the LWOB SURF FLAG word into
+						//    Material::TFlags, so `m->TFlags & Surf_Luminous` is
+						//    readable right now, no parser needed) -- but it is NOT
+						//    equivalent to this predicate. Greets disagreements:
+						//      name-hit but NOT Luminous: 'lamp',
+						//        'screen emiter fance', 'screen emiter'
+						//      Luminous but name MISSES: 'screen2', 'sh', 'screen 3',
+						//        'screen 4', 'teleporter', 'linght'   (of these,
+						//        screen2/3/4 are already skipped via Mat_Transparent)
+						//
+						// The load-bearing case is 'lamp' -- the OPAQUE lamp HOUSING
+						// (Transparency 0, not Luminous, so neither the flag mask below
+						// nor Surf_Luminous would skip it). Greets omnis 0-6 sit INSIDE
+						// their own fixtures: measured from GREETS.FLD, each of those
+						// omnis has 504-639 'lamp' vertices within 0.8 units, spread
+						// over all 8 octants around it (nearest vertex 0.33-0.38). If
+						// 'lamp' cast shadows, every one of those lights would bake the
+						// interior of its own housing and the room would read fully
+						// occluded. The 'lamp light' glass around them (240 verts, also
+						// 8/8 octants) is ALREADY skipped by Mat_Transparent below
+						// (Transparency 50) -- so the name rule is redundant for the
+						// glass and essential for the housing.
+						//
+						// Conclusion: substituting Surf_Luminous would BREAK greets.
+						// The right replacement is an explicit authored per-surface bit,
+						// and the project already has the mechanism: add castsShadow /
+						// receivesShadow to the RVSF payload (Surf_RevExt = 0x8000 in
+						// LWREAD.H plus a new RevExtMask bit; wire through
+						// FLD_READ.CPP ReadMaterial, FLD_MAT.CPP, and tools/lwsread
+						// FLDSAVE.CPP) so the EDITOR can mark emitters and fixtures
+						// directly. Then prefer the authored bit here and keep this
+						// name match as the fallback for unflagged content. NOT built
+						// -- no content carries such a bit today, and a speculative
+						// parser for empty fields is worse than an honest heuristic.
+						//
+						// NOTE FOR GpuBench: GpuBench/ reproduces this predicate
+						// byte-for-byte as Batch::castsShadow. Any change here must be
+						// mirrored there or the two arms diverge.
+						// The predicate itself now lives at file scope as
+						// Shadow_MaterialSkipsCasting (with the same packed
+						// atomic cache), because the deferred kernel needs the
+						// SAME answer at RECEIVE time — see the header comment
+						// there for why (a non-caster can never satisfy the
+						// PolyId identity test and is otherwise shadowed for
+						// ever). One definition, no drift.
+						auto shouldSkip = [](Material *m) -> bool {
+							return Shadow_MaterialSkipsCasting(m);
 						};
 						int kept = 0, skXpar = 0, skDegen = 0, skBack = 0, skNoTxtr = 0;
 						// Material flag census — one-shot dump of (Name,
@@ -805,12 +984,13 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		}
 	}
 	// Same thread_local capture trap as Phase A: snapshot data() by value.
+	const TailProf::Stamp _profShadowB("shadow-bake");
 	{
 		const PhaseBJob *const bJobs = sPhaseBJobs.data();
 		dispatchIndexed((int)sPhaseBJobs.size(), nullptr,
 		                [bJobs, &runPhaseBTile](int jj) { runPhaseBTile(bJobs[jj]); });
 	}
-	TailProf::drain(renderns::shadowDone, tilesEnqueued, "shadow-bake");
+	TailProf::drain(renderns::shadowDone, tilesEnqueued, "shadow-bake", 3, _profShadowB);
 	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on
 	// the buffer this mode just wrote. Reports a tile flipping between
 	// occupied and empty across consecutive frames — the whole-tile
@@ -827,16 +1007,16 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			if (!O || !(O->Flags & Omni_Active)) continue;
 			const bool isStaticP = (O->Flags & Omni_StaticShadow) != 0;
 			if (isStaticP != wantStaticOmnis) continue;
-			const auto &buf = writeDynamicBuf ? sm.depth_dynamic : sm.depth;
+			const auto &buf = writeDynamicBuf ? sm.packDyn : sm.packSD;
 			std::array<int,16> occ{};
 			const int tw = sm.xres / 4, th = sm.yres / 4;
 			for (int ty = 0; ty < 4; ++ty)
 				for (int tx = 0; tx < 4; ++tx) {
 					int n = 0;
 					for (int y = ty*th; y < (ty+1)*th; y += 4) {
-						const uint16_t *row = buf.data() + size_t(y)*sm.xres;
+						const uint32_t *row = buf.data() + size_t(y)*sm.xres;
 						for (int x = tx*tw; x < (tx+1)*tw; x += 4)
-							if (row[x]) ++n;
+							if (ShadowTexZ(row[x])) ++n;
 					}
 					occ[ty*4+tx] = n;
 				}
@@ -855,12 +1035,12 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			// prev/now PGMs of the first two changes for texel diffing.
 			{
 				static std::vector<uint64_t> sHash;
-				static std::vector<uint16_t> sPrevBuf;
+				static std::vector<uint32_t> sPrevBuf;
 				if (sHash.size() != g_shadowMaps.size())
 					sHash.assign(g_shadowMaps.size(), 0);
 				uint64_t h = 0xcbf29ce484222325ull;
 				const uint8_t *bp = (const uint8_t*)buf.data();
-				for (size_t k = 0; k < buf.size() * 2; k += 7) {
+				for (size_t k = 0; k < buf.size() * 4; k += 7) {
 					h ^= bp[k]; h *= 0x100000001b3ull;
 				}
 				const char *dl = std::getenv("FDS_SHADOW_DUMP_LIGHT");
@@ -881,7 +1061,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 								    li, dumpN, which ? "now" : "prev");
 								FILE *fp = std::fopen(fn, "wb");
 								if (fp) {
-									std::fwrite(b2.data(), 2, b2.size(), fp);
+									std::fwrite(b2.data(), 4, b2.size(), fp);
 									std::fclose(fp);
 								}
 							}
@@ -915,7 +1095,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			                [maps, dynPl](int k) {
 				ShadowMap *smp = &g_shadowMaps[maps[k]];
 				ShadowMap_SwizzlePlanes(*smp, dynPl);
-				if (!dynPl && smp->depthDynSw.empty())
+				if (!dynPl && smp->packDynSw.empty())
 					ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
 			});
 		}
@@ -1055,11 +1235,11 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			FILE *f = std::fopen(path, "wb");
 			if (!f) continue;
 			std::fprintf(f, "P5\n%d %d\n255\n", sm.xres, sm.yres);
-			for (uint16_t e : sm.depth) {
-				// e in [0..0xFFFF]; 0 = empty, 0xFFFF = closest. Scale
+			for (uint32_t t : sm.packSD) {
+				// z in [0..0xFFFF]; 0 = empty, 0xFFFF = closest. Scale
 				// to 0..255 for the PGM viewer. Empty/background pixels
 				// render as black.
-				uint8_t b = uint8_t(e >> 8);
+				uint8_t b = uint8_t(ShadowTexZ(t) >> 8);
 				std::fwrite(&b, 1, 1, f);
 			}
 			std::fclose(f);
@@ -1106,3 +1286,71 @@ void ShadowBake_JoinPending() {
 		if (g_shadowBakeThread.joinable()) g_shadowBakeThread.join();
 	}
 }
+
+// ── --mem_census: the per-shadow-map render scratch ────────────────────────
+// The formula to read here is the INDEX, not the element: both vectors are
+// sized by g_shadowMaps.size() = 6 x cube omnis + spots, while what actually
+// needs to exist at once is bounded by how many light passes run CONCURRENTLY
+// (the pool size). Every entry's FList is sized to the whole scene's Polys,
+// and every entry's VertexScratch holds full Vertex[]/Face[] clones of each
+// mesh that light-face rasterized.
+static void MemCensus_ShadowScratch() {
+	std::lock_guard<std::mutex> lk(shadowScratchMtx());
+	auto &all = shadowScratchAll();
+	if (all.empty()) return;
+	size_t flistB = 0, cloneVertB = 0, cloneFaceB = 0, cloneFrameB = 0;
+	size_t slots = 0, liveSlots = 0, cloneCount = 0, flistCap = 0;
+	size_t usedSum = 0, usedMax = 0;
+	for (const ShadowScratchTLS *S : all) {
+		slots += S->faces.size();
+		for (const fds::FaceListContext &f : S->faces) {
+			const size_t b = (f.fStorage.capacity() + f.sStorage.capacity())
+			               * sizeof(fds::FListEntry);
+			flistB += b;
+			if (b) { ++liveSlots; flistCap = std::max(flistCap, f.fStorage.capacity()); }
+			// What the light-face actually FILLED last frame — the number the
+			// capacity should be compared against.
+			const size_t used = size_t(f.cAll < 0 ? 0 : f.cAll);
+			usedSum += used;
+			usedMax = std::max(usedMax, used);
+		}
+		for (const fds::VertexScratch &vs : S->scratch)
+			for (const auto &kv : vs.clones) {
+				const fds::PerTriMeshClone &c = kv.second;
+				cloneVertB  += c.verts.capacity() * sizeof(Vertex);
+				cloneFaceB  += c.faces.capacity() * sizeof(Face);
+				cloneFrameB += size_t(c.frame.capacity) * 72u;
+				++cloneCount;
+			}
+	}
+	// TOUCHED: FaceListContext::resize uses vector::resize, which VALUE-
+	// initializes every FListEntry — its bbMin/bbMax NSDMIs mean a real
+	// per-element constructor run, so every page is written even though only
+	// `cAll` entries carry real work.
+	fds::MemCensus::add("shadow.scratch", "per-light FList + radix scratch", flistB, true,
+		"%zu threads x %zu maps = %zu slots (%zu sized) x 2 x Polys=%zu x "
+		"FListEntry(%zu). ACTUALLY FILLED: max %zu, mean %zu per map = %.1f%% of "
+		"capacity — the capacity is the WHOLE SCENE's face count, per light-face",
+		all.size(), all.empty() ? 0 : all[0]->faces.size(), slots, liveSlots,
+		flistCap, sizeof(fds::FListEntry), usedMax,
+		liveSlots ? usedSum / liveSlots : 0,
+		(flistCap && liveSlots) ? 100.0 * double(usedSum) / double(liveSlots) / double(flistCap) : 0.0);
+	fds::MemCensus::add("shadow.scratch", "per-light mesh clones (Vertex[])", cloneVertB, true,
+		"%zu live (shadow map x mesh) clones x VIndex x sizeof(Vertex)=%zu",
+		cloneCount, sizeof(Vertex));
+	fds::MemCensus::add("shadow.scratch", "per-light mesh clones (Face[])", cloneFaceB, true,
+		"same %zu clones x FIndex x sizeof(Face)=%zu", cloneCount, sizeof(Face));
+	fds::MemCensus::add("shadow.scratch", "per-light clone VertexFrame SoA", cloneFrameB, true,
+		"same %zu clones x ceil8(VIndex) x 72 B (16 float + 2 u32 fields)", cloneCount);
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_ShadowScratch);
+
+// ── --mem_census: the MAIN-pass face list ─────────────────────────────────
+static void MemCensus_MainFaceList() {
+	const size_t b = (fds::g_mainFaces.fStorage.capacity()
+	                + fds::g_mainFaces.sStorage.capacity()) * sizeof(fds::FListEntry);
+	fds::MemCensus::add("facelist", "g_mainFaces (FList + radix scratch)", b, false,
+		"2 x Polys=%zu x FListEntry(%zu) = sortKey(4)+pad(4)+Face*(8)+bbox(8)",
+		fds::g_mainFaces.fStorage.capacity(), sizeof(fds::FListEntry));
+}
+FDS_MEMCENSUS_REPORTER(MemCensus_MainFaceList);

@@ -11,6 +11,30 @@ extern "C" {
 	// pass `false` to skip per-buffer FFT work. Defaults to enabled.
 	void Modplayer_SetDisplay(ModplayerHandle handle, bool on);
 
+	// Read the current playback position for music sync. Lock-free: it reads
+	// the same display/status snapshot the player publishes each audio buffer,
+	// so it never blocks and never touches the song mutex (safe to call from
+	// any thread, including while the audio/mixer thread is running).
+	//
+	// Units:
+	//   order      pattern-order index (position in the song's order table)
+	//   row        row within the current pattern
+	//   tickInRow  tick within the current row (0 .. speed-1)
+	//   songTick   monotonic playback clock in MILLISECONDS since playback
+	//              start; keeps counting across Modplayer_SetOrder jumps —
+	//              the robust sync reference clock.
+	//
+	// Any out-pointer may be NULL (that field is skipped). The values only
+	// advance while the display path is enabled: call
+	// Modplayer_SetDisplay(handle, true) before polling. With display disabled
+	// the player never republishes the snapshot, so the getter returns the
+	// last-published (initially all-zero) values.
+	void Modplayer_GetPosition(ModplayerHandle handle,
+	                           unsigned int* order,
+	                           unsigned int* row,
+	                           unsigned int* tickInRow,
+	                           unsigned long long* songTick);
+
 #if defined(__EMSCRIPTEN__)
 	// external-audio backend: host opens its own audio device (SDL_AudioDevice
 	// in our case) and pulls samples via this entry point. `frames` must be

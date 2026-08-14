@@ -116,7 +116,24 @@ void AddOmni(Scene *Sc,Omni *Om,char *ObjName)
 	Vector_Form(&Om->IPos,0,0,0);
 	// Lights are active + flare-rendered by default; SceneAuthored marks this
 	// as the i-th FLD/LWS light for the editor's enumeration + LWS write-back.
-	Om->Flags = Omni_Active | Omni_Flare | Omni_SceneAuthored;
+	// Spots get NO flare sprite: a headlight is a beam, not a glow quad (and
+	// the code-created city headlights they replace never flared either).
+	// The no-op Filler matters: Transform.cpp's flare pass inserts every
+	// omni's F face regardless of flags, and PREPROC.CPP skips spots when
+	// stamping the sprite blitter — without this lambda the renderer would
+	// call a null Filler. Same pattern as fds::MakeSpotLight.
+	// Preserve mask: ConvertOmni runs BEFORE AddOmni and may have set the
+	// authored volumetric-beam opt-in (FLD bit 512 → Omni_ForceVolCone) —
+	// the policy assignment below must not clobber it. (Legacy FLDs never
+	// set the bit, so the preserved term is 0 and the assignment is
+	// unchanged for them.)
+	Om->Flags = Omni_Active | Omni_SceneAuthored
+	          | (Om->Type == Light_SpotLight ? 0u : (DWord)Omni_Flare)
+	          | (Om->Flags & (DWord)Omni_ForceVolCone);
+	if (Om->Type == Light_SpotLight)
+		Om->F.Filler = [](Face*, Vertex**, DWord, DWord,
+		                  const fds::RenderTarget&,
+		                  const fds::CameraContext&) {};
 	Om->F.A = Om->F.B = Om->F.C = &Om->V;
 
 	if (Sc->OmniHead)
@@ -489,6 +506,45 @@ Omni *ConvertOmni(FldLight *Src)
 		K->Bias=E->Bias;
 	}
 
+	// Range envelope (FLD light flag bit 16 = Light_Range). NOTE for anyone
+	// reading Omni::IRange later: this fills the SPLINE only. `OL->IRange`
+	// itself stays 0 (the Omni was memset above) until the first
+	// Animate_Objects evaluates the spline — Reset_XForm, the only other code
+	// that ever set IRange from Keys[0], is dead (see FDS/MISC/PREPROC.CPP).
+	// So "IRange == 0 at scene init" means "not animated yet", NOT "the
+	// content authored no range".
+	//
+	// Measured 2026-08-06 — every shipping scene DOES author ranges, and none
+	// animates them (all single-key):
+	//   greets   10 omnis, Range 30 on all ten (was 3/3/10/10/7/20/20/2/2/2
+	//            until the ranges were moved into the authoring source — see
+	//            the greets note below)
+	//   city     76 lights, Range 800..7000 (one light has no envelope)
+	//   chase    41 lights, Range 30000..5e6 (32 have ANIMATED INTENSITY,
+	//            which Animate_Objects handles via the Size spline — ranges
+	//            themselves are static)
+	//   fountain 14 lights, Range 50..100 (one has no envelope)
+	//   crash     1 light, no Range envelope
+	// Range is NOT multiplied by Scene_Scale here (Scene_Scale is 1.0, so the
+	// omission is currently unobservable) whereas Pos keys are — worth knowing
+	// if Scene_Scale ever stops being 1.
+	//
+	// greets history (fixed 2026-08-06): greets used to run the authored range
+	// through TWO code-side patches, and the rendered value was neither the
+	// authored number nor either patch alone.
+	//   1. SceneCorrections() scaled every omni's Range spline by
+	//      {2, 2, 2, 2, 2, 1.7, 1.7, 2, 2, 2}  ("a crazy hack used to adjust
+	//      omnilights in code").
+	//   2. Initialize_Greets' greets_omni_default_range patch then ran BEFORE
+	//      the first Animate_Objects, saw IRange == 0 on all ten — which means
+	//      "the spline has not been evaluated yet", NOT "no authored range" —
+	//      and overwrote BOTH IRange AND Range.Keys[0].Pos.x with a flat 30,
+	//      silently discarding step 1 AND the envelope.
+	// Both are gone. The LWS now authors the final rendered value (30 on all
+	// ten) and nothing rewrites it, so this spline is the single source of
+	// truth. Proven by construction: the flat-30 LWS with both patches removed
+	// renders byte-identical to the pre-change greets pin
+	// (f1297141611c484bac7cc10a8bdcf630, 3/3 runs).
 	if (Src->Range)
 	{
 		OL->Range.NumKeys = Src->Range->Keys;
@@ -529,6 +585,68 @@ Omni *ConvertOmni(FldLight *Src)
 	if (Src->Flags&EndBehavior_Repeat)
 		OL->Pos.Flags=TrackREPEAT;
 
+	// FLD spot lights (LWS "LightType 2"). Until 2026-07 the converter DROPPED
+	// spot records entirely (ConvertFLD only admitted Light_Point), so no
+	// shipping FLD contains one — this branch is provably inert for legacy
+	// content (verified across every Runtime/SCENES/*.FLD). Convention:
+	//   - the authored aim is the light's LOCAL +Z (LightWave's zero-rotation
+	//     direction). Authored light-rotation keys remain unsupported, same
+	//     as they always were for point lights.
+	//   - the FLD ConeAngle envelope's first key is the OUTER cone angle in
+	//     degrees; the hotspot (inner) cone is half of it — the same 15/30
+	//     ratio the code-created city headlights used (SpotlightCones.h).
+	//   - parented spots must never be Omni_Stationary: their single-key Pos
+	//     spline holds a LOCAL mount offset and the hierarchy pass composes
+	//     the moving parent on top each frame (Transform.cpp), so a static-
+	//     lighting bake would freeze them at the wrong place.
+	if (Src->Flags & Light_Spot)
+	{
+		OL->Type = Light_SpotLight;
+		float coneDeg = 30.0f;
+		if (Src->ConeAngle && Src->ConeAngle->Keys && Src->ConeAngle->Key)
+			coneDeg = Src->ConeAngle->Key[0].Channel[0];
+		OL->FallOff = cosf(coneDeg * (3.14159265f / 180.0f));
+		OL->HotSpot = cosf(0.5f * coneDeg * (3.14159265f / 180.0f));
+		// Cone axis = local +Z rotated by the light's AUTHORED first-key rotation
+		// (H/P/B), using the same Euler convention as object motion (ConvertKey:
+		// engine RX=-rot.y, RY=-rot.x, RZ=-rot.z, radians). The world direction of
+		// local +Z is matrix column 2 — identical to the per-frame parented-spot
+		// aim (Transform.cpp reads Rot col 2). Parented spots overwrite IDir each
+		// frame; NON-parented authored spots (e.g. chase canyon spots) now honor
+		// their aim instead of a hardcoded +Z. H=P=B=0 reproduces (0,0,1) exactly,
+		// so unrotated spots are byte-identical (this is inert until aim is authored).
+		if (Src->Keys > 0) {
+			Matrix rm;
+			Euler_Angles(rm,
+			             -Src->KF[0].Rotation.y * Rad2Deg,
+			             -Src->KF[0].Rotation.x * Rad2Deg,
+			             -Src->KF[0].Rotation.z * Rad2Deg);
+			OL->IDir.x = rm[0][2];
+			OL->IDir.y = rm[1][2];
+			OL->IDir.z = rm[2][2];
+		} else {
+			Vector_Form(&OL->IDir, 0.0f, 0.0f, 1.0f);
+		}
+		stationary = false;
+	}
+
+	// Authored volumetric beam (FLD bit 2048, LWS "VolumetricLight 1"):
+	// per-light cone-pass opt-in + gain, no scene-wide --draw_cones needed.
+	// VolBeamGain 0 = unset → 1.0 at consumption (SoA build). The flag must
+	// survive AddOmni's Flags policy assignment — see the preserve mask there.
+	if (Src->Flags & Light_VolumetricCone)
+	{
+		OL->Flags |= Omni_ForceVolCone;
+		OL->VolBeamGain = Src->VolBeamGain;
+	}
+
+	// Authored per-light flare-sprite size multiplier (FLD bit 4096, LWS
+	// "FdsFlareScale <f>"): decouple the lens-flare sprite size from ISize.
+	// 0 = unset → 1.0 at consumption (F.FlareSize = ISize × FlareScale, both
+	// render passes). Same 0-sentinel convention as VolBeamGain / HaloIntensity.
+	if (Src->Flags & Light_FlareScale)
+		OL->FlareScale = Src->FlareScale;
+
 	if (stationary)
 		OL->Flags |= Omni_Stationary;
 
@@ -558,6 +676,24 @@ Scene *ConvertFLD(FldScene *FLD)
 	memset(Sc,0,sizeof(Scene));
 	Sc->StartFrame = FLD->FirstFrame;
 	Sc->EndFrame   = FLD->LastFrame;
+	// Authored scene-wide env-reflection defaults (FLD header extension —
+	// see FLD_READ.CPP ReadGeneralSceneData; 0 = unset). LoadFLD memcpy's
+	// this Scene over the caller's, so the fields survive into the live
+	// scene for EnvReflection_FramePrep.
+	Sc->EnvReflSceneMode = FLD->EnvReflSceneMode;
+	Sc->EnvBakeResScene  = FLD->EnvBakeResScene;
+
+	// Authored backdrop gradient (FLD Scene_SkyColors payload → Scene). QColor
+	// stores BGRA bytes; A left 0 (unused by the paint). HasSkyGradient gates
+	// the default-off sky_gradient pass (Render_SkyGradient).
+	Sc->HasSkyGradient = FLD->SkyColorsSet;
+	if (FLD->SkyColorsSet)
+	{
+		Sc->SkyZenith.R = FLD->ZenithColor.Red; Sc->SkyZenith.G = FLD->ZenithColor.Green; Sc->SkyZenith.B = FLD->ZenithColor.Blue;
+		Sc->SkySky.R    = FLD->SkyColor.Red;    Sc->SkySky.G    = FLD->SkyColor.Green;    Sc->SkySky.B    = FLD->SkyColor.Blue;
+		Sc->SkyGround.R = FLD->GroundColor.Red; Sc->SkyGround.G = FLD->GroundColor.Green; Sc->SkyGround.B = FLD->GroundColor.Blue;
+		Sc->SkyNadir.R  = FLD->NadirColor.Red;  Sc->SkyNadir.G  = FLD->NadirColor.Green;  Sc->SkyNadir.B  = FLD->NadirColor.Blue;
+	}
 
 	// Used to walk MatLib to seek to the tail so AddMaterial could append
 	// linearly. AddMaterial now head-inserts and dedupes via a hash map
@@ -571,7 +707,7 @@ Scene *ConvertFLD(FldScene *FLD)
 
 	for (SourceLgt=FLD->Light;SourceLgt;SourceLgt=SourceLgt->Next)
 	{
-		if (SourceLgt->Flags&Light_Point)
+		if (SourceLgt->Flags&(Light_Point|Light_Spot))
 		{
 			 OL=ConvertOmni(SourceLgt);
 			 AddOmni(Sc,OL,SourceLgt->Name);

@@ -1,0 +1,26 @@
+# ── chase-combat ─────────────────────────────────────────────────────────
+# Ship2 (the pursuer, behind Ship1) hammers the leader with blaster fire —
+# the "action from the chasing ship". Turns on the feature-complete B1/B2/C1
+# combat stack (DEMO/BlasterBolts + DEMO/ChaseEvents fire table): forward
+# bolts at Ship1, WATER near-miss splash columns marching across the sea,
+# MOUNTAIN sparks off the gorge walls, muzzle/impact flashes, and a camera
+# jolt on hits. Deterministic pure-t (snapshot-safe); default engine keeps
+# ALL of this OFF, so the chase pins stay byte-identical — this is a
+# review/opt-in look.
+#
+# Usage:            ./DEMO --scene-chase --deferred --flags-file=PRESETS/chase-combat.flags
+#   with lights:    ./DEMO --scene-chase --deferred --cinematic --flags-file=PRESETS/chase-combat.flags
+#   override a line: append --no-chase_cam_fx (CLI after --flags-file wins).
+# One token per line; leading `--` optional; `#` starts a comment.
+
+# master switch: wire the BlasterBolts module into the chase driver
+chase_blasters
+
+# camera shake + FOV punch on impacts (rides on the authored dolly, pure-t)
+chase_cam_fx
+
+# brighter muzzle/impact flashes so the fire reads at chase scale
+blaster_flash_peak=1300
+
+# slightly fatter impact sparks so gorge-wall hits + water splashes read
+chase_spark_size=0.00016

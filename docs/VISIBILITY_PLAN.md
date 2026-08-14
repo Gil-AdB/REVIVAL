@@ -1,0 +1,1056 @@
+# Visibility culling — research + campaign plan
+
+Status: **research complete, 2026-08-02; §0's verdict CHALLENGED by the user and
+RE-TESTED WITH CODE 2026-08-03 — see §7 for the experiment (finer chunking + a
+prev-frame hi-Z occlusion cull, both landed default-OFF) and the revised verdict.**
+Prompted by the user direction: *"it's
+about time to seriously think about visibility culling (bsp? bvh? something better?)
+even before we start transforming the polys — this is becoming a very big chunk of
+the work, and I think this will greatly help later stages of the pipeline."*
+
+This doc measures the actual occlusion waste in the current pipeline, surveys the
+architectures against that waste, and lands a recommendation. It follows the
+`ENVDYN_DISPLACEMENT_PLAN.md` house style: verified anchors, measured decision
+points, slices with byte-gates and explicit non-goals.
+
+---
+
+## 0. TL;DR — the verdict (read this first)
+
+**Do NOT build a general occlusion-visibility architecture (cells & portals, PVS,
+BSP, BVH, or a software occluder-raster) right now.** The measurements below show
+the reclaimable envelope is small *because the engine already solved the problem
+occlusion culling exists to solve*, three times over:
+
+1. **It is a DEFERRED renderer.** Shading runs once per *final screen pixel*, not
+   per face. Measured: the shaded-pixel count (`zWritten`) is **~2.08 M on greets
+   at any face count** — flags-off (6.7 k faces) and displaced (73 k faces) both
+   shade the same ~2.08 M pixels. The ~44 ms of deferred lighting + cube-shadow
+   tap (the frame's biggest block) is **invariant to geometry and occlusion.**
+   Occlusion culling cannot touch it. In a *forward* renderer it could — that's
+   the classic win — but the engine already banked that by going deferred.
+2. **Front-to-back sort + Z-early-reject already makes occluded pixels cheap.**
+   The Mekalele G-buffer fill gates its expensive per-pixel work (texel gather,
+   normal encode, G-buffer store) *behind* the Z-test — a z-failed lane pays only
+   an edge test + a Z read/compare. So the measured 40–63 % "wasted" fill samples
+   are the cheap samples, not full fills.
+3. **The geometry front-end is already culled** by the existing bsphere-vs-frustum
+   mesh cull + the greets Piramid chunk split + the B5 `--tile_bbox_cull`
+   per-tile face pre-reject. Measured: those already fire on 35–83 % of meshes and
+   reclaim ~17.6 ms at the 73 k-face displaced pose.
+
+**Specifically on the user's ask ("before we start transforming the polys"):** a
+*perfect* pre-transform occlusion cull saves **0.05–0.8 ms** (see §2). The reason
+is subtle and measured: occlusion here is overwhelmingly **face-level within
+visible chunks**, not **chunk-level**. 73–90 % of *rastered faces* are fully
+occluded, but only **3–27 % of transformed verts** live in a *fully-occluded
+mesh/chunk* — because each spatial chunk that sits behind the front wall still
+keeps at least one visible face, so it can't be rejected wholesale. The transform
+cost the user is worried about is spent on geometry that is genuinely visible (the
+wall you're looking at); occlusion won't cut it. The right levers for that cost are
+the in-flight **SoA vertex refactor** (faster transform) and **chunk LOD**
+(`docs/OPTIMIZATION_BACKLOG.md` S5) — not visibility.
+
+What ships from this research: **Slice 0 — a permanent, default-off `--vis_stats`
+diagnostic** so this decision stays measured as scenes evolve, and a documented
+**trip-wire** (§3) for the one scenario that could flip the verdict.
+
+---
+
+## 1. Verified anchors (the pipeline reality this stands on)
+
+- **Deferred path** (`docs/GRAPHICS_PIPELINE.md`): G-buffer fill (`RenderInnerMekalele`
+  → `Mekalele.h`) → per-pixel `Render_DeferredLighting`. Shading is per screen pixel.
+- **Front-to-back sort** (`Transform.cpp:66` `FRONT_TO_BACK_SORTING`; radix in
+  `SORTS.H`). Closer faces first → farther faces z-fail and skip work.
+- **Z-early-reject in the fill** (`Mekalele.h` `apply_exact`): `p_mask &= zmask`
+  precedes the `if (barry::any_lane_set(p_mask))` block that does the texel gather
+  + G-buffer store. **Occluded pixels skip the expensive work already.**
+- **Existing geometry culls:** per-mesh bsphere-vs-6-frustum-plane cull
+  (`Transform.cpp:982–1082`, `continue` on `Tri_Invisible`); greets Piramid split
+  into an N³ chunk grid (`GREETS.CPP:2016+`, default grid 8); B5 per-tile face
+  screen-bbox pre-reject (`RenderInner.cpp`, `FListEntry.bbMin/Max`,
+  `--tile_bbox_cull` default ON, commit 9b6d70d).
+- **No prior geometry-visibility system exists.** `WorldAabb.h` states its
+  non-goals verbatim: *"no BVH, no occlusion, no precomputed visibility."* The
+  word "portal" in the code (`bouncePortalReject`, GreetsMirror) is a *light /
+  reflection* gate, not a visibility portal. Prior **light** contribution-culling
+  (`--contrib-cull-thresh`) was built and **reverted** as a measured no-win with
+  tile-boundary artifacts (149ba77). S3 mesh-AABB-vs-frustum cull was measured
+  **not worth it** (backlog). The mirror campaign hit *"chunk culls constantly
+  firing → stale mirror footprints"* (`GreetsMirror.h:108`) — a caution that
+  aggressive per-chunk culls interact badly with the offscreen passes.
+- **Measurement method:** temporary `--vis_stats` counters (reverted; see §5).
+  Per main-camera frame it reports, from the opaque `FList` + a per-face won-pixel
+  tally set in the Mekalele commit: faces WON vs FULLY-OCCLUDED (z-fail every
+  pixel), G-buffer edge-covered vs z-written samples, per-mesh(chunk) occlusion +
+  vert counts, and Transform meshes-seen / -xformed. Validated: `vertsXformed`
+  tracks the documented XFRM linearly (flags-off 82,975 verts ↔ 0.70 ms;
+  displaced 958,339 verts ↔ 7.8 ms — 11.5× both).
+
+---
+
+## 2. PHASE 1 — the waste, measured (1920×1080, this machine)
+
+### 2a. Per-pose occlusion + overdraw
+
+| pose | frame ms | opaque faces | faces fully occluded | fill overdraw (edge/written) | wasted fill samples | verts transformed | verts in fully-occluded meshes |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| greets flags-off t=5780 | 48.7 | 6,769 | **73.0 %** | 1.90× | 47.3 % | 82,975 | **7.1 %** |
+| greets flags-off t=2145 | ~48 | 4,709 | **90.2 %** | 1.70× | 41.1 % | 73,400 | **12.7 %** |
+| greets displaced t=5780 | 88.8 | 73,258 | **89.1 %** | 1.96× | 49.0 % | 958,339 | **10.2 %** |
+| greets displaced t=2145 | ~90 | 51,261 | **88.3 %** | 1.61× | 37.7 % | 862,283 | **3.0 %** |
+| city t=1961 | 99.0 | 19,606 | **73.4 %** | 2.22× | 55.0 % | 138,550 | **8.0 %** |
+| chase t=800 | ~ | 25,827 | **89.2 %** | 2.67× | 62.6 % | 30,548 | **27.5 %** |
+
+`zWritten` (shaded opaque pixels) = greets ~2.08 M (full screen), city 1.13 M
+(45 % sky), chase 0.22 M (11 % — mostly sky + transparent water). **This is what
+the deferred kernel shades, and it does not move with face count.**
+
+### 2b. The two questions the plan turns on
+
+**Q1 — of faces surviving frustum+backface into FList, what fraction end up fully
+occluded (the RNDR occlusion opportunity)?** Very high: **73–90 %.** Indoor pyramid
++ city depth = you face a wall, everything behind z-fails. *But* the fill cost of
+those faces is small (z-early-reject skips their expensive work; §1), so this large
+fraction converts to a small time saving — bounded by §2c.
+
+**Q2 — of verts transformed in XFRM, what fraction belong to fully-occluded
+meshes/chunks (the pre-transform opportunity, the user's ask)?** Low: **3–27 %,
+typically ~8–10 %.** Occlusion is face-level *inside* visible chunks; chunks are
+spatial cells that almost always keep ≥1 visible face. Absolute pre-transform
+ceiling = that fraction × XFRM:
+
+| pose | XFRM (measured) | occluded-mesh verts | **pre-transform cull ceiling** |
+|---|--:|--:|--:|
+| greets flags-off | 0.70 ms | 7–13 % | **~0.05–0.09 ms** |
+| city t=1961 | 2.31 ms | 8.0 % | **~0.18 ms** |
+| greets displaced t=5780 | 7.8 ms | 10.2 % | **~0.80 ms** |
+| chase t=800 | ~0.3 ms | 27.5 % | **~0.08 ms** |
+
+Even the fat displaced pose caps a *perfect, zero-cost* pre-transform occlusion
+cull at **~0.8 ms** of an 88.8 ms frame.
+
+### 2c. Q3 — per-mesh/chunk stats + where the 7.8 ms XFRM goes
+
+- Greets is ~140 meshes flags-off / ~227 displaced (Piramid chunk grid + momy +
+  robot + screens + chunks). The frustum cull already rejects **49–186** of them
+  per frame (t=2145 rejects 186/227 — camera faces one wall).
+- The 7.8 ms displaced XFRM is **958 k verts across the 112 non-culled meshes**,
+  ~90 % of which are genuinely visible or in mixed chunks. It is **on-screen work**
+  — the displaced wall you're looking at, not hidden geometry. Occlusion cannot
+  reclaim it; **LOD / SoA-transform can.** (Side note: transform processes *all*
+  verts of a non-culled mesh even where most faces are later backface-culled from
+  FList — a real but sub-ms inefficiency the SoA / face-driven-transform work
+  addresses, orthogonal to visibility.)
+
+### 2d. Q4 — SORT cost vs FList length
+
+Radix is 4 linear passes over `CAll` 16-byte `FListEntry` slots — O(CAll), so
+halving faces halves sort. But sort is **not a cost worth culling for**: at the
+73 k-face displaced pose, disabling it (`FDS_NO_SORT=1`) made the frame **slower**
+(90.9 vs 88.8 ms) — front-to-back ordering pays for itself via Z-reject. Sort at
+that face count is < 2 ms and net-positive.
+
+### 2e. The face-front-end is already reclaimed (the ceiling that matters)
+
+`--tile_bbox_cull` A/B (the existing B5 reject, the closest proxy for "cull faces
+cheaply"):
+
+| pose | bbox cull OFF | ON | **face-front-end reclaimed** |
+|---|--:|--:|--:|
+| greets displaced t=5780 | 106.4 ms | 88.8 ms | **17.6 ms** |
+| city t=1961 | 102.4 ms | 99.0 ms | **3.4 ms** |
+
+At normal poses the whole face-front-end is only ~3 ms; at the 400 k-poly displaced
+pose it's ~18 ms and **B5 already captures it.** A new occlusion system would
+compete for the *remainder* — in-frustum, on-tile, occluded faces that B5 doesn't
+already reject — a fraction of these numbers.
+
+---
+
+## 3. The honest counterfactual (why the ceiling is small)
+
+An occlusion cull removes geometry that is inside the frustum but hidden. Its
+payoff is: (a) skip shading it, (b) skip filling it, (c) skip transforming it.
+In THIS engine:
+
+- **(a) shading — already gone.** Deferred shades each final pixel once.
+  `zWritten` is invariant to face count. **0 ms reclaimable.**
+- **(b) filling — mostly gone.** Z-early-reject means occluded pixels skip the
+  texel/store. What remains is per-face clipper entry + per-pixel edge/z test for
+  in-frustum on-tile occluded faces — a slice of the ~3 ms (normal) / ~18 ms
+  (displaced) front-end that B5's bbox cull already takes most of. **Low
+  single-digit ms reclaimable at the extreme pose; sub-ms normally.**
+- **(c) transforming — 0.05–0.8 ms** (§2b), and it's not even chunk-shaped.
+
+So the reclaimable envelope for a *from-scratch, perfect, free* occlusion system is
+roughly **< 1 ms (normal scenes) to a few ms (the opt-in 400 k-poly displaced
+pose)**, on frames of 48–99 ms — and a real system is neither free (the cull test
+costs) nor perfect (it must be conservative or it moves pins). The frame's actual
+elephants are pixel-bound and untouched by visibility: cube-shadow tap ~32 ms,
+deferred kernel ~12 ms, shadow bake ~12–27 ms (a *different* camera with its own
+culls). **Visibility culling is not where the frame is.**
+
+**Trip-wire that flips this verdict:** if a future scene becomes *forward-shaded*,
+*heavily depth-complex with expensive per-fragment work that Z-early-reject can't
+skip*, or *geometry-front-end-bound past what B5 reclaims* (e.g. a displaced-LOD
+regime pushing well past 100 k on-screen occluded faces), re-open §4. The
+`--vis_stats` diagnostic (Slice 0) is exactly how to detect that: watch `overdraw`,
+`faces fully occluded`, and the `no-tile_bbox_cull` delta.
+
+---
+
+## 4. PHASE 2 — architecture survey (verdicts against §2/§3)
+
+Each is judged on: expected win vs the §2 numbers, cost, determinism risk (pins —
+a cull that fires wrongly moves gate hashes), interaction with the offscreen passes
+(shadow / mirror-RTT / env-probe have their OWN cameras — a main-view visibility
+set must never cull the shadow/RTT world), and authoring burden.
+
+| Option | Expected win here | Cost / risk | Verdict |
+|---|---|---|---|
+| **Cells & portals** (greets = indoor pyramid; chunks exist; author via LWS/editor) | Targets exactly the occluded 73–90 % of faces. But reclaim is bounded by §3: shade-once + z-reject already neutralise most of it → **sub-ms to a few ms**. | High authoring (portal placement per scene); conservative PVS-per-frame or pins move; must be main-view-only vs the 4 offscreen camera passes. Dynamic fly-through camera needs fine cells. | **NO.** Classic big win is shade-overdraw; deferred already took it. |
+| **PVS** (precomputed per-cell visible set, Quake lineage; fits the bake culture) | Same ceiling as portals, computed offline. | Heaviest authoring + bake; greets/chase cameras move continuously → many cells; determinism of the bake (greets env-bake nondeterminism already breaks its md5 gate). | **NO.** Same ceiling, more machinery. |
+| **BSP** | Would *split* authored quad geometry → **more** faces, worsening the very face-front-end that's the only real cost. | Splitting fights authored content; classic use (sort order) already solved by radix + Z-buffer. | **NO.** Dominated by cells/portals and counterproductive here. |
+| **BVH over chunks+meshes** | Would make the existing frustum cull *hierarchical* (fewer tests). But the frustum cull is already sub-ms and fires well (§2c). | Medium build; entry point for hierarchical occlusion — but occlusion's ceiling is the problem, not the test count. | **NO (low value).** The test isn't the cost. |
+| **Software occlusion** (prev-frame hi-Z reproject, or low-res occluder raster of big flat walls/buildings, tested per chunk/mesh AABB *before transform*) | The only option aimed at *true* occlusion, and the user's "before transform" ask. City buildings + greets front wall are good occluders. But the pre-transform ceiling is **0.05–0.8 ms** (§2b) and the fill sliver is what B5 already reclaims. | The occluder raster itself costs (a depth pre-pass); determinism risk; "chunk culls constantly firing" already bit the mirror path. | **NO now.** Reclaim < its own cost at these poses. Revisit only via the §3 trip-wire; even then LOD beats it for displaced greets (the faces are the on-screen wall, not occluded). |
+| **Hybrid per-scene** | — | — | **Moot** given the above. |
+| **Finer frustum granularity** | Chunks already ARE the granularity (~98–227 cells); finer = per-face = what the clipper + B5 bbox already do. | — | **Already have it.** |
+
+---
+
+## 5. PHASE 3 — the plan
+
+### Recommended architecture: **keep the current culls; add measurement, not machinery.**
+
+The current stack (per-mesh bsphere frustum cull → greets chunk split → radix
+front-to-back → B5 tile bbox pre-reject → deferred shade-once with Z-early-reject)
+is, for a deferred software renderer, already the right visibility architecture.
+The research does not justify a portal/PVS/BVH/occluder campaign. It justifies
+**locking in the ability to keep this decision measured**, plus two orthogonal
+levers (already tracked elsewhere) that address the cost the user actually feels.
+
+### Slice 0 — permanent `--vis_stats` diagnostic (SHIP)
+
+Promote the temporary research counters to a permanent default-off flag: opaque
+faces WON vs FULLY-OCCLUDED, G-buffer overdraw (edge vs z-written), per-mesh(chunk)
+occlusion + vert counts, Transform meshes-seen/-xformed. This is Slice 0 of any
+future visibility work and the trip-wire detector for §3.
+- **Expected win:** 0 ms (diagnostic). Keeps the verdict honest as scenes grow.
+- **Gate:** default OFF; no hot-loop cost when off (the fill counters sit behind a
+  cached `g_visStatsActive` bool set only during the main opaque pass). Byte-null:
+  render_gate 3/3, city `37e62845` + fountain `51fff7cd` exact, wasm links.
+- **Non-goal:** it does not cull anything.
+- *(This research REVERTED its counters rather than ship them — see §6. Slice 0 is
+  the clean re-land if/when wanted; it is deliberately deferred, not done, because
+  the research task's remit was measurement, not landing engine features.)*
+
+### Slice 1 — (CONDITIONAL, de-scoped) per-chunk hierarchical frustum+coarse-Z cull
+
+Only if the §3 trip-wire fires. A cheap per-chunk test before transform: existing
+bsphere frustum + a coarse previous-frame hi-Z reproject of the chunk AABB. Wins
+the 3–27 % occluded-mesh verts + their faces.
+- **Expected win FROM §2:** ≤ 0.8 ms today (displaced greets); sub-ms elsewhere.
+  **Below the noise floor of most poses → not worth building now.**
+- **Gate (if ever built):** default OFF; conservative (never cull a mesh with any
+  visible face — false-negatives OK, false-positives move pins); MAIN-VIEW ONLY
+  (`g_offscreenViewDepth==0 && !g_inShadowPass`) so shadow/RTT/env keep their
+  worlds; byte-null off; 24-run greets determinism gate (env-bake race) + city/
+  fountain byte pins + render_gate 3/3 + wasm.
+- **Non-goals:** no BSP splitting; no PVS bake; no portal authoring; never applied
+  to an offscreen camera.
+
+### Explicit non-goals for the whole campaign
+
+- No cells & portals, no PVS, no BSP, no BVH. (§4.)
+- No software occluder-raster pass. (§4.)
+- Do **not** target the deferred lighting / cube-tap with visibility — it's
+  per-final-pixel and geometry-invariant (§3).
+- Do **not** try to cull the shadow-bake world from the main view.
+
+### Where the frame time actually is (redirect, not part of this campaign)
+
+Tracked in `docs/PERF_STATE.md` + `docs/OPTIMIZATION_BACKLOG.md`, and confirmed by
+this research to be the real levers:
+1. **Cube-shadow tap ~32 ms** — per-pixel, the #1 cost. `shadow_polyid_no_pcf`,
+   fewer shadow omnis, better cache layout.
+2. **Deferred kernel ~12 ms** + **shadow bake ~12–27 ms.**
+3. For the **displaced-greets face explosion** the user is feeling: **chunk LOD**
+   (backlog S5) to cut the *visible* face count, and the **SoA vertex refactor**
+   to speed the transform of visible geometry — *not* occlusion (the faces are the
+   on-screen wall).
+
+---
+
+## 6. What this research committed
+
+**Nothing to the engine.** The `--vis_stats` instrumentation (a `FeatureFlags.def`
+flag, two `Face` fields, counters in `Mekalele.h` / `Transform.cpp` /
+`RENDER.CPP`, and a `VisStats_Report()`) was built, used to produce §2, and then
+**reverted** — the research remit was to measure and plan, and the numbers now live
+here. Slice 0 (§5) is the clean re-land recipe if a permanent diagnostic is wanted;
+it carries the gate obligations listed there. This document is the deliverable.
+
+---
+
+## 7. ADDENDUM 2026-08-03 — the chunk-granularity challenge, tested with code
+
+Status: **experiment complete.** The user rejected §0's pre-transform reading
+with a sharp argument: the displaced-greets tessellation costs ~40 ms of pure
+per-poly front-end, ~89 % of those faces are fully occluded in-frustum, and §2's
+"only 3–27 % of transformed verts live in fully-occluded chunks" FROZE the chunk
+granularity — grid-8 cells sized for the flat mesh hold ~406 faces each once
+displacement multiplies the walls ~20×, so the ~10 % figure could be an artifact
+of coarse chunks rather than a property of occlusion. Directive: *"check this
+with actual code before declaring this won't work."* This section is that code,
+its measurements, and the revised verdict.
+
+### 7a. What was built (committed, all default-OFF, byte-null off)
+
+- **Phase A (1739e95): `--greets_chunk_size=S`** — size-based near-cubic chunk
+  cells (per-axis grid = ceil(span/S)) replacing the uniform N³ grid, so cell
+  size is independent of face count. 0 = legacy grid, byte-identical. Chunks
+  also store world/local AABBs (from the same worldVerts the cube cull uses).
+  `--vis_stats` prints a per-chunk face histogram + a per-frame visibility
+  census (the §5 Slice-0 diagnostic, landed for real this time).
+- **Phase B (5bcd6cc): `--chunk_occlusion`** — a PREVIOUS-FRAME hi-Z occlusion
+  cull BEFORE transform. Design pivot mid-experiment (user direction): instead
+  of rasterising the S1 flat-proxy occluders in a current-frame prepass (built
+  first; byte-neutral but pays its own raster), reuse the frame's own opaque
+  depth. Engine subtlety: the tick CLEARS ZPage16 before Transform, so the
+  final depth is captured at END of frame (post-Render) together with its
+  camera; the next frame's Transform tests each mesh/chunk world AABB (after
+  the frustum cull, before the per-vertex transform) against the min-pooled
+  hi-Z (240×135 at 1080p), projected with the CAPTURED prev camera — exact for
+  static geometry; rotation-revealed chunks land off-buffer and are kept;
+  depth margin = `--chunk_occl_bias` + 2× the camera translation delta.
+  Occluders = the REAL scene depth (displaced walls, mummies, robot) for free.
+  MAIN-VIEW-ONLY (shadow / RTT / env / off-axis passes untouched); first frame
+  inert; snapshot pin dumps force it inert (`--chunk_occl_snapshot_force`
+  [dev] overrides for the pop rig); `--chunk_occl_verify` (FDS_OCCL_VERIFY)
+  audits every culled chunk against the final current-frame depth.
+
+### 7b. Phase A: finer granularity alone is pure overhead
+
+Displaced Piramid, 87,256 faces / 261,768 verts (1080p, this machine):
+
+| chunking | chunks | faces/chunk mean / max | XFRM p50 @ t=5780 |
+|---|--:|--:|--:|
+| grid-8 (ship) | 215 | 406 / 2,095 | ~7.9–8.5 ms |
+| size=2 | 1,770 | 49 / 359 | ~8.4–8.7 ms |
+| size=1 | 6,669 | 13 / 170 | ~9.2–9.6 ms (**+~13 %**) |
+
+More chunks = more per-mesh transform setup + FList entries, and nothing
+rejects them at an in-room pose. Granularity only pays through a rejection
+mechanism — which is Phase B's job.
+
+### 7c. Phase B census: the cull works — and the catch stays small at every granularity
+
+`--vis_stats`, displaced greets, prev-frame cull ON (final build; "frustum-
+surviving" = verts the existing bsphere cull already kept, ~830–960 k/frame):
+
+| pose | chunking | in-frustum chunks tested | occl-culled | verts culled | % of frustum-surviving |
+|---|---|--:|--:|--:|--:|
+| t=5780 (into room) | grid-8 | 109 | 17 | 25,944 | 2.8 % |
+| t=5780 | size=2 | 764 | 339 | 63,183 | **6.7 %** |
+| t=5780 | size=1 | 2,847 | 1,588 | 72,198 | **7.7 %** |
+| t=2145 (faces wall) | size=2 | 173 | 9 | 2,403 | **0.3 %** |
+| t=6097 (corridor) | size=2 | 428 | 250 | 41,688 | 5.0 % |
+
+This is the decisive number. §2 measured ~10 % occluded-mesh verts at coarse
+chunks; the challenge predicted fine chunks would blow that open. Measured:
+**8× more chunks than ship moves the occludable fraction to 6.7 %; 31× more
+moves it to 7.7 %.** Granularity was NOT the bottleneck. At t=2145 the reason
+is structural: the camera faces a wall, so the frustum cull already rejects
+1,606 of 1,782 chunks — the hidden geometry is OUT-of-frustum, not in-frustum-
+occluded. And at t=5780 the ~93 % of transformed verts that remain are the
+displaced wall the camera is LOOKING AT. Occlusion cannot reclaim on-screen
+work; only LOD / a faster transform can.
+
+### 7d. Cost/benefit + the prev-frame trade, measured
+
+Timing (40-iter p50, interleaved OFF/ON reps; the box was shared with another
+session's renders for part of the run — contaminated pairs [frame p50 > 120 ms
+or an obviously inflated section] discarded; XFRM/SORT deltas were consistent
+across every clean pair, frame-level deltas are noise-limited):
+
+| pose | chunking | OFF frame / XFRM / SORT / RNDR | ON frame / XFRM / SORT / RNDR | Δframe |
+|---|---|---|---|--:|
+| t=5780 | grid-8 | 94.5 / 8.06 / 0.61 / 57.3 | 95.2 / 7.76 / 0.56 / 58.0 | +0.7 |
+| t=5780 | size=2 (r1) | 100.2 / 8.71 / 0.65 / 60.9 | 90.2 / 8.06 / 0.49 / 53.8 | −10.0 |
+| t=5780 | size=2 (r2) | 96.3 / 8.53 / 0.61 / 58.4 | 96.7 / 7.96 / 0.49 / 58.0 | +0.4 |
+| t=5780 | size=1 (r1) | 101.9 / 9.33 / 0.63 / 57.4 | 100.9 / 8.87 / 0.48 / 56.4 | −1.1 |
+| t=5780 | size=1 (r3) | 94.3 / 8.66 / 0.59 / 52.7 | 91.9 / 8.37 / 0.45 / 50.8 | −2.5 |
+| t=2145 | size=2 | 101.5 / 6.74 / 0.42 / 66.1 | 102.6 / 6.51 / 0.41 / 67.4 | **+1.1** |
+| t=6097 | size=2 (r1) | 79.1 / 6.80 / 0.14 / 43.4 | 77.8 / 6.22 / 0.07 / 43.0 | −1.3 |
+| t=6097 | size=2 (r2) | 71.0 / 6.13 / 0.13 / 38.0 | 72.3 / 5.85 / 0.06 / 39.2 | +1.3 |
+
+Consistent signal: **XFRM −0.2…−0.65 ms, SORT −0.05…−0.16 ms** (fewer FList
+entries; t=6097 halves SORT). Against that, the hi-Z min-pool costs **~0.8 ms**
+per frame (inside RNDR at EndFrame). Net frame delta: within measurement noise
+at the poses where the cull catches, and a ~+1 ms LOSS at wall-facing t=2145
+where it catches nothing. There is no pose where the cull buys a resolvable
+frame-level win.
+
+Temporal-pop audit (the prev-frame design's honest cost):
+- Fixed camera, 60 frames: **0 violations** (the static-world prev-frame test
+  is exact).
+- Real-frame-delta camera sweep (9 ticks/frame, t=2000..6100): **8.1
+  violations/frame** (audit upper bound — the rect test is loose at
+  silhouettes). Bias 0.5→4.0 barely moves it (661→595 over a 111-frame
+  window): structural disocclusion, not margin. Violations occur even at
+  <0.05 units of camera delta (dynamic occluders + audit looseness).
+- **Ground truth** (2-timestamp snapshot rig at the two worst audit poses,
+  N=4 OFF/ON, systematic-byte metric that excludes the known ~1-in-12 kernel
+  flip): 2918→2927 = 1,545 systematic bytes (~515 px, **0.025 %** of the
+  frame); 2972→2981 = 2,454 (~818 px, **0.039 %**). The pops are REAL,
+  single-frame, small, concentrated at fast-camera segments.
+
+Gates: flags-off is byte-null — city `37e62845` exact, fountain `51fff7cd`
+exact, render_gate 3/3, wasm links; snapshot pins cannot move (harness-forced
+inert). Scope: the cull is wired into the greets tick; city/chase never call
+it (the mechanism is scene-agnostic — prev-frame ZPage16 exists everywhere —
+but city's two-deferred-passes-per-frame structure needs its own
+which-pass-depth audit before wiring, deliberately not attempted here).
+
+### 7e. Revised verdict
+
+**§0's ceiling is CONFIRMED — now with code instead of extrapolation — with
+one honest correction in the user's favor.**
+
+- The user was right that §2's occluded-vert figure was granularity-bound at
+  the top end, and right to demand code: ship grid-8 chunks catch only 2.8 %
+  where size-2 chunks catch 6.7 % at the same pose. Coarse chunks DID
+  understate the catch.
+- But the ceiling saturates immediately: 31× more chunks buys 6.7 %→7.7 %,
+  squarely inside §2's 3–27 % envelope, because the transformed verts are the
+  looked-at wall. "A lot of perf headroom" is REFUTED by measurement: gross
+  reclaim (XFRM+SORT ≈ 0.4–0.8 ms) ≈ the hi-Z pool cost (~0.8 ms) at the best
+  poses, a net LOSS at wall-facing poses, plus a real (small) temporal pop and
+  +13 % XFRM overhead if fine chunking is left on without the cull.
+- The ~40 ms displaced front-end the user is feeling remains real — and
+  remains pointed at **chunk LOD (backlog S5)** and the **SoA transform**,
+  exactly as §5 concluded. B5 already banked the face-front-end; the deferred
+  shade-once + Z-early-reject already banked the pixels.
+
+What survives (kept in-tree, default-OFF): `--greets_chunk_size` (the knob
+chunk-LOD will want anyway), `--chunk_occlusion` + `--chunk_occl_verify` +
+`--vis_stats` (§5's Slice 0/1 machinery, now real code with a free occluder
+source and a working audit), and this measured record. If a future scene is
+genuinely geometry-front-end-bound with true in-frustum occlusion (deep
+portals, street-level city canyons), the §3 trip-wire now has a working
+prototype to light up instead of a research doc.
+
+---
+
+## 8. ADDENDUM 2026-08-05 — the MIRROR passes, measured per pass
+
+Status: **measurement complete, nothing culled, no default changed.** Prompted
+by a directive to "make frustum culling actually work for the mirror RTT
+passes" on the premise that a mirror clone's room-sized bsphere defeats the
+off-axis cull at `Transform.cpp:1186`. Two new default-OFF instruments landed
+for it: **`--xfrm_pass_prof=N`** (per-PASS front-end census — `--xfrm_prof` is
+main-view-only by construction) and **`--mirror_cull_census=N`** +
+**`--mirror_cull_census_cell=S`** (the clone-split CEILING, computed by
+re-running the *same* sphere test on the sub-spheres a split would produce).
+
+**They are COMPILE-TIME gated (`cmake -DFDS_VIS_CENSUS=ON`), not merely
+flag-gated, and that is a measured finding in its own right.** The first cut
+guarded every added statement with `if (flag)` and left the code in
+`Transform_Objects`. That is NOT byte-null in this build: `-O3 -flto
+-ffp-contract=fast` means carrying the never-taken branches changes which
+expressions the compiler contracts into FMAs in the *surrounding* vertex/face
+work. Isolated worktree, HEAD vs HEAD+patch, cold-cache city @ t=1961, each
+arm stable 2–3/3: **b2af24de → 850be968, 216 differing bytes of 6.2 M
+(0.0035 %), max |Δ| 44** — i.e. ~72 pixels landing on the other side of a
+raster/z boundary. Reverting only `Transform.cpp` restored the pin exactly, so
+it is that TU's codegen and not the `FeatureFlags.def` insertion or the
+`GreetsMirror` side. Moving the census body behind a `noinline` call boundary
+did not fix it (a third hash). `#if FDS_VIS_CENSUS` does: with it off the
+preprocessor removes every line, `Transform_Objects` is textually the
+un-instrumented function, and byte-nullity is guaranteed by construction —
+verified **census-OFF city = b2af24de, exact**, render_gate 3/3, and
+census-ON mirrortest byte-identical to its baseline (so the numbers below were
+taken without perturbing the render).
+
+*General lesson for this tree: "the flag is off so it is byte-null" is not a
+sound argument for anything added inside a hot `-ffp-contract=fast` function.
+Either prove it with a controlled A/B or gate it at compile time.*
+
+*Gate hygiene note found on the way: the city pin depends on whether
+`Runtime/cache/city_envmap_cube.bin` exists — the same binary hashes
+`2dd5e5dd` warm and `850be968` cold. Any city A/B must fix the cache state on
+both arms (the numbers above are all cold-cache).
+
+### 8a. Where the geometry front-end actually goes (`--xfrm_pass_prof`)
+
+greets, 1920×1080, `--deferred --greets_displace`, 8 poses (7 review poses +
+the t=5780 bench). Counts are exact and load-independent; ms are per frame,
+box shared with another agent's renders (load 10–18), so read them as
+"which pass dominates", not as clean absolutes. SHADOW/OFFSCREEN ms are
+summed across workers (core-ms); MAIN is serial frame-ms.
+
+| pass | calls/frame | meshes xformed/seen | verts xformed/seen | ms |
+|---|--:|--:|--:|--:|
+| MAIN | 1 | 43–112 / 229 | 852 k–958 k / 1 069 k | 4.2–6.8 |
+| **MIRROR-RTT** | **0.00** | — | — | **0** |
+| SHADOW | 33–36 | ~1 000 / 7 400–8 240 | 7.55–7.73 M / 17.5–19.4 M | 340–790 core-ms |
+| OFFSCREEN (env/SH probes) | 5.4 | ~362 / 1 238 | 2.70 M / 6.73 M | 13–60 core-ms |
+
+**Three structural facts the premise missed:**
+
+1. **There is no mirror RTT pass.** `--mirror_rtt` defaults to 0, so the
+   second-order RTT bake never runs in the shipping config — measured 0 calls
+   at every one of the 8 poses.
+2. **Even when it does run, the RTT HIDES every clone** (`UpdateAllMirrors`'
+   RTT scope clears `HTrack_Visible` on each `m.cloneMesh`, GreetsMirror.cpp
+   ~2670): a reflection of a reflection is what the RTT itself provides. So a
+   clone is never in an off-axis pass, and the off-axis per-plane test at
+   `Transform.cpp:1186` only ever sees the REAL scene — whose Piramid is
+   already chunked. That cull works.
+3. **The clone's cost is MAIN-VIEW.** Exactly ONE clone is active at the wall
+   poses; at 534 356 verts it is **50 % of what the main view sees and 56 % of
+   what it transforms**. (At t=2845 no mirror is potentially visible, the clone
+   is `HTrack_Visible`-cleared and costs nothing — that gate already works.)
+4. The passes/frame count is **~40**, not ~16: 1 main + ~34 shadow (7 omnis ×
+   6 cube faces + bakes) + ~5 env/SH probe faces + 0 RTT.
+
+### 8b. The clone-split CEILING (`--mirror_cull_census`)
+
+The census runs the mesh cull's own sphere test per sub-sphere, plus a second
+arm against the **mirror WINDOW** — the screen rect of the mirror's wall faces.
+The window matters because a clone paints only where `gb.mirrorId` equals its
+own `mirrorMaskTag`, so clone geometry projecting outside that rect is dead
+weight even when it is inside the camera frustum. Measured window sizes:
+**0.04–3.9 % of the screen.**
+
+**Arm A — one sub-sphere per SOURCE MESH** (the cheapest possible split: emit
+one clone TriMesh per source mesh; 228 spheres):
+
+| pose | window %screen | frustum-cullable | window-cullable |
+|---|--:|--:|--:|
+| t=5743 | 0.80 | 0.0 % | 30.3 % |
+| t=5780 | 0.80 | 8.2 % | 31.5 % |
+| t=5963 | 0.17 | 40.6 % | 41.3 % |
+| t=6133 | 0.06 | 33.1 % | 42.2 % |
+| t=6293 | 0.04 | 29.8 % | 41.8 % |
+| t=6097 | — | 36.7 % | (window rect unusable: a wall vert behind near) |
+| t=1588 | 3.89 | 2.7 % | 23.3 % |
+
+It **saturates at ~40 %**, and finer SOURCE chunking does not move it
+(`--greets_chunk_size` 0→1 at t=5743: 228→6 955 spheres, 30.3 %→41.4 %). The
+reason is structural: only the Piramid is chunked at source, so the statues /
+ceiling / robot arrive as ~11 room-sized ranges holding **51 %** of the clone.
+
+**Arm B — SPATIAL cells over the WHOLE clone** (`--mirror_cull_census_cell=S`,
+the granularity a real spatial split would have), frustum / window:
+
+| cell | sub-spheres | t=5743 | t=5780 | t=6133 |
+|---|--:|--:|--:|--:|
+| per-source-mesh | 228 | 0.0 / 30.3 | 8.2 / 31.5 | 33.1 / 42.2 |
+| 8 | **103** | 1.7 / **62.9** | 17.4 / **62.9** | 68.3 / **89.3** |
+| 4 | 425 | 5.2 / 72.4 | 18.8 / 72.4 | 74.5 / 94.7 |
+| 2 | 1 735 | 7.3 / 79.4 | 20.3 / 79.2 | 77.4 / 98.2 |
+| 1 | 5 174 | 8.4 / 82.0 | 20.7 / 82.3 | 79.0 / 99.3 |
+
+**The ceiling is 63 % at the wall poses and 89 % at a mirror-panel pose, at
+cell=8 — which is 103 sub-meshes, FEWER than the 228 a per-source split would
+make.** Two corrections to the premise fall out: the split must be SPATIAL
+over the clone (per-source-mesh caps at 40 %), and the cull that pays is the
+**mirror window**, not the frustum (frustum alone: 2–20 % at wall poses).
+
+Estimated win at cell=8, from the measured per-vert / per-face rates at t=5743
+(VERT 4.363 ms / 955 051 verts = 4.57 ns; FACE 1.473 ms / 143 931 tested =
+10.2 ns) — ESTIMATE, not an A/B of an implemented cull: 63 % × 534 356 verts =
+337 k verts ≈ **1.5 ms**, plus the matching face-loop share ≈ **0.6 ms**, i.e.
+**~2 ms off a 5.9 ms main-view `Transform_Objects` (−35 %)**, ~2.5 % of an
+~82 ms frame, for a sweep cost of 103 × 60 ns = 6 µs. Sort + raster savings on
+top are unquantified (opaque clone faces are currently rasterised over their
+full projection and rejected per pixel; the TRANSPARENT path already bounds
+clone batches by the window, RENDER.CPP ~940, the opaque path does not).
+
+### 8c. Acceleration structure (BVH / octree) — measured verdict: NO
+
+Per-frame mesh-level tests across all ~40 passes: **~9 150**, of which
+**~7 690 are rejections**. Cost of one rejected sweep, measured as the slope of
+the `--xfrm_prof` OTHER bucket against rejected-mesh count at t=5743
+(`--greets_chunk_size` 0/4/2/1 → 120/244/1 108/4 368 rejects, OTHER
+0.024/0.060/0.085/0.284 ms): **~55–61 ns**.
+
+So a *perfect* hierarchy that reduced the O(n) sweep to O(1) would reclaim
+**7 690 × 58 ns ≈ 0.45 core-ms/frame**, and ~90 % of that sits inside 12-way
+threaded shadow passes → well under 0.1 ms of wall-clock frame time. Against
+an ~82 ms frame that is not worth a BVH.
+
+And a hierarchy does **not** reduce transformed verts — with mesh-sized leaves
+it gives the same conservative answer the per-mesh spheres already give. The
+only lever that reduces survivors is finer leaves, and finer leaves measured a
+net LOSS in the main view (t=5743, `--greets_chunk_size` 0→1: verts
+955 051→923 221, −3.3 %, while `Transform_Objects` went 5.875→6.954 ms,
++1.08) — §7b's result, re-confirmed with the clone in frame.
+
+**The one place the "hierarchy" argument does pay is the clone, and there it
+is not a hierarchy**: 103 flat spatial cells already deliver 63–89 %, so the
+sweep stays trivially small and no tree is needed.
+
+### 8d. Cheaper alternative found while measuring (a look call, not a perf call)
+
+**49 % of the clone (261 768 of 534 356 verts) is the DISPLACED Piramid**, and
+it is being cloned at full tessellation to be seen through a window covering
+**0.04–0.8 % of the screen**. S1 already built a flat stand-in of exactly that
+geometry for offscreen consumers (`stone_shadow_proxy`, ~226 faces vs 87 256,
+`--greets_shadow_proxy`). Cloning the proxy instead of the displaced chunks
+removes 49 % of the clone unconditionally, at every pose, from a small change
+to `BuildMirror`'s source-mesh selection — versus a multi-day clone-split
+refactor for 63 %. It costs block-level relief in mirror reflections at a
+sub-1 % screen footprint: **a look call for the user, not a measurement.**
+
+### 8e. Why the split was NOT built here
+
+The ceiling justifies it, but the implementation is not the Piramid pattern
+copied over. A SPATIAL split breaks the invariant `UpdateMirror` relies on —
+`ClonedMeshRange{sourceMesh, vStart, vCount}` assumes each source mesh owns a
+CONTIGUOUS clone vertex range, and a spatial cell's verts are contiguous in
+neither the clone nor the source. It needs a per-clone-vertex source index
+(~2 MB/mirror) plus per-chunk `cloneFaceSrc`, and every `m.cloneMesh`
+consumer becomes a loop: the RTT hide scope, `MirrorShatter`,
+`DisplaceRebuild`, `MaterialEditor`, `EnvBake`, `MainLoop`. Plus the
+`Tri_Possessed` / per-chunk `Obj->Pos`+`Rot` allocation hazards GREETS.CPP
+documents. That is a real refactor with a pixel-risk surface across the mirror
+system, so it is specced here and left for a green-light rather than landed
+against a 2 ms estimate.
+
+---
+
+## 9. ADDENDUM 2026-08-06 — the per-MESH census, and the faceless mesh it found
+
+Status: **measured; one unconditional fix LANDED and byte-null at every gate;
+the two changes it was commissioned to justify are REFUTED by the same
+numbers.** Commissioned as "Phase 0" of an offscreen-geometry cut, on the
+premise from §8a that SHADOW is the geometry elephant (7.6 M verts/frame) and
+from §8d that 49 % of a mirror clone is the displaced Piramid. §8 measured
+those as *lumps*. This section decomposes them **by mesh and by material**,
+which is the granularity a "flatten the wall casters" decision actually turns
+on — and the decomposition says the lump is mostly not geometry at all.
+
+### 9a. The instrument — `--xfrm_pass_mesh_prof=N`
+
+Census build only (`cmake -S . -B build-census -G Ninja -DFDS_VIS_CENSUS=ON`),
+same compile-time gating and for the same reason as §8's instruments. It
+attributes every `Transform_Objects` mesh visit to (pass kind × TriMesh) via a
+**lock-free pointer-keyed table** — the shadow bakes transform on 12 workers
+and a mutex there would serialise them — and prints four tables at the same
+cadence as `--xfrm_pass_prof`:
+
+* `[XFRM-MESH]` — transformed verts per **authored object** (the
+  `Piramid.lwo:cNN` chunks and `momy.lwo::body` bins folded back together).
+* `[XFRM-TOP]` — the top individual meshes **with their face count**.
+* `[XFRM-MAT]` — per **material**, computed at dump time from each mesh's
+  `Face->Txtr` histogram and attributing that mesh's verts to its materials in
+  proportion to face count (so a chunk straddling `rooms`/`floor` is split, not
+  mis-assigned).
+* `[XFRM-ZERO]` — the line that mattered: the share of each pass owned by
+  meshes with `FIndex == 0`.
+
+### 9b. THE FINDING — two thirds of the shadow-pass geometry is a mesh with NO FACES
+
+`GREETS.CPP` ~2540 "retires" the original Piramid after the chunk split by
+zeroing its `FIndex` while **deliberately keeping its arrays alive** (a
+documented anti-UAF measure). Nothing else changed: the object stays on
+`ObjectHead`, its bsphere is still room-sized so the frustum cull can never
+reject it, it is not `Tri_NoShadowCast`, and `Transform_Objects` has **no
+`FIndex == 0` early-out**. So every pass that sees it runs the full per-vertex
+transform over its **16 596 verts** and then iterates a zero-length face loop.
+
+Measured, 1920×1080, `--bench=scene@scene=greets,iters=6`, census build, on
+fog-wt tip `ac1e2a7`, **10 review poses × the RECESS and LID shell arms**
+(`--parallax_pom=128`; NOT `--greets_displace`, which is retired):
+
+| arm (t=5743) | SHADOW verts/frame | of which FACELESS | MAIN | OFFSCREEN |
+|---|--:|--:|--:|--:|
+| recess shell | 540 706 | **365 112 (67.5 %)** | 25.1 % | 55.7 % |
+| lid shell | 539 870 | **365 112 (67.6 %)** | 25.1 % | 53.8 % |
+| flat POM (shipping, base tree) | 540 706 | **365 112 (67.5 %)** | 20.1 % | 48.2 % |
+| `--greets_displace` (retired, base tree) | 6 827 604 | **5 758 896 (84.3 %)** | 27.4 % | 52.3 % |
+
+Over all **20 runs (10 poses × 2 shell arms)** the faceless share is
+**SHADOW 66.3–69.5 %, OFFSCREEN 53.7–55.7 %, MAIN 18.7–72.3 %** (the MAIN
+extreme is t=5534, the corridor-looking-back pose, where the retired parent is
+**60.8 %** of everything the main camera transforms). It does not depend on the
+camera, because nothing culls it. The `--greets_displace` row is the important
+cross-check: §8a's headline "7.6 M shadow verts" was **~84 % this same mesh**,
+whose vert count grows with the tessellation it never draws.
+
+*Measurement note:* the 10-pose matrix was taken with the clone half of the fix
+(9d) already compiled in, so its MAIN/OFFSCREEN totals are the clone-fixed
+ones; SHADOW is unaffected either way (clones are `Tri_NoShadowCast`). The
+flat/`--greets_displace` rows are from the pristine base tree. Cross-check that
+`7bfbc87` did not move transform counts: SHADOW at t=5743 is 540 706 with
+365 112 faceless in **both** trees.
+
+### 9c. The same mesh is 37.7 % of every mirror clone — and it IS §8d's "49 % Piramid"
+
+`BuildMirrorImpl` skips a source mesh on `!T->Faces`, which the retired parent
+passes (its array is alive). Its verts are copied into the clone, mirrored,
+re-mirrored every frame by `UpdateMirror`, and transformed by every pass that
+sees the clone — while its zero-length face loop contributes **no clone face
+that could reference them**. A greets clone is 44 012 verts; **16 596 (37.7 %)
+are those orphans**. In the tessellated arm the parent carries 261 768 verts —
+**exactly the "261 768 (49 %) is the Piramid" figure §8d built its
+flat-proxy-cloning proposal on**. That 49 % was never displaced wall relief in
+the clone; it was orphan vertices. §8d's "look call for the user" is void:
+there is no look to trade.
+
+### 9d. The fix (LANDED, unconditional, byte-null)
+
+Two changes, both stating the same invariant:
+
+* `Transform.cpp` — `if (T->FIndex == 0) continue;` at the top of the mesh
+  loop. Everything this function produces is FList entries and every FList
+  entry comes from a Face. **Unconditional on purpose**: it is an invariant of
+  the loop, not a tunable, and §8 measured that a *never-taken* runtime branch
+  inside this `-ffp-contract=fast` function is itself not byte-null.
+* `GreetsMirror.cpp` — `|| T->FIndex == 0` on the clone COUNT and FILL loops
+  of both the simple and the compound mirror builder (kept in lockstep so the
+  `ClonedMeshRange` vStart offsets stay consistent).
+
+**Gates — HEAD vs FIX, same tree (fog-wt tip `ac1e2a7` + the instrument
+commit), same Runtime, both arms run back to back. 17 paired hashes, ZERO
+mismatches:**
+
+| gate | HEAD | FIX |
+|---|---|---|
+| city @t=1961, **cold** cache | `b2af24de` | `b2af24de` |
+| fountain @t=2500 | `51fff7cd` | `51fff7cd` |
+| greets @t=1588 (pin recipe) | `06e1d4d1` | `06e1d4d1` |
+| render_gate mirrortest/conetest/halotest | 3/3 PASS | 3/3 PASS |
+| greets review poses t=5534/5743/5814/5854/5963/6133/6293 × {flat, recess shell} | 14 hashes | **identical, all 14** |
+
+t=6133 and t=6293 are the mirror-panel poses, so the clone change is gated
+where it bites; t=5534/5814/5854 are the 2026-08-06 additions. (The greets pin
+moved `aed22c16` → `06e1d4d1` between the two trees — that is `7bfbc87`'s
+bitangent-handedness fix, not this change; both arms of each tree agree.)
+`--xfrm_prof` independently confirms structural nullity: `fTested 16607 /
+fPushed 7916` in **both** arms — not one face changed.
+
+**Perf, measured:**
+
+* Main-view `Transform_Objects` (serial frame time), `--xfrm_prof=20`, 5
+  interleaved rounds, min-of-arm: **0.567 → 0.424 ms (−0.143, −25.2 %)**; the
+  VERT stage alone 0.382 → 0.237 (−38 %). Main-view transformed verts
+  **82 639 → 49 447 (−40.2 %)** = the parent (16 596) plus its copy inside the
+  one active clone (16 596).
+* The census re-run **with the fix compiled in** (same instrument, same pose,
+  so this is measured, not arithmetic):
+
+  | pass | verts/frame | core-ms/frame | fPushed |
+  |---|--:|--:|--:|
+  | MAIN | 82 639 → **49 447** (−40.2 %) | 0.642 → **0.454** | 7 916 → 7 916 |
+  | SHADOW | 540 706 → **175 594** (−67.5 %) | 23.073 → **10.672** | 24 735.2 → 24 735.2 |
+  | OFFSCREEN | 309 740 → **118 886** (−61.6 %) | 2.123 → **1.175** | 7 837 → 7 837 |
+  | TOTAL front end | | 25.839 → **12.301** (−52.4 %) | |
+
+  The SHADOW mesh-cull rate rises 57.1 % → 77.5 % for free (the room-sized
+  bsphere that could never be rejected is simply gone), and the clone drops
+  44 012 → 27 416 verts. **`fPushed` is identical in every pass** — the whole
+  reduction is work that produced nothing. NB the removed shadow verts cost
+  ~34 ns each (12.4 core-ms / 365 112) versus the main view's 4.62 ns: the
+  retired parent is 2.26 MB of Vertex per visit × 22 visits/frame, i.e. cold
+  traffic, not cache-resident work. These ms are census-build core-ms summed
+  across workers, taken sequentially on a shared box — read the *ratios* as
+  solid (MAIN 0.642→0.454 here matches the clean build's 0.567→0.424 min) and
+  the absolute wall-clock effect as ~13.5 core-ms ÷ the pool ≈ 1 ms.
+* **Whole-frame delta is NOT resolvable on this box.** 12-thread bench: 6
+  interleaved rounds spanned 51–250 ms/iter under load 15–20, min-head 51.353
+  vs min-fix 51.134. `FDS_THREADS=1`: 5 rounds spanned 374–1507 ms/iter,
+  min-head 374.295 vs min-fix 374.583. Both deltas are inside the noise, which
+  is what §0 predicts — the frame is dominated by per-pixel deferred lighting
+  that no geometry change can touch.
+
+Cost of the removal elsewhere: the retired parent no longer gets a
+`BSphereScreenPos`, so the per-mesh debug-label overlay stops labelling a mesh
+that draws nothing. Nothing else read it.
+
+### 9e. What the census says about the two proposals it was asked to justify
+
+**"Mirrors should reflect the flat proxy (but still do the parallax)" —
+already true in the shipping and shell arms; nothing to build.** Tessellation
+is retired, so the `rooms`/`floor` geometry the clone copies IS the flat
+authored geometry (`rooms`: 588 verts / 196 faces; the `--greets_shadow_proxy`
+stand-in is ~226 faces of *the same* pre-displacement surface). `PomShell_Build`
+runs at GREETS.CPP:1836, **before** the mirrors are built at :2773, and the
+clone face is a `CF = OF` copy, so it inherits `PomShellGroup` and the same
+`Material*` — the march is armed on clone faces by exactly the same
+material-derived `ctx` (`Mekalele.h` :2907–2942 read only `F->Txtr` and
+`F->PomShellGroup`, with no clone exclusion). The perf that motivated the swap
+was the 49 % orphan block, which 9d removed at zero look cost. Sourcing the
+clone from the proxy on top of that would move **~1.8 k of 27 416** remaining
+clone verts and swap flat geometry for the same flat geometry.
+
+*Verified rather than assumed, and re-verified on current HEAD.* At t=1588
+(recess shell arm, `--parallax_pom=128` — 32 steps leaves pixels unresolved and
+would have measured an artifact) the mirror's own `gb.mirrorId` footprint —
+located by diffing a `--greets_mirror_debug_mask` render against the plain one
+— is x[698..835] y[0..244], **32 674 px (1.58 % of screen)**. Re-rendering that
+arm with `--no-parallax --parallax_pom=0` changes **31 583 of those 32 674 px
+(96.7 %), mean |Δ| 42.2, max 449** (pre-`7bfbc87`: 96.3 %, mean 40.8 — the
+handedness fix did not disturb it). The march runs inside the reflection and
+the relief reads there; crops confirm the mortar grooves are shaded in the
+mirrored masonry and flatten without it. So the user's "still do the parallax"
+requirement is **already met**, and there is no geometry swap left that would
+keep it.
+
+**"Flatten the wall casters for the shadow passes" — buys ~1–2 %, and the
+user's feared wall-look cost buys nothing back.** Per-material, t=5743,
+shipping arm: `rooms` + `rooms::mirUV` = **2 506 of 540 706 shadow verts
+(0.46 %)**; adding `floor*` and `siling` reaches ~4 000 (0.74 %). After 9d
+that is 4 000 of 175 594 = **2.3 %** of a pass whose whole front end is
+~7 core-ms. `--greets_shadow_proxy` was sized against ~81 k *displaced* faces;
+with tessellation retired **that win is already banked** — the walls the
+shadow bake rasterises are already the ~226-face flat surface the proxy would
+substitute.
+
+### 9f. What is actually left, ranked (post-9d, t=5743, shipping arm)
+
+SHADOW is 175 594 verts/frame over 29 calls. Ranked by share:
+
+| # | target | verts/frame | share | note |
+|---|---|--:|--:|---|
+| 1 | `Hull.lwo` (robot) | 82 800 | 47.2 % | 2 400 faces / 7 200 verts, transformed in ~11.5 of 29 shadow calls. LOD or per-light culling are the levers; both are look-neutral in a shadow map. |
+| 2 | `Piramid.lwo:cNN` chunks | 80 635 | 45.9 % | already chunked; §7b measured finer chunking a net LOSS. |
+| 3 | robot legs | 11 403 | 6.5 % | |
+| 4 | **wall casters (`rooms`/`floor`/`siling`)** | **~4 000** | **2.3 %** | **not worth flattening — see 9e.** |
+
+A separate item the census surfaced, **not** actioned here because it is a
+look call: mirror CLONES are hidden inside the mirror RTT scope but **not**
+inside the env/SH probe bakes — 110 030 of 309 740 OFFSCREEN verts/frame
+(35.5 %) pre-9d, ~68 540 post-9d, are clone meshes being transformed for
+probes. Whether a probe should see a reflection at all is the user's call.
+
+---
+
+## 10. ADDENDUM 2026-08-06 (later) — the mirror WINDOW cull, and the orphan CLONE VERTICES the re-measurement found
+
+Status: **one unconditional fix LANDED and byte-identical at 21 gates in both
+arms (`964bf1d`); one further correctness fix landed behind a default-OFF flag
+and measured byte-identical too; the SPATIAL CLONE SPLIT §8e specced is
+REFUTED for the shipping arm by the same numbers and de-scoped.** Commissioned
+from the user's question — *"a clone is culled by the frustum and never by the
+mirror window — can we improve something here?"* — with §8b's measured ceiling
+(63 % at wall poses, 89 % at panel poses, cell = 8) and its ~2 ms estimate as
+the brief.
+
+**Step 1 re-measured that ceiling on current HEAD and it had moved, because
+§8b's headline was mostly orphan vertices — and so, it turned out, was most of
+what remained.**
+
+### 10a. What §8b's ceiling was actually made of
+
+§8b measured the clone at **534 356 verts** and found cell = 8 spatial cells
+window-cullable at **62.9 %** at t=5743 while per-source-mesh saturated at
+30.3 %. §9c then established that **261 768 of those 534 356 (49 %) were the
+retired faceless Piramid parent**, and `799c808` removed them. Re-running the
+same instrument at t=5743 on the post-9d clone:
+
+| arm | clone verts | cell | sub-spheres | frustum-cullable | window-cullable |
+|---|--:|---|--:|--:|--:|
+| shipping flat | 27 416 | per-source-mesh | 8 | 0.0 % | **37.4 %** |
+| shipping flat | 27 416 | 8 | 60 | 0.1 % | **25.6 %** |
+| shipping flat | 27 416 | 2 | 223 | 0.6 % | 41.6 % |
+| `--greets_displace` | 272 751 | per-source-mesh | 9 | 0.0 % | 3.8 % |
+| `--greets_displace` | 272 751 | 8 | 103 | 1.6 % | **61.6 %** |
+| `--greets_displace` | 272 751 | 2 | 1 735 | 7.1 % | 77.8 % |
+
+At the mirror-PANEL poses the spatial cells still win big (t=6133 shipping:
+per-mesh 39.5 % → cell 8 **93.7 %**, of which the plain frustum already gets
+89.2 %; t=6293 the same). But **at the wall pose the spatial split now culls
+LESS than a per-source-mesh split** (25.6 % vs 37.4 %), which inverts §8b's
+central claim. The mechanism is §9c's: the margin spatial cells held over
+per-source-mesh was the room-spanning orphan block, and that block is gone.
+Window sizes are unchanged (0.04–0.80 % of screen at these poses), and at
+t=5534 (the corridor-looking-back pose) **no mirror is active at all**, so the
+clone costs nothing there and no cull can help.
+
+### 10b. THE FINDING — 90 % of a clone's vertices are referenced by no clone face
+
+The clone's VERTEX fill copied **every** vertex of every surviving source
+mesh. Its FACE fill drops faces **four** ways: `isMirrorSurface`, a null
+corner, `--greets_displace_flat_mirror`'s `Face_MainOnly` skip, and the *"in
+FRONT of the mirror plane"* side test. Nothing fed those rejections back into
+the vertex selection. Measured with a new compile-time-gated `[MIRROR-ORPHAN]`
+line, greets t=5743:
+
+| arm | mirror | clone verts | referenced by a clone face | ORPHAN |
+|---|---|--:|--:|--:|
+| `--greets_displace` | teleporter | 272 751 | 26 861 | **245 890 (90.2 %)** |
+| `--greets_displace` | P_TEXT.JPG#5 | 272 751 | 26 765 | 245 986 (90.2 %) |
+| `--greets_displace` | P_TEXT.JPG#11 | 272 751 | 1 893 | 270 858 (99.3 %) |
+| `--greets_displace` | P_TEXT.JPG#13 | 272 751 | 24 476 | 248 275 (91.0 %) |
+| shipping flat | teleporter | 27 416 | 27 370 | 46 (0.2 %) |
+| shipping flat | P_TEXT.JPG#5 | 27 416 | 27 274 | 142 (0.5 %) |
+| shipping flat | **P_TEXT.JPG#11** | 27 416 | **1 926** | **25 490 (93.0 %)** |
+| shipping flat | P_TEXT.JPG#13 | 27 416 | 24 922 | 2 494 (9.1 %) |
+
+This is the class §9d removed at MESH granularity (`FIndex == 0`), one level
+down at VERTEX granularity — and it is **most of the clone**.
+
+Two separate causes, worth keeping apart:
+
+1. **The displaced arm's 90 % is `--greets_displace_flat_mirror` doing half
+   its job.** The flag's Rule 3 skips a source mesh only when *every* one of
+   its faces is rejected, and greets merges the room into meshes that also
+   carry non-`Face_MainOnly` faces — so the flag dropped the displaced FACES
+   (90 890 → 9 198 per clone, verified) while leaving every displaced VERTEX
+   in the clone. Its documented *"so the saving lands in the transform phase,
+   not only in RNDR"* was therefore **not happening**. With
+   `--no-greets_displace_flat_mirror` the same clone is 272 588 verts / 90 890
+   faces and only 0.1 % orphan — i.e. the orphans are exactly the vertices the
+   flag orphaned.
+2. **The shipping arm's 93 % on mirror `P_TEXT.JPG#11` is the plane-side
+   test.** That mirror keeps 642 of ~9 200 faces (the rest are behind its
+   plane), so 1 926 of 27 416 vertices are reachable. This one is
+   arm-independent and has been there since the mirror system was built.
+
+### 10c. The fix (LANDED `964bf1d`, unconditional, byte-identical at 21 gates)
+
+Clone only the vertices a surviving clone face references. Deliberately **not**
+§8e's spatial split:
+
+* ONE shared `cloneFaceLive()` predicate decides face survival; the count loop
+  sizes the vertex array EXACTLY with it and the fill loop caches it. The
+  count/fill lockstep this file keeps warning about cannot drift when there is
+  one copy of the test. The FACE count stays the loose one on purpose —
+  `totalFaces == 0` returns *without* reclaiming the mirror id while
+  `fOfs == 0` reclaims it, and `gb.mirrorId` is a rendered value.
+* `Mirror::cloneSrcVert` maps clone vertex → source vertex. source→clone is a
+  COMPACTION, not the identity, so every per-frame refresh goes through it:
+  `UpdateMirror`'s Pos/N/Tangent/colour re-mirror and `DisplaceRebuild`'s
+  `Vertex::ShellH` copy (18a58ae's fix — the one site outside GreetsMirror.cpp
+  that assumed the identity).
+* **`ClonedMeshRange` stays CONTIGUOUS on the clone side**, which is why none
+  of §8e's hazards apply: the census sub-spheres, `cloneFaceSrc`, the RTT hide
+  scope, `MirrorShatter`, `MaterialEditor` and `EnvBake` are untouched, and
+  there is still exactly one `m.cloneMesh` per mirror.
+
+**Front-end effect, t=5743, exact counts (`--xfrm_pass_mesh_prof`, census
+build, both arms):**
+
+| arm | pass | HEAD | FIX | delta |
+|---|---|--:|--:|--:|
+| `--greets_displace` | MAIN | 545 339 | 299 449 | **−245 890 (−45.1 %)** |
+| `--greets_displace` | OFFSCREEN | 3 086 425 | 2 407 892 | **−678 533 (−22.0 %)** |
+| `--greets_displace` | SHADOW | 5 857 441 | 5 857 441 | 0 |
+| shipping flat | MAIN | 54 832 | 54 786 | −46 |
+| shipping flat | OFFSCREEN | 219 614 | 200 464 | −19 150 (−8.7 %) |
+| shipping flat | SHADOW | 460 071 | 460 071 | 0 |
+
+SHADOW is unchanged **by construction** — clones are `Tri_NoShadowCast`. The
+active clone's share of the greets main view stays 50 % in the flat arm (its
+teleporter clone was only 0.2 % orphan) and falls **50 % → 9 %** in the
+displaced one. HEAD's clone share of OFFSCREEN, 68 540 verts/frame, reproduces
+§9f's figure exactly; the fix takes it to 49 390.
+
+**Serial main-view `Transform_Objects`** (`--xfrm_prof`, interleaved
+HEAD/FIX/FIX+tight rounds, min-of-arm, load 24–40 on a shared box — read the
+ratios as solid and the absolutes as indicative). **In the shipping arm the win
+is at the MIRROR-PANEL review poses, not the wall pose**, because that is where
+the 93 %-orphan mirror `P_TEXT.JPG#11` is the active clone:
+
+| pose | arm | main verts HEAD → FIX | XFRM ms HEAD → FIX | VERT stage | fPushed |
+|---|---|--:|--:|--:|--:|
+| t=5743 | `--greets_displace` | 545 339 → **299 449 (−45.1 %)** | 3.686 → **2.691 (−27.0 %)** | 2.527 → **1.410 (−44.2 %)** | 34 754 → 34 754 |
+| t=6133 (panel) | shipping flat | 54 272 → **28 782 (−47.0 %)** | 0.304 → **0.189 (−37.8 %)** | 0.234 → 0.121 | 2 227 → 2 227 |
+| t=6293 (panel) | shipping flat | 54 272 → **28 782 (−47.0 %)** | 0.305 → **0.200 (−34.4 %)** | 0.235 → 0.123 | 2 038 → 2 038 |
+| t=5743 (wall) | shipping flat | 54 832 → 54 786 (−46) | 0.409 → 0.442 | 0.232 → 0.252 | 7 930 → 7 930 |
+
+n = 5 rounds per arm for the flat rows, 3–4 for the displaced pair (the sweep
+was cut short at load 33–37; the 27 % effect is an order of magnitude above the
+round-to-round spread).
+
+`fPushed` is identical at every pose in every arm — **not one face changed**,
+which is the structural statement that the removed work produced nothing. The
+t=5743 row is a null-change pose where the measured 0.033 ms is load noise on
+a shared box, not a regression signal; it is reported rather than dropped.
+
+### 10d. `--mirror_clone_tight_bsphere` — the cull the user actually asked about
+
+With the clone compacted, its bounding sphere is stale by construction: it is
+still stamped from the bbox of **every source vertex the builder walked**.
+Mirror `P_TEXT.JPG#11` keeps 1 926 vertices in one corner of the room yet its
+sphere spans the whole mirrored room, so **no camera pose can reject it** —
+that is the mechanism behind "a clone is culled by the frustum and never by
+the mirror window". Tightening the sphere to the KEPT vertices is the
+*correct* sphere, not merely a conservative one: a clone cannot draw a vertex
+it does not carry, so a clone this rejects had no vertex in the frustum.
+
+Measured effect on the sphere at t=5743, shipping arm: `P_TEXT.JPG#11`'s z
+extent 81.0 → 26.6 world units, `P_TEXT.JPG#13`'s 80.8 → 66.3.
+
+It is **default OFF**, and after measuring it the honest reason is not the
+one anticipated. It changes cull outcomes and therefore the `Tri_Inside` /
+`Tri_Ahead` classification that selects the clipped-vs-unclipped vertex path,
+so it was expected to need a divergence budget — but it measured
+**byte-identical at all 21 gates in both arms**, *because it culls nothing*:
+main-view transformed verts are identical with it ON and OFF at every one of
+the six (arm × pose) pairs measured (flat t=5743/6133/6293, displaced t=5743;
+28 782 / 54 786 / 299 449 either way). The reason is 10e's table: even the
+correct tight sphere over an entire compacted clone spans more than a cell,
+and the whole-clone sphere is **0.0 % frustum-cullable at every pose measured**
+whether it is loose or tight. **So: keep it OFF. It is a correctness fix with
+no measured win** — worth having on the shelf for whoever revisits a split,
+not worth flipping.
+
+*Do not read the byte-identity as evidence that a tighter sphere is safe in
+general; here it is evidence that it did nothing.*
+
+### 10e. Verdict on §8e's spatial clone split — DE-SCOPED, with the numbers
+
+After 10c the clone is ~27 k verts in **both** arms (26 861 displaced / 27 370
+flat at t=5743), so the split is now sized against a target an order of
+magnitude smaller than the one §8b costed:
+
+* Main-view `Transform_Objects` in the shipping arm is **0.19–0.44 ms total**.
+  §8b's "~2 ms off a 5.9 ms pass" was computed against a 534 356-vert clone
+  that was 49 % retired-Piramid orphans and 45 % more orphans on top; the
+  arithmetic does not survive either removal.
+* The split's own cost is unchanged and is the expensive part: a per-clone-
+  vertex source index, per-chunk `cloneFaceSrc`, and every `m.cloneMesh`
+  consumer becoming a loop (RTT hide scope, `MirrorShatter`,
+  `DisplaceRebuild`, `MaterialEditor`, `EnvBake`, `MainLoop`), with the
+  `Tri_Possessed` / per-chunk Pos+Rot allocation hazards GREETS.CPP documents.
+* And the ceiling it would chase is now **37.4 % per-source-mesh vs 25.6 %
+  spatial at the wall pose** — the split is the *worse* of the two granularities
+  exactly where it was supposed to pay.
+
+**The ceiling RE-MEASURED on the compacted clone** — this is what a split
+would actually be chasing now (same instrument, `--mirror_cull_census`):
+
+| arm | pose | clone verts | cell | sub-spheres | frustum-cullable | window-cullable |
+|---|---|--:|---|--:|--:|--:|
+| flat | t=5743 | 27 370 | per-mesh | 8 | 0.0 % | **37.5 %** (10 260 v) |
+| flat | t=5743 | 27 370 | 8 | 60 | 0.1 % | 25.7 % (7 028 v) |
+| flat | t=5743 | 27 370 | 2 | 223 | 0.6 % | 41.7 % (11 414 v) |
+| flat | t=6133 / t=6293 | **1 926** | per-mesh | 1 | 0.0 % | 0.0 % |
+| flat | t=6133 / t=6293 | 1 926 | 8 | 22 | 98.1 % | 99.8 % (**1 923 v**) |
+| displ | t=5743 | 26 861 | per-mesh | 9 | 0.0 % | 38.2 % (10 260 v) |
+| displ | t=5743 | 26 861 | 8 | 60 | 0.1 % | 25.1 % (6 751 v) |
+| displ | t=6133 / t=6293 | **1 893** | 8 | 22 | 99.0 % | 99.9 % (**1 891 v**) |
+
+At the mirror-PANEL poses a split would cull 98–100 % — **of 1 926 vertices**,
+i.e. ~1 890 verts ≈ 0.01 ms. At the wall pose the best granularity is
+per-source-mesh at 10 260 verts ≈ 0.05 ms of a 0.44 ms pass, and the spatial
+cells §8e specced are the *worse* of the two there. The whole-clone sphere is
+**0.0 % frustum-cullable at every pose in both arms**, loose or tight — which
+is the user's observation, confirmed exactly, and now worth almost nothing.
+
+**Recommendation: do not build the spatial split, and do not flip
+`--mirror_clone_tight_bsphere` on** (10d: it culls nothing measurable). The one
+leftover with real size behind it is to **bound the OPAQUE clone raster by the
+mirror window the way the TRANSPARENT path already does** (RENDER.CPP
+~936–990: a clone batch's bound is its mirror's stamped `gb.mirrorId` window,
+not the clone geometry's projection). Opaque clone faces are still rasterised
+over their full projection and rejected per pixel, and RNDR was 7.19 of the
+clone's 11.40 ms in the pre-`1a91ed5` displaced arm — the un-attacked half of
+the original question, needing no clone split at all. NOT re-measured after
+`964bf1d`; measure before building.

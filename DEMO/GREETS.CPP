@@ -26,8 +26,14 @@
 #include <RENDER/GreetsMirror.h>
 #include <RENDER/MirrorShatter.h>
 #include "RENDER/EnvBake.h"
+#include "RENDER/WorldAabb.h"
+#include "RENDER/ChunkOcclusion.h"
 #include "FillerTest.h"
+
+// FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp).
+void Xtrace_WriteFile(const char*);
 #include "MeshOps.h"
+#include "DisplaceRebuild.h"   // live shell rebuild (editor displacement panel)
 #include "MaterialImport.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
@@ -56,6 +62,13 @@ static Scene *GreetSc;
 // call at scene init; per-frame `UpdateAllMirrors` re-mirrors every
 // dynamic source mesh + cloned omni for each.
 static std::vector<fds::Mirror> g_greetsMirrors;
+// Handed to the live displacement rebuild (DEMO/DisplaceRebuild.cpp), which
+// has to exclude the clone meshes from the shell build and re-stamp each clone
+// face's patch id from its source afterwards. Null when no mirror was built.
+std::vector<fds::Mirror> *Greets_MirrorList()
+{
+	return g_greetsMirrors.empty() ? nullptr : &g_greetsMirrors;
+}
 // Second-order RTT slots (one per outer-mirror × inner-panel pair),
 // prepared at init when --mirror-rtt is on; textures re-rendered per
 // frame by RenderSecondOrderMirrors before the main transform.
@@ -173,11 +186,24 @@ static int32_t CHPartTime = 20.0f*100;
 static void SceneCorrections()
 {
 	// a crazy hack used to adjust omnilights in code.
-	float OmniRangeMult[] = 
-	//	ent1  ent2  ctr1  ctr2  crd1  hal1  hal2  rbtl  rbtr  rbth
-		{2.0,  2.0,  2.0, 2.0,  2.0,  1.7,  1.7,  2.0,  2.0,  2.0};
-//		{0.9,  0.9,  0.3,  0.3,  0.4,  2.0,  2.0,  0.5,  0.5,  0.5};
-//		{0.01,  0.01,  0.01,  0.01,  0.01,  1.0,  1.0,  0.01,  0.01,  0.01};
+	//
+	// Light RANGE is no longer adjusted here — it is AUTHORED, in
+	// Authoring/greets/JENINPYR-new-2.LWS ("LightRange <f>" per AddLight
+	// block) → tools/lwsread → the FLD Range envelope → Omni::Range →
+	// Omni::IRange, evaluated per frame by Animate_Objects
+	// (FDS/RENDER/Transform.cpp). Two code-side patches used to sit on top
+	// of that and both are gone:
+	//   * this function's `OmniRangeMult[] = {2,2,2,2,2,1.7,1.7,2,2,2}`
+	//     (Spline_Scale on O->Range), and
+	//   * Initialize_Greets' `greets_omni_default_range` patch, which ran
+	//     before the first Animate_Objects, saw IRange == 0 (which means
+	//     "spline not evaluated yet", NOT "no authored range" — see
+	//     FDS/FLD/FLD_CONV.CPP) and overwrote BOTH IRange and Range.Keys[0]
+	//     with a flat 30, silently discarding the multipliers above AND the
+	//     authored envelope.
+	// The LWS now carries the final rendered value (30 on all ten), so the
+	// authoring file says what actually renders and per-light tuning is an
+	// authoring act. Verified byte-identical at the greets pin.
 	float OmniSizeMult[] =
 	//	ent1  ent2  ctr1  ctr2  crd1  hal1  hal2  rbtl  rbtr  rbth
 		{1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.5,  1.5,  1.5};
@@ -209,8 +235,8 @@ static void SceneCorrections()
 			O->Flags &=~Omni_Flare;
 		Spline_Scale(&O->Size, OmniSizeMult[index]);
 
-		// adjust range
-		Spline_Scale(&O->Range, OmniRangeMult[index]);
+		// (range: authored in the LWS — see the note at the top of this
+		// function. Nothing to do here.)
 		index++;
 	}
 
@@ -334,6 +360,28 @@ struct GreetsGenerator
 		CodeBuf = (DWord *)_aligned_malloc(256 * 256 * 4, 16);
 		OldBuf = (DWord*)_aligned_malloc(256 * 256 * 4, 16);
 		ScaledBuf = (DWord*)_aligned_malloc(256 * 256 * 4, 16);
+		// ── DETERMINISM (2026-08-05) ────────────────────────────────────────
+		// OldBuf is the SMEAR FEEDBACK source. Render() does
+		//   GridRendererT(Smear_GP, &OldImage /* == OldBuf */, ScaledBuf, …)
+		//   AlphaBlend(CodeBuf, ScaledBuf, …);  memcpy(OldBuf, ScaledBuf, …)
+		//   TexutreRemap()          // OldBuf → OutBuf == Txtr->Mipmap[0]
+		// so the FIRST frame resampled whatever _aligned_malloc handed back and
+		// fed it forward into the greets screen texture from then on. Left
+		// uninitialized, the code screens rendered raw heap garbage: different
+		// every run, and different on every render of the SAME timestamp.
+		// PROVEN, not inferred: at greets@t=1588 every other kernel input hashes
+		// bit-identical across divergent runs (geometry, Z, all G-buffer planes,
+		// omnis, static shadow maps, static-shadow lightmaps + coverage bits,
+		// vertex colours, and every source texture at its true BPP extent) —
+		// only the sampled screen texel differed (`tex=9bd0204f` vs `5ecf175c`
+		// at px 1113,376, material `screen2`). Zeroing here makes that texel
+		// stable and is also the correct start for a decaying smear trail.
+		// ScaledBuf/CodeBuf are GridRendererT destinations; zero them too so a
+		// partial write can never resurrect the same bug class.
+		// Init-time only — no per-frame cost. See docs/SESSION_STATE.md.
+		memset(OldBuf,    0, 256 * 256 * 4);
+		memset(ScaledBuf, 0, 256 * 256 * 4);
+		memset(CodeBuf,   0, 256 * 256 * 4);
 
 
 		CodeTexture.FileName = strdup("TEXTURES/CODE.JPG");
@@ -789,6 +837,22 @@ static void BuildGreetsShatter()
 	//       all-inside test rejects the surrounding wall; behind-front
 	//       rejects the coplanar front faces; depth is slabbed so we
 	//       don't reach far geometry.
+	//       *** The "all-inside test rejects the surrounding wall" claim is
+	//       true only of FLAT geometry, and that was the bug the user hit as
+	//       "when the mirror breaks it takes the wall behind it with it —
+	//       it's caused by the displace flag". (A) had NO material filter, so
+	//       its only scoping was the footprint + a depth slab reaching
+	//       0.5*min(span) = 5.93u BEHIND the glass — and the stone wall
+	//       'rooms' sits inside that slab. Flat, 'rooms' is 2 room-spanning
+	//       quads and no face fits the 14.55x11.86 footprint (measured: (A)
+	//       contributes ZERO faces (B) didn't already have). Under
+	//       --greets_displace, DisplaceStoneSubdiv splits 'rooms' into ~68.5k
+	//       faces and 2436 of them fit entirely inside it → the break hides
+	//       the WALL, leaving a hole into the void once the shards fall.
+	//       --greets_shatter_screen_mat_only (default ON) scopes (A) by the
+	//       same material test (B)/(C) use, so the mirror can only take its
+	//       own geometry with it. Measured hide-face counts:
+	//       450 flat / 2886 displaced before → 450 / 450 after.
 	//   (B) the emissive frame ("screen emiter*") — it PROTRUDES in front
 	//       of the glass (positive depth) and sits just OUTSIDE the glass
 	//       rect, so (A) never catches it; that's the black border on the
@@ -808,7 +872,7 @@ static void BuildGreetsShatter()
 		// neighbouring screens on other planes don't match here).
 		const float uExp = 1.00f * (u1 - u0), vExp = 1.00f * (v1 - v0);
 		const bool  dump = std::getenv("FDS_GREETS_SHATTER_BOXDUMP") != nullptr;
-		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0;
+		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0, nMatRejected = 0;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh) continue;
 			TriMesh *T = (TriMesh*)Obj->Data;
@@ -843,7 +907,13 @@ static void BuildGreetsShatter()
 					// neighbours that share the plane.
 					if (pu < u0 - uPan || pu > u1 + uPan || pv < v0 - vPan || pv > v1 + vPan) inPanel = false;
 				}
-				const bool isBox   = inGlass && behindFront;          // (A) box body
+				// (A) box body. The material test is the scoping the geometric
+				// footprint cannot provide once the room shell is tessellated —
+				// see the block comment above. --no-greets_shatter_screen_mat_only
+				// restores the unscoped collector (the wall-eating arm).
+				const bool boxMatOK = isFrameMat ||
+				    !fds::FeatureFlags::greets_shatter_screen_mat_only();
+				const bool isBox   = inGlass && behindFront && boxMatOK;  // (A) box body
 				const bool isFrame = inExp   && isFrameMat;           // (B) frame in footprint
 				// (C) The mirror cluster is only a SUB-RECTANGLE of the physical
 				// glass panel; the rest of the coplanar 'screen*' glass survives
@@ -851,6 +921,9 @@ static void BuildGreetsShatter()
 				// by a generous (3x) footprint so it can't reach a different
 				// screen that merely shares this X-plane far away in Z.
 				const bool isPanelFace = coplanar && isFrameMat && inPanel; // (C)
+				// Census: faces rule (A) WOULD have taken without the material
+				// scope. Under --greets_displace this is the displaced wall.
+				if (inGlass && behindFront && !isFrameMat) ++nMatRejected;
 				if (isBox || isFrame || isPanelFace) {
 					g_greetsScreenBoxFaces.push_back(&F);
 					if (isFrame) ++nFrame;
@@ -864,9 +937,13 @@ static void BuildGreetsShatter()
 		}
 		if (dump)
 			std::fprintf(stderr, "[GREETS-SHATTER] hide faces=%zu (frame=%d) depth=[%.3f..%.3f] "
-			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
+			             "(maxDepth=%.3f span u=%.2f v=%.2f) non-screen-mat in rule(A) "
+			             "footprint=%d (%s)\n",
 			             g_greetsScreenBoxFaces.size(), nFrame, dmin, dmax, maxDepth,
-			             u1-u0, v1-v0);
+			             u1-u0, v1-v0, nMatRejected,
+			             fds::FeatureFlags::greets_shatter_screen_mat_only()
+			                 ? "REJECTED by --greets_shatter_screen_mat_only"
+			                 : "COLLECTED — the wall goes with the mirror");
 		// One-shot per-material census over a GENEROUS region around the
 		// screen (0.6x footprint margin, 1.5x depth slab), tallying total
 		// vs collected per material so we can see what survives the break
@@ -1016,19 +1093,158 @@ static void GreetsApplyInitDefaults()
 	// is visually adequate for lights that near-always sit close to their
 	// caster and saves ~1 ms of bake (measured 2026-07-01).
 	FF::setDefault(FF::IntId::greets_moving_omni_shadow_res, 128);
-	FF::setDefault(FF::FloatId::greets_omni_default_range, 30.0f);
+	// greets_omni_default_range stays at its .def default of 0 (inert).
+	// Omni ranges are authored in Authoring/greets/JENINPYR-new-2.LWS; the
+	// flag is a hard override for tuning only. It used to default to 30
+	// here and unconditionally flattened all ten authored ranges.
 	FF::setDefault(FF::BoolId::shard_deferred,          true);
 	FF::setDefault(FF::IntId::greets_shard_res,         64);
+	// Mirror RTT slot build. MUST be here, not in GreetsApplyRunDefaults:
+	// GreetsMirror.cpp's `wantRtt = rttSlots && (mirror_rtt() || recurse)`
+	// (:1401) is evaluated during Initialize_Greets, so a run-phase default
+	// arrives after the decision and is INERT — measured, 0 RTT slots ever
+	// built on the default path. Moving it here is what makes the reflections
+	// (and second-order mirrors) actually default ON, at the cost of building
+	// the slots: +3.67 ms under --greets_displace, +2.11 ms flat.
+	FF::setDefault(FF::BoolId::mirror_rtt,              true);
+	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
 	// Lightmap bake atlas params (LightmapBake_Static reads these). NOT
-	// shadow_lightmap itself: that's the per-pixel SAMPLE gate the deferred
-	// kernel reads for EVERY scene, so it leaks if set during the shared init
-	// phase — it lives in GreetsApplyRunDefaults instead, and the bake is
-	// force-enabled at spawn so it still runs here. res/planar/skip_animated
-	// only matter while sampling (shadow_lightmap on), so they're inert on
-	// other scenes and safe to leave at init.
+	// shadow_lightmap itself — which stays in GreetsApplyRunDefaults, but NOT
+	// for the reason this comment used to give.
+	//
+	// CORRECTED 2026-08-10 (measured, SESSION_STATE 2026-08-10 §1). The old
+	// text called shadow_lightmap "the per-pixel SAMPLE gate the deferred
+	// kernel reads for EVERY scene". It is not a per-pixel gate and the
+	// kernel never reads it. The per-pixel gate is
+	//   lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic()
+	// (DeferredSurfaceKernel.cpp:1622). shadow_lightmap's only readers are
+	// ALLOCATION sites — EngineGBuffer_Resize (Mekalele.cpp:85, which runs at
+	// BOOT, before every scene init), GreetsMirror.cpp:3051 and
+	// MirrorShatter.cpp:655/940 (offscreen G-buffers) — plus the two bake
+	// entry points in LightmapBake.cpp. That misreading is what put the flag
+	// on the wrong side of the resize: the run-phase write lands AFTER
+	// EngineGBuffer_Resize has already decided not to allocate lightmapMF/ST,
+	// so the planes never exist and `--shadow_lm_dynamic` alone is inert
+	// (0 px at 18 poses, measured).
+	//
+	// It is NOT moved to this init block, and that is deliberate: moving it
+	// would not fix the boot-time consumer either (EngineGBuffer_Resize runs
+	// before ALL scene inits, not just before greets'), while it WOULD switch
+	// on real work — LightmapStampOrigBary, the offscreen lightmap planes, and
+	// the 54 ms atlas bake — to feed a path that measures +1.7 ms/frame for a
+	// 95 %-one-LSB look change. Opening that gate is a look/perf decision, not
+	// a placement fix; `--shadow_lightmap --shadow_lm_dynamic` is how to
+	// evaluate it. What the run-phase placement DOES still buy is scope: the
+	// flag is process-global and Initialize_Greets runs first natively, so an
+	// init-phase write would allocate those planes for city/chase/fountain too.
+	//
+	// res/planar/skip_animated only matter while sampling (shadow_lightmap on),
+	// so they're inert on other scenes and safe to leave at init.
 	FF::setDefault(FF::IntId::shadow_lightmap_res,      128);
 	FF::setDefault(FF::BoolId::shadow_lightmap_planar,  true);
 	FF::setDefault(FF::BoolId::shadow_skip_animated,    true);
+	// ATLAS SIZING, BOTH ARMS (2026-08-09, at the user's instruction). The line
+	// above sizes EVERY face's lightmap patch at 128², so the store is
+	// numFaces * res² * numOmnis BYTES and allocate() touches all of it: the
+	// SHIPPING flat arm was paying 5.61 GB for 33 396 faces and a 1.13 s startup
+	// bake, and it scales with FACE COUNT while the surface it describes does
+	// not grow at all (--greets_displace made that absurd, at 19.36 GB, which is
+	// where the flag came from). --shadow_lightmap_texel_density sizes each
+	// MESH's atlas from its mean face AREA instead —
+	// res = clamp(ceil(sqrt(meanFaceArea) * density), 8, shadow_lightmap_res) —
+	// capped by the line above, so it can only ever REDUCE, never sharpen. The
+	// unit is texels per WORLD UNIT: 14.2 is calibrated to leave the authored
+	// wall quads at the 128 cap, so a surface keeps the shadow resolution per
+	// world unit the flat wall already shipped with, whatever it is tessellated
+	// into. 347 of the flat arm's 370 baked meshes fall under the cap at 14.2
+	// (mean face edge 1.303 world -> res 19); the 23 that keep it are the big
+	// authored quads, which is why nothing the review poses look at changes.
+	// MEASURED on the FLAT arm, greets t=5743, 2026-08-09: atlas 5.61 -> 0.09 GB,
+	// static bake 1104 -> 54 ms (min-of-9 interleaved, load 11-17), peak
+	// footprint 7.44 -> 1.50 GB (/usr/bin/time -l), greets-entry join wait
+	// 3497 -> 221 ms at load 31. Per-frame: t=5743 49.39 -> 49.47 ms and t=5780
+	// 51.84 -> 50.08 ms (min-of-15 interleaved) — neutral to slightly better.
+	// LOOK: NULL, measured, not assumed. Byte-identical at all 16 poses of
+	// docs/greets_review_poses.txt AND at the pin pose, so the greets pin
+	// 778fa6acd85a69cf241babefcdaf598e does NOT move (4/4); city and fountain
+	// likewise (4/4 each). It is null because the shipping arm never SAMPLES the
+	// atlas: DeferredSurfaceKernel.cpp's lmKernelEnabled is
+	// `!shadow_dynamic() || shadow_lm_dynamic()`, greets sets shadow_dynamic and
+	// shadow_lm_dynamic defaults 0, so every pixel takes the cube tap and
+	// --no-shadow_lightmap renders byte-identical frames. Forcing the atlas live
+	// with --shadow_lm_dynamic is ALSO byte-identical at all 16 poses, so the
+	// resolution drop is invisible on the live path too. That the flat arm bakes
+	// a 5.61 GB array it then never reads is a separate, bigger finding —
+	// docs/OPTIMIZATION_BACKLOG.md.
+	// --shadow_lightmap_texel_density=0 is the one-flag revert to the legacy
+	// fixed-128 atlas (verified: reproduces the pin 4/4).
+	// SUPERSEDED 2026-08-10 for the DEFAULT arm: "that the flat arm bakes an
+	// array it never reads is a separate, bigger finding" is now closed — the
+	// bake is skipped outright when the atlas has no reader (Initialize_Greets),
+	// so on a default run there is no atlas, no [LM] line, and this density
+	// value is inert. It still governs the sizing whenever the bake DOES run
+	// (--shadow_lightmap), which is the only arm that can sample it.
+	FF::setDefault(FF::FloatId::shadow_lightmap_texel_density, 14.2f);
+	// TESSELLATION ERGONOMICS (2026-08-06). --greets_displace alone paid a
+	// per-frame shadow re-raster (and an env/lightmap bake) over ~87 k displaced
+	// faces to produce relief that a PolyId cube map cannot resolve anyway. The
+	// S1 offscreen proxy substitutes the ~226 flat pre-displacement faces in
+	// every offscreen pass and is the single biggest free-ish win the arm has, so
+	// --greets_displace now turns it on for itself: ONE flag gives the good
+	// tessellated arm instead of a five-flag incantation.
+	// MEASURED (t=5780 wall bench, 1920x1080, 12 threads, iters=20, 4 interleaved
+	// rounds, min-of-arm, load 7-10): frame 67.95 -> 62.05 ms, of which BAKE
+	// 9.18 -> 3.45 (flat POM's own BAKE is 3.26 at the same pose).
+	// NOT LOOK-NEUTRAL, and not claimed to be: substituting flat casters changes
+	// shadow occlusion at wall/floor junctions. Colour diff over the 13 review
+	// poses (16 camera/t pairs, docs/greets_review_poses.txt): byte-identical at
+	// 5 of 16; elsewhere 1 282-110 668 px >4/255, worst t=6097 with 58 021 px
+	// >12/255 / 14 604 >32/255 / max 144, concentrated at the corner junction —
+	// a broad low-amplitude occlusion shift (mean |d| on changed px 1.0-4.3), no
+	// structural artifact. --no-greets_shadow_proxy restores the displaced
+	// casters (setDefault, not a force). Inert without --greets_displace, so the
+	// shipping flat-POM arm is untouched.
+	// The second companion, same reasoning and the same measured size: a mirror
+	// clone is MAIN-VIEW geometry, so Face_MainOnly never spares it the
+	// tessellated wall and the reflection re-transforms + re-rasterises all of
+	// it (measured 11.40 ms/frame of the displaced arm vs 3.31 ms of the flat
+	// arm; the clone pushed MORE displaced faces than the direct view). Sourcing
+	// it from the flat proxy is -5.91 ms and byte-IDENTICAL at both mirror review
+	// poses (t=6133, t=6293); at t=5743 it moves 2 990 px >12/255 (0.14 % of the
+	// frame, inside the mirror window) and the two frames are indistinguishable
+	// side by side. Needs the proxy, which the line above just defaulted on.
+	// A THIRD companion used to be defaulted here — the static shadow lightmap's
+	// per-face atlas, which the displaced arm blew up to 19.36 GB / 115 346 faces
+	// against the flat arm's 5.61 GB / 33 396 (peak footprint 22.97 vs 6.93 GB,
+	// bake 6.2-11.7 s vs 1.13 s, /usr/bin/time -l on a 64 GB box). It is no
+	// longer companion-scoped: --shadow_lightmap_texel_density=14.2 is now a
+	// PLAIN GREETS DEFAULT, set unconditionally ~50 lines above, because the flat
+	// arm was carrying the same waste in kind. The displaced arm still gets it —
+	// it just gets it the same way the shipping arm does. Both arms revert with
+	// --shadow_lightmap_texel_density=0.
+	if (FF::greets_displace()) {
+		FF::setDefault(FF::BoolId::greets_shadow_proxy, true);
+		FF::setDefault(FF::BoolId::greets_displace_flat_mirror, true);
+		std::fprintf(stderr, "[STONE] --greets_displace defaults its two perf "
+			"companions ON: --greets_shadow_proxy=%d (offscreen passes rasterise "
+			"the flat stone, -5.9 ms, DOES move shadow occlusion at wall "
+			"junctions) and --greets_displace_flat_mirror=%d (reflections source "
+			"the flat stone, -5.9 ms, byte-identical at both mirror review "
+			"poses). Use --no-<flag> to compare either. The lightmap atlas rule "
+			"--shadow_lightmap_texel_density=%.1f is no longer a companion: it is "
+			"a greets default on BOTH arms now (see the [LM] line); "
+			"--shadow_lightmap_texel_density=0 restores the fixed-128 atlas.\n",
+			FF::greets_shadow_proxy() ? 1 : 0,
+			FF::greets_displace_flat_mirror() ? 1 : 0,
+			FF::shadow_lightmap_texel_density());
+	}
+	// --greets_displace_flat_mirror sources the reflection's stone from the flat
+	// proxy; without a proxy there is nothing to source and the reflection would
+	// simply lose its walls. Say so rather than render a hole.
+	if (FF::greets_displace_flat_mirror() && !FF::greets_shadow_proxy())
+		std::fprintf(stderr, "[MIRROR] WARNING: --greets_displace_flat_mirror "
+			"without --greets_shadow_proxy — no flat stone exists to clone, so "
+			"the reflection will have NO walls. Enable the proxy.\n");
 }
 
 static void GreetsApplyRunDefaults()
@@ -1038,9 +1254,50 @@ static void GreetsApplyRunDefaults()
 	// Shadow sampling / dynamic bake (greets tick + deferred kernel).
 	FF::setDefault(FF::BoolId::shadows,                 true);
 	FF::setDefault(FF::BoolId::shadow_dynamic,          true);
-	// Per-pixel lightmap SAMPLE gate — set at RUN (not init) so it doesn't
-	// leak onto earlier scenes; the bake itself was force-enabled at init.
+	// Static-lightmap ALLOCATION gate (not, as this comment used to say, a
+	// per-pixel sample gate — see the corrected block in
+	// GreetsApplyInitDefaults). Kept at RUN so the two lightmap G-buffer
+	// planes are not allocated for city/chase/fountain. It arrives after the
+	// only consumer that matters (EngineGBuffer_Resize, at BOOT), so on the
+	// shipping arm it is close to inert: what it still reaches are the
+	// lazily-built offscreen G-buffers (GreetsMirror RTT, MirrorShatter
+	// workers), which get lightmap planes they then never sample because
+	// lmKernelEnabled is false. As of the same change the greets atlas bake is
+	// skipped entirely when this flag is off at init — see Initialize_Greets.
 	FF::setDefault(FF::BoolId::shadow_lightmap,         true);
+	// PBR shading stack (deferred surface kernel, global render path). This is
+	// the set the user launches greets with every time; making them scene
+	// defaults is a deliberate LOOK MOVE — the greets render changes.
+	//   pbr               DeferredSurfaceKernel.cpp:1429 -> Cook-Torrance (GGX D +
+	//                     Smith-Schlick G + Schlick F) instead of Blinn-Phong, in
+	//                     BOTH the scalar per-light path (:2400) and the 8-wide vec
+	//                     path (:2156). The flag's help still says "vec path only";
+	//                     that is stale — greets' normal-mapped pixels take the
+	//                     scalar branch and DO get GGX.
+	//   env_brdf_analytic Karis split-sum env-BRDF (ek = (f0*A+B)*gain) in place of
+	//                     the ad-hoc f90=1-rough Schlick weight (:1439).
+	//   pbr_multiscatter  Fdez-Aguera energy compensation built from the A,B terms
+	//                     env_brdf_analytic computes (:1440) — a NO-OP without it,
+	//                     which is why the two ship together.
+	//   diffuse_energy    (1-F) diffuse weighting using the same per-pixel Fresnel
+	//                     the env compose already produced (:1442).
+	//   sh_ambient        L2 SH irradiance in place of the flat Sc->Ambient constant
+	//                     (:1445 + RENDER.CPP:489's one-shot probe bake).
+	// The middle three need --env_refl to change a pixel; greets gets it for free
+	// because its RVSM metallic-map imports (momy / amudim / screen emiter / ...)
+	// call setDefault(env_refl,true) in MaterialImport at scene init — measured in
+	// the init log, not assumed. metal_map / roughness_map / ao_map are already
+	// compile-default ON (FeatureFlags.def), so they need nothing here.
+	// Deliberately NOT included: pbr_roughness and deferred_vec_force ([test]
+	// knobs — fixed-roughness override and a cost-measurement path that throws
+	// away the normal map), and xpar_pbr, which is not a dependent of pbr at all
+	// (the transparent kernel reads it independently at :2785 and never reads
+	// pbr()) — that is a separate look call on the glass panels.
+	FF::setDefault(FF::BoolId::pbr,                     true);
+	FF::setDefault(FF::BoolId::env_brdf_analytic,       true);
+	FF::setDefault(FF::BoolId::pbr_multiscatter,        true);
+	FF::setDefault(FF::BoolId::diffuse_energy,          true);
+	FF::setDefault(FF::BoolId::sh_ambient,              true);
 	// HDR + bloom + cones (global render path).
 	FF::setDefault(FF::BoolId::hdr,                     true);
 	FF::setDefault(FF::BoolId::hdr_linear,              true);
@@ -1055,14 +1312,59 @@ static void GreetsApplyRunDefaults()
 	FF::setDefault(FF::FloatId::cone_strength,          2.0f);
 	FF::setDefault(FF::BoolId::cone_fine_tiles,         true);
 	FF::setDefault(FF::FloatId::disco_bloom,            0.0f);
-	// Mirror RTT (per-frame) + shatter feel.
-	FF::setDefault(FF::BoolId::mirror_rtt,              true);
-	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
+	// Shatter feel. mirror_rtt / mirror_rtt_density USED to be set here and
+	// were inert: GreetsMirror.cpp's `wantRtt` decision runs during
+	// Initialize_Greets, i.e. BEFORE this run-phase block, so the default never
+	// reached it and 0 RTT slots were ever built. They now live in
+	// GreetsApplyInitDefaults, next to the other build/bake flags.
 	FF::setDefault(FF::FloatId::greets_shard_fall_speed, 0.8f);
 	FF::setDefault(FF::FloatId::greets_shard_randomness, 0.8f);
 	// Pin greets' own exposure so it doesn't inherit a leaked --cinematic value
 	// from the prior scene (crash sets one via setDefault; greets runs after it).
 	FF::setDefault(FF::FloatId::hdr_exposure,           cine::kGreetsExposure);
+	// ── --env-dynamic IMPLIES --env_probe_follow_owner ────────────────────
+	// He ran `--greets-displace --scene-greets --env_probe_center
+	// --env-dynamic` and reported "the hull bake is still static (apart from
+	// the rotating disco ball)"; when told the follow flag exists: "annoying.
+	// I ran it with env dynamic." He is right that the two belong together,
+	// and the reason is mechanical, not ergonomic: a probe's capture point is
+	// derived from its owner's geometry ONCE and EnvReflection_FramePrep's
+	// `if (env.byMat.count(M)) continue;` never revisits it, and
+	// overlayComposite renders the movers from S.view.bake* — that SAME frozen
+	// point. So --env_dynamic alone re-renders the mech faithfully, every
+	// frame, into a cube captured from where the mech used to stand: measured
+	// on this scene, the canopy probe stayed at (10.8 2.3 -55.8) while its
+	// owner walked to (44.4 4.7 -62.2). The dynamic half cannot fix itself.
+	//
+	// SCOPE. env_dynamic is compile-default OFF and no scene turns it on, so
+	// this fires only when he asked for it; GreetsApplyRunDefaults is the
+	// greets-exclusive entry (createGreetsScene), so city/chase/fountain never
+	// see it; and setDefault means an explicit --no-env_probe_follow_owner
+	// still wins. Every recorded pin is therefore byte-null by construction —
+	// none of them passes --env-dynamic — and that was run, not assumed.
+	//
+	// PLACEMENT IS RUN-PHASE, AND VERIFIED RATHER THAN ARGUED (the setDefault
+	// audit found writes that were inert because their reader ran at BOOT).
+	// The only reader is EnvReflection_FramePrep, which renderFrame calls
+	// EVERY FRAME — after this block, since createGreetsScene runs before the
+	// first tick. The init-phase probe bakes do run earlier and see it OFF,
+	// which is correct and free: the tracker only records a transform
+	// signature on first sight and cannot act before the following frame.
+	// PROVED FROM THE TRACE, not the code — with --env-dynamic and no follow
+	// flag, [ENVFOLLOW] re-bakes the canopy probe at (24.5 2.2 -59.7),
+	// (31.4 2.2 -60.4), (34.4 2.3 -60.8), (40.1 4.0 -61.6), (43.0 4.7 -62.1),
+	// (44.3 5.0 -62.2) — it follows.
+	//
+	// COST is bounded by env_probe_follow_budget (1 spline-animated re-bake
+	// per frame) and greets has exactly one such owner, so the worst case is
+	// one 256² cube bake on a frame where the mech has drifted past
+	// env_probe_follow_eps (1.0 u). MEASURED over the 7-frame walk
+	// t=6000..7100, which fires 5 re-bakes, min-of-6 interleaved wall:
+	// 2844 ms off vs 2967 ms on = +123 ms / 5 = ~25 ms per re-bake. Machine
+	// load 15.05, so read that as tens of ms, not three digits. Frames where
+	// nothing drifted pay only the FNV transform signature (stage 1).
+	if (FF::env_dynamic())
+		FF::setDefault(FF::BoolId::env_probe_follow_owner, true);
 	// --cinematic: greets keeps its own hotter HDR/bloom (set above) but gains
 	// the same filmic post stack as the other scenes. The disco ball + omnis are
 	// the brightest sources in the demo, so anamorphic streaks earn their keep.
@@ -1233,10 +1535,168 @@ static void GreetsFixBitangentHandedness(Scene *sc)
 // Compute_Vertex_Tangents. See docs/ENGINE.md.)
 
 
+// ── S1 offscreen shadow proxy (docs/ENVDYN_DISPLACEMENT_PLAN.md) ────────────
+// The displaced stone (rooms/floor, ~81k detail faces under --greets_displace)
+// is main-camera-only; every offscreen consumer (per-frame shadow bake, mirror
+// RTT, env probe) rasterises this FLAT stand-in instead. Mortar relief is
+// invisible in cast shadows and sub-texel in reflections, so the proxy carries
+// the ~226 pre-displacement faces — cutting the per-frame shadow re-raster of
+// moving disco spots from ~81k faces to ~226.
+//
+// Snapshot is captured BEFORE the displace/subdiv/smooth-weld runs (flat geom
+// with final UVs); the mesh is built AFTER them so DisplaceStoneSmoothNormals'
+// position-bucket weld (per rooms/floor material) can't fold the proxy verts
+// into the displaced surface. The proxy is NOT Tri_Stationary (no per-vertex SL
+// buffer needed) but IS Tri_Possessed (skip the animate spline walk) and
+// Tri_OffscreenProxy (skip the main pass). ShadowMatIDs are stamped from the
+// displaced walls' single-id cluster AFTER the Piramid clustering, so the
+// deferred PolyId self-shadow test matches between the displaced G-buffer
+// pixels and this flat caster.
+// S1 diagnostics (chunk shadow-skip census).
+int g_s1PureChunks = 0, g_s1PureChunkFaces = 0, g_s1MixedChunks = 0, g_s1MixedMainFaces = 0;
+
+struct StoneProxySnapshot {
+    std::vector<Vertex>   verts;
+    std::vector<Face>     faces;   // A/B/C repointed at build time
+    std::vector<uint32_t> fidx;    // 3 vert indices per face
+    bool captured = false;
+};
+
+static void CaptureStoneProxySnapshot(Scene *Sc, StoneProxySnapshot &snap) {
+    snap.verts.clear(); snap.faces.clear(); snap.fidx.clear(); snap.captured = false;
+    TriMesh *piramid = nullptr;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+        if (std::strstr(Obj->Name, "Piramid")) { piramid = (TriMesh*)Obj->Data; break; }
+    }
+    if (!piramid) return;
+    std::map<Vertex*, uint32_t> vmap;
+    for (DWord i = 0; i < piramid->FIndex; ++i) {
+        Face &f = piramid->Faces[i];
+        if (!f.A || !f.B || !f.C || !f.Txtr || !f.Txtr->Name) continue;
+        if (std::strcmp(f.Txtr->Name, "rooms") && std::strcmp(f.Txtr->Name, "floor"))
+            continue;
+        uint32_t vi[3];
+        Vertex *src[3] = { f.A, f.B, f.C };
+        for (int k = 0; k < 3; ++k) {
+            auto it = vmap.find(src[k]);
+            if (it == vmap.end()) {
+                vi[k] = uint32_t(snap.verts.size());
+                vmap[src[k]] = vi[k];
+                snap.verts.push_back(*src[k]);
+            } else vi[k] = it->second;
+        }
+        snap.faces.push_back(f);
+        snap.fidx.push_back(vi[0]); snap.fidx.push_back(vi[1]); snap.fidx.push_back(vi[2]);
+    }
+    snap.captured = !snap.faces.empty();
+}
+
+static TriMesh *BuildStoneProxyMesh(Scene *Sc, const StoneProxySnapshot &snap) {
+    if (!snap.captured) return nullptr;
+    Object *piramidObj = nullptr;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+        if (std::strstr(Obj->Name, "Piramid")) { piramidObj = Obj; break; }
+    }
+    if (!piramidObj) return nullptr;
+    TriMesh *piramid = (TriMesh*)piramidObj->Data;
+    const uint32_t nV = uint32_t(snap.verts.size());
+    const uint32_t nF = uint32_t(snap.faces.size());
+    TriMesh *proxy = new TriMesh();
+    proxy->VIndex = nV;
+    proxy->FIndex = nF;
+    proxy->Verts = new Vertex[nV];
+    proxy->Faces = new Face[nF];
+    std::memcpy(proxy->Verts, snap.verts.data(), nV * sizeof(Vertex));
+    float xmin=FLT_MAX,xmax=-FLT_MAX,ymin=FLT_MAX,ymax=-FLT_MAX,zmin=FLT_MAX,zmax=-FLT_MAX;
+    for (uint32_t i = 0; i < nF; ++i) {
+        Face &d = proxy->Faces[i];
+        d = snap.faces[i];
+        d.A = &proxy->Verts[snap.fidx[3*i+0]];
+        d.B = &proxy->Verts[snap.fidx[3*i+1]];
+        d.C = &proxy->Verts[snap.fidx[3*i+2]];
+        d.A_idx = snap.fidx[3*i+0]; d.B_idx = snap.fidx[3*i+1]; d.C_idx = snap.fidx[3*i+2];
+        d.ParentTri = proxy;
+        d.Flags &= ~Face_MainOnly;   // the PROXY casts; it must not be dropped offscreen
+        for (Vertex *v : { d.A, d.B, d.C }) {
+            if (v->Pos.x<xmin) xmin=v->Pos.x; if (v->Pos.x>xmax) xmax=v->Pos.x;
+            if (v->Pos.y<ymin) ymin=v->Pos.y; if (v->Pos.y>ymax) ymax=v->Pos.y;
+            if (v->Pos.z<zmin) zmin=v->Pos.z; if (v->Pos.z>zmax) zmax=v->Pos.z;
+        }
+    }
+    proxy->BSphereCtr.x=(xmin+xmax)*0.5f; proxy->BSphereCtr.y=(ymin+ymax)*0.5f; proxy->BSphereCtr.z=(zmin+zmax)*0.5f;
+    float r2max=0.0f;
+    for (uint32_t i=0;i<nV;++i){ float dx=proxy->Verts[i].Pos.x-proxy->BSphereCtr.x,
+        dy=proxy->Verts[i].Pos.y-proxy->BSphereCtr.y, dz=proxy->Verts[i].Pos.z-proxy->BSphereCtr.z;
+        float r2=dx*dx+dy*dy+dz*dz; if (r2>r2max) r2max=r2; }
+    proxy->BSphereRadius=std::sqrt(r2max); proxy->BSphereRad=r2max;
+    proxy->IPos=piramid->IPos; proxy->IScale=piramid->IScale; proxy->IRot=piramid->IRot;
+    Matrix_Copy(proxy->RotMat, piramid->RotMat);
+    Matrix_Copy(proxy->UnscaledRotMat, piramid->UnscaledRotMat);
+    // Inherit Piramid flags but: drop Tri_Stationary (no SL buffer allocated),
+    // add Tri_Possessed (empty splines → skip Animate), add Tri_OffscreenProxy.
+    proxy->Flags = (piramid->Flags & ~Tri_Stationary) | Tri_Possessed | Tri_OffscreenProxy;
+    Object *proxyObj = new Object();
+    proxyObj->Type = Obj_TriMesh;
+    proxyObj->Data = proxy;
+    proxyObj->Pos = new Vector(*piramidObj->Pos);
+    struct MatrixHolder { Matrix m; };
+    MatrixHolder *holder = new MatrixHolder();
+    proxyObj->Rot = &holder->m;
+    Matrix_Copy(*proxyObj->Rot, *piramidObj->Rot);
+    proxyObj->Pivot = piramidObj->Pivot;
+    proxyObj->Parent = piramidObj->Parent;
+    proxyObj->ParentID = piramidObj->ParentID;
+    proxyObj->Name = strdup("stone_shadow_proxy");   // no "Piramid" → clustering/chunk skip it
+    proxyObj->Next = piramidObj->Next;
+    proxyObj->Prev = piramidObj;
+    if (piramidObj->Next) piramidObj->Next->Prev = proxyObj;
+    piramidObj->Next = proxyObj;
+    proxy->Next = Sc->TriMeshHead; proxy->Prev = nullptr;
+    if (Sc->TriMeshHead) Sc->TriMeshHead->Prev = proxy;
+    Sc->TriMeshHead = proxy;
+    std::fprintf(stderr, "[STONE-PROXY] built flat shadow proxy: %u verts / %u faces "
+        "(rooms+floor pre-displace) — offscreen-only\n", nV, nF);
+    return proxy;
+}
+
+// Tag every displaced rooms/floor face main-only (skip in offscreen passes) and
+// stamp the flat proxy's faces with the displaced walls' single shadow-cluster
+// id so the PolyId self-shadow test matches. Called after the Piramid clustering.
+static void FinalizeStoneProxy(Scene *Sc, TriMesh *proxy) {
+    uint16_t roomsId = 0, floorId = 0;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+        if (!std::strstr(Obj->Name, "Piramid")) continue;
+        TriMesh *T = (TriMesh*)Obj->Data;
+        for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+            if (!F->Txtr || !F->Txtr->Name) continue;
+            if (!std::strcmp(F->Txtr->Name, "rooms")) { if (!roomsId) roomsId = F->ShadowMatID; }
+            else if (!std::strcmp(F->Txtr->Name, "floor")) { if (!floorId) floorId = F->ShadowMatID; }
+        }
+    }
+    if (proxy) {
+        for (Face *F = proxy->Faces; F < proxy->Faces + proxy->FIndex; ++F) {
+            if (!F->Txtr || !F->Txtr->Name) continue;
+            if (!std::strcmp(F->Txtr->Name, "rooms")) F->ShadowMatID = roomsId;
+            else if (!std::strcmp(F->Txtr->Name, "floor")) F->ShadowMatID = floorId;
+        }
+        std::fprintf(stderr, "[STONE-PROXY] stamped shadow ids rooms=0x%04x floor=0x%04x "
+            "onto proxy caster\n", roomsId, floorId);
+    }
+}
+
 void Initialize_Greets()
 {
+	InitTimelineMark("greets: Initialize_Greets begin");
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
+	// --pom_rebuild (editor): defer a requested --pom_shell past init so the
+	// pristine snapshot taken at the end of this function is genuinely pristine.
+	// No-op without the flag (the shipping demo path is untouched).
+	rev::DisplaceRebuild_BeginInit();
 	GreetSc = loadSceneAligned("SCENES/GREETS.FLD");
+	InitTimelineMark("greets: LoadFLD end");
 
 	gg = new GreetsGenerator;
 
@@ -1277,7 +1737,15 @@ void Initialize_Greets()
 			M->Txtr->FileName = strdup(albedo);   // old name leaks (init-time, tiny)
 			M->Txtr->BPP = 0;                     // force (re)load by Unify_Textures
 			M->Flags |= Mat_AoInAlpha;            // albedo alpha = baked AO
-			M->ParallaxScale = pxScale;
+			// Code-default parallax depth for the legacy stone-tex path — but only
+			// when the surface DIDN'T author one. The editor persists per-material
+			// parallaxScale into the LWO 'RVSF' sub-chunk (loaded into
+			// Material::ParallaxScale at FLD time); stomping it here unconditionally
+			// made editor parallax edits on 'rooms'/'floor' silently do nothing
+			// (they saved to RVSF but never rendered — the "parallax changes aren't
+			// being saved" report). Honor an authored value (!= the 1.0 default);
+			// floor's unauthored default still gets its dialed-down 0.25.
+			if (M->ParallaxScale == 1.0f) M->ParallaxScale = pxScale;
 			// Roughness map (--roughness_map): per-pixel specular intensity. 8-bit
 			// single-channel (MakeHeight8), same layout as albedo → same swizzled UV.
 			if (rough) {
@@ -1301,6 +1769,41 @@ void Initialize_Greets()
 					std::fprintf(stderr, "[GREETS] parallax '%s' -> height %s (%dx%d mips=%u, %s)\n",
 					             M->Name, height, M->HeightMap->SizeX, M->HeightMap->SizeY,
 					             M->HeightMap->numMipmaps, hm ? "8-bit" : "32-bit fallback");
+					// Tier-2 cone-step POM (--parallax_pom): offline-bake a cone map
+					// companion (needs the 8-bit height layout). Only when the flag is
+					// on → default-off pays nothing and is byte-identical.
+					if (fds::FeatureFlags::parallax_pom_cone() && M->HeightMap->BPP == 8) {
+						auto t0 = std::chrono::high_resolution_clock::now();
+						// --pom_cone_exact (S1 P1): per-texel EGSR'24-style bake
+						// through a disk cache, instead of the max-pooled 128²
+						// grid. Default 0 = the legacy bake, byte-identical.
+						const int coneExact = fds::FeatureFlags::pom_cone_exact();
+						M->ConeMap = coneExact > 0
+						    ? LoadOrBakeConeMapExact(M->HeightMap, coneExact, M->Name)
+						    : MakeConeMap(M->HeightMap);
+						double ms = std::chrono::duration<double, std::milli>(
+							std::chrono::high_resolution_clock::now() - t0).count();
+						std::fprintf(stderr, "[GREETS] parallax_pom '%s' -> cone map %s (exact=%d, %.0f ms)\n",
+						             M->Name, M->ConeMap ? "baked" : "FAILED", coneExact, ms);
+					}
+					// S1c (--pom_horizon): bake the relief self-shadow horizon
+					// HERE, off the FULL height field — the --greets_displace
+					// path swaps M->HeightMap for the RESIDUAL further down, but
+					// the geometry still carries the low band, so the shadow term
+					// must model the whole relief in both paths. The amplitude is
+					// the same UV number the shell geometry is built with.
+					// The kernel addresses the horizon map with the ALBEDO's
+					// swizzledUV + miplevel (exactly as it does the normal and AO
+					// maps). The albedo is only RE-POINTED here (BPP=0 forces
+					// Unify_Textures to reload it inside Preprocess_Scene), so it
+					// is still the OLD 256² texture at this moment and cannot be
+					// compared yet — the layout check runs post-Preprocess below.
+					if (fds::FeatureFlags::pom_horizon() && M->HeightMap->BPP == 8) {
+						M->PomHorizon = LoadOrBakeHorizonMap(
+							M->HeightMap,
+							fds::FeatureFlags::parallax_strength() * M->ParallaxScale,
+							fds::FeatureFlags::pom_horizon_radius(), M->Name);
+					}
 				}
 			}
 			if (Texture *n = GreetsLoadNormalMap(normal, flipG)) {
@@ -1324,11 +1827,78 @@ void Initialize_Greets()
 	}
 
 	Preprocess_Scene(GreetSc, "GREETS");
+	InitTimelineMark("greets: Preprocess_Scene end (textures loaded)");
 
-	// Persisted PBR map assignments (the editor's "Save" writes this sidecar —
-	// LWO1 can't hold map paths, so they live here). Before the CLI overlay so
-	// an explicit --material-import still wins for testing.
-	fds::MaterialImport_ApplySidecar(GreetSc, "SCENES/GREETS.MAT");
+	// S1c layout check, now that Unify_Textures has actually LOADED the albedo
+	// (before Preprocess the stone materials still point at their old 256²
+	// texture — see the bake site above). The kernel indexes the horizon map
+	// with the albedo's swizzled UV + miplevel, so a layout mismatch would read
+	// a wrong texel silently; drop the map instead.
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != GreetSc || !M->PomHorizon) continue;
+		const Texture *A = M->Txtr;
+		const PomHorizonMap *Hz = M->PomHorizon;
+		if (A && A->SizeX == Hz->sizeX && A->SizeY == Hz->sizeY
+		    && A->blockSizeX == Hz->blockSizeX && A->blockSizeY == Hz->blockSizeY
+		    && A->numMipmaps == Hz->numMipmaps)
+			continue;
+		std::fprintf(stderr, "[POM-HORIZON] '%s': height layout (%dx%d bs=%d,%d "
+			"mips=%u) != albedo (%dx%d bs=%d,%d mips=%u) — the kernel addresses "
+			"the horizon map with the albedo's swizzled UV, so it is DROPPED for "
+			"this material\n", M->Name ? M->Name : "?",
+			Hz->sizeX, Hz->sizeY, Hz->blockSizeX, Hz->blockSizeY, Hz->numMipmaps,
+			A ? A->SizeX : 0, A ? A->SizeY : 0, A ? A->blockSizeX : 0,
+			A ? A->blockSizeY : 0, A ? A->numMipmaps : 0);
+		M->PomHorizon = nullptr;
+	}
+
+	// Refraction OPT-IN (Mat_Refractive) — CODE DEFAULTS: mark the greets glass
+	// display panels so they keep refracting the room behind them under
+	// --glass_refract now that refraction is per-material opt-in. These are the
+	// transparent (Mat_Transparent from the FLD) half-silvered "amudim"/column
+	// glass screens sharing the P_TEXT design plus the glass lamp cover — the
+	// ONLY greets transparents that refracted under the old blanket gate
+	// ('screen 4' is the display opposite the teleporter and the sole visible
+	// refractor at the greets snapshot pose; 'screen2' is the column panel;
+	// 'lamp light' the lamp glass). ('amudim' itself is opaque MARB4 marble —
+	// not glass; the room walls / mirror-mask clones stay unmarked.)
+	//
+	// Code-default glass set: mark the half-silvered greets transparents as
+	// Mat_Refractive so --glass_refract warps the scene behind them. Per-material
+	// 'refractive' is otherwise authored in the LWO 'RVSF' sub-chunk (loaded into
+	// Mat_Refractive at FLD time, FLD_MAT.CPP); this block is the scene's built-in
+	// default for its known glass surfaces. FOUNTAIN.CPP marks its glass set the
+	// same way. (This block used to live inside the normal-map-bake loop below,
+	// which silently re-marked surfaces — kept up here, run once.)
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != GreetSc || !M->Name) continue;
+		if (!std::strcmp(M->Name, "screen 4") || !std::strcmp(M->Name, "screen2") ||
+		    !std::strcmp(M->Name, "lamp light"))
+			M->Flags |= Mat_Refractive;
+	}
+
+	// Source-authored PBR map assignments (custom LWO 'RVSM' sub-chunk → FLD
+	// Surf_RevMaps payload → FldRevMap* — sidecar-elim §1e). The successor to
+	// the retired GREETS.MAT map lines: same MaterialImport_ApplyMapFile path,
+	// driven from the FLD instead of the sidecar. Before the CLI overlay so an
+	// explicit --material-import below still wins. No-op when the FLD carries no
+	// RVSM payload. (The .MAT sidecar reader is retired — every per-surface value
+	// the sidecar carried now rides the LWO RVSF/RVSM/SMAN sources.)
+	fds::MaterialImport_ApplyRevMaps(GreetSc, "greets");
+
+	// Authored per-surface smoothing angles (native LWO SMAN -> Material::
+	// MaxSmoothingAngle -> the MeshOps registry, sidecar-elim §1.5). Seeds only
+	// surfaces whose authored SMAN differs from greets' 89.5° global default (the
+	// value every stock Piramid.lwo surface carries), reproducing the retired
+	// `surface|smoothAngle|value` sidecar lines from the source. Runs before
+	// MakeFacesIndependentByAngle below (which consumes the registry). INERT
+	// until a surface's SMAN is authored away from 89.5° (registry stays empty).
+	{
+		const int nSeed = MeshOps_SeedAuthoredSmoothAngles(GreetSc, 89.5f, 0.05f);
+		if (nSeed)
+			std::fprintf(stderr, "[GREETS] seeded %d authored per-surface smoothing "
+			             "angle(s) from native SMAN (sidecar-elim §1.5)\n", nSeed);
+	}
 
 	// CLI material import (--material-import=MAT:DIR): overlay PBR map folders
 	// onto named materials for testing. After Preprocess (textures loaded), so
@@ -1347,20 +1917,202 @@ void Initialize_Greets()
 
 	GreetSc->PathingMinVelocity = 0.01;
 
-	// EXPERIMENTAL geometry fix for the mummy ('momy'): Phong-tessellate the
-	// coarse lathe to round the silhouette. DEFAULT OFF (FDS_MOMY_SUBDIV=N to
-	// enable) — the current impl CRACKS the mesh at its UV/duplicate-vertex
-	// seams (edge-midpoint sharing is keyed by vertex index and doesn't merge
-	// coincident verts), so it needs a vertex-weld pass before it's usable.
+	// Geometry fix for the mummies ('momy-1' + its mirror 'momy-2'):
+	// Phong-tessellate the coarse lathes to round the silhouette. DEFAULT OFF
+	// (FDS_MOMY_SUBDIV=N to enable). The old "cracks at UV/duplicate-vertex
+	// seams" note here was a MISDIAGNOSIS — the lathe is index-closed (no
+	// unshared coincident verts; measured via FDS_SUBDIV_DIAG, boundary-edges
+	// raw=0), and the holes were the unguarded Phong projection inverting
+	// sub-triangles at the cap rim / pole where endpoint normals disagree.
+	// Fixed 2026-07-30 in SubdivideMaterialFaces (crease-guarded projection);
+	// SUBDIV=2 renders closed at the deterministic momy close-cam
+	// (FDS_GREETS_CAM="-12.1,3.2,-27,0,-0.06,-1", which frames momy-2 — both
+	// mummies are subdivided so that pose is a valid gate).
 	{
 		const char *lv = std::getenv("FDS_MOMY_SUBDIV");
 		const int levels = lv ? std::atoi(lv) : 0;
-		if (levels > 0) SubdivideMaterialFaces(GreetSc, "momy", levels);
+		if (levels > 0) {
+			SubdivideMaterialFaces(GreetSc, "momy-1", levels);
+			SubdivideMaterialFaces(GreetSc, "momy-2", levels);
+		}
+	}
+
+	// Stone displacement workstream (docs/ENVDYN_DISPLACEMENT_PLAN.md, B):
+	// tessellate the wall ('rooms') + floor ('floor') for the height-map
+	// displacement bake — LINEAR midpoints (pure density; PN rounding would
+	// bow the flat walls near corners where smoothed vertex normals tilt) —
+	// then (--greets_displace) push interior verts along their smooth normals
+	// by the low-mip height sample. Same hook point as the momy subdiv:
+	// per-vertex normals exist (Preprocess), per-face UVs are final
+	// (GreetsRetileFloor ran), MakeFacesIndependentByAngle below re-derives
+	// vertex normals + tangents on the displaced mesh, and the Piramid chunk
+	// split further down wraps the displaced verts in its chunk bounds.
+	// Defaults (subdiv 0, displace 0) = neither call runs (byte-identical).
+	// S1 offscreen shadow proxy: captured here (rooms/floor still FLAT), built
+	// after the displace/smooth passes below, finalized after the clustering.
+	InitTimelineMark("greets: displace block begin");
+	StoneProxySnapshot g_stoneProxySnap;
+	TriMesh *g_stoneProxyMesh = nullptr;
+	{
+		const int  L        = fds::FeatureFlags::greets_stone_subdiv();
+		const bool displace = fds::FeatureFlags::greets_displace();
+		if (displace && fds::FeatureFlags::greets_shadow_proxy())
+			CaptureStoneProxySnapshot(GreetSc, g_stoneProxySnap);
+		if (!displace && L > 0) {
+			// Legacy pure-density knob (no bake): linear midpoint split only.
+			SubdivideMaterialFaces(GreetSc, "rooms", L, /*phong=*/false);
+			SubdivideMaterialFaces(GreetSc, "floor", L, /*phong=*/false);
+		}
+		if (!displace && fds::FeatureFlags::displace_viz())
+			std::fprintf(stderr, "[DISPLACE-VIZ] --displace_viz is on but "
+				"--greets_displace is OFF — no bake runs, so the overlay has "
+				"nothing to draw. Add --greets_displace.\n");
+		if (displace) {
+			const float amp   = fds::FeatureFlags::greets_displace_amp();
+			const int   mip   = fds::FeatureFlags::greets_displace_mip();
+			const float adapt = fds::FeatureFlags::greets_displace_adapt();
+			const float cpb   = fds::FeatureFlags::greets_displace_cpb();
+			// Symmetric adaptive subdivision + displacement in ONE pass (S1/S2
+			// of the diagonal-grain fix — the old linear-subdiv + interior-
+			// displace pair put a roof-ridge on every stone quad's diagonal).
+			// greets_stone_subdiv > 0 forces that UNIFORM level (the cost-
+			// comparison baseline); 0 = adaptive 0..3 by height-map busyness.
+			// The displaced-material set (rooms+floor) lets the cross-material
+			// seam pin (--greets_displace_neighbor_pin) tell a NON-displaced
+			// neighbour (siling/lintel — pin against it) from the sibling
+			// displaced junction (rooms<->floor — leave relieved).
+			static const std::vector<std::string> kDisplacedMats = { "rooms", "floor" };
+			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb, &kDisplacedMats);
+			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb, &kDisplacedMats);
+			// B4 residual: geometry now carries the low band of the relief, so
+			// POM must march the RESIDUAL (full − upsampled low band) or the
+			// blocks get counted twice (geometry bump + parallax shift of the
+			// same edges). Degenerate maps return null (the bake skipped them
+			// — original map stays, e.g. the all-white shipping wall map).
+			// Cone POM's map is rebaked from the residual heights when active.
+			for (Material *M = MatLib; M; M = M->Next) {
+				if (M->RelScene != GreetSc || !M->Name || !M->HeightMap) continue;
+				if (std::strcmp(M->Name, "rooms") && std::strcmp(M->Name, "floor"))
+					continue;
+				if (Texture *resid = MakeResidualHeight(M->HeightMap, mip)) {
+					M->HeightMap = resid;   // original leaks (init-time, matches loaders)
+					if (M->ConeMap) {
+						const int coneExact = fds::FeatureFlags::pom_cone_exact();
+						M->ConeMap = coneExact > 0
+						    ? LoadOrBakeConeMapExact(M->HeightMap, coneExact, M->Name)
+						    : MakeConeMap(M->HeightMap);
+						std::fprintf(stderr, "[DISPLACE] '%s' cone map rebaked "
+						             "from the residual (exact=%d)\n", M->Name, coneExact);
+					}
+					std::fprintf(stderr, "[DISPLACE] '%s' POM input -> residual "
+					             "height map\n", M->Name);
+				}
+			}
+		}
 	}
 
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
+	InitTimelineMark("greets: DisplaceStoneSubdiv block end");
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
+	InitTimelineMark("greets: MakeFacesIndependentByAngle end");
+
+	// Displaced stone: re-SMOOTH the displaced surface normals. The pass above
+	// (MakeFacesIndependentByAngle, 30°) facets the new relief — adjacent cell
+	// faces exceed the crease threshold, split, and the triangulation shows as
+	// hairline/facet seams (plus a split tangent basis → normal-map noise). A
+	// scene-wide position-bucket weld averages the displaced face normals within
+	// greets_displace_smooth degrees, so shading + tangents go continuous and
+	// the seams vanish, while authored 90° corners (and material borders) stay
+	// hard. No-op when --greets_displace is off.
+	if (fds::FeatureFlags::greets_displace()) {
+		const float sm = fds::FeatureFlags::greets_displace_smooth();
+		DisplaceStoneSmoothNormals(GreetSc, "rooms", sm);
+		DisplaceStoneSmoothNormals(GreetSc, "floor", sm);
+	}
+
+	// S1b PER-PIXEL SHELL (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md):
+	// push the stone out to the LID of a relief slab so the POM march has
+	// something to enter and can DISCARD rays that leave the patch (= real
+	// block-edge silhouettes with the geometry behind showing through). Runs
+	// here because vertex normals are final (MakeFacesIndependentByAngle above
+	// split the creased walls per face, so each wall's verts are its own) and
+	// the Piramid chunk split further down copies Vertex/Face structs wholesale.
+	// The campaign's per-pixel mode is --no-greets_displace (the march carries
+	// the FULL height map); combined with --greets_displace the shell would sit
+	// on the already-displaced surface with the RESIDUAL map as its input, which
+	// is a different (unvalidated) configuration — warn but allow.
+	if (fds::FeatureFlags::pom_shell()) {
+		if (fds::FeatureFlags::greets_displace())
+			std::fprintf(stderr, "[POM-SHELL] WARNING: --pom_shell together with "
+				"--greets_displace — the shell is being built on the DISPLACED "
+				"surface and marches the RESIDUAL map. The campaign's per-pixel "
+				"mode is --no-greets_displace.\n");
+		const bool pin = fds::FeatureFlags::pom_shell_pin();
+		// --pom_shell_weld=3 (S1d-2e): PomShell_Build runs once per material,
+		// so its position-bucket weld can only ever average normals WITHIN the
+		// material being built and the wall/floor corners still tear. Snapshot
+		// the pristine mesh ONCE here, across every material about to be
+		// shelled, so both sides of a junction extrude along one direction and
+		// land on one point. No-op (and byte-null) below --pom_shell_weld=3.
+		const char *weldMats[2] = { nullptr, nullptr }; int nWeldMats = 0;
+		{
+			for (const char *nm : { "rooms", "floor" })
+				for (Material *m = MatLib; m; m = m->Next)
+					if (m->RelScene == GreetSc && m->Name && !std::strcmp(m->Name, nm)
+					    && m->HeightMap) { weldMats[nWeldMats++] = nm; break; }
+			PomShell_WeldPrepare(GreetSc, weldMats, nWeldMats);
+			// R2: --pom_shell_slit_census. Pre-build position snapshot, so the
+			// census below can attribute the delta each POSITION actually
+			// received without instrumenting PomShell_Build itself. No-op and
+			// byte-null with the flag off.
+			PomShell_SlitSnapshot(GreetSc);
+			// ── S1d-3 PRISM (--pom_prism, default 0 = OFF) ── BEGIN
+			// Same pre-build snapshot, kept separately because the prism's
+			// consumer runs much later (after the ::mirUV split) while the slit
+			// census consumes and frees its own immediately below.
+			PomShell_PrismSnapshot(GreetSc);
+			// ── S1d-3 PRISM ── END
+		}
+		for (const char *nm : { "rooms", "floor" }) {
+			Material *M = nullptr;
+			for (Material *m = MatLib; m; m = m->Next)
+				if (m->RelScene == GreetSc && m->Name && !std::strcmp(m->Name, nm)) { M = m; break; }
+			if (!M || !M->HeightMap) {
+				std::fprintf(stderr, "[POM-SHELL] '%s': no height map — no shell "
+					"(needs --greets_stone_tex + --parallax)\n", nm);
+				continue;
+			}
+			// The amplitude the march runs at, consumed once here.
+			PomShell_Build(GreetSc, nm,
+			               fds::FeatureFlags::parallax_strength() * M->ParallaxScale, pin);
+		}
+		PomShell_SlitCensus(GreetSc, weldMats, nWeldMats);
+		PomShell_WeldReset();
+	}
+
+	// S1 offscreen proxy: NOW that the displace + face-independence + smooth-weld
+	// passes are done, (1) tag every displaced rooms/floor face main-only so the
+	// offscreen/bake passes skip the ~81k detail, and (2) build the flat proxy
+	// mesh from the pre-displace snapshot so those passes rasterise the ~226 flat
+	// faces instead. The tag propagates through the Piramid chunk split (per-face
+	// struct copy). Both no-op unless --greets_displace captured a snapshot.
+	if (g_stoneProxySnap.captured) {
+		int tagged = 0;
+		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+			if (!std::strstr(Obj->Name, "Piramid")) continue;
+			TriMesh *T = (TriMesh*)Obj->Data;
+			for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+				if (!F->Txtr || !F->Txtr->Name) continue;
+				if (!std::strcmp(F->Txtr->Name, "rooms") ||
+				    !std::strcmp(F->Txtr->Name, "floor")) { F->Flags |= Face_MainOnly; ++tagged; }
+			}
+		}
+		g_stoneProxyMesh = BuildStoneProxyMesh(GreetSc, g_stoneProxySnap);
+		std::fprintf(stderr, "[STONE-PROXY] tagged %d displaced rooms/floor faces "
+			"Face_MainOnly (offscreen passes use the flat proxy)\n", tagged);
+	}
 
 	// Specular/Glossiness are AUTHORED IN THE LWO SOURCES now (Authoring/
 	// greets — stairs/amudim/floor/hull/cockpit at spec 0.4 gloss 48, the
@@ -1369,31 +2121,25 @@ void Initialize_Greets()
 	// deleted, so the browser editor's LWO write-back is authoritative — a
 	// saved specular no longer gets stomped at the next scene load. The name
 	// lists remain only to pick which surfaces get a Sobel-baked normal map.
-	for (Material *M = MatLib; M; M = M->Next) {
-		if (M->RelScene != GreetSc || !M->Name) continue;
-		const char *n = M->Name;
-		const bool isShiny = strstr(n, "stairs") || strstr(n, "amudim") ||
-		                     strstr(n, "floor")  || strstr(n, "marb")   ||
-		                     strstr(n, "MARB")   || strstr(n, "hull")   ||
-		                     strstr(n, "cockpit");
-		// Wall / ceiling surfaces — the FLD names them 'rooms' (the
-		// big brick wall texture in the back of the greets scene) and
-		// 'siling' (the ceiling that uses the same brick atlas). They show
-		// enough surface detail in the diffuse to benefit from a Sobel-baked
-		// tangent-space map.
-		const bool isWall = !strcmp(n, "rooms") || !strcmp(n, "siling");
-		// Tangent-space normal maps work on any face orientation —
-		// the perturbation lives in the surface's own tangent plane
-		// and the lighting kernel multiplies by per-pixel TBN to bring
-		// it into view space. Apply to every shiny material + the
-		// wall/ceiling materials.
-		if ((isShiny || isWall) && M->Txtr && !M->NormalMap) {
-			M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f);
-			if (M->NormalMap) {
-				std::fprintf(stderr, "[GREETS] baked tangent-space normal map for '%s'\n", n);
-			}
-		}
-	}
+	// THE SOBEL NORMAL-MAP NAME GATE IS GONE (2026-08-09, user's call:
+	// "fuck the string match - it was a temp measure anyway - remove").
+	//
+	// It used to bake a tangent-space normal map FROM THE DIFFUSE for any
+	// material whose NAME matched a substring list, which is a guess dressed
+	// as authoring: it turned the mech's camouflage PAINT into geometric
+	// dents (docs/SHADING_CONTRACT.md §11 row E8 — hull pixel (767,723) read
+	// Y 131.2 shipped against 45.0 without it and 41.0 on the Metal arm).
+	//
+	// By the end it only reached 'siling'; every other name on the list was
+	// already served by a real map through the stone-tex or RVSM path and
+	// skipped by the `!M->NormalMap` guard. So nothing here is load-bearing.
+	//
+	// A surface that WANTS relief now gets it the one honest way: an authored
+	// TEXTURES/PBR/<set>/normal.png reached by the LWO 'RVSM' sub-chunk, which
+	// MaterialImport_ApplyRevMaps (DEMO/MaterialImport.cpp) loads with no code
+	// change — the same route 'rooms', 'stairs' and 'amudim' already take.
+	// BakeNormalMapFromDiffuse itself is kept: the editor still offers it as
+	// an explicit per-surface action, which is authoring, not inference.
 
 	gg->Init();
 
@@ -1585,15 +2331,49 @@ void Initialize_Greets()
 		// a unique ShadowMatID per facet → at each poly edge the light-view and
 		// camera-view faces carry different ids → the PolyId equality test reports
 		// a spurious self-shadow → a dark line on every facet edge. The mummy
-		// ('momy') is the one curved lathe in Piramid.lwo, so force its whole
-		// surface to a single id (it then self-matches everywhere → no acne lines).
-		// Same idea as the hull/robot single-id merge. Add curved alcove mats here
-		// when we tackle those (concave, so it's a softer trade-off — real
-		// self-shadowing inside the alcove is lost along with the artifact).
-		static const std::set<std::string> kSingleShadowIdMats = { "momy" };
+		// The two mummies ('momy-1' and 'momy-2') are identical curved lathes in
+		// Piramid.lwo (mirror copies, 336 polys each), so force each whole surface
+		// to a single id (it then self-matches everywhere → no acne lines). BOTH
+		// belong here: the special-case is per-SURFACE (keyed on the material name
+		// per face), and the 2026-07-30 split-bake made the second mummy a distinct
+		// surface — without membership its facets get per-plane ids → the per-facet
+		// self-shadow acne this list exists to kill. Same idea as the hull/robot
+		// single-id merge. Add curved alcove mats here when we tackle those
+		// (concave, so it's a softer trade-off — real self-shadowing inside the
+		// alcove is lost along with the artifact).
+		std::set<std::string> kSingleShadowIdMats = { "momy-1", "momy-2" };
+		// Displaced stone: the per-(material, PLANE) clustering below assumes the
+		// wall is coplanar (one flat 'rooms' plane => one ShadowMatID => no self-
+		// shadow). Displacement tilts/offsets EVERY facet onto its own plane, so
+		// each facet would get a UNIQUE ShadowMatID and self-shadow its neighbours
+		// — the per-facet hairline acne on the subdivided walls (worst at grazing).
+		//
+		// PARENT-PLANE inheritance (--greets_displace_shadow_planes, default on):
+		// key each displaced facet by its PARENT (pre-displacement authored)
+		// plane — the bake stamped the parent's registry ordinal into
+		// F->ShadowMatID (transient tag; see MeshOps_StoneParentPlane). Facets of
+		// one flat wall share one id (no per-facet acne, same as the collapse
+		// WITHIN a wall) but DIFFERENT walls get different ids, so an occluding
+		// wall shadows a receiver wall again. The previous whole-material
+		// single-id collapse made every rooms-vs-rooms occlusion self-match in
+		// the deferred PolyId identity test — an omni behind a wall lit the next
+		// wall straight through it (the reported light bleed). --no- restores
+		// the collapse (momy-style) for A/B.
+		const bool planeInherit = fds::FeatureFlags::greets_displace() &&
+		                          fds::FeatureFlags::greets_displace_shadow_planes();
+		if (fds::FeatureFlags::greets_displace() && !planeInherit) {
+			kSingleShadowIdMats.insert("rooms");
+			kSingleShadowIdMats.insert("floor");
+		}
+		auto isDisplacedStone = [&](const Material *M) {
+			return planeInherit && M && M->Name &&
+			       (!std::strcmp(M->Name, "rooms") || !std::strcmp(M->Name, "floor"));
+		};
 
 		int totalClusters = 0;
 		int totalTaggedFaces = 0;
+		// all meshes' clusters (the proxy stamping below needs cross-mesh lookup)
+		std::map<std::pair<Material*, PlaneKey>, uint16_t> allClusters;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
 			if (!std::strstr(Obj->Name, "Piramid")) continue;
@@ -1626,12 +2406,25 @@ void Initialize_Greets()
 				// surface lands in ONE cluster (one ShadowMatID) → self-matches
 				// everywhere, killing the per-facet self-shadow acne lines.
 				const bool singleId = src->Name && kSingleShadowIdMats.count(src->Name) > 0;
-				PlaneKey key = singleId
-				    ? PlaneKey{ 0, 0, 0, 0 }
-				    : PlaneKey{ quantize(nx, kNormalQ),
-				                quantize(ny, kNormalQ),
-				                quantize(nz, kNormalQ),
-				                quantize(d,  kDistanceQ) };
+				PlaneKey key;
+				if (const StoneParentPlane *pp = isDisplacedStone(src)
+				        ? MeshOps_StoneParentPlane(src->Name, F->ShadowMatID) : nullptr) {
+					// displaced stone: cluster by the PARENT authored plane the
+					// bake stamped (facet planes are per-facet noise).
+					key = PlaneKey{ quantize(pp->nx, kNormalQ),
+					                quantize(pp->ny, kNormalQ),
+					                quantize(pp->nz, kNormalQ),
+					                quantize(pp->d,  kDistanceQ) };
+				} else if (singleId || (isDisplacedStone(src) && F->ShadowMatID == 0)) {
+					// single-id collapse; also the unstamped-displaced fallback
+					// (degenerate parent normal) so those faces still self-match.
+					key = PlaneKey{ 0, 0, 0, 0 };
+				} else {
+					key = PlaneKey{ quantize(nx, kNormalQ),
+					                quantize(ny, kNormalQ),
+					                quantize(nz, kNormalQ),
+					                quantize(d,  kDistanceQ) };
+				}
 				auto mk = std::make_pair(src, key);
 				auto it = clusters.find(mk);
 				if (it == clusters.end()) {
@@ -1652,12 +2445,47 @@ void Initialize_Greets()
 				"(%d tagged, %d degen skipped)\n",
 				Obj->Name, unsigned(T->FIndex), clusters.size(),
 				meshTaggedFaces, degenFaceCount);
+			allClusters.insert(clusters.begin(), clusters.end());
 		}
 		std::fprintf(stderr,
 			"[PIRAMID-SPLIT] total clusters: %d  tagged faces: %d  "
 			"(per-face F->ShadowMatID; no Material clones)\n",
 			totalClusters, totalTaggedFaces);
+		// S1 offscreen proxy under parent-plane inheritance: the flat proxy IS
+		// the parent geometry, so each proxy face's OWN authored plane quantizes
+		// to exactly the parent key its displaced facets clustered under — stamp
+		// per face by lookup (the id must match per WALL now, not per material).
+		if (g_stoneProxyMesh && planeInherit) {
+			int hit = 0, miss = 0;
+			for (Face *F = g_stoneProxyMesh->Faces;
+			     F < g_stoneProxyMesh->Faces + g_stoneProxyMesh->FIndex; ++F) {
+				if (!F->Txtr || !isDisplacedStone(F->Txtr)) continue;
+				const float len = std::sqrt(F->N.x*F->N.x + F->N.y*F->N.y + F->N.z*F->N.z);
+				if (!(len > 1e-4f)) continue;
+				const float inv = 1.0f / len;
+				// same d convention as the bake registry: n̂·A = −NormProd/|N|
+				const float d = -F->NormProd * inv;
+				const PlaneKey key{ quantize(F->N.x*inv, kNormalQ),
+				                    quantize(F->N.y*inv, kNormalQ),
+				                    quantize(F->N.z*inv, kNormalQ),
+				                    quantize(d, kDistanceQ) };
+				auto it = allClusters.find(std::make_pair(F->Txtr, key));
+				if (it != allClusters.end()) { F->ShadowMatID = it->second; ++hit; }
+				else ++miss;
+			}
+			std::fprintf(stderr, "[STONE-PROXY] parent-plane ids stamped onto the "
+				"proxy caster: %d matched, %d unmatched\n", hit, miss);
+		}
 	}
+	// S1 offscreen proxy (single-id collapse path): stamp the displaced walls'
+	// single shadow cluster onto the flat proxy caster so the deferred PolyId
+	// self-shadow test matches between the displaced G-buffer pixels and the
+	// flat occluder. Must run AFTER the clustering above assigned the ids.
+	// No-op unless the proxy was built; the parent-plane path stamped per-face
+	// ids inside the block above instead.
+	if (g_stoneProxyMesh && !(fds::FeatureFlags::greets_displace() &&
+	                          fds::FeatureFlags::greets_displace_shadow_planes()))
+		FinalizeStoneProxy(GreetSc, g_stoneProxyMesh);
 	// Piramid spatial chunk split: partition Piramid.lwo's faces into a
 	// 3D spatial grid; each non-empty cell becomes its own TriMesh + Object
 	// with a tight bsphere. The original Piramid is "retired" (FIndex=0)
@@ -1671,6 +2499,11 @@ void Initialize_Greets()
 	// cube face → ~5× reduction in mech-omni xform cost.
 	{
 		const int chunkGrid = fds::FeatureFlags::greets_piramid_chunk_grid();
+		// Phase A (docs/VISIBILITY_PLAN.md §7): size-based granularity override.
+		// >0 = near-cubic cells of ~chunkSize world units per side (resolution-
+		// independent, so the cell size doesn't grow 20x under displacement). 0 =
+		// legacy uniform N^3 grid (byte-identical). See greets_chunk_size help.
+		const float chunkSize = fds::FeatureFlags::greets_chunk_size();
 		// Chunking is a deferred-path optimization — splits the Piramid
 		// into smaller TriMeshes so the per-cube-face bsphere cull in
 		// shadow Transform_Objects can reject most cells per face. The
@@ -1684,7 +2517,13 @@ void Initialize_Greets()
 		// reproduces at grid≥4 on greets fwd (2026-05-30). Until
 		// Lighting() is rewritten to use per-face ambient, skip chunking
 		// entirely in forward mode.
-		if (chunkGrid > 0 && fds::FeatureFlags::deferred()) {
+		// fds::DeferredPathEnabled(), NOT FeatureFlags::deferred(): the user's
+		// interactive greets run reaches the deferred kernel via ForceDeferred /
+		// shard_deferred without the bare --deferred flag ever being set, so this
+		// test answered "forward" and skipped the split on the very path that
+		// needs it — 59 556 displaced faces never got NoShadowCast, i.e. 15.10 ms
+		// of shadow bake per frame. One predicate, defined once in RENDER.CPP.
+		if ((chunkGrid > 0 || chunkSize > 0.0f) && fds::DeferredPathEnabled()) {
 			// Find Piramid.lwo
 			Object *piramidObj = nullptr;
 			TriMesh *piramid = nullptr;
@@ -1716,14 +2555,25 @@ void Initialize_Greets()
 				const float spanX = std::max(0.001f, xmax - xmin);
 				const float spanY = std::max(0.001f, ymax - ymin);
 				const float spanZ = std::max(0.001f, zmax - zmin);
+				// Per-axis cell counts. chunkSize==0 -> gx=gy=gz=chunkGrid, which
+				// makes cellOf + the index formula BYTE-IDENTICAL to the legacy
+				// uniform-N^3 path (same int() truncation, same clamp, same
+				// (iz*N+iy)*N+ix). chunkSize>0 -> near-cubic cells sized in world
+				// units, independent of the mesh's face count (Phase A).
+				int gx = chunkGrid, gy = chunkGrid, gz = chunkGrid;
+				if (chunkSize > 0.0f) {
+					gx = std::max(1, int(std::ceil(spanX / chunkSize)));
+					gy = std::max(1, int(std::ceil(spanY / chunkSize)));
+					gz = std::max(1, int(std::ceil(spanZ / chunkSize)));
+				}
 				auto cellOf = [&](float fx, float fy, float fz) -> int64_t {
-					int ix = std::clamp(int((fx - xmin) / spanX * float(chunkGrid)),
-					                    0, chunkGrid - 1);
-					int iy = std::clamp(int((fy - ymin) / spanY * float(chunkGrid)),
-					                    0, chunkGrid - 1);
-					int iz = std::clamp(int((fz - zmin) / spanZ * float(chunkGrid)),
-					                    0, chunkGrid - 1);
-					return (int64_t(iz) * chunkGrid + iy) * chunkGrid + ix;
+					int ix = std::clamp(int((fx - xmin) / spanX * float(gx)),
+					                    0, gx - 1);
+					int iy = std::clamp(int((fy - ymin) / spanY * float(gy)),
+					                    0, gy - 1);
+					int iz = std::clamp(int((fz - zmin) / spanZ * float(gz)),
+					                    0, gz - 1);
+					return (int64_t(iz) * gy + iy) * gx + ix;
 				};
 				// Bucket faces by cell (face centroid).
 				std::map<int64_t, std::vector<DWord>> cellFaces;
@@ -1735,6 +2585,25 @@ void Initialize_Greets()
 					const float cy = (f.A->Pos.y + f.B->Pos.y + f.C->Pos.y) * (1.0f/3.0f);
 					const float cz = (f.A->Pos.z + f.B->Pos.z + f.C->Pos.z) * (1.0f/3.0f);
 					cellFaces[cellOf(cx, cy, cz)].push_back(i);
+				}
+				// --vis_stats: per-chunk face-count histogram (Phase A census).
+				if (fds::FeatureFlags::vis_stats()) {
+					// pow2 buckets: [1,2) [2,4) ... [2^k, 2^(k+1))
+					int hist[16] = {0};
+					size_t fmin = SIZE_MAX, fmax = 0, ftot = 0;
+					for (const auto& kv : cellFaces) {
+						const size_t n = kv.second.size();
+						if (!n) continue;
+						fmin = std::min(fmin, n); fmax = std::max(fmax, n); ftot += n;
+						int b = 0; size_t v = n;
+						while (v > 1 && b < 15) { v >>= 1; ++b; }
+						++hist[b];
+					}
+					std::fprintf(stderr, "[CHUNK-HIST] cells=%zu faces min/mean/max=%zu/%.0f/%zu buckets(pow2):",
+					    cellFaces.size(), fmin, cellFaces.empty()?0.0:double(ftot)/cellFaces.size(), fmax);
+					for (int b = 0; b < 16; ++b)
+						if (hist[b]) std::fprintf(stderr, " [%d-%d):%d", 1<<b, 1<<(b+1), hist[b]);
+					std::fprintf(stderr, "\n");
 				}
 				// Build per-cell chunks.
 				int chunksCreated = 0;
@@ -1773,10 +2642,17 @@ void Initialize_Greets()
 					float cxmin=FLT_MAX, cxmax=-FLT_MAX;
 					float cymin=FLT_MAX, cymax=-FLT_MAX;
 					float czmin=FLT_MAX, czmax=-FLT_MAX;
+					// S1: count displaced (Face_MainOnly) faces. A chunk that is
+					// ENTIRELY displaced rooms/floor casts no shadow itself (the
+					// flat proxy does) — so mark it Tri_NoShadowCast to skip its
+					// per-vertex transform in the shadow bake too (the per-face
+					// skip alone only drops the raster, not Phase-A transform).
+					DWord mainOnlyFaces = 0;
 					for (DWord i = 0; i < chunkFaces; ++i) {
 						const Face &srcF = piramid->Faces[faceIndices[i]];
 						Face &dstF = chunk->Faces[i];
 						dstF = srcF;
+						if (srcF.Flags & Face_MainOnly) ++mainOnlyFaces;
 						dstF.A = srcF.A ? &chunk->Verts[vertMap[srcF.A]] : nullptr;
 						dstF.B = srcF.B ? &chunk->Verts[vertMap[srcF.B]] : nullptr;
 						dstF.C = srcF.C ? &chunk->Verts[vertMap[srcF.C]] : nullptr;
@@ -1828,16 +2704,44 @@ void Initialize_Greets()
 					// (already baked in). Safe because chunk is
 					// Tri_Possessed (RotMat / IPos won't change per frame).
 					chunk->worldVerts = new Vector[chunkVerts];
+					float wmnx=FLT_MAX, wmny=FLT_MAX, wmnz=FLT_MAX;
+					float wmxx=-FLT_MAX, wmxy=-FLT_MAX, wmxz=-FLT_MAX;
 					for (DWord i = 0; i < chunkVerts; ++i) {
 						MatrixXVector(chunk->RotMat, &chunk->Verts[i].Pos,
 						              &chunk->worldVerts[i]);
 						Vector_SelfAdd(&chunk->worldVerts[i], &chunk->IPos);
+						const Vector &w = chunk->worldVerts[i];
+						if (w.x<wmnx) wmnx=w.x; if (w.x>wmxx) wmxx=w.x;
+						if (w.y<wmny) wmny=w.y; if (w.y>wmxy) wmxy=w.y;
+						if (w.z<wmnz) wmnz=w.z; if (w.z>wmxz) wmxz=w.z;
 					}
+					// World + local AABB for the Phase-B chunk-occlusion cull
+					// (docs/VISIBILITY_PLAN.md §7). Derived from worldVerts (the
+					// exact transform the shipping cube-face cull uses), and marked
+					// valid so WorldAabb_UpdateScene leaves these static boxes alone.
+					// Inert unless --chunk_occlusion reads them.
+					chunk->WorldAabbMin = { wmnx, wmny, wmnz };
+					chunk->WorldAabbMax = { wmxx, wmxy, wmxz };
+					chunk->WorldAabbValid = 1;
+					chunk->LocalAabbMin = { cxmin, cymin, czmin };
+					chunk->LocalAabbMax = { cxmax, cymax, czmax };
+					chunk->LocalAabbValid = 1;
 					chunk->Flags = piramid->Flags;
 					// Tri_Possessed: skip TriMeshHead loop in Animate_Objects.
 					// Without it, Spline_Calc_3D on the chunk's empty
 					// (NumKeys=0) Pos spline derefs null Keys and hangs.
 					chunk->Flags |= Tri_Possessed;
+					// S1: a chunk that is 100% displaced rooms/floor doesn't cast
+					// its own shadow — the flat proxy does. Skip the whole chunk
+					// (incl. its per-vertex transform) from the shadow bake. Mixed
+					// chunks (some non-target siling/momy) still cast; their
+					// displaced faces are dropped per-face by Face_MainOnly.
+					if (mainOnlyFaces > 0 && mainOnlyFaces == chunkFaces) {
+						chunk->Flags |= Tri_NoShadowCast;
+						++g_s1PureChunks; g_s1PureChunkFaces += int(chunkFaces);
+					} else if (mainOnlyFaces > 0) {
+						++g_s1MixedChunks; g_s1MixedMainFaces += int(mainOnlyFaces);
+					}
 					// Wrap in Object. Allocate per-chunk Pos vector + Rot
 					// matrix — Animate_Objects's Object loop writes to
 					// Obj->Pos when reconciling parent transforms; sharing
@@ -1883,19 +2787,46 @@ void Initialize_Greets()
 				// reader.
 				const DWord origVerts = piramid->VIndex;
 				piramid->FIndex = 0;
-				std::fprintf(stderr,
-				    "[PIRAMID-CHUNKS] grid=%d³ → %d chunks  "
-				    "(orig %u faces / %u verts → %u total chunk verts; "
-				    "%u faces with null vertex skipped)\n",
-				    chunkGrid, chunksCreated,
-				    unsigned(origFaces), unsigned(origVerts),
-				    unsigned(totalChunkVerts), unsigned(degen));
+				if (chunkSize > 0.0f)
+					std::fprintf(stderr,
+					    "[PIRAMID-CHUNKS] size=%.2f (grid=%dx%dx%d) → %d chunks  "
+					    "(orig %u faces / %u verts → %u total chunk verts; "
+					    "%u faces with null vertex skipped)\n",
+					    chunkSize, gx, gy, gz, chunksCreated,
+					    unsigned(origFaces), unsigned(origVerts),
+					    unsigned(totalChunkVerts), unsigned(degen));
+				else
+					std::fprintf(stderr,
+					    "[PIRAMID-CHUNKS] grid=%d³ → %d chunks  "
+					    "(orig %u faces / %u verts → %u total chunk verts; "
+					    "%u faces with null vertex skipped)\n",
+					    chunkGrid, chunksCreated,
+					    unsigned(origFaces), unsigned(origVerts),
+					    unsigned(totalChunkVerts), unsigned(degen));
+				if (g_stoneProxyMesh)
+					std::fprintf(stderr, "[STONE-PROXY] shadow-skip census: %d pure "
+					    "displaced chunks (%d faces) NoShadowCast; %d mixed chunks "
+					    "keep %d displaced faces (Phase-A transform still paid)\n",
+					    g_s1PureChunks, g_s1PureChunkFaces, g_s1MixedChunks, g_s1MixedMainFaces);
 			}
 		}
 	}
 	// Split mirrored-UV faces onto handedness clones (after all robot/face
 	// retargeting, before the matID rebuild so the clones get IDs).
+	InitTimelineMark("greets: chunking/clustering end");
 	GreetsFixBitangentHandedness(GreetSc);
+	// ── S1d-3 PRISM (--pom_prism, default 0 = OFF) ── BEGIN
+	// Here, and not next to PomShell_Build, for two reasons: the ::mirUV split
+	// above has just assigned each shelled face its final handedness material,
+	// which the side quads copy verbatim; and the mirror clone build below has
+	// not run yet, so the new faces are cloned into the mirrors like any other.
+	// The chunk split above has already run, but its chunks all carry Piramid's
+	// transform, so one side mesh in that space is exact.
+	if (fds::FeatureFlags::pom_shell() && fds::FeatureFlags::pom_prism() > 0) {
+		static const char *kPrismMats[2] = { "rooms", "floor" };
+		PomShell_BuildPrism(GreetSc, kPrismMats, 2);
+	}
+	// ── S1d-3 PRISM ── END
 	Scene_RebuildMatTable(GreetSc);
 	std::fprintf(stderr, "[ROBOT-MAT] total clones: %d\n", totalClones);
 	std::fflush(stderr);
@@ -1915,6 +2846,7 @@ void Initialize_Greets()
 	// mirror build (the teleporter mirror clones the ball; its 2-key
 	// Pos spline marks it dynamic → re-mirrored per frame).
 	fds::BuildDiscoBall(GreetSc);
+	InitTimelineMark("greets: BuildDiscoBall end");
 
 	// Blaster-bolt test harness (--greets-blasters): build the bolt texture.
 	if (fds::FeatureFlags::greets_blasters())
@@ -1927,29 +2859,32 @@ void Initialize_Greets()
 	// The bake itself spawns its own thread and parallelizes with the
 	// remaining scene playback.
 	{
-		// FLD-loaded omnis in greets all ship with IRange=0 (the FLD
-		// Range envelope is optional; FLD_CONV.CPP defaults it to a
-		// 1-key spline at 0). That kills surface lighting (range2=0 →
-		// rejects every pixel), halo bounds, and shadow FZP. Patch to
-		// the flag-controlled default so they actually contribute.
-		const float omniDefRange = fds::FeatureFlags::greets_omni_default_range();
-		if (omniDefRange > 0.0f) {
-			int patched = 0;
+		// Omni range is AUTHORED (LWS "LightRange" → FLD Range envelope →
+		// Omni::Range, evaluated per frame by Animate_Objects). Nothing
+		// patches it by default any more — see the note in
+		// SceneCorrections() for the two patches that used to.
+		//
+		// greets_omni_default_range survives only as an explicit tuning
+		// dial, default 0 = inert. When > 0 it FORCES every Light_Omni's
+		// range to that value: it rewrites the spline keys, because
+		// writing IRange alone would be undone by the very next
+		// Animate_Objects. Note this hits every Light_Omni present at
+		// this point, which includes the disco-ball lights built just
+		// above, not only the ten from the FLD.
+		const float omniForceRange = fds::FeatureFlags::greets_omni_default_range();
+		if (omniForceRange > 0.0f) {
+			int forced = 0;
 			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
 				if (O->Type != Light_Omni) continue;
-				if (O->IRange > 0.0f) continue;
-				O->IRange = omniDefRange;
-				O->rRange = 1.0f / omniDefRange;
-				if (O->Range.NumKeys >= 1 && O->Range.Keys) {
-					O->Range.Keys[0].Pos.x = omniDefRange;
-				}
-				++patched;
+				O->IRange = omniForceRange;
+				O->rRange = 1.0f / omniForceRange;
+				for (mword k = 0; k < O->Range.NumKeys && O->Range.Keys; ++k)
+					O->Range.Keys[k].Pos.x = omniForceRange;
+				++forced;
 			}
-			if (patched > 0) {
-				std::fprintf(stderr,
-				    "[GREETS] patched IRange=%g on %d FLD omnis (had 0)\n",
-				    omniDefRange, patched);
-			}
+			std::fprintf(stderr,
+			    "[GREETS] --greets_omni_default_range: forced IRange=%g on %d omnis "
+			    "(overriding the authored LWS ranges)\n", omniForceRange, forced);
 		}
 
 		// Animate_Objects fills in every FLD omni's IPos / IDir from
@@ -2083,10 +3018,22 @@ void Initialize_Greets()
 			    "(moving = per-frame full re-bake; no static bake or lightmap)\n",
 			    markedStatic, omniCubeRes, markedMoving, movingOmniRes, totalOmnis);
 		}
+		InitTimelineMark("greets: shadow-map block begin");
 		ShadowMaps_Rebuild(GreetSc, 1024);
+		InitTimelineMark("greets: ShadowMaps_Rebuild end");
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
-		ShadowMaps_BakeStatic(GreetSc);
+		InitTimelineMark("greets: CubeShadowMaps_Rebuild end");
+		// Force the static occluder bake even when --shadows isn't set yet:
+		// greets turns --shadows on at RUN (GreetsApplyRunDefaults), AFTER this
+		// init bake, so under bare --deferred shadows() is still off here. The
+		// static-shadow lightmap bake spawned below is likewise force-enabled
+		// (bakeForce) and READS these occluder maps; without the same force the
+		// maps stay empty and every lightmap texel bakes 100% lit (no static
+		// shadows). Same condition as bakeForce so the two stay in lockstep.
+		ShadowMaps_BakeStatic(GreetSc, /*forceEnable=*/!GreetsScenePreempted());
+		InitTimelineMark("greets: ShadowMaps_BakeStatic end");
 		fds::LightmapStampOrigBary(GreetSc);
+		InitTimelineMark("greets: LightmapStampOrigBary end");
 		// NOTE: the lightmap bake thread is spawned LATER (after the mirror /
 		// shatter setup below), not here — LightmapBake_Static reads Materials,
 		// and BuildMirrorsByTextureName / BuildGreetsShatter rewrite the
@@ -2101,6 +3048,7 @@ void Initialize_Greets()
 	// reflection shows at each pixel. Mirror-in-mirror (two facing)
 	// would currently produce empty recursion past depth 1; if greets
 	// ever needs that we'll add a depth cap.
+	InitTimelineMark("greets: mirror build begin");
 	if (fds::FeatureFlags::greets_mirror()) {
 		g_greetsMirrors.clear();
 		// One mirror per material name, plus one mirror per coplanar
@@ -2164,28 +3112,93 @@ void Initialize_Greets()
 	// thread reads Materials, so starting it earlier raced the read against
 	// those writes (TSan: LightmapBake_Static vs Scene_RebuildMatTable). The
 	// bake is still background — joined in Run_Greets before the first frame.
-	// Unconditional (matches the prior behaviour); LightmapBake_Static no-ops
-	// fast when --shadow-lightmap is off.
+	//
+	// … AND IT IS ONLY SPAWNED WHEN THE ATLAS CAN BE READ. See the block
+	// comment on lmAtlasReachable below: on the shipping arm it cannot, and
+	// the bake was 54 ms of startup and 0.09 GB of fully-touched store for a
+	// buffer no pixel ever samples.
 	{
-		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
-		const auto bakeSpawnT = std::chrono::steady_clock::now();
+		InitTimelineMark("greets: shadow/env bake end — spawning lightmap thread");
 		Scene * const greetScForBake = GreetSc;
+		// ── WILL ANY PIXEL EVER READ THE ATLAS? ───────────────────────────
+		// The atlas has exactly one runtime reader: resolveCubeAtten's
+		// `useLightmap && pl.lm` branch (DeferredShadowSampling.h:120), fed by
+		// resolvePixelLightmap (:47). That needs BOTH of:
+		//   (a) the lightmapMF/ST G-buffer planes to exist. They are allocated
+		//       only by EngineGBuffer_Resize (Mekalele.cpp:85) under
+		//       FeatureFlags::shadow_lightmap(), and every resize call site
+		//       (SDL2.cpp:433/441 at boot, Snapshot.cpp:153,
+		//       ReproHarness.cpp:130) runs BEFORE any scene init. So the flag's
+		//       value HERE — where only the CLI/env can have set it, since
+		//       GreetsApplyRunDefaults has not run yet — is exactly the value
+		//       the resize already saw. It is the plane-allocation gate, read
+		//       one phase late but with the same answer.
+		//   (b) lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic()
+		//       (DeferredSurfaceKernel.cpp:1622). Greets defaults
+		//       shadow_dynamic ON and shadow_lm_dynamic OFF, so this is false
+		//       on the shipping arm too — a second, independent closed gate.
+		// We key on (a) alone, deliberately: it is knowable here without
+		// guessing at run-phase defaults, and it is the CONSERVATIVE half —
+		// `--shadow_lightmap` on the command line still bakes, so the
+		// `--shadow_lightmap --shadow_lm_dynamic` arm (the only combination
+		// that has ever sampled the atlas: 41.9 % of pixels moved, +1.7 ms,
+		// SESSION_STATE 2026-08-10) is bit-for-bit what it was.
+		// MEASURED for the shipping arm: --no-shadow_lightmap is byte-identical
+		// (e61a8f1), and a deliberately crippled atlas is byte-identical
+		// (4e8a76c) — the atlas is not being read, twice proven.
+		const bool lmAtlasReachable = fds::FeatureFlags::shadow_lightmap();
 		// Force the bake on: greets wants lightmaps, but the global
-		// shadow_lightmap SAMPLE flag is now set at greets-RUN (so it doesn't
-		// leak onto city/fountain), so the bake's own gate would otherwise
-		// no-op here. Skip the force when greets won't render (preempted by
-		// another --scene-X) — then the bake no-ops fast as before.
-		const bool bakeForce = !GreetsScenePreempted();
-		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT, bakeForce]() {
-			fds::LightmapBake_Static(greetScForBake, bakeForce);
-			const auto bakeDoneT = std::chrono::steady_clock::now();
-			const double ms = std::chrono::duration<double, std::milli>(
-				bakeDoneT - bakeSpawnT).count();
+		// shadow_lightmap flag is set at greets-RUN (so it doesn't leak onto
+		// city/fountain), so the bake's own gate would otherwise no-op here.
+		// Skip the force when greets won't render (preempted by another
+		// --scene-X) — then the bake no-ops fast as before.
+		const bool notPreempted = !GreetsScenePreempted();
+		const bool bakeForce    = notPreempted && lmAtlasReachable;
+		// LightmapBake_Static's own gate is `forceEnable || shadow_lightmap()`,
+		// and bakeForce implies shadow_lightmap() — so lmAtlasReachable is
+		// exactly "spawning the thread would do work". When it would not, the
+		// only thing lost is the stamp below, and only for the arm that used to
+		// get it (bakeForce true before this change, i.e. not preempted).
+		// A preempted greets stamped nothing before and stamps nothing now.
+		if (!lmAtlasReachable && notPreempted) {
+			// SKIPPING — but not skipping the bake's one side effect that is
+			// NOT about lightmaps. Face::MeshFaceIdx is read by
+			// tbrXparOrderLess (FILLERS.CPP:1876), the camera-independent
+			// tie-break of the per-strip transparent sort, which greets' glass
+			// panels exercise on every frame. Stamping is O(faces) of stores
+			// and costs microseconds; the atlas is what cost 54 ms.
+			// Synchronous rather than threaded: nothing else is left to
+			// overlap, and it removes the join.
+			fds::LightmapStampFaceIndices(greetScForBake);
 			std::fprintf(stderr,
-				"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
-				ms);
-		});
+				"[GREETS-BAKE] static lightmap bake SKIPPED — the atlas has no "
+				"reader (--shadow_lightmap off at G-buffer resize, so the "
+				"lightmapMF/ST planes do not exist). Face indices stamped "
+				"anyway (transparent-sort tie-break). Pass --shadow_lightmap "
+				"to bake; --shadow_lightmap --shadow_lm_dynamic to sample it.\n");
+			InitTimelineMark("greets: lightmap bake skipped (atlas unreadable)");
+		} else {
+			std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
+			const auto bakeSpawnT = std::chrono::steady_clock::now();
+			g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT, bakeForce]() {
+				fds::LightmapBake_Static(greetScForBake, bakeForce);
+				const auto bakeDoneT = std::chrono::steady_clock::now();
+				const double ms = std::chrono::duration<double, std::milli>(
+					bakeDoneT - bakeSpawnT).count();
+				std::fprintf(stderr,
+					"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
+					ms);
+			});
+		}
 	}
+
+	// --pom_rebuild (editor): snapshot the stone's PRISTINE geometry on the
+	// FINAL rendered meshes (post chunk split, post mirror clone) and apply any
+	// deferred shell mode through the same rebuild path the editor panel drives.
+	// No-op without the flag. Last thing in init so the snapshot sees exactly
+	// the vertices the rasterizer will read.
+	rev::DisplaceRebuild_EndInit(GreetSc);
+	InitTimelineMark("greets: Initialize_Greets END");
 }
 
 //void MMXClear(void *Page, dword Len)
@@ -2602,6 +3615,13 @@ struct GreetsScene : SceneDriver {
 		// F3: toggle shadow technique (depth ↔ poly-ID). Runtime A/B.
 		{
 			static bool sF3Prev = false;
+			// Back on F3 (2026-08-06). It was parked on the untranslated ScF6
+			// to free F3 for REV.CPP's TimerProc review scrub; that scrub is
+			// gone (it fought SceneDriver for Timer and lost), so F3 is free
+			// and this toggle is reachable again — in wasm too, now that
+			// MainLoop's table translates F3. Feedback is the [SHADOW-MODE]
+			// stderr line below; the old "Shadow: %s [F3]" screen overlay was
+			// deleted, so nothing advertises a key that does not work.
 			const bool f3Now = Keyboard[ScF3] != 0;
 			if (f3Now && !sF3Prev) {
 				const ShadowMode cur = g_shadowMode.load();
@@ -2677,7 +3697,7 @@ struct GreetsScene : SceneDriver {
 		}
 
 		Animate_Objects(GreetSc, View);
-		TailProf::mark("Tick-Anim", _tickT); _tickT = TailProf::nowNs();
+		TailProf::mark("Tick-Anim", _tickT, 3); _tickT = TailProf::nowNs();
 
 		// Mirror shatter (Y key): bake the room into a panorama from the
 		// screen's centre, break it into reflecting shards, and close the
@@ -2920,7 +3940,7 @@ struct GreetsScene : SceneDriver {
 			}
 		}
 
-		TailProf::mark("Tick-Logic", _tickT);
+		TailProf::mark("Tick-Logic", _tickT, 3);
 
 		// Second-order mirror RTT pass (no-op without --mirror-rtt):
 		// re-render the visible mirror-in-mirror panels into their slot
@@ -2928,9 +3948,25 @@ struct GreetsScene : SceneDriver {
 		// camera pose from this frame's spline step) and BEFORE the
 		// main Transform_Objects (the pass clobbers per-vertex
 		// transforms, which the main transform recomputes).
-		{ TailProf::ScopeTimer _tp("RTT");
+		{ TailProf::ScopeTimer _tp("RTT", 3);
 		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
 		                              g_greetsRttSlots); }
+
+		// Foundation F (docs/ENVDYN_DISPLACEMENT_PLAN.md): refresh world
+		// AABBs after Animate_Objects (pose current) and before the main
+		// Transform, so the frustum-vs-AABB machinery + the --draw_aabbs
+		// overlay see this frame's boxes. Only walked when a consumer is
+		// live (the debug overlay for now); flag-off = never called = byte-
+		// null.
+		if (fds::FeatureFlags::draw_aabbs())
+			fds::WorldAabb_UpdateScene(GreetSc);
+
+		// ENVDYN Workstream A3: live dynamic-mesh reflection overlay — the
+		// mech rendered into flagged env probes, composited over their static
+		// capture. Ordered here (post-Animate, post-RTT, PRE main Transform),
+		// like RenderSecondOrderMirrors — NOT inside FramePrep. No-op unless
+		// --env_dynamic and a flagged/relevant probe exists.
+		fds::EnvDynamic_Overlay(GreetSc);
 
 		// --bake_tick_overlap: dispatch the per-frame shadow bake NOW — its
 		// pool tasks run underneath the serial Transform/Lighting/Radix
@@ -2956,9 +3992,17 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
 
+		// Phase B: arm the prev-frame chunk-occlusion cull (poses are current
+		// post-Animate) BEFORE the transform. The depth capture itself happens
+		// in ChunkOcclusion_EndFrame below (post-Render — ZPage16 is cleared
+		// before Transform, so it can't be read here). AABB refresh cost lands
+		// in XFRM; the min-pool lands in RNDR and is reported by --vis_stats.
+		// No-op unless --chunk_occlusion (or --vis_stats).
+		fds::ChunkOcclusion_BeginFrame(GreetSc);
+
 		_tickT = TailProf::nowNs();
 		Transform_Objects(GreetSc, fds::g_mainCamera, fds::g_mainFaces);
-		TailProf::mark("Tick-Xfrm", _tickT); _tickT = TailProf::nowNs();
+		TailProf::mark("Tick-Xfrm", _tickT, 3); _tickT = TailProf::nowNs();
 
 		// PROFILER: LGHT phase.
 		prof.switchTo(PROF_LGHT);
@@ -2969,13 +4013,18 @@ struct GreetsScene : SceneDriver {
 		// read next frame either — skip the ~4ms pass. The first
 		// frame a panel becomes visible again renders from colors at
 		// most one skip stale, same staleness class as the design.
+		// Same predicate correction as the chunk split above: with the bare
+		// --deferred flag unset but the deferred path live (ForceDeferred /
+		// shard_deferred), this read "forward" and ran the full forward
+		// Lighting() pass every frame — 6.49 ms whose only consumer is the RTT
+		// bake, which was not even running.
 		const bool lightingConsumed =
-		    !fds::FeatureFlags::deferred() ||
+		    !fds::DeferredPathEnabled() ||
 		    !fds::FeatureFlags::mirror_rtt() ||
 		    fds::g_rttJobsLastFrame > 0;
 		if (lightingConsumed)
 			Lighting(GreetSc);
-		TailProf::mark("Tick-Light", _tickT); _tickT = TailProf::nowNs();
+		TailProf::mark("Tick-Light", _tickT, 3); _tickT = TailProf::nowNs();
 
 		// PROFILER: SORT phase.
 		prof.leave(PROF_LGHT);
@@ -2983,7 +4032,7 @@ struct GreetsScene : SceneDriver {
 		prof.enter(PROF_SORT);
 
 		Radix_Sort(FList, SList, CAll);
-		TailProf::mark("Tick-Radix", _tickT);
+		TailProf::mark("Tick-Radix", _tickT, 3);
 
 		// PROFILER: RNDR phase.
 		prof.switchTo(PROF_BAKE);
@@ -3009,7 +4058,7 @@ struct GreetsScene : SceneDriver {
 			ShadowBake_JoinPending();   // tick-thread join: the bake never
 			                            // contends the render's own waves
 		prof.switchTo(PROF_RNDR);
-		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
+		{ TailProf::ScopeTimer _tp("GreetsCodeStage", 3); gg->Render(); }
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;
 		// Diagnostic: identify shadow maps whose dynamic polyId hash isn't
@@ -3033,8 +4082,8 @@ struct GreetsScene : SceneDriver {
 		// wall covers. Without this clones spill outside the mirror
 		// surface footprint (worked for teleporter only because the
 		// surrounding Piramid walls were the de facto occluder mask).
-		{ TailProf::ScopeTimer _tp("StampMasks");   fds::StampMirrorMasks(GreetSc, g_greetsMirrors); }
-		{ TailProf::ScopeTimer _tp("ProbeMirrors"); fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors); }
+		{ TailProf::ScopeTimer _tp("StampMasks", 3);   fds::StampMirrorMasks(GreetSc, g_greetsMirrors); }
+		{ TailProf::ScopeTimer _tp("ProbeMirrors", 3); fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors); }
 
 		// The mirror clone-mask (Mekalele's per-pixel gb.mirrorId ==
 		// ctx.mirrorTag) only runs on the deferred path. Forward sends
@@ -3065,11 +4114,17 @@ struct GreetsScene : SceneDriver {
 			             fwd, def, def/fwd, defNV, defNV/fwd, int(CAll), int(XRes), int(YRes));
 		}
 		if (fds::FeatureFlags::greets_mirror()) {
-			TailProf::ScopeTimer _tp("Render-3D");
+			TailProf::ScopeTimer _tp("Render-3D", 3);
 			Render(RenderPath::ForceDeferred);
 		} else {
 			Render();
 		}
+
+		// Phase B: capture this frame's final opaque depth (ZPage16 is live
+		// right after Render) as the NEXT frame's occluder, run the
+		// --chunk_occl_verify over-cull audit on this frame's culled chunks,
+		// report --vis_stats, reset.
+		fds::ChunkOcclusion_EndFrame(GreetSc);
 
 		// F9: one-shot PPM frame dump to /tmp/greets_dump_N.ppm. Edge-
 		// triggered so a held key only fires once. Lets the user fly
@@ -3106,12 +4161,25 @@ struct GreetsScene : SceneDriver {
 					std::fclose(f);
 					std::fprintf(stderr, "[GREETS] dumped %s (t=%d)\n", path, dumpT);
 				}
+				// FDS_XPAR_TRACE: write the dumped frame's transparent composite
+				// census next to the pixel dump (same tag) for z-order forensics.
+				{
+					char tp[96];
+					std::snprintf(tp, sizeof tp, "/tmp/greets_xtrace_%d_t%d.txt",
+					              sDumpN - 1, dumpT);
+					Xtrace_WriteFile(tp);
+				}
 				// Also print the current camera pose + scene time so the
 				// user can reproduce this exact view headless:
 				//   FDS_GREETS_CAM="px,py,pz,fx,fy,fz" ./DEMO --snapshot=greets@t=<t>
 				// pos = eye; fwd = the camera's forward (Mat row 2).
+				// %.9g: full float round-trip precision. 3 decimals was enough to
+				// re-frame a shot but NOT to reproduce facing-threshold bugs — a
+				// grazing face's front/back test (N·A ~ 0) can flip inside the
+				// truncation error, so the pinned headless repro landed on the
+				// other side of the flip than the live run being reported.
 				std::fprintf(stderr,
-					"[GREETS-CAM] FDS_GREETS_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\" t=%d\n",
+					"[GREETS-CAM] FDS_GREETS_CAM=\"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\" t=%d\n",
 					View->ISource.x, View->ISource.y, View->ISource.z,
 					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2], dumpT);
 				std::fflush(stderr);
@@ -3136,26 +4204,33 @@ struct GreetsScene : SceneDriver {
 			fds::DebugOverlayMirrorMask(GreetSc);
 		}
 
+		// Foundation F world-AABB / frustum overlay (--draw_aabbs).
+		if (fds::FeatureFlags::draw_aabbs())
+			fds::WorldAabb_DrawOverlay(GreetSc);
+
+		// Stone-displacement bake wireframe (--displace_viz): the geometry
+		// DisplaceMaterialVertices added/moved, tinted by displacement
+		// magnitude. No-op (byte-null) unless --displace_viz is on.
+		if (fds::FeatureFlags::displace_viz())
+			fds::DisplaceViz_DrawOverlay(GreetSc);
+
+		// S1d-1 patch-boundary seam classification (--pom_seam_viz): every
+		// classified boundary edge, coloured by class, depth-tested. No-op
+		// (byte-null) unless --pom_seam_viz > 0.
+		if (fds::FeatureFlags::pom_seam_viz() > 0)
+			fds::PomSeamViz_DrawOverlay(GreetSc);
+
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
 
-		// Persistent render-mode indicator (top-right). Always visible
-		// outside shadow-viz mode so the active F3 mode is obvious.
-		// screen_text = master HUD switch (off in headless captures).
-		if (!sShadowMapView && fds::FeatureFlags::screen_text()) {
-			const bool inPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
-			snprintf(MSGStr, sizeof(MSGStr), "Shadow: %s [F3]",
-				inPolyId ? "PolyId" : "Depth");
-			// Right-justify against the right edge — variable string
-			// length (PolyId vs Depth) shouldn't shift the indicator.
-			// One line below the resolution overlay drawn in V_Flip
-			// (SDL2.cpp:48) at y≈4*scale with ~16*scale glyph height.
-			const int kCharPx = 10;  // approx per-glyph width at 1x, scales with g_fontScale
-			const int textPx = int(strlen(MSGStr)) * kCharPx * g_fontScale;
-			int xJustified = XRes - textPx - 8 * g_fontScale;
-			if (xJustified < 0) xJustified = 0;
-			OutTextXY(VPage, xJustified, 5 + 20 * g_fontScale, MSGStr, 255);
-		}
+		// RETIRED 2026-08-06: the persistent "Shadow: Depth|PolyId [F3]"
+		// indicator that used to sit top-right. It was on screen in EVERY
+		// greets capture to report a technique nobody switches mid-review, and
+		// its "[F3]" had gone stale twice over (F3 briefly became a review
+		// scrub, and the toggle it named had been moved to an untranslated
+		// ScF6, so the overlay advertised a control that did nothing). The
+		// toggle is back on F3 a few hundred lines up and prints
+		// [SHADOW-MODE] to stderr when it fires — that is the feedback now.
 
 		//draw_cones(sShadowMapView);
 
@@ -3165,7 +4240,13 @@ struct GreetsScene : SceneDriver {
 		// Updates every frame so the value follows whatever's under the
 		// crosshair as the camera moves. Suppressed in shadow-viz mode
 		// where M overwrites the framebuffer.
-		if (g_gbuffer && !sShadowMapView) {
+		// BEHIND --mat_probe SINCE 2026-08-06, default OFF. It is genuinely
+		// the way a material gets named from a screenshot, but it was
+		// unconditional, so it also sat in the bottom-left of every capture
+		// this campaign took. FDS_GREETS_FACEFIND implies it — that env var
+		// drives the face census nested below and is the same investigation.
+		if ((fds::FeatureFlags::mat_probe() || std::getenv("FDS_GREETS_FACEFIND"))
+		    && g_gbuffer && !sShadowMapView) {
 			const int cx = XRes / 2;
 			const int cy = YRes / 2;
 			const size_t ci = size_t(cy) * size_t(XRes) + size_t(cx);
@@ -3384,7 +4465,8 @@ struct GreetsScene : SceneDriver {
 			// the actual data each frame.
 			uint16_t zMin = 0xFFFF, zMax = 0;
 			if (!sVizPolyId) {
-				for (uint16_t e : sm.depth) {
+				for (uint32_t t : sm.packSD) {
+					const uint16_t e = ShadowTexZ(t);
 					if (e == 0) continue;  // skip unwritten
 					if (e < zMin) zMin = e;
 					if (e > zMax) zMax = e;
@@ -3395,13 +4477,12 @@ struct GreetsScene : SceneDriver {
 			dword *out = (dword*)VPage;
 			for (int py = 0; py < YRes; ++py) {
 				const int smY = (py * sm.yres) / YRes;
-				const uint16_t *zRow = sm.depth.data() + size_t(smY) * size_t(sm.xres);
-				const uint16_t *idRow = sm.polyId.data() + size_t(smY) * size_t(sm.xres);
+				const uint32_t *pRow = sm.packSD.data() + size_t(smY) * size_t(sm.xres);
 				for (int px = 0; px < XRes; ++px) {
 					const int smX = (px * sm.xres) / XRes;
 					uint32_t pixel;
 					if (sVizPolyId) {
-						const uint32_t v = idRow[smX];
+						const uint32_t v = ShadowTexId(pRow[smX]);
 						if (v == 0) {
 							pixel = 0xFF000000u;
 						} else {
@@ -3413,7 +4494,7 @@ struct GreetsScene : SceneDriver {
 							      | (uint32_t(r) << 16) | 0xFF000000u;
 						}
 					} else {
-						const uint16_t z = zRow[smX];
+						const uint16_t z = ShadowTexZ(pRow[smX]);
 						uint8_t g;
 						if (z == 0) {
 							g = 0;
@@ -3481,8 +4562,10 @@ void Greets_JoinBakeThread()
 
 void Run_Greets()
 {
+	InitTimelineMark("Run_Greets: begin (joining lightmap bake)");
 	Greets_JoinBakeThread();
 	auto scene = createGreetsScene();
+	InitTimelineMark("Run_Greets: scene driver ready");
 	runSceneBlocking(*scene);
 }
 

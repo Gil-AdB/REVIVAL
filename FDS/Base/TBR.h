@@ -17,6 +17,14 @@ struct TBREntry
     Face *F;
     dword next;
     float renderZ;
+    // Facing rank, PRECOMPUTED single-threaded at insert time: back(0),
+    // sprite(1), front(2). The per-strip sort's tie-break and the clump
+    // classifier consume THIS instead of re-deriving facing from the live
+    // TPos SoA during the walk — re-deriving raced with concurrent strip
+    // work (nondeterministic transparent order, ~1-in-8 frames: the greets
+    // mirror screens flashed pink). Insert runs on the render thread before
+    // any strip is dispatched, so the value is stable by construction.
+    uint8_t rank;
 };
 
 #pragma pack(pop)

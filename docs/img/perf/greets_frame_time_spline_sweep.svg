@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="560" viewBox="0 0 1500 560" font-family="ui-sans-serif,-apple-system,Helvetica,Arial">
+<rect width="1500" height="560" fill="#0f1115"/>
+<line x1="90" y1="500.0" x2="1470" y2="500.0" stroke="#2a2f3a" stroke-width="1"/>
+<text x="80" y="504.0" fill="#8b93a7" font-size="13" text-anchor="end">0</text>
+<line x1="90" y1="429.2" x2="1470" y2="429.2" stroke="#2a2f3a" stroke-width="1"/>
+<text x="80" y="433.2" fill="#8b93a7" font-size="13" text-anchor="end">2</text>
+<line x1="90" y1="358.5" x2="1470" y2="358.5" stroke="#2a2f3a" stroke-width="1"/>
+<text x="80" y="362.5" fill="#8b93a7" font-size="13" text-anchor="end">4</text>
+<line x1="90" y1="287.7" x2="1470" y2="287.7" stroke="#2a2f3a" stroke-width="1"/>
+<text x="80" y="291.7" fill="#8b93a7" font-size="13" text-anchor="end">6</text>
+<line x1="90" y1="216.9" x2="1470" y2="216.9" stroke="#2a2f3a" stroke-width="1"/>
+<text x="80" y="220.9" fill="#8b93a7" font-size="13" text-anchor="end">8</text>
+<line x1="90" y1="146.2" x2="1470" y2="146.2" stroke="#2a2f3a" stroke-width="1"/>
+<text x="80" y="150.2" fill="#8b93a7" font-size="13" text-anchor="end">10</text>
+<line x1="90" y1="75.4" x2="1470" y2="75.4" stroke="#2a2f3a" stroke-width="1"/>
+<text x="80" y="79.4" fill="#8b93a7" font-size="13" text-anchor="end">12</text>
+<line x1="90.0" y1="40" x2="90.0" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="90.0" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">0</text>
+<line x1="262.5" y1="40" x2="262.5" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="262.5" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">1000</text>
+<line x1="435.0" y1="40" x2="435.0" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="435.0" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">2000</text>
+<line x1="607.5" y1="40" x2="607.5" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="607.5" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">3000</text>
+<line x1="780.0" y1="40" x2="780.0" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="780.0" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">4000</text>
+<line x1="952.5" y1="40" x2="952.5" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="952.5" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">5000</text>
+<line x1="1125.0" y1="40" x2="1125.0" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="1125.0" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">6000</text>
+<line x1="1297.5" y1="40" x2="1297.5" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="1297.5" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">7000</text>
+<line x1="1470.0" y1="40" x2="1470.0" y2="500" stroke="#1c212b" stroke-width="1"/>
+<text x="1470.0" y="522" fill="#8b93a7" font-size="13" text-anchor="middle">8000</text>
+<rect x="90" y="106.9" width="1380" height="-23.0" fill="#ff5c5c" opacity="0.18"/>
+<text x="100" y="98.9" fill="#ff8a8a" font-size="13">reported dip: 85-90 fps (11.1-11.8 ms) - never reached</text>
+<line x1="90" y1="205.2" x2="1470" y2="205.2" stroke="#4a5568" stroke-width="1" stroke-dasharray="5,5"/>
+<text x="1340" y="199.2" fill="#6b7280" font-size="12">8.33 ms = 120 fps</text>
+<path d="M90.0,318.5 L107.2,303.9 L124.5,312.0 L141.8,288.5 L159.0,300.4 L176.2,290.8 L193.5,327.9 L210.8,330.2 L228.0,320.4 L245.2,320.3 L262.5,297.6 L279.8,282.0 L297.0,288.9 L314.2,294.7 L331.5,279.6 L348.8,296.2 L366.0,292.4 L383.2,277.7 L400.5,294.1 L417.8,293.7 L435.0,295.7 L452.2,295.1 L469.5,289.5 L486.8,295.2 L504.0,293.0 L521.2,309.3 L538.5,310.0 L555.8,309.9 L573.0,307.1 L590.2,306.7 L607.5,319.8 L624.8,296.8 L642.0,297.9 L659.2,296.8 L676.5,297.7 L693.8,297.7 L711.0,277.9 L728.2,297.4 L745.5,297.8 L762.8,285.3 L780.0,297.0 L797.2,304.3 L814.5,305.3 L831.8,304.0 L849.0,297.6 L866.2,309.1 L883.5,309.4 L900.8,305.8 L918.0,307.0 L935.2,299.9 L952.5,309.4 L969.8,300.6 L987.0,293.9 L1004.2,304.7 L1021.5,280.8 L1038.8,284.9 L1056.0,345.5 L1073.2,298.0 L1090.5,306.0 L1107.8,339.8 L1125.0,361.3 L1142.2,360.8 L1159.5,362.5 L1176.8,360.8 L1194.0,361.5 L1211.2,363.8 L1228.5,364.3 L1245.8,360.9 L1263.0,354.7 L1280.2,340.6 L1297.5,289.2 L1314.8,292.0 L1332.0,294.6 L1349.2,345.7 L1366.5,344.2 L1383.8,343.3 L1401.0,345.6 L1418.2,345.8 L1435.5,345.8 L1452.8,344.9 L1470.0,344.8" fill="none" stroke="#7dd3fc" stroke-width="1.6" opacity="0.75"/>
+<path d="M90.0,322.9 L107.2,308.6 L124.5,319.1 L141.8,294.8 L159.0,305.9 L176.2,297.3 L193.5,332.7 L210.8,336.3 L228.0,326.6 L245.2,324.9 L262.5,302.8 L279.8,288.9 L297.0,294.0 L314.2,299.9 L331.5,285.4 L348.8,301.6 L366.0,297.8 L383.2,282.3 L400.5,299.4 L417.8,298.7 L435.0,300.5 L452.2,300.8 L469.5,295.9 L486.8,300.6 L504.0,298.3 L521.2,315.3 L538.5,316.5 L555.8,315.7 L573.0,314.2 L590.2,312.6 L607.5,324.8 L624.8,302.9 L642.0,302.9 L659.2,303.4 L676.5,302.1 L693.8,302.8 L711.0,283.4 L728.2,302.1 L745.5,303.0 L762.8,294.2 L780.0,303.4 L797.2,311.3 L814.5,313.3 L831.8,309.8 L849.0,304.6 L866.2,314.4 L883.5,313.7 L900.8,310.1 L918.0,311.3 L935.2,306.0 L952.5,314.3 L969.8,306.1 L987.0,299.4 L1004.2,309.9 L1021.5,285.7 L1038.8,295.9 L1056.0,351.3 L1073.2,305.3 L1090.5,312.7 L1107.8,345.9 L1125.0,367.6 L1142.2,367.6 L1159.5,368.9 L1176.8,366.9 L1194.0,367.8 L1211.2,370.2 L1228.5,377.7 L1245.8,376.1 L1263.0,360.2 L1280.2,346.3 L1297.5,294.0 L1314.8,297.5 L1332.0,300.1 L1349.2,350.7 L1366.5,349.4 L1383.8,349.6 L1401.0,351.7 L1418.2,350.6 L1435.5,350.8 L1452.8,350.8 L1470.0,350.7" fill="none" stroke="#38bdf8" stroke-width="2.4" opacity="1"/>
+<text x="90" y="24" fill="#e5e7eb" font-size="16" font-weight="600">GpuBench greets frame time along the authored camera spline - 1920x1080, tess px=8 P=8, mirrors + second order</text>
+<text x="780" y="548" fill="#8b93a7" font-size="13" text-anchor="middle">demo t</text>
+<text x="18" y="270" fill="#8b93a7" font-size="13" transform="rotate(-90 18 270)" text-anchor="middle">GPU frame ms</text>
+<text x="100" y="255.8" fill="#38bdf8" font-size="13">median 3.46-6.15 ms   p95 3.84-6.28 ms   worst pose t=1700</text>
+</svg>

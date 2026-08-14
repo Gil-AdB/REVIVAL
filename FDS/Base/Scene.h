@@ -74,6 +74,32 @@ struct Scene
     // explicitly set. Read via xparPeelPassesEffective() in the xpar dispatch.
     dword            XparPeelPasses;
 
+    // AUTHORED scene-wide env-reflection defaults, loaded from the FLD
+    // scene header (LWS "FdsSceneEnvRefl" / "FdsSceneEnvBakeRes" via
+    // tools/lwsread — Scene_EnvDefaults conditional payload; 0 = unset).
+    // Consumed by EnvReflection_FramePrep (EnvBake.cpp):
+    //   EnvReflSceneMode  -1/0/1 — scene-wide default for materials whose
+    //                     per-surface EnvReflMode is 0 (auto); the
+    //                     env_refl_scene_mode flag (CLI/editor) overrides
+    //                     it when explicitly set, per-surface always wins.
+    //   EnvBakeResScene   default probe FACE res for the scene; sits below
+    //                     an explicit --env-bake-res and per-surface
+    //                     EnvBakeRes, above the legacy env_refl_res sizing.
+    sdword           EnvReflSceneMode;
+    sdword           EnvBakeResScene;
+
+    // Authored backdrop gradient (LWS ZenithColor/SkyColor/GroundColor/
+    // NadirColor → FLD Scene_SkyColors payload → here). Painted into
+    // void/sky pixels top→bottom by the default-off sky_gradient pass
+    // (Render_SkyGradient). HasSkyGradient == 0 → unset (legacy black void).
+    // Stored as QColor (BGRA byte) — the four vertical stops, zenith at the
+    // top of the frame, nadir at the bottom.
+    sdword           HasSkyGradient;
+    QColor           SkyZenith;   // straight up  (top of frame)
+    QColor           SkySky;      // upper sky
+    QColor           SkyGround;   // lower / toward horizon-ground
+    QColor           SkyNadir;    // straight down (bottom of frame)
+
     // Static-shadow lightmap table populated by LightmapBake_Static.
     // Index 0 is reserved sentinel (nullptr) so Mekalele's per-pixel
     // staticLMMeshId == 0 means "no lightmap for this pixel". Indices
@@ -85,6 +111,7 @@ struct Scene
     // struct — Snapshot.cpp memset()s fresh Scenes before the loader
     // fills them in.
     std::vector<struct TriMesh*> *staticLMTable = nullptr;
+
 };
 
 #pragma pack(pop)

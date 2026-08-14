@@ -17,16 +17,52 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <vector>
 #include "simde/x86/fma.h"
 
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "RENDER/Hdr.h"   // fds::hdrf — the per-target HDR radiance element
 #include "Base/CameraContext.h"   // fds::CameraContext (light-list builders)
 
 namespace meka { struct GBuffer; }
 struct Scene;
+
+// SSR (--env_ssr) previous-frame color copy. renderFrame memcpys VPage into
+// this at the FIRST deferred pass of each main frame (before that pass's
+// raster overwrites VPage, so it holds last frame's FINAL image); the env
+// compose's SSR march (EnvSpecComposeScalar) samples it — 1-frame-stale, since
+// sampling live VPage races the concurrent tile writes. Sized XRes*YRes*4
+// (BGRA dwords, == PageSize). g_ssrPrevW/H are the dims it was sized for; the
+// march only runs when ctx.xres/yres match (skips mismatched offscreen bakes).
+extern std::vector<uint8_t> g_ssrPrevColor;
+extern int g_ssrPrevW, g_ssrPrevH;
+
+// Does anything in this process configuration READ the lightmapMF/ST G-buffer
+// planes? Two independent gates must both be open (0b466b7, and the
+// --shadow_lightmap flag row):
+//   1. shadow_lightmap()  — the ALLOCATION gate. EngineGBuffer_Resize consults
+//      it at BOOT for the main G-buffer; the OFFSCREEN G-buffer builders (the
+//      mirror RTT slot, the shard bake's serial + per-worker buffers) consult
+//      it whenever they lazily build, which for greets is AFTER
+//      GreetsApplyRunDefaults has turned it on — so they, unlike the main
+//      buffer, really did allocate.
+//   2. lmKernelEnabled = !shadow_dynamic() || shadow_lm_dynamic() — the
+//      per-pixel SAMPLE gate (DeferredSurfaceKernel.cpp, resolveCubeAtten).
+// greets ships with shadow_dynamic ON and shadow_lm_dynamic OFF, so gate 2 is
+// shut and every texel those offscreen planes cost — 6 B/px of store plus
+// Mekalele's per-pixel writes into them — was unreadable. Allocating on gate 1
+// alone is what made that dead weight; the offscreen builders use THIS, so
+// they cannot drift from the kernel. `--shadow_lightmap --shadow_lm_dynamic`
+// (the only arm that can sample the atlas) still opens both and still gets its
+// planes, bit-for-bit.
+inline bool DeferredLightmapPlanesReadable() {
+	return fds::FeatureFlags::shadow_lightmap()
+	    && (!fds::FeatureFlags::shadow_dynamic()
+	        || fds::FeatureFlags::shadow_lm_dynamic());
+}
 
 constexpr int DEFERRED_MAX_LIGHTS = 128;
 // Scene-wide light capacity (ViewLightsSoA + the halo/volumetric index
@@ -34,7 +70,8 @@ constexpr int DEFERRED_MAX_LIGHTS = 128;
 // multiply the scene total (greets: 15 source × (1 + #mirrors)) but the
 // per-tile mirror-footprint cull keeps each TILE's list small — so the
 // scene array must hold them all while TileLights stays at 128.
-// ViewLightsSoA is ~33 arrays of 4 bytes → 256 entries ≈ 34 KB, trivial.
+// ViewLightsSoA is 41 arrays of 4 bytes → 256 entries ≈ 41 KB, trivial.
+// (Said "~33 arrays ≈ 34 KB" until --mem_census counted them.)
 constexpr int DEFERRED_MAX_VIEW_LIGHTS = 256;
 constexpr int DEFERRED_NUM_TILES_X = 12;
 constexpr int DEFERRED_NUM_TILES_Y = 8;
@@ -110,6 +147,11 @@ struct ViewLightsSoA {
 	alignas(32) float    haloRange     [DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float    haloRange2    [DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float    haloRRange    [DEFERRED_MAX_VIEW_LIGHTS];
+	// Per-spot volumetric-cone density multiplier (haloDensityMul's cone
+	// sibling). Filled from Omni::VolBeamGain in the SoA build (0 = unset
+	// → 1.0), consumed by Render_VolumetricCones_Tile — scalar and vec
+	// integration paths both multiply the accumulated integral by it.
+	alignas(32) float    coneGain      [DEFERRED_MAX_VIEW_LIGHTS];
 	// Per-light mirror id (0 = original world; >0 = clone of mirror
 	// with that id). The kernels read gb.mirrorId[pixel] once per
 	// pixel and skip any light whose mirrorId disagrees, so original-
@@ -140,8 +182,17 @@ struct ViewLightsSoA {
 // single `load_a` pull 8 omnis with one 32-byte aligned read instead
 // of building a Vec4f via four `ld1.s {v}[lane]` scalar gathers.
 //
-// Memory: 24 tiles × 8 arrays × 128 floats × 4 bytes = 96 KiB total.
-// Easily fits in L2; per-tile slice stays warm in L1 across pixels.
+// Memory: this said "24 tiles × 8 arrays × 128 floats × 4 bytes = 96 KiB
+// total" for a long time and was stale by ~25 arrays and 72 tiles — the number
+// it quoted is why nobody looked. MEASURED by --mem_census: sizeof(TileLights)
+// is 16 928 B (33 arrays × DEFERRED_MAX_LIGHTS=128 × 4 B), so
+// s_tileLights[DEFERRED_NUM_TILES=96] is 1.55 MiB and
+// g_stripLights[DEFERRED_MAX_STRIPS=512] (DeferredLightLists.cpp) is 8.27 MiB.
+// Both are BSS sized by the CAP, not by the scene: at 1080p only 135 of the 512
+// strips are ever written, so most of the 8.27 MiB stays untouched (address
+// space, not RSS) — but it is 8.27 MiB of the binary's BSS either way, and a
+// per-tile slice is no longer the "easily fits in L1" object this claimed.
+// Keep this figure honest: run `--mem_census` if you change the array count.
 struct TileLights {
 	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
 	alignas(32) float posY[DEFERRED_MAX_LIGHTS];
@@ -197,8 +248,16 @@ struct TileLights {
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 	float           zMin;           // view-space z of closest pixel in tile
-	float           zMax;           // view-space z of farthest pixel in tile
-	                                // (+inf / -inf when tile has no geometry)
+	float           zMax;           // view-space z of farthest OPAQUE surface
+	                                // pixel in tile (+inf / -inf when the tile
+	                                // has no geometry). SKY / untouched pixels
+	                                // are NOT counted — see hasSky.
+	bool            hasSky;         // ≥1 pixel had no geometry (zEnc==0). Such
+	                                // pixels' rays run to the fog cutoff, so the
+	                                // volumetric cone cull must extend its far
+	                                // bound past zMax for these tiles (else it
+	                                // clips beams glowing in the sky part → a
+	                                // rectangular per-tile seam).
 };
 
 // Per-frame setup shared across all tile jobs. Captured by reference
@@ -248,6 +307,38 @@ struct DeferredLightingCtx {
 	meka::GBuffer       *gbXpar;       // transparent front layer
 	word                *xparZ;        // transparent front depth
 	word                *xparZBack;    // transparent back depth
+	// Per-matID bitmask of Shadow_MaterialSkipsCasting(matTable.data[matID])
+	// — "this material was excluded from the shadow BAKE", which under
+	// --shadow_noncaster_depth resolves the receiver to the -1 (force-Depth)
+	// sentinel. The predicate depends ONLY on the Material*, and matID selects
+	// that from matTable, so it is constant for the whole frame; it was being
+	// re-evaluated once per shaded PIXEL through an out-of-line call with a
+	// function-local atomic cache (measured 3.44 % of all steady-state samples
+	// on greets t=5743 — 5.5 % of the lighting stage). Filled once per frame in
+	// Render_DeferredLighting; matID is 8-bit so 256 bits covers the table.
+	// Bit set == skips casting. Byte-identical: same predicate, same Material*.
+	uint64_t             shadowSkipMask[4];
+	// True when the tile kernels run INLINE on the calling thread (an
+	// offscreen bake: DeferredOverride::inlineDispatch). Then the kernel must
+	// NOT release renderns::tileDone and the dispatch loop must not acquire
+	// it: the permit would go straight back to the thread that posted it, and
+	// that shared semaphore is the one every pool thread uses. MEASURED: 12
+	// threads round-tripping ONE std::counting_semaphore cost 3.4-4.0 us per
+	// release+acquire pair in CORE time against 34 ns uncontended, and the
+	// mirror-shard bake was paying 96 tiles x 238 shards = 22 848 of them per
+	// shatter frame. Pixel values do not depend on this flag.
+	bool                 inlineDispatch = false;
+	// HDR radiance target for THIS pass (B,G,R,coverage ×4 per pixel, xres×yres),
+	// or nullptr when this pass writes no HDR. Replaces the kernels' old
+	// `Hdr_WritableFor(ctx.xres, ctx.yres)` test, which used "g_hdrBuf happens to
+	// be sized like me" as a de-facto "am I the main pass?" — so any offscreen
+	// bake at another resolution silently fell through to the LDR combine and
+	// ended up on a DIFFERENT TRANSFER FUNCTION from the frame it feeds. Main
+	// frame: g_hdrBuf.data() under exactly the old predicate (byte-identical).
+	// Offscreen: DeferredOverride::hdr, which for the shard bake is the calling
+	// worker's OWN buffer — the bakes run N-concurrent, so this cannot be a
+	// global the way the serial mirror RTT's Hdr_BeginFramePass is.
+	fds::hdrf           *hdrBuf = nullptr;
 };
 
 
@@ -271,6 +362,10 @@ struct DeferredOverride {
     word                 *xparZ      = nullptr;
     word                 *xparZBack  = nullptr;
     bool                  inlineDispatch = false;
+    // Per-target HDR radiance buffer (xres*yres*4 hdrf), or null for an LDR
+    // bake. Per WORKER, not per scene: N shard bakes run concurrently, which is
+    // why the mirror RTT's serial Hdr_BeginFramePass(w,h) shape does not port.
+    fds::hdrf            *hdr        = nullptr;
 };
 
 // Deferred opaque lighting pass. ov=nullptr → main frame (engine globals,
@@ -496,6 +591,64 @@ static inline bool bouncePortalReject(const L &tl, int n,
 	       cz < tl.winMinZ[n] - pad || cz > tl.winMaxZ[n] + pad;
 }
 
+// ─── the Newton-Raphson refinement step at ONE instruction ──────────────────
+// arm64 has dedicated fused step instructions for exactly these two
+// recurrences, and the long-hand spelling below was costing three to five
+// vector-ALU ops for one of them.  Round 4 measured the cone pass at ~81% of
+// this core's 4-wide NEON ALU issue ceiling, which makes VECTOR-ALU OP COUNT
+// the metric that moves cycles (docs/HW_PROFILING.md section 12), so the same
+// 2-ops-to-1 argument that shipped FDS_CONE_NEONMINMAX applies here:
+//
+//   FRECPS  Vd, Vn, Vm  =  2.0 - Vn*Vm          (fused, one rounding)
+//   FRSQRTS Vd, Vn, Vm  = (3.0 - Vn*Vm) / 2     (fused, one rounding)
+//
+// The rcp step is `fnmadd(x, r, 2)` — literally FRECPS.  The rsqrt step is
+// `fnmadd(0.5*x, r*r, 1.5)` = (3 - x*r*r)/2 — literally FRSQRTS, one op in
+// place of a constant materialisation, a broadcast copy, a multiply and an
+// fmls.  Both were checked against the long-hand spelling over 61.4 M inputs
+// (every 37th representable positive float plus 4 M log-uniform draws): ZERO
+// bit differences for x > 2.4e-38.  Below that the long-hand form loses the
+// exponent — `0.5*x` goes subnormal and rounds — and the native step is the
+// MORE accurate of the two; the cone kernel's arguments (discriminants of
+// O(1e-9..1e4), W² floored at 1e-12, interval lengths) never reach there.
+// Build with -DFDS_CONE_NEONSTEP=0 for the long-hand spelling.
+#ifndef FDS_CONE_NEONSTEP
+#define FDS_CONE_NEONSTEP 1
+#endif
+
+#if FDS_CONE_NEONSTEP && (defined(__ARM_NEON) || defined(__aarch64__))
+// r * (2 - x*r) — one FRECPS per 128-bit half.
+static inline __m256 rcp_step_x8(__m256 x, __m256 r) {
+    simde__m256_private xp = simde__m256_to_private(x),
+                        rp = simde__m256_to_private(r), o;
+    for (int h = 0; h < 2; ++h)
+        o.m128_private[h].neon_f32 = vmulq_f32(rp.m128_private[h].neon_f32,
+            vrecpsq_f32(xp.m128_private[h].neon_f32, rp.m128_private[h].neon_f32));
+    return simde__m256_from_private(o);
+}
+// r * (3 - x*r*r)/2 — one FRSQRTS per 128-bit half (plus the r*r it needs).
+static inline __m256 rsqrt_step_x8(__m256 x, __m256 r) {
+    simde__m256_private xp = simde__m256_to_private(x),
+                        rp = simde__m256_to_private(r), o;
+    for (int h = 0; h < 2; ++h) {
+        const float32x4_t rr = vmulq_f32(rp.m128_private[h].neon_f32,
+                                         rp.m128_private[h].neon_f32);
+        o.m128_private[h].neon_f32 = vmulq_f32(rp.m128_private[h].neon_f32,
+            vrsqrtsq_f32(xp.m128_private[h].neon_f32, rr));
+    }
+    return simde__m256_from_private(o);
+}
+#else
+static inline __m256 rcp_step_x8(__m256 x, __m256 r) {
+    return _mm256_mul_ps(r, _mm256_fnmadd_ps(x, r, _mm256_set1_ps(2.0f)));
+}
+static inline __m256 rsqrt_step_x8(__m256 x, __m256 r) {
+    return _mm256_mul_ps(r, _mm256_fnmadd_ps(
+        _mm256_mul_ps(_mm256_set1_ps(0.5f), x),
+        _mm256_mul_ps(r, r), _mm256_set1_ps(1.5f)));
+}
+#endif
+
 // rsqrt + one Newton-Raphson step (~24-bit). The cone passes feed
 // cosT = D·W·rsqrt(W²) into smoothstep((cosT−cosO)/(cosI−cosO)):
 // for NARROW cones the 1/(cosI−cosO) gain is ~350 (1.5°/4.5°), which
@@ -503,10 +656,7 @@ static inline bool bouncePortalReject(const L &tl, int n,
 // attenuation noise — the beam 'fur'/fan-stripe moire family. Wide
 // city cones (gain 2-10) never showed it.
 static inline __m256 rsqrt_nr_x8(__m256 x) {
-    __m256 r = _mm256_rsqrt_ps(x);
-    return _mm256_mul_ps(r, _mm256_fnmadd_ps(
-        _mm256_mul_ps(_mm256_set1_ps(0.5f), x),
-        _mm256_mul_ps(r, r), _mm256_set1_ps(1.5f)));
+    return rsqrt_step_x8(x, _mm256_rsqrt_ps(x));
 }
 
 #endif // FDS_RENDER_DEFERRED_COMMON_H_INCLUDED

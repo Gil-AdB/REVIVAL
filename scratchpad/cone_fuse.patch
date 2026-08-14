@@ -1,0 +1,198 @@
+# Round 3 of the cone-cost campaign: the stage FUSION -- hand the 8-wide
+# stages' outputs over in REGISTERS instead of through the six stack arrays
+# (zLoArr/zHiArr/aliveLane, dzArr/invDzArr/fadeStartArr).
+#
+# BUILT, MEASURED, REJECTED. It is bit-exact (city 3cbe42b1 / greets 778fa6ac /
+# fountain 8db68ccb all 3/3 with it on) and it does exactly what it claims --
+# four of the solve's six `str q` disappear from the disassembly. It is still
+# worth only 0.1% instructions, because the register allocator re-spends every
+# register it frees, and it COSTS +2.0% instructions in the real two-arm
+# shipping structure. Full numbers: docs/HW_PROFILING.md section 11.
+#
+# Kept as a patch rather than as #if arms in the kernel because it touches eight
+# sites across 300 lines and leaving it in would cost the shipping binary the
+# very 2% that disqualified it.
+#
+#   git apply scratchpad/cone_fuse.patch
+#   cmake -S . -B build -G Ninja -DCMAKE_CXX_FLAGS="-DFDS_CONE_FUSE=1 -DFDS_CONE_FORCE=1"
+#   # ...measure with scratchpad/cone_fuse_ab.sh, then: git checkout FDS/RENDER/DeferredVolumetric.cpp
+#
+--- a/FDS/RENDER/DeferredVolumetric.cpp
++++ b/FDS/RENDER/DeferredVolumetric.cpp
+@@ -142,6 +142,16 @@
+ #define FDS_CONE_HOTONLY 0
+ #endif
+ 
++// ─── FDS_CONE_FUSE — round 3's lever: BUILT, MEASURED, REJECTED ─────────────
++// Hands the 8-wide stages' outputs to each other in REGISTERS instead of
++// through the six stack arrays. Bit-exact (all three pins 3/3), does exactly
++// what it claims (four of the solve's six `str q` disappear), and is worth
++// 0.1% -- while costing +2.0% instructions in the real two-arm shipping
++// structure. docs/HW_PROFILING.md section 11.
++#ifndef FDS_CONE_FUSE
++#define FDS_CONE_FUSE 0
++#endif
++
+ static constexpr bool g_coneDiag = (FDS_CONE_DIAG != 0);
+ static std::atomic<long long> g_dPairs{0};   // batch x spot pairs entering the scalar solve
+ static std::atomic<long long> g_dSegPair{0}; // ...of which take the 8-segment hybrid
+@@ -656,6 +666,7 @@
+     // accumulate) 8 lanes wide. Read once per tile, same as above.
+     const bool laneVec = (FDS_CONE_FORCE != 0)
+                        || fds::FeatureFlags::vol_cone_lane_vec();
++    constexpr bool coneFused = (FDS_CONE_FUSE != 0);
+     const __m256 vDensity_v = _mm256_set1_ps(density);
+     const bool analyticCone = fds::FeatureFlags::vol_cone_analytic();
+     // Path-counter bump — once per tile call, not per (spot × batch).
+@@ -823,6 +834,13 @@
+                     alignas(32) float zHiArr[8] = {};
+                     alignas(32) float aliveLane[8] = {};
+                     bool spotAlive = false;
++                    // The stage hand-over registers. The arrays are not a
++                    // buffer, they are a PHI NODE -- two arms converge and a
++                    // memory location is the only place a compiler merges a
++                    // value produced element-wise on one path and vector-wise
++                    // on the other. Under FDS_CONE_FUSE every consumer reads
++                    // these instead, and only the scalar arm pays a load.
++                    __m256 vZLoR, vZHiR, vAliveR;
+                     if (g_coneDiag) {
+                         g_dPairs.fetch_add(1, std::memory_order_relaxed);
+                         if (segPath) g_dSegPair.fetch_add(1, std::memory_order_relaxed);
+@@ -882,6 +900,10 @@
+                     // is purely about where the wide arm earns its keep.
+                     const bool solveVec = coneSolveVec && omid == 0 && !bounce
+                                           && !segPath;
++                    // laneVec is in the condition because the SCALAR dz/fade
++                    // loop reads the arrays element-wise: fusion is a property
++                    // of the whole chain, not of one stage.
++                    const bool fusedSolve = solveVec && coneFused && laneVec;
+                     if (solveVec) {
+                         const __m256 sX    = _mm256_load_ps(Xarr);
+                         const __m256 sUV   = _mm256_load_ps(uVarr);
+@@ -1075,9 +1097,18 @@
+                             _mm256_or_ps(NOT(mDVBig),
+                                 _mm256_cmp_ps(zLo, zHi, _CMP_LT_OQ)));
+ 
+-                        _mm256_store_ps(zLoArr,    _mm256_and_ps(zLo, mAlive));
+-                        _mm256_store_ps(zHiArr,    _mm256_and_ps(zHi, mAlive));
+-                        _mm256_store_ps(aliveLane, _mm256_and_ps(sOne, mAlive));
++                        // The same masked __m256 either way -- fused simply
++                        // keeps it rather than storing it.
++                        const __m256 fZLo   = _mm256_and_ps(zLo,  mAlive);
++                        const __m256 fZHi   = _mm256_and_ps(zHi,  mAlive);
++                        const __m256 fAlive = _mm256_and_ps(sOne, mAlive);
++                        if (fusedSolve) {
++                            vZLoR = fZLo; vZHiR = fZHi; vAliveR = fAlive;
++                        } else {
++                            _mm256_store_ps(zLoArr,    fZLo);
++                            _mm256_store_ps(zHiArr,    fZHi);
++                            _mm256_store_ps(aliveLane, fAlive);
++                        }
+                         const int aliveBits = _mm256_movemask_ps(mAlive);
+                         spotAlive = aliveBits != 0;
+                         if (g_coneDiag) {
+@@ -1195,10 +1226,16 @@
+                         g_dDead.fetch_add(1, std::memory_order_relaxed);
+                     }
+                     if (!spotAlive) continue;
++                    // Merge point. After the dead-pair `continue`, so a pair
++                    // with no live lane never pays the loads.
++                    if (!fusedSolve) {
++                        vZLoR   = _mm256_load_ps(zLoArr);
++                        vZHiR   = _mm256_load_ps(zHiArr);
++                        vAliveR = _mm256_load_ps(aliveLane);
++                    }
+                     // ablation: keep the 8-wide cone-interval solve.
+-                    CONE_ABL_CUT(3, _mm256_add_ps(_mm256_load_ps(zLoArr),
+-                                    _mm256_add_ps(_mm256_load_ps(zHiArr),
+-                                                  _mm256_load_ps(aliveLane))));
++                    CONE_ABL_CUT(3, _mm256_add_ps(vZLoR,
++                                    _mm256_add_ps(vZHiR, vAliveR)));
+ 
+                     // Clone AND bounce spots have no own map (smIdx=-1)
+                     // but carry the SOURCE's map: visibility of a sample
+@@ -1250,6 +1287,8 @@
+                     }
+ 
+                     alignas(32) float dzArr[8] = {}, invDzArr[8] = {}, fadeStartArr[8] = {};
++                    __m256 vDzR, vInvDzR, vFadeStartR;
++                    const bool fusedLane = laneVec && coneFused;
+                     // ─── dz / surface-fade window, 8 lanes at a time ──
+                     // The scalar loop below is 0.270 Ginstr/f of this
+                     // pass — 9.4% — measured by the round-2 ablation
+@@ -1276,21 +1315,26 @@
+                     // product, not a re-association.
+                     if (laneVec) {
+                         const __m256 vZeroL  = _mm256_setzero_ps();
+-                        const __m256 mLive   = _mm256_cmp_ps(
+-                                               _mm256_load_ps(aliveLane),
++                        const __m256 mLive   = _mm256_cmp_ps(vAliveR,
+                                                vZeroL, _CMP_NEQ_UQ);
+                         const __m256 vD      = _mm256_mul_ps(
+-                                               _mm256_sub_ps(_mm256_load_ps(zHiArr),
+-                                                             _mm256_load_ps(zLoArr)),
++                                               _mm256_sub_ps(vZHiR, vZLoR),
+                                                _mm256_set1_ps(inv_nSamp));
+                         const __m256 vFwMin  = _mm256_set1_ps(12.0f * invZScale);
+                         const __m256 vFadeW  = _mm256_blendv_ps(vD, vFwMin,
+                                                _mm256_cmp_ps(vD, vFwMin, _CMP_LT_OQ));
+                         const __m256 vInvFw  = _mm256_div_ps(_mm256_set1_ps(1.0f), vFadeW);
+                         const __m256 vFadeS  = _mm256_sub_ps(_mm256_load_ps(zMaxArr), vFadeW);
+-                        _mm256_store_ps(dzArr,        _mm256_blendv_ps(vZeroL, vD,     mLive));
+-                        _mm256_store_ps(invDzArr,     _mm256_blendv_ps(vZeroL, vInvFw, mLive));
+-                        _mm256_store_ps(fadeStartArr, _mm256_blendv_ps(vZeroL, vFadeS, mLive));
++                        const __m256 fDz    = _mm256_blendv_ps(vZeroL, vD,     mLive);
++                        const __m256 fInvDz = _mm256_blendv_ps(vZeroL, vInvFw, mLive);
++                        const __m256 fFadeS = _mm256_blendv_ps(vZeroL, vFadeS, mLive);
++                        if (fusedLane) {
++                            vDzR = fDz; vInvDzR = fInvDz; vFadeStartR = fFadeS;
++                        } else {
++                            _mm256_store_ps(dzArr,        fDz);
++                            _mm256_store_ps(invDzArr,     fInvDz);
++                            _mm256_store_ps(fadeStartArr, fFadeS);
++                        }
+                     } else {
+                     for (int lane = 0; lane < 8; ++lane) {
+                         if (aliveLane[lane] == 0.0f) continue;
+@@ -1307,19 +1351,24 @@
+                     }
+                     }
+ 
++                    // Merge point 2.
++                    if (!fusedLane) {
++                        vDzR        = _mm256_load_ps(dzArr);
++                        vInvDzR     = _mm256_load_ps(invDzArr);
++                        vFadeStartR = _mm256_load_ps(fadeStartArr);
++                    }
+                     // ablation: keep the scalar per-lane dz/fade loop.
+-                    CONE_ABL_CUT(4, _mm256_add_ps(_mm256_load_ps(dzArr),
+-                                    _mm256_add_ps(_mm256_load_ps(invDzArr),
+-                                                  _mm256_load_ps(fadeStartArr))));
++                    CONE_ABL_CUT(4, _mm256_add_ps(vDzR,
++                                    _mm256_add_ps(vInvDzR, vFadeStartR)));
+ 
+                     const __m256 vX_v        = _mm256_load_ps(Xarr);
+                     const __m256 vY_v        = _mm256_set1_ps(Y);
+                     const __m256 vZMax_v     = _mm256_load_ps(zMaxArr);
+-                    const __m256 vZLo_v      = _mm256_load_ps(zLoArr);
+-                    const __m256 vDz_v       = _mm256_load_ps(dzArr);
+-                    const __m256 vInvDz_v    = _mm256_load_ps(invDzArr);
+-                    const __m256 vFadeStart_v= _mm256_load_ps(fadeStartArr);
+-                    const __m256 vAlive_v    = _mm256_load_ps(aliveLane);
++                    const __m256 vZLo_v      = vZLoR;
++                    const __m256 vDz_v       = vDzR;
++                    const __m256 vInvDz_v    = vInvDzR;
++                    const __m256 vFadeStart_v= vFadeStartR;
++                    const __m256 vAlive_v    = vAliveR;
+                     const __m256 vPx_v       = _mm256_set1_ps(Px);
+                     const __m256 vPy_v       = _mm256_set1_ps(Py_l);
+                     const __m256 vPz_v       = _mm256_set1_ps(Pz);
+@@ -1393,7 +1442,7 @@
+                                     _mm256_set1_ps(1.5f)));
+ 
+                         const __m256 vTwoA    = _mm256_add_ps(vAlpha, vAlpha);
+-                        const __m256 vZHi_v   = _mm256_load_ps(zHiArr);
++                        const __m256 vZHi_v   = vZHiR;
+                         const __m256 vArgHi   = _mm256_mul_ps(vInvD,
+                                                 _mm256_fmadd_ps(vTwoA, vZHi_v, vBeta));
+                         const __m256 vArgLo   = _mm256_mul_ps(vInvD,

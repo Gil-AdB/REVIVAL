@@ -1,0 +1,4341 @@
+#include "Deferred.h"
+#include "ParticleReplay.h"
+
+#import <Foundation/Foundation.h>
+#import <QuartzCore/CAMetalLayer.h>
+#include <SDL.h>
+#include <SDL_metal.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <chrono>
+#include <map>
+#include <vector>
+
+namespace gpubench {
+namespace {
+
+// The interactive keymap, printed on startup and mirrored in the HUD.
+//
+// The MOVE/LOOK half is not invented here: it is FDS/CAMERAS/CAMERAS.CPP's
+// Dynamic_Camera(), the house free-cam that DEMO/DisplaceTest.cpp drives and
+// every scene's TAB-camera uses, called directly (SceneIngest FreeCam*). The
+// aliases (End/PgDn, gray +/-, the legacy Z-for-back) are its own.
+// Mouse-look and the four view keys below it are GpuBench ADDITIONS — the
+// house cam reads no mouse and has no notion of a spline toggle.
+const char *kKeymap =
+    "[KEYS] move   W / S,Z          forward / back        (engine Dynamic_Camera)\n"
+    "[KEYS]        A,End / D,PgDn   strafe left / right\n"
+    "[KEYS]        Q,gray+ / E,gray-  up / down\n"
+    "[KEYS] look   arrows            Left,Right = yaw   Up,Down = pitch\n"
+    "[KEYS]        Home / PgUp       roll left / right\n"
+    "[KEYS]        mouse-drag        look (GpuBench addition; the house cam has none)\n"
+    "[KEYS] speed  , / .             translation dial slower / faster (x1.1 per frame held)\n"
+    "[KEYS]        K / L             rotation dial slower / faster\n"
+    "[KEYS] pose   G                 dump the pose ([DTEST-POSE] + a --cam= string)\n"
+    "[KEYS] view   TAB               free-fly <-> the AUTHORED camera spline\n"
+    "[KEYS]        SPACE             pause the demo timer (the camera still moves)\n"
+    "[KEYS]        [ / ]             scrub the demo timer -/+ 100\n"
+    "[KEYS]        ESC, Backspace    quit\n";
+
+// --- MSL-matching layouts (float3 is 16-byte aligned in MSL) ----------------
+
+struct FrameUniforms {
+    float camRow0[4], camRow1[4], camRow2[4];
+    float camSrc[4];
+    float sx, ox, sy, oy;
+    float dza, dzb, invSx, invSy;
+    float nearZ, farZ, exposure;
+    uint32_t numLights;
+    uint32_t shadowsOn;
+    float ambientFactor, diffuseFactor, specularFactor;
+    float lightRangeScale;
+    int32_t vizLight;
+    float pad2[2];              // align clipPlane to 16 (MSL float4 rule)
+    float clipPlane[4];         // xyz = N, w = d; all-zero N = disabled
+    uint32_t mirrorCount;
+    float envReflGain;
+    float reflUv[2];            // 1/w,1/h of the bound reflTex; 0 = same res (read())
+    float aabbMin[4], aabbMax[4];
+    float envProbePos[8][4];
+    float metalCompat[4];       // .x = D1 dial, .y = D2 dial (see Deferred.h)
+    // FLAT AMBIENT — the CPU's `else` branch, not an approximation of it.
+    // `sh_ambient` defaults 0 (FeatureFlags.def:47) and ONLY greets turns it on
+    // (GREETS.CPP:1175 setDefault). Every other scene therefore runs the flat
+    // branch at DeferredSurfaceKernel.cpp:1761-1768,
+    //     lB = Luminosity*255 + Diffuse * Sc->Ambient.B
+    // with NO Ambient_Factor (that global is dead in FDS — SHADING_CONTRACT D7).
+    // .rgb = Scene::Ambient/255, .w = 1 selects it over the SH evaluation.
+    float flatAmbient[4];
+    float hdrMode[4];           // .x = hdr_linear (albedo^2 + sqrt encode)
+};
+
+struct ConeUniforms {
+    float density, nSamples, fadeFloor, pad;
+};
+
+struct BatchUniforms {
+    float rotRow0[4], rotRow1[4], rotRow2[4];
+    float objPos[4];
+    float baseColor[4];
+    float matParams[4];
+    float mapFlags[4];
+    float misc[4];              // .x = mirror panel index (1-based)
+    float misc2[4];             // .x = env probe index (1-based), .y = Reflection,
+                                // .z = XparBlendAlpha, .w = transparent dst weight
+    float xpar[4];              // .x raw Luminosity, .y Specular, .z Glossiness,
+                                // .w additive flag — the FORWARD transparent kernel
+};
+
+struct XparUniforms {
+    float sceneAmbient[4];      // Scene::Ambient / 255 (float3 + pad)
+    float peelReverse, usePeelFloor, pad0, pad1;
+};
+
+struct GpuLight {
+    float pos[4];
+    float color[4];
+    float range, invRange;
+    int32_t shadowIndex;      // cube slot for omnis, 2D-map slot for spots
+    float shadowNear, shadowFar;
+    int32_t isSpot;
+    float cosInner, cosOuter;
+    float dir[4];             // world, normalised (Omni::IDir)
+    // Spot shadow projection: view rows from Kick_Camera + tan(halfFov).
+    float sRow0[4], sRow1[4], sRow2[4];
+};
+
+struct ShadowUniforms {
+    float row0[4], row1[4], row2[4];
+    float lightPos[4];
+    float dza, dzb;
+    // 1/tan(halfFov) for a spot's narrow frustum; 1.0 for a 90-degree cube face.
+    float projScale, pad1;
+};
+
+struct BloomUniforms {
+    float srcSize[2];
+    float dstSize[2];
+    float threshold;
+    float intensity;
+    float pad[2];
+};
+
+struct FlareUniforms {
+    float centerPx[4];   // .xy screen px, .z view z, .w half-extent px
+    float gain[4];       // .x gain, .zw target resolution
+};
+
+constexpr int kMaxShadowCubes = 16;
+constexpr int kMaxSpotMaps    = 16;
+
+// Metal cube-face convention, slice order +X,-X,+Y,-Y,+Z,-Z. Rows are
+// (right, up, forward) so the shadow vertex shader's rowmul yields
+// (view.x, view.y, view.z) with a 90-degree square frustum.
+//
+// DERIVED, not guessed. Metal (like D3D) maps a direction to a face with
+//   ma = max(|x|,|y|,|z|),  u = 0.5*(sc/ma + 1),  v = 0.5*(tc/ma + 1)
+// and per face:
+//   +X: sc=-z tc=-y   -X: sc=+z tc=-y
+//   +Y: sc=+x tc=+z   -Y: sc=+x tc=-z
+//   +Z: sc=+x tc=-y   -Z: sc=-x tc=-y
+// Our bake writes clip.xy = (dot(right,d), dot(up,d)) and clip.w = dot(fwd,d).
+// Metal's viewport has an UPPER-LEFT origin, so texel row 0 <-> ndc.y=+1 <->
+// dot(up,d)=+ma, while the sampler puts v=0 (row 0) at tc=-ma. Therefore
+//   right = sc_direction   and   up = -tc_direction.
+// The `up = -tc` sign is the part that was wrong in the first implementation:
+// every face was baked VERTICALLY MIRRORED, so the tap read the wrong texel and
+// reported "occluded" almost everywhere once lights were in range. The symptom
+// (0% fully-unshadowed pixels) is the signature of a bad face mapping.
+struct CubeFace { float right[3], up[3], fwd[3]; };
+constexpr CubeFace kCubeFaces[6] = {
+    {{ 0,  0, -1}, {0,  1,  0}, { 1,  0,  0}},   // +X  sc=-z tc=-y
+    {{ 0,  0,  1}, {0,  1,  0}, {-1,  0,  0}},   // -X  sc=+z tc=-y
+    {{ 1,  0,  0}, {0,  0, -1}, { 0,  1,  0}},   // +Y  sc=+x tc=+z
+    {{ 1,  0,  0}, {0,  0,  1}, { 0, -1,  0}},   // -Y  sc=+x tc=-z
+    {{ 1,  0,  0}, {0,  1,  0}, { 0,  0,  1}},   // +Z  sc=+x tc=-y
+    {{-1,  0,  0}, {0,  1,  0}, { 0,  0, -1}},   // -Z  sc=-x tc=-y
+};
+
+// ---- tiny 5x7 bitmap font for the HUD ---------------------------------
+// A HUD is required (live per-pass GPU ms), and there is no text stack in this
+// target. 5 columns x 7 rows, each column a bit mask with bit0 = top row.
+struct Glyph { char c; uint8_t col[5]; };
+static const Glyph kFont[] = {
+ {' ',{0x00,0x00,0x00,0x00,0x00}},{'!',{0x00,0x00,0x5F,0x00,0x00}},
+ {'.',{0x00,0x60,0x60,0x00,0x00}},{',',{0x00,0x50,0x30,0x00,0x00}},
+ {':',{0x00,0x36,0x36,0x00,0x00}},{'/',{0x20,0x10,0x08,0x04,0x02}},
+ {'-',{0x08,0x08,0x08,0x08,0x08}},{'+',{0x08,0x08,0x3E,0x08,0x08}},
+ {'=',{0x14,0x14,0x14,0x14,0x14}},{'%',{0x23,0x13,0x08,0x64,0x62}},
+ {'(',{0x00,0x1C,0x22,0x41,0x00}},{')',{0x00,0x41,0x22,0x1C,0x00}},
+ {'[',{0x00,0x7F,0x41,0x41,0x00}},{']',{0x00,0x41,0x41,0x7F,0x00}},
+ {'<',{0x08,0x14,0x22,0x41,0x00}},{'>',{0x41,0x22,0x14,0x08,0x00}},
+ {'0',{0x3E,0x51,0x49,0x45,0x3E}},{'1',{0x00,0x42,0x7F,0x40,0x00}},
+ {'2',{0x42,0x61,0x51,0x49,0x46}},{'3',{0x21,0x41,0x45,0x4B,0x31}},
+ {'4',{0x18,0x14,0x12,0x7F,0x10}},{'5',{0x27,0x45,0x45,0x45,0x39}},
+ {'6',{0x3C,0x4A,0x49,0x49,0x30}},{'7',{0x01,0x71,0x09,0x05,0x03}},
+ {'8',{0x36,0x49,0x49,0x49,0x36}},{'9',{0x06,0x49,0x49,0x29,0x1E}},
+ {'A',{0x7E,0x11,0x11,0x11,0x7E}},{'B',{0x7F,0x49,0x49,0x49,0x36}},
+ {'C',{0x3E,0x41,0x41,0x41,0x22}},{'D',{0x7F,0x41,0x41,0x22,0x1C}},
+ {'E',{0x7F,0x49,0x49,0x49,0x41}},{'F',{0x7F,0x09,0x09,0x09,0x01}},
+ {'G',{0x3E,0x41,0x49,0x49,0x7A}},{'H',{0x7F,0x08,0x08,0x08,0x7F}},
+ {'I',{0x00,0x41,0x7F,0x41,0x00}},{'J',{0x20,0x40,0x41,0x3F,0x01}},
+ {'K',{0x7F,0x08,0x14,0x22,0x41}},{'L',{0x7F,0x40,0x40,0x40,0x40}},
+ {'M',{0x7F,0x02,0x0C,0x02,0x7F}},{'N',{0x7F,0x04,0x08,0x10,0x7F}},
+ {'O',{0x3E,0x41,0x41,0x41,0x3E}},{'P',{0x7F,0x09,0x09,0x09,0x06}},
+ {'Q',{0x3E,0x41,0x51,0x21,0x5E}},{'R',{0x7F,0x09,0x19,0x29,0x46}},
+ {'S',{0x46,0x49,0x49,0x49,0x31}},{'T',{0x01,0x01,0x7F,0x01,0x01}},
+ {'U',{0x3F,0x40,0x40,0x40,0x3F}},{'V',{0x1F,0x20,0x40,0x20,0x1F}},
+ {'W',{0x3F,0x40,0x38,0x40,0x3F}},{'X',{0x63,0x14,0x08,0x14,0x63}},
+ {'Y',{0x07,0x08,0x70,0x08,0x07}},{'Z',{0x61,0x51,0x49,0x45,0x43}},
+};
+static const Glyph *FindGlyph(char c) {
+    if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
+    for (const auto &g : kFont) if (g.c == c) return &g;
+    return &kFont[0];
+}
+// Draw `s` into an RGBA8 buffer at (x0,y0), `sc` pixels per font pixel.
+static void HudText(uint8_t *buf, int bw, int bh, int x0, int y0, int sc,
+                    const char *s, uint8_t r, uint8_t g, uint8_t b) {
+    int x = x0;
+    for (const char *p = s; *p; ++p) {
+        const Glyph *gl = FindGlyph(*p);
+        for (int c = 0; c < 5; ++c)
+            for (int row = 0; row < 7; ++row) {
+                if (!((gl->col[c] >> row) & 1)) continue;
+                for (int dy = 0; dy < sc; ++dy)
+                    for (int dx = 0; dx < sc; ++dx) {
+                        const int px = x + c * sc + dx, py = y0 + row * sc + dy;
+                        if (px < 0 || py < 0 || px >= bw || py >= bh) continue;
+                        uint8_t *o = buf + (size_t(py) * size_t(bw) + size_t(px)) * 4;
+                        o[0] = r; o[1] = g; o[2] = b; o[3] = 255;
+                    }
+            }
+        x += 6 * sc;
+    }
+}
+
+double Percentile(std::vector<double> v, double p) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    const double idx = p * double(v.size() - 1);
+    const size_t lo = size_t(std::floor(idx)), hi = size_t(std::ceil(idx));
+    return v[lo] + (v[hi] - v[lo]) * (idx - double(lo));
+}
+
+std::string ReadFile(const std::string &path) {
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f) return {};
+    std::fseek(f, 0, SEEK_END);
+    long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    std::string s(size_t(n < 0 ? 0 : n), '\0');
+    if (n > 0 && std::fread(s.data(), 1, size_t(n), f) != size_t(n)) s.clear();
+    std::fclose(f);
+    return s;
+}
+
+bool WritePPM(const std::string &path, const uint8_t *bgra, int w, int h, size_t rowBytes) {
+    FILE *f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+    std::vector<uint8_t> row(size_t(w) * 3);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t *s = bgra + size_t(y) * rowBytes;
+        for (int x = 0; x < w; ++x) {
+            row[size_t(x) * 3 + 0] = s[size_t(x) * 4 + 2];
+            row[size_t(x) * 3 + 1] = s[size_t(x) * 4 + 1];
+            row[size_t(x) * 3 + 2] = s[size_t(x) * 4 + 0];
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+    return true;
+}
+
+// Project the FLD's authored vertical zenith->nadir backdrop gradient into 9 L2
+// SH coefficients per channel, by numeric integration over the sphere. Real
+// authored content, and the shader still pays the full 9-coefficient evaluation
+// (which is the point — --sh_ambient is what greets runs, and a flat constant
+// would be a different, cheaper shader).
+void ProjectSkyGradientToSH(const float zenith[3], const float nadir[3], float sh[9][4]) {
+    std::memset(sh, 0, sizeof(float) * 9 * 4);
+    const int NT = 64, NP = 128;
+    double acc[9][3] = {};
+    double wsum = 0.0;
+    for (int it = 0; it < NT; ++it) {
+        const double theta = (double(it) + 0.5) / NT * M_PI;
+        const double st = std::sin(theta), ct = std::cos(theta);
+        for (int ip = 0; ip < NP; ++ip) {
+            const double phi = (double(ip) + 0.5) / NP * 2.0 * M_PI;
+            // world: +Y is up, matching the scene's authored gradient axis
+            const double y = ct, x = st * std::cos(phi), z = st * std::sin(phi);
+            const double t = (y + 1.0) * 0.5;
+            const double dw = st * (M_PI / NT) * (2.0 * M_PI / NP);
+            double Y[9];
+            Y[0] = 0.282095;
+            Y[1] = 0.488603 * y;
+            Y[2] = 0.488603 * z;
+            Y[3] = 0.488603 * x;
+            Y[4] = 1.092548 * x * y;
+            Y[5] = 1.092548 * y * z;
+            Y[6] = 0.315392 * (3.0 * z * z - 1.0);
+            Y[7] = 1.092548 * x * z;
+            Y[8] = 0.546274 * (x * x - y * y);
+            for (int c = 0; c < 3; ++c) {
+                const double L = (nadir[c] + (zenith[c] - nadir[c]) * t) / 255.0;
+                for (int k = 0; k < 9; ++k) acc[k][c] += L * Y[k] * dw;
+            }
+            wsum += dw;
+        }
+    }
+    (void)wsum;
+    for (int k = 0; k < 9; ++k)
+        for (int c = 0; c < 3; ++c) sh[k][c] = float(acc[k][c]);
+}
+
+}  // namespace
+
+bool RunDeferred(Scene &scene, const DeferredOptions &opt,
+                 const std::string &shaderPath, DeferredResult &out) {
+@autoreleasepool {
+    NSError *err = nil;
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+    if (!dev) { std::fprintf(stderr, "[DEFERRED] no Metal device\n"); return false; }
+
+    const std::string src = ReadFile(shaderPath);
+    if (src.empty()) {
+        std::fprintf(stderr, "[DEFERRED] cannot read %s\n", shaderPath.c_str());
+        return false;
+    }
+    id<MTLLibrary> lib = [dev newLibraryWithSource:@(src.c_str())
+                                           options:[MTLCompileOptions new]
+                                             error:&err];
+    if (!lib) {
+        std::fprintf(stderr, "[DEFERRED] MSL compile failed: %s\n",
+                     [[err localizedDescription] UTF8String]);
+        return false;
+    }
+
+    const int W = scene.xres, H = scene.yres;
+
+    // ---- vertex descriptor / pipelines -----------------------------------
+    MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
+    vd.attributes[0].format = MTLVertexFormatFloat3; vd.attributes[0].offset = 0;  vd.attributes[0].bufferIndex = 0;
+    vd.attributes[1].format = MTLVertexFormatFloat3; vd.attributes[1].offset = 12; vd.attributes[1].bufferIndex = 0;
+    vd.attributes[2].format = MTLVertexFormatFloat2; vd.attributes[2].offset = 24; vd.attributes[2].bufferIndex = 0;
+    // Engine tangent (xyz) + UV-winding handedness sign (w) — see SceneIngest.h.
+    vd.attributes[3].format = MTLVertexFormatFloat4; vd.attributes[3].offset = 32; vd.attributes[3].bufferIndex = 0;
+    vd.layouts[0].stride = sizeof(Vertex);
+
+    MTLRenderPipelineDescriptor *gpd = [MTLRenderPipelineDescriptor new];
+    gpd.vertexFunction = [lib newFunctionWithName:@"vs_gbuffer"];
+    gpd.fragmentFunction = [lib newFunctionWithName:@"fs_gbuffer"];
+    gpd.vertexDescriptor = vd;
+    gpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    gpd.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
+    gpd.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    gpd.colorAttachments[3].pixelFormat = MTLPixelFormatRGBA8Uint;  // mirror id, metalness, env probe, F0
+    gpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    id<MTLRenderPipelineState> psoGBuf = [dev newRenderPipelineStateWithDescriptor:gpd error:&err];
+    if (!psoGBuf) { std::fprintf(stderr, "[DEFERRED] gbuffer pso: %s\n", [[err localizedDescription] UTF8String]); return false; }
+
+    MTLRenderPipelineDescriptor *spd = [MTLRenderPipelineDescriptor new];
+    spd.vertexFunction = [lib newFunctionWithName:@"vs_shadow"];
+    spd.fragmentFunction = nil;                  // depth-only
+    spd.vertexDescriptor = vd;
+    spd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    id<MTLRenderPipelineState> psoShadow = [dev newRenderPipelineStateWithDescriptor:spd error:&err];
+    if (!psoShadow) { std::fprintf(stderr, "[DEFERRED] shadow pso: %s\n", [[err localizedDescription] UTF8String]); return false; }
+
+    // A MISSING MSL ENTRY POINT MUST BE FATAL, and this is not defensive
+    // programming — it cost a full debugging round. `cmake --build --target
+    // GpuBench` does NOT build the separate GpuBenchShaders staging target, so
+    // the binary can run against a STALE .metal that lacks a newly added
+    // function. `newFunctionWithName:` then returns nil, and Metal accepts a
+    // pipeline with a nil fragmentFunction as VALID (it is how depth-only
+    // pipelines are built). The result is a perfectly healthy pipeline that
+    // writes nothing, and a new pass that measures as "changed 0 pixels" with
+    // no error anywhere. Fail here instead.
+    auto fn_ = [&](NSString *n) -> id<MTLFunction> {
+        id<MTLFunction> f = [lib newFunctionWithName:n];
+        if (!f) {
+            std::fprintf(stderr,
+                "[DEFERRED] FATAL: shader entry point '%s' not found in the compiled\n"
+                "[DEFERRED]   library. The staged .metal is almost certainly STALE —\n"
+                "[DEFERRED]   build the GpuBenchShaders target too (plain `cmake --build\n"
+                "[DEFERRED]   <dir>` does it; `--target GpuBench` does NOT).\n",
+                [n UTF8String]);
+            std::exit(4);
+        }
+        return f;
+    };
+    auto makeFsPso = [&](NSString *fn, MTLPixelFormat fmt) -> id<MTLRenderPipelineState> {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_fullscreen");
+        p.fragmentFunction = fn_(fn);
+        p.colorAttachments[0].pixelFormat = fmt;
+        NSError *e = nil;
+        id<MTLRenderPipelineState> s = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!s) std::fprintf(stderr, "[DEFERRED] pso %s: %s\n",
+                             [fn UTF8String], [[e localizedDescription] UTF8String]);
+        return s;
+    };
+    // Flare sprites: ADDITIVE into the HDR target, matching the CPU's
+    // Spriter<Res,true,true> which adds into the float radiance buffer.
+    id<MTLRenderPipelineState> psoFlare;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_flare");
+        p.fragmentFunction = fn_(@"fs_flare");
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoFlare = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoFlare) { std::fprintf(stderr, "[DEFERRED] flare pso: %s\n",
+                                      [[e localizedDescription] UTF8String]); return false; }
+    }
+
+    // PARTICLE REPLAY pipeline — additive into HDR, instanced. See
+    // ParticleReplay.h for the format and the DEMO-side dump it reads.
+    id<MTLRenderPipelineState> psoPcl = nil;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_pcl");
+        p.fragmentFunction = fn_(@"fs_pcl");
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoPcl = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoPcl) { std::fprintf(stderr, "[DEFERRED] pcl pso: %s\n",
+                                    [[e localizedDescription] UTF8String]); return false; }
+    }
+    // Volumetric cones: ADDITIVE into the HDR target before bloom, which is
+    // where the CPU composites them (VolCompositeAdd into g_hdrBuf, unclamped).
+    id<MTLRenderPipelineState> psoCones;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_fullscreen");
+        p.fragmentFunction = fn_(@"fs_cones");
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoCones = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoCones) { std::fprintf(stderr, "[DEFERRED] cone pso: %s\n",
+                                      [[e localizedDescription] UTF8String]); return false; }
+    }
+    id<MTLRenderPipelineState> psoBloomBright = makeFsPso(@"fs_bloom_bright", MTLPixelFormatRGBA16Float);
+    id<MTLRenderPipelineState> psoBloomBlur   = makeFsPso(@"fs_bloom_blur",   MTLPixelFormatRGBA16Float);
+    id<MTLRenderPipelineState> psoBloomAdd;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_fullscreen");
+        p.fragmentFunction = fn_(@"fs_bloom_add");
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoBloomAdd = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoBloomAdd) { std::fprintf(stderr, "[DEFERRED] bloom-add pso: %s\n",
+                                         [[e localizedDescription] UTF8String]); return false; }
+    }
+    // ---- TRANSPARENT surfaces: depth-resolve + three composite modes -------
+    // The depth-resolve pipeline has NO colour attachment: it exists only to
+    // pick the one fragment per pixel that this (mesh, side, peel pass) layer
+    // keeps, which is what the CPU's single-slot xpar G-buffer does implicitly.
+    id<MTLRenderPipelineState> psoXparDepth;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_xpar");
+        p.fragmentFunction = fn_(@"fs_xpar_depth");
+        p.vertexDescriptor = vd;
+        p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        NSError *e = nil;
+        psoXparDepth = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoXparDepth) { std::fprintf(stderr, "[DEFERRED] xpar-depth pso: %s\n",
+                                          [[e localizedDescription] UTF8String]); return false; }
+    }
+    // Three blend modes, one per CPU composite form. The per-material weight
+    // travels as the encoder's BLEND COLOUR, so `dw` and `alpha` are real
+    // blend factors rather than shader arithmetic against a stale destination.
+    auto makeXparPso = [&](MTLBlendFactor srcF, MTLBlendFactor dstF)
+                       -> id<MTLRenderPipelineState> {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_xpar");
+        p.fragmentFunction = fn_(@"fs_xpar");
+        p.vertexDescriptor = vd;
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = srcF;
+        p.colorAttachments[0].destinationRGBBlendFactor = dstF;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        NSError *e = nil;
+        id<MTLRenderPipelineState> s = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!s) std::fprintf(stderr, "[DEFERRED] xpar pso: %s\n",
+                             [[e localizedDescription] UTF8String]);
+        return s;
+    };
+    // out = lit + dst*dw               (Transparency-weighted, the shipped form)
+    id<MTLRenderPipelineState> psoXparLegacy =
+        makeXparPso(MTLBlendFactorOne, MTLBlendFactorBlendColor);
+    // out = lit*a + dst*(1-a)          (XparBlendAlpha > 0: fountain's crystal)
+    id<MTLRenderPipelineState> psoXparLerp =
+        makeXparPso(MTLBlendFactorBlendColor, MTLBlendFactorOneMinusBlendColor);
+    // out = lit + dst                  (Mat_Additive, order-independent)
+    id<MTLRenderPipelineState> psoXparAdd =
+        makeXparPso(MTLBlendFactorOne, MTLBlendFactorOne);
+    if (!psoXparLegacy || !psoXparLerp || !psoXparAdd) return false;
+
+    id<MTLRenderPipelineState> psoLight   = makeFsPso(@"fs_lighting", MTLPixelFormatRGBA16Float);
+    id<MTLRenderPipelineState> psoTonemap = makeFsPso(@"fs_tonemap",  MTLPixelFormatBGRA8Unorm);
+    id<MTLRenderPipelineState> psoViz     = makeFsPso(@"fs_viz",      MTLPixelFormatBGRA8Unorm);
+    if (!psoLight || !psoTonemap || !psoViz) return false;
+
+    MTLDepthStencilDescriptor *dsd = [MTLDepthStencilDescriptor new];
+    dsd.depthCompareFunction = MTLCompareFunctionGreater;   // reversed-Z
+    dsd.depthWriteEnabled = YES;
+    id<MTLDepthStencilState> dss = [dev newDepthStencilStateWithDescriptor:dsd];
+
+    // Transparent depth-peel resolve states. `Near` reproduces the CPU's legacy
+    // single-pass peel (side Z cleared to "farthest", the rasterizer keeps the
+    // nearer fragment — Mekalele.h:1392-1398); `Far` reproduces the K>1 reverse
+    // peel (cleared to "nearest", keep the farther one above the peel floor,
+    // ibid. :1399-1420) so the layers composite farthest-first.
+    id<MTLDepthStencilState> dssXparNear, dssXparFar, dssXparEqual;
+    {
+        MTLDepthStencilDescriptor *d = [MTLDepthStencilDescriptor new];
+        d.depthCompareFunction = MTLCompareFunctionGreater;   // reversed-Z: nearer
+        d.depthWriteEnabled = YES;
+        dssXparNear = [dev newDepthStencilStateWithDescriptor:d];
+        d.depthCompareFunction = MTLCompareFunctionLess;      // farther
+        dssXparFar = [dev newDepthStencilStateWithDescriptor:d];
+        d.depthCompareFunction = MTLCompareFunctionEqual;
+        d.depthWriteEnabled = NO;
+        dssXparEqual = [dev newDepthStencilStateWithDescriptor:d];
+    }
+
+    MTLSamplerDescriptor *sdesc = [MTLSamplerDescriptor new];
+    // --tex_point prices the FILTERING difference against the CPU, which point-
+    // samples and picks its mip by clipper subdivision. Default stays trilinear
+    // + 8x aniso: it is the better image, just not the CPU's image.
+    sdesc.minFilter = opt.texPoint ? MTLSamplerMinMagFilterNearest
+                                   : MTLSamplerMinMagFilterLinear;
+    sdesc.magFilter = sdesc.minFilter;
+    sdesc.mipFilter = opt.texPoint ? MTLSamplerMipFilterNotMipmapped
+                                   : MTLSamplerMipFilterLinear;
+    sdesc.sAddressMode = MTLSamplerAddressModeRepeat;
+    sdesc.tAddressMode = MTLSamplerAddressModeRepeat;
+    sdesc.maxAnisotropy = opt.texPoint ? 1 : 8;
+    id<MTLSamplerState> samp = [dev newSamplerStateWithDescriptor:sdesc];
+
+    MTLSamplerDescriptor *shd = [MTLSamplerDescriptor new];
+    shd.minFilter = MTLSamplerMinMagFilterLinear;   // enables hardware PCF
+    shd.magFilter = MTLSamplerMinMagFilterLinear;
+    shd.compareFunction = MTLCompareFunctionGreater; // reversed-Z
+    id<MTLSamplerState> shadowSamp = [dev newSamplerStateWithDescriptor:shd];
+    // Plain (non-comparison) sampler so the diagnostic viz can read the RAW baked
+    // depth instead of a pass/fail bit.
+    MTLSamplerDescriptor *rawd = [MTLSamplerDescriptor new];
+    rawd.minFilter = MTLSamplerMinMagFilterNearest;
+    rawd.magFilter = MTLSamplerMinMagFilterNearest;
+    id<MTLSamplerState> rawSamp = [dev newSamplerStateWithDescriptor:rawd];
+    // Env probe cube: trilinear, because roughness selects a MIP and the CPU
+    // lerps between levels too (nearest-level select speckled on noisy
+    // roughness maps, DeferredSurfaceKernel.cpp:1094-1110).
+    MTLSamplerDescriptor *envd = [MTLSamplerDescriptor new];
+    envd.minFilter = MTLSamplerMinMagFilterLinear;
+    envd.magFilter = MTLSamplerMinMagFilterLinear;
+    envd.mipFilter = MTLSamplerMipFilterLinear;
+    envd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    envd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> envSamp = [dev newSamplerStateWithDescriptor:envd];
+    // Bilinear + clamp-to-edge for the bloom upsample (Hdr.cpp clamps its
+    // bilinear fetch to the buffer edge the same way).
+    MTLSamplerDescriptor *bsd = [MTLSamplerDescriptor new];
+    bsd.minFilter = MTLSamplerMinMagFilterLinear;
+    bsd.magFilter = MTLSamplerMinMagFilterLinear;
+    bsd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    bsd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> bloomSamp = [dev newSamplerStateWithDescriptor:bsd];
+
+    // ---- buffers / textures ----------------------------------------------
+    id<MTLCommandQueue> queue = [dev newCommandQueue];
+    id<MTLBuffer> vb = [dev newBufferWithBytes:scene.verts.data()
+                                        length:scene.verts.size() * sizeof(Vertex)
+                                       options:MTLResourceStorageModeShared];
+
+    std::vector<id<MTLTexture>> texes;
+    {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        for (const auto &img : scene.textures) {
+            MTLTextureDescriptor *td =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                  width:NSUInteger(img.w)
+                                                                 height:NSUInteger(img.h)
+                                                              mipmapped:YES];
+            td.usage = MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModeShared;
+            id<MTLTexture> t = [dev newTextureWithDescriptor:td];
+            [t replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(img.w), NSUInteger(img.h))
+                 mipmapLevel:0 withBytes:img.rgba.data() bytesPerRow:NSUInteger(img.w) * 4];
+            [blit generateMipmapsForTexture:t];
+            texes.push_back(t);
+        }
+        [blit endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+
+    // Render targets are PRIVATE. StorageModeShared forces write-through to
+    // system memory and disables lossless compression on Apple silicon; using it
+    // here inflated the gbuffer / lighting / tonemap buckets several-fold in the
+    // first run. The final image is copied to a shared staging texture ONCE,
+    // after the timed loop, so readback never taxes the measurement.
+    auto mkTarget = [&](MTLPixelFormat fmt, MTLStorageMode mode) -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                              width:NSUInteger(W)
+                                                             height:NSUInteger(H)
+                                                          mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = mode;
+        return [dev newTextureWithDescriptor:td];
+    };
+    id<MTLTexture> gAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
+    id<MTLTexture> gNormal = mkTarget(MTLPixelFormatRG16Snorm,   MTLStorageModePrivate);
+    id<MTLTexture> gParams = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
+    // RGBA8Uint, not RG8Uint: .x mirror panel id, .y metalness*255, and since
+    // the env-reflection work .z the 1-based ENV PROBE index and .w F0*255.
+    id<MTLTexture> gMirror = mkTarget(MTLPixelFormatRGBA8Uint,   MTLStorageModePrivate);
+    id<MTLTexture> gDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
+    id<MTLTexture> hdrTex  = mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate);
+    id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
+    id<MTLTexture> stageTex = mkTarget(MTLPixelFormatBGRA8Unorm, MTLStorageModeShared);
+    // Transparent peel scratch: the per-layer resolved depth, and the previous
+    // layer's resolved depth (the CPU's g_xparPeelFloor). Both are depth
+    // textures so the resolve can render into them AND the shader can read them.
+    auto mkDepthRW = [&](void) -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                               width:NSUInteger(W)
+                                                              height:NSUInteger(H)
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    // PING-PONG, not a copy. The peel floor is "the previous layer's resolved
+    // depth"; the arm used to produce it with a full-screen blit encoder per
+    // extra pass (78 blit encoders/frame on fountain). Alternating the two
+    // textures is the same data with no copy and no encoder.
+    id<MTLTexture> xparDepthPP[2] = { mkDepthRW(), mkDepthRW() };
+
+    // ---- mirror reflection targets -----------------------------------------
+    // One full-res lit HDR reflection per active mirror panel (greets has 3),
+    // rendered through the SAME deferred pipeline from the plane-reflected
+    // camera, plus one shared reflection G-buffer set reused sequentially
+    // (Metal's hazard tracking orders the encoders). Full resolution because
+    // the composite is a same-pixel read — a reflected point on the mirror
+    // plane projects to the SAME pixel in both views — and because the CPU
+    // renders its first-order clones at main resolution too.
+    constexpr int kMaxMirrors = 4;
+    const int nMirrors = std::min<int>(int(scene.mirrors.size()), kMaxMirrors);
+    std::vector<id<MTLTexture>> reflHdr;
+    id<MTLTexture> mAlbedo = nil, mNormal = nil, mParams = nil, mMirror = nil,
+                   mDepth = nil;
+    if (nMirrors > 0) {
+        for (int i = 0; i < nMirrors; ++i)
+            reflHdr.push_back(mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate));
+        mAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
+        mNormal = mkTarget(MTLPixelFormatRG16Snorm,    MTLStorageModePrivate);
+        mParams = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
+        mMirror = mkTarget(MTLPixelFormatRGBA8Uint,    MTLStorageModePrivate);
+        mDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
+    }
+
+    // ---- SECOND-ORDER mirror targets ---------------------------------------
+    // A mirror inside a mirror. For an ordered pair (A, B) the content of B's
+    // panel, as seen inside A's reflection, is the scene from the DOUBLY
+    // reflected eye reflect_B(reflect_A(eye)) — the CPU's own order-2 bake
+    // camera (GreetsMirror.cpp:2985-2991).
+    //
+    // WHY ONLY nMirrors TARGETS AND NOT nMirrors^2: the pairs are consumed
+    // immediately. The frame renders, for outer mirror A, every (A, B) into
+    // refl2[B], then A's own G-buffer and A's lighting (which reads refl2),
+    // then moves to A+1 and overwrites them. Metal's hazard tracking already
+    // orders those encoders, which is the same argument that lets the FIRST
+    // order share ONE G-buffer set. The order-2 G-buffer shares that set too:
+    // every (A,B) G-buffer is consumed by its own lighting pass before A's own
+    // G-buffer overwrites it.
+    //
+    // WHY SMALLER: order-2 content is only ever seen through panel B, a small
+    // part of the frame. --mirror2_scale (0.5) is the knob; the composite
+    // switches to a normalised bilinear sample when it is not 1.
+    const bool mirror2On = opt.mirror2 && nMirrors > 1;
+    const float m2Scale = std::min(1.0f, std::max(0.125f, opt.mirror2Scale));
+    const int W2 = std::max(64, int(float(W) * m2Scale));
+    const int H2 = std::max(64, int(float(H) * m2Scale));
+    auto mkTargetWH = [&](MTLPixelFormat fmt, int w, int h) -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                               width:NSUInteger(w)
+                                                              height:NSUInteger(h)
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    std::vector<id<MTLTexture>> refl2;
+    id<MTLTexture> m2Albedo = nil, m2Normal = nil, m2Params = nil, m2Mirror = nil,
+                   m2Depth = nil;
+    if (mirror2On) {
+        for (int i = 0; i < nMirrors; ++i)
+            refl2.push_back(mkTargetWH(MTLPixelFormatRGBA16Float, W2, H2));
+        m2Albedo = mkTargetWH(MTLPixelFormatRGBA8Unorm,   W2, H2);
+        m2Normal = mkTargetWH(MTLPixelFormatRG16Snorm,    W2, H2);
+        m2Params = mkTargetWH(MTLPixelFormatRGBA8Unorm,   W2, H2);
+        m2Mirror = mkTargetWH(MTLPixelFormatRGBA8Uint,    W2, H2);
+        m2Depth  = mkTargetWH(MTLPixelFormatDepth32Float, W2, H2);
+        std::fprintf(stderr,
+            "[MIRROR2] second-order mirrors ON — %d panel(s), up to %d ordered pair(s)/frame,\n"
+            "[MIRROR2]   targets %dx%d (%.2f x main), min panel footprint %.0f px\n",
+            nMirrors, nMirrors * (nMirrors - 1), W2, H2, double(m2Scale),
+            double(opt.mirror2MinPx));
+    }
+    // ---- ENVIRONMENT PROBE CUBES -------------------------------------------
+    // One mipmapped HDR texturecube per probe, baked ONCE from the lit scene
+    // through this arm's own G-buffer + lighting pipeline. See the DECISION
+    // comment in SceneIngest.cpp: the probes are GPU-baked rather than pulled
+    // from the CPU's EnvReflection_Table, because the CPU bakes its probes with
+    // the software deferred rasterizer and importing that would put the CPU
+    // renderer inside the GPU cost being measured.
+    constexpr int kMaxEnvProbes = 8;
+    const int envRes = (opt.loadOpt && opt.loadOpt->envRes > 0) ? opt.loadOpt->envRes : 128;
+    const int nProbes = std::min<int>(int(scene.envProbes.size()), kMaxEnvProbes);
+    std::vector<id<MTLTexture>> envCubes;
+    id<MTLTexture> eAlbedo = nil, eNormal = nil, eParams = nil, eMirror = nil,
+                   eDepth = nil, eHdr = nil;
+    auto mkSquare = [&](MTLPixelFormat fmt, int res) -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                              width:NSUInteger(res)
+                                                             height:NSUInteger(res)
+                                                          mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    if (nProbes > 0) {
+        for (int i = 0; i < nProbes; ++i) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor
+                textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                size:NSUInteger(envRes)
+                                           mipmapped:YES];
+            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            // Private for measurement; --dump_env_cube needs CPU-visible
+            // storage and is never a timing run (same rule as --dump_cube).
+            td.storageMode = opt.dumpEnvCube ? MTLStorageModeShared
+                                             : MTLStorageModePrivate;
+            envCubes.push_back([dev newTextureWithDescriptor:td]);
+        }
+        eAlbedo = mkSquare(MTLPixelFormatRGBA8Unorm,   envRes);
+        eNormal = mkSquare(MTLPixelFormatRG16Snorm,    envRes);
+        eParams = mkSquare(MTLPixelFormatRGBA8Unorm,   envRes);
+        eMirror = mkSquare(MTLPixelFormatRGBA8Uint,    envRes);
+        eDepth  = mkSquare(MTLPixelFormatDepth32Float, envRes);
+        eHdr    = mkSquare(MTLPixelFormatRGBA16Float,  envRes);
+    }
+    id<MTLTexture> dummyEnvCube;
+    {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor
+            textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                            size:1 mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        dummyEnvCube = [dev newTextureWithDescriptor:td];
+    }
+
+    id<MTLTexture> dummyRefl;
+    {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                              width:1 height:1 mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModePrivate;
+        dummyRefl = [dev newTextureWithDescriptor:td];
+    }
+    // Quarter-res bloom ping-pong (DS=4, exactly Hdr.cpp's constant).
+    const int BW = (W + 3) / 4, BH = (H + 3) / 4;
+    auto mkBloom = [&]() -> id<MTLTexture> {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                              width:NSUInteger(BW)
+                                                             height:NSUInteger(BH)
+                                                          mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        return [dev newTextureWithDescriptor:td];
+    };
+    id<MTLTexture> bloomA = mkBloom(), bloomB = mkBloom();
+
+    // ---- shadow cubes (omnis) + single maps (spots) -----------------------
+    // A Light_SpotLight bakes ONE perspective depth map, not six cube faces —
+    // FDS/RENDER/Shadows.cpp treats `cubeFace < 0` as the spot path. Matching
+    // that matters for cost as well as correctness: 10 disco spots as cubes would
+    // be 60 extra faces per frame instead of 10.
+    std::vector<id<MTLTexture>> cubes;
+    std::vector<bool> cubeIsMoving;
+    std::vector<id<MTLTexture>> spots;
+    std::vector<int> lightCube(scene.lights.size(), -1);
+    std::vector<float> cubeNear(scene.lights.size(), 0.05f);
+    std::vector<float> cubeFar(scene.lights.size(), 1.0f);
+    if (opt.shadows) {
+        for (size_t i = 0; i < scene.lights.size(); ++i) {
+            const Light &L = scene.lights[i];
+            if (!std::isfinite(L.pos[0]) || L.range <= 0.0f) continue;
+            if (!L.castsShadow) continue;
+            if (L.isSpot) {
+                if (int(spots.size()) >= kMaxSpotMaps) continue;
+                const int res = L.shadowRes > 0 ? L.shadowRes : 256;
+                MTLTextureDescriptor *td =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                      width:NSUInteger(res)
+                                                                     height:NSUInteger(res)
+                                                                  mipmapped:NO];
+                td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModePrivate;
+                lightCube[i] = int(spots.size());
+                cubeNear[i] = 0.05f;
+                cubeFar[i] = L.range * opt.lightRangeScale;
+                spots.push_back([dev newTextureWithDescriptor:td]);
+                out.shadowFaces += 1;
+                out.shadowTexels += long(res) * res;
+                continue;
+            }
+            if (int(cubes.size()) >= kMaxShadowCubes) break;
+            // greets flags every FLD omni as a caster; static ones bake at
+            // greets_omni_shadow_res (512), mech-parented "moving" ones at
+            // greets_moving_omni_shadow_res (128).
+            const int res = L.parented ? opt.movingShadowRes : opt.staticShadowRes;
+            MTLTextureDescriptor *td = [MTLTextureDescriptor new];
+            td.textureType = MTLTextureTypeCube;
+            td.pixelFormat = MTLPixelFormatDepth32Float;
+            td.width = td.height = NSUInteger(res);
+            td.mipmapLevelCount = 1;
+            td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            // Private for measurement (Shared disables lossless compression); the
+            // --dump_cube diagnostic needs CPU-visible storage, and that run is
+            // never a timing run.
+            td.storageMode = (opt.dumpCube >= 0 || opt.probe) ? MTLStorageModeShared
+                                                              : MTLStorageModePrivate;
+            id<MTLTexture> c = [dev newTextureWithDescriptor:td];
+            lightCube[i] = int(cubes.size());
+            cubeNear[i] = 0.05f;
+            // The cube's far plane MUST track lightRangeScale. Scaling a light's
+            // reach without re-scaling the frustum it was baked in puts every
+            // surface beyond the original range outside the baked depth, which
+            // reads as "occluded" -- it looked like a broken shadow tap when it
+            // was a broken test.
+            cubeFar[i] = L.range * opt.lightRangeScale;
+            cubes.push_back(c);
+            cubeIsMoving.push_back(L.parented);
+            if (L.parented) ++out.movingCubes;
+            out.shadowFaces += 6;
+            out.shadowTexels += 6L * res * res;
+        }
+    }
+    out.shadowCubes = int(cubes.size());
+    // Every slot of the shader's texture array must be bound.
+    id<MTLTexture> dummyCube;
+    {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor new];
+        td.textureType = MTLTextureTypeCube;
+        td.pixelFormat = MTLPixelFormatDepth32Float;
+        td.width = td.height = 1;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModePrivate;
+        dummyCube = [dev newTextureWithDescriptor:td];
+    }
+    id<MTLTexture> dummy2D;
+    {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                              width:1 height:1 mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModePrivate;
+        dummy2D = [dev newTextureWithDescriptor:td];
+    }
+
+    // ---- uniforms ---------------------------------------------------------
+    FrameUniforms fu{};
+    // Everything view-dependent lives in this lambda so the interactive window can
+    // re-run it every frame without duplicating the derivation.
+    auto refreshFrameUniforms = [&]() {
+        for (int c = 0; c < 3; ++c) {
+            fu.camRow0[c] = scene.camera.rot[0][c];
+            fu.camRow1[c] = scene.camera.rot[1][c];
+            fu.camRow2[c] = scene.camera.rot[2][c];
+            fu.camSrc[c] = scene.camera.src[c];
+        }
+    };
+    refreshFrameUniforms();
+    fu.sx = 2.0f * scene.camera.perspX / float(W);
+    fu.ox = 2.0f * scene.camera.cntrEX / float(W) - 1.0f;
+    fu.sy = 2.0f * scene.camera.perspY / float(H);
+    fu.oy = 1.0f - 2.0f * scene.camera.cntrEY / float(H);
+    fu.invSx = 1.0f / fu.sx;
+    fu.invSy = 1.0f / fu.sy;
+    fu.nearZ = scene.camera.nearZ;
+    fu.farZ = scene.camera.farZ;
+    fu.dza = -fu.nearZ / (fu.farZ - fu.nearZ);
+    fu.dzb = fu.nearZ * fu.farZ / (fu.farZ - fu.nearZ);
+    fu.exposure = opt.exposure;
+    fu.shadowsOn = opt.shadows ? 1u : 0u;
+    // GREETS.CPP ~3005, verified by reading. Applies to the SH branch only.
+    fu.ambientFactor = 0.25f;
+    // Which ambient branch of the CPU kernel this scene runs — see
+    // Scene::shAmbient. greets: SH (sh_ambient setDefault true). Everything
+    // else: the flat Sc->Ambient constant. fountain's authored sky gradient is
+    // (0,0,0), so the SH branch gave it zero ambient and the frame went black.
+    fu.flatAmbient[0] = scene.ambient[0] * (1.0f / 255.0f);
+    fu.flatAmbient[1] = scene.ambient[1] * (1.0f / 255.0f);
+    fu.flatAmbient[2] = scene.ambient[2] * (1.0f / 255.0f);
+    fu.flatAmbient[3] = scene.shAmbient ? 0.0f : 1.0f;
+    // Which HDR composite the CPU reference for this scene is built from —
+    // see FrameUniforms::hdrMode in the shader. greets setDefaults hdr_linear
+    // (GREETS.CPP:1178); the global default is 0, so every other scene runs the
+    // gamma composite and its tonemap does NOT sqrt-encode.
+    fu.hdrMode[0] = opt.hdrLinear ? 1.0f : 0.0f;
+    fu.hdrMode[1] = fu.hdrMode[2] = fu.hdrMode[3] = 0.0f;
+    fu.diffuseFactor = 1.0f;
+    fu.specularFactor = 1.0f;
+    fu.lightRangeScale = opt.lightRangeScale;
+    fu.vizLight = opt.vizLight;
+    // env_refl_gain, FeatureFlags.def:142, default 1.0.
+    fu.envReflGain = 1.0f;
+    fu.metalCompat[0] = opt.cpuMetalDiffuse ? 1.0f : 0.0f;
+    fu.metalCompat[1] = opt.cpuMetalTint ? 1.0f : 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        fu.aabbMin[c] = scene.aabbMin[c];
+        fu.aabbMax[c] = scene.aabbMax[c];
+    }
+    for (size_t i = 0; i < scene.envProbes.size() && i < 8; ++i)
+        for (int c = 0; c < 3; ++c) fu.envProbePos[i][c] = scene.envProbes[i].pos[c];
+
+    // ---- volumetric cone constants (DeferredVolumetric.cpp:1797-1802) -------
+    //   density = cone_strength * 1e-3, and under --hdr (which greets runs)
+    //   with --no-hdr_cone_softknee (the default) it is scaled by
+    //   hdr_glow_scale. greets' cone_strength is 1.2 from GreetsDisco.cpp,
+    //   NOT the global 0.05 default.
+    // The light colour needs no conversion: the CPU's cone adds
+    // w * (O->L.rgb * ISize) into a 0..255 HDR buffer, this arm's GpuLight
+    // colour is (O->L.rgb/255 * ISize) into a 0..1 HDR buffer, so the same
+    // `density` lands the same relative brightness.
+    ConeUniforms coneU{};
+    coneU.density   = opt.coneStrength * 0.001f * opt.hdrGlowScale;
+    coneU.nSamples  = float(opt.volNSamples);
+    // The CPU's fade window floor is "12 z-buffer quanta" — a z16 staircase
+    // remedy. This arm's depth is float, so carry a small absolute floor in
+    // the same world-unit ballpark (12 * FZP*1.1/0xFF00) instead of pretending
+    // to a quantum that does not exist here.
+    coneU.fadeFloor = 12.0f * (scene.camera.farZ * 1.1f) / 65280.0f;
+    int nSpotLights = 0;
+    for (const auto &l : scene.lights) if (l.isSpot) ++nSpotLights;
+    // clipPlane stays all-zero (disabled) for the main view; the reflection
+    // passes carry their own FrameUniforms copy with the mirror plane set.
+    fu.mirrorCount = uint32_t(nMirrors);
+
+    std::vector<GpuLight> lights;
+    std::vector<const char *> lightOrigin;
+    for (size_t i = 0; i < scene.lights.size(); ++i) {
+        const Light &L = scene.lights[i];
+        if (!std::isfinite(L.pos[0]) || L.range <= 0.0f) continue;
+        GpuLight g{};
+        for (int c = 0; c < 3; ++c) {
+            g.pos[c] = L.pos[c];
+            // NOT squared. The CPU treats the authored 0..255 light colour as
+            // LINEAR radiance at power 1: the view-light list is
+            // `colR = O->L.R * O->ISize` (DeferredSurfaceKernel.cpp:5551-5553)
+            // and the --hdr_linear composite is `rl = (albedo/255)^2 * l + s`
+            // (ibid. 2618-2631) — the albedo is linearised, the light is not.
+            // Squaring here halved every 128-valued channel (the mech omnis'
+            // G) against the CPU. Independent confirmation of the convention:
+            // the SH ambient projects the UNSQUARED sky gradient and matched
+            // the CPU base within 1.4%.
+            const float c01 = L.color[c] / 255.0f;
+            g.color[c] = c01 * L.intensity;
+        }
+        g.range = L.range;
+        g.invRange = 1.0f / L.range;
+        g.shadowIndex = lightCube[i];
+        g.shadowNear = cubeNear[i];
+        g.shadowFar = cubeFar[i];
+        g.isSpot = L.isSpot ? 1 : 0;
+        g.cosInner = L.cosInner;
+        g.cosOuter = L.cosOuter;
+        for (int c = 0; c < 3; ++c) g.dir[c] = L.dir[c];
+        for (int c = 0; c < 3; ++c) {
+            g.sRow0[c] = L.shadowRot[0][c];
+            g.sRow1[c] = L.shadowRot[1][c];
+            g.sRow2[c] = L.shadowRot[2][c];
+        }
+        // sRow0.w carries 1/tan(halfFov) — the same projection scale the bake's
+        // vertex shader applies, so the tap cannot drift from the bake.
+        g.sRow0[3] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f);
+        lights.push_back(g);
+        lightOrigin.push_back(L.origin ? L.origin : "?");
+    }
+    std::fprintf(stderr, "[DEFERRED] LIGHT INVENTORY (%zu usable of %zu in scene):\n",
+                 lights.size(), scene.lights.size());
+    for (size_t i = 0; i < lights.size(); ++i) {
+        // Nearest-geometry probe. A shadow cube whose every face reads ~0.25 units
+        // means the omni is INSIDE something; that is a scene fact, not a bake bug,
+        // and it is far cheaper to establish here than from the baked depth.
+        float nearest = 1e30f;
+        const char *nearestMesh = "-", *nearestMat = "-";
+        long within = 0;
+        for (const auto &b : scene.batches) {
+            for (uint32_t v = b.firstVertex; v < b.firstVertex + b.vertexCount; ++v) {
+                const Vertex &V = scene.verts[v];
+                const float o[3] = {V.px, V.py, V.pz};
+                float w[3];
+                for (int c = 0; c < 3; ++c)
+                    w[c] = b.rot[c][0]*o[0] + b.rot[c][1]*o[1] + b.rot[c][2]*o[2] + b.pos[c];
+                const float dx = w[0]-lights[i].pos[0], dy = w[1]-lights[i].pos[1],
+                            dz = w[2]-lights[i].pos[2];
+                const float d = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (d < nearest) { nearest = d; nearestMesh = b.meshName.c_str();
+                                   nearestMat = b.materialName.c_str(); }
+                if (d < 1.0f) ++within;
+            }
+        }
+        std::fprintf(stderr,
+            "[DEFERRED]   [%zu] %-10s pos=(%7.2f,%6.2f,%8.2f) rgb=(%.3f,%.3f,%.3f) "
+            "range=%5.1f slot=%d %s  nearestGeom=%.3f (%s/%s) vertsWithin1u=%ld\n",
+            i, lightOrigin[i], lights[i].pos[0], lights[i].pos[1], lights[i].pos[2],
+            lights[i].color[0], lights[i].color[1], lights[i].color[2],
+            lights[i].range, lights[i].shadowIndex,
+            lights[i].shadowIndex < 0 ? "(no shadow)"
+              : (lights[i].isSpot ? "(spot 2D map)"
+                 : (cubeIsMoving[size_t(lights[i].shadowIndex)] ? "(moving 128^2)"
+                                                                : "(static 512^2)")),
+            nearest, nearestMesh, nearestMat, within);
+    }
+    fu.numLights = uint32_t(lights.size());
+    out.litLights = int(lights.size());
+    if (lights.empty()) { std::fprintf(stderr, "[DEFERRED] no usable lights\n"); return false; }
+    id<MTLBuffer> lightBuf = [dev newBufferWithBytes:lights.data()
+                                             length:lights.size() * sizeof(GpuLight)
+                                            options:MTLResourceStorageModeShared];
+    // Flare list. One draw per flaring omni (<= 10 here) rather than instancing:
+    // each flare has its own generated texture, and 10 draws is not a cost worth
+    // an argument-buffer for.
+    struct FlareInst { float wpos[3]; float worldHalf; int tex; };
+    std::vector<FlareInst> flares;
+    // THE FROZEN-MECH-OMNI BUG (reported 2026-08-08: "mech omnis are staying in
+    // place"). This list used to be built ONCE here, outside the frame loop, and
+    // nothing rewrote it — so the flare SPRITES stayed at their load-time world
+    // positions forever while everything else animated. That is exactly what a
+    // viewer sees as "the mech omnis don't move": §6.2b established that the
+    // reference's bright blue-white pools ARE the flare sprites, not omni
+    // surface lighting, so a frozen sprite list freezes the visible light even
+    // though the GpuLight buffer underneath was being refreshed correctly every
+    // frame. Rebuilding it per frame is now part of refreshLightBuffer's
+    // contract rather than a separate step someone can forget again.
+    auto rebuildFlares = [&]() {
+        flares.clear();
+        for (const auto &L : scene.lights) {
+            if (L.flareTexIndex < 0 || L.flareSize <= 0.0f) continue;
+            if (!std::isfinite(L.pos[0])) continue;
+            FlareInst fi{};
+            for (int c = 0; c < 3; ++c) fi.wpos[c] = L.pos[c];
+            // Half-extent in px = 2 * ImageSize * perspX * flareSize / z; fold
+            // the z-independent part here, divide by view z at draw time.
+            // perspX is re-read each rebuild because the authored FOV spline can
+            // change it (greets' has one key, but a posed arm's does not have to).
+            fi.worldHalf = 2.0f * scene.imageSize * scene.camera.perspX * L.flareSize;
+            fi.tex = L.flareTexIndex;
+            flares.push_back(fi);
+        }
+    };
+    rebuildFlares();
+
+    // Per-frame light refresh for the interactive window: the mech omnis ride the
+    // hierarchy and the 10 disco spots rotate, so position/direction/intensity and
+    // the spot shadow basis all change every tick. Cube/map SLOT assignment does
+    // not -- Reanimate rebuilds scene.lights in the same order and length, so
+    // lightCube[] stays valid.
+    auto refreshLightBuffer = [&]() {
+        size_t k = 0;
+        for (size_t i = 0; i < scene.lights.size() && k < lights.size(); ++i) {
+            const Light &L = scene.lights[i];
+            if (!std::isfinite(L.pos[0]) || L.range <= 0.0f) continue;
+            GpuLight &g = lights[k++];
+            for (int c = 0; c < 3; ++c) {
+                g.pos[c] = L.pos[c];
+                // Not squared — see the comment on the initial fill above.
+                const float c01 = L.color[c] / 255.0f;
+                g.color[c] = c01 * L.intensity;
+                g.dir[c] = L.dir[c];
+                g.sRow0[c] = L.shadowRot[0][c];
+                g.sRow1[c] = L.shadowRot[1][c];
+                g.sRow2[c] = L.shadowRot[2][c];
+            }
+            g.range = L.range;
+            g.invRange = 1.0f / L.range;
+            g.cosInner = L.cosInner;
+            g.cosOuter = L.cosOuter;
+            g.sRow0[3] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f);
+        }
+        // The flare sprite list rides the SAME per-frame refresh, so a light
+        // that moves cannot leave its visible burst behind. See rebuildFlares.
+        rebuildFlares();
+    };
+    std::fprintf(stderr, "[DEFERRED] flare sprites: %zu (ImageSize=%.3f, additive into HDR)\n",
+                 flares.size(), scene.imageSize);
+
+
+    float sh[9][4];
+    ProjectSkyGradientToSH(scene.skyZenith, scene.skyNadir, sh);
+    id<MTLBuffer> shBuf = [dev newBufferWithBytes:sh length:sizeof(sh)
+                                          options:MTLResourceStorageModeShared];
+
+    std::vector<BatchUniforms> bus(scene.batches.size());
+    auto refreshBatchUniforms = [&]() {
+    for (size_t i = 0; i < scene.batches.size(); ++i) {
+        const Batch &b = scene.batches[i];
+        BatchUniforms &u = bus[i];
+        for (int c = 0; c < 3; ++c) {
+            u.rotRow0[c] = b.rot[0][c];
+            u.rotRow1[c] = b.rot[1][c];
+            u.rotRow2[c] = b.rot[2][c];
+            u.objPos[c] = b.pos[c];
+            // NOT squared here. The G-buffer carries a GAMMA value for both the
+            // textured and untextured cases, and fs_lighting does the single
+            // --hdr_linear squaring at the point of use. Squaring here as well
+            // made untextured surfaces a different colour space from textured
+            // ones.
+            u.baseColor[c] = b.baseColor[c];
+        }
+        u.baseColor[3] = (b.textureIndex >= 0) ? 1.0f : 0.0f;
+        u.matParams[0] = b.diffuse;
+        u.matParams[1] = b.specular;
+        // GGX lobe roughness, the CPU's exact mapping
+        // (DeferredSurfaceKernel.cpp:1790-1809): gloss 0 means "authored
+        // specular without a Phong exponent" and falls back to 32; then
+        // rough = sqrt(2/(gloss+2)), clamped [0.04, 1]. The previous
+        // 1 - gloss/128 mapping gave Glossiness=48 a rough of 0.625 where
+        // the CPU runs 0.2 — a much wider, dimmer lobe.
+        {
+            const float gloss = b.glossiness > 0 ? float(b.glossiness) : 32.0f;
+            float rough = std::sqrt(2.0f / (gloss + 2.0f));
+            if (rough < 0.04f) rough = 0.04f;
+            if (rough > 1.0f)  rough = 1.0f;
+            u.matParams[2] = rough;
+        }
+        u.matParams[3] = b.luminosity;
+        u.mapFlags[0] = (opt.nmap && b.normalTexIndex >= 0) ? 1.0f : 0.0f;
+        u.mapFlags[1] = (b.roughTexIndex >= 0) ? 1.0f : 0.0f;
+        u.mapFlags[2] = b.aoInAlpha ? 1.0f : 0.0f;
+        u.mapFlags[3] = b.parallaxScale;
+        u.misc[0] = float(b.mirrorIndex);
+        u.misc[1] = (b.aoTexIndex >= 0) ? 1.0f : 0.0f;
+        u.misc[2] = (b.metalTexIndex >= 0) ? 1.0f : 0.0f;
+        // AO strength, the CPU's product: --ao_map_strength (2.0) x
+        // Material::AoStrength, applied as ao' = 1 - k*(1-ao) on the AMBIENT
+        // only (DeferredSurfaceKernel.cpp:1871-1878 + FeatureFlags.def:137).
+        u.misc[3] = 2.0f * b.aoStrength;
+        u.misc2[0] = float(b.envProbe);
+        u.misc2[1] = b.reflection;
+        // Transparent composite weights, verbatim from the CPU's blend
+        // (DeferredSurfaceKernel.cpp:3514-3532): XparBlendAlpha > 0 selects the
+        // lerp, otherwise dw = Transparency*0.01 with a 0.5 fallback for the
+        // hand-built xpar materials that author Transparency = 0.
+        u.misc2[2] = b.xparBlendAlpha;
+        u.misc2[3] = (b.transparency > 0.0f) ? b.transparency * 0.01f : 0.5f;
+        // The FORWARD transparent kernel's own material inputs. Luminosity is
+        // passed RAW: the transparent composite is `Luminosity*255 + ...` with
+        // no cap (ibid. :2996), while matParams[3] rides an RGBA8 plane that
+        // saturates at 4 — fountain's 'f in shpere' authors 100.
+        u.xpar[0] = b.luminosity;
+        u.xpar[1] = b.specular;
+        u.xpar[2] = float(b.glossiness > 0 ? b.glossiness : 32u);
+        u.xpar[3] = b.additive ? 1.0f : 0.0f;
+    }
+    };
+    refreshBatchUniforms();
+
+    {
+        int nCast = 0; long triCast = 0, triAll = 0;
+        std::string skipped;
+        for (const auto &b : scene.batches) {
+            triAll += b.vertexCount / 3;
+            if (b.castsShadow) { ++nCast; triCast += b.vertexCount / 3; }
+            else { if (!skipped.empty()) skipped += ", "; skipped += b.materialName; }
+        }
+        std::fprintf(stderr,
+            "[DEFERRED] shadow casters: %d of %zu batches, %ld of %ld tris "
+            "(CPU parity: Shadows.cpp skips Transparent/Additive/SkipZ + name "
+            "lamp|emi). NON-casters: %s\n",
+            nCast, scene.batches.size(), triCast, triAll,
+            skipped.empty() ? "(none)" : skipped.c_str());
+    }
+
+    // =======================================================================
+    // GPU HARDWARE TESSELLATION — setup. See Deferred.h for the knob's units
+    // and docs/GPU_BENCHMARK_PLAN.md §6.3 for the cost curve this produces.
+    //
+    // WHY HARDWARE TESSELLATION AND NOT MESH SHADERS, stated because both are
+    // available on this device: the question being answered is what the CPU
+    // campaign's geometric carve costs on hardware built for it, and the
+    // comparison is only clean if NOTHING ELSE MOVES. Tessellation replaces
+    // exactly one stage — the vertex stage of the stone's draws — and leaves
+    // the vertex format, the per-batch uniform block, the G-buffer fragment
+    // shader and every other pass byte-identical, so the whole delta in the
+    // cost curve is geometry amplification. A mesh-shader path would replace
+    // vertex FETCH as well (hand-rolled index/vertex addressing out of a
+    // threadgroup) and its numbers would mix two changes. Mesh shaders' one
+    // real advantage here is that they have no factor-16 ceiling; the instanced
+    // pre-split below buys the same reach without moving anything else.
+    // =======================================================================
+    struct TessUniformsHost {
+        float k[4];    // targetPx, worldAmp, heightMean, presplit P
+        float k2[4];   // patchCount, cullEnable, maxFactor, heightMip
+        float k3[4];   // viewport W, viewport H, backCull, edgeMap
+        float k4[4];   // uniform-factor override (calibration probe), 0 = off
+    };
+    struct StoneBatch {
+        size_t   bi = 0;
+        uint32_t patchCount = 0;
+        size_t   vertexOff = 0;      // bytes into vb for control point 0
+        size_t   factorOff = 0;      // bytes into tessFactorBuf
+        int      heightTex = -1;
+        float    mean = 0.5f;
+        size_t   borderOff = 0;      // bytes into tessBorderBuf
+    };
+    std::vector<StoneBatch> stone;
+    id<MTLRenderPipelineState>  psoGBufTess = nil, psoGBufTessStats = nil;
+    id<MTLComputePipelineState> psoTessFactors = nil;
+    id<MTLBuffer> tessFactorBuf = nil, tessSubBuf = nil, tessStatBuf = nil;
+    id<MTLBuffer> tessBorderBuf = nil;
+    int tessP = std::max(1, opt.tessPresplit);
+    int tessMaxFactor = 0;
+    if (opt.tess) {
+        // The stone. `rooms` and `floor` are exactly what --greets_stone_tex
+        // overrides and exactly what --greets_displace bakes
+        // (GREETS.CPP:1839-1841 kDisplacedMats), so the two arms displace the
+        // same two materials.
+        auto stripMirUV = [](const std::string &n) {
+            const size_t k = n.rfind("::mirUV");
+            return (k != std::string::npos) ? n.substr(0, k) : n;
+        };
+        for (size_t i = 0; i < scene.batches.size(); ++i) {
+            const Batch &b = scene.batches[i];
+            const std::string m = stripMirUV(b.materialName);
+            if (m != "rooms" && m != "floor") continue;
+            if (b.heightTexIndex < 0) {
+                std::fprintf(stderr, "[TESS] '%s' has NO height map — not tessellated\n",
+                             b.materialName.c_str());
+                continue;
+            }
+            StoneBatch s;
+            s.bi = i;
+            s.patchCount = b.vertexCount / 3;
+            s.vertexOff = size_t(b.firstVertex) * sizeof(Vertex);
+            s.heightTex = b.heightTexIndex;
+            // mipMean, the CPU bake's own quantity (MeshOps.cpp:2097-2113):
+            // the arithmetic mean of every texel of the sampled mip, 0..1. Box
+            // mip reduction preserves the mean exactly on a power-of-two
+            // texture, so the level-0 mean IS the level-`tessMip` mean.
+            const TextureImage &hi = scene.textures[size_t(b.heightTexIndex)];
+            double sum = 0; size_t n = hi.rgba.size() / 4;
+            for (size_t k = 0; k < n; ++k) sum += hi.rgba[k * 4];
+            s.mean = n ? float(sum / double(n) / 255.0) : 0.5f;
+            stone.push_back(s);
+        }
+
+        // ---- AUTHORED-BORDER CLASSIFICATION (the CPU bake's pin) -----------
+        // MEASURED 2026-08-11: the two arms' displacement reference conventions
+        // are IDENTICAL — same formula amp*(h-mean) along the normal, same amp
+        // (0.300), same mip (2), and the same mean to four decimals (GpuBench
+        // reports 0.5491 for `rooms`; the CPU bake's mipMean over
+        // greets_wall_h.png is 0.549053, and a box reduction preserves it
+        // exactly at every level). So the user's "the GPU bulges the mesh
+        // there" is NOT a convention mismatch. What the GPU is missing is the
+        // CPU's PIN: DisplaceStoneSubdiv holds every subdivision vertex on an
+        // AUTHORED PATCH BORDER at exactly zero displacement, and the GPU
+        // displaced those points like any other. At the greets doorway jamb the
+        // CPU value is 0 and the GPU's is amp*(h-mean), which for a brick texel
+        // (h up to 0.665) is +0.035 world units OUTWARD — the bulge.
+        //
+        // Same rule, same definition: an edge used by exactly ONE triangle of
+        // the material is an authored border. The stone's vertex buffer is
+        // DE-INDEXED per face, so the edge identity has to come from POSITION,
+        // quantised to a grid the way the CPU's seamKey does. Classification is
+        // over every batch of the same (mirUV-stripped) material, so a material
+        // split across batches still sees its own topology.
+        {
+            auto qkey = [](float x, float y, float z) {
+                auto q = [](float v) { return int64_t(std::llround(double(v) * 4096.0)); };
+                const int64_t a = q(x), b2 = q(y), c = q(z);
+                return (uint64_t(a) * 0x9E3779B97F4A7C15ull)
+                     ^ (uint64_t(b2) * 0xC2B2AE3D27D4EB4Full)
+                     ^ (uint64_t(c) * 0x165667B19E3779F9ull);
+            };
+            // material name -> edge key -> use count
+            // Ordered PAIR of endpoint keys, not their XOR: an XOR key collides
+            // freely on a lattice-aligned mesh (measured — it classified 12 of
+            // 678 edges as borders where the CPU census finds ~210).
+            using EKey = std::pair<uint64_t,uint64_t>;
+            auto mkEdge = [](uint64_t a, uint64_t b) {
+                return a < b ? EKey{a,b} : EKey{b,a};
+            };
+            std::unordered_map<std::string, std::map<EKey,int>> edgeUse;
+            for (const auto &s : stone) {
+                const Batch &b = scene.batches[s.bi];
+                const std::string m = stripMirUV(b.materialName);
+                auto &eu = edgeUse[m];
+                for (uint32_t p = 0; p < s.patchCount; ++p) {
+                    const Vertex *V = &scene.verts[size_t(b.firstVertex) + size_t(p)*3];
+                    for (int e = 0; e < 3; ++e) {
+                        const Vertex &A = V[(e+1)%3], &B = V[(e+2)%3];   // edge OPPOSITE corner e
+                        eu[mkEdge(qkey(A.px,A.py,A.pz), qkey(B.px,B.py,B.pz))] += 1;
+                    }
+                }
+            }
+            std::vector<uint32_t> masks;
+            size_t off = 0; int nBorder = 0, nEdges = 0;
+            for (auto &s : stone) {
+                const Batch &b = scene.batches[s.bi];
+                const auto &eu = edgeUse[stripMirUV(b.materialName)];
+                s.borderOff = off * sizeof(uint32_t);
+                for (uint32_t p = 0; p < s.patchCount; ++p) {
+                    const Vertex *V = &scene.verts[size_t(b.firstVertex) + size_t(p)*3];
+                    uint32_t m = 0;
+                    for (int e = 0; e < 3; ++e) {
+                        const Vertex &A = V[(e+1)%3], &B = V[(e+2)%3];
+                        auto it = eu.find(mkEdge(qkey(A.px,A.py,A.pz), qkey(B.px,B.py,B.pz)));
+                        ++nEdges;
+                        if (it != eu.end() && it->second == 1) { m |= (1u << e); ++nBorder; }
+                    }
+                    masks.push_back(m);
+                    ++off;
+                }
+            }
+            if (!masks.empty()) {
+                tessBorderBuf = [dev newBufferWithBytes:masks.data()
+                                                 length:masks.size()*sizeof(uint32_t)
+                                                options:MTLResourceStorageModeShared];
+                std::fprintf(stderr,
+                    "[TESS] authored-border classification: %d of %d patch edges are "
+                    "single-use borders (the CPU bake pins these to ZERO; "
+                    "--tess_border_ramp=%.3f fades the GPU displacement to zero over "
+                    "that fraction of the patch, 0 = no pin)\n",
+                    nBorder, nEdges, double(opt.tessBorderRamp));
+            }
+        }
+
+        // ---- --tess_seam_audit: WHY A DISPLACED SEAM CRACKS AT ALL ---------
+        // After the factor-record bug is fixed, a THIN residual crack survives
+        // along some base-triangle edges, and it is amp-proportional and
+        // P-INVARIANT — so it is not a tessellation factor mismatch. This
+        // measures the only other thing it can be: the stone's vertex buffer is
+        // de-indexed per FACE and carries PER-FACE UVs (SceneIngest.cpp:1438),
+        // so two faces meeting at a shared POSITION can disagree about the UV
+        // there. The displacement is amp*(h(uv)-mean) along the normal, so a UV
+        // disagreement is a WORLD-SPACE disagreement about where that shared
+        // point goes, and the surface pulls apart by exactly that much.
+        // Reported: how many shared positions disagree on UV, on NORMAL, and
+        // the world gap each implies at the current --tess_amp.
+        if (opt.tessSeamAudit) {
+            struct Key { float x, y, z; };
+            struct KeyHash {
+                size_t operator()(const Key &k) const {
+                    uint32_t a, b, c;
+                    std::memcpy(&a, &k.x, 4); std::memcpy(&b, &k.y, 4); std::memcpy(&c, &k.z, 4);
+                    return size_t(a) * 0x9E3779B1u ^ size_t(b) * 0x85EBCA77u ^ size_t(c) * 0xC2B2AE3Du;
+                }
+            };
+            struct KeyEq {
+                bool operator()(const Key &p, const Key &q) const {
+                    return !std::memcmp(&p, &q, sizeof(Key));
+                }
+            };
+            struct Att { float u, v, nx, ny, nz, h; };
+            std::unordered_map<Key, std::vector<Att>, KeyHash, KeyEq> shared;
+            // Bilinear fetch of the RED channel at the mip --tess_mip, built by
+            // box reduction — the same reduction the GPU mip chain uses, so this
+            // is the value vs_gbuffer_tess samples with level(tessMip).
+            auto sampleH = [&](const TextureImage &t, int mip, float u, float v) -> float {
+                int w = std::max(1, t.w >> mip), h2 = std::max(1, t.h >> mip);
+                const int step = 1 << mip;
+                auto tex = [&](int x, int y) -> float {
+                    // box-average the step x step block of level 0
+                    double s = 0; int n2 = 0;
+                    for (int dy = 0; dy < step; ++dy)
+                        for (int dx = 0; dx < step; ++dx) {
+                            int sx = (x * step + dx) % t.w, sy = (y * step + dy) % t.h;
+                            s += t.rgba[(size_t(sy) * size_t(t.w) + size_t(sx)) * 4]; ++n2;
+                        }
+                    return float(s / double(n2) / 255.0);
+                };
+                float fx = u * float(w) - 0.5f, fy = v * float(h2) - 0.5f;
+                int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
+                float ax = fx - float(x0), ay = fy - float(y0);
+                auto wrap = [](int a, int n2) { a %= n2; return a < 0 ? a + n2 : a; };
+                const float h00 = tex(wrap(x0, w), wrap(y0, h2)), h10 = tex(wrap(x0 + 1, w), wrap(y0, h2));
+                const float h01 = tex(wrap(x0, w), wrap(y0 + 1, h2)), h11 = tex(wrap(x0 + 1, w), wrap(y0 + 1, h2));
+                return (h00 * (1 - ax) + h10 * ax) * (1 - ay) + (h01 * (1 - ax) + h11 * ax) * ay;
+            };
+            for (const auto &s : stone) {
+                const Batch &bb = scene.batches[s.bi];
+                const TextureImage &ht = scene.textures[size_t(s.heightTex)];
+                for (uint32_t k = 0; k < bb.vertexCount; ++k) {
+                    const Vertex &v = scene.verts[size_t(bb.firstVertex) + k];
+                    Att a{v.u, v.v, v.nx, v.ny, v.nz,
+                          sampleH(ht, opt.tessMip, v.u, v.v) - s.mean};
+                    shared[Key{v.px, v.py, v.pz}].push_back(a);
+                }
+            }
+            size_t nPos = 0, nUvSplit = 0, nNrmSplit = 0, nGap = 0;
+            double maxGap = 0, sumGap = 0;
+            for (const auto &kv : shared) {
+                if (kv.second.size() < 2) continue;
+                ++nPos;
+                bool uvSplit = false, nrmSplit = false;
+                double lo3[3] = {1e30, 1e30, 1e30}, hi3[3] = {-1e30, -1e30, -1e30};
+                for (const Att &a : kv.second) {
+                    const Att &f = kv.second.front();
+                    if (std::fabs(a.u - f.u) > 1e-6f || std::fabs(a.v - f.v) > 1e-6f) uvSplit = true;
+                    if (std::fabs(a.nx - f.nx) > 1e-4f || std::fabs(a.ny - f.ny) > 1e-4f ||
+                        std::fabs(a.nz - f.nz) > 1e-4f) nrmSplit = true;
+                    const double d[3] = {double(a.nx) * a.h, double(a.ny) * a.h, double(a.nz) * a.h};
+                    for (int c = 0; c < 3; ++c) { lo3[c] = std::min(lo3[c], d[c]); hi3[c] = std::max(hi3[c], d[c]); }
+                }
+                nUvSplit += uvSplit ? 1 : 0;
+                nNrmSplit += nrmSplit ? 1 : 0;
+                const double g = std::sqrt((hi3[0]-lo3[0])*(hi3[0]-lo3[0]) + (hi3[1]-lo3[1])*(hi3[1]-lo3[1]) +
+                                           (hi3[2]-lo3[2])*(hi3[2]-lo3[2])) * double(std::fabs(opt.tessAmp));
+                if (g > 1e-5) { ++nGap; sumGap += g; maxGap = std::max(maxGap, g); }
+            }
+            std::fprintf(stderr,
+                "[TESS-SEAM] %zu distinct corner positions in the stone; %zu are shared "
+                "by 2+ faces.\n",
+                shared.size(), nPos);
+            std::fprintf(stderr,
+                "[TESS-SEAM] of the %zu shared:\n"
+                "[TESS-SEAM]   UV disagrees at %zu of them (%.1f%%), NORMAL at %zu (%.1f%%).\n"
+                "[TESS-SEAM]   world displacement gap at amp %.3f: %zu positions open, "
+                "mean %.4f, MAX %.4f units.\n",
+                nPos, nUvSplit, nPos ? 100.0 * double(nUvSplit) / double(nPos) : 0.0,
+                nNrmSplit, nPos ? 100.0 * double(nNrmSplit) / double(nPos) : 0.0,
+                double(opt.tessAmp), nGap, nGap ? sumGap / double(nGap) : 0.0, maxGap);
+        }
+
+        // The P x P sub-patch lattice, in the order [[instance_id]] indexes.
+        std::vector<int32_t> subs;
+        subs.reserve(size_t(tessP) * size_t(tessP) * 4);
+        for (int a = 0; a < tessP; ++a)
+            for (int b = 0; a + b < tessP; ++b)
+                { subs.push_back(a); subs.push_back(b); subs.push_back(0); subs.push_back(0); }
+        for (int a = 0; a < tessP - 1; ++a)
+            for (int b = 0; a + b < tessP - 1; ++b)
+                { subs.push_back(a); subs.push_back(b); subs.push_back(1); subs.push_back(0); }
+        if (subs.size() != size_t(tessP) * size_t(tessP) * 4) {
+            std::fprintf(stderr, "[TESS] internal: sub-patch table %zu != %d\n",
+                         subs.size() / 4, tessP * tessP);
+            return false;
+        }
+        tessSubBuf = [dev newBufferWithBytes:subs.data()
+                                      length:subs.size() * sizeof(int32_t)
+                                     options:MTLResourceStorageModeShared];
+
+        // One factor record (4 halves) per (sub-patch, patch), per batch,
+        // 256-byte aligned so the per-batch offset is legal for both the
+        // compute bind and setTessellationFactorBuffer:.
+        size_t off = 0;
+        for (auto &s : stone) {
+            s.factorOff = off;
+            const size_t bytes = size_t(tessP) * size_t(tessP) * size_t(s.patchCount) * 8;
+            off += (bytes + 255) & ~size_t(255);
+        }
+        if (off == 0) {
+            std::fprintf(stderr, "[TESS] no stone batches found — --tess is inert\n");
+        } else {
+            tessFactorBuf = [dev newBufferWithLength:off options:MTLResourceStorageModePrivate];
+        }
+        tessStatBuf = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
+
+        // maxTessellationFactor: PROBED, not assumed. Metal documents 16 as the
+        // default; whether this device accepts more is settled by asking it.
+        MTLVertexDescriptor *tvd = [MTLVertexDescriptor vertexDescriptor];
+        tvd.attributes[0].format = MTLVertexFormatFloat3; tvd.attributes[0].offset = 0;  tvd.attributes[0].bufferIndex = 0;
+        tvd.attributes[1].format = MTLVertexFormatFloat3; tvd.attributes[1].offset = 12; tvd.attributes[1].bufferIndex = 0;
+        tvd.attributes[2].format = MTLVertexFormatFloat2; tvd.attributes[2].offset = 24; tvd.attributes[2].bufferIndex = 0;
+        tvd.attributes[3].format = MTLVertexFormatFloat4; tvd.attributes[3].offset = 32; tvd.attributes[3].bufferIndex = 0;
+        tvd.layouts[0].stride = sizeof(Vertex);
+        tvd.layouts[0].stepFunction = MTLVertexStepFunctionPerPatchControlPoint;
+
+        auto makeTessPso = [&](NSString *fn, int maxFactor) -> id<MTLRenderPipelineState> {
+            MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+            p.vertexFunction = fn_(fn);
+            p.fragmentFunction = fn_([fn hasSuffix:@"_stats"] ? @"fs_gbuffer_fragcount"
+                                                              : @"fs_gbuffer");
+            p.vertexDescriptor = tvd;
+            p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            p.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
+            p.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            p.colorAttachments[3].pixelFormat = MTLPixelFormatRGBA8Uint;
+            p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+            p.maxTessellationFactor = NSUInteger(maxFactor);
+            // PerPatchAndPerInstance, NOT PerPatch. This is the crack bug, and
+            // the Metal API VALIDATION LAYER states it outright:
+            //
+            //   validateCommonTessellationErrors:481: failed assertion
+            //   `for MTLTessellationFactorStepFunctionConstant and
+            //    MTLTessellationFactorStepFunctionPerPatch
+            //    tessellationFactorBufferInstanceStride(1568) must be zero.'
+            //
+            // Under PerPatch the factor-record address is a function of the
+            // PATCH INDEX ALONE — the instanceStride passed to
+            // setTessellationFactorBuffer: is required to be zero and is
+            // otherwise IGNORED. So all P*P sub-patch instances of base patch p
+            // read record p, which cs_tess_factors wrote for SUB-PATCH 0. Two
+            // consequences, both MEASURED at t=5743 px=8 P=8:
+            //   * if sub-patch 0 of a base triangle frustum-culls (factor 0),
+            //     ALL 64 sub-patches vanish -> whole-base-triangle holes,
+            //     290,756 background pixels where the flat frame has stone;
+            //   * where it survives, all 64 sub-patches inherit sub-patch 0's
+            //     edge factors, which do not match what the NEIGHBOURING base
+            //     triangle derives for the shared edge -> hairline cracks.
+            // P=1 was clean only because instanceCount is then 1 and the record
+            // it wrongly shares is its own.
+            // PerPatchAndPerInstance addresses
+            //   offset + instanceID*instanceStride + patchIndex*8,
+            // which is exactly the (sub * nPatch + patch) layout the kernel
+            // writes.
+            p.tessellationFactorStepFunction =
+                MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
+            p.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+            // MEASURED, not assumed. The main pass culls FRONT faces (FDS builds
+            // plane normals as Cross_Product(V,U), so the engine's visible faces
+            // are Metal's front ones), and with the tessellator emitting
+            // Clockwise the whole stone came out backfacing: at --tess_amp=0 the
+            // floor and half the right wall were simply absent, and --no-cull
+            // brought them back pixel-identical to the flat frame
+            // (mean |d| 0.043/255 over the whole frame). CounterClockwise is
+            // therefore the orientation that preserves the input triangles'
+            // facing through this arm's barycentric sub-patch mapping.
+            p.tessellationOutputWindingOrder = MTLWindingCounterClockwise;
+            p.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+            p.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+            NSError *e = nil;
+            return [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        };
+        for (int cand : {64, 32, 16}) {
+            psoGBufTess = makeTessPso(@"vs_gbuffer_tess", cand);
+            if (psoGBufTess) { tessMaxFactor = cand; break; }
+        }
+        if (!psoGBufTess) {
+            std::fprintf(stderr, "[TESS] no tessellation pipeline would build\n");
+            return false;
+        }
+        psoGBufTessStats = makeTessPso(@"vs_gbuffer_tess_stats", tessMaxFactor);
+
+        NSError *ce = nil;
+        psoTessFactors = [dev newComputePipelineStateWithFunction:fn_(@"cs_tess_factors")
+                                                            error:&ce];
+        if (!psoTessFactors) {
+            std::fprintf(stderr, "[TESS] factor kernel pso: %s\n",
+                         [[ce localizedDescription] UTF8String]);
+            return false;
+        }
+        out.tessMaxFactor = tessMaxFactor;
+        std::fprintf(stderr,
+            "[TESS] ON — target %.2f px/edge, presplit %dx%d, amp %.3f world, mip %d,\n"
+            "[TESS]      max hw factor %d (PROBED: the pipeline accepted %d), so the\n"
+            "[TESS]      effective per-edge ceiling is %d x %d = %d subdivisions.\n",
+            double(opt.tessTargetPx), tessP, tessP, double(opt.tessAmp), opt.tessMip,
+            tessMaxFactor, tessMaxFactor, tessP, tessMaxFactor, tessP * tessMaxFactor);
+        for (const auto &s : stone)
+            std::fprintf(stderr,
+                "[TESS]      '%s': %u base patches, %u sub-patches, height mean %.4f\n",
+                scene.batches[s.bi].materialName.c_str(), s.patchCount,
+                s.patchCount * uint32_t(tessP * tessP), double(s.mean));
+    }
+
+    // Per-batch tessellation uniforms, refreshed with the frame.
+    std::vector<TessUniformsHost> tus(stone.size());
+    auto refreshTessUniforms = [&](float vpW, float vpH) {
+        for (size_t i = 0; i < stone.size(); ++i) {
+            TessUniformsHost &t = tus[i];
+            t.k[0] = opt.tessTargetPx;
+            t.k[1] = opt.tessAmp;
+            t.k[2] = stone[i].mean;
+            t.k[3] = float(tessP);
+            t.k2[0] = float(stone[i].patchCount);
+            t.k2[1] = opt.tessCull ? 1.0f : 0.0f;
+            t.k2[2] = float(tessMaxFactor);
+            t.k2[3] = float(opt.tessMip);
+            t.k3[0] = vpW;
+            t.k3[1] = vpH;
+            t.k3[2] = opt.tessBackCull ? 1.0f : 0.0f;
+            t.k3[3] = float(opt.tessEdgeMap);
+            t.k4[0] = float(opt.tessUniform);
+            t.k4[1] = opt.tessBorderRamp;   // authored-border pin fade width (barycentric)
+            t.k4[2] = t.k4[3] = 0.0f;
+        }
+    };
+    refreshTessUniforms(float(W), float(H));
+
+    // ---- per-pass GPU timestamps -----------------------------------------
+    // MEASURED on this device: counterSets == ["timestamp"], and
+    // supportsCounterSampling(AtStageBoundary) == YES while AtDrawBoundary ==
+    // NO. So per-ENCODER is the finest granularity available -- which is exactly
+    // "per pass", the granularity the comparison wants.
+    id<MTLCounterSet> tsSet = nil;
+    for (id<MTLCounterSet> cs in [dev counterSets])
+        if ([[cs name] isEqualToString:MTLCommonCounterSetTimestamp]) tsSet = cs;
+    const bool haveStageCounters =
+        tsSet && [dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary];
+
+    // shadow, gbuffer, lighting, tonemap, mirror, tessellation-factor compute
+    const int kPasses = 7;
+    id<MTLCounterSampleBuffer> sampleBuf = nil;
+    if (haveStageCounters) {
+        MTLCounterSampleBufferDescriptor *d = [MTLCounterSampleBufferDescriptor new];
+        d.counterSet = tsSet;
+        d.sampleCount = NSUInteger(kPasses * 2);
+        d.storageMode = MTLStorageModeShared;
+        sampleBuf = [dev newCounterSampleBufferWithDescriptor:d error:&err];
+        if (!sampleBuf)
+            std::fprintf(stderr, "[DEFERRED] counter sample buffer failed: %s\n",
+                         [[err localizedDescription] UTF8String]);
+    }
+
+    auto attachCounters = [&](MTLRenderPassDescriptor *rp, int passIdx) {
+        if (!sampleBuf) return;
+        rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+        rp.sampleBufferAttachments[0].startOfVertexSampleIndex = NSUInteger(passIdx * 2);
+        rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = NSUInteger(passIdx * 2 + 1);
+        rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+        rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+    };
+
+    // ---- one frame --------------------------------------------------------
+    // Per-cube-FACE frustum cull for the shadow bake. `fc` is the face basis
+    // (right, up, forward) and `lp` the light position; a batch survives if its
+    // world bounding sphere intersects the 90-degree square frustum out to
+    // `far`. This is the analogue of the CPU's per-pass mesh cull — without it
+    // the GPU rasterises all 27 casting batches into all 6 faces of every cube
+    // while the CPU culls per face, and the shadow rows of the comparison table
+    // would be measuring different workloads.
+    auto sphereInCubeFace = [](const Batch &b, const float lp[3],
+                               const CubeFace &fc, float farD) -> bool {
+        const float d[3] = {b.bsCtr[0]-lp[0], b.bsCtr[1]-lp[1], b.bsCtr[2]-lp[2]};
+        const float z = d[0]*fc.fwd[0] + d[1]*fc.fwd[1] + d[2]*fc.fwd[2];
+        if (z < -b.bsRad || z > farD + b.bsRad) return false;
+        // 90-degree frustum: the side planes are (fwd +/- right)/sqrt2 and
+        // (fwd +/- up)/sqrt2, all through the light.
+        const float x = d[0]*fc.right[0] + d[1]*fc.right[1] + d[2]*fc.right[2];
+        const float y = d[0]*fc.up[0]    + d[1]*fc.up[1]    + d[2]*fc.up[2];
+        const float k = 0.70710678f, r = b.bsRad;
+        if ((z - x) * k < -r) return false;
+        if ((z + x) * k < -r) return false;
+        if ((z - y) * k < -r) return false;
+        if ((z + y) * k < -r) return false;
+        return true;
+    };
+    // Shadow-pass cull state, set per face by bakeCubes before drawScene.
+    const CubeFace *curFace = nullptr;
+    const float *curLightPos = nullptr;
+    float curFar = 0.0f;
+    long shadowBatchesDrawn = 0, shadowBatchesCulled = 0;
+
+    // ENV PROBE SELF-EXCLUSION. While baking probe P, every batch whose
+    // material IS the surface P was baked for is skipped — the CPU's
+    // g_envBakeSkipMats, which is FACE-level and matches on the material name
+    // with any '::mirUV' suffix stripped (EnvBake.cpp:243-252). Without it a
+    // metal bakes the inside of itself and reflects a black shell.
+    // Empty = no exclusion (every pass other than a probe bake).
+    std::string envSkipMat;
+    // True only for the duration of bakeEnvProbes (see --env_bake_skip_animated).
+    bool envBaking = false;
+    auto baseMatName = [](const std::string &n) {
+        const size_t k = n.rfind("::mirUV");
+        return (k != std::string::npos) ? n.substr(0, k) : n;
+    };
+    // `baseCull` is the pass's cull mode; drawScene overrides it PER BATCH for
+    // Mat_TwoSided materials and restores it after. THE BUG THIS FIXES
+    // (reported 2026-08-08: "has backface culling for transparent materials"):
+    // culling landed in 69bf0f0 as one setCullMode for the whole pass, but the
+    // engine's own test has a per-material bypass —
+    //   FDS/RENDER/Transform.cpp:2429-2434
+    //     if ((!F->VisibilityFlagsAll()) && (forceTS || shadowNoBackface
+    //         || (F->Txtr->Flags & Mat_TwoSided)
+    //         || (AP·F->N < F->NormProd)))            // backface culling
+    // so a Mat_TwoSided face is NEVER culled on the CPU. greets' 'screen2' —
+    // the display box between the amudim columns, flags 0x0034 — is exactly
+    // such a material, and this arm was dropping half of it. The bypass is
+    // keyed on TwoSided, NOT on transparency: 'lamp light' / 'screen 3' /
+    // 'screen 4' (0x0024) are single-sided on both arms and culling them is
+    // correct parity.
+    MTLCullMode curCull = MTLCullModeNone;
+    // Set only for the MAIN G-buffer pass. The mirror reflection views and the
+    // shadow / env bakes keep the FLAT stone, and that is CPU PARITY rather
+    // than a shortcut: --greets_displace setDefaults BOTH greets_shadow_proxy
+    // (the displaced stone is rendered only to the main camera) and
+    // greets_displace_flat_mirror (the mirror clones reflect the flat stone)
+    // at GREETS.CPP:1140-1142.
+    bool tessThisPass = false;
+    bool tessStatsArmed = false;      // only inside the untimed --tess_stats probe
+    auto drawScene = [&](id<MTLRenderCommandEncoder> enc, bool gbuffer,
+                         MTLCullMode baseCull = MTLCullModeNone) {
+        [enc setVertexBuffer:vb offset:0 atIndex:0];
+        curCull = baseCull;
+        const bool doTess = tessThisPass && gbuffer && psoGBufTess && tessFactorBuf;
+        bool tessPipeBound = false;
+        // Which batch indices take the tessellated pipeline this pass.
+        auto stoneSlot = [&](size_t bi) -> const StoneBatch * {
+            if (!doTess) return nullptr;
+            for (const auto &s : stone) if (s.bi == bi) return &s;
+            return nullptr;
+        };
+        for (size_t i = 0; i < scene.batches.size(); ++i) {
+            const Batch &b = scene.batches[i];
+            if (!envSkipMat.empty() && baseMatName(b.materialName) == envSkipMat) continue;
+            // --env_bake_skip_animated: the CPU's whole-mesh exclusion of
+            // MOVING geometry from every env probe (Deferred.h, envSkipAnimated).
+            // `envBaking` is only true inside bakeEnvProbes, so this cannot
+            // touch the main view.
+            if (envBaking && opt.envSkipAnimated && b.animForBake) continue;
+            // TRANSPARENT + ADDITIVE surfaces are NOT in the opaque G-buffer.
+            // That is the CPU's own routing, not a simplification:
+            // RenderInner.cpp:294-296 `if (Mat_Transparent) continue;` in
+            // RenderInnerMekalele, and :317-318 sends Mat_Additive to the
+            // forward TheOtherBarry<ADDITIVE> instead of Mekalele. Both are
+            // composited later, by encodeXpar. Mirror-tagged panels stay here:
+            // this arm composites their reflection in fs_lighting rather than
+            // through the CPU's transparent wallMatClone (a stated deviation).
+            if (gbuffer && b.mirrorIndex == 0 && (b.transparent || b.additive)) continue;
+            // Shadow pass: honour the same caster filter the CPU bake applies.
+            if (!gbuffer && !b.castsShadow) continue;
+            if (gbuffer) {
+                const MTLCullMode want = b.twoSided ? MTLCullModeNone : baseCull;
+                if (want != curCull) { [enc setCullMode:want]; curCull = want; }
+            }
+            if (!gbuffer && opt.shadowCull && curFace && curLightPos) {
+                if (!sphereInCubeFace(b, curLightPos, *curFace, curFar)) {
+                    ++shadowBatchesCulled;
+                    continue;
+                }
+                ++shadowBatchesDrawn;
+            }
+            [enc setVertexBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
+            if (gbuffer) {
+                [enc setFragmentBytes:&bus[i] length:sizeof(BatchUniforms) atIndex:2];
+                id<MTLTexture> a = (b.textureIndex   >= 0) ? texes[size_t(b.textureIndex)]   : texes[0];
+                id<MTLTexture> n = (b.normalTexIndex >= 0) ? texes[size_t(b.normalTexIndex)] : texes[0];
+                id<MTLTexture> r = (b.roughTexIndex  >= 0) ? texes[size_t(b.roughTexIndex)]  : texes[0];
+                id<MTLTexture> ao = (b.aoTexIndex    >= 0) ? texes[size_t(b.aoTexIndex)]     : texes[0];
+                id<MTLTexture> mt = (b.metalTexIndex >= 0) ? texes[size_t(b.metalTexIndex)]  : texes[0];
+                [enc setFragmentTexture:a atIndex:0];
+                [enc setFragmentTexture:n atIndex:1];
+                [enc setFragmentTexture:r atIndex:2];
+                [enc setFragmentTexture:ao atIndex:3];
+                [enc setFragmentTexture:mt atIndex:4];
+            }
+            if (const StoneBatch *s = stoneSlot(i)) {
+                // TESSELLATED DRAW. Same fragment shader, same uniforms, same
+                // textures — only the vertex stage differs, which is what makes
+                // the cost curve attributable to geometry and nothing else.
+                if (!tessPipeBound) {
+                    [enc setRenderPipelineState:tessStatsArmed ? psoGBufTessStats
+                                                               : psoGBufTess];
+                    tessPipeBound = true;
+                }
+                const size_t si = size_t(s - stone.data());
+                [enc setVertexBuffer:vb offset:NSUInteger(s->vertexOff) atIndex:0];
+                [enc setVertexBytes:&tus[si] length:sizeof(TessUniformsHost) atIndex:3];
+                [enc setVertexBuffer:tessSubBuf offset:0 atIndex:4];
+                [enc setVertexBuffer:tessBorderBuf offset:NSUInteger(s->borderOff) atIndex:6];
+                if (tessStatsArmed) {
+                    [enc setVertexBuffer:tessStatBuf offset:0 atIndex:5];
+                    [enc setFragmentBuffer:tessStatBuf offset:0 atIndex:5];
+                }
+                [enc setVertexTexture:texes[size_t(s->heightTex)] atIndex:0];
+                [enc setVertexSamplerState:samp atIndex:0];
+                [enc setTessellationFactorBuffer:tessFactorBuf
+                                          offset:NSUInteger(s->factorOff)
+                                   instanceStride:NSUInteger(s->patchCount) * 8];
+                [enc drawPatches:3
+                      patchStart:0
+                      patchCount:NSUInteger(s->patchCount)
+                patchIndexBuffer:nil
+          patchIndexBufferOffset:0
+                   instanceCount:NSUInteger(tessP * tessP)
+                    baseInstance:0];
+                // Restore for the next ordinary batch.
+                [enc setRenderPipelineState:psoGBuf];
+                [enc setVertexBuffer:vb offset:0 atIndex:0];
+                tessPipeBound = false;
+                continue;
+            }
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:NSUInteger(b.firstVertex)
+                    vertexCount:NSUInteger(b.vertexCount)];
+        }
+    };
+
+    // Bake policy MATCHES greets. GreetsApplyInitDefaults sets
+    // greets_omni_shadows, which marks every FLD omni Omni_CastsShadow |
+    // Omni_StaticShadow -- so the STATIC omnis' cubes are baked ONCE and cached,
+    // and only the mech-parented "moving" omnis pay a per-frame re-bake
+    // (PERF_STATE.md stage 7, DynamicOmnisPerFrame). An earlier revision here
+    // re-baked all 60 faces every frame: wrong for parity, and it starved the GPU
+    // on CPU encode, which inflated every later pass's timestamp span.
+    auto bakeCubes = [&](id<MTLCommandBuffer> cb, bool movingOnly, bool timed) {
+        size_t firstIdx = SIZE_MAX, lastIdx = 0;
+        if (timed) {
+            for (size_t ci = 0; ci < cubes.size(); ++ci) {
+                if (movingOnly && !cubeIsMoving[ci]) continue;
+                if (firstIdx == SIZE_MAX) firstIdx = ci;
+                lastIdx = ci;
+            }
+        }
+        for (size_t ci = 0; ci < cubes.size(); ++ci) {
+            if (movingOnly && !cubeIsMoving[ci]) continue;
+            // find the light owning this cube
+            size_t li = 0;
+            for (size_t k = 0; k < lights.size(); ++k)
+                if (!lights[k].isSpot && lights[k].shadowIndex == int(ci)) { li = k; break; }
+            const float sn = lights[li].shadowNear, sf = lights[li].shadowFar;
+            for (int f = 0; f < 6; ++f) {
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.depthAttachment.texture = cubes[ci];
+                rp.depthAttachment.slice = NSUInteger(f);
+                rp.depthAttachment.loadAction = MTLLoadActionClear;
+                rp.depthAttachment.storeAction = MTLStoreActionStore;
+                rp.depthAttachment.clearDepth = 0.0;
+                // Time the WHOLE bake wave: start on the first face's encoder,
+                // end on the last. Sampling only the first face measured 1 of 60.
+                const bool firstFace = timed && (ci == firstIdx && f == 0);
+                const bool lastFace  = timed && (ci == lastIdx && f == 5);
+                if (sampleBuf && (firstFace || lastFace)) {
+                    rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                    rp.sampleBufferAttachments[0].startOfVertexSampleIndex =
+                        firstFace ? 0 : MTLCounterDontSample;
+                    rp.sampleBufferAttachments[0].endOfFragmentSampleIndex =
+                        lastFace ? 1 : MTLCounterDontSample;
+                    rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                    rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                }
+                id<MTLRenderCommandEncoder> enc =
+                    [cb renderCommandEncoderWithDescriptor:rp];
+                [enc setRenderPipelineState:psoShadow];
+                [enc setDepthStencilState:dss];
+                [enc setCullMode:MTLCullModeNone];
+                ShadowUniforms su{};
+                for (int c = 0; c < 3; ++c) {
+                    su.row0[c] = kCubeFaces[f].right[c];
+                    su.row1[c] = kCubeFaces[f].up[c];
+                    su.row2[c] = kCubeFaces[f].fwd[c];
+                    su.lightPos[c] = lights[li].pos[c];
+                }
+                su.dza = -sn / (sf - sn);
+                su.dzb = sn * sf / (sf - sn);
+                su.projScale = 1.0f;          // 90-degree cube face
+                [enc setVertexBytes:&su length:sizeof(su) atIndex:1];
+                curFace = &kCubeFaces[f];
+                curLightPos = lights[li].pos;
+                curFar = sf;
+                drawScene(enc, /*gbuffer=*/false);
+                curFace = nullptr; curLightPos = nullptr;
+                [enc endEncoding];
+            }
+        }
+    };
+
+    // Spot maps: ONE perspective depth map each, re-baked EVERY FRAME because the
+    // disco spots rotate (GreetsDisco's UpdateDiscoBall rewrites IPos/IDir per
+    // tick, and Shadows.cpp re-bakes them on the DynamicOmnisPerFrame path). The
+    // 10% FOV pad and the Kick_Camera basis both come from the ingest, which built
+    // them with the engine's own call — so bake and tap cannot drift apart.
+    auto bakeSpotMaps = [&](id<MTLCommandBuffer> cb) {
+        for (size_t si = 0; si < spots.size(); ++si) {
+            size_t li = SIZE_MAX;
+            for (size_t k = 0; k < lights.size(); ++k)
+                if (lights[k].isSpot && lights[k].shadowIndex == int(si)) { li = k; break; }
+            if (li == SIZE_MAX) continue;
+            const float sn = lights[li].shadowNear, sf = lights[li].shadowFar;
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.depthAttachment.texture = spots[si];
+            rp.depthAttachment.loadAction = MTLLoadActionClear;
+            rp.depthAttachment.storeAction = MTLStoreActionStore;
+            rp.depthAttachment.clearDepth = 0.0;
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:psoShadow];
+            [enc setDepthStencilState:dss];
+            [enc setCullMode:MTLCullModeNone];
+            ShadowUniforms su{};
+            for (int c = 0; c < 3; ++c) {
+                su.row0[c] = lights[li].sRow0[c];
+                su.row1[c] = lights[li].sRow1[c];
+                su.row2[c] = lights[li].sRow2[c];
+                su.lightPos[c] = lights[li].pos[c];
+            }
+            su.dza = -sn / (sf - sn);
+            su.dzb = sn * sf / (sf - sn);
+            su.projScale = lights[li].sRow0[3];
+            [enc setVertexBytes:&su length:sizeof(su) atIndex:1];
+            drawScene(enc, /*gbuffer=*/false);
+            [enc endEncoding];
+        }
+    };
+
+    // One-time STATIC bake, outside the timed loop, as greets caches it.
+    {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        bakeCubes(cb, /*movingOnly=*/false, /*timed=*/false);
+        bakeSpotMaps(cb);
+        // Clear the 1x1 dummy reflection to black: it is bound for INACTIVE
+        // mirrors (camera behind the plane), whose panels then composite +0
+        // instead of stale or undefined texels.
+        {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = dummyRefl;
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            [e endEncoding];
+        }
+        [cb commit];
+        [cb waitUntilCompleted];
+        out.staticBakeMs = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
+    }
+
+    // ---- --dump_cube: read the baked depth back and LOOK at it -------------
+    if (opt.dumpCube >= 0) {
+        if (opt.dumpCube >= int(lights.size())) {
+            std::fprintf(stderr, "[DUMPCUBE] light %d out of range (%zu lights)\n",
+                         opt.dumpCube, lights.size());
+        } else if (lights[size_t(opt.dumpCube)].shadowIndex < 0
+                   || lights[size_t(opt.dumpCube)].isSpot) {
+            std::fprintf(stderr, "[DUMPCUBE] light %d has no CUBE (spot=%d, slot=%d)\n",
+                         opt.dumpCube, lights[size_t(opt.dumpCube)].isSpot,
+                         lights[size_t(opt.dumpCube)].shadowIndex);
+        } else {
+            const size_t ci = size_t(lights[size_t(opt.dumpCube)].shadowIndex);
+            id<MTLTexture> cube = cubes[ci];
+            const int res = int([cube width]);
+            const float sn = lights[size_t(opt.dumpCube)].shadowNear;
+            const float sf = lights[size_t(opt.dumpCube)].shadowFar;
+            const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+            static const char *fnames[6] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
+            std::vector<float> face(size_t(res) * size_t(res));
+            // 3x2 atlas: row 0 = +X -X +Y, row 1 = -Y +Z -Z
+            std::vector<uint8_t> atlas(size_t(res) * 3 * size_t(res) * 2 * 4, 0);
+            const size_t aw = size_t(res) * 3;
+            std::fprintf(stderr,
+                "[DUMPCUBE] light %d cube %zu res=%d near=%.4f far=%.4f "
+                "(dza=%.6f dzb=%.6f)\n",
+                opt.dumpCube, ci, res, sn, sf, dza, dzb);
+            for (int f = 0; f < 6; ++f) {
+                [cube getBytes:face.data()
+                   bytesPerRow:NSUInteger(res) * sizeof(float)
+                 bytesPerImage:face.size() * sizeof(float)
+                    fromRegion:MTLRegionMake2D(0, 0, NSUInteger(res), NSUInteger(res))
+                   mipmapLevel:0
+                         slice:NSUInteger(f)];
+                long nNan = 0, nCleared = 0, nValid = 0;
+                float mn = 1e30f, mx = -1e30f, dmn = 1e30f, dmx = -1e30f;
+                double dsum = 0.0;
+                for (float v : face) {
+                    if (!std::isfinite(v)) { ++nNan; continue; }
+                    if (v <= 0.0f) { ++nCleared; continue; }
+                    ++nValid;
+                    mn = std::min(mn, v); mx = std::max(mx, v);
+                    const float dist = dzb / (v - dza);
+                    dmn = std::min(dmn, dist); dmx = std::max(dmx, dist);
+                    dsum += dist;
+                }
+                std::fprintf(stderr,
+                    "[DUMPCUBE]   %s  valid=%7ld (%5.1f%%)  cleared=%7ld  nonfinite=%ld"
+                    "  storedZ[%.6f..%.6f]  dist[%.3f..%.3f] mean=%.3f\n",
+                    fnames[f], nValid, 100.0 * double(nValid) / double(face.size()),
+                    nCleared, nNan,
+                    nValid ? mn : 0.0f, nValid ? mx : 0.0f,
+                    nValid ? dmn : 0.0f, nValid ? dmx : 0.0f,
+                    nValid ? dsum / double(nValid) : 0.0);
+                // 8x8 grid of DECODED WORLD DISTANCE across the face. min/max
+                // alone hid the thing that mattered here: a face can be 100%
+                // valid, span 0.5..30 units, and still be a near wall over most
+                // of its solid angle. The grid shows WHERE the occluder is.
+                // Row 0 is texel row 0 = the +up edge (Metal's origin is
+                // upper-left), column 0 the -right edge.
+                for (int gy = 0; gy < 8; ++gy) {
+                    std::string line;
+                    char cell[16];
+                    for (int gx = 0; gx < 8; ++gx) {
+                        const int sx = (2 * gx + 1) * res / 16;
+                        const int sy = (2 * gy + 1) * res / 16;
+                        const float v = face[size_t(sy) * size_t(res) + size_t(sx)];
+                        if (!std::isfinite(v))   std::snprintf(cell, sizeof cell, "  nan ");
+                        else if (v <= 0.0f)      std::snprintf(cell, sizeof cell, "  --- ");
+                        else std::snprintf(cell, sizeof cell, "%6.2f", dzb / (v - dza));
+                        line += cell;
+                    }
+                    std::fprintf(stderr, "[DUMPCUBE]     %s|%s\n",
+                                 gy == 0 ? fnames[f] : "  ", line.c_str());
+                }
+                // atlas tile: distance ramped over [near, far]; magenta = nonfinite,
+                // dark blue = cleared (nothing rendered into this texel)
+                const size_t tx = size_t(f % 3) * size_t(res);
+                const size_t ty = size_t(f / 3) * size_t(res);
+                for (int y = 0; y < res; ++y)
+                    for (int x = 0; x < res; ++x) {
+                        const float v = face[size_t(y) * size_t(res) + size_t(x)];
+                        uint8_t r, g, b;
+                        if (!std::isfinite(v)) { r = 255; g = 0; b = 255; }
+                        else if (v <= 0.0f)    { r = 10;  g = 15; b = 60; }
+                        else {
+                            const float dist = dzb / (v - dza);
+                            const float t = std::min(1.0f, std::max(0.0f,
+                                                (dist - sn) / (sf - sn)));
+                            const uint8_t g8 = uint8_t(255.0f * (1.0f - t));
+                            r = g8; g = g8; b = g8;
+                        }
+                        uint8_t *p = &atlas[((ty + size_t(y)) * aw + tx + size_t(x)) * 4];
+                        p[0] = b; p[1] = g; p[2] = r; p[3] = 255;   // BGRA, WritePPM order
+                    }
+            }
+            const std::string dp = opt.dumpCubePath.empty()
+                                 ? std::string("gpubench_cube.ppm") : opt.dumpCubePath;
+            if (WritePPM(dp, atlas.data(), int(aw), res * 2, aw * 4))
+                std::fprintf(stderr, "[DUMPCUBE] wrote %s (3x2 face atlas, "
+                                     "white=near black=far, magenta=nonfinite, "
+                                     "navy=cleared)\n", dp.c_str());
+        }
+    }
+
+    // ---- --probe_px: why is THIS pixel not lit by light N ------------------
+    // Builds the pixel's camera ray from the same fu.sx/ox/sy/oy the vertex
+    // shader projects with, ray-casts ALL geometry for the visible surface and
+    // its geometric normal, then replays the lighting pass's own per-light gate
+    // and names the test that failed.
+    if (opt.probePx) {
+        const int PX = opt.probePxXY[0], PY = opt.probePxXY[1];
+        const float ndcx = 2.0f * (float(PX) + 0.5f) / float(W) - 1.0f;
+        const float ndcy = 1.0f - 2.0f * (float(PY) + 0.5f) / float(H);
+        const float vd[3] = {(ndcx - fu.ox) * fu.invSx, (ndcy - fu.oy) * fu.invSy, 1.0f};
+        float rd[3];
+        for (int c = 0; c < 3; ++c)
+            rd[c] = scene.camera.rot[0][c] * vd[0] + scene.camera.rot[1][c] * vd[1]
+                  + scene.camera.rot[2][c] * vd[2];
+        const float rl = std::sqrt(rd[0]*rd[0] + rd[1]*rd[1] + rd[2]*rd[2]);
+        for (int c = 0; c < 3; ++c) rd[c] /= rl;
+        const float ro[3] = {scene.camera.src[0], scene.camera.src[1], scene.camera.src[2]};
+        float bestT = 1e30f, bestN[3] = {0,0,0};
+        std::string bm = "-", bmat = "-";
+        for (const auto &b : scene.batches) {
+            for (uint32_t v = b.firstVertex; v + 2 < b.firstVertex + b.vertexCount; v += 3) {
+                float w[3][3];
+                for (int k = 0; k < 3; ++k) {
+                    const Vertex &V = scene.verts[v + uint32_t(k)];
+                    const float ob[3] = {V.px, V.py, V.pz};
+                    for (int c = 0; c < 3; ++c)
+                        w[k][c] = b.rot[c][0]*ob[0] + b.rot[c][1]*ob[1]
+                                + b.rot[c][2]*ob[2] + b.pos[c];
+                }
+                float e1[3], e2[3], pv[3], tv[3], qv[3];
+                for (int c = 0; c < 3; ++c) {
+                    e1[c] = w[1][c]-w[0][c]; e2[c] = w[2][c]-w[0][c]; tv[c] = ro[c]-w[0][c];
+                }
+                pv[0]=rd[1]*e2[2]-rd[2]*e2[1]; pv[1]=rd[2]*e2[0]-rd[0]*e2[2]; pv[2]=rd[0]*e2[1]-rd[1]*e2[0];
+                const float det = e1[0]*pv[0]+e1[1]*pv[1]+e1[2]*pv[2];
+                if (std::fabs(det) < 1e-12f) continue;
+                const float inv = 1.0f/det;
+                const float uu = (tv[0]*pv[0]+tv[1]*pv[1]+tv[2]*pv[2])*inv;
+                if (uu < 0.0f || uu > 1.0f) continue;
+                qv[0]=tv[1]*e1[2]-tv[2]*e1[1]; qv[1]=tv[2]*e1[0]-tv[0]*e1[2]; qv[2]=tv[0]*e1[1]-tv[1]*e1[0];
+                const float vv = (rd[0]*qv[0]+rd[1]*qv[1]+rd[2]*qv[2])*inv;
+                if (vv < 0.0f || uu+vv > 1.0f) continue;
+                const float t = (e2[0]*qv[0]+e2[1]*qv[1]+e2[2]*qv[2])*inv;
+                if (t > 1e-4f && t < bestT) {
+                    bestT = t; bm = b.meshName; bmat = b.materialName;
+                    // FDS winding: Compute_Face_Normals (PREPROC.CPP:29) does
+                    // Cross_Product(V, U) with U=B-A, V=C-A, i.e. N = e2 x e1 —
+                    // the NEGATION of the usual e1 x e2. Getting this backwards
+                    // made every room surface look outward-facing and sent this
+                    // investigation down a blind alley for a round.
+                    bestN[0]=e2[1]*e1[2]-e2[2]*e1[1];
+                    bestN[1]=e2[2]*e1[0]-e2[0]*e1[2];
+                    bestN[2]=e2[0]*e1[1]-e2[1]*e1[0];
+                    const float nl = std::sqrt(bestN[0]*bestN[0]+bestN[1]*bestN[1]+bestN[2]*bestN[2]);
+                    if (nl > 0.0f) for (int c=0;c<3;++c) bestN[c]/=nl;
+                }
+            }
+        }
+        if (bestT > 1e29f) {
+            std::fprintf(stderr, "[PROBEPX] px(%d,%d): camera ray hits nothing\n", PX, PY);
+        } else {
+            const float hp[3] = {ro[0]+rd[0]*bestT, ro[1]+rd[1]*bestT, ro[2]+rd[2]*bestT};
+            std::fprintf(stderr,
+                "[PROBEPX] px(%d,%d) -> %s/%s at (%.3f,%.3f,%.3f) dist=%.3f "
+                "geoNormal=(%.3f,%.3f,%.3f)\n",
+                PX, PY, bm.c_str(), bmat.c_str(), hp[0], hp[1], hp[2], bestT,
+                bestN[0], bestN[1], bestN[2]);
+            for (size_t li = 0; li < lights.size(); ++li) {
+                float toL[3] = {lights[li].pos[0]-hp[0], lights[li].pos[1]-hp[1],
+                                lights[li].pos[2]-hp[2]};
+                const float d = std::sqrt(toL[0]*toL[0]+toL[1]*toL[1]+toL[2]*toL[2]);
+                if (d <= 1e-6f) continue;
+                const float rr = lights[li].range * opt.lightRangeScale;
+                // Two-sided NoL: the sign only tells which face of the polygon
+                // the light is on, and the loader does not carry a consistent
+                // winding for every authored surface.
+                const float NoLs = (toL[0]*bestN[0]+toL[1]*bestN[1]+toL[2]*bestN[2])/d;
+                const float atten = std::max(0.0f, 1.0f - d * (lights[li].invRange
+                                                               / opt.lightRangeScale));
+                const char *verdict = (d >= rr) ? "OUT OF RANGE"
+                                    : (NoLs <= 0.0f ? "BACKFACING (NoL<=0)" : "reaches");
+                std::fprintf(stderr,
+                    "[PROBEPX]   light %2zu %-11s d=%7.3f range=%5.1f NoL=%+.3f atten=%.3f "
+                    "col=(%.2f,%.2f,%.2f)\n",
+                    li, verdict, d, rr, NoLs, atten,
+                    lights[li].color[0], lights[li].color[1], lights[li].color[2]);
+            }
+        }
+    }
+
+    // ---- --probe: ground truth vs the tap, for ONE world point -------------
+    // (a) ray-cast the SAME casting triangles the bake rasterised, name the
+    //     nearest hit's mesh/material; (b) replicate the shader's cube tap on
+    //     the host from the read-back cube. Agreement means the cube is honest
+    //     and any occlusion is geometry; disagreement localises the bug to the
+    //     tap's conventions. Requires --dump_cube (Shared storage on the cubes).
+    if (opt.probe) {
+        const float P[3] = {opt.probePoint[0], opt.probePoint[1], opt.probePoint[2]};
+        std::fprintf(stderr, "[PROBE] world point (%.3f, %.3f, %.3f)\n", P[0], P[1], P[2]);
+        // Moller-Trumbore against every CASTING triangle, in world space.
+        auto castRay = [&](const float o[3], const float d[3], float maxT,
+                           float &hitT, std::string &mesh, std::string &mat) {
+            hitT = maxT; mesh = "-"; mat = "-";
+            for (const auto &b : scene.batches) {
+                if (!b.castsShadow) continue;
+                for (uint32_t v = b.firstVertex; v + 2 < b.firstVertex + b.vertexCount; v += 3) {
+                    float w[3][3];
+                    for (int k = 0; k < 3; ++k) {
+                        const Vertex &V = scene.verts[v + uint32_t(k)];
+                        const float ob[3] = {V.px, V.py, V.pz};
+                        for (int c = 0; c < 3; ++c)
+                            w[k][c] = b.rot[c][0]*ob[0] + b.rot[c][1]*ob[1]
+                                    + b.rot[c][2]*ob[2] + b.pos[c];
+                    }
+                    float e1[3], e2[3], pv[3], tv[3], qv[3];
+                    for (int c = 0; c < 3; ++c) {
+                        e1[c] = w[1][c] - w[0][c];
+                        e2[c] = w[2][c] - w[0][c];
+                        tv[c] = o[c] - w[0][c];
+                    }
+                    pv[0] = d[1]*e2[2] - d[2]*e2[1];
+                    pv[1] = d[2]*e2[0] - d[0]*e2[2];
+                    pv[2] = d[0]*e2[1] - d[1]*e2[0];
+                    const float det = e1[0]*pv[0] + e1[1]*pv[1] + e1[2]*pv[2];
+                    if (std::fabs(det) < 1e-12f) continue;   // two-sided, as the bake is
+                    const float inv = 1.0f / det;
+                    const float u = (tv[0]*pv[0] + tv[1]*pv[1] + tv[2]*pv[2]) * inv;
+                    if (u < 0.0f || u > 1.0f) continue;
+                    qv[0] = tv[1]*e1[2] - tv[2]*e1[1];
+                    qv[1] = tv[2]*e1[0] - tv[0]*e1[2];
+                    qv[2] = tv[0]*e1[1] - tv[1]*e1[0];
+                    const float vv = (d[0]*qv[0] + d[1]*qv[1] + d[2]*qv[2]) * inv;
+                    if (vv < 0.0f || u + vv > 1.0f) continue;
+                    const float t = (e2[0]*qv[0] + e2[1]*qv[1] + e2[2]*qv[2]) * inv;
+                    if (t > 1e-4f && t < hitT) {
+                        hitT = t; mesh = b.meshName; mat = b.materialName;
+                    }
+                }
+            }
+        };
+        std::vector<float> faceBuf;
+        for (size_t li = 0; li < lights.size(); ++li) {
+            if (lights[li].isSpot || lights[li].shadowIndex < 0) continue;
+            const float L0[3] = {lights[li].pos[0], lights[li].pos[1], lights[li].pos[2]};
+            float dw[3] = {P[0]-L0[0], P[1]-L0[1], P[2]-L0[2]};
+            const float dist = std::sqrt(dw[0]*dw[0] + dw[1]*dw[1] + dw[2]*dw[2]);
+            if (dist <= 1e-5f) continue;
+            const float dir[3] = {dw[0]/dist, dw[1]/dist, dw[2]/dist};
+            float hitT; std::string hm, hmat;
+            castRay(L0, dir, dist * 0.999f, hitT, hm, hmat);
+            const bool geomBlocked = hitT < dist * 0.999f;
+            // Host replica of the shader tap.
+            const float ax = std::fabs(dw[0]), ay = std::fabs(dw[1]), az = std::fabs(dw[2]);
+            const float major = std::max(ax, std::max(ay, az));
+            int face; float sc, tc;
+            if (ax >= ay && ax >= az) { face = dw[0] > 0 ? 0 : 1;
+                                        sc = dw[0] > 0 ? -dw[2] : dw[2]; tc = -dw[1]; }
+            else if (ay >= az)        { face = dw[1] > 0 ? 2 : 3;
+                                        sc = dw[0]; tc = dw[1] > 0 ? dw[2] : -dw[2]; }
+            else                      { face = dw[2] > 0 ? 4 : 5;
+                                        sc = dw[2] > 0 ? dw[0] : -dw[0]; tc = -dw[1]; }
+            const float sn = lights[li].shadowNear, sf = lights[li].shadowFar;
+            const float dza = -sn / (sf - sn), dzb = sn * sf / (sf - sn);
+            const size_t ci = size_t(lights[li].shadowIndex);
+            id<MTLTexture> cube = cubes[ci];
+            const int res = int([cube width]);
+            const char *storageNote = "";
+            float stored = 0.0f, storedDist = -1.0f;
+            int tx = -1, ty = -1;
+            if ([cube storageMode] == MTLStorageModeShared) {
+                faceBuf.assign(size_t(res) * size_t(res), 0.0f);
+                [cube getBytes:faceBuf.data()
+                   bytesPerRow:NSUInteger(res) * sizeof(float)
+                 bytesPerImage:faceBuf.size() * sizeof(float)
+                    fromRegion:MTLRegionMake2D(0, 0, NSUInteger(res), NSUInteger(res))
+                   mipmapLevel:0 slice:NSUInteger(face)];
+                const float u = 0.5f * (sc / major + 1.0f);
+                const float v = 0.5f * (tc / major + 1.0f);
+                tx = std::min(res - 1, std::max(0, int(u * float(res))));
+                ty = std::min(res - 1, std::max(0, int(v * float(res))));
+                stored = faceBuf[size_t(ty) * size_t(res) + size_t(tx)];
+                storedDist = (stored > dza + 1e-9f) ? dzb / (stored - dza) : 1e9f;
+            } else {
+                storageNote = " (cube is Private — pass --dump_cube=N for the readback)";
+            }
+            const float ref = dza + dzb / std::max(major, 1e-5f);
+            std::fprintf(stderr,
+                "[PROBE]  light %2zu  dist=%7.3f major=%7.3f  RAYCAST: %s"
+                "  t=%7.3f (%s/%s)\n",
+                li, dist, major, geomBlocked ? "BLOCKED" : "clear  ",
+                hitT, hm.c_str(), hmat.c_str());
+            std::fprintf(stderr,
+                "[PROBE]            CUBE face=%d texel=(%d,%d) stored=%.8f"
+                "  storedDist=%8.3f  ref=%.8f  tap says %s%s\n",
+                face, tx, ty, stored, storedDist, ref,
+                (storedDist < 0.0f) ? "?"
+                    : ((ref + 0.0004f > stored) ? "LIT" : "SHADOWED"), storageNote);
+        }
+    }
+
+    // One deferred G-buffer fill into an arbitrary target set with an
+    // arbitrary camera (FrameUniforms). Shared by the main view and the
+    // per-mirror reflection views.
+    // `mirroredBasis` = this pass's view matrix has determinant -1 (a reflection).
+    // See the cull-mode comment below: it MUST invert the cull sense.
+    auto encodeGBuffer = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                             id<MTLTexture> tAlb, id<MTLTexture> tNrm,
+                             id<MTLTexture> tPar, id<MTLTexture> tMir,
+                             id<MTLTexture> tDep,
+                             void (^counterHook)(MTLRenderPassDescriptor *),
+                             bool mirroredBasis = false,
+                             const MTLScissorRect *scissor = nullptr) {
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = tAlb;
+        rp.colorAttachments[1].texture = tNrm;
+        rp.colorAttachments[2].texture = tPar;
+        rp.colorAttachments[3].texture = tMir;
+        for (int i = 0; i < 4; ++i) {
+            rp.colorAttachments[i].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[i].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        }
+        rp.depthAttachment.texture = tDep;
+        rp.depthAttachment.loadAction = MTLLoadActionClear;
+        rp.depthAttachment.storeAction = MTLStoreActionStore;
+        rp.depthAttachment.clearDepth = 0.0;
+        if (counterHook) counterHook(rp);
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoGBuf];
+        [enc setDepthStencilState:dss];
+        // BACKFACE CULL, matching Transform_Objects' own test
+        // (Transform.cpp:2434). WHICH mode is correct was MEASURED, not
+        // reasoned: FDS's Compute_Face_Normals builds the plane normal as
+        // Cross_Product(V,U) with U=B-A, V=C-A — i.e. e2 x e1, the NEGATION of
+        // the usual convention — so the engine's visible faces are the ones
+        // Metal calls FRONT-facing under its default clockwise winding.
+        // Rendering both: CullBack drops the whole room (whole-frame luma
+        // 115.68 -> 63.19), CullFront is pixel-identical to CullNone.
+        //
+        // THE MIRROR BUG (reported 2026-08-08: "the gpu main mirror is missing
+        // most of the reflected geometry"). A reflection view matrix has
+        // determinant -1, so every triangle's SCREEN-SPACE WINDING reverses.
+        // CullFront — measured correct for the main camera — therefore rejects
+        // in a mirror exactly the geometry it keeps in the main view. This pass
+        // predates culling: the reflection code still carries the comment
+        // "det -1, so a left-handed basis; harmless while raster culling is
+        // off", and culling was turned ON in 69bf0f0 without revisiting it. A
+        // stale invariant, not a new mistake — and the reason the mirror lost
+        // most of its content while still rendering something (the panels'
+        // own emissive and whatever happened to face the other way).
+        const MTLCullMode baseCull = opt.cull ? (mirroredBasis ? MTLCullModeBack
+                                                               : MTLCullModeFront)
+                                              : MTLCullModeNone;
+        [enc setCullMode:baseCull];
+        // SCISSOR (second-order mirrors only). The order-2 view is consumed
+        // through ONE panel, so shading the rest of the target is waste; the
+        // clear still covers the whole attachment, which is what keeps a stale
+        // pair's content from being read at a pixel the next pair does not
+        // rewrite. Vertex work is unaffected — this trims fragments, which is
+        // where the pass's cost is.
+        if (scissor) [enc setScissorRect:*scissor];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        drawScene(enc, /*gbuffer=*/true, baseCull);
+        [enc endEncoding];
+    };
+
+    // ---- TRANSPARENT SURFACES: the depth peel ------------------------------
+    // The CPU's mechanism, in its own two halves (the user's framing): the PEEL
+    // sets the ORDER, the tiled TBR only makes it fast. This arm reproduces the
+    // order exactly and picks its own scheduling, because a GPU's natural
+    // scheduling is not a per-strip linked list.
+    //
+    // ORDER, read out of FDS/RENDER/Transform.cpp:2586-2633 (the sort key) and
+    // RENDER.CPP:895-1140 (the batcher):
+    //   * transparents are clumped by (ParentTri, side) — the MESH pointer, not
+    //     the material, so greets' four transparent materials all living in
+    //     Piramid.lwo form ONE clump per side;
+    //   * the key is objScore + faceFine, with +4*fzp for front-facing, so
+    //     EVERY back-facing clump composites before EVERY front-facing one, and
+    //     within a side the clumps run far-to-near. The documented result for a
+    //     nested pair is outer.back, inner.back, inner.front, outer.front;
+    //   * within a clump, K = xparPeelPassesEffective() passes PER SIDE
+    //     (DeferredSurfaceKernel.cpp:3600): K == 1 keeps the single nearest
+    //     fragment (the legacy 2-deep front/back peel greets runs); K > 1 peels
+    //     farthest-first against a per-pixel peel floor (fountain authors 4).
+    //
+    // SCHEDULING, chosen freely and stated: two encoders per (clump, side,
+    // pass) — a depth resolve then a blended colour pass at depth-Equal — plus
+    // one depth blit per extra pass to advance the floor. No tile binning.
+    struct XparGroup {
+        std::vector<size_t> batches; float ctr[3]; float rad;
+        // Conservative WORLD AABB of the clump — the union of its batches'
+        // bounding-sphere boxes. Used ONLY by the encoder-merge disjointness
+        // test below; the ordering still uses ctr/rad unchanged, so the
+        // composite sequence is bit-for-bit what it was.
+        float bmin[3], bmax[3];
+    };
+    std::vector<XparGroup> xparGroups;
+    {
+        std::map<int, size_t> byMesh;
+        for (size_t i = 0; i < scene.batches.size(); ++i) {
+            const Batch &b = scene.batches[i];
+            if (b.mirrorIndex != 0) continue;
+            if (!b.transparent && !b.additive) continue;
+            auto it = byMesh.find(b.meshId);
+            if (it == byMesh.end()) {
+                byMesh[b.meshId] = xparGroups.size();
+                XparGroup g;
+                g.batches.push_back(i);
+                for (int c = 0; c < 3; ++c) g.ctr[c] = b.bsCtr[c];
+                g.rad = b.bsRad;
+                for (int c = 0; c < 3; ++c) {
+                    g.bmin[c] = b.bsCtr[c] - b.bsRad;
+                    g.bmax[c] = b.bsCtr[c] + b.bsRad;
+                }
+                xparGroups.push_back(std::move(g));
+            } else {
+                XparGroup &g = xparGroups[it->second];
+                g.batches.push_back(i);
+                // Union of bounding spheres, coarse but only used for ordering.
+                g.rad = std::max(g.rad, b.bsRad);
+                for (int c = 0; c < 3; ++c) {
+                    g.bmin[c] = std::min(g.bmin[c], b.bsCtr[c] - b.bsRad);
+                    g.bmax[c] = std::max(g.bmax[c], b.bsCtr[c] + b.bsRad);
+                }
+            }
+        }
+    }
+    const int xparPeelPasses = std::max(1, opt.xparPeelPasses > 0 ? opt.xparPeelPasses
+                                                                  : scene.xparPeelPasses);
+    if (!xparGroups.empty())
+        std::fprintf(stderr,
+            "[XPAR] %zu peel clump(s) (grouped by mesh, as the CPU clumps by "
+            "ParentTri), %d peel pass(es) per side -> %d layers per pixel per "
+            "clump; %zu encoder(s)/frame\n",
+            xparGroups.size(), xparPeelPasses, 2 * xparPeelPasses,
+            xparGroups.size() * size_t(xparPeelPasses) * 2 * 2);
+
+    // Encoder census for the report: render encoders actually emitted by the
+    // peel, and how many times encodeXpar ran (main view + one per mirror
+    // reflection), so the per-frame figure is a measurement rather than the
+    // clump-count arithmetic that used to be printed.
+    size_t xparEncoders = 0, xparEncodeCalls = 0, xparRunsTotal = 0;
+
+    // dst = the HDR target this composite lands in (the main frame's, or a
+    // mirror reflection's). `srcDepth` is the OPAQUE depth of that same view.
+    auto encodeXpar = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                          id<MTLTexture> dst, id<MTLTexture> srcDepth,
+                          bool mirroredBasis) {
+        if (xparGroups.empty() || !opt.xpar) return;
+        ++xparEncodeCalls;
+        // Order groups within a side. `extent` is the CPU's own: the object's
+        // bounding-sphere view depth pushed to its FAR edge for back faces and
+        // its NEAR edge for front faces (Transform.cpp:2621-2626). Larger
+        // extent composites first.
+        auto viewZ = [&](const XparGroup &g) {
+            float z = 0.0f;
+            for (int c = 0; c < 3; ++c) z += u.camRow2[c] * (g.ctr[c] - u.camSrc[c]);
+            return z;
+        };
+        for (int side = 0; side < 2; ++side) {          // 0 = BACK faces first
+            const bool front = (side == 1);
+            std::vector<size_t> order(xparGroups.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                const float ea = viewZ(xparGroups[a]) + (front ? -xparGroups[a].rad
+                                                               :  xparGroups[a].rad);
+                const float eb = viewZ(xparGroups[b]) + (front ? -xparGroups[b].rad
+                                                               :  xparGroups[b].rad);
+                return ea > eb;                          // far to near
+            });
+            // Engine-front-facing == Metal BACK-facing here (measured, see the
+            // G-buffer cull comment), so drawing only the engine's front faces
+            // means CullModeFront. A reflection basis has determinant -1 and
+            // reverses screen winding, so both senses flip.
+            MTLCullMode cull = front ? MTLCullModeFront : MTLCullModeBack;
+            if (mirroredBasis)
+                cull = (cull == MTLCullModeFront) ? MTLCullModeBack : MTLCullModeFront;
+
+            // ---- ENCODER MERGING, with the proof that makes it faithful ----
+            // The obvious restructure — "one encoder per LAYER, draw every
+            // transparent clump into it" — is NOT semantics-preserving, and the
+            // CPU source says so. `RenderXparClumpInStrip`
+            // (DeferredSurfaceKernel.cpp:3768-3789) is called PER CLUMP and its
+            // pass 0 does `memset(g_xparPeelFloor, 0)`: the floor is a per-pixel
+            // BUFFER but its LIFETIME is one clump. Layer 0 of clump B therefore
+            // starts from "accept everything" again, not from clump A's layer 0.
+            // Merging all clumps into one layer pass would make layer 0 the
+            // farthest fragment over the WHOLE scene and reorder every
+            // overlapping pair. On fountain that is exactly the case the peel
+            // exists for — 'f_sphere' (pilon.lwo) and 'f in shpere' (inbal.lwo)
+            // are concentric to within 2 units and are DIFFERENT MESHES, so they
+            // are different clumps.
+            //
+            // What IS exactly equivalent: merge encoders across clumps whose
+            // SCREEN FOOTPRINTS ARE DISJOINT. Every buffer the peel touches —
+            // the floor, the side depth, the destination colour — is per-pixel,
+            // so two clumps that share no pixel cannot observe each other, in
+            // either order. Restricting the merge to a CONSECUTIVE RUN of the
+            // existing far-to-near order additionally guarantees that any two
+            // clumps that DO overlap keep their relative order: they land in
+            // different runs, and runs are encoded in order.
+            //
+            // The footprint is the projection of the clump's world AABB corners
+            // through the frame's own constants, padded, with anything crossing
+            // the near plane treated as full-screen. Over-estimating can only
+            // refuse a merge; it can never permit a wrong one.
+            struct Rect { float x0, y0, x1, y1; bool all; };
+            std::vector<Rect> rects(order.size());
+            for (size_t oi = 0; oi < order.size(); ++oi) {
+                const XparGroup &g = xparGroups[order[oi]];
+                Rect r{ 1e30f, 1e30f, -1e30f, -1e30f, false };
+                for (int k = 0; k < 8 && !r.all; ++k) {
+                    const float wp[3] = { (k & 1) ? g.bmax[0] : g.bmin[0],
+                                          (k & 2) ? g.bmax[1] : g.bmin[1],
+                                          (k & 4) ? g.bmax[2] : g.bmin[2] };
+                    float P[3] = {0, 0, 0};
+                    const float d[3] = { wp[0] - u.camSrc[0], wp[1] - u.camSrc[1],
+                                         wp[2] - u.camSrc[2] };
+                    for (int c = 0; c < 3; ++c) {
+                        P[0] += u.camRow0[c] * d[c];
+                        P[1] += u.camRow1[c] * d[c];
+                        P[2] += u.camRow2[c] * d[c];
+                    }
+                    if (P[2] <= u.nearZ) { r.all = true; break; }
+                    const float nx = (P[0] / P[2]) * u.sx + u.ox;
+                    const float ny = (P[1] / P[2]) * u.sy + u.oy;
+                    r.x0 = std::min(r.x0, nx); r.x1 = std::max(r.x1, nx);
+                    r.y0 = std::min(r.y0, ny); r.y1 = std::max(r.y1, ny);
+                }
+                if (!r.all) {   // ~2 px of NDC slack on each edge
+                    const float px = 4.0f / float(W), py = 4.0f / float(H);
+                    r.x0 -= px; r.x1 += px; r.y0 -= py; r.y1 += py;
+                }
+                rects[oi] = r;
+            }
+            auto overlaps = [](const Rect &a, const Rect &b) {
+                if (a.all || b.all) return true;
+                return !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
+            };
+            // First-fit LAYERING, not just consecutive runs: clump i goes into
+            // the earliest run that (a) sits at or after every earlier clump it
+            // OVERLAPS, and (b) holds nothing it overlaps. (a) preserves the
+            // far-to-near order for every overlapping pair — the only pairs
+            // whose order is observable — and (b) makes within-run order
+            // irrelevant. A clump that overlaps nothing can therefore join run 0
+            // even if a barrier clump sits between it and run 0 in the sort.
+            std::vector<std::vector<size_t>> runs;   // indices into `order`
+            std::vector<size_t> runOf(order.size(), 0);
+            for (size_t oi = 0; oi < order.size(); ++oi) {
+                // --no-xpar_merge: one run per clump, i.e. the pre-merge
+                // scheduling, so the merge can be priced on its own.
+                if (!opt.xparMerge) { runs.push_back({oi}); runOf[oi] = runs.size() - 1; continue; }
+                size_t lo = 0;
+                for (size_t j = 0; j < oi; ++j)
+                    if (overlaps(rects[j], rects[oi]) && runOf[j] + 1 > lo) lo = runOf[j] + 1;
+                size_t r = lo;
+                for (; r < runs.size(); ++r) {
+                    bool clash = false;
+                    for (size_t m : runs[r]) if (overlaps(rects[m], rects[oi])) { clash = true; break; }
+                    if (!clash) break;
+                }
+                while (runs.size() <= r) runs.push_back({});
+                runs[r].push_back(oi);
+                runOf[oi] = r;
+            }
+            xparRunsTotal += runs.size();
+            xparEncoders  += runs.size() * size_t(xparPeelPasses) * 2;
+
+            for (const auto &run : runs) {
+                int cur = 0;                     // ping-pong slot for this run
+                for (int pass = 0; pass < xparPeelPasses; ++pass) {
+                    id<MTLTexture> layerTex = xparDepthPP[cur];
+                    id<MTLTexture> floorTex = xparDepthPP[cur ^ 1];
+                    XparUniforms xu{};
+                    for (int c = 0; c < 3; ++c)
+                        xu.sceneAmbient[c] = scene.ambient[c] * (1.0f / 255.0f);
+                    xu.peelReverse   = (xparPeelPasses > 1) ? 1.0f : 0.0f;
+                    xu.usePeelFloor  = (pass > 0) ? 1.0f : 0.0f;
+
+                    // (a) depth resolve — one fragment per pixel for this layer
+                    {
+                        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                        rp.depthAttachment.texture = layerTex;
+                        rp.depthAttachment.loadAction = MTLLoadActionClear;
+                        rp.depthAttachment.storeAction = MTLStoreActionStore;
+                        // reversed-Z: 0 = far (keep-nearest init), 1 = near
+                        // (keep-farthest init), matching the CPU's 0 / 0xFFFF.
+                        rp.depthAttachment.clearDepth = (xparPeelPasses > 1) ? 1.0 : 0.0;
+                        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                        [e setRenderPipelineState:psoXparDepth];
+                        [e setDepthStencilState:(xparPeelPasses > 1) ? dssXparFar : dssXparNear];
+                        [e setCullMode:cull];
+                        [e setVertexBuffer:vb offset:0 atIndex:0];
+                        [e setVertexBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBytes:&xu length:sizeof(xu) atIndex:5];
+                        [e setFragmentTexture:srcDepth atIndex:5];
+                        [e setFragmentTexture:floorTex atIndex:6];
+                        for (size_t oi : run) {
+                            const XparGroup &g = xparGroups[order[oi]];
+                            for (size_t bi : g.batches) {
+                                const Batch &b = scene.batches[bi];
+                                if (!front && !b.twoSided) continue;   // see below
+                                [e setVertexBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
+                                [e drawPrimitives:MTLPrimitiveTypeTriangle
+                                      vertexStart:NSUInteger(b.firstVertex)
+                                      vertexCount:NSUInteger(b.vertexCount)];
+                            }
+                        }
+                        [e endEncoding];
+                    }
+                    // (b) composite the resolved layer
+                    {
+                        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                        rp.colorAttachments[0].texture = dst;
+                        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        rp.depthAttachment.texture = layerTex;
+                        rp.depthAttachment.loadAction = MTLLoadActionLoad;
+                        rp.depthAttachment.storeAction = MTLStoreActionStore;
+                        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                        [e setDepthStencilState:dssXparEqual];
+                        [e setCullMode:cull];
+                        [e setVertexBuffer:vb offset:0 atIndex:0];
+                        [e setVertexBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBytes:&u length:sizeof(u) atIndex:1];
+                        [e setFragmentBuffer:lightBuf offset:0 atIndex:3];
+                        [e setFragmentBytes:&xu length:sizeof(xu) atIndex:5];
+                        [e setFragmentSamplerState:samp atIndex:0];
+                        [e setFragmentTexture:srcDepth atIndex:5];
+                        [e setFragmentTexture:floorTex atIndex:6];
+                        for (size_t oi : run) {
+                            const XparGroup &g = xparGroups[order[oi]];
+                            for (size_t bi : g.batches) {
+                            const Batch &b = scene.batches[bi];
+                            // THE BACK LAYER ONLY EXISTS FOR Mat_TwoSided. The
+                            // peel splits the faces that SURVIVED
+                            // Transform_Objects' backface cull, and that cull's
+                            // only bypass is Mat_TwoSided
+                            // (Transform.cpp:2429-2434) — so a single-sided
+                            // transparent contributes nothing to the back
+                            // layer. This is the reason FOUNTAIN.CPP:854-864
+                            // force-sets TwoSided on the orb shells: without it
+                            // "those back-facing tris get culled before reaching
+                            // the deferred dispatch, so the back layer stays
+                            // empty and the orbs render as a thin shell."
+                            // Drawing both sides unconditionally double-lit
+                            // greets' 560-tri 'lamp light' set: MEASURED at
+                            // t=2000 as 223,615 px moved with |err| against the
+                            // reference rising 40.81 -> 46.44 on them.
+                            if (!front && !b.twoSided) continue;
+                            if (b.additive) {
+                                [e setRenderPipelineState:psoXparAdd];
+                            } else if (b.xparBlendAlpha > 0.0f) {
+                                [e setRenderPipelineState:psoXparLerp];
+                                [e setBlendColorRed:b.xparBlendAlpha green:b.xparBlendAlpha
+                                               blue:b.xparBlendAlpha alpha:1.0f];
+                            } else {
+                                const float dw = (b.transparency > 0.0f)
+                                               ? b.transparency * 0.01f : 0.5f;
+                                [e setRenderPipelineState:psoXparLegacy];
+                                [e setBlendColorRed:dw green:dw blue:dw alpha:1.0f];
+                            }
+                            [e setVertexBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
+                            [e setFragmentBytes:&bus[bi] length:sizeof(BatchUniforms) atIndex:2];
+                            [e setFragmentTexture:(b.textureIndex >= 0
+                                                       ? texes[size_t(b.textureIndex)]
+                                                       : texes[0]) atIndex:0];
+                            [e drawPrimitives:MTLPrimitiveTypeTriangle
+                                  vertexStart:NSUInteger(b.firstVertex)
+                                  vertexCount:NSUInteger(b.vertexCount)];
+                            }
+                        }
+                        [e endEncoding];
+                    }
+                    // (c) the next pass's floor IS this pass's resolved depth —
+                    // ping-pong, no blit. (Was a full-screen depth copy encoder
+                    // per extra pass: 78 blit encoders/frame on fountain.)
+                    cur ^= 1;
+                }
+            }
+        }
+    };
+
+    // ---- ENVIRONMENT PROBE BAKE --------------------------------------------
+    // Six 90-degree faces per probe, each rendered through the SAME G-buffer +
+    // lighting pipeline the frame uses — so what a metal reflects is the lit
+    // world, with this arm's shadows and lights in it, not a constant and not
+    // a sky gradient. Baked ONCE (greets' probes are static; the CPU caches
+    // them the same way and re-bakes only on invalidation), and deliberately
+    // NOT included in the per-frame timings for the same reason the static
+    // shadow cubes are not.
+    //
+    // Face bases are kCubeFaces, the same table the shadow cubes use and the
+    // same one Metal's texturecube sampler expects, so a direction sampled in
+    // the lighting pass lands on the texel this bake wrote. That equivalence
+    // was already established (and its 'up = -tc' sign already paid for) by
+    // the shadow work; reusing it is why this needs no new convention.
+    auto bakeEnvProbes = [&]() {
+        if (nProbes <= 0) return 0.0;
+        const auto t0 = std::chrono::steady_clock::now();
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        envBaking = true;
+        for (int p = 0; p < nProbes; ++p) {
+            // Self-exclusion: the surface this probe belongs to is not in it.
+            envSkipMat = baseMatName(scene.envProbes[size_t(p)].material);
+            for (int f = 0; f < 6; ++f) {
+                FrameUniforms fe = fu;
+                for (int c = 0; c < 3; ++c) {
+                    fe.camRow0[c] = kCubeFaces[f].right[c];
+                    fe.camRow1[c] = kCubeFaces[f].up[c];
+                    fe.camRow2[c] = kCubeFaces[f].fwd[c];
+                    fe.camSrc[c]  = scene.envProbes[size_t(p)].pos[c];
+                }
+                // A 90-degree square face: perspX = perspY = res/2 and the
+                // principal point at the centre, so sx = sy = 1 and ox = oy = 0.
+                fe.sx = 1.0f; fe.ox = 0.0f;
+                fe.sy = 1.0f; fe.oy = 0.0f;
+                fe.invSx = 1.0f; fe.invSy = 1.0f;
+                fe.mirrorCount = 0;                 // a probe carries no mirror composite
+                for (int c = 0; c < 4; ++c) fe.clipPlane[c] = 0.0f;
+                encodeGBuffer(cb, fe, eAlbedo, eNormal, eParams, eMirror, eDepth, nil);
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = eHdr;
+                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+                [enc setRenderPipelineState:psoLight];
+                [enc setFragmentBytes:&fe length:sizeof(fe) atIndex:1];
+                [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+                [enc setFragmentBuffer:shBuf offset:0 atIndex:3];
+                [enc setFragmentTexture:eAlbedo atIndex:0];
+                [enc setFragmentTexture:eNormal atIndex:1];
+                [enc setFragmentTexture:eParams atIndex:2];
+                [enc setFragmentTexture:eDepth  atIndex:3];
+                for (int s = 0; s < kMaxShadowCubes; ++s)
+                    [enc setFragmentTexture:(s < int(cubes.size()) ? cubes[size_t(s)] : dummyCube)
+                                    atIndex:NSUInteger(4 + s)];
+                for (int s = 0; s < kMaxSpotMaps; ++s)
+                    [enc setFragmentTexture:(s < int(spots.size()) ? spots[size_t(s)] : dummy2D)
+                                    atIndex:NSUInteger(20 + s)];
+                [enc setFragmentTexture:eMirror atIndex:36];
+                for (int s = 0; s < 4; ++s)
+                    [enc setFragmentTexture:dummyRefl atIndex:NSUInteger(37 + s)];
+                // NO ENV CUBES inside a probe bake: one bounce only. Feeding the
+                // probes back in would make the bake order-dependent and let a
+                // pair of facing metals amplify each other, which the CPU's
+                // single-pass FramePrep also does not do.
+                for (int s = 0; s < kMaxEnvProbes; ++s)
+                    [enc setFragmentTexture:dummyEnvCube atIndex:NSUInteger(41 + s)];
+                [enc setFragmentSamplerState:shadowSamp atIndex:1];
+                [enc setFragmentSamplerState:rawSamp atIndex:2];
+                [enc setFragmentSamplerState:envSamp atIndex:3];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [enc endEncoding];
+                id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+                [bl copyFromTexture:eHdr sourceSlice:0 sourceLevel:0
+                        sourceOrigin:MTLOriginMake(0, 0, 0)
+                          sourceSize:MTLSizeMake(NSUInteger(envRes), NSUInteger(envRes), 1)
+                           toTexture:envCubes[size_t(p)] destinationSlice:NSUInteger(f)
+                    destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [bl endEncoding];
+            }
+        }
+        envSkipMat.clear();
+        envBaking = false;
+        {   // roughness -> mip needs the chain
+            id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+            for (int p = 0; p < nProbes; ++p) [bl generateMipmapsForTexture:envCubes[size_t(p)]];
+            [bl endEncoding];
+        }
+        [cb commit];
+        [cb waitUntilCompleted];
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t0).count();
+    };
+
+    // ---- PARTICLE REPLAY: load the dump, build the instance buffer --------
+    // This is the GPU half of dump-and-replay (ParticleReplay.h). Positions and
+    // colours come from the CPU's OWN per-frame particle state, so identical
+    // input on both arms means any image difference is RENDERING, not
+    // simulation — the property that makes this an oracle. Nothing is
+    // simulated here and nothing is guessed: with no --pcl file the pass is
+    // simply absent, which is the state fountain has been in all along.
+    struct PclInstance { float posSize[4]; float color[4]; };
+    id<MTLBuffer> pclBuf = nil;
+    id<MTLTexture> pclTex = nil;
+    size_t pclCount = 0;
+    if (!opt.pclPath.empty()) {
+        PclDump dump;
+        if (!PclLoad(opt.pclPath, dump, /*verbose=*/true)) return false;
+        const int fi = dump.nearestByCurFrame(scene.curFrame);
+        if (fi < 0) { std::fprintf(stderr, "[PCL] dump has no frames\n"); return false; }
+        const PclFrame &fr = dump.frames[size_t(fi)];
+        if (std::fabs(fr.curFrame - scene.curFrame) > 0.5f)
+            std::fprintf(stderr, "[PCL] WARNING: nearest dumped frame is curFrame %.2f but "
+                                 "this render is at %.2f — the spray is from a DIFFERENT "
+                                 "instant and any diff is partly simulation\n",
+                         fr.curFrame, scene.curFrame);
+        std::vector<PclInstance> inst(fr.particles.size());
+        for (size_t i = 0; i < fr.particles.size(); ++i) {
+            const PclParticle &q = fr.particles[i];
+            PclInstance &d = inst[i];
+            for (int c = 0; c < 3; ++c) d.posSize[c] = q.pos[c];
+            // FILLERS.CPP:2329 — edgeLen = ImageSize * RZ * PerspX * FlareSize * 2,
+            // and Spriter takes that as the HALF-extent. Everything except the
+            // 1/z is constant per particle, so fold it here and divide in the
+            // vertex stage, exactly as the flare path does.
+            d.posSize[3] = fr.imageSize * scene.camera.perspX * q.flareSize * 2.0f;
+            for (int c = 0; c < 3; ++c) d.color[c] = float(q.rgb[c]) * (1.0f / 255.0f);
+            d.color[3] = 1.0f;
+        }
+        pclCount = inst.size();
+        if (pclCount) {
+            pclBuf = [dev newBufferWithBytes:inst.data()
+                                      length:inst.size() * sizeof(PclInstance)
+                                     options:MTLResourceStorageModeShared];
+            std::vector<uint8_t> rgba; int tw = 0, th = 0;
+            PclBuildSpriteTexture(rgba, tw, th);
+            MTLTextureDescriptor *td =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                   width:NSUInteger(tw)
+                                                                  height:NSUInteger(th)
+                                                               mipmapped:NO];
+            td.usage = MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModeShared;
+            pclTex = [dev newTextureWithDescriptor:td];
+            [pclTex replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(tw), NSUInteger(th))
+                      mipmapLevel:0 withBytes:rgba.data() bytesPerRow:NSUInteger(tw) * 4];
+        }
+        std::fprintf(stderr,
+            "[PCL] replaying %zu particle(s) from dump frame %d (curFrame %.2f, "
+            "ImageSize %.3f) — ONE instanced draw, additive into HDR, no peel\n",
+            pclCount, fi, fr.curFrame, fr.imageSize);
+    }
+
+    // ---- GPU PARTICLE SIMULATION (--pcl_sim) -------------------------------
+    // The replay above needs a recording of the exact pose. A free-fly window
+    // has no such recording and never can, so this is the interactive half:
+    // Particle_Kinematics' motion model, ported to a compute kernel, stepped on
+    // the same clock the rest of the frame animates on.
+    //
+    // IT IS NOT AN ORACLE. It does not reproduce the CPU's RAND_15() history,
+    // so the individual particles differ from frame one. Shape, spread,
+    // density, lifetime, size and colour ARE ported term for term and are what
+    // a by-eye comparison can use. --pcl (a dump) remains the bit-comparable
+    // instrument and is what the tables in docs/GPU_BENCHMARK_PLAN.md use.
+    struct PclSimU {
+        float dt, timer, sizeScale;
+        uint32_t frameIdx, outerCursor, outerSpawn, innerCursor, innerSpawn;
+    };
+    const uint32_t kPclOuter = 3000, kPclInner = 1500, kPclTotal = 8250;
+    // Auto = the window, on fountain only. The emitter geometry in the kernel is
+    // fountain's (FntSpring/FntHead/magwav), so switching it on elsewhere would
+    // paint a fountain's spray into another scene.
+    const char *pclFld = (opt.loadOpt && opt.loadOpt->fldPath) ? opt.loadOpt->fldPath : "";
+    const bool pclSceneIsFountain = std::strstr(pclFld, "FOUNTAIN") != nullptr;
+    // The ingest already resolves the scene's FDS ImageSize (SceneIngest.cpp:574
+    // — fountain 10.0, everything else 0.25) because the flare pass needs it;
+    // the sprite half-extent is the same expression, so reuse it rather than
+    // carry a second constant that can drift.
+    const float pclImgSize = (opt.pclImageSize > 0.0f) ? opt.pclImageSize : scene.imageSize;
+    bool pclSimOn = (opt.pclSim == 1) ||
+                    (opt.pclSim < 0 && opt.interactive && pclSceneIsFountain);
+    // A dump is strictly more precise than a re-derivation; if the user supplied
+    // one, it wins and says so.
+    if (pclSimOn && pclBuf) {
+        std::fprintf(stderr,
+            "[PCL] --pcl= dump given as well as the sim: the DUMP wins (it is the "
+            "bit-comparable instrument). Drop --pcl to use the sim.\n");
+        pclSimOn = false;
+    }
+    if (pclSimOn && !pclSceneIsFountain)
+        std::fprintf(stderr,
+            "[PCL] WARNING: the sim's emitter geometry is FOUNTAIN's "
+            "(FntSpring/magwav, DEMO/FOUNTAIN.H); this scene is '%s'.\n", pclFld);
+
+    id<MTLComputePipelineState> psoPclSim = nil;
+    id<MTLBuffer> pclSimBuf = nil;      // persistent per-slot state
+    id<MTLBuffer> pclInstBuf = nil;     // what vs_pcl reads
+    uint32_t pclFrameIdx = 0, pclOuterCursor = 0, pclInnerCursor = 0;
+    float pclCarryOuter = 0.0f, pclCarryInner = 0.0f;
+    double pclSimMs = 0.0;              // last measured step cost, GPU time
+    if (pclSimOn) {
+        NSError *e = nil;
+        psoPclSim = [dev newComputePipelineStateWithFunction:fn_(@"cs_pcl_sim") error:&e];
+        if (!psoPclSim) {
+            std::fprintf(stderr, "[PCL] sim pso: %s\n", [[e localizedDescription] UTF8String]);
+            return false;
+        }
+        // 48 B of state per slot; zeroed = every slot dead, which is the CPU's
+        // own post-memset state in Initialize_Particles (:433).
+        pclSimBuf = [dev newBufferWithLength:kPclTotal * 48
+                                     options:MTLResourceStorageModePrivate];
+        // SHARED, not private: 264 KB on a unified-memory device costs nothing
+        // to the draw and buys a per-run CENSUS (alive count, bounding box,
+        // mean colour) that can be diffed against the CPU dump's own numbers.
+        // A spray that renders is not the same claim as a spray with the right
+        // population, and this arm has already paid twice for a pass that drew
+        // a fraction of what it should and read as "the GPU is too dark".
+        pclInstBuf = [dev newBufferWithLength:kPclTotal * sizeof(float) * 8
+                                      options:MTLResourceStorageModeShared];
+        {   // Private buffers are not zero-initialised by contract. Fill them.
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+            [bl fillBuffer:pclSimBuf range:NSMakeRange(0, [pclSimBuf length]) value:0];
+            [bl fillBuffer:pclInstBuf range:NSMakeRange(0, [pclInstBuf length]) value:0];
+            [bl endEncoding];
+            [cb commit]; [cb waitUntilCompleted];
+        }
+        std::vector<uint8_t> rgba; int tw = 0, th = 0;
+        PclBuildSpriteTexture(rgba, tw, th);
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                               width:NSUInteger(tw)
+                                                              height:NSUInteger(th)
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeShared;
+        pclTex = [dev newTextureWithDescriptor:td];
+        [pclTex replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(tw), NSUInteger(th))
+                  mipmapLevel:0 withBytes:rgba.data() bytesPerRow:NSUInteger(tw) * 4];
+        pclBuf = pclInstBuf;
+        pclCount = kPclTotal;
+    }
+
+    // One simulation step. `dtSec` is the step, `timerCs` the scene Timer
+    // (centiseconds) AT that step — the emitter phase depends on it, so a
+    // warm-up has to walk the real time wall, not repeat one instant.
+    // Encoded into a caller-supplied command buffer so a 300-step warm-up is
+    // 300 dispatches in a handful of submissions rather than 300 round trips.
+    auto pclSimEncode = [&](id<MTLCommandBuffer> cb, float dtSec, float timerCs) {
+        if (!psoPclSim) return;
+        // The spawn accumulators are the CPU's own (SwCarry / SwCarry2,
+        // FOUNTAIN.CPP:655 and :748): a fractional spawn budget carried across
+        // frames so the rate is exact at any frame rate.
+        const float swOut = dtSec * 600.0f + pclCarryOuter;      // FntSpawnOutPcl
+        const uint32_t spawnOut = uint32_t(swOut);
+        pclCarryOuter = swOut - float(spawnOut);
+        const float swIn = dtSec * 120.0f + pclCarryInner;       // FntSpawnInnerPcl
+        const uint32_t spawn2 = uint32_t(swIn);
+        pclCarryInner = swIn - float(spawn2);
+        const uint32_t spawnIn = spawn2 * 3;                     // the CPU's Spwn = Spwn2*3
+
+        PclSimU su{};
+        su.dt = dtSec;
+        su.timer = timerCs;
+        su.sizeScale = pclImgSize * scene.camera.perspX * 2.0f;
+        su.frameIdx = pclFrameIdx++;
+        su.outerCursor = pclOuterCursor;
+        su.outerSpawn = std::min(spawnOut, kPclOuter);
+        su.innerCursor = pclInnerCursor;
+        su.innerSpawn = std::min(spawnIn, kPclInner);
+        pclOuterCursor = (pclOuterCursor + su.outerSpawn) % kPclOuter;
+        pclInnerCursor = (pclInnerCursor + su.innerSpawn) % kPclInner;
+
+        id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        [ce setComputePipelineState:psoPclSim];
+        [ce setBuffer:pclSimBuf offset:0 atIndex:0];
+        [ce setBuffer:pclInstBuf offset:0 atIndex:1];
+        [ce setBytes:&su length:sizeof(su) atIndex:2];
+        const NSUInteger tg = std::min<NSUInteger>(
+            [psoPclSim maxTotalThreadsPerThreadgroup], 256);
+        [ce dispatchThreads:MTLSizeMake(kPclTotal, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [ce endEncoding];
+    };
+
+    // Spin the sim through the wall of scene time immediately BEFORE `timerCs`
+    // at a fixed step, so the population is at equilibrium and the rotating
+    // emitters carry their real phase history. Nothing about particle state is
+    // authored at a given t; the CPU gets there by having simulated from scene
+    // start, and this is the same thing done cheaply.
+    auto pclSimWarmTo = [&](float timerCs) {
+        if (!psoPclSim) return;
+        const float stepSec = std::max(opt.pclSimStep, 1e-4f);
+        const int n = std::max(0, int(opt.pclSimWarm / stepSec + 0.5f));
+        const auto t0 = std::chrono::steady_clock::now();
+        // Batched: one command buffer per 64 steps. Each dispatch reads the
+        // buffer the previous one wrote, and Metal orders dispatches within an
+        // encoder-per-dispatch chain on the same queue, so this is safe.
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        for (int i = 0; i < n; ++i) {
+            const float tCs = timerCs - float(n - i) * stepSec * 100.0f;
+            pclSimEncode(cb, stepSec, tCs);
+            if ((i % 64) == 63) { [cb commit]; [cb waitUntilCompleted]; cb = [queue commandBuffer]; }
+        }
+        [cb commit]; [cb waitUntilCompleted];
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
+        // CENSUS. Same three quantities the CPU dump can be asked for, so the
+        // motion model is checkable as numbers and not only by eye.
+        const auto *inst = static_cast<const float *>([pclInstBuf contents]);
+        uint32_t alive = 0, aOuter = 0;
+        float lo3[3] = {1e30f, 1e30f, 1e30f}, hi3[3] = {-1e30f, -1e30f, -1e30f};
+        double sc3[3] = {0, 0, 0};
+        for (uint32_t i = 0; i < kPclTotal; ++i) {
+            const float *d = inst + i * 8;
+            if (!(d[3] > 0.0f)) continue;
+            ++alive; if (i < kPclOuter) ++aOuter;
+            for (int c = 0; c < 3; ++c) {
+                lo3[c] = std::min(lo3[c], d[c]); hi3[c] = std::max(hi3[c], d[c]);
+                sc3[c] += double(d[4 + c]) * 255.0;
+            }
+        }
+        const double inv = alive ? 1.0 / double(alive) : 0.0;
+        std::fprintf(stderr,
+            "[PCL] SIM (NOT an oracle — GPU-integrated, does not track the CPU's RNG):\n"
+            "[PCL]   warmed %d steps of %.4f s to Timer %.1f (%.2f s of scene time) in "
+            "%.2f ms wall\n"
+            "[PCL]   %u slots (outer %u + inner 3x%u + spiral %u inert), ImageSize %.2f, "
+            "perspX %.1f\n"
+            "[PCL]   census: %u ACTIVE (%u outer + %u inner) | bbox x[%.1f %.1f] "
+            "y[%.1f %.1f] z[%.1f %.1f] | mean RGB %.1f/%.1f/%.1f\n",
+            n, stepSec, timerCs, opt.pclSimWarm, ms,
+            kPclTotal, kPclOuter, kPclInner, kPclTotal - kPclOuter - 3 * kPclInner,
+            pclImgSize, scene.camera.perspX,
+            alive, aOuter, alive - aOuter,
+            lo3[0], hi3[0], lo3[1], hi3[1], lo3[2], hi3[2],
+            sc3[0] * inv, sc3[1] * inv, sc3[2] * inv);
+    };
+    if (pclSimOn) pclSimWarmTo(float(scene.resolvedDemoT));
+    // Price ONE step the way the WINDOW pays for it: its own command buffer,
+    // committed and waited on, one dispatch inside. Not amortised over a
+    // batched warm-up, because the window cannot batch — it has to have this
+    // frame's particles before it encodes this frame.
+    if (pclSimOn && opt.iters > 0) {
+        const int n = 60;
+        double mn = 1e30, sum = 0; int got = 0;
+        for (int i = 0; i < n; ++i) {
+            id<MTLCommandBuffer> scb = [queue commandBuffer];
+            pclSimEncode(scb, 1.0f / 60.0f, float(scene.resolvedDemoT));
+            [scb commit]; [scb waitUntilCompleted];
+            const double ms = ([scb GPUEndTime] - [scb GPUStartTime]) * 1000.0;
+            if (ms > 0) { mn = std::min(mn, ms); sum += ms; ++got; }
+        }
+        if (got) std::fprintf(stderr,
+            "[PCL]   step cost, %d single-step command buffers (the window's own "
+            "submission shape): min %.4f ms, mean %.4f ms GPU\n", got, mn, sum / got);
+        // Put the population back where the render expects it.
+        pclSimWarmTo(float(scene.resolvedDemoT));
+    }
+
+    // Particle sprites: ONE instanced draw, additive into `dst`, depth-TESTED
+    // against `depthTex` with no depth write — Spriter's own semantics.
+    auto encodePcl = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                         id<MTLTexture> dst, id<MTLTexture> depthTex) {
+        if (!pclBuf || pclCount == 0) return;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoPcl];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc setVertexBuffer:pclBuf offset:0 atIndex:2];
+        const float vp[4] = { float(W), float(H), scene.camera.cntrEX, scene.camera.cntrEY };
+        [enc setVertexBytes:vp length:sizeof(vp) atIndex:3];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        [enc setFragmentTexture:pclTex atIndex:0];
+        [enc setFragmentTexture:depthTex atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+                                                   instanceCount:NSUInteger(pclCount)];
+        [enc endEncoding];
+    };
+
+    // Flare sprites, additive into `dst`, projected with camera `camRot/camSrc`
+    // taken from a FrameUniforms. `clip` skips lights at/behind a mirror plane
+    // (their reflections would otherwise hang in front of it).
+    auto encodeFlares = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                            id<MTLTexture> dst, id<MTLTexture> depthTex,
+                            const float *clip4) {
+        if (!opt.flares || flares.empty()) return;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoFlare];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentSamplerState:samp atIndex:0];
+        [enc setFragmentTexture:depthTex atIndex:1];
+        for (const auto &fi : flares) {
+            if (clip4) {
+                const float sd = fi.wpos[0]*clip4[0] + fi.wpos[1]*clip4[1]
+                               + fi.wpos[2]*clip4[2] + clip4[3];
+                if (sd < 0.05f) continue;
+            }
+            float rel[3];
+            for (int c = 0; c < 3; ++c) rel[c] = fi.wpos[c] - u.camSrc[c];
+            float vx = 0, vy = 0, vz = 0;
+            for (int c = 0; c < 3; ++c) {
+                vx += u.camRow0[c] * rel[c];
+                vy += u.camRow1[c] * rel[c];
+                vz += u.camRow2[c] * rel[c];
+            }
+            if (!(vz > scene.camera.nearZ && vz < scene.camera.farZ)) continue;
+            FlareUniforms fun{};
+            fun.centerPx[0] = scene.camera.cntrEX + vx * scene.camera.perspX / vz;
+            fun.centerPx[1] = scene.camera.cntrEY - vy * scene.camera.perspY / vz;
+            fun.centerPx[2] = vz;
+            fun.centerPx[3] = fi.worldHalf / vz;
+            fun.gain[0] = opt.flareGain;
+            fun.gain[2] = float(W);
+            fun.gain[3] = float(H);
+            [enc setVertexBytes:&fun length:sizeof(fun) atIndex:2];
+            [enc setFragmentBytes:&fun length:sizeof(fun) atIndex:2];
+            [enc setFragmentTexture:texes[size_t(fi.tex)] atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        }
+        [enc endEncoding];
+    };
+
+    // VOLUMETRIC SPOT CONES into an arbitrary HDR target with an arbitrary
+    // camera. Factored out of renderFrame so the MIRROR REFLECTION views can
+    // run it too — reported 2026-08-08 as "no spotlight cones in mirrors".
+    //
+    // The CPU shows beams inside its mirrors, and it is worth being precise
+    // about how, because the two arms get there differently. The CPU has ONE
+    // screen-space cone pass (RENDER.CPP:1237) and admits the MIRROR-CLONE
+    // spots into it, gated per pixel on the mirror's stamped footprint with the
+    // chord clamped to start at the glass depth (DeferredVolumetric.cpp:761-772
+    // and the comment at :1858-1883, "Mirror-clone spots ARE admitted (beams
+    // show in mirrors)"). This arm has no clone geometry and no footprint mask:
+    // its mirror is a real reflection render, so the faithful equivalent is to
+    // run the same integral from the reflected camera against the reflection's
+    // own depth buffer. Same beams, same shadow taps, different bookkeeping.
+    auto encodeCones = [&](id<MTLCommandBuffer> cb, const FrameUniforms &u,
+                           id<MTLTexture> dst, id<MTLTexture> depthTex) {
+        if (!opt.cones || coneU.density <= 0.0f || nSpotLights <= 0) return;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:psoCones];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+        [enc setFragmentBytes:&coneU length:sizeof(coneU) atIndex:4];
+        [enc setFragmentTexture:depthTex atIndex:3];
+        for (int i = 0; i < kMaxSpotMaps; ++i)
+            [enc setFragmentTexture:(i < int(spots.size()) ? spots[size_t(i)] : dummy2D)
+                            atIndex:NSUInteger(20 + i)];
+        [enc setFragmentSamplerState:shadowSamp atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+    };
+
+    auto renderFrame = [&]() -> id<MTLCommandBuffer> {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        tessThisPass = false;      // mirrors + bakes take the flat stone
+
+        // --- pass 0: per-frame DYNAMIC shadow bake (moving omnis only) ---
+        if (opt.shadows) {
+            bakeCubes(cb, /*movingOnly=*/!opt.rebakeAll, /*timed=*/true);
+            bakeSpotMaps(cb);
+        }
+
+        // --- pass 0b: mirror REFLECTION views (pass index 4 in the counters) ---
+        // Per visible mirror: reflect the camera across the panel plane
+        // (position mirrored, each view row reflected — det -1, so a
+        // left-handed basis; harmless while raster culling is off), render
+        // the real scene through the same G-buffer + lighting pipeline with
+        // an oblique clip at the plane, and light it with the same lights and
+        // the same world-space shadow cubes. This is radiometrically the
+        // CPU's clone+cloned-omni machinery: what you see through the panel
+        // is the lit world reflected. No second bounce: another mirror's
+        // panel inside a reflection shows its emissive text, not a further
+        // reflection (the CPU's --mirror_rtt order-2 slots are out of scope,
+        // stated in the plan).
+        bool mirrorActive[kMaxMirrors] = {};
+        int firstActive = -1, lastActive = -1;
+        // --viz=mirror (13) NEEDS the reflection passes to run; every other
+        // viz mode deliberately skips them.
+        if (nMirrors > 0 && (opt.viz < 0 || opt.viz == 13)) {
+            for (int i = 0; i < nMirrors; ++i) {
+                const auto &m = scene.mirrors[size_t(i)];
+                const float sd = m.n[0]*scene.camera.src[0] + m.n[1]*scene.camera.src[1]
+                               + m.n[2]*scene.camera.src[2] + m.d;
+                mirrorActive[i] = sd > 0.01f;
+                if (mirrorActive[i]) { if (firstActive < 0) firstActive = i; lastActive = i; }
+            }
+        }
+        // The deferred lighting encoder for a REFLECTION target. Shared by the
+        // first-order pass and the second-order pre-pass so the two can never
+        // drift in what they light with (same lights, same world-space shadow
+        // cubes, same env probes); `refl4` is what lands at texture 37..40 and
+        // is the ONLY difference between an order-1 and an order-2 pass.
+        auto encodeReflLight = [&](const FrameUniforms &u, id<MTLTexture> dst,
+                                   id<MTLTexture> tAlb, id<MTLTexture> tNrm,
+                                   id<MTLTexture> tPar, id<MTLTexture> tDep,
+                                   id<MTLTexture> tMir,
+                                   id<MTLTexture> const *refl4,
+                                   const MTLScissorRect *scissor) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = dst;
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:psoLight];
+            if (scissor) [enc setScissorRect:*scissor];
+            [enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+            [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+            [enc setFragmentBuffer:shBuf offset:0 atIndex:3];
+            [enc setFragmentTexture:tAlb atIndex:0];
+            [enc setFragmentTexture:tNrm atIndex:1];
+            [enc setFragmentTexture:tPar atIndex:2];
+            [enc setFragmentTexture:tDep atIndex:3];
+            for (int s = 0; s < kMaxShadowCubes; ++s)
+                [enc setFragmentTexture:(s < int(cubes.size()) ? cubes[size_t(s)] : dummyCube)
+                                atIndex:NSUInteger(4 + s)];
+            for (int s = 0; s < kMaxSpotMaps; ++s)
+                [enc setFragmentTexture:(s < int(spots.size()) ? spots[size_t(s)] : dummy2D)
+                                atIndex:NSUInteger(20 + s)];
+            [enc setFragmentTexture:tMir atIndex:36];
+            for (int s = 0; s < 4; ++s)
+                [enc setFragmentTexture:(refl4 && refl4[s] ? refl4[s] : dummyRefl)
+                                atIndex:NSUInteger(37 + s)];
+            for (int s = 0; s < kMaxEnvProbes; ++s)
+                [enc setFragmentTexture:(s < nProbes ? envCubes[size_t(s)] : dummyEnvCube)
+                                atIndex:NSUInteger(41 + s)];
+            [enc setFragmentSamplerState:shadowSamp atIndex:1];
+            [enc setFragmentSamplerState:rawSamp atIndex:2];
+            [enc setFragmentSamplerState:envSamp atIndex:3];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+        };
+
+        // Screen bbox, in a w x h target, of a world AABB under `u`. Used to
+        // decide whether an (A,B) order-2 pair is worth rendering and to scissor
+        // it to the panel.
+        //
+        // The box is CLIPPED TO THE NEAR PLANE along its twelve edges rather
+        // than "any corner behind the eye => claim the whole target". That
+        // fallback is correct but useless: MEASURED at t=6133, three of the five
+        // live pairs straddle the eye plane and took the whole 960x540 target,
+        // which is the entire point of the scissor thrown away. Clipping the
+        // edges keeps those tight and still never under-covers, because the
+        // projection of a convex body clipped to z >= near is contained in the
+        // hull of its clipped edge endpoints.
+        auto projectAabb = [](const FrameUniforms &u, const float bmn[3],
+                              const float bmx[3], int w, int h, float out4[4]) -> bool {
+            auto view = [&](const float p[3], float v[3]) {
+                const float r[3] = {p[0] - u.camSrc[0], p[1] - u.camSrc[1], p[2] - u.camSrc[2]};
+                v[0] = u.camRow0[0]*r[0] + u.camRow0[1]*r[1] + u.camRow0[2]*r[2];
+                v[1] = u.camRow1[0]*r[0] + u.camRow1[1]*r[1] + u.camRow1[2]*r[2];
+                v[2] = u.camRow2[0]*r[0] + u.camRow2[1]*r[1] + u.camRow2[2]*r[2];
+            };
+            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+            bool any = false;
+            auto add = [&](const float v[3]) {
+                const float z = std::max(v[2], u.nearZ);
+                const float nx = (u.sx*v[0] + u.ox*z) / z, ny = (u.sy*v[1] + u.oy*z) / z;
+                const float sx = (nx * 0.5f + 0.5f) * float(w);
+                const float sy = (0.5f - ny * 0.5f) * float(h);
+                x0 = std::min(x0, sx); x1 = std::max(x1, sx);
+                y0 = std::min(y0, sy); y1 = std::max(y1, sy);
+                any = true;
+            };
+            float V[8][3];
+            for (int k = 0; k < 8; ++k) {
+                const float p[3] = {(k & 1) ? bmx[0] : bmn[0],
+                                    (k & 2) ? bmx[1] : bmn[1],
+                                    (k & 4) ? bmx[2] : bmn[2]};
+                view(p, V[k]);
+                if (V[k][2] > u.nearZ) add(V[k]);
+            }
+            for (int a = 0; a < 8; ++a)
+                for (int bit = 1; bit < 8; bit <<= 1) {
+                    const int b = a | bit;
+                    if (b == a) continue;                  // edge, each once
+                    const bool fa = V[a][2] > u.nearZ, fb = V[b][2] > u.nearZ;
+                    if (fa == fb) continue;                // both sides handled above
+                    const float t = (u.nearZ - V[a][2]) / (V[b][2] - V[a][2]);
+                    const float c[3] = {V[a][0] + t*(V[b][0]-V[a][0]),
+                                        V[a][1] + t*(V[b][1]-V[a][1]), u.nearZ};
+                    add(c);
+                }
+            if (!any) return false;
+            out4[0] = std::max(0.0f, x0);      out4[1] = std::max(0.0f, y0);
+            out4[2] = std::min(float(w), x1);  out4[3] = std::min(float(h), y1);
+            return out4[2] > out4[0] && out4[3] > out4[1];
+        };
+
+        int m2Pairs = 0;
+        bool m2Started = false;
+
+        for (int i = 0; i < nMirrors; ++i) {
+            if (!mirrorActive[i]) continue;
+            const auto &m = scene.mirrors[size_t(i)];
+            FrameUniforms fum = fu;
+            const float N[3] = {m.n[0], m.n[1], m.n[2]};
+            const float sdC = N[0]*fu.camSrc[0] + N[1]*fu.camSrc[1] + N[2]*fu.camSrc[2] + m.d;
+            for (int c = 0; c < 3; ++c) fum.camSrc[c] = fu.camSrc[c] - 2.0f * sdC * N[c];
+            float *rows[3] = {fum.camRow0, fum.camRow1, fum.camRow2};
+            const float *src[3] = {fu.camRow0, fu.camRow1, fu.camRow2};
+            for (int r = 0; r < 3; ++r) {
+                const float d = src[r][0]*N[0] + src[r][1]*N[1] + src[r][2]*N[2];
+                for (int c = 0; c < 3; ++c) rows[r][c] = src[r][c] - 2.0f * d * N[c];
+            }
+            for (int c = 0; c < 3; ++c) fum.clipPlane[c] = N[c];
+            fum.clipPlane[3] = m.d;
+            fum.mirrorCount = 0;   // set below iff --mirror2 renders a pair for A
+
+            // ---- SECOND ORDER: every (A=i, B=j) pair, before A's own view ----
+            // The eye for pair (A,B) is reflect_B(reflect_A(eye)) — TWO plane
+            // reflections, so the basis determinant is back to +1 and the cull
+            // sense returns to the main view's (mirroredBasis=false). That is
+            // not a detail: with the first-order sense the whole order-2 view
+            // renders inside-out.
+            id<MTLTexture> refl4[4] = {nil, nil, nil, nil};
+            bool anyPair = false;
+            if (mirror2On) {
+                for (int j = 0; j < nMirrors; ++j) {
+                    if (j == i) continue;              // a panel is clipped out of its own view
+                    const auto &mb = scene.mirrors[size_t(j)];
+                    if (!mb.hasBounds()) continue;
+                    // B must face A's reflected eye, the same sd > 0 test the
+                    // first order applies to the real eye.
+                    const float sdB = mb.n[0]*fum.camSrc[0] + mb.n[1]*fum.camSrc[1]
+                                    + mb.n[2]*fum.camSrc[2] + mb.d;
+                    if (sdB <= 0.01f) continue;
+                    // Footprint of panel B inside A's view, in MAIN pixels —
+                    // that is the gate's unit and, scaled, the scissor.
+                    float bx[4];
+                    if (!projectAabb(fum, mb.bmin, mb.bmax, W, H, bx)) continue;
+                    if ((bx[2]-bx[0]) * (bx[3]-bx[1]) < opt.mirror2MinPx) continue;
+
+                    FrameUniforms fu2 = fum;
+                    const float NB[3] = {mb.n[0], mb.n[1], mb.n[2]};
+                    for (int c = 0; c < 3; ++c)
+                        fu2.camSrc[c] = fum.camSrc[c] - 2.0f * sdB * NB[c];
+                    float *r2[3] = {fu2.camRow0, fu2.camRow1, fu2.camRow2};
+                    const float *s2[3] = {fum.camRow0, fum.camRow1, fum.camRow2};
+                    for (int r = 0; r < 3; ++r) {
+                        const float dd = s2[r][0]*NB[0] + s2[r][1]*NB[1] + s2[r][2]*NB[2];
+                        for (int c = 0; c < 3; ++c) r2[r][c] = s2[r][c] - 2.0f * dd * NB[c];
+                    }
+                    for (int c = 0; c < 3; ++c) fu2.clipPlane[c] = NB[c];
+                    fu2.clipPlane[3] = mb.d;
+                    fu2.mirrorCount = 0;      // ORDER 2 IS THE CEILING
+                    fu2.reflUv[0] = fu2.reflUv[1] = 0.0f;
+
+                    const float sc = float(W2) / float(W);
+                    MTLScissorRect srect;
+                    srect.x = NSUInteger(std::max(0.0f, std::floor(bx[0]*sc)));
+                    srect.y = NSUInteger(std::max(0.0f, std::floor(bx[1]*sc)));
+                    srect.width  = NSUInteger(std::min(float(W2) - float(srect.x),
+                                        std::ceil((bx[2]-bx[0])*sc) + 1.0f));
+                    srect.height = NSUInteger(std::min(float(H2) - float(srect.y),
+                                        std::ceil((bx[3]-bx[1])*sc) + 1.0f));
+                    if (srect.width == 0 || srect.height == 0) continue;
+
+                    void (^h2)(MTLRenderPassDescriptor *) = nil;
+                    if (sampleBuf && !m2Started) {
+                        h2 = ^(MTLRenderPassDescriptor *rp) {
+                            rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                            rp.sampleBufferAttachments[0].startOfVertexSampleIndex = 12;
+                            rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = MTLCounterDontSample;
+                            rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                            rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                        };
+                    }
+                    encodeGBuffer(cb, fu2, m2Albedo, m2Normal, m2Params, m2Mirror, m2Depth,
+                                  h2, /*mirroredBasis=*/false, &srect);
+                    encodeReflLight(fu2, refl2[size_t(j)], m2Albedo, m2Normal, m2Params,
+                                    m2Depth, m2Mirror, nullptr, &srect);
+                    refl4[j] = refl2[size_t(j)];
+                    anyPair = true;
+                    m2Started = true;
+                    ++m2Pairs;
+                    if (opt.mirror2Stats)
+                        std::fprintf(stderr,
+                            "[MIRROR2] pair m%d->m%d ('%s' inside '%s') scissor %lux%lu at %lu,%lu\n",
+                            i + 1, j + 1, mb.material.c_str(), m.material.c_str(),
+                            (unsigned long)srect.width, (unsigned long)srect.height,
+                            (unsigned long)srect.x, (unsigned long)srect.y);
+                }
+            }
+            if (anyPair) {
+                // Turn the composite ON inside A's lighting pass, and switch the
+                // fetch from an integer same-pixel read to a normalised sample
+                // because the order-2 targets are smaller than this pass.
+                //
+                // reflUv normalises by THIS PASS's resolution, not the source
+                // texture's: the shader multiplies its own `position.xy`, which
+                // is in reflHdr (full-res) pixels, and the sampler does the
+                // mapping into the smaller texture. Getting this backwards
+                // (1/W2) sends uv up to 2.0, clamp-to-edge pins every fetch to
+                // the black border, and the whole feature silently composites
+                // ZERO — measured exactly that way before this line was right.
+                fum.mirrorCount = uint32_t(nMirrors);
+                fum.reflUv[0] = 1.0f / float(W);
+                fum.reflUv[1] = 1.0f / float(H);
+            }
+
+            const bool first = (i == firstActive), last = (i == lastActive);
+            void (^hook)(MTLRenderPassDescriptor *) = nil;
+            if (sampleBuf && first) {
+                hook = ^(MTLRenderPassDescriptor *rp) {
+                    rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                    rp.sampleBufferAttachments[0].startOfVertexSampleIndex = 8;
+                    rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = MTLCounterDontSample;
+                    rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                    rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                };
+            }
+            encodeGBuffer(cb, fum, mAlbedo, mNormal, mParams, mMirror, mDepth, hook,
+                          /*mirroredBasis=*/true);
+            // First-order lighting into reflHdr[i]. `refl4` is all-nil unless
+            // --mirror2 rendered a pair for this A, in which case those are the
+            // order-2 views and fum.mirrorCount is non-zero — that is the whole
+            // of "a mirror inside a mirror".
+            encodeReflLight(fum, reflHdr[size_t(i)], mAlbedo, mNormal, mParams,
+                            mDepth, mMirror, anyPair ? refl4 : nullptr, nullptr);
+            // flare sprites inside the reflection (the CPU draws clone flares
+            // in its mirrors); lights behind the plane are clipped.
+            {
+                const float clip4[4] = {N[0], N[1], N[2], m.d};
+                encodeFlares(cb, fum, reflHdr[size_t(i)], mDepth, clip4);
+            }
+            // Transparent surfaces and volumetric beams INSIDE the reflection.
+            // The CPU gets both: its clone mesh carries the transparent faces
+            // (they composite through the same peel, bounded to the mirror
+            // window, RENDER.CPP:936-985) and its clone spots are admitted to
+            // the cone pass behind the glass. Order matches the main view:
+            // peel, then cones.
+            encodeXpar(cb, fum, reflHdr[size_t(i)], mDepth, /*mirroredBasis=*/true);
+            encodeCones(cb, fum, reflHdr[size_t(i)], mDepth);
+            if (sampleBuf && last) {
+                // close the mirror-pass counter interval with an empty encoder
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = reflHdr[size_t(i)];
+                rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                rp.sampleBufferAttachments[0].startOfVertexSampleIndex = MTLCounterDontSample;
+                rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = 9;
+                rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                [e endEncoding];
+            }
+        }
+
+        // Close the order-2 counter interval (pass index 6). It cannot be closed
+        // inside the loop the way the mirror pass is: the last pair is only
+        // known once every outer mirror has been walked.
+        if (sampleBuf && m2Started && !refl2.empty()) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = refl2[0];
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+            rp.sampleBufferAttachments[0].startOfVertexSampleIndex = MTLCounterDontSample;
+            rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = 13;
+            rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+            rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            [e endEncoding];
+        }
+        if (opt.mirror2Stats && mirror2On)
+            std::fprintf(stderr, "[MIRROR2] %d order-2 pair(s) rendered this frame\n", m2Pairs);
+
+        tessThisPass = opt.tess;
+        // --- pass 0c: TESSELLATION FACTORS (compute) ---
+        // One thread per (base patch, sub-patch). Must run in the same command
+        // buffer, before the G-buffer encoder that consumes the factor buffer.
+        if (tessThisPass && psoTessFactors && tessFactorBuf) {
+            MTLComputePassDescriptor *cpd = [MTLComputePassDescriptor computePassDescriptor];
+            if (sampleBuf) {
+                cpd.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                cpd.sampleBufferAttachments[0].startOfEncoderSampleIndex = 10;
+                cpd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 11;
+            }
+            id<MTLComputeCommandEncoder> ce =
+                [cb computeCommandEncoderWithDescriptor:cpd];
+            [ce setComputePipelineState:psoTessFactors];
+            for (size_t si = 0; si < stone.size(); ++si) {
+                const StoneBatch &s = stone[si];
+                [ce setBuffer:tessFactorBuf offset:NSUInteger(s.factorOff) atIndex:0];
+                [ce setBuffer:vb offset:NSUInteger(s.vertexOff) atIndex:1];
+                [ce setBytes:&fu length:sizeof(fu) atIndex:2];
+                [ce setBytes:&bus[s.bi] length:sizeof(BatchUniforms) atIndex:3];
+                [ce setBytes:&tus[si] length:sizeof(TessUniformsHost) atIndex:4];
+                [ce setBuffer:tessSubBuf offset:0 atIndex:5];
+                [ce setBuffer:tessStatBuf offset:0 atIndex:6];
+                [ce dispatchThreads:MTLSizeMake(s.patchCount, NSUInteger(tessP * tessP), 1)
+                threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(s.patchCount, 32),
+                                                  std::min<NSUInteger>(NSUInteger(tessP * tessP), 8), 1)];
+            }
+            [ce endEncoding];
+        }
+
+        // --- pass 1: G-buffer ---
+        encodeGBuffer(cb, fu, gAlbedo, gNormal, gParams, gMirror, gDepth,
+                      sampleBuf ? ^(MTLRenderPassDescriptor *rp) {
+                          rp.sampleBufferAttachments[0].sampleBuffer = sampleBuf;
+                          rp.sampleBufferAttachments[0].startOfVertexSampleIndex = 2;
+                          rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = 3;
+                          rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                          rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                      } : (void (^)(MTLRenderPassDescriptor *))nil);
+        tessThisPass = false;
+
+        // --- pass 2: PBR lighting (or a debug viz) ---
+        const bool viz = opt.viz >= 0;
+        if (opt.stages >= 2) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = viz ? ldrTex : hdrTex;
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            attachCounters(rp, 2);
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:viz ? psoViz : psoLight];
+            [enc setFragmentBytes:&fu length:sizeof(fu) atIndex:1];
+            [enc setFragmentBuffer:lightBuf offset:0 atIndex:2];
+            [enc setFragmentBuffer:shBuf offset:0 atIndex:3];
+            [enc setFragmentTexture:gAlbedo atIndex:0];
+            [enc setFragmentTexture:gNormal atIndex:1];
+            [enc setFragmentTexture:gParams atIndex:2];
+            [enc setFragmentTexture:gDepth atIndex:3];
+            for (int i = 0; i < kMaxShadowCubes; ++i)
+                [enc setFragmentTexture:(i < int(cubes.size()) ? cubes[size_t(i)] : dummyCube)
+                                atIndex:NSUInteger(4 + i)];
+            for (int i = 0; i < kMaxSpotMaps; ++i)
+                [enc setFragmentTexture:(i < int(spots.size()) ? spots[size_t(i)] : dummy2D)
+                                atIndex:NSUInteger(20 + i)];
+            [enc setFragmentTexture:gMirror atIndex:36];
+            // Reflection slots: the live render for ACTIVE mirrors, cleared
+            // black for inactive ones (their panels then show emissive only).
+            for (int i = 0; i < 4; ++i)
+                [enc setFragmentTexture:((i < nMirrors && mirrorActive[i])
+                                             ? reflHdr[size_t(i)] : dummyRefl)
+                                atIndex:NSUInteger(37 + i)];
+            if (opt.viz == 13) {
+                std::fprintf(stderr, "[MIRRORPROBE] panels=%d\n", nMirrors);
+                for (int i = 0; i < nMirrors; ++i) {
+                    const auto &m = scene.mirrors[size_t(i)];
+                    const float sd = m.n[0]*scene.camera.src[0] + m.n[1]*scene.camera.src[1]
+                                   + m.n[2]*scene.camera.src[2] + m.d;
+                    std::fprintf(stderr,
+                        "[MIRRORPROBE]   %d '%s' N=(%.2f,%.2f,%.2f) d=%.2f  camSignedDist=%+.2f  %s\n",
+                        i + 1, m.material.c_str(), m.n[0], m.n[1], m.n[2], m.d, sd,
+                        mirrorActive[i] ? "ACTIVE (reflection rendered + bound)"
+                                        : "INACTIVE (camera behind the plane; black bound)");
+                }
+            }
+            for (int i = 0; i < kMaxEnvProbes; ++i)
+                [enc setFragmentTexture:(i < nProbes ? envCubes[size_t(i)] : dummyEnvCube)
+                                atIndex:NSUInteger(41 + i)];
+            [enc setFragmentSamplerState:shadowSamp atIndex:1];
+            [enc setFragmentSamplerState:rawSamp atIndex:2];
+            [enc setFragmentSamplerState:envSamp atIndex:3];
+            if (viz) {
+                uint32_t m = uint32_t(opt.viz);
+                [enc setFragmentBytes:&m length:sizeof(m) atIndex:4];
+            }
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+        }
+
+        // --- pass 2b: flare sprites, additive into the HDR target ---
+        // BRACES MATTER HERE. They were missing until the particle pass was
+        // measured against a real dump: `encodePcl` sat outside the `if` and so
+        // ran under every --viz mode and at --stages=1, painting spray over
+        // buffers that are supposed to show one isolated quantity.
+        if (!viz && opt.stages >= 2) {
+            encodeFlares(cb, fu, hdrTex, gDepth, nullptr);
+            // Particle spray, same slot as the flares: additive, depth-tested.
+            // ORDER vs the peel is a MEASURED deviation, not a free choice —
+            // see pass 2b1' below and §6.2m. This is the --pcl_before_xpar
+            // bracket; the default draws AFTER the peel.
+            if (!opt.pclAfterXpar) encodePcl(cb, fu, hdrTex, gDepth);
+        }
+
+        // --- pass 2b1: TRANSPARENT SURFACES (depth peel) ---
+        // RENDER.CPP order: the peel runs after the deferred lighting resolve
+        // and the sprite loop, and BEFORE the volumetric cones and the bloom
+        // bright-pass (:741-1161 peel, :1192-1206 sprites, :1233-1239 cones,
+        // :1266 bloom). Transparents therefore bloom, which is why the CPU
+        // deliberately leaves their composite unclamped under HDR.
+        if (!viz && opt.stages >= 2)
+            encodeXpar(cb, fu, hdrTex, gDepth, /*mirroredBasis=*/false);
+
+        // --- pass 2b1': the OTHER side of the sprite/glass ordering ---
+        // The CPU walks ONE back-to-front TBR list holding both sprites and
+        // transparent clumps (FILLERS.CPP:2317-2380: a sprite FLUSHES the open
+        // clump before blitting itself). So per particle:
+        //   sprite BEHIND glass -> blitted first, then the glass composites
+        //                          over it, so it IS attenuated by (1-alpha);
+        //   sprite IN FRONT     -> the glass composites first, then the sprite
+        //                          is added on top, so it is NOT attenuated.
+        // A single whole-spray pass cannot express both. Drawing before the
+        // peel attenuates EVERY sprite (right for the ones behind, too dim for
+        // the ones in front); drawing after attenuates NONE (right for the ones
+        // in front, too bright for the ones behind). The truth is bracketed by
+        // the two, which is why both are runnable and both are measured.
+        if (!viz && opt.stages >= 2 && opt.pclAfterXpar)
+            encodePcl(cb, fu, hdrTex, gDepth);
+
+        // --- pass 2b2: VOLUMETRIC SPOT CONES, additive into HDR ---
+        // RENDER.CPP:1231-1240 order: after the opaque/TBR draws, BEFORE
+        // DoF/bright/bloom/tonemap. So the shafts feed the bloom, as they do on
+        // the CPU — putting this after bloom would render visibly harder beams.
+        if (!viz && opt.stages >= 2)
+            encodeCones(cb, fu, hdrTex, gDepth);
+
+        // --- pass 2c: bloom (bright-pass -> 4 blur taps -> additive upsample) ---
+        if (!viz && opt.stages >= 3 && opt.bloom && opt.bloomIntensity > 0.0f) {
+            BloomUniforms bu{};
+            bu.srcSize[0] = float(W); bu.srcSize[1] = float(H);
+            bu.dstSize[0] = float(BW); bu.dstSize[1] = float(BH);
+            bu.threshold = opt.bloomThreshold;
+            bu.intensity = opt.bloomIntensity;
+            auto fsPass = [&](id<MTLRenderPipelineState> pso, id<MTLTexture> dst,
+                              id<MTLTexture> srcTex, const float dir[2], bool additive) {
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = dst;
+                rp.colorAttachments[0].loadAction =
+                    additive ? MTLLoadActionLoad : MTLLoadActionDontCare;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                [e setRenderPipelineState:pso];
+                [e setFragmentBytes:&bu length:sizeof(bu) atIndex:1];
+                if (dir) [e setFragmentBytes:dir length:sizeof(float) * 2 atIndex:2];
+                [e setFragmentTexture:srcTex atIndex:0];
+                [e setFragmentSamplerState:bloomSamp atIndex:0];
+                [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [e endEncoding];
+            };
+            static const float kH[2] = {1.0f, 0.0f}, kV[2] = {0.0f, 1.0f};
+            fsPass(psoBloomBright, bloomA, hdrTex, nullptr, false);
+            // TWO full separable passes, as Hdr.cpp does (`for pass < 2`).
+            for (int pass = 0; pass < 2; ++pass) {
+                fsPass(psoBloomBlur, bloomB, bloomA, kH, false);
+                fsPass(psoBloomBlur, bloomA, bloomB, kV, false);
+            }
+            fsPass(psoBloomAdd, hdrTex, bloomA, nullptr, true);
+        }
+
+        // --- pass 3: tonemap ---
+        if (!viz && opt.stages >= 3) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = ldrTex;
+            rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            attachCounters(rp, 3);
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            [enc setRenderPipelineState:psoTonemap];
+            [enc setFragmentBytes:&fu length:sizeof(fu) atIndex:1];
+            [enc setFragmentTexture:hdrTex atIndex:0];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding];
+        }
+
+        [cb commit];
+        return cb;
+    };
+
+    // ---- one-time ENV PROBE BAKE -------------------------------------------
+    // After the static shadow bake (so the probes contain shadowed light) and
+    // before anything timed. Reported, not folded into the frame cost.
+    if (nProbes > 0) {
+        const double ms = bakeEnvProbes();
+        std::fprintf(stderr,
+            "[ENVREFL] baked %d probe cube(s), %d faces at %d^2 + mips, ONCE: %.2f ms\n",
+            nProbes, nProbes * 6, envRes, ms);
+        for (int i = 0; i < nProbes; ++i)
+            std::fprintf(stderr, "[ENVREFL]   probe %d '%s' at (%.1f %.1f %.1f), %d material(s)\n",
+                         i + 1, scene.envProbes[size_t(i)].material.c_str(),
+                         scene.envProbes[size_t(i)].pos[0], scene.envProbes[size_t(i)].pos[1],
+                         scene.envProbes[size_t(i)].pos[2], scene.envProbes[size_t(i)].users);
+
+        // ---- --dump_env_cube: read the baked probe content back and LOOK ---
+        // The CPU arm's probes are 8-bit LDR VPage faces; this arm's are
+        // RGBA16Float LINEAR radiance on the 0-1 scale. To compare CONTENT the
+        // two must be expressed in the same units: the whole GPU frame is the
+        // CPU frame / 255 (docs/SHADING_CONTRACT.md §1), so every number below
+        // is the stored radiance x255 — directly against FDS's
+        // [ENVBAKE-FACE] census.
+        if (opt.dumpEnvCube) {
+            static const char *fnames[6] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
+            std::vector<uint16_t> face(size_t(envRes) * size_t(envRes) * 4);
+            auto h2f = [](uint16_t h) -> float {
+                const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+                uint32_t bits;
+                if (e == 0)        bits = m ? ((s << 31) | ((127 - 15 + 1) << 23) | (m << 13)) : (s << 31);
+                else if (e == 31)  bits = (s << 31) | (0xFFu << 23) | (m << 13);
+                else               bits = (s << 31) | ((e + 127 - 15) << 23) | (m << 13);
+                float f; std::memcpy(&f, &bits, 4); return f;
+            };
+            for (int p = 0; p < nProbes; ++p) {
+                std::string safe = scene.envProbes[size_t(p)].material;
+                for (char &c : safe) if (!std::isalnum((unsigned char)c)) c = '_';
+                std::vector<uint8_t> atlas(size_t(envRes) * 3 * size_t(envRes) * 2 * 3, 0);
+                const size_t aw = size_t(envRes) * 3;
+                for (int f = 0; f < 6; ++f) {
+                    [envCubes[size_t(p)] getBytes:face.data()
+                                      bytesPerRow:NSUInteger(envRes) * 8
+                                    bytesPerImage:face.size() * sizeof(uint16_t)
+                                       fromRegion:MTLRegionMake2D(0, 0, NSUInteger(envRes), NSUInteger(envRes))
+                                      mipmapLevel:0
+                                            slice:NSUInteger(f)];
+                    double sB = 0, sG = 0, sR = 0, sY = 0;
+                    std::vector<float> ys; ys.reserve(size_t(envRes) * envRes);
+                    for (int i = 0; i < envRes * envRes; ++i) {
+                        const float R = h2f(face[size_t(i) * 4 + 0]) * 255.0f;
+                        const float G = h2f(face[size_t(i) * 4 + 1]) * 255.0f;
+                        const float B = h2f(face[size_t(i) * 4 + 2]) * 255.0f;
+                        const float Y = 0.299f * R + 0.587f * G + 0.114f * B;
+                        sB += B; sG += G; sR += R; sY += Y;
+                        ys.push_back(Y);
+                        const int ax = (f % 3) * envRes + (i % envRes);
+                        const int ay = (f / 3) * envRes + (i / envRes);
+                        // sqrt encode for the atlas ONLY (the census above is
+                        // linear) so a linear probe is viewable next to the
+                        // CPU's gamma-ish LDR one without crushing to black.
+                        auto enc = [](float v) -> uint8_t {
+                            float t = std::sqrt(std::max(v, 0.0f) / 255.0f) * 255.0f;
+                            return uint8_t(t < 0 ? 0 : (t > 255 ? 255 : t));
+                        };
+                        const size_t o = (size_t(ay) * aw + size_t(ax)) * 3;
+                        atlas[o + 0] = enc(R); atlas[o + 1] = enc(G); atlas[o + 2] = enc(B);
+                    }
+                    std::sort(ys.begin(), ys.end());
+                    const double n = double(envRes) * envRes;
+                    std::fprintf(stderr, "[ENVBAKE-FACE] '%s' face %d %s res %d  "
+                        "meanBGR %.2f/%.2f/%.2f  meanY %.2f  p50 %.1f p95 %.1f max %.1f "
+                        " (x255 linear)\n",
+                        scene.envProbes[size_t(p)].material.c_str(), f, fnames[f], envRes,
+                        sB / n, sG / n, sR / n, sY / n,
+                        double(ys[size_t(0.50 * (n - 1))]), double(ys[size_t(0.95 * (n - 1))]),
+                        double(ys.back()));
+                }
+                const std::string path = opt.dumpEnvCubeDir + "/gpuenv_" + safe + ".ppm";
+                if (FILE *fp = std::fopen(path.c_str(), "wb")) {
+                    std::fprintf(fp, "P6\n%zu %d\n255\n", aw, envRes * 2);
+                    std::fwrite(atlas.data(), 1, atlas.size(), fp);
+                    std::fclose(fp);
+                    std::fprintf(stderr, "[ENVBAKE-FACE] wrote %s (%zux%d atlas, sqrt-encoded)\n",
+                                 path.c_str(), aw, envRes * 2);
+                }
+            }
+        }
+    }
+
+    // ---- --anim_probe: the window's per-frame refresh, OFFSCREEN ------------
+    // Written because "mech omnis are staying in place" was reported from a
+    // window run and could not be reproduced offscreen: setting the pose AT LOAD
+    // moves everything, so the load path was innocent and the defect lived in
+    // the per-frame path — which nothing headless exercised.
+    //
+    // This runs the EXACT sequence the window loop runs (Reanimate, then
+    // refreshFrameUniforms / refreshBatchUniforms / refreshLightBuffer) and
+    // prints the GPU-FACING structures afterwards, not scene.* — the whole bug
+    // class here is "the CPU-side list updated but the thing the shader reads
+    // did not", and reading scene.* would have reported success.
+    if (opt.animProbe) {
+        LoadOptions lo = opt.loadOpt ? *opt.loadOpt : LoadOptions{};
+        lo.camPose.clear();          // same as the window: follow the spline
+        lo.verbose = false;
+        std::fprintf(stderr,
+            "[ANIMPROBE] the window's per-frame refresh, run offscreen. Values are read\n"
+            "[ANIMPROBE]   from the GPU-facing arrays (GpuLight / BatchUniforms / flare\n"
+            "[ANIMPROBE]   instances) AFTER the refresh, so a stale upload shows up here.\n");
+        for (float t : {float(opt.animProbeT[0]), float(opt.animProbeT[1])}) {
+            Reanimate(scene, lo, t);
+            refreshFrameUniforms();
+            refreshBatchUniforms();
+            refreshLightBuffer();
+            std::fprintf(stderr, "[ANIMPROBE] t=%.0f  cam=(%.2f,%.2f,%.2f)\n",
+                         t, fu.camSrc[0], fu.camSrc[1], fu.camSrc[2]);
+            for (size_t i = 0; i < lights.size(); ++i) {
+                if (lightOrigin[i] == std::string("fld") && i < 7) continue;
+                std::fprintf(stderr, "[ANIMPROBE]   light[%zu] %-10s pos=(%7.2f,%6.2f,%8.2f)\n",
+                             i, lightOrigin[i], lights[i].pos[0], lights[i].pos[1],
+                             lights[i].pos[2]);
+                if (i >= 12 && i < 20) { i = 19; }   // the ten spots are enough at three
+            }
+            for (size_t i = 0; i < flares.size(); ++i)
+                std::fprintf(stderr, "[ANIMPROBE]   flare[%zu] wpos=(%7.2f,%6.2f,%8.2f) half=%.3f\n",
+                             i, flares[i].wpos[0], flares[i].wpos[1], flares[i].wpos[2],
+                             flares[i].worldHalf);
+            // A mech batch: the geometry half of the same question.
+            for (size_t i = 0; i < scene.batches.size(); ++i) {
+                if (scene.batches[i].meshName.find("mech") == std::string::npos &&
+                    scene.batches[i].meshName.find("Mech") == std::string::npos) continue;
+                std::fprintf(stderr, "[ANIMPROBE]   batch[%zu] '%s' objPos=(%7.2f,%6.2f,%8.2f)\n",
+                             i, scene.batches[i].meshName.c_str(),
+                             bus[i].objPos[0], bus[i].objPos[1], bus[i].objPos[2]);
+                break;
+            }
+        }
+        return true;
+    }
+
+    // ---- INTERACTIVE WINDOW ------------------------------------------------
+    if (opt.interactive) {
+        if (!opt.loadOpt) { std::fprintf(stderr, "[WINDOW] no LoadOptions\n"); return false; }
+        if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+            std::fprintf(stderr, "[WINDOW] SDL_Init: %s\n", SDL_GetError()); return false;
+        }
+        SDL_Window *win = SDL_CreateWindow("GpuBench — greets on the GPU",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, opt.winW, opt.winH,
+            SDL_WINDOW_METAL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
+        if (!win) { std::fprintf(stderr, "[WINDOW] CreateWindow: %s\n", SDL_GetError()); return false; }
+        SDL_MetalView view = SDL_Metal_CreateView(win);
+        CAMetalLayer *layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
+        layer.device = dev;
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.framebufferOnly = YES;
+
+        id<MTLRenderPipelineState> psoBlit = makeFsPso(@"fs_blit", MTLPixelFormatBGRA8Unorm);
+        id<MTLRenderPipelineState> psoHud;
+        {
+            MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+            p.vertexFunction = fn_(@"vs_fullscreen");
+            p.fragmentFunction = fn_(@"fs_hud");
+            p.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            p.colorAttachments[0].blendingEnabled = YES;
+            p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+            p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            NSError *e = nil;
+            psoHud = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+            if (!psoHud) { std::fprintf(stderr, "[WINDOW] hud pso: %s\n",
+                                        [[e localizedDescription] UTF8String]); return false; }
+        }
+        // Tall enough for the census + the dropped-object warning. The HUD is a
+        // fixed-size texture and HudText clips, so a too-short one silently
+        // swallows the last lines -- which would be exactly the diagnostic ones.
+        const int HUDW = 560, HUDH = 240;
+        MTLTextureDescriptor *htd =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                              width:HUDW height:HUDH mipmapped:NO];
+        htd.usage = MTLTextureUsageShaderRead;
+        htd.storageMode = MTLStorageModeShared;
+        id<MTLTexture> hudTex = [dev newTextureWithDescriptor:htd];
+        std::vector<uint8_t> hudBuf(size_t(HUDW) * HUDH * 4, 0);
+
+        // Free-fly is FDS's OWN Dynamic_Camera (see SceneIngest.h) — seeded from
+        // the ingest camera so the window opens on the same pose the offscreen
+        // renders use, and calibrated for this scene's depth range.
+        FreeCamInit(scene);
+        bool  freeFly = opt.freeFly, paused = false, mouseLook = false, running = true;
+        // resolvedDemoT, not loadOpt->demoT: Load may have substituted a
+        // mid-scene t for the greets-specific default, and the first
+        // Reanimate would otherwise snap the window straight back to the
+        // out-of-range frame the substitution existed to avoid.
+        float demoT = scene.resolvedDemoT;
+        // The sim was already warmed to resolvedDemoT above, so the first
+        // window frame steps by whatever the first tick advances demoT by.
+        float pclPrevDemoT = demoT;
+        LoadOptions lo = *opt.loadOpt;
+        // THE CAMERA-INTERPOLATION FIX. `lo` drives Reanimate's RefreshCamera
+        // every frame, and with a non-empty camPose RefreshCamera PINS the
+        // camera to that review pose and takes FOV from FOV.Keys[0]. The
+        // interactive arm cleared camPose only when --spline was passed at
+        // STARTUP, so in a default `--window` run TAB into "SPLINE" showed a
+        // frozen viewpoint — Animate_Objects was evaluating the authored spline
+        // into sc.CameraHead correctly, and RefreshCamera was then overwriting
+        // it. Clearing it here means the scripted camera is ALWAYS the engine's
+        // per-frame spline evaluation (Spline_Calc_3D Source/Target +
+        // Spline_Calc_1D Roll/FOV -> Kick_Camera -> CalcPersp), while free-fly
+        // still starts from the review pose because FC was seeded above.
+        lo.camPose.clear();
+
+        std::fprintf(stderr,
+            "[WINDOW] open %dx%d — camera is FDS's own Dynamic_Camera (the\n"
+            "[WINDOW]   DisplaceTest / TAB-camera control set), spline is the\n"
+            "[WINDOW]   engine's per-frame Spline_Calc evaluation.\n"
+            "%s", opt.winW, opt.winH, kKeymap);
+
+        uint64_t prevTick = SDL_GetPerformanceCounter();
+        const double freq = double(SDL_GetPerformanceFrequency());
+        double cpuAnimMs = 0, cpuUploadMs = 0, gpuFrameMs = 0;
+        double emaFps = 0;
+        int frameNo = 0;
+        uint64_t vhash0 = VertexHash(scene);
+        bool vertsEverChanged = false;
+
+        while (running) {
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) running = false;
+                else if (ev.type == SDL_KEYDOWN) {
+                    switch (ev.key.keysym.sym) {
+                        // ESC and Backspace both quit, as DisplaceTest's loop does.
+                        case SDLK_ESCAPE: case SDLK_BACKSPACE: running = false; break;
+                        case SDLK_TAB:
+                            // Leaving spline mode must not teleport: FC is kept in
+                            // sync with the scripted camera below, so free-fly
+                            // resumes exactly where the spline had the eye.
+                            freeFly = !freeFly; break;
+                        case SDLK_SPACE:  paused = !paused; break;
+                        case SDLK_LEFTBRACKET:  demoT -= 100.0f; break;
+                        case SDLK_RIGHTBRACKET: demoT += 100.0f; break;
+                        // G, rising edge only — the FULL pose block (both arms'
+                        // paste-ready repro lines at 9 significant digits) plus
+                        // DisplaceTest's own [DTEST-POSE] form. The live demo
+                        // timer and free-fly/spline state are passed in, so a
+                        // pose dumped after scrubbing with [ / ] reproduces the
+                        // SCENE time as well as the viewpoint.
+                        case SDLK_g:
+                            PrintPoseBlock(scene, lo,
+                                           freeFly ? PoseOrigin::FreeFly
+                                                   : PoseOrigin::Spline,
+                                           demoT);
+                            FreeCamDumpPose(scene);
+                            break;
+                        case SDLK_F1: std::fputs(kKeymap, stderr); break;
+                        default: break;
+                    }
+                } else if (ev.type == SDL_MOUSEBUTTONDOWN) mouseLook = true;
+                else if (ev.type == SDL_MOUSEBUTTONUP)   mouseLook = false;
+                else if (ev.type == SDL_MOUSEMOTION && mouseLook) {
+                    // A GpuBench addition, but through the same world-yaw /
+                    // camera-local-pitch decomposition Dynamic_Camera uses.
+                    if (!freeFly) { FreeCamSyncFromScene(scene); freeFly = true; }
+                    FreeCamMouseLook(scene, -float(ev.motion.xrel) * 0.004f,
+                                            -float(ev.motion.yrel) * 0.004f);
+                }
+            }
+            const uint64_t now = SDL_GetPerformanceCounter();
+            const float dt = float(double(now - prevTick) / freq);
+            prevTick = now;
+            emaFps = emaFps ? emaFps * 0.9 + (1.0 / std::max(dt, 1e-4f)) * 0.1
+                            : 1.0 / std::max(dt, 1e-4f);
+
+            if (!paused) demoT += opt.timeScale * dt;
+
+            // --- CPU-side per-frame work, timed separately from GPU pass time ---
+            const auto tAnim0 = std::chrono::steady_clock::now();
+            Reanimate(scene, lo, demoT);
+            const auto tAnim1 = std::chrono::steady_clock::now();
+            cpuAnimMs = std::chrono::duration<double, std::milli>(tAnim1 - tAnim0).count();
+
+            if (frameNo == 3 && VertexHash(scene) != vhash0) vertsEverChanged = true;
+
+            // Camera. SPLINE = whatever Reanimate's Animate_Objects just
+            // evaluated (the engine's Kochanek-Bartels Source/Target/Roll/FOV
+            // splines through Kick_Camera + CalcPersp). FREE-FLY = the engine's
+            // Dynamic_Camera, driven by the house key set.
+            if (freeFly) {
+                const uint8_t *k = SDL_GetKeyboardState(nullptr);
+                FreeCamInput in;
+                in.fwd       = k[SDL_SCANCODE_W];
+                in.back      = k[SDL_SCANCODE_S] || k[SDL_SCANCODE_Z];
+                in.left      = k[SDL_SCANCODE_A] || k[SDL_SCANCODE_END];
+                in.right     = k[SDL_SCANCODE_D] || k[SDL_SCANCODE_PAGEDOWN];
+                in.up        = k[SDL_SCANCODE_Q] || k[SDL_SCANCODE_KP_PLUS];
+                in.down      = k[SDL_SCANCODE_E] || k[SDL_SCANCODE_KP_MINUS];
+                in.yawLeft   = k[SDL_SCANCODE_LEFT];
+                in.yawRight  = k[SDL_SCANCODE_RIGHT];
+                in.pitchUp   = k[SDL_SCANCODE_UP];
+                in.pitchDown = k[SDL_SCANCODE_DOWN];
+                in.rollLeft  = k[SDL_SCANCODE_HOME];
+                in.rollRight = k[SDL_SCANCODE_PAGEUP];
+                in.slower    = k[SDL_SCANCODE_COMMA];
+                in.faster    = k[SDL_SCANCODE_PERIOD];
+                in.rotSlower = k[SDL_SCANCODE_K];
+                in.rotFaster = k[SDL_SCANCODE_L];
+                FreeCamStep(scene, in, dt);
+            } else {
+                // Keep FC under the scripted camera so TAB does not teleport.
+                FreeCamSyncFromScene(scene);
+            }
+
+            // --- refresh the GPU-visible per-frame state ---
+            const auto tUp0 = std::chrono::steady_clock::now();
+            refreshFrameUniforms();
+            refreshBatchUniforms();
+            refreshLightBuffer();
+            std::memcpy([lightBuf contents], lights.data(), lights.size() * sizeof(GpuLight));
+            const auto tUp1 = std::chrono::steady_clock::now();
+            cpuUploadMs = std::chrono::duration<double, std::milli>(tUp1 - tUp0).count();
+
+            // --- GPU particle sim: ONE step, on the window's own clock -------
+            // demoT is in centiseconds (the scene Timer's unit), so the step is
+            // (demoT - prev)/100 seconds — the SAME quantity DEMO derives as
+            // `dt = 0.01*dTime`. Driving it from demoT and not from the wall
+            // clock is what makes [ and ] scrubbing and SPACE-pause behave: a
+            // paused window has a still spray, and scrubbing forward advances
+            // it. Timed as its own command buffer so the cost is a number on
+            // the window path, not an inference from an offscreen run.
+            if (psoPclSim) {
+                const float simDt = (demoT - pclPrevDemoT) * 0.01f;
+                pclPrevDemoT = demoT;
+                // A big jump ([ / ] scrub, or a hitch) would integrate one
+                // enormous step and fling the whole spray out of the basin.
+                // Clamp to a tick and re-warm on a backwards or large jump —
+                // which is exactly what a scrub means: "show me that instant".
+                if (simDt < 0.0f || simDt > 0.5f) {
+                    pclSimWarmTo(demoT);
+                } else if (simDt > 0.0f) {
+                    const auto s0 = std::chrono::steady_clock::now();
+                    id<MTLCommandBuffer> scb = [queue commandBuffer];
+                    pclSimEncode(scb, simDt, demoT);
+                    [scb commit]; [scb waitUntilCompleted];
+                    pclSimMs = ([scb GPUEndTime] > [scb GPUStartTime])
+                                 ? ([scb GPUEndTime] - [scb GPUStartTime]) * 1000.0
+                                 : std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - s0).count();
+                }
+            }
+
+            id<MTLCommandBuffer> cb = renderFrame();
+            [cb waitUntilCompleted];
+            gpuFrameMs = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
+            std::vector<double> perPass(kPasses, 0.0);
+            if (sampleBuf) {
+                NSData *d = [sampleBuf resolveCounterRange:NSMakeRange(0, NSUInteger(kPasses*2))];
+                if (d && [d length] >= sizeof(MTLCounterResultTimestamp) * kPasses * 2) {
+                    const auto *ts = static_cast<const MTLCounterResultTimestamp *>([d bytes]);
+                    for (int p = 0; p < kPasses; ++p) {
+                        const uint64_t a = ts[p*2].timestamp, b2 = ts[p*2+1].timestamp;
+                        if (a != MTLCounterErrorValue && b2 != MTLCounterErrorValue && b2 > a)
+                            perPass[p] = double(b2 - a) / 1e6;
+                    }
+                }
+            }
+
+            // --- HUD ---
+            std::fill(hudBuf.begin(), hudBuf.end(), uint8_t(0));
+            char line[160];
+            int ly = 4;
+            std::snprintf(line, sizeof line, "GPU FRAME %6.3F MS   %5.0F FPS", gpuFrameMs, emaFps);
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 255, 255); ly += 18;
+            // One entry per kPasses. This array used to have FIVE while the
+            // loop below ran to kPasses (6) — an out-of-bounds read that
+            // printed garbage for the last row; adding order-2 made it 7.
+            static const char *pn[kPasses] = {"SHADOW BAKE", "GBUFFER", "LIGHTING",
+                                              "TONEMAP", "MIRROR", "TESS FACTORS",
+                                              "MIRROR2"};
+            for (int p = 0; p < kPasses; ++p) {
+                std::snprintf(line, sizeof line, "  %-12s %6.3F MS", pn[p], perPass[p]);
+                HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 170, 210, 255); ly += 15;
+            }
+            std::snprintf(line, sizeof line, "CPU ANIM %5.3F  UPLOAD %5.3F MS", cpuAnimMs, cpuUploadMs);
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 220, 140); ly += 18;
+            std::snprintf(line, sizeof line, "T=%6.0F FRAME %6.1F  %s%s",
+                          demoT, scene.curFrame, freeFly ? "FREE-FLY" : "SPLINE",
+                          paused ? " (PAUSED)" : "");
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 200, 255, 200); ly += 15;
+            // THE CENSUS, on screen. A HUD that says only "48 DRAWS" cannot be
+            // told apart from a scene that has 48 draws, which is how a window
+            // screenshot of a scene missing two objects and half its lights got
+            // reported as a rendering defect. Every number here is shown as
+            // submitted/total so the screenshot itself says whether anything
+            // was lost, and OBJ carries the ingest drop that DRAWS alone hides.
+            std::snprintf(line, sizeof line, "DRAWS %zu  OBJ %d/%d  LIGHTS %d/%zu  VERTS %s",
+                          scene.batches.size(),
+                          int(scene.meshCount), int(scene.meshCount) + scene.droppedMeshes,
+                          out.litLights, scene.lights.size(),
+                          vertsEverChanged ? "RE-UPLOADED" : "STATIC");
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 190, 190, 190); ly += 15;
+            if (scene.droppedMeshes > 0) {
+                // Loud, and it names the objects: this state is PERMANENT for
+                // the life of the window (Reanimate only refreshes batches that
+                // already exist), so scrubbing back will not fix it and the
+                // user needs to know to relaunch with an in-range --t.
+                std::snprintf(line, sizeof line, "!! %d OBJ DROPPED AT LOAD: %.40s",
+                              scene.droppedMeshes, scene.droppedNames.c_str());
+                HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 2, line, 255, 90, 90); ly += 15;
+                HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                        "PERMANENT - RELAUNCH WITH AN IN-RANGE --t", 255, 140, 140); ly += 11;
+            }
+            ly += 4;
+            // The keymap belongs on screen, not only in the startup log — the
+            // report that "I don't get the complete set of keys" was made at the
+            // window, where the log had already scrolled.
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                    "W/S,Z FWD/BACK  A,END/D,PGDN STRAFE  Q/E UP/DOWN", 150, 150, 150); ly += 11;
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                    "ARROWS LOOK  HOME/PGUP ROLL  DRAG LOOK  , . SPEED  K L TURN", 150, 150, 150); ly += 11;
+            HudText(hudBuf.data(), HUDW, HUDH, 4, ly, 1,
+                    "TAB SPLINE  SPACE PAUSE  [ ] TIME  G POSE  F1 KEYS  ESC QUIT", 150, 150, 150);
+            [hudTex replaceRegion:MTLRegionMake2D(0, 0, HUDW, HUDH) mipmapLevel:0
+                        withBytes:hudBuf.data() bytesPerRow:HUDW * 4];
+
+            // --- present ---
+            @autoreleasepool {
+                id<CAMetalDrawable> drawable = [layer nextDrawable];
+                if (drawable) {
+                    id<MTLCommandBuffer> pcb = [queue commandBuffer];
+                    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                    rp.colorAttachments[0].texture = drawable.texture;
+                    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> e = [pcb renderCommandEncoderWithDescriptor:rp];
+                    float ds[2] = {float(drawable.texture.width), float(drawable.texture.height)};
+                    [e setRenderPipelineState:psoBlit];
+                    [e setFragmentBytes:ds length:sizeof(ds) atIndex:1];
+                    [e setFragmentTexture:ldrTex atIndex:0];
+                    [e setFragmentSamplerState:bloomSamp atIndex:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    float hs[2] = {float(HUDW), float(HUDH)};
+                    [e setRenderPipelineState:psoHud];
+                    [e setFragmentBytes:hs length:sizeof(hs) atIndex:1];
+                    [e setFragmentTexture:hudTex atIndex:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    [e endEncoding];
+                    [pcb presentDrawable:drawable];
+                    [pcb commit];
+                }
+            }
+            // Periodic telemetry so the window's animation and per-pass costs are
+            // verifiable from a log, not only from the on-screen HUD.
+            if ((frameNo % 30) == 0) {
+                // The FORWARD vector and a paste-ready reproduction line are part
+                // of this, not a nicety: a report that quotes only the position
+                // cannot be reproduced offscreen, and a defect nobody can re-render
+                // is a defect nobody can measure. Row 2 of the view matrix IS the
+                // forward axis (row-major, row-dot-v), the same convention --cam=
+                // and DEMO's FNTSNAP_FWD take.
+                const float *f = scene.camera.rot[2];
+                std::fprintf(stderr,
+                    "[WINDOW] f=%4d t=%7.0f CurFrame=%7.1f cam=(%.2f,%.2f,%.2f) "
+                    "fwd=(%.4f,%.4f,%.4f) %s | "
+                    "gpu %6.3f ms (bake %.3f gbuf %.3f light %.3f tone %.3f) | "
+                    "cpu anim %.3f upload %.3f | pclsim %.4f ms | %.0f fps\n"
+                    // The census on every telemetry line, not only in the HUD:
+                    // a pasted log is the other half of a window report, and
+                    // "draws=N" alone never said whether N was the whole scene.
+                    "[WINDOW]   census: draws=%zu obj=%d/%d lights=%d/%zu%s\n",
+                    frameNo, demoT, scene.curFrame,
+                    scene.camera.src[0], scene.camera.src[1], scene.camera.src[2],
+                    f[0], f[1], f[2],
+                    freeFly ? "free-fly" : "spline",
+                    gpuFrameMs, perPass[0], perPass[1], perPass[2], perPass[3],
+                    cpuAnimMs, cpuUploadMs, pclSimMs, emaFps,
+                    scene.batches.size(),
+                    int(scene.meshCount), int(scene.meshCount) + scene.droppedMeshes,
+                    out.litLights, scene.lights.size(),
+                    scene.droppedMeshes ? "  !! OBJECTS DROPPED AT LOAD, PERMANENT" : "");
+                // The repro pair, through the SAME builders the [POSE] block
+                // uses. The hand-rolled version this replaces had three defects
+                // that made it not paste-ready: %.5f instead of 9 significant
+                // digits (the precision DEMO deliberately prints, because a
+                // grazing face's front/back test flips inside the truncation
+                // error); an unquoted --cam=; and a literal "<scene>" that zsh
+                // parses as a redirection and refuses to run. It also printed
+                // FNTSNAP_* on every scene, which is only correct on fountain.
+                {
+                    char gpuCmd[512], cpuCmd[768];
+                    PoseGpuCommand(scene, lo, demoT, gpuCmd, sizeof gpuCmd);
+                    PoseCpuCommand(scene, lo, demoT, cpuCmd, sizeof cpuCmd);
+                    std::fprintf(stderr,
+                        "[WINDOW]   GPU repro: %s\n"
+                        "[WINDOW]   CPU repro: %s\n",
+                        gpuCmd, cpuCmd);
+                }
+            }
+            ++frameNo;
+            if (opt.winFrames > 0 && frameNo >= opt.winFrames) running = false;
+        }
+        std::fprintf(stderr, "[WINDOW] closed after %d frames. verts re-uploaded: %s\n",
+                     frameNo, vertsEverChanged ? "YES" : "NO (rigid-hierarchy animation)");
+        SDL_Metal_DestroyView(view);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return true;
+    }
+
+    // ---- CPU-side per-frame cost, HEADLESS ---------------------------------
+    // The comparison table needs the CPU work a real-time frame would pay
+    // alongside the GPU passes, split the way the interactive path splits it:
+    // ANIMATION (Reanimate = the engine's own Animate_Objects + the light /
+    // camera / transform refresh) vs UPLOAD (rebuilding the batch uniform
+    // blocks and the light buffer, then the memcpy). Measured here rather than
+    // quoted from a --window run, because a visible window is the user's to
+    // launch. The offscreen benchmark itself renders a PINNED pose and pays
+    // NEITHER — so these are reported separately and never folded into the
+    // GPU frame time.
+    if (opt.cpuProf > 0 && opt.loadOpt) {
+        using clk = std::chrono::steady_clock;
+        LoadOptions lo = *opt.loadOpt;
+        lo.verbose = false;
+        double animMs = 0, upMs = 0;
+        float t = float(opt.loadOpt->demoT);
+        for (int i = 0; i < opt.cpuProf; ++i) {
+            t += 1.0f;                       // a real tick, so splines re-evaluate
+            const auto a0 = clk::now();
+            Reanimate(scene, lo, t);
+            const auto a1 = clk::now();
+            refreshFrameUniforms();
+            refreshBatchUniforms();
+            refreshLightBuffer();
+            std::memcpy([lightBuf contents], lights.data(),
+                        lights.size() * sizeof(GpuLight));
+            const auto a2 = clk::now();
+            animMs += std::chrono::duration<double, std::milli>(a1 - a0).count();
+            upMs   += std::chrono::duration<double, std::milli>(a2 - a1).count();
+        }
+        std::fprintf(stderr,
+            "[DEFERRED] CPU per-frame (headless, %d iters): animation %.4f ms "
+            "(Animate_Objects + light/camera/transform refresh), upload %.4f ms "
+            "(%zu batch uniform blocks + %zu lights). NOT included in the GPU "
+            "frame time -- the timed loop renders a pinned pose.\n",
+            opt.cpuProf, animMs / opt.cpuProf, upMs / opt.cpuProf,
+            scene.batches.size(), lights.size());
+    }
+
+    // ---- warmup + measure --------------------------------------------------
+    std::fprintf(stderr, "[DEFERRED] warmup %d frames…\n", opt.warmup);
+    for (int i = 0; i < opt.warmup; ++i) { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
+
+    // ---- --tess_stats: the EXACT geometry census, in an UNTIMED frame ------
+    // Two independent counts, taken together so neither has to be trusted
+    // alone: the factor kernel accumulates the boundary segment total B and
+    // the live patch count N, and a stats variant of the post-tessellation
+    // vertex function counts every vertex invocation V. For a patch
+    // tessellated into a topological disk, Euler gives T = 2V - B - 2 exactly
+    // (check: uniform level f has V=(f+1)(f+2)/2, B=3f, T=f^2). The stats
+    // pipeline is a SEPARATE entry point, so the timed pipeline carries no
+    // atomic at all.
+    if (opt.tess && opt.tessStats && psoGBufTessStats && tessFactorBuf) {
+        std::memset([tessStatBuf contents], 0, 32);
+        tessStatsArmed = true;
+        { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
+        tessStatsArmed = false;
+        // COPY the counters out before anything else touches the buffer — the
+        // factor-kernel timing loop below dispatches the same kernel 20 more
+        // times and would otherwise inflate every figure read from the live
+        // pointer by 21x. (It did, for one round.)
+        uint32_t st[8];
+        std::memcpy(st, [tessStatBuf contents], sizeof(st) < 32 ? sizeof(st) : 32);
+        out.tessBoundarySegs = st[0];
+        out.tessPatchesLive  = st[1];
+        out.tessVerts        = st[2];
+        // THE TRIANGLE COUNT IS EXACT, AND THE DIVISOR IS MEASURED, NOT ASSUMED.
+        // --tess_uniform=F on 194 live patches at t=5743 gives, per patch:
+        //   F   1     2     3     4     5     8     16     32     64
+        //   V   3     18    39    72    111   288   1152   4608   18432
+        // Metal's triangle-domain tessellator at inner level n builds a ring
+        // between the outer boundary (3n segments) and an inner patch at level
+        // n-2, so T(n) = T(n-2) + 6n - 6 with T(1)=1, T(2)=6 — i.e. T(2k)=6k^2,
+        // about 1.5*n^2 and NOT the n^2 a uniform subdivision would give. Every
+        // measured V above is EXACTLY 3*T(n) from that recursion (F=64: T=6144,
+        // V=18432). So the post-tessellation vertex function is invoked once per
+        // triangle CORNER with no vertex reuse, and
+        //     TRIANGLES = V / 3, exactly.
+        out.tessTris = out.tessVerts / 3;
+
+        // The factor kernel's own cost, alone in a command buffer, so the
+        // curve can say how much of the frame is bookkeeping.
+        {
+            std::vector<double> ms;
+            for (int r = 0; r < 20; ++r) {
+                id<MTLCommandBuffer> cb = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+                [ce setComputePipelineState:psoTessFactors];
+                for (size_t si = 0; si < stone.size(); ++si) {
+                    const StoneBatch &s = stone[si];
+                    [ce setBuffer:tessFactorBuf offset:NSUInteger(s.factorOff) atIndex:0];
+                    [ce setBuffer:vb offset:NSUInteger(s.vertexOff) atIndex:1];
+                    [ce setBytes:&fu length:sizeof(fu) atIndex:2];
+                    [ce setBytes:&bus[s.bi] length:sizeof(BatchUniforms) atIndex:3];
+                    [ce setBytes:&tus[si] length:sizeof(TessUniformsHost) atIndex:4];
+                    [ce setBuffer:tessSubBuf offset:0 atIndex:5];
+                    [ce setBuffer:tessStatBuf offset:0 atIndex:6];
+                    [ce dispatchThreads:MTLSizeMake(s.patchCount, NSUInteger(tessP * tessP), 1)
+                    threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(s.patchCount, 32),
+                                                      std::min<NSUInteger>(NSUInteger(tessP * tessP), 8), 1)];
+                }
+                [ce endEncoding];
+                [cb commit]; [cb waitUntilCompleted];
+                ms.push_back(([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0);
+            }
+            std::sort(ms.begin(), ms.end());
+            out.tessFactorMs = ms.front();
+        }
+        std::fprintf(stderr,
+            "[TESS-STATS] live patches %lld of %lld dispatched  |  boundary segments %lld\n"
+            "[TESS-STATS] post-tess VERTEX invocations %lld (MEASURED, one atomic each)\n"
+            "[TESS-STATS] TRIANGLES %lld  (= V/3; the 3 is MEASURED via --tess_uniform)\n"
+            "[TESS-STATS] factor kernel alone: %.4f ms (min of 20)\n",
+            out.tessPatchesLive,
+            (long long)(stone.empty() ? 0 : [&]{ long long n = 0; for (auto &s : stone) n += s.patchCount; return n; }()) * (long long)(tessP * tessP),
+            out.tessBoundarySegs, out.tessVerts, out.tessTris, out.tessFactorMs);
+        std::fprintf(stderr,
+            "[TESS-STATS] CALIBRATION: sum inner %u | V if DEDUPED %u | "
+            "V if per-CORNER-of-n^2 %u | measured V %lld\n",
+            st[3], st[4], st[5], out.tessVerts);
+        {
+            long long covered = 0;  // pixels the tessellated stone actually covers
+            covered = st[6];
+            std::fprintf(stderr,
+                "[TESS-STATS] %.1f triangles per LIVE PATCH | stone FRAGMENTS shaded %lld "
+                "(%.2f%% of the frame) | TRIANGLES PER COVERED PIXEL %.3f\n",
+                out.tessPatchesLive ? double(out.tessTris) / double(out.tessPatchesLive) : 0.0,
+                covered, 100.0 * double(covered) / (double(W) * double(H)),
+                covered ? double(out.tessTris) / double(covered) : 0.0);
+        }
+        // Re-warm: the stats frame ran a different pipeline.
+        for (int i = 0; i < 10; ++i) { id<MTLCommandBuffer> cb = renderFrame(); [cb waitUntilCompleted]; }
+    }
+
+    const char *passNames[kPasses] = {"shadow-bake", "gbuffer", "lighting",
+                                      "tonemap", "mirror", "tess-factors",
+                                      "mirror2"};
+    std::vector<double> frameMs;
+    std::vector<std::vector<double>> passMs(kPasses);
+
+    for (int i = 0; i < opt.iters; ++i) {
+        id<MTLCommandBuffer> cb = renderFrame();
+        [cb waitUntilCompleted];
+        const double ms = ([cb GPUEndTime] - [cb GPUStartTime]) * 1000.0;
+        if (ms > 0.0) frameMs.push_back(ms);
+        if (sampleBuf) {
+            NSData *d = [sampleBuf resolveCounterRange:NSMakeRange(0, NSUInteger(kPasses * 2))];
+            if (d && [d length] >= sizeof(MTLCounterResultTimestamp) * kPasses * 2) {
+                const auto *ts = static_cast<const MTLCounterResultTimestamp *>([d bytes]);
+                for (int p = 0; p < kPasses; ++p) {
+                    const uint64_t a = ts[p * 2].timestamp, b = ts[p * 2 + 1].timestamp;
+                    if (a == MTLCounterErrorValue || b == MTLCounterErrorValue || b <= a) continue;
+                    passMs[p].push_back(double(b - a) / 1e6);   // GPU ticks are ns here
+                }
+            }
+        }
+    }
+
+    if (frameMs.empty()) { std::fprintf(stderr, "[DEFERRED] no GPU timestamps\n"); return false; }
+    // Workload census: what the culls actually removed, per frame, so the
+    // comparison table's shadow row can state the batch count it measured
+    // rather than the batch count that exists.
+    if (opt.iters > 0) {
+        const double perFrame = double(opt.iters);
+        std::fprintf(stderr,
+            "[DEFERRED] culling: main-view backface %s; shadow per-cube-face frustum %s "
+            "-- shadow batch draws %.1f/frame, culled %.1f/frame (%.1f%% rejected)\n",
+            opt.cull ? "ON" : "OFF", opt.shadowCull ? "ON" : "OFF",
+            double(shadowBatchesDrawn) / perFrame,
+            double(shadowBatchesCulled) / perFrame,
+            (shadowBatchesDrawn + shadowBatchesCulled)
+                ? 100.0 * double(shadowBatchesCulled)
+                        / double(shadowBatchesDrawn + shadowBatchesCulled)
+                : 0.0);
+    }
+    if (opt.xpar && xparEncodeCalls > 0) {
+        // Peel scheduling census. `runs` are the merged encoder groups; the
+        // unmerged form is one run per clump, which is what the old scheduling
+        // emitted. Blit encoders are now zero (the floor ping-pongs).
+        const double calls = double(xparEncodeCalls);
+        std::fprintf(stderr,
+            "[XPAR] peel scheduling: %.1f encoder run(s)/view (%zu clump(s)), "
+            "%.0f render encoder(s) per encodeXpar call vs %zu unmerged, "
+            "0 blit encoder(s) (was %zu) -- merge admits only SCREEN-DISJOINT "
+            "clumps, so the composite is unchanged\n",
+            double(xparRunsTotal) / calls / 2.0, xparGroups.size(),
+            double(xparEncoders) / calls,
+            xparGroups.size() * size_t(xparPeelPasses) * 2 * 2,
+            xparGroups.size() * size_t(xparPeelPasses > 1 ? xparPeelPasses - 1 : 0) * 2);
+    }
+    out.frame = {"frame", Percentile(frameMs, 0.5), Percentile(frameMs, 0.05), Percentile(frameMs, 0.95)};
+    for (int p = 0; p < kPasses; ++p) {
+        if (passMs[p].empty()) continue;
+        out.passes.push_back({passNames[p],
+                              Percentile(passMs[p], 0.5),
+                              Percentile(passMs[p], 0.05),
+                              Percentile(passMs[p], 0.95)});
+    }
+
+    if (!opt.outPath.empty()) {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:ldrTex sourceSlice:0 sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(NSUInteger(W), NSUInteger(H), 1)
+                    toTexture:stageTex destinationSlice:0 destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        const size_t rowBytes = size_t(W) * 4;
+        std::vector<uint8_t> pix(rowBytes * size_t(H));
+        [stageTex getBytes:pix.data() bytesPerRow:rowBytes
+               fromRegion:MTLRegionMake2D(0, 0, NSUInteger(W), NSUInteger(H)) mipmapLevel:0];
+        if (WritePPM(opt.outPath, pix.data(), W, H, rowBytes))
+            std::fprintf(stderr, "[DEFERRED] wrote %s\n", opt.outPath.c_str());
+    }
+    return true;
+}
+}
+
+}  // namespace gpubench

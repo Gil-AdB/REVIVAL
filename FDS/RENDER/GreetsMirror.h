@@ -33,6 +33,7 @@ struct Material;
 struct Object;
 struct Omni;
 struct Scene;
+struct Camera;
 struct TriMesh;
 struct Texture;
 struct Vertex;
@@ -63,6 +64,40 @@ struct ClonedMeshRange {
     bool     dynamic;
 };
 
+// One clone sub-range with its OWN tight bounding sphere, in clone
+// space (the clone mesh's transform is identity, so clone space ==
+// world space). A mirror clone is built as ONE TriMesh holding the
+// whole mirrored room, so its single bsphere is room-sized and the
+// mesh-level frustum cull can never reject it — the same disease the
+// greets Piramid chunk split cured for the source wall. These are the
+// spheres a per-source-mesh SPLIT of the clone would give each piece;
+// --mirror_cull_census measures, without changing any geometry, how
+// many of the clone's verts such a split would let the existing cull
+// reject. Populated at BuildMirror, refreshed for dynamic ranges by
+// UpdateMirror, keyed on the clone TriMesh (stable across the
+// mirrors-vector reallocations that would dangle a MeshRange pointer).
+struct MirrorCloneSubSphere {
+    uint32_t vStart = 0, vCount = 0;
+    Vector   ctr{};
+    float    radSq = 0.0f;
+    bool     dynamic = false;
+};
+
+// The sub-spheres for a mirror clone mesh, or nullptr for any mesh
+// that isn't one. Cheap hash lookup; only --mirror_cull_census calls it.
+const std::vector<MirrorCloneSubSphere> *MirrorCloneSubSpheres(const TriMesh *T);
+
+// One mirror WALL face (the mirror's screen window) plus the live mesh
+// that owns it, so a caller can transform its verts to world/view. The
+// clone can only paint pixels whose gb.mirrorId equals its own tag —
+// i.e. INSIDE this window — so clone geometry projecting outside it
+// contributes nothing at all, even though it sits inside the camera
+// frustum. --mirror_cull_census measures that (much tighter) ceiling
+// alongside the plain-frustum one. Registered per frame for ACTIVE
+// mirrors by UpdateAllMirrors, keyed on the clone TriMesh.
+struct MirrorCloneWall { const Face *face; const TriMesh *mesh; };
+const std::vector<MirrorCloneWall> *MirrorCloneWalls(const TriMesh *T);
+
 // Source/clone omni pair owned by a Mirror. Per-frame IPos / IDir
 // updates re-reflect the source's current pose; IRange gets clamped
 // to plane distance for soft compartmentalization.
@@ -82,6 +117,16 @@ struct Mirror {
     TriMesh    *cloneMesh = nullptr;
     Material   *wallMatClone = nullptr;
     std::vector<ClonedMeshRange> meshRanges;
+    // Per CLONE vertex (parallel to cloneMesh->Verts): the index of the
+    // SOURCE vertex it was mirrored from. The clone only carries vertices
+    // some surviving clone face references, so the mapping is a COMPACTION
+    // of the source array, not the identity — clone vertex
+    // `r.vStart + k` comes from `r.sourceMesh->Verts[cloneSrcVert[r.vStart + k]]`.
+    // Every per-frame source→clone refresh MUST go through this (UpdateMirror's
+    // Pos/N/Tangent/colour re-mirror; DisplaceRebuild's Vertex::ShellH copy),
+    // or the reflection re-mirrors the wrong vertices. Empty for compound
+    // (depth-1) clones, which have no meshRanges and are never refreshed.
+    std::vector<uint32_t>        cloneSrcVert;
     std::vector<ClonedOmniRef>   omniClones;
     // Per clone face (parallel to cloneMesh->Faces): the source face +
     // its owning mesh. UpdateMirror re-derives each clone face's world
@@ -255,10 +300,16 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName);
 // greets display is surface "screen 3"); the small amudim screens ("screen 4")
 // and column panels ("screen2") are simply left off the list. Pass nullptr to
 // keep the legacy area-gated behaviour (any P_TEXT cluster >= min-area).
+// byMatName: match faces by Material NAME instead of texture filename
+// (textureFileName is then read as the material name). Lets a hand-built
+// scene route its named mirror panels through the RTT-slot builder — the
+// path recursive mirrors need (--mirror-recurse-depth demotes clones to
+// first-order RTT panels here). Default false = legacy texture-name match.
 int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                               std::vector<Mirror> &out,
                               std::vector<MirrorRttSlot> *rttSlots = nullptr,
-                              const std::vector<std::string> *allowedMatNames = nullptr);
+                              const std::vector<std::string> *allowedMatNames = nullptr,
+                              bool byMatName = false);
 
 // Depth-1 recursive: for each ordered pair (A, B) of already-built
 // base mirrors, append a compound mirror representing "looking at B
@@ -316,6 +367,15 @@ extern int g_rttJobsLastFrame;
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots);
 
+// Recursion primitive (mirror-recursion campaign, docs/MIRROR_RECURSION_PLAN.md):
+// the virtual camera whose view of the REAL scene equals `src`'s view of the
+// reflection in the mirror plane (N·x + d = 0). Position is mirrored; the
+// basis is `src`'s basis with each row reflected across N — a det = -1
+// (left-handed) basis, so a view rendered with it is winding-flipped and MUST
+// be rasterized with inverted back-face culling (the reflection reverses
+// handedness). Forward = row 2, as everywhere in the engine.
+Camera MirrorReflectedCamera(const Camera &src, const Vector &N, float d);
+
 // Per-frame probe for second-order ("mirror in mirror") pairs, gated
 // by --mirror-rtt-probe. For each ordered pair (A, B) of ACTIVE base
 // mirrors where A's clone of B's panel projects on screen, logs:
@@ -342,5 +402,24 @@ void DebugOverlayMirrorMask(Scene *sc);
 // camera update for this frame and BEFORE Render() (so the stamp is in
 // place when clone faces rasterize).
 void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors);
+
+// Screen-space bounding box of the footprint StampMirrorMasks stamped for one
+// mirror tag THIS FRAME. Accumulated from the very same clipped wall polygons
+// the stamp rasterizes, so it costs 4 min/max per wall vertex and can never
+// disagree with the mask about where the mirror is; it is a SUPERSET of the
+// stamped pixels (the quad's bbox), which is exactly what an extent-vs-extent
+// reject wants — the exact per-pixel decision stays with the mask itself.
+//
+// Exists for --mirror_flare_bbox: a mirror-clone FLARE is a sprite with real
+// screen extent, and gating it on whether its CENTRE pixel carries the tag
+// deletes the whole sprite the moment the centre crosses the mirror edge (the
+// user-reported "flares rendering in mirrors should be decided by their bbox,
+// no center point"). The bbox answers "could this sprite touch the mirror at
+// all" in O(1); FILLERS' Spriter then clips it per pixel.
+struct MirrorMaskBBox {
+    int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    bool    valid = false;
+};
+const MirrorMaskBBox &MirrorMaskScreenBBox(uint8_t tag);
 
 }  // namespace fds

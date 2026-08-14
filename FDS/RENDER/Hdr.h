@@ -27,6 +27,14 @@ using hdrf = float;
 #endif
 extern std::vector<hdrf> g_hdrBuf;
 
+// Glass refraction (--glass_refract) reads a STABLE snapshot of the finalized
+// opaque background: the transparent peel writes g_hdrBuf/VPage concurrently
+// across tiles, so refracting the LIVE buffer at an offset raced (offset read
+// vs another tile mid-write) → flicker. renderFrame copies into these once
+// post-fog / pre-peel when the flag is on; sampleBgHdr/sampleBgLdr read them.
+extern std::vector<hdrf>     g_glassRefrHdr;   // opaque HDR snapshot (B,G,R,cov ×N) — matches g_hdrBuf storage
+extern std::vector<uint32_t> g_glassRefrLdr;   // opaque VPage snapshot (BGRA ×N)
+
 // Set true by the froxel composite (the only writer of g_hdrBuf) when it runs in
 // HDR mode; reset by Hdr_BeginFrame. The tonemap no-ops when false, so frames
 // that never populated the buffer (fog off, non-froxel paths) render normally
@@ -131,6 +139,24 @@ void Render_LensPostPass();
 // No-op unless --grade / --grain. Threaded. Call AFTER Render_LensPostPass,
 // main view only.
 void Render_GradeGrainPass();
+
+// ── Per-target, SINGLE-THREADED twins of the two calls above ──────────────
+// For an offscreen bake that runs INLINE on a pool worker (the mirror-shard
+// reflection: N bakes concurrent, one per worker). The global forms cannot be
+// used there for two independent reasons: they address ONE global buffer via
+// MainRenderTargetFromGlobals(), and they dispatch row bands through the shared
+// pool + `renderns::tileDone` — which a thread that is itself a pool worker
+// mid-render must not do. These take the target explicitly and run on the
+// calling thread. Semantics are otherwise identical to their global twins,
+// with one documented omission: no Mat_HdrEmissive (0xFFFFFFFE) boost, exactly
+// as the mirror RTT also goes without it (its `boostOK` is false because the
+// mat32 plane it would read belongs to the main G-buffer, not the RTT).
+//   hdr    — w*h*4 radiance (B,G,R,coverage); h[3]==0 means "kernel wrote no
+//            radiance here", which is what Activate lifts from the 8-bit page.
+//   vpage  — 32-bit BGRA target; stride is in DWORDS, not bytes.
+void Hdr_ActivateNoFogInline(hdrf *hdr, uint32_t *vpage, int stride, int w, int h);
+void Render_TonemapToVPageInline(const hdrf *hdr, uint32_t *vpage, int stride,
+                                 int w, int h);
 
 // Tonemap g_hdrBuf -> VPage (8-bit BGRA). Call after all HDR writes, before the
 // UI/text overlays (those must NOT be tonemapped). No-op if g_hdrBuf is unsized.

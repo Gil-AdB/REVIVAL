@@ -14,11 +14,14 @@
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <RENDER/SpotlightCones.h>
+#include <RENDER/TailProf.h>   // FDS_TAIL_PROF: dispMap-resample attribution
 #include <algorithm>
 #include <memory>
 #include <vector>
 #include "FRUSTRUM.H"
 #include <RENDER/OffscreenView.h>  // g_offscreenViewDepth (cube-map bake marks itself offscreen)
+#include <RENDER/EnvCube.h>        // env_cube: padded 6-face bake + convention
+#include <RENDER/EnvBake.h>        // city_env_pixel: register per-building env stores
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
@@ -103,7 +106,13 @@ void Calc_CTable()
 }
 
 DWord *DistBuf,*DistPage;
-DWord WaterBuf[65536*4];
+// 256x256 DWord snapshot of the water texture. Was `[65536*4]` — a BYTE count
+// used as an ELEMENT count, so the array was 4x the 256 KB the memcpy below
+// writes and 3/4 of it was never touched by anything. Found by --mem_census's
+// sweep for sizes that are products of the wrong unit (FDS/Base/MemCensus.h).
+// Byte-null: the memcpy still copies 65536*4 BYTES, which now exactly fills it,
+// and the only reader is inside Water_Distort's commented-out body.
+DWord WaterBuf[65536];
 
 void Setup_Water_Distort()
 {
@@ -1041,6 +1050,78 @@ void City_Lighting()
 	}
 }
 
+// ── city_env_pixel: pass-1 (mirrored world) forward-reflective glass ──────
+// Pass-2 renders the windows through the deferred per-pixel env compose (no
+// Face_Reflective), which left the water's mirrored towers either with NO
+// reflection at all, or — worse — with the deferred kernel env-composing the
+// mirror pass: wrong by construction (real-world bake data against mirrored
+// positions) and 200–660k wasted composes/frame. Instead, give the MIRROR
+// pass the default path's cheap per-vertex method: before Reflected_Transform
+// runs, flag the window faces reflective and fill the per-vertex paraboloid-
+// sheet UVs exactly like Transform.cpp's Face_Reflective block (world-space
+// form of the same cv-pull + viewer-side sheet pick), from the current
+// camera. RenderInner then dispatches them to TheOtherBarry<OVERWRITE,
+// TEXTURETEXTURE> and Mekalele stamps the mat32 sentinel, so the mirror
+// pass's kernel never sees them. cityMirrorGlassRestore() clears the flag
+// again so pass-2 rasterizes the glass into the G-buffer as before.
+struct MirrorGlassFace { TriMesh* T; Face* F; };
+static std::vector<MirrorGlassFace> g_mirrorGlassFaces;
+
+static void cityMirrorGlassForward()
+{
+	for (auto& [T, F] : g_mirrorGlassFaces) {
+		if (!T->EnvHemiSheets[0]) continue;   // no sheets — leave deferred-only
+		Vector wsPos[3];
+		size_t i = 0;
+		for (Vertex* v : { F->A, F->B, F->C }) {
+			MatrixXVector(T->RotMat, &v->Pos, &wsPos[i]);
+			wsPos[i] += T->IPos;
+			++i;
+		}
+		// World-space face plane from the winding (Transform-block parity;
+		// equivalent to its object-space AP/N form for rigid+scale).
+		auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
+		Vector_Norm(&n);
+		Vector bsWorld;
+		MatrixXVector(T->RotMat, &T->BSphereCtr, &bsWorld);
+		bsWorld += T->IPos;
+		Vector cv = View->ISource;
+		const float planeD = fabsf((cv - wsPos[0]) * n);
+		const float optD   = fabsf((bsWorld - wsPos[0]) * n);
+		if (planeD > optD) {
+			const float hackD = powf(planeD - optD, 0.8f) + optD;
+			Vector pullDir = bsWorld - View->ISource;
+			const float step = pullDir * n;
+			// Same degeneracy guard as the forward block (pullDir within
+			// ~5.7° of the plane → skip, see Transform.cpp).
+			if (step * step > 0.01f * (pullDir * pullDir))
+				cv += (hackD - planeD) / step * pullDir;
+		}
+		const Vector w0 = wsPos[0] - cv;
+		const float nSide = (w0 * n) > 0.0f ? -1.0f : 1.0f;
+		const int k = fds::EnvCube_SelectFace(nSide * n.x, nSide * n.y,
+		                                      nSide * n.z);
+		float eu[3], ev[3];
+		for (i = 0; i < 3; ++i) {
+			Vector d = wsPos[i] - cv;
+			d -= (d * n) * 2.0f * n;
+			Vector_Norm(&d);
+			fds::EnvCube_DirToParaboloidUV(k, d.x, d.y, d.z, eu[i], ev[i]);
+		}
+		F->ReflectionTexture = T->EnvHemiSheets[k];
+		F->EU1 = eu[0]; F->EV1 = ev[0];
+		F->EU2 = eu[1]; F->EV2 = ev[1];
+		F->EU3 = eu[2]; F->EV3 = ev[2];
+		F->Flags |= Face_Reflective;
+	}
+}
+
+static void cityMirrorGlassRestore()
+{
+	for (auto& [T, F] : g_mirrorGlassFaces)
+		F->Flags &= ~dword(Face_Reflective);
+}
+
 void Reflective_AnimateTexture()
 {
 	TriMesh *T = (TriMesh *)(RflObj->Data);
@@ -1615,6 +1696,19 @@ constexpr int PANORAMA_YRES = 1024;
 constexpr int CUBE_MAP_XRES = 1024;
 constexpr int CUBE_MAP_YRES = 1024;
 
+// --env_live_water: per-face resolution of the water-coverage mask stamped
+// beside each building's cube bake. 128² is 1/16 the linear rate of the 512²
+// faces on purpose — the mask only has to say WHERE the waterline is, it is
+// read bilinearly (so it is a ramp, not a staircase), and at this rate all 71
+// probes cost 6·128²·71 = 7.0 MB against the ~450 MB of colour they gate.
+constexpr int CITY_ENV_WATERMASK_RES = 128;
+
+// Backing store for TriMesh::EnvWaterMask (the forward reflective path): the
+// `buildings` bake scratch is local to Initialize_City, so the masks the
+// meshes point at have to outlive it. Rebuilt from scratch on every init;
+// released with the scene.
+static std::vector<std::vector<uint8_t>> g_cityEnvWaterMasks;
+
 // Synthetic test panorama: paints quadrant labels + lat/lon gridlines.
 // Decodes which world direction the equirectangular generator maps to
 // which (eu, ev) when overlaid on a real building's reflection.
@@ -1748,67 +1842,557 @@ static void bakeBuildingPanorama(Object* Obj,
 #endif
 }
 
-// ── Vehicle headlights ("for the lulz") ──────────────────────────────
-// Every vehicle-sized mover gets one warm spotlight welded to its nose,
-// re-aimed along its motion every frame. "Vehicle" = TriMesh with an
-// animated Pos spline (>1 key) and a vehicle-scale bounding sphere —
-// the city traffic system: taxis, buses, trams, police, cars, bike,
-// ambulance, plus the two AlignToPath ships. The size gate excludes the
-// movers that are NOT vehicles (water.lwo r=1061, the b1.lwo building
-// r=709, the r=0 camera target). Cones read as volumetric beams under
-// --draw_cones and glow in the froxel fog; surface lighting paints
-// whatever they sweep. No shadows (~30 moving shadow maps would eat
-// the frame budget). The police car strobes red/blue, obviously.
+// ── env_live_water_shade: procedural-water re-shade of one baked face ──────
+// The default probe bake shows the water as its STATIC authored texture (the
+// forward transparent composite over the mirrored world, lit + dst/2) —
+// visibly wrong against a --water_procedural main view, which replaces that
+// with the deferred fresnel composite of a deep colour and the reflection
+// underlay (DeferredSurfaceKernel's waterProc block) plus the screen-space
+// caustic-cell modulation (pwater::RenderGlints' texMix block). When the bake
+// gate is on (see the env_cube branch in Initialize_City), the water MESH is
+// hidden for the whole bake — pass 2 leaves the pure mirrored world as the
+// reflection underlay — and this pass re-shades, at full render res before
+// the downsample, every texel whose probe ray hits the water plane
+// unoccluded, with the main view's own formula:
+//
+//     cos = -dy of the normalized texel ray             (plane normal = +Y)
+//     F   = fresnelBase + (refl - base)*(1-cos)^5       (kernel waterProc)
+//     out = deep*(1-F) + underlay*F                     (kernel LDR blend)
+//     out = out*mod + blueAdd*(1, .40, .08)             (caustic cell, t=0)
+//
+// The wave clock is FROZEN at 0: the bake runs once at init, and live motion
+// comes from the env_live_water sample-time perturb — exactly how the main
+// view animates its static pass-1 image with the dispMap ripple. Specular
+// GLINTS are deliberately NOT baked: they are view-dependent sparkle and
+// would freeze into noise glued to the reflected content (documented drop).
+// Froxel-fog inscatter over distant water is a main-view-only term too (the
+// bake's underlay carries only the forward fog of its own render).
+//
+// Occlusion mask = RenderGlints' ray-cast trick: the plane hit's view-z vs
+// the opaque ZPage16. Mirrored (pass-1) geometry can never mask — a virtual
+// image lies BEYOND the plane hit along any ray — so exactly the real
+// below-horizon geometry (neighbour building bases, piers) keeps its texels.
+// Row-parallel with disjoint row bands → deterministic output.
+//
+// SECOND JOB — the --env_live_water COVERAGE MASK (maskFace, maskRes² bytes
+// for this face). The same per-pixel decision this pass makes ("is this texel
+// unoccluded water?") is exactly what the sample-time wave-slope tilt needs
+// in order to leave the reflected skyline alone: 5d28db7 gated the tilt on
+// `below the horizon`, but a window at building-mid-height reflects a wholly
+// below-horizon hemisphere, so the horizon test let the reflected buildings
+// ripple like liquid (user: "it perturbs the whole reflection, not just the
+// water part there"). The mask is box-accumulated from the FULL-RES decision
+// (coverage 0..255 per cell, so the waterline is fractional and the tilt
+// ramps out across it instead of stepping), and it is built whether or not
+// the re-shade itself runs — --no-env_live_water_shade still needs to know
+// where the water is. Bands are split on MASK rows so every cell is written
+// by exactly one thread; the source-row mapping is exact integer division, so
+// no cell is double-counted and the output is thread-count-independent.
+static void shadeAndMaskFaceWater(const Camera& envCam, bool doReshade,
+                                  uint8_t* maskFace, int maskRes)
+{
+	const float ey = envCam.ISource.y;
+	const float wY = g_waterY;
+	if (ey <= wY) return;                                  // probe under water
+	const float wDeepB    = fds::FeatureFlags::water_deep_b();
+	const float wDeepG    = fds::FeatureFlags::water_deep_g();
+	const float wDeepR    = fds::FeatureFlags::water_deep_r();
+	const float wRefl     = fds::FeatureFlags::water_reflectivity();
+	const float wFresBase = fds::FeatureFlags::water_fresnel_base();
+	const float texMix    = fds::FeatureFlags::water_albedo_mix();
+	const float texScale  = fds::FeatureFlags::water_tex_scale();
+	const float texWarp   = fds::FeatureFlags::water_tex_warp();
+	const float scale     = fds::FeatureFlags::water_bump_scale();
+	const float tWave     = 0.0f;                          // frozen (see above)
+	const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+	const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+	const float cex = CntrEX, cey = CntrEY;
+	// Camera world→view rotation rows = camera axes → columns give view→world.
+	const float m00=envCam.Mat[0][0], m10=envCam.Mat[1][0], m20=envCam.Mat[2][0];
+	const float m01=envCam.Mat[0][1], m11=envCam.Mat[1][1], m21=envCam.Mat[2][1];
+	const float m02=envCam.Mat[0][2], m12=envCam.Mat[1][2], m22=envCam.Mat[2][2];
+	const float ex=envCam.ISource.x, ez=envCam.ISource.z;
+	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+	// Depth bias on the occlusion test, TWO ZPage16 LSBs of view-z. Needed
+	// because the WATER MESH ITSELF is in the depth buffer whenever the bake
+	// keeps it (--no-env_live_water_shade): its rasterized depth and this
+	// pass's analytic plane hit are the same surface, so the comparison is
+	// decided by 16-bit quantization and the water occludes itself in bands
+	// — the mask dumped as horizontal stripes at ~50% coverage and the tilt
+	// would have strobed along them (measured: 15.4% mean coverage against
+	// the water-hidden arm's 33.5%; with the bias the two agree). A real
+	// occluder stands well clear of the plane, so two LSBs cannot lose one;
+	// it can only reclaim a sub-texel sliver at a silhouette, where the
+	// coverage ramp already blends.
+	const float zBias = 2.0f * invZScale;
+	const float fzp = (CitySc && CitySc->FZP > 0.0f) ? CitySc->FZP : 1e30f;
+	dword* const vp = (dword*)VPage;
+	const uint16_t* const oz = ZPage16;
+	const int xr = XRes;
+	const int yr = YRes;
+	auto band = [=](int my0, int my1) {
+		std::vector<uint32_t> cnt(static_cast<size_t>(maskRes), 0u);
+		for (int my = my0; my < my1; ++my) {
+		const int ys = int((int64_t)my       * yr / maskRes);
+		const int ye = int((int64_t)(my + 1) * yr / maskRes);
+		std::fill(cnt.begin(), cnt.end(), 0u);
+		for (int y = ys; y < ye; ++y) {
+			dword* row = vp + size_t(y) * size_t(xr);
+			const uint16_t* orow = oz + size_t(y) * size_t(xr);
+			for (int x = 0; x < xr; ++x) {
+				const float xn = (float(x) - cex) * invFX;
+				const float yn = (cey - float(y)) * invFY;
+				const float D = m01*xn + m11*yn + m21;     // d(world.y)/d(view-z)
+				if (D >= 0.0f) continue;                   // at/above horizon
+				const float sd = (wY - ey) / D;            // view-z of the plane hit
+				if (sd <= 1.0f || sd >= fzp) continue;     // behind eye / past far plane
+				const uint16_t oe = orow[x];               // opaque-Z occlusion
+				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd - zBias) continue;
+				// This source pixel IS unoccluded water — the one fact both
+				// the re-shade and the live-water tilt key off.
+				++cnt[size_t((int64_t)x * maskRes / xr)];
+				if (!doReshade) continue;
+				const float dx = m00*xn + m10*yn + m20;    // world ray per view-z
+				const float dz = m02*xn + m12*yn + m22;
+				// Fresnel from the normalized ray vs the +Y plane normal —
+				// the kernel's Schlick form (cos > 0 here since D < 0).
+				const float cosT = -D / std::sqrt(dx*dx + D*D + dz*dz);
+				const float c = 1.0f - cosT;
+				const float c5 = c*c*c*c*c;
+				float F = wFresBase + (wRefl - wFresBase) * c5;
+				if (F < 0.0f) F = 0.0f; if (F > 1.0f) F = 1.0f;
+				const dword p = row[x];
+				const float k = 1.0f - F;
+				float oB = wDeepB * k + float(p & 0xFFu)         * F;
+				float oG = wDeepG * k + float((p >>  8) & 0xFFu) * F;
+				float oR = wDeepR * k + float((p >> 16) & 0xFFu) * F;
+				// Caustic-cell modulation at the plane hit (same block as the
+				// main view's screen pass, frozen clock, no flow).
+				const float wx = ex + sd * dx;
+				const float wz = ez + sd * dz;
+				float mod, blue;
+				if (pwater::CausticModulation(wx, wz, tWave, scale, texMix,
+				                              texScale, texWarp, 0.0f, 0.0f,
+				                              mod, blue)) {
+					oB = oB * mod + blue;
+					oG = oG * mod + blue * 0.40f;
+					oR = oR * mod + blue * 0.08f;
+				}
+				int nb = int(oB), ng = int(oG), nr = int(oR);
+				if (nb < 0) nb = 0; if (nb > 255) nb = 255;
+				if (ng < 0) ng = 0; if (ng > 255) ng = 255;
+				if (nr < 0) nr = 0; if (nr > 255) nr = 255;
+				row[x] = dword(nb) | (dword(ng) << 8) | (dword(nr) << 16) | 0xFF000000u;
+			}
+		}
+		// Cell coverage = water pixels / source pixels in the cell, exact per
+		// column band (integer division, so the columns tile the row without
+		// gap or overlap regardless of xr/maskRes divisibility).
+		uint8_t* mrow = maskFace + size_t(my) * size_t(maskRes);
+		for (int mx = 0; mx < maskRes; ++mx) {
+			const int xs = int((int64_t)mx       * xr / maskRes);
+			const int xe = int((int64_t)(mx + 1) * xr / maskRes);
+			const uint32_t tot = uint32_t((ye - ys) * (xe - xs));
+			mrow[mx] = tot ? uint8_t((cnt[size_t(mx)] * 255u + tot / 2u) / tot) : 0u;
+		}
+		}
+	};
+	auto& tp = ThreadPool::instance();
+	const int nT = (int)tp.size();
+	if (nT < 2 || maskRes < 8) { band(0, maskRes); return; }
+	const int chunk = (maskRes + nT - 1) / nT;
+	auto remaining = std::make_shared<std::atomic<int>>(0);
+	for (int i = 0; i < nT; ++i) {
+		const int y0 = i * chunk; if (y0 >= maskRes) break;
+		const int y1 = std::min(y0 + chunk, maskRes);
+		remaining->fetch_add(1, std::memory_order_relaxed);
+		tp.enqueue([band, y0, y1, remaining]() {
+			band(y0, y1);
+			remaining->fetch_sub(1, std::memory_order_release);
+		});
+	}
+	while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+}
+
+// env_cube: bake six PADDED cube faces for one building using the EnvCube
+// convention (EnvCube_Basis + padded FOV), box-downsample each to faceRes, and
+// pack them FACE-MAJOR into `rawFaces` (6 × faceRes² RGBA). No equirect
+// reprojection — the faces go straight to Materialize + T->EnvCubeFaces, and
+// Transform's Face_Reflective block picks one per triangle. The caller must
+// have set the padded projection (EnvCam.IFOV = EnvCube_FaceFovDegrees(),
+// CalcPersp, FOVX/FOVY) before calling.
+static void bakeBuildingCubeFaces(Object* Obj,
+                                  Camera& envCam,
+                                  const VESA_Surface& tmpSurf,
+                                  int faceRes,
+                                  std::vector<uint8_t>& rawFaces,
+                                  bool procWaterShade,
+                                  std::vector<uint8_t>* waterMaskOut,
+                                  int maskRes)
+{
+	TriMesh* T = (TriMesh*)Obj->Data;
+	const dword flags = T->Flags;
+	T->Flags &= ~HTrack_Visible;
+
+	// Mute omni FLARE sprites for the bake: a searchlight flare near a
+	// building bakes as a giant white blob filling a large solid angle of
+	// the env store — invisible in the dim legacy pano, but per-pixel
+	// Fresnel at grazing reflects it near full strength (the scripted-cam
+	// "white bloom sweeping the facade"). Same trick as the mirror RTT.
+	std::vector<std::pair<Omni*, float>> mutedFlares;
+	for (Omni* O = CitySc->OmniHead; O; O = O->Next) {
+		mutedFlares.push_back({ O, O->ISize });
+		O->ISize = 0.0f;
+	}
+
+	rawFaces.assign(size_t(6) * faceRes * faceRes * 4, 0);
+	if (waterMaskOut) waterMaskOut->assign(size_t(6) * maskRes * maskRes, 0);
+	const int ratio = CUBE_MAP_XRES / faceRes;   // 1024/512 = 2
+	const int n = ratio * ratio;
+
+	envCam.ISource = T->IPos + T->BSphereCtr;
+	for (int k = 0; k != 6; ++k) {
+		parallel_memset(VPage, 0, PageSize);
+		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		const fds::EnvCubeBasisT& B = fds::EnvCube_Basis(k);
+		envCam.Mat[0][0] = B.right[0]; envCam.Mat[0][1] = B.right[1]; envCam.Mat[0][2] = B.right[2];
+		envCam.Mat[1][0] = B.up[0];    envCam.Mat[1][1] = B.up[1];    envCam.Mat[1][2] = B.up[2];
+		envCam.Mat[2][0] = B.fwd[0];   envCam.Mat[2][1] = B.fwd[1];   envCam.Mat[2][2] = B.fwd[2];
+
+		RenderSkyCube(SkySc, View, true, /*ForceForward=*/true);
+		Reflected_Transform(CitySc);
+		if (0 != CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceForward); }
+		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
+		if (0 != CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceForward); }
+
+		// env_live_water: stamp this face's water-coverage mask, and (when
+		// env_live_water_shade put the water mesh out of the bake) re-shade
+		// the exposed mirrored underlay as procedural water — one full-res
+		// pass over the face, both jobs off the same per-pixel decision.
+		if (waterMaskOut)
+			shadeAndMaskFaceWater(envCam, procWaterShade,
+			                      waterMaskOut->data()
+			                          + size_t(k) * maskRes * maskRes,
+			                      maskRes);
+
+		// Box-downsample CUBE_MAP_XRES² → faceRes², force opaque alpha.
+		const uint32_t* src = (const uint32_t*)tmpSurf.Data;
+		uint32_t* dst = (uint32_t*)rawFaces.data() + size_t(k) * faceRes * faceRes;
+		for (int y = 0; y < faceRes; ++y)
+			for (int x = 0; x < faceRes; ++x) {
+				uint32_t sb = 0, sg = 0, sr = 0;
+				for (int yy = 0; yy < ratio; ++yy)
+					for (int xx = 0; xx < ratio; ++xx) {
+						const uint32_t p = src[size_t(y*ratio + yy) * CUBE_MAP_XRES + (x*ratio + xx)];
+						sb += p & 0xFF; sg += (p >> 8) & 0xFF; sr += (p >> 16) & 0xFF;
+					}
+				dst[size_t(y) * faceRes + x] = 0xFF000000u
+					| ((sb / n) & 0xFF) | (((sg / n) & 0xFF) << 8) | (((sr / n) & 0xFF) << 16);
+			}
+	}
+	T->Flags = flags;
+	for (auto& p : mutedFlares) p.first->ISize = p.second;
+
+	// FDS_ENVBAKE_DUMP dev hook: "1" keeps the legacy single-path dump (last
+	// building baked wins); "all" writes one file per building; any other
+	// value is an object-name filter (e.g. "b12.lwo"). Per-building paths
+	// carry the name so before/after crops of a specific probe are trivial.
+	const char* dumpSel = std::getenv("FDS_ENVBAKE_DUMP");
+	if (dumpSel && (!std::strcmp(dumpSel, "1") || !std::strcmp(dumpSel, "all")
+	                || !std::strcmp(dumpSel, Obj->Name))) {
+		const bool legacy = !std::strcmp(dumpSel, "1");
+		char dumpPath[256];
+		if (legacy)
+			std::snprintf(dumpPath, sizeof(dumpPath), "/tmp/city_cube_faces.ppm");
+		else
+			std::snprintf(dumpPath, sizeof(dumpPath), "/tmp/city_cube_faces_%s.ppm", Obj->Name);
+		std::fprintf(stderr, "[ENVBAKE-DUMP] %s center=(%.1f, %.1f, %.1f) waterY=%.1f -> %s\n",
+		             Obj->Name, envCam.ISource.x, envCam.ISource.y, envCam.ISource.z,
+		             g_waterY, dumpPath);
+		if (FILE* fp = std::fopen(dumpPath, "wb")) {
+			const int gw = faceRes * 3, gh = faceRes * 2;
+			std::fprintf(fp, "P6\n%d %d\n255\n", gw, gh);
+			const uint32_t* rf = (const uint32_t*)rawFaces.data();
+			for (int y = 0; y < gh; ++y)
+				for (int x = 0; x < gw; ++x) {
+					const int f = (y / faceRes) * 3 + (x / faceRes);
+					const uint32_t p = rf[size_t(f)*faceRes*faceRes + size_t(y % faceRes)*faceRes + (x % faceRes)];
+					unsigned char rgb[3] = { (unsigned char)((p >> 16) & 0xFF),
+					                         (unsigned char)((p >> 8) & 0xFF),
+					                         (unsigned char)(p & 0xFF) };
+					std::fwrite(rgb, 1, 3, fp);
+				}
+			std::fclose(fp);
+		}
+		// ...and the --env_live_water coverage mask beside it, same 3x2 grid,
+		// as a PGM: white = the tilt is at full strength here, black = the
+		// baked content is not water and must not move. Reading this next to
+		// the colour dump is how you tell "the mask is wrong" from "the tilt
+		// is wrong".
+		if (waterMaskOut && !waterMaskOut->empty()) {
+			char mPath[256];
+			std::snprintf(mPath, sizeof(mPath), "%s.watermask.pgm", dumpPath);
+			if (FILE* fp = std::fopen(mPath, "wb")) {
+				const int gw = maskRes * 3, gh = maskRes * 2;
+				std::fprintf(fp, "P5\n%d %d\n255\n", gw, gh);
+				const uint8_t* mm = waterMaskOut->data();
+				for (int y = 0; y < gh; ++y)
+					for (int x = 0; x < gw; ++x) {
+						const int f = (y / maskRes) * 3 + (x / maskRes);
+						const uint8_t v = mm[size_t(f)*maskRes*maskRes
+						                     + size_t(y % maskRes)*maskRes + (x % maskRes)];
+						std::fwrite(&v, 1, 1, fp);
+					}
+				std::fclose(fp);
+				std::fprintf(stderr, "[ENVBAKE-DUMP] water mask -> %s\n", mPath);
+			}
+		}
+	}
+}
+
+// ── Vehicle headlights ────────────────────────────────────────────────
+// Two schemes share one vehicle census ("vehicle" = TriMesh with an
+// animated Pos spline (>1 key) and a vehicle-scale bounding sphere; the
+// size gate excludes water.lwo r=1061, the moving b1.lwo building r=709
+// and the r=0 camera target — census: taxi ×8, bus ×5, car2 ×2, poliece,
+// bike, abulans, tra_frnt ×3, tra_vagn ×5, SHIP1, shp2):
+//
+//   LEGACY (--city-headlights, DEFAULT ON — the city pin was established
+//   with this look): one warm spot welded to the nose, re-aimed along
+//   frame-to-frame motion each tick.
+//
+//   FRONT-ROW (--city-headlights-front, default OFF): the legacy nose
+//   spot is replaced by a PAIR of spots per vehicle, seated on the front
+//   face of the local-space AABB at ±35% of the body width, slightly
+//   below mid-height, aimed along the vehicle's LOCAL +Z. +Z-is-forward
+//   was measured, not assumed: sampling each mover's Pos spline motion
+//   at 4 phases and pulling it into local space through the authored
+//   rotation gives local ≈ (0,0,+1) for every vehicle type (transient
+//   x-drift mid-turn is the rotation keys lagging the motion keys); for
+//   the two AlignToPath ships UnscaledRotMat·(0,0,1) IS the path heading
+//   by construction. Each spot omni is PARENTED to its vehicle Object
+//   through a code-created Obj_Omni wrapper (the same shape AddOmni
+//   builds for FLD lights): its single-key Pos spline holds the LOCAL
+//   mount offset, Animate_Objects' hierarchy pass then composes
+//   parent.Rot(scaled)·local + parent.Pos every frame — so position
+//   tracks the animated vehicle (incl. the ×18.9-scaled SHIP1) with no
+//   per-frame code. Omni IDir is NOT touched by the hierarchy pass
+//   (omni wrappers alias the shared Mat_ID identity), so aim alone is
+//   refreshed per tick from UnscaledRotMat column 2. Tram WAGONS
+//   (tra_vagn — trailing cars, no cab) are excluded; the tra_frnt cab
+//   keeps its pair (it shuttles back and forth, so on the return leg the
+//   beams face away from motion — like a real back-to-back tram cab).
+//   ll_pas/pas2/lll_pas ("train truck" track/pipe scenery) are static
+//   (NumKeys<=1) and never enter the census.
+//
+// Neither scheme sets Omni_SceneAuthored (the editor's lights list and
+// the LWS/FLD light index space see only authored lights); tuning goes
+// through the FeatureFlags render-flags panel (city_headlight_intensity,
+// city_headlight_range). No shadow casting, no volumetric cones by
+// default (--draw_cones opts in scene-wide) — ~30-46 moving shadow maps
+// would eat the frame budget. The police car strobes red/blue, obviously.
 namespace {
-struct VehicleHeadlight {
+struct VehicleHeadlight {          // legacy scheme
 	TriMesh* T;
 	Omni*    spot;
 	Vector   lastDir;
 	Vector   prevPos;
 	bool     hasPrev;   // delta heading needs one animated frame first
 	bool     police;
+	const char* name;
 };
 std::vector<VehicleHeadlight> g_headlights;
+
+struct VehicleFrontLights {        // front-row scheme
+	TriMesh* T;
+	Omni*    spot[2];   // left / right
+	bool     police;
+	const char* name;
+};
+std::vector<VehicleFrontLights> g_frontLights;
+
+// Shared census gate. Returns nullptr if this Object is not a vehicle.
+TriMesh *headlightVehicle(Object *O)
+{
+	if (O->Type != Obj_TriMesh) return nullptr;
+	TriMesh *T = (TriMesh *)O->Data;
+	if (T->Pos.NumKeys <= 1) return nullptr;               // parked scenery
+	if (T->BSphereRadius <= 0.0f || T->BSphereRadius > 200.0f)
+		return nullptr;               // water / moving building / camera target
+	return T;
+}
+
+// FDS_HEADLIGHT_AXIS_DUMP=1 — one-shot native investigation hook (PICK_TEST
+// convention): per vehicle, print the local AABB + authored scale, and the
+// motion direction pulled into local space at 4 spline phases (the
+// snapshot tick freezes scene time, so frame-delta motion is useless for
+// this). This is how the +Z front axis and the mount offsets were derived.
+void headlightAxisDump(const char *name, TriMesh *T)
+{
+	if (!std::getenv("FDS_HEADLIGHT_AXIS_DUMP") || T->VIndex == 0) return;
+	Vector mn = T->Verts[0].Pos, mx = T->Verts[0].Pos;
+	for (DWord v = 1; v < T->VIndex; ++v) {
+		const Vector &p = T->Verts[v].Pos;
+		mn.x = std::min(mn.x, p.x); mx.x = std::max(mx.x, p.x);
+		mn.y = std::min(mn.y, p.y); mx.y = std::max(mx.y, p.y);
+		mn.z = std::min(mn.z, p.z); mx.z = std::max(mx.z, p.z);
+	}
+	Vector sc0; Spline_Calc_3D(&T->Scale, T->Pos.Keys[0].Frame + 1.0f, &sc0);
+	fprintf(stderr, "[HL-AABB] %-14s r=%7.1f aabb=(%.1f,%.1f,%.1f)..(%.1f,%.1f,%.1f) keys=%d align=%d euler=%d scale=(%.2f,%.2f,%.2f)\n",
+	        name, T->BSphereRadius, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z,
+	        (int)T->Pos.NumKeys, (T->Flags & Tri_AlignToPath) ? 1 : 0,
+	        (T->Flags & Tri_Euler) ? 1 : 0, sc0.x, sc0.y, sc0.z);
+	const int nk = (int)T->Pos.NumKeys;
+	const float f0 = T->Pos.Keys[0].Frame, f1 = T->Pos.Keys[nk-1].Frame;
+	for (float frac : {0.15f, 0.35f, 0.55f, 0.75f}) {
+		const float f = f0 + (f1 - f0) * frac;
+		Vector p0, p1, mo;
+		Spline_Calc_3D(&T->Pos, f,        &p0);
+		Spline_Calc_3D(&T->Pos, f + 1.0f, &p1);
+		Vector_Sub(&p1, &p0, &mo);
+		const float l = Vector_Length(&mo);
+		if (l < 1e-4f) continue;
+		Vector_SelfScale(&mo, 1.0f / l);
+		Matrix R;
+		if (T->Flags & Tri_Euler) {
+			Vector e; Spline_Calc_3D(&T->Rotate, f, &e);
+			Euler_Angles(R, e.x, e.y, e.z);
+		} else {
+			Quaternion q; Spline_Calc_4D_Alt(&T->Rotate, f, &q);
+			Convert_Quat2Mat(&q, R);
+		}
+		Vector lo;
+		lo.x = R[0][0]*mo.x + R[1][0]*mo.y + R[2][0]*mo.z;
+		lo.y = R[0][1]*mo.x + R[1][1]*mo.y + R[2][1]*mo.z;
+		lo.z = R[0][2]*mo.x + R[1][2]*mo.y + R[2][2]*mo.z;
+		fprintf(stderr, "[HL-AXIS] %-14s f=%7.1f world=(%+.2f,%+.2f,%+.2f) local=(%+.2f,%+.2f,%+.2f)\n",
+		        name, f, mo.x, mo.y, mo.z, lo.x, lo.y, lo.z);
+	}
+}
 }
 
 static void Setup_Vehicle_Headlights()
 {
 	g_headlights.clear();
-	if (!fds::FeatureFlags::city_headlights()) return;
+	g_frontLights.clear();
+	if (!fds::FeatureFlags::city_headlights() &&
+	    !fds::FeatureFlags::city_headlights_front()) return;
+	const bool front = fds::FeatureFlags::city_headlights_front();
 	int omnis = 0;
 	for (Omni *o = CitySc->OmniHead; o; o = o->Next) ++omnis;
+	// Tail of the object list — front-mode wrapper Objects are APPENDED so
+	// they iterate AFTER their parent vehicle in Animate_Objects' hierarchy
+	// pass (parents' Pos/Rot must already be composed).
+	Object *tail = CitySc->ObjectHead;
+	while (tail && tail->Next) tail = tail->Next;
 	for (Object *O = CitySc->ObjectHead; O; O = O->Next) {
-		if (O->Type != Obj_TriMesh) continue;
-		TriMesh *T = (TriMesh *)O->Data;
-		if (T->Pos.NumKeys <= 1) continue;                     // parked scenery
-		if (T->BSphereRadius <= 0.0f || T->BSphereRadius > 200.0f)
-			continue;                                          // water / moving building / camera target
+		TriMesh *T = headlightVehicle(O);
+		if (!T) continue;
 		const char *name = O->Name ? O->Name : "?";
 		const bool police = std::strstr(name, "poliece") != nullptr;
-		Omni *spot = fds::MakeSpotLight(
-			CitySc,
-			/*RGB*/ 255.0f, 235.0f, 185.0f,                  // warm halogen
-			fds::FeatureFlags::city_headlight_intensity(),
-			/*range*/ 1600.0f,                               // ~16m at 1cm/unit
-			T->IPos, Vector(0.0f, 0.0f, 1.0f),
-			/*hot=*/6.0f, /*outer=*/16.0f,
-			/*shadowMapRes=*/0, /*castsShadow=*/false);
-		g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 0.0f),
-		                        Vector(0.0f, 0.0f, 0.0f), false, police});
-		fprintf(stderr, "[CITY] headlight on '%s'%s\n", name,
-		        police ? " (strobe)" : "");
+		headlightAxisDump(name, T);
+
+		if (!front) {
+			// LEGACY: one nose spot, re-aimed along motion per tick.
+			Omni *spot = fds::MakeSpotLight(
+				CitySc,
+				/*RGB*/ 255.0f, 235.0f, 185.0f,                  // warm halogen
+				fds::FeatureFlags::city_headlight_intensity(),
+				/*range*/ 1600.0f,                               // ~16m at 1cm/unit
+				T->IPos, Vector(0.0f, 0.0f, 1.0f),
+				/*hot=*/6.0f, /*outer=*/16.0f,
+				/*shadowMapRes=*/0, /*castsShadow=*/false);
+			g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 0.0f),
+			                        Vector(0.0f, 0.0f, 0.0f), false, police, name});
+			fprintf(stderr, "[CITY] headlight on '%s'%s\n", name,
+			        police ? " (strobe)" : "");
+			continue;
+		}
+
+		// FRONT-ROW: skip the trailing tram wagons (no cab, no lights).
+		if (std::strstr(name, "tra_vagn")) continue;
+
+		// Local-space AABB → mount points on the front (+Z) face.
+		Vector mn = T->Verts[0].Pos, mx = T->Verts[0].Pos;
+		for (DWord v = 1; v < T->VIndex; ++v) {
+			const Vector &p = T->Verts[v].Pos;
+			mn.x = std::min(mn.x, p.x); mx.x = std::max(mx.x, p.x);
+			mn.y = std::min(mn.y, p.y); mx.y = std::max(mx.y, p.y);
+			mn.z = std::min(mn.z, p.z); mx.z = std::max(mx.z, p.z);
+		}
+		const float W = mx.x - mn.x, H = mx.y - mn.y, L = mx.z - mn.z;
+		const float mountY = 0.5f * (mn.y + mx.y) - 0.15f * H;  // slightly below mid-height
+		const float mountZ = mx.z + 0.02f * L;                  // just ahead of the nose
+
+		// Beam range scales with the vehicle's WORLD size (the ships are
+		// Scale-splined ×18.9 / ×7.8 — sample the spline; IScale isn't
+		// evaluated yet at init). Reference: a 50-unit-radius mid-size
+		// vehicle gets exactly city_headlight_range.
+		Vector sc; Spline_Calc_3D(&T->Scale, T->Pos.Keys[0].Frame + 1.0f, &sc);
+		const float worldR = T->BSphereRadius * (sc.x > 0.0f ? sc.x : 1.0f);
+		float sizeF = worldR / 50.0f;
+		// Clamp 0.5x-1.5x: at 2.5x the x18.9-scaled SHIP1 (worldR 158 →
+		// range 4000) floodlit half the basin's water — tuned by snapshot.
+		sizeF = sizeF < 0.5f ? 0.5f : (sizeF > 1.5f ? 1.5f : sizeF);
+		const float range = fds::FeatureFlags::city_headlight_range() * sizeF;
+
+		VehicleFrontLights fl{T, {nullptr, nullptr}, police, name};
+		for (int s = 0; s < 2; ++s) {
+			const float mountX = (s ? 0.35f : -0.35f) * W;   // "along the front row"
+			Omni *spot = fds::MakeSpotLight(
+				CitySc,
+				/*RGB*/ 255.0f, 235.0f, 185.0f,              // warm halogen
+				fds::FeatureFlags::city_headlight_intensity(),
+				range,
+				/*pos = LOCAL mount (see wrapper below)*/
+				Vector(mountX, mountY, mountZ),
+				/*dir*/ Vector(0.0f, 0.0f, 1.0f),
+				/*hot=*/15.0f, /*outer=*/30.0f,
+				/*shadowMapRes=*/0, /*castsShadow=*/false);
+			// Parent wrapper: the same Object shape AddOmni gives FLD
+			// lights (Pos aliases the omni's IPos; Rot aliases the shared
+			// identity — Animate_Objects deliberately skips the rotation
+			// compose for omnis). Each frame the omni's single-key Pos
+			// spline re-loads the LOCAL mount into IPos and the hierarchy
+			// pass composes parent.Rot·local + parent.Pos on top. NOT
+			// Omni_SceneAuthored → invisible to the editor's authored-light
+			// index space.
+			Object *Wr = new Object;
+			Wr->Data = spot;
+			Wr->Type = Obj_Omni;
+			Wr->Pos  = &spot->IPos;
+			Wr->Rot  = &Mat_ID;
+			Wr->Parent   = O;
+			Wr->ParentID = -1;      // parent resolved by pointer, not by load-time ID
+			Wr->Name = strdup("city headlight");
+			Wr->Number = tail ? tail->Number + 1 : 0;
+			Wr->Prev = tail;
+			if (tail) tail->Next = Wr; else CitySc->ObjectHead = Wr;
+			tail = Wr;
+			fl.spot[s] = spot;
+		}
+		g_frontLights.push_back(fl);
+		fprintf(stderr, "[CITY] front headlights on '%s'%s worldR=%.0f range=%.0f mount=(±%.1f,%.1f,%.1f)\n",
+		        name, police ? " (strobe)" : "", worldR, range,
+		        0.35f * W, mountY, mountZ);
 	}
-	fprintf(stderr, "[CITY] %zu vehicle headlights (%d scene omnis before; deferred cap %d)\n",
-	        g_headlights.size(), omnis, 128);
+	fprintf(stderr, "[CITY] %zu nose + %zu front-pair vehicle headlights (%d scene omnis before; per-tile cap 128, view cap 256)\n",
+	        g_headlights.size(), g_frontLights.size() * 2, omnis);
 }
 
-// Re-aim after Animate_Objects (which re-evaluates each spot's single-key
-// Pos spline back to its creation pos — overwrite wins, same pattern as
-// the greets robot spots).
+// Per-tick refresh, after Animate_Objects.
+//   legacy: Animate re-evaluates each spot's single-key Pos spline back to
+//     its creation pos — the nose re-mount + motion re-aim overwrite wins
+//     (same pattern as the greets robot spots).
+//   front-row: POSITION is already composed by the hierarchy pass (parented
+//     wrapper) — only the aim needs refreshing, since the hierarchy pass
+//     never rotates omni IDir: world front = UnscaledRotMat · (0,0,1) =
+//     column 2 (pure rotation incl. the AlignToPath ships' path alignment).
 static void Update_Vehicle_Headlights()
 {
+	const float baseIntensity = fds::FeatureFlags::city_headlight_intensity();
 	const float intensity = fds::FeatureFlags::city_headlights()
-	    ? fds::FeatureFlags::city_headlight_intensity() : 0.0f;
+	    ? baseIntensity : 0.0f;
 	for (VehicleHeadlight &h : g_headlights) {
 		TriMesh *T = h.T;
 		// Heading: AlignToPath meshes (the ships) maintain T->Heading with
@@ -1855,6 +2439,30 @@ static void Update_Vehicle_Headlights()
 			h.spot->L.B = red ? 40.0f : 255.0f;
 		}
 	}
+	// Front-row pairs: aim + live intensity only (position is parented).
+	const float frontIntensity = fds::FeatureFlags::city_headlights_front()
+	    ? baseIntensity : 0.0f;
+	for (VehicleFrontLights &h : g_frontLights) {
+		TriMesh *T = h.T;
+		const float (*M)[3] = T->UnscaledRotMat;
+		Vector dir(M[0][2], M[1][2], M[2][2]);   // R·(0,0,1): local +Z in world
+		const float l2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
+		if (l2 > 1e-12f) {
+			const float il = 1.0f / std::sqrt(l2);
+			dir.x *= il; dir.y *= il; dir.z *= il;
+		}
+		const float on = (T->Flags & HTrack_Visible) ? frontIntensity : 0.0f;
+		for (Omni *spot : h.spot) {
+			spot->IDir  = dir;
+			spot->ISize = on;
+			if (h.police) {
+				const bool red = ((int32_t)Timer / 250) & 1;
+				spot->L.R = red ? 255.0f : 40.0f;
+				spot->L.G = 40.0f;
+				spot->L.B = red ? 40.0f : 255.0f;
+			}
+		}
+	}
 }
 
 void Initialize_City()
@@ -1880,9 +2488,9 @@ void Initialize_City()
 
 	Preprocess_Scene(CitySc, "CITY");
 
-	// Persisted editor overrides (PBR maps + numeric surface props) — the
-	// browser editor's "Save" writes this sidecar; no-op when absent.
-	fds::MaterialImport_ApplySidecar(CitySc, "SCENES/CITY.MAT");
+	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
+	// reader is retired, sidecar-elim endgame). No-op when none are authored.
+	fds::MaterialImport_ApplyRevMaps(CitySc, "city");
 
 	//for(M = MatLib;M;M=M->Next)
 	//{
@@ -2007,6 +2615,270 @@ void Initialize_City()
 		}
 	}
 
+	// env_cube: six padded cube faces per building (forward reflective path).
+	// Keyed + cached separately (formatSalt + face dims) so it never collides
+	// with the legacy equirect cache; the equirect branch is byte-untouched.
+	// city_env_pixel: neither bake runs — windows reflect per-pixel through
+	// the deferred kernel via the auto-baked EnvReflection stores instead of
+	// any per-building forward artifact (see the windows loop below).
+	const bool useCube = fds::FeatureFlags::env_cube();
+	const bool cityEnvPixel = fds::FeatureFlags::city_env_pixel();
+
+	// ── env_live_water_shade bake gate (see reshadeFaceWaterProcedural) ──
+	// The city look defaults water_procedural ON at scene start
+	// (createCityScene / RunCitySnapshot both setDefault it AFTER this init
+	// runs) — resolve the flag with the SAME default here so the bake and
+	// the main view agree in bare runs. Read via isSet rather than a global
+	// setDefault: Initialize_City also runs inside OTHER scenes' snapshot
+	// harnesses (fountain needs SkySc), and flipping the global default
+	// from here would leak city semantics into their kernels. An explicit
+	// --no-water_procedural still wins, and the water material's sidecar
+	// tri-state (WaterProcMode) wins over the flag. (No CITY.MAT ships
+	// today; if one ever sets 'waterProcedural' it is applied at scene
+	// start — after this bake — so only a tri-state already present here is
+	// honored.) Gate additionally requires env_live_water (default OFF →
+	// flag-off runs are byte-identical, cache path included).
+	bool bakeWaterProcEff = fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::water_procedural)
+	    ? fds::FeatureFlags::water_procedural()
+	    : true;                                  // the city factory's default
+	if (RflObj) {
+		const Material* WM = ((TriMesh*)RflObj->Data)->Faces[0].Txtr;
+		if (WM && WM->WaterProcMode) bakeWaterProcEff = WM->WaterProcMode > 0;
+	}
+	const bool liveWaterShade = fds::FeatureFlags::env_live_water()
+	    && fds::FeatureFlags::env_live_water_shade()
+	    && bakeWaterProcEff
+	    && RflObj && g_waterMaxX > g_waterMinX;
+	// The COVERAGE MASK the sample-time tilt gates on is needed by BOTH
+	// env_live_water arms — --no-env_live_water_shade still has to know where
+	// the reflected water ends, or the perturb goes back to rippling the
+	// reflected skyline. Deliberately a SUPERSET of liveWaterShade (same
+	// water-plane precondition, none of the procedural-water ones) so the
+	// re-shade can never run without the mask pass that carries it.
+	const bool liveWaterMask = fds::FeatureFlags::env_live_water()
+	    && g_waterMaxX > g_waterMinX;
+
+	if ((useCube || cityEnvPixel) && !skipCubeMap) {
+		constexpr int CITY_CUBE_FACE_RES = 512;
+		// BAKE-AFFECTING FLAGS MUST BE IN THE KEY. The cube is produced by the
+		// ordinary software rasterizer, so any flag that changes a rendered
+		// pixel changes the cube — but ComputeCityPanoramaCacheKey only sees
+		// CITY.FLD's bytes, the dims, this salt and the building names, and the
+		// filename is FIXED. A differing bake therefore OVERWRITES the file
+		// silently, and a stale one is never invalidated.
+		//
+		// That cost a whole investigation on 2026-08-08: the `--mips` default
+		// flip changed the bake, the user's Runtime/cache kept the pre-flip cube
+		// (so his pin still passed), a fresh worktree cold-baked a different one
+		// (so the pin "drifted"), and the --no-mips control could not exonerate
+		// the flip because --no-mips changes the FRAME and cannot un-bake a cube
+		// already on disk. See docs/SESSION_STATE.md, commit ad55e94.
+		//
+		// Fold in every flag the bake reads. Adding a flag here is cheap; the
+		// cost of omitting one is a silent wrong-content cache that survives
+		// rebuilds. The POM caches already do this properly — see
+		// ConeExactCacheKey in DEMO/MeshOps.cpp, which hashes the real input
+		// texels plus every parameter.
+		uint32_t bakeFlagSalt = 0u;
+		{
+			using FF = fds::FeatureFlags;
+			const uint32_t bits =
+			      (FF::mips()            ? 1u <<  0 : 0u)
+			    | (FF::mip_fix()         ? 1u <<  1 : 0u)
+			    | (FF::mip_aniso()       ? 1u <<  2 : 0u)
+			    | (FF::hdr_metal_kill()  ? 1u <<  3 : 0u)
+			    | (FF::env_bake_linear() ? 1u <<  4 : 0u)
+			    | (FF::env_bake_fix()    ? 1u <<  5 : 0u)
+			    | (FF::pbr()             ? 1u <<  6 : 0u)
+			    | (FF::metal_map()       ? 1u <<  7 : 0u)
+			    | (FF::roughness_map()   ? 1u <<  8 : 0u)
+			    | (FF::ao_map()          ? 1u <<  9 : 0u)
+			    | (FF::deferred()        ? 1u << 10 : 0u);
+			// mip_bias is a float and it moves the selected level, so it is
+			// bake-affecting too; quantize rather than hash the raw bits so
+			// harmless last-digit noise doesn't thrash a 426 MiB artifact.
+			const uint32_t biasQ = uint32_t(int32_t(FF::mip_bias() * 256.0f)) & 0xFFFFu;
+			bakeFlagSalt = bits ^ (biasQ << 12);
+		}
+		const uint32_t cubeSalt = (0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f))
+		                          + 1u      // v2: flares muted in the bake
+		                          + 1u      // v3: bake-affecting flags folded in
+		                          + bakeFlagSalt;
+		const size_t faceBytes = size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4;
+		fprintf(stderr, "[CITY] env_cube on — 6 padded faces/building @ %d^2 (fov %.1f)\n",
+		        CITY_CUBE_FACE_RES, fds::EnvCube_FaceFovDegrees());
+
+		// Padded projection for the face renders (1024² surface).
+		EnvCam.IFOV = fds::EnvCube_FaceFovDegrees();
+		CalcPersp(&EnvCam);
+		FOVX = EnvCam.PerspX; FOVY = EnvCam.PerspY;
+
+		// SEPARATE cache file so the cube bake never overwrites the equirect
+		// cache (flag-off keeps hitting its own intact cache → byte-stable).
+		// env_live_water_shade: the cube cache is BYPASSED entirely (no read,
+		// no write) — the gate-on bake produces DIFFERENT content (water mesh
+		// hidden + procedural re-shade), the on-disk file must stay the
+		// pristine static bake for flag-off byte-identity, and a second
+		// salted file would double a ~450 MB artifact. Fresh bake ≈ 4 s at
+		// init; the re-shade itself depends on live water_* flag values, so
+		// re-deriving it each run also keeps those tunables live.
+		// KEY IN THE FILENAME, so variants COEXIST instead of overwriting each
+		// other. A fixed name means flipping a bake-affecting flag silently
+		// replaces the other variant's 426 MiB artifact and the next run under
+		// the old flags cold-bakes again — thrashing, and worse, a pin taken
+		// under one flag set can be invalidated by a run under another with no
+		// commit and no trace. Same shape as pom_cone_exact_%016llx.bin
+		// (DEMO/MeshOps.cpp). Old fixed-name files are simply never hit again;
+		// they are safe to delete and are NOT auto-removed here, because
+		// silently deleting a ~450 MB file the user may have deliberately kept
+		// is not this code's call.
+		char cubeCacheName[96];
+		std::snprintf(cubeCacheName, sizeof cubeCacheName,
+		              "cache/city_envmap_cube_%08x.bin", cubeSalt);
+		const char* kCubeCacheFile = cubeCacheName;
+		// ...and bypassed for the mask arm too: the coverage plane is a
+		// product of the bake's own depth buffer, so a cache hit (which
+		// restores colour only) would leave the tilt maskless and silently
+		// inert. --env_live_water therefore always pays the fresh bake.
+		const bool cacheOn = fds::FeatureFlags::city_envmap_cache()
+		                  && !liveWaterShade && !liveWaterMask;
+		uint64_t ck = 0;
+		if (cacheOn)
+			ck = fds::ComputeCityPanoramaCacheKey("SCENES/CITY.FLD",
+				CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES,
+				CITY_CUBE_FACE_RES, CITY_CUBE_FACE_RES, buildings, cubeSalt);
+		const bool cubeHit = cacheOn && ck != 0
+			&& fds::TryLoadCityPanoramaCache(ck,
+				CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES, buildings, kCubeCacheFile);
+		if (cubeHit) {
+			building_count = int(buildings.size());
+		} else {
+			// env_live_water_shade: hide the water mesh for the WHOLE bake
+			// (pass 2 then leaves the pure mirrored world as the water
+			// region's reflection underlay — the static authored texture
+			// never composites) and build the wave field + caustic texture
+			// the re-shade samples (idempotent; init() rebuilds the same
+			// deterministic data at scene start).
+			TriMesh* lwWaterT = liveWaterShade ? (TriMesh*)RflObj->Data : nullptr;
+			dword lwWaterFlags = 0;
+			if (lwWaterT) {
+				fprintf(stderr, "[CITY] env_live_water_shade on — baking the "
+				        "probes' water region as procedural water (cache bypassed)\n");
+				pwater::BuildField();
+				lwWaterFlags = lwWaterT->Flags;
+				lwWaterT->Flags &= ~HTrack_Visible;
+			}
+			for (auto& b : buildings) {
+				if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
+				building_count++;
+				b.waterMaskRes = liveWaterMask ? CITY_ENV_WATERMASK_RES : 0;
+				bakeBuildingCubeFaces(b.obj, EnvCam, TmpSurf, CITY_CUBE_FACE_RES,
+				                      b.rawPanorama, liveWaterShade,
+				                      liveWaterMask ? &b.waterMask : nullptr,
+				                      CITY_ENV_WATERMASK_RES);
+			}
+			if (lwWaterT) lwWaterT->Flags = lwWaterFlags;
+			if (liveWaterMask) {
+				// Census: coverage is the share of the probe sphere the tilt
+				// is allowed to move. Anything near 100 % means the mask is
+				// not discriminating (and the reflected skyline is rippling
+				// again); 0 % means the bake produced no water at all.
+				double sum = 0.0; size_t n = 0;
+				for (const auto& b : buildings)
+					for (uint8_t m : b.waterMask) { sum += m; ++n; }
+				fprintf(stderr, "[CITY] env_live_water: water-coverage masks for "
+				        "%d probes @ %d^2/face (%.1f%% mean coverage, %.1f MB)\n",
+				        building_count, CITY_ENV_WATERMASK_RES,
+				        n ? 100.0 * sum / (255.0 * double(n)) : 0.0,
+				        double(n) / (1024.0 * 1024.0));
+			}
+			if (cacheOn && ck != 0
+			    && !g_shouldQuit.load(std::memory_order_relaxed)
+			    && building_count == int(buildings.size())) {
+				fds::WriteCityPanoramaCache(ck,
+					CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES, buildings, kCubeCacheFile);
+			}
+		}
+		if (cityEnvPixel) {
+			// city_env_pixel: the SAME cached faces feed the deferred env
+			// compose per pixel — registered per windows-clone material in
+			// the windows loop below (rawPanorama kept alive until then).
+			// The paraboloid sheets below are STILL synthesized: the
+			// PASS-1 mirrored world renders the glass forward off them
+			// (cityMirrorGlassForward) so the water's reflected towers
+			// keep a reflection; only pass-2 glass is deferred.
+			fprintf(stderr, "[CITY] city_env_pixel on — registering the "
+			        "per-building face bake as deferred env stores "
+			        "(+ sheets for the mirror pass)\n");
+		}
+		{
+		// Synthesize six PARABOLOID hemisphere sheets per building from the
+		// raw padded faces (no extra render, no extra cache) and Materialize
+		// them into TriMesh::EnvHemiSheets. Transform binds each reflective
+		// triangle to the sheet of its panel normal's dominant axis — a
+		// STATIC choice, so reflections never pop as the camera moves (the
+		// gnomonic per-triangle face pick + wide-span fallback both flipped
+		// charts with the view and visibly jumped). Per sheet texel:
+		// paraboloid-inverse → world dir → padded-face lookup — the same
+		// EnvCube helpers Transform samples with, so conventions can't drift.
+		// The (sheet, texel)→(face, src-texel) map is building-independent;
+		// precompute it once and reuse as a gather table for all 71.
+		constexpr int kSheetRes = 512;
+		{
+			std::vector<uint32_t> sheetGather(size_t(6) * kSheetRes * kSheetRes);
+			for (int k = 0; k < 6; ++k)
+				for (int py = 0; py < kSheetRes; ++py)
+					for (int px = 0; px < kSheetRes; ++px) {
+						const float su = (float(px) + 0.5f) / float(kSheetRes);
+						const float sv = (float(py) + 0.5f) / float(kSheetRes);
+						float dx, dy, dz;
+						fds::EnvCube_ParaboloidUVToDir(k, su, sv, dx, dy, dz);
+						int face; float fu, fv;
+						fds::EnvCube_DirToFaceUV(dx, dy, dz, face, fu, fv);
+						sheetGather[(size_t(k) * kSheetRes + py) * kSheetRes + px] =
+							uint32_t(face) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES
+							+ uint32_t(fv * CITY_CUBE_FACE_RES) * CITY_CUBE_FACE_RES
+							+ uint32_t(fu * CITY_CUBE_FACE_RES);
+					}
+			std::vector<uint32_t> sheet(size_t(kSheetRes) * kSheetRes);
+			g_cityEnvWaterMasks.clear();
+			g_cityEnvWaterMasks.reserve(buildings.size());
+			for (auto& b : buildings) {
+				if (b.rawPanorama.size() != faceBytes) continue;
+				TriMesh* T = (TriMesh*)b.obj->Data;
+				// --env_live_water: hand the forward path this probe's water
+				// mask. Copied into scene-lifetime storage; moving the outer
+				// vector keeps every inner buffer's address, so the mesh
+				// pointers survive the reserve/growth.
+				if (b.waterMaskRes >= 2 && !b.waterMask.empty()) {
+					g_cityEnvWaterMasks.push_back(b.waterMask);
+					T->EnvWaterMask    = g_cityEnvWaterMasks.back().data();
+					T->EnvWaterMaskRes = b.waterMaskRes;
+				}
+				const uint32_t* faces32 = (const uint32_t*)b.rawPanorama.data();
+				for (int k = 0; k < 6; ++k) {
+					const uint32_t* g =
+						&sheetGather[size_t(k) * kSheetRes * kSheetRes];
+					for (size_t t = 0; t < sheet.size(); ++t)
+						sheet[t] = faces32[g[t]];
+					Material* sm = Materialize(sheet.data(), kSheetRes, kSheetRes);
+					T->EnvHemiSheets[k] = sm->Txtr;
+					// Non-null marker for the window-stamp loop below; the
+					// texture it stamps is overwritten by Transform's
+					// per-triangle sheet pick on the first frame.
+					if (k == 0) b.obj->Reflection = sm;
+				}
+				// city_env_pixel: the windows loop below still needs the
+				// raw faces for EnvReflection_RegisterCubeFaces — it does
+				// the clear once the stores are registered.
+				if (!cityEnvPixel) {
+					b.rawPanorama.clear();
+					b.rawPanorama.shrink_to_fit();
+				}
+			}
+		}
+		}
+	} else {
 	const bool envCacheEnabled = !skipCubeMap && fds::FeatureFlags::city_envmap_cache();
 	uint64_t envCacheKey = 0;
 	if (envCacheEnabled) {
@@ -2057,6 +2929,7 @@ void Initialize_City()
 		b.rawPanorama.clear();
 		b.rawPanorama.shrink_to_fit();
 	}
+	}
 
 	// For deferred-path env-map dispatch: the lighting pass has only
 	// matID per-pixel (from mat32 in the G-buffer); per-building env
@@ -2066,13 +2939,27 @@ void Initialize_City()
 	// The forward path's TheOtherBarry uses F->ReflectionTexture (set
 	// alongside) and Face_Reflective so it keeps working unchanged.
 	int windowsCloned = 0;
+	g_mirrorGlassFaces.clear();   // re-init safety (demo loop)
+	// city_env_pixel: per-building store registration bookkeeping. The
+	// building entries still hold the raw (linear) 512^2 padded faces from
+	// the cube bake above; the FIRST windows clone of a building registers
+	// them as that material's deferred env store (downsampled to 256,
+	// noParallax — the city AABB proxy painted moving exit-face bands
+	// across facades), later clones of the SAME building alias the store.
+	std::map<Object*, fds::BuildingPanoramaEntry*> bldByObj;
+	std::map<Object*, int> storeIdxByObj;
+	const bool cityEnvPixelReg = cityEnvPixel && !skipCubeMap;
+	if (cityEnvPixelReg)
+		for (auto& b : buildings) bldByObj[b.obj] = &b;
 	for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
 		if (Obj->Type != Obj_TriMesh) { continue; }
 		if (Obj->Name == nullptr) { continue; }
 		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
 		// Obj->Reflection is set by the cube-map bake — null when SKIP_CUBEMAP=1
-		// or any other reason the bake didn't run.
-		if (!Obj->Reflection) continue;
+		// or any other reason the bake didn't run. city_env_pixel needs no
+		// forward bake: the clone/retarget below is what routes the windows'
+		// matID to the deferred env compose, so the loop must still run.
+		if (!Obj->Reflection && !cityEnvPixel) continue;
 
 		// Per-building dedup: same windows-base-mat shared across multiple
 		// faces on this building reuses one clone.
@@ -2083,16 +2970,75 @@ void Initialize_City()
 			if (!F->Txtr || !F->Txtr->Name) continue;
 			if (!strstr(F->Txtr->Name, "windows")) continue;
 
-			F->Flags |= Face_Reflective;
-			F->ReflectionTexture = Obj->Reflection->Txtr;
+			if (!cityEnvPixel) {
+				// Forward path: TEXTURETEXTURE filler composes tex + env
+				// per vertex-interpolated UVs (paraboloid sheets / equirect).
+				F->Flags |= Face_Reflective;
+				F->ReflectionTexture = Obj->Reflection->Txtr;
+			}
+			// city_env_pixel: NO Face_Reflective — the face rasterizes
+			// through Mekalele with the clone's matID, and the deferred
+			// kernel's env compose reflects per pixel from the material's
+			// auto-baked cube store.
 
 			Material *base = F->Txtr;
 			Material *clone = baseToClone[base];
 			if (!clone) {
+				if (cityEnvPixel && std::getenv("ENVDBG"))
+					fprintf(stderr, "[ENVDBG] windows base '%s' Flags=0x%x Lum=%.2f Diff=%.2f\n",
+					        base->Name ? base->Name : "?", (unsigned)base->Flags,
+					        base->Luminosity, base->Diffuse);
 				clone = getAlignedType<Material>(16);
 				std::memcpy(clone, base, sizeof(Material));
-				clone->EnvTexture = Obj->Reflection->Txtr;
+				clone->EnvTexture = Obj->Reflection ? Obj->Reflection->Txtr : nullptr;
 				clone->Reflection = 0.5f;       // 50% env blend (tunable)
+				if (cityEnvPixel) {
+					// Deferred env compose semantics: Reflection is a
+					// PERCENT (F0 = Reflection/100, dielectric floor 0.04)
+					// and Glossiness drives the roughness→mip pick. 40% +
+					// tight gloss ≈ the legacy half-add look with Fresnel.
+					clone->Reflection = fds::FeatureFlags::city_env_f0();
+					clone->Glossiness = fds::FeatureFlags::city_env_gloss();
+					// Kill per-pixel dynamic lighting on the glass: the
+					// authored forward glass is vertex-Gouraud-lit, and on
+					// building-scale quads the omni pools between vertices
+					// vanish — deferred per-pixel lighting resurrected the
+					// sweeping searchlight pools as big blobs flashing
+					// across facades (the scripted-cam "jumps like crazy").
+					// Emissive texture + Fresnel reflection = the authored
+					// composite, computed per pixel.
+					clone->Diffuse = 0.0f;
+					clone->Luminosity = fds::FeatureFlags::city_env_lum();
+					clone->Specular = 0.0f;
+				}
+				if (cityEnvPixelReg) {
+					auto bi = bldByObj.find(Obj);
+					if (bi != bldByObj.end() && !bi->second->rawPanorama.empty()) {
+						TriMesh* BT = (TriMesh*)Obj->Data;
+						const Vector center = BT->IPos + BT->BSphereCtr;
+						auto si = storeIdxByObj.find(Obj);
+						if (si == storeIdxByObj.end()) {
+							const int idx = fds::EnvReflection_RegisterCubeFaces(
+								CitySc, clone,
+								(const uint32_t*)bi->second->rawPanorama.data(),
+								512, 256, center,
+								// cv-pull damping parity with the forward
+								// path (authored reflection sweep rate);
+								// the bsphere radius plays the role of
+								// optimalDistFromPlane.
+								BT->BSphereRadius,
+								// --env_live_water: the probe's water mask
+								// (the store copies it — rawPanorama and the
+								// mask are both freed right after this).
+								bi->second->waterMaskRes >= 2
+								    ? bi->second->waterMask.data() : nullptr,
+								bi->second->waterMaskRes);
+							storeIdxByObj[Obj] = idx;
+						} else if (si->second >= 0) {
+							fds::EnvReflection_AliasMaterial(CitySc, clone, si->second);
+						}
+					}
+				}
 				clone->ID = 0;                  // re-assigned by Scene_RebuildMatTable
 				clone->Prev = nullptr;
 				clone->Next = MatLib;
@@ -2102,9 +3048,23 @@ void Initialize_City()
 				++windowsCloned;
 			}
 			F->Txtr = clone;
+			// Pass-1 mirror glass: collected once; flagged reflective per
+			// frame around the mirrored-world render only.
+			if (cityEnvPixel)
+				g_mirrorGlassFaces.push_back({T, F});
 		}
 	}
 	fprintf(stderr, "[CITY] cloned %d windows-materials with EnvTexture set\n", windowsCloned);
+	if (cityEnvPixelReg) {
+		fprintf(stderr, "[CITY] registered %zu per-building env stores (default "
+		        "256^2 faces — per-surface envBakeRes / --env-bake-res override, "
+		        "capped at the 512^2 source; noParallax) from the cube bake\n",
+		        storeIdxByObj.size());
+		for (auto& b : buildings) {
+			b.rawPanorama.clear();
+			b.rawPanorama.shrink_to_fit();
+		}
+	}
 
 	// Pick up the new clones in matTable so the deferred lighting pass
 	// can resolve their matIDs.
@@ -2343,7 +3303,15 @@ struct CityScene : SceneDriver {
 	// summed cross-axis per pixel to drive dispMap. See updateRippleDispMap.
 	std::vector<float> rip_gx1, rip_gx2, rip_gy1, rip_gy2;
 
-	~CityScene() override { Destroy_Scene(CitySc); }
+	~CityScene() override {
+		// Retract the live-water env state — it points at CITY's water
+		// plane/extent and must not leak into later scenes' env lookups.
+		fds::g_envLiveWater = fds::EnvLiveWaterState{};
+		// ...and the per-building water masks the city meshes point at.
+		g_cityEnvWaterMasks.clear();
+		g_cityEnvWaterMasks.shrink_to_fit();
+		Destroy_Scene(CitySc);
+	}
 
 	// Rebuild the per-resolution displacement and back buffers. dispMap
 	// stores precomputed source-pixel indices for the water-distort effect;
@@ -2522,9 +3490,60 @@ struct CityScene : SceneDriver {
 		// the race-free scene-time snapshot. dTime (set here) stays the
 		// wallclock delta the free camera / water scroll rely on in pause.
 		tickSceneTimer(TTrd, pause_mode);
-		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
+		// Sub-tick clock (g_FrameTimeF): same value as g_FrameTime plus the
+		// fractional ticks the int Timer floors away — kills the whole-tick
+		// quantization of the camera/animation step (at 30fps: dt=3,4,3,4).
+		// Falls back to the int clock in snapshot/bench (g_fineSceneClock
+		// off) so captures stay deterministic.
+		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame)
+		         * (g_fineSceneClock ? g_FrameTimeF : (float)g_FrameTime)
+		         / (float)CTPartTime;
 		tickTabToggle(CitySc, "city");
 		Dynamic_Camera();
+
+		// CITYSNAP_VIEW="px,py,pz,fx,fy,fz[,ifov]" — LIVE-loop camera pin
+		// (dev/debug only; no-op unless the env var is set). Snapshot.cpp
+		// pins the same way for the offline harness, but the per-frame
+		// texture-oscillation repro only shows in the LIVE loop (real dTime
+		// + per-frame rand() flicker + threading). Pinning here freezes the
+		// camera so the world still animates (water, omni flicker, lights)
+		// while consecutive dumps stay spatially aligned — isolating the
+		// temporal shading difference from camera motion. Overrides View
+		// AFTER Dynamic_Camera so nothing downstream re-points it this frame.
+		{
+			static bool sPinInit = false;
+			static bool sPinOn   = false;
+			if (!sPinInit) {
+				sPinInit = true;
+				if (const char* s = std::getenv("CITYSNAP_VIEW")) {
+					float px, py, pz, fx = 0, fy = 0, fz = 1, fov = 0;
+					const int n = std::sscanf(s, "%f,%f,%f,%f,%f,%f,%f",
+					                          &px, &py, &pz, &fx, &fy, &fz, &fov);
+					if (n >= 6) {
+						if (fov <= 0) fov = View->IFOV;   // borrow spline cam's fov
+						// Pin via the global free camera FC: Animate_Objects skips
+						// its camera-spline walk when the passed cam == &FC (see
+						// Transform.cpp:255), so the pinned pose survives the tick
+						// without a zeroed-Spline deref. Same tactic as Snapshot.cpp.
+						FC.ISource = Vector(px, py, pz);
+						Vector fwd(fx, fy, fz); Vector_Norm(&fwd);
+						Vector worldUp(0.0f, 1.0f, 0.0f);
+						if (std::fabs(fwd.y) > 0.95f) worldUp = Vector(0.0f, 0.0f, 1.0f);
+						Vector right; Cross_Product(&worldUp, &fwd, &right); Vector_Norm(&right);
+						Vector up;    Cross_Product(&fwd, &right, &up);
+						FC.Mat[0][0]=right.x; FC.Mat[0][1]=right.y; FC.Mat[0][2]=right.z;
+						FC.Mat[1][0]=up.x;    FC.Mat[1][1]=up.y;    FC.Mat[1][2]=up.z;
+						FC.Mat[2][0]=fwd.x;   FC.Mat[2][1]=fwd.y;   FC.Mat[2][2]=fwd.z;
+						FC.IFOV = fov;
+						CalcPersp(&FC);
+						sPinOn = true;
+						fprintf(stderr, "[CITYSNAP-LIVE] view pinned pos=(%.0f,%.0f,%.0f) fwd=(%.3f,%.3f,%.3f) ifov=%.1f\n",
+						        px, py, pz, fwd.x, fwd.y, fwd.z, fov);
+					}
+				}
+			}
+			if (sPinOn) View = &FC;
+		}
 
 		// SkyCube uses the main camera; render it AFTER Dynamic_Camera
 		// so it tracks the current frame's view (previously was rendered
@@ -2551,6 +3570,40 @@ struct CityScene : SceneDriver {
 		// leaves the static warp baked by rebuildDispBuffers untouched.
 		if (fds::FeatureFlags::water_ripple())
 			updateRippleDispMap((float)g_FrameTime);
+
+		// Live water in the BAKED env reflections (--env_live_water): publish
+		// this frame's wave state for the env samplers (forward per-vertex
+		// sheets + deferred env compose) — the window reflections' frozen
+		// water then undulates with the SAME field/clock as the dispMap
+		// ripple above. Published on the tick thread before Transform/Render
+		// (tiles only read); t from g_FrameTime → snapshot-deterministic.
+		// Gated on water_ripple too: if the main-view reflection is static,
+		// the env stays the static bake (exact no-op — helper early-out).
+		{
+			fds::EnvLiveWaterState &lw = fds::g_envLiveWater;
+			lw.active = fds::FeatureFlags::env_live_water()
+			         && fds::FeatureFlags::water_ripple()
+			         && g_waterMaxX > g_waterMinX;
+			if (lw.active) {
+				lw.waterY = g_waterY;
+				lw.minX = g_waterMinX; lw.maxX = g_waterMaxX;
+				lw.minZ = g_waterMinZ; lw.maxZ = g_waterMaxZ;
+				lw.amp   = fds::FeatureFlags::env_live_water_amp();
+				lw.t     = (float)g_FrameTime * 0.02f
+				         * fds::FeatureFlags::water_ripple_speed();
+				lw.scale = fds::FeatureFlags::water_bump_scale();
+				// Water-mask remap, resolved once per frame so the per-pixel
+				// path is one subtract + one multiply. bias 1 would divide by
+				// zero, so clamp just under it (bias 1 = "only 100% water
+				// texels", which 0.999 already is at 8-bit coverage).
+				float mb = fds::FeatureFlags::env_live_water_mask_bias();
+				if (mb < 0.0f) mb = 0.0f;
+				if (mb > 0.999f) mb = 0.999f;
+				lw.maskBias = mb;
+				lw.maskGain = 1.0f / (1.0f - mb);
+				lw.slopeFn = &pwater::WaveSlope;
+			}
+		}
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
@@ -2590,6 +3643,7 @@ struct CityScene : SceneDriver {
 		prof.switchTo(PROF_XFRM);
 
 		// render reflection of all objects except water
+		cityMirrorGlassForward();   // city_env_pixel: forward glass in the mirror pass
 		Reflected_Transform(CitySc);
 
 		prof.leave(PROF_XFRM);
@@ -2616,26 +3670,72 @@ struct CityScene : SceneDriver {
 			// skipVolumetric=true — the pass-1 output is consumed by the
 			// dispMap distortion below, so volumetric work (cones/halos)
 			// here is wasted CPU (≈60ms/frame on the cube omni halo).
+			// Freeze Face::LastMip during the mirrored pass — mirrored
+			// distances pick different mips; letting them overwrite the
+			// state would feed the main pass's mip hysteresis garbage.
+			g_mipLastMipWrite = false;
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
+			g_mipLastMipWrite = true;
 			{
-				memcpy(backBuffer.data(), VPage, PageSize);
-				dword* ptr = (dword*)VPage;
-				uint16_t* zbuffer_ptr = ZPage16;
-				// Capture the pass-1 Z through the SAME displacement the
-				// color takes: the froxel composite fogs the water's
-				// reflection underlay at this mirrored path length, giving
-				// the mirror the same fog gradient as the world above
+				TailProf::ScopeTimer _tp("dispmap-resample", 3);
+				// Row-band parallel resample (mirrors updateRippleDispMap's
+				// pool fan-out). Independence: the memcpy snapshots VPage into
+				// the immutable backBuffer; the gather then reads only
+				// backBuffer + ZPage16 (both read-only in the loop) and writes
+				// VPage[i]/zRefl[i] exactly once per i — so index bands are
+				// disjoint. displacements cross bands, so the copy is a HARD
+				// barrier: every band must finish its memcpy before ANY band
+				// starts gathering. Two waves, each joined.
+				// Capture the pass-1 Z through the SAME displacement the color
+				// takes: the froxel composite fogs the water's reflection
+				// underlay at this mirrored path length, giving the mirror the
+				// same fog gradient as the world above
 				// (|mirrorCam→building| = camera→water→building).
-				uint16_t* zr = zRefl.data();
-				size_t idx = 0;
-				for (auto displacement : dispMap) {
-					if (*zbuffer_ptr++ != 0) {
-						*ptr = backBuffer[displacement];
-						zr[idx] = ZPage16[displacement];
-					} else {
-						zr[idx] = 0;
+				dword* const vp = (dword*)VPage;
+				dword* const bbw = backBuffer.data();
+				const dword* const bb = bbw;
+				uint16_t* const zr = zRefl.data();
+				const uint16_t* const zp = ZPage16;
+				const int* const dm = dispMap.data();
+				const int nPix = (int)dispMap.size();
+				auto copyBand = [=](int i0, int i1) {
+					memcpy(bbw + i0, vp + i0,
+					       size_t(i1 - i0) * sizeof(dword));
+				};
+				auto gatherBand = [=](int i0, int i1) {
+					for (int i = i0; i < i1; ++i) {
+						if (zp[i] != 0) {
+							const int d = dm[i];
+							vp[i] = bb[d];
+							zr[i] = zp[d];
+						} else {
+							zr[i] = 0;
+						}
 					}
-					ptr++; ++idx;
+				};
+				auto& tp = ThreadPool::instance();
+				const int nThreads = (int)tp.size();
+				if (nThreads < 2 || nPix < 4096) {
+					copyBand(0, nPix);
+					gatherBand(0, nPix);
+				} else {
+					const int chunk = (nPix + nThreads - 1) / nThreads;
+					auto runWave = [&](auto&& band) {
+						auto remaining = std::make_shared<std::atomic<int>>(0);
+						for (int t = 0; t < nThreads; ++t) {
+							const int i0 = t * chunk; if (i0 >= nPix) break;
+							const int i1 = std::min(i0 + chunk, nPix);
+							remaining->fetch_add(1, std::memory_order_relaxed);
+							tp.enqueue([band, i0, i1, remaining]() {
+								band(i0, i1);
+								remaining->fetch_sub(1, std::memory_order_release);
+							});
+						}
+						while (remaining->load(std::memory_order_acquire) != 0)
+							std::this_thread::yield();
+					};
+					runWave(copyBand);    // wave 1: snapshot VPage → backBuffer
+					runWave(gatherBand);  // wave 2: displaced gather (barrier above)
 				}
 				FastFog_SetReflectionZ(zr, -RflSurfOfs);   // plane: N=(0,1,0), y = -ofs
 			}
@@ -2657,6 +3757,7 @@ struct CityScene : SceneDriver {
 		}
 
 		// render all objects normally
+		cityMirrorGlassRestore();   // pass-2: glass back to the deferred path
 		prof.enter(PROF_XFRM);
 		((TriMesh*)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
@@ -2725,8 +3826,21 @@ struct CityScene : SceneDriver {
 		{
 			static bool sGPrev = false;
 			static int  sDumpN = 0;
-			const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0;
-			if (gNow && !sGPrev) {
+			// FDS_CITY_DUMP_RANGE="t0,t1": auto-dump every LIVE frame with
+			// t in [t0,t1] — the snapshot driver did NOT reproduce the
+			// per-pixel-env dancing, so the capture must come from the real
+			// loop (real dTime, threading, per-frame state carry).
+			static int sAutoT0 = -1, sAutoT1 = -1;
+			static bool sAutoInit = false;
+			if (!sAutoInit) {
+				sAutoInit = true;
+				if (const char* r = std::getenv("FDS_CITY_DUMP_RANGE"))
+					std::sscanf(r, "%d,%d", &sAutoT0, &sAutoT1);
+			}
+			const int tNow = int(Timer);
+			const bool autoNow = sAutoT0 >= 0 && tNow >= sAutoT0 && tNow <= sAutoT1;
+			const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0 || autoNow;
+			if (gNow && (!sGPrev || autoNow)) {
 				char path[64];
 				snprintf(path, sizeof(path), "/tmp/city_dump_%d.ppm", sDumpN++);
 				std::FILE *f = std::fopen(path, "wb");
@@ -2746,7 +3860,11 @@ struct CityScene : SceneDriver {
 						std::fwrite(row.data(), 1, row.size(), f);
 					}
 					std::fclose(f);
-					fprintf(stderr, "[CITY] dumped %s (t=%d)\n", path, (int)Timer);
+					// ftF/cf = the CONTENT time this frame was animated with
+					// (fine clock → CurFrame); t = Timer at dump time, which
+					// lags by the render duration — analysis must use cf.
+					fprintf(stderr, "[CITY] dumped %s (t=%d ftF=%.2f cf=%.2f)\n",
+					        path, (int)Timer, g_FrameTimeF, CurFrame);
 				}
 				fprintf(stderr,
 					"[CITY-CAM] CITYSNAP_VIEW=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\"\n",
@@ -2789,8 +3907,8 @@ std::unique_ptr<SceneDriver> createCityScene()
 	// for), independent of --cinematic. --no-water_procedural still disables it.
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
 	// Re-pin the fresnel deep-colour composite: chase's factory defaults it
-	// OFF (black night-sky underlay), so a chase→city replay must restore
-	// the city look here.
+	// OFF (black night-sky underlay), so a chase→city replay must restore the
+	// city look here (soa-vertex 9902349).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_fresnel_composite, true);
 	ApplyCinematicProfile(cine::kCity);          // storm-city look (fog/rain/post)
 	return std::make_unique<CityScene>();

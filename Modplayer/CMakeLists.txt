@@ -40,12 +40,23 @@ else()
         "${MODPLAYER_DIR}/target/${_cargo_profile_dir}/libmodplayer.a")
 endif()
 
+# Cargo must run on EVERY build: the .a used to be the only OUTPUT with no
+# source DEPENDS, so once it existed Ninja never re-ran cargo, and Rust-side
+# changes (e.g. a submodule bump adding an FFI export) silently never reached
+# the link — the stale-lib `undefined symbol: Modplayer_FillBufferPlanar`
+# wasm break. The second, never-created OUTPUT below keeps the edge
+# permanently dirty (so cargo — which tracks its own deps and no-ops in
+# ~0.06 s — runs each build), while Ninja's restat on custom-command edges
+# re-stats the .a afterwards: unchanged mtime = no downstream relink.
+# (A plain always-run add_custom_target doesn't work: its edges skip
+# restat, so every build relinked the ~7 s wasm executables.)
+set(_cargo_force_run "${CMAKE_CURRENT_BINARY_DIR}/cargo_always_run")
 if(EMSCRIPTEN)
     # The C++ side links with -pthread (--shared-memory). Rust objects must be
     # built with the matching wasm features, otherwise wasm-ld rejects them.
     # Rebuild std too (-Z build-std) so its objects also carry +atomics.
     add_custom_command(
-        OUTPUT "${_modplayer_rust_lib}"
+        OUTPUT "${_modplayer_rust_lib}" "${_cargo_force_run}"
         COMMAND ${CMAKE_COMMAND} -E env
                 CMAKE_POLICY_VERSION_MINIMUM=3.5
                 "RUSTFLAGS=-C target-feature=+atomics,+bulk-memory"
@@ -54,19 +65,17 @@ if(EMSCRIPTEN)
                 -Z build-std=std,panic_abort
                 --package modplayer-lib
         WORKING_DIRECTORY "${MODPLAYER_DIR}"
-        COMMENT "Building modplayer (Rust wasm, ${_cargo_profile_dir})"
-        USES_TERMINAL)
+        COMMENT "Building modplayer (Rust wasm, ${_cargo_profile_dir})")
 else()
     add_custom_command(
-        OUTPUT "${_modplayer_rust_lib}"
+        OUTPUT "${_modplayer_rust_lib}" "${_cargo_force_run}"
         # CMAKE_POLICY_VERSION_MINIMUM=3.5 lets the vendored sdl2-sys build under
         # CMake >= 4.0, which dropped compatibility with its older cmake_minimum_required.
         COMMAND ${CMAKE_COMMAND} -E env CMAKE_POLICY_VERSION_MINIMUM=3.5
                 "${CARGO_EXECUTABLE}" build ${_cargo_profile_flag}
                 --package modplayer-lib
         WORKING_DIRECTORY "${MODPLAYER_DIR}"
-        COMMENT "Building modplayer (Rust, ${_cargo_profile_dir})"
-        USES_TERMINAL)
+        COMMENT "Building modplayer (Rust, ${_cargo_profile_dir})")
 endif()
 
 add_custom_target(modplayer_rust_build DEPENDS "${_modplayer_rust_lib}")

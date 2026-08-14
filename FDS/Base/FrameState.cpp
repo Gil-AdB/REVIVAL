@@ -43,6 +43,31 @@ thread_local Vector g_reflConeApex  = {0, 0, 0};
 thread_local Vector g_reflConeDir   = {0, 0, 1};
 thread_local float  g_reflConeTan2  = 2.0f;
 
+// Per-FACE cone cull + the shard bake's per-phase accumulators — see
+// FrameState.h. Same thread_local reasoning: each parallel shard worker owns
+// its own cone, census and clocks; the apex is read from the global above.
+thread_local bool     g_reflFaceCull     = false;
+thread_local Vector   g_reflFaceConeDir  = {0, 0, 1};
+thread_local float    g_reflFaceConeTan2 = 2.0f;
+thread_local uint64_t g_reflFaceTested   = 0;
+thread_local uint64_t g_reflFaceCulled   = 0;
+thread_local uint64_t g_reflFaceDrawn    = 0;
+thread_local double   g_phSetup = 0.0;
+thread_local double   g_phXform = 0.0;
+thread_local double   g_phRaster = 0.0;
+thread_local double   g_phFill = 0.0;
+thread_local double   g_phLight = 0.0;
+thread_local double   g_phCone = 0.0;
+#if FDS_SHARD_BAKE_LAB
+thread_local double   g_phDlLights = 0.0;
+thread_local double   g_phDlDepth  = 0.0;
+thread_local double   g_phDlBin    = 0.0;
+thread_local double   g_phDlCtx    = 0.0;
+thread_local double   g_phDlTiles  = 0.0;
+thread_local uint64_t g_phDlCalls  = 0;
+thread_local uint64_t g_phDlLightN = 0;
+#endif
+
 // Legacy struct kept while phase 2 lands. Its fields are no longer the
 // canonical home for the per-frame state — they're transitional and
 // will be removed once every site moves to CameraContext / FaceListContext.

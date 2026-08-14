@@ -1,0 +1,85 @@
+# ── city-noir ────────────────────────────────────────────────────────────
+# The tuned storm-city look: froxel fog (metaball blob field) + rain + HDR
+# cinematic post stack. Consolidated from the long hand-rolled CLI line —
+# with the --fast-fog-blob typo fixed (the flag is fast_fog_blobs; without
+# it the whole worley/metaball fog noise field was dead and the fog was a
+# smooth slab wherever SCRIPTS/city.params didn't re-enable it).
+#
+# Usage:            ./DEMO --flags-file=PRESETS/city-noir.flags
+# Override a line:  ./DEMO --flags-file=PRESETS/city-noir.flags --no-rain
+# (parse order wins: CLI tokens AFTER --flags-file= override lines here).
+# One token per line; the leading `--` is optional; `#` starts a comment.
+
+# Base: --cinematic already bundles hdr + hdr_linear + bloom + anamorphic +
+# chromatic + vignette + grade + grain at per-scene tuned exposures (via
+# setDefault, so every explicit line below still wins over its profile
+# value). Replaces ~12 tokens of the original line.
+cinematic
+
+# ...but pinned back to the ORIGINAL hand-rolled look where cinematic's
+# per-scene profiles deviate from it (measured deltas, city@t=1961 +
+# fountain@t=2500 snapshots):
+#  - the original line had NO bloom; cinematic turns it on (245/0.4) —
+#    delete these two lines to opt into cinematic's restrained bloom.
+#    bloom_threshold is pinned because the ANAMORPHIC bright-pass shares
+#    it (cinematic's 245 subtly dims the streaks vs the default 200).
+no-bloom
+bloom_threshold=200
+#  - the fountain/crash cinematic profiles default anamorphic + shadows
+#    OFF (bloom-only look); the original line ran them ON everywhere.
+anamorphic
+shadows
+
+# HDR exposure + glow compensation (city fog inscatter supplies brightness,
+# so exposure runs low; softknee = physically-grounded glow roll-off).
+hdr_exposure=0.2
+hdr_glow_scale=0.05
+hdr_glow_softknee
+
+# Anamorphic streaks: single fat horizontal pass, no vertical cross.
+anamorphic_intensity=2
+anamorphic_vert=0
+anamorphic_decay=0.2
+anamorphic_passes=1
+
+# Lens: strong corner CA + heavy vignette.
+chromatic_amount=3
+vignette_strength=0.8
+
+# Froxel volumetric fog — metaball blob field (blob_overlap>0 switches the
+# froxel noise from worley to the additive metaball field; fast_fog_blobs
+# must be ON or no noise field is evaluated at all).
+fast_fog
+fast_fog_worley
+fast_fog_blobs
+fast_fog_density=30
+fast_fog_bottom=-400
+fast_fog_top=450
+fast_fog_cell=450
+fast_fog_worley_thresh=2
+fast_fog_inscatter=4
+fast_fog_glow_max=100
+fast_fog_blob_overlap=8
+
+# Storm.
+rain
+
+# Procedural fresnel water composite (city/chase water surface).
+water_procedural
+
+# Ambient occlusion: GTAO at quarter res.
+ssao
+ssao_downscale=4
+ssao_gtao
+
+# Shading + edge AA.
+pbr
+aa
+
+# Volumetric cone density (headlight beams et al).
+cone_strength=4
+
+# Fountain lightning strike flash (peak intensity + reach).
+bolt_flash_peak=10000
+bolt_flash_range=600
+

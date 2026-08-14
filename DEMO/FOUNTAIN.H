@@ -43,3 +43,14 @@ extern void Load_Vortex();
 extern void Iterate_Photonbeam_Texture();
 extern void Noise_Sample();
 extern void Add_Vortex_ToScene();
+
+// --pcl_dump=PATH[,t0,t1] — write the per-frame fountain particle state the CPU
+// actually rendered, for GpuBench's --pcl replay (the CPU half of
+// DUMP-AND-REPLAY; format v1 in GpuBench/ParticleReplay.h). DEFAULT OFF and
+// byte-null when off. Pre-scanned out of argv like --material-import / --snapshot
+// because the flag carries a PATH and FeatureFlags is bool/float/int only.
+// t0/t1 are an inclusive window on the scene Timer; omit for every frame.
+void ParticleDump_ParseArgs(int argc, const char *const *argv);
+// Called from FountainScene::tick() right after Particle_Kinematics.
+struct Scene;
+void ParticleDump_Write(Scene *Sc);

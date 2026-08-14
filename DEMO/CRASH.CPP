@@ -32,8 +32,9 @@ void Initialize_Crash()
 
 	Preprocess_Scene(CrashSc, "CRASH");
 
-	// Editor persistence: PBR maps + prop overrides saved for this scene.
-	fds::MaterialImport_ApplySidecar(CrashSc, "SCENES/CRASH.MAT");
+	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
+	// reader is retired, sidecar-elim endgame). No-op when none are authored.
+	fds::MaterialImport_ApplyRevMaps(CrashSc, "crash");
 
 	// Auto-detect creased meshes (laptop facade) and switch them to
 	// per-face vertex normals; smooth meshes (if any) untouched.

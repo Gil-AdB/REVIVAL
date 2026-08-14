@@ -21,6 +21,14 @@
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/LightmapBake.h"
 
+// The shadow CASTER predicate, defined once in RENDER/Shadows.cpp. True =
+// this material is excluded from the shadow bake (Transparent/Additive/SkipZ,
+// or a name containing "lamp"/"emi"). The RECEIVE side needs it because
+// ShadowMode::PolyId is an IDENTITY test — "the closest thing to the light
+// along this ray must be ME" — which a material that never wrote its id into
+// the cube can never satisfy. See --shadow_noncaster_depth in resolveCubeAtten.
+bool Shadow_MaterialSkipsCasting(const Material *m);
+
 // Per-pixel lightmap address resolved once at top of the per-pixel loop.
 // `lm == nullptr` ⇒ legacy path (per-pixel cube shadow tap). Otherwise:
 // bilinear sample from the cached lightmap. Two writers populate `lm`:
@@ -99,11 +107,28 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 	// lightmap path — their cube is re-baked every frame from current
 	// IPos, so the t=0 static lightmap is invalid. Fall through to the
 	// per-pixel cube tap below, which reads the freshly-baked cube.
-	const bool cubeOmniStatic = (cubeIdx >= 0
-	    && size_t(cubeIdx) < g_cubeShadowRefs.size()
-	    && g_cubeShadowRefs[cubeIdx].omni
-	    && (g_cubeShadowRefs[cubeIdx].omni->Flags & Omni_StaticShadow));
-	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis && cubeOmniStatic) {
+	//
+	// Evaluated LAZILY, inside the guard below, rather than eagerly here.
+	// `g_cubeShadowRefs.size()` on a 48-byte element type is a magic-constant
+	// multiply (~9 instructions), and the two `.omni` derefs that follow are a
+	// dependent pointer chase — all of it dead on any pixel WITHOUT a lightmap
+	// address, which on greets is most of them. Pure && reordering of
+	// side-effect-free tests: byte-identical.
+	auto cubeOmniStatic = [&]() -> bool {
+		return (cubeIdx >= 0
+		    && size_t(cubeIdx) < g_cubeShadowRefs.size()
+		    && g_cubeShadowRefs[cubeIdx].omni
+		    && (g_cubeShadowRefs[cubeIdx].omni->Flags & Omni_StaticShadow));
+	};
+	// surfaceMatId < 0 = "this receiver has no shadow identity" (the caller
+	// resolved it as a NON-CASTER under --shadow_noncaster_depth). It must skip
+	// the lightmap too: the atlas was baked through the same PolyId identity
+	// test and encodes the same permanent self-shadow. Falls through to the
+	// biased depth tap at the bottom. Byte-null while the flag is off, because
+	// every other caller resolves surfaceMatId from a uint16 plane and can
+	// never pass a negative.
+	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis
+	    && surfaceMatId >= 0 && cubeOmniStatic()) {
 		// Debug: --shadow-lightmap-recompute-bake replaces the atlas
 		// bilinear lookup with a fresh per-pixel call to the bake-time
 		// sampler (SampleStaticCubeAtWorld). Same flow as the bake, but
@@ -168,9 +193,9 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 		}
 		// Composite static × dynamic for --shadow-dynamic. The lightmap
 		// atlas only encodes static-occluder shadow factor (baked once at
-		// scene init from sm.depth / sm.polyId). To get dynamic mesh
+		// scene init from sm.packSD). To get dynamic mesh
 		// shadows on static surfaces, layer a per-pixel cube tap against
-		// the DYNAMIC buffers only (sm.depth_dynamic / sm.polyId_dynamic
+		// the DYNAMIC plane only (sm.packDyn
 		// — re-baked each frame by Render_DeferredShadowMaps in
 		// DynamicMeshesPerFrame mode). Multiply: the surface must pass
 		// both the static and dynamic occlusion tests to receive light.
@@ -200,12 +225,15 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 	// PolyId path skips bias arithmetic entirely (identity test, no
 	// depth comparison) — hoist the mode check above the slope-bias
 	// math so PolyId mode pays nothing for slope it never uses.
-	if (caFlags.shadowMode == ShadowMode::PolyId) {
+	if (caFlags.shadowMode == ShadowMode::PolyId && surfaceMatId >= 0) {
 		return CubeShadow_Sample(cubeIdx,
 		                          sampleWorldX, sampleWorldY, sampleWorldZ,
 		                          vx, vy, vz, /*constBias=*/0, /*slopeBias=*/0,
 		                          surfaceMatId);
 	}
+	// Non-caster receiver (or Depth mode): biased depth comparison. Depth acne
+	// is not a risk for a non-caster — acne comes from a surface being compared
+	// against its OWN stored depth, and this one never wrote any.
 	const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
 	const float nDotL = dotGeo * lenInv;
 	const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);

@@ -10,11 +10,145 @@
 #include "ProceduralWater.h"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include "BlasterBolts.h"      // B1: blaster combat (chase_blasters)
+#include "ChaseEvents.h"       // B1: pure-t fire table + reconstruction
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
+#include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
 #include <memory>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>              // [CHASECAM] camera dump (chase_cam_dump)
+#include <cstring>
 
 #define FRONT_TO_BACK_SORTING
 static Scene *ChaseSc;
+// L2.4 sky: chase-local sky cube (the shared starfield/nebula skybox city and
+// fountain use, via CreateSkyCube/RenderSkyCube). Replaces the L1 ad-hoc
+// gradient + the black void — a lit sky above the horizon that the transparent
+// water also reflects. Chase-owned (not city's global SkySc) so the chase
+// snapshot, which never inits city, still has one.
+static Scene *ChaseSkySc = nullptr;
+
+namespace {
+// M1.3 engine-glow throttle (default-off chase_engine_mod). The maneuver signal
+// is a pure function of CurFrame — the ship rotation-spline angular rate (deg
+// per frame, central difference; FLD meshes are always Tri_Euler so Rotate is
+// Euler H/P/B). No accumulation → jump-to-t reproduces it exactly (snapshot-safe).
+constexpr float kEngineModD = 2.0f;   // finite-difference half-window (frames)
+
+float chaseAngRate(TriMesh *T, float frame, float D)
+{
+	if (!T || T->Rotate.NumKeys < 2) return 0.0f;
+	Vector a, b;
+	Spline_Calc_3D(&T->Rotate, frame - D, &a);
+	Spline_Calc_3D(&T->Rotate, frame + D, &b);
+	float dh = b.x - a.x, dp = b.y - a.y, db = b.z - a.z;
+	return std::sqrt(dh * dh + dp * dp + db * db) / (2.0f * D);
+}
+
+// P90 of |angular rate| over the frame range — a robust per-ship peak that
+// normalises the punch (deterministic: positions/rotations are immutable).
+float chaseAngRateRef(TriMesh *T, int32_t f0, int32_t f1, float D)
+{
+	if (!T) return 1.0f;
+	std::vector<float> v;
+	for (int32_t f = f0; f <= f1; f += 2) v.push_back(chaseAngRate(T, (float)f, D));
+	if (v.empty()) return 1.0f;
+	std::sort(v.begin(), v.end());
+	float r = v[(size_t)(v.size() * 0.90)];
+	return r > 1e-4f ? r : 1e-4f;
+}
+
+// ── B1 blaster combat (chase_blasters) ──────────────────────────────────────
+// World transform of a ship mesh at an ARBITRARY frame (not necessarily the
+// current one): reconstruct IPos + the scaled RotMat straight from the
+// Pos/Rotate/Scale splines exactly as Animate_Objects does (FLD ship meshes are
+// Tri_Euler). Writes into locals only — never T->IPos/T->RotMat, which the live
+// render pass owns. This is what makes the fire table a pure function of t.
+void chaseShipXform(TriMesh *T, float frame, Vector &outPos, Matrix outRot)
+{
+	Vector u, s;
+	Spline_Calc_3D(&T->Pos, frame, &outPos);
+	Spline_Calc_3D(&T->Scale, frame, &s);
+	if (T->EditorScale > 0.0f) Vector_SelfScale(&s, T->EditorScale);
+	Spline_Calc_3D(&T->Rotate, frame, &u);
+	Euler_Angles(outRot, u.x, u.y, u.z);
+	Vector *W = (Vector *)outRot;
+	Vector_SelfScale(W, s.x); ++W;
+	Vector_SelfScale(W, s.y); ++W;
+	Vector_SelfScale(W, s.z);
+}
+
+// World centre of a ship at `frame` (bounding-sphere centre through the scaled
+// rotation + position) — the aim anchor for the target ship.
+Vector chaseShipCenter(TriMesh *T, float frame)
+{
+	Vector pos; Matrix rot;
+	chaseShipXform(T, frame, pos, rot);
+	Vector off;
+	MatrixXVector(rot, &T->BSphereCtr, &off);
+	return Vector{ pos.x + off.x, pos.y + off.y, pos.z + off.z };
+}
+
+// ship2 wing-muzzle world position at `frame`. Local offsets are fractions of
+// the ship's model bounding radius about its bounding centre (scale-robust); the
+// two wings straddle local X. INTERIM hardcode — the FdsMuzzle LWS keyword
+// (parent-local muzzle coords in the FLD object record, flag-bit + payload) is
+// the later refinement noted in the plan.
+Vector chaseMuzzleWorld(TriMesh *T, float frame, int wing)
+{
+	Vector pos; Matrix rot;
+	chaseShipXform(T, frame, pos, rot);
+	const float R = T->BSphereRadius;
+	Vector local = T->BSphereCtr;
+	local.x += (wing ? +0.55f : -0.55f) * R;   // right / left wing
+	local.y += 0.10f * R;                        // just above the hull
+	local.z += 0.35f * R;                        // toward the nose
+	Vector off;
+	MatrixXVector(rot, &local, &off);
+	return Vector{ pos.x + off.x, pos.y + off.y, pos.z + off.z };
+}
+
+// Deterministic hash → [0,1). Pure — the impact spray is reconstructed from
+// (seed,k) every frame (no rand state), so snapshots reproduce it.
+inline float chaseHash01(uint32_t x) {
+	x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+	return float(x & 0x00FFFFFFu) / float(0x01000000u);
+}
+
+// Build the 32×32 radial additive disc for impact-spark sprites (the fountain
+// particle-texture recipe: white radial falloff, tinted per-particle via the
+// vertex LR/LG/LB the sprite filler reads). Linear buffer — TBR_Sprite samples
+// it directly (unlike the swizzled deferred textures).
+Material *g_chaseSparkMat = nullptr;
+Material *buildChaseSparkMat() {
+	Texture *T = new Texture;
+	std::memset(T, 0, sizeof(Texture));
+	T->BPP = 32;
+	T->SizeX = 32; T->LSizeX = 5;
+	T->SizeY = 32; T->LSizeY = 5;
+	DWord *px = new DWord[32 * 32];
+	for (int y = 0; y < 32; ++y) {
+		const float fy = 1.0f - 2.0f * (float(y) + 0.5f) / 32.0f;
+		for (int x = 0; x < 32; ++x) {
+			const float fx = -1.0f + 2.0f * (float(x) + 0.5f) / 32.0f;
+			const float r2 = fx * fx + fy * fy;
+			DWord c = 0;
+			if (r2 < 1.0f) {
+				const float f = (1.0f - r2);
+				c = 0x010101u * (DWord)(f * f * 255.0f);   // soft core
+			}
+			px[x + 32 * y] = c;
+		}
+	}
+	T->Data = (byte *)px;
+	Material *M = new Material;
+	*M = Material{};
+	M->Txtr = T;
+	return M;
+}
+} // namespace
 
 static int32_t CHPartTime = 25.0f*100;
 
@@ -28,7 +162,11 @@ static float RflSurfOfs = 0;
 static float g_chaseWaterMinX = 0, g_chaseWaterMaxX = 0,
              g_chaseWaterMinZ = 0, g_chaseWaterMaxZ = 0, g_chaseWaterY = 0;
 
-static DWord WaterBuf[65536 * 4];
+// 256x256 DWord snapshot of the water texture. Was `[65536 * 4]` — a BYTE count
+// used as an ELEMENT count (same defect as CITY.CPP's copy of this), so the
+// array was 4x what the memcpy below writes. Byte-null: the memcpy still copies
+// 65536*4 BYTES, which now exactly fills it.
+static DWord WaterBuf[65536];
 
 static void Setup_Water_Distort()
 {
@@ -462,7 +600,11 @@ static void Reflected_Transform(Scene *Sc)
 			//dz +=0x7FFFFFFF;
 			//RoundToInt(&O->Face.SortZ.DW,dz);
 
-			O->F.FlareSize = O->ISize;
+			// FlareScale parity with the main pass (Transform.cpp:1835 /
+			// CITY.CPP:823): decouple the reflected flare sprite from ISize so
+			// authored FdsFlareScale shrinks the flare in the water reflection
+			// too, not just the direct view. 0 = legacy 1.0 (byte-identical).
+			O->F.FlareSize = O->ISize * (O->FlareScale > 0.0f ? O->FlareScale : 1.0f);
 #ifdef FRONT_TO_BACK_SORTING
 			O->F.SortZ.F = 2 * fzp - dz;
 #else
@@ -740,26 +882,57 @@ static void Reflective_Surface_Setup()
 void Initialize_Chase()
 {
 	ChaseSc = loadSceneAligned("SCENES/CHASE.FLD");
-	CHPartTime = 25.0*(ChaseSc->EndFrame-ChaseSc->StartFrame)/25.0f;
+	// Playback duration in Timer ticks (10 ms each → 100/sec). Chase plays FAST
+	// by design: 1 authored frame ≈ 1 tick → the 1..1760 range runs in ~17.6 s,
+	// the intended fast-paced feel (the authored 30 fps / ~58.6 s reads too slow
+	// for this scene). The finale (Ship1's climb-out, keys ≤1760) plays because
+	// EndFrame is 1760 — the only prior bug was an amputated frame range, not
+	// the speed. Duration IS the speed knob: to re-time, change this mapping or
+	// the authored frame range.
+	CHPartTime = ChaseSc->EndFrame - ChaseSc->StartFrame;
 	ChaseSc->FZP = 50000.0f;
 	ChaseSc->NZP = 2.0f;
 	ChaseSc->Flags |= Scn_Fogged | Scn_ZBuffer;
 
-	ChaseSc->Ambient.R = 4 * 2;
-	ChaseSc->Ambient.G = 4 * 2;
-	ChaseSc->Ambient.B = 64 * 2;
+	// L2 mood fix: the 1998 ambient was (8,8,128) — a near-pure dark blue that
+	// crushed every surface's albedo R/G to ~3% while blue sat at 50% (pixel =
+	// texel x light / 256), so everything not directly lit read as flat navy
+	// ("too dark, too blue"). Rebalanced to a desaturated cool grey-blue: R/G
+	// lifted so surface albedo reads, blue dominance dropped so it's a night
+	// tone not a blue filter. Directional shape now comes from the (revived)
+	// moon key light (CHASE.LWS "Light": real LightRange + cool-white) rather
+	// than from a saturated ambient wash.
+	ChaseSc->Ambient.R = 47;
+	ChaseSc->Ambient.G = 55;
+	ChaseSc->Ambient.B = 76;
 
 	tagSceneMaterials(ChaseSc, /*restrictToScene=*/true);
 
 	Reflective_Surface_Setup();
 
-	SceneCorrections();
+	// Legacy 1998 load-time omni fixup — retired: the effective Size/Range
+	// values are now authored in CHASE.LWS (LgtIntensity x0.1, LightRange
+	// x100000). Default OFF; --chase-legacy-omni-hack re-applies it (only
+	// correct against an un-baked LWS/FLD — it double-applies on the shipped
+	// baked scene). See FeatureFlags.def.
+	if (fds::FeatureFlags::chase_legacy_omni_hack())
+		SceneCorrections();
 	Preprocess_Scene(ChaseSc, "CHASE");
 
-	// Persisted editor overrides (PBR maps + numeric surface props) — the
-	// browser editor's "Save" writes this sidecar; no-op when absent.
-	fds::MaterialImport_ApplySidecar(ChaseSc, "SCENES/CHASE.MAT");
+	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
+	// reader is retired, sidecar-elim endgame). No-op when none are authored.
+	fds::MaterialImport_ApplyRevMaps(ChaseSc, "chase");
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
+
+	// L2.4: build the sky cube (same SB*.JPG starfield skybox as city). Loaded
+	// here so RunChaseSnapshot (which inits chase in isolation, never city)
+	// gets it too. Rendered per-frame in tick() BEFORE the reflection pass.
+	ChaseSkySc = CreateSkyCube(0);
+
+	// B1: blaster bolts (ship2 fires at Ship1) — bake the bolt texture. Gated so
+	// flag-off leaves the scene byte-identical (no texture, no omnis, no draw).
+	if (fds::FeatureFlags::chase_blasters())
+		fds::BlasterBolts_Init();
 }
 
 namespace {
@@ -768,6 +941,15 @@ struct ChaseScene : SceneDriver {
 	FrameProfiler prof{"chase"};
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)
 	bool    pause_mode = false;
+	// M1.3 engine-glow throttle state (chase_engine_mod): the two ship meshes
+	// + their P90 angular-rate reference, resolved once at init.
+	TriMesh *ship1M = nullptr, *ship2M = nullptr;
+	float    ship1Ref = 1.0f, ship2Ref = 1.0f;
+	// B2 mountain-hit aim: world centre + radius of every canyon-wall instance,
+	// captured at init (static single-key meshes). resolveAimPoint(kind=2) picks
+	// the wall whose SURFACE is nearest Ship1 and aims a spark burst at it.
+	struct MtnInst { Vector ctr; float rad; };
+	std::vector<MtnInst> mountains;
 
 	~ChaseScene() override { Destroy_Scene(ChaseSc); }
 
@@ -794,7 +976,303 @@ struct ChaseScene : SceneDriver {
 			if (wT && wT->Faces && wT->Faces->Txtr)
 				SetDeferredWaterMatID((int)wT->Faces->Txtr->ID);
 		}
+		// M1.3: locate the ship meshes (by name) + precompute their maneuver
+		// reference for the engine-glow throttle. Init-time only; inert unless
+		// chase_engine_mod is turned on in tick().
+		ship1M = ship2M = nullptr;
+		mountains.clear();
+		for (Object *o = ChaseSc->ObjectHead; o; o = o->Next) {
+			if (!o->Name || !o->Data) continue;
+			if (std::strstr(o->Name, "hip1")) ship1M = (TriMesh *)o->Data;
+			else if (std::strstr(o->Name, "hip2")) ship2M = (TriMesh *)o->Data;
+			// Canyon walls: m1..m5, mm7, big_m — static single-key meshes. Capture
+			// their world centre + radius once (any frame; motion is constant) for
+			// the B2 mountain-hit aim. Only needed when combat is on.
+			else if (fds::FeatureFlags::chase_blasters() &&
+			         (o->Name[0] == 'm' || o->Name[0] == 'M')) {
+				TriMesh *M = (TriMesh *)o->Data;
+				mountains.push_back({ chaseShipCenter(M, 0.0f), shipWorldRadius(M, 0.0f) });
+			}
+		}
+		ship1Ref = chaseAngRateRef(ship1M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
+		ship2Ref = chaseAngRateRef(ship2M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
 		TTrd = Timer;
+
+		// B2: impact-spark particle pool (chase_blasters only). Reconstructed
+		// pure-t in driveBlasters from the impact events; TBR_Sprite additive
+		// discs. Not allocated when the flag is off → NumOfParticles stays 0 and
+		// the engine's particle loops are no-ops (default chase byte-identical).
+		if (fds::FeatureFlags::chase_blasters() && !ChaseSc->Pcl) {
+			if (!g_chaseSparkMat) g_chaseSparkMat = buildChaseSparkMat();
+			const int N = 2560;
+			ChaseSc->NumOfParticles = N;
+			ChaseSc->Pcl = new Particle[N];
+			std::memset(ChaseSc->Pcl, 0, sizeof(Particle) * N);
+			for (int i = 0; i < N; ++i) {
+				Particle &P = ChaseSc->Pcl[i];
+				P.F.A = P.F.B = &P.V;
+				P.F.Filler = TBR_Sprite;
+				P.F.Txtr = g_chaseSparkMat;
+				P.Flags = 0;
+			}
+		}
+	}
+
+	// Ship world bounding radius at a frame (miss-offset + fx scaling). Shared
+	// by the blaster spawner and the camera-fx proximity math.
+	float shipWorldRadius(TriMesh *M, float f) {
+		if (!M) return 1.0f;
+		Vector s; Spline_Calc_3D(&M->Scale, f, &s);
+		const float sc = M->EditorScale > 0.0f ? M->EditorScale : 1.0f;
+		return M->BSphereRadius * sc * (s.x > 1e-4f ? s.x : 1.0f);
+	}
+
+	// Resolve a bolt's aim / impact world point. kind (the fire-table `water`
+	// field): 0 hull → ship1 centre + miss·R; 1 water → the sea beside Ship1
+	// (x,z = ship1 + miss·R, y = the water plane); 2 mountain → the nearest
+	// canyon-wall surface point to Ship1 (miss nudges it tangentially). One place
+	// so bolts, flashes, sparks and camera-fx agree.
+	Vector resolveAimPoint(int kind, float aimFrame, float mx, float my, float mz) {
+		const Vector c = chaseShipCenter(ship1M, aimFrame);
+		const float R = shipWorldRadius(ship1M, aimFrame);
+		if (kind == 1) return Vector{ c.x + mx * R, g_chaseWaterY, c.z + mz * R };
+		if (kind == 2) return resolveMountainPoint(c, R, mx, my, mz);
+		return Vector{ c.x + mx * R, c.y + my * R, c.z + mz * R };
+	}
+
+	// Nearest canyon-wall surface point to Ship1 centre `c`. Picks the mountain
+	// whose bounding-sphere SURFACE is closest, then a point on that sphere facing
+	// the ship (so sparks read as landing ON the rock). miss·R nudges it along the
+	// wall so a burst walks fire; my raises it up the face. Falls back to a hull-
+	// style point if no mountain was captured (combat off, or none in scene).
+	Vector resolveMountainPoint(const Vector &c, float R, float mx, float my, float mz) {
+		if (mountains.empty()) return Vector{ c.x + mx * R, c.y + my * R, c.z + mz * R };
+		int best = -1; float bestD = 1e30f;
+		for (size_t i = 0; i < mountains.size(); ++i) {
+			const Vector &m = mountains[i].ctr;
+			const float d = std::sqrt((m.x-c.x)*(m.x-c.x) + (m.y-c.y)*(m.y-c.y) +
+			                          (m.z-c.z)*(m.z-c.z)) - mountains[i].rad;
+			if (d < bestD) { bestD = d; best = (int)i; }
+		}
+		const MtnInst &M = mountains[best];
+		// Direction from the wall centre toward the ship → the near face. Place the
+		// burst JUST OUTSIDE the bounding sphere toward the ship (×1.0) so it sits
+		// on/in front of the rock and is never occluded by it. A tangential/vertical
+		// nudge (miss·R, R = ship radius) scatters bursts along the wall.
+		float dx = c.x-M.ctr.x, dy = c.y-M.ctr.y, dz = c.z-M.ctr.z;
+		float L = std::sqrt(dx*dx + dy*dy + dz*dz); if (L < 1e-3f) L = 1e-3f;
+		dx /= L; dy /= L; dz /= L;
+		Vector p{ M.ctr.x + dx * M.rad,
+		          M.ctr.y + dy * M.rad,
+		          M.ctr.z + dz * M.rad };
+		p.x += mx * R; p.z += mz * R;
+		p.y += (my + 0.5f) * R;                 // bias up the face
+		if (p.y < g_chaseWaterY) p.y = g_chaseWaterY;
+		return p;
+	}
+
+	// Bounding radius of the canyon wall a mountain-hit lands on (nearest-surface
+	// to Ship1 @ frame). Used to scale the spark burst to the WALL, not the ship —
+	// a ship-radius burst is an invisible speck on a thousand-unit rock. Returns a
+	// sane fallback if no mountains were captured.
+	float nearestMountainRadius(float aimFrame) {
+		if (mountains.empty()) return 1.0f;
+		const Vector c = chaseShipCenter(ship1M, aimFrame);
+		int best = -1; float bestD = 1e30f;
+		for (size_t i = 0; i < mountains.size(); ++i) {
+			const Vector &m = mountains[i].ctr;
+			const float d = std::sqrt((m.x-c.x)*(m.x-c.x) + (m.y-c.y)*(m.y-c.y) +
+			                          (m.z-c.z)*(m.z-c.z)) - mountains[i].rad;
+			if (d < bestD) { bestD = d; best = (int)i; }
+		}
+		return mountains[best].rad;
+	}
+
+	// C1: deterministic camera FX (chase_cam_fx) — shake + FOV punch on hits.
+	// Applied AFTER Animate_Objects (which set View's base pose + FOVX/FOVY) so
+	// the perturbation rides on the authored dolly; reconstructed pure-t from the
+	// impact table (amplitude decays after each hit, scaled by camera proximity),
+	// so snapshots reproduce it and flag-off / no-active-hit leaves View untouched.
+	void applyCameraFx() {
+		if (!fds::FeatureFlags::chase_cam_fx() || !ship1M || !View) return;
+		const float t = CurFrame;
+		constexpr float kShakeWin = 12.0f;   // frames a hit shakes the camera
+		std::vector<chase::ImpactState> impacts;
+		chase::BlasterImpactsAt(chase::BlasterFireTable(), t, kShakeWin, impacts);
+		if (impacts.empty()) return;
+
+		const Vector cam = View->ISource;
+		float amp = 0.0f;
+		for (const chase::ImpactState &im : impacts) {
+			const Vector P = resolveAimPoint(im.water, im.aimFrame, im.missX, im.missY, im.missZ);
+			const float R = shipWorldRadius(ship1M, im.aimFrame);
+			const float dx = P.x-cam.x, dy = P.y-cam.y, dz = P.z-cam.z;
+			const float dist = std::sqrt(dx*dx + dy*dy + dz*dz) + 1e-3f;
+			const float decay = 1.0f - im.age / kShakeWin;    // 1 at hit → 0
+			float prox = (6.0f * R) / dist; if (prox > 1.5f) prox = 1.5f;
+			amp += decay * decay * prox;
+		}
+		if (amp < 1e-3f) return;
+		if (amp > 2.0f) amp = 2.0f;
+
+		const float R0 = shipWorldRadius(ship1M, t);
+		const float m  = amp * fds::FeatureFlags::chase_cam_shake_gain() * R0;
+		const float ph = t;
+		const float sx = std::sin(ph*2.9f)      * 0.55f + std::sin(ph*6.1f+1.3f) * 0.45f;
+		const float sy = std::sin(ph*3.7f+0.7f) * 0.55f + std::sin(ph*7.3f+2.1f) * 0.45f;
+		const float sz = std::sin(ph*3.3f+2.7f);
+		View->ISource.x += sx * m;
+		View->ISource.y += sy * m * 0.7f;   // less vertical jitter
+		View->ISource.z += sz * m;
+
+		// Roll about the view forward axis: rotate Mat rows 0 (right) / 1 (up).
+		const float rollAng = amp * 0.012f * std::sin(ph*4.3f + 0.9f);   // radians
+		const float cr = std::cos(rollAng), sr = std::sin(rollAng);
+		for (int c = 0; c < 3; ++c) {
+			const float r0 = View->Mat[0][c], r1 = View->Mat[1][c];
+			View->Mat[0][c] =  cr*r0 + sr*r1;
+			View->Mat[1][c] = -sr*r0 + cr*r1;
+		}
+
+		// FOV punch inward on the hit (brief zoom), recovering as amp decays.
+		// Re-set the FOVX/FOVY globals after CalcPersp exactly like Animate_Objects.
+		const float kick = fds::FeatureFlags::chase_cam_fov_kick();
+		if (kick != 0.0f) {
+			View->IFOV -= kick * (amp > 1.0f ? 1.0f : amp);
+			if (View->IFOV < 4.0f) View->IFOV = 4.0f;
+			CalcPersp(View);
+			FOVX = View->PerspX;
+			FOVY = View->PerspY;
+		}
+	}
+
+	// B1: reconstruct the blaster combat as a PURE FUNCTION of CurFrame (§8.B) —
+	// which bolts/flashes exist at t and where, rebuilt from the fire table every
+	// frame (no accumulation → the jump-to-t snapshot reproduces it exactly).
+	// Places bolts, drives the transient bolt-lights + muzzle/impact flashes.
+	// MUST run after Animate_Objects (ship IPos/RotMat + omni IPos are set) and
+	// before Lighting + Reflected_Transform (so the bolt omnis light + reflect).
+	void driveBlasters() {
+		if (!fds::FeatureFlags::chase_blasters() || !ship1M || !ship2M) return;
+		const float t = CurFrame;
+		const auto &table = chase::BlasterFireTable();
+
+		// Bolt streak size scales with the current ship2→Ship1 gap so tracers
+		// read at chase scale (ships tens of units, water spans thousands) —
+		// full bolt ≈ 12% of the gap, width a slim fraction of that.
+		{
+			const Vector s2 = chaseShipCenter(ship2M, t);
+			const Vector s1 = chaseShipCenter(ship1M, t);
+			const float dx=s1.x-s2.x, dy=s1.y-s2.y, dz=s1.z-s2.z;
+			float half = 0.06f * std::sqrt(dx*dx + dy*dy + dz*dz);
+			if (half < 2.0f) half = 2.0f;
+			fds::BlasterBolts_SetBoltSize(half, 0.14f * half);
+		}
+
+		// Ship1 world bounding radius at a frame (for miss-offset scaling).
+		auto ship1Radius = [&](float f) -> float { return shipWorldRadius(ship1M, f); };
+
+		// Bolts: place each live bolt at its lerped muzzle→aim position.
+		std::vector<chase::BoltState> bolts;
+		chase::BlasterBoltsAliveAt(table, t, bolts);
+		fds::BlasterBolts_ResetActive();
+		for (const chase::BoltState &bs : bolts) {
+			const Vector muzzle = chaseMuzzleWorld(ship2M, bs.fireFrame, bs.wing);
+			const Vector aim = resolveAimPoint(bs.water, bs.aimFrame, bs.missX, bs.missY, bs.missZ);
+			const Vector pos{ muzzle.x + (aim.x-muzzle.x)*bs.u,
+			                  muzzle.y + (aim.y-muzzle.y)*bs.u,
+			                  muzzle.z + (aim.z-muzzle.z)*bs.u };
+			const Vector dir{ aim.x-muzzle.x, aim.y-muzzle.y, aim.z-muzzle.z };
+			fds::BlasterBolts_Place(pos, dir, bs.r, bs.g, bs.b);
+		}
+		fds::BlasterBolts_EmitLights(ChaseSc);
+
+		// Muzzle + impact flashes (fountain bolt_flash envelope, pure-t).
+		const float decay  = fds::FeatureFlags::blaster_flash_decay();
+		constexpr float kFlashWindow = 26.0f;   // frames
+		std::vector<chase::FlashState> flashes;
+		chase::BlasterFlashesAt(table, t, decay, kFlashWindow, flashes);
+		fds::BlasterBolts_ResetFlashes(ChaseSc);
+		for (const chase::FlashState &fs : flashes) {
+			const Vector p = (fs.kind == 0)
+				? chaseMuzzleWorld(ship2M, fs.fireFrame, fs.wing)
+				: resolveAimPoint(fs.water, fs.aimFrame, fs.missX, fs.missY, fs.missZ);
+			fds::BlasterBolts_AddFlash(p, fs.intensity, fs.r, fs.g, fs.b);
+		}
+
+		// B2: impact-spark particles — a deterministic ballistic spray per bolt
+		// impact, reconstructed pure-t (positions are f(seed,k,age), never
+		// integrated). HULL hits burst up-and-out and fall; WATER near-misses
+		// (kind 1) throw a TALL vertical splash column; MOUNTAIN hits (kind 2)
+		// spray sparks off the rock. Additive TBR_Sprite discs tinted by bolt.
+		if (ChaseSc->Pcl) {
+			constexpr float kPclLife = 52.0f;   // frames
+			constexpr int   kPerImpact = 30;
+			// TBR_Sprite screen size = ImageSize(1000)·RZ·PerspX·FlareSize, so a
+			// world-space disc of radius w has FlareSize ≈ w/1000. Sparks are a
+			// small fraction of the target ship radius; size + brightness are
+			// tunable FeatureFlags, spread + gravity baked to the ship scale.
+			const float szK = fds::FeatureFlags::chase_spark_size();
+			const float brK = fds::FeatureFlags::chase_spark_bright();
+			constexpr float spK = 0.008f;   // spread speed  (× shipRadius / frame)
+			constexpr float gK  = 0.0004f;  // gravity       (× shipRadius / frame^2)
+			std::vector<chase::ImpactState> impacts;
+			chase::BlasterImpactsAt(table, t, kPclLife, impacts);
+			const int N = ChaseSc->NumOfParticles;
+			Particle *Pcl = ChaseSc->Pcl;
+			int slot = 0;
+			for (const chase::ImpactState &im : impacts) {
+				const Vector P = resolveAimPoint(im.water, im.aimFrame, im.missX, im.missY, im.missZ);
+				const bool  isWater = (im.water == 1);
+				const bool  isMtn   = (im.water == 2);
+				// Burst scale: ship-radius for hull/water sparks; a fraction of the
+				// CANYON-WALL radius for mountain hits (a ship-sized burst is an
+				// invisible speck on a thousand-unit rock — scale it to the wall).
+				float R = ship1Radius(im.aimFrame);
+				if (isMtn) { const float mr = nearestMountainRadius(im.aimFrame);
+				             R = mr * 0.13f;      // spread scale (fly distance)
+				             if (R < 180.0f) R = 180.0f; else if (R > 650.0f) R = 650.0f; }
+				const float lifeFrac = im.age / im.life;
+				const float fade = 1.0f - lifeFrac;              // brightness/size decay
+				// Water columns rise high on a lighter gravity (tall spout, up then
+				// fall); mountain sparks fly off the wall on light gravity; hull
+				// sparks burst up-and-out.
+				const float g = R * gK * (isWater ? 1.5f : (isMtn ? 0.7f : 1.0f));
+				for (int k = 0; k < kPerImpact && slot < N; ++k) {
+					const uint32_t base = im.seed + uint32_t(k) * 40503u;
+					const float r1 = chaseHash01(base + 1u);
+					const float r2 = chaseHash01(base + 2u);
+					const float r3 = chaseHash01(base + 3u);
+					const float az = r1 * 6.2831853f;
+					const float ct = isWater ? (0.92f + 0.08f * r2)    // tall near-vertical column
+					               : isMtn   ? (0.05f + 0.95f * r2)     // wide spray off the rock
+					                         : (0.15f + 0.85f * r2);    // up-biased hemisphere
+					const float st = std::sqrt(std::max(0.0f, 1.0f - ct * ct));
+					const Vector dir{ st * std::cos(az), ct, st * std::sin(az) };
+					const float speed = R * spK * (isWater ? (1.9f + 1.3f * r3)   // taller column
+					                             : isMtn   ? (0.7f + 0.9f * r3)
+					                                       : (0.5f + 0.5f * r3));
+					Particle &pc = Pcl[slot++];
+					pc.V.Pos.x = P.x + dir.x * speed * im.age;
+					pc.V.Pos.y = P.y + dir.y * speed * im.age - 0.5f * g * im.age * im.age;
+					pc.V.Pos.z = P.z + dir.z * speed * im.age;
+					// Water columns stay bright longer (slower fade); mountain sparks
+					// are dimmer + more saturated (many small discs over a wide spray
+					// must NOT additively blow to a white ball). brK = FeatureFlags peak.
+					const float bright = brK * (isWater ? (0.42f + 0.45f * fade)
+					                          : isMtn   ? (0.40f * fade)
+					                                    : fade);
+					// hull/water: hot-white core + tint; mountain: warmer/less white.
+					const float coreW = isMtn ? 0.25f : 0.5f;
+					pc.V.LR = (coreW + (1.0f - coreW) * im.r) * bright;
+					pc.V.LG = (coreW + (1.0f - coreW) * im.g) * bright;
+					pc.V.LB = (coreW + (1.0f - coreW) * im.b) * bright;
+					pc.F.FlareSize = R * szK * (isWater ? 1.35f : (isMtn ? 0.30f : 1.0f)) * (0.35f + 0.65f * fade);
+					pc.Flags = Particle_Active;
+				}
+			}
+			for (int i = slot; i < N; ++i) Pcl[i].Flags &= ~Particle_Active;
+		}
 	}
 
 	bool tick() override {
@@ -820,7 +1298,81 @@ struct ChaseScene : SceneDriver {
 		Dynamic_Camera();
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
+		// L2.4 sky cube: paint the starfield backdrop into VPage now — BEFORE
+		// the reflection + main passes. Rendered first (like city), it fills
+		// every no-geometry pixel and clears the Z-buffer, so: (a) above the
+		// horizon the main geometry draws over the sky, sky where nothing does;
+		// (b) below the horizon the reflection pass draws mirrored geometry over
+		// the sky, and the transparent water then blends the reflected sky where
+		// no mirrored geometry covers it — the sky reflects on the water for
+		// free. Uses the current-frame View (set by Dynamic_Camera above).
+		RenderSkyCube(ChaseSkySc, View, false);
+
 		Animate_Objects(ChaseSc, View);
+
+		// M1.3 engine-glow throttle (default-off). Animate_Objects has just
+		// re-set each omni's ISize from its (constant) Size spline, so this
+		// per-frame multiply is a clean override — no accumulation. It runs
+		// before Lighting + both Transform passes, so the punched ISize flows
+		// into the light contribution AND the flare sprite (F.FlareSize =
+		// ISize x FlareScale) in the main and reflected views alike.
+		if (fds::FeatureFlags::chase_engine_mod()) {
+			const float gain = fds::FeatureFlags::chase_engine_mod_gain();
+			auto punch = [&](TriMesh *M, float ref) -> float {
+				if (!M) return 1.0f;
+				float n = chaseAngRate(M, CurFrame, kEngineModD) / ref;
+				if (n > 1.0f) n = 1.0f;
+				return 1.0f + gain * n;
+			};
+			const float mul1 = punch(ship1M, ship1Ref);
+			const float mul2 = punch(ship2M, ship2Ref);
+			for (Omni *O = ChaseSc->OmniHead; O; O = O->Next) {
+				// warm engine glows only (253,65,2) — the white moon (255,255,255)
+				// fails the green test and is left untouched.
+				if (O->L.R < 200.0f || O->L.G > 130.0f || O->L.B > 60.0f) continue;
+				const float z = O->Pos.NumKeys ? O->Pos.Keys[0].Pos.z : 0.0f;
+				O->ISize *= (z < -76.0f) ? mul1 : mul2;   // -88 Ship1 / -64 ship2
+			}
+		}
+
+		// C1: camera shake / FOV punch on hits (default-off chase_cam_fx).
+		// After Animate_Objects (View's base pose + FOVX/FOVY are set), before the
+		// reflection + main transforms so every pass uses the perturbed camera.
+		applyCameraFx();
+
+		// Debug camera dump: one [CHASECAM] line, captured AFTER the full
+		// camera chain (Dynamic_Camera + chase_cam_fx) so the printed pose is
+		// exactly what this frame renders with. Two triggers, same line:
+		//  - --chase_cam_dump: every frame (headless framing traces; grep
+		//    '\[CHASECAM\]' alongside [CHASESNAP]).
+		//  - 'G' key, rising edge: on-demand while flying interactively —
+		//    the same convention as cloaktest's pose dump.
+		// Pure observer — no state touched.
+		{
+			static bool sGPrev = false;
+			const bool gNow = Keyboard[ScG] != 0;
+			const bool gEdge = gNow && !sGPrev;
+			sGPrev = gNow;
+			if (fds::FeatureFlags::chase_cam_dump() || gEdge) {
+				Vector s1{}, s2{};
+				if (ship1M) s1 = chaseShipCenter(ship1M, CurFrame);
+				if (ship2M) s2 = chaseShipCenter(ship2M, CurFrame);
+				std::fprintf(stderr,
+					"[CHASECAM] t=%ld f=%.1f cam=(%.1f %.1f %.1f) tgt=(%.1f %.1f %.1f) "
+					"roll=%.3f fov=%.2f ship1=(%.1f %.1f %.1f) ship2=(%.1f %.1f %.1f)\n",
+					(long)g_FrameTime, (double)CurFrame,
+					(double)View->ISource.x, (double)View->ISource.y, (double)View->ISource.z,
+					(double)View->ITarget.x, (double)View->ITarget.y, (double)View->ITarget.z,
+					(double)View->IRoll, (double)View->IFOV,
+					(double)s1.x, (double)s1.y, (double)s1.z,
+					(double)s2.x, (double)s2.y, (double)s2.z);
+			}
+		}
+
+		// B1: pure-t blaster reconstruction — after Animate_Objects (ship poses
+		// + omni IPos set, engine-glow punch applied), before Lighting +
+		// Reflected_Transform so the bolt omnis + flashes light and reflect.
+		driveBlasters();
 
 		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
@@ -839,6 +1391,13 @@ struct ChaseScene : SceneDriver {
 			prof.leave(PROF_RNDR);
 		}
 
+		// B1 (§8.E): reflect the bolt streaks on the water — mirrored, dimmed
+		// additive billboards drawn AFTER the reflection Render and BEFORE the
+		// main pass, so the transparent water composites over them like the
+		// reflected world. Bolts only (cheap); dense particles are NOT reflected.
+		if (fds::FeatureFlags::chase_blasters())
+			fds::BlasterBolts_DrawReflected(g_chaseWaterY);
+
 		prof.enter(PROF_XFRM);
 		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(ChaseSc, fds::g_mainCamera, fds::g_mainFaces);
@@ -852,9 +1411,40 @@ struct ChaseScene : SceneDriver {
 
 		// Procedural caustic texture + specular glints over the water plane
 		// (shared with city). Screen-space, peel-independent, occlusion-tested.
-		if (fds::FeatureFlags::water_bump())
-			pwater::RenderGlints(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
-			                     g_chaseWaterMinZ, g_chaseWaterMaxZ);
+		if (fds::FeatureFlags::water_bump()) {
+			// drama-5: chase opts into the varied (less-regular) sea. Call-site
+			// dispatch keeps the default RenderGlints byte-identical for city.
+			if (fds::FeatureFlags::water_variation())
+				pwater::RenderGlintsVaried(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
+				                           g_chaseWaterMinZ, g_chaseWaterMaxZ);
+			else
+				pwater::RenderGlints(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
+				                     g_chaseWaterMinZ, g_chaseWaterMaxZ);
+		}
+
+		// B1: blaster bolts — additive screen-space draw over the finished frame
+		// (post-tonemap, like greets). Occluded against terrain/ships by the
+		// filler's built-in ZPage16 Z-test (§8.C: WriteZ=false still gates on
+		// depth). Drawn last so bolts glow over the composited scene + glints.
+		if (fds::FeatureFlags::chase_blasters())
+			fds::BlasterBolts_Draw();
+
+		// On-screen profiler overlay (--profiler / rev.cfg ProfilerEnable) —
+		// the same block city/greets draw, so chase can be profiled
+		// interactively (per-section ms, FPS, polys/Mpx). Drawn onto VPage
+		// right before the flip; prof.dump() at scene end already existed.
+		if (g_profilerActive) {
+			char MSGStr[128];
+			const float meanMs = prof.meanFrameMs();
+			const float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
+			int scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
+			snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
+			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+			fds::RenderStats_Flush();
+			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);
+			scroll = prof.drawOverlay(scroll);
+		}
 
 		prof.enter(PROF_FLIP);
 		Flip(MainSurf);
@@ -876,11 +1466,23 @@ std::unique_ptr<SceneDriver> createChaseScene()
 {
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
 	// Procedural FIELD only (ripple/glints/caustics): the kernel's fresnel
-	// deep-colour composite assumes a bright reflection underlay (city);
-	// chase reflects a black night sky, so it must keep the forward-style
-	// lit-texel blend or the water goes dark with a view-angle band.
+	// deep-colour composite assumes a bright reflection underlay (city); chase
+	// reflects a black night sky, so it must keep the forward-style lit-texel
+	// blend or the water goes dark with a view-angle band (soa-vertex 9902349).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_fresnel_composite, false);
+	// Varied, less-regular sea (drama-5): layer a low-frequency swell + an extra
+	// rotated ripple octave on the wave field and sum multi-scale caustics so
+	// chase's open water reads natural instead of a uniform repeating field.
+	// Default-off flag → city/fountain byte-identical; chase opts in here.
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_variation, true);
 	ApplyCinematicProfile(cine::kChase);          // same cityscape atmosphere as city
+	// Chase-scale bolt-light reach (B1): the module default (range 14) is
+	// greets-room scale — invisible here where ships are hundreds of units
+	// apart. Give the travelling bolt-lights a scene-appropriate reach so they
+	// pool moving glows on the water. setDefault → explicit CLI/env still wins,
+	// and it only matters under --chase_blasters (EmitLights is gated on it).
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_range, 90.0f);
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_intensity, 260.0f);
 	return std::make_unique<ChaseScene>();
 }
 

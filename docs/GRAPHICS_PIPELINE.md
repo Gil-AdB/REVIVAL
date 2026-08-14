@@ -222,6 +222,51 @@ or by confirming the effect writes `g_hdrBuf`.
 
 ---
 
+## 8b. Where the frame time actually goes — `--deferred_prof`
+
+The frame profiler's `RNDR` is one bracket around the whole of `renderFrame`, which
+on greets is ~90 % of the frame. `--deferred_prof=<N>` (`FDS/RENDER/TailProf.h`)
+splits it and prints ONE table at process exit — no overlay, no plumbing, works
+under `--bench` and `--snapshot` alike. Default 0 = no clock reads, byte-null
+(verified against `tools/render_gate.sh` + all three scene pins).
+
+```sh
+cd Runtime
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ./DEMO --deferred --profiler=1 --deferred_prof=5 \
+         --bench=scene@scene=greets,t=5743,iters=60
+```
+
+Reading it — four things that are easy to get wrong:
+
+- **`wall` vs `thrsum` are different questions.** `wall` is ELAPSED time on the tick
+  thread and is what sums to the frame. `thrsum` is Σ of the tile tasks' own
+  durations — CORE-milliseconds, ~W× larger. `effPar = thrsum/wall` is the average
+  number of workers the wave kept busy: ≈ pool size means compute-bound and
+  balanced (no barrier-tail idle to reclaim); ≪ pool means a load-imbalanced tail.
+  Quoting a thrsum as if it were frame time overstates a phase ~10×.
+- **Use `wall_min`, not `wall_avg`,** for any A/B. The mean is inflated by whatever
+  else the machine is doing; the min over steady frames is the stable statistic.
+- **`OTHER` is the credibility gate.** It is the per-frame `renderFrame` minus Σ of
+  its phases. Near zero (≈0.05 ms on greets) = the frame is fully attributed and
+  the numbers can be trusted. Several ms = the tick thread lost time somewhere no
+  scope covers — re-take the measurement rather than quote it.
+- **`--bench`, not `--snapshot`.** The value of the flag is a WARMUP frame count,
+  because the first main-view frame pays the one-shot env-reflection panorama bakes
+  and the SH probe (~230 ms inside that one frame on greets). A single snapshot
+  pose is *all* warmup; the table says so in a banner rather than pretending.
+
+`--bench=scene` drives `city`, `fountain` and `greets` at a pinned `Timer`
+(`--bench=scene@scene=<s>,t=<T>,iters=<N>`); `FDS_GREETS_CAM` pins the greets pose.
+The legacy `FDS_TAIL_PROF=1` env selects the older rolling every-60-invocations
+prints instead of the table.
+
+To attribute *inside* the lighting kernel, the ablation gates `--prof_no_lights`
+(omni loop off), `--prof_no_tex` (albedo fetch → constant) and `--prof_no_spec`
+exist for exactly that; they CHANGE PIXELS, so they are measurement-only.
+
+---
+
 ## 9. Worked example — SSAO (`FDS/RENDER/DeferredSSAO.cpp`)
 
 A complete, recent post-pass that exercises every section above:
@@ -386,3 +431,4 @@ and call it in `renderFrame` at the right point in §2.
 | Runtime flags | `FDS/Base/FeatureFlags.{def,h,cpp}` |
 | Camera/view globals | `FDS/Base/FDS_VARS.H` |
 | Headless snapshots | `DEMO/Snapshot.cpp` |
+| Env maps (padded cube faces) | `FDS/RENDER/EnvCube.h` (convention + trig-free lookup), `EnvBake.cpp` (deferred bake), `DEMO/CITY.CPP` (per-building bake) — see `docs/ENV_CUBEMAP_PLAN.md`; `--no-env_cube` = legacy equirect |

@@ -12,4 +12,5 @@ std::unique_ptr<SceneDriver> createCityScene();
 std::unique_ptr<SceneDriver> createChaseScene();
 std::unique_ptr<SceneDriver> createFountainScene();
 std::unique_ptr<SceneDriver> createCrashScene();
+std::unique_ptr<SceneDriver> createPBRTestScene();
 std::unique_ptr<SceneDriver> createGreetsScene();

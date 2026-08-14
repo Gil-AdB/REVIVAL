@@ -1,6 +1,7 @@
 #include "Snapshot.h"
 
 #include "CITY.H"
+#include "ChaseEvents.h"
 #include "MaterialEditor.h"
 #include "FillerTest.h"
 #include "GLAT.H"
@@ -21,6 +22,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <map>
+#include <array>
+#include <string>
 #include <set>
 #include <cstdio>
 #include <cstdlib>
@@ -240,6 +244,10 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
 
 static void buildLookAt(const Vector& eye, const Vector& target, Matrix outM);
 
+// Defined below the fountain loop; the editor dump/test-hook vehicle is shared
+// by every scene snapshot loop (fountain/crash/chase call it forward).
+static void RunEditorDumpHooks();
+
 int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -293,8 +301,24 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         Timer = ts;
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
 
+        // Same native editor-hook vehicle as the greets loop below
+        // (PICK_TEST/SPLIT_TEST/CLEARMAP_TEST ride Editor_GetSurfacesJSON) —
+        // BEFORE the tick so a CLEARMAP_TEST reset lands in the dumped frame.
+        if (std::getenv("DUMP_SURFACES")) {
+            static bool dumped = false;
+            if (!dumped) {
+                dumped = true;
+                std::fprintf(stderr, "[SURFACES] %s\n",
+                             rev::Editor_GetSurfacesJSON().c_str());
+            }
+        }
+
         bool more = driver->tick();
         (void)more;
+
+        // Post-tick editor dump/test-hook vehicle ([OBJECTS]/DUMP_MESHES +
+        // OBJSCALE_TEST & co.) — same as the greets/city loops.
+        RunEditorDumpHooks();
 
         if (overrideCam) {
             View->ISource = camPos;
@@ -336,6 +360,46 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// DUMP_SURFACES=1 — native validation hook for the surface-editor core: print
+// the live surface list + object hierarchy once after a tick (frame data is
+// live) so the Embind path can be checked headless. Shared by the greets and
+// city snapshot loops; it is also the vehicle the PICK_TEST/SPLIT_TEST/
+// CLEARMAP_TEST/FOCUS_TEST env hooks ride (they fire inside
+// Editor_GetSurfacesJSON). DUMP_MESHES=1 adds one line per scene OBJECT —
+// its name / number / parent / face count / distinct surface set — ground
+// truth for the editor's object-grouping heuristics.
+static void RunEditorDumpHooks() {
+    if (!std::getenv("DUMP_SURFACES")) return;
+    static bool dumped = false;
+    if (dumped) return;
+    dumped = true;
+    std::fprintf(stderr, "[SURFACES] %s\n", rev::Editor_GetSurfacesJSON().c_str());
+    std::fprintf(stderr, "[OBJECTS] %s\n", rev::Editor_GetObjectsJSON().c_str());
+    // Authored-light inventory (index/name/parent/type) — the native ground
+    // truth for the editor's lights list + light-groups feature (added for
+    // the city authored-headlights verification: 76 lights, 46 grouped
+    // under their parent vehicles).
+    std::fprintf(stderr, "[LIGHTS] %s\n", rev::Editor_GetLightsJSON().c_str());
+    if (std::getenv("DUMP_MESHES") && CurScene) {
+        int oi = 0;
+        for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next, ++oi) {
+            if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+            TriMesh *T = (TriMesh *)Obj->Data;
+            std::set<std::string> names;
+            for (DWord f = 0; f < T->FIndex; ++f)
+                if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
+                    names.insert(rev::Editor_BaseSurfName(T->Faces[f].Txtr->Name));
+            std::string line;
+            for (const std::string &s : names) { if (!line.empty()) line += " | "; line += s; }
+            std::fprintf(stderr, "[MESH %3d] obj='%s' num=%u parent='%s' %u faces: %s\n",
+                         oi, Obj->Name ? Obj->Name : "",
+                         (unsigned)Obj->Number,
+                         (Obj->Parent && Obj->Parent->Name) ? Obj->Parent->Name : "",
+                         (unsigned)T->FIndex, line.c_str());
+        }
+    }
+}
+
 // IMPORT_TEST=surface:role:path — exercise the RUNTIME map-import path
 // (rev::Editor_ImportTexture / MaterialImport_ApplyMapFile, the browser
 // editor's code) natively, as opposed to the CLI --material-import which
@@ -346,6 +410,15 @@ static void RunImportTestHook() {
     if (!spec) return;
     static bool done = false;
     if (done) return;
+    // IMPORT_TEST_AFTER=N (default 0): hold the import until N ticks have
+    // already run, so probes are baked BEFORE the edit. Lets an env-reflection
+    // test see the TARGETED-invalidate re-bake (one store, not the whole
+    // scene) in the [ENVREFL] log — with the default 0 the import fires before
+    // the first tick as before (first frame shows the map).
+    static int calls = 0;
+    const char *afterEnv = std::getenv("IMPORT_TEST_AFTER");
+    const int after = afterEnv ? std::atoi(afterEnv) : 0;
+    if (calls++ < after) return;
     done = true;
     // Semicolon-separated list of surface:role:path entries.
     std::string all = spec, s;
@@ -417,6 +490,61 @@ static void RunUVTestHook() {
     }
     const std::string r = rev::Editor_SetUVMapping(surf, proj, sx, sy, sz, axis);
     std::fprintf(stderr, "[UVTEST] %s -> %s\n", surf, r.c_str());
+}
+
+// SURF_TEST=surface:key:value[;...] — exercise the RUNTIME surface-property
+// edit path (rev::Editor_SetSurfaceProp — the browser editor's number boxes /
+// checkboxes / selects) natively, headless. Same idiom and same purpose as
+// LIGHT_TEST above: the browser editor's own code, without the browser. Values
+// go through strtof, so NEGATIVES ('-2.5') and exponents parse. Needed because
+// the env-probe controls (envBakeOfs*, envRefl, envBakeRes, envDynamic) only
+// live-apply through this path — their invalidate + re-bake is invisible to the
+// CLI/init-time sidecar route.
+//
+// SURF_TEST_AFTER=N (default 0): hold the edits until N ticks have run, so the
+// probes are BAKED before the edit lands and the log shows the targeted
+// invalidate + re-bake rather than a first-time bake. Mirrors IMPORT_TEST_AFTER.
+//
+// Special key 'envBakeOfsAuto': no value — calls rev::Editor_AutoCenterProbe,
+// the "auto-center" button, so the button is testable headless too.
+static void RunSurfTestHook() {
+    const char *spec = std::getenv("SURF_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    static int calls = 0;
+    const char *afterEnv = std::getenv("SURF_TEST_AFTER");
+    const int after = afterEnv ? std::atoi(afterEnv) : 0;
+    if (calls++ < after) return;
+    done = true;
+    std::string all = spec, s;
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t semi = all.find(';', pos);
+        if (semi == std::string::npos) semi = all.size();
+        s = all.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (s.empty()) continue;
+        // Split from the RIGHT: surface names legitimately contain colons
+        // ("Hull.lwo::cockpit_upper", "stairs::mirUV"), so a left-to-right
+        // split cuts the surface name in half and silently edits nothing.
+        const size_t cLast = s.rfind(':');
+        if (cLast == std::string::npos) { std::fprintf(stderr, "[SURFTEST] want surface:key[:value]\n"); continue; }
+        if (s.compare(cLast + 1, std::string::npos, "envBakeOfsAuto") == 0) {
+            const std::string surf = s.substr(0, cLast);
+            const std::string r = rev::Editor_AutoCenterProbe(surf.c_str());
+            std::fprintf(stderr, "[SURFTEST] %s auto-center -> %s\n", surf.c_str(), r.c_str());
+            continue;
+        }
+        const size_t cKey = s.rfind(':', cLast - 1);
+        if (cKey == std::string::npos) { std::fprintf(stderr, "[SURFTEST] want surface:key:value\n"); continue; }
+        const std::string surf = s.substr(0, cKey);
+        const std::string key  = s.substr(cKey + 1, cLast - cKey - 1);
+        const float val = std::strtof(s.c_str() + cLast + 1, nullptr);
+        const bool ok = rev::Editor_SetSurfaceProp(surf.c_str(), key.c_str(), val);
+        std::fprintf(stderr, "[SURFTEST] %s %s = %g: %s\n", surf.c_str(), key.c_str(),
+                     (double)val, ok ? "ok" : "FAILED");
+    }
 }
 
 int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
@@ -510,6 +638,55 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         RunImportTestHook();
         RunLightTestHook();
         RunUVTestHook();
+        RunSurfTestHook();
+
+        // FDS_DUMP_TXTR: arm the per-pixel parallax-UV recorder for this tick so
+        // the rasterizer records where the march landed each covered pixel.
+        static std::vector<float> s_uvbuf;
+        static std::vector<float> s_uvgeobuf;
+        if (std::getenv("FDS_DUMP_TXTR")) {
+            s_uvbuf.assign(size_t(xres) * yres * 2, -1.0e9f);
+            meka::g_pomDbgUV = s_uvbuf.data();
+            meka::g_pomDbgStride = xres;
+            meka::g_pomDbgH = yres;
+            // Companion GEOMETRIC-UV plane: the camera-free surface coordinate
+            // that lets a sweep key the parallax OFFSET by surface point instead
+            // of by screen pixel. Same arming so a run either has both or neither.
+            s_uvgeobuf.assign(size_t(xres) * yres * 2, -1.0e9f);
+            meka::g_pomDbgUVGeo = s_uvgeobuf.data();
+        }
+        // --pom_path_viz: arm the per-pixel MARCH PATH CODE plane for this tick.
+        static std::vector<uint32_t> s_pathbuf;
+        if (fds::FeatureFlags::pom_path_viz() != 0) {
+            s_pathbuf.assign(size_t(xres) * yres, 0u);
+            meka::g_pomPathBuf = s_pathbuf.data();
+            meka::g_pomDbgStride = xres;
+            meka::g_pomDbgH = yres;
+            static bool legendPrinted = false;
+            if (!legendPrinted) {
+                legendPrinted = true;
+                std::fprintf(stderr,
+                  "[POMPATH] per-pixel march path code, uint32[xres*yres], dumped as *_path.u32\n"
+                  "[POMPATH]  [3:0] KIND    1 single-shift (no march)   2 LOD row-far (march skipped)\n"
+                  "[POMPATH]                3 naive HIT   4 naive no-hit (passed under the stone)\n"
+                  "[POMPATH]                5 cone HIT    6 cone UNRESOLVED (out of steps, ray still\n"
+                  "[POMPATH]                              inside the slab -> lane degrades to NO SHIFT)\n"
+                  "[POMPATH]                7 cone MISS (exited the slab bottom)\n"
+                  "[POMPATH]                8 reference HIT   9 reference MISS\n"
+                  "[POMPATH]  [7:4] ACTION  0 keep  1 clamp-to-FLAT  2 clamp-into-BOX  3 land-on-SIDE\n"
+                  "[POMPATH]                4 DISCARD (lane killed; geometry behind wins the pixel)\n"
+                  "[POMPATH]  [11:8] WHY    8 no-cross  9 domain exit  10 base clip  11 side-entry miss\n"
+                  "[POMPATH]  [15:12] which own-box side the final UV left (uMin,uMax,vMin,vMax)\n"
+                  "[POMPATH]  16 side-face entry taken   17/18 LOD fade partial/full   19 quarter shared\n"
+                  "[POMPATH]  20 --pom_shell_cap BIT (1/(V.N) was clamped at this pixel)\n"
+                  "[POMPATH]  21 --pom_cone_min_step floor fired   22 --parallax_max_offset clamped\n"
+                  "[POMPATH]  23 side-edge kill  24 recess arm  25 lid arm  26 shell face\n"
+                  "[POMPATH]  31 STICKY: a fragment at this pixel was shell-killed\n"
+                  "[POMPATH]  mode 1 also recolours the albedo: ORANGE clamp-flat, YELLOW clamp-box,\n"
+                  "[POMPATH]  MINT side-land, RED discard, gray single, navy row-far, green naive-hit,\n"
+                  "[POMPATH]  olive naive-no-hit, blue cone-hit, MAGENTA cone-UNRESOLVED, dkred cone-miss\n");
+            }
+        }
 
         bool more = driver->tick();
         (void)more;
@@ -517,30 +694,7 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // Native validation hook for the surface-editor core (Phase 1): with
         // DUMP_SURFACES=1 print the live surface list once after a tick (when
         // CurScene == GreetSc) so the Embind path can be checked headless.
-        if (std::getenv("DUMP_SURFACES")) {
-            static bool dumped = false;
-            if (!dumped) {
-                dumped = true;
-                std::fprintf(stderr, "[SURFACES] %s\n",
-                             rev::Editor_GetSurfacesJSON().c_str());
-                std::fprintf(stderr, "[OBJECTS] %s\n",
-                             rev::Editor_GetObjectsJSON().c_str());
-                // DUMP_MESHES=1: one line per mesh — its distinct surface set.
-                // Ground truth for the editor's object-grouping heuristics.
-                if (std::getenv("DUMP_MESHES")) {
-                    int mi = 0;
-                    for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next, ++mi) {
-                        std::set<std::string> names;
-                        for (DWord f = 0; f < T->FIndex; ++f)
-                            if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
-                                names.insert(rev::Editor_BaseSurfName(T->Faces[f].Txtr->Name));
-                        std::string line;
-                        for (const std::string &s : names) { if (!line.empty()) line += " | "; line += s; }
-                        std::fprintf(stderr, "[MESH %3d] %u faces: %s\n", mi, (unsigned)T->FIndex, line.c_str());
-                    }
-                }
-            }
-        }
+        RunEditorDumpHooks();
         // EDIT_TEST: does a surface edit persist across a render tick? (snap-back
         // hunt) Set cockpit specular to a marker, print it, tick again, reprint.
         if (std::getenv("EDIT_TEST")) {
@@ -567,6 +721,193 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                       cfg.outDir.c_str(), ts);
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
         std::fprintf(stderr, "[GREETSSNAP] t=%d -> %s\n", ts, colorPath);
+
+        // FDS_SNAPSHOT_ZDUMP: raw ZPage16 depth (word[xres*yres]) beside the color
+        // PPM. Deterministic (geometry, not the noisy shading) — the far-z leak
+        // detector for the S4a seam-hole hunt: z==0 = nothing rasterised there =
+        // background peeking through. Env-gated → inert (no gate touches it).
+        if (std::getenv("FDS_SNAPSHOT_ZDUMP") && ZPage16) {
+            char zp[1024];
+            std::snprintf(zp, sizeof(zp), "%s/greets_t%06d_depth.z16", cfg.outDir.c_str(), ts);
+            if (FILE* zf = std::fopen(zp, "wb")) {
+                std::fwrite(ZPage16, sizeof(word), size_t(xres) * yres, zf);
+                std::fclose(zf);
+                // g_zscale printed so a z16 diff converts to world units
+                // offline (zEnc = 0xFF80 - g_zscale*z).
+                std::fprintf(stderr, "[GREETSSNAP] depth -> %s (zscale=%.4f)\n",
+                             zp, (double)g_zscale);
+            }
+        }
+
+        // FDS_SNAPSHOT_GBUFDUMP: raw deferred G-buffer material plane
+        // (uint32[xres*yres], packed mip:4|matID:8|swizzledUV:20; the forward
+        // sentinels 0xFFFFFFFF/0xFFFFFFFE pass through) plus the matID -> name
+        // table on stderr. This is the S1b/S1c CLASSIFIER instrument: with the
+        // z16 dump it says, for every pixel a --pom_shell discard killed, WHICH
+        // surface won the pixel instead (another wall at a plausible depth =
+        // correct see-through; the floor; nothing = eaten wall). Env-gated →
+        // inert (no gate touches it), same pattern as FDS_SNAPSHOT_ZDUMP.
+        if (std::getenv("FDS_SNAPSHOT_GBUFDUMP") && g_gbuffer
+            && g_gbuffer->txtr.size() >= size_t(xres) * yres) {
+            char gp[1024];
+            std::snprintf(gp, sizeof(gp), "%s/greets_t%06d_mat.u32", cfg.outDir.c_str(), ts);
+            if (FILE* gf = std::fopen(gp, "wb")) {
+                std::fwrite(g_gbuffer->txtr.data(), sizeof(uint32_t), size_t(xres) * yres, gf);
+                std::fclose(gf);
+                std::fprintf(stderr, "[GREETSSNAP] gbuf-mat -> %s\n", gp);
+            }
+            const MatTable mt = Scene_GetMatTable(CurScene);
+            for (dword i = 0; i < mt.count; ++i)
+                std::fprintf(stderr, "[GBUFDUMP] id=%u name=%s\n", (unsigned)i,
+                             (mt.data[i] && mt.data[i]->Name) ? mt.data[i]->Name : "(unnamed)");
+        }
+
+        // --face_id_dump: DIAGNOSTIC per-pixel FACE ownership. matID is one byte
+        // shared by every wall in the scene, so it cannot answer "which polygon
+        // won this pixel, and should it have been occluded?". The faceId plane
+        // carries (Face* >> 4) << 4 | fanSubTriangle. Dump the plane, then walk
+        // the scene and print a resolution table for exactly the keys that
+        // actually appear on screen (the full face list would be tens of
+        // thousands of lines). Key collisions are REPORTED, not hidden — the key
+        // is only unique while the heap stays inside a 4 GB window.
+        if (g_gbuffer && !g_gbuffer->faceId.empty()
+            && g_gbuffer->faceId.size() >= size_t(xres) * yres) {
+            char fp[1024];
+            std::snprintf(fp, sizeof(fp), "%s/greets_t%06d_face.u32", cfg.outDir.c_str(), ts);
+            if (FILE* ff = std::fopen(fp, "wb")) {
+                std::fwrite(g_gbuffer->faceId.data(), sizeof(uint32_t),
+                            size_t(xres) * yres, ff);
+                std::fclose(ff);
+                std::fprintf(stderr, "[GREETSSNAP] faceid -> %s\n", fp);
+            }
+            std::set<uint32_t> present;   // face keys (already >> 4, no sub-tri)
+            for (size_t i = 0, n = size_t(xres) * yres; i < n; ++i) {
+                const uint32_t k = g_gbuffer->faceId[i];
+                if (k) present.insert(k >> 4);
+            }
+            int printed = 0, collisions = 0;
+            std::set<uint32_t> seen;
+            for (Object *Obj = CurScene ? CurScene->ObjectHead : nullptr; Obj; Obj = Obj->Next) {
+                if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+                TriMesh *T = (TriMesh*)Obj->Data;
+                for (int32_t fi = 0; fi < T->FIndex; ++fi) {
+                    Face *F = &T->Faces[fi];
+                    const uint32_t key = uint32_t(uintptr_t(F) >> 4) & 0x0FFFFFFFu;
+                    if (!present.count(key)) continue;
+                    if (!seen.insert(key).second) { ++collisions; }
+                    std::fprintf(stderr,
+                        "[FACEID] key=%u mesh=%s fi=%d mat=%s N=(%.4f,%.4f,%.4f) d=%.4f"
+                        " A=(%.3f,%.3f,%.3f) B=(%.3f,%.3f,%.3f) C=(%.3f,%.3f,%.3f)"
+                        " uv=(%.3f,%.3f)(%.3f,%.3f)(%.3f,%.3f) grp=%u\n",
+                        (unsigned)key, Obj->Name ? Obj->Name : "(unnamed)", (int)fi,
+                        (F->Txtr && F->Txtr->Name) ? F->Txtr->Name : "(none)",
+                        F->N.x, F->N.y, F->N.z, F->NormProd,
+                        F->A ? F->A->Pos.x : 0.f, F->A ? F->A->Pos.y : 0.f, F->A ? F->A->Pos.z : 0.f,
+                        F->B ? F->B->Pos.x : 0.f, F->B ? F->B->Pos.y : 0.f, F->B ? F->B->Pos.z : 0.f,
+                        F->C ? F->C->Pos.x : 0.f, F->C ? F->C->Pos.y : 0.f, F->C ? F->C->Pos.z : 0.f,
+                        F->U1, F->V1, F->U2, F->V2, F->U3, F->V3,
+                        (unsigned)F->PomShellGroup);
+                    ++printed;
+                }
+            }
+            std::fprintf(stderr, "[FACEID] %zu distinct keys on screen, %d resolved, "
+                         "%d KEY COLLISIONS (two faces sharing a key — treat those "
+                         "rows as ambiguous)\n", present.size(), printed, collisions);
+        }
+
+        // FDS_DUMP_TXTR: dump the finalized per-pixel parallax UV (uf,vf) that the
+        // march recorded during this tick (see g_pomDbgUV set before the tick).
+        // Diffing two runs' UV bins isolates the MARCH output (spatial texel
+        // distance) from all lighting/post — the only headless metric that is
+        // march-correctness-sensitive on this god-ray/bloom frame (final-color
+        // diffs are amplification-dominated).
+        if (meka::g_pomDbgUV) {
+            char tp[1024];
+            std::snprintf(tp, sizeof(tp), "%s/greets_t%06d_uv.bin", cfg.outDir.c_str(), ts);
+            if (FILE* f = std::fopen(tp, "wb")) {
+                std::fwrite(meka::g_pomDbgUV, sizeof(float),
+                            size_t(xres) * yres * 2, f);
+                std::fclose(f);
+                std::fprintf(stderr, "[GREETSSNAP] uv -> %s\n", tp);
+            }
+            if (meka::g_pomDbgUVGeo) {
+                std::snprintf(tp, sizeof(tp), "%s/greets_t%06d_uvgeo.bin",
+                              cfg.outDir.c_str(), ts);
+                if (FILE* f = std::fopen(tp, "wb")) {
+                    std::fwrite(meka::g_pomDbgUVGeo, sizeof(float),
+                                size_t(xres) * yres * 2, f);
+                    std::fclose(f);
+                    std::fprintf(stderr, "[GREETSSNAP] uvgeo -> %s\n", tp);
+                }
+                meka::g_pomDbgUVGeo = nullptr;
+            }
+            meka::g_pomDbgUV = nullptr;
+        }
+        // --pom_path_viz: MIRRORED-UV CENSUS. The march's bitangent sign comes
+        // from Material::TbnHandedness, but that field is only maintained for
+        // NORMAL-MAPPED materials (GreetsFixBitangentHandedness skips the
+        // rest), while the geometrically correct sign is each FACE's own UV
+        // determinant. Print both so a disagreement is visible rather than
+        // assumed: "det<0 but mat=+1" faces are ones whose march still walks V
+        // backwards after the handedness fix.
+        if (fds::FeatureFlags::pom_path_viz() != 0) {
+            static bool censusDone = false;
+            if (!censusDone) {
+                censusDone = true;
+                std::map<std::string, std::array<long long, 4>> tab; // det<0/mat<0/agree/total
+                for (Object *Obj = CurScene ? CurScene->ObjectHead : nullptr; Obj; Obj = Obj->Next) {
+                    if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+                    TriMesh *T = (TriMesh*)Obj->Data;
+                    for (int32_t fi = 0; fi < T->FIndex; ++fi) {
+                        Face *F = &T->Faces[fi];
+                        if (!F->Txtr) continue;
+                        const float du1 = F->U2 - F->U1, dv1 = F->V2 - F->V1;
+                        const float du2 = F->U3 - F->U1, dv2 = F->V3 - F->V1;
+                        const bool detNeg = (du1 * dv2 - du2 * dv1) < 0.0f;
+                        const bool matNeg = F->Txtr->TbnHandedness < 0.0f;
+                        auto &r = tab[F->Txtr->Name ? F->Txtr->Name : "(unnamed)"];
+                        r[0] += detNeg; r[1] += matNeg; r[2] += (detNeg == matNeg); r[3] += 1;
+                    }
+                }
+                for (auto &kv : tab)
+                    std::fprintf(stderr, "[POMPATH-HAND] mat=%-28s faces=%lld detNeg=%lld "
+                                 "matNeg=%lld agree=%lld (%.1f%%)\n", kv.first.c_str(),
+                                 kv.second[3], kv.second[0], kv.second[1], kv.second[2],
+                                 100.0 * double(kv.second[2]) / double(kv.second[3] ? kv.second[3] : 1));
+            }
+        }
+        // --pom_path_viz: dump the per-pixel march path code plane.
+        if (meka::g_pomPathBuf) {
+            char pp[1024];
+            std::snprintf(pp, sizeof(pp), "%s/greets_t%06d_path.u32", cfg.outDir.c_str(), ts);
+            if (FILE* f = std::fopen(pp, "wb")) {
+                std::fwrite(meka::g_pomPathBuf, sizeof(uint32_t),
+                            size_t(xres) * yres, f);
+                std::fclose(f);
+                std::fprintf(stderr, "[GREETSSNAP] path -> %s\n", pp);
+            }
+            meka::g_pomPathBuf = nullptr;
+        }
+
+        // GBUF_PROBE="x1,y1,x2,y2": per-column-parity matID histogram over a
+        // rect — diagnosis hook (e.g. which pixels are forward-sentinel vs
+        // which deferred material; the env-refl quarter-dots hunt).
+        if (const char* pr = std::getenv("GBUF_PROBE")) {
+            int px1, py1, px2, py2;
+            if (std::sscanf(pr, "%d,%d,%d,%d", &px1, &py1, &px2, &py2) == 4) {
+                std::unordered_map<uint64_t, int> hist;  // (matID-or-sentinel)<<1 | x-parity -> n
+                for (int yy = py1; yy < py2; ++yy)
+                    for (int xx = px1; xx < px2; ++xx) {
+                        const uint32_t m32 = g_gbuffer->txtr[size_t(yy) * xres + xx];
+                        const uint32_t key = (m32 == 0xFFFFFFFFu || m32 == 0xFFFFFFFEu)
+                            ? m32 : ((m32 >> 20) & 0xFF);
+                        ++hist[(uint64_t(key) << 1) | uint64_t(xx & 1)];
+                    }
+                for (auto& kv : hist)
+                    std::fprintf(stderr, "[GBUFPROBE] mat=%08x oddx=%d n=%d\n",
+                                 uint32_t(kv.first >> 1), int(kv.first & 1), kv.second);
+            }
+        }
         ++produced;
     }
 
@@ -598,6 +939,9 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
         driver->tick();   // on-screen "Frame N/M" confirms the mapping
 
+        // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
+        RunEditorDumpHooks();
+
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/crash_f%04d_color.ppm",
                       cfg.outDir.c_str(), fr);
@@ -612,9 +956,141 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// --snapshot=pbrtest[@t=N1,N2,...] — the PBR/env-reflection test scene at
+// pinned Timer values (0..800; camera dollies over the 240-frame spline).
+// Deterministic baseline shots for the material/reflection pipeline.
+int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+    Initialize_PBRTest();
+
+    std::vector<int32_t> timestamps = cfg.timestamps;
+    if (timestamps.empty()) timestamps = {100, 400, 700};
+
+    auto driver = createPBRTestScene();
+    driver->init();
+
+    // FDS_PBRTEST_CAM="px,py,pz,lx,ly,lz": posed free-cam (position +
+    // look-at) instead of the scene dolly — orbit shots for material
+    // verification. View=&FC → Animate_Objects leaves the camera alone.
+    if (const char* s = std::getenv("FDS_PBRTEST_CAM")) {
+        float px, py, pz, lx, ly, lz;
+        if (std::sscanf(s, "%f,%f,%f,%f,%f,%f", &px, &py, &pz, &lx, &ly, &lz) == 6) {
+            FC.ISource = Vector(px, py, pz);
+            Vector look(lx, ly, lz);
+            Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+            FC.IFOV = 60.0f;
+            CalcPersp(&FC);
+            View = &FC;
+            std::fprintf(stderr, "[PBRTESTSNAP] posed cam (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)\n",
+                         px, py, pz, lx, ly, lz);
+        }
+    }
+
+    int produced = 0;
+    for (int32_t ts : timestamps) {
+        std::srand(0);
+        Timer = ts;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+        driver->tick();
+
+        // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
+        RunEditorDumpHooks();
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/pbrtest_t%06d_color.ppm",
+                      cfg.outDir.c_str(), ts);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[PBRTESTSNAP] t=%d polys=%d -> %s\n", ts, (int)CAll, colorPath);
+        if (const char* pr = std::getenv("GBUF_PROBE")) {
+            int px1, py1, px2, py2;
+            if (std::sscanf(pr, "%d,%d,%d,%d", &px1, &py1, &px2, &py2) == 4 && g_gbuffer) {
+                std::unordered_map<uint64_t, int> hist;
+                for (int yy = py1; yy < py2; ++yy)
+                    for (int xx = px1; xx < px2; ++xx) {
+                        const uint32_t m32 = g_gbuffer->txtr[size_t(yy) * xres + xx];
+                        const uint32_t key = (m32 == 0xFFFFFFFFu || m32 == 0xFFFFFFFEu)
+                            ? m32 : ((m32 >> 20) & 0xFF);
+                        ++hist[key];
+                    }
+                for (auto& kv : hist)
+                    std::fprintf(stderr, "[GBUFPROBE] mat=%08x n=%d\n", uint32_t(kv.first), kv.second);
+            }
+        }
+        // GBUF_NPROBE="x1,y1,x2,y2": decoded G-buffer normal at the region's
+        // corner/edge/centre sample points (view-space; the env-reflection
+        // input). One line per sample: px py -> n=(x y z).
+        if (const char* pr = std::getenv("GBUF_NPROBE")) {
+            int px1, py1, px2, py2;
+            if (std::sscanf(pr, "%d,%d,%d,%d", &px1, &py1, &px2, &py2) == 4 && g_gbuffer) {
+                const int mx = (px1 + px2) / 2, my = (py1 + py2) / 2;
+                const int pts[5][2] = { {mx, py1+8}, {mx, py2-8}, {px1+8, my}, {px2-8, my}, {mx, my} };
+                const char* names[5] = { "top", "bottom", "left", "right", "centre" };
+                for (int k = 0; k < 5; ++k) {
+                    const size_t i = size_t(pts[k][1]) * xres + pts[k][0];
+                    float nx, ny, nz;
+                    meka::oct_decode_u16(g_gbuffer->normal[i], nx, ny, nz);
+                    std::fprintf(stderr, "[GBUFNPROBE] %-6s (%d,%d) n=(%.3f %.3f %.3f) z16=%u\n",
+                                 names[k], pts[k][0], pts[k][1], nx, ny, nz,
+                                 (unsigned)((word*)MainSurf->Z16)[i]);
+                }
+            }
+        }
+        if (View)
+            std::fprintf(stderr, "[PBRTESTSNAP] cam src=(%.2f %.2f %.2f) fwd=(%.3f %.3f %.3f) IFOV=%.2f PerspX=%.1f\n",
+                         View->ISource.x, View->ISource.y, View->ISource.z,
+                         View->Mat[2][0], View->Mat[2][1], View->Mat[2][2], View->IFOV, View->PerspX);
+        if (View)
+            std::fprintf(stderr, "[PBRTESTSNAP] cam keys: src=%d tgt=%d fov=%d flags=%u camHead=%p View=%p\n",
+                         (int)View->Source.NumKeys, (int)View->Target.NumKeys, (int)View->FOV.NumKeys,
+                         (unsigned)View->Flags, (void*)CurScene->CameraHead, (void*)View);
+        if (View && View->Source.NumKeys >= 2)
+            std::fprintf(stderr, "[PBRTESTSNAP] srcKey0 frame=%.1f pos=(%.2f %.2f %.2f) key1 frame=%.1f pos=(%.2f %.2f %.2f) fovKey0=%.2f curFrame=%.1f\n",
+                         View->Source.Keys[0].Frame, View->Source.Keys[0].Pos.x, View->Source.Keys[0].Pos.y, View->Source.Keys[0].Pos.z,
+                         View->Source.Keys[1].Frame, View->Source.Keys[1].Pos.x, View->Source.Keys[1].Pos.y, View->Source.Keys[1].Pos.z,
+                         View->FOV.NumKeys ? View->FOV.Keys[0].Pos.x : -1.0f, CurFrame);
+        if (CurScene && CurScene->TriMeshHead) {
+            TriMesh *T = CurScene->TriMeshHead;
+            std::fprintf(stderr, "[PBRTESTSNAP] mesh IPos=(%.2f %.2f %.2f) bsr=%.2f flags=%u VIndex=%u FIndex=%u\n",
+                         T->IPos.x, T->IPos.y, T->IPos.z,
+                         T->BSphereRadius, (unsigned)T->Flags, (unsigned)T->VIndex, (unsigned)T->FIndex);
+        }
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 // --snapshot=chase[@t=N1,N2,...] — drive the chase scene driver at pinned Timer
-// values (centiseconds; chase runs ~0..2500). Driver-based: createChaseScene
+// values (centiseconds). Chase plays FAST: CHPartTime = EndFrame-StartFrame =
+// 1759 ticks (~17.6 s), so CurFrame = 1 + (EndFrame-StartFrame)*t/CHPartTime =
+// 1 + t. Valid range 0..1758 (frames 1..1759, ≈ the full 1..1760 incl. the
+// climb-out finale); re-dumps the last rendered VPage past the end. The pin
+// recipe t=100,400,800,1200,1600 samples CurFrame≈101..1601 — near full-scene
+// coverage. Driver-based: createChaseScene
 // applies the cinematic + water_procedural defaults, exactly like the live demo.
+// S0 (§8.B) determinism proof: stamp a deterministic marker for one resolved
+// event into the final VPage. Pure function of the event data — same bytes
+// every run. Writes ARGB8888 dwords straight to MainSurf->Data (post-tonemap),
+// exactly the buffer write_ppm reads.
+static void stampChaseEventMarker(const chase::Event* e, int xres, int yres) {
+    if (!e || !MainSurf || !MainSurf->Data) return;
+    const int side = 24;
+    const int x0 = 16 + (e->kind & 7) * 8;   // separate co-active events
+    const int y0 = 16;
+    const dword col = 0xFF000000u
+        | (dword(e->p[0] > 1.f ? 255 : int(e->p[0] * 255.f + 0.5f)) << 16)
+        | (dword(e->p[1] > 1.f ? 255 : int(e->p[1] * 255.f + 0.5f)) << 8)
+        |  dword(e->p[2] > 1.f ? 255 : int(e->p[2] * 255.f + 0.5f));
+    for (int y = y0; y < y0 + side && y < yres; ++y) {
+        dword* row = reinterpret_cast<dword*>(MainSurf->Data + size_t(y) * MainSurf->BPSL);
+        for (int x = x0; x < x0 + side && x < xres; ++x) row[x] = col;
+    }
+}
+
 int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -626,12 +1102,63 @@ int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     auto driver = createChaseScene();
     driver->init();
 
+    // The chase driver draws the interactive profiler overlay inside tick()
+    // when the `profiler` flag is on — and rev.cfg's ProfilerEnable=1 seeds
+    // that flag. Zeroing g_profilerActive here is NOT enough: FrameProfiler::
+    // beginFrame() re-mirrors the flag into the global EVERY frame (the
+    // P-key-less toggle path), so the overlay would come back on tick 1.
+    // The overlay's wall-clock timing text is non-deterministic and must
+    // never land in snapshot bytes (the first tick prints a constant 0-FPS
+    // line, every later tick prints real timings — pins would flip every
+    // run). Clear the FLAG, but only when it was cfg-seeded (unmarked): an
+    // EXPLICIT --profiler on a snapshot run stays honored, same precedence
+    // idiom as the rev.cfg seeding in REV.CPP.
+    if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::profiler)) {
+        fds::FeatureFlags::setParamFromText("profiler", "0");
+        fds::FeatureFlags::clearSetMark("profiler");
+    }
+    g_profilerActive = fds::FeatureFlags::profiler();
+
+    // S0 music-sync foundation (default-off; flag-off leaves everything below
+    // untouched, so the chase pins are byte-identical). When on, resolve an
+    // event table (a beatmap+events file pair if present, else a self-contained
+    // throwaway table active only at t=800) and mark whatever is active at t.
+    const bool eventTest = fds::FeatureFlags::chase_event_test();
+    std::vector<chase::Event> events;
+    if (eventTest) {
+        chase::Beatmap bm;
+        const char* bmPath = std::getenv("FDS_CHASE_BEATMAP");
+        const char* evPath = std::getenv("FDS_CHASE_EVENTS");
+        int32_t musicStart = 0;
+        if (const char* ms = std::getenv("FDS_CHASE_MUSIC_START_TICK")) musicStart = std::atoi(ms);
+        bool haveFile = false;
+        if (bmPath && chase::Beatmap_Load(bmPath, bm) && evPath) {
+            haveFile = chase::Events_Load(evPath, bm, musicStart, events) && !events.empty();
+        }
+        if (!haveFile) events = chase::Events_TestTable(/*anchor=*/800);
+        std::fprintf(stderr, "[CHASEEVENT] chase_event_test on: %zu event(s) "
+                     "(source=%s, musicStart=%d)\n",
+                     events.size(), haveFile ? "beatmap+table" : "test-table", musicStart);
+    }
+
     int produced = 0;
     for (int32_t ts : timestamps) {
         std::srand(0);
         Timer = ts;
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
         driver->tick();   // clears VPage, renders both passes + glints, noop-flips
+
+        // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
+        RunEditorDumpHooks();
+
+        if (eventTest) {
+            // PURE FUNCTION of t — reconstruct active set from the resolved
+            // table (no accumulation), then stamp. This is the §8.B contract.
+            std::vector<const chase::Event*> active;
+            chase::Events_ActiveAt(events, ts, active);
+            for (const chase::Event* e : active) stampChaseEventMarker(e, xres, yres);
+            std::fprintf(stderr, "[CHASEEVENT] t=%d active=%zu\n", ts, active.size());
+        }
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/chase_t%06d_color.ppm",
@@ -729,6 +1256,11 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        // Same DUMP_SURFACES/[OBJECTS]/DUMP_MESHES + editor-test-hook vehicle
+        // as the greets loop — city object-hierarchy/pick/focus work needs a
+        // headless view of the live scene too.
+        RunEditorDumpHooks();
 
         // Pose anchor for CITYSNAP_VIEW hunts: where the camera is.
         std::fprintf(stderr,
@@ -3423,6 +3955,16 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
     if (cfg.scene == "city") {
         Initialize_City();
         driver = createCityScene();
+    } else if (cfg.scene == "fountain") {
+        // Fountain's tick calls RenderSkyCube(SkySc, …) and SkySc is created
+        // inside Initialize_City — same two-step the fountain SNAPSHOT does
+        // (RunFountainSnapshot above). The cinematic profile is applied by the
+        // live factory, so a bench that skipped it would measure a different
+        // post chain than the demo runs.
+        Initialize_City();
+        Initialize_Fountain();
+        ApplyCinematicProfile(cine::kFountain);
+        driver = createFountainScene();
     } else if (cfg.scene == "greets") {
         Initialize_Greets();
         // Initialize_Greets spawns the lightmap bake on a background
@@ -3432,7 +3974,7 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
         Greets_JoinBakeThread();
         driver = createGreetsScene();
     } else {
-        std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, greets)\n",
+        std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, fountain, greets)\n",
                      cfg.scene.c_str());
         ThreadPool::instance().close();
         return 2;
@@ -4137,7 +4679,7 @@ Texture *MT_makeTextAlphaTexture(const char *fileName) {
 Material *MT_makeMaterial(Scene *sc, const char *name, Texture *texture,
                           float r, float g, float b, dword flags) {
     Material *M = getAlignedType<Material>(16);
-    std::memset(M, 0, sizeof(Material));
+    *M = Material{};   // NSDMI defaults (Tint*/AoStrength = 1), not memset
     M->Txtr = texture;
     M->BaseCol.R = r; M->BaseCol.G = g; M->BaseCol.B = b; M->BaseCol.A = 255;
     M->Diffuse = 1.0f;

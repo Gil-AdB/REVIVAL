@@ -462,11 +462,17 @@ material global ID or ptr
 #include "ImageCompression.h"
 #include "PhotonTracer.h"
 #include "Snapshot.h"
+#include "ReproHarness.h"
 #include "MaterialImport.h"
+#include "FOUNTAIN.H"      // ParticleDump_ParseArgs (--pcl_dump=, argv pre-scan)
 #include "Resize.h"
 #include <float.h>
 #include <Base/TriMesh.h>
 #include <Base/FeatureFlags.h>
+#include <RENDER/EnvCube.h>
+#include <RENDER/ChunkOcclusion.h>  // g_occlSnapshotInert: pin dumps keep the cull inert
+#include <RENDER/VizCycle.h>        // VizCycle_Step: the X / Shift+X debug-viz cycle
+#include <RENDER/EnvBake.h>         // EnvMap_StepProbe: F / Shift+F env-probe paging
 #include <Base/TuneServer.h>
 #include "Config.h"
 #include "Threads.h"
@@ -476,6 +482,10 @@ material global ID or ptr
 #include <csignal>
 #include <utility>
 #include <iostream>
+#include <mutex>        // InitTimelineMark
+#include <chrono>       // InitTimelineMark
+#include <thread>       // InitTimelineMark
+#include <vector>       // InitTimelineMark
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include "MainLoop.h"
@@ -497,6 +507,30 @@ material global ID or ptr
 // Tries: <bindir>, <bindir>/../Runtime, <bindir>/../../Runtime — the
 // first one that has rev.cfg wins. No-op on emscripten (assets are
 // preloaded at "/").
+// --no-chdir_assets / FDS_CHDIR_ASSETS=0: skip the chdir entirely and render
+// whatever the launch CWD points at. Parsed straight from argv because the
+// chdir is the FIRST thing main() does — the FeatureFlags table does not exist
+// yet — so only the exact spellings below work for this one flag. It is still
+// registered in FeatureFlags.def so --help lists it and --strict_flags does not
+// reject it. See that flag's doc for why you would want it: the chdir keys the
+// asset root off the BINARY's location, so a worktree build silently renders
+// worktree assets and writes worktree caches, which is a measurement hazard
+// when the pins are taken against the user's uncommitted authoring files.
+static bool WantChdirToAssetRoot(int argc, const char* const* argv)
+{
+	if (const char* e = std::getenv("FDS_CHDIR_ASSETS")) {
+		if (e[0] == '0' && e[1] == '\0') return false;
+	}
+	for (int i = 1; i < argc; ++i) {
+		if (!argv[i]) continue;
+		if (std::strcmp(argv[i], "--no-chdir_assets") == 0) return false;
+		if (std::strcmp(argv[i], "--no-chdir-assets") == 0) return false;
+		if (std::strcmp(argv[i], "--chdir_assets=0")  == 0) return false;
+		if (std::strcmp(argv[i], "--chdir-assets=0")  == 0) return false;
+	}
+	return true;
+}
+
 static void ChdirToAssetRoot(const char* argv0)
 {
 #ifndef __EMSCRIPTEN__
@@ -555,9 +589,35 @@ int32_t g_hiDPI;
 // See Rev.h for semantics.
 std::atomic<bool> g_shouldQuit{false};
 std::atomic<bool> g_skipScene{false};
+std::atomic<bool> g_shiftHeld{false};
 // g_forceMipLevel / g_vizMipLevel are defined in FDS/RENDER/DeferredLighting.cpp
 // (so the FDS library doesn't have an unresolved symbol from DEMO/).
 // Declared in Rev.h.
+
+// --init_timeline. See Rev.h. The mutex is only taken when the flag is on, so
+// the shipping path pays one relaxed bool load per mark and nothing else.
+// Thread ids are interned in first-seen order (t0 = whoever marked first,
+// normally the demo director) so the log reads without 64-bit hashes in it.
+void InitTimelineMark(const char *label)
+{
+	if (!fds::FeatureFlags::init_timeline()) return;
+	static std::mutex             s_mtx;
+	static std::chrono::steady_clock::time_point s_t0, s_prev;
+	static bool                   s_started = false;
+	static std::vector<std::thread::id> s_tids;
+	std::lock_guard<std::mutex> lk(s_mtx);
+	const auto now = std::chrono::steady_clock::now();
+	if (!s_started) { s_t0 = s_prev = now; s_started = true; }
+	const auto id  = std::this_thread::get_id();
+	size_t slot = 0;
+	for (; slot < s_tids.size(); ++slot) if (s_tids[slot] == id) break;
+	if (slot == s_tids.size()) s_tids.push_back(id);
+	const double abs_ms = std::chrono::duration<double, std::milli>(now - s_t0).count();
+	const double dt_ms  = std::chrono::duration<double, std::milli>(now - s_prev).count();
+	s_prev = now;
+	std::fprintf(stderr, "[INIT-T] %9.1f (dt %8.1f) [t%zu] %s\n",
+	             abs_ms, dt_ms, slot, label);
+}
 
 float dTime;
 
@@ -607,10 +667,20 @@ static char G_WindowClassStr[MAX_GSTRING] = "Revival";
 static char G_AppTitle[MAX_GSTRING];
 
 Uint32 TimerProc(Uint32 interval, void *param)
-{ 
-    Timer++;
+{
+	// One free-running tick. NOTHING ELSE BELONGS HERE.
+	//
+	// A review scrub used to live in this callback (hold F4/F3, step Timer by
+	// --scrub_speed) and it NEVER WORKED. The scene driver owns the clock:
+	// SceneDriver::tickSceneTimer computes the scene time it wants and then
+	// does `if (pauseMode || scrubbed) Timer = sceneT`, re-pinning the atomic
+	// from the wall clock every single frame — so every increment this callback
+	// made was overwritten before anything read it. Removed 2026-08-06.
+	// The scrub that does work is F1/F2 (rewind / fast-forward) in
+	// tickSceneTimer, with SHIFT as the --scrub_speed multiplier.
+	Timer++;
 	return interval;
-} 
+}
 
 int TimerInit(int32_t Freq)
 {
@@ -1115,10 +1185,13 @@ void CodeEntry(void *var)
 
 	// return;
 
+	InitTimelineMark("CodeEntry: begin");
 	Initialize_Glato(); //9.3
+	InitTimelineMark("Initialize_Glato: end");
 	//Initialize_Nova();
 
 	std::thread t1([]() {
+		InitTimelineMark("t1: begin");
 		InitPolyStats(200);
 		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
 		FPU_LPrecision();
@@ -1131,10 +1204,15 @@ void CodeEntry(void *var)
 		// concurrent LoadFLD calls would race + corrupt the version
 		// check and exit(1).
 		Initialize_Greets(); //5.6
+		InitTimelineMark("t1: Initialize_Greets end");
 		Initialize_City();
+		InitTimelineMark("t1: Initialize_City end");
 		Initialize_Chase();
+		InitTimelineMark("t1: Initialize_Chase end");
 		Initialize_Fountain(); //8.3
+		InitTimelineMark("t1: Initialize_Fountain end");
 		Initialize_Crash();
+		InitTimelineMark("t1: Initialize_Crash end (t1 done)");
 	});// (); //9.3
 
 //	Initialize_Koch();
@@ -1153,6 +1231,12 @@ void CodeEntry(void *var)
 	// Single-scene dispatch: if the user passed --scene-mirrortest,
 	// skip the whole demo sequence and run only that scene. Useful
 	// for poking at the mirror system with free-cam.
+	if (fds::FeatureFlags::scene_cloaktest()) {
+		extern void Run_CloakTest();
+		if (t1.joinable()) t1.join();   // same FList-realloc race as mirrortest
+		Run_CloakTest();
+		goto demo_exit;
+	}
 	if (fds::FeatureFlags::scene_mirrortest()) {
 		extern void Run_MirrorTest();
 		// Join the init thread BEFORE running the mirror test scene.
@@ -1181,14 +1265,46 @@ void CodeEntry(void *var)
 		Run_ConeTest();
 		goto demo_exit;
 	}
-	if (!skipToFountain) {
+	if (fds::FeatureFlags::scene_displacetest()) {
+		// Minimal stone-displacement bake rig (one quad + a height map). Join
+		// the init thread first (same g_mainFaces realloc race as the others).
+		extern void Run_DisplaceTest();
+		if (t1.joinable()) t1.join();
+		Run_DisplaceTest();
+		goto demo_exit;
+	}
+	if (fds::FeatureFlags::scene_chase()) {
+		// Chase-only review mode (loop alignment / light-drama judging).
+		// Join-first for the same g_mainFaces realloc race as the others.
+		// Music (started above when enabled) plays from song start — fine
+		// for look review. --chase-start=T warps the clock so the loop
+		// (t~500) or the island stretch (t~1200) is reachable immediately;
+		// a cold jump skips pre-T accumulated state (bolts/events), which
+		// is acceptable here and touches nothing outside this branch.
+		if (t1.joinable()) t1.join();
+		if (fds::FeatureFlags::chase_start() > 0)
+			Timer = fds::FeatureFlags::chase_start();
+		Run_Chase();
+		goto demo_exit;
+	}
+	// FDS_SKIP_INTRO=1 (dev/debug only): skip the Glato intro + its
+	// wall-clock Timer<4000 gate and jump straight to City. Used to make
+	// the per-frame city-texture-oscillation repro captures cheap (the
+	// intro is ~150s of wall time). No effect on a normal run. Inlined
+	// (no local) so it doesn't cross the earlier goto demo_exit jumps.
+	if (!skipToFountain && std::getenv("FDS_SKIP_INTRO") == nullptr) {
+	InitTimelineMark("Run_Glato: begin");
 	Run_Glato();
+	InitTimelineMark("Run_Glato: end — now joining t1");
 
 	t1.join();
+	InitTimelineMark("t1.join: returned (THE STALL, if any, is this dt)");
 
 	while (Timer<4000) { if (g_shouldQuit.load()) goto demo_exit; }
+	InitTimelineMark("Timer>=4000 gate passed — City starts");
 	} else {
 	t1.join();
+	InitTimelineMark("t1.join: returned (FDS_SKIP_INTRO path)");
 	}
 
 
@@ -1242,9 +1358,23 @@ demo_exit:;
 
 int main(int argc, const char *argv[])
 {
-	ChdirToAssetRoot(argc > 0 ? argv[0] : "");
+	if (WantChdirToAssetRoot(argc, argv)) {
+		ChdirToAssetRoot(argc > 0 ? argv[0] : "");
+	} else {
+		// The report is inside the same guard as ChdirToAssetRoot itself:
+		// <unistd.h> (and so getcwd) is only included for native builds, and
+		// on emscripten the chdir is a no-op anyway — assets are preloaded at
+		// "/", so there is no launch CWD worth naming.
+#ifndef __EMSCRIPTEN__
+		char cwd[4096] = {0};
+		if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+		std::fprintf(stderr,
+			"[CHDIR] asset-root chdir SKIPPED (--no-chdir_assets); assets resolve "
+			"from the launch CWD: %s\n", cwd[0] ? cwd : "(unknown)");
+#endif
+	}
 
-	// Headless modes (--snapshot / --bench) must never pop an SDL window,
+	// Headless modes (--snapshot / --bench / --repro) must never pop an SDL window,
 	// steal desktop focus, or play music when run in the background (the byte
 	// gate, perf benches, agents). Detect them up front so we can (a) force
 	// SDL's built-in dummy video+audio drivers BEFORE any SDL_Init and (b)
@@ -1252,13 +1382,16 @@ int main(int argc, const char *argv[])
 	// touches SDL anyway, but the raster/scene/flip bench opens a real window —
 	// dummy makes it offscreen. Interactive runs (no --snapshot/--bench) are
 	// untouched and still open a real window with audio. We match the
-	// --snapshot / --bench *prefix*, which is a superset of the --snapshot= /
-	// --bench= forms the arg parsers accept, so every headless invocation is
-	// covered.
+	// --snapshot / --bench / --repro *prefix*, which is a superset of the
+	// --snapshot= / --bench= / --repro= forms the arg parsers accept, so every
+	// headless invocation is covered. --repro drives the REAL interactive main
+	// path (see ReproHarness.h), so it is the one headless mode that would
+	// otherwise happily open a window — it MUST be in this list.
 	bool headless = false;
 	for (int i = 1; i < argc; ++i) {
 		if (argv[i] && (std::strncmp(argv[i], "--snapshot", 10) == 0 ||
-		                std::strncmp(argv[i], "--bench",    7) == 0)) {
+		                std::strncmp(argv[i], "--bench",    7) == 0 ||
+		                std::strncmp(argv[i], "--repro",    7) == 0)) {
 			headless = true;
 			break;
 		}
@@ -1270,6 +1403,12 @@ int main(int argc, const char *argv[])
 	// --material-import=MAT:DIR specs aren't FeatureFlags; pre-scan argv (like
 	// --snapshot above). Scenes apply them at init via MaterialImport_Apply.
 	fds::MaterialImport_ParseArgs(argc, argv);
+	// --pcl_dump=PATH[,t0,t1] carries a PATH, so it is not a FeatureFlag either
+	// (that table is bool/float/int only). Same pre-scan; default off and
+	// byte-null when off. FOUNTAIN.CPP owns it — it is the CPU half of
+	// dump-and-replay for GpuBench's fountain spray (docs/GPU_BENCHMARK_PLAN.md
+	// §6.2j).
+	ParticleDump_ParseArgs(argc, argv);
 	ConfigurationDB cfg;
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
@@ -1320,9 +1459,26 @@ int main(int argc, const char *argv[])
 "  ./DEMO                                   run the demo interactively\n"
 "  ./DEMO --snapshot=<scene>[@t=T1,T2,...] [--out=DIR]\n"
 "  ./DEMO --bench=<kind>[@iters=N,seed=N,...]\n"
+"  ./DEMO --repro=<scene>@t=T1,T2,... [--out=DIR]\n"
 "  ./DEMO [--<flag> | --no-<flag> | --<flag>=VALUE]...\n"
+"  ./DEMO --pcl_dump=PATH[,t0,t1]           dump fountain's particle state per frame\n"
+"                                           (for GpuBench --pcl; default off, and\n"
+"                                            byte-null when off. t0/t1 are an\n"
+"                                            inclusive scene-Timer window — 8,250\n"
+"                                            particles x 20 B/frame adds up fast)\n"
 "  ./DEMO --help | -h                       this message\n"
 "  ./DEMO --print-completion[=bash|zsh]     emit shell completion script\n"
+"\n"
+"REPRO (headless INTERACTIVE harness — no SDL window; use when --snapshot\n"
+"       CANNOT reproduce a defect the user sees in his live run)\n"
+"  --repro=greets@t=2993 --out=DIR\n"
+"      Runs the REAL scene driver through the REAL per-frame path, scrubbing\n"
+"      to t the way F1/F2 does, so defects that need accumulated per-frame\n"
+"      state appear. --snapshot renders ONE cold tick with the fine scene\n"
+"      clock and the chunk-occlusion cull pinned, and is blind to those by\n"
+"      construction. Honours FDS_GREETS_CAM. Tunables: --repro_from (the\n"
+"      history-depth bisection dial), --repro_settle, --repro_seq,\n"
+"      --repro_play, --repro_max_frames. See docs/INTERACTIVE_REPRO.md.\n"
 "\n"
 "SNAPSHOT SCENES (headless deterministic PPM dump, no SDL window)\n"
 "  city           City scene driver at specified Timer values\n"
@@ -1388,12 +1544,72 @@ int main(int argc, const char *argv[])
 	// flags fall through to snapshot/bench parsing; those parsers ignore
 	// anything they don't recognise.
 	fds::FeatureFlags::parseArgs(argc, argv);
+
+	// Flag implication: city_env_pixel routes the city glass through the
+	// deferred env-specular compose, which only has data when env_refl's
+	// FramePrep bakes ran — without it the glass is flat (loses even the
+	// legacy sheet reflections). Default env_refl ON in that case; an
+	// explicit --no-env-refl still wins (setDefault never overrides a
+	// user-set flag).
+	if (fds::FeatureFlags::city_env_pixel() && !fds::FeatureFlags::env_refl()) {
+		fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_refl, true);
+		if (fds::FeatureFlags::env_refl())
+			std::fprintf(stderr, "[FLAGS] city_env_pixel: enabling env_refl "
+			             "(required for the per-pixel glass compose)\n");
+	}
+
+	// Env-cube convention self-test (FDS_ENV_CUBE_SELFTEST=1): dir→face/uv→dir
+	// round-trip + central uv→dir→uv check. Aborts on gross failure so an
+	// orientation bug is caught before any real bake. No-op otherwise.
+	if (std::getenv("FDS_ENV_CUBE_SELFTEST")) {
+		if (!fds::EnvCube_SelfTest()) {
+			std::fprintf(stderr, "[ENVCUBE-SELFTEST] FAILED — aborting.\n");
+			return 3;
+		}
+	}
+
 	fds::TuneServer_Start();
+
+	// --repro: headless INTERACTIVE repro harness. Runs the REAL scene driver
+	// through the REAL per-frame path for as many frames as it takes to scrub to
+	// the requested scene time, so defects that need accumulated per-frame state
+	// (which --snapshot's single cold tick cannot express) actually appear. It
+	// is checked BEFORE --snapshot so neither of the two pins below — the fine
+	// scene clock and the chunk-occlusion inertness — is applied to it: those
+	// pins are precisely what makes a snapshot blind. See ReproHarness.h and
+	// docs/INTERACTIVE_REPRO.md.
+	ReproConfig repro;
+	if (ParseReproArgs(argc, argv, repro)) {
+		return RunRepro(repro, g_demoXRes, g_demoYRes);
+	}
 
 	SnapshotConfig snap;
 	if (ParseSnapshotArgs(argc, argv, snap)) {
 		// Headless deterministic dump path — no SDL window, no music.
 		// Used to diff native vs wasm at the pixel level / per-tick state.
+		// Integer scene clock only: captures must be a pure function of the
+		// pinned Timer, not of wall-clock fractions (see g_FrameTimeF).
+		g_fineSceneClock = false;
+		// Pin dumps must stay a pure function of Timer: the prev-frame chunk
+		// occlusion cull (ChunkOcclusion.h) would make ticks 2..N of a multi-t
+		// recipe depend on the PREVIOUS timestamp's depth — recipe-fragile
+		// pins would move. Force it inert for every snapshot scene; the bench
+		// harness (timing + verify sweep) keeps it live. --chunk_occl_snapshot_force
+		// ([dev]) re-enables it for the temporal-pop ground-truth pixel rig.
+		fds::g_occlSnapshotInert = !fds::FeatureFlags::chunk_occl_snapshot_force();
+		// --snapshot_ss (DIAGNOSTIC, default 1): render the snapshot at N times
+		// the configured resolution per axis. Used to build a SUPERSAMPLED
+		// converged reference for the displacement inventory
+		// (docs/S1_DISCREPANCY_INVENTORY.md) — the arms under test always render
+		// at 1x, and the 4x reference is box-downsampled offline. Snapshot path
+		// only; it never touches the live window's resolution.
+		const int ssN = fds::FeatureFlags::snapshot_ss();
+		if (ssN > 1) {
+			g_demoXRes *= ssN;
+			g_demoYRes *= ssN;
+			std::fprintf(stderr, "[SNAPSHOT] --snapshot_ss=%d -> %dx%d\n",
+			             ssN, (int)g_demoXRes, (int)g_demoYRes);
+		}
 		if (snap.scene == "city") {
 			return RunCitySnapshot(snap, g_demoXRes, g_demoYRes);
 		}
@@ -1420,6 +1636,9 @@ int main(int argc, const char *argv[])
 		}
 		if (snap.scene == "crash") {
 			return RunCrashSnapshot(snap, g_demoXRes, g_demoYRes);
+		}
+		if (snap.scene == "pbrtest") {
+			return RunPBRTestSnapshot(snap, g_demoXRes, g_demoYRes);
 		}
 		if (snap.scene == "chase") {
 			return RunChaseSnapshot(snap, g_demoXRes, g_demoYRes);
@@ -1449,6 +1668,7 @@ int main(int argc, const char *argv[])
 
 	BenchConfig bench;
 	if (ParseBenchArgs(argc, argv, bench)) {
+		g_fineSceneClock = false;   // deterministic clock (see snapshot path)
 		// Headless rasterizer benchmark — no SDL window, no music.
 		// Same flow as the snapshot harness but the inner loop times instead
 		// of dumping. Run under `node --cpu-prof DEMO_snapshot.js --bench=...`
@@ -1520,6 +1740,14 @@ int main(int argc, const char *argv[])
             (void *)window.get(), g_demoXRes, g_demoYRes);
 
     SDL_RaiseWindow(window.get());
+
+    // SDL2 starts with text input ACTIVE on macOS, routing key events through
+    // the Cocoa text-input (NSTextInputClient) path — so press-and-hold on a
+    // key (camera movement etc.) pops the macOS accent/glyph picker instead of
+    // repeating. The demo reads raw scancodes (Keyboard[]) and never needs text
+    // events, so stop text input: kills the accent popup, clean key repeats.
+    // Harmless on other platforms.
+    SDL_StopTextInput();
 
 	// _controlfp(_EM_INEXACT, _MCW_EM);
 	FPU_LPrecision();
@@ -1640,6 +1868,12 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_BACKSPACE: legacy = ScBackSpace; break;
 				case SDL_SCANCODE_F1:        legacy = ScF1; break;
 				case SDL_SCANCODE_F2:        legacy = ScF2; break;
+				// F3 = the greets shadow-technique toggle (depth <-> poly-ID),
+				// back on F3 as of 2026-08-06: it had been parked on the
+				// untranslated ScF6 to make room for the TimerProc review
+				// scrub, and that scrub is gone (see TimerProc). F4 is
+				// deliberately NOT translated — it was added for that scrub
+				// and now has no consumer, so it stays a free key.
 				case SDL_SCANCODE_F3:        legacy = ScF3; break;
 				case SDL_SCANCODE_F9:        legacy = ScF9; break;
 				case SDL_SCANCODE_F11:       legacy = ScF11; break;
@@ -1689,6 +1923,13 @@ int main(int argc, const char *argv[])
 			if (legacy >= 0) {
 				Keyboard[legacy] = (event.type == SDL_KEYDOWN) ? 1 : 0;
 			}
+			// SHIFT state for the demo thread (Rev.h g_shiftHeld): the FAST arm
+			// of SceneDriver's F1/F2 scene-clock scrub. Taken from keysym.mod on
+			// EVERY key event, including the shift key's own down/up, because
+			// SDL folds the modifier into its state before filling mod.
+			g_shiftHeld.store(
+			    (event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0,
+			    std::memory_order_relaxed);
 			// New key conventions (see CLAUDE.md / commit message):
 			//   ESC       = exit demo immediately (whole program)
 			//   Backspace = skip to next scene
@@ -1722,6 +1963,47 @@ int main(int argc, const char *argv[])
 					extern void ShadowMap_ViewCycleBack();
 					if (back) ShadowMap_ViewCycleBack();
 					else      ShadowMap_ViewCycle();
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_X) {
+					// DEBUG-VIZ CYCLE: X steps forward through every viz that
+					// can actually show something in this run, Shift+X steps
+					// back. FDS/RENDER/VizCycle.cpp prints the menu + the mode
+					// name, and paints the name bottom-left so a screenshot is
+					// self-identifying.
+					//
+					// Why X and not V (the obvious letter): V is already the
+					// shadow-map thumbnail cycle, ten lines up. X is the only
+					// key untranslated in BOTH scancode tables (here and
+					// MainLoop.cpp), absent from every Keyboard[] consumer in
+					// DEMO/ and FDS/, and outside anyFreeCamKey's fly set — and
+					// it sits next to Z/C so the left hand reaches it without
+					// leaving WASD while the right hand keeps steering.
+					// repeat==0: hold-to-repeat would spin the whole cycle.
+					if (event.key.repeat == 0) {
+						const Uint16 mod = event.key.keysym.mod;
+						const bool back = (mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+						fds::VizCycle_Step(back ? -1 : +1);
+					}
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_F) {
+					// ENV-MAP INSPECTOR probe paging: F = next probe,
+					// Shift+F = previous, both wrapping. X selects the
+					// inspector MODE (faces / mip chain / CPU|GPU) through
+					// the ordinary viz cycle; this key only moves WHICH probe
+					// is on screen, because greets bakes ~6 and city registers
+					// 71 and a viewer that can only show one is not a viewer.
+					//
+					// Why F: it is the one letter that is neither translated
+					// into Keyboard[] by the switch above (so no scene poll
+					// site can see it) nor handled in this chain, in EITHER
+					// event pump (here and DEMO/MainLoop.cpp) — checked
+					// against both scancode tables and every Keyboard[Sc*]
+					// consumer in DEMO/ and FDS/. It also sits under the left
+					// index finger on WASD, next to X.
+					// repeat == 0: hold-to-repeat would spin 71 city probes.
+					if (event.key.repeat == 0) {
+						const Uint16 mod = event.key.keysym.mod;
+						const bool back = (mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+						fds::EnvMap_StepProbe(back ? -1 : +1);
+					}
 				} else if (event.key.keysym.scancode == SDL_SCANCODE_B) {
 					// Cycle the shadow-map debug view's buffer mode:
 					// static → dynamic → combined (closest-by-depth).
@@ -1754,7 +2036,7 @@ int main(int argc, const char *argv[])
 				} else if (event.key.keysym.scancode == SDL_SCANCODE_T) {
 					// Toggle per-frame staleness tracker for the dynamic
 					// cube buffers. When on, logs every 60 frames any
-					// shadow maps whose polyId_dynamic hash hasn't changed
+					// shadow maps whose dynamic polyId hash hasn't changed
 					// since the last check — those are the ones whose
 					// dynamic bake isn't actually writing fresh content
 					// (the "frozen at t=0" symptom).

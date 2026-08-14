@@ -28,11 +28,14 @@ CLI:
     fldpatch.py SCENE.FLD --set 'surface|diffuse|0.8' --out patched.fld
 """
 import argparse
+import math
 import struct
 import sys
 
 MAT_PROPS = ("baseR", "baseG", "baseB", "diffuse", "specular", "glossiness",
-             "luminosity", "transparency", "reflection")
+             "luminosity", "transparency", "reflection", "smoothAngle")
+
+SURF_SMOOTHING = 4        # LWREAD.H: Surf_Smoothing bit in the material TFlags
 LIGHT_KEYS = ("r", "g", "b", "intensity", "range")
 
 KF_SIZE = 56          # FldKeyFrame: 3 Vectors + 5 floats
@@ -126,10 +129,12 @@ class FldFile:
         name = self._cstr() if self.has_mat_names else ""
         off = self.pos                     # fixed block starts at Color
         self._skip(3)                      # FldColor
+        flags_off = self.pos               # TFlags u16 (bit 2 = Surf_Smoothing)
         self._skip(2)                      # Flags u16
         self._skip(4 * 5)                  # Lum, Dif, Spec, Refl, Transp
         self._skip(2 + 2)                  # Glossiness, ReflectionMode
-        self._cstr()                       # ReflectionImage
+        self._cstr()                       # ReflectionImage (variable length)
+        smooth_off = self.pos + 4 * 3      # after SeamAngle, RefrIndex, EdgeTransp
         self._skip(4 * 4)                  # SeamAngle, RefrIndex, EdgeTransp, MaxSmooth
         ctex_start = self.pos              # ColorTexture (projection string)
         self._cstr()
@@ -144,6 +149,7 @@ class FldFile:
         self._skip(2 * 3)                  # NoiseFrequencies, WrapX, WrapY
         self._skip(4 * 4)                  # AAStrength, Opacity, TFP0, TFP1
         self.mats.append({"obj": obj_name, "name": name, "off": off,
+                          "flags": flags_off, "smooth": smooth_off,
                           "ctex": (ctex_start, ctex_end),
                           "tflg": tflg_off, "tsiz": tsiz_off})
 
@@ -217,7 +223,12 @@ class FldFile:
         for m in self.mats:
             if m["name"] in out:
                 continue
-            out[m["name"]] = self._read_mat(m["off"])
+            rec = self._read_mat(m["off"])
+            rad = struct.unpack_from("<f", self.data, m["smooth"])[0]
+            flg = struct.unpack_from("<H", self.data, m["flags"])[0]
+            rec["smoothAngle"] = rad * 180.0 / math.pi
+            rec["smoothing"] = bool(flg & SURF_SMOOTHING)
+            out[m["name"]] = rec
         return out
 
     def _read_mat(self, off):
@@ -274,6 +285,17 @@ class FldFile:
                 elif p == "glossiness":
                     struct.pack_into("<H", self.data, off + 25,
                                      max(0, min(65535, int(round(float(v))))))
+                elif p == "smoothAngle":
+                    # Native LWO/FLD field: MaxSmoothingAngle is stored in
+                    # RADIANS; the editor/engine speak DEGREES. deg>0 also SETS
+                    # the Surf_Smoothing flag (the surface must be flagged smooth
+                    # for the engine to honor the angle); deg<=0 CLEARS it so the
+                    # surface renders faceted. Clamp to [0,180].
+                    deg = max(0.0, min(180.0, float(v)))
+                    struct.pack_into("<f", self.data, m["smooth"], deg * math.pi / 180.0)
+                    fl = struct.unpack_from("<H", self.data, m["flags"])[0]
+                    fl = (fl | SURF_SMOOTHING) if deg > 0.0 else (fl & ~SURF_SMOOTHING)
+                    struct.pack_into("<H", self.data, m["flags"], fl)
             count += 1
         return count
 

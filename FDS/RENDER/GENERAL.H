@@ -79,7 +79,14 @@ void Planar_Mapping(TriMesh *T)
 
 void Init_Randomseed()
 {
-	srand(static_cast<unsigned>(time(NULL)));
+	// Fixed seed, deliberately. The only per-frame rand consumer is the
+	// Omni_Rand flare twinkle (Transform.cpp), and a time(NULL) seed made
+	// every run's twinkle sequence unique — which surfaced as nondeterministic
+	// frames (a lamp flare's jittered strip span occasionally re-splits the
+	// glass band plan) and as never-identical env-reflection bakes (the probe
+	// sees the flares). A pinned seed keeps the twinkle but makes playback,
+	// snapshot md5 gates, and bakes reproducible run-to-run.
+	srand(0x5EEDu);
 }
 
 char FDS_Init(unsigned short x,unsigned short y,unsigned char bpp)

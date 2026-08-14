@@ -62,6 +62,194 @@ namespace renderns {
 static std::atomic<int> g_coneAnalyticHits{0};
 static std::atomic<int> g_coneRaymarchHits{0};
 
+// Cone-cost diagnostic scaffold: counts the (8px-batch x spot) iteration
+// volume of the vec path and how much of it dies in the scalar prologue.
+// COMPILE-TIME gated so the shipping build pays literally nothing — this
+// sits in the hottest loop in the codebase (37.5% of all running CPU on
+// city t=1961), where even a well-predicted branch is not free.
+// Re-derive the census with:  cmake -B build -DCMAKE_CXX_FLAGS=-DFDS_CONE_DIAG=1
+// then run with FDS_CONE_ATTR=1.  See docs/HW_PROFILING.md sections 9-10 for
+// the numbers this produced (the solve is 63.6% of the pass) and for the
+// xctrace recipe that found the pass in the first place.
+#ifndef FDS_CONE_DIAG
+#define FDS_CONE_DIAG 0
+#endif
+// Compiled-out record of a measured-and-rejected early-out in the 8-wide
+// cone solve — see the comment at its site for the numbers.
+#ifndef FDS_CONE_SOLVE_EARLYOUT
+#define FDS_CONE_SOLVE_EARLYOUT 0
+#endif
+// Compiled-out record of the OTHER measured-and-rejected variant of the
+// 8-wide cone solve: its three reciprocals and two square roots done with
+// the NEON estimate instructions instead of true IEEE div/sqrt. Numbers and
+// verdict at the RCP/SQRTV definitions below.
+#ifndef FDS_CONE_SOLVE_APPROX
+#define FDS_CONE_SOLVE_APPROX 0
+#endif
+// Ablation ladder for the SECOND round of the cone-cost campaign (the first
+// round's ladder was ad-hoc and not committed; this one is, because the split
+// has to be re-derived every time the pass changes shape). COMPILE-TIME only:
+// build the TU with -DFDS_CONE_ABLATE=n and the per-spot loop `continue`s at
+// staged depth n, so the Ginstr/f difference between two builds prices exactly
+// one stage. n=0 (shipping) emits literally nothing.
+//
+//   1  cut at the top of the per-spot loop      -> per-batch floor
+//   2  keep the per-spot scalar prologue
+//   3  keep + the 8-wide cone-interval solve
+//   4  keep + the scalar per-lane dz/fade loop
+//   5  keep + the broadcasts and the integration body (cut before accumulate)
+//   0  full pass
+//
+// Each cut sinks the values it retains into a per-TILE vector accumulator
+// (one volatile store per tile call, so no false sharing and no perturbation
+// of the composite's `accB<=0` skip) — otherwise the retained work is dead and
+// the compiler deletes exactly what we are trying to price. Sink cost is 2-7
+// instructions per (batch x spot); quantified where it matters.
+#ifndef FDS_CONE_ABLATE
+#define FDS_CONE_ABLATE 0
+#endif
+#if FDS_CONE_ABLATE
+static volatile float g_ablSink = 0.0f;
+// NB: no do/while(0) wrapper — the `continue` has to reach the per-spot
+// `for`, and a do/while would swallow it.
+#define CONE_ABL_CUT(stage, expr) \
+    if constexpr ((FDS_CONE_ABLATE) == (stage)) { \
+        ablSinkV = _mm256_add_ps(ablSinkV, (expr)); continue; }
+#define CONE_ABL_CUT_BARE(stage) \
+    if constexpr ((FDS_CONE_ABLATE) == (stage)) { continue; }
+#else
+#define CONE_ABL_CUT(stage, expr)  ((void)0)
+#define CONE_ABL_CUT_BARE(stage)   ((void)0)
+#endif
+
+// ─── Compile-time ARM FOLDING — the companion instrument to FDS_CONE_ABLATE ──
+// The ablation ladder prices a STAGE. This prices an ARM. A runtime-flagged
+// function carries every arm in one register allocation, so its disassembly
+// and its register pressure are the union of paths no single frame takes;
+// round 2 needed a build with the flags folded to constants to see the
+// shipping path alone, built one ad hoc, and could only describe it in prose.
+// Committed because round 3's whole question turned out to be "where does the
+// register allocator spend its slots", which a two-arm histogram cannot answer.
+//
+//   0  runtime flags (shipping — folds to the plain flag reads, byte-null)
+//   1  vol_cone_solve_vec and vol_cone_lane_vec folded to compile-time TRUE,
+//      so the scalar fallbacks dead-code away entirely
+#ifndef FDS_CONE_FORCE
+#define FDS_CONE_FORCE 0
+#endif
+
+// ─── FDS_CONE_HOTONLY — prices the arms a scene never executes ──────────────
+// DIAGNOSTIC ONLY, and it is not a correct renderer: it deletes the segmented
+// hybrid, the ray-march fallback and the midpoint shadow tap outright, leaving
+// only the branch city's wide headlights actually take. City is byte-identical
+// under it (it never reaches the deleted arms), which is what makes it a clean
+// measurement of how much of the hot path's cost is INTERFERENCE from code that
+// never runs. Answer, city t=1961: 0.248 Ginstr/f, 10.5% of the pass — and
+// 0.000 Gcyc. See docs/HW_PROFILING.md section 11.
+#ifndef FDS_CONE_HOTONLY
+#define FDS_CONE_HOTONLY 0
+#endif
+
+// ─── FDS_CONE_W4 — round 4's native-width solve: BUILT, MEASURED, REJECTED ──
+// Spells the 8-wide cone-interval solve as TWO 4-wide passes, so that a live
+// value costs ONE of the 32 NEON registers instead of two. It is bit-exact
+// (city 3cbe42b1 3/3) and it does relieve pressure — and it buys NOTHING,
+// which is the result: at =1 (unrolled, what the compiler does to a trip count
+// of 2) instructions fall 3.7% and cycles move +0.7%; at =2 (half loop kept
+// ROLLED, which is the only spelling that actually halves the live set: stack
+// `str q` 89/79 -> 72/70) cycles go +7.5% and wall +8.5%. __m256 on arm64 is
+// not two wasted registers, it is two INDEPENDENT NEON chains — free 2x
+// unroll-and-jam — and taking them apart costs more than the spills it saves.
+// Kept compiled out rather than behind a FeatureFlag because round 3 priced a
+// live second arm in this kernel at +2.0 to +3.5% instructions, and a measured
+// -0.1% is not worth that. docs/HW_PROFILING.md section 12.
+//   0 = not compiled  1 = W4, half loop unrolled  2 = W4, half loop rolled
+#ifndef FDS_CONE_W4
+#define FDS_CONE_W4 0
+#endif
+
+// ─── FDS_CONE_NEONMINMAX — every min/max in the cone kernel at ONE op ───────
+// See fmin_x8/fmax_x8 for why the shipping binary emits zero fmin.4s/fmax.4s
+// today. 1 = use the NEON instruction; 0 = the byte-exact cmp+blend the port
+// was built with. NOT a FeatureFlag: round 3 priced a live second arm in this
+// kernel at +2.0 to +3.5% instructions, and 19 sites cannot be switched at
+// runtime without putting a branch on each of them.
+// DEFAULT 1 — it ships. city -4.5% cycles / -3.8% wall, greets -3.2% / -3.5%,
+// -3.2 to -4.7% cycles at every pose of the city t-sweep, and it turned out to
+// be BIT-EXACT in practice: city 3cbe42b1, greets 778fa6ac, fountain 8db68ccb
+// all 3/3, render_gate ALL FOUR rows PASS including conetest. Build with
+// -DFDS_CONE_NEONMINMAX=0 to get the cmp+blend spelling back.
+#ifndef FDS_CONE_NEONMINMAX
+#define FDS_CONE_NEONMINMAX 1
+#endif
+
+static constexpr bool g_coneDiag = (FDS_CONE_DIAG != 0);
+static std::atomic<long long> g_dPairs{0};   // batch x spot pairs entering the scalar solve
+static std::atomic<long long> g_dSegPair{0}; // ...of which take the 8-segment hybrid
+static std::atomic<long long> g_dDead{0};    // ...of which had ZERO alive lanes (wasted prologue)
+static std::atomic<long long> g_dLanes{0};   // alive (lane x spot) pairs reaching integration
+static std::atomic<long long> g_dSphDead{0}; // ...pairs whose EIGHT lanes all miss the range sphere
+
+
+// The ONLY fused multiply-add the 8-wide cone solve is allowed to use.
+// simde lowers _mm256_fmadd_ps to vfmaq_f32 on arm64 (a true FMA), but
+// lowers _mm256_fmsub_ps / _mm256_fnmadd_ps to sub(mul(a,b),c) — which
+// under the tree-wide -ffp-contract=fast hands the "which product gets
+// rounded" decision back to the compiler, and that decision is exactly
+// what the bit-exact port has to pin down. Every `a*b - c` in the solve
+// is therefore written fma_x8(a, b, NEG(c)).
+static inline __m256 fma_x8(const __m256 &a, const __m256 &b, const __m256 &c) {
+    return _mm256_fmadd_ps(a, b, c);
+}
+// Same barrier at the machine's NATIVE width (--vol_cone_solve_w4). arm64 has
+// no 256-bit unit: simde lowers every __m256 op to two 128-bit NEON ops, so an
+// __m256 value costs TWO of the 32 v-registers. Spelling the hot chain 4 wide
+// issues the identical NEON ops and halves the register cost of every live
+// value; fma_x4 pins the contraction the same way fma_x8 does.
+static inline __m128 fma_x4(const __m128 &a, const __m128 &b, const __m128 &c) {
+    return _mm_fmadd_ps(a, b, c);
+}
+
+// ─── min/max at ONE instruction instead of two ──────────────────────────────
+// The cone kernel contains ~19 min/max sites and the shipping binary emits
+// ZERO `fmin.4s` / `fmax.4s` for them. Two separate reasons, same cost:
+//   * the solve and the dz/fade loop spell std::min/std::max by hand as
+//     cmp+blend, because 7e34645 found NEON FMIN resolves NaN and -0 the
+//     opposite way from the scalar FCSEL and the port had to be bit-exact;
+//   * every `_mm256_max_ps` already in the kernel ALSO lowers to cmp+blend,
+//     because SIMDE_FAST_NANS is not defined in this build and simde's
+//     NaN-correct fallback is `m = a<b; (a&m)|(b&~m)`, which LLVM folds to
+//     fcmgt+bsl. So the intrinsic that looks like one op is two.
+// Round 4 measured the pass at ~81% of this core's 4-wide NEON ALU issue
+// ceiling (the solve retires ~205 vector-ALU ops in ~63 cycles per
+// (batch x spot)), which makes VECTOR-ALU OP COUNT the metric that moves
+// cycles -- so a systematic 2-ops-to-1 is worth having. vmaxq_f32 is FMAX,
+// not FMAXNM: NaN propagates (matching the simde fallback, which also
+// returns the NaN operand), and only the +0/-0 tie-break differs.
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static inline __m256 fmax_x8(const __m256 &a, const __m256 &b) {
+    simde__m256_private ap = simde__m256_to_private(a),
+                        bp = simde__m256_to_private(b), rp;
+    rp.m128_private[0].neon_f32 = vmaxq_f32(ap.m128_private[0].neon_f32,
+                                            bp.m128_private[0].neon_f32);
+    rp.m128_private[1].neon_f32 = vmaxq_f32(ap.m128_private[1].neon_f32,
+                                            bp.m128_private[1].neon_f32);
+    return simde__m256_from_private(rp);
+}
+static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) {
+    simde__m256_private ap = simde__m256_to_private(a),
+                        bp = simde__m256_to_private(b), rp;
+    rp.m128_private[0].neon_f32 = vminq_f32(ap.m128_private[0].neon_f32,
+                                            bp.m128_private[0].neon_f32);
+    rp.m128_private[1].neon_f32 = vminq_f32(ap.m128_private[1].neon_f32,
+                                            bp.m128_private[1].neon_f32);
+    return simde__m256_from_private(rp);
+}
+#else
+static inline __m256 fmax_x8(const __m256 &a, const __m256 &b) { return _mm256_max_ps(a, b); }
+static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) { return _mm256_min_ps(a, b); }
+#endif
+
 // OR of the mirror-footprint presence bits (ctx.tileMirrorPresence,
 // LIGHTING-tile geometry: 8-rounded X over the 12x8 grid) across every
 // lighting tile overlapping the given pixel rect. Used by the cone and
@@ -132,6 +320,263 @@ static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, flo
     if (newG > 255) newG = 255;
     if (newB > 255) newB = 255;
     out[i] = (dword(newR) << 16) | (dword(newG) << 8) | dword(newB) | 0xFF000000u;
+}
+
+// ─── Cone turbulence (cone_turbulence / cone_swirl flags) ───────────────
+//
+// Animated internal structure for the volumetric beams: per-sample (ray-
+// march) / per-segment (analytic hybrid) density modulation by a cheap
+// self-contained 3D value noise, evaluated in WORLD space so a moving or
+// rotating beam sweeps through a static drifting medium (the "flashlight
+// through smoke" read; cone-space sampling would glue the pattern to the
+// beam, which looks like a gobo, not smoke). Optional swirl pre-rotates
+// each sample around the beam axis by an angle proportional to the axial
+// distance + scene time, which shears the world field into helical
+// streaks that ride the beam.
+//
+// Determinism: every term derives from g_FrameTime (scene clock, pinned
+// in snapshots) and pure position hashes — no rand()/wall time. All
+// per-frame constants are computed once per Render_VolumetricCones call
+// (orchestrator side) and passed down by value; tiles never write shared
+// state.
+struct ConeTurb {
+	bool  on = false;
+	float amp = 0.0f;         // modulation amplitude (flag × 2.2 contrast)
+	float invCell = 1.0f;     // 1 / cone_turb_scale (world units → cells)
+	float driftX = 0.0f, driftY = 0.0f, driftZ = 0.0f;  // cell offset (×t)
+	float swirl = 0.0f;       // cone_swirl (0 = no axis rotation)
+	float twistK = 0.0f;      // rad per world unit of axial distance
+	float phase = 0.0f;       // rad, time term of the swirl angle
+	int   octaves = 1;
+	// view→world copied from the ctx (world = M·view + cam).
+	float M[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+	float camX = 0.0f, camY = 0.0f, camZ = 0.0f;
+};
+
+// Integer-lattice hash → [0,1). Same avalanching recipe as the pixel
+// jitter hash above; pure function of the lattice coords.
+static inline float ConeTurbHash3(int x, int y, int z) {
+	uint32_t h = uint32_t(x) * 0x8DA6B343u
+	           + uint32_t(y) * 0xD8163841u
+	           + uint32_t(z) * 0xCB1AB31Fu;
+	h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+	return float(h & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+}
+
+// Trilinear value noise, smoothstep-faded, → [0,1).
+static inline float ConeTurbNoise3(float x, float y, float z) {
+	const float fx = std::floor(x), fy = std::floor(y), fz = std::floor(z);
+	const int ix = int(fx), iy = int(fy), iz = int(fz);
+	float tx = x - fx, ty = y - fy, tz = z - fz;
+	tx = tx * tx * (3.0f - 2.0f * tx);
+	ty = ty * ty * (3.0f - 2.0f * ty);
+	tz = tz * tz * (3.0f - 2.0f * tz);
+	const float c000 = ConeTurbHash3(ix,     iy,     iz    );
+	const float c100 = ConeTurbHash3(ix + 1, iy,     iz    );
+	const float c010 = ConeTurbHash3(ix,     iy + 1, iz    );
+	const float c110 = ConeTurbHash3(ix + 1, iy + 1, iz    );
+	const float c001 = ConeTurbHash3(ix,     iy,     iz + 1);
+	const float c101 = ConeTurbHash3(ix + 1, iy,     iz + 1);
+	const float c011 = ConeTurbHash3(ix,     iy + 1, iz + 1);
+	const float c111 = ConeTurbHash3(ix + 1, iy + 1, iz + 1);
+	const float x00 = c000 + (c100 - c000) * tx;
+	const float x10 = c010 + (c110 - c010) * tx;
+	const float x01 = c001 + (c101 - c001) * tx;
+	const float x11 = c011 + (c111 - c011) * tx;
+	const float y0  = x00 + (x10 - x00) * ty;
+	const float y1  = x01 + (x11 - x01) * ty;
+	return y0 + (y1 - y0) * tz;
+}
+
+// Density modulation factor at a view-space sample point (sx,sy,sz) inside
+// the cone (apex P, unit axis D, both view space). Mean ≈ 1 so overall
+// beam brightness is preserved; the noise redistributes it into wisps.
+static inline float ConeTurbFactor(const ConeTurb &tp,
+                                   float sx, float sy, float sz,
+                                   float Px, float Py, float Pz,
+                                   float Dx, float Dy, float Dz)
+{
+	if (tp.swirl != 0.0f) {
+		// Rotate the sample around the beam axis by φ(axialDist, t):
+		// r' = r·cosφ + (D×r)·sinφ (r ⊥ D so Rodrigues collapses).
+		const float Wx = sx - Px, Wy = sy - Py, Wz = sz - Pz;
+		const float ta = Dx*Wx + Dy*Wy + Dz*Wz;
+		const float rx = Wx - ta*Dx, ry = Wy - ta*Dy, rz = Wz - ta*Dz;
+		const float phi = tp.swirl * (tp.twistK * ta) + tp.phase;
+		const float cs = std::cos(phi), sn = std::sin(phi);
+		const float cxv = Dy*rz - Dz*ry;
+		const float cyv = Dz*rx - Dx*rz;
+		const float czv = Dx*ry - Dy*rx;
+		sx = Px + ta*Dx + rx*cs + cxv*sn;
+		sy = Py + ta*Dy + ry*cs + cyv*sn;
+		sz = Pz + ta*Dz + rz*cs + czv*sn;
+	}
+	const float wx = tp.M[0][0]*sx + tp.M[0][1]*sy + tp.M[0][2]*sz + tp.camX;
+	const float wy = tp.M[1][0]*sx + tp.M[1][1]*sy + tp.M[1][2]*sz + tp.camY;
+	const float wz = tp.M[2][0]*sx + tp.M[2][1]*sy + tp.M[2][2]*sz + tp.camZ;
+	const float nx = wx * tp.invCell + tp.driftX;
+	const float ny = wy * tp.invCell + tp.driftY;
+	const float nz = wz * tp.invCell + tp.driftZ;
+	float n = ConeTurbNoise3(nx, ny, nz);
+	if (tp.octaves >= 2)
+		n = 0.65f * n + 0.35f * ConeTurbNoise3(nx * 2.03f + 37.2f,
+		                                       ny * 2.03f + 11.7f,
+		                                       nz * 2.03f +  5.9f);
+	const float m = 1.0f + tp.amp * (2.0f * n - 1.0f);
+	return m > 0.0f ? m : 0.0f;
+}
+
+// ─── 8-wide turbulence (lanes = 8 pixels, same layout as the cone
+// integration). A scalar-per-lane version of the factor cost the greets
+// cone pass +35 ms/frame (measured); this vector version keeps it in
+// the low single digits. Math mirrors the scalar helper (same lattice
+// hash / fade / octave weights); the swirl sin/cos uses the standard
+// parabola approx (~0.1% err — invisible at density-modulation gain).
+static inline __m256 ConeTurbAbs_x8(__m256 x) {
+	return _mm256_andnot_ps(_mm256_set1_ps(-0.0f), x);
+}
+// sin over [-π,π]: y = B·r + C·r·|r|, refined y += 0.225(y·|y| − y).
+static inline __m256 ConeTurbSin_x8(__m256 r) {
+	const __m256 B = _mm256_set1_ps(1.27323954f);
+	const __m256 C = _mm256_set1_ps(-0.405284735f);
+	__m256 y = _mm256_fmadd_ps(_mm256_mul_ps(C, r), ConeTurbAbs_x8(r),
+	                           _mm256_mul_ps(B, r));
+	y = _mm256_fmadd_ps(_mm256_set1_ps(0.225f),
+	                    _mm256_fmsub_ps(y, ConeTurbAbs_x8(y), y), y);
+	return y;
+}
+// Wrap x to [-π,π].
+static inline __m256 ConeTurbWrapPi_x8(__m256 x) {
+	const __m256 inv2pi = _mm256_set1_ps(0.15915494f);
+	const __m256 twopi  = _mm256_set1_ps(6.2831853f);
+	const __m256 n = _mm256_round_ps(_mm256_mul_ps(x, inv2pi), 0 + 8);
+	return _mm256_fnmadd_ps(n, twopi, x);
+}
+// One octave of 8-wide value noise — the vector twin of ConeTurbNoise3
+// (identical lattice hash constants and avalanche).
+static inline __m256 ConeTurbNoise3_x8(__m256 x, __m256 y, __m256 z) {
+	const __m256 fx = _mm256_floor_ps(x);
+	const __m256 fy = _mm256_floor_ps(y);
+	const __m256 fz = _mm256_floor_ps(z);
+	__m256 tx = _mm256_sub_ps(x, fx);
+	__m256 ty = _mm256_sub_ps(y, fy);
+	__m256 tz = _mm256_sub_ps(z, fz);
+	const __m256 three = _mm256_set1_ps(3.0f), two = _mm256_set1_ps(2.0f);
+	tx = _mm256_mul_ps(_mm256_mul_ps(tx, tx), _mm256_fnmadd_ps(two, tx, three));
+	ty = _mm256_mul_ps(_mm256_mul_ps(ty, ty), _mm256_fnmadd_ps(two, ty, three));
+	tz = _mm256_mul_ps(_mm256_mul_ps(tz, tz), _mm256_fnmadd_ps(two, tz, three));
+	const __m256i K1 = _mm256_set1_epi32((int)0x8DA6B343u);
+	const __m256i K2 = _mm256_set1_epi32((int)0xD8163841u);
+	const __m256i K3 = _mm256_set1_epi32((int)0xCB1AB31Fu);
+	const __m256i ix = _mm256_cvttps_epi32(fx);
+	const __m256i iy = _mm256_cvttps_epi32(fy);
+	const __m256i iz = _mm256_cvttps_epi32(fz);
+	// base = ix·K1 + iy·K2 + iz·K3; the 8 corners are base + subset sums
+	// of {K1,K2,K3} — adds only, 3 mullo total.
+	const __m256i base = _mm256_add_epi32(
+	    _mm256_add_epi32(_mm256_mullo_epi32(ix, K1), _mm256_mullo_epi32(iy, K2)),
+	    _mm256_mullo_epi32(iz, K3));
+	const __m256i k12  = _mm256_add_epi32(K1, K2);
+	// Avalanche + 24-bit → float [0,1): h^=h>>13; h*=K; h^=h>>16.
+	const __m256i AV = _mm256_set1_epi32((int)0xC2B2AE35u);
+	const __m256i M24 = _mm256_set1_epi32(0x00FFFFFF);
+	const __m256 inv24 = _mm256_set1_ps(1.0f / 16777216.0f);
+	auto corner = [&](__m256i h) -> __m256 {
+		h = _mm256_xor_si256(h, _mm256_srli_epi32(h, 13));
+		h = _mm256_mullo_epi32(h, AV);
+		h = _mm256_xor_si256(h, _mm256_srli_epi32(h, 16));
+		return _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_and_si256(h, M24)), inv24);
+	};
+	const __m256 c000 = corner(base);
+	const __m256 c100 = corner(_mm256_add_epi32(base, K1));
+	const __m256 c010 = corner(_mm256_add_epi32(base, K2));
+	const __m256 c110 = corner(_mm256_add_epi32(base, k12));
+	const __m256i baseZ = _mm256_add_epi32(base, K3);
+	const __m256 c001 = corner(baseZ);
+	const __m256 c101 = corner(_mm256_add_epi32(baseZ, K1));
+	const __m256 c011 = corner(_mm256_add_epi32(baseZ, K2));
+	const __m256 c111 = corner(_mm256_add_epi32(baseZ, k12));
+	auto lerp = [&](__m256 a, __m256 b, __m256 t) -> __m256 {
+		return _mm256_fmadd_ps(_mm256_sub_ps(b, a), t, a);
+	};
+	const __m256 x00 = lerp(c000, c100, tx);
+	const __m256 x10 = lerp(c010, c110, tx);
+	const __m256 x01 = lerp(c001, c101, tx);
+	const __m256 x11 = lerp(c011, c111, tx);
+	const __m256 y0  = lerp(x00, x10, ty);
+	const __m256 y1  = lerp(x01, x11, ty);
+	return lerp(y0, y1, tz);
+}
+
+// Vector twin of ConeTurbFactor: 8 view-space sample points at once.
+static inline __m256 ConeTurbFactor_x8(const ConeTurb &tp,
+                                       __m256 sx, __m256 sy, __m256 sz,
+                                       float Px, float Py, float Pz,
+                                       float Dx, float Dy, float Dz)
+{
+	if (tp.swirl != 0.0f) {
+		const __m256 vPx = _mm256_set1_ps(Px), vPy = _mm256_set1_ps(Py),
+		             vPz = _mm256_set1_ps(Pz);
+		const __m256 vDx = _mm256_set1_ps(Dx), vDy = _mm256_set1_ps(Dy),
+		             vDz = _mm256_set1_ps(Dz);
+		const __m256 Wx = _mm256_sub_ps(sx, vPx);
+		const __m256 Wy = _mm256_sub_ps(sy, vPy);
+		const __m256 Wz = _mm256_sub_ps(sz, vPz);
+		const __m256 ta = _mm256_fmadd_ps(vDx, Wx,
+		                  _mm256_fmadd_ps(vDy, Wy, _mm256_mul_ps(vDz, Wz)));
+		const __m256 rx = _mm256_fnmadd_ps(ta, vDx, Wx);
+		const __m256 ry = _mm256_fnmadd_ps(ta, vDy, Wy);
+		const __m256 rz = _mm256_fnmadd_ps(ta, vDz, Wz);
+		const __m256 phi = _mm256_fmadd_ps(
+		    _mm256_set1_ps(tp.swirl * tp.twistK), ta,
+		    _mm256_set1_ps(tp.phase));
+		const __m256 rphi = ConeTurbWrapPi_x8(phi);
+		const __m256 sn = ConeTurbSin_x8(rphi);
+		const __m256 cs = ConeTurbSin_x8(ConeTurbWrapPi_x8(
+		    _mm256_add_ps(rphi, _mm256_set1_ps(1.57079633f))));
+		const __m256 cxv = _mm256_fmsub_ps(vDy, rz, _mm256_mul_ps(vDz, ry));
+		const __m256 cyv = _mm256_fmsub_ps(vDz, rx, _mm256_mul_ps(vDx, rz));
+		const __m256 czv = _mm256_fmsub_ps(vDx, ry, _mm256_mul_ps(vDy, rx));
+		sx = _mm256_add_ps(_mm256_fmadd_ps(ta, vDx, vPx),
+		     _mm256_fmadd_ps(rx, cs, _mm256_mul_ps(cxv, sn)));
+		sy = _mm256_add_ps(_mm256_fmadd_ps(ta, vDy, vPy),
+		     _mm256_fmadd_ps(ry, cs, _mm256_mul_ps(cyv, sn)));
+		sz = _mm256_add_ps(_mm256_fmadd_ps(ta, vDz, vPz),
+		     _mm256_fmadd_ps(rz, cs, _mm256_mul_ps(czv, sn)));
+	}
+	const __m256 wx = _mm256_fmadd_ps(_mm256_set1_ps(tp.M[0][0]), sx,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[0][1]), sy,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[0][2]), sz,
+	                                  _mm256_set1_ps(tp.camX))));
+	const __m256 wy = _mm256_fmadd_ps(_mm256_set1_ps(tp.M[1][0]), sx,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[1][1]), sy,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[1][2]), sz,
+	                                  _mm256_set1_ps(tp.camY))));
+	const __m256 wz = _mm256_fmadd_ps(_mm256_set1_ps(tp.M[2][0]), sx,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[2][1]), sy,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[2][2]), sz,
+	                                  _mm256_set1_ps(tp.camZ))));
+	const __m256 nx = _mm256_fmadd_ps(wx, _mm256_set1_ps(tp.invCell),
+	                                  _mm256_set1_ps(tp.driftX));
+	const __m256 ny = _mm256_fmadd_ps(wy, _mm256_set1_ps(tp.invCell),
+	                                  _mm256_set1_ps(tp.driftY));
+	const __m256 nz = _mm256_fmadd_ps(wz, _mm256_set1_ps(tp.invCell),
+	                                  _mm256_set1_ps(tp.driftZ));
+	__m256 n = ConeTurbNoise3_x8(nx, ny, nz);
+	if (tp.octaves >= 2) {
+		const __m256 s2 = _mm256_set1_ps(2.03f);
+		n = _mm256_fmadd_ps(n, _mm256_set1_ps(0.65f),
+		    _mm256_mul_ps(_mm256_set1_ps(0.35f),
+		    ConeTurbNoise3_x8(
+		        _mm256_fmadd_ps(nx, s2, _mm256_set1_ps(37.2f)),
+		        _mm256_fmadd_ps(ny, s2, _mm256_set1_ps(11.7f)),
+		        _mm256_fmadd_ps(nz, s2, _mm256_set1_ps( 5.9f)))));
+	}
+	const __m256 m = _mm256_fmadd_ps(
+	    _mm256_set1_ps(tp.amp),
+	    _mm256_fmsub_ps(_mm256_set1_ps(2.0f), n, _mm256_set1_ps(1.0f)),
+	    _mm256_set1_ps(1.0f));
+	return _mm256_max_ps(m, _mm256_setzero_ps());
 }
 
 // Full-screen distance fog over opaque pixels. Runs after
@@ -261,7 +706,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                          const int *spotIdx, int spotCount,
                                          float invFOVX, float invFOVY,
                                          float invZScale, float density,
-                                         float fogZ, float invFogZ) {
+                                         float fogZ, float invFogZ,
+                                         const ConeTurb &turb) {
     // Render state from the threaded ctx, not globals. Local refs/aliases
     // shadow the file-scope names so the (large) body is untouched.
     const DeferredLightingCtx &dc = ctx;
@@ -288,6 +734,58 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
     const bool vecPath = fds::FeatureFlags::vol_vec();
+#if FDS_CONE_ABLATE
+    // Per-tile ablation sink (see the ladder note at FDS_CONE_ABLATE).
+    __m256 ablSinkV = _mm256_setzero_ps();
+#endif
+    // 8-wide cone-interval solve (see the transcript note at the loop).
+    // Read once per tile call — the branch never enters the per-spot loop.
+    const bool coneSolveVec = (FDS_CONE_FORCE != 0)
+                            || fds::FeatureFlags::vol_cone_solve_vec();
+    // The two leftover SCALAR per-lane loops (dz/fade window, colour
+    // accumulate) 8 lanes wide. Read once per tile, same as above.
+    const bool laneVec = (FDS_CONE_FORCE != 0)
+                       || fds::FeatureFlags::vol_cone_lane_vec();
+    // The same solve at the machine's NATIVE 128-bit width, run twice over the
+    // 8-pixel batch (see FDS_CONE_W4). Compile-time only: at the default 0 the
+    // arm below emits literally nothing and the shipping kernel disassembles to
+    // the parent's histogram.
+    constexpr bool solveW4 = (FDS_CONE_W4 != 0);
+    // min/max, one NEON instruction under FDS_CONE_NEONMINMAX and the
+    // byte-exact cmp+blend transcript otherwise. MAXT/MINT reproduce the
+    // hand-written spelling in the solve and the dz/fade loop
+    // (max = (a<b)?b:a, min = (b<a)?b:a); VMAX/VMIN stand in for the
+    // _mm256_max_ps/_mm256_min_ps calls already in the body, which lower to
+    // the same two ops because SIMDE_FAST_NANS is not defined here.
+    auto MAXT = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmax_x8(a, b);
+#else
+        return _mm256_blendv_ps(a, b, _mm256_cmp_ps(a, b, _CMP_LT_OQ));
+#endif
+    };
+    auto MINT = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmin_x8(a, b);
+#else
+        return _mm256_blendv_ps(a, b, _mm256_cmp_ps(b, a, _CMP_LT_OQ));
+#endif
+    };
+    auto VMAX = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmax_x8(a, b);
+#else
+        return _mm256_max_ps(a, b);
+#endif
+    };
+    auto VMIN = [](const __m256 &a, const __m256 &b) {
+#if FDS_CONE_NEONMINMAX
+        return fmin_x8(a, b);
+#else
+        return _mm256_min_ps(a, b);
+#endif
+    };
+    const __m256 vDensity_v = _mm256_set1_ps(density);
     const bool analyticCone = fds::FeatureFlags::vol_cone_analytic();
     // Path-counter bump — once per tile call, not per (spot × batch).
     // useAnalytic is constant within a call (depends only on the cone-
@@ -375,8 +873,17 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 if (!anyAlive) continue;
 
                 alignas(32) float accB[8] = {}, accG[8] = {}, accR[8] = {};
+                // 8-wide colour accumulators — see the accumulate note at
+                // the bottom of the per-spot loop. Live in REGISTERS across
+                // the whole spot loop under --vol_cone_lane_vec; drained to
+                // accB/accG/accR once per batch, so the composite loop
+                // below is untouched.
+                __m256 vAccB = _mm256_setzero_ps();
+                __m256 vAccG = _mm256_setzero_ps();
+                __m256 vAccR = _mm256_setzero_ps();
 
                 for (int s = 0; s < spotCount; ++s) {
+                    CONE_ABL_CUT_BARE(1);   // ablation: per-batch floor
                     const int li = spotIdx[s];
                     // Per-batch rect cull: skip if the 8-pixel batch
                     // (per-batch rect-cull experiment was reverted —
@@ -401,6 +908,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     const bool  narrowCone = cosO > 0.985f;
                     const int   nSamp      = narrowCone ? 16 : N_SAMPLES;
                     const float inv_nSamp  = narrowCone ? (1.0f / 16.0f) : inv_N;
+                    // Turbulence needs per-segment density taps, which the
+                    // wide-cone single closed form doesn't have — route
+                    // turbulent wide cones through the segmented hybrid
+                    // too. turb.on=false → segPath==narrowCone → the
+                    // legacy branch structure, byte-identical.
+                    const bool  segPath    = narrowCone || turb.on;
                     // Clone spot: beam reflection, confined to its
                     // mirror's footprint below.
                     const uint32_t omid = lights->mirrorId[li];
@@ -430,11 +943,457 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
                     const float c2   = cosO * cosO;
                     const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
+                    // ablation: keep the per-spot scalar prologue only.
+                    CONE_ABL_CUT(2, _mm256_set1_ps(DP + PP + c2 +
+                                                   inv_cosI_minus_cosO +
+                                                   r2 + rr + inv_nSamp));
 
                     alignas(32) float zLoArr[8] = {};
                     alignas(32) float zHiArr[8] = {};
                     alignas(32) float aliveLane[8] = {};
                     bool spotAlive = false;
+                    if (g_coneDiag) {
+                        g_dPairs.fetch_add(1, std::memory_order_relaxed);
+                        if (segPath) g_dSegPair.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    // ─── 8-wide cone-interval solve ──────────────────
+                    // The scalar loop below is 63.6% of this whole pass
+                    // (2.681 of 4.217 Ginstr/f in city; 25.6 M scalar
+                    // solves/frame at ~105 instructions each — commit
+                    // a16567b). It sits inside the per-spot loop feeding
+                    // a body that is already 8-wide, so the lever is to
+                    // widen it. Everything here is a BIT-EXACT transcript
+                    // of the scalar arm, read off the arm64 disassembly
+                    // of the shipping binary rather than off the source —
+                    // under the tree-wide -ffp-contract=fast the compiler
+                    // picks WHICH product of each multiply-add pair to
+                    // fuse, and the choice is not what the source order
+                    // suggests. The map it chose (all verified against
+                    // objdump, `fmadd`/`fnmsub` operand by operand):
+                    //   VP  = fl( Pz + fma(Px, X, fl(Y*Py)) )
+                    //   DV  = fl( Dz + fma(Dx, X, fl(Y*Dy)) )
+                    //   sD  = fma(VP, VP, -fl(sphereC*uV))
+                    //   a   = fma(DV, DV, -fl(c2*uV))
+                    //   b   = t+t,  t = fma(c2, VP, -fl(DP*DV))
+                    //   disc= fma(b, b, fl(cq * fl(a * -4)))
+                    //   cq  = fma(DP, DP, -fl(c2*PP))
+                    // i.e. in every pair the SECOND product is the one
+                    // that gets rounded. `Y*Py` and `Y*Dy` are rounded
+                    // scalars the scalar loop's LICM already hoisted out
+                    // per (row × spot) — kept scalar here for the same
+                    // reason and broadcast. `1/uV`, `1/(2a)` and `DP/DV`
+                    // stay true IEEE divides and the two sqrts stay true
+                    // sqrts: no rcp/rsqrt+NR shortcut, that family is a
+                    // known image-changer in this codebase (rsqrt_nr_x8).
+                    // fma_x8 is the only fused op used, because simde's
+                    // _mm256_fmadd_ps lowers to vfmaq_f32 while
+                    // _mm256_fmsub_ps lowers to sub(mul(...)) and would
+                    // leave the fusion choice back with the compiler —
+                    // a*b-c is written fma(a,b,neg(c)) so the rounded
+                    // operand is pinned by construction.
+                    // Mirror-clone (omid) and bounce spots keep the
+                    // scalar arm: both need per-lane gathers/branches
+                    // that aren't worth widening at their frequency.
+                    // So do SEGMENTED cones (narrow disco beams, and any
+                    // turbulent cone) — and that one is a MEASUREMENT, not
+                    // a symmetry. The wide arm always computes both a-sign
+                    // branches, both roots and the whole tail for all eight
+                    // lanes, where the scalar arm's dead lanes bail early;
+                    // that trade wins big when the solve is most of the
+                    // work (city: every headlight is a wide cone on the
+                    // cheap closed form, −30.6% instructions on the pass)
+                    // and stops paying when the body is the 8-segment
+                    // hybrid and the solve is a minor share. Ungated, at
+                    // the greets pin pose: instructions −3.8% but cycles
+                    // +3.6% and wall +1.4% (7.63 → 7.73 ms), reproduced in
+                    // two independent interleaved min-of-6 sessions. Both
+                    // arms are bit-identical, so this gate is byte-null and
+                    // is purely about where the wide arm earns its keep.
+                    const bool solveVec = coneSolveVec && omid == 0 && !bounce
+                                          && !segPath;
+                    // ─── the same solve at NATIVE 128-bit width ──────
+                    // Two 4-lane passes over the same 8-pixel batch. The
+                    // NEON op count is identical (simde already emits two
+                    // 128-bit ops per __m256 op); what changes is that a
+                    // live value now costs ONE v-register instead of two,
+                    // so the ~30-value live set stops overflowing a
+                    // 32-register file. Aimed at CYCLES, not instructions:
+                    // the round-4 cycle ablation puts this stage at 0.250
+                    // of the pass's 0.585 Gcyc/f (42.7%), and round 3
+                    // established the pass is dependency-bound.
+                    // Transcribed op for op from the 8-wide arm below —
+                    // same contraction map, same cmp+blend spelling of
+                    // std::min/max, same unordered predicates. Xarr/uVarr/
+                    // zMaxArr are alignas(32), so +4 floats is still a
+                    // 16-byte-aligned address.
+                    if (solveVec && solveW4) {
+                        const __m128 qZero = _mm_setzero_ps();
+                        const __m128 qOne  = _mm_set1_ps(1.0f);
+                        const __m128 qZMin = _mm_set1_ps(0.05f);
+                        const __m128 qAll  = _mm_cmp_ps(qZero, qZero, _CMP_EQ_OQ);
+                        auto NEG = [](const __m128 &v) {
+                            return _mm_xor_ps(v, _mm_set1_ps(-0.0f));
+                        };
+                        auto NOT = [&](const __m128 &v) {
+                            return _mm_xor_ps(v, qAll);
+                        };
+                        auto RCP   = [&](const __m128 &v) {
+                            return _mm_div_ps(qOne, v);
+                        };
+                        auto SQRTV = [](const __m128 &v) {
+                            return _mm_sqrt_ps(v);
+                        };
+                        // Scalars the 8-wide arm also computes once per
+                        // (batch × spot); hoisted out of the half loop so
+                        // the halves share them rather than recompute.
+                        const float  YPy     = Y * Py_l;
+                        const float  YDy     = Y * Dy;
+                        const float  sphereC = PP - r2;
+                        const float  cq      = std::fma(DP, DP, -(c2 * PP));
+                        int aliveBits = 0;
+#if FDS_CONE_W4 == 2
+                        // Control build: keep the half loop ROLLED. Left to
+                        // itself the compiler fully unrolls a trip count of 2
+                        // and schedules both halves together, which restores
+                        // exactly the 8-wide live set — so the unrolled W4 arm
+                        // is not a test of register pressure at all. This is.
+                        #pragma clang loop unroll(disable)
+#endif
+                        for (int h = 0; h < 8; h += 4) {
+                            const __m128 sX    = _mm_load_ps(Xarr + h);
+                            const __m128 sUV   = _mm_load_ps(uVarr + h);
+                            const __m128 sZMax = _mm_load_ps(zMaxArr + h);
+
+                            __m128 mAlive = _mm_cmp_ps(sZMax, qZero, _CMP_NLE_UQ);
+
+                            const __m128 sVP = _mm_add_ps(_mm_set1_ps(Pz),
+                                fma_x4(_mm_set1_ps(Px), sX, _mm_set1_ps(YPy)));
+                            const __m128 sDV = _mm_add_ps(_mm_set1_ps(Dz),
+                                fma_x4(_mm_set1_ps(Dx), sX, _mm_set1_ps(YDy)));
+
+                            const __m128 sC2   = _mm_set1_ps(c2);
+                            const __m128 sSphD = fma_x4(sVP, sVP,
+                                NEG(_mm_mul_ps(_mm_set1_ps(sphereC), sUV)));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_cmp_ps(sSphD, qZero, _CMP_NLT_UQ));
+
+                            const __m128 sA  = fma_x4(sDV, sDV,
+                                NEG(_mm_mul_ps(sC2, sUV)));
+                            const __m128 sBh = fma_x4(sC2, sVP,
+                                NEG(_mm_mul_ps(_mm_set1_ps(DP), sDV)));
+                            const __m128 sB  = _mm_add_ps(sBh, sBh);
+                            const __m128 sDisc = fma_x4(sB, sB,
+                                _mm_mul_ps(_mm_set1_ps(cq),
+                                    _mm_mul_ps(sA, _mm_set1_ps(-4.0f))));
+
+                            const __m128 sSq    = SQRTV(sDisc);
+                            const __m128 sInv2a = RCP(_mm_add_ps(sA, sA));
+                            const __m128 sR1 = _mm_mul_ps(sInv2a,
+                                _mm_sub_ps(NEG(sB), sSq));
+                            const __m128 sR2 = _mm_mul_ps(sInv2a,
+                                _mm_sub_ps(sSq, sB));
+                            const __m128 rMin = _mm_blendv_ps(sR1, sR2,
+                                _mm_cmp_ps(sR2, sR1, _CMP_LT_OQ));
+                            const __m128 rMax = _mm_blendv_ps(sR1, sR2,
+                                _mm_cmp_ps(sR1, sR2, _CMP_LT_OQ));
+
+                            const __m128 mDisc = _mm_cmp_ps(sDisc, qZero, _CMP_NLT_UQ);
+                            const __m128 mANeg = _mm_cmp_ps(sA,
+                                _mm_set1_ps(-1e-8f), _CMP_LT_OQ);
+                            const __m128 mAPos = _mm_cmp_ps(sA,
+                                _mm_set1_ps(1e-8f), _CMP_GT_OQ);
+
+                            const __m128 zLoHit = _mm_blendv_ps(rMax, qZMin,
+                                _mm_cmp_ps(rMax, qZMin, _CMP_LT_OQ));
+                            const __m128 zHiHit = _mm_blendv_ps(rMin, sZMax,
+                                _mm_cmp_ps(sZMax, rMin, _CMP_LT_OQ));
+                            const __m128 mFwd = _mm_cmp_ps(sDV,
+                                _mm_set1_ps(1e-6f), _CMP_GT_OQ);
+                            const __m128 mBwd = _mm_cmp_ps(sDV,
+                                _mm_set1_ps(-1e-6f), _CMP_LT_OQ);
+                            const __m128 zLoRt = _mm_blendv_ps(qZMin, zLoHit, mFwd);
+                            const __m128 zHiRt = _mm_blendv_ps(zHiHit, sZMax, mFwd);
+                            const __m128 mPosOk = _mm_or_ps(NOT(mDisc),
+                                _mm_and_ps(_mm_or_ps(mFwd, mBwd),
+                                    _mm_cmp_ps(zHiRt, zLoRt, _CMP_GT_OQ)));
+                            const __m128 zLoP = _mm_blendv_ps(qZMin, zLoRt, mDisc);
+                            const __m128 zHiP = _mm_blendv_ps(sZMax, zHiRt, mDisc);
+
+                            __m128 zLo = _mm_blendv_ps(zLoP, rMin, mANeg);
+                            __m128 zHi = _mm_blendv_ps(zHiP, rMax, mANeg);
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_or_ps(_mm_and_ps(mANeg, mDisc),
+                                          _mm_and_ps(mAPos, mPosOk)));
+
+                            const __m128 sSphSq = SQRTV(sSphD);
+                            const __m128 sInvUV = RCP(sUV);
+                            const __m128 zSphLo = _mm_mul_ps(sInvUV,
+                                _mm_sub_ps(sVP, sSphSq));
+                            const __m128 zSphHi = _mm_mul_ps(sInvUV,
+                                _mm_add_ps(sVP, sSphSq));
+                            zLo = _mm_blendv_ps(zLo, zSphLo,
+                                _mm_cmp_ps(zLo, zSphLo, _CMP_LT_OQ));
+                            zHi = _mm_blendv_ps(zHi, zSphHi,
+                                _mm_cmp_ps(zHi, zSphHi, _CMP_GT_OQ));
+                            zLo = _mm_blendv_ps(zLo, qZMin,
+                                _mm_cmp_ps(zLo, qZMin, _CMP_LT_OQ));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_cmp_ps(zHi, zLo, _CMP_GT_OQ));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_cmp_ps(zLo, sZMax, _CMP_LT_OQ));
+                            zHi = _mm_blendv_ps(zHi, sZMax,
+                                _mm_cmp_ps(zHi, sZMax, _CMP_GT_OQ));
+
+                            const __m128 mDVBig = _mm_cmp_ps(
+                                _mm_andnot_ps(_mm_set1_ps(-0.0f), sDV),
+                                _mm_set1_ps(1e-6f), _CMP_GT_OQ);
+                            const __m128 zFwd = _mm_div_ps(
+                                _mm_set1_ps(DP), sDV);
+                            const __m128 mDVPos = _mm_cmp_ps(sDV, qZero, _CMP_GT_OQ);
+                            zLo = _mm_blendv_ps(zLo, zFwd,
+                                _mm_and_ps(_mm_and_ps(mDVBig, mDVPos),
+                                    _mm_cmp_ps(zLo, zFwd, _CMP_LT_OQ)));
+                            zHi = _mm_blendv_ps(zHi, zFwd,
+                                _mm_and_ps(_mm_andnot_ps(mDVPos, mDVBig),
+                                    _mm_cmp_ps(zHi, zFwd, _CMP_GT_OQ)));
+                            mAlive = _mm_and_ps(mAlive,
+                                _mm_or_ps(NOT(mDVBig),
+                                    _mm_cmp_ps(zLo, zHi, _CMP_LT_OQ)));
+
+                            _mm_store_ps(zLoArr + h,    _mm_and_ps(zLo, mAlive));
+                            _mm_store_ps(zHiArr + h,    _mm_and_ps(zHi, mAlive));
+                            _mm_store_ps(aliveLane + h, _mm_and_ps(qOne, mAlive));
+                            aliveBits |= _mm_movemask_ps(mAlive) << h;
+                        }
+                        spotAlive = aliveBits != 0;
+                        if (g_coneDiag) {
+                            g_dLanes.fetch_add(__builtin_popcount(unsigned(aliveBits)),
+                                               std::memory_order_relaxed);
+                            if (!spotAlive)
+                                g_dDead.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else if (solveVec) {
+                        const __m256 sX    = _mm256_load_ps(Xarr);
+                        const __m256 sUV   = _mm256_load_ps(uVarr);
+                        const __m256 sZMax = _mm256_load_ps(zMaxArr);
+                        const __m256 sZero = _mm256_setzero_ps();
+                        const __m256 sOne  = _mm256_set1_ps(1.0f);
+                        const __m256 sZMin = _mm256_set1_ps(0.05f);
+                        const __m256 sAll  = _mm256_cmp_ps(sZero, sZero, _CMP_EQ_OQ);
+                        auto NEG = [](const __m256 &v) {
+                            return _mm256_xor_ps(v, _mm256_set1_ps(-0.0f));
+                        };
+                        auto NOT = [&](const __m256 &v) {
+                            return _mm256_xor_ps(v, sAll);
+                        };
+                        // Reciprocal and square root. THE APPROXIMATE ARM
+                        // WAS BUILT AND MEASURED AND IS NOT USED — see the
+                        // numbers in the commit message. The reasoning that
+                        // sent it there was that vdivq/vsqrtq are the only
+                        // non-pipelined ops in the loop (3 divides + 2
+                        // sqrts per 8px-batch × spot); the reasoning that
+                        // killed it is that this loop is instruction-BOUND,
+                        // not latency-bound (IPC 3.90 measured), and one
+                        // vrecpe/vrsqrte is only an 8-bit estimate on NEON
+                        // — half the 12 bits the x86 intrinsic name
+                        // implies — so any usable accuracy needs
+                        // Newton-Raphson steps that cost MORE instructions
+                        // than the divide they replaced. Measured: raw
+                        // estimates, the fastest thing this family can be,
+                        // are SLOWER than exact div/sqrt on both counters.
+                        // So the vec_ggx precedent never had to be argued
+                        // here (the user's point stands that a volumetric
+                        // integrand tolerates approximation better than a
+                        // reflect() direction does) — approximation simply
+                        // does not pay in this loop, and exact div/sqrt
+                        // keeps the byte gate for free.
+#if FDS_CONE_SOLVE_APPROX
+                        auto RCP   = [](const __m256 &v) {
+                            return _mm256_rcp_ps(v);
+                        };
+                        auto SQRTV = [](const __m256 &v) {
+                            return _mm256_mul_ps(v, _mm256_rsqrt_ps(v));
+                        };
+#else
+                        auto RCP   = [&](const __m256 &v) {
+                            return _mm256_div_ps(sOne, v);
+                        };
+                        auto SQRTV = [](const __m256 &v) {
+                            return _mm256_sqrt_ps(v);
+                        };
+#endif
+                        // Lanes past laneCount have zMaxArr == 0 and die
+                        // on this same test, exactly as they do scalar.
+                        // NLE_UQ, not GT_OQ: the scalar test is
+                        // `if (zMax <= 0) continue`, and the unordered
+                        // predicate is its exact negation, so a NaN would
+                        // keep the lane on both arms rather than on one.
+                        __m256 mAlive = _mm256_cmp_ps(sZMax, sZero, _CMP_NLE_UQ);
+
+                        // VP = X·Px + Y·Py + Pz, DV = X·Dx + Y·Dy + Dz.
+                        // Y·Py + Pz and Y·Dy + Dz are BOTH per-(row × spot)
+                        // scalars, so the whole tail of each dot product folds
+                        // into ONE broadcast: 4 vector-ALU ops per pair
+                        // (dup + copy + two fmla) where the transcript spent 7
+                        // (dup + copy + two fmla + a second dup + two fadd).
+                        // This is the round-4b fold applied to the head of the
+                        // chain, and unlike 4b it is NOT bit-exact — the
+                        // scalar arm rounds Y·Py before adding Pz, this rounds
+                        // the fused Y·Py + Pz once — so it is a judge call on
+                        // the numbers below, not a transcript.
+                        const float  VPk = std::fma(Y, Py_l, Pz);
+                        const float  DVk = std::fma(Y, Dy,   Dz);
+                        const __m256 sVP =
+                            fma_x8(_mm256_set1_ps(Px), sX, _mm256_set1_ps(VPk));
+                        const __m256 sDV =
+                            fma_x8(_mm256_set1_ps(Dx), sX, _mm256_set1_ps(DVk));
+
+                        const float  sphereC = PP - r2;
+                        const float  cq      = std::fma(DP, DP, -(c2 * PP));
+                        const __m256 sSphD   = fma_x8(sVP, sVP,
+                            _mm256_mul_ps(_mm256_set1_ps(-sphereC), sUV));
+                        // `if (sphereDisc < 0) continue` — NLT_UQ is the
+                        // exact negation (a NaN keeps the lane, as scalar).
+                        mAlive = _mm256_and_ps(mAlive,
+                            _mm256_cmp_ps(sSphD, sZero, _CMP_NLT_UQ));
+                        // DIAG-only: how many (batch x spot) pairs lose ALL
+                        // eight lanes at the range sphere? That is the ceiling
+                        // on any cull placed before the solve.
+                        if (g_coneDiag && _mm256_movemask_ps(mAlive) == 0)
+                            g_dSphDead.fetch_add(1, std::memory_order_relaxed);
+#if FDS_CONE_SOLVE_EARLYOUT
+                        // Range-sphere early-out — MEASURED AND NOT KEPT
+                        // (kept compiled-out as the record of the test).
+                        // The reasoning was that 39.9% of (8px-batch ×
+                        // spot) pairs have zero alive lanes (a16567b) and
+                        // the scalar arm gets to `continue` out of them at
+                        // this exact point, before the divides. It does not
+                        // pay: matched three-arm A/B, city t=1961, cones
+                        // Ginstr/f 2.884 with this branch against 2.874
+                        // without it. The premise is what is wrong — a pair
+                        // is only skipped when ALL EIGHT lanes miss the
+                        // range sphere, and most dead pairs lose their
+                        // lanes later (a-sign, or zHi<=zLo in the tail), so
+                        // the branch fires too rarely to pay for itself.
+                        // Byte-null either way: when no lane survives, all
+                        // the outputs below are masked to the zero the
+                        // arrays already hold.
+                        if (_mm256_movemask_ps(mAlive) == 0) {
+                            if (g_coneDiag)
+                                g_dDead.fetch_add(1, std::memory_order_relaxed);
+                            continue;
+                        }
+#endif
+
+                        const __m256 sA  = fma_x8(sDV, sDV,
+                            _mm256_mul_ps(_mm256_set1_ps(-c2), sUV));
+                        // b = 2·(c2·VP − DP·DV). Scaling by two is exact in
+                        // IEEE, so pushing it into both broadcasts rounds the
+                        // identical real product once and deletes the doubling
+                        // add — the same argument round 4b used for cq·(a·−4).
+                        // Bit-exact by construction.
+                        const __m256 sB  = fma_x8(_mm256_set1_ps(c2 + c2), sVP,
+                            _mm256_mul_ps(_mm256_set1_ps(-(DP + DP)), sDV));
+                        // fl(cq * fl(a*-4)) == fl(fl(cq*-4) * a): BOTH inner
+                        // products are exact (scaling by a power of two), so
+                        // either spelling rounds the same real product once.
+                        // Folding it into the scalar deletes a whole __m256 mul.
+                        const __m256 sDisc = fma_x8(sB, sB,
+                            _mm256_mul_ps(_mm256_set1_ps(cq * -4.0f), sA));
+
+                        const __m256 sSq    = SQRTV(sDisc);
+                        const __m256 sInv2a = RCP(_mm256_add_ps(sA, sA));
+                        const __m256 sR1 = _mm256_mul_ps(sInv2a,
+                            _mm256_sub_ps(NEG(sB), sSq));
+                        const __m256 sR2 = _mm256_mul_ps(sInv2a,
+                            _mm256_sub_ps(sSq, sB));
+                        // std::min/std::max transcribed as cmp+select so
+                        // the NaN/±0 tie-breaks match fcsel rather than
+                        // NEON's FMIN (which resolves NaN the other way).
+                        const __m256 rMin = MINT(sR1, sR2);
+                        const __m256 rMax = MAXT(sR1, sR2);
+
+                        const __m256 mDisc = _mm256_cmp_ps(sDisc, sZero, _CMP_NLT_UQ);
+                        const __m256 mANeg = _mm256_cmp_ps(sA,
+                            _mm256_set1_ps(-1e-8f), _CMP_LT_OQ);
+                        const __m256 mAPos = _mm256_cmp_ps(sA,
+                            _mm256_set1_ps(1e-8f), _CMP_GT_OQ);
+
+                        // a > +1e-8: forward/backward half-space pick,
+                        // and the disc<0 case that opens the whole ray.
+                        const __m256 zLoHit = MAXT(rMax, sZMin);
+                        const __m256 zHiHit = MINT(rMin, sZMax);
+                        const __m256 mFwd = _mm256_cmp_ps(sDV,
+                            _mm256_set1_ps(1e-6f), _CMP_GT_OQ);
+                        // |DV| > 1e-6 IS (DV > 1e-6) | (DV < -1e-6), for every
+                        // input including NaN (all three compares false) and
+                        // +-0 -- so the backward compare and the or below are
+                        // the same mask the apex-plane cut needs later, and one
+                        // fabs+cmp replaces two cmps and an or.
+                        const __m256 mDVBig = _mm256_cmp_ps(
+                            _mm256_andnot_ps(_mm256_set1_ps(-0.0f), sDV),
+                            _mm256_set1_ps(1e-6f), _CMP_GT_OQ);
+                        const __m256 zLoRt = _mm256_blendv_ps(sZMin, zLoHit, mFwd);
+                        const __m256 zHiRt = _mm256_blendv_ps(zHiHit, sZMax, mFwd);
+                        const __m256 mPosOk = _mm256_or_ps(NOT(mDisc),
+                            _mm256_and_ps(mDVBig,
+                                _mm256_cmp_ps(zHiRt, zLoRt, _CMP_GT_OQ)));
+                        const __m256 zLoP = _mm256_blendv_ps(sZMin, zLoRt, mDisc);
+                        const __m256 zHiP = _mm256_blendv_ps(sZMax, zHiRt, mDisc);
+
+                        __m256 zLo = _mm256_blendv_ps(zLoP, rMin, mANeg);
+                        __m256 zHi = _mm256_blendv_ps(zHiP, rMax, mANeg);
+                        mAlive = _mm256_and_ps(mAlive,
+                            _mm256_or_ps(_mm256_and_ps(mANeg, mDisc),
+                                         _mm256_and_ps(mAPos, mPosOk)));
+
+                        // Range-sphere clamp + the shared tail.
+                        const __m256 sSphSq = SQRTV(sSphD);
+                        const __m256 sInvUV = RCP(sUV);
+                        const __m256 zSphLo = _mm256_mul_ps(sInvUV,
+                            _mm256_sub_ps(sVP, sSphSq));
+                        const __m256 zSphHi = _mm256_mul_ps(sInvUV,
+                            _mm256_add_ps(sVP, sSphSq));
+                        zLo = MAXT(zLo, zSphLo);
+                        zHi = MINT(zHi, zSphHi);
+                        zLo = MAXT(zLo, sZMin);
+                        mAlive = _mm256_and_ps(mAlive,
+                            _mm256_cmp_ps(zHi, zLo, _CMP_GT_OQ));
+                        mAlive = _mm256_and_ps(mAlive,
+                            _mm256_cmp_ps(zLo, sZMax, _CMP_LT_OQ));
+                        zHi = MINT(zHi, sZMax);
+
+                        // Forward-cone cut at the apex plane z = DP/DV.
+#if FDS_CONE_SOLVE_APPROX
+                        const __m256 zFwd = _mm256_mul_ps(
+                            _mm256_set1_ps(DP), _mm256_rcp_ps(sDV));
+#else
+                        const __m256 zFwd = _mm256_div_ps(
+                            _mm256_set1_ps(DP), sDV);
+#endif
+                        const __m256 mDVPos = _mm256_cmp_ps(sDV, sZero, _CMP_GT_OQ);
+                        zLo = _mm256_blendv_ps(zLo, zFwd,
+                            _mm256_and_ps(_mm256_and_ps(mDVBig, mDVPos),
+                                _mm256_cmp_ps(zLo, zFwd, _CMP_LT_OQ)));
+                        zHi = _mm256_blendv_ps(zHi, zFwd,
+                            _mm256_and_ps(_mm256_andnot_ps(mDVPos, mDVBig),
+                                _mm256_cmp_ps(zHi, zFwd, _CMP_GT_OQ)));
+                        mAlive = _mm256_and_ps(mAlive,
+                            _mm256_or_ps(NOT(mDVBig),
+                                _mm256_cmp_ps(zLo, zHi, _CMP_LT_OQ)));
+
+                        _mm256_store_ps(zLoArr,    _mm256_and_ps(zLo, mAlive));
+                        _mm256_store_ps(zHiArr,    _mm256_and_ps(zHi, mAlive));
+                        _mm256_store_ps(aliveLane, _mm256_and_ps(sOne, mAlive));
+                        const int aliveBits = _mm256_movemask_ps(mAlive);
+                        spotAlive = aliveBits != 0;
+                        if (g_coneDiag) {
+                            g_dLanes.fetch_add(__builtin_popcount(unsigned(aliveBits)),
+                                               std::memory_order_relaxed);
+                            if (!spotAlive)
+                                g_dDead.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else {
                     for (int lane = 0; lane < laneCount; ++lane) {
                         if (zMaxArr[lane] <= 0.0f) continue;
                         const float X = Xarr[lane];
@@ -537,8 +1496,16 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         zHiArr[lane]    = zHi;
                         aliveLane[lane] = 1.0f;
                         spotAlive = true;
+                        if (g_coneDiag) g_dLanes.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (g_coneDiag && !spotAlive)
+                        g_dDead.fetch_add(1, std::memory_order_relaxed);
                     }
                     if (!spotAlive) continue;
+                    // ablation: keep the 8-wide cone-interval solve.
+                    CONE_ABL_CUT(3, _mm256_add_ps(_mm256_load_ps(zLoArr),
+                                    _mm256_add_ps(_mm256_load_ps(zHiArr),
+                                                  _mm256_load_ps(aliveLane))));
 
                     // Clone AND bounce spots have no own map (smIdx=-1)
                     // but carry the SOURCE's map: visibility of a sample
@@ -576,7 +1543,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     float sm_m20=0, sm_m21=0, sm_m22=0, sm_oz=0;
                     float sm_cntrX=0, sm_cntrY=0, sm_perspX=0, sm_perspY=0;
                     float sm_zScale=0;
-                    const uint16_t *sm_depth = nullptr;
+                    const uint32_t *sm_pack = nullptr;
                     int sm_xres=0, sm_yres=0;
                     if (sm) {
                         sm_m00=sm->viewToLight[0][0]; sm_m01=sm->viewToLight[0][1]; sm_m02=sm->viewToLight[0][2]; sm_ox=sm->viewToLightOffset.x;
@@ -585,11 +1552,52 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         sm_cntrX=sm->cntrX; sm_cntrY=sm->cntrY;
                         sm_perspX=sm->perspX; sm_perspY=sm->perspY;
                         sm_zScale=sm->zScale;
-                        sm_depth=sm->depth.data();
+                        sm_pack=sm->packSD.data();
                         sm_xres=sm->xres; sm_yres=sm->yres;
                     }
 
                     alignas(32) float dzArr[8] = {}, invDzArr[8] = {}, fadeStartArr[8] = {};
+                    // ─── dz / surface-fade window, 8 lanes at a time ──
+                    // The scalar loop below is 0.270 Ginstr/f of this
+                    // pass — 9.4% — measured by the round-2 ablation
+                    // ladder (FDS_CONE_ABLATE). It is the SAME shape of
+                    // defect the 8-wide solve fixed in 7e34645: a scalar
+                    // per-lane loop sandwiched between an 8-wide producer
+                    // (the solve, which just wrote zLoArr/zHiArr) and an
+                    // 8-wide consumer (the integration body, which loads
+                    // dzArr/invDzArr/fadeStartArr straight back as
+                    // __m256). Every lane therefore pays a store and a
+                    // reload it never needed: the disassembly of the
+                    // shipping kernel is 894 ldr + 583 str out of 4475
+                    // instructions (33%), and this loop is one of the two
+                    // places that traffic comes from.
+                    // BIT-EXACT, and cheaply so — there is no fma in it,
+                    // so no contraction map to reproduce. The only two
+                    // spellings that matter: std::max(d, fwMin) is
+                    // (d < fwMin) ? fwMin : d transcribed as cmp+blend,
+                    // NOT _mm256_max_ps (NEON FMAX resolves NaN and -0
+                    // the opposite way from the scalar FCSEL — the trap
+                    // 7e34645 documents); and `if (alive == 0) continue`
+                    // negates to the UNORDERED _CMP_NEQ_UQ. 12.0f*invZScale
+                    // is loop-invariant, so hoisting it is the identical
+                    // product, not a re-association.
+                    if (laneVec) {
+                        const __m256 vZeroL  = _mm256_setzero_ps();
+                        const __m256 mLive   = _mm256_cmp_ps(
+                                               _mm256_load_ps(aliveLane),
+                                               vZeroL, _CMP_NEQ_UQ);
+                        const __m256 vD      = _mm256_mul_ps(
+                                               _mm256_sub_ps(_mm256_load_ps(zHiArr),
+                                                             _mm256_load_ps(zLoArr)),
+                                               _mm256_set1_ps(inv_nSamp));
+                        const __m256 vFwMin  = _mm256_set1_ps(12.0f * invZScale);
+                        const __m256 vFadeW  = MAXT(vD, vFwMin);
+                        const __m256 vInvFw  = _mm256_div_ps(_mm256_set1_ps(1.0f), vFadeW);
+                        const __m256 vFadeS  = _mm256_sub_ps(_mm256_load_ps(zMaxArr), vFadeW);
+                        _mm256_store_ps(dzArr,        _mm256_blendv_ps(vZeroL, vD,     mLive));
+                        _mm256_store_ps(invDzArr,     _mm256_blendv_ps(vZeroL, vInvFw, mLive));
+                        _mm256_store_ps(fadeStartArr, _mm256_blendv_ps(vZeroL, vFadeS, mLive));
+                    } else {
                     for (int lane = 0; lane < 8; ++lane) {
                         if (aliveLane[lane] == 0.0f) continue;
                         const float d = (zHiArr[lane] - zLoArr[lane]) * inv_nSamp;
@@ -603,6 +1611,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         invDzArr[lane]     = 1.0f / fadeW;
                         fadeStartArr[lane] = zMaxArr[lane] - fadeW;
                     }
+                    }
+
+                    // ablation: keep the scalar per-lane dz/fade loop.
+                    CONE_ABL_CUT(4, _mm256_add_ps(_mm256_load_ps(dzArr),
+                                    _mm256_add_ps(_mm256_load_ps(invDzArr),
+                                                  _mm256_load_ps(fadeStartArr))));
 
                     const __m256 vX_v        = _mm256_load_ps(Xarr);
                     const __m256 vY_v        = _mm256_set1_ps(Y);
@@ -647,7 +1661,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     //       at z=zMid. Whole segment in or out (binary).
                     //       Stair-steps at shadow boundaries; tolerable
                     //       because halos are inherently diffuse.
+#if FDS_CONE_HOTONLY
+                    if (true) {
+#else
                     if (useAnalytic) {
+#endif
                         // α z² + β z + γ = rr²·d²(z) + 0.05
                         const __m256 vRR2_v   = _mm256_mul_ps(vRR_v, vRR_v);
                         // Per-lane uV (= X²+Y²+1, varies per pixel).
@@ -673,12 +1691,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // striations across bright narrow cones (the
                         // disco-beam moire). One Newton-Raphson step
                         // (~24-bit) kills it for ~3 fma.
+                        // The step is one FRSQRTS (see rsqrt_step_x8).
                         __m256 vInvD          = _mm256_rsqrt_ps(vSafeDisc);
-                        vInvD = _mm256_mul_ps(vInvD,
-                                _mm256_fnmadd_ps(
-                                    _mm256_mul_ps(_mm256_set1_ps(0.5f), vSafeDisc),
-                                    _mm256_mul_ps(vInvD, vInvD),
-                                    _mm256_set1_ps(1.5f)));
+                        vInvD = rsqrt_step_x8(vSafeDisc, vInvD);
 
                         const __m256 vTwoA    = _mm256_add_ps(vAlpha, vAlpha);
                         const __m256 vZHi_v   = _mm256_load_ps(zHiArr);
@@ -686,6 +1701,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                                 _mm256_fmadd_ps(vTwoA, vZHi_v, vBeta));
                         const __m256 vArgLo   = _mm256_mul_ps(vInvD,
                                                 _mm256_fmadd_ps(vTwoA, vZLo_v, vBeta));
+                        // ablation: keep through vArgHi/vArgLo (pre-atan).
+                        CONE_ABL_CUT(6, _mm256_add_ps(vInvD,
+                                        _mm256_add_ps(vArgHi, vArgLo)));
                         // atan(u) − atan(v) computed DIRECTLY via the
                         // identity atan((u−v)/(1+uv)) (+π when uv<−1;
                         // u>v always since zHi>zLo): near the ray-
@@ -725,23 +1743,31 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             const __m256 DW = _mm256_fmadd_ps(vDx_v, Wx,
                                               _mm256_fmadd_ps(vDy_v, Wy,
                                                _mm256_mul_ps(vDz_dir_v, Wz)));
-                            const __m256 safeW2 = _mm256_max_ps(W2, _mm256_set1_ps(1e-12f));
+                            const __m256 safeW2 = VMAX(W2, _mm256_set1_ps(1e-12f));
                             const __m256 cosT = _mm256_mul_ps(DW, rsqrt_nr_x8(safeW2));
                             __m256 t = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
-                            t = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t));
+                            t = VMAX(vZero_v, VMIN(vOne_v, t));
                             const __m256 sm = _mm256_mul_ps(_mm256_mul_ps(t, t),
                                               _mm256_sub_ps(vThree_v, _mm256_mul_ps(vTwo_v, t)));
                             const __m256 mIn = _mm256_cmp_ps(cosT, vCosI_v, _CMP_GE_OQ);
                             return _mm256_blendv_ps(sm, vOne_v, mIn);
                         };
                         __m256 vIntegral;
-                        if (!narrowCone) {
+#if FDS_CONE_HOTONLY
+                        if (true) {
+#else
+                        if (!segPath) {
+#endif
                             // Wide cones: single closed form. coneAtten
                             // is applied at the midpoint further below.
                             vIntegral = _mm256_mul_ps(
                                         _mm256_add_ps(vInvD, vInvD),
                                         atanDiff(vArgHi, vArgLo));
+#if FDS_CONE_HOTONLY
+                        } else if (false) {
+#else
                         } else {
+#endif
                             // Narrow cones (disco beams): per-segment
                             // hybrid. The pure midpoint coneAtten fans
                             // into stripes (cosT_mid varies violently
@@ -773,8 +1799,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 // whole-chord z16 sensitivity.
                                 __m256 sf = _mm256_mul_ps(
                                     _mm256_sub_ps(vZMaxFade_v, zm), vInvDz_v);
-                                sf = _mm256_max_ps(vZero_v,
-                                     _mm256_min_ps(vOne_v, sf));
+                                sf = VMAX(vZero_v,
+                                     VMIN(vOne_v, sf));
                                 // Per-segment shadow tap: the single
                                 // whole-chord midpoint tap let beam
                                 // segments BEHIND walls glow whenever
@@ -811,22 +1837,47 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                             uint32_t(iY) >= uint32_t(sm_yres)) continue;
                                         const size_t o2 = size_t(iY) * size_t(sm_xres) + size_t(iX);
                                         const uint16_t zS = std::max(
-                                            sm->depth[o2], sm->depth_dynamic[o2]);
+                                            ShadowTexZ(sm->packSD[o2]),
+                                            ShadowTexZ(sm->packDyn[o2]));
                                         int pixZ = 0xFF80 - int(lz * sm_zScale);
                                         if (pixZ < 0) pixZ = 0;
                                         if (pixZ + 128 < int(zS)) shA[ln] = 0.0f;
                                     }
                                     shv = _mm256_load_ps(shA);
                                 }
-                                vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
-                                       _mm256_mul_ps(_mm256_mul_ps(coneAttenAt(zm), sf),
-                                                     shv), vSum);
+                                // Per-segment turbulent density tap —
+                                // 8-wide across lanes (a scalar-per-lane
+                                // version cost +35 ms/frame on greets).
+                                // Dead lanes compute on zm≈0 — finite,
+                                // masked by mAlive downstream. Branch
+                                // (not a ×1.0 blend): the off path must
+                                // keep the EXACT legacy expression —
+                                // simde maps these intrinsics to plain
+                                // vector ops on arm64, and reshaping the
+                                // chain shifts fma contraction (flipped
+                                // the greets pin by a few ulps).
+                                if (turb.on) {
+                                    const __m256 tbv = ConeTurbFactor_x8(
+                                        turb,
+                                        _mm256_mul_ps(zm, vX_v),
+                                        _mm256_mul_ps(zm, vY_v), zm,
+                                        Px, Py_l, Pz, Dx, Dy, Dz);
+                                    vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
+                                           _mm256_mul_ps(_mm256_mul_ps(coneAttenAt(zm), sf),
+                                                         _mm256_mul_ps(shv, tbv)), vSum);
+                                } else {
+                                    vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
+                                           _mm256_mul_ps(_mm256_mul_ps(coneAttenAt(zm), sf),
+                                                         shv), vSum);
+                                }
                                 uPrev = uk;
                             }
                             vIntegral = _mm256_mul_ps(
                                         _mm256_add_ps(vInvD, vInvD), vSum);
                         }
 
+                        // ablation: keep through vIntegral (atanDiff done).
+                        CONE_ABL_CUT(7, vIntegral);
                         // Midpoint sample: cosT_mid and surfaceFade_mid
                         // approximate the otherwise-z-dependent factors.
                         const __m256 vZMid    = _mm256_mul_ps(
@@ -853,29 +1904,32 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 dist_m   = _mm256_mul_ps(W2_m, invLen_m);
                         __m256 softEdge_m     = _mm256_sub_ps(vOne_v,
                                                 _mm256_mul_ps(vRR_v, dist_m));
-                        softEdge_m = _mm256_max_ps(vZero_v, softEdge_m);
+                        softEdge_m = VMAX(vZero_v, softEdge_m);
                         softEdge_m = _mm256_mul_ps(softEdge_m, softEdge_m);
                         // coneAtten at midpoint: smoothstep(cosO→cosI).
                         __m256 t_m = _mm256_mul_ps(_mm256_sub_ps(cosT_m, vCosO_v), vInvCIO_v);
-                        t_m = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t_m));
+                        t_m = VMAX(vZero_v, VMIN(vOne_v, t_m));
                         const __m256 smooth_m = _mm256_mul_ps(
                                                 _mm256_mul_ps(t_m, t_m),
                                                 _mm256_sub_ps(vThree_v,
                                                   _mm256_mul_ps(vTwo_v, t_m)));
                         const __m256 mInner_m = _mm256_cmp_ps(cosT_m, vCosI_v, _CMP_GE_OQ);
-                        // Narrow cones already folded coneAtten in per
+                        // Segmented cones already folded coneAtten in per
                         // segment — don't apply the midpoint one again.
-                        const __m256 coneAtten_m = narrowCone
+                        const __m256 coneAtten_m = segPath
                             ? vOne_v
                             : _mm256_blendv_ps(smooth_m, vOne_v, mInner_m);
                         // surfaceFade at midpoint.
                         const __m256 mFade_m  = _mm256_cmp_ps(vZMid, vFadeStart_v, _CMP_GT_OQ);
                         const __m256 fadeVal_m = _mm256_mul_ps(
                                                  _mm256_sub_ps(vZMax_v, vZMid), vInvDz_v);
-                        // Narrow cones folded the fade per segment.
-                        const __m256 surfaceFade_m = narrowCone
+                        // Segmented cones folded the fade per segment.
+                        const __m256 surfaceFade_m = segPath
                             ? vOne_v
                             : _mm256_blendv_ps(vOne_v, fadeVal_m, mFade_m);
+                        // ablation: keep through the midpoint block.
+                        CONE_ABL_CUT(8, _mm256_add_ps(coneAtten_m,
+                                        _mm256_add_ps(surfaceFade_m, softEdge_m)));
 
                         // Match ray-march brightness scaling: N × mean.
                         const __m256 vIntervalLen = _mm256_sub_ps(vZHi_v, vZLo_v);
@@ -885,10 +1939,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // contribution per "sample-unit": mean × N ×
                         // coneAtten_mid × surfaceFade_mid.
                         // rcp refined for the same reason as invD.
+                        // The step is one FRECPS (see rcp_step_x8).
                         __m256 vRcpLen = _mm256_rcp_ps(vSafeLen);
-                        vRcpLen = _mm256_mul_ps(vRcpLen,
-                                  _mm256_fnmadd_ps(vSafeLen, vRcpLen,
-                                                   _mm256_set1_ps(2.0f)));
+                        vRcpLen = rcp_step_x8(vSafeLen, vRcpLen);
                         __m256 vAcc = _mm256_mul_ps(vIntegral, vRcpLen);
                         vAcc = _mm256_mul_ps(vAcc, vN);
                         vAcc = _mm256_mul_ps(vAcc, coneAtten_m);
@@ -901,7 +1954,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         if (invFogZ > 0.0f) {
                             __m256 fog_m = _mm256_sub_ps(vOne_v,
                                             _mm256_mul_ps(vZMid, vInvFogZ_v));
-                            fog_m = _mm256_max_ps(vZero_v, fog_m);
+                            fog_m = VMAX(vZero_v, fog_m);
                             fog_m = _mm256_mul_ps(fog_m, fog_m);
                             vAcc = _mm256_mul_ps(vAcc, fog_m);
                         }
@@ -911,6 +1964,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // stochastic sample offsets produce inter-pixel
                         // variation) without sacrificing the analytic
                         // smoothness. Hash from existing pxHashArr.
+                        // ablation: keep through vAcc incl. fog (pre-noise).
+                        CONE_ABL_CUT(9, vAcc);
                         if (noiseStrength > 0.0f) {
                             alignas(32) float noiseBuf[8];
                             for (int lane = 0; lane < 8; ++lane) {
@@ -924,6 +1979,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         }
                         // Mask out lanes where: discQ<=0, cone-axis test
                         // fails (cosT<cosO at midpoint), or lane dead.
+                        // ablation: keep through the noise multiply.
+                        CONE_ABL_CUT(10, vAcc);
                         const __m256 mAng = _mm256_cmp_ps(cosT_m, vCosO_v, _CMP_GE_OQ);
                         __m256 m          = _mm256_and_ps(mAlive,
                                             _mm256_and_ps(mDisc, mAng));
@@ -933,9 +1990,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // shadow boundaries; tolerated because halos
                         // are diffuse. Mirrors the in-loop sm path
                         // above but uses zMid instead of per-sample z.
-                        if (sm && !narrowCone) {
-                            // (narrow cones fold shadow per segment in
-                            // the hybrid above)
+                        if (!FDS_CONE_HOTONLY && sm && !segPath) {
+                            // (segmented cones fold shadow per segment
+                            // in the hybrid above)
                             alignas(32) float maskArr_s[8], zArr_s[8];
                             _mm256_store_ps(maskArr_s, m);
                             _mm256_store_ps(zArr_s, vZMid);
@@ -970,8 +2027,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 if (pixZ < 0) pixZ = 0;
                                 if (pixZ > 0xFFFF) pixZ = 0xFFFF;
                                 const int biased = pixZ + 128;
-                                const uint16_t shadowZ =
-                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                const uint16_t shadowZ = ShadowTexZ(
+                                    sm_pack[size_t(iY) * size_t(sm_xres) + size_t(iX)]);
                                 if (biased < int(shadowZ)) shadowMul_s[lane] = 0.0f;
                             }
                             const __m256 vShad_s = _mm256_load_ps(shadowMul_s);
@@ -980,7 +2037,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         }
 
                         accV = _mm256_and_ps(vAcc, m);
+#if FDS_CONE_HOTONLY
+                    } else if (false) {
+#else
                     } else {
+#endif
                     for (int k = 0; k < nSamp; ++k) {
                         alignas(32) float fracBuf[8];
                         for (int lane = 0; lane < 8; ++lane) {
@@ -1023,7 +2084,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         mask = _mm256_and_ps(mask, _mm256_cmp_ps(cosT, vCosO_v, _CMP_GE_OQ));
 
                         __m256 t_v = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
-                        t_v = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t_v));
+                        t_v = VMAX(vZero_v, VMIN(vOne_v, t_v));
                         const __m256 smooth = _mm256_mul_ps(
                             _mm256_mul_ps(t_v, t_v),
                             _mm256_sub_ps(vThree_v, _mm256_mul_ps(vTwo_v, t_v)));
@@ -1039,7 +2100,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         __m256 fogAtten = vOne_v;
                         if (invFogZ > 0.0f) {
                             fogAtten = _mm256_sub_ps(vOne_v, _mm256_mul_ps(vZ, vInvFogZ_v));
-                            fogAtten = _mm256_max_ps(vZero_v, fogAtten);
+                            fogAtten = VMAX(vZero_v, fogAtten);
                             fogAtten = _mm256_mul_ps(fogAtten, fogAtten);
                         }
 
@@ -1075,8 +2136,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 if (pixZ < 0) pixZ = 0;
                                 if (pixZ > 0xFFFF) pixZ = 0xFFFF;
                                 const int biased = pixZ + 128;
-                                const uint16_t shadowZ =
-                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                const uint16_t shadowZ = ShadowTexZ(
+                                    sm_pack[size_t(iY) * size_t(sm_xres) + size_t(iX)]);
                                 if (biased < int(shadowZ)) shadowMul[lane] = 0.0f;
                             }
                             const __m256 vShad = _mm256_load_ps(shadowMul);
@@ -1087,13 +2148,26 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         __m256 contrib = _mm256_mul_ps(
                             _mm256_mul_ps(coneAtten, distAtten),
                             _mm256_mul_ps(fogAtten, surfaceFade));
+                        // Per-sample turbulent density — 8-wide across
+                        // lanes (masked-out lanes compute on harmless
+                        // finite values; the and-mask drops them).
+                        if (turb.on) {
+                            contrib = _mm256_mul_ps(contrib,
+                                ConeTurbFactor_x8(turb,
+                                    _mm256_mul_ps(vZ, vX_v),
+                                    _mm256_mul_ps(vZ, vY_v), vZ,
+                                    Px, Py_l, Pz, Dx, Dy, Dz));
+                        }
                         contrib = _mm256_and_ps(contrib, mask);
                         accV = _mm256_add_ps(accV, contrib);
                     }
                     }
+                    // ablation: keep the broadcasts + the integration body,
+                    // cut before the per-lane colour accumulate.
+                    CONE_ABL_CUT(5, accV);
 
                     alignas(32) float accArr[8];
-                    _mm256_store_ps(accArr, accV);
+                    if (!laneVec) _mm256_store_ps(accArr, accV);
                     const float colB = lights->colB[li];
                     const float colG = lights->colG[li];
                     const float colR = lights->colR[li];
@@ -1107,13 +2181,60 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // invisibility).
                     const float nNorm = useAnalytic
                         ? 1.0f : float(N_SAMPLES) / float(nSamp);
+                    // Per-spot beam gain (authored VolumetricLightIntensity;
+                    // unset → 1.0, exact ×1.0 keeps legacy content bit-
+                    // identical). Applied as a trailing factor so gain-free
+                    // lights evaluate the identical expression as before.
+                    const float coneGain = lights->coneGain[li];
+                    // ─── colour accumulate, 8 lanes at a time ─────────
+                    // The scalar loop below is 0.301 Ginstr/f — 10.5% of
+                    // the pass (round-2 ablation ladder). It is the OTHER
+                    // end of the same defect as the dz/fade loop: accV is
+                    // already an __m256 and gets spilled to accArr purely
+                    // so eight scalar iterations can read it back, each
+                    // then doing a load-modify-store on three more stack
+                    // arrays — 8x(1+3 loads + 3 stores) per (batch x spot)
+                    // where three register FMAs would do. Holding the
+                    // accumulators in __m256 across the spot loop deletes
+                    // that traffic entirely; they are drained to
+                    // accB/accG/accR once per BATCH, so the composite loop
+                    // that follows never learns the difference.
+                    // BIT-EXACT. Two things to get right and both are in
+                    // 7e34645's list: `if (acc <= 0) continue` negates to
+                    // the UNORDERED _CMP_NLE_UQ (an ordered predicate
+                    // would silently drop a NaN lane the scalar arm
+                    // propagates); and the multiply ORDER is preserved
+                    // exactly as ((acc*density)*nNorm)*coneGain rather
+                    // than folded into one scalar factor, which would be a
+                    // re-association and would move the pin. The trailing
+                    // `accB += w*colB` is spelled as an explicit FMA
+                    // because that is what the compiler contracted it to
+                    // under the tree-wide -ffp-contract=fast (verified
+                    // against the city pin, which does not move).
+                    if (laneVec) {
+                        const __m256 mPos = _mm256_cmp_ps(accV, _mm256_setzero_ps(),
+                                                          _CMP_NLE_UQ);
+                        __m256 w = _mm256_mul_ps(accV, vDensity_v);
+                        w = _mm256_mul_ps(w, _mm256_set1_ps(nNorm));
+                        w = _mm256_mul_ps(w, _mm256_set1_ps(coneGain));
+                        w = _mm256_and_ps(w, mPos);
+                        vAccB = _mm256_fmadd_ps(w, _mm256_set1_ps(colB), vAccB);
+                        vAccG = _mm256_fmadd_ps(w, _mm256_set1_ps(colG), vAccG);
+                        vAccR = _mm256_fmadd_ps(w, _mm256_set1_ps(colR), vAccR);
+                    } else {
                     for (int lane = 0; lane < 8; ++lane) {
                         if (accArr[lane] <= 0.0f) continue;
-                        const float w = accArr[lane] * density * nNorm;
+                        const float w = accArr[lane] * density * nNorm * coneGain;
                         accB[lane] += w * colB;
                         accG[lane] += w * colG;
                         accR[lane] += w * colR;
                     }
+                    }
+                }
+                if (laneVec) {
+                    _mm256_store_ps(accB, vAccB);
+                    _mm256_store_ps(accG, vAccG);
+                    _mm256_store_ps(accR, vAccR);
                 }
 
                 for (int lane = 0; lane < laneCount; ++lane) {
@@ -1341,7 +2462,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 float sm_m20=0, sm_m21=0, sm_m22=0, sm_oz=0;
                 float sm_cntrX=0, sm_cntrY=0, sm_perspX=0, sm_perspY=0;
                 float sm_zScale=0;
-                const uint16_t *sm_depth = nullptr;
+                const uint32_t *sm_pack = nullptr;
                 int sm_xres=0, sm_yres=0;
                 if (sm) {
                     sm_m00=sm->viewToLight[0][0]; sm_m01=sm->viewToLight[0][1]; sm_m02=sm->viewToLight[0][2]; sm_ox=sm->viewToLightOffset.x;
@@ -1350,7 +2471,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     sm_cntrX=sm->cntrX; sm_cntrY=sm->cntrY;
                     sm_perspX=sm->perspX; sm_perspY=sm->perspY;
                     sm_zScale=sm->zScale;
-                    sm_depth=sm->depth.data();
+                    sm_pack=sm->packSD.data();
                     sm_xres=sm->xres; sm_yres=sm->yres;
                 }
                 const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
@@ -1411,13 +2532,19 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                 if (pixZ < 0) pixZ = 0;
                                 if (pixZ > 0xFFFF) pixZ = 0xFFFF;
                                 const int biased = pixZ + 128;
-                                const uint16_t shadowZ =
-                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                const uint16_t shadowZ = ShadowTexZ(
+                                    sm_pack[size_t(iY) * size_t(sm_xres) + size_t(iX)]);
                                 if (biased < int(shadowZ)) continue;  // shadowed
                             }
                         }
                     }
-                    acc += coneAtten * distAtten * fogAtten * surfaceFade;
+                    // Turbulent density modulation (world-space noise ×
+                    // optional axis swirl) — scalar path.
+                    float turbF = 1.0f;
+                    if (turb.on)
+                        turbF = ConeTurbFactor(turb, z*X, z*Y, z,
+                                               Px, Py, Pz, Dx, Dy, Dz);
+                    acc += coneAtten * distAtten * fogAtten * surfaceFade * turbF;
                 }
                 if (acc <= 0.0f) continue;
                 // No dz scaling — the path-integral form (acc × dz) gave
@@ -1427,7 +2554,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 // inverse-square distAtten above gives roughly position-
                 // invariant brightness, biased toward close cones — matches
                 // the "flashlight in fog" mental model.
-                const float w = acc * density;
+                // Trailing per-spot beam gain: unset → 1.0 (exact), same as
+                // the vec path.
+                const float w = acc * density * lights->coneGain[li];
                 accB += w * lights->colB[li];
                 accG += w * lights->colG[li];
                 accR += w * lights->colR[li];
@@ -1438,6 +2567,16 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
         }
         }
     }
+#if FDS_CONE_ABLATE
+    // Drain the ablation sink once per TILE CALL: keeps the retained work
+    // alive against DCE without a per-batch store (which would false-share
+    // across the 12 workers and pollute the cycle column).
+    {
+        alignas(32) float t[8];
+        _mm256_store_ps(t, ablSinkV);
+        g_ablSink = t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];
+    }
+#endif
 }
 
 // Volumetric-pass timing accumulators — struct + RAII scope live in
@@ -1508,6 +2647,43 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     // already fully fogged out. fogZ <= 0 disables (unfogged scenes).
     const float fogZ    = (ctx.Sc->Flags & Scn_Fogged) ? ctx.Sc->FZP : 0.0f;
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
+
+    // Cone turbulence: all per-frame constants derived ONCE here on the
+    // dispatching thread (g_FrameTime is the deterministic scene clock —
+    // fixed-t snapshots repeat exactly; tiles get a const ref, no shared
+    // mutable state). Local because concurrent shard bakes call this
+    // reentrantly with their own ctx (viewToWorld differs per shard).
+    ConeTurb turb;
+    {
+        const float amp = fds::FeatureFlags::cone_turbulence();
+        if (amp > 0.0f) {
+            turb.on  = true;
+            // 2-octave value noise concentrates near 0.5, so the raw
+            // flag reads weak; ×2.2 makes flag=1 span ≈[0..2.7]× density
+            // (mean stays ≈1 — turbulence redistributes, not dims).
+            turb.amp = amp * 2.2f;
+            const float cell = std::max(0.05f, fds::FeatureFlags::cone_turb_scale());
+            turb.invCell = 1.0f / cell;
+            const float tsec = float(g_FrameTime) * 0.01f;
+            const float spd  = fds::FeatureFlags::cone_turb_speed();
+            // Fixed world drift direction (mostly lateral + a slight
+            // rise), in noise cells/s — the fast-fog wind convention.
+            turb.driftX = (0.60f * spd) * tsec;
+            turb.driftY = (0.25f * spd) * tsec;
+            turb.driftZ = (0.35f * spd) * tsec;
+            turb.swirl  = fds::FeatureFlags::cone_swirl();
+            // swirl=1 → one full twist per 8 noise cells along the axis;
+            // the phase rotates the helix over time (rate rides spd).
+            turb.twistK = 6.2831853f / (8.0f * cell);
+            turb.phase  = 1.2f * spd * tsec;
+            turb.octaves = std::max(1, std::min(2,
+                fds::FeatureFlags::cone_turb_octaves()));
+            std::memcpy(turb.M, ctx.viewToWorld, sizeof(turb.M));
+            turb.camX = ctx.cameraWorldX;
+            turb.camY = ctx.cameraWorldY;
+            turb.camZ = ctx.cameraWorldZ;
+        }
+    }
 
     // Iterate the frame-global ViewLightsSoA built by Render_DeferredLighting
     // (dc.lights / .numLights). The per-tile TileLights apply a
@@ -1634,12 +2810,29 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                     continue;
                 }
                 if (coneCull) {
+                    // Far bound of the tile's volumetric chunk. A cone's
+                    // in-scatter reaches a pixel along [near, thatPixel's ray
+                    // far]. For an OPAQUE pixel the ray ends at its surface;
+                    // for a SKY / background pixel it runs out to the fog
+                    // cutoff (where the cone fades to zero). tileLights.zMax
+                    // is the farthest *opaque surface* only (sky pixels are
+                    // excluded in computeTileDepthBounds), so a tile that
+                    // MIXES surface + sky must extend the chunk to the fog
+                    // cutoff — otherwise a beam glowing in the tile's sky
+                    // portion is clipped away here and reappears in the
+                    // adjacent pure-sky tile, drawing a rectangular seam
+                    // (the "missing light on the rect" tiled-deferred bug).
                     float zHiT = -1e30f;
                     for (int sj = 0; sj < scaleY; ++sj)
                         for (int si = 0; si < scaleX; ++si) {
                             const int st = (j*scaleY + sj) * DEFERRED_NUM_TILES_X + (i*scaleX + si);
-                            const float zm = ctx.tileLights[st].zMax;
-                            zHiT = std::max(zHiT, (zm > 0.0f && zm < 1e30f) ? zm : fzpFar);
+                            const TileLights &stl = ctx.tileLights[st];
+                            const float zm = stl.zMax;
+                            // hasSky OR no valid surface → the ray reaches the
+                            // fog cutoff; else the farthest opaque surface.
+                            const float far = (stl.hasSky || !(zm > 0.0f && zm < 1e30f))
+                                              ? fzpFar : zm;
+                            zHiT = std::max(zHiT, far);
                         }
                     const float pad  = r * sinO_cull;
                     const float dirZ = lights->dirZ[li];
@@ -1685,6 +2878,32 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                 nReal, nBounce, nClone, eReal, eBounce, eClone);
     }
 
+    if (g_coneDiag && !inlineDispatch) {
+        // Per-spot shape census: which spots take the 8-segment hybrid, and
+        // which carry a shadow map (8 scalar taps/lane on that path).
+        int nNarrow = 0, nShadow = 0;
+        for (int s = 0; s < spotCount; ++s) {
+            const int li = spotIdx[s];
+            if (lights->cosOuter[li] > 0.985f) ++nNarrow;
+            if (lights->shadowMapIdx[li] >= 0 ||
+                lights->srcShadowMapIdx[li] >= 0) ++nShadow;
+        }
+        const long long P = g_dPairs.load(), D = g_dDead.load();
+        const long long S = g_dSegPair.load(), L = g_dLanes.load();
+        const long long SD = g_dSphDead.load();
+        fprintf(stderr,
+            "[CONE-DIAG] spots=%d narrow(seg8)=%d shadowed=%d | "
+            "batchxspot=%lld dead=%lld (%.1f%%) seg=%lld (%.1f%%) | "
+            "alive lanexspot=%lld (%.2f per pair, %.1f%% of 8) sphdead=%lld (%.1f%%)\n",
+            spotCount, nNarrow, nShadow, P, D,
+            P ? 100.0 * double(D) / double(P) : 0.0,
+            S, P ? 100.0 * double(S) / double(P) : 0.0,
+            L, P ? double(L) / double(P) : 0.0,
+            P ? 100.0 * double(L) / (8.0 * double(P)) : 0.0,
+            SD, P ? 100.0 * double(SD) / double(P) : 0.0);
+        g_dPairs = 0; g_dDead = 0; g_dSegPair = 0; g_dLanes = 0; g_dSphDead = 0;
+    }
+
     if (!inlineDispatch) renderns::tileCounter = 0;
     if (inlineDispatch) {
         // Offscreen shard bake: run on the calling worker thread (no
@@ -1696,13 +2915,14 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
                                          tileSpotIdx[t], tileSpotCount[t],
                                          invFOVX,invFOVY,invZScale,density,
-                                         fogZ,invFogZ);
+                                         fogZ,invFogZ, turb);
         }
     } else {
         // Work-stealing chunk dispatch via dispatchIndexed (fn releases
         // tileDone itself → done=nullptr; the [&] captures reference this
         // frame's stack, valid until the drain below). Tiles write
         // disjoint rows in any order → byte-identical.
+        const TailProf::Stamp _profCones("cones");
         dispatchIndexed(numTiles, nullptr, [&](int t) {
             const int j = t / numTilesX, i = t - j * numTilesX;
             const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, yres);
@@ -1711,11 +2931,11 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
                                          tileSpotIdx[t], tileSpotCount[t],
                                          invFOVX,invFOVY,invZScale,density,
-                                         fogZ,invFogZ);
+                                         fogZ,invFogZ, turb);
             TailProf::addBusy(_tp);   // before release → race-free idle metric
             renderns::tileDone.release();
         });
-        TailProf::drain(renderns::tileDone, numTiles, "cones");
+        TailProf::drain(renderns::tileDone, numTiles, "cones", 2, _profCones);
     }
 }
 
@@ -2389,8 +3609,8 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
     }
     if (omniCount == 0) return;
 
-    constexpr int numTilesX = 6;
-    constexpr int numTilesY = 4;
+    constexpr int numTilesX = 12;
+    constexpr int numTilesY = 8;
     constexpr int numTiles  = numTilesX * numTilesY;
     const int tileSizeX = (xres + numTilesX - 1) / numTilesX;
     const int tileSizeY = (yres + numTilesY - 1) / numTilesY;
@@ -2573,8 +3793,8 @@ void Render_DeferredSkybox(const DeferredLightingCtx &ctx) {
     // cubemap UV change between adjacent pixels for mip selection.
     const float pixelAngle = (invFOVX_l > invFOVY_l) ? invFOVX_l : invFOVY_l;
 
-    constexpr int numTilesX = 6;
-    constexpr int numTilesY = 4;
+    constexpr int numTilesX = 12;
+    constexpr int numTilesY = 8;
     const int tileSizeX = (xres + numTilesX - 1) / numTilesX;
     const int tileSizeY = (yres + numTilesY - 1) / numTilesY;
     renderns::tileCounter = 0;
@@ -2746,11 +3966,12 @@ void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
 	// (the old global-reading code silently fogged the WRONG target).
 	if (!ctx.gb || !ctx.vpage || !ctx.zpage16) return;
 	const float invFZP = 1.0f / ctx.Sc->FZP;
-	constexpr auto numTilesX = 6;
-	constexpr auto numTilesY = 4;
+	constexpr auto numTilesX = 12;
+	constexpr auto numTilesY = 8;
 	const auto tileSizeX = (ctx.xres + (numTilesX - 1)) / numTilesX;
 	const auto tileSizeY = (ctx.yres + (numTilesY - 1)) / numTilesY;
 	renderns::tileCounter = 0;
+	const TailProf::Stamp _profFog("fog");
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
 	    [&ctx, tileSizeX, tileSizeY, invFZP](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
@@ -2759,6 +3980,6 @@ void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
 		Render_DeferredFogPass_Tile(ctx, x1, y1, x2, y2, invFZP);
 		renderns::tileDone.release();
 	});
-	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog");
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog", 2, _profFog);
 }
 

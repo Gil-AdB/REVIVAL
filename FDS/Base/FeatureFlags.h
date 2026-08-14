@@ -81,6 +81,17 @@ public:
     // Parses --flag / --no-flag / --flag=value forms. Recognises --help / -h.
     // Returns true on success, false when --help was requested or an unknown
     // flag was seen (in which case help has already been printed to stderr).
+    //
+    // --flags-file=<path> loads flag tokens from a text file (one per line,
+    // `--` prefix optional, `#` comments + blank lines skipped; files may
+    // include further flags-files, depth-capped + cycle-safe). Precedence is
+    // pure parse order — CLI tokens AFTER the --flags-file= token override
+    // the file's values. See applyFlagsFile in FeatureFlags.cpp.
+    //
+    // Tokens that match no registered flag warn on stderr ("[FLAGS] unknown
+    // flag '--foo' (ignored)") unless they belong to the snapshot / bench /
+    // material-import argv parsers or --no-warn-unknown-flags /
+    // FDS_WARN_UNKNOWN_FLAGS=0 suppressed the warning.
     static bool parseArgs(int argc, const char *const *argv);
 
     // Prints the full flag table to `out`, grouped by category.

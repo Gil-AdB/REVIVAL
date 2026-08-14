@@ -2,10 +2,10 @@ LWSC
 1
 
 FirstFrame 1
-LastFrame 1700
+LastFrame 1760
 FrameStep 1
 PreviewFirstFrame 1
-PreviewLastFrame 1700
+PreviewLastFrame 1760
 PreviewFrameStep 5
 FramesPerSecond 30.000000
 
@@ -24,7 +24,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -51690 1535 60810 0 0 0 1.526 1.526 1.526
+  -47000 1699.3377 66000 0 0 0 1.526 1.526 1.526
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 2565
@@ -36,7 +36,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  1660 11 -78620 10.2 0 0 1 1 1
+  1660 -12.1667 -78620 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 53
@@ -47,7 +47,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  6460 11 -77310 -32.3 0 0 1 1 1
+  6460 -12.1667 -77310 -32.3 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -58,7 +58,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  10660 18 -81767.5 23 0 0 1 1 1
+  10660 -12.1667 -81767.5 23 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -69,7 +69,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -3390 17.5 -76959.5 24.5 0 0 1 1 1
+  -3390 -12.1667 -76959.5 24.5 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -80,7 +80,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  3120 19.5 -72554.5 -20.7 -0.6 0 1 1 1
+  3120 -1.6946 -72554.5 -20.7 -0.6 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -91,7 +91,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  8250 19.5 -71396.5 -16 0 0 1 1 1
+  8250 -12.1667 -71396.5 -16 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -102,7 +102,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -1210 16 -71370 19.7 0.2 0 1 1 1
+  -1210 -8.676 -71370 19.7 0.2 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -112,18 +112,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  3560 21 -65373 62.59999 0 0 1 1 1
-  0 0 0 0 0
-EndBehavior 1
-LockedChannels 48
-ShadowOptions 7
-
-LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
-ShowObject 8 7
-ObjectMotion (unnamed)
-  9
-  1
-  -5490 21 -65338 28.6 0 0 1 1 1
+  3560 -12.1667 -65373 62.59999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -134,7 +123,18 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  10920 24 -63069.5 0 0 0 1 1 1
+  -5490 -12.1667 -65338 28.6 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10920 -12.1667 -63069.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -144,7 +144,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  12180 22.5 -69478.5 0 0 0 1 1 1
+  12180 -12.1667 -69478.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -154,7 +154,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -5250 18.5 -60075 0 0 0 1 1 1
+  -5250 -12.1667 -60075 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -164,7 +164,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  2370 25 -61169 0 0 0 1 1 1
+  2370 -12.1667 -61169 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -174,7 +174,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  1170 26 -58318.5 0 0 0 1 1 1
+  1170 -12.1667 -58318.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -184,7 +184,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -4770 26 -56171 0 0 0 1 1 1
+  -4770 -12.1667 -56171 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -194,7 +194,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  900 36 -53208.5 0 0 0 1 1 1
+  900 -8 -53208.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -204,7 +204,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -4620 27.5 -51480.5 0 0 0 1 1 1
+  -4620 -8 -51480.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -214,7 +214,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  530 32.5 -45580 0 0 0 1 1 1
+  530 -8 -45580 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 5
@@ -225,7 +225,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -4290 43.5 -44763 0 0 0 1 1 1
+  -4290 -8 -44763 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -235,7 +235,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  320 32 -37788.5 0 0 0 1 1 1
+  320 -8 -37788.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -245,7 +245,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -5680 32.5 -37613.5 0 0 0 1 1 1
+  -5680 -8 -37613.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -255,7 +255,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  10 24 -28220.5 0 0 0 1 1 1
+  10 -8 -28220.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -265,7 +265,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -6830 26 -30521.5 -26.2 0 0 1 1 1
+  -6830 -8 -30521.5 -26.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -276,7 +276,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -2950 29.5 -19780 40.09999 0 0 1 1 1
+  -2950 -8 -19780 40.09999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 61
@@ -287,7 +287,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -10200 42 -24929.5 -21.1 -0.6999999 0 1 1 1
+  -10200 4.217 -24929.5 -21.1 -0.6999999 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -297,18 +297,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -13320 22.5 -20379.5 40.09999 0 0 1 1 1
-  0 0 0 0 0
-EndBehavior 1
-LockedChannels 56
-ShadowOptions 7
-
-LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
-ShowObject 8 7
-ObjectMotion (unnamed)
-  9
-  1
-  -26200 29.5 26900.5 0 0 0 1 1 1
+  -13320 -8 -20379.5 40.09999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 56
@@ -319,7 +308,18 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -2950 17.5 -19780 40.09999 0 0 1 1 1
+  -26200 -8 26900.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 56
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2950 -8 -19780 40.09999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 61
@@ -330,7 +330,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -7180 24 -48519.5 10.2 0 0 1 1 1
+  -7180 -12.1667 -48519.5 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -341,7 +341,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  4710 25.5 -48171 10.2 0 0 1 1 1
+  4710 -12.1667 -48171 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -352,7 +352,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  6240 35 -51649.5 10.2 0 0 1 1 1
+  6240 -12.1667 -51649.5 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -363,7 +363,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -6070 34 -24700 10.2 0 0 1 1 1
+  -6070 -12.1667 -24700 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -374,7 +374,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -12270 38.5 -28992 10.2 0 0 1 1 1
+  -12270 -12.1667 -28992 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -385,7 +385,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  5440 22 -34500 10.2 0 0 1 1 1
+  5440 -12.1667 -34500 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -396,7 +396,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -11950 24.5 -35992 10.2 0 0 1 1 1
+  -11950 -12.1667 -35992 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -407,7 +407,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  11335 17.5 -53923 10.2 0 0 1 1 1
+  11335 -12.1667 -53923 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -418,7 +418,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -18065 26.5 -53241 10.2 0 0 1 1 1
+  -18065 -12.1667 -53241 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -429,7 +429,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -17015 28.5 -35867 10.2 0 0 1 1 1
+  -17015 -12.1667 -35867 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -440,7 +440,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -14875 111.5 -6800 -25.7 0 0 1 1 1
+  -14875 134.0074 -6800 -25.7 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 53
@@ -451,7 +451,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -24075 20.5 3766.5 -21.1 0 0 1 1 1
+  -24075 -8 3766.5 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -462,7 +462,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -18500 15.5 4894 -205.8 0 0 1 1 1
+  -18500 -8 4894 -205.8 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -473,7 +473,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -26975 25.5 6345 -21.1 0 0 1 1 1
+  -26975 -8 6345 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -484,7 +484,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -19625 28 7770 -200.3 0 0 1 1 1
+  -19625 -8 7770 -200.3 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -495,7 +495,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -21875 28 10668.5 -200.7 0 0 1 1 1
+  -21875 -8 10668.5 -200.7 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -506,7 +506,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -26625 24 10294 -21.1 0 0 1 1 1
+  -26625 -8 10294 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -517,7 +517,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -22250 27.5 15543 -201.2 0 0 1 1 1
+  -22250 -8 15543 -201.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -528,7 +528,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -28925 32 13420 -21.1 0 0 1 1 1
+  -28925 -8 13420 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -539,7 +539,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -23850 16.5 19345 -197.8 0 0 1 1 1
+  -23850 -8 19345 -197.8 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -550,7 +550,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -28975 28.5 18393.5 -21.1 0 0 1 1 1
+  -28975 -8 18393.5 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -561,7 +561,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -35540 17 13179 10.2 0 0 1 1 1
+  -35540 -12.1667 13179 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -572,7 +572,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -31575 21.5 4599.5 0 0 0 2.256 2.256 2.256
+  -31575 -8 4599.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -582,7 +582,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -13475 32 7223 0 0 0 2.256 2.256 2.256
+  -13475 -8 7223 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -592,7 +592,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -14325 21 18573 0 0 0 2.256 2.256 2.256
+  -14325 -8 18573 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -602,7 +602,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -30725 28 8746.5 0 0 0 2.256 2.256 2.256
+  -30725 -8 8746.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -612,7 +612,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -41900 18.5 23500 0 0 0 2.256 2.256 2.256
+  -41900 -8 23500 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -622,7 +622,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  8725 22 -11526 0 0 0 2.256 2.256 2.256
+  8725 -8 -11526 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -632,7 +632,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -30100 14.5 -7225.5 0 0 0 2.256 2.256 2.256
+  -30100 -8 -7225.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -642,7 +642,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -15250 11.5 12951.5 0 0 0 2.256 2.256 2.256
+  -15250 -8 12951.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -652,7 +652,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -47450 11.5 15347.5 0 0 0 2.256 2.256 2.256
+  -47450 -8 15347.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -662,7 +662,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -17175 17 24673.5 0 0 0 2.256 2.256 2.256
+  -17175 -8 24673.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -672,7 +672,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -56600 12 29551 0 0 0 2.256 2.256 2.256
+  -56600 -8 29551 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -682,7 +682,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -10600 13.5 -40326 0 0 0 2.256 2.256 2.256
+  -10600 -8 -40326 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -692,7 +692,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  5850 14 -40699 0 0 0 2.256 2.256 2.256
+  5850 -8 -40699 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -702,7 +702,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -9250 19 -80499.5 0 0 0 2.256 2.256 2.256
+  -9250 -8 -80499.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -712,7 +712,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -8950 18 -44599.5 0 0 0 2.256 2.256 2.256
+  -8950 -8 -44599.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -722,7 +722,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -21775 17.5 45000.5 0 0 0 2.256 2.256 2.256
+  -21775 -8 45000.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -732,7 +732,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -34500 17 36599 0 0 0 2.256 2.256 2.256
+  -34500 -8 36599 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -742,7 +742,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -60675 15 44875 0 0 0 2.256 2.256 2.256
+  -60675 -8 44875 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -752,7 +752,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -41600 19.5 47378 0 0 0 2.256 2.256 2.256
+  -41600 -8 47378 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -762,7 +762,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -36175 26 44300 0 0 0 2.256 2.256 2.256
+  -36175 -8 44300 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -772,7 +772,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -28125 19 -15325 0 0 0 2.256 2.256 2.256
+  -28125 -8 -15325 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -782,7 +782,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -34090 17.5 20700 -61.40001 0 0 1 1 1
+  -34090 -8 20700 -61.40001 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -793,7 +793,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -38065 18.5 25925 -5.4 0 0 1 1 1
+  -38065 -8 25925 -5.4 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -804,7 +804,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -30515 18.5 32676 -38.7 0 0 1 1 1
+  -30515 -8 32676 -38.7 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -815,7 +815,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -43015 17 32028.5 -35.6 0 0 1 1 1
+  -43015 -8 32028.5 -35.6 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -826,7 +826,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -50390 20 40301 -36.5 0 0 1 1 1
+  -50390 -8 40301 -36.5 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -836,112 +836,142 @@ LoadObject MY_OBJEC\DEMO\chasing\Ship1.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
-  53
-  9025 400 -82225 -48.3 0 0 1 1 1
+  68
+  9025 400 -82225 -49.461 0 -2.3604 2 2 2
   0 0 0 0 0
-  5108.57 311.0266 -78875.44 -46.1 0 0 1 1 1
+  5108.57 311.0266 -78875.44 -48.5363 0 -9.9141 2 2 2
   127 0 0 0 0
-  4300 300 -78050 -43.7 0 0 1 1 1
+  4300 300 -78050 -40.7091 0 -22.8022 2 2 2
   153 0 0 0 0
-  2942.709 321.1327 -76358.2 -33.6 0 0 1 1 1
+  2942.709 321.1327 -76358.2 -34.6551 0 -29.5268 2 2 2
   193 0 0 0 0
-  1725 325 -74325 -22.3 0 0 1 1 1
+  1725 325 -74325 -17.5622 0 -21.6744 2 2 2
   234 0 0 0 0
-  875 200 -69825 -13.8 0 0 1 1 1
+  875 200 -69825 -14.3737 0 -9.382 2 2 2
   291 0 0 0 0
-  -575 100 -65350 -12.4 0 0 1 1 1
+  -575 100 -65350 -13.6371 0 -8.9416 2 2 2
   384 0 0 0 0
-  -1047.63 129.0513 -61900.25 -7.599998 0 0 1 1 1
+  -1047.63 129.0513 -61900.25 -7.2369 0 -13.6999 2 2 2
   421 0 0 0 0
-  -1175 128 -60625 -1.9 0 0 1 1 1
+  -1175 128 -60625 -5.1364 0 -10.3758 2 2 2
   436 0 0 0 0
-  -1307.641 129.2311 -59007.63 -1.06392 0 -15.4 1 1 1
+  -1307.641 129.2311 -59007.63 -4.2364 0 -15.4 2 2 2
   460 0 0 0 0
-  -1625 134.5 -54550 -1.3 0 0 1 1 1
-  528 0 0 0 0
-  -1892.151 155.289 -44857.2 0 0 0 1 1 1
+  -1459.5582 271.7531 -55329.8593 -4.2364 -22.5 0 2 2 2
+  505 0 0 0 0
+  -1497.3802 662.5558 -54414.2251 -4.2364 -45 0 2 2 2
+  510 0 0 0 0
+  -1527.2049 1247.1295 -53692.1969 -4.2364 -67.5 0 2 2 2
+  515 0 0 0 0
+  -1546.5807 1936.5714 -53223.127 -4.2364 -90 0 2 2 2
+  520 0 0 0 0
+  -1554.6467 2626.0132 -53027.8574 -4.2364 -112.5 0 2 2 2
+  525 0 0 0 0
+  -1552.2638 3210.5869 -53085.5462 -4.2364 -135 0 2 2 2
+  530 0 0 0 0
+  -1541.8836 3601.3896 -53336.841 -4.2364 -157.5 0 2 2 2
+  535 0 0 0 0
+  -1527.1753 3739.0181 -53692.9145 -4.2364 -180 0 2 2 2
+  540 0 0 0 0
+  -1512.467 3602.613 -54048.9881 -4.2364 -202.5 0 2 2 2
+  545 0 0 0 0
+  -1502.0868 3213.0337 -54300.2828 -4.2364 -225 0 2 2 2
+  550 0 0 0 0
+  -1499.7038 2629.6833 -54357.9716 -4.2364 -247.5 0 2 2 2
+  555 0 0 0 0
+  -1507.7698 1941.4649 -54162.702 -4.2364 -270 0 2 2 2
+  560 0 0 0 0
+  -1527.1456 1253.2464 -53693.6321 -4.2364 -292.5 0 2 2 2
+  565 0 0 0 0
+  -1556.9704 669.896 -52971.6039 -4.2364 -315 0 2 2 2
+  570 0 0 0 0
+  -1594.7923 280.3168 -52055.9697 -4.2364 -337.5 0 2 2 2
+  575 0 0 0 0
+  -1636.9424 143.9116 -51035.5568 -4.2364 -360 0 2 2 2
+  580 0 0 0 0
+  -1892.151 155.289 -44857.2 -1.7579 -360 0.5392 2 2 2
   673 0 0 0 0
-  -2225 165 -35000 -4 0 0 1 1 1
+  -2225 165 -35000 -3.8003 -360 4.5317 2 2 2
   817 0 0 0 0
-  -3075 150 -27050 -8.599998 0 0 1 1 1
+  -3075 150 -27050 -6.7185 -360 22.5922 2 2 2
   924 0 0 0 0
-  -3303.078 158.2267 -25848.23 -15.5 -0.3 0 1 1 1
+  -3303.078 158.2267 -25848.23 -16.8868 -360.3 36 2 2 2
   939 0 0 0 0
-  -4350 225 -22850 -34.3 0 0 1 1 1
+  -4350 225 -22850 -32.31 -360 31.8927 2 2 2
   973 0 0 0 0
-  -7849.886 530.2166 -18658.68 -39.7 0.2 0 1 1 1
+  -7849.886 597.7166 -18658.68 -40.1378 -359.8 4.2609 2 2 2
   1028 0 0 0 0
-  -10400 750 -15675 -35.39999 0 0 1 1 1
+  -10400 952.5 -15675 -34.473 -360 -12.106 2 2 2
   1066 0 0 0 0
-  -12250 875 -12250 -29.3 0 0 1 1 1
+  -12250 1257.5 -12250 -28.5828 -360 -11.3186 2 2 2
   1098 0 0 0 0
-  -14350 800 -8425 -27.5 0 0 1 1 1
+  -14350 1250 -8425 -27.6749 -360 -4.7897 2 2 2
   1135 0 0 0 0
-  -19289.58 742.9814 1172.687 -26.5 -0.2999999 0 1 1 1
+  -19289.58 1102.9814 1172.687 -26.9243 -360.3 -2.0329 2 2 2
   1196 0 0 0 0
-  -22425 675 7475 -24.8 0 0 1 1 1
+  -22425 855 7475 -24.8441 -360 1.782 2 2 2
   1236 0 0 0 0
-  -26525 350 16800 -26.3 0 0 1 1 1
+  -26525 395 16800 -27.4635 -360 9.5365 2 2 2
   1306 0 0 0 0
-  -30975 275 23925 -36.89999 0 0 1 1 1
+  -30975 275 23925 -34.5817 -360 16.558 2 2 2
   1361 0 0 0 0
-  -33555.73 334.819 26998.59 -40.3 -0.5 0 1 1 1
+  -33555.73 334.819 26998.59 -40.7905 -360.5 14.8694 2 2 2
   1390 0 0 0 0
-  -35088.55 382.0032 28692.19 -41.8 -0.5 0 1 1 1
+  -35088.55 382.0032 28692.19 -42.0681 -360.5 -7.02 2 2 2
   1408 0 0 0 0
-  -35256.54 386.3549 28883.02 -40.60001 0.4 0 1 1 1
+  -35256.54 386.3549 28883.02 -41.205 -359.6 -29.3653 2 2 2
   1410 0 0 0 0
-  -35297.29 387.2325 28930.59 -40.09999 0.9999999 0 1 1 1
+  -35297.29 387.2325 28930.59 -40.7607 -359 -20.4624 2 2 2
   1411 0 0 0 0
-  -35502.48 391.8886 29168.34 -41.09999 0 0 1 1 1
+  -35502.48 391.8886 29168.34 -40.8076 -360 -2.8972 2 2 2
   1413 0 0 0 0
-  -35707.84 396.5742 29406.09 -40.09999 0 0 1 1 1
+  -35707.84 396.5742 29406.09 -40.8227 -360 0.809 2 2 2
   1415 0 0 0 0
-  -35913.25 401.2689 29643.84 -40.09999 0 0 1 1 1
+  -35913.25 401.2689 29643.84 -40.8296 -360 0.3692 2 2 2
   1418 0 0 0 0
-  -36118.71 405.9717 29881.59 -41.49999 -0.6999999 0 1 1 1
+  -36118.71 405.9717 29881.59 -40.8364 -360.7 0.2908 2 2 2
   1420 0 0 0 0
-  -36324.21 410.6824 30119.33 -41.789 -0.7895004 0 1 1 1
+  -36324.21 410.6824 30119.33 -40.842 -360.7895 -3.4847 2 2 2
   1423 0 0 0 0
-  -36529.75 415.4007 30357.08 -40.94554 -1.017768 0 1 1 1
+  -36529.75 415.4007 30357.08 -40.8468 -361.0178 -15.8362 2 2 2
   1425 0 0 0 0
-  -36735.32 420.125 30594.82 -40.40546 1.419209 0 1 1 1
+  -36735.32 420.125 30594.82 -40.2255 -358.5808 -24.3876 2 2 2
   1428 0 0 0 0
-  -38300 450 32450 -34.5 0 0 1 1 1
+  -38300 450 32450 -34.5592 -360 -17.248 2 2 2
   1447 0 0 0 0
-  -41182.89 342.8795 37051.77 -30.98095 -0.7005215 0 1 1 1
+  -41182.89 342.8795 37051.77 -32.0648 -360.7005 -5.9291 2 2 2
   1495 0 0 0 0
-  -41332.46 337.4813 37290.76 -31.91231 2.661615 0 1 1 1
+  -41332.46 337.4813 37290.76 -32.1008 -357.3384 1.3674 2 2 2
   1498 0 0 0 0
-  -41482.14 332.4954 37528.8 -31.8 0 0 1 1 1
+  -41482.14 332.4954 37528.8 -32.1631 -360 6.6628 2 2 2
   1500 0 0 0 0
-  -41631.81 327.5292 37766.8 -31.8 -1 0 1 1 1
+  -41631.81 327.5292 37766.8 -32.3743 -361 8.766 2 2 2
   1503 0 0 0 0
-  -43350 275 40475 -36 0 0 1 1 1
+  -43350 275 40475 -35.08 -360 6.3801 2 2 2
   1531 0 0 0 0
-  -47085.14 315.6244 45531.86 -36.10001 2.7 0 1 1 1
+  -47085.14 315.6244 45531.86 -36.5806 -357.3 1.8643 2 2 2
   1586 0 0 0 0
-  -49593.4 364.4752 48887.7 -36.40001 2.8 0 1 1 1
+  -49593.4 364.4752 48887.7 -36.7551 -357.2 -16.5098 2 2 2
   1623 0 0 0 0
-  -49764.02 367.8561 49118.65 -34.2 0.6999999 0 1 1 1
+  -49764.02 367.8561 49118.65 -35.6188 -359.3 -36 2 2 2
   1625 0 0 0 0
-  -49928.2 370.9355 49355.02 -33.2 -2.8 0 1 1 1
+  -49928.2 370.9355 49355.02 -34.1463 -362.8 -36 2 2 2
   1628 0 0 0 0
-  -50087.42 373.7182 49595.48 -30.3 -0.1 0 1 1 1
+  -50087.42 373.7182 49595.48 -31.4172 -360.1 -36 2 2 2
   1630 0 0 0 0
-  -50200 375 49800 -22.6 0.2 0 1 1 1
+  -50200 375 49800 -22.9566 -359.8 -36 2 2 2
   1632 0 0 0 0
-  -50997.3 374.1722 51743.55 -16 -0.3999999 0 1 1 1
+  -50997.3 374.1722 51743.55 -17.381 -360.4 -36 2 2 2
   1650 0 0 0 0
-  -51770.51 401.2489 54817.33 -11.5 0.3 0 1 1 1
+  -51770.51 401.2489 54817.33 -14.0393 -359.7 -27.7865 2 2 2
   1675 0 0 0 0
-  -51836.44 418.4786 55099.36 -11.7 0 0 1 1 1
+  -51836.44 418.4786 55099.36 -12.7568 -360 -33.7259 2 2 2
   1678 0 0 0 0
-  -51893.91 449.5373 55362.38 -14.1 -0.4 0 1 1 1
+  -51893.91 449.5373 55362.38 -12.0751 -360.4 -25.1257 2 2 2
   1680 0 0 0 0
-  -52350 800 57500 -8.599998 -47.89999 0 1 1 1
+  -52350 800 57500 -8.4706 -407.9 -12.6997 2 2 2
   1702 0 0 0 0
-  -52525 4175 59600 0 -61.79999 0 1 1 1
+  -52525 4175 59600 -4.7636 -421.8 -8.4546 2 2 2
   1760 0 0 0 0
 EndBehavior 1
 LockedChannels 29
@@ -958,69 +988,1259 @@ LoadObject MY_OBJEC\DEMO\chasing\ship2.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
-  29
-  9879 365 -83555.5 0 0 0 1 1 1
+  30
+  9879 365 -83555.5 -52.6292 0 -24.102 2 2 2
   0 0 0 0 0
-  4536.657 365 -79475.29 0 0 0 1 1 1
+  4536.657 365 -79475.29 -35.1169 0 -23.9274 2 2 2
   173 0 0 0 0
-  1229 365 -71255.5 -21.5 0 0 1 1 1
+  1229 365 -71255.5 -21.5 0 -19.703 2 2 2
   286 0 0 0 0
-  -471 365 -66495.5 -11.4 0 0 1 1 1
+  -471 365 -66495.5 -11.4 0 -15.917 2 2 2
   388 0 0 0 0
-  -1781 365 -60715.5 -13.7 0 -37 1 1 1
+  -1781 365 -60715.5 -13.7 0 -37 2 2 2
   460 0 0 0 0
-  -3011 365 -54985.5 0 0 -39.5 1 1 1
+  -3011 365 -54985.5 -2.4698 0 -39.5 2 2 2
   547 0 0 0 0
-  -2431 245 -45645.5 0 0 0 1 1 1
+  -2431 245 -45645.5 1.8882 0 -2.7045 2 2 2
   670 0 0 0 0
-  -2501 245 -39515.5 0 0 0 1 1 1
+  -2501 245 -39515.5 -1.3827 0 8.0946 2 2 2
   767 0 0 0 0
-  -2711 245 -34045.5 0 0 0 1 1 1
+  -2711 245 -34045.5 -3.7833 0 22.5476 2 2 2
   849 0 0 0 0
-  -3481 245 -24695.5 0 0 0 1 1 1
+  -3481 245 -24695.5 -17.0175 0 36 2 2 2
   961 0 0 0 0
-  -7051 245 -19865.5 0 0 0 1 1 1
+  -7051 317 -19865.5 -38.5761 0 19.4824 2 2 2
   1028 0 0 0 0
-  -10811 755 -15505.5 0 0 0 1 1 1
+  -10811 1091 -15505.5 -34.9757 0 -20.4814 2 2 2
   1074 0 0 0 0
-  -12011 755 -12775.5 0 0 0 1 1 1
+  -12011 1235 -12775.5 -24.8993 0 -26.5768 2 2 2
   1105 0 0 0 0
-  -13661 755 -9365.5 0 0 0 1 1 1
+  -13661 1235 -9365.5 -25.4942 0 -2.0636 2 2 2
   1135 0 0 0 0
-  -15101 755 -6295.5 0 0 0 1 1 1
+  -15101 1211 -6295.5 -26.5339 0 10.4055 2 2 2
   1156 0 0 0 0
-  -17341 755 -1995.5 0 0 0 1 1 1
+  -17341 1115 -1995.5 -28.121 0 5.8499 2 2 2
   1182 0 0 0 0
-  -19681 755 2274.5 0 0 0 1 1 1
+  -19681 995 2274.5 -28.487 0 -2.1149 2 2 2
   1212 0 0 0 0
-  -23701 485 9724.5 0 0 0 1 1 1
+  -23701 677 9724.5 -26.0819 0 -1.179 2 2 2
   1263 0 0 0 0
-  -24811 485 12754.5 0 0 0 1 1 1
+  -24571 749 12994.5 -26.9859 0 9.7801 2 2 2
   1284 0 0 0 0
-  -28287.06 625 18730.63 0 0 0 1 1 1
+  -27687 999.4 19331 -29.2057 0 22.8775 2 2 2
   1330 0 0 0 0
-  -30921 485 23684.5 0 0 0 1 1 1
+  -30681 581 23924 -35.3004 0 23.4025 2 2 2
   1371 0 0 0 0
-  -34641 485 27704.5 0 0 0 1 1 1
+  -34641 485 27704.5 -42.7033 0 1.018 2 2 2
   1417 0 0 0 0
-  -38101 485 31464.5 0 0 0 1 1 1
+  -38101 485 31464.5 -34.9383 0 -15.2463 2 2 2
   1463 0 0 0 0
-  -41641 485 37724.5 0 0 0 1 1 1
+  -41641 485 37724.5 -30.7627 0 -3.7769 2 2 2
   1509 0 0 0 0
-  -44351 485 41964.5 0 0 0 1 1 1
+  -44351 485 41964.5 -35.0835 0 0.5084 2 2 2
   1550 0 0 0 0
-  -48131 485 46964.5 0 0 0 1 1 1
+  -48131 485 46964.5 -36.7365 0 -30.8558 2 2 2
   1606 0 0 0 0
-  -50001 485 49534.5 0 0 0 1 1 1
+  -50001 485 49534.5 -25.5626 0 -36 2 2 2
   1632 0 0 0 0
-  -51771 485 54574.5 0 0 0 1 1 1
+  -51771 485 54574.5 -10.8671 0 -36 2 2 2
   1678 0 0 0 0
-  -51771 1425 58754.5 0 0 0 1 1 1
+  -52350 2500 58300 -9 -45 -12 2 2 2
   1734 0 0 0 0
+  -52480 3600 59200 -6 -55 -8 2 2 2
+  1760 0 0 0 0
 EndBehavior 1
 LockedChannels 16
 ShadowOptions 7
 
+
+
+FDSCORRIDORBEGIN
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10840.816 -8 -26071.2164 -39.863 0 0 1.2602 1.2602 1.2602
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -510.1345 -8 -17444.7675 -178.164 0 0 0.8845 0.8845 0.8845
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1620.7104 -15.1183 -18372.1339 161.3515 0 0 1.7084 1.7084 1.7084
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -11060.8529 -17.5108 -24314.817 130.5046 0 0 2.2826 2.2826 2.2826
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -590.7785 -8 -15571.9706 -39.863 0 0 1.5891 1.5891 1.5891
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -13291.1766 -8 -24237.0712 132.7738 0 0 1.045 1.045 1.045
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4034.8161 -8 -16507.7147 -103.7731 0 0 2.0388 2.0388 2.0388
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4429.8603 -8 -16837.5892 -104.075 0 0 1.5947 1.5947 1.5947
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -14104.1259 -8 -23052.9792 -40.5201 0 0 1.4753 1.4753 1.4753
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2971.396 -8 -13537.9742 176.5763 0 0 0.958 0.958 0.958
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12554.6135 -8 -19690.513 -167.9274 0 0 1.8033 1.8033 1.8033
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5792.1018 -14.1621 -13910.6788 -2.7119 0 0 1.4789 1.4789 1.4789
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5454.921 -8 -13622.4946 38.7367 0 0 1.8353 1.8353 1.8353
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15848.4074 -8 -20467.5602 -108.1637 0 0 0.9464 0.9464 0.9464
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6909.8335 -8 -12827.8728 153.0262 0 0 2.5205 2.5205 2.5205
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15667.9054 -13.995 -16584.8198 -141.4603 0 0 1.4388 1.4388 1.4388
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6013.7702 -8 -11370.1774 -28.3755 0 0 1.0235 1.0235 1.0235
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -16166.9497 -15.9654 -16854.3766 -18.0982 0 0 1.9117 1.9117 1.9117
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15919.8889 -8 -14647.0511 103.8264 0 0 2.0995 2.0995 2.0995
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7686.1401 -14.9766 -10199.6247 -89.8538 0 0 1.6744 1.6744 1.6744
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -19518.7099 -8 -14626.1969 -28.7676 0 0 1.5378 1.5378 1.5378
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7566.5017 -8 -8064.2002 -100.1761 0 0 0.7283 0.7283 0.7283
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -16499.6463 -8 -12968.6717 -169.5125 0 0 1.7095 1.7095 1.7095
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -18189.4479 -15.2408 -11878.3217 49.8536 0 0 1.7378 1.7378 1.7378
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7882.4309 -8 -6219.5672 -28.7676 0 0 1.2141 1.2141 1.2141
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -19880.1391 -8 -10276.0867 -27.0029 0 0 0.7221 0.7221 0.7221
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10639.3455 -8 -5520.1868 -18.0982 0 0 2.2484 2.2484 2.2484
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -9681.6169 -8 -5027.2787 -142.1296 0 0 1.9987 1.9987 1.9987
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21817.7813 -8 -8288.0971 -27.2332 0 0 1.2709 1.2709 1.2709
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -9416.3747 -8 -1905.5447 -170.5116 0 0 0.943 0.943 0.943
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -20813.5366 -8 -4786.0254 -157.1796 0 0 2.1785 2.1785 2.1785
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -11799.3965 -17.2575 -146.7757 147.3643 0 0 2.2218 2.2218 2.2218
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12337.6108 -15.3879 -423.775 -76.2755 0 0 1.7731 1.7731 1.7731
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24177.0165 -8 -3531.8625 -40.767 0 0 0.8783 0.8783 0.8783
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -13921.8181 -8 1746.1147 167.4961 0 0 2.626 2.626 2.626
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24660.9744 -17.1112 -713.3788 -32.8405 0 0 2.1867 2.1867 2.1867
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12435.326 -8 5368.9187 -26.4505 0 0 1.5703 1.5703 1.5703
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15902.6057 -8 3643.9365 89.4911 0 0 1.5083 1.5083 1.5083
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24708.5854 -8 2211.2574 -132.5966 0 0 2.2669 2.2669 2.2669
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15353.6887 -17.415 6865.3471 -27.7193 0 0 2.2596 2.2596 2.2596
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28410.137 -8 3318.0469 -26.4505 0 0 1.3905 1.3905 1.3905
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -16484.5407 -8 9251.0676 -21.0786 0 0 0.7146 0.7146 0.7146
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -27221.5423 -8 3909.3764 87.5327 0 0 2.2878 2.2878 2.2878
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -27644.5192 -14.5154 6610.7926 162.0232 0 0 1.5637 1.5637 1.5637
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15807.1876 -8 11815.4102 -23.734 0 0 1.6033 1.6033 1.6033
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -29861.7539 -8 8020.4257 157.0723 0 0 0.8474 0.8474 0.8474
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -20011.2262 -8 12351.4888 70.0775 0 0 1.9865 1.9865 1.9865
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28209.5649 -13.9192 8746.8573 -28.1902 0 0 1.4206 1.4206 1.4206
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -31555.0125 -8 9660.4397 -23.734 0 0 1.4558 1.4558 1.4558
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -17781.4397 -8 15716.3806 -14.7954 0 0 1.0637 1.0637 1.0637
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -29972.6022 -8 12740.6942 39.0794 0 0 2.4083 2.4083 2.4083
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21150.2704 -14.5612 16619.6819 -53.2152 0 0 1.5747 1.5747 1.5747
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21994.6073 -8 16248.4453 -126.252 0 0 1.7886 1.7886 1.7886
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -33297.5103 -8 13663.3074 176.5562 0 0 0.9373 0.9373 0.9373
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -22418.9385 -8 18446.3792 81.2987 0 0 2.1773 2.1773 2.1773
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -33052.538 -17.4921 15244.2458 129.562 0 0 2.2781 2.2781 2.2781
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21947.409 -8 22180.0807 -31.9873 0 0 1.2847 1.2847 1.2847
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -23542.0808 -8 21184.1103 35.3269 0 0 1.8044 1.8044 1.8044
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -33003.3941 -8 17976.1115 73.5861 0 0 2.4748 2.4748 2.4748
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24787.5473 -15.2008 23107.4122 83.7235 0 0 1.7282 1.7282 1.7282
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -35569.0584 -8 19074.8688 -31.9873 0 0 1.0922 1.0922 1.0922
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24169.1399 -8 26194.8179 -27.1722 0 0 0.9994 0.9994 0.9994
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -34709.2486 -15.3916 19611.8728 -13.5364 0 0 1.774 1.774 1.774
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+FDSCORRIDOREND
+
+FDSLIGHTS_OBJ_BEGIN
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  3926.0994 -35 -73590.7214 0 0 0 42.237 31.2867 42.237
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_0
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  3926.0994 850 -73590.7214 0 48 0 1 1 1
+  0 0 0 0 0
+  3926.0994 850 -73590.7214 135 48 0 1 1 1
+  220 0 0 0 0
+  3926.0994 850 -73590.7214 270 48 0 1 1 1
+  440 0 0 0 0
+  3926.0994 850 -73590.7214 405 48 0 1 1 1
+  660 0 0 0 0
+  3926.0994 850 -73590.7214 540 48 0 1 1 1
+  880 0 0 0 0
+  3926.0994 850 -73590.7214 675 48 0 1 1 1
+  1100 0 0 0 0
+  3926.0994 850 -73590.7214 810 48 0 1 1 1
+  1320 0 0 0 0
+  3926.0994 850 -73590.7214 945 48 0 1 1 1
+  1540 0 0 0 0
+  3926.0994 850 -73590.7214 1080 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_0b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  3926.0994 850 -73590.7214 180 48 0 1 1 1
+  0 0 0 0 0
+  3926.0994 850 -73590.7214 315 48 0 1 1 1
+  220 0 0 0 0
+  3926.0994 850 -73590.7214 450 48 0 1 1 1
+  440 0 0 0 0
+  3926.0994 850 -73590.7214 585 48 0 1 1 1
+  660 0 0 0 0
+  3926.0994 850 -73590.7214 720 48 0 1 1 1
+  880 0 0 0 0
+  3926.0994 850 -73590.7214 855 48 0 1 1 1
+  1100 0 0 0 0
+  3926.0994 850 -73590.7214 990 48 0 1 1 1
+  1320 0 0 0 0
+  3926.0994 850 -73590.7214 1125 48 0 1 1 1
+  1540 0 0 0 0
+  3926.0994 850 -73590.7214 1260 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2672.3716 -35 -66333.3067 0 0 0 42.237 31.2867 42.237
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_1
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -2672.3716 850 -66333.3067 47 48 0 1 1 1
+  0 0 0 0 0
+  -2672.3716 850 -66333.3067 182 48 0 1 1 1
+  220 0 0 0 0
+  -2672.3716 850 -66333.3067 317 48 0 1 1 1
+  440 0 0 0 0
+  -2672.3716 850 -66333.3067 452 48 0 1 1 1
+  660 0 0 0 0
+  -2672.3716 850 -66333.3067 587 48 0 1 1 1
+  880 0 0 0 0
+  -2672.3716 850 -66333.3067 722 48 0 1 1 1
+  1100 0 0 0 0
+  -2672.3716 850 -66333.3067 857 48 0 1 1 1
+  1320 0 0 0 0
+  -2672.3716 850 -66333.3067 992 48 0 1 1 1
+  1540 0 0 0 0
+  -2672.3716 850 -66333.3067 1127 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_1b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -2672.3716 850 -66333.3067 227 48 0 1 1 1
+  0 0 0 0 0
+  -2672.3716 850 -66333.3067 362 48 0 1 1 1
+  220 0 0 0 0
+  -2672.3716 850 -66333.3067 497 48 0 1 1 1
+  440 0 0 0 0
+  -2672.3716 850 -66333.3067 632 48 0 1 1 1
+  660 0 0 0 0
+  -2672.3716 850 -66333.3067 767 48 0 1 1 1
+  880 0 0 0 0
+  -2672.3716 850 -66333.3067 902 48 0 1 1 1
+  1100 0 0 0 0
+  -2672.3716 850 -66333.3067 1037 48 0 1 1 1
+  1320 0 0 0 0
+  -2672.3716 850 -66333.3067 1172 48 0 1 1 1
+  1540 0 0 0 0
+  -2672.3716 850 -66333.3067 1307 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  749.9472 423.2187 -53091.589 0 0 0 68.4861 50.7304 68.4861
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_2
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  749.9472 1858.2187 -53091.589 94 48 0 1 1 1
+  0 0 0 0 0
+  749.9472 1858.2187 -53091.589 229 48 0 1 1 1
+  220 0 0 0 0
+  749.9472 1858.2187 -53091.589 364 48 0 1 1 1
+  440 0 0 0 0
+  749.9472 1858.2187 -53091.589 499 48 0 1 1 1
+  660 0 0 0 0
+  749.9472 1858.2187 -53091.589 634 48 0 1 1 1
+  880 0 0 0 0
+  749.9472 1858.2187 -53091.589 769 48 0 1 1 1
+  1100 0 0 0 0
+  749.9472 1858.2187 -53091.589 904 48 0 1 1 1
+  1320 0 0 0 0
+  749.9472 1858.2187 -53091.589 1039 48 0 1 1 1
+  1540 0 0 0 0
+  749.9472 1858.2187 -53091.589 1174 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_2b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  749.9472 1858.2187 -53091.589 274 48 0 1 1 1
+  0 0 0 0 0
+  749.9472 1858.2187 -53091.589 409 48 0 1 1 1
+  220 0 0 0 0
+  749.9472 1858.2187 -53091.589 544 48 0 1 1 1
+  440 0 0 0 0
+  749.9472 1858.2187 -53091.589 679 48 0 1 1 1
+  660 0 0 0 0
+  749.9472 1858.2187 -53091.589 814 48 0 1 1 1
+  880 0 0 0 0
+  749.9472 1858.2187 -53091.589 949 48 0 1 1 1
+  1100 0 0 0 0
+  749.9472 1858.2187 -53091.589 1084 48 0 1 1 1
+  1320 0 0 0 0
+  749.9472 1858.2187 -53091.589 1219 48 0 1 1 1
+  1540 0 0 0 0
+  749.9472 1858.2187 -53091.589 1354 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4169.1794 682.7736 -45460.7821 0 0 0 68.4861 50.7304 68.4861
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_3
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -4169.1794 2117.7736 -45460.7821 141 48 0 1 1 1
+  0 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 276 48 0 1 1 1
+  220 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 411 48 0 1 1 1
+  440 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 546 48 0 1 1 1
+  660 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 681 48 0 1 1 1
+  880 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 816 48 0 1 1 1
+  1100 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 951 48 0 1 1 1
+  1320 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 1086 48 0 1 1 1
+  1540 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 1221 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_3b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -4169.1794 2117.7736 -45460.7821 321 48 0 1 1 1
+  0 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 456 48 0 1 1 1
+  220 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 591 48 0 1 1 1
+  440 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 726 48 0 1 1 1
+  660 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 861 48 0 1 1 1
+  880 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 996 48 0 1 1 1
+  1100 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 1131 48 0 1 1 1
+  1320 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 1266 48 0 1 1 1
+  1540 0 0 0 0
+  -4169.1794 2117.7736 -45460.7821 1401 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  89.6474 35.201 -35398.7358 0 0 0 68.4861 50.7304 68.4861
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_4
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  89.6474 1470.201 -35398.7358 188 48 0 1 1 1
+  0 0 0 0 0
+  89.6474 1470.201 -35398.7358 323 48 0 1 1 1
+  220 0 0 0 0
+  89.6474 1470.201 -35398.7358 458 48 0 1 1 1
+  440 0 0 0 0
+  89.6474 1470.201 -35398.7358 593 48 0 1 1 1
+  660 0 0 0 0
+  89.6474 1470.201 -35398.7358 728 48 0 1 1 1
+  880 0 0 0 0
+  89.6474 1470.201 -35398.7358 863 48 0 1 1 1
+  1100 0 0 0 0
+  89.6474 1470.201 -35398.7358 998 48 0 1 1 1
+  1320 0 0 0 0
+  89.6474 1470.201 -35398.7358 1133 48 0 1 1 1
+  1540 0 0 0 0
+  89.6474 1470.201 -35398.7358 1268 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_4b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  89.6474 1470.201 -35398.7358 368 48 0 1 1 1
+  0 0 0 0 0
+  89.6474 1470.201 -35398.7358 503 48 0 1 1 1
+  220 0 0 0 0
+  89.6474 1470.201 -35398.7358 638 48 0 1 1 1
+  440 0 0 0 0
+  89.6474 1470.201 -35398.7358 773 48 0 1 1 1
+  660 0 0 0 0
+  89.6474 1470.201 -35398.7358 908 48 0 1 1 1
+  880 0 0 0 0
+  89.6474 1470.201 -35398.7358 1043 48 0 1 1 1
+  1100 0 0 0 0
+  89.6474 1470.201 -35398.7358 1178 48 0 1 1 1
+  1320 0 0 0 0
+  89.6474 1470.201 -35398.7358 1313 48 0 1 1 1
+  1540 0 0 0 0
+  89.6474 1470.201 -35398.7358 1448 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5938.3087 151.6513 -25278.1896 0 0 0 68.4861 50.7304 68.4861
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_5
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -5938.3087 1586.6513 -25278.1896 235 48 0 1 1 1
+  0 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 370 48 0 1 1 1
+  220 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 505 48 0 1 1 1
+  440 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 640 48 0 1 1 1
+  660 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 775 48 0 1 1 1
+  880 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 910 48 0 1 1 1
+  1100 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 1045 48 0 1 1 1
+  1320 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 1180 48 0 1 1 1
+  1540 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 1315 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_5b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -5938.3087 1586.6513 -25278.1896 415 48 0 1 1 1
+  0 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 550 48 0 1 1 1
+  220 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 685 48 0 1 1 1
+  440 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 820 48 0 1 1 1
+  660 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 955 48 0 1 1 1
+  880 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 1090 48 0 1 1 1
+  1100 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 1225 48 0 1 1 1
+  1320 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 1360 48 0 1 1 1
+  1540 0 0 0 0
+  -5938.3087 1586.6513 -25278.1896 1495 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -32123.3981 -35 28843.2619 0 0 0 42.237 31.2867 42.237
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_6
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -32123.3981 850 28843.2619 282 48 0 1 1 1
+  0 0 0 0 0
+  -32123.3981 850 28843.2619 417 48 0 1 1 1
+  220 0 0 0 0
+  -32123.3981 850 28843.2619 552 48 0 1 1 1
+  440 0 0 0 0
+  -32123.3981 850 28843.2619 687 48 0 1 1 1
+  660 0 0 0 0
+  -32123.3981 850 28843.2619 822 48 0 1 1 1
+  880 0 0 0 0
+  -32123.3981 850 28843.2619 957 48 0 1 1 1
+  1100 0 0 0 0
+  -32123.3981 850 28843.2619 1092 48 0 1 1 1
+  1320 0 0 0 0
+  -32123.3981 850 28843.2619 1227 48 0 1 1 1
+  1540 0 0 0 0
+  -32123.3981 850 28843.2619 1362 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_6b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -32123.3981 850 28843.2619 462 48 0 1 1 1
+  0 0 0 0 0
+  -32123.3981 850 28843.2619 597 48 0 1 1 1
+  220 0 0 0 0
+  -32123.3981 850 28843.2619 732 48 0 1 1 1
+  440 0 0 0 0
+  -32123.3981 850 28843.2619 867 48 0 1 1 1
+  660 0 0 0 0
+  -32123.3981 850 28843.2619 1002 48 0 1 1 1
+  880 0 0 0 0
+  -32123.3981 850 28843.2619 1137 48 0 1 1 1
+  1100 0 0 0 0
+  -32123.3981 850 28843.2619 1272 48 0 1 1 1
+  1320 0 0 0 0
+  -32123.3981 850 28843.2619 1407 48 0 1 1 1
+  1540 0 0 0 0
+  -32123.3981 850 28843.2619 1542 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+LoadObject lighthouse.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -45678.0231 -35 39755.859 0 0 0 42.237 31.2867 42.237
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_7
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -45678.0231 850 39755.859 329 48 0 1 1 1
+  0 0 0 0 0
+  -45678.0231 850 39755.859 464 48 0 1 1 1
+  220 0 0 0 0
+  -45678.0231 850 39755.859 599 48 0 1 1 1
+  440 0 0 0 0
+  -45678.0231 850 39755.859 734 48 0 1 1 1
+  660 0 0 0 0
+  -45678.0231 850 39755.859 869 48 0 1 1 1
+  880 0 0 0 0
+  -45678.0231 850 39755.859 1004 48 0 1 1 1
+  1100 0 0 0 0
+  -45678.0231 850 39755.859 1139 48 0 1 1 1
+  1320 0 0 0 0
+  -45678.0231 850 39755.859 1274 48 0 1 1 1
+  1540 0 0 0 0
+  -45678.0231 850 39755.859 1409 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+AddNullObject fds_beacon_rotor_7b
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -45678.0231 850 39755.859 509 48 0 1 1 1
+  0 0 0 0 0
+  -45678.0231 850 39755.859 644 48 0 1 1 1
+  220 0 0 0 0
+  -45678.0231 850 39755.859 779 48 0 1 1 1
+  440 0 0 0 0
+  -45678.0231 850 39755.859 914 48 0 1 1 1
+  660 0 0 0 0
+  -45678.0231 850 39755.859 1049 48 0 1 1 1
+  880 0 0 0 0
+  -45678.0231 850 39755.859 1184 48 0 1 1 1
+  1100 0 0 0 0
+  -45678.0231 850 39755.859 1319 48 0 1 1 1
+  1320 0 0 0 0
+  -45678.0231 850 39755.859 1454 48 0 1 1 1
+  1540 0 0 0 0
+  -45678.0231 850 39755.859 1589 48 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+FDSLIGHTS_OBJ_END
 AmbientColor 255 255 255
 AmbIntensity 0.250000
 
@@ -1033,9 +2253,10 @@ LightMotion (unnamed)
   -2 20127 -2 45 35 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
-LightColor 255 255 255
-LgtIntensity 1.000000
+LightColor 205 222 255
+LgtIntensity 0.550000
 LightType 1
+LightRange 300000.000000
 ShadowType 1
 
 AddLight
@@ -1046,14 +2267,15 @@ LightMotion (unnamed)
   1
   28 21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.15
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1074,14 +2296,15 @@ LightMotion (unnamed)
   1
   28 -21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.15
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1102,14 +2325,15 @@ LightMotion (unnamed)
   1
   -28 21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.15
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1130,14 +2354,15 @@ LightMotion (unnamed)
   1
   -28 -21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.15
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1158,14 +2383,15 @@ LightMotion (unnamed)
   1
   -15 0 -64 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.15
 EndBehavior 1
 LockedChannels 5
 ParentObject 80
-LightColor 253 65 2
-LgtIntensity 0.500000
+LightColor 255 140 60
+LgtIntensity 0.130000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.200000
 FlareDissolve 0.000000
@@ -1186,14 +2412,15 @@ LightMotion (unnamed)
   1
   15 0 -64 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.15
 EndBehavior 1
 LockedChannels 5
 ParentObject 80
-LightColor 253 65 2
-LgtIntensity 0.500000
+LightColor 255 140 60
+LgtIntensity 0.130000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.200000
 FlareDissolve 0.000000
@@ -1206,49 +2433,2937 @@ FlareRandStreakDens 50.000000
 FlareRandStreakSharp 6.000000
 ShadowType 1
 
+AddLight
+LightName canyon warm spot
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -22000 4000 -8000 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 138 52
+LgtIntensity 1.650000
+LightType 2
+ConeAngle 28.000000
+LightRange 44000.000000
+VolumetricLight 1
+VolumetricLightIntensity 5.000000
+ShadowType 1
+
+AddLight
+LightName canyon cool spot
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -30000 4000 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 70 150 235
+LgtIntensity 1.650000
+LightType 2
+ConeAngle 28.000000
+LightRange 44000.000000
+VolumetricLight 1
+VolumetricLightIntensity 5.000000
+ShadowType 1
+
+FDSLIGHTS_LGT_BEGIN
+AddLight
+LightName fds runway 0A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 145
+LightColor 255 40 40
+LgtIntensity  (envelope)
+  1
+  33
+  1.6
+  0 0 0 0 0
+  1.1237
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  1.1237
+  385 0 0 0 0
+  1.6
+  440 0 0 0 0
+  1.1237
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  1.1237
+  825 0 0 0 0
+  1.6
+  880 0 0 0 0
+  1.1237
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  1.1237
+  1265 0 0 0 0
+  1.6
+  1320 0 0 0 0
+  1.1237
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  1.1237
+  1705 0 0 0 0
+  1.6
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 0B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 145
+LightColor 60 255 110
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  1.1237
+  165 0 0 0 0
+  1.6
+  220 0 0 0 0
+  1.1237
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  1.1237
+  605 0 0 0 0
+  1.6
+  660 0 0 0 0
+  1.1237
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  1.1237
+  1045 0 0 0 0
+  1.6
+  1100 0 0 0 0
+  1.1237
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  1.1237
+  1485 0 0 0 0
+  1.6
+  1540 0 0 0 0
+  1.1237
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 0A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 146
+LightColor 255 40 40
+LgtIntensity  (envelope)
+  1
+  33
+  1.6
+  0 0 0 0 0
+  1.1237
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  1.1237
+  385 0 0 0 0
+  1.6
+  440 0 0 0 0
+  1.1237
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  1.1237
+  825 0 0 0 0
+  1.6
+  880 0 0 0 0
+  1.1237
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  1.1237
+  1265 0 0 0 0
+  1.6
+  1320 0 0 0 0
+  1.1237
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  1.1237
+  1705 0 0 0 0
+  1.6
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 0B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 146
+LightColor 60 255 110
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  1.1237
+  165 0 0 0 0
+  1.6
+  220 0 0 0 0
+  1.1237
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  1.1237
+  605 0 0 0 0
+  1.6
+  660 0 0 0 0
+  1.1237
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  1.1237
+  1045 0 0 0 0
+  1.6
+  1100 0 0 0 0
+  1.1237
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  1.1237
+  1485 0 0 0 0
+  1.6
+  1540 0 0 0 0
+  1.1237
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 1A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 148
+LightColor 40 170 255
+LgtIntensity  (envelope)
+  1
+  33
+  0.4443
+  0 0 0 0 0
+  1.3562
+  55 0 0 0 0
+  1.5537
+  110 0 0 0 0
+  0.8424
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.4443
+  440 0 0 0 0
+  1.3562
+  495 0 0 0 0
+  1.5537
+  550 0 0 0 0
+  0.8424
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.4443
+  880 0 0 0 0
+  1.3562
+  935 0 0 0 0
+  1.5537
+  990 0 0 0 0
+  0.8424
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.4443
+  1320 0 0 0 0
+  1.3562
+  1375 0 0 0 0
+  1.5537
+  1430 0 0 0 0
+  0.8424
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.4443
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 1B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 148
+LightColor 255 70 220
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.4443
+  220 0 0 0 0
+  1.3562
+  275 0 0 0 0
+  1.5537
+  330 0 0 0 0
+  0.8424
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.4443
+  660 0 0 0 0
+  1.3562
+  715 0 0 0 0
+  1.5537
+  770 0 0 0 0
+  0.8424
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.4443
+  1100 0 0 0 0
+  1.3562
+  1155 0 0 0 0
+  1.5537
+  1210 0 0 0 0
+  0.8424
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.4443
+  1540 0 0 0 0
+  1.3562
+  1595 0 0 0 0
+  1.5537
+  1650 0 0 0 0
+  0.8424
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 1A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 149
+LightColor 40 170 255
+LgtIntensity  (envelope)
+  1
+  33
+  0.4443
+  0 0 0 0 0
+  1.3562
+  55 0 0 0 0
+  1.5537
+  110 0 0 0 0
+  0.8424
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.4443
+  440 0 0 0 0
+  1.3562
+  495 0 0 0 0
+  1.5537
+  550 0 0 0 0
+  0.8424
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.4443
+  880 0 0 0 0
+  1.3562
+  935 0 0 0 0
+  1.5537
+  990 0 0 0 0
+  0.8424
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.4443
+  1320 0 0 0 0
+  1.3562
+  1375 0 0 0 0
+  1.5537
+  1430 0 0 0 0
+  0.8424
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.4443
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 1B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 149
+LightColor 255 70 220
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.4443
+  220 0 0 0 0
+  1.3562
+  275 0 0 0 0
+  1.5537
+  330 0 0 0 0
+  0.8424
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.4443
+  660 0 0 0 0
+  1.3562
+  715 0 0 0 0
+  1.5537
+  770 0 0 0 0
+  0.8424
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.4443
+  1100 0 0 0 0
+  1.3562
+  1155 0 0 0 0
+  1.5537
+  1210 0 0 0 0
+  0.8424
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.4443
+  1540 0 0 0 0
+  1.3562
+  1595 0 0 0 0
+  1.5537
+  1650 0 0 0 0
+  0.8424
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 2A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 151
+LightColor 255 160 40
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.7427
+  110 0 0 0 0
+  1.5182
+  165 0 0 0 0
+  1.4189
+  220 0 0 0 0
+  0.5421
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.7427
+  550 0 0 0 0
+  1.5182
+  605 0 0 0 0
+  1.4189
+  660 0 0 0 0
+  0.5421
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.7427
+  990 0 0 0 0
+  1.5182
+  1045 0 0 0 0
+  1.4189
+  1100 0 0 0 0
+  0.5421
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.7427
+  1430 0 0 0 0
+  1.5182
+  1485 0 0 0 0
+  1.4189
+  1540 0 0 0 0
+  0.5421
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 2B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 151
+LightColor 90 110 255
+LgtIntensity  (envelope)
+  1
+  33
+  1.4189
+  0 0 0 0 0
+  0.5421
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.7427
+  330 0 0 0 0
+  1.5182
+  385 0 0 0 0
+  1.4189
+  440 0 0 0 0
+  0.5421
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.7427
+  770 0 0 0 0
+  1.5182
+  825 0 0 0 0
+  1.4189
+  880 0 0 0 0
+  0.5421
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.7427
+  1210 0 0 0 0
+  1.5182
+  1265 0 0 0 0
+  1.4189
+  1320 0 0 0 0
+  0.5421
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.7427
+  1650 0 0 0 0
+  1.5182
+  1705 0 0 0 0
+  1.4189
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 2A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 152
+LightColor 255 160 40
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.7427
+  110 0 0 0 0
+  1.5182
+  165 0 0 0 0
+  1.4189
+  220 0 0 0 0
+  0.5421
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.7427
+  550 0 0 0 0
+  1.5182
+  605 0 0 0 0
+  1.4189
+  660 0 0 0 0
+  0.5421
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.7427
+  990 0 0 0 0
+  1.5182
+  1045 0 0 0 0
+  1.4189
+  1100 0 0 0 0
+  0.5421
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.7427
+  1430 0 0 0 0
+  1.5182
+  1485 0 0 0 0
+  1.4189
+  1540 0 0 0 0
+  0.5421
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 2B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 152
+LightColor 90 110 255
+LgtIntensity  (envelope)
+  1
+  33
+  1.4189
+  0 0 0 0 0
+  0.5421
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.7427
+  330 0 0 0 0
+  1.5182
+  385 0 0 0 0
+  1.4189
+  440 0 0 0 0
+  0.5421
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.7427
+  770 0 0 0 0
+  1.5182
+  825 0 0 0 0
+  1.4189
+  880 0 0 0 0
+  0.5421
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.7427
+  1210 0 0 0 0
+  1.5182
+  1265 0 0 0 0
+  1.4189
+  1320 0 0 0 0
+  0.5421
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.7427
+  1650 0 0 0 0
+  1.5182
+  1705 0 0 0 0
+  1.4189
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 3A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 154
+LightColor 60 255 110
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  1.034
+  220 0 0 0 0
+  1.5948
+  275 0 0 0 0
+  1.2078
+  330 0 0 0 0
+  0.266
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  1.034
+  660 0 0 0 0
+  1.5948
+  715 0 0 0 0
+  1.2078
+  770 0 0 0 0
+  0.266
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  1.034
+  1100 0 0 0 0
+  1.5948
+  1155 0 0 0 0
+  1.2078
+  1210 0 0 0 0
+  0.266
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  1.034
+  1540 0 0 0 0
+  1.5948
+  1595 0 0 0 0
+  1.2078
+  1650 0 0 0 0
+  0.266
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 3B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 154
+LightColor 255 40 40
+LgtIntensity  (envelope)
+  1
+  33
+  1.034
+  0 0 0 0 0
+  1.5948
+  55 0 0 0 0
+  1.2078
+  110 0 0 0 0
+  0.266
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  1.034
+  440 0 0 0 0
+  1.5948
+  495 0 0 0 0
+  1.2078
+  550 0 0 0 0
+  0.266
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  1.034
+  880 0 0 0 0
+  1.5948
+  935 0 0 0 0
+  1.2078
+  990 0 0 0 0
+  0.266
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  1.034
+  1320 0 0 0 0
+  1.5948
+  1375 0 0 0 0
+  1.2078
+  1430 0 0 0 0
+  0.266
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  1.034
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 3A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 155
+LightColor 60 255 110
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  1.034
+  220 0 0 0 0
+  1.5948
+  275 0 0 0 0
+  1.2078
+  330 0 0 0 0
+  0.266
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  1.034
+  660 0 0 0 0
+  1.5948
+  715 0 0 0 0
+  1.2078
+  770 0 0 0 0
+  0.266
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  1.034
+  1100 0 0 0 0
+  1.5948
+  1155 0 0 0 0
+  1.2078
+  1210 0 0 0 0
+  0.266
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  1.034
+  1540 0 0 0 0
+  1.5948
+  1595 0 0 0 0
+  1.2078
+  1650 0 0 0 0
+  0.266
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 3B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 155
+LightColor 255 40 40
+LgtIntensity  (envelope)
+  1
+  33
+  1.034
+  0 0 0 0 0
+  1.5948
+  55 0 0 0 0
+  1.2078
+  110 0 0 0 0
+  0.266
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  1.034
+  440 0 0 0 0
+  1.5948
+  495 0 0 0 0
+  1.2078
+  550 0 0 0 0
+  0.266
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  1.034
+  880 0 0 0 0
+  1.5948
+  935 0 0 0 0
+  1.2078
+  990 0 0 0 0
+  0.266
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  1.034
+  1320 0 0 0 0
+  1.5948
+  1375 0 0 0 0
+  1.2078
+  1430 0 0 0 0
+  0.266
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  1.034
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 4A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 157
+LightColor 255 70 220
+LgtIntensity  (envelope)
+  1
+  33
+  0.9399
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.3511
+  275 0 0 0 0
+  1.2856
+  330 0 0 0 0
+  1.5793
+  385 0 0 0 0
+  0.9399
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.3511
+  715 0 0 0 0
+  1.2856
+  770 0 0 0 0
+  1.5793
+  825 0 0 0 0
+  0.9399
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.3511
+  1155 0 0 0 0
+  1.2856
+  1210 0 0 0 0
+  1.5793
+  1265 0 0 0 0
+  0.9399
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.3511
+  1595 0 0 0 0
+  1.2856
+  1650 0 0 0 0
+  1.5793
+  1705 0 0 0 0
+  0.9399
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 4B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 157
+LightColor 40 170 255
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.3511
+  55 0 0 0 0
+  1.2856
+  110 0 0 0 0
+  1.5793
+  165 0 0 0 0
+  0.9399
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.3511
+  495 0 0 0 0
+  1.2856
+  550 0 0 0 0
+  1.5793
+  605 0 0 0 0
+  0.9399
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.3511
+  935 0 0 0 0
+  1.2856
+  990 0 0 0 0
+  1.5793
+  1045 0 0 0 0
+  0.9399
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.3511
+  1375 0 0 0 0
+  1.2856
+  1430 0 0 0 0
+  1.5793
+  1485 0 0 0 0
+  0.9399
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 4A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 158
+LightColor 255 70 220
+LgtIntensity  (envelope)
+  1
+  33
+  0.9399
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.3511
+  275 0 0 0 0
+  1.2856
+  330 0 0 0 0
+  1.5793
+  385 0 0 0 0
+  0.9399
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.3511
+  715 0 0 0 0
+  1.2856
+  770 0 0 0 0
+  1.5793
+  825 0 0 0 0
+  0.9399
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.3511
+  1155 0 0 0 0
+  1.2856
+  1210 0 0 0 0
+  1.5793
+  1265 0 0 0 0
+  0.9399
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.3511
+  1595 0 0 0 0
+  1.2856
+  1650 0 0 0 0
+  1.5793
+  1705 0 0 0 0
+  0.9399
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 4B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 158
+LightColor 40 170 255
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.3511
+  55 0 0 0 0
+  1.2856
+  110 0 0 0 0
+  1.5793
+  165 0 0 0 0
+  0.9399
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.3511
+  495 0 0 0 0
+  1.2856
+  550 0 0 0 0
+  1.5793
+  605 0 0 0 0
+  0.9399
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.3511
+  935 0 0 0 0
+  1.2856
+  990 0 0 0 0
+  1.5793
+  1045 0 0 0 0
+  0.9399
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.3511
+  1375 0 0 0 0
+  1.2856
+  1430 0 0 0 0
+  1.5793
+  1485 0 0 0 0
+  0.9399
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 5A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 160
+LightColor 90 110 255
+LgtIntensity  (envelope)
+  1
+  33
+  1.4731
+  0 0 0 0 0
+  1.4731
+  55 0 0 0 0
+  0.6421
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.6421
+  385 0 0 0 0
+  1.4731
+  440 0 0 0 0
+  1.4731
+  495 0 0 0 0
+  0.6421
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.6421
+  825 0 0 0 0
+  1.4731
+  880 0 0 0 0
+  1.4731
+  935 0 0 0 0
+  0.6421
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.6421
+  1265 0 0 0 0
+  1.4731
+  1320 0 0 0 0
+  1.4731
+  1375 0 0 0 0
+  0.6421
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.6421
+  1705 0 0 0 0
+  1.4731
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 5B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 160
+LightColor 255 160 40
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.6421
+  165 0 0 0 0
+  1.4731
+  220 0 0 0 0
+  1.4731
+  275 0 0 0 0
+  0.6421
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.6421
+  605 0 0 0 0
+  1.4731
+  660 0 0 0 0
+  1.4731
+  715 0 0 0 0
+  0.6421
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.6421
+  1045 0 0 0 0
+  1.4731
+  1100 0 0 0 0
+  1.4731
+  1155 0 0 0 0
+  0.6421
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.6421
+  1485 0 0 0 0
+  1.4731
+  1540 0 0 0 0
+  1.4731
+  1595 0 0 0 0
+  0.6421
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 5A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 161
+LightColor 90 110 255
+LgtIntensity  (envelope)
+  1
+  33
+  1.4731
+  0 0 0 0 0
+  1.4731
+  55 0 0 0 0
+  0.6421
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.6421
+  385 0 0 0 0
+  1.4731
+  440 0 0 0 0
+  1.4731
+  495 0 0 0 0
+  0.6421
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.6421
+  825 0 0 0 0
+  1.4731
+  880 0 0 0 0
+  1.4731
+  935 0 0 0 0
+  0.6421
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.6421
+  1265 0 0 0 0
+  1.4731
+  1320 0 0 0 0
+  1.4731
+  1375 0 0 0 0
+  0.6421
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.6421
+  1705 0 0 0 0
+  1.4731
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 5B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 161
+LightColor 255 160 40
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.6421
+  165 0 0 0 0
+  1.4731
+  220 0 0 0 0
+  1.4731
+  275 0 0 0 0
+  0.6421
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.6421
+  605 0 0 0 0
+  1.4731
+  660 0 0 0 0
+  1.4731
+  715 0 0 0 0
+  0.6421
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.6421
+  1045 0 0 0 0
+  1.4731
+  1100 0 0 0 0
+  1.4731
+  1155 0 0 0 0
+  0.6421
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.6421
+  1485 0 0 0 0
+  1.4731
+  1540 0 0 0 0
+  1.4731
+  1595 0 0 0 0
+  0.6421
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 6A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 163
+LightColor 255 40 40
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.9399
+  55 0 0 0 0
+  1.5793
+  110 0 0 0 0
+  1.2856
+  165 0 0 0 0
+  0.3511
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.9399
+  495 0 0 0 0
+  1.5793
+  550 0 0 0 0
+  1.2856
+  605 0 0 0 0
+  0.3511
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.9399
+  935 0 0 0 0
+  1.5793
+  990 0 0 0 0
+  1.2856
+  1045 0 0 0 0
+  0.3511
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.9399
+  1375 0 0 0 0
+  1.5793
+  1430 0 0 0 0
+  1.2856
+  1485 0 0 0 0
+  0.3511
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 6B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 163
+LightColor 60 255 110
+LgtIntensity  (envelope)
+  1
+  33
+  0.3511
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.9399
+  275 0 0 0 0
+  1.5793
+  330 0 0 0 0
+  1.2856
+  385 0 0 0 0
+  0.3511
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.9399
+  715 0 0 0 0
+  1.5793
+  770 0 0 0 0
+  1.2856
+  825 0 0 0 0
+  0.3511
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.9399
+  1155 0 0 0 0
+  1.5793
+  1210 0 0 0 0
+  1.2856
+  1265 0 0 0 0
+  0.3511
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.9399
+  1595 0 0 0 0
+  1.5793
+  1650 0 0 0 0
+  1.2856
+  1705 0 0 0 0
+  0.3511
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 6A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 164
+LightColor 255 40 40
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.9399
+  55 0 0 0 0
+  1.5793
+  110 0 0 0 0
+  1.2856
+  165 0 0 0 0
+  0.3511
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.9399
+  495 0 0 0 0
+  1.5793
+  550 0 0 0 0
+  1.2856
+  605 0 0 0 0
+  0.3511
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.9399
+  935 0 0 0 0
+  1.5793
+  990 0 0 0 0
+  1.2856
+  1045 0 0 0 0
+  0.3511
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.9399
+  1375 0 0 0 0
+  1.5793
+  1430 0 0 0 0
+  1.2856
+  1485 0 0 0 0
+  0.3511
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 6B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 164
+LightColor 60 255 110
+LgtIntensity  (envelope)
+  1
+  33
+  0.3511
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.9399
+  275 0 0 0 0
+  1.5793
+  330 0 0 0 0
+  1.2856
+  385 0 0 0 0
+  0.3511
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.9399
+  715 0 0 0 0
+  1.5793
+  770 0 0 0 0
+  1.2856
+  825 0 0 0 0
+  0.3511
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.9399
+  1155 0 0 0 0
+  1.5793
+  1210 0 0 0 0
+  1.2856
+  1265 0 0 0 0
+  0.3511
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.9399
+  1595 0 0 0 0
+  1.5793
+  1650 0 0 0 0
+  1.2856
+  1705 0 0 0 0
+  0.3511
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 7A
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 166
+LightColor 40 170 255
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.266
+  110 0 0 0 0
+  1.2078
+  165 0 0 0 0
+  1.5948
+  220 0 0 0 0
+  1.034
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.266
+  550 0 0 0 0
+  1.2078
+  605 0 0 0 0
+  1.5948
+  660 0 0 0 0
+  1.034
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.266
+  990 0 0 0 0
+  1.2078
+  1045 0 0 0 0
+  1.5948
+  1100 0 0 0 0
+  1.034
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.266
+  1430 0 0 0 0
+  1.2078
+  1485 0 0 0 0
+  1.5948
+  1540 0 0 0 0
+  1.034
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 7B
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 166
+LightColor 255 70 220
+LgtIntensity  (envelope)
+  1
+  33
+  1.5948
+  0 0 0 0 0
+  1.034
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.266
+  330 0 0 0 0
+  1.2078
+  385 0 0 0 0
+  1.5948
+  440 0 0 0 0
+  1.034
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.266
+  770 0 0 0 0
+  1.2078
+  825 0 0 0 0
+  1.5948
+  880 0 0 0 0
+  1.034
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.266
+  1210 0 0 0 0
+  1.2078
+  1265 0 0 0 0
+  1.5948
+  1320 0 0 0 0
+  1.034
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.266
+  1650 0 0 0 0
+  1.2078
+  1705 0 0 0 0
+  1.5948
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 7A2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 167
+LightColor 40 170 255
+LgtIntensity  (envelope)
+  1
+  33
+  0.2
+  0 0 0 0 0
+  0.2
+  55 0 0 0 0
+  0.266
+  110 0 0 0 0
+  1.2078
+  165 0 0 0 0
+  1.5948
+  220 0 0 0 0
+  1.034
+  275 0 0 0 0
+  0.2
+  330 0 0 0 0
+  0.2
+  385 0 0 0 0
+  0.2
+  440 0 0 0 0
+  0.2
+  495 0 0 0 0
+  0.266
+  550 0 0 0 0
+  1.2078
+  605 0 0 0 0
+  1.5948
+  660 0 0 0 0
+  1.034
+  715 0 0 0 0
+  0.2
+  770 0 0 0 0
+  0.2
+  825 0 0 0 0
+  0.2
+  880 0 0 0 0
+  0.2
+  935 0 0 0 0
+  0.266
+  990 0 0 0 0
+  1.2078
+  1045 0 0 0 0
+  1.5948
+  1100 0 0 0 0
+  1.034
+  1155 0 0 0 0
+  0.2
+  1210 0 0 0 0
+  0.2
+  1265 0 0 0 0
+  0.2
+  1320 0 0 0 0
+  0.2
+  1375 0 0 0 0
+  0.266
+  1430 0 0 0 0
+  1.2078
+  1485 0 0 0 0
+  1.5948
+  1540 0 0 0 0
+  1.034
+  1595 0 0 0 0
+  0.2
+  1650 0 0 0 0
+  0.2
+  1705 0 0 0 0
+  0.2
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+AddLight
+LightName fds runway 7B2
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 167
+LightColor 255 70 220
+LgtIntensity  (envelope)
+  1
+  33
+  1.5948
+  0 0 0 0 0
+  1.034
+  55 0 0 0 0
+  0.2
+  110 0 0 0 0
+  0.2
+  165 0 0 0 0
+  0.2
+  220 0 0 0 0
+  0.2
+  275 0 0 0 0
+  0.266
+  330 0 0 0 0
+  1.2078
+  385 0 0 0 0
+  1.5948
+  440 0 0 0 0
+  1.034
+  495 0 0 0 0
+  0.2
+  550 0 0 0 0
+  0.2
+  605 0 0 0 0
+  0.2
+  660 0 0 0 0
+  0.2
+  715 0 0 0 0
+  0.266
+  770 0 0 0 0
+  1.2078
+  825 0 0 0 0
+  1.5948
+  880 0 0 0 0
+  1.034
+  935 0 0 0 0
+  0.2
+  990 0 0 0 0
+  0.2
+  1045 0 0 0 0
+  0.2
+  1100 0 0 0 0
+  0.2
+  1155 0 0 0 0
+  0.266
+  1210 0 0 0 0
+  1.2078
+  1265 0 0 0 0
+  1.5948
+  1320 0 0 0 0
+  1.034
+  1375 0 0 0 0
+  0.2
+  1430 0 0 0 0
+  0.2
+  1485 0 0 0 0
+  0.2
+  1540 0 0 0 0
+  0.2
+  1595 0 0 0 0
+  0.266
+  1650 0 0 0 0
+  1.2078
+  1705 0 0 0 0
+  1.5948
+  1760 0 0 0 0
+EndBehavior 1
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 7.000000
+ShadowType 1
+FDSLIGHTS_LGT_END
 ShowCamera 1 7
 CameraMotion (unnamed)
   9
-  18
-  9505.78 618.084 -83574.03 -25.5 0.9 0 1 1 1
+  51
+  10924.2813 525 -84328.6668 -45.6666 3.9603 0 1 1 1
   0 0 0 0 0
-  1689.74 393.084 -74978.46 -25.5 0.9 0 1 1 1
-  236 0 0 0 0
-  -971.6257 43.08398 -61200.67 -25.5 0.9 0 1 1 1
-  424 0 0 0 0
-  -650.1207 293.084 -47236.36 -25.5 0.9 0 1 1 1
-  632 0 0 0 0
-  -1799.497 293.084 -36190.19 -25.5 0.9 0 1 1 1
-  794 0 0 0 0
-  -2585.002 243.084 -29611.73 -25.5 0.9 0 1 1 1
-  895 0 0 0 0
-  -5632.386 393.084 -21268.94 -25.5 0.9 0 1 1 1
-  1000 0 0 0 0
-  -11736.9 968.084 -13278.21 -25.5 0.9 0 1 1 1
-  1092 0 0 0 0
-  -14781.28 718.084 -7420.447 -25.5 0.9 0 1 1 1
-  1144 0 0 0 0
-  -19600.38 843.084 1539.308 -25.5 0.9 0 1 1 1
-  1202 0 0 0 0
-  -24519.88 443.084 14037.02 -25.5 0.9 0 1 1 1
-  1283 0 0 0 0
-  -31167.99 343.084 23889.68 -25.5 0.9 0 1 1 1
-  1364 0 0 0 0
-  -37799.42 343.084 30529.01 -25.5 0.9 0 1 1 1
-  1450 0 0 0 0
-  -50862.07 1258.276 46487.78 -25.5 0.9 0 1 1 1
-  1622 0 0 0 0
-  -50415.32 329.0067 48411.07 -25.5 0.9 0 1 1 1
-  1647 0 0 0 0
-  -49735.17 1118.084 49512.87 -25.5 0.9 0 1 1 1
-  1656 0 0 0 0
-  -49550.88 1118.084 50600.87 -25.5 0.9 0 1 1 1
-  1673 0 0 0 0
-  -49843.88 1118.084 51951.87 -25.5 0.9 0 1 1 1
+  9874.3411 525 -83526.7758 -44.7233 4.2229 0 1 1 1
+  34 0 0 0 0
+  8824.4009 525 -82724.8848 -43.8096 4.476 0 1 1 1
+  68 0 0 0 0
+  7774.4606 525 -81922.9939 -42.9244 4.7199 0 1 1 1
+  102 0 0 0 0
+  6724.5204 525 -81121.1029 -41.6697 4.8812 0 1 1 1
+  136 0 0 0 0
+  5674.5801 525 -80319.2119 -38.5444 4.4707 0 1 1 1
+  170 0 0 0 0
+  4133.1046 525 -78418.8555 -27.9761 4.8141 0 1 1 1
+  204 0 0 0 0
+  3137.8803 525 -75945.6443 -32.2285 5.6826 0 1 1 1
+  238 0 0 0 0
+  2142.6561 525 -73472.4332 -23.9779 6.9028 0 1 1 1
+  272 0 0 0 0
+  1362.8805 525 -71534.629 -18.0711 7.4488 0 1 1 1
+  306 0 0 0 0
+  785.0722 525 -69953.0378 -16.9701 7.9059 0 1 1 1
+  340 0 0 0 0
+  218.4055 525 -68366.3711 -16.2464 8.3576 0 1 1 1
+  374 0 0 0 0
+  -528.0347 525 -66153.3686 -8.7223 7.4073 0 1 1 1
+  408 0 0 0 0
+  -1146.6458 525 -63423.9241 -4.7145 7.0805 0 1 1 1
+  442 0 0 0 0
+  -1712.3798 525 -60927.7847 2.1683 6.3264 0 1 1 1
+  476 0 0 0 0
+  -2195.4997 525 -58689.2446 9.2747 -1.8189 0 1 1 1
+  510 0 0 0 0
+  -2676.1894 525 -56449.9343 25.152 -48.6646 0 1 1 1
+  544 0 0 0 0
+  -2925.4258 511.425 -53930.1499 32.2494 5.419 0 1 1 1
+  578 0 0 0 0
+  -2765.1006 478.2542 -51348.3612 18.6788 6.8858 0 1 1 1
+  612 0 0 0 0
+  -2604.7754 445.0835 -48766.5726 14.8525 7.3785 0 1 1 1
+  646 0 0 0 0
+  -2452.4371 413.5652 -46313.4005 9.7915 7.3996 0 1 1 1
+  680 0 0 0 0
+  -2427.9098 405 -44164.5683 6.7851 6.7511 0 1 1 1
+  714 0 0 0 0
+  -2452.4459 405 -42015.9085 5.5978 6.3965 0 1 1 1
+  748 0 0 0 0
+  -2477.5911 405 -39813.9053 4.1801 6.1617 0 1 1 1
+  782 0 0 0 0
+  -2556.6307 405 -37545.1172 4.0017 6.035 0 1 1 1
+  816 0 0 0 0
+  -2644.3563 405 -35260.0727 1.1956 5.7606 0 1 1 1
+  850 0 0 0 0
+  -2824.9949 405 -32417.5975 -0.9142 6.3307 0 1 1 1
+  884 0 0 0 0
+  -3058.7449 405 -29579.2046 -1.615 6.9884 0 1 1 1
+  918 0 0 0 0
+  -3292.4949 405 -26740.8118 -9.1613 6.443 0 1 1 1
+  952 0 0 0 0
+  -4024.2977 405 -23926.8024 -32.0532 4.1871 0 1 1 1
+  986 0 0 0 0
+  -5839.5136 405 -21478.3993 -35.1591 1.1424 0 1 1 1
+  1020 0 0 0 0
+  -8330.1922 578.5531 -18381.5009 -37.5591 -0.939 0 1 1 1
+  1054 0 0 0 0
+  -10829.8136 915 -15462.6991 -22.2769 3.7979 0 1 1 1
+  1088 0 0 0 0
+  -12379.7708 915 -12013.3737 -27.7773 3.6863 0 1 1 1
+  1122 0 0 0 0
+  -14548.9413 915 -7472.4585 -30.1996 4.1277 0 1 1 1
+  1156 0 0 0 0
+  -17340.2777 915 -1996.8865 -31.8173 4.7112 0 1 1 1
+  1190 0 0 0 0
+  -20006.339 892.9124 2885.8526 -28.6566 5.2092 0 1 1 1
+  1224 0 0 0 0
+  -22673.0404 712.9124 7859.6951 -24.4627 4.8276 0 1 1 1
+  1258 0 0 0 0
+  -24758.7175 645 12669.9256 -25.3157 5.5706 0 1 1 1
+  1292 0 0 0 0
+  -27314.0131 746.5064 17097.5213 -23.7628 8.5172 0 1 1 1
+  1326 0 0 0 0
+  -29586.5653 714.9897 21217.3198 -27.5091 8.565 0 1 1 1
+  1360 0 0 0 0
+  -31883.3743 645 24753.932 -39.2565 5.7073 0 1 1 1
+  1394 0 0 0 0
+  -34573.2683 645 27660.753 -38.2576 4.4573 0 1 1 1
+  1428 0 0 0 0
+  -37130.7818 645 30439.6948 -34.0275 4.1931 0 1 1 1
+  1462 0 0 0 0
+  -39983.2434 645 34833.6174 -29.145 6.7574 0 1 1 1
+  1496 0 0 0 0
+  -42312.087 645 38811.6034 -32.5685 9.5295 0 1 1 1
+  1530 0 0 0 0
+  -44194.9646 1337.3636 41757.5078 -37.8925 24.9355 0 1 1 1
+  1564 0 0 0 0
+  -46157.3097 2029.7273 44386.9629 -37.7774 32.0347 0 1 1 1
+  1598 0 0 0 0
+  -48292.4943 2722.0909 47220.4395 -36.4616 36.9944 0 1 1 1
+  1632 0 0 0 0
+  -50296.3381 2885 50435.8216 -19.9082 37.0315 0 1 1 1
+  1666 0 0 0 0
+  -51314.5569 2885 53335.1565 -14.1132 28.4298 0 1 1 1
   1700 0 0 0 0
 EndBehavior 1
-TargetObject 79
-ZoomFactor 3.200000
+TargetObject 0
+ZoomFactor 2.400000
 Resolution 0
 PixelAspectRatio 2
 SegmentMemory 2200000

@@ -77,7 +77,7 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 	if (strength > 1.0f) strength = 1.0f;
 	const bool viz = fds::FeatureFlags::aa_viz();   // edge heatmap instead of blend
 	const float invZScale = (ctx.zscale != 0.0f) ? 1.0f / ctx.zscale : 1.0f;
-	const meka::u16* nrm = ctx.gb->normal.data();
+	const meka::u32* nrm = ctx.gb->normal.data();
 	const word*      zEnc = ctx.zpage16;
 	dword*           out  = reinterpret_cast<dword*>(ctx.vpage);
 
@@ -85,15 +85,15 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 	dword* src = g_aaSrc.data();
 	std::memcpy(src, out, N * sizeof(dword));
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 	const int tsx = (W + numTilesX - 1) / numTilesX;
 	const int tsy = (H + numTilesY - 1) / numTilesY;
 
 	// Edge metric for one pixel (0 = flat interior … ~2 = strong edge), or -1 for
 	// a sky pixel (skip). Normal edge from the RAW packed oct code — no decode:
-	// the u16 is (int8 octX)|(int8 octY)<<8, adjacent normals have adjacent oct
-	// codes, so |Δqx|+|Δqy| is a linear angle proxy (~127 L1 ≈ 90° crease →
-	// scale 1/127 ≈ old 1-N·N). Fold seams can spike Δ for similar normals — a
+	// the u32 is (int16 octX)|(int16 octY)<<16, adjacent normals have adjacent oct
+	// codes, so |Δqx|+|Δqy| is a linear angle proxy (~32767 L1 ≈ 90° crease →
+	// scale 1/32767 ≈ old 1-N·N). Fold seams can spike Δ for similar normals — a
 	// harmless false-positive edge, never a miss. This is the SCALAR reference;
 	// the SIMD interior below computes the identical metric 8-wide.
 	auto edgeAt = [&](int x, int y) -> float {
@@ -102,9 +102,9 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 		if (ze == 0) return -1.0f;
 		const float z0 = float(0xFF80 - ze) * invZScale;
 		const float denom = z0 > 1e-3f ? z0 : 1e-3f;
-		const meka::u16 p0 = nrm[i];
-		const int qx0 = int(int8_t(p0 & 0xff));
-		const int qy0 = int(int8_t((p0 >> 8) & 0xff));
+		const meka::u32 p0 = nrm[i];
+		const int qx0 = int(int16_t(p0 & 0xffff));
+		const int qy0 = int(int16_t((p0 >> 16) & 0xffff));
 		// Per axis: depth edge needs a STEP (large first-diff on at least one
 		// side) AND CURVATURE (the two sides not co-linear) → a real
 		// silhouette/crease. A grazing floor is a straight depth ramp (big
@@ -115,7 +115,7 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 		float edge = 0.0f;
 		for (int a = 0; a < 2; ++a) {
 			const word zA = zEnc[i + size_t(ax[a][0])], zB = zEnc[i + size_t(ax[a][1])];
-			const meka::u16 pA = nrm[i + size_t(ax[a][0])], pB = nrm[i + size_t(ax[a][1])];
+			const meka::u32 pA = nrm[i + size_t(ax[a][0])], pB = nrm[i + size_t(ax[a][1])];
 			if (zA == 0 || zB == 0) { edge += 2.0f; continue; }   // silhouette vs sky
 			const float za = float(0xFF80 - zA) * invZScale, zb = float(0xFF80 - zB) * invZScale;
 			const float step = std::max(std::fabs(z0 - za), std::fabs(z0 - zb)) / denom;
@@ -124,9 +124,9 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 			const float sT = step > 0.04f ? 1.0f : step * 25.0f;
 			const float cT = curv > 0.015f ? 1.0f : curv * 66.7f;
 			edge += std::min(sT, cT);                              // depth edge (this axis)
-			const int dqa = std::abs(qx0 - int(int8_t(pA & 0xff))) + std::abs(qy0 - int(int8_t((pA >> 8) & 0xff)));
-			const int dqb = std::abs(qx0 - int(int8_t(pB & 0xff))) + std::abs(qy0 - int(int8_t((pB >> 8) & 0xff)));
-			edge += float(std::max(dqa, dqb)) * (1.0f / 127.0f);  // normal edge (this axis)
+			const int dqa = std::abs(qx0 - int(int16_t(pA & 0xffff))) + std::abs(qy0 - int(int16_t((pA >> 16) & 0xffff)));
+			const int dqb = std::abs(qx0 - int(int16_t(pB & 0xffff))) + std::abs(qy0 - int(int16_t((pB >> 16) & 0xffff)));
+			edge += float(std::max(dqa, dqb)) * (1.0f / 32767.0f);  // normal edge (this axis)
 		}
 		return edge * 0.25f;
 	};
@@ -138,13 +138,13 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 		if (ze == 0) { dE = nE = 0; return false; }
 		const float z0 = float(0xFF80 - ze) * invZScale;
 		const float denom = z0 > 1e-3f ? z0 : 1e-3f;
-		const meka::u16 p0 = nrm[i];
-		const int qx0 = int(int8_t(p0 & 0xff)), qy0 = int(int8_t((p0 >> 8) & 0xff));
+		const meka::u32 p0 = nrm[i];
+		const int qx0 = int(int16_t(p0 & 0xffff)), qy0 = int(int16_t((p0 >> 16) & 0xffff));
 		const int ax[2][2] = { { -1, +1 }, { -W, +W } };
 		dE = nE = 0.0f;
 		for (int a = 0; a < 2; ++a) {
 			const word zA = zEnc[i + size_t(ax[a][0])], zB = zEnc[i + size_t(ax[a][1])];
-			const meka::u16 pA = nrm[i + size_t(ax[a][0])], pB = nrm[i + size_t(ax[a][1])];
+			const meka::u32 pA = nrm[i + size_t(ax[a][0])], pB = nrm[i + size_t(ax[a][1])];
 			if (zA == 0 || zB == 0) { dE += 2.0f; continue; }
 			const float za = float(0xFF80 - zA) * invZScale, zb = float(0xFF80 - zB) * invZScale;
 			const float step = std::max(std::fabs(z0 - za), std::fabs(z0 - zb)) / denom;
@@ -152,9 +152,9 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 			const float sT = step > 0.04f ? 1.0f : step * 25.0f;
 			const float cT = curv > 0.015f ? 1.0f : curv * 66.7f;
 			dE += std::min(sT, cT);
-			const int dqa = std::abs(qx0 - int(int8_t(pA & 0xff))) + std::abs(qy0 - int(int8_t((pA >> 8) & 0xff)));
-			const int dqb = std::abs(qx0 - int(int8_t(pB & 0xff))) + std::abs(qy0 - int(int8_t((pB >> 8) & 0xff)));
-			nE += float(std::max(dqa, dqb)) * (1.0f / 127.0f);
+			const int dqa = std::abs(qx0 - int(int16_t(pA & 0xffff))) + std::abs(qy0 - int(int16_t((pA >> 16) & 0xffff)));
+			const int dqb = std::abs(qx0 - int(int16_t(pB & 0xffff))) + std::abs(qy0 - int(int16_t((pB >> 16) & 0xffff)));
+			nE += float(std::max(dqa, dqb)) * (1.0f / 32767.0f);
 		}
 		dE *= 0.25f; nE *= 0.25f; return true;
 	};
@@ -220,7 +220,7 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 				const __m256  vOne   = _mm256_set1_ps(1.0f);
 				const __m256  vEps   = _mm256_set1_ps(1e-3f);
 				const __m256  v25    = _mm256_set1_ps(25.0f);
-				const __m256  vInv127= _mm256_set1_ps(1.0f / 127.0f);
+				const __m256  vInv127= _mm256_set1_ps(1.0f / 32767.0f);
 				const int off[4] = { -1, +1, -W, +W };
 
 				const bool useSimd = !std::getenv("FDS_AA_SCALAR");
@@ -235,9 +235,9 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 						const __m256  z0 = _mm256_mul_ps(
 							_mm256_cvtepi32_ps(_mm256_sub_epi32(vFF80, ze)), vInvZ);
 						const __m256  centerSky = _mm256_castsi256_ps(_mm256_cmpeq_epi32(ze, vZeroI));
-						const __m256i nv = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(nrm + i)));
-						const __m256i qx0 = _mm256_srai_epi32(_mm256_slli_epi32(nv, 24), 24);
-						const __m256i qy0 = _mm256_srai_epi32(_mm256_slli_epi32(nv, 16), 24);
+						const __m256i nv = _mm256_loadu_si256((const __m256i*)(nrm + i));
+						const __m256i qx0 = _mm256_srai_epi32(_mm256_slli_epi32(nv, 16), 16);
+						const __m256i qy0 = _mm256_srai_epi32(nv, 16);
 						const __m256  denom = _mm256_max_ps(z0, vEps);
 
 						// Per-axis step×curvature depth + max-side normal edge — the
@@ -265,12 +265,12 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 							const __m256  sT = _mm256_min_ps(vOne, _mm256_mul_ps(step, v25));
 							const __m256  cT = _mm256_min_ps(vOne, _mm256_mul_ps(curv, v66_7));
 							const __m256  depthA = _mm256_min_ps(sT, cT);
-							const __m256i nAi = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(nrm + jm)));
-							const __m256i nBi = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(nrm + jp)));
-							const __m256i qxa = _mm256_srai_epi32(_mm256_slli_epi32(nAi, 24), 24);
-							const __m256i qya = _mm256_srai_epi32(_mm256_slli_epi32(nAi, 16), 24);
-							const __m256i qxb = _mm256_srai_epi32(_mm256_slli_epi32(nBi, 24), 24);
-							const __m256i qyb = _mm256_srai_epi32(_mm256_slli_epi32(nBi, 16), 24);
+							const __m256i nAi = _mm256_loadu_si256((const __m256i*)(nrm + jm));
+							const __m256i nBi = _mm256_loadu_si256((const __m256i*)(nrm + jp));
+							const __m256i qxa = _mm256_srai_epi32(_mm256_slli_epi32(nAi, 16), 16);
+							const __m256i qya = _mm256_srai_epi32(nAi, 16);
+							const __m256i qxb = _mm256_srai_epi32(_mm256_slli_epi32(nBi, 16), 16);
+							const __m256i qyb = _mm256_srai_epi32(nBi, 16);
 							const __m256i dqa = _mm256_add_epi32(_mm256_abs_epi32(_mm256_sub_epi32(qx0, qxa)),
 							                                     _mm256_abs_epi32(_mm256_sub_epi32(qy0, qya)));
 							const __m256i dqb = _mm256_add_epi32(_mm256_abs_epi32(_mm256_sub_epi32(qx0, qxb)),

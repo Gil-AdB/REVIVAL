@@ -21,11 +21,35 @@
 // set it while a worker thread reads it.
 extern std::atomic<bool> g_shouldQuit;
 
+// --init_timeline (default OFF, byte-null, stderr only): stamp one startup
+// milestone. Prints "[INIT-T] +<abs ms> (dt <ms>) [t<n>] <label>", where <abs>
+// is measured from the FIRST mark of the run and <dt> from the previous mark on
+// ANY thread — the init chain runs on the t1 worker while Run_Glato plays on the
+// demo thread, so the marks legitimately interleave and only the absolute column
+// is ordered. Exists because "the tessellation bake hangs the intro" is a
+// DURATION question, not a threading one (Initialize_Greets already runs
+// concurrently with the intro; it only stalls the demo if it outlasts it), and
+// the two cannot be told apart without per-phase timestamps.
+void InitTimelineMark(const char *label);
+
 // Per-scene "skip to next" flag. Set by Backspace keydown. Cleared by
 // runSceneBlocking() once it observes the flag and breaks out of the tick
 // loop, so the next scene starts clean. Distinct from g_shouldQuit so that
 // "skip" doesn't accidentally exit the program.
 extern std::atomic<bool> g_skipScene;
+
+// SHIFT held, as of the last key event. Written by both SDL event pumps
+// (REV.CPP native, MainLoop.cpp wasm) from SDL_Keysym::mod; SDL updates its
+// modifier state BEFORE it fills keysym.mod, so the shift key's own KEYDOWN
+// already reads as held and its own KEYUP already reads as released.
+// Read by SceneDriver::tickSceneTimer as the FAST arm of the F1/F2 scene-clock
+// scrub (step x --scrub_speed while held).
+// Deliberately NOT a Keyboard[] slot: ScLShift/ScRShift are defined in
+// FDS_DEFS.H but have no consumers, and Keypressed() (FDS/ISR/ISR.CPP) scans
+// the WHOLE array — routing shift through Keyboard[] would make "any key held"
+// true whenever shift is down, which the legacy P-key timefreeze in
+// RENDER.CPP busy-waits on.
+extern std::atomic<bool> g_shiftHeld;
 
 // Runtime mip-level debug knobs (toggled via N / Shift+N in REV.CPP).
 //   g_forceMipLevel: -1 = auto (rasterizer-chosen), 0..7 = override.
@@ -92,6 +116,7 @@ void Greets_JoinBakeThread();
 void Greets_ShutdownBakeThread();
 
 void Initialize_Crash();
+void Initialize_PBRTest();
 void Run_Crash();
 
 #endif

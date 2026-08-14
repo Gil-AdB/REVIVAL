@@ -107,6 +107,40 @@ void ReadGeneralSceneData(FldScene *Sc)
 	ReadObjectNames=(Names[0]=='O');
 	ReadMaterialNames=(Names[1]=='M');
 	ReadLightNames=(Names[2]=='L');
+	// Bit 2048 = Scene_EnvDefaults (authored scene-wide env-reflection
+	// defaults, LWS "FdsSceneEnvRefl"/"FdsSceneEnvBakeRes"): two int32s,
+	// written conditionally by tools/lwsread FLDSAVE.CPP. Same provably-
+	// inert-for-legacy extension idiom as Light_VolumetricCone — legacy
+	// writers only ever store EndBehavior values <= 1024 here. The bit is
+	// STRIPPED after reading so anything consuming the envelope's
+	// EndBehavior sees the legacy value (Sc is memset(0) by the caller,
+	// so bit-free files leave both fields 0 = unset).
+	if (Sc->AmbientIntensity->EndBehavior & Scene_EnvDefaults)
+	{
+		fread(&Sc->EnvReflSceneMode,1,4,FLD);
+		fread(&Sc->EnvBakeResScene,1,4,FLD);
+		Sc->AmbientIntensity->EndBehavior &= ~(uint32_t)Scene_EnvDefaults;
+		printf("[FLD] scene env defaults: envRefl=%d envBakeRes=%d\n",
+		       (int)Sc->EnvReflSceneMode, (int)Sc->EnvBakeResScene);
+	}
+	// Bit 4096 = Scene_SkyColors (authored backdrop gradient): four FldColor
+	// triples, written after the env-defaults payload by tools/lwsread. Same
+	// provably-inert-for-legacy idiom — legacy writers never set >1024 (env-
+	// defaults aside) on this envelope's EndBehavior, and Sc is memset(0) by
+	// the caller so a bit-free FLD leaves SkyColorsSet=0 (legacy black void).
+	// Strip the bit so EndBehavior consumers never see it.
+	if (Sc->AmbientIntensity->EndBehavior & Scene_SkyColors)
+	{
+		fread(&Sc->ZenithColor,1,sizeof(FldColor),FLD);
+		fread(&Sc->SkyColor,1,sizeof(FldColor),FLD);
+		fread(&Sc->GroundColor,1,sizeof(FldColor),FLD);
+		fread(&Sc->NadirColor,1,sizeof(FldColor),FLD);
+		Sc->SkyColorsSet = 1;
+		Sc->AmbientIntensity->EndBehavior &= ~(uint32_t)Scene_SkyColors;
+		printf("[FLD] scene sky gradient: zenith=(%d,%d,%d) nadir=(%d,%d,%d)\n",
+		       Sc->ZenithColor.Red, Sc->ZenithColor.Green, Sc->ZenithColor.Blue,
+		       Sc->NadirColor.Red, Sc->NadirColor.Green, Sc->NadirColor.Blue);
+	}
 }
 
 void ReadMaterial(FldMat *Mat)
@@ -156,6 +190,53 @@ void ReadMaterial(FldMat *Mat)
 	fread(&Mat->Opacity,1,4,FLD);
 	fread(&Mat->TFP0,1,4,FLD);
 	fread(&Mat->TFP1,1,4,FLD);
+	// Revival per-surface extension: conditional payload gated on Surf_RevExt
+	// (0x8000) in the material FLAG word — u16 RevExtMask + only the authored
+	// fields, ascending mask-bit order (matches tools/lwsread FLDSAVE.CPP). The
+	// FldMat is not zero-initialized (new FldMat[] on a POD), so gate on the
+	// disk-read Flags bit, not on RevExtMask, and read RevExtMask from disk only
+	// when the bit is set. Legacy FLDs never carry the bit (LWOB FLAG tops out at
+	// 1024), so this branch is provably inert for shipping content. Mapped to the
+	// live Material in FLD_MAT.CPP AddMaterial. See docs/SIDECAR_MIGRATION_PLAN.md.
+	if (Mat->Flags & Surf_RevExt)
+	{
+		fread(&Mat->RevExtMask,1,2,FLD);
+		if (Mat->RevExtMask & 0x001) fread(&Mat->AoStrength,1,4,FLD);
+		if (Mat->RevExtMask & 0x002) fread(&Mat->ParallaxScale,1,4,FLD);
+		if (Mat->RevExtMask & 0x004) fread(&Mat->TintR,1,4,FLD);
+		if (Mat->RevExtMask & 0x008) fread(&Mat->TintG,1,4,FLD);
+		if (Mat->RevExtMask & 0x010) fread(&Mat->TintB,1,4,FLD);
+		if (Mat->RevExtMask & 0x020) fread(&Mat->RefractIor,1,4,FLD);
+		if (Mat->RevExtMask & 0x040) fread(&Mat->Refractive,1,1,FLD);
+		if (Mat->RevExtMask & 0x080) fread(&Mat->EnvReflMode,1,1,FLD);
+		if (Mat->RevExtMask & 0x100) fread(&Mat->EnvBakeRes,1,4,FLD);
+		if (Mat->RevExtMask & 0x200) fread(&Mat->WaterProcMode,1,1,FLD);
+		if (Mat->RevExtMask & 0x400) fread(&Mat->EnvDynamic,1,1,FLD);
+		if (Mat->RevExtMask & 0x800) fread(&Mat->SpecMul,1,4,FLD);
+		// One bit, three floats (X,Y,Z) — see the FLD_READ.H note. Read as
+		// three separate 4-byte fields, never as one 12-byte struct read: the
+		// wire format is positional, not a memory image.
+		if (Mat->RevExtMask & 0x1000)
+		{
+			fread(&Mat->EnvBakeOfsX,1,4,FLD);
+			fread(&Mat->EnvBakeOfsY,1,4,FLD);
+			fread(&Mat->EnvBakeOfsZ,1,4,FLD);
+		}
+	}
+	// Revival per-surface PBR map-SET extension: a SECOND conditional payload
+	// gated on Surf_RevMaps (0x0800), written AFTER the RVSF numeric payload by
+	// tools/lwsread FLDSAVE.CPP — u16 RevMapMask + set-name string (0x01) +
+	// normalFlip byte (0x40), ascending mask-bit order. Directory-per-set: the
+	// engine resolves TEXTURES/PBR/<set>/<role>.png. Independent of Surf_RevExt
+	// (a surface can carry maps with no numeric dials, e.g. 'teleporter').
+	// Legacy FLDs never carry the bit. Collected in FLD_MAT.CPP + applied at
+	// scene init via MaterialImport_ApplyMapFile. See SIDECAR_MIGRATION_PLAN §1e.
+	if (Mat->Flags & Surf_RevMaps)
+	{
+		fread(&Mat->RevMapMask,1,2,FLD);
+		if (Mat->RevMapMask & 0x01) ReadString(&Mat->MapSet);
+		if (Mat->RevMapMask & 0x40) fread(&Mat->NormalFlip,1,1,FLD);
+	}
 #ifdef DebugMode
 	FLDLOG("---S---|Color texture = %s\n",Mat->ColorTexture);
 	FLDLOG("---u---|Diffuse texture = %s\n",Mat->DiffuseTexture);
@@ -258,6 +339,19 @@ void ReadLight(FldLight *Light)
 	if (Light->Flags&4) Light->Falloff=ReadEnvelope();
 	if (Light->Flags&8) Light->ConeAngle=ReadEnvelope();
 	if (Light->Flags&16) Light->Range=ReadEnvelope(); //v0.114
+	// Bit 2048 = Light_VolumetricCone (authored volumetric beam): one float,
+	// the per-light beam gain (0 = unset → 1.0). Written conditionally by
+	// tools/lwsread FLDSAVE.CPP — legacy FLD writers only ever set bits
+	// ≤1024 (EndBehavior tops out the word), so this branch is provably
+	// inert for legacy content (Light is memset(0) by the caller).
+	if (Light->Flags&Light_VolumetricCone) fread(&Light->VolBeamGain,1,4,FLD);
+	// Bit 4096 = Light_FlareScale (authored per-light flare-sprite size, LWS
+	// "FdsFlareScale <f>"): one float, the sprite-size multiplier (0 = unset →
+	// 1.0). Written conditionally AND LAST by tools/lwsread FLDSAVE.CPP (after
+	// the VolBeamGain field), read in the same order here. Provably inert for
+	// legacy content — no shipping FLD light carries 4096 (PathAlignment is
+	// object-section in every scene; Light is memset(0) by the caller).
+	if (Light->Flags&Light_FlareScale) fread(&Light->FlareScale,1,4,FLD);
 }
 
 void ReadCamera(FldCamera *Cam)

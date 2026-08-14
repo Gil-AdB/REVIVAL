@@ -48,6 +48,47 @@ typedef struct
 	float          Opacity;
 	float					 TFP0;
 	float					 TFP1;
+	// Revival per-surface extension — Surf_RevExt(0x8000)-gated conditional
+	// payload after the material record (u16 RevExtMask + only the authored
+	// fields, ascending mask-bit order). Read in FLD_READ.CPP ReadMaterial,
+	// mapped to Material in FLD_MAT.CPP AddMaterial. Bit order MUST match
+	// tools/lwsread (FLDSAVE.CPP / LWOREAD.CPP). memset(0) = no extension.
+	// See docs/SIDECAR_MIGRATION_PLAN.md §1a.
+	uint16_t       RevExtMask;      // 0 = none
+	float          AoStrength;      // bit 0x001
+	float          ParallaxScale;   // bit 0x002
+	float          TintR;           // bit 0x004
+	float          TintG;           // bit 0x008
+	float          TintB;           // bit 0x010
+	float          RefractIor;      // bit 0x020
+	uint8_t        Refractive;      // bit 0x040 -> Mat_Refractive
+	int8_t         EnvReflMode;     // bit 0x080
+	int32_t        EnvBakeRes;      // bit 0x100
+	int8_t         WaterProcMode;   // bit 0x200
+	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
+	float          SpecMul;         // bit 0x800 — specular response multiplier
+	// bit 0x1000 — env-probe capture-point OFFSET, world units, THREE floats
+	// under ONE bit (X,Y,Z). A deliberate deviation from the one-bit-per-scalar
+	// convention tintR/G/B follows: this is one semantic vector, and spending
+	// three of the four remaining mask bits on it would all but fill the u16.
+	// Positional order inside the payload is X then Y then Z; the bit is
+	// written only when at least one component is authored non-zero.
+	float          EnvBakeOfsX;     // bit 0x1000
+	float          EnvBakeOfsY;     // bit 0x1000
+	float          EnvBakeOfsZ;     // bit 0x1000
+	// (bits 0x2000/0x4000/0x8000 remain free in the RVSF u16 for future
+	//  per-material response multipliers — e.g. roughMul/metalMul siblings;
+	//  aoStrength already covers the AO one. Map roles live in RVSM, not here.)
+	// Revival per-surface PBR map-SET extension — Surf_RevMaps(0x0800)-gated
+	// conditional payload AFTER the RVSF numeric payload (u16 RevMapMask +
+	// set-name string bit 0x01 + normalFlip byte bit 0x40). Directory-per-set:
+	// MapSet names a texture set; the engine resolves TEXTURES/PBR/<set>/
+	// <role>.png. Read in FLD_READ.CPP ReadMaterial, collected in FLD_MAT.CPP
+	// AddMaterial, applied at scene init via MaterialImport_ApplyMapFile. Bit
+	// order MUST match tools/lwsread / tools/lwopatch. memset(0) = no extension.
+	uint16_t       RevMapMask;      // 0 = none
+	char          *MapSet;          // bit 0x01 (texture set name)
+	uint8_t        NormalFlip;      // bit 0x40 (0/1)
 } FldMat;
 
 typedef struct _FldKeyFrame_
@@ -124,6 +165,14 @@ typedef struct FldLgt
 	FldEnv        *Falloff;
 	FldEnv        *ConeAngle;
 	FldEnv        *Range;
+	// Per-light volumetric beam gain — conditional field, only present in
+	// the FLD when Flags carries Light_VolumetricCone (2048). 0 = unset →
+	// converter/engine treat as 1.0 (FlareScale/HaloIntensity convention).
+	float          VolBeamGain;
+	// Per-light flare-sprite size multiplier — conditional field, only present
+	// in the FLD when Flags carries Light_FlareScale (4096). 0 = unset →
+	// engine treats as 1.0 (mapped to Omni::FlareScale in FLD_CONV.CPP).
+	float          FlareScale;
 	FldLgt        *Next;
 } FldLight;
 
@@ -148,6 +197,18 @@ typedef struct
   float         FramesPerSecond;
   FldEnv       *AmbientColor;
 	FldEnv       *AmbientIntensity;
+  // Authored scene-wide env-reflection defaults (Scene_EnvDefaults-gated
+  // conditional header payload; 0 = unset). See LWREAD.H + FLD_READ.CPP.
+  int32_t       EnvReflSceneMode;   // -1 none / 0 auto / 1 all
+  int32_t       EnvBakeResScene;    // probe face res (pow2 64..1024), 0 unset
+  // Authored backdrop gradient (Scene_SkyColors-gated header payload; LWS
+  // ZenithColor/SkyColor/GroundColor/NadirColor). SkyColorsSet != 0 when the
+  // FLD carried the four colors; 0 = unset (legacy black void).
+  int32_t       SkyColorsSet;
+  FldColor      ZenithColor;        // straight up
+  FldColor      SkyColor;           // upper sky
+  FldColor      GroundColor;        // lower / toward horizon-ground
+  FldColor      NadirColor;         // straight down
 } FldScene;
 
 extern FldScene *ReadFLD(const char *FileName);
@@ -158,3 +219,20 @@ extern Scene *ConvertFLD(FldScene *FLD);
 extern Material *AddMaterial(FldMat *OrgMat, Scene *SceneGroup);
 extern void Get_Mapping(Face *F,FldMat *Mat);
 extern void DumpMaterialDedupStats();
+
+// Revival per-surface PBR map-role extension (sidecar-elim §1e). AddMaterial
+// records one entry per Surf_RevMaps material into a process-global list;
+// MaterialImport_ApplyRevMaps (DEMO) reads it back at scene init and calls
+// MaterialImport_ApplyMapFile for each authored role — the SAME apply path the
+// .MAT sidecar used, so a scene reproduces its maps from the FLD alone. Strings
+// are owned copies valid until FldRevMapClear (returned via c_str()); a NULL
+// role field = not authored, normalFlip = -1 = not authored.
+struct RevMapAssignment {
+	Scene      *scene;
+	const char *matName;
+	const char *set;          // texture set name -> TEXTURES/PBR/<set>/<role>.png
+	int         normalFlip;   // -1 unset, else 0/1
+};
+extern int  FldRevMapCount();
+extern const RevMapAssignment *FldRevMapAt(int i);
+extern void FldRevMapClear();

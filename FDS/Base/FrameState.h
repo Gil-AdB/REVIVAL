@@ -9,6 +9,8 @@
 // while phase-2 migrates them across; new code should take the two
 // context refs directly.
 
+#include <cstdint>
+
 #include "CameraContext.h"
 #include "FaceListContext.h"
 #include "Vector.h"
@@ -49,6 +51,63 @@ extern thread_local bool   g_reflVertCull;
 extern thread_local Vector g_reflConeApex;   // = Er (camera ISource)
 extern thread_local Vector g_reflConeDir;    // = shard normal (cone axis, unit)
 extern thread_local float  g_reflConeTan2;   // tan²(half-angle): perp² > tan2·axisDist² → out
+
+// Per-FACE cone cull for the same pass — --shard_cone_cull=2, compiled only
+// into a lab build (-DFDS_SHARD_BAKE_LAB=ON; the top-level CMakeLists.txt says
+// why, and docs/OPTIMIZATION_BACKLOG.md says why it is PARKED).
+// It replaces the per-VERTEX form above, which was unsound by construction: it
+// decided FACE visibility from VERTEX positions and stamped the rejects with
+// fake screen positions, so a quad whose INTERIOR covered the whole shard view
+// vanished and a straddler rasterized through the fakes (ddb1d15). This one
+// tests the FACE's own world bounding sphere against the cone and rejects the
+// face WHOLE — no vertex is ever touched, so a surviving face renders exactly
+// as with no cull at all. That is the correctness invariant, and it is why the
+// arm measures 0 of 1 048 576 atlas pixels different from no cull.
+// The apex is shared with the per-vertex globals above (g_reflConeApex = Er);
+// the AXIS and the half-angle are this test's own, and that is the whole
+// reason it culls anything. The legacy cone points along the shard NORMAL, and
+// the reflected eye does not look at its own shard — the window sits metres off
+// to the side — so that cone has to open to 17-19° on greets just to reach it
+// (measured), not the ~1° the window subtends. MirrorShatter's shardFaceCone
+// builds these two by INVERTING the shard's actual off-axis projection at the
+// four screen corners, which assumes nothing about the camera basis (it is not
+// orthonormal: a shard quad is not a rectangle). Superset by convexity — a
+// circular cone of half-angle < 90° is convex and the frustum is the convex
+// hull of its four corner rays. (Defined in FrameState.cpp.)
+extern thread_local bool     g_reflFaceCull;
+extern thread_local Vector   g_reflFaceConeDir;   // apex → viewport centre, unit
+extern thread_local float    g_reflFaceConeTan2;  // tan²(half-angle) about THAT axis
+// Cull census, summed per shard by MirrorShatter and printed with the
+// [SHARD-CULL] line under FDS_SHARD_REFL_PROF. thread_local so the per-face
+// increments cost no atomic.
+extern thread_local uint64_t g_reflFaceTested;
+extern thread_local uint64_t g_reflFaceCulled;
+extern thread_local uint64_t g_reflFaceDrawn;   // FList entries the bake pushed
+
+// Per-phase core-ms accumulators for the shard bake's [SHARD-PHASE] line
+// (FDS_SHARD_REFL_PROF). This is the attribution that settled what the bake
+// costs — 4 % geometry front-end, 78 % Render_DeferredLighting — and therefore
+// why the cull above is parked. Written only while that env var is set.
+extern thread_local double   g_phSetup;
+extern thread_local double   g_phXform;
+extern thread_local double   g_phRaster;
+extern thread_local double   g_phFill;
+extern thread_local double   g_phLight;
+extern thread_local double   g_phCone;
+#if FDS_SHARD_BAKE_LAB
+// Sub-split of g_phLight — where Render_DeferredLighting's per-INVOCATION time
+// goes when the target is a 64² shard cell. LAB ONLY: these clocks sit in a
+// shared hot function and adding calls there is the exact hazard 5adcae12
+// bisected (a call, not a branch, moves the pins under -ffp-contract), so they
+// are preprocessed out of the shipping build.
+extern thread_local double   g_phDlLights;  // ViewLightsSoA memset + omni loop
+extern thread_local double   g_phDlDepth;   // computeTileDepthBounds
+extern thread_local double   g_phDlBin;     // buildTileLightLists
+extern thread_local double   g_phDlCtx;     // ctx fill (matTable, shadowSkipMask…)
+extern thread_local double   g_phDlTiles;   // the tile-kernel loop itself
+extern thread_local uint64_t g_phDlCalls;   // invocations
+extern thread_local uint64_t g_phDlLightN;  // Σ numLights over invocations
+#endif
 
 // Snapshot of the current main-pass render target globals (VPage,
 // ZPage16, XRes, YRes, VESA_BPSL, g_gbuffer*, g_xparZ*) into a
