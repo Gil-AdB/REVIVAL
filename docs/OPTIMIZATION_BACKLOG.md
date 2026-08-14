@@ -10,6 +10,159 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-14b — fountain's 77 % frame item, closed: the two-layer transparent kernel was scanning 198 M px a frame to shade 0.97 M, and 3 of its 4 peel passes rendered nothing
+
+**Result: fountain t=1200 27.46 -> 15.47 ms frame min (-11.99 ms, -43.7 %), `TBR-render` 20.17 -> 8.17 ms (-59.5 %), instructions -55.0 % of `renderFrame`. Every gate byte-identical. Two flags, both default ON, both byte-null by construction.**
+
+### What the profile called "two layers" is not two depth layers
+
+`Render_DeferredTransparentLighting_Tile<0>` / `<1>` are `XparLayer::Front` /
+`XparLayer::Back` — the front- and back-FACING transparent layers, not a depth
+peel. The depth peel is a separate axis: `FOUNTAIN.CPP:1083` sets
+`FntSc->XparPeelPasses = 4`, so each (clump, side) rasters and composites FOUR
+times. Anyone attacking "one of the two layers" would have been attacking the
+wrong structure.
+
+### The census — `--xpar_extent_census`, fountain t=1200, 1920x1080
+
+`RenderXparClumpInStrip` composites a *clump*: a run of consecutive
+same-(mesh, frontFacing) transparent faces in one 8-row strip. It flushes on
+every mesh/side change **and on every interleaved sprite**, and the fountain
+spray is 33 358 sprites a frame. So:
+
+| | value |
+|---|--:|
+| clump flushes / frame | **3 221** |
+| composite invocations (flushes x 4 peel passes) | **12 884** |
+| px a full-strip-width scan covers | **197.90 M** |
+| px carrying a live transparent fragment | **0.97 M — 0.491 %** |
+
+Each of those 12 884 invocations cleared and re-scanned all 1920x8 px of its
+strip for a clump that typically spans a handful of 8-px tile columns. **The
+per-strip dispatch bounds Y and only Y** — `Render_DeferredTransparentLighting_
+Tile<Layer>(stripCtx, stripIdx, 0, strip_y, XRes, strip_y + strip_h)`. Nothing
+in the pipeline bounded X, and nothing skipped an empty clump.
+
+Per side and per peel pass, same pose:
+
+| layer | calls | empty | live px | live / scanned |
+|---|--:|--:|--:|--:|
+| front peel0 | 1 665 | 12.3 % | 0.517 M | 60.3 % |
+| front peel1 | 1 665 | **100.0 %** | 0.000 M | 0 % |
+| front peel2 | 1 665 | **100.0 %** | 0.000 M | 0 % |
+| front peel3 | 1 665 | **100.0 %** | 0.000 M | 0 % |
+| back peel0 | 1 556 | 14.5 % | 0.454 M | 56.2 % |
+| back peel1 | 1 556 | **99.9 %** | 0.000 M | 0 % |
+| back peel2 | 1 556 | **100.0 %** | 0.000 M | 0 % |
+| back peel3 | 1 556 | **100.0 %** | 0.000 M | 0 % |
+
+**9 663 of 12 884 passes a frame produce nothing.** `--xpar-peel-passes` is a
+per-SCENE constant, but a clump is a sprite-delimited run of faces, and those
+almost never stack in depth. Exactly ONE clump in the frame has a real second
+depth layer.
+
+### Lever 1 — `--xpar_strip_extent` (default ON, byte-null by construction)
+
+The rasterizer records the tile-column extent it touched (`meka::g_rasterXExtent`,
+updated inside the `g_rasterStripClamp.tileYMax < INT32_MAX` branch that only
+the TBR xpar strip path sets, so every opaque raster emits the code it emitted
+before). The clump then clears and composites only those columns.
+
+Byte-null argument, not measurement: outside the tracked range a strip's slice
+is in its cleared state, so (a) the clear has nothing to clear there and (b) the
+composite kernel's first per-pixel test is `mat32 == 0xFFFFFFFF -> continue`.
+The extent is the union of per-triangle tile bounding boxes — a superset of what
+was written, which is the direction that keeps it safe. Both TBR schedulers call
+`XparStripSlices_MarkAllDirty()` before dispatch so the previous frame, the
+legacy peel and resolution changes are all covered.
+
+**Scanned px 197.90 M -> 6.66 M (3.36 %). Live fragment count IDENTICAL (0.97 M)
+in both arms — the bound loses nothing.**
+
+### Lever 2 — `--xpar_peel_early_out` (default ON, byte-null by construction)
+
+Reverse-peel accept mask (`Mekalele.h:1455`):
+`zmask = (z_candidate < z_existing) & (z_candidate > peelFloor)`, with
+`z_existing` pre-cleared to `0xFFFF` and `peelFloor` = the previous pass's layer
+Z. If pass N-1 committed nothing, its extent is still all `0xFFFF`, so pass N
+needs `z < 0xFFFF && z > 0xFFFF` — empty. And pass N then leaves an untouched
+layer in turn, so every later pass is empty too. A committed fragment can never
+store `0xFFFF` (pass 0's own mask already requires `z_candidate < 0xFFFF`), so
+"all 0xFFFF over the clump's columns" is an EXACT "nothing here", not a
+heuristic. Passes 12 884 -> 6 014; live count unchanged.
+
+### THREE-ARM COST — parent binary / OFF / ON, one asset tree, interleaved, min-of-6 over 7 rounds (r0 dropped)
+
+Load 15.95 -> 10.90 across the batch, so read `Ginstr/f` where a wall figure
+surprises. `parent` = `43ac3456` built in this worktree; `off` = HEAD with both
+flags off; `ext` / `peel` = one lever each.
+
+**fountain t=1200, `--deferred`, 1920x1080**
+
+| | parent | off | ext only | peel only | **ON** |
+|---|--:|--:|--:|--:|--:|
+| frame min | 27.46 | 27.56 | 17.14 | 22.20 | **15.47** |
+| `renderFrame` | 25.26 | 25.31 | 14.98 | 19.95 | **13.27** |
+| `TBR-render` | 20.17 | 20.17 | 9.93 | 14.75 | **8.17** |
+| `renderFrame` Ginstr/f | 3.514 | 3.515 | 1.840 | 2.672 | **1.583** |
+| `TBR-render` Ginstr/f | 3.011 | 3.012 | 1.338 | 2.170 | **1.081** |
+
+**The frame-saving-equals-pass-saving check closes to 0.1 %:** `renderFrame`
+falls 11.992 ms, `TBR-render` falls 12.003 ms — 100.1 % of the frame saving is
+in the phase that was attacked, and `FRAME_MIN` moves the same 11.99 ms.
+
+| pose | parent frame | ON frame | delta | parent TBR | ON TBR | TBR Ginstr/f |
+|---|--:|--:|--:|--:|--:|---|
+| fountain t=1200 | 27.46 | **15.47** | **-11.99 (-43.7 %)** | 20.17 | 8.17 | 3.011 -> 1.081 |
+| fountain t=2500 | 22.73 | **13.88** | **-8.85 (-38.9 %)** | 14.54 | 6.06 | 2.211 -> 0.766 |
+| fountain t=600 | 19.96 | **12.28** | **-7.68 (-38.5 %)** | 11.99 | 4.29 | 1.821 -> 0.538 |
+| city t=1961 | 76.34 | 76.30 | 0.00 | 7.00 | 6.77 | 0.846 -> 0.841 |
+| greets t=3122 (his pose) | 47.04 | 46.96 | -0.08 | 6.13 | 6.06 | 1.178 -> 1.162 |
+| chase t=1600 | — | — | — | 4.61 | 4.62 | 0.853 -> 0.853 |
+
+`parent` vs `off` agree on instructions to 3-4 decimals at **every** pose
+(3.514/3.515, 2.549/2.551, 2.314/2.315, 6.217/6.220, 5.016/5.016, 1.899/1.899),
+so the flags carry no dark cost in their OFF arm. The other three scenes are
+NULL, as expected — they do not run thousands of sprite-delimited clumps a
+frame. This is a fountain fix.
+
+### GATES — every arm byte-identical, three flag configurations
+
+Differential (same binary, flags off / peel-only / both on), so the claim is
+"this moved nothing", not "a hash matched":
+
+| gate | OFF | peel only | **ON** |
+|---|---|---|---|
+| fountain t=2500 `8db68ccb59416e9a44037e9f387b7bd9` | 3/3 | 3/3 | 3/3 |
+| fountain t=1200 glass `40ce5f1e9847ce50add24e68f482fda8` | 3/3 | 3/3 | 3/3 |
+| fountain t=1200 plain deferred `3417643da0dfaf57f52be489e1356fce` | 2/2 | 2/2 | 2/2 |
+| greets t=1588 `778fa6acd85a69cf241babefcdaf598e` | 2/2 | 2/2 | 2/2 |
+| city t=1961 `3f8948232c192a979ffe7f76c4b387ab` | 2/2 | 2/2 | 2/2 |
+| chase t=100/400/800/1200/1600 (all five pins) | ✓ | ✓ | ✓ |
+| `render_gate.sh` | — | — | ALL FOUR PASS (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`) |
+
+Both TBR schedulers are covered on purpose: the glass rows go through
+`TBR_Render_GlassLayered` (barrier-per-band), the plain-deferred row through the
+plain `TBR_Render` strip walk.
+
+**Temporal / animated-spray evidence:** `--snapshot=fountain@t=100,200,...,3000`
+— **30 animated frames, cat-md5 `14a2ba04f4174453f89eb5701b0028f7` in both
+arms, and all 30 per-frame md5s match pairwise.** The additive spray is where a
+composite-order or peel-order error would show as flicker; it is byte-identical
+frame by frame across the pose sweep, so there is no look call to make here.
+
+### WHAT IS LEFT IN `TBR-render` (8.17 ms at t=1200)
+
+Not the composite any more. The bound leaves 6.66 M px scanned for 0.97 M live,
+and the early-out removes 3/4 of the passes; what remains is the per-pass
+`FrustumClipper` construct + `InitViewport` + `clipper.Render` over the clump's
+faces (6 014 times a frame), the 33 358 `SpriterRT<32>` sprite blits, and the
+now-narrow memsets. **Next lever, unpriced:** `peel1` still runs 2 792 times a
+frame to find nothing — you cannot know a pass is empty without running it, but
+you *could* know it from pass 0's own fragment count if the filler reported
+"committed exactly one layer per pixel". That is a real, byte-null-shaped idea
+and it is NOT measured.
+
 ## 2026-08-14 — the parked per-tile shadow early-out, MEASURED: the byte-null half ships, the byte-affecting half is refuted at the tile and re-specified at 8x8
 
 The shadow-diet round parked *"per-tile light/shadow early-outs — a tile fully

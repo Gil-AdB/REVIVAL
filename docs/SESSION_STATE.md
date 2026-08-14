@@ -1,5 +1,106 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-14c — FOUNTAIN'S 77 % FRAME ITEM IS CLOSED: -11.99 ms, AND THE CAUSE WAS THAT NOTHING IN THE PIPELINE BOUNDED X
+>
+> Round 1's #3 item — "two-layer transparent lighting, 21.7 of 28.1 ms at
+> fountain t=1200, achievable 5-8 ms". Measured cause, two byte-null fixes,
+> **-11.99 ms of a 27.46 ms frame (-43.7 %)**. Full write-up + every table in
+> `docs/OPTIMIZATION_BACKLOG.md` (2026-08-14b).
+>
+> ### FIRST, THE PROFILE'S OWN NAME FOR IT WAS MISLEADING
+>
+> `Render_DeferredTransparentLighting_Tile<0>` / `<1>` are **front-FACING and
+> back-FACING**, not two depth layers. The depth peel is a different axis:
+> `FOUNTAIN.CPP:1083` sets `XparPeelPasses = 4`, so every clump rasters and
+> composites four times per side. "Do one layer instead of two" would have been
+> aimed at the wrong structure.
+>
+> ### THE CENSUS (`--xpar_extent_census`, new)
+>
+> A clump flushes on every (mesh, side) change **and on every interleaved
+> sprite** — and the spray is 33 358 sprites a frame. fountain t=1200:
+>
+> | | |
+> |---|--:|
+> | clump flushes / frame | **3 221** |
+> | composite invocations (x4 peel passes) | **12 884** |
+> | px scanned by the full-strip-width composite | **197.90 M** |
+> | px with a live transparent fragment | **0.97 M — 0.491 %** |
+>
+> The per-strip dispatch bounds Y and **only** Y: every clump composited
+> `x = 0 .. XRes` regardless of where its handful of faces actually landed. And
+> peel passes 1-3 are **100.0 % / 100.0 % / 100.0 %** empty on the front layer
+> (99.9 % / 100 % / 100 % on the back) — 9 663 of 12 884 passes a frame render
+> nothing at all.
+>
+> ### TWO FLAGS, BOTH DEFAULT ON, BOTH BYTE-NULL BY CONSTRUCTION
+>
+> * **`--xpar_strip_extent`** — the rasterizer records the tile columns it
+>   touched; the clump clears and composites only those. Outside them the slice
+>   is in its cleared state and the kernel's first test is
+>   `mat32 == 0xFFFFFFFF -> continue`, so the skipped columns contributed zero.
+>   Scanned px **197.90 M -> 6.66 M**, live count identical.
+> * **`--xpar_peel_early_out`** — reverse peel accepts on
+>   `(z < z_existing) & (z > peelFloor)` with `z_existing` pre-cleared to
+>   `0xFFFF`; if the previous pass committed nothing its extent is still all
+>   `0xFFFF`, so this pass — and every later one — accepts nothing. Passes
+>   **12 884 -> 6 014**.
+>
+> ### THREE ARMS (parent binary / OFF / ON), one asset tree, interleaved, min-of-6
+>
+> | pose | parent | ON | delta | `TBR-render` Ginstr/f |
+> |---|--:|--:|--:|---|
+> | **fountain t=1200** | **27.46** | **15.47** | **-11.99 (-43.7 %)** | 3.011 -> **1.081** |
+> | fountain t=2500 | 22.73 | **13.88** | -8.85 (-38.9 %) | 2.211 -> 0.766 |
+> | fountain t=600 | 19.96 | **12.28** | -7.68 (-38.5 %) | 1.821 -> 0.538 |
+> | city t=1961 | 76.34 | 76.30 | 0.00 | 0.846 -> 0.841 |
+> | greets t=3122 (your pose) | 47.04 | 46.96 | -0.08 | 1.178 -> 1.162 |
+> | chase t=1600 | — | — | — | 0.853 -> 0.853 |
+>
+> `renderFrame` falls 11.992 ms and `TBR-render` falls 12.003 ms at t=1200 —
+> **100.1 % of the frame saving is in the phase attacked.** `parent` and `off`
+> agree on instructions to 3-4 decimals at every pose, so the OFF arm is the
+> parent and the flags carry no dark cost.
+>
+> ### GATES — ALL BYTE-IDENTICAL, THREE FLAG CONFIGURATIONS
+>
+> fountain `8db68ccb59416e9a44037e9f387b7bd9` 3/3, greets
+> `778fa6acd85a69cf241babefcdaf598e` 2/2, city `3f8948232c192a979ffe7f76c4b387ab`
+> 2/2, all five chase pins, `render_gate.sh` **ALL FOUR PASS** — under flags OFF,
+> peel-only, and both ON. Both TBR schedulers covered (glass rows go through
+> `TBR_Render_GlassLayered`, the plain-deferred fountain row through the plain
+> strip walk). **Animated evidence: `--snapshot=fountain@t=100..3000` step 100,
+> 30 frames, every per-frame md5 identical between arms** — the additive spray is
+> exactly where a composite/peel-order error would flicker, and it does not move.
+> There is no look call to make.
+>
+> ### ONE MORE MEASUREMENT WHILE IN THERE — `gbuffer` PARALLELISM, AND THE OBVIOUS FIX IS REFUTED
+>
+> Round 1 flagged `gbuffer` at `effPar` 5.0-5.5 of 12 as the survey's only
+> scheduling problem. It IS granularity — the G-buffer raster dispatches a
+> **fixed 6x5 = 30-tile grid** (`RENDER.CPP:449`), 320x216 px a tile at
+> 1920x1080 — but the naive fix is measured and loses. Probe build with the grid
+> at **12x10 = 120 tiles**, same binary otherwise, snapshot harness:
+>
+> | pose | grid | `gbuffer` wall | thrsum | `effPar` | `gbuffer` Ginstr/f |
+> |---|---|--:|--:|--:|--:|
+> | chase t=800 (x2) | 6x5 | **10.22** | 57.20 | 5.2 | 0.597 |
+> | chase t=800 (x2) | 12x10 | 14.41 | 141.89 | **9.1** | **1.424** |
+> | chase t=1600 (x2) | 6x5 | **5.64** | 28.78 | 5.0 | 0.312 |
+> | chase t=1600 (x2) | 12x10 | 9.00 | 89.02 | **9.3** | **0.881** |
+> | fountain t=2500 | 6x5 | 2.64 | 14.13 | 5.0 | 0.160 |
+> | fountain t=2500 | 12x10 | **2.41** | 19.08 | **6.7** | 0.195 |
+>
+> **The idle is real and subdividing removes it — `effPar` 5.2 -> 9.1 — but the
+> total work more than DOUBLES** (chase t=800 thrsum 57.2 -> 141.9 ms, +139 %
+> instructions), because each clipper tile re-walks the whole scene's face list:
+> per-tile traversal is re-paid per tile. Net wall +41 % on chase. So it is not a
+> serial section (a serial section would put `thrsum` at or below `wall`) and it
+> is not fixable by "more tiles". The shape that could work is splitting only the
+> HEAVY tiles, or cutting the per-tile traversal cost so subdivision is cheap;
+> both move `ClipperTileRect` ownership and want their own round. **Do not
+> re-propose a uniform finer grid — it is priced here and it loses.**
+
 > ## 2026-08-14b — THE PARKED SHADOW EARLY-OUT, MEASURED: HALF OF EVERY TILE'S LIGHT LIST AT YOUR POSE CANNOT LIGHT ONE PIXEL OF THAT TILE
 >
 > The shadow-diet round parked *"per-tile light/shadow early-outs"* because they

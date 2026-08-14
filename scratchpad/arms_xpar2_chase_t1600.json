@@ -1,0 +1,45 @@
+[
+ {
+  "tag": "parent",
+  "bin": "/tmp/bin_xpar_parent",
+  "args": [
+   "--snapshot=chase@t=1600,1600,1600,1600,1600,1600,1600,1600,1600,1600",
+   "--out=/tmp/p1/chasesnap",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "off",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--snapshot=chase@t=1600,1600,1600,1600,1600,1600,1600,1600,1600,1600",
+   "--out=/tmp/p1/chasesnap",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--no-xpar_strip_extent",
+   "--no-xpar_peel_early_out"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "on",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--snapshot=chase@t=1600,1600,1600,1600,1600,1600,1600,1600,1600,1600",
+   "--out=/tmp/p1/chasesnap",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--xpar_strip_extent",
+   "--xpar_peel_early_out"
+  ],
+  "env": {}
+ }
+]

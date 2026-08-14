@@ -558,6 +558,15 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
                             class Face** faces, int count, bool front,
                              int strip_y, int strip_h, bool bandSnapshot = true);
 
+// Declare every strip's xpar layer slice dirty over its full width. Both TBR
+// schedulers call this before dispatch: the per-strip column tracker that
+// bounds the clump clears (--xpar_strip_extent) only knows what IT dirtied,
+// so anything left by the previous frame, by the legacy peel, or by a
+// resolution change has to be conservatively re-declared.
+void XparStripSlices_MarkAllDirty();
+// --xpar_extent_census: print + reset the per-call composite census.
+void XparExtentCensus_Report();
+
 bool deferredUnifiedTbrEnabled();
 int  xparPeelPassesEffective();
 

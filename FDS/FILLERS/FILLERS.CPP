@@ -2135,6 +2135,10 @@ static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 {
 	extern void Xtrace_FrameBegin();   // FDS_XPAR_TRACE dev diagnostic
 	Xtrace_FrameBegin();
+	// Whatever the previous frame / the legacy peel left in the xpar layer
+	// slices is unknown to the per-strip column tracker — declare it all dirty
+	// so the first clump in each strip clears the full width.
+	XparStripSlices_MarkAllDirty();
 	using namespace tbrglass;
 	const dword numTiles = Sc->NumTiles;
 	if (g_plans.size() < numTiles) g_plans.resize(numTiles);
@@ -2342,11 +2346,13 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 	// per-strip walk below runs unchanged (byte-identical).
 	if (fds::FeatureFlags::glass_refract() > 0.0f) {
 		TBR_Render_GlassLayered(Sc, dctx);
+		XparExtentCensus_Report();
 		return;
 	}
 
 	extern void Xtrace_FrameBegin();   // FDS_XPAR_TRACE dev diagnostic
 	Xtrace_FrameBegin();
+	XparStripSlices_MarkAllDirty();    // see the same call in TBR_Render_GlassLayered
 
 	const int numTiles = int(Sc->NumTiles);
 	std::counting_semaphore<INT_MAX> stripsDone{0};
@@ -2538,6 +2544,7 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 		}
 	}
 
+	XparExtentCensus_Report();
 	Sc->SBufferCur = 0;
 }
 

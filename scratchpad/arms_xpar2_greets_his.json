@@ -1,0 +1,48 @@
+[
+ {
+  "tag": "parent",
+  "bin": "/tmp/bin_xpar_parent",
+  "args": [
+   "--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848",
+   "--greets_displace",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {
+   "FDS_GREETS_CAM": "-8.6249094,2.72651696,-53.2339516,0.210607708,0.0055912463,-0.977554619"
+  }
+ },
+ {
+  "tag": "off",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848",
+   "--greets_displace",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--no-xpar_strip_extent",
+   "--no-xpar_peel_early_out"
+  ],
+  "env": {
+   "FDS_GREETS_CAM": "-8.6249094,2.72651696,-53.2339516,0.210607708,0.0055912463,-0.977554619"
+  }
+ },
+ {
+  "tag": "on",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848",
+   "--greets_displace",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--xpar_strip_extent",
+   "--xpar_peel_early_out"
+  ],
+  "env": {
+   "FDS_GREETS_CAM": "-8.6249094,2.72651696,-53.2339516,0.210607708,0.0055912463,-0.977554619"
+  }
+ }
+]

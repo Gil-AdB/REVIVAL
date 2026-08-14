@@ -1,0 +1,70 @@
+[
+ {
+  "tag": "parent",
+  "bin": "/tmp/bin_xpar_parent",
+  "args": [
+   "--bench=scene@scene=fountain,t=600,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "off",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--bench=scene@scene=fountain,t=600,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--no-xpar_strip_extent",
+   "--no-xpar_peel_early_out"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "ext",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--bench=scene@scene=fountain,t=600,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--xpar_strip_extent",
+   "--no-xpar_peel_early_out"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "peel",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--bench=scene@scene=fountain,t=600,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--no-xpar_strip_extent",
+   "--xpar_peel_early_out"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "on",
+  "bin": "/tmp/bin_xpar_head",
+  "args": [
+   "--bench=scene@scene=fountain,t=600,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags",
+   "--xpar_strip_extent",
+   "--xpar_peel_early_out"
+  ],
+  "env": {}
+ }
+]

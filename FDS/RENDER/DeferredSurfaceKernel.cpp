@@ -4173,6 +4173,83 @@ void Xtrace_WriteFile(const char *path) {
 	std::fprintf(stderr, "[XTRACE] wrote %s\n", path);
 }
 
+// ── Per-strip dirty-column tracking for the xpar layer slices ─────────────
+// A clump flushes on every (mesh, side) change AND on every interleaved
+// sprite, so a strip runs many clumps a frame (fountain t=1200: 3224 flushes
+// over 135 strips, x4 peel passes). Each of those was clearing and re-scanning
+// the FULL 1920 px strip width for a clump that typically covers a handful of
+// tile columns.
+//
+// The invariant that makes bounding both byte-null: outside `dirty`, a strip's
+// slice of a side layer is in its CLEARED state (txtr = 0xFFFFFFFF, Z = the
+// path's init), and the shared peel floor is zero outside `dirtyFloor`. Each
+// clump clears exactly the dirty range (restoring "clean everywhere"), rasters,
+// records the tile-column extent its own raster touched, and re-marks that as
+// the new dirty range. The composite then scans exactly that extent: every
+// column it skips holds 0xFFFFFFFF, which the kernel's first per-pixel test
+// (`mat32 == 0xFFFFFFFF -> continue`) would have skipped anyway.
+//
+// One worker owns a strip for the whole of its task and the strips partition
+// the screen, so plain (non-atomic) per-strip entries cannot race. Both TBR
+// schedulers mark every strip fully dirty before dispatch, which covers
+// whatever the previous frame, the legacy peel or a resolution change left.
+struct XparSliceDirty { int32_t x0; int32_t x1; };   // [x0, x1), empty when x0 >= x1
+static XparSliceDirty g_xparDirtySide[2][DEFERRED_MAX_STRIPS];   // [front] [strip]
+static XparSliceDirty g_xparDirtyFloor[DEFERRED_MAX_STRIPS];     // g_xparPeelFloor is shared by both sides
+
+void XparStripSlices_MarkAllDirty()
+{
+	for (int i = 0; i < DEFERRED_MAX_STRIPS; ++i) {
+		g_xparDirtySide[0][i] = g_xparDirtySide[1][i] = { 0, INT32_MAX };
+		g_xparDirtyFloor[i] = { 0, INT32_MAX };
+	}
+}
+
+// Per-frame census of what the bound buys (--xpar_extent_census), split by
+// side (front / back facing layer — the two Render_DeferredTransparentLighting_
+// Tile<> instantiations) and by peel pass, so "which layer is empty" is a
+// measurement rather than an assumption.
+static constexpr int XCE_MAXPASS = 8;
+static std::atomic<uint64_t> g_xceFlushes{0}, g_xcePasses{0},
+                             g_xcePxFull{0}, g_xcePxBound{0}, g_xcePxLive{0};
+static std::atomic<uint64_t> g_xcePassN[2][XCE_MAXPASS];       // invocations
+static std::atomic<uint64_t> g_xcePassLive[2][XCE_MAXPASS];    // live fragments
+static std::atomic<uint64_t> g_xcePassBnd[2][XCE_MAXPASS];     // scanned px under the bound
+static std::atomic<uint64_t> g_xcePassEmpty[2][XCE_MAXPASS];   // invocations with zero live px
+
+void XparExtentCensus_Report()
+{
+	if (!fds::FeatureFlags::xpar_extent_census()) return;
+	const uint64_t fl = g_xceFlushes.exchange(0), pa = g_xcePasses.exchange(0);
+	const uint64_t full = g_xcePxFull.exchange(0), bnd = g_xcePxBound.exchange(0),
+	               live = g_xcePxLive.exchange(0);
+	if (!pa) return;
+	std::fprintf(stderr,
+		"[XPAR-CENSUS] flushes=%llu passes=%llu  px full=%.2fM bound=%.2fM (%.2f%%) "
+		"live=%.2fM (%.3f%% of full, %.2f%% of bound)\n",
+		(unsigned long long)fl, (unsigned long long)pa,
+		double(full) / 1e6, double(bnd) / 1e6,
+		full ? 100.0 * double(bnd) / double(full) : 0.0,
+		double(live) / 1e6,
+		full ? 100.0 * double(live) / double(full) : 0.0,
+		bnd ? 100.0 * double(live) / double(bnd) : 0.0);
+	for (int s = 1; s >= 0; --s)
+		for (int p = 0; p < XCE_MAXPASS; ++p) {
+			const uint64_t n = g_xcePassN[s][p].exchange(0);
+			const uint64_t lv = g_xcePassLive[s][p].exchange(0);
+			const uint64_t bd = g_xcePassBnd[s][p].exchange(0);
+			const uint64_t em = g_xcePassEmpty[s][p].exchange(0);
+			if (!n) continue;
+			std::fprintf(stderr,
+				"[XPAR-CENSUS]   %-5s peel%d  calls=%6llu  empty=%6llu (%5.1f%%)  "
+				"bound=%7.3fM  live=%7.3fM (%5.2f%% of bound)\n",
+				s ? "front" : "back", p, (unsigned long long)n,
+				(unsigned long long)em, 100.0 * double(em) / double(n),
+				double(bd) / 1e6, double(lv) / 1e6,
+				bd ? 100.0 * double(lv) / double(bd) : 0.0);
+		}
+}
+
 // Per-strip xpar render helper, called from TBR_Render's per-strip walk
 // for each clump of consecutive same-(mesh, frontFacing) transparent
 // faces in the sorted item list. The strip covers rows [strip_y,
@@ -4181,9 +4258,10 @@ void Xtrace_WriteFile(const char *path) {
 //
 // One xpar G-buffer layer is dirtied per clump (back layer for back-
 // facing tris, front layer for front-facing tris). We clear only the
-// strip's slice (61 KB per layer at 1920 wide), raster the clump's
-// faces with clipper extents = strip rect, then composite the strip
-// rows via Render_DeferredTransparentLighting_Tile<Layer>.
+// strip's slice (61 KB per layer at 1920 wide, or just the dirty columns
+// under --xpar_strip_extent), raster the clump's faces with clipper
+// extents = strip rect, then composite the strip rows via
+// Render_DeferredTransparentLighting_Tile<Layer>.
 void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
                              Face** faces, int count, bool front,
                              int strip_y, int strip_h, bool bandSnapshot)
@@ -4193,6 +4271,77 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	const int peelPasses = xparPeelPassesEffective();
 	meka::GBuffer* sideGB = front ? g_gbufferTransparent : g_gbufferTransparentBack;
 	uint16_t*      sideZ  = front ? g_xparZ              : g_xparZBack;
+
+	// ── Column bound (see XparSliceDirty above). OFF → every range below is
+	//    the full strip width and the memsets stay the single contiguous ones. ──
+	const int stripIdx0 = strip_y >> 3;   // TILELOG=3
+	const bool extentOn = fds::FeatureFlags::xpar_strip_extent() &&
+	                      stripIdx0 >= 0 && stripIdx0 < DEFERRED_MAX_STRIPS;
+	const bool censusOn = fds::FeatureFlags::xpar_extent_census();
+	XparSliceDirty *const dSide  = extentOn ? &g_xparDirtySide[front ? 1 : 0][stripIdx0] : nullptr;
+	XparSliceDirty *const dFloor = extentOn ? &g_xparDirtyFloor[stripIdx0] : nullptr;
+	// Clamp a recorded range into this frame's screen width.
+	auto clamped = [&](const XparSliceDirty *d, int &x0, int &x1) {
+		if (!d) { x0 = 0; x1 = XRes; return; }
+		x0 = d->x0 < 0 ? 0 : d->x0;
+		x1 = d->x1 > XRes ? XRes : d->x1;
+		if (x1 < x0) x1 = x0;
+	};
+	// Column-bounded fills. The full-width case keeps the original single
+	// contiguous memset so the flag's OFF arm is instruction-for-instruction
+	// what the parent did.
+	auto fillSide = [&](int x0, int x1, int zByte) {
+		if (x0 >= x1) return;
+		if (x0 == 0 && x1 == XRes) {
+			if (sideGB) std::memset(sideGB->txtr.data() + rowStart, 0xFF, rowCount * sizeof(uint32_t));
+			if (sideZ)  std::memset(sideZ + rowStart, zByte, rowCount * sizeof(uint16_t));
+			return;
+		}
+		const size_t w = size_t(x1 - x0);
+		for (int r = 0; r < strip_h; ++r) {
+			const size_t off = size_t(strip_y + r) * size_t(XRes) + size_t(x0);
+			if (sideGB) std::memset(sideGB->txtr.data() + off, 0xFF, w * sizeof(uint32_t));
+			if (sideZ)  std::memset(sideZ + off, zByte, w * sizeof(uint16_t));
+		}
+	};
+	auto fillFloor = [&](int x0, int x1) {          // zero the peel floor
+		if (!g_xparPeelFloor || x0 >= x1) return;
+		if (x0 == 0 && x1 == XRes) {
+			std::memset(g_xparPeelFloor + rowStart, 0, rowCount * sizeof(uint16_t));
+			return;
+		}
+		const size_t w = size_t(x1 - x0);
+		for (int r = 0; r < strip_h; ++r)
+			std::memset(g_xparPeelFloor + size_t(strip_y + r) * size_t(XRes) + size_t(x0),
+			            0, w * sizeof(uint16_t));
+	};
+	const bool peelEarlyOut = fds::FeatureFlags::xpar_peel_early_out();
+	// "Did the last pass commit anything in this clump's columns?" — a committed
+	// fragment's stored Z is always < 0xFFFF (pass 0's own accept mask requires
+	// z_candidate < z_existing with z_existing pre-cleared to 0xFFFF), so an
+	// all-0xFFFF window is an exact "nothing here". An empty window counts as
+	// untouched: a clump whose raster reached no tile at all commits nothing.
+	auto sideZUntouched = [&](int x0, int x1) -> bool {
+		if (!sideZ) return true;
+		if (x0 >= x1) return true;
+		for (int r = 0; r < strip_h; ++r) {
+			const uint16_t *p = sideZ + size_t(strip_y + r) * size_t(XRes) + size_t(x0);
+			for (int k = x0; k < x1; ++k, ++p) if (*p != 0xFFFFu) return false;
+		}
+		return true;
+	};
+	auto copyFloor = [&](int x0, int x1) {          // peel floor <- this side's Z
+		if (!g_xparPeelFloor || !sideZ || x0 >= x1) return;
+		if (x0 == 0 && x1 == XRes) {
+			std::memcpy(g_xparPeelFloor + rowStart, sideZ + rowStart, rowCount * sizeof(uint16_t));
+			return;
+		}
+		const size_t w = size_t(x1 - x0);
+		for (int r = 0; r < strip_h; ++r) {
+			const size_t off = size_t(strip_y + r) * size_t(XRes) + size_t(x0);
+			std::memcpy(g_xparPeelFloor + off, sideZ + off, w * sizeof(uint16_t));
+		}
+	};
 
 	// LEGACY per-strip band snapshot (blocky): only used when bandSnapshot=true.
 	// The barrier-per-layer TBR scheduler (TBR_Render_GlassLayered) passes
@@ -4214,7 +4363,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	// MekaleleTransparent (front) / MekaleleTransparentBack (back). The
 	// composite uses a ctx variant whose tileLights -> g_stripLights so the
 	// strip gets exactly the lights overlapping its 8 rows.
-	auto rasterAndComposite = [&]() {
+	auto rasterAndComposite = [&](int passIdx) {
 		FrustumClipper clipper;
 		clipper.InitViewport(CurScene);
 		clipper.SetClippingExtents(0.0f, float(strip_y),
@@ -4227,24 +4376,58 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 		const int stripTileRow = strip_y >> 3;  // TILELOG=3
 		const meka::RasterStripClamp savedClamp = meka::g_rasterStripClamp;
 		meka::g_rasterStripClamp = { stripTileRow, stripTileRow };
+		meka::g_rasterXExtent = { INT32_MAX, -1 };   // arm the column recorder
 		for (int i = 0; i < count; ++i) {
 			Face* F = faces[i];
 			if (!F) continue;
 			if (front) clipper.Render(F, MekaleleTransparent,     false, rt, cam);
 			else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
 		}
+		const meka::RasterXExtent xext = meka::g_rasterXExtent;
 		meka::g_rasterStripClamp = savedClamp;
+
+		// Columns this clump's raster can have written. Empty when it wrote
+		// nothing at all (fully clipped / backfacing / z-rejected clump), in
+		// which case there is nothing to composite and nothing left dirty.
+		int cx0 = 0, cx1 = XRes;
+		if (extentOn) {
+			if (xext.hi < xext.lo) { cx0 = 0; cx1 = 0; }
+			else {
+				cx0 = xext.lo << 3;                       // TILE_SIZE=8
+				cx1 = (xext.hi + 1) << 3;
+				if (cx0 < 0) cx0 = 0;
+				if (cx1 > XRes) cx1 = XRes;
+				if (cx1 < cx0) cx1 = cx0;
+			}
+			dSide->x0 = cx0; dSide->x1 = cx1;
+		}
 
 		// FDS_XPAR_TRACE census: record this clump in the strip's composite
 		// sequence (lock-free: this strip runs on one worker; slot row is ours).
-		if (xt_on) {
+		if (xt_on || censusOn) {
 			size_t filled = 0;
-			if (sideGB) {
-				const uint32_t* tx = sideGB->txtr.data() + rowStart;
-				for (size_t k = 0; k < rowCount; ++k) if (tx[k] != 0xFFFFFFFFu) ++filled;
+			if (sideGB && cx1 > cx0) {
+				const uint32_t* tx = sideGB->txtr.data();
+				for (int r = 0; r < strip_h; ++r) {
+					const size_t off = size_t(strip_y + r) * size_t(XRes);
+					for (int k = cx0; k < cx1; ++k) if (tx[off + size_t(k)] != 0xFFFFFFFFu) ++filled;
+				}
+			}
+			if (censusOn) {
+				const uint64_t bnd = uint64_t(strip_h) * uint64_t(cx1 > cx0 ? cx1 - cx0 : 0);
+				g_xcePasses.fetch_add(1, std::memory_order_relaxed);
+				g_xcePxFull.fetch_add(rowCount, std::memory_order_relaxed);
+				g_xcePxBound.fetch_add(bnd, std::memory_order_relaxed);
+				g_xcePxLive.fetch_add(filled, std::memory_order_relaxed);
+				const int sd = front ? 1 : 0;
+				const int p  = passIdx < XCE_MAXPASS ? passIdx : XCE_MAXPASS - 1;
+				g_xcePassN[sd][p].fetch_add(1, std::memory_order_relaxed);
+				g_xcePassLive[sd][p].fetch_add(filled, std::memory_order_relaxed);
+				g_xcePassBnd[sd][p].fetch_add(bnd, std::memory_order_relaxed);
+				if (!filled) g_xcePassEmpty[sd][p].fetch_add(1, std::memory_order_relaxed);
 			}
 			const int s = strip_y >> 3;
-			if (s >= 0 && s < XT_STRIPS && xt_count[s] < XT_SLOTS) {
+			if (xt_on && s >= 0 && s < XT_STRIPS && xt_count[s] < XT_SLOTS) {
 				int &n = xt_count[s];
 				xt_mat[s][n]    = (count && faces[0] && faces[0]->Txtr && faces[0]->Txtr->Name)
 				                  ? faces[0]->Txtr->Name : "?";
@@ -4256,15 +4439,16 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 			}
 		}
 
+		if (cx1 <= cx0) return;
 		const int stripIdx = strip_y >> 3;  // TILELOG=3
 		DeferredLightingCtx stripCtx = dctx;
 		stripCtx.tileLights = g_stripLights;
 		if (front) {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
-				stripCtx, stripIdx, 0, strip_y, XRes, strip_y + strip_h);
+				stripCtx, stripIdx, cx0, strip_y, cx1, strip_y + strip_h);
 		} else {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
-				stripCtx, stripIdx, 0, strip_y, XRes, strip_y + strip_h);
+				stripCtx, stripIdx, cx0, strip_y, cx1, strip_y + strip_h);
 		}
 	};
 
@@ -4272,30 +4456,47 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	// clipper.Render above reads g_xparPeelReverse on the same thread.
 	g_xparPeelReverse = (peelPasses > 1);
 
+	if (censusOn) g_xceFlushes.fetch_add(1, std::memory_order_relaxed);
+
 	if (peelPasses <= 1) {
 		// Legacy single-fragment peel — byte-identical. Clear the strip's
-		// slice of the side layer (txtr=empty, Z=0) and render once.
-		if (sideGB) std::memset(sideGB->txtr.data() + rowStart, 0xFF, rowCount * sizeof(uint32_t));
-		if (sideZ)  std::memset(sideZ + rowStart, 0, rowCount * sizeof(uint16_t));
-		rasterAndComposite();
+		// slice of the side layer (txtr=empty, Z=0) and render once. Only the
+		// columns the previous clump dirtied need clearing; the rest already
+		// hold the cleared state.
+		int c0, c1; clamped(dSide, c0, c1);
+		fillSide(c0, c1, 0);
+		rasterAndComposite(0);
 		if (glassClump) glassBandSnapshotEnd();
 		return;
 	}
 
 	// Reverse depth peel WITHIN this (clump, side), K passes deep, over the
 	// strip's row slice — farthest-first, compositing each over the last.
+	// Under the column bound: pass 0 clears whatever the previous clump left
+	// dirty, and passes 1..K-1 clear (and floor-copy) exactly this clump's own
+	// extent — the tile columns are a purely geometric bound, identical in
+	// every pass of one clump, so pass 0's recorded extent covers them all.
 	for (int pass = 0; pass < peelPasses; ++pass) {
 		// Per-pass ceiling: pass 0 accepts all (0); later passes accept only
 		// fragments nearer than the previous pass's peeled Z.
 		if (pass == 0) {
-			if (g_xparPeelFloor) std::memset(g_xparPeelFloor + rowStart, 0, rowCount * sizeof(uint16_t));
-		} else if (g_xparPeelFloor && sideZ) {
-			std::memcpy(g_xparPeelFloor + rowStart, sideZ + rowStart, rowCount * sizeof(uint16_t));
+			int f0, f1; clamped(dFloor, f0, f1);
+			fillFloor(f0, f1);                       // floor is now zero everywhere
+			if (dFloor) *dFloor = { 0, 0 };
+		} else {
+			int f0, f1; clamped(dSide, f0, f1);
+			// --xpar_peel_early_out: the previous pass left its whole extent at
+			// the 0xFFFF clear value, so this pass's ceiling is 0xFFFF there and
+			// its accept mask `(z < 0xFFFF) & (z > 0xFFFF)` is empty — as is
+			// every later pass's, each inheriting an untouched layer in turn.
+			if (peelEarlyOut && sideZUntouched(f0, f1)) break;
+			copyFloor(f0, f1);
+			if (dFloor) *dFloor = { f0, f1 };
 		}
 		// Clear side layer slice: Z to 0xFFFF (keep-farthest init), txtr empty.
-		if (sideGB) std::memset(sideGB->txtr.data() + rowStart, 0xFF, rowCount * sizeof(uint32_t));
-		if (sideZ)  std::memset(sideZ + rowStart, 0xFF, rowCount * sizeof(uint16_t));
-		rasterAndComposite();
+		int c0, c1; clamped(dSide, c0, c1);
+		fillSide(c0, c1, 0xFF);
+		rasterAndComposite(pass);
 	}
 	if (glassClump) glassBandSnapshotEnd();
 }

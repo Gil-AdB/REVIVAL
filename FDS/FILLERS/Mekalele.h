@@ -1005,6 +1005,22 @@ struct RasterStripClamp {
 };
 inline thread_local RasterStripClamp g_rasterStripClamp;
 
+// Tile-x extent (inclusive tile indices) touched by the raster since the
+// last arm. Recorded ONLY on the unified-TBR xpar strip path — the update
+// sits inside the `g_rasterStripClamp.tileYMax < INT32_MAX` branch, which
+// RenderXparClumpInStrip is the sole setter of, so every opaque and legacy
+// raster path emits exactly the code it emitted before. RenderXparClumpInStrip
+// arms it before a clump's raster and reads it after, to bound that clump's
+// composite (and the NEXT clear) to the columns the clump can have written.
+// Empty when hi < lo. Conservative: it is the union of per-triangle tile
+// bounding boxes, so it is a superset of the pixels actually written, which
+// is what "byte-null" needs.
+struct RasterXExtent {
+	int lo = INT32_MAX;
+	int hi = -1;
+};
+inline thread_local RasterXExtent g_rasterXExtent;
+
 struct GBufferSpan {
 	u32 *normal;
 	u16 *tangent;
@@ -3240,6 +3256,12 @@ struct TileRasterizer {
 			if (tile_My > g_rasterStripClamp.tileYMax) tile_My = g_rasterStripClamp.tileYMax;
 			if (tile_my < g_rasterStripClamp.tileYMin) tile_my = g_rasterStripClamp.tileYMin;
 			if (tile_my > tile_My) return;
+			// Column extent for the xpar clump composite bound (see RasterXExtent).
+			// Once per triangle, only on the strip path.
+			if (tile_mx <= tile_Mx) {
+				if (tile_mx < g_rasterXExtent.lo) g_rasterXExtent.lo = tile_mx;
+				if (tile_Mx > g_rasterXExtent.hi) g_rasterXExtent.hi = tile_Mx;
+			}
 		}
 
 		TScreenCoord v1x = TScreenCoord(v1.PX * SUBPIXEL_MULT + 0.5);
