@@ -333,6 +333,22 @@ line when it cannot do anything.
 
 ## 2026-08-12 — TODO: the cone INTEGRATION BODY is now the majority of the cone pass
 
+> **UPDATE 2026-08-15 (round 7, docs/HW_PROFILING.md §15).** Two of the things
+> this entry points at have since been settled, so read them before starting:
+> the ablation split it asks for **was re-run on the vectorised arm** — on
+> *chase*, the scene that turned out to own the biggest cone bill (§14.2) — and
+> the `!segPath` gate quoted in the first bullet **is gone** (§14.3: it was set
+> on a round-1 greets measurement that the kernel has since invalidated; greets
+> now improves without it). The prologue this entry dismisses as not-the-lever
+> was in fact worth **−9.1 % of chase's pass and −8.1 % of city's**, bit-exact,
+> because the spot loop is the innermost of three (§15). What is genuinely left
+> of the body: the per-segment shadow tap on greets (`shadowed=51` of 51 spots,
+> unpriced), and the `rsqrt_nr_x8` question in this entry's second bullet, still
+> open. The 8-segment `W²`/`D·W` closed form is **REFUTED** — built and measured
+> at +0.1..+0.7 % instructions, because that loop runs only on ALIVE pairs
+> (8.1 % of chase's at t=800); see §15.5 rather than rebuilding it.
+
+
 The per-lane quadratic solve is **DONE** (`--vol_cone_solve_vec`, default ON,
 bit-exact, −9.4 ms/frame on city t=1961; docs/HW_PROFILING.md §9). That moves
 the cone pass from 4.09 → 2.87 Ginstr/f, and it is *still* the biggest single

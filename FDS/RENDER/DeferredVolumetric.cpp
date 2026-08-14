@@ -78,6 +78,15 @@ static std::atomic<int> g_coneRaymarchHits{0};
 #ifndef FDS_CONE_SOLVE_APPROX
 #define FDS_CONE_SOLVE_APPROX 0
 #endif
+// Compiled-out record of round 7's SECOND probe: W² and D·W inside the
+// 8-segment hybrid's coneAtten evaluated in CLOSED FORM from uV/VP/DV/PP
+// instead of rebuilding W = z·V − P per segment. Numbers and verdict at the
+// coneAttenAt lambda. Short version: it removes real ops but they are not on
+// the pass's critical path in enough pairs to pay, and it is a
+// re-association, so it stays off.
+#ifndef FDS_CONE_SEG_CLOSEDFORM
+#define FDS_CONE_SEG_CLOSEDFORM 0
+#endif
 // Ablation ladder for the SECOND round of the cone-cost campaign (the first
 // round's ladder was ad-hoc and not committed; this one is, because the split
 // has to be re-derived every time the pass changes shape). COMPILE-TIME only:
@@ -716,6 +725,53 @@ static void Render_DeferredFogPass_Tile(const DeferredLightingCtx &ctx,
 //     c_q = (D·P)² - c²|P|².
 //   Real roots → ray crosses cone boundary; clamp interval to
 //     [NearZ, min(z_surf, z_at_range)] and integrate.
+
+// Per-tile spot-list cap — see the tile filter in Render_VolumetricCones.
+// File scope because the per-(tile × spot) precompute below sizes on it.
+constexpr int CONE_TILE_SPOT_CAP = 64;
+
+// ─── Per-(tile × spot) INVARIANTS, computed ONCE per tile ────────────────
+// The spot loop is the innermost of three (row → 8-px batch → spot), so
+// every value that depends only on the LIGHT was being recomputed for every
+// (batch × spot) pair: twelve scattered SoA loads, two three-term dot
+// products, a square, four ternaries and a DIVIDE. Round 6's ablation ladder
+// priced exactly that block at 8.3 % of the whole cone pass on chase and
+// 7.2 % of its cycles — 104 instructions per pair (f1ffc925,
+// docs/HW_PROFILING.md §14.7).
+//
+// Hoisting it to the tile is BIT-EXACT BY CONSTRUCTION: identical
+// expressions on identical operands, evaluated once instead of ~10 000 times
+// per tile (a coarse 6×4 tile at 1920×1080 is 40 batches × 270 rows). Every
+// field below is a VERBATIM move of the line it replaces — no term is
+// re-associated and no product is respelled — so the compiler's contraction
+// map (docs/HW_PROFILING.md §13) travels with the value.
+//
+// `sphereC`, `cq` and the three pre-scaled broadcast constants are the same
+// idea one stage further down: the solve recomputed them per pair from these
+// same per-spot scalars. `c2+c2`, `DP+DP` and `cq*-4` are exact operations
+// (power-of-two scaling and negation), so folding them here rounds nothing
+// that was not already rounded.
+struct ConeSpotPre {
+	float Px, Py_l, Pz;             // apex, view space
+	float Dx, Dy, Dz;               // axis, view space
+	float cosO, cosI;
+	float r2, rr;
+	float DP, PP, c2;
+	float inv_cosI_minus_cosO;      // THE divide
+	float inv_nSamp;
+	float sphereC;                  // PP - r2
+	float cq;                       // fma(DP, DP, -(c2*PP))
+	float c2x2;                     // c2 + c2          (exact)
+	float negDPx2;                  // -(DP + DP)       (exact)
+	float cqm4;                     // cq * -4          (exact)
+	float hsNx, hsNy, hsNz, hsD;    // bounce half-space plane, view space
+	uint32_t omid;                  // mirror-clone id (0 = real spot)
+	int32_t  li;                    // index back into the light SoA
+	int32_t  nSamp;
+	bool     segPath;
+	bool     bounce;
+};
+
 static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                          int x1, int y1, int x2, int y2,
                                          const ViewLightsSoA *lights,
@@ -846,6 +902,84 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                           || fds::FeatureFlags::deferred_quarter()
                           || fds::FeatureFlags::deferred_checkerboard();
     const int yStep = (vecPath && coneReduced) ? 2 : 1;
+
+    // ─── the per-(tile × spot) precompute (see ConeSpotPre) ─────────────
+    // Built once here, consumed by the SIMD spot loop below. Spots the old
+    // prologue `continue`d out of are simply not appended, so the compacted
+    // list reproduces the old iteration exactly — both `continue`s sat
+    // BEFORE the first diag counter, so the census is unaffected too.
+    ConeSpotPre conePre[CONE_TILE_SPOT_CAP];
+    int conePreCount = 0;
+    if (vecPath) {
+        const int nPre = std::min(spotCount, CONE_TILE_SPOT_CAP);
+        for (int s = 0; s < nPre; ++s) {
+            const int li = spotIdx[s];
+            const float Px = lights->posX[li], Py_l = lights->posY[li], Pz = lights->posZ[li];
+            const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
+            const float cosO = lights->cosOuter[li];
+            const float cosI = lights->cosInner[li];
+            // Narrow cones (half-angle < ~10°, the disco beams) take the
+            // per-segment hybrid inside the analytic branch; nSamp only
+            // matters when the analytic flag is off. Turbulence needs
+            // per-segment density taps, so turbulent wide cones route
+            // through the segmented hybrid too — turb.on=false →
+            // segPath==narrowCone, the legacy branch structure.
+            const bool  narrowCone = cosO > 0.985f;
+            const int   nSamp      = narrowCone ? 16 : N_SAMPLES;
+            const float inv_nSamp  = narrowCone ? (1.0f / 16.0f) : inv_N;
+            const bool  segPath    = narrowCone || turb.on;
+            // Clone spot: beam reflection, confined to its mirror's
+            // footprint by the per-pixel gate in the solve.
+            const uint32_t omid = lights->mirrorId[li];
+            if (omid != 0 && (!mmask || !mmz)) continue;
+            // Bounce spot: chord clamped to the camera side of its mirror
+            // plane (apex behind the glass). Plane → view space:
+            // n_v = viewMatᵀ·N, d_v = N·camW + D.
+            const bool bounce = lights->bounceClamp[li] != 0;
+            float hsNx=0, hsNy=0, hsNz=0, hsD=0;
+            if (bounce) {
+                const float Nx = lights->mirNX[li];
+                const float Ny = lights->mirNY[li];
+                const float Nz = lights->mirNZ[li];
+                const auto &VW = dc.viewToWorld;
+                hsNx = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
+                hsNy = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
+                hsNz = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
+                hsD  = Nx*dc.cameraWorldX +
+                       Ny*dc.cameraWorldY +
+                       Nz*dc.cameraWorldZ +
+                       lights->mirD[li];
+                if (hsD == 0.0f) continue;  // camera on the glass
+            }
+            const float r2   = lights->range2[li];
+            const float rr   = lights->rRange[li];
+            const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
+            const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
+            const float c2   = cosO * cosO;
+            const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
+            const float cq   = std::fma(DP, DP, -(c2 * PP));
+            ConeSpotPre &p = conePre[conePreCount++];
+            p.Px = Px; p.Py_l = Py_l; p.Pz = Pz;
+            p.Dx = Dx; p.Dy = Dy;    p.Dz = Dz;
+            p.cosO = cosO; p.cosI = cosI;
+            p.r2 = r2; p.rr = rr;
+            p.DP = DP; p.PP = PP; p.c2 = c2;
+            p.inv_cosI_minus_cosO = inv_cosI_minus_cosO;
+            p.inv_nSamp = inv_nSamp;
+            p.sphereC = PP - r2;
+            p.cq      = cq;
+            p.c2x2    = c2 + c2;
+            p.negDPx2 = -(DP + DP);
+            p.cqm4    = cq * -4.0f;
+            p.hsNx = hsNx; p.hsNy = hsNy; p.hsNz = hsNz; p.hsD = hsD;
+            p.omid = omid;
+            p.li = li;
+            p.nSamp = nSamp;
+            p.segPath = segPath;
+            p.bounce = bounce;
+        }
+    }
+
     for (int py = y1; py < y2; py += yStep) {
         const float Y = (CntrEY - float(py)) * invFOVY;
         const size_t row = size_t(py) * size_t(XRes);
@@ -898,67 +1032,39 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 __m256 vAccG = _mm256_setzero_ps();
                 __m256 vAccR = _mm256_setzero_ps();
 
-                for (int s = 0; s < spotCount; ++s) {
+                for (int s = 0; s < conePreCount; ++s) {
                     CONE_ABL_CUT_BARE(1);   // ablation: per-batch floor
-                    const int li = spotIdx[s];
                     // Per-batch rect cull: skip if the 8-pixel batch
                     // (per-batch rect-cull experiment was reverted —
                     // per-tile cull at dispatcher already does screen-
                     // rect check; per-batch overhead didn't pay across
                     // the city sweep.)
-                    const float Px = lights->posX[li], Py_l = lights->posY[li], Pz = lights->posZ[li];
-                    const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
-                    const float cosO = lights->cosOuter[li];
-                    const float cosI = lights->cosInner[li];
-                    // Narrow cones (half-angle < ~10°, the disco
-                    // beams) take the per-segment hybrid inside the
-                    // analytic branch (exact segment integrals ×
-                    // per-segment coneAtten — a single midpoint
-                    // coneAtten fans into stripes at this gain, and a
-                    // uniform-z march loses the 1/d² core spike to a
-                    // sample lottery). nSamp only matters when the
-                    // analytic flag is off: the fallback march then
-                    // uses 16 samples instead of the global N. See
-                    // rsqrt_nr_x8 for the 12-bit-rsqrt amplification
-                    // that originally made this whole family visible.
-                    const bool  narrowCone = cosO > 0.985f;
-                    const int   nSamp      = narrowCone ? 16 : N_SAMPLES;
-                    const float inv_nSamp  = narrowCone ? (1.0f / 16.0f) : inv_N;
-                    // Turbulence needs per-segment density taps, which the
-                    // wide-cone single closed form doesn't have — route
-                    // turbulent wide cones through the segmented hybrid
-                    // too. turb.on=false → segPath==narrowCone → the
-                    // legacy branch structure, byte-identical.
-                    const bool  segPath    = narrowCone || turb.on;
-                    // Clone spot: beam reflection, confined to its
-                    // mirror's footprint below.
-                    const uint32_t omid = lights->mirrorId[li];
-                    if (omid != 0 && (!mmask || !mmz)) continue;
-                    // Bounce spot: chord clamped to the camera side of
-                    // its mirror plane (apex behind the glass). Plane
-                    // → view space: n_v = viewMatᵀ·N, d_v = N·camW + D.
-                    const bool bounce = lights->bounceClamp[li] != 0;
-                    float hsNx=0, hsNy=0, hsNz=0, hsD=0;
-                    if (bounce) {
-                        const float Nx = lights->mirNX[li];
-                        const float Ny = lights->mirNY[li];
-                        const float Nz = lights->mirNZ[li];
-                        const auto &VW = dc.viewToWorld;
-                        hsNx = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
-                        hsNy = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
-                        hsNz = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
-                        hsD  = Nx*dc.cameraWorldX +
-                               Ny*dc.cameraWorldY +
-                               Nz*dc.cameraWorldZ +
-                               lights->mirD[li];
-                        if (hsD == 0.0f) continue;  // camera on the glass
-                    }
-                    const float r2   = lights->range2[li];
-                    const float rr   = lights->rRange[li];
-                    const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
-                    const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
-                    const float c2   = cosO * cosO;
-                    const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
+                    //
+                    // EVERYTHING here used to be COMPUTED at this point,
+                    // once per (batch × spot) — the 104-instruction
+                    // prologue round 6 priced at 8.3 % of the pass. It is
+                    // now a straight read of the per-tile ConeSpotPre
+                    // record built before the row loop; see the struct's
+                    // note for why that is bit-exact rather than merely
+                    // equivalent.
+                    const ConeSpotPre &P_ = conePre[s];
+                    const int   li   = P_.li;
+                    const float Px   = P_.Px, Py_l = P_.Py_l, Pz = P_.Pz;
+                    const float Dx   = P_.Dx, Dy   = P_.Dy,   Dz = P_.Dz;
+                    const float cosO = P_.cosO, cosI = P_.cosI;
+                    const int   nSamp     = P_.nSamp;
+                    const float inv_nSamp = P_.inv_nSamp;
+                    const bool  segPath   = P_.segPath;
+                    const uint32_t omid   = P_.omid;
+                    const bool  bounce    = P_.bounce;
+                    const float hsNx = P_.hsNx, hsNy = P_.hsNy,
+                                hsNz = P_.hsNz, hsD  = P_.hsD;
+                    const float r2   = P_.r2;
+                    const float rr   = P_.rr;
+                    const float DP   = P_.DP;
+                    const float PP   = P_.PP;
+                    const float c2   = P_.c2;
+                    const float inv_cosI_minus_cosO = P_.inv_cosI_minus_cosO;
                     // ablation: keep the per-spot scalar prologue only.
                     CONE_ABL_CUT(2, _mm256_set1_ps(DP + PP + c2 +
                                                    inv_cosI_minus_cosO +
@@ -1081,8 +1187,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // the halves share them rather than recompute.
                         const float  YPy     = Y * Py_l;
                         const float  YDy     = Y * Dy;
-                        const float  sphereC = PP - r2;
-                        const float  cq      = std::fma(DP, DP, -(c2 * PP));
+                        const float  sphereC = P_.sphereC;   // per-tile
+                        const float  cq      = P_.cq;        // per-tile
                         int aliveBits = 0;
 #if FDS_CONE_W4 == 2
                         // Control build: keep the half loop ROLLED. Left to
@@ -1281,8 +1387,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 sDV =
                             fma_x8(_mm256_set1_ps(Dx), sX, _mm256_set1_ps(DVk));
 
-                        const float  sphereC = PP - r2;
-                        const float  cq      = std::fma(DP, DP, -(c2 * PP));
+                        // sphereC / cq / the three pre-scaled broadcast
+                        // constants below are per-SPOT invariants, lifted
+                        // to the per-tile ConeSpotPre record — the same
+                        // values, computed once (see the struct's note).
+                        const float  sphereC = P_.sphereC;
                         const __m256 sSphD   = fma_x8(sVP, sVP,
                             _mm256_mul_ps(_mm256_set1_ps(-sphereC), sUV));
                         // `if (sphereDisc < 0) continue` — NLT_UQ is the
@@ -1325,14 +1434,14 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // identical real product once and deletes the doubling
                         // add — the same argument round 4b used for cq·(a·−4).
                         // Bit-exact by construction.
-                        const __m256 sB  = fma_x8(_mm256_set1_ps(c2 + c2), sVP,
-                            _mm256_mul_ps(_mm256_set1_ps(-(DP + DP)), sDV));
+                        const __m256 sB  = fma_x8(_mm256_set1_ps(P_.c2x2), sVP,
+                            _mm256_mul_ps(_mm256_set1_ps(P_.negDPx2), sDV));
                         // fl(cq * fl(a*-4)) == fl(fl(cq*-4) * a): BOTH inner
                         // products are exact (scaling by a power of two), so
                         // either spelling rounds the same real product once.
                         // Folding it into the scalar deletes a whole __m256 mul.
                         const __m256 sDisc = fma_x8(sB, sB,
-                            _mm256_mul_ps(_mm256_set1_ps(cq * -4.0f), sA));
+                            _mm256_mul_ps(_mm256_set1_ps(P_.cqm4), sA));
 
                         const __m256 sSq    = SQRTV(sDisc);
                         const __m256 sInv2a = RCP(_mm256_add_ps(sA, sA));
@@ -1779,8 +1888,46 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             return _mm256_add_ps(at,
                                    _mm256_and_ps(mWrap, _mm256_set1_ps(3.14159265f)));
                         };
+#if FDS_CONE_SEG_CLOSEDFORM
+                        // ROUND 7'S SECOND PROBE — MEASURED AND NOT KEPT
+                        // (compiled out in place as the record of the test).
+                        // W = z·V − P with V = (X, Y, 1), so both dot products
+                        // the smoothstep needs are quadratics in z whose
+                        // coefficients the solve already produced:
+                        //   W·W = z²(V·V) − 2z(V·P) + P·P = z(z·uV − 2VP) + PP
+                        //   D·W = z(D·V) − D·P            = z·DV − DP
+                        // 3 vector ops per segment against the 11 the explicit
+                        // W spelling costs — 64 __m256 ops saved per alive pair
+                        // for 4 of setup, which is what §14.7 parked.
+                        // MEASURED, two binaries in one worktree, interleaved
+                        // min-of-6 with round 0 discarded, load 5.4–9.7:
+                        //   cones Ginstr/f  chase t800 1.993 → 1.995 (+0.1 %)
+                        //                   chase t400 2.690 → 2.696 (+0.2 %)
+                        //                   greets t1588 0.952 → 0.959 (+0.7 %)
+                        //   cones Gcyc/f    −1.7 % / −1.6 % / −2.8 %
+                        // The INSTRUCTION column is a small LOSS on all three,
+                        // and the arithmetic says why: the segment loop runs
+                        // only on ALIVE pairs, 8.1 % of chase's at t=800, so
+                        // the whole block is ~0.9 % of the pass GROSS before
+                        // the replacement's own cost. What is left is a
+                        // shorter dependency chain (IPC 4.30 → 4.39), worth
+                        // 1.6–2.8 % of cycles — under §14.7's 2 % bar, and it
+                        // is a RE-ASSOCIATION, so buying it means moving
+                        // bytes. Not worth a judge call at that size.
+                        const __m256 vDVc_v = _mm256_fmadd_ps(vX_v, vDx_v,
+                                              _mm256_fmadd_ps(vY_v, vDy_v, vDz_dir_v));
+                        const __m256 vN2VP_v = _mm256_mul_ps(vVP_v,
+                                               _mm256_set1_ps(-2.0f));
+                        const __m256 vNDP_v  = _mm256_set1_ps(-DP);
+#endif
                         // coneAtten (smoothstep cosO→cosI) at a given z.
                         auto coneAttenAt = [&](const __m256 &z) -> __m256 {
+#if FDS_CONE_SEG_CLOSEDFORM
+                            const __m256 W2 = _mm256_fmadd_ps(z,
+                                              _mm256_fmadd_ps(z, vUv_v, vN2VP_v),
+                                              vPP_v);
+                            const __m256 DW = _mm256_fmadd_ps(z, vDVc_v, vNDP_v);
+#else
                             const __m256 Wx = _mm256_sub_ps(_mm256_mul_ps(z, vX_v), vPx_v);
                             const __m256 Wy = _mm256_sub_ps(_mm256_mul_ps(z, vY_v), vPy_v);
                             const __m256 Wz = _mm256_sub_ps(z, vPz_v);
@@ -1790,6 +1937,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             const __m256 DW = _mm256_fmadd_ps(vDx_v, Wx,
                                               _mm256_fmadd_ps(vDy_v, Wy,
                                                _mm256_mul_ps(vDz_dir_v, Wz)));
+#endif
                             const __m256 safeW2 = VMAX(W2, _mm256_set1_ps(1e-12f));
                             const __m256 cosT = _mm256_mul_ps(DW, rsqrt_nr_x8(safeW2));
                             __m256 t = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
@@ -2795,7 +2943,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     // most tiles will see 0 spots — the per-pixel inner loop short-
     // circuits via spotCount==0. Array sized for the 12x8 max; cap 64 is
     // ample (only spots → ~10 disco + 12 bounce on greets, well under 64).
-    constexpr int CONE_TILE_SPOT_CAP = 64;
+    // CONE_TILE_SPOT_CAP moved to file scope — the per-(tile × spot)
+    // precompute in the tile fn sizes its record array on the same cap.
     int tileSpotIdx  [DEFERRED_NUM_TILES][CONE_TILE_SPOT_CAP];   // local: concurrent shard bakes
     int tileSpotCount[DEFERRED_NUM_TILES];
     for (int t = 0; t < numTiles; ++t) tileSpotCount[t] = 0;

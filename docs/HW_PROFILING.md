@@ -1477,3 +1477,157 @@ byte-identical (its cones are wide). Images:
 * **Do not price a cull on this pass without its fire rate first.** 14.4 has the
   same instrument giving 83.9 %, 18.8 % and 3.4 % on three poses of two scenes,
   and the verdict flips sign across that range.
+
+## 15. Worked example round 7 — the innermost loop was rebuilding per-LIGHT constants, 2026-08-15
+
+§14.7 parked one item as *"bit-exact by construction and unattacked"*: the
+per-spot scalar prologue — **8.3 % of chase's cone pass and 7.2 % of its
+cycles, 104 instructions per (batch × spot) including a divide**. This is that
+item. It is the cheapest thing the campaign has landed, because it is not an
+algorithm change at all: the same expressions, on the same operands, evaluated
+once instead of ten thousand times per tile.
+
+### 15.1 The inventory — what in that loop actually depends on the batch
+
+The kernel's nest is **row → 8-px batch → spot**, with the spot loop
+**innermost**. Read against that nest the whole prologue is loop-invariant:
+
+| value | varies with | verdict |
+|---|---|---|
+| `Px,Py,Pz` `Dx,Dy,Dz` `cosO,cosI` `r2,rr` | light index | **per-spot** (12 scattered SoA loads) |
+| `narrowCone`, `nSamp`, `inv_nSamp`, `segPath` | `cosO`, `turb.on` | **per-spot** (4 selects) |
+| `omid`, `bounce` + their two `continue`s | light index | **per-spot** |
+| `hsNx/hsNy/hsNz/hsD` (bounce half-space) | light × `viewToWorld`, camera | **per-frame** |
+| `DP = D·P`, `PP = P·P`, `c2 = cosO²` | the above | **per-spot** (2 three-term dots) |
+| `inv_cosI_minus_cosO` | `cosI`, `cosO` | **per-spot — THE DIVIDE** |
+| `Y·Py`, `Y·Dy` (`VPk`/`DVk`) | the row's `Y` | per-**(row × spot)** — *not* hoisted, see 15.6 |
+| `X`, `uV`, `zMax`, `pxHash` | the pixel | genuinely per-batch |
+| `VP`, `DV`, `a`, `b`, `disc`, the roots | the pixel | genuinely per-batch |
+
+And one stage further down, *inside* the solve, five more per-spot values the
+8-wide arm was rebuilding for every pair: `sphereC = PP − r2`,
+`cq = fma(DP,DP,−(c2·PP))`, and the three broadcast constants `c2+c2`,
+`−(DP+DP)`, `cq·−4`. The last three are **exact** operations (power-of-two
+scaling and negation), so folding them rounds nothing that was not already
+rounded.
+
+**What was deliberately left alone**, and why it is worth saying: the
+shadow-map block (`smIdx`, `smMirror`, the mirror plane, the 17 `sm_*`
+scalars) is *also* per-spot invariant, but it sits **after** `if (!spotAlive)
+continue;` — it runs on 8.1 % of chase's pairs, and hoisting it converts loads
+into loads rather than deleting arithmetic. Left for a measurement, not
+assumed.
+
+### 15.2 The hoisting scope — per TILE, because that is where the spot list is
+
+`Render_VolumetricCones_Tile` receives `spotIdx/spotCount`: the **per-tile**
+list `43ac3456`'s sphere cull builds. So the smallest scope that makes these
+compute-once without touching a signature is *per tile, per spot*, in a
+`ConeSpotPre[64]` record array built between the `yStep` line and the row
+loop. The amortisation is not marginal: a coarse 6×4 tile at 1920×1080 is
+320×270 px = **40 batches × 270 rows = 10 800** evaluations collapsed to one.
+Going per-*frame* would save the remaining 0.01 % and would need the record
+threaded through the dispatcher — not worth it.
+
+Two details make the compacted list exact rather than merely equivalent:
+the prologue's two `continue`s (clone spot with no mirror mask; bounce spot
+with the camera on the glass) are hoisted **into the precompute as
+non-appends**, and both sat *before* the first `g_coneDiag` counter, so the
+census is unaffected too.
+
+### 15.3 Bit-exact, verified rather than argued
+
+Every field is a **verbatim move** of the line it replaces — no term
+re-associated, no product respelled — so the compiler's contraction map (§13)
+travels with the value. The check is the pin battery, and it passed first try:
+
+* **chase** t100 `7678a6bc…` t400 `42d79fad…` t800 `b29c73f1…` t1200
+  `31aa5203…` t1600 `1544b0e7…` — **all five unmoved**
+* **greets** `570a7b44…`, **city** `3f894823…`, **fountain** `8db68ccb…` —
+  unmoved
+* 2/2 stable on each binary, **differential** (both binaries built in one
+  worktree, one asset tree, run 1 discarded)
+* `render_gate` **ALL FOUR rows PASS** byte-identical
+
+**Not one pixel moves anywhere.** That is what "bit-exact by construction"
+is supposed to buy, and it is the reason this change needs no judge call.
+
+### 15.4 Measured — two arms, parent binary, interleaved min-of-6
+
+No FeatureFlag: §14.3 priced the dual-arm tax in this kernel at **+5.9 %
+instructions** for one extra live bool, so a hoist that is bit-exact ships as
+a straight replacement. Two independent interleaved sessions, `scratchpad/prof1.py`,
+per-arm binaries, one asset tree, order rotating each round, round 0 discarded.
+Load 5–22 — read `Ginstr/f`, which reproduced **to 0.15 % between the two
+sessions** for every row.
+
+| pose | cones wall | cones Ginstr/f | cones Gcyc/f |
+|---|--:|--:|--:|
+| chase t=800 | 14.766 → **13.601** (−7.9 %) | 2.191 → **1.992 (−9.1 %)** | 0.502 → 0.464 (−7.6 %) |
+| chase t=400 | 20.114 → **18.527** (−7.9 %) | 3.013 → **2.691 (−10.7 %)** | 0.688 → 0.625 (−9.2 %) |
+| city t=1961 | 15.529 → 14.998 (−3.4 %) | 2.264 → **2.081 (−8.1 %)** | 0.540 → 0.520 (−3.7 %) |
+| greets t=1588 | 6.545 → 6.270 (−4.2 %) | 0.994 → **0.951 (−4.3 %)** | 0.220 → 0.207 (−5.9 %) |
+| greets t=3122 (the user's pose) | 6.186 → 5.997 (−3.1 %) | 0.893 → 0.889 (−0.4 %) | 0.212 → 0.206 (−2.8 %) |
+
+**Attribution check** (frame delta vs pass delta, Ginstr/f): chase t=800
+−0.199 / −0.199; chase t=400 −0.320 / −0.322; city −0.181 / −0.183; greets
+t=1588 −0.042 / −0.043. The saving is where the timer says it is.
+
+**It beats its own price, and the reason is honest bookkeeping**: §14.7 priced
+the prologue at 8.3 % and chase measures −9.1 %, because the five per-spot
+values lifted out of the *solve* (15.1) are not in that 8.3 % bucket.
+
+**This is the first change of the campaign that helps all three cone scenes**,
+and the mechanism says why: the prologue runs for **every** (batch × spot)
+pair regardless of which branch the pair then takes, so city's all-wide cones
+pay it exactly as chase's narrow ones do. Round 6 could only reach city as
+codegen; this reaches it directly (−8.1 % instructions on 3.2 M pairs).
+
+### 15.5 The other parked item, measured and NOT kept
+
+§14.7's third bullet: the 8-segment loop rebuilds `W = z·V − P` per segment
+when both dot products are closed forms in `z` from values the solve already
+produced — `W·W = z(z·uV − 2VP) + PP`, `D·W = z·DV − DP`. **3 vector ops per
+segment against 11**, ×8 segments. Built and measured (`FDS_CONE_SEG_CLOSEDFORM`,
+compiled out in place as the record):
+
+| pose | cones Ginstr/f | cones Gcyc/f | IPC |
+|---|--:|--:|--:|
+| chase t=800 | 1.993 → 1.995 (**+0.1 %**) | 0.463 → 0.455 (−1.7 %) | 4.30 → 4.39 |
+| chase t=400 | 2.690 → 2.696 (**+0.2 %**) | 0.626 → 0.616 (−1.6 %) | 4.30 → 4.38 |
+| greets t=1588 | 0.952 → 0.959 (**+0.7 %**) | 0.213 → 0.207 (−2.8 %) | 4.48 → 4.62 |
+
+**The instruction column is a small LOSS on all three, and the arithmetic says
+why: the segment loop runs only on ALIVE pairs.** Chase t=800 is 91.9 % dead
+(§14.1), so 8.1 % × 3 601 800 pairs × 64 saved `__m256` ops is **~0.9 % of the
+pass GROSS** — before the closed form's own per-pair setup and its effect on
+register allocation eat it. What survives is a shorter dependency chain, worth
+1.6–2.8 % of cycles.
+
+**Not kept**, and the rule it follows is §14.7's own: under the 2 % bar, and
+it is a **re-association**, so buying it means moving bytes. Priced that too,
+so the next person does not have to: chase **75 / 85 px** of 2 073 600 at max
+|Δ| **2/255**, greets **2 323 px (0.112 %)** at 2/255. A judge call, an
+artifact battery and a countersign for −1.7 % of one pass's cycles is not a
+trade worth making.
+
+**The reusable form of this**: *an optimisation inside a branch is worth its
+op count times the branch's FIRE RATE, not its op count.* §14.4 said the same
+thing about culls from the other direction. On this pass the census
+(`-DFDS_CONE_DIAG=1`) prints that rate; read it before building the arm.
+
+### 15.6 Carry forward
+
+* `Y·Py` and `Y·Dy` are per-**(row × spot)** and still recomputed per batch.
+  Hoisting them needs a per-row array refreshed over the spot list — 2 fma
+  saved per pair against a 128-float write per row. Priced at ~0.15 % of the
+  pass by op count; almost certainly under the noise floor, and stated here so
+  nobody re-derives it.
+* The per-spot **shadow-map block** (15.1) is the same shape of hoist one
+  stage down, gated behind `spotAlive`. It converts loads to loads, so its
+  value is the branch structure, not the arithmetic — measure before building.
+* **greets still carries `shadowed=51` of 51 spots** and pays a per-segment
+  scalar shadow tap chase pays nothing for. Unpriced, unchanged from §14.7.
+* Chase's cone pass has now gone **2.817 → 2.192 → 1.992 Ginstr/f** across
+  rounds 6 and 7, −29.3 % in total, on a scene the campaign had never opened
+  two days ago.

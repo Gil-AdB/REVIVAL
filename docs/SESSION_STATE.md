@@ -1,5 +1,72 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-15 — ROUND 7: THE CONE KERNEL'S INNERMOST LOOP WAS REBUILDING PER-LIGHT CONSTANTS 10 800 TIMES A TILE. NOT ONE PIXEL MOVES, AND IT IS THE FIRST CONE WIN THAT HELPS ALL THREE SCENES
+>
+> `f1ffc925` §14.7 parked the per-spot scalar prologue as *"bit-exact by
+> construction and unattacked"* — **8.3 % of chase's cone pass, 7.2 % of its
+> cycles, 104 instructions per (batch × spot) including a DIVIDE**. Cashed now.
+> Full write-up, inventory table and reproduction: `docs/HW_PROFILING.md` §15.
+>
+> ### THE DEFECT IS THE LOOP ORDER, NOT THE MATH
+>
+> The nest is **row → 8-px batch → spot**, spot loop **innermost**. So twelve
+> scattered SoA loads, two three-term dot products, a square, four selects and
+> `1/(cosI − cosO)` ran for every (batch × spot) pair to produce values that
+> depend only on **which light it is**. They now live in a `ConeSpotPre` record
+> built once per tile — a coarse 6×4 tile at 1920×1080 is 320×270 px, so
+> **10 800 evaluations collapse to one**. Five more per-spot values were lifted
+> out of the solve itself (`sphereC`, `cq`, and the exact constants `c2+c2`,
+> `−(DP+DP)`, `cq·−4`).
+>
+> ### NOT ONE PIXEL MOVES — EVERY PIN AT ITS CURRENT VALUE, FIRST TRY
+>
+> Every field is a **verbatim move** of the line it replaces, so the
+> contraction map (§13) travels with the value. Differential battery (both
+> binaries in one worktree, one asset tree, run 1 discarded), **2/2 each**:
+> chase t100 `7678a6bc…` t400 `42d79fad…` t800 `b29c73f1…` t1200 `31aa5203…`
+> t1600 `1544b0e7…`, greets `570a7b44…`, city `3f894823…`, fountain
+> `8db68ccb…` — **all eight UNMOVED**. `render_gate.sh` **ALL FOUR PASS**
+> byte-identical (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+> **No pin table edit is needed and none was made.**
+>
+> ### MEASURED — no flag (§14.3 priced the dual-arm tax at +5.9 %), two arms,
+> ### parent binary, interleaved min-of-6, TWO independent sessions
+>
+> | pose | cones wall | cones Ginstr/f | cones Gcyc/f |
+> |---|--:|--:|--:|
+> | chase t=800 | 14.766 → **13.601** (−7.9 %) | 2.191 → **1.992 (−9.1 %)** | 0.502 → 0.464 (−7.6 %) |
+> | chase t=400 | 20.114 → **18.527** (−7.9 %) | 3.013 → **2.691 (−10.7 %)** | 0.688 → 0.625 (−9.2 %) |
+> | city t=1961 | 15.529 → 14.998 (−3.4 %) | 2.264 → **2.081 (−8.1 %)** | 0.540 → 0.520 (−3.7 %) |
+> | greets t=1588 | 6.545 → 6.270 (−4.2 %) | 0.994 → **0.951 (−4.3 %)** | 0.220 → 0.207 (−5.9 %) |
+> | **greets t=3122 (your pose)** | 6.186 → 5.997 (−3.1 %) | 0.893 → 0.889 (−0.4 %) | 0.212 → 0.206 (−2.8 %) |
+>
+> `Ginstr/f` reproduced **to 0.15 %** across the two sessions on every row.
+> Attribution (frame Ginstr delta vs pass delta): chase t=800 −0.199/−0.199,
+> t=400 −0.320/−0.322, city −0.181/−0.183, greets −0.042/−0.043.
+>
+> **It beats its own 8.3 % price** because the five values lifted out of the
+> *solve* are not in that bucket. And it is the **first cone change of the
+> campaign that helps all three cone scenes** — the prologue ran for every pair
+> regardless of which branch it took, so city's all-wide cones paid it exactly
+> as chase's narrow ones did. Round 6 could only reach city as codegen.
+>
+> ### THE OTHER PARKED ITEM: BUILT, MEASURED, NOT KEPT
+>
+> §14.7's 8-segment `W²`/`D·W` closed form (3 vector ops per segment against
+> 11, ×8) is **+0.1 / +0.2 / +0.7 % INSTRUCTIONS** on chase t800 / t400 /
+> greets t1588 — a small LOSS — and −1.7 / −1.6 / −2.8 % cycles. The
+> arithmetic explains it: that loop runs only on **alive** pairs (8.1 % of
+> chase's at t=800), so the whole block is ~0.9 % of the pass *gross*. It is a
+> re-association, and it was priced in bytes so nobody has to again: chase
+> 75/85 px, greets 2 323 px, all at max |Δ| 2/255. Under §14.7's 2 % bar →
+> **not kept**, compiled out in place as `FDS_CONE_SEG_CLOSEDFORM` with its
+> numbers. The shipping binary is **byte-identical** with the arm present,
+> which is the proof it costs nothing to carry.
+>
+> **The reusable rule**: an optimisation inside a branch is worth its op count
+> times the branch's **fire rate**, not its op count. §14.4 said the same thing
+> about culls from the other end.
+
 > ## 2026-08-14c — FOUNTAIN'S 77 % FRAME ITEM IS CLOSED: -11.99 ms, AND THE CAUSE WAS THAT NOTHING IN THE PIPELINE BOUNDED X
 >
 > Round 1's #3 item — "two-layer transparent lighting, 21.7 of 28.1 ms at
