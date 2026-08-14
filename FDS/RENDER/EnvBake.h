@@ -329,19 +329,32 @@ inline float EnvLiveWater_MaskAt(const uint8_t* mask, int res,
 // No mask (a bake that never produced one — the legacy equirect city path) =
 // NO perturb. The unmasked version is the defect, so falling back to it would
 // ship the bug; falling back to the static bake is at worst the flag-off look.
-inline void EnvLiveWater_PerturbDir(float bakeX, float bakeY, float bakeZ,
-                                    float& dx, float& dy, float& dz,
-                                    const uint8_t* mask, int maskRes)
+// SPLIT IN TWO because the forward consumer cannot use the combined form.
+// Weight first: "how much water is the content this direction reads", 0..1,
+// with every early-out that makes the tilt inapplicable folded in as 0. A
+// PER-PIXEL consumer (the deferred kernel) can take this weight and apply the
+// tilt in the same breath — PerturbDir below is exactly that. A PER-VERTEX
+// consumer cannot: see the comment on EnvLiveWater_TiltDir.
+inline float EnvLiveWater_Weight(float bakeY, float dx, float dy, float dz,
+                                 const uint8_t* mask, int maskRes)
 {
     const EnvLiveWaterState& lw = g_envLiveWater;
-    if (!lw.active) return;
-    if (dy >= -1e-6f) return;                       // above horizon
-    if (bakeY <= lw.waterY) return;                 // probe under water: n/a
-    if (!mask || maskRes < 2) return;               // no water mask → no tilt
+    if (!lw.active) return 0.0f;
+    if (dy >= -1e-6f) return 0.0f;                  // above horizon
+    if (bakeY <= lw.waterY) return 0.0f;            // probe under water: n/a
+    if (!mask || maskRes < 2) return 0.0f;          // no water mask → no tilt
     float w = EnvLiveWater_MaskAt(mask, maskRes, dx, dy, dz);
     w = (w - lw.maskBias) * lw.maskGain;
-    if (w <= 0.0f) return;                          // reflected content is not water
-    if (w > 1.0f) w = 1.0f;
+    if (w <= 0.0f) return 0.0f;                     // content is not water
+    return w > 1.0f ? 1.0f : w;
+}
+
+// Apply the wave-slope tilt at a weight the caller already decided.
+inline void EnvLiveWater_TiltDir(float bakeX, float bakeY, float bakeZ,
+                                 float& dx, float& dy, float& dz, float w)
+{
+    const EnvLiveWaterState& lw = g_envLiveWater;
+    if (w <= 0.0f) return;
     // Plane hit from the bake point — UNBOUNDED, like the main view's
     // dispMap ripple (updateRippleDispMap ray-casts every pixel to the
     // plane with no extent test; the flooded city reads as water in every
@@ -362,6 +375,16 @@ inline void EnvLiveWater_PerturbDir(float bakeX, float bakeY, float bakeZ,
     const float k = lw.amp * w * -dy;
     dx += k * sx;
     dz += k * sz;
+}
+
+// The PER-PIXEL form: weight and tilt in one call, which is only correct when
+// the caller owns the pixel it is shading.
+inline void EnvLiveWater_PerturbDir(float bakeX, float bakeY, float bakeZ,
+                                    float& dx, float& dy, float& dz,
+                                    const uint8_t* mask, int maskRes)
+{
+    const float w = EnvLiveWater_Weight(bakeY, dx, dy, dz, mask, maskRes);
+    if (w > 0.0f) EnvLiveWater_TiltDir(bakeX, bakeY, bakeZ, dx, dy, dz, w);
 }
 
 }  // namespace fds
