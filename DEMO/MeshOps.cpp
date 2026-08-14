@@ -3842,6 +3842,119 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			auto faceV = [&](const Face &F, int k) -> float { return k==0?F.V1:(k==1?F.V2:F.V3); };
 			auto setUV = [&](Face &F, int k, float u, float v) {
 				if (k==0){F.U1=u;F.V1=v;} else if (k==1){F.U2=u;F.V2=v;} else {F.U3=u;F.V3=v;} };
+			// ── BAND PRE-SPLIT (fan bound, 2026-08-14). The pitch recursion below
+			// splits only the BORDER edge: (a,b,c) -> (a,m,c)+(m,b,c), so every
+			// sliver keeps the face's original opposite corner. A stone-sized
+			// border face therefore becomes a FAN of ~2^passes degenerate slivers
+			// sharing one apex (observed live at the t=6001 doorway: hundreds of
+			// slivers radiating from a single vertex), and — the same defect worn
+			// two ways — the border verts' mitre/profile displacement blends
+			// linearly from the border all the way to that apex, so the corner
+			// chamfer reads as wide as the FACE instead of as mortar. Bound both:
+			// first split the face's two side edges at perpendicular width
+			// kBandWidth from the border, inserting an interior polyline that
+			// mirrors the border. The recursion then operates on a band whose far
+			// side is kBandWidth away — slivers are short, and the border blend
+			// spans mortar scale. A side vert that lands ON another qualifying
+			// authored border edge (corner faces: the pre-split point subdivides
+			// that edge) inherits BORDER status for its edge and re-runs the
+			// per-point veto, so the second border's densification and pinning
+			// survive the split. Faces already narrower than 1.6x the band are
+			// left to the recursion unchanged.
+			constexpr float kBandWidth = 0.10f;   // world units, chamfer span
+			{
+				int nBand = 0;
+				bool didBand = true;
+				for (int pass = 0; didBand && pass < 8; ++pass) {
+					didBand = false;
+					const size_t nf = faces.size();
+					for (size_t i = 0; i < nf; ++i) {
+						if (!(faces[i].Txtr && faces[i].Txtr->Name &&
+						      !std::strcmp(faces[i].Txtr->Name, matName))) continue;
+						for (int k = 0; k < 3; ++k) {
+							const uint32_t a = fIdx[i][k], b = fIdx[i][(k+1)%3], c = fIdx[i][(k+2)%3];
+							if (a >= recessOnly.size() || b >= recessOnly.size()) continue;
+							if (!recessOnly[a] || !recessOnly[b]) continue;
+							if (a >= freeEdgeKA.size() || b >= freeEdgeKA.size()) continue;
+							if (!freeEdgeKA[a] || freeEdgeKA[a] != freeEdgeKA[b] ||
+							    freeEdgeKB[a] != freeEdgeKB[b]) continue;   // same authored edge only
+							const Vector A = verts[a].Pos, B = verts[b].Pos, C = verts[c].Pos;
+							const float ex=B.x-A.x, ey=B.y-A.y, ez=B.z-A.z;
+							const float el2 = ex*ex+ey*ey+ez*ez;
+							if (el2 < 1e-12f) continue;
+							const float cxr=C.x-A.x, cyr=C.y-A.y, czr=C.z-A.z;
+							const float t0 = (cxr*ex+cyr*ey+czr*ez)/el2;
+							const float px=cxr-t0*ex, py=cyr-t0*ey, pz=czr-t0*ez;
+							const float hC = std::sqrt(px*px+py*py+pz*pz);
+							if (hC <= kBandWidth*1.6f) continue;   // band already narrow
+							const float t = kBandWidth / hC;       // param along s->c
+							// insert a vert on side edge (s,c); if that edge is itself a
+							// qualifying border edge, the new vert subdivides it and must
+							// stay a border vert of THAT edge (veto re-run at its position)
+							auto sideVert = [&](uint32_t s) -> uint32_t {
+								Vertex m = verts[s];
+								m.Pos.x = verts[s].Pos.x + t*(verts[c].Pos.x - verts[s].Pos.x);
+								m.Pos.y = verts[s].Pos.y + t*(verts[c].Pos.y - verts[s].Pos.y);
+								m.Pos.z = verts[s].Pos.z + t*(verts[c].Pos.z - verts[s].Pos.z);
+								float nx = (1.0f-t)*verts[s].N.x + t*verts[c].N.x;
+								float ny = (1.0f-t)*verts[s].N.y + t*verts[c].N.y;
+								float nz = (1.0f-t)*verts[s].N.z + t*verts[c].N.z;
+								const float nl = std::sqrt(nx*nx+ny*ny+nz*nz);
+								if (nl > 1e-6f) { m.N.x=nx/nl; m.N.y=ny/nl; m.N.z=nz/nl; }
+								const uint32_t mid = uint32_t(verts.size());
+								verts.push_back(m);
+								pinnedZero.resize(verts.size(), 0);
+								recessOnly.resize(verts.size(), 0);
+								freeEdgeDir.resize(verts.size(), Vector{0.0f,0.0f,0.0f});
+								freeEdgeKA.resize(verts.size(), 0); freeEdgeKB.resize(verts.size(), 0);
+								const bool sideIsBorder =
+									s < recessOnly.size() && c < recessOnly.size() &&
+									recessOnly[s] && recessOnly[c] &&
+									freeEdgeKA[s] && freeEdgeKA[s] == freeEdgeKA[c] &&
+									freeEdgeKB[s] == freeEdgeKB[c];
+								if (sideIsBorder) {
+									const Vector fn = faces[i].N;
+									if (abutPointMat(verts[mid].Pos, freeEdgeKA[s], freeEdgeKB[s], &fn)) {
+										pinnedZero[mid] = 1;
+									} else {
+										recessOnly[mid] = 1;
+										freeEdgeDir[mid] = freeEdgeDir[s];
+										freeEdgeKA[mid] = freeEdgeKA[s]; freeEdgeKB[mid] = freeEdgeKB[s];
+									}
+								}
+								return mid;
+							};
+							const uint32_t a2 = sideVert(a);
+							const uint32_t b2 = sideVert(b);
+							// face-local UVs at the side points
+							const float ua=faceU(faces[i],k),        va=faceV(faces[i],k);
+							const float ub=faceU(faces[i],(k+1)%3),  vb=faceV(faces[i],(k+1)%3);
+							const float uc=faceU(faces[i],(k+2)%3),  vc=faceV(faces[i],(k+2)%3);
+							const float ua2=ua+t*(uc-ua), va2=va+t*(vc-va);
+							const float ub2=ub+t*(uc-ub), vb2=vb+t*(vc-vb);
+							// (a,b,c) -> band (a,b,b2) + band (a,b2,a2) + interior (a2,b2,c)
+							Face f1 = faces[i];                        // (a,b2,a2)
+							setUV(f1,(k+1)%3,ub2,vb2); setUV(f1,(k+2)%3,ua2,va2);
+							std::array<uint32_t,3> i1 = fIdx[i];
+							i1[(k+1)%3]=b2; i1[(k+2)%3]=a2;
+							Face f2 = faces[i];                        // (a2,b2,c)
+							setUV(f2,k,ua2,va2); setUV(f2,(k+1)%3,ub2,vb2);
+							std::array<uint32_t,3> i2 = fIdx[i];
+							i2[k]=a2; i2[(k+1)%3]=b2;
+							// face i becomes the border band tri (a,b,b2)
+							setUV(faces[i],(k+2)%3,ub2,vb2);
+							fIdx[i][(k+2)%3]=b2;
+							faces.push_back(f1); fIdx.push_back(i1); faceFromEdge.push_back(faceFromEdge[i]);
+							faces.push_back(f2); fIdx.push_back(i2); faceFromEdge.push_back(faceFromEdge[i]);
+							++nBand; didBand = true;
+							break;   // face i's edges changed; rescan
+						}
+					}
+				}
+				if (nBand)
+					std::fprintf(stderr, "[STONE] '%s' border band pre-split: %d faces banded "
+						"at width %.2f (fan bound)\n", matName, nBand, kBandWidth);
+			}
 			int nProfSplit = 0, nProfPin = 0;
 			bool didSplit = true;
 			for (int pass = 0; didSplit && pass < 8; ++pass) {
