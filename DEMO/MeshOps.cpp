@@ -1962,6 +1962,23 @@ inline float meshLerpf(float a, float b, float t) { return a + (b - a) * t; }
 std::map<std::string, std::vector<StoneParentPlane>> g_stoneParentPlanes;
 std::map<std::string, std::map<std::array<int,4>, uint16_t>> g_stoneParentPlaneKeys;
 
+// ── carved-vert shading restore (--greets_displace_groove_shade) ─────────────
+// A groove is an occluded crevice: it shades like the wall around it (dark
+// from the mortar albedo), never like a ceiling-facing mirror or a lit ledge.
+// The displacement loop records, for every vert carved BELOW its reference,
+// the AUTHORED pre-displacement normal it rode and a depth weight;
+// DisplaceStoneSmoothNormals blends the recomputed geometric normal back
+// toward the authored one by that weight. Keyed by the DISPLACED position's
+// exact bits — per-cell chunk copies are bitwise, so they inherit.
+struct GrooveShadeRec { Vector wallN; float w; };
+struct GrooveShadeKey {
+	uint32_t x, y, z;
+	bool operator==(const GrooveShadeKey &o) const { return x==o.x && y==o.y && z==o.z; }
+};
+struct GrooveShadeKeyH { size_t operator()(const GrooveShadeKey &k) const {
+	return (size_t(k.x)*73856093u) ^ (size_t(k.y)*19349663u) ^ (size_t(k.z)*83492791u); } };
+std::unordered_map<GrooveShadeKey, GrooveShadeRec, GrooveShadeKeyH> g_grooveShade;
+
 // Edge-aligned tessellation (the flat-top fix): the mortar-groove grid of a
 // stone height map, detected in MAP space at the bake mip. A groove RUN is a
 // below-threshold interval of a mean-height profile (mortar is recessed, so
@@ -4488,6 +4505,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				for (size_t k : vs) { mitreOf[mc[k].v] = gid; ++nMitreVerts; }
 			}
 		}
+		const bool grooveShadeOn = fds::FeatureFlags::greets_displace_groove_shade();
 		for (uint32_t i=0;i<nV;++i){
 			if (pinnedZero[i]||hCnt[i]==0) continue;
 			const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
@@ -4601,6 +4619,20 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				}
 			}
 			verts[i].Pos.x+=dx*dsp; verts[i].Pos.y+=dy*dsp; verts[i].Pos.z+=dz*dsp;
+			// Carved below the reference: record the AUTHORED normal this vert
+			// rode (pre-displacement — the wall plane on a flat wall) and a
+			// depth weight, keyed by the DISPLACED position's exact bits, for
+			// DisplaceStoneSmoothNormals' shading restore. Geometry keeps the
+			// carve; shading stops presenting the cut faces to the lighting.
+			if (grooveShadeOn && dsp < 0.0f) {
+				const float gw = std::min(1.0f, -dsp / (0.35f*std::fabs(amp) + 1e-6f));
+				GrooveShadeRec rec;
+				rec.wallN.x = N.x/nl; rec.wallN.y = N.y/nl; rec.wallN.z = N.z/nl;
+				rec.w = gw;
+				const Vector &Pd = verts[i].Pos;
+				g_grooveShade[GrooveShadeKey{ meshF2bits(Pd.x), meshF2bits(Pd.y),
+				                              meshF2bits(Pd.z) }] = rec;
+			}
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
 		}
 		if (bowCensus && !bowDist.empty()) {
@@ -5366,6 +5398,8 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 		return true;
 	};
 
+	const bool grooveShadeOn = fds::FeatureFlags::greets_displace_groove_shade();
+	int nGrooveShaded = 0;
 	// Weld BOTH the normal AND the tangent over each corner's gated position bucket.
 	// A split mesh (greets, post-MakeFacesIndependent) gives every corner its OWN
 	// per-face tangent, so coincident corners get DIFFERENT tangents (per-cell
@@ -5386,6 +5420,24 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 		}
 		Vector n;
 		if (Vector_Length(&nAcc) < EPSILON) n = fN; else { Vector_Norm(&nAcc); n = nAcc; }
+		// Carved-vert shading restore (--greets_displace_groove_shade): blend
+		// the geometric normal back toward the authored one the vert rode,
+		// by carve depth. The tangent Gram-Schmidt below re-orthogonalizes
+		// against the blended normal, so the whole TBN follows.
+		if (grooveShadeOn) {
+			const Vector &Pc = corners[i].V->Pos;
+			auto itg = g_grooveShade.find(GrooveShadeKey{ meshF2bits(Pc.x),
+			                                              meshF2bits(Pc.y),
+			                                              meshF2bits(Pc.z) });
+			if (itg != g_grooveShade.end() && itg->second.w > 0.0f) {
+				const GrooveShadeRec &R = itg->second;
+				n.x = n.x*(1.0f - R.w) + R.wallN.x*R.w;
+				n.y = n.y*(1.0f - R.w) + R.wallN.y*R.w;
+				n.z = n.z*(1.0f - R.w) + R.wallN.z*R.w;
+				if (Vector_Length(&n) > EPSILON) Vector_Norm(&n); else n = R.wallN;
+				++nGrooveShaded;
+			}
+		}
 		outN[i] = n;
 		// Gram-Schmidt the tangent against the smoothed normal (T ⟂ N), like PREPROC.
 		const float TdotN = Dot_Product(&tAcc, &n);
@@ -5402,6 +5454,10 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 	std::fprintf(stderr, "[STONE] '%s' re-smoothed %zu displaced corners @ %.0f deg "
 	             "(weld-aware normals + tangents; hard creases + material borders kept)\n",
 	             matName, corners.size(), (double)smoothAngleDeg);
+	if (nGrooveShaded)
+		std::fprintf(stderr, "[STONE-GROOVE] '%s' %d carved corners re-shaded with "
+		             "their authored normal (--no-greets_displace_groove_shade for the "
+		             "ledge/mirror A/B)\n", matName, nGrooveShaded);
 }
 
 // B4 residual height map (docs/ENVDYN_DISPLACEMENT_PLAN.md): the POM input for

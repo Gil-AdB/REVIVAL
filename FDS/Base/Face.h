@@ -54,6 +54,18 @@ struct Face
 	float           EU1 = 0.0f, EV1 = 0.0f;
 	float           EU2 = 0.0f, EV2 = 0.0f;
 	float           EU3 = 0.0f, EV3 = 0.0f;
+	// --env_live_water, forward paraboloid-sheet path only: the wave-slope
+	// tilt of the reflection lookup expressed as a per-FACE UV offset (units
+	// of ReflectionTexture UV, i.e. the same 0..1 space as EU/EV). EU/EV stay
+	// UNPERTURBED; the filler adds LwDU/LwDV per pixel, scaled by that
+	// pixel's own water coverage, which rides in the reflection texel's ALPHA
+	// byte. WHY IT IS SPLIT THIS WAY: a per-vertex tilt is interpolated
+	// affinely across the triangle, so tilting one corner whose reflection is
+	// water drags every pixel of the face — including the ones reading the
+	// skyline. Exactly 0,0 when the flag is off (or nothing this face
+	// reflects can be water), and the filler then skips the path entirely and
+	// is byte-identical to the pre-flag build. See FDS/RENDER/EnvBake.h.
+	float           LwDU = 0.0f, LwDV = 0.0f;
 
 	RasterFunc		Filler = nullptr;
 	Material      * Txtr = nullptr;

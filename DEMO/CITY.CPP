@@ -2799,6 +2799,51 @@ void Initialize_City()
 					CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES, buildings, kCubeCacheFile);
 			}
 		}
+		// --env_water_region_viz: the SCREEN-SPACE half of FDS_ENVBAKE_DUMP's
+		// water-mask PGM. The PGM answers "where does the mask think the water
+		// is" in CUBE space; this answers "which SCREEN pixels read those
+		// texels" — the region a --env_live_water phase A/B has to be scored
+		// over, and the one thing the forward paraboloid path cannot be asked
+		// directly (its filler interpolates per-vertex UVs, so the only way to
+		// ask a pixel what class of content it reads is to change that content
+		// and see who moves). Applied to rawPanorama BEFORE the sheets are
+		// synthesized and before the deferred stores are registered, so both
+		// consumers are classified by one switch. AFTER the cache write, so a
+		// viz run can never poison a cached bake.
+		if (const int wrViz = fds::FeatureFlags::env_water_region_viz()) {
+			const int mr = CITY_ENV_WATERMASK_RES;
+			const int fr = CITY_CUBE_FACE_RES;
+			size_t flipped = 0, total = 0;
+			for (auto& b : buildings) {
+				if (b.waterMaskRes != mr || b.waterMask.empty()) continue;
+				if (b.rawPanorama.size() != faceBytes) continue;
+				uint32_t* f32 = (uint32_t*)b.rawPanorama.data();
+				for (int k = 0; k < 6; ++k) {
+					const uint8_t* mm = b.waterMask.data() + size_t(k) * mr * mr;
+					uint32_t* fp = f32 + size_t(k) * fr * fr;
+					for (int y = 0; y < fr; ++y) {
+						const uint8_t* mrow = mm + size_t(y * mr / fr) * mr;
+						for (int x = 0; x < fr; ++x, ++total) {
+							const bool isWater = mrow[x * mr / fr] >= 128;
+							if (isWater == (wrViz == 1)) {
+								fp[size_t(y) * fr + x] ^= 0x00FFFFFFu;
+								++flipped;
+							}
+						}
+					}
+				}
+			}
+			// INVERT, not paint: a flag colour collides with the content (a
+			// night skyline is mostly near-black, so "paint the non-water
+			// black" would classify almost nothing), while the complement
+			// differs from the original for every texel but an exact
+			// 0x808080 and survives bloom, grade, CA and tonemap intact.
+			fprintf(stderr, "[CITY] env_water_region_viz=%d — inverted %.1f%% of the "
+			        "baked env texels (%s class); diff this frame against the "
+			        "viz=0 frame to get that class's screen region\n",
+			        wrViz, total ? 100.0 * double(flipped) / double(total) : 0.0,
+			        wrViz == 1 ? "WATER" : "NON-WATER");
+		}
 		if (cityEnvPixel) {
 			// city_env_pixel: the SAME cached faces feed the deferred env
 			// compose per pixel — registered per windows-clone material in
@@ -2841,6 +2886,17 @@ void Initialize_City()
 							+ uint32_t(fu * CITY_CUBE_FACE_RES);
 					}
 			std::vector<uint32_t> sheet(size_t(kSheetRes) * kSheetRes);
+			// --env_live_water: the sheets carry this probe's water-coverage
+			// mask in their ALPHA byte, so the forward filler can ask each
+			// PIXEL (not each vertex) how much water it is reading. Upsampled
+			// bilinearly 128²→512² per cube face first, using the same
+			// px = u·res − 0.5 convention as EnvLiveWater_MaskAt, so the
+			// forward path's soft waterline ramp matches the deferred one's;
+			// then the EXISTING sheet gather resamples it into paraboloid
+			// space alongside the colour it belongs to. Empty when the flag
+			// is off → alpha stays the bake's 0xFF, byte-identical.
+			std::vector<uint8_t> faceMaskUp(
+				liveWaterMask ? size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES : 0);
 			g_cityEnvWaterMasks.clear();
 			g_cityEnvWaterMasks.reserve(buildings.size());
 			for (auto& b : buildings) {
@@ -2856,11 +2912,45 @@ void Initialize_City()
 					T->EnvWaterMaskRes = b.waterMaskRes;
 				}
 				const uint32_t* faces32 = (const uint32_t*)b.rawPanorama.data();
+				// Bilinear 128²→512² upsample of this probe's mask, per face,
+				// once for all six sheets (every sheet gathers from all six).
+				const bool haveMask = !faceMaskUp.empty()
+				                   && b.waterMaskRes == CITY_ENV_WATERMASK_RES
+				                   && !b.waterMask.empty();
+				if (haveMask) {
+					const int mr = CITY_ENV_WATERMASK_RES, fr = CITY_CUBE_FACE_RES;
+					for (int f = 0; f < 6; ++f) {
+						const uint8_t* mm = b.waterMask.data() + size_t(f) * mr * mr;
+						uint8_t* up = faceMaskUp.data() + size_t(f) * fr * fr;
+						for (int y = 0; y < fr; ++y) {
+							float py = ((float(y) + 0.5f) / float(fr)) * float(mr) - 0.5f;
+							if (py < 0.0f) py = 0.0f;
+							int y0 = int(py); if (y0 > mr - 2) y0 = mr - 2;
+							const float ay = py - float(y0);
+							const uint8_t* r0 = mm + size_t(y0) * mr;
+							const uint8_t* r1 = r0 + mr;
+							for (int x = 0; x < fr; ++x) {
+								float px = ((float(x) + 0.5f) / float(fr)) * float(mr) - 0.5f;
+								if (px < 0.0f) px = 0.0f;
+								int x0 = int(px); if (x0 > mr - 2) x0 = mr - 2;
+								const float ax = px - float(x0);
+								const float t0v = float(r0[x0]) + ax * (float(r0[x0+1]) - float(r0[x0]));
+								const float t1v = float(r1[x0]) + ax * (float(r1[x0+1]) - float(r1[x0]));
+								up[size_t(y) * fr + x] =
+									uint8_t(t0v + ay * (t1v - t0v) + 0.5f);
+							}
+						}
+					}
+				}
 				for (int k = 0; k < 6; ++k) {
 					const uint32_t* g =
 						&sheetGather[size_t(k) * kSheetRes * kSheetRes];
 					for (size_t t = 0; t < sheet.size(); ++t)
 						sheet[t] = faces32[g[t]];
+					if (haveMask)
+						for (size_t t = 0; t < sheet.size(); ++t)
+							sheet[t] = (sheet[t] & 0x00FFFFFFu)
+							         | (uint32_t(faceMaskUp[g[t]]) << 24);
 					Material* sm = Materialize(sheet.data(), kSheetRes, kSheetRes);
 					T->EnvHemiSheets[k] = sm->Txtr;
 					// Non-null marker for the window-stamp loop below; the

@@ -255,6 +255,89 @@ is unaffected and still the fallback. Gates for the fix itself: city
 discard it), `render_gate.sh` ALL PASS. The flag stays default OFF; the
 decision between 2d/2e/2f is still the user's.
 
+### 2 — 2026-08-14: the mask was right, the FORWARD path's granularity was not
+
+User, on a binary rebuilt at `5f1ffa92`: *"--env_live_water still moves the whole
+reflection."* He was right again, and the reason the block above missed it is in
+its own sentence: *"the deferred `EnvPanoStore` and the forward `TriMesh` both
+carry it"*. Carrying it is not applying it. **Every number in that block came from
+`FDS_CITY_ENV_PIXEL=1 --deferred`** — and he runs `PRESETS/city-noir.flags`, which
+names no `--deferred` and no `--city_env_pixel`, so his city renders through the
+**forward paraboloid-sheet path**, the one consumer that was never measured.
+
+**Why a correct mask still leaks there.** The forward path perturbs the reflected
+direction **per VERTEX** and converts it to a sheet UV; the rasterizer then
+interpolates that UV **affinely** across the triangle. So the perturbation a wet
+corner receives is spread over every pixel of the face, weighted by that corner's
+barycentric — including the pixels reading the reflected skyline. A per-vertex
+mask cannot localize below face granularity, however exactly right it is. The
+deferred path does not have the problem because each pixel reads the mask for
+itself.
+
+**Measured, under HIS preset, at three eye heights** (camera pinned, wave clock
+moved ALONE with `--water_ripple_speed` 1.0 vs 1.6, scored only over pixels that
+are provably static with the flag off, region classes from the new
+`--env_water_region_viz`):
+
+| eye y | arm | reflected SKY moving | of region | mean \|Δ\| / max | reflected WATER Σ\|Δ\| |
+|---|---|---|---|---|---|
+| 190 (street) | before | 22 185 | 16.33 % | 2.99 / 17 | 100 % |
+| 190 | **after** | **882** | **0.65 %** | 1.94 / 8 | **105.5 %** |
+| 423 (the pin pose) | before | 38 148 | 15.19 % | 4.94 / 41 | 100 % |
+| 423 | **after** | **5 594** | **2.23 %** | 5.68 / 40 | **110.6 %** |
+| 800 (high) | before | 53 251 | 13.12 % | 7.17 / 94 | 100 % |
+| 800 | **after** | **8 366** | **2.06 %** | 7.01 / 93 | **102.4 %** |
+
+The deferred path at the pin pose under the same preset reads **6 927 (3.1 %)**,
+so the forward path is now better localized than the reference it is being held
+to. Two thirds of what is left is the *intended* soft ramp across the reflected
+waterline, not leak: hardening the mask with `--env_live_water_mask_bias=0.5`
+takes 5 594 → 1 672 and 8 366 → 2 120 **with the water motion unchanged** (102 %,
+98.8 %) — the residual after that is bloom/CA spill from the moving water, and it
+matches the floor an all-or-nothing per-face gate reaches (1 702).
+
+**The fix.** `EU/EV` stay UNPERTURBED. `Transform.cpp` hands the filler a per-FACE
+UV offset (`Face::LwDU/LwDV`) = the corners' full-tilt (w=1) UV displacement,
+averaged **weighted by each corner's own coverage** (a flat mean pulls the
+amplitude toward the dry corners: 87.2 % of the pre-fix water motion instead of
+110.6 %, for no better freeze). The sheets carry the bake's coverage plane in
+their **ALPHA byte** — bilinearly upsampled 128²→512² per cube face, then
+resampled into paraboloid space by the gather table the colour already uses — and
+`TheOtherBarry<OVERWRITE, TEXTURETEXTURE>` scales the offset by **each pixel's
+own** coverage before a second gather. The mask is therefore read at the
+UNPERTURBED lookup structurally, not by convention: it is the alpha of the texel
+the pixel was already fetching.
+
+**Rejected, with numbers.** An all-or-nothing per-FACE gate (tilt only when all
+three corners read water) freezes the skyline just as well — 1 702 px — and costs
+**57 % of the water motion** (Σ\|Δ\| 42.9 % of before), because at these poses
+most panes straddle the reflected waterline and freeze whole. That is the
+tradeoff the per-pixel mask buys out.
+
+**Cost.** Flag OFF is byte-null AND instruction-null: `LwDU/LwDV` are exactly 0,
+`lwAlphaMask` is false, and the whole block is skipped — proved differentially,
+the pre-fix binary and this one render the flag-off frame to the same md5 at two
+poses (`f592a411…`, `2b833c09…`). Flag ON costs one extra 8-lane gather on
+reflective pixels whose coverage exceeds the bias.
+
+**New instrument, `--env_water_region_viz`** (default 0, byte-null). The
+screen-space half of `FDS_ENVBAKE_DUMP`'s mask PGM: the PGM says where the mask
+thinks the water is in CUBE space, this says which SCREEN pixels read those
+texels. It INVERTS one class of baked env texels (1 = water, 2 = non-water) so
+the class's screen region is the diff against the un-inverted frame — invert
+rather than paint, because a night skyline is mostly near-black and "paint it
+black" classifies nothing. It is the only way to ask the forward path what a
+pixel is reading, and without it none of the table above is measurable.
+Evidence: `docs/img/envmap/envwaterfwd_region_viz_t1961.png`,
+`envwaterfwd_pin_y423_before_after.png`, `envwaterfwd_high_y800_before_after.png`,
+`envwaterfwd_low_y190_before_after.png`.
+
+**Still not perturbed at all:** `cityMirrorGlassForward()` (DEMO/CITY.CPP), the
+pass-1 mirrored-world glass under `--city_env_pixel`. It builds sheet UVs with
+the same math and never calls the tilt, so glass seen *in the water* keeps a
+static reflection. That is a gap, not a leak (it moves 0 px), and it only exists
+under a flag that is default off.
+
 ## 3. Forward-path texture filtering (glass/water/additive still point-sampled)
 
 The deferred albedo filtering (e9e60a3) covers Mekalele-rasterized opaque

@@ -2570,25 +2570,99 @@ AfterXForm:
 					const float lwPX = T->IPos.x + T->BSphereCtr.x;
 					const float lwPY = T->IPos.y + T->BSphereCtr.y;
 					const float lwPZ = T->IPos.z + T->BSphereCtr.z;
+					// --env_live_water: the tilt leaves this loop as a
+					// per-FACE UV OFFSET, and the mask read moves to the
+					// filler, where it is per PIXEL (the sheets carry the
+					// coverage in their alpha byte). WHY NOT PERTURB THE
+					// VERTEX DIRECTION, which is what 5d28db7/5f1ffa92 did:
+					// the rasterizer interpolates the resulting UV affinely,
+					// so tilting one corner whose reflection is water drags
+					// EVERY pixel of the face with it — including the ones
+					// reading the skyline — weighted by that corner's
+					// barycentric. A per-vertex mask cannot localize below
+					// face granularity, however right the mask is. Measured
+					// under the user's preset at the t=1961 pose: per-vertex
+					// weights left 38 148 reflected-skyline pixels moving
+					// between two wave clocks (mean |Δ| 4.94, max 41) against
+					// the deferred per-pixel path's 6 927 / 1.81 / 12.
+					// The offset is the three corners' FULL-tilt (w = 1) UV
+					// displacement, averaged weighted by each corner's own
+					// coverage (see below); the per-pixel coverage is what
+					// scales it. Amplitude is therefore face-constant where the old
+					// code interpolated it linearly — a difference of degree
+					// (both are coarse), against localization, which is the
+					// difference between "the water ripples" and "the skyline
+					// ripples too".
+					float lwDU = 0.0f, lwDV = 0.0f, lwWSum = 0.0f;
+					float lwDUf = 0.0f, lwDVf = 0.0f;
+					int   lwN  = 0;
+					const bool lwLive = T->EnvWaterMask
+					                 && T->EnvWaterMaskRes >= 2
+					                 && fds::g_envLiveWater.active
+					                 && lwPY > fds::g_envLiveWater.waterY;
 					for (i = 0; i < 3; ++i) {
 						auto d = wsPos[i] - cv;
 						d -= (d * n) * 2.0f * n;
 						Vector_Norm(&d);
-						// The mask is indexed by DIRECTION (dominant-axis
-						// face), not by the sheet's pinned face k — the
-						// question it answers is "is the content THIS WAY
-						// water", which every face covering the direction
-						// answers the same; the canonical face just holds
-						// it furthest from the padding.
-						fds::EnvLiveWater_PerturbDir(lwPX, lwPY, lwPZ,
-						                             d.x, d.y, d.z,
-						                             T->EnvWaterMask,
-						                             T->EnvWaterMaskRes);
 						fds::EnvCube_DirToParaboloidUV(k, d.x, d.y, d.z,
 						                               eu[i], ev[i]);
+						if (!lwLive || d.y >= -1e-6f) continue;
+						// FULL tilt (w = 1); the pixel's own coverage is what
+						// scales it down, and it is read with the UNPERTURBED
+						// lookup — here, structurally, because the offset is
+						// added to the unperturbed UV the texel was fetched
+						// at rather than folded into the direction.
+						Vector dp = d;
+						fds::EnvLiveWater_TiltDir(lwPX, lwPY, lwPZ,
+						                          dp.x, dp.y, dp.z, 1.0f);
+						float pu, pv;
+						fds::EnvCube_DirToParaboloidUV(k, dp.x, dp.y, dp.z,
+						                               pu, pv);
+						// Weight each corner's displacement by ITS OWN water
+						// coverage: on a pane straddling the reflected
+						// waterline the water pixels sit near the wet
+						// corners, and the tilt magnitude that belongs to
+						// them is that corner's (it scales with |dy| and
+						// with the slope at a wildly different plane hit).
+						// A flat mean pulls the amplitude toward the dry
+						// corners and measurably deadens the water. Measured
+						// (t=1961, user's preset, Σ|Δ| over the reflected-
+						// water region as a share of the pre-fix arm's):
+						// flat mean 87.2 %, coverage-weighted 110.6 %, with
+						// the reflected-skyline residual 3 375 vs 5 594 px —
+						// both far under the deferred path's 6 927 at the
+						// same pose, so the amplitude is bought for free.
+						const float wv = fds::EnvLiveWater_Weight(
+							lwPY, d.x, d.y, d.z,
+							T->EnvWaterMask, T->EnvWaterMaskRes);
+						lwDUf += pu - eu[i];
+						lwDVf += pv - ev[i];
+						lwDU  += (pu - eu[i]) * wv;
+						lwDV  += (pv - ev[i]) * wv;
+						lwWSum += wv;
+						++lwN;
+					}
+					if (lwWSum > 0.0f) {
+						const float inv = 1.0f / lwWSum;
+						F->LwDU = lwDU * inv;
+						F->LwDV = lwDV * inv;
+					} else if (lwN) {
+						// Below the horizon but no corner reads water — the
+						// face's INTERIOR still might (the corners are three
+						// samples of a curved footprint), so keep the flat
+						// mean and let the per-pixel alpha decide.
+						const float inv = 1.0f / float(lwN);
+						F->LwDU = lwDUf * inv;
+						F->LwDV = lwDVf * inv;
+					} else {
+						F->LwDU = F->LwDV = 0.0f;
 					}
 					F->ReflectionTexture = T->EnvHemiSheets[k];
 				} else {
+				// The legacy equirect panorama carries no coverage mask
+				// (nothing baked one), so no live-water tilt — the flag's
+				// documented "no mask → no tilt" fallback.
+				F->LwDU = F->LwDV = 0.0f;
 				i = 0;
 				for (Vertex* v : { F->A, F->B, F->C }) {
 					auto d = wsPos[i] - cv;
