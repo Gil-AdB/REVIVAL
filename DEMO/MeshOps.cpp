@@ -4363,12 +4363,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		struct MitreGroup {
 			Vector dir;      // canonical unit corner-line direction
 			Vector bis;      // outward bisector of the two wall normals (unit)
+			Vector foot;     // point on the line (P - (P.dir)dir of a member)
 			float  cosHalf;  // dot(bis, wall normal), guarded away from 0
 			std::vector<std::pair<float,float>> prof;   // owner side (s, h), sorted
 			int nA, nB;      // population per wall
 		};
 		std::vector<MitreGroup> mitreGroups;
-		int nMitreVerts = 0, nMitreSolo = 0, nMitreApplied = 0;
+		int nMitreVerts = 0, nMitreSolo = 0, nMitreApplied = 0, nBandBlend = 0;
 		if (freeEdge && fds::FeatureFlags::greets_displace_mitre()) {
 			// Oriented per-vert fan normal for freed verts: raw cross accumulated
 			// over incident target faces, oriented by the smoothed vertex normal
@@ -4546,6 +4547,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				MitreGroup G;
 				G.dir = mc[vs[0]].dir; G.bis = bis; G.cosHalf = ch;
 				G.nA = int(A.size()); G.nB = int(B.size());
+				{	// a point on the line, for perpendicular-distance tests below
+					const Vector &Pf = basePos[mc[vs[0]].v];
+					const float t0 = Pf.x*G.dir.x + Pf.y*G.dir.y + Pf.z*G.dir.z;
+					G.foot = Vector{ Pf.x - t0*G.dir.x, Pf.y - t0*G.dir.y, Pf.z - t0*G.dir.z };
+				}
 				const std::vector<size_t> &own = (B.size() > A.size()) ? B : A;
 				// RAW field, then LOCAL UPPER ENVELOPE — two deliberate choices:
 				// 1. NO line-height override (lineRep/linePlat implement the
@@ -4713,6 +4719,62 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				dx = G.bis.x; dy = G.bis.y; dz = G.bis.z;
 				++nMitreApplied;
 			}
+			// ── CORNER-BAND BLEND (2026-08-14, the t=6001 bulb): the welded corner
+			// verts land flush-or-recessed on the shared profile, but the BAND
+			// verts one band-width inside (5700cbbf's pre-split polyline) still
+			// sample their OWN face's UV phase of the height field, full field,
+			// both signs. Where that phase disagrees with the drawn texel row —
+			// measured at the jamb: sampled "stone, stand proud" on a rendered
+			// MORTAR row — the band bulges outward beside a flush corner, and the
+			// two sheets, sampling independently, disagree with each other: the
+			// rounded wrap + crease the user called the clay corner. Within one
+			// blend width of a welded line, the vert's displacement VECTOR blends
+			// toward the line's shared envelope-deficit profile: at the line it
+			// equals the weld exactly (continuity with welded verts), at the band
+			// edge it is the vert's own field. Both sheets read one profile at one
+			// s, so they cannot shear, and a groove row recesses on BOTH faces —
+			// the user's stated expectation, which is authoritative here.
+			else if (!mitreGroups.empty()) {
+				constexpr float kBlendW = 0.12f;   // band width + weld-miss margin
+				for (const MitreGroup &G : mitreGroups) {
+					if (G.prof.empty()) continue;
+					const Vector &P0 = basePos[i];
+					const float s = P0.x*G.dir.x + P0.y*G.dir.y + P0.z*G.dir.z;
+					if (s < G.prof.front().first - 0.05f) continue;
+					if (s > G.prof.back().first  + 0.05f) continue;
+					const float rx = P0.x - G.foot.x - s*G.dir.x;
+					const float ry = P0.y - G.foot.y - s*G.dir.y;
+					const float rz = P0.z - G.foot.z - s*G.dir.z;
+					const float d2 = rx*rx + ry*ry + rz*rz;
+					if (d2 >= kBlendW*kBlendW) continue;
+					const auto &PR = G.prof;
+					float hp;
+					if (s <= PR.front().first)      hp = PR.front().second;
+					else if (s >= PR.back().first)  hp = PR.back().second;
+					else {
+						size_t lo = 0, hi = PR.size()-1;
+						while (lo+1 < hi) { const size_t m=(lo+hi)/2; if (PR[m].first <= s) lo=m; else hi=m; }
+						const float dt = PR[hi].first - PR[lo].first;
+						const float t = dt > 1e-9f ? (s - PR[lo].first)/dt : 0.0f;
+						hp = PR[lo].second + (PR[hi].second - PR[lo].second)*t;
+					}
+					const float w    = 1.0f - std::sqrt(d2)/kBlendW;  // 1 at the line
+					const float dspM = amp*hp/G.cosHalf;
+					const float vx = w*G.bis.x*dspM + (1.0f-w)*dx*dsp;
+					const float vy = w*G.bis.y*dspM + (1.0f-w)*dy*dsp;
+					const float vz = w*G.bis.z*dspM + (1.0f-w)*dz*dsp;
+					const float vl = std::sqrt(vx*vx + vy*vy + vz*vz);
+					if (vl > 1e-9f) {
+						// keep dsp SIGNED relative to the own outward direction, so
+						// groove-shade's carve test (dsp < 0) still sees carves.
+						const float sgn = (vx*dx + vy*dy + vz*dz) < 0.0f ? -1.0f : 1.0f;
+						dx = vx/(vl*sgn); dy = vy/(vl*sgn); dz = vz/(vl*sgn);
+						dsp = sgn*vl;
+					} else { dsp = 0.0f; }
+					++nBandBlend;
+					break;
+				}
+			}
 			// BOW CENSUS: the doorway-jamb wall plane is x=17.898 (normal +x), its
 			// freed border the vertical line z=-58.014. Record every displaced vert
 			// on that plane, away from the lintel and the floor course.
@@ -4730,6 +4792,20 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					bowIn  .push_back(dsp*dz);
 					bowFree.push_back(recessOnly[i] ? 1 : 0);
 				}
+			}
+			// DIAGNOSTIC (census flag): the FINAL vector applied at the jamb —
+			// after the weld and the band blend, unlike [STONE-FREEV], which
+			// prints the pre-weld state and reads inverted where the weld or the
+			// blend supersedes it (the t=6001 misread).
+			if (fds::FeatureFlags::greets_displace_junction_census()) {
+				const Vector &Pq = basePos[i];
+				if (Pq.x > 17.4f && Pq.x < 18.4f && Pq.z > -63.5f && Pq.z < -57.5f
+				    && Pq.y > 2.9f && Pq.y < 4.9f)
+					std::fprintf(stderr, "[STONE-FINALV] '%s' pos(%.3f,%.3f,%.3f) "
+						"dir(%+.3f,%+.3f,%+.3f) dsp %+.4f%s\n",
+						matName, double(Pq.x), double(Pq.y), double(Pq.z),
+						double(dx), double(dy), double(dz), double(dsp),
+						mitreOf[i] >= 0 ? " WELD" : "");
 			}
 			verts[i].Pos.x+=dx*dsp; verts[i].Pos.y+=dy*dsp; verts[i].Pos.z+=dz*dsp;
 			// Carved below the reference: record the AUTHORED normal this vert
@@ -4779,8 +4855,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		if (nMitreVerts || nMitreSolo)
 			std::fprintf(stderr, "[STONE-MITRE] '%s': %d corner verts welded across "
 				"%zu mitre lines (%d applied in the displacement loop); %d candidates "
-				"on one-sided lines left plain-freed\n",
-				matName, nMitreVerts, mitreGroups.size(), nMitreApplied, nMitreSolo);
+				"on one-sided lines left plain-freed; %d band verts blended to the "
+				"shared profile\n",
+				matName, nMitreVerts, mitreGroups.size(), nMitreApplied, nMitreSolo,
+				nBandBlend);
 		if (nBMeanPlane || nBMeanFallback)
 			std::fprintf(stderr, "[STONE-BMEAN] '%s': %d freed border verts took "
 				"their OWN plane's mean, %d fell back to the material mean (no "
