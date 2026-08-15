@@ -36,6 +36,55 @@
 // composite path's dynamic-only tap 4 → 2. Total bytes resident are
 // unchanged (4 × u16 either way); only the grouping changed. Measured in
 // docs/OPTIMIZATION_BACKLOG.md.
+// ─── 8×8 PolyId uniformity pyramid ───────────────────────────────────────
+// Block edge is a compile-time 8 (kShadowUniShift = 3): the census in
+// 43ac3456 swept the coherence of the tap verdict against block size and 8×8
+// was where the uniform share stopped growing fast enough to pay for a finer
+// pyramid. kShadowUniMixed cannot collide with a real ShadowMatID because
+// those are 16-bit and this sentinel sets the high half.
+inline constexpr int      kShadowUniShift = 3;
+inline constexpr int      kShadowUniSize  = 1 << kShadowUniShift;
+inline constexpr uint32_t kShadowUniMixed = 0xFFFFFFFFu;
+
+// Rebuild one plane's uniformity pyramid from the linear plane. dynPlane
+// selects packDyn (true) or packSD (false). Cheap enough to run inside the
+// bake's own parallel-over-maps dispatch — one sequential pass over a plane
+// that the raster just left hot.
+void ShadowMap_BuildUniformity(struct ShadowMap &sm, bool dynPlane);
+
+// Per-thread accumulator for the dirty box above: MekaleleShadowDepth ORs each
+// clipped polygon's clamped screen bbox in, the phase-B tile task resets it
+// before its face loop and reads it after. Thread-local rather than atomic
+// because the raster runs thousands of polygons per tile and four CAS loops
+// each would price the bake instead of the build. [0..3] = x0, y0, x1, y1.
+extern thread_local int g_shadowRasterBox[4];
+inline void ShadowRasterBoxReset() {
+	g_shadowRasterBox[0] = g_shadowRasterBox[1] = 0x7FFFFFFF;
+	g_shadowRasterBox[2] = g_shadowRasterBox[3] = -1;
+}
+
+#if FDS_SHADOW_TAP_CENSUS
+// [INSTRUMENT, compiled out unless -DFDS_SHADOW_TAP_CENSUS=ON] Where every
+// PolyId cube tap went. Per-thread counters (no atomics in the tap — a shared
+// cache line under 12 workers would price the thing it is measuring); summed
+// on demand by ShadowPyrCensusTotals from a process-wide registry, and printed
+// as extra rows of the existing --shadow_tap_census report so the two share
+// one frame accounting.
+struct ShadowPyrCensus {
+    uint64_t reached = 0;   // PolyId taps that got as far as the pyramid check
+    uint64_t noPyr   = 0;   // ... of those, map had no pyramid built
+    uint64_t fastLit = 0;   // ... resolved uniform-LIT, no texel read
+    uint64_t fastOcc = 0;   // ... resolved uniform-OCCLUDING, no texel read
+    uint64_t mixed   = 0;   // ... fell through to the real 2x2 tap
+    uint64_t dynOnly = 0;   // of `reached`, the lightmap-composite (dyn-only) form
+};
+ShadowPyrCensus &ShadowPyrCensusTLS();
+void ShadowPyrCensusTotals(ShadowPyrCensus &out);
+#define FDS_PYR_CENSUS(field) (++ShadowPyrCensusTLS().field)
+#else
+#define FDS_PYR_CENSUS(field) ((void)0)
+#endif
+
 inline constexpr uint16_t ShadowTexZ (uint32_t t) { return uint16_t(t & 0xFFFFu); }
 inline constexpr uint16_t ShadowTexId(uint32_t t) { return uint16_t(t >> 16); }
 inline constexpr uint32_t ShadowTexPack(uint16_t z, uint16_t id) {
@@ -80,6 +129,51 @@ struct ShadowMap {
 	// with zero-filled edge padding (reads there = "unwritten" sentinel).
 	// Empty until first swizzle → hot readers fall back to linear when empty.
 	std::vector<uint32_t> packSDSw, packDynSw;
+
+	// ─── 8×8 PolyId UNIFORMITY PYRAMID (uniSD / uniDyn) ──────────────────
+	// One u32 per 8×8 block of the plane. Value = the single ShadowMatID that
+	// EVERY texel of that block's 9×9 APRON carries, or kShadowUniMixed when
+	// the apron is not uniform. Built from the linear planes right after each
+	// bake writes them (ShadowMap_BuildUniformity), so it is a pure function
+	// of the plane contents and never goes stale: the only writers of packSD /
+	// packDyn are the per-map clear + raster inside Render_DeferredShadowMaps
+	// and the assign() below, and each rebuilds the matching pyramid.
+	//
+	// WHY A 9×9 APRON AND NOT AN 8×8 BLOCK. A 2×2 PCF footprint anchored at
+	// (iX, iY) reads texels (iX..iX+1, iY..iY+1). Summarising the bare 8×8
+	// block would leave every footprint anchored on the block's last row or
+	// column straddling two blocks — 23 % of anchor positions, and exactly
+	// the ones in the interior of a large uniform region, where the fast path
+	// is worth the most. Extending the summary one texel past the right and
+	// bottom edges makes the block index (iX>>3, iY>>3) sufficient on its own:
+	// every footprint anchored inside the block lies inside the apron. No
+	// boundary branch at the tap, no straddle case to get wrong. (At the map's
+	// right/bottom edge the apron is clamped to xres-1 / yres-1; the tap's own
+	// `iX + 1 >= xres` reject already guarantees no footprint reads past it.)
+	//
+	// WHY IT IS BYTE-NULL. In ShadowMode::PolyId a texel's verdict is the pure
+	// id comparison `id != 0 && id != receiverId`. If all four footprint texels
+	// carry the same id c, the 2×2 PCF sum is either 0 (c lit) or w00+w10+w01+
+	// w11 (c occluding) — the SAME float expression the tap would evaluate, in
+	// the same order, so the fast path returns the identical bit pattern. See
+	// CubeShadow_Sample below.
+	std::vector<uint32_t> uniSD, uniDyn;
+	int    uniW = 0;                  // blocks per row  = (xres + 7) >> 3
+	int    uniH = 0;                  // block rows      = (yres + 7) >> 3
+
+	// Texel-space bbox of everything the LAST bake rasterised into this map,
+	// clamped to the plane; x1 < x0 means "the bake wrote nothing". Set on the
+	// tick thread after the raster drain from per-tile-job boxes, so it is
+	// order-independent and identical run to run.
+	//
+	// WHY IT EXISTS. Phase A clears the whole plane, so every texel OUTSIDE
+	// this box is known-zero and its pyramid entry is known-zero too — no read
+	// required. Without it the per-frame dynamic build has to stream all 14 MB
+	// of greets' fourteen 512^2 dynamic planes to rediscover that the mech is
+	// the only thing in them, and MEASURED that cost 0.375 ms/frame at the
+	// user's pose against a 0.336 ms tap saving: the build ate the win whole.
+	int dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = -1, dirtyY1 = -1;
+
 	int    xres = 0;
 	int    yres = 0;
 
@@ -368,6 +462,67 @@ inline float CubeShadow_Sample(int cubeIdx,
     const int iX = int(smX);
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
+    // ─── PolyId uniformity pyramid: a verdict WITHOUT a tap ───────────────
+    // A BRANCH AROUND the tap, not extra live state inside it. Split in two so
+    // each fast path pays only what it needs: the block lookup runs FIRST (it
+    // needs nothing but iX/iY), and a uniformly-LIT block returns before the
+    // weights are even formed. The uniformly-OCCLUDING arm does need them, so
+    // it falls through to the shared weight block below and returns there.
+    // Either way the 2x2 addressing block — the swizzle test, the row offset,
+    // the four texel offsets, the two plane base pointers — is skipped whole.
+    //
+    // What is skipped on top of that: 4 texels x 2 planes = 8 packed loads over
+    // up to 4 cache lines, plus the four id compares. What is paid: one u32
+    // from a (xres/8)^2 table — 16 KB for a 512^2 face, which stays resident.
+    uint32_t uniC = kShadowUniMixed;
+#if FDS_SHADOW_TAP_CENSUS
+    if (surfaceMatId >= 0) {
+        FDS_PYR_CENSUS(reached);
+        if (dynamicOnly) FDS_PYR_CENSUS(dynOnly);
+        if (sm.uniSD.empty()) FDS_PYR_CENSUS(noPyr);
+    }
+#endif
+    if (surfaceMatId >= 0 && !sm.uniSD.empty()) {
+        const size_t b = size_t(iY >> kShadowUniShift) * size_t(sm.uniW)
+                       + size_t(iX >> kShadowUniShift);
+        const uint32_t uD = sm.uniDyn[b];
+        // dynamicOnly reads ONLY the dynamic plane, so uD is its verdict
+        // outright. The full tap takes the closest-by-z of the two ids, and
+        // the pyramid can only settle that without looking when the dynamic
+        // apron is uniformly EMPTY: with dId == 0 at every texel closestPacked
+        // returns the static id verbatim (`if (dId == 0) return sId;`),
+        // whatever the z halves hold. Any other dynamic content -> mixed ->
+        // the real tap runs below, unchanged.
+        uniC = dynamicOnly ? uD : (uD == 0u ? sm.uniSD[b] : kShadowUniMixed);
+        if (uniC == kShadowUniMixed) { FDS_PYR_CENSUS(mixed); }
+        else {
+            // Uniform id over the whole footprint, so the 2x2 PCF is exactly
+            // this one texel's verdict, four times.
+            if (uniC == 0u || uint16_t(uniC) == uint16_t(surfaceMatId)) {
+                FDS_PYR_CENSUS(fastLit);
+                return 1.0f;   // occ would never leave its 0.0f initialiser
+            }
+            FDS_PYR_CENSUS(fastOcc);
+            // --shadow_polyid_no_pcf takes the single (00) texel and sets
+            // occ = 1.0f outright; mirror that rather than summing weights
+            // that can land a few ULP short of 1.0f and return ~6e-8.
+            if (fds::FeatureFlags::shadow_polyid_no_pcf()) return 0.0f;
+        }
+    }
+    const float fx = smX - float(iX);
+    const float fy = smY - float(iY);
+    const float w00 = (1.0f - fx) * (1.0f - fy);
+    const float w10 =         fx  * (1.0f - fy);
+    const float w01 = (1.0f - fx) *         fy;
+    const float w11 =         fx  *         fy;
+    // Uniform OCCLUDING block: all four `occ += w` fire, in this order, over
+    // these same four floats — the identical expression, and therefore the
+    // identical bit pattern, the tap below would have produced.
+    if (uniC != kShadowUniMixed) {
+        float occU = 0.0f;
+        occU += w00; occU += w10; occU += w01; occU += w11;
+        return (occU >= 1.0f) ? 0.0f : (1.0f - occU);
+    }
     // Tap addressing: linear row-major, or 8×8-tiled under --shadow-swizzle
     // (halves the cache lines a 2×2 footprint touches; the tiled copies are
     // derived after each bake). Falls back to linear when a needed tiled
@@ -391,12 +546,6 @@ inline float CubeShadow_Sample(int cubeIdx,
         o01 = o00 + size_t(sm.xres); o11 = o01 + 1;
         psB = sm.packSD.data();  pdB = sm.packDyn.data();
     }
-    const float fx = smX - float(iX);
-    const float fy = smY - float(iY);
-    const float w00 = (1.0f - fx) * (1.0f - fy);
-    const float w10 =         fx  * (1.0f - fy);
-    const float w01 = (1.0f - fx) *         fy;
-    const float w11 =         fx  *         fy;
     float occ = 0.0f;
     if (surfaceMatId >= 0) {
         // PolyId mode: identity test. The ShadowBarry rasterizer writes

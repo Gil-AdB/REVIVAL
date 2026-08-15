@@ -760,11 +760,16 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		ShadowMap *sm; const fds::CameraContext *cam;
 		const fds::FaceListContext *faces;
 		float x1f, y1f, x2f, y2f;
+		// Texel bbox this tile's raster actually wrote (see ShadowMap::dirtyX0).
+		// Written by the tile's OWN task and by nobody else — one slot per job,
+		// so there is no atomic and no ordering to get wrong; the union into the
+		// per-map box happens on the tick thread after the drain.
+		int bx0, by0, bx1, by1;
 	};
 	static thread_local std::vector<PhaseBJob> sPhaseBJobs;
 	sPhaseBJobs.clear();
 	const bool dynBakeB = writeDynamicBuf;
-	auto runPhaseBTile = [dynBakeB](const PhaseBJob &J) {
+	auto runPhaseBTile = [dynBakeB](PhaseBJob &J) {
 		ShadowMap *const smPtr = J.sm;
 		const fds::CameraContext *const camPtr = J.cam;
 		const fds::FaceListContext *const facesPtr = J.faces;
@@ -778,6 +783,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 						FrustumClipper clipper;
 						clipper.InitViewport(*camPtr);
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
+						ShadowRasterBoxReset();
 						const auto& f = *facesPtr;
 						// Per-Material "skip in shadow bake" cache. The FLD
 						// doesn't tag lamps / emitters with any flag bit,
@@ -920,6 +926,8 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 								    f.cAll, skNoTxtr, skXpar, skDegen, skBack);
 							}
 						}
+						J.bx0 = g_shadowRasterBox[0]; J.by0 = g_shadowRasterBox[1];
+						J.bx1 = g_shadowRasterBox[2]; J.by1 = g_shadowRasterBox[3];
 						g_currentShadowMap = nullptr;
 						g_inDynamicShadowBake = false;
 						TailProf::addBusy(_tp);   // before release → race-free
@@ -930,6 +938,11 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	// [experiment: --shadow-swizzle] maps this bake writes → re-tiled after
 	// the raster drain (see below). Filled by the same Phase-B filter.
 	const bool sSwz = fds::FeatureFlags::shadow_swizzle();
+	// Maps this bake WRITES. Was filled only under --shadow_swizzle; the 8x8
+	// uniformity pyramid needs the same list (it is the exact set of planes
+	// whose contents change, and therefore the exact set whose pyramid must be
+	// rebuilt), so it is now always collected — one push_back per enqueued map,
+	// ~126 a frame at greets.
 	std::vector<size_t> swzMaps;
 	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
 		ShadowMap& sm = g_shadowMaps[lightIdx];
@@ -968,7 +981,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		const int rawTY = (sm.yres + numTY - 1) / numTY;
 		const int tileSizeX = rawTX & ~7;
 		const int tileSizeY = rawTY & ~7;
-		if (sSwz) swzMaps.push_back(lightIdx);
+		swzMaps.push_back(lightIdx);
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
@@ -979,18 +992,35 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 				const float x1f = float(tx * tileSizeX);
 				const float x2f = float((tx == numTX - 1) ? sm.xres : ((tx + 1) * tileSizeX));
 				++tilesEnqueued;
-				sPhaseBJobs.push_back({smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f});
+				sPhaseBJobs.push_back({smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f,
+			                       0x7FFFFFFF, 0x7FFFFFFF, -1, -1});
 			}
 		}
 	}
 	// Same thread_local capture trap as Phase A: snapshot data() by value.
 	const TailProf::Stamp _profShadowB("shadow-bake");
 	{
-		const PhaseBJob *const bJobs = sPhaseBJobs.data();
+		PhaseBJob *const bJobs = sPhaseBJobs.data();
 		dispatchIndexed((int)sPhaseBJobs.size(), nullptr,
 		                [bJobs, &runPhaseBTile](int jj) { runPhaseBTile(bJobs[jj]); });
 	}
 	TailProf::drain(renderns::shadowDone, tilesEnqueued, "shadow-bake", 3, _profShadowB);
+	// Fold each tile's written-texel box into its map's. Serial on the tick
+	// thread over ~one job per (map x tile) — 224 iterations a frame at greets
+	// — so the result cannot depend on which worker finished first.
+	for (size_t k = 0; k < swzMaps.size(); ++k) {
+		ShadowMap &sm = g_shadowMaps[swzMaps[k]];
+		sm.dirtyX0 = 0x7FFFFFFF; sm.dirtyY0 = 0x7FFFFFFF;
+		sm.dirtyX1 = -1;         sm.dirtyY1 = -1;
+	}
+	for (const PhaseBJob &J : sPhaseBJobs) {
+		if (J.bx1 < J.bx0 || J.by1 < J.by0) continue;
+		ShadowMap &sm = *J.sm;
+		if (J.bx0 < sm.dirtyX0) sm.dirtyX0 = J.bx0;
+		if (J.by0 < sm.dirtyY0) sm.dirtyY0 = J.by0;
+		if (J.bx1 > sm.dirtyX1) sm.dirtyX1 = J.bx1;
+		if (J.by1 > sm.dirtyY1) sm.dirtyY1 = J.by1;
+	}
 	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on
 	// the buffer this mode just wrote. Reports a tile flipping between
 	// occupied and empty across consecutive frames — the whole-tile
@@ -1121,6 +1151,61 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 					swzMaps.size());
 				std::fflush(stderr);
 				sSwzAcc[mi] = 0.0;
+			}
+		}
+	}
+
+	// ─── 8x8 PolyId uniformity pyramid ───────────────────────────────────
+	// Rebuild the pyramid for exactly the planes this bake just wrote, on the
+	// same worker pool and in the same shape as the swizzle pass above, while
+	// those planes are still hot. Timed SEPARATELY (its own [SHADOW-PYR] line
+	// under --shadow_bake_time, and a one-shot line for the init bake) because
+	// a build cost hidden inside the bake total would be indistinguishable
+	// from the tap win it is supposed to be paid out of.
+	//
+	// It is NOT gated on g_shadowMode == PolyId. The mode is a runtime toggle
+	// (F3 in greets) and the pyramid is a pure function of plane contents, so
+	// gating the BUILD would leave a stale pyramid one keypress away; gating
+	// the TAP (surfaceMatId >= 0, which Depth-mode callers never satisfy) has
+	// the same effect on cost with none of the staleness.
+	if (!swzMaps.empty()) {
+		const auto tPyrStart = clk::now();
+		const TailProf::Stamp _profPyr("shadow-uniformity");
+		{
+			const size_t *maps = swzMaps.data();
+			const bool dynPl = writeDynamicBuf;
+			dispatchIndexed(int(swzMaps.size()), &renderns::shadowDone,
+			                [maps, dynPl](int k) {
+				ShadowMap_BuildUniformity(g_shadowMaps[maps[k]], dynPl);
+			});
+		}
+		// depth 3 = outside renderFrame, same bucket the bake itself books to,
+		// so --deferred_prof carries the build cost as its own row instead of
+		// folding it into the bake it must be judged against.
+		TailProf::drain(renderns::shadowDone, int(swzMaps.size()),
+		                "shadow-uniformity", 3, _profPyr);
+		const double pyrMs = std::chrono::duration<double, std::milli>(clk::now() - tPyrStart).count();
+		if (mode == ShadowBakeMode::StaticOnce) {
+			std::fprintf(stderr, "[SHADOW-PYR] init uniformity build: %.2f ms (%zu maps)\n",
+			             pyrMs, swzMaps.size());
+			std::fflush(stderr);
+		} else if (sBakeTime) {
+			static thread_local double sPyrAcc[3] = {0.0, 0.0, 0.0};
+			static thread_local int    sPyrN[3]   = {0, 0, 0};
+			static const int sPyrInterval = []() {
+				const char *e = std::getenv("FDS_SHADOW_PROF_INTERVAL");
+				return (e && *e) ? std::max(1, std::atoi(e)) : 60;
+			}();
+			const int mi = int(mode);
+			sPyrAcc[mi] += pyrMs;
+			if (++sPyrN[mi] % sPyrInterval == 0) {
+				std::fprintf(stderr,
+					"[SHADOW-PYR] uniformity build: %.3f ms/frame (avg of %d, %s, %zu maps)\n",
+					sPyrAcc[mi] / sPyrInterval, sPyrInterval,
+					mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" : "DynOmnis",
+					swzMaps.size());
+				std::fflush(stderr);
+				sPyrAcc[mi] = 0.0;
 			}
 		}
 	}

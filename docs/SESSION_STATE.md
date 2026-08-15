@@ -1,5 +1,199 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-15b — 80 % OF THE CUBE TAP'S TEXEL READS ARE A LOOKUP THE MAP ALREADY ANSWERED: THE 8x8 PolyId UNIFORMITY PYRAMID
+>
+> The backlog's re-specified 8x8 item (43ac3456), built. In `ShadowMode::PolyId`
+> a tap's verdict is a pure id comparison, so an 8x8 shadow-map block whose
+> texels all carry one id `c` settles ANY 2x2 PCF footprint inside it without a
+> single texel read — same verdict, computed once. **BYTE-NULL, no flag,
+> default on: all eight pins unmoved 3/3 differentially, `render_gate` 4/4 PASS
+> x3, and 9 poses x 4 flag configurations identical.**
+>
+> **-1.27 ms of `lighting-w1` and -1.01 ms of the frame at greets t=5743;
+> -0.93 ms of `lighting-w1` and -0.33 ms of the frame at his t=3122 pose.
+> chase / city / fountain build no shadow maps at all and are structurally
+> inert (renderFrame Ginstr/f identical to 3 decimals).**
+>
+> ### THE DESIGN, AND THE TWO THINGS THE RESPEC ASKED FOR THAT TURNED OUT TO BE UNNECESSARY
+>
+> `ShadowMap::uniSD` / `uniDyn`: one u32 per 8x8 block = the ShadowMatID every
+> texel of that block's **9x9 APRON** carries, or `kShadowUniMixed`. 16 KB per
+> 512^2 face.
+>
+> **The apron is what removes the boundary condition instead of handling it.** A
+> 2x2 footprint anchored at (iX, iY) reads (iX..iX+1, iY..iY+1), so summarising
+> the bare 8x8 block would leave every footprint anchored on the block's last row
+> or column straddling two blocks — 23 % of anchor positions, and precisely the
+> ones in the interior of a large uniform region where the fast path is worth
+> most. Summarising one texel PAST the right and bottom edges makes the block
+> index `(iX>>3, iY>>3)` sufficient on its own. No straddle branch exists to get
+> wrong. At the map edge the apron clamps to `xres-1`; the tap's own
+> `iX + 1 >= xres` reject already guarantees nothing reads past it.
+>
+> The respec asked for (a) per-8x8 DEPTH BOUNDS and (c) a per-(block x light)
+> classification projecting the block's frustum-cell corners and bailing when
+> they straddle two cube faces. **Neither is needed.** (a) is a depth-mode
+> concept — PolyId compares no depths. (c) was an artefact of classifying in
+> SCREEN space; the pyramid is indexed in SHADOW-MAP space by the tap's own
+> `iX/iY`, which the tap has already computed and which has already selected its
+> cube face, so there is no second projection and no seam.
+>
+> **The dynamic plane is handled by the pyramid, not around it.** `closestPacked`
+> reads both planes, so the full tap's fast path fires only where the DYNAMIC
+> apron is uniformly EMPTY (`dId == 0` everywhere => `closestPacked` returns the
+> static id verbatim, whatever the z halves hold) and the static apron is
+> uniform. The lightmap-composite `dynamicOnly` tap reads only `packDyn`, so
+> `uniDyn` alone settles it. Measured under `--shadow_lightmap
+> --shadow_lm_dynamic`, that form is **49.3 %** of taps and 78.8 % still skip.
+>
+> **Byte-exactness is by construction, not by argument.** The weights are
+> computed ONCE, by the same four statements, and merely READ by the fast path —
+> recomputing them inside it would be a bet on clang contracting
+> `(1.0f - fx) * (1.0f - fy)` into the same fnmsub in two places. Uniform-LIT
+> returns 1.0f (the tail's `1.0f - 0.0f`) before the weights are even formed;
+> uniform-OCCLUDING falls through to the shared weight block and runs the same
+> four `occ += w` in the same order. `--shadow_polyid_no_pcf` is mirrored
+> explicitly (`return 0.0f`) rather than summed, because that flag sets
+> `occ = 1.0f` outright and the weight sum can land a few ULP short and return
+> ~6e-8. Depth mode never enters (it passes `surfaceMatId = -1`).
+>
+> ### THE FAST PATH IS A BRANCH AROUND THE TAP, IN TWO PIECES
+>
+> Three refutations say the tap sits at its register-allocation limit, so nothing
+> was added INSIDE it. The block lookup runs first (it needs only iX/iY) and a
+> uniform-lit block returns before the weights; the addressing block — the
+> swizzle test, the row offset, the four texel offsets, the two plane base
+> pointers — is skipped whole by both arms. Ordering matters: the first cut
+> placed the check after the addressing block and bought **-0.138 Gi/f** at
+> t=5743; moving it above bought **-0.192**.
+>
+> ### THE BUILD COST ATE THE WIN ONCE, AND THAT IS WHY THE DIRTY BOX EXISTS
+>
+> First form: eager rebuild of the whole plane for every map the bake wrote.
+> **MEASURED 0.375 ms/frame at his pose against a 0.336 ms tap saving — the
+> build ate the win whole** (t=5743: 0.337 vs 0.846). Cause: greets' fourteen
+> 512^2 DYNAMIC planes are 14 MB, streamed every frame to rediscover that the
+> mech is the only thing in them.
+>
+> Fix: phase A clears the plane, so every texel outside what the raster actually
+> wrote is known-zero and its pyramid entry is known-zero. `MekaleleShadowDepth`
+> stamps each clipped n-gon's clamped bbox into a THREAD-LOCAL box (no atomic —
+> the raster runs thousands of polygons per tile and four CAS each would price
+> the bake instead of the build); the phase-B tile task copies it into its own
+> job slot; the tick thread unions the slots per map after the drain, serially,
+> so the result cannot depend on which worker finished first. The build then
+> zeroes the 16 KB pyramid and rescans only that box, expanded one block on the
+> low side because a block one column earlier still sees into it through its
+> apron.
+>
+> | build, ms/frame at greets t=5743 | eager | dirty-box |
+> |---|--:|--:|
+> | `DynMeshes` (14 x 512^2 dyn planes) | 0.270 | **0.038** |
+> | `DynOmnis` (28 maps, 128^2 + spots) | 0.115 | 0.113 |
+> | `--deferred_prof` `shadow-uniformity` row (both, per frame) | 0.337 | **0.106** |
+>
+> The `DynOmnis` figure does not move because it is dispatch-bound, not
+> scan-bound: 28 tiny tasks through `dispatchIndexed` + semaphore drain. Init
+> (`StaticOnce`, 48 maps) is a one-shot **0.78-0.82 ms**.
+>
+> ### TAPS SKIPPED — the new `--shadow_tap_census` rows (`-DFDS_SHADOW_TAP_CENSUS=ON`)
+>
+> | pose / config | taps reaching the pyramid | uniform-lit | uniform-occ | **skipped** |
+> |---|--:|--:|--:|--:|
+> | greets t=5743 (bench) | 4.744 M/f | 29.5 % | 50.8 % | **80.3 %** |
+> | greets t=1588 (pin recipe) | 6.402 M/f | 32.4 % | 28.7 % | **61.1 %** |
+> | greets t=1588 + `--shadow_lightmap --shadow_lm_dynamic` | 6.041 M/f | 57.8 % | 21.0 % | **78.8 %** |
+>
+> The screen-space census that motivated this (76.1 % of taps in an 8x8-uniform
+> SCREEN block) turns out to have been a lower bound on the shadow-map-space
+> number at t=5743 and an upper bound at t=1588 — related quantities, not the
+> same one, and only the shadow-map one is the thing the pyramid can act on.
+>
+> ### MEASURED — no flag, two arms, one worktree, one asset tree, interleaved min-of-6 (round 0 discarded), load 2.6-5.5
+>
+> | | parent | child | delta |
+> |---|--:|--:|--:|
+> | **greets t=5743, 1920x1080** | | | |
+> | `lighting-w1` wall | 24.155 | **22.885** | **-1.270 (-5.3 %)** |
+> | `lighting-w1` Ginstr/f | 2.953 | **2.761** | **-0.192 (-6.5 %)** |
+> | `lighting-w1` Gcyc/f | 0.825 | 0.759 | -0.066 (-8.0 %) |
+> | `renderFrame` wall | 39.688 | 38.565 | -1.123 (-2.8 %) |
+> | `renderFrame` Ginstr/f | 4.557 | **4.365** | **-0.192 (-4.2 %)** |
+> | frame_ms min | 46.34 | **45.33** | **-1.01** |
+> | `shadow-uniformity` (new row, outside renderFrame) | - | 0.106 ms / 0.010 Gi | +0.106 / +0.010 |
+> | **greets t=3122, HIS POSE, 1512x848** | | | |
+> | `lighting-w1` wall | 15.555 | **14.627** | **-0.928 (-6.0 %)** |
+> | `lighting-w1` Ginstr/f | 1.872 | **1.747** | **-0.125 (-6.7 %)** |
+> | `renderFrame` Ginstr/f | 4.896 | **4.772** | **-0.124 (-2.5 %)** |
+> | frame_ms min | 43.31 | **42.98** | **-0.33** |
+> | `shadow-uniformity` | - | 0.144 ms / 0.011 Gi | +0.144 / +0.011 |
+> | **city t=1961** `renderFrame` Ginstr/f | 0.640 | 0.640 | **0.000** |
+> | **fountain t=1200** `renderFrame` Ginstr/f | 0.301 | 0.301 | **0.000** |
+>
+> **ATTRIBUTION IS EXACT AT BOTH POSES**: the `renderFrame` Ginstr delta equals
+> the `lighting-w1` delta to the last printed digit (-0.192 / -0.192 at t=5743,
+> -0.124 / -0.125 at his pose), which is what "the only thing that changed inside
+> renderFrame is the tap" predicts. The build is OUTSIDE renderFrame (depth 3,
+> same bucket as the bake it must be judged against), so it is NOT hidden in
+> those rows — net of it the change is **-0.180 Gi/f** at t=5743 and
+> **-0.111 Gi/f** at his pose. `shadow-bake` moves +0.165 / +0.059 ms wall for
+> +0.002 / +0.003 Gi — the n-gon bbox stamp, at the edge of what wall resolves.
+>
+> **chase is NOT in the table because `--bench=scene` does not support it**
+> ("scene='chase' not supported (try city, fountain, greets)") — the five chase
+> pins carry it instead, and a chase snapshot emits no `[SHADOW]` line at all:
+> chase, city and fountain build ZERO shadow maps, so the pyramid is never
+> allocated and never queried there.
+>
+> ### POLYID-VS-DEPTH COVERAGE
+>
+> `g_shadowMode` is ONE process-wide global (`FDS/RENDER/Shadows.cpp:161`), not a
+> per-light property, and its compile-time default is PolyId
+> (`FDS_SHADOW_POLYID_DEFAULT_ON = 1`). So the census is a scene census, not a
+> light census: **greets is the only scene with shadow maps** — 10 spot (2-D)
+> maps + 11 cube omnis x 6 faces = 76 entries, of which 8 omnis (48 faces) are
+> `Omni_StaticShadow` and baked once, 14 of those faces take a per-frame
+> `DynMeshes` dynamic bake, and 28 (18 moving-omni cube faces + the 10 spots)
+> take a per-frame `DynOmnis` static-plane bake. Depth mode is reachable only via
+> `FDS_SHADOW_POLYID=0` or the F3 toggle; it takes no pyramid path (it passes
+> `surfaceMatId = -1`) and is byte-identical, verified. The 10 spot maps get a
+> pyramid built that nothing reads yet — the 2-D tap in `computeMapShadowAtten`
+> is the obvious next customer (48.9 % of the omni loop at his pose) and is left
+> for its own measured commit.
+>
+> ### GATES
+>
+> Differential, both binaries built in ONE worktree from ONE tree snapshot, one
+> asset tree, run 1 discarded. **All eight pins UNMOVED 3/3 on the child and 3/3
+> on the parent**: chase t100 `7678a6bc` t400 `42d79fad` t800 `b29c73f1` t1200
+> `31aa5203` t1600 `1544b0e7`, greets `570a7b443f768393dc6647044a9e67b3`,
+> fountain `8db68ccb59416e9a44037e9f387b7bd9`, city
+> `3f8948232c192a979ffe7f76c4b387ab`. `render_gate.sh` **ALL FOUR PASS, three
+> times** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+>
+> Beyond the pins, because the pin recipe does NOT exercise the composite tap:
+> **9 greets poses (1588 / 2000 / 3122 / 4871 / 5534 / 5743 / 5780 / 5814 / 5970)
+> x 4 configurations — default, `--shadow_swizzle`, `--shadow_lightmap
+> --shadow_lm_dynamic`, `--no-shadow_dynamic` — every hash identical.** Plus
+> single-pose differentials on `--shadow_polyid_no_pcf`
+> (`fefdf162ec8c2b85df86129d92b188b1`, 2/2 each) and Depth mode
+> `FDS_SHADOW_POLYID=0` (`ec057b9d3102f5b3970dd04c3e194df6`, 2/2 each). The
+> multi-pose sweep is the STALENESS gate: a pyramid that failed to track a
+> re-baked plane would show as a frame-dependent divergence, not a constant one.
+>
+> ### WHAT THIS DOES NOT BUY, STATED PLAINLY
+>
+> The parked ceiling read "76 % of 7.27 ms". It is not 76 % of 7.27 ms, and the
+> reason is that the tap's cost is not its loads. Measured: **~50 instructions
+> per skipped tap** (0.192 Gi / 3.81 M skipped) — the 8 packed loads, the four
+> `closestPacked` id resolutions, the four compares and the addressing block.
+> Everything BEFORE the block lookup — the face select, the 3x3 view-to-light
+> matmul, the two frustum-ratio rejects, `1/lz`, `smX/smY` — is untouched and is
+> the majority of the tap. IPC barely moves (3.579 -> 3.564 in the first form),
+> which says the same thing from the other side: the tap was compute-bound, not
+> load-bound, so removing loads pays in issue slots and not in stalls. Cutting
+> the projection needs a different lever than this one.
+
 > ## 2026-08-15 — THE OMNI LOOP IS A SHADOW LOOP: 74 % of it is the shadow chain, and 99.5 % of its 2-D-shadow calls compute the constant 1.0f
 >
 > Round 1's #1 item — "deferred omni loop, 19.9 of 47.8 ms at greets t=5743,

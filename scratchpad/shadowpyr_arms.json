@@ -1,0 +1,94 @@
+[
+ {
+  "tag": "t5743-parent",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_parent",
+  "args": [
+   "--bench=scene@scene=greets,t=5743,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "t5743-child",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_child",
+  "args": [
+   "--bench=scene@scene=greets,t=5743,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "his-parent",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_parent",
+  "args": [
+   "--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {
+   "FDS_GREETS_CAM": "-8.6249094,2.72651696,-53.2339516,0.210607708,0.0055912463,-0.977554619"
+  }
+ },
+ {
+  "tag": "his-child",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_child",
+  "args": [
+   "--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {
+   "FDS_GREETS_CAM": "-8.6249094,2.72651696,-53.2339516,0.210607708,0.0055912463,-0.977554619"
+  }
+ },
+ {
+  "tag": "city-parent",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_parent",
+  "args": [
+   "--bench=scene@scene=city,t=1961,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "city-child",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_child",
+  "args": [
+   "--bench=scene@scene=city,t=1961,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "fount-parent",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_parent",
+  "args": [
+   "--bench=scene@scene=fountain,t=1200,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "fount-child",
+  "bin": "/Users/gil-ad/work/rev-shadowpyr/Runtime/DEMO_child",
+  "args": [
+   "--bench=scene@scene=fountain,t=1200,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ }
+]

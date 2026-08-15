@@ -459,6 +459,20 @@ about where. `--shadow_tap_census_block=B` asks the same question per BxB block
 | 8x8 | **76.1 %** |
 | 4x4 | 89.5 % |
 
+**SHIPPED 2026-08-15 (docs/SESSION_STATE.md 2026-08-15b), and two of the three
+requirements below were wrong.** `ShadowMap::uniSD` / `uniDyn`, one u32 per 8x8
+block holding the id of the block's **9x9 apron** (the apron removes the
+straddle case instead of handling it). (a) per-8x8 DEPTH BOUNDS is a depth-mode
+concept — PolyId compares no depths; (c) the frustum-corner classification was
+an artefact of classifying in SCREEN space — the pyramid is indexed in
+SHADOW-MAP space by the tap's own iX/iY, which has already selected its cube
+face. **80.3 % of taps skip at t=5743**, `lighting-w1` -0.192 Gi/f (-6.5 %),
+frame -1.01 ms; his pose -0.125 Gi/f, -0.33 ms. All eight pins unmoved,
+`render_gate` 4/4, 9 poses x 4 configs identical. The ceiling below is NOT
+"76 % of 7.27 ms": a skipped tap saves ~50 instructions (loads + compares +
+addressing); the face select, the 3x3 matmul and the projection are untouched
+and are the majority of the tap. Original specification follows.
+
 **TODO, re-specified as a BYTE-NULL design at 8x8.** PolyId mode makes an exact
 test available that a corner sample never was: over a block's footprint on the
 cube face, if every texel carries the same id `c`, the 2x2 PCF is exactly

@@ -3400,6 +3400,33 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			  double(dUniShadT)/f/1e6, tt > 0 ? 100.0*double(dUniShadT)/tt : 0.0,
 			  double(dMixedT)/f/1e6,   tt > 0 ? 100.0*double(dMixedT)/tt : 0.0,
 			  double(dUniLitE)/f, double(dUniShadE)/f, double(dMixedE)/f);
+#if FDS_SHADOW_TAP_CENSUS
+			// PolyId 8x8 uniformity pyramid: where the taps that reached it
+			// went. Counted per-thread inside CubeShadow_Sample, summed here so
+			// it shares this report's frame accounting; DELTA since the last
+			// report, same as every row above.
+			{
+				static ShadowPyrCensus pPyr{};
+				ShadowPyrCensus cur; ShadowPyrCensusTotals(cur);
+				const double dR   = double(cur.reached - pPyr.reached);
+				const double dNP  = double(cur.noPyr   - pPyr.noPyr);
+				const double dFL  = double(cur.fastLit - pPyr.fastLit);
+				const double dFO  = double(cur.fastOcc - pPyr.fastOcc);
+				const double dMX  = double(cur.mixed   - pPyr.mixed);
+				const double dDO  = double(cur.dynOnly - pPyr.dynOnly);
+				pPyr = cur;
+				const double rr = std::max(1.0, dR);
+				std::fprintf(stderr,
+				  "  PYRAMID (PolyId)    reached %.3f M/f (dyn-only form %.1f%%)  no pyramid %.3f M\n"
+				  "    SKIPPED           uniform-lit %.3f M (%.1f%%)  uniform-occ %.3f M (%.1f%%)"
+				  "   => %.1f%% of taps take NO texel read\n"
+				  "    tapped            mixed %.3f M (%.1f%%)\n",
+				  dR/f/1e6, 100.0*dDO/rr, dNP/f/1e6,
+				  dFL/f/1e6, 100.0*dFL/rr, dFO/f/1e6, 100.0*dFO/rr,
+				  100.0*(dFL+dFO)/rr,
+				  dMX/f/1e6, 100.0*dMX/rr);
+			}
+#endif
 			if (tcB > 0) {
 				const double bt = double(dBUniT + dBMixT);
 				std::fprintf(stderr,

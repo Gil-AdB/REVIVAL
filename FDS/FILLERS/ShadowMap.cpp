@@ -19,8 +19,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 
 thread_local ShadowMap *g_currentShadowMap = nullptr;
+thread_local int g_shadowRasterBox[4] = {0x7FFFFFFF, 0x7FFFFFFF, -1, -1};
 std::vector<ShadowMap> g_shadowMaps;
 std::vector<CubeShadowRef> g_cubeShadowRefs;
 
@@ -32,6 +34,120 @@ std::atomic<bool> g_shadowFullscreenView{false};
 // CubeShadow_Sample's PolyId path actually reads).
 // Cycled by ShadowMap_ViewModeCycle (bound to B in REV.CPP).
 std::atomic<int> g_shadowViewMode{0};
+
+// ─── 8x8 PolyId uniformity pyramid ────────────────────────────────────────
+// One u32 per 8x8 block = the ShadowMatID every texel of the block's 9x9
+// APRON carries, or kShadowUniMixed. See ShadowMap.h for why the apron and
+// why the tap that reads it is byte-null.
+//
+// Structure: a per-texel-ROW pass that collapses each block column's 9-texel
+// run to one id, then a per-BLOCK pass that collapses 9 consecutive rows of
+// that. The alternative — scanning the 9x9 square per block — re-reads the
+// shared column between horizontally adjacent blocks and, worse, walks the
+// plane in a 9-row zig-zag per block row. This form touches every texel once,
+// strictly front-to-back, so the pass runs at streaming speed over a plane the
+// raster has just left in cache. The row scratch is blocksX u32 per row —
+// 512^2 face = 128 KB, allocated once per call from a thread_local.
+void ShadowMap_BuildUniformity(ShadowMap &sm, bool dynPlane)
+{
+    const std::vector<uint32_t> &src = dynPlane ? sm.packDyn : sm.packSD;
+    std::vector<uint32_t> &dst       = dynPlane ? sm.uniDyn  : sm.uniSD;
+    if (sm.xres <= 0 || sm.yres <= 0 || src.empty()) { dst.clear(); return; }
+    const int bw = (sm.xres + kShadowUniSize - 1) >> kShadowUniShift;
+    const int bh = (sm.yres + kShadowUniSize - 1) >> kShadowUniShift;
+    sm.uniW = bw;
+    sm.uniH = bh;
+    // Phase A cleared this plane, so id 0 — "no occluder" — is the correct
+    // entry for every block the bake did not touch. Zero the whole pyramid
+    // (16 KB for a 512^2 face) and then rebuild ONLY the dirty box.
+    if (dst.size() != size_t(bw) * size_t(bh)) dst.assign(size_t(bw) * size_t(bh), 0u);
+    else std::fill(dst.begin(), dst.end(), 0u);
+    if (sm.dirtyX1 < sm.dirtyX0 || sm.dirtyY1 < sm.dirtyY0) return;   // wrote nothing
+
+    // Block range to rebuild. A block at (bx, by) reads the 9x9 apron
+    // [bx*8, bx*8+8] x [by*8, by*8+8], so a block one column/row BEFORE the
+    // dirty box still sees into it — hence the -1 on the low side. Anything
+    // further out reads only cleared texels and stays 0.
+    int bx0 = (sm.dirtyX0 >> kShadowUniShift) - 1; if (bx0 < 0) bx0 = 0;
+    int by0 = (sm.dirtyY0 >> kShadowUniShift) - 1; if (by0 < 0) by0 = 0;
+    int bx1 = sm.dirtyX1 >> kShadowUniShift; if (bx1 > bw - 1) bx1 = bw - 1;
+    int by1 = sm.dirtyY1 >> kShadowUniShift; if (by1 > bh - 1) by1 = bh - 1;
+
+    // Structure: a per-texel-ROW pass that collapses each block column's
+    // 9-texel run to one id, then a per-BLOCK pass that collapses 9 consecutive
+    // rows of that. The alternative — scanning the 9x9 square per block —
+    // re-reads the column shared by horizontally adjacent blocks and walks the
+    // plane in a 9-row zig-zag per block row. This form touches every texel of
+    // the dirty box once, front to back.
+    const int y0px = by0 << kShadowUniShift;
+    int y1px = (by1 << kShadowUniShift) + kShadowUniSize;   // inclusive apron end
+    if (y1px > sm.yres - 1) y1px = sm.yres - 1;
+    const int rowW = bx1 - bx0 + 1;
+    static thread_local std::vector<uint32_t> sRow;
+    const size_t need = size_t(rowW) * size_t(y1px - y0px + 1);
+    if (sRow.size() < need) sRow.assign(need, 0u);
+    uint32_t *rowUni = sRow.data();
+
+    for (int y = y0px; y <= y1px; ++y) {
+        const uint32_t *p = src.data() + size_t(y) * size_t(sm.xres);
+        uint32_t *r = rowUni + size_t(y - y0px) * size_t(rowW);
+        for (int bx = bx0; bx <= bx1; ++bx) {
+            const int x0 = bx << kShadowUniShift;
+            int x1 = x0 + kShadowUniSize;           // inclusive apron end
+            if (x1 > sm.xres - 1) x1 = sm.xres - 1;
+            const uint32_t first = p[x0] & 0xFFFF0000u;
+            uint32_t diff = 0u;
+            for (int x = x0 + 1; x <= x1; ++x) diff |= (p[x] & 0xFFFF0000u) ^ first;
+            r[bx - bx0] = diff ? kShadowUniMixed : (first >> 16);
+        }
+    }
+    for (int by = by0; by <= by1; ++by) {
+        const int ry0 = (by << kShadowUniShift) - y0px;
+        int ry1 = ry0 + kShadowUniSize;             // inclusive apron end
+        if (ry1 > y1px - y0px) ry1 = y1px - y0px;
+        uint32_t *d = dst.data() + size_t(by) * size_t(bw);
+        for (int bx = bx0; bx <= bx1; ++bx) {
+            uint32_t c = rowUni[size_t(ry0) * size_t(rowW) + size_t(bx - bx0)];
+            for (int y = ry0 + 1; y <= ry1 && c != kShadowUniMixed; ++y) {
+                const uint32_t v = rowUni[size_t(y) * size_t(rowW) + size_t(bx - bx0)];
+                if (v != c) c = kShadowUniMixed;
+            }
+            d[bx] = c;
+        }
+    }
+}
+
+#if FDS_SHADOW_TAP_CENSUS
+// Per-thread pyramid tap counters + a process-wide registry so the report
+// covers every worker that ever took a tap, not just the reporting thread.
+// Heap-allocated and deliberately never freed (same reasoning as
+// ShadowScratchTLS in Shadows.cpp): the registry outlives the workers.
+static std::mutex &pyrCensusMtx() { static std::mutex m; return m; }
+static std::vector<ShadowPyrCensus*> &pyrCensusAll()
+{
+    static std::vector<ShadowPyrCensus*> v; return v;
+}
+ShadowPyrCensus &ShadowPyrCensusTLS()
+{
+    static thread_local ShadowPyrCensus *p = [] {
+        auto *q = new ShadowPyrCensus();
+        std::lock_guard<std::mutex> lk(pyrCensusMtx());
+        pyrCensusAll().push_back(q);
+        return q;
+    }();
+    return *p;
+}
+void ShadowPyrCensusTotals(ShadowPyrCensus &out)
+{
+    out = ShadowPyrCensus{};
+    std::lock_guard<std::mutex> lk(pyrCensusMtx());
+    for (const ShadowPyrCensus *c : pyrCensusAll()) {
+        out.reached += c->reached; out.noPyr   += c->noPyr;
+        out.fastLit += c->fastLit; out.fastOcc += c->fastOcc;
+        out.mixed   += c->mixed;   out.dynOnly += c->dynOnly;
+    }
+}
+#endif
 
 void ShadowMap_ViewModeCycle()
 {
@@ -363,6 +479,14 @@ void ShadowMaps_Rebuild(Scene *Sc, int res)
 		const size_t n = size_t(lightRes) * size_t(lightRes);
 		sm.packSD.assign(n, 0u);
 		sm.packDyn.assign(n, 0u);
+		// Uniformity pyramid, sized with the planes. All-zero is the CORRECT
+		// content here, not a placeholder: both planes are all-zero, so every
+		// block's apron is uniformly id 0 and a tap taken before the first bake
+		// reads "no occluder" — exactly what the plane itself would have said.
+		sm.uniW = (sm.xres + kShadowUniSize - 1) >> kShadowUniShift;
+		sm.uniH = (sm.yres + kShadowUniSize - 1) >> kShadowUniShift;
+		sm.uniSD.assign(size_t(sm.uniW) * size_t(sm.uniH), 0u);
+		sm.uniDyn.assign(size_t(sm.uniW) * size_t(sm.uniH), 0u);
 		sm.omni = O;
 		// Camera basis + FOV / z-scale are computed each frame in
 		// Render_DeferredShadowMaps from the omni's pose. zScale here
@@ -410,6 +534,10 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 			const size_t n = size_t(faceRes) * size_t(faceRes);
 			sm.packSD.assign(n, 0u);
 			sm.packDyn.assign(n, 0u);
+			sm.uniW = (sm.xres + kShadowUniSize - 1) >> kShadowUniShift;
+			sm.uniH = (sm.yres + kShadowUniSize - 1) >> kShadowUniShift;
+			sm.uniSD.assign(size_t(sm.uniW) * size_t(sm.uniH), 0u);
+			sm.uniDyn.assign(size_t(sm.uniW) * size_t(sm.uniH), 0u);
 			sm.omni = O;  // shared across all 6 faces
 			sm.cubeFace = int8_t(f);  // tells render pass which axis to face
 			sm.fzp    = O->IRange * sFzpMult;
@@ -975,6 +1103,30 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 	// AVX2 rasterization.
 	extern thread_local bool g_inDynamicShadowBake;
 	const bool useDynamic = g_inDynamicShadowBake;
+	// Dirty-box stamp for the uniformity pyramid. ONE bbox per clipped n-gon,
+	// taken before the fan is triangulated — the fan triangles cover exactly
+	// this polygon, so it is the same bound the per-triangle rasteriser would
+	// have produced, for a fraction of the bookkeeping. Clamped to the plane
+	// because that is where the rasteriser clamps its own span loop.
+	{
+		float bx0 = V[0]->PX, bx1 = V[0]->PX;
+		float by0 = V[0]->PY, by1 = V[0]->PY;
+		for (dword i = 1; i < numVerts; ++i) {
+			const float px = V[i]->PX, py = V[i]->PY;
+			if (px < bx0) bx0 = px; else if (px > bx1) bx1 = px;
+			if (py < by0) by0 = py; else if (py > by1) by1 = py;
+		}
+		int ix0 = int(std::floor(bx0)); if (ix0 < 0) ix0 = 0;
+		int iy0 = int(std::floor(by0)); if (iy0 < 0) iy0 = 0;
+		int ix1 = int(std::ceil (bx1)); if (ix1 > sm->xres - 1) ix1 = sm->xres - 1;
+		int iy1 = int(std::ceil (by1)); if (iy1 > sm->yres - 1) iy1 = sm->yres - 1;
+		if (ix0 <= ix1 && iy0 <= iy1) {
+			if (ix0 < g_shadowRasterBox[0]) g_shadowRasterBox[0] = ix0;
+			if (iy0 < g_shadowRasterBox[1]) g_shadowRasterBox[1] = iy0;
+			if (ix1 > g_shadowRasterBox[2]) g_shadowRasterBox[2] = ix1;
+			if (iy1 > g_shadowRasterBox[3]) g_shadowRasterBox[3] = iy1;
+		}
+	}
 	ShadowBarry r(sm, idOverride, useDynamic);
 	for (dword i = 2; i < numVerts; ++i) {
 		const Vertex& v1 = *V[0];
