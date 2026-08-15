@@ -190,7 +190,31 @@ struct ShadowMap {
 
 	// Camera built from the omni. lightViewMat is the 3x3 world→view
 	// rotation; lightISource is the world-space light position.
-	Matrix lightViewMat;
+	//
+	// THE `{}` IS LOAD-BEARING, and its absence was a real bug. `Matrix` is
+	// `typedef float[3][3]` (Base/Matrix.h) — a bare array with no member
+	// initializer of its own — while every scalar around it carries an NSDMI,
+	// and `Vector` carries its own. Both Rebuild functions build their entry
+	// as `ShadowMap sm;`, which is DEFAULT-initialization: the NSDMI members
+	// get their values and the bare arrays get whatever was on that stack
+	// frame. Neither Rebuild writes these two — they are computed at the END
+	// of Render_DeferredShadowMaps, from the View current at that moment. So
+	// in the window between "the scene built its shadow maps" and "the first
+	// bake ran", any lighting pass that samples a shadow map multiplies its
+	// view-space position by NINE FLOATS OF STACK GARBAGE.
+	//
+	// That window is not hypothetical. The greets tick runs
+	// RenderSecondOrderMirrors (GREETS.CPP) BEFORE ShadowBake_DispatchGreets,
+	// so the mirror RTT's frame-1 deferred lighting always lands inside it —
+	// measured as a per-launch content flip in 3 of 48 traced launches, and as
+	// a shadow-state digest that took 6 distinct values in 6 launches while
+	// every other input digest was identical.
+	//
+	// Zero is the right value, not merely a defined one: it makes the pre-bake
+	// tap read the all-zero planes as "no occluder", which is exactly what the
+	// uniformity-pyramid comment in ShadowMaps_Rebuild already promises a tap
+	// taken before the first bake will see.
+	Matrix lightViewMat{};
 	Vector lightISource;
 	float  perspX = 0.0f;             // = (xres/2) / tan(fovX/2)
 	float  perspY = 0.0f;             // similarly
@@ -219,7 +243,10 @@ struct ShadowMap {
 	//     lightPos = viewToLight * pixelViewSpace + viewToLightOffset
 	// per pixel — one 3×3 matmul + 1 vector add, no per-pixel transpose
 	// or world-space round-trip.
-	Matrix viewToLight;
+	// Same `{}`, same reason as lightViewMat above — and this is the one that
+	// reaches the screen: the per-pixel tap multiplies by THIS matrix
+	// (DeferredSurfaceKernel.cpp:627 and :677).
+	Matrix viewToLight{};
 	Vector viewToLightOffset;
 };
 

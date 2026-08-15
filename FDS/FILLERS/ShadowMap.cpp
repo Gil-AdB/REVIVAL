@@ -472,7 +472,13 @@ void ShadowMaps_Rebuild(Scene *Sc, int res)
 		// Light_Omni shadow casters use cube shadow maps via
 		// CubeShadowMaps_Rebuild — not a single 2D entry here.
 		if (O->Type != Light_SpotLight) continue;
-		ShadowMap sm;
+		// `{}` = VALUE-initialization. ShadowMap's two `Matrix` members are
+		// raw float[3][3] with no NSDMI, so a bare `ShadowMap sm;` hands the
+		// vector this stack frame in place of a light transform — see the
+		// comment on ShadowMap::lightViewMat for what that cost. The header
+		// now initialises them too; this is the belt to that brace, and it
+		// also covers any member added later without an initializer.
+		ShadowMap sm{};
 		// Per-light resolution: Omni.shadowMapRes overrides the global
 		// default. Lets short-range orbit lights use 256² (16× less
 		// raster cost than 1024²) while keeping the main spot at 1024².
@@ -531,7 +537,7 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 		const int faceRes = (O->shadowMapRes > 0) ? int(O->shadowMapRes) : res;
 
 		for (int f = 0; f < 6; ++f) {
-			ShadowMap sm;
+			ShadowMap sm{};   // value-init: see ShadowMaps_Rebuild above
 			sm.xres = faceRes;
 			sm.yres = faceRes;
 			const size_t n = size_t(faceRes) * size_t(faceRes);

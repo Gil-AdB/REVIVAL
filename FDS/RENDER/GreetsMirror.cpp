@@ -13,6 +13,7 @@
 #include <Base/TriMesh.h>
 #include <Base/Vertex.h>
 #include <FILLERS/Mekalele.h>  // g_gbuffer + GBuffer::mirrorId plane
+#include <FILLERS/ShadowMap.h>     // --mirror_rtt_trace: g_shadowMaps digest
 #include <RENDER/OffscreenView.h>  // OffscreenViewScope (RTT world swap)
 #include <RENDER/DeferredCommon.h> // DeferredOverride + Render_DeferredLighting/VolumetricCones (deferred RTT)
 #include <RENDER/Hdr.h>            // HDR-correct reflections: per-RTT-slot begin/tonemap
@@ -2856,6 +2857,34 @@ int g_rttJobsLastFrame = 0;
 // One record per BAKE — a frame with no bake simply has no line, which the
 // diff shows as a gap. See the flag's help text for what the two columns
 // discriminate: SCHEDULE (frame/slot/res) versus CONTENT (the texture hash).
+//
+// STAGE DIGESTS (2026-08-16). One hash per bake was enough to say "the render
+// is where it moves"; it cannot say WHICH part of the render. The record now
+// carries a digest after every stage the bake runs, in execution order:
+//
+//   hCam   camera basis + off-axis projection scalars + near plane   (INPUT)
+//   hFloor the shared xpar peel floor + its non-0xFFFF count         (INPUT)
+//   hXfrm  the sorted draw list + every scene vertex it projected    (GEOMETRY)
+//   hOmni  the animated light state the lighting pass rebuilds from  (INPUT)
+//   hShad  g_shadowMaps: planes, pyramids AND the viewToLight affine (INPUT)
+//   hMat   every material scalar + every mip byte of every texture   (INPUT)
+//   hGB    the G-buffer planes after the surface kernel              (RASTER)
+//   hLit   the RTT surface after deferred lighting                   (LIGHTING)
+//   hLitH  g_hdrBuf after deferred lighting, i.e. the float half     (LIGHTING)
+//   hCone  the RTT surface after cones + tonemap                     (VOLUMETRIC)
+//   hash   the slot texture after the text composite + Sachletz      (OUTPUT)
+//
+// A launch diff then names the first stage that moved, and the stages BEFORE it
+// that did not — which is what makes the claim an argument rather than a
+// correlation. It is what turned "the RTT render is non-deterministic" into
+// "ShadowMap::viewToLight is uninitialised at the frame-1 bake": hLit moved
+// while hCam/hFloor/hXfrm/hOmni/hMat/hGB held, and hShad only started moving
+// once the transforms were added to it.
+//
+// All of it is still in-memory and printf-free. The two heavy digests (hShad's
+// 16 MB of planes, hMat's whole texture set) are gated to the first frames,
+// because that is where a pre-first-bake read can live and paying them for 349
+// frames would move the very timing under test.
 namespace {
 struct RttTraceRec {
     int32_t  frame;
@@ -2863,13 +2892,35 @@ struct RttTraceRec {
     int16_t  texW, texH;
     int32_t  staleAtBake;
     uint64_t hash;      // FNV-1a over the baked texel bytes
+    uint64_t hCam;
+    uint64_t hFloor;
+    uint32_t floorNon;  // entries != 0xFFFF in the shared peel floor at entry
+    int32_t  cAll;
+    uint64_t hXfrm;
+    uint64_t hOmni;     // the animated light state the lighting pass reads
+    uint64_t hShad;     // g_shadowMaps (early frames only — 16 MB/frame)
+    uint64_t hMat;      // the material table + every texture byte it points at
+    uint64_t hGB;
+    uint64_t hLit;      // RTT surface after deferred lighting
+    uint64_t hLitH;     // g_hdrBuf after deferred lighting (the float half)
+    uint64_t hCone;
 };
 std::vector<RttTraceRec> g_rttTrace;
+std::vector<uint8_t>     g_rttLitDump;   // frame 1's lit surface, verbatim
+int g_rttLitDumpW = 0, g_rttLitDumpH = 0;
 int32_t g_rttTraceFrame = 0;
 inline uint64_t rttFnv1a(const void *p, size_t n) {
     const uint8_t *b = static_cast<const uint8_t *>(p);
     uint64_t h = 1469598103934665603ull;
     for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+// Word-wise mixer for the big planes (a byte-at-a-time FNV over the G-buffer
+// every frame would be the one thing in here that could move the timing).
+inline uint64_t rttMix32(uint64_t h, const void *p, size_t nBytes) {
+    const uint32_t *w = static_cast<const uint32_t *>(p);
+    const size_t n = nBytes >> 2;
+    for (size_t i = 0; i < n; ++i) { h ^= w[i]; h *= 1099511628211ull; h ^= h >> 29; }
     return h;
 }
 }  // namespace
@@ -2879,9 +2930,20 @@ void MirrorRttTrace_Report()
     if (!fds::FeatureFlags::mirror_rtt_trace()) return;
     uint64_t all = 1469598103934665603ull;
     for (const RttTraceRec &r : g_rttTrace) {
-        std::fprintf(stderr, "[RTTTRACE] f=%d slot=%d res=%dx%d stale=%d hash=%016llx\n",
+        std::fprintf(stderr, "[RTTTRACE] f=%d slot=%d res=%dx%d stale=%d "
+                             "cam=%016llx floor=%016llx/%u cAll=%d xfrm=%016llx "
+                             "omni=%016llx shad=%016llx mat=%016llx gb=%016llx lit=%016llx "
+                             "lith=%016llx cone=%016llx hash=%016llx\n",
                      int(r.frame), int(r.slot), int(r.texW), int(r.texH),
-                     int(r.staleAtBake), (unsigned long long)r.hash);
+                     int(r.staleAtBake),
+                     (unsigned long long)r.hCam,
+                     (unsigned long long)r.hFloor, unsigned(r.floorNon), int(r.cAll),
+                     (unsigned long long)r.hXfrm,
+                     (unsigned long long)r.hOmni, (unsigned long long)r.hShad,
+                     (unsigned long long)r.hMat,
+                     (unsigned long long)r.hGB, (unsigned long long)r.hLit,
+                     (unsigned long long)r.hLitH, (unsigned long long)r.hCone,
+                     (unsigned long long)r.hash);
         all = rttFnv1a(&r, sizeof(r)) ^ (all * 1099511628211ull);
     }
     // Two digests, so a one-line diff already says WHICH half moved: SCHED
@@ -2891,6 +2953,17 @@ void MirrorRttTrace_Report()
         const int32_t k[4] = { r.frame, int32_t(r.slot), int32_t(r.texW) * 65536 + r.texH,
                                r.staleAtBake };
         sched = rttFnv1a(k, sizeof(k)) ^ (sched * 1099511628211ull);
+    }
+    // Frame 1's lit surface verbatim, so a launch diff can be taken in PIXELS
+    // and not just in digests. One frame, 32 KB at 128x64.
+    if (!g_rttLitDump.empty()) {
+        std::fprintf(stderr, "[RTTPIX] f=1 %dx%d\n", g_rttLitDumpW, g_rttLitDumpH);
+        for (size_t i = 0; i < g_rttLitDump.size(); i += 64) {
+            std::fprintf(stderr, "[RTTPIX] %06zu ", i);
+            for (size_t k = i; k < i + 64 && k < g_rttLitDump.size(); ++k)
+                std::fprintf(stderr, "%02x", g_rttLitDump[k]);
+            std::fprintf(stderr, "\n");
+        }
     }
     std::fprintf(stderr, "[RTTTRACE] bakes=%zu frames=%d SCHED=%016llx FULL=%016llx\n",
                  g_rttTrace.size(), int(g_rttTraceFrame),
@@ -3177,6 +3250,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     auto bakeJob = [&](MirrorRttSlot &s, const Vector &camPos, const float D,
                        const bool backSide, const float swPx, const float shPx,
                        const bool adaptive) {
+        // --mirror_rtt_trace stage digests; every one stays 0 when the flag is
+        // off and the branches below are the only cost the default path pays.
+        uint64_t tCam = 0, tFloor = 0, tXfrm = 0, tGB = 0, tLit = 0, tCone = 0;
+        uint64_t tOmni = 0, tShad = 0, tLitH = 0, tMat = 0;
+        uint32_t tFloorNon = 0;
         // Shrink this job's bake to its on-screen footprint (never above
         // the allocated texWMax/texHMax). Aspect is preserved by sizing
         // each axis from its own projected extent.
@@ -3266,6 +3344,128 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // vertex stamp did).
         for (Face *f : s.faces) f->uvFromVertices();
 
+        if (rttTrace) {
+            // INPUT 1 — the camera this bake was handed. The basis is written
+            // from the slot's plane, the projection scalars from the reflected
+            // eye: if THIS moves, nothing downstream is worth reading.
+            const float cam[] = { camPos.x, camPos.y, camPos.z, D,
+                                  eN.x, eN.y, eN.z, eU.x, eU.y, eU.z,
+                                  s.axisV.x, s.axisV.y, s.axisV.z,
+                                  FOVX, FOVY, CntrEX, CntrEY, sc->NZP, sc->FZP };
+            tCam = rttFnv1a(cam, sizeof(cam));
+            // INPUT 2 — the shared, ENGINE-scoped transparent peel floor as this
+            // bake finds it. The RTT renders at 128x64 into a plane sized for
+            // the MAIN frame, so a leak here is the standing hypothesis; count
+            // the non-0xFFFF entries as well as hashing, because "how many"
+            // separates a leak from a hash collision at a glance.
+            if (g_xparPeelFloor && g_xparZCount > 0) {
+                tFloor = rttMix32(1469598103934665603ull, g_xparPeelFloor,
+                                  size_t(g_xparZCount) * sizeof(uint16_t) & ~size_t(3));
+                for (int i = 0; i < g_xparZCount; ++i)
+                    if (g_xparPeelFloor[i] != 0xFFFFu) ++tFloorNon;
+            }
+            // INPUT 3 — the LIGHTS. Render_DeferredLighting rebuilds its
+            // ViewLightsSoA from Sc->OmniHead on every call, so the animated
+            // omni state is a lighting input that the G-buffer digest above
+            // cannot see: the surface kernel never reads it. Identical `gb`
+            // with a moved `omni` is the exact signature of "same triangles,
+            // different light".
+            {
+                uint64_t h = 1469598103934665603ull;
+                for (const Omni *O = sc->OmniHead; O; O = O->Next) {
+                    const float q[14] = { O->IPos.x, O->IPos.y, O->IPos.z,
+                                          O->IDir.x, O->IDir.y, O->IDir.z,
+                                          O->ISize, O->IRange, O->rRange,
+                                          O->FallOff, O->HotSpot,
+                                          O->HaloIntensity, O->HaloRange,
+                                          O->VolBeamGain };
+                    h = rttMix32(h, q, sizeof(q));
+                    const uint32_t m[3] = { uint32_t(O->Flags), uint32_t(O->Type),
+                                            uint32_t(O->mirrorId) };
+                    h = rttMix32(h, m, sizeof(m));
+                    h = rttMix32(h, &O->L, sizeof(O->L) & ~size_t(3));
+                }
+                tOmni = h;
+            }
+            // INPUT 4 — the SHADOW MAPS. Greets bakes 8 static 512^2 + 3 moving
+            // 128^2 and the lighting kernel samples them; the surface kernel
+            // does not. Gated to the first frames because a full digest is
+            // ~16 MB per bake, and the divergence this is hunting is at f=1 —
+            // paying it for 349 frames would move the very timing under test.
+            if (g_rttTraceFrame <= 4) {
+                uint64_t h = 1469598103934665603ull;
+                for (const ShadowMap &sm : g_shadowMaps) {
+                    const int32_t k[7] = { sm.xres, sm.yres, int32_t(sm.dynBaked),
+                                           sm.dirtyX0, sm.dirtyY0, sm.dirtyX1, sm.dirtyY1 };
+                    h = rttMix32(h, k, sizeof(k));
+                    if (!sm.packSD.empty())
+                        h = rttMix32(h, sm.packSD.data(), sm.packSD.size() * 4);
+                    if (!sm.packDyn.empty())
+                        h = rttMix32(h, sm.packDyn.data(), sm.packDyn.size() * 4);
+                    if (!sm.uniSD.empty())
+                        h = rttMix32(h, sm.uniSD.data(), sm.uniSD.size() * 4);
+                    if (!sm.uniDyn.empty())
+                        h = rttMix32(h, sm.uniDyn.data(), sm.uniDyn.size() * 4);
+                }
+                // The sampling TRANSFORMS, not just the texels: viewToLight /
+                // viewToLightOffset / lightViewMat are recomputed at the END of
+                // every shadow bake against whatever `View` was current then,
+                // so they are carried state, and identical plane CONTENTS with
+                // a moved matrix would land the same shadow somewhere else.
+                for (const ShadowMap &sm : g_shadowMaps) {
+                    h = rttMix32(h, &sm.viewToLight, sizeof(sm.viewToLight));
+                    h = rttMix32(h, &sm.viewToLightOffset, sizeof(sm.viewToLightOffset));
+                    h = rttMix32(h, &sm.lightViewMat, sizeof(sm.lightViewMat));
+                    h = rttMix32(h, &sm.lightISource, sizeof(sm.lightISource));
+                    const int32_t k2[3] = { sm.cubeFace, sm.uniW, sm.uniH };
+                    h = rttMix32(h, k2, sizeof(k2));
+                }
+                tShad = h;
+            }
+            // INPUT 5 — the MATERIALS and every texture byte they point at.
+            // In the deferred path the albedo/normal/rough/metal FETCH happens
+            // in the LIGHTING kernel (DeferredSurfaceKernel.cpp reads
+            // srcTex->Mipmap[miplevel] per pixel), not in the surface kernel —
+            // so a texture whose mip level was allocated but never filled is
+            // read with an IDENTICAL G-buffer and a different result. Hash
+            // every level, not just level 0, for exactly that reason.
+            if (g_rttTraceFrame <= 2) {
+                uint64_t h = 1469598103934665603ull;
+                MatTable mt = Scene_GetMatTable(sc);
+                auto hashTex = [&](const Texture *t) {
+                    if (!t) { h = rttMix32(h, "nul", 4); return; }
+                    const int32_t k[6] = { t->SizeX, t->SizeY, t->LSizeX, t->LSizeY,
+                                           int32_t(t->BPP), int32_t(t->numMipmaps) };
+                    h = rttMix32(h, k, sizeof(k));
+                    const int bpp = int(t->BPP) / 8;
+                    for (dword m = 0; m < t->numMipmaps && m < 16; ++m) {
+                        if (!t->Mipmap[m]) continue;
+                        const size_t n = size_t(std::max(1, t->SizeX >> m))
+                                       * size_t(std::max(1, t->SizeY >> m))
+                                       * size_t(bpp > 0 ? bpp : 4);
+                        h = rttMix32(h, t->Mipmap[m], n & ~size_t(3));
+                    }
+                };
+                for (dword i = 0; i < mt.count; ++i) {
+                    const Material *M = mt.data ? mt.data[i] : nullptr;
+                    if (!M) { h = rttMix32(h, "nom", 4); continue; }
+                    const float q[6] = { M->Luminosity, M->Diffuse, M->Specular,
+                                         M->Transparency, M->TintR, M->TintB };
+                    h = rttMix32(h, q, sizeof(q));
+                    const uint32_t m2[2] = { uint32_t(M->Flags), uint32_t(M->Glossiness) };
+                    h = rttMix32(h, m2, sizeof(m2));
+                    hashTex(M->Txtr);
+                    hashTex(M->NormalMap);
+                    hashTex(M->RoughnessMap);
+                    hashTex(M->AoMap);
+                    hashTex(M->HeightMap);
+                    hashTex(M->EnvTexture);
+                }
+                // Scene-level lighting constants the kernel folds in.
+                h = rttMix32(h, &sc->Ambient, sizeof(sc->Ambient) & ~size_t(3));
+                tMat = h;
+            }
+        }
         std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
         std::memset(s_rttSurf.Z16, 0, sizeof(word) * size_t(s.texW) * size_t(s.texH));
         fds::g_offAxisFrustumCull = true;
@@ -3283,6 +3483,41 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         const bool slotDeferred = rttDeferred;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
+            if (rttTrace) {
+                // GEOMETRY — what the sort handed the raster, in two halves.
+                // (a) The DRAW LIST: sort key + screen bbox per entry, in final
+                //     order. Pointers are deliberately NOT hashed — ASLR would
+                //     make every launch differ — and FListEntry::face is NOT
+                //     dereferenced, because CAll counts omni and particle
+                //     entries too and their `face` is not a Face.
+                // (b) The TRANSFORM OUTPUT itself: every scene vertex's
+                //     projected position, 1/Z, lit colour, visibility flags and
+                //     UV, walked from the meshes in list order. This is the half
+                //     that says whether the scene handed the raster different
+                //     numbers, as opposed to the raster making different pixels
+                //     out of the same ones.
+                uint64_t h = 1469598103934665603ull;
+                const int32_t cnt[3] = { int32_t(CAll), int32_t(CPolys), int32_t(COmnies) };
+                h = rttMix32(h, cnt, sizeof(cnt));
+                for (int32_t i = 0; i < CAll; ++i) {
+                    const fds::FListEntry &e = SList[i];
+                    const int32_t k[3] = { int32_t(e.sortKey),
+                                           int32_t(e.bbMinX) * 65536 + e.bbMinY,
+                                           int32_t(e.bbMaxX) * 65536 + e.bbMaxY };
+                    h = rttMix32(h, k, sizeof(k));
+                }
+                for (const TriMesh *t = sc->TriMeshHead; t; t = t->Next) {
+                    if (!t->Verts) continue;
+                    for (DWord vi = 0; vi < t->VIndex; ++vi) {
+                        const Vertex &v = t->Verts[vi];
+                        const float q[5] = { v.PX, v.PY, v.RZ, v.U, v.V };
+                        h = rttMix32(h, q, sizeof(q));
+                        const uint32_t m[2] = { uint32_t(v.BGRA), uint32_t(v.Flags) };
+                        h = rttMix32(h, m, sizeof(m));
+                    }
+                }
+                tXfrm = h;
+            }
             if (slotDeferred) {
                 // Deferred RTT bake: render the recursive reflection through the
                 // deferred kernel (shadows + matches the main view) + the cone
@@ -3307,6 +3542,42 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 rctx.target.yres             = s.texH;
                 rctx.target.gbuffer          = &s_rttGB;
                 MekaleleFillRegionInline(rctx, 0, 0, float(s.texW), float(s.texH));
+                if (rttTrace) {
+                    // RASTER — every G-buffer plane the kernel writes, plus the
+                    // depth it resolved. NOTE the planes that this bake does NOT
+                    // clear (normal/tangent/shadowMatID/lightmapST): they are
+                    // hashed too, precisely so a stale-plane read shows up here.
+                    uint64_t h = 1469598103934665603ull;
+                    h = rttMix32(h, s_rttGB.txtr.data(), np * sizeof(uint32_t));
+                    if (!s_rttGB.normal.empty())
+                        h = rttMix32(h, s_rttGB.normal.data(), np * sizeof(s_rttGB.normal[0]));
+                    if (!s_rttGB.tangent.empty())
+                        h = rttMix32(h, s_rttGB.tangent.data(), np * sizeof(s_rttGB.tangent[0]));
+                    if (!s_rttGB.shadowMatID.empty())
+                        h = rttMix32(h, s_rttGB.shadowMatID.data(),
+                                     np * sizeof(s_rttGB.shadowMatID[0]) & ~size_t(3));
+                    if (!s_rttGB.lightmapMF.empty())
+                        h = rttMix32(h, s_rttGB.lightmapMF.data(),
+                                     np * sizeof(s_rttGB.lightmapMF[0]) & ~size_t(3));
+                    if (!s_rttGB.lightmapST.empty())
+                        h = rttMix32(h, s_rttGB.lightmapST.data(),
+                                     np * sizeof(s_rttGB.lightmapST[0]) & ~size_t(3));
+                    h = rttMix32(h, s_rttSurf.Z16, np * sizeof(word) & ~size_t(3));
+                    h = rttMix32(h, s_rttSurf.Data, np * 4);
+                    // Planes s_rttGB never clears per bake and the kernel may
+                    // still read: hashed so a stale-plane read cannot hide.
+                    if (!s_rttGB.albedo.empty())
+                        h = rttMix32(h, s_rttGB.albedo.data(), np * 4);
+                    if (!s_rttGB.faceId.empty())
+                        h = rttMix32(h, s_rttGB.faceId.data(), np * 4);
+                    if (!s_rttGB.mirrorId.empty())
+                        h = rttMix32(h, s_rttGB.mirrorId.data(), np & ~size_t(3));
+                    if (!s_rttGB.mirrorMask.empty())
+                        h = rttMix32(h, s_rttGB.mirrorMask.data(), np & ~size_t(3));
+                    if (!s_rttGB.mirrorMaskZ.empty())
+                        h = rttMix32(h, s_rttGB.mirrorMaskZ.data(), np * 2 & ~size_t(3));
+                    tGB = h;
+                }
                 DeferredLightingCtx dctx{};
                 DeferredOverride ov;
                 ov.gb         = &s_rttGB;
@@ -3327,6 +3598,26 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 // tonemap runs. The main pass's Hdr_BeginFrame restores g_hdrBuf.
                 if (rttHdr) fds::Hdr_BeginFramePass(s.texW, s.texH);
                 Render_DeferredLighting(dctx, &ov);
+                if (rttTrace) {
+                    // LIGHTING — 8-bit surface AND, when HDR is on, the float
+                    // radiance the panel composite actually samples. Hashing
+                    // only the 8-bit half would quantise away exactly the small
+                    // deltas a dither is made of.
+                    tLit = rttMix32(1469598103934665603ull, s_rttSurf.Data, np * 4);
+                    if (rttHdr && !fds::g_hdrBuf.empty())
+                        tLitH = rttMix32(1469598103934665603ull, fds::g_hdrBuf.data(),
+                                         std::min(fds::g_hdrBuf.size(), np * 4)
+                                             * sizeof(fds::hdrf));
+                    // FRAME-1 PIXELS. The digest says the stage moved; the
+                    // pixels say WHERE, and "where" is what separates one bad
+                    // tile from one bad light from scattered LSB noise. 32 KB,
+                    // one frame, printed post-hoc with the rest of the trace.
+                    if (g_rttTraceFrame == 1) {
+                        g_rttLitDump.assign((const uint8_t*)s_rttSurf.Data,
+                                            (const uint8_t*)s_rttSurf.Data + np * 4);
+                        g_rttLitDumpW = s.texW; g_rttLitDumpH = s.texH;
+                    }
+                }
                 // Hdr_ActivateNoFog (not a bare g_hdrActive=true): with
                 // --deferred-quarter the kernel shades only wave-1 into g_hdrBuf;
                 // the wave-2 FILL pixels land in s_rttSurf (8-bit) but NOT g_hdrBuf,
@@ -3343,6 +3634,13 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                     // the active flag so a later pass (e.g. parallel shards) can't
                     // accumulate into this RTT-sized buffer at its own dims.
                     fds::g_hdrActive = false;
+                }
+                if (rttTrace) {
+                    uint64_t h = rttMix32(1469598103934665603ull, s_rttSurf.Data, np * 4);
+                    if (rttHdr && !fds::g_hdrBuf.empty())
+                        h = rttMix32(h, fds::g_hdrBuf.data(),
+                                     std::min(fds::g_hdrBuf.size(), np * 4) * sizeof(fds::hdrf));
+                    tCone = h;   // VOLUMETRIC — cones + tonemap resolved
                 }
             } else {
                 Render(RenderPath::ForceForward);
@@ -3517,12 +3815,27 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         s.mat->Txtr->SizeX = s.texW; s.mat->Txtr->LSizeX = log2p2(s.texW);
         s.mat->Txtr->SizeY = s.texH; s.mat->Txtr->LSizeY = log2p2(s.texH);
         if (rttTrace) {
-            g_rttTrace.push_back({ g_rttTraceFrame,
-                                   int16_t(&s - slots.data()),
-                                   int16_t(s.texW), int16_t(s.texH),
-                                   int32_t(s.staleFrames),
-                                   rttFnv1a(s.mat->Txtr->Data,
-                                            size_t(s.texW) * size_t(s.texH) * 4) });
+            // FULL hashes sizeof(rec), so the struct's alignment holes must
+            // not carry stack garbage — an aggregate-initialised temporary
+            // leaves them indeterminate, and the whole-run digest then reports
+            // a per-launch difference the render never made. Zero, then assign
+            // field by field (struct assignment may copy padding too).
+            RttTraceRec rec;
+            std::memset(&rec, 0, sizeof(rec));
+            rec.frame       = g_rttTraceFrame;
+            rec.slot        = int16_t(&s - slots.data());
+            rec.texW        = int16_t(s.texW);
+            rec.texH        = int16_t(s.texH);
+            rec.staleAtBake = int32_t(s.staleFrames);
+            rec.hash        = rttFnv1a(s.mat->Txtr->Data,
+                                       size_t(s.texW) * size_t(s.texH) * 4);
+            rec.hCam = tCam; rec.hFloor = tFloor; rec.floorNon = tFloorNon;
+            rec.cAll = int32_t(CAll);
+            rec.hXfrm = tXfrm; rec.hOmni = tOmni; rec.hShad = tShad;
+            rec.hMat = tMat;
+            rec.hGB = tGB; rec.hLit = tLit;
+            rec.hLitH = tLitH; rec.hCone = tCone;
+            g_rttTrace.push_back(rec);
         }
         s.staleFrames = 0;
     };

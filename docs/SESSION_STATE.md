@@ -1,5 +1,147 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16 — THE MIRROR RTT'S PER-LAUNCH DITHER IS NOT THE PEEL LEAK: IT IS AN UNINITIALISED SHADOW MATRIX, AND THE WINDOW IS FRAME 1
+>
+> **VERDICT: A DIFFERENT BUG.** The parked `--repro_prescenes` dither is not
+> `44c8aeed`'s peel-floor leak, and the argument is mechanical rather than
+> statistical: in this recipe **there is nothing to leak**. `--mirror_rtt_trace`
+> now digests the shared `g_xparPeelFloor` at every RTT bake and counts its
+> non-0xFFFF entries, and across **48 launches × 349 bakes, with the per-frame
+> restore explicitly DISABLED, that count is 0 every single time** — the fountain
+> is only *initialised* by `--repro_prescenes`, never rendered, so the deep peel
+> that dirties the plane never runs. The two arms of `44c8aeed` are byte-identical
+> under this recipe by construction. The 30/30 that "did not establish a fix" was
+> not evidence of one, and now it does not need to be.
+>
+> ### THE NAMED WRITE
+>
+> ```
+> FDS/FILLERS/ShadowMap.h:193    Matrix lightViewMat;      // no initializer
+> FDS/FILLERS/ShadowMap.h:222    Matrix viewToLight;       // no initializer  <- the one that reaches pixels
+> FDS/FILLERS/ShadowMap.cpp:475  ShadowMap sm;             // ShadowMaps_Rebuild     — DEFAULT-init
+> FDS/FILLERS/ShadowMap.cpp:534  ShadowMap sm;             // CubeShadowMaps_Rebuild — DEFAULT-init
+> read per pixel at
+> FDS/RENDER/DeferredSurfaceKernel.cpp:627 and :677
+>       lx = sm.viewToLight[0][0]*x + ... + sm.viewToLightOffset.x
+> ```
+>
+> `Matrix` is `typedef float[3][3]` (`FDS/Base/Matrix.h:5`) — a bare array with
+> **no member initializer**, while every scalar beside it in `ShadowMap` carries
+> an NSDMI and `Vector` carries its own. Both Rebuild functions construct their
+> entry as `ShadowMap sm;`, which is **default**-initialization: the NSDMI members
+> get their values, the two bare arrays get **that stack frame**. Neither Rebuild
+> writes them — they are computed at the *end* of `Render_DeferredShadowMaps`
+> against whatever `View` is current there. So between "the scene built its shadow
+> maps" and "the first bake ran", any lighting pass that samples a shadow map
+> multiplies its view-space position by **nine floats of stack garbage**.
+>
+> **The greets tick walks straight into that window.** `RenderSecondOrderMirrors`
+> (`DEMO/GREETS.CPP:3977`) runs BEFORE `ShadowBake_DispatchGreets` (`:4081`), so
+> the mirror RTT's **frame-1** deferred lighting is, in a bare launch, the first
+> shadow-sampling pass in the process — and the only one that ever reads the
+> matrices unwritten. From frame 2 the bake has written them and every launch
+> agrees, which is exactly why the defect heals after one frame.
+>
+> ### THE EVIDENCE CHAIN (48 traced launches per claim, pre-fix arm)
+>
+> `--mirror_rtt_trace` now records a digest after **every stage of the bake in
+> execution order**, so a launch diff names the first stage that moved *and*
+> every stage before it that did not:
+>
+> | stage | what it covers | launches differing (of 48) |
+> |---|---|--:|
+> | `cam` | camera basis + off-axis projection + near/far | 0 |
+> | `floor` | `g_xparPeelFloor` + count of non-0xFFFF entries | 0 (**count 0 always**) |
+> | `cAll` / `xfrm` | draw list + every scene vertex's PX/PY/RZ/BGRA/flags/UV | 0 |
+> | `omni` | animated light state the lighting pass rebuilds from | 0 |
+> | `shad` (planes only) | packSD / packDyn / uniSD / uniDyn / dirty boxes | 0 |
+> | `gb` | every G-buffer plane + Z + surface after the surface kernel | 0 |
+> | **`lit`** | **surface after `Render_DeferredLighting`** | **3** |
+> | `lith` / `cone` / `hash` | downstream of `lit` | 3 |
+>
+> **First divergence: FRAME 1, column `lit`, in 3 of 48 — and frame 1 only** (all
+> three launches match the modal trace again from frame 2 on).
+>
+> Then the two questions that separate the two kinds of non-determinism:
+>
+> 1. **Race, or input?** New `--mirror_rtt_relight` re-runs the lighting stage a
+>    second time from a byte-restored copy of its inputs. **`lit2 == lit` in every
+>    launch including both diverging ones** — the stage is a function of what it
+>    reads, so a race inside it is ruled out and a launch-varying INPUT is not.
+> 2. **Which input?** Adding the shadow-map **transforms** (`viewToLight`,
+>    `lightViewMat`, `lightISource`, `viewToLightOffset`) to the `shad` digest —
+>    the planes alone had been identical 48/48 — made it take **6 distinct values
+>    in 6 launches**, while `mat` (every material scalar + every mip byte of every
+>    texture they point at) and `gb` were 1 of 6. That is the input, named.
+>
+> **WHAT IT LOOKS LIKE.** `[RTTPIX]` dumps frame 1's RTT surface verbatim. The
+> diverging image differs on **4 851 of 8 192 px (59.2 %)**, rows **25..63** of 64
+> across the full width, **max |Δ| 216, mean signed +32.88** — i.e. a large
+> coherent region of the reflected room lit *brighter*, which is a shadow tap
+> landing somewhere it should not. Not a dither in the LSBs: a whole surface.
+>
+> ### THE FIX, AND WHY ZERO IS THE RIGHT VALUE
+>
+> `Matrix lightViewMat{}` / `Matrix viewToLight{}` at the declarations, plus
+> `ShadowMap sm{}` (value-init) at both construction sites as the belt to that
+> brace. Zero is not merely *defined*: with a zero transform the pre-bake tap
+> reads the all-zero planes as **"no occluder"**, which is exactly what
+> `ShadowMaps_Rebuild`'s own uniformity-pyramid comment already promises a tap
+> taken before the first bake will see. Post-fix frame 1 lands on the *brighter*
+> of the two pre-fix images — the fully-lit one — which is that promise kept.
+>
+> ### VERIFIED
+>
+> Recipe throughout: `FDS_GREETS_CAM=<his pose> ./DEMO --repro=greets@t=3409
+> --repro_from=0 --repro_xres=1512 --repro_yres=848 --repro_prescenes
+> --profiler=0 --mirror_rtt_trace`, dummy drivers, run 1 discarded.
+>
+> - **ON TIP, 48 launches × 349 bakes: every RENDER column of the trace
+>   (`cam` `floor` `cAll` `xfrm` `gb` `lit` `lith` `cone` `hash`) is ONE distinct
+>   value — flip rate 0/48**, against **3/48** on the pre-fix arm. `shad` is
+>   48/48 identical at each of frames 1..4, where pre-fix it took 6 distinct
+>   values in 6 launches.
+> - The dumped **t=3409 frame md5 is `10f9d3255d01f6358a6e1683490db2b2` 48/48**
+>   in every arm — the frame-1 error is overwritten by 348 later rebakes, so at
+>   this pose it never reaches the dump. It *does* reach the first rendered frame
+>   of greets in a live run, which is where a viewer would see it.
+> - **`render_gate.sh` 4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` /
+>   `166fa25a`).
+> - **Pins, 2/2 each on tip `0fed9f95`+fix**: chase `3bfd4244` `42d79fad`
+>   `622b96a2` `31aa5203` `ca07a814`, fountain `8db68ccb`, greets `570a7b44` —
+>   all seven at their recorded values. **city reads `4031ceec…`, not the
+>   recorded `3413028b…` — and that is NOT this change**: the same tip with these
+>   edits stashed and rebuilt gives `4031ceec…` too. The city move is pre-existing
+>   on `0fed9f95` (the perf work landed between `44c8aeed` and it touches
+>   `DEMO/CITY.CPP`, `ProceduralWater.cpp`, `Lighting.cpp`, `DeferredFastFog.cpp`
+>   and adds `FaceTileBin`), and the city pin is anyway documented as conditional
+>   on `Runtime/cache/city_envmap_cube.bin`. Differential control == arm on all
+>   eight rows; whoever owns that perf series should re-pin city.
+>
+> ### TWO TRAPS THIS ROUND, BOTH OF WHICH HAD ALREADY BITTEN
+>
+> - **`Runtime/rev.cfg` has `ProfilerEnable 1`.** The profiler overlay draws live
+>   millisecond numbers into the framebuffer, so **every** run's frame md5 differs
+>   and the instrument measures the HUD. `--profiler=0` restores the documented
+>   `10f9d325…` exactly. Shared mutable state, second time it has cost a round.
+> - **The trace's own `FULL` digest hashed the record's alignment holes.**
+>   `RttTraceRec` is `push_back({...})`-aggregate-initialised, and its padding
+>   bytes are indeterminate — so `FULL` reported per-launch differences the render
+>   never made. The previous round's "`FULL` differed in 4 of 24" is therefore
+>   partly probe noise. The record is now memset + assigned field by field.
+>
+> ### STILL OPEN (small, and NOT this defect)
+>
+> Post-fix, the new `mat` digest — every material scalar plus **every mip level**
+> of every texture they reference — takes **2 distinct values in 48 launches**
+> (43 / 5, the same split at frames 1 and 2) while every render column stays
+> identical 48/48. Some texture byte is launch-varying and no
+> frame-1 pixel samples it; the shape of that is an allocated-but-never-filled mip
+> level (`Materialize` in `DEMO/CITY.CPP:1662` writes level 0 only and sets
+> `numMipmaps = 1`, so the suspect is elsewhere). Inert at this pose, worth one
+> round when something reads it.
+
+
 > ## 2026-08-16 — THE GREETS MIRROR BAND, CLOSED: THE FOUNTAIN LEFT ITS DEPTH-PEEL FLOOR BEHIND
 >
 > **The band is the FOUNTAIN's, drawn on greets' mirror, three scenes later.**
