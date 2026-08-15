@@ -162,10 +162,13 @@ the row to quote for city:
 | `renderFrame` Ginstr/f | 4.384 | 4.173 | −4.8 % |
 | `renderFrame` Gcyc/f | 1.165 | 1.083 | −7.0 % |
 
-Same treatment on greets t=5743 (11 rounds, rotated) leaves `renderFrame` at
-**−0.1 % instructions / +0.1 % cycles** — flat, as the neutral verdict above
-says. Its frame-min column swings ±10 % between batches in BOTH directions at
-those flat counters; that is the box, not the change.
+Same treatment on greets t=5743 (12 rounds, rotated): **frame min 56.98 → 57.09
+(+0.2 %), frame mean 85.48 → 83.57 (−2.2 %), `renderFrame` 50.13 → 48.06,
+`gbuffer` 9.455 → 8.841 (−6.5 %), thrsum 98.3 → 92.5 (−5.9 %)** at
+`renderFrame` **−0.1 % instructions / +0.1 % cycles**. Flat frame, as the
+neutral verdict above says — and note that without the rotation the same pose
+read +10.5 % on frame min at those same flat counters. That swing is the box,
+not the change; do not read either sign of it as a result.
 
 **BYTE-NULL** — all nine pins unmoved 2/2 on each binary, `render_gate.sh` 4/4.
 The S2 contract is why: the box is a conservative superset of the un-clipped
