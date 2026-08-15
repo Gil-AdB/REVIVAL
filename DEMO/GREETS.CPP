@@ -1225,6 +1225,23 @@ static void GreetsApplyInitDefaults()
 	if (FF::greets_displace()) {
 		FF::setDefault(FF::BoolId::greets_shadow_proxy, true);
 		FF::setDefault(FF::BoolId::greets_displace_flat_mirror, true);
+		// THE APPROVED CORNER ARM IS NOW WHAT --greets_displace MEANS (2026-08-15).
+		// The look the user signed off on (483ee71e, "the arm for the user's eye,
+		// all four corner cams verified on renders") is
+		//   --greets_displace_free_edge --greets_displace_border_mean=2
+		//   --greets_displace_seam_weld --greets_displace_plane_normal
+		// and every one of those four was default OFF, so a run of the plain
+		// umbrella --greets_displace rendered the OLD, unapproved shape: pinned
+		// borders (no silhouette relief), a flush corner weld standing proud of
+		// its own wall, and the smoothed-normal ride whose in-plane component
+		// makes the jamb line wander. Same rule --greets_displace_mitre already
+		// states for itself: the user passes the umbrella and expects the look he
+		// approved, not a five-flag incantation. setDefault, so --no-<flag> (and
+		// --greets_displace_border_mean=0) still opt any of them back out.
+		FF::setDefault(FF::BoolId::greets_displace_free_edge,    true);
+		FF::setDefault(FF::IntId ::greets_displace_border_mean,  2);
+		FF::setDefault(FF::BoolId::greets_displace_seam_weld,    true);
+		FF::setDefault(FF::BoolId::greets_displace_plane_normal, true);
 		std::fprintf(stderr, "[STONE] --greets_displace defaults its two perf "
 			"companions ON: --greets_shadow_proxy=%d (offscreen passes rasterise "
 			"the flat stone, -5.9 ms, DOES move shadow occlusion at wall "
@@ -1237,6 +1254,14 @@ static void GreetsApplyInitDefaults()
 			FF::greets_shadow_proxy() ? 1 : 0,
 			FF::greets_displace_flat_mirror() ? 1 : 0,
 			FF::shadow_lightmap_texel_density());
+		std::fprintf(stderr, "[STONE] --greets_displace carries the APPROVED CORNER "
+			"ARM: --greets_displace_free_edge=%d --greets_displace_border_mean=%d "
+			"--greets_displace_seam_weld=%d --greets_displace_plane_normal=%d. "
+			"These are setDefaults; --no-<flag> / =0 opts any of them out.\n",
+			FF::greets_displace_free_edge() ? 1 : 0,
+			FF::greets_displace_border_mean(),
+			FF::greets_displace_seam_weld() ? 1 : 0,
+			FF::greets_displace_plane_normal() ? 1 : 0);
 	}
 	// --greets_displace_flat_mirror sources the reflection's stone from the flat
 	// proxy; without a proxy there is nothing to source and the reflection would
