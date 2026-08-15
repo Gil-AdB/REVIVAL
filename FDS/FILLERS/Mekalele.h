@@ -3375,6 +3375,15 @@ extern meka::GBuffer *g_gbuffer;
 extern meka::GBuffer *g_gbufferTransparent;
 extern uint16_t      *g_xparZ;        // separate Z-buffer for closest-front transparent
 extern uint16_t      *g_xparPeelFloor; // depth-peel floor/ceiling buffer (per-pass bound)
+// True when a MULTI-pass peel has written g_xparPeelFloor away from its
+// all-0xFFFF "accept everything" state. The legacy single-pass raster has no
+// floor logic of its own and depends on that state (see XparPeel_ResetAll in
+// Mekalele.cpp), so the dispatcher restores it once per frame when this is set.
+extern std::atomic<bool> g_xparPeelFloorDirty;
+// Re-establish every cross-scene transparent-peel global: the floor, the two
+// deep-layer slices + their Z, the per-strip dirty-column records, and this
+// thread's reverse-peel flag. Cheap, and meant to be called once per scene entry.
+void XparPeel_ResetAll();
 // When true, the transparent rasterizer runs in reverse-peel mode: keep the
 // FARTHEST fragment nearer than g_xparPeelFloor (the ceiling), with the layer
 // Z pre-cleared to 0xFFFF. Set per (mesh, side) batch by the K-pass dispatch

@@ -567,6 +567,18 @@ void XparStripSlices_MarkAllDirty();
 // --xpar_extent_census: print + reset the per-call composite census.
 void XparExtentCensus_Report();
 
+// --mirror_rtt_trace: print the whole run's greets mirror RTT bake trace in
+// one burst (recorded in memory so the per-frame path stays timing-neutral).
+// Called by the --repro harness just before it dumps its frame.
+namespace fds { void MirrorRttTrace_Report(); }
+
+// Re-establish every ENGINE-scoped transparent depth-peel global (peel floor
+// -> all-0xFFFF, the two deep-layer slices + their Z, the per-strip
+// dirty-column records, this thread's reverse-peel flag). Called from
+// SceneDriver::setupFaceLists, i.e. once per scene entry: the peel state is
+// engine-scoped and a deep-peel scene otherwise leaks it into the next one.
+void XparPeel_ResetAll();
+
 bool deferredUnifiedTbrEnabled();
 int  xparPeelPassesEffective();
 

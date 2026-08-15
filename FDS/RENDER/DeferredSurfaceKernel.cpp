@@ -4642,6 +4642,10 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	};
 	auto fillFloor = [&](int x0, int x1) {          // zero the peel floor
 		if (!g_xparPeelFloor || x0 >= x1) return;
+		// Same invariant break as the legacy peel loop's memset — see
+		// XparPeel_ResetAll. The strip path zeroes/copies only columns, but
+		// "not all 0xFFFF" is all the next single-pass reader cares about.
+		g_xparPeelFloorDirty.store(true, std::memory_order_relaxed);
 		if (x0 == 0 && x1 == XRes) {
 			std::memset(g_xparPeelFloor + rowStart, 0, rowCount * sizeof(uint16_t));
 			return;
@@ -4668,6 +4672,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	};
 	auto copyFloor = [&](int x0, int x1) {          // peel floor <- this side's Z
 		if (!g_xparPeelFloor || !sideZ || x0 >= x1) return;
+		g_xparPeelFloorDirty.store(true, std::memory_order_relaxed);
 		if (x0 == 0 && x1 == XRes) {
 			std::memcpy(g_xparPeelFloor + rowStart, sideZ + rowStart, rowCount * sizeof(uint16_t));
 			return;

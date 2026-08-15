@@ -279,6 +279,35 @@ int RunRepro(const ReproConfig& cfg, int xres, int yres) {
         Initialize_Crash();
         std::fprintf(stderr, "[REPRO] --repro_prescenes: done\n");
     }
+    // ── --repro_run_fountain: the other scenes' RENDER history ──────────────
+    // Initialising a scene is not running it. The fountain is the only scene
+    // that drives the transparent depth peel in REVERSE mode (4 passes), and
+    // every buffer that mode touches — the deep-layer xpar G-buffer slices,
+    // g_xparPeelFloor, the per-strip dirty-column records — is engine-global
+    // and survives the scene. Render real fountain frames here so greets
+    // inherits exactly what it inherits in a bare ./DEMO run.
+    const int runFount = std::max(0, FF::repro_run_fountain());
+    if (runFount > 0) {
+        if (!FF::repro_prescenes()) {
+            // The fountain's tick calls RenderSkyCube(SkySc, ...) and SkySc is
+            // built by Initialize_City — same pairing RunFountainSnapshot needs.
+            Initialize_City();
+            Initialize_Fountain();
+        }
+        const int32_t savedTimer = Timer.load();
+        auto fdrv = createFountainScene();
+        fdrv->init();
+        std::fprintf(stderr, "[REPRO] --repro_run_fountain: rendering %d real fountain "
+                             "frames, peel passes = %d\n",
+                     runFount, xparPeelPassesEffective());
+        for (int i = 0; i < runFount; ++i) {
+            std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+            if (!fdrv->tick()) break;
+        }
+        fdrv->cleanup();
+        Timer = savedTimer;
+        std::fprintf(stderr, "[REPRO] --repro_run_fountain: done\n");
+    }
     // The lightmap bake runs on a background thread and the first rendered
     // frame samples it; Run_Greets joins before its first tick and so must we.
     Greets_JoinBakeThread();
@@ -381,6 +410,7 @@ int RunRepro(const ReproConfig& cfg, int xres, int yres) {
                 // file called t002993 that is really t=3001 is exactly the kind
                 // of quiet lie this harness exists to stop.
                 const int32_t got = int32_t(Timer.load());
+                fds::MirrorRttTrace_Report();   // --mirror_rtt_trace, one burst
                 char path[1024];
                 std::snprintf(path, sizeof(path), "%s/repro_greets_t%06d.ppm",
                               cfg.outDir.c_str(), int(got));

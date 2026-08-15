@@ -808,6 +808,38 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// them would lose. Per-object peeling gives each mesh a fresh
 		// xpar G-buffer.
 
+		// ── Restore the peel floor's all-0xFFFF invariant ─────────────────
+		// The single-pass raster's floor gate (`z_candidate < peelFloor`) is a
+		// no-op ONLY while every entry is 0xFFFF; the multi-pass reverse peel
+		// zeroes the plane and never puts it back, and the plane is global to
+		// the ENGINE, not to a scene or a render target. Restoring here — once
+		// per frame, and only after a frame that actually peeled deep — costs
+		// the fountain one memset it already pays thousands of, and costs every
+		// other scene exactly nothing after the first frame. Without it, the
+		// scene that follows a deep-peel scene has its transparents silently
+		// z-rejected over the previous scene's transparent footprint (the greets
+		// mirror band; see XparPeel_ResetAll in Mekalele.cpp).
+		// NOTE THE SIZE: g_xparZCount, the plane's OWN length, never this
+		// pass's XRes*YRes. renderFrame runs for offscreen targets too (the
+		// greets mirror RTT bakes at 256x256 and 512x229 reach this line
+		// before the main frame does), and they share the one main-sized
+		// plane. Restoring only the current target's rect would clear the
+		// flag while leaving the rest of the plane polluted — which is
+		// exactly how the first cut of this fix silently did nothing.
+		// Only the SINGLE-pass raster depends on the 0xFFFF state; a
+		// multi-pass peel establishes its own floor at pass 0 over its whole
+		// extent (RENDER.CPP's parallel_memset below, and the strip path's
+		// fillFloor after XparStripSlices_MarkAllDirty has re-declared the
+		// full width dirty), so it neither needs nor benefits from this. The
+		// gate is therefore exactly "restore before the only reader that
+		// cares", and the deep-peel scene pays nothing at all.
+		if (g_xparPeelFloor && g_xparZCount > 0 && xparPeelPassesEffective() <= 1 &&
+		    g_xparPeelFloorDirty.load(std::memory_order_relaxed)) {
+			parallel_memset(g_xparPeelFloor, 0xFF,
+			                size_t(g_xparZCount) * sizeof(uint16_t));
+			g_xparPeelFloorDirty.store(false, std::memory_order_relaxed);
+		}
+
 		const bool unifiedTbr = deferredUnifiedTbrEnabled();
 
 		// Unified-TBR path (task #9): insert every transparent face into
@@ -1172,6 +1204,9 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 					parallel_memset(g_xparPeelFloor, 0, numPixels * sizeof(uint16_t));
 				else if (g_xparPeelFloor && sideZ)
 					std::memcpy(g_xparPeelFloor, sideZ, numPixels * sizeof(uint16_t));
+				// The plane is no longer all-0xFFFF: tell the dispatcher to put
+				// it back before the next frame's single-pass raster reads it.
+				g_xparPeelFloorDirty.store(true, std::memory_order_relaxed);
 				// Clear the side layer: Z to 0xFFFF (keep-farthest init),
 				// txtr to the empty sentinel.
 				if (sideGB) parallel_memset(sideGB->txtr.data(), 0xFF, numPixels * sizeof(uint32_t));
