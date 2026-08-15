@@ -88,10 +88,12 @@ struct EnvPanoLinear {
     float bakeX = 0, bakeY = 0, bakeZ = 0;
     float boxMinX = 0, boxMinY = 0, boxMinZ = 0;
     float boxMaxX = 0, boxMaxY = 0, boxMaxZ = 0;
-    // --env_live_water: per-face WATER COVERAGE of the baked content, 0..255,
-    // face-major waterMaskRes² bytes per face (owned by the EnvPanoStore /
-    // the scene that registered the faces). 255 = every source pixel behind
-    // this texel was an unoccluded hit on the water plane, 0 = none were.
+    // --env_live_water: the bake's per-texel WATER VERDICT, ONE BIT PER TEXEL
+    // at the bake's own FULL face resolution (waterMaskRes = texels per face
+    // edge, a multiple of 8). Face-major, then row-major, LSB-first within a
+    // byte; bit index = (face·res + y)·res + x. Owned by the EnvPanoStore /
+    // the scene that registered the faces. 1 = the bake ray-cast this texel to
+    // the water plane and it was an unoccluded hit; 0 = it is not water.
     // Null when the bake did not produce one — see EnvLiveWater_PerturbDir.
     const uint8_t* waterMask = nullptr;
     int            waterMaskRes = 0;
@@ -227,10 +229,11 @@ int EnvReflection_StoreIndex(Scene* sc, const Material* M);
 // CITY's per-building bake, already disk-cached), box-downsamples to
 // storeRes if smaller, builds the mip chain, marks the store noParallax,
 // and maps M to it (FramePrep then skips M — no redundant centroid bake).
-// waterMask (optional) is the bake's per-face water-coverage plane, 6 x
-// maskRes² bytes in the same face order; the store COPIES it (the caller's
-// bake scratch does not outlive init) and --env_live_water gates its tilt on
-// it. Returns the store index for AliasMaterial, or -1 on failure.
+// waterMask (optional) is the bake's per-texel water-verdict BIT plane,
+// 6 x maskRes²/8 bytes in the same face order (see EnvPanoLinear::waterMask);
+// the store COPIES it (the caller's bake scratch does not outlive init) and
+// --env_live_water gates its tilt on it. Returns the store index for
+// AliasMaterial, or -1 on failure.
 int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                                     const uint32_t* faceMajor, int faceRes,
                                     int storeRes, const Vector& bakePoint,
@@ -265,41 +268,41 @@ struct EnvLiveWaterState {
     float amp = 0.0f;          // direction-perturb amplitude (env_live_water_amp)
     float t = 0.0f;            // wave clock: g_FrameTime * 0.02 * ripple_speed
     float scale = 1.0f;        // wave spatial scale: water_bump_scale
-    // Mask remap (env_live_water_mask_bias), precomputed on the publish side:
-    // w' = clamp((w - bias) * maskGain), maskGain = 1/(1-bias). bias 0 = the
-    // raw bilinear coverage ramp; bias -> 1 = only fully-water texels move.
-    float maskBias = 0.0f;
-    float maskGain = 1.0f;
     void (*slopeFn)(float wx, float wz, float t, float scale,
                     float& sx, float& sz) = nullptr;
 };
 extern EnvLiveWaterState g_envLiveWater;
 
-// Bilinear fetch of a baked water-coverage mask, same uv->texel convention as
-// the colour fetch (EnvCubeFetchBil: px = u*res - 0.5, clamp, lerp), so the
-// mask lines up with the texels it gates to within a fraction of a texel.
-// Returns 0..1.
-inline float EnvLiveWater_MaskAt(const uint8_t* mask, int res,
+// Bytes one face of a res² 1-bit water-verdict plane occupies (res % 8 == 0).
+inline size_t EnvLiveWater_MaskFaceBytes(int res)
+{
+    return (size_t(res) * size_t(res)) >> 3;
+}
+
+// POINT sample of the bake's per-texel water verdict.
+//
+// THE CONVENTION IS THE WHOLE POINT (user: "a simple bit map on the reflection
+// bake can really help here to decide what pixels should be displaced and which
+// won't — since currently it's not exact at all and bleeds"). floor(u·res) is
+// the texel that CONTAINS the direction, which is exactly the texel the
+// paraboloid sheet gather fetched its colour from (DEMO/CITY.CPP builds the
+// gather with the same floor(fu·faceRes)) — so the verdict a consumer reads is
+// the verdict OF THE TEXEL IT IS READING, not an interpolation of its
+// neighbours'. No bilinear, no fractional coverage, no ramp: the predecessor's
+// 128²-per-512²-face coverage plane put a 4-texel box blur and a bilinear tap
+// between the bake's exact answer and the consumer, and that blur IS the bleed.
+inline bool EnvLiveWater_MaskBit(const uint8_t* mask, int res,
                                  float dx, float dy, float dz)
 {
     int face; float u, v;
     EnvCube_DirToFaceUV(dx, dy, dz, face, u, v);
-    float px = u * float(res) - 0.5f;
-    float py = v * float(res) - 0.5f;
-    if (px < 0.0f) px = 0.0f;
-    if (py < 0.0f) py = 0.0f;
-    int x0 = int(px), y0 = int(py);
-    if (x0 > res - 2) x0 = res - 2;
-    if (y0 > res - 2) y0 = res - 2;
-    const float ax = px - float(x0), ay = py - float(y0);
-    const uint8_t* base = mask + size_t(face) * size_t(res) * size_t(res);
-    const float m00 = float(base[size_t(y0) * res + x0]);
-    const float m10 = float(base[size_t(y0) * res + x0 + 1]);
-    const float m01 = float(base[size_t(y0 + 1) * res + x0]);
-    const float m11 = float(base[size_t(y0 + 1) * res + x0 + 1]);
-    const float t0 = m00 + ax * (m10 - m00);
-    const float t1 = m01 + ax * (m11 - m01);
-    return (t0 + ay * (t1 - t0)) * (1.0f / 255.0f);
+    int x = int(u * float(res));
+    int y = int(v * float(res));
+    if (x < 0) x = 0; else if (x > res - 1) x = res - 1;
+    if (y < 0) y = 0; else if (y > res - 1) y = res - 1;
+    const size_t bit = (size_t(face) * size_t(res) + size_t(y)) * size_t(res)
+                     + size_t(x);
+    return ((mask[bit >> 3] >> (bit & 7)) & 1u) != 0u;
 }
 
 // Perturb an env lookup direction (world space, any scale) in place when the
@@ -322,9 +325,14 @@ inline float EnvLiveWater_MaskAt(const uint8_t* mask, int res,
 // every source pixel to the plane and z-tests it against the opaque depth
 // buffer (DEMO/CITY.CPP shadeAndMaskFaceWater — the same test that decides
 // which texels env_live_water_shade re-shades). It stamps that decision into
-// a per-face coverage mask; this reads it back with the UNPERTURBED direction
-// (the perturbed one would be circular) and scales the tilt by it. Coverage
-// is fractional and bilinear, so the waterline is a soft ramp, not a seam.
+// a FULL-RESOLUTION 1-BIT plane — one bit per baked texel; this reads it back
+// with the UNPERTURBED direction (the perturbed one would be circular) and
+// gates the tilt HARD on it. The tilt therefore ends exactly at the reflected
+// waterline, one texel wide, because that is the resolution the verdict was
+// computed at. (The predecessor stored the same verdict box-accumulated into a
+// 128²-per-face coverage plane read bilinearly: user, on that build, "it's not
+// exact at all and bleeds". The classification was never the bug; the storage
+// resolution was.)
 //
 // No mask (a bake that never produced one — the legacy equirect city path) =
 // NO perturb. The unmasked version is the defect, so falling back to it would
@@ -335,6 +343,10 @@ inline float EnvLiveWater_MaskAt(const uint8_t* mask, int res,
 // PER-PIXEL consumer (the deferred kernel) can take this weight and apply the
 // tilt in the same breath — PerturbDir below is exactly that. A PER-VERTEX
 // consumer cannot: see the comment on EnvLiveWater_TiltDir.
+//
+// The weight is now BINARY (0 or 1) by construction: the bit either says this
+// texel is water or it does not. It stays a float because the forward path
+// still averages the three corners' answers into one per-face amplitude.
 inline float EnvLiveWater_Weight(float bakeY, float dx, float dy, float dz,
                                  const uint8_t* mask, int maskRes)
 {
@@ -342,11 +354,8 @@ inline float EnvLiveWater_Weight(float bakeY, float dx, float dy, float dz,
     if (!lw.active) return 0.0f;
     if (dy >= -1e-6f) return 0.0f;                  // above horizon
     if (bakeY <= lw.waterY) return 0.0f;            // probe under water: n/a
-    if (!mask || maskRes < 2) return 0.0f;          // no water mask → no tilt
-    float w = EnvLiveWater_MaskAt(mask, maskRes, dx, dy, dz);
-    w = (w - lw.maskBias) * lw.maskGain;
-    if (w <= 0.0f) return 0.0f;                     // content is not water
-    return w > 1.0f ? 1.0f : w;
+    if (!mask || maskRes < 8) return 0.0f;          // no water mask → no tilt
+    return EnvLiveWater_MaskBit(mask, maskRes, dx, dy, dz) ? 1.0f : 0.0f;
 }
 
 // Apply the wave-slope tilt at a weight the caller already decided.
@@ -370,8 +379,8 @@ inline void EnvLiveWater_TiltDir(float bakeX, float bakeY, float bakeZ,
     // Tilt ∝ |dy| so grazing rays (huge t, tiny dy) don't overshoot: the
     // same slope reads as a gentler direction change near the horizon,
     // which also fades the effect exactly where the plane hit is least
-    // certain (occluders far from the probe). × the water coverage w, so
-    // the tilt dies out across the reflected waterline instead of at it.
+    // certain (occluders far from the probe). × w, which the exact mask
+    // makes a 0/1 gate: the tilt stops AT the reflected waterline.
     const float k = lw.amp * w * -dy;
     dx += k * sx;
     dz += k * sz;

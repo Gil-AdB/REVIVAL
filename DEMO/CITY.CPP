@@ -1696,12 +1696,37 @@ constexpr int PANORAMA_YRES = 1024;
 constexpr int CUBE_MAP_XRES = 1024;
 constexpr int CUBE_MAP_YRES = 1024;
 
-// --env_live_water: per-face resolution of the water-coverage mask stamped
-// beside each building's cube bake. 128² is 1/16 the linear rate of the 512²
-// faces on purpose — the mask only has to say WHERE the waterline is, it is
-// read bilinearly (so it is a ramp, not a staircase), and at this rate all 71
-// probes cost 6·128²·71 = 7.0 MB against the ~450 MB of colour they gate.
-constexpr int CITY_ENV_WATERMASK_RES = 128;
+// --env_live_water: per-face resolution of the water-verdict mask stamped
+// beside each building's cube bake. It is the FACE resolution — one bit per
+// baked texel, no downsample — because the consumer's question is "is THIS
+// texel water", and any coarser plane answers a blurred version of it.
+//
+// The predecessor stored 128²/face at 0..255 coverage and read it bilinearly:
+// a 4×4-texel box blur plus a bilinear tap between the bake's exact answer and
+// the sampler. User, looking at that build: "I think a simple bit map on the
+// reflection bake can really help here to decide what pixels should be
+// displaced and which won't — since currently it's not exact at all and
+// bleeds." One bit at full res is 32 KiB/face, 192 KiB/probe, and MEASURED
+// across all 71 city probes (the [CITY] census line prints it) 13.3 MiB —
+// exactly 2× the 6.7 MiB coverage plane it replaces, 1/8 of what a full-res
+// BYTE plane would have cost (106.5 MiB), and ~3 % of the ~450 MB of colour
+// it gates.
+// Kept in lockstep with CITY_CUBE_FACE_RES by a static_assert at the bake site.
+constexpr int CITY_ENV_WATERMASK_RES = 512;
+
+// Bit accessors for that plane. Face-major, then row-major, LSB-first — the
+// SAME bit index fds::EnvLiveWater_MaskBit computes, and the same flat texel
+// index the paraboloid sheet gather table produces, so the sheet build can
+// use a gather entry directly as a bit index. A row is res/8 whole bytes, so
+// row bands never share a byte and the threaded bake needs no atomics.
+static inline bool cityWaterMaskGet(const uint8_t* m, size_t bit)
+{
+	return ((m[bit >> 3] >> (bit & 7)) & 1u) != 0u;
+}
+static inline void cityWaterMaskSet(uint8_t* m, size_t bit)
+{
+	m[bit >> 3] |= uint8_t(1u << (bit & 7));
+}
 
 // Backing store for TriMesh::EnvWaterMask (the forward reflective path): the
 // `buildings` bake scratch is local to Initialize_City, so the masks the
@@ -1874,22 +1899,34 @@ static void bakeBuildingPanorama(Object* Obj,
 // below-horizon geometry (neighbour building bases, piers) keeps its texels.
 // Row-parallel with disjoint row bands → deterministic output.
 //
-// SECOND JOB — the --env_live_water COVERAGE MASK (maskFace, maskRes² bytes
-// for this face). The same per-pixel decision this pass makes ("is this texel
-// unoccluded water?") is exactly what the sample-time wave-slope tilt needs
-// in order to leave the reflected skyline alone: 5d28db7 gated the tilt on
-// `below the horizon`, but a window at building-mid-height reflects a wholly
+// SECOND JOB — the --env_live_water WATER-VERDICT BITMAP (maskFace, maskRes²
+// BITS for this face). The same per-pixel decision this pass makes ("is this
+// texel unoccluded water?") is exactly what the sample-time wave-slope tilt
+// needs in order to leave the reflected skyline alone: 5d28db7 gated the tilt
+// on `below the horizon`, but a window at building-mid-height reflects a wholly
 // below-horizon hemisphere, so the horizon test let the reflected buildings
 // ripple like liquid (user: "it perturbs the whole reflection, not just the
-// water part there"). The mask is box-accumulated from the FULL-RES decision
-// (coverage 0..255 per cell, so the waterline is fractional and the tilt
-// ramps out across it instead of stepping), and it is built whether or not
-// the re-shade itself runs — --no-env_live_water_shade still needs to know
-// where the water is. Bands are split on MASK rows so every cell is written
-// by exactly one thread; the source-row mapping is exact integer division, so
-// no cell is double-counted and the output is thread-count-independent.
+// water part there"). The derivation below is unchanged from 5f1ffa92 — same
+// ray-cast, same z-test, same two-LSB bias; what changed is that the answer is
+// now stored AT THE TEXEL instead of box-accumulated into a 128²-per-face
+// coverage plane and read back bilinearly (user: "it's not exact at all and
+// bleeds"). maskRes == the face resolution, so one bit per baked texel.
+//
+// The source render is finer than the face (1024² → 512², ratio² source pixels
+// per texel), so a texel still needs a rule, and it is the SAME rule the colour
+// downsample implies and --env_water_region_viz already used to classify:
+// MAJORITY of the texel's own source pixels (coverage ≥ waterBias, default
+// 0.5). That is env_live_water_mask_bias, re-sited from a sample-time threshold
+// on a blurred plane to a bake-time threshold on the exact cell — see its flag
+// doc. It is built whether or not the re-shade itself runs:
+// --no-env_live_water_shade still needs to know where the water is. Bands are
+// split on TEXEL rows, and a row is maskRes/8 whole bytes, so every bit is
+// written by exactly one thread with no byte shared across bands; the
+// source-row mapping is exact integer division, so the output is
+// thread-count-independent.
 static void shadeAndMaskFaceWater(const Camera& envCam, bool doReshade,
-                                  uint8_t* maskFace, int maskRes)
+                                  uint8_t* maskFace, int maskRes,
+                                  float waterBias)
 {
 	const float ey = envCam.ISource.y;
 	const float wY = g_waterY;
@@ -1985,15 +2022,19 @@ static void shadeAndMaskFaceWater(const Camera& envCam, bool doReshade,
 				row[x] = dword(nb) | (dword(ng) << 8) | (dword(nr) << 16) | 0xFF000000u;
 			}
 		}
-		// Cell coverage = water pixels / source pixels in the cell, exact per
-		// column band (integer division, so the columns tile the row without
-		// gap or overlap regardless of xr/maskRes divisibility).
-		uint8_t* mrow = maskFace + size_t(my) * size_t(maskRes);
+		// One BIT per texel: water iff at least one of the texel's own source
+		// pixels was an unoccluded water hit AND they clear the coverage
+		// threshold. The column band is exact integer division, so the columns
+		// tile the row without gap or overlap regardless of xr/maskRes
+		// divisibility (with maskRes == the face res it is a plain 2×2 cell).
+		uint8_t* mrow = maskFace + size_t(my) * (size_t(maskRes) >> 3);
 		for (int mx = 0; mx < maskRes; ++mx) {
 			const int xs = int((int64_t)mx       * xr / maskRes);
 			const int xe = int((int64_t)(mx + 1) * xr / maskRes);
 			const uint32_t tot = uint32_t((ye - ys) * (xe - xs));
-			mrow[mx] = tot ? uint8_t((cnt[size_t(mx)] * 255u + tot / 2u) / tot) : 0u;
+			const uint32_t c   = cnt[size_t(mx)];
+			if (c != 0u && float(c) >= waterBias * float(tot))
+				mrow[mx >> 3] |= uint8_t(1u << (mx & 7));
 		}
 		}
 	};
@@ -2028,7 +2069,7 @@ static void bakeBuildingCubeFaces(Object* Obj,
                                   std::vector<uint8_t>& rawFaces,
                                   bool procWaterShade,
                                   std::vector<uint8_t>* waterMaskOut,
-                                  int maskRes)
+                                  int maskRes, float waterBias)
 {
 	TriMesh* T = (TriMesh*)Obj->Data;
 	const dword flags = T->Flags;
@@ -2046,7 +2087,8 @@ static void bakeBuildingCubeFaces(Object* Obj,
 	}
 
 	rawFaces.assign(size_t(6) * faceRes * faceRes * 4, 0);
-	if (waterMaskOut) waterMaskOut->assign(size_t(6) * maskRes * maskRes, 0);
+	const size_t maskFaceBytes = fds::EnvLiveWater_MaskFaceBytes(maskRes);
+	if (waterMaskOut) waterMaskOut->assign(size_t(6) * maskFaceBytes, 0);
 	const int ratio = CUBE_MAP_XRES / faceRes;   // 1024/512 = 2
 	const int n = ratio * ratio;
 
@@ -2065,15 +2107,14 @@ static void bakeBuildingCubeFaces(Object* Obj,
 		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
 		if (0 != CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceForward); }
 
-		// env_live_water: stamp this face's water-coverage mask, and (when
+		// env_live_water: stamp this face's water-verdict bitmap, and (when
 		// env_live_water_shade put the water mesh out of the bake) re-shade
 		// the exposed mirrored underlay as procedural water — one full-res
 		// pass over the face, both jobs off the same per-pixel decision.
 		if (waterMaskOut)
 			shadeAndMaskFaceWater(envCam, procWaterShade,
-			                      waterMaskOut->data()
-			                          + size_t(k) * maskRes * maskRes,
-			                      maskRes);
+			                      waterMaskOut->data() + size_t(k) * maskFaceBytes,
+			                      maskRes, waterBias);
 
 		// Box-downsample CUBE_MAP_XRES² → faceRes², force opaque alpha.
 		const uint32_t* src = (const uint32_t*)tmpSurf.Data;
@@ -2124,11 +2165,12 @@ static void bakeBuildingCubeFaces(Object* Obj,
 				}
 			std::fclose(fp);
 		}
-		// ...and the --env_live_water coverage mask beside it, same 3x2 grid,
-		// as a PGM: white = the tilt is at full strength here, black = the
-		// baked content is not water and must not move. Reading this next to
-		// the colour dump is how you tell "the mask is wrong" from "the tilt
-		// is wrong".
+		// ...and the --env_live_water verdict bitmap beside it, same 3x2 grid,
+		// as a PGM: white = the tilt applies here, black = the baked content is
+		// not water and must not move. Reading this next to the colour dump is
+		// how you tell "the mask is wrong" from "the tilt is wrong" — and now
+		// it is the SAME grid size as the colour dump, so the two overlay
+		// pixel-for-pixel instead of needing a 4× upscale to compare.
 		if (waterMaskOut && !waterMaskOut->empty()) {
 			char mPath[256];
 			std::snprintf(mPath, sizeof(mPath), "%s.watermask.pgm", dumpPath);
@@ -2139,8 +2181,9 @@ static void bakeBuildingCubeFaces(Object* Obj,
 				for (int y = 0; y < gh; ++y)
 					for (int x = 0; x < gw; ++x) {
 						const int f = (y / maskRes) * 3 + (x / maskRes);
-						const uint8_t v = mm[size_t(f)*maskRes*maskRes
-						                     + size_t(y % maskRes)*maskRes + (x % maskRes)];
+						const size_t bit = (size_t(f) * maskRes + size_t(y % maskRes))
+						                 * size_t(maskRes) + size_t(x % maskRes);
+						const uint8_t v = cityWaterMaskGet(mm, bit) ? 255u : 0u;
 						std::fwrite(&v, 1, 1, fp);
 					}
 				std::fclose(fp);
@@ -2658,8 +2701,22 @@ void Initialize_City()
 	const bool liveWaterMask = fds::FeatureFlags::env_live_water()
 	    && g_waterMaxX > g_waterMinX;
 
+	// --env_live_water_mask_bias, now a BAKE-time coverage threshold on each
+	// texel's own source pixels (see the flag doc and shadeAndMaskFaceWater).
+	// Clamped to [0,1]; 0.5 = the majority rule, i.e. the exact classification.
+	float liveWaterBias = fds::FeatureFlags::env_live_water_mask_bias();
+	if (liveWaterBias < 0.0f) liveWaterBias = 0.0f;
+	if (liveWaterBias > 1.0f) liveWaterBias = 1.0f;
+
 	if ((useCube || cityEnvPixel) && !skipCubeMap) {
 		constexpr int CITY_CUBE_FACE_RES = 512;
+		// The verdict bitmap is one bit per BAKED TEXEL — that is what makes
+		// it exact, and a row must be whole bytes for the threaded bake's
+		// row bands to be free of shared bytes.
+		static_assert(CITY_ENV_WATERMASK_RES == CITY_CUBE_FACE_RES,
+		              "the water verdict is per baked texel, not a plane beside it");
+		static_assert(CITY_ENV_WATERMASK_RES % 8 == 0,
+		              "mask rows must be whole bytes (threaded bake writes row bands)");
 		// BAKE-AFFECTING FLAGS MUST BE IN THE KEY. The cube is produced by the
 		// ordinary software rasterizer, so any flag that changes a rendered
 		// pixel changes the cube — but ComputeCityPanoramaCacheKey only sees
@@ -2775,21 +2832,26 @@ void Initialize_City()
 				bakeBuildingCubeFaces(b.obj, EnvCam, TmpSurf, CITY_CUBE_FACE_RES,
 				                      b.rawPanorama, liveWaterShade,
 				                      liveWaterMask ? &b.waterMask : nullptr,
-				                      CITY_ENV_WATERMASK_RES);
+				                      CITY_ENV_WATERMASK_RES, liveWaterBias);
 			}
 			if (lwWaterT) lwWaterT->Flags = lwWaterFlags;
 			if (liveWaterMask) {
-				// Census: coverage is the share of the probe sphere the tilt
-				// is allowed to move. Anything near 100 % means the mask is
-				// not discriminating (and the reflected skyline is rippling
-				// again); 0 % means the bake produced no water at all.
-				double sum = 0.0; size_t n = 0;
+				// Census: the water share is the fraction of the probe sphere
+				// the tilt is allowed to move. Anything near 100 % means the
+				// mask is not discriminating (and the reflected skyline is
+				// rippling again); 0 % means the bake produced no water at all.
+				size_t set = 0, n = 0;
 				for (const auto& b : buildings)
-					for (uint8_t m : b.waterMask) { sum += m; ++n; }
-				fprintf(stderr, "[CITY] env_live_water: water-coverage masks for "
-				        "%d probes @ %d^2/face (%.1f%% mean coverage, %.1f MB)\n",
+					for (uint8_t m : b.waterMask) {
+						set += size_t(__builtin_popcount((unsigned)m));
+						n   += 8;
+					}
+				fprintf(stderr, "[CITY] env_live_water: per-texel water verdict for "
+				        "%d probes @ %d^2/face, 1 bit/texel (%.1f%% water, %.1f MB; "
+				        "a byte plane at this res would be %.1f MB)\n",
 				        building_count, CITY_ENV_WATERMASK_RES,
-				        n ? 100.0 * sum / (255.0 * double(n)) : 0.0,
+				        n ? 100.0 * double(set) / double(n) : 0.0,
+				        double(n / 8) / (1024.0 * 1024.0),
 				        double(n) / (1024.0 * 1024.0));
 			}
 			if (cacheOn && ck != 0
@@ -2818,20 +2880,15 @@ void Initialize_City()
 				if (b.waterMaskRes != mr || b.waterMask.empty()) continue;
 				if (b.rawPanorama.size() != faceBytes) continue;
 				uint32_t* f32 = (uint32_t*)b.rawPanorama.data();
-				for (int k = 0; k < 6; ++k) {
-					const uint8_t* mm = b.waterMask.data() + size_t(k) * mr * mr;
-					uint32_t* fp = f32 + size_t(k) * fr * fr;
-					for (int y = 0; y < fr; ++y) {
-						const uint8_t* mrow = mm + size_t(y * mr / fr) * mr;
-						for (int x = 0; x < fr; ++x, ++total) {
-							const bool isWater = mrow[x * mr / fr] >= 128;
-							if (isWater == (wrViz == 1)) {
-								fp[size_t(y) * fr + x] ^= 0x00FFFFFFu;
-								++flipped;
-							}
-						}
+				// mask res == face res, so the classification the viz paints is
+				// the SAME per-texel bit the tilt gates on — no resampling
+				// between the instrument and the thing it measures.
+				const uint8_t* mm = b.waterMask.data();
+				for (size_t t = 0, nT = size_t(6) * fr * fr; t < nT; ++t, ++total)
+					if (cityWaterMaskGet(mm, t) == (wrViz == 1)) {
+						f32[t] ^= 0x00FFFFFFu;
+						++flipped;
 					}
-				}
 			}
 			// INVERT, not paint: a flag colour collides with the content (a
 			// night skyline is mostly near-black, so "paint the non-water
@@ -2886,17 +2943,17 @@ void Initialize_City()
 							+ uint32_t(fu * CITY_CUBE_FACE_RES);
 					}
 			std::vector<uint32_t> sheet(size_t(kSheetRes) * kSheetRes);
-			// --env_live_water: the sheets carry this probe's water-coverage
-			// mask in their ALPHA byte, so the forward filler can ask each
-			// PIXEL (not each vertex) how much water it is reading. Upsampled
-			// bilinearly 128²→512² per cube face first, using the same
-			// px = u·res − 0.5 convention as EnvLiveWater_MaskAt, so the
-			// forward path's soft waterline ramp matches the deferred one's;
-			// then the EXISTING sheet gather resamples it into paraboloid
-			// space alongside the colour it belongs to. Empty when the flag
-			// is off → alpha stays the bake's 0xFF, byte-identical.
-			std::vector<uint8_t> faceMaskUp(
-				liveWaterMask ? size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES : 0);
+			// --env_live_water: the sheets carry this probe's per-texel water
+			// VERDICT in their ALPHA byte (0 or 255), so the forward filler
+			// can ask each PIXEL — not each vertex — whether the texel it is
+			// fetching is water. THE CARRIER IS EXACT BY CONSTRUCTION and
+			// costs nothing: a sheet gather entry IS a flat face-texel index,
+			// so it is also the bit index in the verdict plane, and the alpha
+			// a pixel reads is the verdict OF THE TEXEL IT READ. The
+			// predecessor upsampled a 128² coverage plane bilinearly to 512²
+			// and quantized the ramp into that byte — a blur on top of a blur,
+			// and the bleed the user saw at the reflected waterline. Flag off
+			// → alpha stays the bake's 0xFF, byte-identical.
 			g_cityEnvWaterMasks.clear();
 			g_cityEnvWaterMasks.reserve(buildings.size());
 			for (auto& b : buildings) {
@@ -2906,42 +2963,19 @@ void Initialize_City()
 				// mask. Copied into scene-lifetime storage; moving the outer
 				// vector keeps every inner buffer's address, so the mesh
 				// pointers survive the reserve/growth.
-				if (b.waterMaskRes >= 2 && !b.waterMask.empty()) {
+				if (b.waterMaskRes >= 8 && !b.waterMask.empty()) {
 					g_cityEnvWaterMasks.push_back(b.waterMask);
 					T->EnvWaterMask    = g_cityEnvWaterMasks.back().data();
 					T->EnvWaterMaskRes = b.waterMaskRes;
 				}
 				const uint32_t* faces32 = (const uint32_t*)b.rawPanorama.data();
-				// Bilinear 128²→512² upsample of this probe's mask, per face,
-				// once for all six sheets (every sheet gathers from all six).
-				const bool haveMask = !faceMaskUp.empty()
-				                   && b.waterMaskRes == CITY_ENV_WATERMASK_RES
+				// The verdict plane is ALREADY at face resolution, so there is
+				// nothing to resample: a gather entry is a flat face-texel
+				// index, hence also the bit index. No upsample buffer, no
+				// second pass over 6 x 512² per probe.
+				const bool haveMask = b.waterMaskRes == CITY_ENV_WATERMASK_RES
 				                   && !b.waterMask.empty();
-				if (haveMask) {
-					const int mr = CITY_ENV_WATERMASK_RES, fr = CITY_CUBE_FACE_RES;
-					for (int f = 0; f < 6; ++f) {
-						const uint8_t* mm = b.waterMask.data() + size_t(f) * mr * mr;
-						uint8_t* up = faceMaskUp.data() + size_t(f) * fr * fr;
-						for (int y = 0; y < fr; ++y) {
-							float py = ((float(y) + 0.5f) / float(fr)) * float(mr) - 0.5f;
-							if (py < 0.0f) py = 0.0f;
-							int y0 = int(py); if (y0 > mr - 2) y0 = mr - 2;
-							const float ay = py - float(y0);
-							const uint8_t* r0 = mm + size_t(y0) * mr;
-							const uint8_t* r1 = r0 + mr;
-							for (int x = 0; x < fr; ++x) {
-								float px = ((float(x) + 0.5f) / float(fr)) * float(mr) - 0.5f;
-								if (px < 0.0f) px = 0.0f;
-								int x0 = int(px); if (x0 > mr - 2) x0 = mr - 2;
-								const float ax = px - float(x0);
-								const float t0v = float(r0[x0]) + ax * (float(r0[x0+1]) - float(r0[x0]));
-								const float t1v = float(r1[x0]) + ax * (float(r1[x0+1]) - float(r1[x0]));
-								up[size_t(y) * fr + x] =
-									uint8_t(t0v + ay * (t1v - t0v) + 0.5f);
-							}
-						}
-					}
-				}
+				const uint8_t* mbits = haveMask ? b.waterMask.data() : nullptr;
 				for (int k = 0; k < 6; ++k) {
 					const uint32_t* g =
 						&sheetGather[size_t(k) * kSheetRes * kSheetRes];
@@ -2950,7 +2984,8 @@ void Initialize_City()
 					if (haveMask)
 						for (size_t t = 0; t < sheet.size(); ++t)
 							sheet[t] = (sheet[t] & 0x00FFFFFFu)
-							         | (uint32_t(faceMaskUp[g[t]]) << 24);
+							         | (cityWaterMaskGet(mbits, g[t])
+							            ? 0xFF000000u : 0u);
 					Material* sm = Materialize(sheet.data(), kSheetRes, kSheetRes);
 					T->EnvHemiSheets[k] = sm->Txtr;
 					// Non-null marker for the window-stamp loop below; the
@@ -3117,10 +3152,14 @@ void Initialize_City()
 								// the bsphere radius plays the role of
 								// optimalDistFromPlane.
 								BT->BSphereRadius,
-								// --env_live_water: the probe's water mask
-								// (the store copies it — rawPanorama and the
-								// mask are both freed right after this).
-								bi->second->waterMaskRes >= 2
+								// --env_live_water: the probe's per-texel
+								// water verdict bitmap, at the 512² SOURCE
+								// face res — NOT downsampled with the
+								// colour to 256², because a blurred verdict
+								// is exactly the bleed this replaces. (The
+								// store copies it — rawPanorama and the
+								// mask are both freed right after this.)
+								bi->second->waterMaskRes >= 8
 								    ? bi->second->waterMask.data() : nullptr,
 								bi->second->waterMaskRes);
 							storeIdxByObj[Obj] = idx;
@@ -3666,15 +3705,11 @@ struct CityScene : SceneDriver {
 				lw.t     = (float)g_FrameTime * 0.02f
 				         * fds::FeatureFlags::water_ripple_speed();
 				lw.scale = fds::FeatureFlags::water_bump_scale();
-				// Water-mask remap, resolved once per frame so the per-pixel
-				// path is one subtract + one multiply. bias 1 would divide by
-				// zero, so clamp just under it (bias 1 = "only 100% water
-				// texels", which 0.999 already is at 8-bit coverage).
-				float mb = fds::FeatureFlags::env_live_water_mask_bias();
-				if (mb < 0.0f) mb = 0.0f;
-				if (mb > 0.999f) mb = 0.999f;
-				lw.maskBias = mb;
-				lw.maskGain = 1.0f / (1.0f - mb);
+				// NO per-frame mask remap any more. The verdict is a BIT
+				// decided at bake time, so there is nothing left to threshold
+				// at sample time — env_live_water_mask_bias moved to the bake
+				// (Initialize_City's liveWaterBias), where it now sets which
+				// coverage of a texel's own source pixels counts as water.
 				lw.slopeFn = &pwater::WaveSlope;
 			}
 		}

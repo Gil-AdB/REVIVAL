@@ -2573,7 +2573,8 @@ AfterXForm:
 					// --env_live_water: the tilt leaves this loop as a
 					// per-FACE UV OFFSET, and the mask read moves to the
 					// filler, where it is per PIXEL (the sheets carry the
-					// coverage in their alpha byte). WHY NOT PERTURB THE
+					// bake's per-texel water VERDICT in their alpha byte).
+					// WHY NOT PERTURB THE
 					// VERTEX DIRECTION, which is what 5d28db7/5f1ffa92 did:
 					// the rasterizer interpolates the resulting UV affinely,
 					// so tilting one corner whose reflection is water drags
@@ -2619,19 +2620,21 @@ AfterXForm:
 						fds::EnvCube_DirToParaboloidUV(k, dp.x, dp.y, dp.z,
 						                               pu, pv);
 						// Weight each corner's displacement by ITS OWN water
-						// coverage: on a pane straddling the reflected
-						// waterline the water pixels sit near the wet
-						// corners, and the tilt magnitude that belongs to
-						// them is that corner's (it scales with |dy| and
-						// with the slope at a wildly different plane hit).
-						// A flat mean pulls the amplitude toward the dry
-						// corners and measurably deadens the water. Measured
-						// (t=1961, user's preset, Σ|Δ| over the reflected-
-						// water region as a share of the pre-fix arm's):
-						// flat mean 87.2 %, coverage-weighted 110.6 %, with
-						// the reflected-skyline residual 3 375 vs 5 594 px —
-						// both far under the deferred path's 6 927 at the
-						// same pose, so the amplitude is bought for free.
+						// verdict — with the exact mask that is a 0/1 bit, so
+						// this is the mean over the corners actually reading
+						// water. On a pane straddling the reflected waterline
+						// the water pixels sit near the wet corners, and the
+						// tilt magnitude that belongs to them is that corner's
+						// (it scales with |dy| and with the slope at a wildly
+						// different plane hit). A flat mean over all three
+						// pulls the amplitude toward the dry corners and
+						// measurably deadens the water: measured on the
+						// coverage predecessor (t=1961, user's preset, Σ|Δ|
+						// over the reflected-water region as a share of the
+						// pre-fix arm's), flat mean 87.2 % against 110.6 %.
+						// LOCALIZATION does not come from here — the per-pixel
+						// verdict in the filler decides WHICH pixels move;
+						// this only decides HOW FAR.
 						const float wv = fds::EnvLiveWater_Weight(
 							lwPY, d.x, d.y, d.z,
 							T->EnvWaterMask, T->EnvWaterMaskRes);

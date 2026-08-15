@@ -626,9 +626,9 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
 namespace {
 struct EnvPanoStore {
     std::vector<uint32_t> levels[EnvPanoLinear::kMaxMips];
-    // --env_live_water water-coverage mask backing EnvPanoLinear::waterMask
-    // (6 x waterMaskRes² bytes, face-major). Empty for stores whose bake did
-    // not produce one.
+    // --env_live_water per-texel water-verdict BIT plane backing
+    // EnvPanoLinear::waterMask (6 x waterMaskRes²/8 bytes, face-major). Empty
+    // for stores whose bake did not produce one.
     std::vector<uint8_t>  waterMask;
     EnvPanoLinear view;
     // Bake provenance, for the largest-wish-wins res upgrade of SHARED
@@ -3752,13 +3752,15 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
     for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
         v.mip[k] = store->levels[k].data();
     v.bakeX = bakePoint.x; v.bakeY = bakePoint.y; v.bakeZ = bakePoint.z;
-    // --env_live_water: own a copy of the bake's water-coverage mask (the
-    // caller's per-building scratch is freed right after registration). Not
-    // mipped — the tilt weight wants the sharpest waterline it has, and the
-    // mask is already the coarse plane.
-    if (waterMask && maskRes >= 2) {
-        store->waterMask.assign(waterMask,
-                                waterMask + size_t(6) * maskRes * maskRes);
+    // --env_live_water: own a copy of the bake's water-verdict BIT plane (the
+    // caller's per-building scratch is freed right after registration). Never
+    // mipped and never downsampled with the colour: the colour is box-averaged
+    // to storeRes because a blurred reflection is still a reflection, but a
+    // blurred VERDICT is the bleed the exact mask exists to remove — the tilt
+    // reads the bake's own full-res answer at the texel it is sampling.
+    if (waterMask && maskRes >= 8) {
+        store->waterMask.assign(
+            waterMask, waterMask + size_t(6) * EnvLiveWater_MaskFaceBytes(maskRes));
         v.waterMask = store->waterMask.data();
         v.waterMaskRes = maskRes;
     }

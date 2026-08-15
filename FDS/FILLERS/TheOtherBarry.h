@@ -298,14 +298,13 @@ struct TileRasterizer {
 		float du1zdx, du1zdy;
 		float dv1zdx, dv1zdy;
 		// --env_live_water (Face::LwDU/LwDV): the wave-slope tilt as a
-		// per-face offset in SECOND-TEXTURE TEXELS, plus the coverage remap
-		// (--env_live_water_mask_bias) the per-pixel weight goes through.
+		// per-face offset in SECOND-TEXTURE TEXELS. The per-pixel weight it
+		// is scaled by is now a BIT, so there is no remap to carry: a lane
+		// either takes the whole offset or none of it.
 		// lwOn == false → not one instruction of it runs.
 		float    lwDU = 0.0f, lwDV = 0.0f;
-		float    lwBias = 0.0f, lwGain = 1.0f;
-		uint32_t lwAlphaMin = 0;      // bias*255: coverage above it moves
 		bool     lwOn = false;        // this face has a tilt to apply
-		bool     lwAlphaMask = false; // the reflection texel's alpha is COVERAGE, not opacity
+		bool     lwAlphaMask = false; // the reflection texel's alpha is the WATER VERDICT, not opacity
 	};
 	float drzdx, drzdy;
 	float dadx, dady;
@@ -552,36 +551,33 @@ struct TileRasterizer {
 						auto texture1_samples = gather(Vec8ui(p_offset1), t0.TextureAddr1, p_mask);
 						if (t0.lwAlphaMask) {
 						if (t0.lwOn) {
-							// --env_live_water, THE PER-PIXEL MASK READ. The
+							// --env_live_water, THE PER-PIXEL VERDICT READ. The
 							// texel just fetched at the UNPERTURBED lookup
-							// carries this direction's baked water coverage in
-							// its alpha byte (DEMO/CITY.CPP stamps it into the
-							// sheets); that is the weight the tilt is scaled
-							// by, so a pixel reading the reflected skyline
-							// gets 0 and does not move, however much water its
-							// neighbours — or its own triangle's corners — are
-							// reading. Second gather only; the arithmetic is
-							// the same remap the deferred kernel runs
-							// (EnvBake.h EnvLiveWater_Weight).
+							// carries the bake's water verdict FOR ITSELF in its
+							// alpha byte (DEMO/CITY.CPP stamps the bit into the
+							// sheets through the same gather table as the
+							// colour), so a pixel reading the reflected skyline
+							// does not move, however much water its neighbours —
+							// or its own triangle's corners — are reading, and
+							// the boundary is exactly one texel wide.
+							// The alpha is 0 or 255 and nothing between, so this
+							// is ONE integer compare and the wet lanes take the
+							// whole offset: no int→float convert, no remap
+							// multiply, no clamp, no per-lane weight. Second
+							// gather only, and it is CHEAPER than the coverage
+							// form it replaces.
 							const Vec8ui aI = Vec8ui(texture1_samples) >> 24;
-							// w > 0 exactly when coverage > bias, so the "does
-							// this lane move at all" test is an integer
-							// compare on the alpha byte (lwAlphaMin =
-							// bias·255), no float round trip on dry lanes.
-							const auto wet = p_mask & (aI > Vec8ui(t0.lwAlphaMin));
+							const auto wet = p_mask & (aI > Vec8ui(127u));
 							if (horizontal_or(wet)) {
-								const Vec8f a = to_float(Vec8i(aI));
-								Vec8f w = (a * (1.0f / 255.0f) - Vec8f(t0.lwBias)) * Vec8f(t0.lwGain);
-								w = min(max(w, Vec8f(0.0f)), Vec8f(1.0f));
-								Vec8i pu = roundi(mul_add(w, Vec8f(t0.lwDU), u1f));
-								Vec8i pv = roundi(mul_add(w, Vec8f(t0.lwDV), v1f));
+								Vec8i pu = roundi(u1f + Vec8f(t0.lwDU));
+								Vec8i pv = roundi(v1f + Vec8f(t0.lwDV));
 								const auto po = packed_tile_u(pu, t0.Log1Height, t1_umask_swizzled)
 								              + packed_tile_v(pv, t1_vmask);
 								const auto tilted = gather(Vec8ui(po), t0.TextureAddr1, wet);
 								texture1_samples = select(wet, tilted, texture1_samples);
 							}
 						}
-						// The alpha byte is the mask, not opacity — put the
+						// The alpha byte is the verdict, not opacity — put the
 						// bake's opaque 0xFF back before the composite so the
 						// blend (and any AlphaTest user) sees exactly what it
 						// saw before the flag existed.
@@ -1032,19 +1028,16 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// TEXTURETEXTURE user — the greets disco ball, the city mirror
 		// pass, the legacy equirect path — takes the same instructions it
 		// always did.
-		// The city sheets carry the water-coverage mask in their alpha byte
-		// whenever --env_live_water baked one, whether or not THIS face ends
-		// up tilting; the composite below must not see coverage where it
-		// expects the bake's opaque 0xFF, or a face with no tilt would still
-		// differ from the pre-flag build.
+		// The city sheets carry the water VERDICT BIT in their alpha byte
+		// (0 or 255) whenever --env_live_water baked one, whether or not THIS
+		// face ends up tilting; the composite below must not see the mask
+		// where it expects the bake's opaque 0xFF, or a face with no tilt
+		// would still differ from the pre-flag build.
 		r.t0.lwAlphaMask = fds::g_envLiveWater.active;
 		if (F->LwDU != 0.0f || F->LwDV != 0.0f) {
 			r.t0.lwOn   = true;
 			r.t0.lwDU   = F->LwDU * float(1 << r.t0.Log1Width);
 			r.t0.lwDV   = F->LwDV * float(1 << r.t0.Log1Height);
-			r.t0.lwBias = fds::g_envLiveWater.maskBias;
-			r.t0.lwGain = fds::g_envLiveWater.maskGain;
-			r.t0.lwAlphaMin = uint32_t(fds::g_envLiveWater.maskBias * 255.0f);
 		}
 	}
 

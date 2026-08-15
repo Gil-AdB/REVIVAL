@@ -58,12 +58,15 @@ struct TriMesh
     Texture         *EnvHemiSheets[6] = { nullptr, nullptr, nullptr,
                                           nullptr, nullptr, nullptr };
 
-    // --env_live_water: this mesh's probe bake's per-face WATER COVERAGE
-    // mask (6 x EnvWaterMaskRes² bytes, face-major, EnvCube face order).
-    // The forward reflective path gates its wave-slope tilt on it so only the
-    // reflected water moves, not the reflected skyline. Non-owning: the scene
-    // that baked the faces owns the storage for the scene's lifetime (CITY).
-    // Null → no tilt (see fds::EnvLiveWater_PerturbDir).
+    // --env_live_water: this mesh's probe bake's per-texel WATER VERDICT,
+    // 1 bit per texel at the bake's full face resolution (6 x
+    // EnvWaterMaskRes²/8 bytes, face-major, EnvCube face order — the layout
+    // fds::EnvLiveWater_MaskBit indexes). The forward reflective path reads it
+    // per CORNER here (for the per-face tilt amplitude) and per PIXEL in the
+    // filler (via the sheets' alpha byte, which carries the same bit), so only
+    // the reflected water moves, not the reflected skyline. Non-owning: the
+    // scene that baked the faces owns the storage for the scene's lifetime
+    // (CITY). Null → no tilt (see fds::EnvLiveWater_PerturbDir).
     const uint8_t   *EnvWaterMask    = nullptr;
     int              EnvWaterMaskRes = 0;
 

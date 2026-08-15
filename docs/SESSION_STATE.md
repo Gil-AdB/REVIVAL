@@ -1,5 +1,125 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16 — THE WATER VERDICT IS ONE BIT PER BAKED TEXEL NOW, AND THE MEASUREMENT SAYS THE REMAINING BAND IS THE ENV TAP, NOT THE MASK
+>
+> His verdict on the coverage build: *"--env_live_water - mostly ok, but I think
+> you use the original water line (not reflected) as a reference to what displace
+> and what not. I think a simple bit map on the reflection bake can really help
+> here to decide what pixels should be displaced and which won't - since currently
+> it's not exact at all and bleeds."*
+>
+> **His diagnosis of the STORAGE was right; his guess at the MECHANISM was not.**
+> The reference was never the un-reflected waterline — the bake ray-casts every
+> source pixel to the water plane and z-tests it, so the classification was
+> already about reflected content. What was wrong is that the answer was then
+> **box-accumulated 4×4 into a 128²-per-face coverage plane and read back
+> BILINEARLY**, i.e. a blur on top of a blur between the bake's exact answer and
+> the consumer. That is the bleed, and it is visible at storage resolution:
+> `docs/img/envwaterbit/waterbit_storage_b5_face5.png`
+> (/Users/gil-ad/work/rev-waterbit/docs/img/envwaterbit/waterbit_storage_b5_face5.png)
+> — the BEFORE plane washes a soft red ramp over the reflected quay and the
+> building bases; the AFTER bit follows those silhouettes texel for texel.
+>
+> ### WHAT SHIPPED
+>
+> `CITY_ENV_WATERMASK_RES` 128 → **512 = the face resolution**, stored as **ONE
+> BIT PER BAKED TEXEL** (face-major, row-major, LSB first). Every consumer
+> POINT-samples it — `EnvLiveWater_MaskAt`'s bilinear tap is deleted and replaced
+> by `EnvLiveWater_MaskBit`, which floors to the texel that CONTAINS the
+> direction: the same texel the colour fetch is reading. The forward paraboloid
+> sheets carry the bit in their alpha byte **exactly by construction and for
+> free** — a sheet gather entry IS a flat face-texel index, hence also the bit
+> index — so the 128²→512² bilinear upsample the sheets used to pay is gone
+> outright (one buffer and one pass over 6×512² per probe deleted).
+>
+> **MEMORY, MEASURED (the `[CITY]` census line prints it): 13.3 MiB for 71
+> probes** at 6 × 512²/8 bytes each — exactly 2× the 6.7 MiB coverage plane it
+> replaces, **1/8** of the 106.5 MiB a full-res BYTE plane would have cost, and
+> ~3 % of the ~450 MB of colour it gates. Water share 33.7 % (the coverage plane
+> read 33.5 % mean — the two agree, which is the point: the classification was
+> never the bug, the storage resolution was).
+>
+> ### `env_live_water_mask_bias` DID NOT DIE, IT MOVED — and maskGain DID die
+>
+> With the verdict stored per texel there is no fraction left to threshold at
+> sample time, so **`maskBias`/`maskGain`, `lwBias`/`lwGain`/`lwAlphaMin` and
+> `EnvLiveWater_MaskAt` are all deleted** (grep-verified: zero references in the
+> tree). The per-pixel gate is now ONE integer compare on a 0/255 alpha, with no
+> int→float convert, no remap multiply and no clamp — strictly fewer instructions
+> per gated pixel than the ramp it replaces. The flag survives **re-sited to the
+> bake**, where a fraction still genuinely exists: the bake renders 1024² and
+> stores 512², so a texel owns exactly 4 source pixels and the ladder is
+> 1/4·2/4·3/4·4/4. **Default 0.0 → 0.5 = MAJORITY**, the exact classification.
+> 0 dilates the water region by up to a texel, 1 erodes it.
+>
+> ### THE ACCEPTANCE ARM, MEASURED — and the honest half of the result
+>
+> Camera pinned, wave clock moved ALONE (`--water_ripple_speed` 1.0 vs 1.6),
+> control = the same clock change with the flag OFF, region classes from
+> `--env_water_region_viz` at `amp=0`. **His arm literally**:
+> `./DEMO --env_live_water --deferred --city-env-pixel`. Regions are scored
+> EXCLUSIVELY, because a mipped bilinear env tap reads a NEIGHBOURHOOD of baked
+> texels and the water/non-water sets overlap on every pixel that straddles the
+> reflected waterline — scoring against the union hides the whole result inside
+> the overlap.
+>
+> | pose | arm | DRY moved (reads ONLY non-water) | boundary band moved | water motion |
+> |---|---|--:|--:|--:|
+> | y=190 | before | **0** of 126 248 | 39 664 (45.16 %) | 100 % |
+> | y=190 | after | **0** | **36 203 (41.22 %)** | 100.3 % |
+> | y=423 (his pin pose) | before | **0** of 202 160 | 72 530 (59.66 %) | 100 % |
+> | y=423 | after | **0** | **65 560 (53.92 %)** | 100.4 % |
+> | y=800 | before | **0** of 307 417 | 89 008 (63.47 %) | 100 % |
+> | y=800 | after | **0** | **80 740 (57.58 %)** | 100.1 % |
+>
+> **THE DEFERRED PATH NEVER HAD A GROSS BLEED: 0 pixels that read only non-water
+> content move, in EITHER arm, at every pose.** It already read the mask per
+> pixel (`5f1ffa92`); the forward path was the one with the structural leak and
+> `b2e6c915` fixed that. So on his arm the exact bit buys a **boundary
+> tightening** — 8 354 px stop being displaced, 1 412 start, net −6 942, and
+> 99.6 % of the ones that stop are boundary pixels. Water motion is not damped to
+> buy it (100.1–100.4 %). Crop: `docs/img/envwaterbit/waterbit_city_t1961_his_arm.png`.
+>
+> ### THE DISCRIMINATOR — the residual band is the TAP's mip footprint, not the mask
+>
+> One run separates them. With the env tap sharpened (`--city-env-gloss=4000`,
+> mip ≈ 0) at the same pose, the boundary band collapses 121 582 → 42 457 px and
+> **the two arms separate hard**:
+>
+> | arm | DRY moved | band moved | water motion |
+> |---|--:|--:|--:|
+> | before | **226 px** (0.10 % of 234 980) | 36 090 (85.00 %) | 100 % |
+> | after | **0 px** | **25 842 (60.87 %)** | 100.3 % |
+>
+> So the coverage plane **did** displace content that reads only non-water — 226
+> px of it — and the exact bit displaces none. At his default `city_env_gloss`
+> 24 the tap averages ~8–16 baked texels, so the band there is **the filter's
+> width, not the mask's**, and no mask can shrink it: displacing a filtered
+> lookup drags whatever else is inside the filter. Crop:
+> `docs/img/envwaterbit/waterbit_city_t1961_sharp_tap.png`. **If he wants the
+> band itself narrower, the lever is the tap (gloss / a sharper env mip), not the
+> verdict** — that is now measured rather than assumed, and it is the next thing
+> to put to him.
+>
+> ### GATES — FLAG OFF IS BYTE-NULL
+>
+> Differential, one asset tree, base = `f25bb992`: **all eight pins reproduce
+> their recorded values 2/2 on both arms** — chase `3bfd4244`/`42d79fad`/
+> `622b96a2`/`31aa5203`/`ca07a814`, city `3413028b`, fountain `8db68ccb`, greets
+> `570a7b44`. The FORWARD city row agrees at `bbc0056b` once run 1 is discarded
+> (it cold-bakes its own cube — the documented discard, and the base arm's run 1
+> `316b9f8e` is exactly that trap firing). `render_gate.sh` **ALL FOUR PASS** at
+> `4ac809e5`/`826c09e6`/`b41894f9`/`166fa25a`.
+>
+> **COST: NOT RESOLVABLE, and I am not going to invent a number.** Two
+> interleaved ABBA batteries (6×20 and 8×25 iters) on this box read a within-arm
+> spread of 85–315 ms and 117–207 ms against an effect that can only be a few
+> tenths; the paired deltas change sign round to round. What IS known is
+> mechanical and directional: the per-pixel gate lost a 4-tap bilinear plus a
+> subtract/multiply/clamp and gained nothing, the sheet build lost a whole
+> 6×512²-per-probe upsample pass, and resident memory went 6.7 → 13.3 MiB. Re-run
+> it on a quiet machine before quoting anything.
+
 > ## 2026-08-15f — THE GREETS PEEL A/B WAS MEASURING NOTHING: GREETS HAS NEVER RUN MORE THAN ONE PEEL PASS
 >
 > ### 1. THE BAND LEAD IS DEAD — the user's `--xpar-peel-passes=1` A/B had no independent variable
@@ -172,6 +292,12 @@
 > revert this one alone and the old pin table returns with −29 %/−40 % of the
 > round still in place. Countersign or revert; the numbers to weigh are 7 px
 > against 1.9 ms of chase and 0.5 ms of city.
+>
+> > **COUNTERSIGNED 2026-08-15 by the user — "6 seems ok"** (item 6 of the
+> > round-up: this judge call together with `f1ffc925`'s chase/greets ≤ 2/255).
+> > The four moved pin values above are ADOPTED and are the ones every later
+> > gate is held to — they reproduce exactly in the 2026-08-16 exact-water-bit
+> > round's differential gate. No revert is held open.
 
 > ## 2026-08-15d — THE WATER PASSES WERE NEVER SLOW, THEY WERE BADLY SHARED: −29 % CHASE, −40 % CITY, BIT-EXACT
 >
@@ -1352,6 +1478,12 @@
 > −1.8 %/−2.3 %, t=1400 −0.9 %/−2.2 %, t=2400 −3.0 %/−3.0 %. Greets −2.1 % cyc.
 >
 > ### BYTES — JUDGE CALL, LANDED DEFAULT-ON, PIN MOVED
+>
+> > **COUNTERSIGNED 2026-08-15 by the user — "6 seems ok".** This was item 6 of
+> > the round-up put to him (the two outstanding pin-move judge calls: this one,
+> > chase/greets at ≤ 2/255, and `593f7842`'s water caustic at 7 px/1 LSB). The
+> > pin values below are therefore ADOPTED, not pending; the fold stays
+> > default-on and no revert is held open.
 >
 > The VP/DV fold is NOT bit-exact (the scalar arm rounds `Y·Py` before adding
 > `Pz`; this rounds the fused sum once). Measured: **t=900, t=1400, t=2400
