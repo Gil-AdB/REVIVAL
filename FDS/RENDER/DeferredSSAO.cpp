@@ -251,6 +251,16 @@ void Render_SSAO() {
 		const float thickness = fds::FeatureFlags::ssao_gtao_thickness();
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
+		// SECTOR SCALE — the horizon angles are consumed ONLY as h*32 (32-sector
+		// visibility bitmask), and h itself is (halfPI - nAng)/PI - sgn*a/PI. So
+		// the whole (divide by PI, add the per-slice offset, multiply by 32) chain
+		// collapses into one FNMADD against a per-(slice,direction) constant:
+		//   S = kang - a*cSgn,  kang = (halfPI-nAng)*32/PI,  cSgn = sgn*32/PI.
+		// That removes TWO full-precision vector divides per sample from the
+		// innermost loop (2 x 8 lanes x 16 samples x 1.28 M cells at his arm's
+		// full-res SSAO), which on this core are the only non-pipelined FP ops in
+		// the chain besides the two sqrts inside gtaoAcos.
+		const float kSec = 32.0f / kPI;
 		buildSliceTrig(slices);          // main thread, before the dispatch
 		const bool noSimd = std::getenv("FDS_SSAO_NOSIMD") != nullptr;   // A/B validation escape
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
@@ -292,8 +302,14 @@ void Render_SSAO() {
 							const float pnx = Nx - snx*ndotsn, pny = Ny - sny*ndotsn, pnz = Nz - snz*ndotsn;
 							const float tx = sny*Vz - snz*Vy, ty = snz*Vx - snx*Vz, tz = snx*Vy - sny*Vx;
 							const float nAng = atan2_approx(pnx*tx + pny*ty + pnz*tz, pnx*Vx + pny*Vy + pnz*Vz);
+							// SECTOR UNITS (see the SIMD twin): the horizon angle is
+							// only ever consumed as h*32, so carry 32/PI into the
+							// per-slice constant and the per-sample work becomes one
+							// FNMADD instead of a divide by PI plus a multiply by 32.
+							const float kang = (kHalfPI - nAng) * kSec;
 							uint32_t mask = 0u;
 							for (int sgn = -1; sgn <= 1; sgn += 2) {
+								const float cSgn = float(sgn) * kSec;
 								for (int j = 0; j < steps; ++j) {
 									const float t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
 									const int sx = px + int(float(sgn)*dcx*t + 0.5f);
@@ -312,12 +328,12 @@ void Render_SSAO() {
 									const float binv = fast_rsqrt(bx*bx + by*by + bz*bz + 1e-12f);
 									const float fa = gtaoAcos((dx*Vx + dy*Vy + dz*Vz) * dinv);
 									const float ba = gtaoAcos((bx*Vx + by*Vy + bz*Vz) * binv);
-									float h0 = (float(sgn)*(-fa) - nAng + kHalfPI) / kPI;
-									float h1 = (float(sgn)*(-ba) - nAng + kHalfPI) / kPI;
-									h0 = h0<0?0:(h0>1?1:h0); h1 = h1<0?0:(h1>1?1:h1);
+									float h0 = kang - fa*cSgn;      // sector units, 0..32
+									float h1 = kang - ba*cSgn;
+									h0 = h0<0?0:(h0>32.0f?32.0f:h0); h1 = h1<0?0:(h1>32.0f?32.0f:h1);
 									const float mn = h0<h1?h0:h1, mx = h0<h1?h1:h0;
-									uint32_t startBit = (uint32_t)(mn * 32.0f);
-									int angBits = (int)ceilf((mx - mn) * 32.0f);
+									uint32_t startBit = (uint32_t)mn;
+									int angBits = (int)ceilf(mx - mn);
 									if (angBits > 0) {
 										if (startBit > 31) startBit = 31;
 										const uint32_t bf = (angBits >= 32) ? 0xFFFFFFFFu : (0xFFFFFFFFu >> (32 - angBits));
@@ -374,8 +390,7 @@ void Render_SSAO() {
 						const __m256 pxiV=_mm256_load_ps(aPxi), pyV=_mm256_set1_ps(float(py));
 						const __m256 sradV=_mm256_load_ps(aSr);
 						alignas(32) float visAcc[8] = {0,0,0,0,0,0,0,0};
-						const __m256 vHalf=_mm256_set1_ps(0.5f), vOne=_mm256_set1_ps(1.0f), vZero=_mm256_setzero_ps();
-						const __m256 vPI=_mm256_set1_ps(kPI), vHalfPI=_mm256_set1_ps(kHalfPI);
+						const __m256 vHalf=_mm256_set1_ps(0.5f), vZero=_mm256_setzero_ps();
 						const __m256 vThick=_mm256_set1_ps(thickness), vR2=_mm256_set1_ps(r2max), vEps=_mm256_set1_ps(1e-8f);
 						const __m256 v32=_mm256_set1_ps(32.0f);
 						const __m256i i32=_mm256_set1_epi32(32), iAll=_mm256_set1_epi32(-1);
@@ -394,14 +409,16 @@ void Render_SSAO() {
 								const float nd=aNx[k]*snx+aNy[k]*sny+aNz[k]*snz;
 								const float pnx=aNx[k]-snx*nd,pny=aNy[k]-sny*nd,pnz=aNz[k]-snz*nd;
 								const float tx=sny*aVz[k]-snz*aVy[k],ty=snz*aVx[k]-snx*aVz[k],tz=snx*aVy[k]-sny*aVx[k];
-								aNang[k]=atan2_approx(pnx*tx+pny*ty+pnz*tz, pnx*aVx[k]+pny*aVy[k]+pnz*aVz[k]);
+								aNang[k]=(kHalfPI-atan2_approx(pnx*tx+pny*ty+pnz*tz,
+								                               pnx*aVx[k]+pny*aVy[k]+pnz*aVz[k]))*kSec;
 							}
-							const __m256 dcxV=_mm256_load_ps(aDcx), dsyV=_mm256_load_ps(aDsy), nAngV=_mm256_load_ps(aNang);
+							const __m256 dcxV=_mm256_load_ps(aDcx), dsyV=_mm256_load_ps(aDsy), kangV=_mm256_load_ps(aNang);
 							const __m256 jitV=_mm256_load_ps(aJit);
 							const __m256 srStep=_mm256_mul_ps(sradV,_mm256_set1_ps(1.0f/float(steps)));
 							__m256i maskV=_mm256_setzero_si256();
 							for (int sgn=-1; sgn<=1; sgn+=2) {
 								const __m256 sgnV=_mm256_set1_ps(float(sgn));
+								const __m256 cSgnV=_mm256_set1_ps(float(sgn)*kSec);
 								for (int j=0;j<steps;++j) {
 									// t = ((j+0.5)+jit*0.5) * srad/steps
 									__m256 tV=_mm256_mul_ps(_mm256_add_ps(_mm256_set1_ps(float(j)+0.5f),
@@ -442,13 +459,15 @@ void Render_SSAO() {
 									const __m256 fdot=_mm256_mul_ps(_mm256_fmadd_ps(dx,VxV,_mm256_fmadd_ps(dy,VyV,_mm256_mul_ps(dz,VzV))),dinv);
 									const __m256 bdot=_mm256_mul_ps(_mm256_fmadd_ps(bx,VxV,_mm256_fmadd_ps(by,VyV,_mm256_mul_ps(bz,VzV))),binv);
 									const __m256 fa=gtaoAcos_x8(fdot), ba=gtaoAcos_x8(bdot);
-									// h = (sgn*(-a) - nAng + halfPI)/PI
-									__m256 h0=_mm256_div_ps(_mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(sgnV,_mm256_sub_ps(vZero,fa)),nAngV),vHalfPI),vPI);
-									__m256 h1=_mm256_div_ps(_mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(sgnV,_mm256_sub_ps(vZero,ba)),nAngV),vHalfPI),vPI);
-									h0=_mm256_min_ps(_mm256_max_ps(h0,vZero),vOne); h1=_mm256_min_ps(_mm256_max_ps(h1,vZero),vOne);
+									// h*32 = kang - a*(sgn*32/PI), one FNMADD each: the
+									// two _mm256_div_ps by PI and the two multiplies by
+									// 32 are folded into the per-slice constant above.
+									__m256 h0=_mm256_fnmadd_ps(fa,cSgnV,kangV);
+									__m256 h1=_mm256_fnmadd_ps(ba,cSgnV,kangV);
+									h0=_mm256_min_ps(_mm256_max_ps(h0,vZero),v32); h1=_mm256_min_ps(_mm256_max_ps(h1,vZero),v32);
 									const __m256 mn=_mm256_min_ps(h0,h1), mx=_mm256_max_ps(h0,h1);
-									__m256i startB=_mm256_min_epi32(_mm256_cvttps_epi32(_mm256_mul_ps(mn,v32)),_mm256_set1_epi32(31));
-									__m256i angB=_mm256_min_epi32(_mm256_max_epi32(_mm256_cvttps_epi32(_mm256_ceil_ps(_mm256_mul_ps(_mm256_sub_ps(mx,mn),v32))),_mm256_setzero_si256()),i32);
+									__m256i startB=_mm256_min_epi32(_mm256_cvttps_epi32(mn),_mm256_set1_epi32(31));
+									__m256i angB=_mm256_min_epi32(_mm256_max_epi32(_mm256_cvttps_epi32(_mm256_ceil_ps(_mm256_sub_ps(mx,mn))),_mm256_setzero_si256()),i32);
 									// base = 0xFFFFFFFF >> (32-angB);  contrib = base << startB
 									__m256i base=_mm256_srlv_epi32(iAll,_mm256_sub_epi32(i32,angB));
 									__m256i contrib=_mm256_sllv_epi32(base,startB);
