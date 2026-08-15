@@ -26,11 +26,25 @@ namespace pwater {
 // scrolling layers at different scale/rotation — the layers break each other's
 // tiling into something organic + non-repetitive, and the whole thing is a
 // couple of texture taps per pixel instead of ~9 trig calls (the optimization).
-static std::vector<float> g_waterNrm;       // WNRM*WNRM*2 floats: slope (nx,nz), tiling
-static constexpr int      WNRM = 128;
+// WNRM_S = the STORAGE stride, one texel wider/taller than the tile. The map
+// is periodic, so column WNRM is a verbatim copy of column 0 and row WNRM a
+// verbatim copy of row 0 — a HALO. The point is the sampler: with the halo,
+// the "+1 neighbour" of the last texel is the texel next to it in memory, so
+// sampleWaterNrm's two `(x + 1) % WNRM` wraps disappear. clang cannot fold
+// those into an AND (it must handle a negative left operand), so each cost
+// add/and/negs/and/csneg = 5 instructions, ×4 per waterWaveSlope call (two
+// axes × two layers) = 20 of the function's 161 — in the 4th-hottest symbol
+// of the city frame. The halo also makes the (i0,i0+1) pair CONTIGUOUS, which
+// lets the corner loads pair.
+// BIT-EXACT by construction: every fetched value is the same float the modulo
+// addressed, and the halo is copied AFTER the normalize so it is bit-identical
+// to its source texel.
+static std::vector<float> g_waterNrm;       // WNRM_S*WNRM_S*2 floats: slope (nx,nz), tiling
+static constexpr int      WNRM   = 128;     // tile period
+static constexpr int      WNRM_S = WNRM + 1;// storage stride (halo)
 
 static void buildWaterNormalMap() {
-	g_waterNrm.assign(size_t(WNRM) * size_t(WNRM) * 2, 0.0f);
+	g_waterNrm.assign(size_t(WNRM_S) * size_t(WNRM_S) * 2, 0.0f);
 	struct W { int kx, kz; float a, ph; };
 	const W ws[8] = {
 		{1, 0, 1.00f, 0.0f}, {0, 1, 0.85f, 1.3f}, {1, 1, 0.70f, 2.1f}, {2,-1, 0.55f, 0.7f},
@@ -46,13 +60,29 @@ static void buildWaterNormalMap() {
 			nx += w.a * (twoPi * float(w.kx) / float(WNRM)) * c;
 			nz += w.a * (twoPi * float(w.kz) / float(WNRM)) * c;
 		}
-		float* p = &g_waterNrm[(size_t(j) * WNRM + i) * 2];
+		float* p = &g_waterNrm[(size_t(j) * WNRM_S + i) * 2];
 		p[0] = nx; p[1] = nz;
 		if (std::fabs(nx) > maxAbs) maxAbs = std::fabs(nx);
 		if (std::fabs(nz) > maxAbs) maxAbs = std::fabs(nz);
 	}
 	const float inv = 1.0f / maxAbs;                            // normalize slope to ~[-1,1]
-	for (float& v : g_waterNrm) v *= inv;
+	for (int j = 0; j < WNRM; ++j) for (int i = 0; i < WNRM; ++i) {
+		float* p = &g_waterNrm[(size_t(j) * WNRM_S + i) * 2];
+		p[0] *= inv; p[1] *= inv;
+	}
+	// Wrap halo: column WNRM == column 0, row WNRM == row 0 (the map is
+	// periodic), copied AFTER the scale so each halo texel is bit-identical to
+	// the texel the old `% WNRM` would have addressed.
+	for (int j = 0; j < WNRM; ++j) {
+		const float* s = &g_waterNrm[(size_t(j) * WNRM_S + 0) * 2];
+		float*       d = &g_waterNrm[(size_t(j) * WNRM_S + WNRM) * 2];
+		d[0] = s[0]; d[1] = s[1];
+	}
+	for (int i = 0; i <= WNRM; ++i) {
+		const float* s = &g_waterNrm[(size_t(0)    * WNRM_S + i) * 2];
+		float*       d = &g_waterNrm[(size_t(WNRM) * WNRM_S + i) * 2];
+		d[0] = s[0]; d[1] = s[1];
+	}
 }
 
 static inline void sampleWaterNrm(float u, float v, float& nx, float& nz) {
@@ -61,11 +91,13 @@ static inline void sampleWaterNrm(float u, float v, float& nx, float& nz) {
 	float fv = v - std::floor(v / N) * N;
 	int i0 = int(fu), j0 = int(fv); if (i0 >= N) i0 = 0; if (j0 >= N) j0 = 0;
 	const float du = fu - i0, dv = fv - j0;
-	const int i1 = (i0 + 1) % N, j1 = (j0 + 1) % N;
-	const float* a = &g_waterNrm[(size_t(j0)*N + i0)*2];
-	const float* b = &g_waterNrm[(size_t(j0)*N + i1)*2];
-	const float* c = &g_waterNrm[(size_t(j1)*N + i0)*2];
-	const float* d = &g_waterNrm[(size_t(j1)*N + i1)*2];
+	// i0,j0 are in [0, N-1] (fu,fv in [0,N) by the wrap, clamped above), so
+	// the +1 neighbour is in [1, N] — inside the HALO, no modulo. See the
+	// comment on WNRM_S.
+	const float* a = &g_waterNrm[(size_t(j0)*WNRM_S + i0)*2];
+	const float* b = a + 2;                                     // (i0+1, j0)
+	const float* c = a + size_t(WNRM_S)*2;                      // (i0,   j0+1)
+	const float* d = c + 2;                                     // (i0+1, j0+1)
 	nx = (a[0]*(1-du)+b[0]*du)*(1-dv) + (c[0]*(1-du)+d[0]*du)*dv;
 	nz = (a[1]*(1-du)+b[1]*du)*(1-dv) + (c[1]*(1-du)+d[1]*du)*dv;
 }
