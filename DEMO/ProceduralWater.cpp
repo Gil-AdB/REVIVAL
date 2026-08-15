@@ -3,12 +3,15 @@
 #include "Rev.h"
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
+#include <RENDER/TailProf.h>   // --deferred_prof: the water passes run OUTSIDE
+                               // renderFrame, so they had no phase row at all.
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -207,6 +210,85 @@ static inline float causticCellVaried(float wx, float wz, float bnx, float bnz,
 	return cell*0.5f + c2*0.28f + c3*0.22f;
 }
 
+// ───────── Instrument: the pixel census (--water_census) ─────────
+// Both water passes scan the WHOLE framebuffer and ray-cast every pixel to the
+// water plane. This counts what that scan actually finds, so every "does this
+// work produce anything visible" question has a denominator. Deliberately a
+// SEPARATE sweep (classification math only, no shading) so the shading loops
+// stay untouched — the census arm and the timing arm are different runs anyway.
+namespace {
+struct CensusAcc {
+	const char* tag = nullptr;
+	long long frames = 0, total = 0, rejD = 0, rejNear = 0, rejFar = 0, rejOccl = 0, live = 0;
+};
+CensusAcc g_census[4];
+bool g_censusPrinted = false;
+
+void censusPrint() {
+	if (g_censusPrinted) return;
+	g_censusPrinted = true;
+	bool any = false;
+	for (const CensusAcc& a : g_census) if (a.tag && a.frames) { any = true; break; }
+	if (!any) return;
+	printf("[WCENSUS] ==== water-pass pixel classification (per frame) ====\n");
+	printf("[WCENSUS] %-14s %8s %12s %9s %9s %9s %9s %11s %7s\n",
+	       "pass", "frames", "scanned/f", "rej_D", "rej_near", "rej_far", "rej_occl", "LIVE/f", "live%");
+	for (const CensusAcc& a : g_census) {
+		if (!a.tag || !a.frames) continue;
+		const double f = double(a.frames);
+		printf("[WCENSUS] %-14s %8lld %12.0f %9.0f %9.0f %9.0f %9.0f %11.0f %6.2f%%\n",
+		       a.tag, a.frames, double(a.total)/f, double(a.rejD)/f, double(a.rejNear)/f,
+		       double(a.rejFar)/f, double(a.rejOccl)/f, double(a.live)/f,
+		       a.total ? 100.0*double(a.live)/double(a.total) : 0.0);
+	}
+	printf("[WCENSUS] rej_near = ray misses the plane in front of the eye (sd<=1) — the ABOVE-HORIZON half.\n");
+	printf("[WCENSUS] rej_far  = plane hit past the far plane. rej_occl = opaque geometry in front (glints only;\n");
+	printf("[WCENSUS]            the city ripple map has NO occlusion test, so its LIVE count includes pixels\n");
+	printf("[WCENSUS]            covered by buildings whose dispMap entry is never read).\n");
+	printf("[WCENSUS] LIVE = pixels that get a full wave-slope evaluation (+ caustics + specular for glints).\n");
+}
+CensusAcc* censusSlot(const char* tag) {
+	for (CensusAcc& a : g_census) {
+		if (a.tag && std::strcmp(a.tag, tag) == 0) return &a;
+		if (!a.tag) { a.tag = tag; static bool reg = (std::atexit(censusPrint), true); (void)reg; return &a; }
+	}
+	return nullptr;
+}
+}  // namespace
+
+void Census(const char* tag, float waterY, bool useOcclusion, bool useFarCut) {
+	if (!fds::FeatureFlags::water_census() || !View) return;
+	CensusAcc* a = censusSlot(tag);
+	if (!a) return;
+	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+	const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+	const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+	const float cex = CntrEX, cey = CntrEY;
+	const float m01=View->Mat[0][1], m11=View->Mat[1][1], m21=View->Mat[2][1];
+	const float ey=View->ISource.y;
+	const float fzp = useFarCut && CurScene && CurScene->FZP > 0.0f ? CurScene->FZP : 1e30f;
+	const uint16_t* const oz = ZPage16;
+	++a->frames;
+	for (int y = 0; y < YRes; ++y) {
+		const uint16_t* orow = oz + size_t(y) * size_t(XRes);
+		for (int x = 0; x < XRes; ++x) {
+			++a->total;
+			const float xn = (float(x) - cex) * invFX;
+			const float yn = (cey - float(y)) * invFY;
+			const float D = m01*xn + m11*yn + m21;
+			if (D == 0.0f) { ++a->rejD; continue; }
+			const float sd = (waterY - ey) / D;
+			if (sd <= 1.0f)  { ++a->rejNear; continue; }
+			if (sd >= fzp)   { ++a->rejFar;  continue; }
+			if (useOcclusion) {
+				const uint16_t oe = orow[x];
+				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) { ++a->rejOccl; continue; }
+			}
+			++a->live;
+		}
+	}
+}
+
 // ───────── Public API ─────────
 
 void BuildField() {
@@ -253,6 +335,7 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 	const float strength = fds::FeatureFlags::water_bump_strength();
 	if (strength <= 0.0f || !View) return;
 	if (maxX <= minX) return;                      // water extent not set yet
+	Census("glints", waterY, /*useOcclusion=*/true, /*useFarCut=*/true);
 	const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
 	const float scale = fds::FeatureFlags::water_bump_scale();
 	// Field-warped albedo texture (only in procedural mode): the SAME field
@@ -287,6 +370,15 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 	// ripple uses, so glints and reflection agree (coherent water).
 	const float bumpAmp = 1.7f;
 	const float wYplane = waterY;
+	// The specular lobe cannot brighten a pixel below a KNOWN half-vector
+	// threshold, and powf is the single most expensive operation in this loop —
+	// a libm CALL, taken on every pixel that reaches it. The tail is exact, not
+	// approximate: the write is `add = int(g*255 + 0.5)` with
+	// g = pow(ndh,shin)*strength*distFade and distFade <= 1, so add == 0 — i.e.
+	// `continue` — for every ndh with pow(ndh,shin)*strength < 0.5/255.
+	// Inverting that once per pass turns it into a plain compare that provably
+	// skips only pixels whose output was already zero. BIT-EXACT.
+	const float ndhMin = std::pow(0.5f / (255.0f * strength), 1.0f / shin) * 0.99999f;
 	// Cut glints off at the far plane and fade them over the last stretch —
 	// otherwise the grazing water near the horizon spikes the specular into
 	// a bright artifact band.
@@ -359,7 +451,7 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 				float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
 				const float hInv = 1.0f / std::sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
 				const float ndh = (Nx*Hx + Ny*Hy + Nz*Hz) * hInv;
-				if (ndh <= 0.0f) continue;
+				if (ndh < ndhMin) continue;    // provably add == 0 (see ndhMin)
 				const float g = std::pow(ndh, shin) * strength * distFade;
 				int add = int(g * 255.0f + 0.5f); if (add <= 0) continue; if (add > 255) add = 255;
 				const dword p = row[x];
@@ -369,18 +461,7 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 			}
 		}
 	};
-	auto& tp = ThreadPool::instance();
-	const int nT = (int)tp.size();
-	if (nT < 2 || YRes < 64) { band(0, YRes); return; }
-	const int chunk = (YRes + nT - 1) / nT;
-	auto remaining = std::make_shared<std::atomic<int>>(0);
-	for (int i = 0; i < nT; ++i) {
-		const int y0 = i * chunk; if (y0 >= YRes) break;
-		const int y1 = std::min(y0 + chunk, YRes);
-		remaining->fetch_add(1, std::memory_order_relaxed);
-		tp.enqueue([band, y0, y1, remaining]() { band(y0, y1); remaining->fetch_sub(1, std::memory_order_release); });
-	}
-	while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+	runRowBands("water-glints", band);
 }
 
 // water_variation ON path (chase). A full COPY of RenderGlints() that swaps the
@@ -391,6 +472,7 @@ void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float 
 	const float strength = fds::FeatureFlags::water_bump_strength();
 	if (strength <= 0.0f || !View) return;
 	if (maxX <= minX) return;
+	Census("glintsVaried", waterY, /*useOcclusion=*/true, /*useFarCut=*/true);
 	const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
 	const float scale = fds::FeatureFlags::water_bump_scale();
 	const float texMix   = WaterProceduralEffective() ? fds::FeatureFlags::water_albedo_mix() : 0.0f;
@@ -412,6 +494,15 @@ void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float 
 	float Lx=0.35f, Ly=0.82f, Lz=0.42f; { const float l=std::sqrt(Lx*Lx+Ly*Ly+Lz*Lz); Lx/=l;Ly/=l;Lz/=l; }
 	const float bumpAmp = 1.7f;
 	const float wYplane = waterY;
+	// The specular lobe cannot brighten a pixel below a KNOWN half-vector
+	// threshold, and powf is the single most expensive operation in this loop —
+	// a libm CALL, taken on every pixel that reaches it. The tail is exact, not
+	// approximate: the write is `add = int(g*255 + 0.5)` with
+	// g = pow(ndh,shin)*strength*distFade and distFade <= 1, so add == 0 — i.e.
+	// `continue` — for every ndh with pow(ndh,shin)*strength < 0.5/255.
+	// Inverting that once per pass turns it into a plain compare that provably
+	// skips only pixels whose output was already zero. BIT-EXACT.
+	const float ndhMin = std::pow(0.5f / (255.0f * strength), 1.0f / shin) * 0.99999f;
 	const float fzp = (CurScene && CurScene->FZP > 0.0f) ? CurScene->FZP : 1e30f;
 	const float fadeStart = fzp * 0.55f;
 	const float invFadeRange = 1.0f / std::max(1.0f, fzp - fadeStart);
@@ -459,7 +550,7 @@ void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float 
 				float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
 				const float hInv = 1.0f / std::sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
 				const float ndh = (Nx*Hx + Ny*Hy + Nz*Hz) * hInv;
-				if (ndh <= 0.0f) continue;
+				if (ndh < ndhMin) continue;    // provably add == 0 (see ndhMin)
 				const float g = std::pow(ndh, shin) * strength * distFade;
 				int add = int(g * 255.0f + 0.5f); if (add <= 0) continue; if (add > 255) add = 255;
 				const dword p = row[x];
@@ -469,18 +560,7 @@ void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float 
 			}
 		}
 	};
-	auto& tp = ThreadPool::instance();
-	const int nT = (int)tp.size();
-	if (nT < 2 || YRes < 64) { band(0, YRes); return; }
-	const int chunk = (YRes + nT - 1) / nT;
-	auto remaining = std::make_shared<std::atomic<int>>(0);
-	for (int i = 0; i < nT; ++i) {
-		const int y0 = i * chunk; if (y0 >= YRes) break;
-		const int y1 = std::min(y0 + chunk, YRes);
-		remaining->fetch_add(1, std::memory_order_relaxed);
-		tp.enqueue([band, y0, y1, remaining]() { band(y0, y1); remaining->fetch_sub(1, std::memory_order_release); });
-	}
-	while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+	runRowBands("water-glints", band);
 }
 
 }  // namespace pwater

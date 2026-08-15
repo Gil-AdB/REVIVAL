@@ -17,7 +17,63 @@
 // view/framebuffer globals (View, VPage, ZPage16, CurScene->FZP, ...), so the
 // caller must have SetCurrentScene + the camera globals live before calling.
 
+#include <algorithm>
+#include <atomic>
+#include <memory>
+#include <thread>
+
+#include <Threads.h>
+#include <Base/FDS_VARS.H>
+#include <RENDER/TailProf.h>
+
 namespace pwater {
+
+// ───────── Band dispatch for the two full-screen water passes ─────────
+// Both glint passes scan every row of the framebuffer, but the rows are NOT
+// equal work: everything above the horizon is a ~10-flop reject and everything
+// below is a full wave-slope + caustic + specular evaluation. The original
+// dispatch handed each worker one CONTIGUOUS block of rows, which is the worst
+// possible split of that gradient — the top workers finish on rejects while the
+// bottom workers carry the whole pass. This hands out SMALL contiguous row
+// chunks from a shared atomic cursor instead: workers that drew cheap rows come
+// back for more, so the tail is one chunk long instead of one band long. Rows
+// are independent (each writes only its own VPage row), so this is bit-exact
+// for any scheduling order.
+//
+// Also reports thrsum/effPar for the phase — without it the water rows were the
+// only phases in the tree with no parallelism column, which is exactly the
+// column that shows this imbalance.
+template <class Band>
+inline void runRowBands(const char* phase, const Band& band) {
+	auto& tp = ThreadPool::instance();
+	const int nT = (int)tp.size();
+	if (nT < 2 || YRes < 64) { band(0, YRes); return; }
+	constexpr int kChunk = 8;                       // rows per grab
+	const TailProf::Stamp _st(phase);
+	auto cursor    = std::make_shared<std::atomic<int>>(0);
+	auto remaining = std::make_shared<std::atomic<int>>(0);
+	for (int i = 0; i < nT; ++i) {
+		remaining->fetch_add(1, std::memory_order_relaxed);
+		tp.enqueue([band, cursor, remaining]() {
+			const long long _tp = TailProf::nowNs();
+			for (;;) {
+				const int y0 = cursor->fetch_add(kChunk, std::memory_order_relaxed);
+				if (y0 >= YRes) break;
+				band(y0, std::min(y0 + kChunk, YRes));
+			}
+			TailProf::addBusy(_tp);
+			remaining->fetch_sub(1, std::memory_order_release);
+		});
+	}
+	while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+	TailProf::drainSpun(phase, nT, _st, /*depth=*/3);
+}
+
+
+// Instrument (--water_census): classify every pixel the named pass scans into
+// reject/live buckets, accumulate, print a [WCENSUS] table at exit. Separate
+// classification-only sweep — the shading loops are untouched.
+void Census(const char* tag, float waterY, bool useOcclusion, bool useFarCut);
 
 // Build the wave normal-field + caustic texture. Call once per scene init.
 void BuildField();

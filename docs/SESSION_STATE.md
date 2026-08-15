@@ -1,5 +1,107 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-15d — THE WATER PASSES WERE NEVER SLOW, THEY WERE BADLY SHARED: −29 % CHASE, −40 % CITY, BIT-EXACT
+>
+> Round-1 row 7 (`docs/PERF_STATE.md` §00) — "water simulation + glints, never
+> profiled before this round" — profiled and attacked. Two instruments land with
+> it, because the passes had **no phase row at all**: they run OUTSIDE
+> `renderFrame`, so every `--deferred_prof` table ever printed omitted them.
+>
+> **CENSUS FIRST — `--water_census`, the denominators nobody had.** Every water
+> pass scans the WHOLE framebuffer and ray-casts each pixel to the water plane:
+>
+> | pass | scene | scanned/f | above horizon | past far plane | occluded | LIVE |
+> |---|---|--:|--:|--:|--:|--:|
+> | `ripple` (dispMap) | city t=1961 | 2 073 600 | 385 920 | — (no far cut) | — (no occl test) | 1 687 680 (81.4 %) |
+> | `glints` | city t=1961 | 2 073 600 | 385 920 | 109 440 | 652 958 | 925 282 (44.6 %) |
+> | `glintsVaried` | chase t=800 | 2 073 600 | 837 120 | 15 360 | 103 222 | 1 117 898 (53.9 %) |
+>
+> **GREETS HAS NO WATER AT ALL** — no `pwater::` call site, no water surface in
+> `GREETS.FLD`. The handover's "greets' water ceiling presumably runs the same
+> machinery" is false; there is nothing to census there.
+>
+> **THE FOUNTAIN-198M PATTERN IS *NOT* WHAT THIS IS, and that is the finding.**
+> 40.4 % of chase's scan and 23.9 % of city's produce nothing, and all of it is
+> exactly row-aligned (837 120 = 436 × 1920; 385 920 = 201 × 1920; 109 440 = 57 ×
+> 1920) — so a row-level early-out captures 100 % of the reject set with no
+> floating-point risk. It was built, and it is **worth 0.7 %**: the reject path is
+> ~10 instructions against **~1050 instructions per LIVE pixel**. The scan is not
+> the cost. Two sibling micro-levers died the same way and are recorded below.
+>
+> **WHAT IT ACTUALLY WAS: the row banding.** Each pass handed every worker ONE
+> CONTIGUOUS BLOCK of rows — the worst possible split of a screen whose top half
+> is a 10-instruction reject and whose bottom half is a full wave-slope + caustic
+> + specular evaluation. `pwater::runRowBands` hands out 8-row chunks from a
+> shared atomic cursor instead. Rows are independent (each writes only its own
+> VPage row), so this is **bit-exact for any scheduling order**, and it now
+> reports `thrsum`/`effPar` — the column whose absence hid this for the whole
+> campaign. `effPar` 11.1 / 10.9 / 11.1 of 12 on the three passes.
+>
+> **AND ONE REAL COMPUTE LEVER: `powf` was being called where its answer could
+> not matter.** The write is `add = int(g*255 + 0.5)` with
+> `g = pow(ndh,shin)*strength*distFade` and `distFade <= 1`, so `add == 0` —
+> already a `continue` — for every `ndh` with `pow(ndh,shin)*strength < 0.5/255`.
+> Inverting that ONCE per pass gives a plain compare ahead of the libm call that
+> provably skips only pixels whose output was zero. **Bit-exact by algebra**, and
+> at city t=1961 it is −11.7 % of the glint pass's CYCLES on its own.
+>
+> ### MEASURED — three arms, one asset tree, interleaved min-of-6 (r0 dropped, load 19→17)
+>
+> | item | parent | child | Δ |
+> |---|--:|--:|--:|
+> | chase t=800 `water-glints` | 14.195 | **10.021** | **−4.174 ms (−29.4 %)** |
+> | city t=1961 `water-glints` | 7.720 | **4.602** | **−3.118 ms (−40.4 %)** |
+> | city t=1961 `water-ripple` | 4.015 | **3.117** | **−0.898 ms (−22.4 %)** |
+> | city `FRAME_MIN` | 76.960 | **73.410** | **−3.550 ms (−4.6 %)** |
+>
+> Parent is `d7a62231` + the instrument ONLY, so both arms carry the same timer.
+> Attribution: `renderFrame` Ginstr/f **3.728 vs 3.732** (chase) and **6.057 vs
+> 6.056** (city); `gbuffer` and `DeferredLighting-call` flat in wall and
+> instructions on both scenes. `Ginstr` chase glints 1.268 → 1.128, city glints
+> 0.523 → 0.434. `Gcyc` chase 0.342 → 0.333, city 0.171 → 0.151 — **chase's win
+> is almost purely parallelism, city's is parallelism plus the `powf` skip.**
+>
+> ### GATES
+>
+> **BIT-EXACT. All eight pins reproduce their RECORDED values — parent 2/2, child
+> 3/3** (chase `7678a6bc` / `42d79fad` / `b29c73f1` / `31aa5203` / `1544b0e7`,
+> city `3f894823`, fountain `8db68ccb`, greets `570a7b44`). `render_gate.sh`
+> **4/4 PASS**. No flag, no judge call, default on. The chase pins exercise
+> `RenderGlintsVaried` (CHASE.CPP `setDefault(water_variation, true)`) and the
+> city pin exercises both `RenderGlints` and `updateRippleDispMap`.
+>
+> ### KILLED THIS ROUND, WITH NUMBERS (all three bit-exact, all three flat)
+>
+> * **Constant texture dimensions** in `sampleWaterTex` — `g_waterTexW/H` are
+>   mutable globals, so `u / W` was a runtime FLOAT DIVIDE and the varied path
+>   takes three taps, i.e. **six fdivs per shaded pixel** for a number that has
+>   been 256 since the texture existed. Folding it removed 5 of the band's 9
+>   `fdiv`. Ginstr 1.172 → 1.181, Gcyc 0.346 → 0.340. **The divides are
+>   independent per tap and the out-of-order core hides them entirely.**
+> * **Occlusion test hoisted above the world-position reconstruction** (fires on
+>   652 958 px/f in city, each of which was paying two 3-term dot products
+>   first): 6.5 M instructions of 477 M = **1.4 %**, sub-noise.
+> * **Per-row horizon / far-plane early-out** (above): **0.7 %**.
+>
+> ### WHAT IS LEFT, PRICED
+>
+> The per-live-pixel body is the whole cost, and it is **five libm calls** in the
+> chase path — `cosf` ×3 + `sinf` (the `waterWaveSlopeVaried` swell) + `powf` —
+> confirmed by disassembly of the outlined band (`$_0::operator()(int,int)`:
+> 909 instructions, 3 `fsqrt`, 5 `bl`). Ablation prices them:
+>
+> * the 4 swell transcendentals → **−20.1 % instructions / −11.7 % wall** of the
+>   chase pass. No bit-exact route exists (they are always consumed); the lever
+>   is a 4-wide vector `cos`, which is a judge call on ~1 ulp.
+> * `powf` beyond the ndhMin skip → the remaining calls are the pixels that
+>   actually glint, so what is left is the lobe itself.
+>
+> A third, untried and structural: **`sampleWaterTex` bilinearly interpolates
+> three channels and every caller then collapses them to `(cb+cg+cr)/765`.**
+> Storing the sum plane instead is one lerp instead of three (~45 instructions
+> per tap, ×3 in the varied path ≈ 15 % of the band) and is exact in the corner
+> values but reassociates the lerp — a small, quantifiable judge call.
+
 > ## 2026-08-15c — THE SPOT PYRAMID HAS A READER NOW, AND THE HANDOVER'S 48.9 % WAS NOT ITS NUMBER
 >
 > **THE TARGET DOES NOT EXIST AT THE SIZE THE HANDOVER CLAIMED.** 91891249 left

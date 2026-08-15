@@ -502,6 +502,31 @@ inline void drain(std::counting_semaphore<INT_MAX>& sem, int n, const char* wave
 	drain(sem, n, wave, depth, st.ns, &st);
 }
 
+// Same bookkeeping for a wave that is joined by SPINNING on an atomic counter
+// rather than acquiring a semaphore (the water passes, the dispMap resample —
+// pool fan-outs that predate the semaphore drain). The caller has already
+// joined; this only closes the counters and books the row, so the wave gets the
+// thrsum/effPar columns instead of a blank.
+inline void drainSpun(const char* wave, int n, const Stamp& st, int depth = 2) {
+	if (!enabled() || n <= 0) return;
+	const long long tLast = nowNs();
+	if (busyN().load(std::memory_order_acquire) > 0) {
+		while (busyN().load(std::memory_order_acquire) < n &&
+		       nowNs() - tLast < 200000)
+			std::this_thread::yield();
+	}
+	busyN().store(0, std::memory_order_relaxed);
+	const double busyMs = busyAcc().exchange(0, std::memory_order_relaxed) / 1e6;
+	double di = 0, dc = 0;
+	if (hwEnabled()) {
+		unsigned long long i1 = 0, c1 = 0;
+		hwRead(i1, c1);
+		di = double(i1 - st.instr); dc = double(c1 - st.cyc);
+		spEnd(st.sid, wave);
+	}
+	record(wave, tLast - st.ns, busyMs, depth, true, n, di, dc);
+}
+
 // ─── the one-shot table ────────────────────────────────────────────────────
 inline void Report(const char* label) {
 	if (!enabled()) return;

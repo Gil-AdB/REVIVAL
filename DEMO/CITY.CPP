@@ -3448,6 +3448,7 @@ struct CityScene : SceneDriver {
 		const float t = timeMs * 0.02f * speed;
 		if ((int)dispMap.size() < XRes * YRes) dispMap.assign(XRes * YRes, 0);
 		if (!View) return;   // need the camera to ray-cast the water plane (keep the static warp)
+		pwater::Census("ripple", g_waterY, /*useOcclusion=*/false, /*useFarCut=*/false);
 		// Ray-cast each pixel to the water plane, evaluate THE shared wave slope
 		// (waterWaveSlope) there, and offset the reflection source by it → the
 		// reflection ripples to the SAME waves as the glints. Coarse octaves (the
@@ -3489,24 +3490,7 @@ struct CityScene : SceneDriver {
 				}
 			}
 		};
-		auto& tp = ThreadPool::instance();
-		const int nThreads = (int)tp.size();
-		if (nThreads < 2 || YRes < 64) { band(0, YRes); return; }
-		const int chunk = (YRes + nThreads - 1) / nThreads;
-		auto remaining = std::make_shared<std::atomic<int>>(0);
-		int launched = 0;
-		for (int i = 0; i < nThreads; ++i) {
-			const int y0 = i * chunk; if (y0 >= YRes) break;
-			const int y1 = std::min(y0 + chunk, YRes);
-			remaining->fetch_add(1, std::memory_order_relaxed);
-			++launched;
-			tp.enqueue([band, y0, y1, remaining]() {
-				band(y0, y1);
-				remaining->fetch_sub(1, std::memory_order_release);
-			});
-		}
-		(void)launched;
-		while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+		pwater::runRowBands("water-ripple", band);
 	}
 
 	void init() override {
