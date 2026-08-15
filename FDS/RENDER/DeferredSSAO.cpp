@@ -119,6 +119,27 @@ void buildRot() {
 	done = true;
 }
 
+// GTAO slice azimuth table — the per-cell cosf/sinf that WEREN'T per-cell.
+// The slice direction is phi = (s + jit) * (PI/slices), and `jit` is
+// g_rotCos[ri]*0.5+0.5 with ri drawn from the SAME 16-entry 4x4 tiling table
+// above. So phi takes only slices*16 distinct values in the whole frame, yet
+// the loop evaluated cosf+sinf per (cell x slice): 2 slices x 1.28 M cells =
+// 5.1 M libm calls a frame at full res, every one of them a repeat of one of 32.
+// Built once per frame on the main thread from the identical expression, so the
+// float fed to cosf/sinf is bit-for-bit the one the loop used. Sized for the
+// flag's own clamps (slices <= 8, 16 rotations).
+float g_sliceCos[8][16], g_sliceSin[8][16];
+void buildSliceTrig(int slices) {
+	const float kPI = 3.14159265f;
+	for (int s = 0; s < slices; ++s)
+		for (int ri = 0; ri < 16; ++ri) {
+			const float jit = g_rotCos[ri] * 0.5f + 0.5f;
+			const float phi = (float(s) + jit) * (kPI / float(slices));
+			g_sliceCos[s][ri] = cosf(phi);
+			g_sliceSin[s][ri] = sinf(phi);
+		}
+}
+
 // Fast acos (GTAO, Eberly fit), ~0.18° max error — cheap vs std::acos in the
 // per-sample horizon loop. Input clamped to [-1,1] by the caller's dot/rsqrt.
 inline float gtaoAcos(float x) {
@@ -230,6 +251,7 @@ void Render_SSAO() {
 		const float thickness = fds::FeatureFlags::ssao_gtao_thickness();
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
+		buildSliceTrig(slices);          // main thread, before the dispatch
 		const bool noSimd = std::getenv("FDS_SSAO_NOSIMD") != nullptr;   // A/B validation escape
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
@@ -261,8 +283,7 @@ void Render_SSAO() {
 						const float jit = g_rotCos[ri] * 0.5f + 0.5f;
 						float vis = 0.0f;
 						for (int s = 0; s < slices; ++s) {
-							const float phi = (float(s) + jit) * (kPI / float(slices));
-							const float dcx = cosf(phi), dsy = sinf(phi);
+							const float dcx = g_sliceCos[s][ri], dsy = g_sliceSin[s][ri];
 							const float d3x = dcx, d3y = -dsy;
 							float snx = d3y*Vz, sny = -d3x*Vz, snz = d3x*Vy - d3y*Vx;
 							const float snl = fast_rsqrt(snx*snx + sny*sny + snz*snz + 1e-12f);
@@ -323,6 +344,7 @@ void Render_SSAO() {
 						alignas(32) float aPx[8], aPy[8], aPz[8], aVx[8], aVy[8], aVz[8];
 						alignas(32) float aNx[8], aNy[8], aNz[8], aSr[8], aJit[8], aPxi[8];
 						alignas(32) int   aPxInt[8];
+						int   aRi[8];
 						bool valid[8];
 						for (int k = 0; k < 8; ++k) {
 							const int cx_ = lx + k;
@@ -333,7 +355,7 @@ void Render_SSAO() {
 							aPxInt[k] = px; aPxi[k] = float(px);
 							if (ze == 0) { valid[k]=false; aoRaw[lo]=1.0f; aoZ[lo]=-1.0f;
 							               aPx[k]=aPy[k]=aPz[k]=0; aVx[k]=aVy[k]=0; aVz[k]=1;
-							               aNx[k]=aNy[k]=0; aNz[k]=1; aSr[k]=2; aJit[k]=0; continue; }
+							               aNx[k]=aNy[k]=0; aNz[k]=1; aSr[k]=2; aJit[k]=0; aRi[k]=0; continue; }
 							const float z = float(0xFF80 - ze) * invZScale;
 							aoZ[lo] = z;
 							const float Px=(float(px)-cx)*z*invFOVX, Py=(cy-float(py))*z*invFOVY, Pz=z;
@@ -344,6 +366,7 @@ void Render_SSAO() {
 							const int ri=((ly&3)*4+(cx_&3)+g_ssaoRotPhase)&15;
 							aPx[k]=Px;aPy[k]=Py;aPz[k]=Pz; aVx[k]=-Px*vinv;aVy[k]=-Py*vinv;aVz[k]=-Pz*vinv;
 							aNx[k]=Nx;aNy[k]=Ny;aNz[k]=Nz; aSr[k]=sr; aJit[k]=g_rotCos[ri]*0.5f+0.5f;
+							aRi[k]=ri;
 							valid[k]=true;
 						}
 						const __m256 PxV=_mm256_load_ps(aPx),PyV=_mm256_load_ps(aPy),PzV=_mm256_load_ps(aPz);
@@ -360,8 +383,10 @@ void Render_SSAO() {
 							// per-lane slice setup (scalar trig; slices×8 only)
 							alignas(32) float aDcx[8],aDsy[8],aNang[8];
 							for (int k=0;k<8;++k){
-								const float phi=(float(s)+aJit[k])*(kPI/float(slices));
-								const float dcx=cosf(phi),dsy=sinf(phi);
+								// phi = (s+jit)*(PI/slices) has only slices*16 values —
+								// tabled once a frame (buildSliceTrig), not 5.1 M libm
+								// calls. Invalid lanes take entry 0 and are discarded.
+								const float dcx=g_sliceCos[s][aRi[k]],dsy=g_sliceSin[s][aRi[k]];
 								aDcx[k]=dcx;aDsy[k]=dsy;
 								const float d3x=dcx,d3y=-dsy;
 								float snx=d3y*aVz[k],sny=-d3x*aVz[k],snz=d3x*aVy[k]-d3y*aVx[k];
@@ -630,28 +655,74 @@ void Render_SSAO() {
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
 			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
 			{
+					// Scalar reference cell — the border columns (the 4x4 box's x
+					// window would run off the plane) and any tile narrower than a
+					// vector still take this.
+					auto blurCell = [&](int lx, int ly, int by0, int by1) {
+						const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
+						const float zc = aoZ[lo];
+						if (zc < 0.0f) { aoBlur[lo] = aoRaw[lo]; return; }
+						const int bx0 = std::max(0, lx - 2), bx1 = std::min(lowW - 1, lx + 1);
+						float sum = 0.0f, wsum = 0.0f;
+						for (int yy = by0; yy <= by1; ++yy) {
+							const size_t r2 = size_t(yy) * size_t(lowW);
+							for (int xx = bx0; xx <= bx1; ++xx) {
+								const size_t o = r2 + size_t(xx);
+								const float zt = aoZ[o];
+								if (zt < 0.0f) continue;
+								const float dz = zc - zt;
+								float w = 1.0f - dz * dz * invDepthK;   // depth-only (divide-free)
+								if (w <= 0.0f) continue;
+								sum += aoRaw[o] * w; wsum += w;
+							}
+						}
+						aoBlur[lo] = wsum > 1e-6f ? sum / wsum : aoRaw[lo];
+					};
+
+					// 8-wide denoise over 8 OUTPUT cells of a row. The 4x4 box is a
+					// fixed stencil, so the 16 taps are 16 unaligned 8-wide loads of
+					// each plane and every lane keeps the scalar's tap ORDER (yy
+					// outer, xx -2..+1 inner). The scalar's two `continue`s become a
+					// weight mask: a rejected tap contributes w = +0.0, and
+					// `sum + aoRaw*0.0` and `wsum + 0.0` are EXACT no-ops in IEEE, so
+					// this is the same sum in the same order — bit-exact, not
+					// approximately equal. The whole point is the branch: the scalar
+					// loop is 16 unpredictable tests per pixel over 1.28 M pixels at
+					// --ssao_downscale=1, which is what his arm runs.
+					const __m256 vZeroB = _mm256_setzero_ps(), vOneB = _mm256_set1_ps(1.0f);
+					const __m256 vInvK  = _mm256_set1_ps(invDepthK);
+					const __m256 vWEps  = _mm256_set1_ps(1e-6f);
+					const int maxStart  = std::min(lx2 - 8, lowW - 9);
 					for (int ly = ly1; ly < ly2; ++ly) {
 						const int by0 = std::max(0, ly - 2), by1 = std::min(lowH - 1, ly + 1);  // 4×4 box
-						for (int lx = lx1; lx < lx2; ++lx) {
-							const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
-							const float zc = aoZ[lo];
-							if (zc < 0.0f) { aoBlur[lo] = aoRaw[lo]; continue; }
-							const int bx0 = std::max(0, lx - 2), bx1 = std::min(lowW - 1, lx + 1);
-							float sum = 0.0f, wsum = 0.0f;
+						const size_t rowLo = size_t(ly) * size_t(lowW);
+						int lx = lx1;
+						for (; lx < lx2 && lx < 2; ++lx) blurCell(lx, ly, by0, by1);
+						for (; lx <= maxStart; lx += 8) {
+							const __m256 zc  = _mm256_loadu_ps(aoZ   + rowLo + size_t(lx));
+							const __m256 raw = _mm256_loadu_ps(aoRaw + rowLo + size_t(lx));
+							__m256 sum = _mm256_setzero_ps(), wsum = _mm256_setzero_ps();
 							for (int yy = by0; yy <= by1; ++yy) {
-								const size_t r2 = size_t(yy) * size_t(lowW);
-								for (int xx = bx0; xx <= bx1; ++xx) {
-									const size_t o = r2 + size_t(xx);
-									const float zt = aoZ[o];
-									if (zt < 0.0f) continue;
-									const float dz = zc - zt;
-									float w = 1.0f - dz * dz * invDepthK;   // depth-only (divide-free)
-									if (w <= 0.0f) continue;
-									sum += aoRaw[o] * w; wsum += w;
+								const float* zr = aoZ   + size_t(yy) * size_t(lowW) + size_t(lx);
+								const float* ar = aoRaw + size_t(yy) * size_t(lowW) + size_t(lx);
+								for (int dx = -2; dx <= 1; ++dx) {
+									const __m256 zt = _mm256_loadu_ps(zr + dx);
+									const __m256 dz = _mm256_sub_ps(zc, zt);
+									__m256 w = _mm256_fnmadd_ps(_mm256_mul_ps(dz, dz), vInvK, vOneB);
+									const __m256 keep = _mm256_and_ps(
+										_mm256_cmp_ps(zt, vZeroB, _CMP_GE_OQ),
+										_mm256_cmp_ps(w,  vZeroB, _CMP_GT_OQ));
+									w = _mm256_and_ps(w, keep);
+									sum  = _mm256_add_ps(sum, _mm256_mul_ps(_mm256_loadu_ps(ar + dx), w));
+									wsum = _mm256_add_ps(wsum, w);
 								}
 							}
-							aoBlur[lo] = wsum > 1e-6f ? sum / wsum : aoRaw[lo];
+							__m256 res = _mm256_blendv_ps(raw, _mm256_div_ps(sum, wsum),
+							                              _mm256_cmp_ps(wsum, vWEps, _CMP_GT_OQ));
+							res = _mm256_blendv_ps(res, raw, _mm256_cmp_ps(zc, vZeroB, _CMP_LT_OQ));
+							_mm256_storeu_ps(aoBlur + rowLo + size_t(lx), res);
 						}
+						for (; lx < lx2; ++lx) blurCell(lx, ly, by0, by1);
 					}
 					renderns::tileDone.release();
 				}
