@@ -10,6 +10,81 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16c — 00b ROW 3 (`FrustumClipper::Render`, 6.2 %): the tile cull was INERT on the mirror pass
+
+**Result: `gbuffer` at city t=1961 (his arm) `0.658 -> 0.444 Ginstr/f` (-32.5 %),
+thrsum `79.3 -> 43.1` core-ms, wall `8.69 -> 6.86`; `renderFrame`
+`4.383 -> 4.174 Ginstr/f` (-4.8 %), `1.196 -> 1.115 Gcyc/f`. In a quieter window
+the big step alone reads frame min `49.93 -> 47.81` ms. **chase t=800 gains
+more than city**: `gbuffer` `0.597 -> 0.334 Ginstr/f` (-44.1 %), thrsum
+`60.5 -> 26.1` core-ms (-56.9 %), `renderFrame` -6.8 % instructions / -8.8 %
+cycles / -6.1 % wall. greets and fountain have no mirror transform and are
+NEUTRAL (they get only the binning half: -1.0 % / -5.9 % of `gbuffer`
+instructions, frame-level inside the noise). BYTE-NULL — all nine pins unmoved
+2/2, `render_gate.sh` 4/4. Two commits: `c26c1c35` + `d9dfa527`.
+Full map in `docs/PERF_STATE.md` 00c.**
+
+### THE ROW'S STATED MECHANISM WAS WRONG, AND THAT IS THE FINDING
+
+00b row 3 read "every raster tile re-walks the whole face list: 30 tiles x 2
+passes x 10 215 faces". The walk is real but cheap; a probe that ran four EXTRA
+reject-only walks per tile priced one whole walk at ~4.5 core-ms/frame, i.e.
+~5 % of the `gbuffer` phase — not 6.2 % of the process.
+
+What was actually happening is that `--tile_bbox_cull` (default ON since the
+S2/B5 work) **never fired on the mirror pass at all**. `Transform_Objects`
+stamps each pushed face's screen bbox into its `FListEntry`; the two
+hand-written mirror transforms that build FList themselves — `Reflected_Transform`
+in `DEMO/CITY.CPP` and `DEMO/CHASE.CPP`, for the water-reflection underlay —
+pushed `*Ins++ = { F->SortZ.DW, F };`, a two-field aggregate that leaves the
+remaining members on their default member initialisers, i.e. the COVER-ALL
+sentinel. Every entry, every frame. A new throwaway `[BBOXCENSUS]` probe at
+city t=1961 (1512x848, 6x5 tiles):
+
+| pass of the frame | cover-all | avg tiles/face | (face, tile) pairs |
+|---|--:|--:|--:|
+| main (`Transform_Objects`) | 1.2 % | 1.45 | 29 671 |
+| mirror (`Reflected_Transform`) | **100 %** | **30.00** | **621 180** |
+
+Same geometry, **21x the clipper entries**, and city runs that pass every frame.
+That is the 6.2 %.
+
+### WHAT SHIPPED
+
+**1. `c26c1c35` — stamp the bbox on the mirror pushes. BYTE-NULL, the whole
+prize.** Body extracted verbatim into `FDS/Base/FaceBBox.h`
+(`fds::FaceBBox_Stamp`) and called from both `Reflected_Transform`s.
+`Transform.cpp` deliberately keeps its own inline copy — its per-mesh face loop
+is the one documented there as pin-fragile under `-ffp-contract=fast` + LTO, and
+the perf case is entirely on the mirror side. Byte-null follows from the S2
+contract, unchanged: the box is a conservative superset of the un-clipped
+triangle and the clipper only SHRINKS coverage, so a box that misses a tile
+means zero output there; near-plane straddlers keep the sentinel.
+
+**2. `d9dfa527` — `--face_tile_bin` (default ON). BYTE-NULL, the smaller half.**
+`renderFrame` walks FList twice (count, then scatter) and hands each tile a
+dense, sequential `Face*` run; no tile walks the list. Order inside a tile is
+preserved EXACTLY (contiguous chunk split + chunk-major prefix sum), which
+matters because the tile kernels are not order-independent — verified
+element-by-element by a throwaway `FDS_BINVERIFY` build across city
+t=1961/2400/400, greets t=2845/5743/6097 and fountain t=2500, 0 mismatches.
+Skipped below 3 000 faces (greets' offscreen RTT passes). New `face-bin`
+`--deferred_prof` row prices the build at **0.200 ms/frame** at city t=1961;
+`--mem_census` adds two `raster/` rows, **403 KiB arena + 113 KiB scratch**
+there. On its own: `gbuffer` wall -8.1 % city / -6.8 % greets, thrsum -11.7 % /
+-15.3 %.
+
+### WHAT IS LEFT HERE
+
+* **The finer raster grid is now UNBLOCKED.** §00 row 9 refuted a 12x10 grid at
+  +139 % instructions *because each clipper tile re-walked the whole face list* —
+  that traversal is gone. Worth re-running on chase (`gbuffer` `effPar` 5.5 of
+  12). Caveat: it moves tile boundaries, so it will NOT be byte-null.
+* **`FrustumClipper::Render`'s residue is the per-(face, tile) clip itself** —
+  three 140-byte `Vertex` copies, the UV/UZ stamp, and `MiplevelClipper`'s
+  subdivision, redone for each tile a face straddles (now 1.45 on average
+  instead of 30). Cutting it further means cutting the copy, not the traversal.
+
 ## 2026-08-16b — CITY UNDER HIS ACCEPTANCE ARM (`--env_live_water --deferred --city-env-pixel`): re-ranked, and the biggest row in it had no instrument
 
 **Result at city t=1961, 1512x848, his exact command: frame min 54.72 -> 49.76 ms

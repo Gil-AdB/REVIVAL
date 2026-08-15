@@ -19,6 +19,126 @@
 
 ---
 
+## 00c. THE G-BUFFER FILL — 2026-08-16c: the mirror pass had no tile cull at all
+
+**§00b row 3 (`FrustumClipper::Render`, 6.2 %) is closed, and its stated
+mechanism was wrong.** The row read "every raster tile re-walks the whole face
+list"; the walk turned out to be the cheap half. What cost the frame was that
+`--tile_bbox_cull` — default ON since the S2/B5 work — was **completely inert
+on the mirror pass**, so 30 tiles × ~20 700 faces reached the clipper where
+~30 000 (face, tile) pairs actually exist.
+
+### THE CENSUS THAT SPLIT IT (city t=1961, 1512×848, 6×5 tiles)
+
+`Transform_Objects` stamps each pushed face's projected screen bbox into its
+`FListEntry`. The two hand-written mirror transforms —
+`Reflected_Transform` in `DEMO/CITY.CPP` and `DEMO/CHASE.CPP`, which build
+FList themselves for the water-reflection underlay — pushed
+`*Ins++ = { F->SortZ.DW, F };`, a two-field aggregate that leaves the rest on
+their default member initialisers, i.e. the **cover-all sentinel**:
+
+| pass of the frame | cover-all entries | avg tiles/face | (face, tile) pairs |
+|---|--:|--:|--:|
+| main (`Transform_Objects`) | 1.2 % | 1.45 | 29 671 |
+| mirror (`Reflected_Transform`) | **100 %** | **30.00** | **621 180** |
+
+City runs both every frame (`renderFrame` calls/f = 2). chase has the same
+transform and the same hole.
+
+### WHAT LANDED
+
+1. **`c26c1c35` — stamp the bbox on the mirror pushes**
+   (`fds::FaceBBox_Stamp`, `FDS/Base/FaceBBox.h`). This is the whole prize.
+2. **`d9dfa527` — `--face_tile_bin`** (default ON): `renderFrame` walks FList
+   twice (count, scatter) and hands each tile a dense `Face*` run, so no tile
+   walks the list at all. Order inside a tile is preserved exactly (chunk-major
+   prefix sum over a contiguous split), verified element-by-element by a
+   throwaway `FDS_BINVERIFY` build over 7 poses — 0 mismatches. New `face-bin`
+   phase row prices the build at **0.200 ms/frame** at city t=1961;
+   `--mem_census` reports 403 KiB arena + 113 KiB scratch there.
+
+### MEASURED, parent `b2de6323` → `d9dfa527`
+
+Two binaries in ONE worktree against ONE asset tree, interleaved, min-of-arm
+with r0 dropped, 1512×848. **The box ran at load 17–24 for this batch, so the
+wall columns below are floors, not clean numbers — `Ginstr/f` and `Gcyc/f` are
+what decide** (the same rule §00b was measured under).
+
+**CITY ARM** (`--env_live_water --deferred --city_env_pixel`):
+
+| row | t=1961 (min-of-8) | t=2400 (min-of-5) | t=400 (min-of-5) |
+|---|--:|--:|--:|
+| **`gbuffer` Ginstr/f** | **0.658 → 0.444 (−32.5 %)** | 0.185 → 0.175 (−5.4 %) | 0.359 → 0.318 (−11.4 %) |
+| `gbuffer` thrsum (core-ms) | 79.3 → 43.1 (−45.7 %) | 17.42 → 17.36 | 35.3 → 31.8 (−10.0 %) |
+| `gbuffer` wall | 8.69 → 6.86 (−21.0 %) | 5.37 → 5.76 † | 4.00 → 3.53 (−11.9 %) |
+| **`renderFrame` Ginstr/f** | **4.383 → 4.174 (−4.8 %)** | 2.273 → 2.269 | 3.216 → 3.180 (−1.1 %) |
+| `renderFrame` Gcyc/f | 1.196 → 1.115 (−6.8 %) | 0.623 → 0.625 | 0.864 → 0.851 (−1.5 %) |
+
+**GREETS ARM** (`--deferred --hdr --hdr-linear --texture-filter=2 --ssao
+--ssao-gtao --greets-displace`):
+
+| row | t=2845 (min-of-4) | t=5743 (min-of-8) | t=6097 (min-of-2) |
+|---|--:|--:|--:|
+| `gbuffer` Ginstr/f | 0.978 → 0.968 (−1.0 %) | 1.001 → 0.991 (−1.0 %) | 0.793 → 0.788 (−0.6 %) |
+| `gbuffer` thrsum (core-ms) | 102.0 → 92.6 (−9.2 %) | 96.7 → 94.8 (−2.0 %) | 97.2 → 86.0 (−11.6 %) |
+| `gbuffer` wall | 9.17 → 8.68 | 8.81 → 8.69 | 7.87 → 7.53 |
+| `renderFrame` Ginstr/f | 4.983 → 4.981 | 4.996 → 4.990 | 4.405 → 4.406 |
+| `renderFrame` Gcyc/f | 1.351 → 1.362 | 1.369 → 1.347 | 1.207 → 1.220 |
+
+† t=2400's `gbuffer` wall is the only row that reads worse, at flat
+instructions (−0.2 % of `renderFrame`) and flat thrsum (−0.3 %) — a 5.4/5.8 ms
+wall pair under load 17–24, not a mechanism. The pose barely has the effect to
+begin with.
+
+**SPOT CHECKS — and chase is the biggest winner of the whole round**, because it
+runs the same `Reflected_Transform` and its mirror frustum is full. chase t=800
+(`--deferred`, profiled through the snapshot harness at one repeated timestamp,
+min-of-5); fountain t=2500 (`--deferred --hdr --glass-refract=1 --glass-test`,
+min-of-5, binning only — it has no mirror transform):
+
+| row | chase t=800 | fountain t=2500 |
+|---|--:|--:|
+| **`gbuffer` Ginstr/f** | **0.597 → 0.334 (−44.1 %)** | 0.136 → 0.128 (−5.9 %) |
+| `gbuffer` thrsum (core-ms) | 60.5 → 26.1 (**−56.9 %**) | 12.34 → 11.36 (−7.9 %) |
+| `gbuffer` wall | 11.07 → 8.53 (−22.9 %) | 2.73 → 2.78 |
+| **`renderFrame` Ginstr/f** | **3.729 → 3.475 (−6.8 %)** | 1.030 → 1.024 (−0.6 %) |
+| `renderFrame` Gcyc/f | 0.894 → 0.815 (−8.8 %) | 0.409 → 0.408 |
+| `renderFrame` wall | 38.43 → 36.09 (−6.1 %) | 34.49 → 34.21 |
+| frame min | — (no `--bench` arm) | 37.40 → 36.95 (−1.2 %) |
+
+§00 row 9 measured chase's `gbuffer` at `effPar` **5.5 of 12** and called it "half
+the pool is idle". Half of what the pool was busy WITH is now gone: 60.5 → 26.1
+core-ms at the same pose.
+
+**Two things the city/greets table says, and both are the mechanism confirming
+itself.**
+t=2400 and t=400 move far less than t=1961: the mirror frustum there holds far
+less of the scene-sized building, exactly the geometry-dependence that made
+2026-08-16b's `LGHT` finding move only at t=1961. And **greets is NEUTRAL**, not
+a win — it has no `Reflected_Transform` (its mirror is the RTT), so it gets only
+the binning half: `renderFrame` instructions flat to −0.1 %, cycles ±1.6 %,
+`gbuffer` instructions −1.0 %. Do not quote greets as a gain.
+
+Cleanest wall reading of the big step, taken in a quieter window (parent vs
+`c26c1c35` alone, min-of-8 over 9 rounds, city t=1961, his arm): **frame min
+49.93 → 47.81 ms, frame mean 56.75 → 54.75, `renderFrame` 40.14 → 37.96,
+`gbuffer` 8.11 → 6.25.**
+
+**BYTE-NULL** — all nine pins unmoved 2/2 on each binary, `render_gate.sh` 4/4.
+The S2 contract is why: the box is a conservative superset of the un-clipped
+triangle and the clipper only shrinks coverage, so a box that misses a tile
+means zero output there.
+
+### WHAT THIS UNBLOCKS
+
+§00 row 9's refuted finer-grid experiment ("a 12×10 grid cost +139 %
+instructions, because each clipper tile re-walks the whole face list") was
+blocked on exactly the traversal that is now gone. It is worth re-running on
+chase, whose `gbuffer` `effPar` is 5.5 of 12 — but note it moves tile
+boundaries, so unlike everything above it will not be byte-null.
+
+---
+
 ## 00b. THE USER'S ACCEPTANCE ARM — city, 1512x848, 2026-08-16
 
 ```
@@ -129,7 +249,7 @@ bench (frame-dominated: init is ~3 s of ~28 s).
 |---|---|--:|--:|---|
 | 1 | `Render_VolumetricCones_Tile` | **20.6 %** | 1.288 (`cones-call`, ×1) | rounds 6–7 took −29 % of chase's; city's is §13's dependency chain. Only "fewer (px × spot) pairs" is left |
 | 2 | `Render_DeferredLighting_Tile_OuterVec` | **15.3 %** | 0.957 (`lighting-w1`, ×2) | of which `--city_env_pixel` +0.129, the env compose +0.089, `--env_live_water` +0.041 |
-| 3 | `FrustumClipper::Render` | **6.2 %** | inside `gbuffer` | **UNATTACKED and the largest untouched row.** Every raster tile re-walks the whole face list: 30 tiles × 2 `renderFrame` passes × 10 215 pushed faces. §00 row 9 named it from the other side (a 12×10 grid cost +139 % instructions for exactly this reason) |
+| 3 | `FrustumClipper::Render` | **6.2 %** | inside `gbuffer` | **DONE 2026-08-16c (`c26c1c35` + `d9dfa527`), and the mechanism in this cell was WRONG.** The walk was never the cost: `--tile_bbox_cull` was **INERT on the mirror pass**, whose hand-written `Reflected_Transform` pushed a 2-field aggregate and left the cover-all bbox default on every entry — 621 180 (face, tile) clipper entries against the main pass's 29 671 on the same geometry. Stamping it + binning faces to tiles: `gbuffer` **0.658 → 0.444 Ginstr/f (−32.5 %)**, thrsum 79.3 → 43.1 core-ms, wall 8.69 → 6.86 ms; `renderFrame` 4.383 → 4.174 Ginstr/f. Byte-null. See the dated block below |
 | 4 | `pwater::waterWaveSlope` | **6.2 %** → ~5.4 % | 0.451 (ripple + glints) | −12 % / −7 % taken; what is left is an 8-wide form of the two bilinear taps |
 | 5 | `meka::TileRasterizer::apply_exact<false>` | 5.4 % | 0.659 (`gbuffer`, ×2) | `effPar` 8.5–8.7 of 12 — better than chase's 5.5, so §00 row 9's "half the pool is idle" does not hold in city |
 | 6 | fastfog lambdas + `Froxel_CompositePixel` + `FastFog_SampleGrid` + `SkyPaint` | 6.2 + 3.4 + 2.7 + 1.6 % | 0.869 (`fastfog`, ×1) | `fog-columns` 0.400 is the residue; `Froxel_GlowTile`'s per-(column × light × slice) `atanf` is unpriced |
@@ -191,6 +311,16 @@ Interleaved parent-vs-tip, min-of-8, both binaries one worktree one asset tree:
 pose. Image cost of all four rungs: 343 px of 24.9 M at 1/255.
 
 ### The ranking AFTER, by instructions — the lighting kernel is #1 again
+
+**Amendment 2026-08-16c (§00c) — and it is a NEUTRAL result, say so.** greets
+gets only the binning half of that round: it has no `Reflected_Transform`, so
+the 21× mirror-pass finding that moved city does not reach it. On this arm
+`--face_tile_bin` is **`gbuffer` 1.001 → 0.991 Ginstr/f (−1.0 %), thrsum
+96.7 → 94.8 core-ms, wall 8.81 → 8.69**, and `renderFrame` moves **−0.1 %
+instructions / −1.6 % cycles at t=5743 and 0.0 % / +0.8 % at t=2845** — i.e.
+inside the noise at frame level. It is kept because it is byte-null, because
+the city arm does gain from it, and because it is what unblocks the finer-grid
+experiment; it is NOT a greets win and nothing here should be quoted as one.
 
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
