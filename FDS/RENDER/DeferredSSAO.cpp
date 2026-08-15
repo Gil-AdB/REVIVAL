@@ -890,6 +890,45 @@ void Render_SSAO() {
 			const int y1 = tsy * tj, y2 = std::min(y1 + tsy, H);
 			const int x1 = tsx * ti, x2 = std::min(x1 + tsx, W);
 			{
+					// FULL-RES HDR FAST PATH — the shape his arm actually runs
+					// (--ssao_downscale=1 + --hdr). g_hdrBuf is INTERLEAVED
+					// B,G,R,coverage f16, so the scalar body was three
+					// load / fcvt / fmul / fcvt / store chains per pixel behind an
+					// unpredictable sky branch, over every pixel of the frame.
+					// vld4/vst4 deinterleaves four pixels in one go and the branch
+					// becomes a SELECT (ao = 1.0f on sky) — x*1.0f is exact in
+					// IEEE and the f16 round-trip is the same round-to-nearest, so
+					// this is bit-identical to the branch, not an approximation of
+					// it. Coverage (lane 3) is left alone, as before.
+#if defined(__aarch64__) && !defined(FDS_HDR_F32)
+					if (down == 1 && useHdr && !dbg) {
+						for (int py = y1; py < y2; ++py) {
+							const size_t row = size_t(py) * size_t(W);
+							int px = x1;
+							for (; px + 4 <= x2; px += 4) {
+								const size_t i = row + size_t(px);
+								float a4[4];
+								for (int k = 0; k < 4; ++k)
+									a4[k] = zEnc[i + k] ? aoSrc[i + k] : 1.0f;
+								const float32x4_t ao = vld1q_f32(a4);
+								float16x4x4_t h = vld4_f16(reinterpret_cast<const __fp16*>(hbuf + i * 4));
+								h.val[0] = vcvt_f16_f32(vmulq_f32(vcvt_f32_f16(h.val[0]), ao));
+								h.val[1] = vcvt_f16_f32(vmulq_f32(vcvt_f32_f16(h.val[1]), ao));
+								h.val[2] = vcvt_f16_f32(vmulq_f32(vcvt_f32_f16(h.val[2]), ao));
+								vst4_f16(reinterpret_cast<__fp16*>(hbuf + i * 4), h);
+							}
+							for (; px < x2; ++px) {
+								const size_t i = row + size_t(px);
+								if (zEnc[i] == 0) continue;
+								const float ao = aoSrc[i];
+								fds::hdrf* h = hbuf + i * 4;
+								h[0] *= ao; h[1] *= ao; h[2] *= ao;
+							}
+						}
+						renderns::tileDone.release();
+						return;
+					}
+#endif
 					for (int py = y1; py < y2; ++py) {
 						const size_t row = size_t(py) * size_t(W);
 						for (int px = x1; px < x2; ++px) {
