@@ -234,7 +234,14 @@ void StaticLighting(Scene *Sc)
 // that used to be function-static (the CurLight array) is thread_local;
 // the tiny Color temporaries live on the stack. Math is untouched, so
 // parallel == serial byte-for-byte per vertex.
-static void LightMeshVerts(Scene *Sc, TriMesh *T)
+// v0/v1 select a VERTEX RANGE of the mesh, so one mesh can be spread over
+// several pool jobs. The per-mesh prologue (material, ambient, the omni
+// candidate list) is rebuilt per range — it is a loop over the scene's omnis,
+// ~3 k instructions against ~800 per vertex, so a 1 024-vertex range amortises
+// it to well under 1 %. Everything a range reads is const for the pass and
+// everything it writes is its own vertices' L{R,G,B,A}, so ranges are as
+// independent as whole meshes were.
+static void LightMeshVerts(Scene *Sc, TriMesh *T, int v0, int v1)
 {
 	Vertex *V, *VE;
 	Omni *O;
@@ -350,8 +357,8 @@ static void LightMeshVerts(Scene *Sc, TriMesh *T)
 		if (T->Flags & Tri_Stationary)
 			stat = true;
 
-		Color *sl = T->SL;
-		for (V = T->Verts, VE = V + T->VIndex; V < VE; V++, sl++)
+		Color *sl = T->SL ? T->SL + v0 : nullptr;   // only read when `stat`
+		for (V = T->Verts + v0, VE = T->Verts + v1; V < VE; V++, sl++)
 		{
 			// this compare isn't so bad as soon as it gets into the BTB.
 			if (stat)
@@ -422,37 +429,55 @@ void Lighting(Scene *Sc)
 		StaticLighting(Sc);
 	}
 
+	// --prof_no_vertex_light: ablation gate, CHANGES PIXELS. Prices the whole
+	// per-vertex pass (see FeatureFlags.def).
+	if (fds::FeatureFlags::prof_no_vertex_light()) return;
+
 	// Fan the per-mesh work across the pool (the pool is parked during the
 	// scene tick, so this is free parallelism — measured ~1 ms serial on
 	// greets). --no-vertex_light_parallel restores the serial walk.
 	if (fds::FeatureFlags::vertex_light_parallel())
 	{
-		// Work-stealing per-mesh fan via dispatchIndexed: W enqueues total
-		// (a task PER MESH drowned in enqueue/semaphore overhead — measured
-		// 1.27 ms vs 0.83 serial — which stealing per index avoids while
-		// still load-balancing the big mech parts). Snapshot .data() by
-		// value: sMeshes is tick-thread state, and thread_local/static
-		// vectors must not be re-resolved inside the worker lambda.
-		static std::vector<TriMesh*> sMeshes;   // tick-thread only
-		sMeshes.clear();
+		// Work-stealing fan via dispatchIndexed: W enqueues total (a task PER
+		// MESH drowned in enqueue/semaphore overhead — measured 1.27 ms vs
+		// 0.83 serial — which stealing per index avoids while still
+		// load-balancing the big mech parts). Snapshot .data() by value:
+		// sJobs is tick-thread state, and thread_local/static vectors must
+		// not be re-resolved inside the worker lambda.
+		//
+		// THE UNIT IS A VERTEX RANGE, NOT A MESH. A mesh-granular fan's wall
+		// is the LARGEST MESH, and city is one scene-sized building mesh plus
+		// ~55 small ones: the LGHT section reads ~6 ms p50 for ~9 core-ms of
+		// work, i.e. an effective parallelism near 1.5 of 12, and the work
+		// itself is untouchable (it is the same per-vertex loop). Chunking at
+		// kVLChunk turns that into ~N jobs the stealing cursor can balance.
+		// BYTE-NULL: LightMeshVerts' per-vertex math is unchanged and each
+		// vertex is still written exactly once, by exactly one job.
+		constexpr int kVLChunk = 1024;
+		struct VLJob { TriMesh *T; int v0, v1; };
+		static std::vector<VLJob> sJobs;        // tick-thread only
+		sJobs.clear();
 		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next)
 		{
 			if (T->Flags & (Tri_Invisible | Tri_Noshading)) continue;
-			sMeshes.push_back(T);
+			const int n = (int)T->VIndex;
+			if (n <= 0) continue;
+			for (int v = 0; v < n; v += kVLChunk)
+				sJobs.push_back({T, v, v + kVLChunk < n ? v + kVLChunk : n});
 		}
-		const int count = (int)sMeshes.size();
+		const int count = (int)sJobs.size();
 		if (count > 1)
 		{
 			static std::counting_semaphore<INT_MAX> sDone{0};
-			TriMesh **meshes = sMeshes.data();
-			dispatchIndexed(count, &sDone, [Sc, meshes](int i) {
-				LightMeshVerts(Sc, meshes[i]);
+			VLJob *jobs = sJobs.data();
+			dispatchIndexed(count, &sDone, [Sc, jobs](int i) {
+				LightMeshVerts(Sc, jobs[i].T, jobs[i].v0, jobs[i].v1);
 			});
 			for (int i = 0; i < count; ++i) sDone.acquire();
 		}
 		else
 		{
-			for (TriMesh *T : sMeshes) LightMeshVerts(Sc, T);
+			for (const VLJob &j : sJobs) LightMeshVerts(Sc, j.T, j.v0, j.v1);
 		}
 		return;
 	}
@@ -460,6 +485,6 @@ void Lighting(Scene *Sc)
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next)
 	{
 		if (T->Flags & (Tri_Invisible | Tri_Noshading)) continue;
-		LightMeshVerts(Sc, T);
+		LightMeshVerts(Sc, T, 0, (int)T->VIndex);
 	}
 }
