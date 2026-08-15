@@ -77,6 +77,17 @@ struct ShadowPyrCensus {
     uint64_t fastOcc = 0;   // ... resolved uniform-OCCLUDING, no texel read
     uint64_t mixed   = 0;   // ... fell through to the real 2x2 tap
     uint64_t dynOnly = 0;   // of `reached`, the lightmap-composite (dyn-only) form
+    // Same five questions for the 2-D SPOT tap in computeMapShadowAtten
+    // (DeferredSurfaceKernel.cpp), which reads the same uniSD pyramid from a
+    // different call chain. Counted separately because the two taps have
+    // different denominators and different fast-path conditions (the spot
+    // tap's PolyId arm never reads the dynamic plane, so uniSD alone settles
+    // it — see the comment at that tap).
+    uint64_t spotReached = 0;
+    uint64_t spotNoPyr   = 0;
+    uint64_t spotFastLit = 0;
+    uint64_t spotFastOcc = 0;
+    uint64_t spotMixed   = 0;
 };
 ShadowPyrCensus &ShadowPyrCensusTLS();
 void ShadowPyrCensusTotals(ShadowPyrCensus &out);

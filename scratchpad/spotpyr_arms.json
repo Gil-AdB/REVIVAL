@@ -1,0 +1,120 @@
+[
+ {
+  "tag": "his-par",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_par",
+  "args": [
+   "--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {
+   "FDS_GREETS_CAM": "-8.6249094,2.72651696,-53.2339516,0.210607708,0.0055912463,-0.977554619"
+  }
+ },
+ {
+  "tag": "his-chi",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_chi",
+  "args": [
+   "--bench=scene@scene=greets,t=3122,iters=20,xres=1512,yres=848",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {
+   "FDS_GREETS_CAM": "-8.6249094,2.72651696,-53.2339516,0.210607708,0.0055912463,-0.977554619"
+  }
+ },
+ {
+  "tag": "t5743-par",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_par",
+  "args": [
+   "--bench=scene@scene=greets,t=5743,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "t5743-chi",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_chi",
+  "args": [
+   "--bench=scene@scene=greets,t=5743,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "t1588-par",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_par",
+  "args": [
+   "--bench=scene@scene=greets,t=1588,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "t1588-chi",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_chi",
+  "args": [
+   "--bench=scene@scene=greets,t=1588,iters=20,xres=1920,yres=1080",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "city-par",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_par",
+  "args": [
+   "--bench=scene@scene=city,t=1961,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "city-chi",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_chi",
+  "args": [
+   "--bench=scene@scene=city,t=1961,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "fount-par",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_par",
+  "args": [
+   "--bench=scene@scene=fountain,t=1200,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "fount-chi",
+  "bin": "/Users/gil-ad/work/rev-spotpyr/Runtime/DEMO_chi",
+  "args": [
+   "--bench=scene@scene=fountain,t=1200,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ }
+]

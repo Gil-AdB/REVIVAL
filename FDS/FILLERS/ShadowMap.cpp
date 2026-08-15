@@ -145,6 +145,9 @@ void ShadowPyrCensusTotals(ShadowPyrCensus &out)
         out.reached += c->reached; out.noPyr   += c->noPyr;
         out.fastLit += c->fastLit; out.fastOcc += c->fastOcc;
         out.mixed   += c->mixed;   out.dynOnly += c->dynOnly;
+        out.spotReached += c->spotReached; out.spotNoPyr   += c->spotNoPyr;
+        out.spotFastLit += c->spotFastLit; out.spotFastOcc += c->spotFastOcc;
+        out.spotMixed   += c->spotMixed;
     }
 }
 #endif

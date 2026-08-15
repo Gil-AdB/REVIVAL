@@ -694,6 +694,94 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 			const int iY = int(smY);
 			if (iX >= 0 && iX + 1 < sm.xres &&
 			    iY >= 0 && iY + 1 < sm.yres) {
+				// ─── 8×8 PolyId uniformity pyramid, the 2-D SPOT tap ─────
+				// The same uniSD lookup CubeShadow_Sample already takes, on
+				// the other tap that reads these maps. The pyramid is built
+				// for EVERY map the bake writes — spot maps included, since
+				// they are in the same swzMaps list (Shadows.cpp) — so the
+				// ten greets spot pyramids were being rebuilt every frame
+				// with no reader. This is that reader.
+				//
+				// THE UNIFORMITY CONDITION IS SIMPLER HERE THAN IN THE CUBE.
+				// The cube tap's PolyId arm resolves closest-by-z ACROSS both
+				// planes, so it can only be settled without a read when the
+				// dynamic apron is uniformly empty (uD == 0). This tap's
+				// PolyId arm reads `psB` and only `psB` — the four
+				// ShadowTexId loads below all come from the static plane, the
+				// dynamic plane appearing only in the z00..z11 quartet that
+				// the depth arm uses. So uniSD alone is the whole verdict,
+				// whatever the dynamic plane holds, and no uniDyn read is
+				// needed. (z00..z11 are computed unconditionally today and
+				// are dead in PolyId mode — the fast path drops those eight
+				// packed loads as well as the four id loads.)
+				//
+				// NO STRADDLE CASE. The range test just above is
+				// `iX + 1 < xres && iY + 1 < yres`, the same footprint the
+				// 9×9 apron summarises, so the block index (iX>>3, iY>>3) is
+				// sufficient on its own. See ShadowMap.h.
+				//
+				// PLACED ABOVE THE ADDRESSING BLOCK, NOT INSIDE THE TAP.
+				// Three refutations (0b85e5df) say a new predicate in the
+				// tap's innermost body costs more than it removes; 91891249
+				// measured the same lookup worth an extra −0.054 Gi/f purely
+				// for sitting above the swizzle test / row offset / four
+				// texel offsets / two base pointers rather than below them.
+				// Both arms skip that block whole.
+				//
+				// BYTE-NULL BY CONSTRUCTION. Uniform-LIT: every `occ += w`
+				// below is skipped, occ stays at its 0.0f initialiser, the
+				// tail computes `1.0f - 0.0f` and this is the last statement
+				// before `return shadowAtten` — so `return 1.0f` is the same
+				// bit pattern. Uniform-OCCLUDING: all four fire, so it falls
+				// through to the SHARED weight block and sums those same four
+				// floats in the same order (recomputing them in a second
+				// place would be a bet on clang contracting
+				// (1.0f-fx)*(1.0f-fy) into the same fnmsub twice). Depth mode
+				// never enters — `polyId` carries the mode test the tail's
+				// own branch used to make, hoisted to one load.
+				//
+				// --shadow_prof_cache's line-transition counter lives inside
+				// the addressing block and is therefore not bumped for a
+				// skipped tap. That is the truthful accounting: a skipped tap
+				// touches no shadow cache line.
+				const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
+				// surfaceShadowId < 0 = non-casting receiver under
+				// --shadow_noncaster_depth; the identity test is unsatisfiable
+				// for it, so it takes the biased depth branch and the pyramid
+				// (an id summary) cannot speak for it.
+				const bool polyId = (mode == ShadowMode::PolyId && surfaceShadowId >= 0);
+				uint32_t uniC = kShadowUniMixed;
+#if FDS_SHADOW_TAP_CENSUS
+				if (polyId) {
+					FDS_PYR_CENSUS(spotReached);
+					if (sm.uniSD.empty()) FDS_PYR_CENSUS(spotNoPyr);
+				}
+#endif
+				if (polyId && !sm.uniSD.empty()) {
+					const size_t b = size_t(iY >> kShadowUniShift) * size_t(sm.uniW)
+					               + size_t(iX >> kShadowUniShift);
+					uniC = sm.uniSD[b];
+					if (uniC == kShadowUniMixed) { FDS_PYR_CENSUS(spotMixed); }
+					else if (uniC == 0u || uint16_t(uniC) == uint16_t(surfaceShadowId)) {
+						FDS_PYR_CENSUS(spotFastLit);
+						return 1.0f;   // occ would never leave its 0.0f initialiser
+					} else {
+						FDS_PYR_CENSUS(spotFastOcc);
+					}
+				}
+				const float fx = smX - float(iX);
+				const float fy = smY - float(iY);
+				const float w00 = (1.0f - fx) * (1.0f - fy);
+				const float w10 =         fx  * (1.0f - fy);
+				const float w01 = (1.0f - fx) *         fy;
+				const float w11 =         fx  *         fy;
+				// Uniform OCCLUDING block: all four `occ += w` fire, in this
+				// order, over these same four floats.
+				if (uniC != kShadowUniMixed) {
+					float occU = 0.0f;
+					occU += w00; occU += w10; occU += w01; occU += w11;
+					return (occU >= 1.0f) ? 0.0f : (1.0f - occU);
+				}
 				// Tap addressing: linear row-major, or 8×8-tiled under
 				// --shadow-swizzle (see CubeShadow_Sample / ShadowSwzOffset;
 				// halves the cache lines a 2×2 footprint touches). Falls back
@@ -737,18 +825,11 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 					}
 					g_shadowProfSamples.fetch_add(1, std::memory_order_relaxed);
 				}
-				const float fx = smX - float(iX);
-				const float fy = smY - float(iY);
-				const float w00 = (1.0f - fx) * (1.0f - fy);
-				const float w10 =         fx  * (1.0f - fy);
-				const float w01 = (1.0f - fx) *         fy;
-				const float w11 =         fx  *         fy;
-				const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
 				float occ = 0.0f;
-				// surfaceShadowId < 0 = non-casting receiver under
-				// --shadow_noncaster_depth; the identity test below is
-				// unsatisfiable for it, so take the biased depth branch.
-				if (mode == ShadowMode::PolyId && surfaceShadowId >= 0) {
+				// The four PCF weights and the `polyId` mode test were both
+				// hoisted above the addressing block by the uniformity fast
+				// path — computed once, read here.
+				if (polyId) {
 					// Surface matID extracted from gb.txtr's packed
 					// (miplevel:4 | matID:8 | swizzledUV:20). Shadow buffer
 					// stores matID+1 of the closest occluder; +1 here too so the
@@ -3414,17 +3495,31 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const double dFO  = double(cur.fastOcc - pPyr.fastOcc);
 				const double dMX  = double(cur.mixed   - pPyr.mixed);
 				const double dDO  = double(cur.dynOnly - pPyr.dynOnly);
+				const double dSR  = double(cur.spotReached - pPyr.spotReached);
+				const double dSNP = double(cur.spotNoPyr   - pPyr.spotNoPyr);
+				const double dSFL = double(cur.spotFastLit - pPyr.spotFastLit);
+				const double dSFO = double(cur.spotFastOcc - pPyr.spotFastOcc);
+				const double dSMX = double(cur.spotMixed   - pPyr.spotMixed);
 				pPyr = cur;
 				const double rr = std::max(1.0, dR);
+				const double sr = std::max(1.0, dSR);
 				std::fprintf(stderr,
-				  "  PYRAMID (PolyId)    reached %.3f M/f (dyn-only form %.1f%%)  no pyramid %.3f M\n"
+				  "  PYRAMID cube tap    reached %.3f M/f (dyn-only form %.1f%%)  no pyramid %.3f M\n"
+				  "    SKIPPED           uniform-lit %.3f M (%.1f%%)  uniform-occ %.3f M (%.1f%%)"
+				  "   => %.1f%% of taps take NO texel read\n"
+				  "    tapped            mixed %.3f M (%.1f%%)\n"
+				  "  PYRAMID spot tap    reached %.3f M/f  no pyramid %.3f M\n"
 				  "    SKIPPED           uniform-lit %.3f M (%.1f%%)  uniform-occ %.3f M (%.1f%%)"
 				  "   => %.1f%% of taps take NO texel read\n"
 				  "    tapped            mixed %.3f M (%.1f%%)\n",
 				  dR/f/1e6, 100.0*dDO/rr, dNP/f/1e6,
 				  dFL/f/1e6, 100.0*dFL/rr, dFO/f/1e6, 100.0*dFO/rr,
 				  100.0*(dFL+dFO)/rr,
-				  dMX/f/1e6, 100.0*dMX/rr);
+				  dMX/f/1e6, 100.0*dMX/rr,
+				  dSR/f/1e6, dSNP/f/1e6,
+				  dSFL/f/1e6, 100.0*dSFL/sr, dSFO/f/1e6, 100.0*dSFO/sr,
+				  100.0*(dSFL+dSFO)/sr,
+				  dSMX/f/1e6, 100.0*dSMX/sr);
 			}
 #endif
 			if (tcB > 0) {

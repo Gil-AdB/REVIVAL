@@ -171,6 +171,18 @@ After the change the omni loop is ~2.19 Gi/f at t=5743 and ~1.40 at his pose.
    because `CubeShadow_Sample` wants view space while the reflection happens in
    world space; a world->light matrix would delete ~15 flops per call but is a
    re-association, not a hoist. **JUDGE-CALL, not free.**
+   **UPDATE 2026-08-15c — the stage is now fully accounted, and the `srcCube`
+   round trip is the ONLY thing left in it.** Of the 1.767 M surviving calls,
+   1.703 M (96.4 %) are `srcCube` and already take the cube pyramid's 81.6 %
+   skip; 0.063 M (3.6 %) are `srcSm`, a single NON-PCF *depth* compare that an
+   *id* pyramid structurally cannot answer; and the light's own 2-D spot map is
+   live in **0.02 %** of the stage's calls — about 520 a frame. Wiring the
+   pyramid into that spot tap (done, byte-null, free — the spot pyramids were
+   already being built) is worth **-0.003 Gi/f at t=1588 and 0.000 at his pose
+   and t=5743**. Read the "48.9 % of the omni loop" row above as the STAGE, not
+   the spot tap. Same reason `volSpotShadow` (`DeferredFastFog.cpp:344`), the
+   volumetric reader of these same 2-D maps, is out of the pyramid's reach: it
+   is a depth compare too.
 3. **The specular lobe, 0.264 / 0.229 Gi/f (10.6 % / 15.9 %).** No
    transcendentals to remove: `--pbr` is off at greets, so the lobe is
    `pow_glossClass` = a bit-exact squaring chain for gloss in {48, 64}, ~6 fmuls.

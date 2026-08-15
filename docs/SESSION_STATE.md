@@ -1,5 +1,120 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-15c — THE SPOT PYRAMID HAS A READER NOW, AND THE HANDOVER'S 48.9 % WAS NOT ITS NUMBER
+>
+> **THE TARGET DOES NOT EXIST AT THE SIZE THE HANDOVER CLAIMED.** 91891249 left
+> the 8x8 uniformity pyramid built for all 76 shadow-map entries and read by only
+> the cube tap, with the 2-D spot tap in `computeMapShadowAtten` named as the next
+> customer at "48.9 % of the omni loop at his pose". **That 48.9 % is 0b85e5df's
+> ablation-ladder figure for the whole `computeMapShadowAtten` STAGE, which is
+> three independent bodies, and the spot tap is the smallest of them by three
+> orders of magnitude.** `--omni_census`, greets, deterministic frame to frame:
+>
+> | | calls/f reaching the stage | own 2-D map (`smIdx>=0`) | clone SOURCE map (`srcSm`) | clone SOURCE cube (`srcCube`) | none of the three |
+> |---|--:|--:|--:|--:|--:|
+> | his pose t=3122 | 2.615 M | **0.02 %** | 2.41 % | 65.14 % | 32.43 % |
+> | t=5743 | 4.749 M | **0.08 %** | 0.00 % | 0.42 % | 99.50 % |
+> | t=1588 | 7.660 M | **0.76 %** | 0.19 % | 1.02 % | 98.03 % |
+>
+> At his pose the stage costs what it costs because of the **`srcCube` mirror-clone
+> branch** — 65.14 % of the calls, a world->view round trip plus a full
+> `CubeShadow_Sample` — and 0b85e5df's guard had already deleted the 32.43 %
+> that carry nothing. The light's OWN spot map is live in about **520 calls a
+> frame**.
+>
+> **THE ANSWER TO "DOES THE PYRAMID REACH THE 1.77 M SURVIVING MIRROR-CLONE
+> CALLS": 96.4 % of them, and it already did.** Of the 1.767 M calls that survive
+> the guard at his pose, 1.703 M take `srcCube`, whose `CubeShadow_Sample` carries
+> 91891249's fast path; they are inside that census's `reached 2.555 M/f` row, of
+> which **81.6 % skip** (the row's other 0.848 M is the own-cube
+> `resolveCubeAtten` — the two add up to 2.551 M against 2.555 M measured). The
+> remaining 0.063 M take `srcSm`, a single NON-PCF **depth** comparison
+> (`pixZ + 128 < zS`); the pyramid is an **id** summary and structurally cannot
+> speak for a depth test, so that branch is out of its reach — as are the
+> volumetric spot readers (`volSpotShadow`, `DeferredFastFog.cpp:344`) for the
+> same reason.
+>
+> **SHIPPED ANYWAY, BECAUSE IT IS FREE AND BYTE-NULL.** The lookup is wired into
+> the spot tap on the same construction as the cube's, ABOVE the addressing block.
+> The condition is SIMPLER here: this tap's PolyId arm reads `psB` and only `psB`
+> (the dynamic plane appears only in the `z00..z11` quartet the DEPTH arm uses),
+> so `uniSD` alone is the whole verdict and no `uniDyn == 0` precondition is
+> needed. Skip rates and what they buy, measured:
+>
+> | pose | spot taps reaching the pyramid | uniform-lit | uniform-occ | **skipped** | cube taps, same frame |
+> |---|--:|--:|--:|--:|--:|
+> | his t=3122 | 0.001 M/f | 0.0 % | 100.0 % | **100.0 %** | 2.555 M/f |
+> | t=5743 | 0.004 M/f | 17.4 % | 80.4 % | **97.8 %** | 4.744 M/f |
+> | t=1588 | 0.058 M/f | 56.3 % | 36.1 % | **92.4 %** | 7.593 M/f |
+>
+> ### MEASURED — two arms (parent 91891249 / child), one worktree, one asset tree, interleaved min over rounds 1-8 of 9, load 5.3-10.6
+>
+> | | parent | child | delta |
+> |---|--:|--:|--:|
+> | **greets t=1588, 1920x1080** | | | |
+> | `lighting-w1` Ginstr/f | 4.853 | **4.850** | **-0.003** |
+> | `renderFrame` Ginstr/f | 7.464 | **7.461** | **-0.003** |
+> | frame_ms min | 69.53 | 69.45 | -0.08 |
+> | **greets t=3122, HIS POSE, 1512x848** | | | |
+> | `lighting-w1` Ginstr/f | 1.747 | 1.747 | **0.000** |
+> | `renderFrame` Ginstr/f | 4.772 | 4.772 | **0.000** |
+> | **greets t=5743, 1920x1080** | | | |
+> | `lighting-w1` Ginstr/f | 2.761 | 2.761 | **0.000** |
+> | `renderFrame` Ginstr/f | 4.365 | 4.365 | **0.000** |
+> | **city t=1961** `renderFrame` Ginstr/f | 6.048 | 6.049 | +0.001 |
+> | **fountain t=1200** `renderFrame` Ginstr/f | 1.580 | 1.580 | 0.000 |
+> | `shadow-uniformity` Ginstr/f (all three greets poses) | 0.010-0.011 | 0.010-0.011 | **0.000** |
+>
+> **THE ONE MOVING ROW IS PREDICTED EXACTLY.** 0.0536 M skipped taps a frame at
+> t=1588 x the ~50 instructions 91891249 measured per skipped tap = 0.0027 Gi;
+> measured -0.003, and `renderFrame` gives back the same -0.003, so the
+> attribution is the tap and nothing else. At the other two poses the prediction
+> is 0.0002 and 0.00005 Gi — three to four orders below the 0.3 % reproducibility
+> floor, and the measurement duly reports 0.000. **The point of the two poses that
+> move nothing is the other direction: hoisting the four PCF weights and the mode
+> load above the addressing block does not COST anything either**, on a function
+> whose other branches run 1.77 M times a frame at his pose.
+>
+> `shadow-uniformity` is IDENTICAL between the arms, which is the confirmation
+> that the build cost was already being paid: 91891249 built the spot pyramids
+> every frame with no reader, and this commit adds no build work at all.
+>
+> ### GATES
+>
+> Differential, both binaries from ONE tree snapshot in ONE worktree, one asset
+> tree. **All eight pins reproduce their RECORDED values 3/3 on both arms** —
+> chase t100 `7678a6bc` t400 `42d79fad` t800 `b29c73f1` t1200 `31aa5203` t1600
+> `1544b0e7`, greets `570a7b443f768393dc6647044a9e67b3`, fountain
+> `8db68ccb59416e9a44037e9f387b7bd9`, city `3f8948232c192a979ffe7f76c4b387ab`
+> (the parent's fountain run 1 returned `b91cb2ba` — the documented cold-cache
+> first-run-after-a-rebuild artefact, gone from runs 2 and 3 and never seen on the
+> child, whose runs read the cache the parent's had already written).
+> `render_gate.sh` **ALL FOUR PASS, twice on each arm**.
+>
+> **THE STALENESS GATE: 9 greets poses x 6 configurations, all 54 hashes
+> identical** — default, `--shadow_swizzle`, `--shadow_lightmap
+> --shadow_lm_dynamic`, `--no-shadow_dynamic`, `--shadow_polyid_no_pcf`, and
+> Depth mode via `FDS_SHADOW_POLYID=0`. Both fast-path arms are exercised across
+> it (uniform-occ dominates at his pose and t=5743, uniform-lit at t=1588).
+>
+> **A TRAP FOUND WHILE BUILDING THAT GATE, worth keeping: a MULTI-t snapshot
+> (`--snapshot=greets@t=a,b,c,...`) is NOT run-to-run stable past its FIRST
+> pose.** Two consecutive runs of the SAME parent binary agree on pose 1 and
+> disagree on all eight others, in every configuration. Any sweep that batches
+> poses into one process is measuring noise; `spotpyr_sweep.sh` gives each pose
+> its own process and is then self-identical 2/2.
+>
+> ### WHAT THIS MEANS FOR THE NEXT LEVER
+>
+> The `computeMapShadowAtten` stage at his pose is now fully accounted: 32.43 %
+> of its calls deleted by 0b85e5df, 65.14 % served by the cube pyramid at an
+> 81.6 % skip rate, 0.02 % served here, and 2.41 % (`srcSm`) structurally out of
+> reach of an id pyramid. What is left inside it is the `srcCube` branch's
+> world->view round trip that 0b85e5df already flagged as a judge-call
+> re-association to a world->light matrix — not a tap count.
+
+---
+
 > ## 2026-08-15b — 80 % OF THE CUBE TAP'S TEXEL READS ARE A LOOKUP THE MAP ALREADY ANSWERED: THE 8x8 PolyId UNIFORMITY PYRAMID
 >
 > The backlog's re-specified 8x8 item (43ac3456), built. In `ShadowMode::PolyId`
@@ -159,7 +274,10 @@
 > `surfaceMatId = -1`) and is byte-identical, verified. The 10 spot maps get a
 > pyramid built that nothing reads yet — the 2-D tap in `computeMapShadowAtten`
 > is the obvious next customer (48.9 % of the omni loop at his pose) and is left
-> for its own measured commit.
+> for its own measured commit. **[SUPERSEDED 2026-08-15c — that customer was
+> wired and it is worth nothing: the 48.9 % is the whole `computeMapShadowAtten`
+> STAGE, and its own 2-D spot map is live in 0.02 % of the stage's calls at his
+> pose. See the block at the top of this file.]**
 >
 > ### GATES
 >
