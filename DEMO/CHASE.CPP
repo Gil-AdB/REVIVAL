@@ -13,6 +13,7 @@
 #include "BlasterBolts.h"      // B1: blaster combat (chase_blasters)
 #include "ChaseEvents.h"       // B1: pure-t fire table + reconstruction
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
+#include <Base/FaceBBox.h>     // Reflected_Transform S2 tile pre-reject stamp
 #include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
 #include <memory>
 #include <vector>
@@ -231,6 +232,11 @@ static void Reflected_Transform(Scene *Sc)
 	float *fv;
 
 	float fzp = CurScene->FZP;
+
+	// S2 tile pre-reject: read the flag + this pass's near plane once.
+	// See the twin block in CITY.CPP's Reflected_Transform.
+	const bool  tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
+	const float bboxNearZ    = Sc->NZP;
 
 	TriMesh *TR;
 
@@ -578,7 +584,13 @@ static void Reflected_Transform(Scene *Sc)
 #else
 				F->SortZ.F = fzp - dz;
 #endif
-				*Ins++ = { F->SortZ.DW, F };
+				fds::FListEntry* e = Ins++;
+				e->sortKey = F->SortZ.DW;
+				e->face    = F;
+				// S2 tile pre-reject bbox — see CITY.CPP's twin. Without it
+				// the mirror pass ran with --tile_bbox_cull inert.
+				if (tileBboxCull) fds::FaceBBox_Stamp(e, F, bboxNearZ);
+				else { e->bbMinX = e->bbMinY = -32768; e->bbMaxX = e->bbMaxY = 32767; }
 			}
 	}
 	CPolys = Ins - FList;

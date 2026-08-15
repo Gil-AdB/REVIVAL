@@ -26,6 +26,7 @@ set(Base
     Base/FDS_DEFS.H
     Base/FDS_VARS.H
     Base/CameraContext.h
+    Base/FaceBBox.h
     Base/FaceListContext.h
     Base/FeatureFlags.cpp
     Base/ParamScript.cpp

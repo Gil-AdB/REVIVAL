@@ -23,6 +23,7 @@
 #include <RENDER/EnvCube.h>        // env_cube: padded 6-face bake + convention
 #include <RENDER/EnvBake.h>        // city_env_pixel: register per-building env stores
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
+#include <Base/FaceBBox.h>     // Reflected_Transform S2 tile pre-reject stamp
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
 // T->Verts. Forward-declared locally; called after any post-init Face
@@ -451,9 +452,16 @@ static void Reflected_Transform(Scene *Sc)
 	float *fv;
 
 	float fzp = CurScene->FZP;
-	
+
+	// S2 tile pre-reject: read the flag + this pass's near plane once.
+	// Sc->NZP is the mirror pass's near plane (Render() runs with the same
+	// scene near/far as the main pass — the camera is reflected, not the
+	// frustum), i.e. the same value Transform_Objects passes as cam.nearZ.
+	const bool  tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
+	const float bboxNearZ    = Sc->NZP;
+
 	TriMesh *TR;
-	
+
 	TR = (TriMesh *)(RflObj->Data);
 	
 	//for (T=Sc->TriMeshHead;T;T=T->Next)
@@ -792,7 +800,17 @@ OUT:
 #else
 				F->SortZ.F = fzp - dz;
 #endif
-				*Ins++ = { F->SortZ.DW, F };
+				fds::FListEntry* e = Ins++;
+				e->sortKey = F->SortZ.DW;
+				e->face    = F;
+				// S2 tile pre-reject bbox — the mirror pass needs it too.
+				// Without this the aggregate push left the cover-all default
+				// on every entry, so --tile_bbox_cull was INERT here and each
+				// of the 30 tiles handed all ~20 700 faces to the clipper
+				// (621 180 pairs vs the main pass's 29 671 at city t=1961).
+				// Pure reject, byte-identical — see FDS/Base/FaceBBox.h.
+				if (tileBboxCull) fds::FaceBBox_Stamp(e, F, bboxNearZ);
+				else { e->bbMinX = e->bbMinY = -32768; e->bbMaxX = e->bbMaxY = 32767; }
 			}
 		}
 	}
