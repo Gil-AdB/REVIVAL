@@ -90,6 +90,31 @@ instructions (−0.2 % of `renderFrame`) and flat thrsum (−0.3 %) — a 5.4/5.
 wall pair under load 17–24, not a mechanism. The pose barely has the effect to
 begin with.
 
+### THE ROW ITSELF — sampled self time, city t=1961, his arm
+
+`sample <pid> 25` on the running bench (leaf histogram; unprivileged, no
+Instruments needed — `scratchpad/selftime.sh`), shares of DEMO self samples.
+**The parent column reproduces §00b's 6.2 % at 6.46 %**, which is what makes the
+after column quotable:
+
+| symbol | parent | tip | absolute samples |
+|---|--:|--:|---|
+| **`FrustumClipper::Render`** | **6.46 %** | **1.21 %** | 9 223 → 1 644 (**−82.2 %**) |
+| `RenderInnerMekalele` (the per-tile walk) | 2.53 % | 0.16 % | 3 605 → 217 (−94.0 %) |
+| `fds::FaceTileBins_Build` + its dispatch | — | 0.10 % | 0 → 133 (new) |
+| **the three together** | **8.99 %** | **1.47 %** | |
+| `Render_VolumetricCones_Tile` (control) | 25.13 % | 27.16 % | 35 850 → 36 843 |
+| `apply_exact<false>` (control) | 6.13 % | 6.23 % | 8 749 → 8 453 |
+
+Both controls are flat in absolute samples — the shares only move because the
+denominator shrank — so the two rows that did move, moved.
+
+Note what the walk row says: at 2.53 % it was **not** negligible, and replacing
+it with a 0.10 % build is a 27× cut in traversal. But it was 39 % the size of
+the clipper row it was being blamed for; the clipper's own 6.46 % came from
+being CALLED 21× too often on the mirror pass, which is why `c26c1c35` is the
+commit that carries this round and `d9dfa527` is the smaller half.
+
 **SPOT CHECKS — and chase is the biggest winner of the whole round**, because it
 runs the same `Reflected_Transform` and its mirror frustum is full. chase t=800
 (`--deferred`, profiled through the snapshot harness at one repeated timestamp,
@@ -119,15 +144,35 @@ a win — it has no `Reflected_Transform` (its mirror is the RTT), so it gets on
 the binning half: `renderFrame` instructions flat to −0.1 %, cycles ±1.6 %,
 `gbuffer` instructions −1.0 %. Do not quote greets as a gain.
 
-Cleanest wall reading of the big step, taken in a quieter window (parent vs
-`c26c1c35` alone, min-of-8 over 9 rounds, city t=1961, his arm): **frame min
-49.93 → 47.81 ms, frame mean 56.75 → 54.75, `renderFrame` 40.14 → 37.96,
-`gbuffer` 8.11 → 6.25.**
+### THE WALL NUMBER, MEASURED PROPERLY
+
+The tables above ran A-then-B in every round, which under this box's structured
+load systematically penalises whichever arm runs second. Re-run with the arm
+order ROTATED per round (`scratchpad/ab2.sh`), 13 rounds, r0 dropped — this is
+the row to quote for city:
+
+| city t=1961, his arm | parent `b2de6323` | tip `d9dfa527` | |
+|---|--:|--:|--:|
+| **frame min** | 50.61 | **47.74** | **−5.7 %** |
+| **frame mean (TOTL)** | 57.71 | **54.24** | −6.0 % |
+| `renderFrame` wall | 40.47 | 37.96 | −6.2 % |
+| `gbuffer` wall | 8.571 | 6.023 | **−29.7 %** |
+| `gbuffer` thrsum | 81.71 | 39.24 | **−52.0 %** |
+| `gbuffer` Ginstr/f | 0.658 | 0.443 | −32.7 % |
+| `renderFrame` Ginstr/f | 4.384 | 4.173 | −4.8 % |
+| `renderFrame` Gcyc/f | 1.165 | 1.083 | −7.0 % |
+
+Same treatment on greets t=5743 (11 rounds, rotated) leaves `renderFrame` at
+**−0.1 % instructions / +0.1 % cycles** — flat, as the neutral verdict above
+says. Its frame-min column swings ±10 % between batches in BOTH directions at
+those flat counters; that is the box, not the change.
 
 **BYTE-NULL** — all nine pins unmoved 2/2 on each binary, `render_gate.sh` 4/4.
 The S2 contract is why: the box is a conservative superset of the un-clipped
 triangle and the clipper only shrinks coverage, so a box that misses a tile
-means zero output there.
+means zero output there. The escape hatches agree too — city t=1961 under his
+arm gives `925ecd43…` on all four of default / `--no-face_tile_bin` /
+`--no-tile_bbox_cull` / both off.
 
 ### WHAT THIS UNBLOCKS
 
@@ -249,7 +294,7 @@ bench (frame-dominated: init is ~3 s of ~28 s).
 |---|---|--:|--:|---|
 | 1 | `Render_VolumetricCones_Tile` | **20.6 %** | 1.288 (`cones-call`, ×1) | rounds 6–7 took −29 % of chase's; city's is §13's dependency chain. Only "fewer (px × spot) pairs" is left |
 | 2 | `Render_DeferredLighting_Tile_OuterVec` | **15.3 %** | 0.957 (`lighting-w1`, ×2) | of which `--city_env_pixel` +0.129, the env compose +0.089, `--env_live_water` +0.041 |
-| 3 | `FrustumClipper::Render` | **6.2 %** | inside `gbuffer` | **DONE 2026-08-16c (`c26c1c35` + `d9dfa527`), and the mechanism in this cell was WRONG.** The walk was never the cost: `--tile_bbox_cull` was **INERT on the mirror pass**, whose hand-written `Reflected_Transform` pushed a 2-field aggregate and left the cover-all bbox default on every entry — 621 180 (face, tile) clipper entries against the main pass's 29 671 on the same geometry. Stamping it + binning faces to tiles: `gbuffer` **0.658 → 0.444 Ginstr/f (−32.5 %)**, thrsum 79.3 → 43.1 core-ms, wall 8.69 → 6.86 ms; `renderFrame` 4.383 → 4.174 Ginstr/f. Byte-null. See the dated block below |
+| 3 | `FrustumClipper::Render` | **6.2 %** → **1.2 %** | inside `gbuffer` | **DONE 2026-08-16c (`c26c1c35` + `d9dfa527`), and the mechanism in this cell was only half right.** The walk was the smaller half: `--tile_bbox_cull` was **INERT on the mirror pass**, whose hand-written `Reflected_Transform` pushed a 2-field aggregate and left the cover-all bbox default on every entry — 621 180 (face, tile) clipper entries against the main pass's 29 671 on the same geometry. Stamping it + binning faces to tiles: this symbol **6.46 → 1.21 % of self time**, and with the walk row (2.53 → 0.16 %) **8.99 → 1.47 %**; `gbuffer` **0.658 → 0.444 Ginstr/f (−32.5 %)**, thrsum 79.3 → 43.1 core-ms; `renderFrame` 4.383 → 4.174 Ginstr/f. Byte-null. See §00c |
 | 4 | `pwater::waterWaveSlope` | **6.2 %** → ~5.4 % | 0.451 (ripple + glints) | −12 % / −7 % taken; what is left is an 8-wide form of the two bilinear taps |
 | 5 | `meka::TileRasterizer::apply_exact<false>` | 5.4 % | 0.659 (`gbuffer`, ×2) | `effPar` 8.5–8.7 of 12 — better than chase's 5.5, so §00 row 9's "half the pool is idle" does not hold in city |
 | 6 | fastfog lambdas + `Froxel_CompositePixel` + `FastFog_SampleGrid` + `SkyPaint` | 6.2 + 3.4 + 2.7 + 1.6 % | 0.869 (`fastfog`, ×1) | `fog-columns` 0.400 is the residue; `Froxel_GlowTile`'s per-(column × light × slice) `atanf` is unpriced |

@@ -14,8 +14,11 @@ Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked
 
 **Result: `gbuffer` at city t=1961 (his arm) `0.658 -> 0.444 Ginstr/f` (-32.5 %),
 thrsum `79.3 -> 43.1` core-ms, wall `8.69 -> 6.86`; `renderFrame`
-`4.383 -> 4.174 Ginstr/f` (-4.8 %), `1.196 -> 1.115 Gcyc/f`. In a quieter window
-the big step alone reads frame min `49.93 -> 47.81` ms. **chase t=800 gains
+`4.383 -> 4.174 Ginstr/f` (-4.8 %), `1.196 -> 1.115 Gcyc/f`. With the arm order
+ROTATED per round (13 rounds, r0 dropped) the wall reads **frame min
+`50.61 -> 47.74` (-5.7 %), frame mean `57.71 -> 54.24` (-6.0 %), `renderFrame`
+`40.47 -> 37.96` (-6.2 %), `gbuffer` `8.571 -> 6.023` (-29.7 %)**.
+**chase t=800 gains
 more than city**: `gbuffer` `0.597 -> 0.334 Ginstr/f` (-44.1 %), thrsum
 `60.5 -> 26.1` core-ms (-56.9 %), `renderFrame` -6.8 % instructions / -8.8 %
 cycles / -6.1 % wall. greets and fountain have no mirror transform and are
@@ -24,12 +27,27 @@ instructions, frame-level inside the noise). BYTE-NULL — all nine pins unmoved
 2/2, `render_gate.sh` 4/4. Two commits: `c26c1c35` + `d9dfa527`.
 Full map in `docs/PERF_STATE.md` 00c.**
 
-### THE ROW'S STATED MECHANISM WAS WRONG, AND THAT IS THE FINDING
+### THE ROW ITSELF, SAMPLED
+
+`sample <pid> 25` on the running bench, city t=1961, his arm, shares of DEMO
+self samples. The parent column reproduces 00b's 6.2 % at 6.46 %:
+
+| symbol | parent | tip |
+|---|--:|--:|
+| **`FrustumClipper::Render`** | **6.46 %** | **1.21 %** |
+| `RenderInnerMekalele` (the per-tile walk) | 2.53 % | 0.16 % |
+| `fds::FaceTileBins_Build` + dispatch | — | 0.10 % |
+| **together** | **8.99 %** | **1.47 %** |
+| `Render_VolumetricCones_Tile` (control) | 35 850 samples | 36 843 |
+| `apply_exact<false>` (control) | 8 749 samples | 8 453 |
+
+### THE ROW'S STATED MECHANISM WAS ONLY HALF RIGHT, AND THAT IS THE FINDING
 
 00b row 3 read "every raster tile re-walks the whole face list: 30 tiles x 2
-passes x 10 215 faces". The walk is real but cheap; a probe that ran four EXTRA
-reject-only walks per tile priced one whole walk at ~4.5 core-ms/frame, i.e.
-~5 % of the `gbuffer` phase — not 6.2 % of the process.
+passes x 10 215 faces". The walk is real — it is the `RenderInnerMekalele`
+2.53 % row above, and a probe that ran four EXTRA reject-only walks per tile
+priced one whole walk at ~4.5 core-ms/frame — but it is a SEPARATE symbol from
+the 6.2 % the row was hung on, and it is 39 % of its size.
 
 What was actually happening is that `--tile_bbox_cull` (default ON since the
 S2/B5 work) **never fired on the mirror pass at all**. `Transform_Objects`
