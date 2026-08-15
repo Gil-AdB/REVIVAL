@@ -1029,6 +1029,17 @@ namespace {
 	std::vector<float> gFrZb;                             // slice boundaries [nz+1]
 	int   gFrX = 0, gFrY = 0, gFrZ = 0;
 	float gFrNear = 1.0f, gFrFar = 1.0f;
+	// Per-frame cache of the two depth-mapping constants. They are functions
+	// of gFrNear/gFrFar alone, but Froxel_CompositePixel — the SCALAR punt
+	// path Froxel_CompositeTileVec8 takes for every 8-lane group containing a
+	// water-reflection lane, i.e. most of city's lower half — recomputed them
+	// PER PIXEL, and one of them is a libm `logf` CALL. The tile function
+	// hoists them because it is a loop; the per-pixel function cannot, and
+	// clang will not do it for it (the dword* VPage store may alias a float
+	// global, so the load of gFrFar is not provably invariant across the
+	// caller's loop). Written once per frame from the SAME expression, so the
+	// value is bit-identical to what the per-pixel form produced.
+	float gFrInvNear = 1.0f, gFrInvLogFN = 1.0f;
 	// Temporal: per-froxel raw scatter L·σ (rgb) + extinction σ, INTERLEAVED
 	// float4 per froxel (one cache line covers a corner-pair in the history
 	// fetch), ping-ponged — this frame's blended values are next frame's
@@ -2247,8 +2258,8 @@ static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P)
 	dword* out = reinterpret_cast<dword*>(VPage);
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float fnx = float(nx)/float(XRes), fny = float(ny)/float(YRes);
-	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
-	const float invNear  = 1.0f / gFrNear;
+	const float invLogFN = gFrInvLogFN;   // per-frame cache; see the decl
+	const float invNear  = gFrInvNear;    // (this is the PER-PIXEL path)
 	const float* zb = gFrZb.data();
 	const float* sctA = gFrSct[gFrCur].data();
 	auto col = [&](int ix, int iy, int iz, float* o) {
@@ -2763,6 +2774,9 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		if (newNear != gFrNear || fogFar != gFrFar) gFrHistValid = false;
 		gFrNear = newNear;
 		gFrFar  = fogFar;
+		// Composite constants, hoisted out of the per-pixel punt path (see decl).
+		gFrInvNear  = 1.0f / gFrNear;
+		gFrInvLogFN = 1.0f / std::log(gFrFar / gFrNear);
 		// History is only meaningful within one continuously-viewed scene —
 		// across a scene change the world the history sampled no longer
 		// exists (it would blend the previous scene's fog into this one's
