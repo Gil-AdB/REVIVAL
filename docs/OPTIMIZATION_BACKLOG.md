@@ -10,6 +10,96 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16 — HIS ACCEPTANCE ARM: SSAO was 39 % of the frame and had never been profiled
+
+**The arm:** `--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace`,
+greets, 1512x848. **Nothing in the round-1 map covers it** — no prior greets
+round carried `--ssao --ssao_gtao`, and `--ssao_downscale` defaults to **1**, so
+GTAO runs FULL RES (1.28 M cells) while every tuning note in
+`docs/GRAPHICS_PIPELINE.md` 9 was written at quarter-res.
+
+### The ranked map of this arm, measured (min-of-6 over 7 interleaved rounds, r0 dropped)
+
+| item | ms @ t=5743 | Ginstr/f | share of `renderFrame` |
+|---|--:|--:|--:|
+| **`ssao`** | **19.4** | **2.143** | **39 %** |
+| `DeferredLighting-call` (`w1` 14.4 + `w2` 2.1) | 17.6 | 2.040 | 35 % |
+| `gbuffer` | 8.5 | 0.986 | 17 % |
+| `shadow-bake` (outside `renderFrame`) | 2.5 | 0.207 | — |
+| `RTT` | 2.1 | 0.024 | — |
+| `bloom-chain` | 1.19 | 0.136 | 2 % |
+| `cones` | 0.73 | 0.063 | 1 % |
+| `tonemap-post` | 0.45 | 0.037 | 1 % |
+| `mirror-grid` | 0.45 | — | 1 % |
+
+`ssao`'s `Ginstr/f` is **2.14–2.16 at all five poses** — it is a fixed full-res
+cost, independent of what the camera sees, which no other phase in this engine
+is. Ablation at t=5743, same batch: `--no-ssao` frame 58.26 -> **39.33**;
+`--no-ssao_gtao` (hemisphere producer) `ssao` 19.4 -> 12.8; dropping
+`--texture_filter=2` `gbuffer` 8.50 -> 7.07 (**tf=2 costs 1.4 ms**, all of it in
+the raster); `--no-bloom` 1.19 ms; dropping `--greets_displace` frame -5.1 ms
+(his approved look, not a target).
+
+### DONE — four rungs, -23 % instructions / -25 % cycles on the pass
+
+Commits `c78d536f` (slice-trig table + 8-wide denoise, BYTE-NULL),
+`f5779342` (vector tail, BYTE-NULL), `289e92c7` (sector units, judge call),
+`b0905ee1` (apply `vld4_f16`/`vst4_f16`, BYTE-NULL).
+
+Parent `f25bb992` run with the four corner flags EXPLICIT vs the tip run with
+the bare umbrella, both binaries built in one worktree against one asset tree,
+interleaved min-of-8, r0 dropped, load 23–37:
+
+| pose | `ssao` Ginstr/f | `ssao` Gcyc/f | `ssao` wall ms | frame min ms |
+|---|--:|--:|--:|--:|
+| t=2845 | 2.150 -> 1.654 | 0.649 -> 0.488 | 19.55 -> 15.06 | 59.53 -> 59.05 |
+| t=3409 | 2.141 -> 1.653 | 0.637 -> 0.487 | 22.27 -> 16.28 | 68.45 -> 65.54 |
+| t=5743 | 2.143 -> 1.652 | 0.651 -> 0.492 | 23.55 -> 16.36 | 77.02 -> 71.29 |
+| t=5813 | 2.149 -> 1.650 | 0.655 -> 0.483 | 20.18 -> 14.26 | 58.30 -> 52.54 |
+| t=6097 | 2.155 -> 1.653 | 0.647 -> 0.487 | 19.81 -> 14.14 | 50.17 -> 44.41 |
+
+Whole-frame: `renderFrame` **Ginstr/f -9.0 to -10.2 %, Gcyc/f -9.3 to -10.5 %**.
+Image cost of all four rungs together: **343 px of 24 883 200 (0.0014 %) over 12
+deterministic greets poses, every one at max |delta| = 1/255** — all of it from
+the sector-units rung.
+
+### THE BIG LEVER LEFT IS A DIAL, NOT A REFACTOR — `--ssao_downscale`
+
+Measured on the tip, same protocol, load 15–29. This is a **LOOK change** and is
+recorded here as an OPTION, not a default:
+
+| arm | `ssao` ms t=5743 / t=6097 | `ssao` Ginstr/f | frame min t=5743 / t=6097 |
+|---|--:|--:|--:|
+| `--ssao_downscale=1` (default, what he runs) | 14.33 / 14.61 | 1.651 | 53.92 / 44.93 |
+| **`--ssao_downscale=2`** | **4.95 / 4.97** | **0.604** | **44.81 / 35.08** |
+| `--ssao_downscale=4` | 2.19 / 2.17 | 0.291 | 42.15 / 32.22 |
+| `--ssao_gtao_steps=2` | 10.37 / 10.26 | 1.137 | 50.74 / 40.67 |
+| `--ssao_gtao_slices=1` | 8.89 / 8.77 | 1.016 | 48.80 / 39.34 |
+
+**`=2` is -9.4 ms of `ssao` and -9.1 ms of the FRAME** — larger than everything
+the four rungs above took together. What it costs, measured against `d=1` over
+four poses: 44–63 % of pixels move, but **mean |delta| on the moved pixels is
+0.53–0.87 / 255** and the peaks are local to contact creases (max 20 at t=2845,
+74 at t=5743; `d=4` reaches 102–109). Side-by-side crops:
+`docs/img/ssaoperf/dial_t{5743,6097,2845,6001}_crop_d1_d2_d4.png`, full frames
+`dial_t*_full_d1_d2_d4.jpg`. **Needs his eye before it goes near a default.**
+
+### What is left inside SSAO, ranked, after the four rungs
+
+* **The per-lane scalar slice setup** — `gtaoRow8` still runs the cross
+  products, `fast_rsqrt` and `atan2_approx` **per lane per slice** (8 x slices
+  scalar setups per vector group). Estimated ~20 % of the compute. Vectorising
+  it is bit-exact only if `atan2_approx`'s branches become selects over the same
+  polynomial; not attempted.
+* **The two `_mm256_sqrt_ps` inside `gtaoAcos_x8`** are now the only
+  non-pipelined FP ops left in the sample chain. Replacing them with
+  `rsqrt`-and-multiply is NOT byte-safe (the Eberly fit's output is quantised to
+  1/32 sectors; a 12-bit reciprocal there flips boundaries at ~0.3 % of samples,
+  three orders of magnitude more than the sector-units rung moved).
+* **The denoise at `down==1` is a 4x4 box over the FULL-RES plane** — 16 taps a
+  pixel. Under `--ssao_downscale>1` it shrinks quadratically along with
+  everything else, which is another reason the dial is the lever.
+
 ## 2026-08-15 — round-1 item #1, the deferred OMNI LOOP: the shadow chain is 74 % of it, not 24.5 %, and 99.5 % of the 2-D-shadow calls compute the constant 1.0f
 
 **Result: greets t=5743 `lighting-w1` 26.00 -> 24.26 ms (-1.75 ms), `renderFrame` 41.87 -> 40.11 ms, frame min 48.33 -> 46.55 ms; instructions -9.0 % of `lighting-w1`, -6.0 % of `renderFrame`. chase t=800 `lighting-w1` -22.5 % instructions / -1.05 ms. BIT-EXACT: all eight pins unmoved 3/3, `render_gate` 4/4 PASS. No flag — there is nothing to A/B, the skipped calls returned 1.0f.**

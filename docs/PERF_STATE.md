@@ -19,6 +19,68 @@
 
 ---
 
+## 00a. THE USER'S ACCEPTANCE ARM — greets, 1512x848, 2026-08-16
+
+```
+./DEMO --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace
+```
+
+**This is a different frame from every table in 00 and 0.** No prior greets
+round carried `--ssao --ssao_gtao`; `--ssao_downscale` defaults to **1**, so
+GTAO runs at FULL resolution. Poses are the SCENE'S OWN scripted camera at
+t=2845 / 3409 / 5743 / 5813 / 6097 (no `FDS_GREETS_CAM`), 12 iters,
+`--deferred_prof=1 --hw_prof --profiler=1`, min-of-6 over 7 interleaved rounds
+with round 0 dropped. Loads ran 15–39 across the session, so **read `Ginstr/f`
+whenever a wall figure looks surprising** — `ssao`'s is stable to 0.2 % across
+poses and batches, the wall is not.
+
+### BEFORE — the map as his command found it (parent `f25bb992`)
+
+| # | phase | ms t=5743 | Ginstr/f | share of `renderFrame` |
+|---|---|--:|--:|--:|
+| 1 | **`ssao`** | **19.4** | **2.143** | **39 %** |
+| 2 | `DeferredLighting-call` | 17.6 | 2.040 | 35 % |
+| 3 | `gbuffer` | 8.5 | 0.986 | 17 % |
+| 4 | `shadow-bake` (outside `renderFrame`) | 2.5 | 0.207 | — |
+| 5 | `RTT` | 2.1 | 0.024 | — |
+| 6 | `bloom-chain` | 1.19 | 0.136 | 2 % |
+| 7 | `cones` | 0.73 | 0.063 | 1 % |
+| 8 | `tonemap-post` | 0.45 | 0.037 | 1 % |
+| 9 | `mirror-grid` | 0.45 | — | 1 % |
+
+Per-flag ablation at t=5743, one batch: `--no-ssao` frame **58.26 -> 39.33**;
+hemisphere instead of GTAO `ssao` 19.4 -> 12.8; **`--texture_filter=2` costs
+1.4 ms**, all of it `gbuffer` (8.50 -> 7.07, 0.986 -> 0.813 Ginstr) — the same
+verdict 0 reached for `=1`, re-measured for `=2` on this arm;
+`--no-bloom` 1.19 ms; `--greets_displace` itself 5.1 ms of frame (his look).
+
+### AFTER — `b0905ee1`, the four SSAO rungs (docs/OPTIMIZATION_BACKLOG.md 2026-08-16)
+
+Interleaved parent-vs-tip, min-of-8, both binaries one worktree one asset tree:
+
+| pose | frame min | `renderFrame` | `ssao` ms | `ssao` Ginstr/f | `ssao` Gcyc/f |
+|---|--:|--:|--:|--:|--:|
+| t=2845 | 59.53 -> 59.05 | 49.67 -> 48.92 | 19.55 -> 15.06 | 2.150 -> 1.654 | 0.649 -> 0.488 |
+| t=3409 | 68.45 -> 65.54 | 59.47 -> 52.94 | 22.27 -> 16.28 | 2.141 -> 1.653 | 0.637 -> 0.487 |
+| t=5743 | 77.02 -> 71.29 | 66.45 -> 59.16 | 23.55 -> 16.36 | 2.143 -> 1.652 | 0.651 -> 0.492 |
+| t=5813 | 58.30 -> 52.54 | 50.68 -> 45.20 | 20.18 -> 14.26 | 2.149 -> 1.650 | 0.655 -> 0.483 |
+| t=6097 | 50.17 -> 44.41 | 45.10 -> 39.23 | 19.81 -> 14.14 | 2.155 -> 1.653 | 0.647 -> 0.487 |
+
+`renderFrame` **Ginstr/f -9.0 to -10.2 %, Gcyc/f -9.3 to -10.5 %** at every
+pose. Image cost of all four rungs: 343 px of 24.9 M at 1/255.
+
+### The ranking AFTER, by instructions — the lighting kernel is #1 again
+
+t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
+**`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
+`cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and
+the cube tap) are the next target on this arm too — **and the single largest
+lever of all is a dial, `--ssao_downscale=2`, worth another -9.1 ms of frame
+for a look change nobody has approved yet** (numbers + crops in
+docs/OPTIMIZATION_BACKLOG.md 2026-08-16).
+
+---
+
 ## 00. ROUND-1 REBASELINE — all five scenes, 2026-08-14
 
 Ordered by what a frame-time-reduction campaign should attack next. Everything
