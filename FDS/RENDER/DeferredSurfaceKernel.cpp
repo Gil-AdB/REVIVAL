@@ -968,6 +968,41 @@ static inline void EnvCubeFetchBil(const fds::EnvPanoLinear* envP, int lvl,
 	B = ch(0); G = ch(8); R = ch(16);
 }
 
+// --env_live_water's mask weight, taken at an ALREADY-PROJECTED direction.
+//
+// EnvBake.h's EnvLiveWater_Weight starts by calling EnvCube_DirToFaceUV on the
+// unperturbed lookup direction — the SAME call, on the SAME operands, that the
+// cube colour fetch makes one line later. Two dominant-axis selects and two
+// divides for one projection, on every env pixel of the city glass. This form
+// takes the face/u/v the caller already has, so the projection is paid once
+// when the tilt does not fire and twice only when it does (a tilted direction
+// is a different direction and must be re-projected).
+//
+// BIT-EXACT: the guard order and the texel pick below are a verbatim move of
+// EnvLiveWater_Weight / EnvLiveWater_MaskBit (868ba5d8's one-bit-per-texel
+// point-sampled form) minus the leading projection.
+// It lives HERE rather than in EnvBake.h because the reflection-bake mask
+// machinery in that header is under concurrent change; EnvBake.h stays the
+// source of truth and this must be kept in step with it — if MaskBit's texel
+// pick or guard set changes, change this too.
+static inline float EnvLiveWaterWeightAtFaceUV(float bakeY, float dy,
+                                               const uint8_t* mask, int maskRes,
+                                               int face, float u, float v)
+{
+	const fds::EnvLiveWaterState& lw = fds::g_envLiveWater;
+	if (!lw.active) return 0.0f;
+	if (dy >= -1e-6f) return 0.0f;                  // above horizon
+	if (bakeY <= lw.waterY) return 0.0f;            // probe under water: n/a
+	if (!mask || maskRes < 8) return 0.0f;          // no water mask → no tilt
+	int x = int(u * float(maskRes));
+	int y = int(v * float(maskRes));
+	if (x < 0) x = 0; else if (x > maskRes - 1) x = maskRes - 1;
+	if (y < 0) y = 0; else if (y > maskRes - 1) y = maskRes - 1;
+	const size_t bit = (size_t(face) * size_t(maskRes) + size_t(y)) * size_t(maskRes)
+	                 + size_t(x);
+	return ((mask[bit >> 3] >> (bit & 7)) & 1u) != 0u ? 1.0f : 0.0f;
+}
+
 // --env_mip_chain (§11 row E7): the VIRTUAL chain depth the roughness→level
 // select divides by. 0 / <=1 = unset → the store's real numMips, so the
 // default is byte-identical. Clamped to 2..16 (a depth of 1 would make every
@@ -1236,9 +1271,6 @@ static inline void EnvSpecComposeScalar(
 	// while the reflected skyline above the waterline stays put (the store's
 	// baked coverage mask decides which is which). Inactive = one branch
 	// inside the helper.
-	fds::EnvLiveWater_PerturbDir(envP->bakeX, envP->bakeY, envP->bakeZ,
-	                             rwx, rwy, rwz,
-	                             envP->waterMask, envP->waterMaskRes);
 	// Direction → lookup coords. env_cube: trig-free dominant-axis face select
 	// + gnomonic UV (EnvCube.h). Equirect: the atan2/asin panorama lookup
 	// (inverse of EnvBake's stitch). ONE branch on the bake's mode, hoisted to
@@ -1248,8 +1280,31 @@ static inline void EnvSpecComposeScalar(
 	float eu = 0.0f, evv = 0.0f;
 	int   cubeFace = 0; float cubeU = 0.0f, cubeV = 0.0f;
 	if (envIsCube) {
+		// --env_live_water and the colour fetch BOTH start from the same
+		// dominant-axis projection of the same UNPERTURBED direction (the
+		// mask is read unperturbed by construction — a perturbed read would
+		// be circular), so the pair cost two face selects and two divides for
+		// one projection. Project once, hand the result to the mask, and
+		// re-project ONLY when the tilt actually fires (then it is a genuinely
+		// different direction). Bit-exact: EnvLiveWater_MaskAt's own
+		// EnvCube_DirToFaceUV call is the identical expression on the
+		// identical operands. Flag off / no mask / above the waterline = the
+		// second projection never happens at all.
 		fds::EnvCube_DirToFaceUV(rwx, rwy, rwz, cubeFace, cubeU, cubeV);
+		const float lwW = EnvLiveWaterWeightAtFaceUV(
+			envP->bakeY, rwy, envP->waterMask, envP->waterMaskRes,
+			cubeFace, cubeU, cubeV);
+		if (lwW > 0.0f) {
+			fds::EnvLiveWater_TiltDir(envP->bakeX, envP->bakeY, envP->bakeZ,
+			                          rwx, rwy, rwz, lwW);
+			fds::EnvCube_DirToFaceUV(rwx, rwy, rwz, cubeFace, cubeU, cubeV);
+		}
 	} else {
+		// Equirect stores keep the combined helper: their colour lookup is
+		// atan2/asin, so there is no shared projection to hoist.
+		fds::EnvLiveWater_PerturbDir(envP->bakeX, envP->bakeY, envP->bakeZ,
+		                             rwx, rwy, rwz,
+		                             envP->waterMask, envP->waterMaskRes);
 		const float lon = atan2_approx(-rwz, -rwx);
 		float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
 		const float lat = asin_approx(sy_);
@@ -5823,14 +5878,27 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						// the shared scalar face pick + bilinear fetch.
 						const fds::EnvPanoLinear* envP_ = lane_envP[k];
 						// Live water: same lookup-dir perturbation as the
-						// scalar compose (parity between the two paths).
-						fds::EnvLiveWater_PerturbDir(
-						    envP_->bakeX, envP_->bakeY, envP_->bakeZ,
-						    envRvx[k], envRvy[k], envRvz[k],
-						    envP_->waterMask, envP_->waterMaskRes);
+						// scalar compose (parity between the two paths), with
+						// the same single-projection form — see
+						// EnvLiveWaterWeightAtFaceUV. This lane IS the city
+						// glass, so it is where the duplicate projection was
+						// actually being paid.
 						int face; float cu, cvv;
 						fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k],
 						                         envRvz[k], face, cu, cvv);
+						{
+							const float lwW = EnvLiveWaterWeightAtFaceUV(
+								envP_->bakeY, envRvy[k],
+								envP_->waterMask, envP_->waterMaskRes,
+								face, cu, cvv);
+							if (lwW > 0.0f) {
+								fds::EnvLiveWater_TiltDir(
+									envP_->bakeX, envP_->bakeY, envP_->bakeZ,
+									envRvx[k], envRvy[k], envRvz[k], lwW);
+								fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k],
+								                         envRvz[k], face, cu, cvv);
+							}
+						}
 						const float lvlF = envLvlF[k];
 						const int lvl0 = int(lvlF);
 						const int lvl1 = lvl0 + 1 < envP_->numMips ? lvl0 + 1 : lvl0;
