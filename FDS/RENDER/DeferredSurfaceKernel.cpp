@@ -4779,6 +4779,34 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 		const int stripIdx = strip_y >> 3;  // TILELOG=3
 		DeferredLightingCtx stripCtx = dctx;
 		stripCtx.tileLights = g_stripLights;
+		// ── THE LIGHT GRID MUST TRAVEL WITH THE LIGHT ARRAY ───────────────
+		// da286d8b made the transparent kernel resolve its light tile from
+		// the PIXEL, via ctx.lt{NumX,NumY,SizeX,SizeY}. Those describe the
+		// deferred 12x8 LIGHTING grid, which is the right grid for the
+		// runTilePass path — but this path swaps tileLights to g_stripLights,
+		// a 1 x numStrips grid of TILESIZE-row Y strips. Leaving the 12x8
+		// geometry in place makes lightTileAt() subscript the STRIP array as
+		// (py/ltSizeY)*12 + px/ltSizeX, i.e. it lights a strip from a light
+		// list built for a completely different band of the screen: exactly
+		// the category error da286d8b fixed, one dispatch level down.
+		// (Verified live: fountain t=1200 differs between --xpar_tile_lights
+		// and --no-xpar_tile_lights, 845 px / max |d| 19, and the OFF arm —
+		// ctx.tileLights[stripIdx] — is the correct one.)
+		// Describing the strip array to the kernel makes the per-pixel lookup
+		// land on py>>3, which for a rect inside this strip is stripIdx: the
+		// same list the pre-da286d8b ordinal subscript picked, and the right
+		// one for strips >= DEFERRED_NUM_TILES too (the legacy subscript
+		// clamped those to tile 95, i.e. every strip below row 768 shared one
+		// list — visible only above 768 px of height).
+		{
+			int numStrips = ((stripCtx.yres > 0 ? stripCtx.yres : YRes) + 7) >> 3;
+			if (numStrips > DEFERRED_MAX_STRIPS) numStrips = DEFERRED_MAX_STRIPS;
+			if (numStrips < 1) numStrips = 1;
+			stripCtx.ltNumX  = 1;
+			stripCtx.ltNumY  = numStrips;
+			stripCtx.ltSizeX = XRes > 0 ? XRes : 1;
+			stripCtx.ltSizeY = 1 << 3;   // TILESIZE
+		}
 		if (front) {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
 				stripCtx, stripIdx, cx0, strip_y, cx1, strip_y + strip_h);

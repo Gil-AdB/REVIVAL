@@ -1,5 +1,96 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-15f — THE GREETS PEEL A/B WAS MEASURING NOTHING: GREETS HAS NEVER RUN MORE THAN ONE PEEL PASS
+>
+> ### 1. THE BAND LEAD IS DEAD — the user's `--xpar-peel-passes=1` A/B had no independent variable
+>
+> `xparPeelPassesEffective()` (`DeferredSurfaceKernel.cpp:4469`) honours the CLI
+> flag only when `isSet()`; otherwise it reads `CurScene->XparPeelPasses`.
+> **`FOUNTAIN.CPP:1083` is the only writer of that field in the tree.** Greets
+> never writes it, so `CurScene->XparPeelPasses == 0 → 1`. His "default (band)"
+> and his "`=1` (no band)" launches were the SAME xpar configuration.
+>
+> **MEASURED, and it is stronger than the wiring argument:** at four greets
+> poses — t=3409 (his band pose, his camera, 1512×848), t=2845, t=3122, t=5743 —
+> `--xpar-peel-passes=4` is **byte-identical** to the default. The peel-pass axis
+> is a complete no-op for greets: no (mesh, side) batch there has two fragments
+> stacked on one pixel. Everything the last two rounds built on "the band is
+> composited by peel passes ≥ 2" — the stale-slice / `--xpar_strip_extent`
+> hypothesis included — rests on a null A/B and should be dropped.
+>
+> ### 2. WHAT THE BAND IS INSTEAD: per-launch intermittent, and I caught a flip
+>
+> Combined with his "it also vanishes with explicit `=4`, and solves itself",
+> the band is **per-launch intermittent**, not flag-borne. Batteries at his exact
+> pose (`--repro=greets@t=3409 --repro_from=0 --repro_xres=1512 --repro_yres=848`,
+> 349 real frames, dummy drivers):
+>
+> | arm | runs | verdict |
+> |---|--:|---|
+> | plain | 12 | all `10f9d325…` |
+> | `MallocPreScribble=1 MallocScribble=1` | 6 | all `10f9d325…` — **no uninitialised-heap read reaches this frame** |
+> | `--repro_late_cam` (scene camera drives the scrub → real camera MOTION) | 4 | all `10f9d325…` |
+> | `--repro_prescenes` | **15** | **14 × `10f9d325…`, 1 × `c2fa243c…`** |
+> | `--repro_late_cam --repro_prescenes` | 3 | all `10f9d325…` |
+> | `--snapshot=greets@t=3409` ± scribble | 12 | all `4754c66f…` |
+>
+> **One flip in 15.** The flipped frame differs on **109 933 px (8.57 %), max
+> |Δ| 107, mean signed −0.50**, and its bounding box is rows 129–554 × cols
+> 478–1286 — **exactly the mirror panel's reflected content**, dithered over the
+> whole panel rather than banded:
+> `docs/img/fogwt/mirror_launch_nondet_t3409_diff.png`
+> (/Users/gil-ad/work/revival-fog/docs/img/fogwt/mirror_launch_nondet_t3409_diff.png).
+>
+> So: **the greets mirror is a per-launch non-deterministic surface**, at ~7 %
+> flip rate, and the flip lands on exactly the pixels his band lands on. This is
+> not yet his +40 band (wrong sign, wrong shape, 100× rarer than he sees it) —
+> but it is the first headless reproduction of ANY per-launch mirror variance,
+> and it is the thread to pull. Suspects, in order: the RTT slot round-robin
+> (`GreetsMirror.cpp:1270`, `kRttPerFrame = 2` of greets' 7–8 slots, so a slot's
+> texture is 0–3 frames stale depending on scheduling) and the adaptive per-slot
+> resolution (`GreetsMirror.cpp:3133`, `pow2clamp` of the on-screen footprint).
+>
+> ### 3. A REAL BUG FOUND ON THE WAY: the strip composite lit itself off the 12×8 grid
+>
+> `da286d8b` made the transparent kernel resolve its light tile from the PIXEL
+> using `ctx.lt{NumX,NumY,SizeX,SizeY}` — correct for the `runTilePass` path.
+> But `RenderXparClumpInStrip` swaps `tileLights` to `g_stripLights`, a
+> **1 × numStrips** grid of 8-row Y strips, and left the 12×8 LIGHTING geometry
+> in the ctx. So `lightTileAt()` subscripted the strip array as
+> `(py/106)*12 + px/126`: **the same category error `da286d8b` fixed, one
+> dispatch level down**, and a regression that path did not have before it.
+> Fountain is the only scene on the unified TBR, so it is the only victim.
+>
+> **MEASURED before the fix**, fountain t=1200 at 1512×848: `--xpar_tile_lights`
+> vs `--no-xpar_tile_lights` differ on 845 px, max |Δ| 19 — and the OFF arm is
+> the correct one. **After the fix the ON arm is byte-identical to OFF** at both
+> 1512×848 and 1920×1080. The fix also repairs a pre-existing legacy defect it
+> supersedes: the old ordinal subscript clamped to `DEFERRED_NUM_TILES-1 = 95`,
+> so every strip below row 768 shared one light list.
+>
+> **Eight pins all unmoved** (chase `3bfd4244`/`42d79fad`/`622b96a2`/`31aa5203`/
+> `ca07a814`, city `3413028b`, fountain `8db68ccb`, greets `570a7b44`),
+> `render_gate.sh` **4/4 PASS**.
+>
+> ### 4. SEPARATE DELIVERABLE: `--cinematic`'s deep peel for CITY and CHASE is dark
+>
+> `SceneTick.h:222` gives `cine::kCity` (and `kChase`) `.xparPeel = 4`, applied
+> via `FF::setDefault(IntId::xpar_peel_passes, …)`. **`setDefault` writes the
+> value but never the set-bit** (`FeatureFlags.h:149`, deliberately — it exists
+> so a scene can tune a global without trampling a user override), and
+> `xparPeelPassesEffective()` gates on `isSet()`. So the profile's 4 is invisible
+> and city/chase run 1 pass under `--cinematic`. **Fountain is NOT affected** —
+> it has an explicit `FntSc->XparPeelPasses = 4`.
+>
+> **DO NOT RUSH TO WIRE IT.** Engaging it costs 4× the transparent raster +
+> composite and buys **nothing measurable**: city t=1961, chase t=800 and chase
+> t=1600, all under `--cinematic`, are **byte-identical** between the default
+> and an explicit `--xpar-peel-passes=4`. The honest fix is either to delete the
+> dead `.xparPeel` field from the profile or to give the resolver a third tier
+> (`isSet` → `Scene::XparPeelPasses` → profile value) — but the second only
+> matters once a scene has stacked transparents that need it, and neither city
+> nor chase does today.
+
 > ## 2026-08-15e — THE CAUSTIC SAMPLER INTERPOLATED THREE CHANNELS TO PRODUCE ONE NUMBER (JUDGE CALL: 7 PX AT |Δ|=1)
 >
 > The parked item from 2026-08-15d, built and landed. `sampleWaterTex` did a
