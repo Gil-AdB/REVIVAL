@@ -469,9 +469,27 @@ void Render_SSAO() {
 						}
 					};
 
+					// THE TAIL WAS 5 % OF THE CELLS AND A QUARTER OF THE PASS.
+					// The tile grid is 12 x 8 over the low-res plane, so at his
+					// 1512x848 / --ssao_downscale=1 a tile row is 126 cells: 15
+					// vector groups and then SIX cells down the scalar reference,
+					// which costs ~8x per cell. Rather than widen the grid (that
+					// moves the tile boundaries and the load balance), the tail is
+					// covered by ONE MORE VECTOR GROUP anchored at lx2-8 — it
+					// recomputes up to 7 cells that the previous group already did,
+					// writing them the identical value from the identical code, and
+					// the overlap never leaves this tile's own [lx1,lx2) so no other
+					// worker's cells are touched. Cells that used to take the scalar
+					// path now take the vector one, which is a ROUNDING difference
+					// (rsqrt/cvt), not a different algorithm — quantified in the
+					// commit. Tiles narrower than a vector (or --ssao_downscale=4 on
+					// a small view) still fall back to the scalar reference.
 					for (int ly = ly1; ly < ly2; ++ly) {
 						int lx = lx1;
-						if (!noSimd) for (; lx + 8 <= lx2; lx += 8) gtaoRow8(lx, ly);
+						if (!noSimd) {
+							for (; lx + 8 <= lx2; lx += 8) gtaoRow8(lx, ly);
+							if (lx < lx2 && lx2 - lx1 >= 8) { gtaoRow8(lx2 - 8, ly); lx = lx2; }
+						}
 						for (; lx < lx2; ++lx) gtaoCell(lx, ly);
 					}
 					renderns::tileDone.release();
