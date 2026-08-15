@@ -32,6 +32,7 @@
 #include "ChunkOcclusion.h"   // fds::DeferredPathEnabled is declared there
 #include "VizCycle.h"         // VizCycle_Overlay (--wire_viz + the X-key cycle)
 #include "TailProf.h"         // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
+#include "FaceTileBin.h"      // --face_tile_bin: per-tile face runs
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
@@ -128,9 +129,12 @@ void renderDeferredTransparentTile_Front(const DeferredLightingCtx &ctx,
 void renderDeferredTransparentTile_Back (const DeferredLightingCtx &ctx,
                                           int tileIdx, int x1, int y1, int x2, int y2);
 
-// Defined in RenderInner.cpp.
-void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2);
-void RenderInnerMekalele(float x1, float y1, float x2, float y2);
+// Defined in RenderInner.cpp. binFaces/binCount: optional dense per-tile face
+// run from the --face_tile_bin pass (nullptr = walk the whole FList, legacy).
+void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2,
+                 Face* const* binFaces = nullptr, int32_t binCount = 0);
+void RenderInnerMekalele(float x1, float y1, float x2, float y2,
+                         Face* const* binFaces = nullptr, int32_t binCount = 0);
 void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
                                     int firstIdx, int count, struct TriMesh* parentFilter,
                                     XparFaceSel faceSel = XparFaceSel::Both);
@@ -617,23 +621,42 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// Built once, captured by the tile lambdas (must outlive the tasks — the
 	// tileDone drain below joins them before this returns).
 	const fds::RenderContext fctx = fds::primaryRenderContext();
+
+	// --face_tile_bin: bin the face list to tiles ONCE, instead of letting all
+	// 30 tiles re-walk it. Pure restatement of the --tile_bbox_cull reject,
+	// order-preserving (FDS/RENDER/FaceTileBin.h), so it is byte-identical and
+	// requires that flag to be on. Built here, between the sort and the tile
+	// dispatch, and consumed before this function returns — no nested
+	// renderFrame runs in that window (the env / SH bakes are in the prologue,
+	// above), so one file-scope arena is safe and nothing allocates per frame
+	// once the scene's face count has been seen.
+	fds::FaceTileBins& bins = fds::FaceTileBins_Instance();
+	bool useBins = false;
+	if (fds::FeatureFlags::face_tile_bin() && fds::FeatureFlags::tile_bbox_cull()) {
+		TailProf::ScopeTimer _tpBin("face-bin", 1);
+		useBins = fds::FaceTileBins_Build(bins, FList, CAll,
+		                                  numTilesX, numTilesY,
+		                                  tileSizeX, tileSizeY, XRes, YRes);
+	}
 	// Work-stealing chunk dispatch — one enqueue per worker instead of per
 	// tile (the per-enqueue mutex+notify cost was ~12 us serial on the tick
 	// thread; see dispatchIndexed). Tile kernels release tileDone per tile.
 	const TailProf::Stamp _profGbuf("gbuffer");
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
-	    [&fctx, deferred, tileSizeX, tileSizeY](int t) {
+	    [&fctx, &bins, deferred, tileSizeX, tileSizeY, useBins](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
 		const int y1 = tileSizeY * j;
 		const int y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
 		const int x1 = tileSizeX * i;
 		const int x2 = (i == numTilesX - 1) ? XRes : (x1 + tileSizeX);
+		Face* const* bf = useBins ? bins.tileFaces(t) : nullptr;
+		const int32_t bc = useBins ? bins.tileCount(t) : 0;
 		// --deferred_prof thread-sum: the tile kernels release tileDone from
 		// inside, so this add can land just after the release — drain() waits
 		// for the stragglers (bounded), see TailProf.h.
 		const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
-		if (deferred) RenderInnerMekalele(x1, y1, x2, y2);
-		else          RenderInner(fctx, x1, y1, x2, y2);
+		if (deferred) RenderInnerMekalele(x1, y1, x2, y2, bf, bc);
+		else          RenderInner(fctx, x1, y1, x2, y2, bf, bc);
 		TailProf::addBusy(_tp);
 	});
 

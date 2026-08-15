@@ -163,6 +163,8 @@ set(RENDER
     RENDER/LightmapBake.cpp
     RENDER/LightmapBake.h
     RENDER/RENDER.CPP
+    RENDER/FaceTileBin.cpp
+    RENDER/FaceTileBin.h
     RENDER/RenderInner.cpp
     RENDER/RenderPipeline.h
     RENDER/Shadows.cpp

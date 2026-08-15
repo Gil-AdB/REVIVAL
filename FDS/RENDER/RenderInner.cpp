@@ -41,6 +41,7 @@
 #include "FRUSTRUM.H"
 #include "Threads.h"
 #include "RenderPipeline.h"
+#include "FaceTileBin.h"
 
 #include <semaphore>
 #include <climits>
@@ -57,7 +58,8 @@ namespace renderns {
 	extern std::condition_variable   condition;
 }
 
-void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2) {
+void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2,
+                 Face* const* binFaces, int32_t binCount) {
 	// Forward raster of ctx's face list into ctx's target — all per-pass
 	// state from ctx, no globals, so a worker can run this on its own
 	// surface/face-list concurrently (RenderContext migration; the parallel
@@ -86,21 +88,29 @@ void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, fl
 	rt.gbufferTransparentBack = nullptr;
 	const auto& cam = ctx.camera;
 
-	int32_t I = ctx.faces.cAll;
+	int32_t I = binFaces ? binCount : ctx.faces.cAll;
 	fds::FListEntry* FLS = ctx.faces.fList;
 	Vertex* A, * B, * C;
 
 	Vertex* V[4];
 
 	// S2 / B5 tile pre-reject (see RenderInnerMekalele for the rationale).
-	const bool bboxCull = fds::FeatureFlags::tile_bbox_cull();
+	// When the caller handed us a face->tile bin (--face_tile_bin) the reject
+	// has already been done once for the whole frame and this tile's run is
+	// dense: read Face* straight out of it, in the same order the walk gave.
+	const bool bboxCull = !binFaces && fds::FeatureFlags::tile_bbox_cull();
 	const int tx1 = int(x1), ty1 = int(y1), tx2 = int(x2), ty2 = int(y2);
 
 	while (I--) {
-		const fds::FListEntry* ep = FLS++;
-		if (bboxCull && (ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
-		                 ep->bbMaxY < ty1 || ep->bbMinY >= ty2)) continue;
-		Face* F = ep->face;
+		Face* F;
+		if (binFaces) {
+			F = *binFaces++;
+		} else {
+			const fds::FListEntry* ep = FLS++;
+			if (bboxCull && (ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
+			                 ep->bbMaxY < ty1 || ep->bbMinY >= ty2)) continue;
+			F = ep->face;
+		}
 
 		// Get Mapping Coordinates from the rendered face.
 		A = F->A; B = F->B;
@@ -168,7 +178,7 @@ void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, fl
 // populated, CurScene + surface globals (VPage/ZPage16/XRes) set.
 void RenderForwardRegionInline(const fds::RenderContext& ctx,
                                float x1, float y1, float x2, float y2) {
-	RenderInner(ctx, x1, y1, x2, y2);
+	RenderInner(ctx, x1, y1, x2, y2, nullptr, 0);
 	renderns::tileDone.acquire();   // drain RenderInner's release (non-blocking)
 }
 
@@ -217,14 +227,15 @@ void MekaleleFillRegionInline(const fds::RenderContext& ctx,
 }
 
 
-void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
+void RenderInnerMekalele(float x1, float y1, float x2, float y2,
+                         Face* const* binFaces, int32_t binCount) {
 	FrustumClipper clipper;
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
 	const auto rt  = fds::MainRenderTargetFromGlobals();
 	const auto& cam = fds::g_mainCamera;
 
-	int32_t I = CAll;
+	int32_t I = binFaces ? binCount : CAll;
 	fds::FListEntry* FLS = FList;//+CAll-1;
 	Vertex* A, * B, * C;
 
@@ -236,14 +247,24 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 	// the three scattered Vertex loads the visibility test needs. Pure reject
 	// (the clipper already clips to the tile), gated for A/B; flag-off faces
 	// carry the cover-all sentinel so the test never fires.
-	const bool bboxCull = fds::FeatureFlags::tile_bbox_cull();
+	//
+	// --face_tile_bin hoists that reject out of the per-tile walk entirely:
+	// renderFrame bins the list once per pass and hands each tile a dense
+	// Face* run, in the SAME order this walk produces (FaceTileBin.h). When
+	// binFaces is non-null the bbox test below is already accounted for.
+	const bool bboxCull = !binFaces && fds::FeatureFlags::tile_bbox_cull();
 	const int tx1 = int(x1), ty1 = int(y1), tx2 = int(x2), ty2 = int(y2);
 
 	while (I--) {
-		const fds::FListEntry* ep = FLS++;
-		if (bboxCull && (ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
-		                 ep->bbMaxY < ty1 || ep->bbMinY >= ty2)) continue;
-		Face* F = ep->face;
+		Face* F;
+		if (binFaces) {
+			F = *binFaces++;
+		} else {
+			const fds::FListEntry* ep = FLS++;
+			if (bboxCull && (ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
+			                 ep->bbMaxY < ty1 || ep->bbMinY >= ty2)) continue;
+			F = ep->face;
+		}
 
 		// Get Mapping Coordinates from the rendered face.
 		A = F->A; B = F->B;
