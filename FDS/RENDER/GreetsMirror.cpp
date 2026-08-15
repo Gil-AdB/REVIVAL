@@ -2849,6 +2849,54 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
 // to this pass — when no slot re-rendered, the next tick can skip it.
 int g_rttJobsLastFrame = 0;
 
+// ── --mirror_rtt_trace: the RTT scheduler's decisions AND its output ───────
+// In-memory only; MirrorRttTrace_Report() prints the whole run in one burst.
+// A per-frame stderr line here would change the main thread's timing on every
+// frame, which is exactly the variable a per-launch flip hunt is measuring.
+// One record per BAKE — a frame with no bake simply has no line, which the
+// diff shows as a gap. See the flag's help text for what the two columns
+// discriminate: SCHEDULE (frame/slot/res) versus CONTENT (the texture hash).
+namespace {
+struct RttTraceRec {
+    int32_t  frame;
+    int16_t  slot;      // index into the scene's slot vector
+    int16_t  texW, texH;
+    int32_t  staleAtBake;
+    uint64_t hash;      // FNV-1a over the baked texel bytes
+};
+std::vector<RttTraceRec> g_rttTrace;
+int32_t g_rttTraceFrame = 0;
+inline uint64_t rttFnv1a(const void *p, size_t n) {
+    const uint8_t *b = static_cast<const uint8_t *>(p);
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+}  // namespace
+
+void MirrorRttTrace_Report()
+{
+    if (!fds::FeatureFlags::mirror_rtt_trace()) return;
+    uint64_t all = 1469598103934665603ull;
+    for (const RttTraceRec &r : g_rttTrace) {
+        std::fprintf(stderr, "[RTTTRACE] f=%d slot=%d res=%dx%d stale=%d hash=%016llx\n",
+                     int(r.frame), int(r.slot), int(r.texW), int(r.texH),
+                     int(r.staleAtBake), (unsigned long long)r.hash);
+        all = rttFnv1a(&r, sizeof(r)) ^ (all * 1099511628211ull);
+    }
+    // Two digests, so a one-line diff already says WHICH half moved: SCHED
+    // covers frame/slot/res/staleness only, FULL adds the texture hashes.
+    uint64_t sched = 1469598103934665603ull;
+    for (const RttTraceRec &r : g_rttTrace) {
+        const int32_t k[4] = { r.frame, int32_t(r.slot), int32_t(r.texW) * 65536 + r.texH,
+                               r.staleAtBake };
+        sched = rttFnv1a(k, sizeof(k)) ^ (sched * 1099511628211ull);
+    }
+    std::fprintf(stderr, "[RTTTRACE] bakes=%zu frames=%d SCHED=%016llx FULL=%016llx\n",
+                 g_rttTrace.size(), int(g_rttTraceFrame),
+                 (unsigned long long)sched, (unsigned long long)all);
+}
+
 Camera MirrorReflectedCamera(const Camera &src, const Vector &N, float d)
 {
     Camera out = src;                       // copy FOV, roll, splines, etc.
@@ -2875,6 +2923,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     // front — the job selection, the per-frame cap, and the bake-pass count
     // all branch on it.
     const int recurseDepth = fds::FeatureFlags::mirror_recurse_depth();
+    const bool rttTrace = fds::FeatureFlags::mirror_rtt_trace();
+    if (rttTrace) ++g_rttTraceFrame;
     // Age every slot once per pass — the scheduler trades footprint
     // area against staleness so the 2-jobs/frame cap round-robins
     // across visible slots instead of starving the small ones.
@@ -3466,6 +3516,14 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         auto log2p2 = [](int v) { int l = 0; while (v > 1) { v >>= 1; ++l; } return l; };
         s.mat->Txtr->SizeX = s.texW; s.mat->Txtr->LSizeX = log2p2(s.texW);
         s.mat->Txtr->SizeY = s.texH; s.mat->Txtr->LSizeY = log2p2(s.texH);
+        if (rttTrace) {
+            g_rttTrace.push_back({ g_rttTraceFrame,
+                                   int16_t(&s - slots.data()),
+                                   int16_t(s.texW), int16_t(s.texH),
+                                   int32_t(s.staleFrames),
+                                   rttFnv1a(s.mat->Txtr->Data,
+                                            size_t(s.texW) * size_t(s.texH) * 4) });
+        }
         s.staleFrames = 0;
     };
 

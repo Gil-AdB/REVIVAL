@@ -145,7 +145,56 @@ void EngineGBuffer_Resize(int X, int Y) {
     // behaviour (every z_candidate < 0xFFFF, since z_candidate <= 0xFF80).
     s_engineXparPeelFloor.assign(numPixels, 0xFFFFu);
     g_xparPeelFloor = s_engineXparPeelFloor.data();
+    g_xparPeelFloorDirty.store(false, std::memory_order_relaxed);
     g_xparZCount = int(numPixels);
+}
+
+// ── The peel floor's invariant, and who is allowed to break it ─────────────
+// The single-pass (legacy) transparent raster has NO floor logic of its own:
+// its gate is `zmask &= (z_candidate < peelFloor)` (Mekalele.h), which is a
+// no-op ONLY because every entry is 0xFFFF and z_candidate <= 0xFF80. That
+// all-0xFFFF state is established exactly once, by EngineGBuffer_Resize
+// above, and the comment there has always said so.
+//
+// The MULTI-pass reverse peel writes the plane: pass 0 zeroes it and later
+// passes copy the side's Z into it (RENDER.CPP's peel loop; the strip path's
+// fillFloor/copyFloor in DeferredSurfaceKernel.cpp). Nothing ever restored it.
+// Since the plane is engine-global and outlives any scene, a scene that peels
+// deep hands the next scene a floor full of zeros — and `z_candidate < 0` is
+// FALSE, so the next scene's single-pass transparents are silently Z-REJECTED
+// wherever the previous scene's transparent geometry happened to land.
+//
+// That is the greets mirror band: the fountain sets Scene::XparPeelPasses = 4
+// (FOUNTAIN.CPP), greets runs the legacy single pass, and greets' mirror-mask
+// wall loses its own fragment over the fountain's leftover rectangle while the
+// reflection clone still composites — an additive copy of the reflected room,
+// hard-edged to a rectangle that belongs to a scene that ended minutes ago.
+//
+// Both halves are fixed: the dirty flag below lets the dispatcher restore the
+// invariant once per frame, and XparPeel_ResetAll is the belt for scene entry.
+std::atomic<bool> g_xparPeelFloorDirty{false};
+
+void XparPeel_ResetAll()
+{
+    const size_t n = size_t(g_xparZCount);
+    if (g_xparPeelFloor && n) std::fill_n(g_xparPeelFloor, n, uint16_t(0xFFFFu));
+    g_xparPeelFloorDirty.store(false, std::memory_order_relaxed);
+    // The two deep-layer slices and their Z. The legacy path full-screen
+    // clears these per batch and both TBR schedulers re-declare every strip
+    // dirty per frame, so they cannot leak today — but they are the same
+    // class of cross-scene global and cost nothing to re-establish here.
+    if (g_gbufferTransparent && g_gbufferTransparent->txtr.size() >= n)
+        std::fill_n(g_gbufferTransparent->txtr.begin(), n, 0xFFFFFFFFu);
+    if (g_gbufferTransparentBack && g_gbufferTransparentBack->txtr.size() >= n)
+        std::fill_n(g_gbufferTransparentBack->txtr.begin(), n, 0xFFFFFFFFu);
+    if (g_xparZ)     std::fill_n(g_xparZ,     n, uint16_t(0));
+    if (g_xparZBack) std::fill_n(g_xparZBack, n, uint16_t(0));
+    // Per-strip dirty-column bookkeeping (the --xpar_strip_extent records).
+    XparStripSlices_MarkAllDirty();
+    // thread_local, so this only disarms the CALLING thread — which is the
+    // one that runs the inline offscreen bakes (the mirror RTT). Every
+    // threadpool raster sets it immediately before its own raster.
+    g_xparPeelReverse = false;
 }
 
 // ── --mem_census: the three G-buffers and the transparent Z/peel planes ────

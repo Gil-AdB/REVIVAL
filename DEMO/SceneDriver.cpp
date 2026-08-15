@@ -21,6 +21,18 @@
 
 void SceneDriver::setupFaceLists(Scene *sc, bool includeOmnisInCount)
 {
+    // Every driver calls this exactly once from its init(), so it is the one
+    // seam every scene entry passes through. Re-establish the transparent
+    // depth-peel globals here: they are ENGINE-scoped, not scene-scoped, and a
+    // scene that peels deep (the fountain, Scene::XparPeelPasses = 4) otherwise
+    // hands the next scene a peel floor full of zeros — which the next scene's
+    // single-pass raster reads as "reject every fragment" over the previous
+    // scene's transparent footprint. That was the greets mirror band. The
+    // per-frame restore in renderFrame is the primary fix (it also covers
+    // offscreen targets sharing the plane); this is the belt, and it also
+    // re-arms the deep-layer slices and the per-strip dirty-column records.
+    XparPeel_ResetAll();
+
     int32_t polys = 0;
     for (TriMesh *t = sc->TriMeshHead; t; t = t->Next)
         polys += t->FIndex;

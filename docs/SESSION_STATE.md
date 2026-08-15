@@ -1,5 +1,129 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16 — THE GREETS MIRROR BAND, CLOSED: THE FOUNTAIN LEFT ITS DEPTH-PEEL FLOOR BEHIND
+>
+> **The band is the FOUNTAIN's, drawn on greets' mirror, three scenes later.**
+> Reproduced deterministically, mechanism read off the source, fixed, and
+> verified 24/24. Gil-Ad's own A/B (`./DEMO` bands always, `--xpar-peel-passes=0`
+> never) was the datum that cracked it — and it never touched greets at all.
+>
+> ### THE INVARIANT, AND WHO BREAKS IT
+>
+> `EngineGBuffer_Resize` fills `g_xparPeelFloor` with **0xFFFF everywhere**
+> (`FDS/FILLERS/Mekalele.cpp:141-147`), and its comment has always said why:
+> the SINGLE-pass transparent raster has no floor logic of its own, its gate is
+>
+> ```
+> zmask &= (z_candidate < extend(bound_c));    // FDS/FILLERS/Mekalele.h:1458
+> ```
+>
+> which is a **no-op only while every entry is 0xFFFF** (`z_candidate <= 0xFF80`).
+> That state is established **once, at resize**, and the plane is scoped to the
+> ENGINE — not to a scene, not to a render target.
+>
+> The MULTI-pass reverse peel writes it and never puts it back:
+> `FDS/RENDER/RENDER.CPP:1172` zeroes it at pass 0, `:1174` copies the side's Z
+> into it at later passes; the unified-TBR strip path does the same per column
+> (`FDS/RENDER/DeferredSurfaceKernel.cpp:4643` `fillFloor`, `:4669` `copyFloor`).
+>
+> **Only one scene in the tree peels deep: the fountain**
+> (`DEMO/FOUNTAIN.CPP:1083`, `FntSc->XparPeelPasses = 4`). Greets runs one pass.
+> So after the fountain, greets' transparents meet a floor full of **zeros**, and
+> `z_candidate < 0` is FALSE — every single-pass transparent fragment is silently
+> **Z-REJECTED** over the fountain's leftover footprint. Greets' mirror-MASK wall
+> loses its own fragment there while the reflection CLONE still composites, so the
+> reflected room lands without the wall pass that should attenuate it: **an
+> additive copy of the reflection, hard-edged to a rectangle that belongs to a
+> scene that ended minutes ago.**
+>
+> **WHY HIS FLAG "FIXED" IT WITHOUT CHANGING GREETS.** `--xpar-peel-passes=0`
+> clamps to 1 in `xparPeelPassesEffective()`, so greets' own passes are 1 either
+> way. What it changes is the `isSet()` gate: an explicit flag makes the resolver
+> ignore `Scene::XparPeelPasses`, so **the FOUNTAIN drops to one pass and never
+> pollutes**. His A/B was a fountain A/B all along.
+>
+> **WHY EVERY HEADLESS ARM MISSED IT.** All of them started at greets.
+> `--repro_prescenes` runs the other scenes' `Initialize_*` — it never RENDERS
+> them, and the pollution is a render-time write.
+>
+> ### THE MEASUREMENT THAT NAILED IT
+>
+> New harness flag **`--repro_run_fountain=N`** renders N real fountain frames
+> before greets, as the director does. At his pose (t=3409, his camera,
+> 1512×848, `--repro_from=0`, 349 frames, `--repro_run_fountain=30`):
+>
+> | | md5 | peel floor at greets' xpar entry |
+> |---|---|---|
+> | bare (fountain peels 4) | `7a2b6920…` | **238 597 / 1 282 176 non-0xFFFF, bbox rows 152..311** |
+> | `--xpar-peel-passes=0` | `af5f7256…` | 0 non-0xFFFF, every frame |
+>
+> The band, bare minus clean: **bbox rows 152..329 × cols 475..1288**, dense rows
+> **152..311**, **zero changed pixels above row 152**, per-channel
+> **B +44.25 / G +42.41 / R +35.77**. `da286d8b` recorded his live band as
+> **+43 / +41 / +35** in rows **152..319**. The polluted rows and the band rows
+> are the same rows.
+>
+> - before: `docs/img/fogwt/greets_band_t3409_before.png`
+> - after: `docs/img/fogwt/greets_band_t3409_after.png`
+> - the additive layer: `docs/img/fogwt/greets_band_t3409_diff.png`
+> - his acceptance arm, after: `docs/img/fogwt/greets_band_t3409_acceptarm_after.png`
+>
+> And the "unexplained" geometry is explained: the 168-row height and the −16
+> offset from greets' 6×5 frame-tile grid were never a greets grid. They are the
+> screen footprint of the fountain's transparent strips.
+>
+> ### THE FIX, AND A TRAP INSIDE IT
+>
+> 1. `XparPeel_ResetAll()` (`FDS/FILLERS/Mekalele.cpp`) re-establishes every
+>    engine-scoped peel global: floor → 0xFFFF, both deep-layer slices + their Z,
+>    `XparStripSlices_MarkAllDirty()`, and this thread's `g_xparPeelReverse`.
+>    Called from `DEMO/SceneDriver.cpp` `setupFaceLists` — the one seam every
+>    driver's `init()` passes through, i.e. once per scene entry.
+> 2. The primary fix: a per-frame restore at the top of `renderFrame`'s
+>    transparent phase, gated on a new `g_xparPeelFloorDirty` that every floor
+>    writer sets, and on `xparPeelPassesEffective() <= 1` — **restore before the
+>    only reader that cares**, so the deep-peel scene pays nothing.
+>
+> **THE TRAP, because the first cut of this fix silently did nothing:** size the
+> restore by `g_xparZCount`, the PLANE's own length, never by this pass's
+> `XRes*YRes`. `renderFrame` runs for offscreen targets too — the greets mirror
+> RTT bakes at 256×256 and 512×229 reach that line **before** the main frame — and
+> they share the one main-sized plane. A target-sized restore memset 65 536 of
+> 1 282 176 entries and cleared the dirty flag, so the main frame skipped it and
+> the band survived untouched. That is what the `[PEELFLOOR]` census caught.
+>
+> ### VERIFIED
+>
+> - **Chained repro 24/24 `af5f7256…`** (all bare-equivalent), and the
+>   `--xpar-peel-passes=0` control lands on the SAME hash 6/6 + 3/3: the two arms
+>   now agree, which is the fix's real signature. Re-run post-rebase: 8/8 + 4/4,
+>   same hash.
+> - **Gil-Ad's acceptance arm** (`--deferred --hdr --hdr-linear --texture-filter=2
+>   --ssao --ssao-gtao --greets-displace`) **4/4 self-identical `b02fb36a…`** and
+>   **equal to its own `--xpar-peel-passes=0` control 2/2** — no band. (Numbers
+>   are post-rebase onto `b0905ee1`'s SSAO/GTAO work; the whole battery was re-run
+>   on the rebased tree, chained repro included, and every arm held.)
+> - **Fountain's peel still engages and is unchanged**: t=1200 `40ce5f1e…` 2/2,
+>   t=2500 pin `8db68ccb…` unmoved.
+> - **All eight pins unmoved**; **`render_gate.sh` 4/4 PASS**.
+>
+> ### PARKED, STILL OPEN: the mirror RTT's own per-launch dither
+>
+> The 2026-08-15f 1-in-15 `--repro_prescenes` flip is a SEPARATE and much milder
+> defect, and the RTT round-robin is now **exonerated by measurement**: 24 traced
+> launches (`--mirror_rtt_trace`, new) give `SCHED` identical **24/24** — one slot,
+> re-baked every frame, constant 128×64, `kRttPerFrame` never even binds at this
+> pose — while the texture-content digest `FULL` differed in **4 of 24**. The
+> non-determinism is INSIDE the RTT render, not in which slot or at what
+> resolution. The frame md5 was stable 24/24, so it rarely reaches the screen.
+>
+> Post-fix the `--repro_prescenes` arm is **30/30 canonical** — but say what that
+> is worth: the pre-fix rate was **1 flip in 27** runs (3.7 %), so 30 clean runs
+> would happen by luck about a third of the time. **It is consistent with the
+> dither being the same leak and it does NOT establish it.** The item stays open,
+> and the next round should either run it to 100+ or, better, chase the RTT
+> render directly with `--mirror_rtt_trace` and bisect the first frame whose
+> `hash=` column diverges.
 > ## 2026-08-16 — THE WATER VERDICT IS ONE BIT PER BAKED TEXEL NOW, AND THE MEASUREMENT SAYS THE REMAINING BAND IS THE ENV TAP, NOT THE MASK
 >
 > His verdict on the coverage build: *"--env_live_water - mostly ok, but I think
