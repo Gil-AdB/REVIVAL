@@ -71,3 +71,17 @@ GATES: all eight pins reproduce their RECORDED values, par 2/2 and chi 3/3
   exactly row-aligned): ~10 instr x 837 120 = 8.4 M of 1 172 M = 0.7%. KILL.
   THE REASON ALL THREE DIE: the reject path is ~10 instructions against
   ~1050 INSTRUCTIONS PER LIVE PIXEL. The scan is not the cost; the shading is.
+
+## L4 LANDED (judge call) — single-channel caustic cell plane
+interleaved min-of-6 vs ebb03fc9 (load 5.5->8.7):
+  chase glints 11.190 -> 9.297 (-16.9%), Ginstr 1.125->1.020, Gcyc .341->.286
+  city  glints  4.727 -> 4.187 (-11.4%), Ginstr 0.431->0.395, Gcyc .154->.139
+  CONTROL: water-ripple Ginstr 0.403 vs 0.403 (does not sample the caustic tex)
+bytes: 7 px of 12.4M over 6 poses, all |d|=1/255; temporal 1-4 px/frame, isolated
+       singletons. render_gate 4/4. FOUR pins move (chase t100/t800/t1600, city).
+
+## END TO END (d7a62231+instr vs final), interleaved min-of-6, load 13->18
+  chase t=800 water-glints 17.559 -> 9.175  (-47.7%)  Ginstr 1.193->1.020 Gcyc .344->.289
+  city t=1961 water-glints  8.035 -> 4.574  (-43.1%)  Ginstr 0.497->0.395 Gcyc .172->.139
+  city t=1961 water-ripple  4.561 -> 3.557  (-22.0%)  Ginstr 0.411->0.403
+  city FRAME_MIN 85.590 -> 82.470

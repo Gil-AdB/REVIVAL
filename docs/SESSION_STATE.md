@@ -1,5 +1,87 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-15e — THE CAUSTIC SAMPLER INTERPOLATED THREE CHANNELS TO PRODUCE ONE NUMBER (JUDGE CALL: 7 PX AT |Δ|=1)
+>
+> The parked item from 2026-08-15d, built and landed. `sampleWaterTex` did a
+> full bilinear tap on **each of B, G and R** — three sets of four byte-extracts,
+> four int→float converts and seven flops — and **every caller collapsed the
+> result on the very next line**: `cell = (cb + cg + cr) * (1/765)`. All four of
+> them (the two glint passes, `causticCellVaried`'s three octaves, and
+> `CausticModulation`'s env-bake re-shade). The per-channel colour is never read
+> by anything. `buildWaterDetail` now also writes a `g_waterCell` plane of
+> `float(B+Gn+R)` and the sampler is one lerp over it.
+>
+> **The corner values are exact** — three bytes, ≤ 765, exactly representable —
+> so nothing is lost at the texels; only the lerp itself reassociates
+> (`lerp(B)+lerp(G)+lerp(R)` → `lerp(B+G+R)`).
+>
+> ### MEASURED — interleaved min-of-6 against `ebb03fc9`, one asset tree (load 5.5→8.7)
+>
+> | item | ebb03fc9 | child | Δ |
+> |---|--:|--:|--:|
+> | chase t=800 `water-glints` | 11.190 | **9.297** | **−1.893 ms (−16.9 %)** |
+> | city t=1961 `water-glints` | 4.727 | **4.187** | **−0.540 ms (−11.4 %)** |
+>
+> `Ginstr` 1.125 → 1.020 chase, 0.431 → 0.395 city; `Gcyc` 0.341 → 0.286 chase,
+> 0.154 → 0.139 city. **The internal control is exact**: `water-ripple` does not
+> sample the caustic texture and its Ginstr is **0.403 vs 0.403**; `renderFrame`
+> is 3.756/3.756 and 6.110/6.110, `gbuffer` 0.602/0.602 and 0.769/0.769.
+>
+> ### THE WHOLE ROUND, END TO END — parent = `d7a62231` + the instrument only (load 13→18)
+>
+> | item | parent | final | Δ |
+> |---|--:|--:|--:|
+> | chase t=800 `water-glints` | 17.559 | **9.175** | **−8.384 ms (−47.7 %)** |
+> | city t=1961 `water-glints` | 8.035 | **4.574** | **−3.461 ms (−43.1 %)** |
+> | city t=1961 `water-ripple` | 4.561 | **3.557** | **−1.004 ms (−22.0 %)** |
+> | city `FRAME_MIN` | 85.590 | **82.470** | −3.120 ms |
+>
+> Load-robust columns: `Ginstr` chase 1.193 → 1.020 (−14.5 %), city glints
+> 0.497 → 0.395 (−20.5 %); `Gcyc` chase 0.344 → 0.289 (−16.0 %), city glints
+> 0.172 → 0.139 (−19.2 %). Controls flat to 3 decimals throughout
+> (`renderFrame` 3.767/3.762 and 6.112/6.115, `gbuffer` 0.603/0.602 and
+> 0.769/0.770, `DeferredLighting-call` 0.587/0.586 and 1.166/1.167).
+> **The percentage is load-dependent and honestly so** — the parent was
+> parallelism-limited, so it degrades faster under load than the child does;
+> the −29.4 % measured for the banding fix at load 19 and the −47.7 % here are
+> the same change seen at two loads.
+>
+> ### THE BYTE VERDICT — a judge call, and a very small one
+>
+> **7 changed pixels out of 12.4 M across six poses, every one of them
+> |Δ| = 1/255.** Per pose: chase t100 1 px, t400 **0**, t800 1 px, t1200 **0**,
+> t1600 2 px, city t1961 3 px. fountain and greets are untouched (greets has no
+> water; the fountain has no `pwater` call site). Temporal battery, **one pose
+> per process** because water is animated: chase t=795/800/805/810 → 1/0/2/1 px,
+> city t=1959/1961/1963 → 4/3/0 px. The changed pixels are **isolated
+> singletons, not a structure** — city t=1961's three are at (1603,412),
+> (894,890) and (1880,946), and the amplified diff shows them as three separate
+> dots with nothing between them:
+> `docs/img/water/L4_celllerp_city_t1961_diff.png`
+> (/Users/gil-ad/work/revival-fog/docs/img/water/L4_celllerp_city_t1961_diff.png).
+> This cannot change glint flicker character: the twinkle comes from the wave
+> field's motion, and a 1/255 flip on 0.0001 % of pixels is below the
+> quantisation of the effect it would have to perturb.
+>
+> **FOUR PIN VALUES MOVE, AND THESE ARE THE NEW ONES** (child self-identical
+> 3/3, `render_gate.sh` 4/4 PASS):
+>
+> | pin | old | new |
+> |---|---|---|
+> | chase t=100 | `7678a6bc6ea964b3b859ecb11c0673c3` | **`3bfd424458a74b7892821de04ab69ca9`** |
+> | chase t=400 | `42d79fadd825a329b36143efe052edfb` | *unmoved* |
+> | chase t=800 | `b29c73f1c54f42a02e0dc2484780cc03` | **`622b96a214404a0abec1d21aae47a478`** |
+> | chase t=1200 | `31aa52039f9b228fa6307c12e14811eb` | *unmoved* |
+> | chase t=1600 | `1544b0e775900b099ac9e38d42fd750d` | **`ca07a81450afc8f1594d32d5e62c10cb`** |
+> | city t=1961 | `3f8948232c192a979ffe7f76c4b387ab` | **`3413028bc70b99f4bc3ee9eec9de7c14`** |
+> | fountain t=2500 | `8db68ccb59416e9a44037e9f387b7bd9` | *unmoved* |
+> | greets t=1588 | `570a7b443f768393dc6647044a9e67b3` | *unmoved* |
+>
+> **This commit is deliberately separate from `ebb03fc9`, which is bit-exact** —
+> revert this one alone and the old pin table returns with −29 %/−40 % of the
+> round still in place. Countersign or revert; the numbers to weigh are 7 px
+> against 1.9 ms of chase and 0.5 ms of city.
+
 > ## 2026-08-15d — THE WATER PASSES WERE NEVER SLOW, THEY WERE BADLY SHARED: −29 % CHASE, −40 % CITY, BIT-EXACT
 >
 > Round-1 row 7 (`docs/PERF_STATE.md` §00) — "water simulation + glints, never

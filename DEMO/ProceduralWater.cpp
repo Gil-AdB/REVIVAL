@@ -122,6 +122,14 @@ static inline void waterWaveSlopeVaried(float wx, float wz, float t, float scale
 // replaces de-swizzling the original low-res albedo (no swizzle dependence, no
 // blockiness).
 static std::vector<dword> g_waterTex;
+// EVERY consumer of the detail texture collapses it the same way, on the very
+// next line: `cell = (cb + cg + cr) * (1/765)`. The per-channel colour is never
+// used. So the sampler bilinearly interpolated THREE channels — three sets of
+// four byte-extracts, four int->float converts and seven flops — to produce one
+// scalar that a single lerp over the pre-summed plane gives directly. The corner
+// sums are exact (three bytes, <= 765, exactly representable), so only the lerp
+// itself reassociates. The dword plane is kept for the FDS_WATERTEX_DUMP debug.
+static std::vector<float> g_waterCell;
 static int g_waterTexW = 0, g_waterTexH = 0;
 
 static void buildWaterDetail() {
@@ -130,6 +138,7 @@ static void buildWaterDetail() {
 	// field tinted blue-cyan; the water pass samples it field-warped for coherence.
 	const int N = 256;
 	g_waterTex.assign(size_t(N) * size_t(N), 0u);
+	g_waterCell.assign(size_t(N) * size_t(N), 0.0f);
 	g_waterTexW = g_waterTexH = N;
 	const int G = 14;                                       // feature-cell grid (tiles seamlessly via %G)
 	auto fp = [](int gx, int gy, int ax) -> float {
@@ -156,6 +165,7 @@ static void buildWaterDetail() {
 		int B = int(40 + c*175), Gn = int(52 + c*190), R = int(30 + c*120);
 		if (B>255)B=255; if (Gn>255)Gn=255; if (R>255)R=255;
 		g_waterTex[size_t(py)*N + px] = dword(B) | (dword(Gn)<<8) | (dword(R)<<16) | 0xFF000000u;
+		g_waterCell[size_t(py)*N + px] = float(B + Gn + R);   // the only value anyone reads
 	}
 	if (std::getenv("FDS_WATERTEX_DUMP")) {                  // debug: see the texture itself
 		FILE* f = fopen("/tmp/water_tex.ppm", "wb");
@@ -171,20 +181,18 @@ static void buildWaterDetail() {
 	}
 }
 
-static inline void sampleWaterTex(float u, float v, float& cb, float& cg, float& cr) {
+// Bilinear tap on the pre-summed cell plane. Returns cb+cg+cr directly — see
+// g_waterCell for why the three channels never had to be interpolated apart.
+static inline float sampleWaterCell(float u, float v) {
 	const int W = g_waterTexW, H = g_waterTexH;
 	float fu = u - std::floor(u / W) * W;                       // wrap
 	float fv = v - std::floor(v / H) * H;
 	int i0 = int(fu), j0 = int(fv); if (i0 >= W) i0 = 0; if (j0 >= H) j0 = 0;
 	const float du = fu - i0, dv = fv - j0;
 	const int i1 = (i0 + 1) % W, j1 = (j0 + 1) % H;
-	const dword a = g_waterTex[size_t(j0)*W + i0], b = g_waterTex[size_t(j0)*W + i1];
-	const dword c = g_waterTex[size_t(j1)*W + i0], d = g_waterTex[size_t(j1)*W + i1];
-	auto lerp4 = [&](int sh) {
-		const float A=float((a>>sh)&0xFF), B=float((b>>sh)&0xFF), C=float((c>>sh)&0xFF), D=float((d>>sh)&0xFF);
-		return (A*(1-du)+B*du)*(1-dv) + (C*(1-du)+D*du)*dv;
-	};
-	cb = lerp4(0); cg = lerp4(8); cr = lerp4(16);
+	const float A = g_waterCell[size_t(j0)*W + i0], B = g_waterCell[size_t(j0)*W + i1];
+	const float C = g_waterCell[size_t(j1)*W + i0], D = g_waterCell[size_t(j1)*W + i1];
+	return (A*(1-du)+B*du)*(1-dv) + (C*(1-du)+D*du)*dv;
 }
 
 // VARIED caustic cell value (water_variation ON — chase only). SEPARATE from the
@@ -194,19 +202,14 @@ static inline void sampleWaterTex(float u, float v, float& cb, float& cg, float&
 static inline float causticCellVaried(float wx, float wz, float bnx, float bnz,
                                       float texScale, float texWarp,
                                       float flowU, float flowV) {
-	float cb, cg, cr;
-	sampleWaterTex(wx*texScale + bnx*texWarp + flowU,
-	               wz*texScale + bnz*texWarp + flowV, cb, cg, cr);
-	const float cell = (cb + cg + cr) * (1.0f/765.0f);
+	const float cell = sampleWaterCell(wx*texScale + bnx*texWarp + flowU,
+	                                   wz*texScale + bnz*texWarp + flowV) * (1.0f/765.0f);
 	const float ca = 0.80f, sa = 0.60f;
 	const float rx = wx*ca - wz*sa, rz = wx*sa + wz*ca;
-	float c2b, c2g, c2r, c3b, c3g, c3r;
-	sampleWaterTex(rx*texScale*2.3f + bnx*texWarp*0.7f + flowU*1.6f,
-	               rz*texScale*2.3f + bnz*texWarp*0.7f - flowV*1.2f, c2b, c2g, c2r);
-	sampleWaterTex(wx*texScale*0.45f + bnx*texWarp*1.6f - flowU*0.5f,
-	               wz*texScale*0.45f + bnz*texWarp*1.6f + flowV*0.5f, c3b, c3g, c3r);
-	const float c2 = (c2b + c2g + c2r) * (1.0f/765.0f);
-	const float c3 = (c3b + c3g + c3r) * (1.0f/765.0f);
+	const float c2 = sampleWaterCell(rx*texScale*2.3f + bnx*texWarp*0.7f + flowU*1.6f,
+	                                 rz*texScale*2.3f + bnz*texWarp*0.7f - flowV*1.2f) * (1.0f/765.0f);
+	const float c3 = sampleWaterCell(wx*texScale*0.45f + bnx*texWarp*1.6f - flowU*0.5f,
+	                                 wz*texScale*0.45f + bnz*texWarp*1.6f + flowV*0.5f) * (1.0f/765.0f);
 	return cell*0.5f + c2*0.28f + c3*0.22f;
 }
 
@@ -312,10 +315,8 @@ bool CausticModulation(float wx, float wz, float t, float scale,
 	if (texMix <= 0.0f || g_waterTexW <= 0 || g_waterNrm.empty()) return false;
 	float bnx, bnz;
 	waterWaveSlope(wx, wz, t, scale, /*nOct=*/6, bnx, bnz);
-	float cb, cg, cr;
-	sampleWaterTex(wx*texScale + bnx*texWarp + flowU,
-	               wz*texScale + bnz*texWarp + flowV, cb, cg, cr);
-	const float cell   = (cb + cg + cr) * (1.0f/765.0f);   // 0..1 cell value
+	const float cell = sampleWaterCell(wx*texScale + bnx*texWarp + flowU,
+	                                   wz*texScale + bnz*texWarp + flowV) * (1.0f/765.0f);
 	const float cellHi = cell - 0.40f;                     // + on lines, - in base
 	mod     = 1.0f + cellHi * 2.0f * texMix * 0.6f;
 	blueAdd = (cellHi > 0.0f ? cellHi : 0.0f) * texMix * 220.0f;
@@ -420,13 +421,11 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 				// the cells show as light/dark detail ON TOP of the reflection,
 				// not hiding it.
 				if (texMix > 0.0f && g_waterTexW > 0) {
-					float cb, cg, cr;
 					// Warp = ripple-in-place (wave slope); flow = translate with the
 					// field at its world velocity (same scroll as the glints) so the
 					// caustics ride the waves instead of standing still.
-					sampleWaterTex(wx*texScale + bnx*texWarp + flowU,
-					               wz*texScale + bnz*texWarp + flowV, cb, cg, cr);
-					const float cell = (cb + cg + cr) * (1.0f/765.0f);   // 0..1 cell value
+					const float cell = sampleWaterCell(wx*texScale + bnx*texWarp + flowU,
+					                                   wz*texScale + bnz*texWarp + flowV) * (1.0f/765.0f);
 					const float cellHi = cell - 0.40f;                   // + on lines, - in base
 					// Uniform (hue-preserving) brightness contrast keeps the base blue
 					// instead of warming it...

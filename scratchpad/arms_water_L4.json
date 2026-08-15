@@ -1,0 +1,52 @@
+[
+ {
+  "tag": "chase800_base",
+  "bin": "./DEMO_base",
+  "args": [
+   "--snapshot=chase@t=800,800,800,800,800,800,800,800,800,800",
+   "--out=/tmp/water/snap",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "city1961_base",
+  "bin": "./DEMO_base",
+  "args": [
+   "--bench=scene@scene=city,t=1961,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "chase800_L4",
+  "bin": "./DEMO_L4",
+  "args": [
+   "--snapshot=chase@t=800,800,800,800,800,800,800,800,800,800",
+   "--out=/tmp/water/snap",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ },
+ {
+  "tag": "city1961_L4",
+  "bin": "./DEMO_L4",
+  "args": [
+   "--bench=scene@scene=city,t=1961,iters=20,xres=1920,yres=1080",
+   "--deferred",
+   "--deferred_prof=1",
+   "--hw_prof",
+   "--strict_flags"
+  ],
+  "env": {}
+ }
+]
