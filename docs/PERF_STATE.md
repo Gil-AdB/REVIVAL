@@ -19,6 +19,127 @@
 
 ---
 
+## 00b. THE USER'S ACCEPTANCE ARM — city, 1512x848, 2026-08-16
+
+```
+./DEMO --env_live_water --deferred --city-env-pixel
+```
+
+**Nobody had ever profiled these two flags together**, and the arm is not a
+small perturbation of §00's city rows — it moves the glass out of the forward
+renderer and into the deferred kernel, and it turns on a per-pixel path in
+`--env_live_water` that had only ever been priced on the FORWARD one. Poses are
+the scene's own scripted camera at **t=1961 / 2400 / 400**, `iters=30`,
+`--profiler=1 --deferred_prof=5 --hw_prof`, **min-of-10 over 11 interleaved
+rounds** with round 0 dropped, two binaries in ONE worktree against ONE asset
+tree. Loads 12–39 across the session — read `Ginstr/f` when a wall figure looks
+surprising.
+
+### TWO THINGS THE ARM INVERTS
+
+* **`--city_env_pixel` makes city FASTER.** It moves the window glass into the
+  G-buffer (`lighting-w1` 0.715 → 0.966 Ginstr/f at t=1961) and deletes the
+  forward per-vertex reflective path, which cost more: clean single runs give
+  frame min **77.11 ms** for plain `--deferred` against **59.22 ms** with the
+  flag. Any city number quoted against plain `--deferred` is a slower frame
+  than the one he runs.
+* **`--env_live_water` is NOT free per pixel here.** The 2026-08-13b "free at
+  the noise floor" was the FORWARD paraboloid path, per vertex. Through the
+  deferred compose it is **+0.041 / +0.015 / +0.047 Ginstr/f of `lighting-w1`**
+  at t=1961 / 2400 / 400 = **+4.4 % / +3.8 % / +6.3 %** of that phase, ≈ 0.74 ms
+  at t=1961. The cost is the wave-slope evaluation the tilt calls per glass
+  pixel, not the mask read.
+
+Three-arm ablation of `lighting-w1` at t=1961 (Ginstr/f), which is how those
+numbers were separated: plain `--deferred` **0.715** → + glass in the G-buffer
+(`--city_env_pixel --no-env_refl`) **0.844** → + the env compose **0.933** → +
+`--env_live_water` **0.974**.
+
+### BEFORE / AFTER — his exact command, parent `44c8aeed` vs `545e96d9`
+
+| | t=1961 par | t=1961 **new** | t=2400 par | t=2400 **new** | t=400 par | t=400 **new** |
+|---|--:|--:|--:|--:|--:|--:|
+| **frame min** | 54.720 | **49.760** | 30.950 | 30.890 | 36.360 | 35.990 |
+| **frame mean (TOTL)** | 59.618 | **54.196** | 35.365 | 35.105 | 39.877 | 39.794 |
+| **`LGHT` p50** | **5.904** | **0.974** | 0.189 | 0.164 | 0.281 | 0.266 |
+| `renderFrame` (×2) | 40.011 | 40.133 | 24.149 | 24.043 | 28.425 | 28.164 |
+| `cones-call` (×1) | 9.436 | 9.378 | 5.133 | 5.157 | 6.517 | 6.477 |
+| `gbuffer` (×2) | 8.207 | 8.381 | 5.167 | 5.102 | 3.663 | 3.634 |
+| `DeferredLighting-call` (×2) | 8.133 | 8.128 | 3.863 | 3.762 | 6.455 | 6.346 |
+| `fastfog` (×1) | 7.524 | 7.452 | 4.148 | 4.106 | 4.631 | 4.530 |
+| ⤷ `fog-columns` | 3.636 | 3.641 | 1.218 | 1.214 | 1.500 | 1.509 |
+| ⤷ `fog-composite` | 3.111 | 3.004 | 2.398 | 2.309 | 2.639 | 2.591 |
+| `TBR-render` (×2) | 4.200 | 4.168 | 3.264 | 3.269 | 4.617 | 4.627 |
+| `water-glints` | 2.459 | 2.416 | 2.003 | 1.973 | 2.551 | 2.530 |
+| `water-ripple` | 1.986 | 1.847 | 1.560 | 1.467 | 2.327 | 2.155 |
+| `gbuf-clear` | 0.556 | 0.543 | 0.553 | 0.568 | 0.547 | 0.528 |
+| **`Ginstr/f` `renderFrame`** | 4.409 | **4.387** | 2.288 | **2.278** | 3.243 | **3.222** |
+| `Ginstr/f` `water-ripple` | 0.252 | **0.221** | 0.205 | **0.181** | 0.295 | **0.259** |
+| `Ginstr/f` `water-glints` | 0.248 | **0.230** | 0.196 | **0.182** | 0.258 | **0.241** |
+| `Ginstr/f` `fog-composite` | 0.392 | **0.377** | 0.311 | **0.301** | 0.347 | **0.335** |
+| `Ginstr/f` `lighting-w1` | 0.963 | **0.957** | 0.391 | **0.389** | 0.736 | **0.728** |
+| `Ginstr/f` `cones-call` | 1.288 | 1.288 | 0.686 | 0.686 | 0.894 | 0.894 |
+
+**−4.96 ms of frame min and −5.42 ms of frame mean at t=1961 (−9.1 %), and
+almost all of it is ONE row that had no instrument.** t=2400 and t=400 barely
+move, and that is the mechanism confirming itself — see `LGHT` below.
+
+### `LGHT` — the biggest WALL row in the frame and the smallest CPU row
+
+`LGHT` runs OUTSIDE `renderFrame`, so no `--deferred_prof` table ever carried
+it and no round of this campaign had opened it. Under this arm at t=1961 it
+reads **5.9 ms p50** — ~10 % of the frame — while `LightMeshVerts` is **1.67 %
+of DEMO self time** in a frame-dominated Time Profiler, i.e. ~9 CORE-ms. Wall 6
+against 9 core-ms over 12 workers is `effPar` ≈ 1.5: a LOAD-IMBALANCE row, not
+a compute row. The fan's unit was a MESH and city is 56 visible meshes of which
+one is the scene-sized building; a work-stealing cursor cannot split a task.
+Chunked to 1 024-vertex ranges it is **0.97 ms**, byte-null. t=2400/t=400 do not
+have that mesh flagged visible, so they had no imbalance and gain nothing —
+which is the check that the diagnosis is right.
+
+`--prof_no_vertex_light` (default off, byte-null) is the ceiling instrument this
+row needed; it is MEASUREMENT ONLY and changes pixels, because the forward
+`TheOtherBarry` filler reads `Vertex::L{R,G,B}` for transparents, water, sprites
+and the forward mirror-pass glass.
+
+### INIT — `--env_live_water` bypasses `city_envmap_cache` BY DESIGN
+
+The mask is a product of the bake's depth buffer, so a colour-only cache hit
+would leave the tilt silently inert. Whole-process wall, `iters=5` (init
+dominates), 3 runs each, all within 0.01 s:
+
+| arm | process wall |
+|---|--:|
+| `--city_env_pixel`, cache warm | **0.98 s** |
+| `--city_env_pixel --no-city_envmap_cache` (cold bake) | 2.18 s |
+| **his arm** (`--env_live_water --city_env_pixel`) | **3.06 s** |
+
+So his arm pays **+2.08 s of init on every launch**, of which 1.20 s is the
+cold bake itself and 0.88 s the live-water re-shade. That is the prize for
+`docs/BACKLOG_PLANS.md` item **2e** (a salted cache for the live bake, which
+must also persist the mask plane). 2d/2e/2f are LOOK items and stay in his
+queue — priced here, not landed.
+
+### THE RANKED TABLE UNDER THIS ARM — city t=1961
+
+Per-symbol shares are Instruments Time Profiler self time over a 400-iteration
+bench (frame-dominated: init is ~3 s of ~28 s).
+
+| # | item | symbol share | Ginstr/f | attack |
+|---|---|--:|--:|---|
+| 1 | `Render_VolumetricCones_Tile` | **20.6 %** | 1.288 (`cones-call`, ×1) | rounds 6–7 took −29 % of chase's; city's is §13's dependency chain. Only "fewer (px × spot) pairs" is left |
+| 2 | `Render_DeferredLighting_Tile_OuterVec` | **15.3 %** | 0.957 (`lighting-w1`, ×2) | of which `--city_env_pixel` +0.129, the env compose +0.089, `--env_live_water` +0.041 |
+| 3 | `FrustumClipper::Render` | **6.2 %** | inside `gbuffer` | **UNATTACKED and the largest untouched row.** Every raster tile re-walks the whole face list: 30 tiles × 2 `renderFrame` passes × 10 215 pushed faces. §00 row 9 named it from the other side (a 12×10 grid cost +139 % instructions for exactly this reason) |
+| 4 | `pwater::waterWaveSlope` | **6.2 %** → ~5.4 % | 0.451 (ripple + glints) | −12 % / −7 % taken; what is left is an 8-wide form of the two bilinear taps |
+| 5 | `meka::TileRasterizer::apply_exact<false>` | 5.4 % | 0.659 (`gbuffer`, ×2) | `effPar` 8.5–8.7 of 12 — better than chase's 5.5, so §00 row 9's "half the pool is idle" does not hold in city |
+| 6 | fastfog lambdas + `Froxel_CompositePixel` + `FastFog_SampleGrid` + `SkyPaint` | 6.2 + 3.4 + 2.7 + 1.6 % | 0.869 (`fastfog`, ×1) | `fog-columns` 0.400 is the residue; `Froxel_GlowTile`'s per-(column × light × slice) `atanf` is unpriced |
+| 7 | `vFogNoise` + `vBlobNoise` | 4.7 + 0.8 % | inside `fog-columns` | §00 row 8's "the noise is the cost" reproduces exactly here |
+| 8 | `Render_DeferredTransparentLighting_Tile<0>` | 3.4 % | 0.531 (`TBR-render`, ×2) | |
+| 9 | `LightMeshVerts` | 1.7 % | none (outside `renderFrame`) | DONE above — the 1.7 %/6 ms split is the whole story |
+| 10 | `logf` / `powf` / `atanf` | 0.9 / 0.9 / 0.3 % | — | `logf` was the froxel composite (fixed); the rest is the glint lobe and the glow integral |
+
+---
+
 ## 00a. THE USER'S ACCEPTANCE ARM — greets, 1512x848, 2026-08-16
 
 ```

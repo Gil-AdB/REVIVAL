@@ -10,6 +10,134 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16b — CITY UNDER HIS ACCEPTANCE ARM (`--env_live_water --deferred --city-env-pixel`): re-ranked, and the biggest row in it had no instrument
+
+**Result at city t=1961, 1512x848, his exact command: frame min 54.72 -> 49.76 ms
+(-4.96, -9.1 %), frame mean 59.62 -> 54.20 ms (-5.42), `renderFrame` instructions
+4.409 -> 4.387 Ginstr/f. Four landings, THREE BIT-EXACT; one judge call at 4 px of
+2 073 600 at |delta| = 1/255. `render_gate.sh` 4/4 PASS; chase x5, greets t1588,
+fountain t2500 unmoved throughout. Full map in `docs/PERF_STATE.md` 00b.**
+
+Measured on `44c8aeed` in `/Users/gil-ad/work/rev-cityarm`, two binaries in one
+worktree against one asset tree, `SDL_VIDEODRIVER=dummy`, 12 pool workers,
+min-of-10 over 11 interleaved rounds with round 0 dropped, arm order rotating.
+Loads 12-39 across the session, so `Ginstr/f` is the column that decides.
+
+### What the arm inverts (both new)
+
+* **`--city_env_pixel` makes city FASTER, not slower.** Clean single runs: frame
+  min **77.11 ms** plain `--deferred` vs **59.22 ms** with the flag. It moves the
+  glass into the deferred kernel (`lighting-w1` 0.715 -> 0.966 Ginstr/f) and
+  deletes a forward per-vertex reflective path that cost more. Any city figure
+  quoted against plain `--deferred` is quoting a slower frame than he runs.
+* **`--env_live_water` is not free per pixel.** 2026-08-13b's "free at the noise
+  floor" was the FORWARD paraboloid path (per vertex). Through the deferred
+  compose it is **+0.041 / +0.015 / +0.047 Ginstr/f of `lighting-w1`** at
+  t=1961 / 2400 / 400 = +4.4 / +3.8 / +6.3 % of the phase, ~0.74 ms at t=1961,
+  and the cost is the wave-slope call, not the mask read.
+
+### WHAT SHIPPED
+
+**1. `LGHT`: the fan's unit was a MESH — BYTE-NULL, -4.9 ms.**
+`LGHT` runs outside `renderFrame` so it has no `--deferred_prof` row and no round
+had opened it. It reads **5.90 ms p50** at t=1961 for **~9 CORE-ms** of work
+(`LightMeshVerts` = 1.67 % of DEMO self time in a frame-dominated profile):
+`effPar` ~1.5 of 12, a LOAD-IMBALANCE row, not a compute row. City is 56 visible
+meshes of which one is the scene-sized building, and a mesh-granular fan's wall
+IS the largest mesh — a work-stealing cursor cannot split a task. `LightMeshVerts`
+now takes a vertex RANGE; the unit is a 1 024-vertex chunk, and the per-range
+prologue (material, ambient, omni candidate list) is a loop over the scene's
+omnis, ~3 k instructions against ~800 per vertex, i.e. under 1 % at that size.
+
+| pose | `LGHT` p50 |
+|---|---|
+| t=1961 | **5.904 -> 0.974 ms** |
+| t=2400 | 0.189 -> 0.164 |
+| t=400  | 0.281 -> 0.266 |
+
+t=2400 and t=400 barely move **and that is the check**: those poses do not have
+the big mesh flagged visible, so there was no imbalance to fix. Instructions are
+unchanged everywhere — this buys wall, not work, which is what a parallelism fix
+must look like. Also adds `--prof_no_vertex_light` (default off, byte-null), the
+ceiling instrument the row lacked; MEASUREMENT ONLY, it changes pixels, because
+the forward `TheOtherBarry` filler reads `Vertex::L{R,G,B}` for transparents,
+water, sprites and the forward mirror-pass glass.
+
+**2. The water field's modulo — JUDGE CALL, 4 px at |delta| = 1/255.**
+`sampleWaterNrm`'s `(i0 + 1) % WNRM` compiled to add/and/negs/and/csneg — five
+instructions, because clang cannot fold a `%` on an `int` it cannot prove
+non-negative — **four times per `waterWaveSlope` call** (two axes x two scroll
+layers). That function is the 4th-hottest symbol of this frame (6.2 % of DEMO
+self time) and is shared by the reflection ripple, the glints AND
+`--env_live_water`'s tilt. A 129-stride HALO (last row/column = verbatim copy of
+the first, written after the normalize so each halo texel is bit-identical to
+its source) removes the modulo and makes the (i0, i0+1) pair contiguous:
+**161 -> 132 instructions**.
+
+| pass | t=1961 | t=2400 | t=400 |
+|---|---|---|---|
+| `water-ripple` Ginstr/f | 0.252 -> 0.221 (-12.3 %) | 0.205 -> 0.181 (-11.7 %) | 0.295 -> 0.259 (-12.2 %) |
+| `water-glints` Ginstr/f | 0.248 -> 0.230 (-7.3 %) | 0.196 -> 0.182 (-7.1 %) | 0.258 -> 0.241 (-6.6 %) |
+
+The 4 moved pixels are the `-ffp-contract=fast` + LTO re-contraction hazard
+`waterWaveSlopeVaried`'s own comment warns about ("touching that reshapes its
+fmadd chain -> city moves"), not an arithmetic change: same fetched bits, same
+expression, different fma grouping. Smaller than the caustic-sum-plane judge call
+that shipped 2026-08-15e (7 px, also all |delta| = 1). **NEW CITY PINS**:
+`--deferred` `3413028bc70b99f4bc3ee9eec9de7c14` -> `4031ceec1a1090372575c4f9c39e2839`;
+his arm `1986f2df63a4585c5d05082f36f8722c` -> `925ecd43f45d8f0574acc9c9a5a958a1`.
+
+**3. `--env_live_water` projected the same direction twice — BIT-EXACT.**
+`EnvLiveWater_Weight` opens with `EnvCube_DirToFaceUV` on the UNPERTURBED
+direction (correctly — a perturbed mask read would be circular) and the cube
+colour fetch repeats the identical call one line later: two dominant-axis selects
+and two divides for one projection, on every glass pixel, in the path his arm
+runs. Project once, hand face/u/v to the mask, re-project only when the tilt
+fires. `lighting-w1` -0.6 % at t=1961, -1.1 % at t=400. The weight helper is
+mirrored into `DeferredSurfaceKernel.cpp` rather than refactored in `EnvBake.h`
+because that header's mask machinery is under concurrent change (it tracks
+`868ba5d8`'s one-bit `EnvLiveWater_MaskBit` form; keep the two in step).
+
+**4. The froxel composite's per-pixel `logf` — BIT-EXACT.**
+`Froxel_CompositeTileVec8` punts a whole 8-lane group to the scalar
+`Froxel_CompositePixel` for any group containing a water-reflection lane — most
+of city's lower half — and that function recomputed
+`1.0f / std::log(gFrFar / gFrNear)` and `1.0f / gFrNear` PER PIXEL. The tile
+version hoists them because it is a loop; the per-pixel one cannot, and clang
+will not hoist across the caller's loop either (the `dword*` VPage store may
+alias a float global). Cached per frame from the same expression:
+`fog-composite` -3.8 / -3.2 / -3.5 %, `fastfog` -1.8 / -1.8 / -2.3 %.
+
+### PRICED, NOT LANDED
+
+* **`BACKLOG_PLANS.md` 2e — a salted cache for the live-water bake.**
+  `--env_live_water` bypasses `city_envmap_cache` by design (the mask is a
+  product of the bake's depth buffer; a colour-only hit leaves the tilt silently
+  inert), so his arm cold-bakes on every launch. Whole-process wall, `iters=5`,
+  3 runs each, spread < 0.01 s: cache warm **0.98 s**, cold bake **2.18 s**, his
+  arm **3.06 s**. So **+2.08 s per launch**, 1.20 s of it the cold bake and
+  0.88 s the live-water re-shade. 2d/2e/2f are LOOK items in his own queue —
+  priced here, not landed.
+
+### WHAT IS LEFT, RANKED, WITH ITS MECHANISM
+
+1. **`FrustumClipper::Render`, 6.2 % — the largest untouched row.** Every raster
+   tile re-walks the whole face list: 30 tiles x 2 `renderFrame` passes x 10 215
+   pushed faces a frame. A face->tile binning pass is the shape. §00 row 9's
+   refuted "finer grid" measured this same disease from the other side (+139 %
+   instructions, because each extra tile re-walked everything).
+2. **8-wide `waterWaveSlope`, ~5 % of the frame after (2).** Two bilinear taps
+   into a 129^2 map per live pixel in three consumers. Every operation maps 1:1
+   to a vector form; the risk is fma contraction — this round's judge call came
+   from exactly that for a far smaller edit — so budget a byte battery.
+3. **`Froxel_GlowTile`'s `atanf`**: one libm call per (coarse column x light x
+   slice) for the analytic inscatter integral. 0.3 % of self time, unpriced.
+4. **`--env_live_water`'s remaining 0.041 Ginstr/f** IS the wave-slope call;
+   item 2 covers it.
+5. **`gbuffer` `effPar` 8.5-8.7 of 12** under this arm. Better than the 5.5 §00
+   recorded on chase, so the "half the pool is idle" framing does not carry to
+   city. Not a lever at this size.
+
 ## 2026-08-16 — HIS ACCEPTANCE ARM: SSAO was 39 % of the frame and had never been profiled
 
 **The arm:** `--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace`,
