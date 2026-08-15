@@ -3658,7 +3658,32 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const bool  xpRoughOn       = xparPbrOn && fds::FeatureFlags::roughness_map();
 	const float xpRoughK        = fds::FeatureFlags::roughness_strength();
 	const bool  xpMetalOn       = xparPbrOn && fds::FeatureFlags::metal_map();
-	const TileLights &tlTile = ctx.tileLights[tileIndex];
+	// ── LIGHT TILE RESOLUTION (see DeferredLightingCtx::ltNumX) ───────────────
+	// `tileIndex` is this job's ordinal in renderFrame's 6x5 FRAME tiler
+	// (RENDER.CPP runTilePass, NT = numTilesX*numTilesY = 30). ctx.tileLights[]
+	// is built on the deferred 12x8 LIGHTING grid (96 entries). Subscripting the
+	// second array with the first grid's ordinal is a category error that never
+	// trips a bounds check (30 < 96) and never crashes — it just lights every
+	// transparent pixel from a FOREIGN region of the screen. The mis-map is
+	// constant within a frame-tile row, so at 1512x848 it lands as horizontal
+	// bands of wrong lighting exactly tileSizeY = (848+4)/5 & ~7 = 168 rows tall,
+	// visible only on transparent surfaces — i.e. on the greets mirror.
+	// Resolve the light tile from the PIXEL instead. A 6x5 frame tile is
+	// 248x168 px and a 12x8 light tile is 128x106, so one dispatch rect spans
+	// several light tiles: the lookup has to be per pixel, not per job.
+	const bool xparTileFix = fds::FeatureFlags::xpar_tile_lights();
+	const int  ltNumX  = ctx.ltNumX  > 0 ? ctx.ltNumX  : 1;
+	const int  ltNumY  = ctx.ltNumY  > 0 ? ctx.ltNumY  : 1;
+	const int  ltSizeX = ctx.ltSizeX > 0 ? ctx.ltSizeX : (XRes > 0 ? XRes : 1);
+	const int  ltSizeY = ctx.ltSizeY > 0 ? ctx.ltSizeY : (ctx.yres > 0 ? ctx.yres : 1);
+	const int  ltLegacy = (tileIndex < 0) ? 0
+	                    : (tileIndex >= DEFERRED_NUM_TILES ? DEFERRED_NUM_TILES - 1 : tileIndex);
+	auto lightTileAt = [&](int px, int py) -> const TileLights & {
+		if (!xparTileFix) return ctx.tileLights[ltLegacy];
+		int ti = px / ltSizeX; if (ti < 0) ti = 0; if (ti >= ltNumX) ti = ltNumX - 1;
+		int tj = py / ltSizeY; if (tj < 0) tj = 0; if (tj >= ltNumY) tj = ltNumY - 1;
+		return ctx.tileLights[tj * ltNumX + ti];
+	};
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
 
@@ -4119,6 +4144,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					}
 				}
 			} else {
+				const TileLights &tlTile = lightTileAt(px, py);
 				for (int n = 0; n < tlTile.count; ++n) {
 					if (tlTile.mirrorId[n] != pmid) continue;
 					const float wx = tlTile.posX[n] - x;
@@ -6975,6 +7001,10 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		}
 	}
 	ctx.tileLights = tileLights;
+	// See DeferredLightingCtx::ltNumX — the transparent composite resolves its
+	// light tile from the pixel, so it needs this pass's actual grid.
+	ctx.ltNumX  = numTilesX;  ctx.ltNumY  = numTilesY;
+	ctx.ltSizeX = tileSizeX;  ctx.ltSizeY = tileSizeY;
 	ctx.hasMirrorPresence = (tilePresence != nullptr);
 	if (tilePresence)
 		std::memcpy(ctx.tileMirrorPresence, tilePresence,

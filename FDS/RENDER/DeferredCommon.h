@@ -277,6 +277,15 @@ struct DeferredLightingCtx {
 	// keep all clone lights (no mirrors this frame / offscreen ctx).
 	uint32_t             tileMirrorPresence[DEFERRED_NUM_TILES];
 	bool                 hasMirrorPresence;
+	// GEOMETRY OF THE GRID tileLights[] IS INDEXED ON. Needed because the
+	// transparent composite is dispatched on renderFrame's 6x5 FRAME tiler, not
+	// on this 12x8 lighting grid, so it cannot use its dispatch ordinal as a
+	// tileLights[] subscript — it has to resolve the light tile from the pixel.
+	// Populated once per pass in Render_DeferredLighting (offscreen targets get
+	// their own clamped grid, so these must be read from the ctx, not from
+	// DEFERRED_NUM_TILES_X/Y).
+	int                  ltNumX, ltNumY;     // light-grid tile counts
+	int                  ltSizeX, ltSizeY;   // light-grid tile size in pixels
 	float                invFOVX;
 	float                invFOVY;
 	float                invZScale;

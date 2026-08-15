@@ -234,6 +234,7 @@ int RunRepro(const ReproConfig& cfg, int xres, int yres) {
     const int     seq     = std::max(0, FF::repro_seq());
     const int     maxFrm  = std::max(1, FF::repro_max_frames());
     const bool    play    = FF::repro_play();
+    const bool    lateCam = FF::repro_late_cam();
 
     // Match the user's WINDOW, not rev.cfg. rev.cfg is shared state and editing
     // it to chase a repro has already cost one diagnosis; this keeps it alone.
@@ -264,6 +265,20 @@ int RunRepro(const ReproConfig& cfg, int xres, int yres) {
     cam.parseEnv();
 
     Initialize_Greets();
+    // REV.CPP's init thread does NOT stop at greets: it inits Greets, City,
+    // Chase, Fountain and Crash into the same process-wide engine globals
+    // before the director runs a single scene. A greets-only repro therefore
+    // reproduces the user's per-frame history but not his INIT history, which
+    // is a real blind spot (see --repro_prescenes). Same order as REV.CPP.
+    if (FF::repro_prescenes()) {
+        std::fprintf(stderr, "[REPRO] --repro_prescenes: initialising City/Chase/Fountain/Crash "
+                             "after Greets, as REV.CPP does\n");
+        Initialize_City();
+        Initialize_Chase();
+        Initialize_Fountain();
+        Initialize_Crash();
+        std::fprintf(stderr, "[REPRO] --repro_prescenes: done\n");
+    }
     // The lightmap bake runs on a background thread and the first rendered
     // frame samples it; Run_Greets joins before its first tick and so must we.
     Greets_JoinBakeThread();
@@ -350,7 +365,11 @@ int RunRepro(const ReproConfig& cfg, int xres, int yres) {
             }
         }
 
-        cam.pin();
+        // --repro_late_cam: don't pin until the target is reached, so the
+        // scene's own camera drives the scrub and CameraHead ends up parked at
+        // the TARGET pose (what a user's TAB leaves behind) rather than frozen
+        // at the init pose (what pinning from frame 0 leaves behind).
+        if (!lateCam || Timer >= want) cam.pin();
         alive = driver->tick();
         ++frames;
 
