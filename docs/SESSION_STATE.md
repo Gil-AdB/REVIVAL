@@ -76,9 +76,21 @@
 >
 > **WHAT IT LOOKS LIKE.** `[RTTPIX]` dumps frame 1's RTT surface verbatim. The
 > diverging image differs on **4 851 of 8 192 px (59.2 %)**, rows **25..63** of 64
-> across the full width, **max |Δ| 216, mean signed +32.88** — i.e. a large
-> coherent region of the reflected room lit *brighter*, which is a shadow tap
-> landing somewhere it should not. Not a dither in the LSBs: a whole surface.
+> across the full width, **max |Δ| 216, mean signed +32.88** — a large coherent
+> region of the reflected room lit *brighter*. Not a dither in the LSBs: a whole
+> surface. And the diff picture says which surfaces, which is the confirmation
+> the digests cannot give — **the MECH's silhouette and the floor/lower walls
+> light up while the ceiling stays black**, i.e. exactly the pixels a shadow tap
+> decides, and nothing else:
+>
+> - `docs/img/fogwt/rttdither_f1_modal.png` (46 of 48 launches)
+>   — /Users/gil-ad/work/revival-fog/docs/img/fogwt/rttdither_f1_modal.png
+> - `docs/img/fogwt/rttdither_f1_flipped.png` (2 of 48)
+>   — /Users/gil-ad/work/revival-fog/docs/img/fogwt/rttdither_f1_flipped.png
+> - `docs/img/fogwt/rttdither_f1_diff.png` (|Δ| ×2, red)
+>   — /Users/gil-ad/work/revival-fog/docs/img/fogwt/rttdither_f1_diff.png
+>
+> (128×64 slot textures, nearest-upscaled ×6.)
 >
 > ### THE FIX, AND WHY ZERO IS THE RIGHT VALUE
 >
