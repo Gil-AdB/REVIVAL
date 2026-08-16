@@ -29,7 +29,7 @@ for pose in POSES:
                     for c in ('wall','gi','gc'):
                         if v[c] < best[k][c]: best[k][c] = v[c]
         data[a] = best
-    for row in ['renderFrame','DeferredLighting-call','lighting-w1','lighting-w2']:
+    for row in ['Render-3D','renderFrame','DeferredLighting-call','lighting-w1','lighting-w2']:
         for col, lbl in (('gi','Gi/f'), ('gc','Gcyc/f'), ('wall','wall')):
             line = f'{row[:20]+" "+lbl:<24}'
             base = data[ARMS[0]].get(row, {}).get(col)
