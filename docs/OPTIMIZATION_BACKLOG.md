@@ -10,6 +10,175 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16u — THE 216 NaN TANGENTS: **ONE cause, and it is not the displacement bake and not greets-only.** Every one of them is a zero-area authored triangle normalized without a guard; the fix is byte-null at every pose measured, and the reason is a rasterizer reject, not luck
+
+16t's loose end: *"216 vertices of greets' displaced `Piramid` chunks carry a NaN
+`Vertex::Tangent`. Own round."* Instrumented, classified, fixed, and quantified.
+Status: **DONE** · one guard in `Compute_Vertex_Tangents`, its twin in
+`DisplaceStoneSmoothNormals` (latent) · `--tangent_nan_census` (instrument,
+default 0) · **0 pixels change anywhere measured**.
+
+### THE CAUSE — one, 216 / 216, and every hypothesis in the hand-off was wrong
+
+`--tangent_nan_census` walks the scene at four displacement-bake stage
+boundaries plus a final sweep, and prints the vertex normal beside every
+non-finite `Tangent`. **All 216 have `|N| == 0`.** The chain, all three links
+measured:
+
+1. `Compute_Face_Normals` (`PREPROC.CPP:22-40`) **deliberately** leaves a
+   degenerate face's `N` as the un-normalized zero cross — `if
+   (Vector_Length(&F->N) < 0.000001) { /* nothing */ } else Vector_Norm(...)`.
+   That is the codebase's existing convention for degenerate geometry.
+2. `MakeFacesIndependent`'s `computeSmoothedNormal` (`MeshOps.cpp:172-221`)
+   inherits it verbatim: with `F->N == 0` the angle gate `Dot(F.N, adj.N) >=
+   cos30` rejects every neighbour *including the face itself*, the accumulator
+   can't beat `EPSILON`, and it `return face->N` — zero.
+3. `Compute_Vertex_Tangents`' perpendicular-axis fallback then computed
+   `Cross_Product(&Vtx->N, &ref, &Tangent)` — zero, because `N` is — and called
+   `Vector_Norm` on it. `Vector_Norm` is `Vector_Scale(V, 1.0/Vector_Length(V),
+   V)` (`MATH.CPP:100`), so a zero vector gives `0 * inf` = **NaN in all three
+   lanes**.
+
+**Not the displacement bake.** Identical counts with and without
+`--greets_displace` — 66 at load, 216 after `MakeFacesIndependentByAngle`
+(72 degenerate faces × 3 per-face clones), unchanged by
+`DisplaceStoneSmoothNormals`, 1080 at `Initialize_Greets END` (the same 216 in
+five copies: the retired `Piramid`, its four chunks, the mirror clones). No
+weld, mitre, corner-treatment or border-densification stage touches them.
+
+**Not the displaced stone either** — the materials are `amudim` 192 (the black
+marble pillars), `momy-1` 12 and `momy-2` 12 (the mummies). `rooms`/`floor`
+contribute **zero**; `DisplaceStoneSmoothNormals`' own twin fallback is taken
+by 0 corners.
+
+**And not greets-only.** The same fallback fires at `Initialize_City` (**1386**
+vertex-hits over 35 mesh-passes) and in crash (6); chase is clean. The clone
+census found greets' because greets is what it walked.
+
+### WHY NOTHING EVER LOOKED WRONG — a rasterizer reject, stated with the line
+
+All 216 have **exactly one incident face**, and the **largest incident-face area
+over all of them is 1.54e-10** (census, post-`MakeFacesIndependentByAngle`).
+Every one of the three rasterizers rejects a fan triangle whose screen
+determinant is ≈0 *before any setup*:
+`Mekalele.h:4012` / `TheOtherBarry.h:1098` / `ShadowMap.cpp:1156`, all
+`if (fabs(det) <= 0.01f) continue;`. A needle of world area 1.5e-10 projects to
+a determinant twelve orders under that threshold. **Zero fragments, in the
+deferred raster, the forward raster and the shadow raster alike.**
+
+And had one reached the tangent lanes it would still not have blackened a pixel:
+`Mekalele.h:3189` masks the lane on `tLen2 > vEps`, which is **false for NaN**,
+so the G-buffer tangent is written as literal 0; `DeferredSurfaceKernel.cpp:2719`
+then fails `packedT != 0` and takes the Mikkelsen ⟂N fallback (`2734-2744`).
+Two independent reasons the defect was invisible — which is exactly why it
+survived to be found by a byte-compare census instead of by an eye.
+
+### THE FIX — guard the normalize, the way the two normalizes next to it are guarded
+
+```c
+Cross_Product(&Vtx->N, &ref, &Vtx->Tangent);
+if (Vector_Length(&Vtx->Tangent) > EPSILON) Vector_Norm(&Vtx->Tangent);
+else                                        Vector_Form(&Vtx->Tangent, 1, 0, 0);
+```
+
+The rule is the surrounding code's own: the branch three lines above is
+`if (Vector_Length(&Vtx->Tangent) > EPSILON) Vector_Norm(...)` and
+`Compute_Face_Normals` is `if (Vector_Length(&F->N) < 0.000001) {} else
+Vector_Norm(...)`. **Length-guard the normalize; do not invent a normal.** The
+only new decision is the value, and a zero `N` admits no perpendicular to
+derive one from — so it takes the axis the fallback's own `ref` choice leaves
+free (`ref` is `(0,1,0)` for every `|N.y| < 0.9`, which a zero `N` always
+satisfies, and `+X ⟂ (0,1,0)`). Finite, unit, deterministic: the three
+properties the other two branches already guarantee.
+
+Twin fix in `DisplaceStoneSmoothNormals` (`MeshOps.cpp:5751-5779`), whose
+comment already says *"matches PREPROC's fallback"* — same hazard, 0 hits
+today, kept in lockstep so the two don't drift.
+
+### THE LOOK DELTA — **0 px, and the value is unobservable, not merely equal**
+
+Differential, both binaries built in one worktree from one tree, run 1 discarded:
+
+| arm | result |
+|---|---|
+| greets acceptance t=5743 / 2845 / 6097 / 6133 | **IDENTICAL**, at `26ad272a` / `10adec3a` / `418fc1fa` / `6d02f31b` |
+| greets t=1588 pin | **IDENTICAL**, `570a7b44` |
+| greets, camera parked on the `amudim` pillars (they fill the frame) | **IDENTICAL** |
+| greets, two cameras parked on `momy-1` / `momy-2` | **IDENTICAL** |
+| city 9-pose sweep + both pin arms (colour **and** z) | **IDENTICAL**, `bd4ffbf8` / `4cb8d2ca` |
+| chase ×5, fountain, crash ×2 | **IDENTICAL** |
+
+**0 pixels changed, max \|Δ\| 0, at every pose.** And the poses are not blind:
+the post-render half of the census projects the degenerate-normal verts through
+the frame just rendered — at the t=5743 acceptance pose **744 of the 1080 copies
+land INSIDE the 1920×1080 viewport**, at 40 distinct pixel positions, screen
+bbox x[200..1833] y[221..479], scattered over lit un-occluded wall.
+
+The strong control: a third binary whose fallback emits **+Z instead of +X** —
+a completely different basis — is **byte-identical to the +X one** at every arm
+above. So this is not "NaN and the fix happened to agree"; the tangent at those
+verts is **not read by anything that reaches a pixel**.
+
+Images (before / after / diff / where):
+`docs/img/nantan/greets_t5743_nantan_{before,after,diff,where,crop_strip}.png`,
+`docs/img/nantan/greets_amudim_nantan_{before,after,diff}.png`.
+`_where` marks the 40 on-screen vert positions and their bbox on the shipped
+frame; `_diff` is black because the delta is exactly zero.
+
+### GATES
+
+* **12 pin recipes, base-vs-fix identical AND at their recorded 16f/16t values**:
+  city `bd4ffbf8` / `4cb8d2ca`, chase `3bfd4244` / `42d79fad` / `622b96a2` /
+  `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588 `570a7b44`, and
+  the four greets acceptance poses.
+* **`--tangent_nan_census` 216 → 0** at all five greets stage boundaries.
+* `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+* `--shadow_plane_hash` **identical base-vs-fix, 2/2 stable on each** —
+  `h=7f0f7d68…`, `cum=6aa86b38…`, the 16t values.
+* Perf: the guard is one `Vector_Length` compare on a branch already only
+  reached by verts with no usable UV gradient, at **scene-init time only**.
+  Nothing per-frame.
+
+### A TRAP THE INSTRUMENT WALKED INTO, WORTH THE NEXT PERSON'S TIME
+
+The first census kept its counters and a `std::vector<float>` as **locals of
+`Compute_Vertex_Tangents` itself**, all behind `if (tangent_nan_census())` and
+therefore never executed with the flag off. **That alone moved the greets t=1588
+pin, `570a7b44` -> `a045c99b`, 3/3 stable on each binary** — while the four
+acceptance poses, city, chase and fountain did not budge. Under
+`-ffp-contract=fast` + thin LTO, extra live state across that function's two hot
+loops is enough to change how the tangent solve fuses, and t=1588 is the recipe
+sensitive enough to show it. Moving every counter into a `noinline` reporter
+that re-derives its numbers from the mesh afterwards restored `570a7b44` exactly.
+**A flag-gated instrument is not automatically byte-null; gate it, then prove
+it.** (And: an unexplained pin move is worth chasing to its cause before
+attributing it to the change under test — here the change under test was
+innocent.)
+
+### LOOSE ENDS THIS ROUND FOUND AND DID NOT TAKE
+
+1. **The normal plane has no `tValid` equivalent.** `Mekalele.h:3159-3163`
+   calls `approx_rsqrt(n2)` on the interpolated view normal with **no zero
+   guard** — `0 * inf = NaN` — and stores it unmasked. The same degenerate verts
+   carry `TN == (0,0,0)`, so a zero *normal* reaching a rasterized triangle is
+   the more dangerous of the two. Unreachable today for the same reason the
+   tangent was, but the tangent had a mask and the normal does not.
+2. **Two tangent readers sit UPSTREAM of the mask.** The POM march
+   (`Mekalele.h:1705-1718`, needs `ctx.heightData`) and `--pom_normal`
+   (`Mekalele.h:2438-2440`, default 0) consume the interpolated tangent before
+   `tLen2` is tested. Moot for NaN now, but neither path is guarded.
+3. **City's 21 `bilding type 1 windows` meshes have 9 verts each whose
+   `|N| == 0` while cornering a face of REAL area (1.22e-4).** Those are not
+   needles — the normal cancels for some other reason — so they are reachable
+   geometry. Inert today only because that material carries no `NormalMap` and
+   no `HeightMap`, so `Mekalele.h:3816`'s `writeTangent` is false and the lane is
+   never produced. That is a material-authoring accident, not a guarantee: give
+   city buildings a normal map and those triangles start consuming a tangent
+   that (pre-fix) was NaN. Worth a census of *why* those normals cancel.
+4. `Compute_Vertex_Normals` will hand out a zero `N` to anything that asks;
+   nothing in the tree treats that as an error. A scene-load-time warning would
+   have surfaced all of this years ago.
+
 ## 2026-08-16t — THE NEVER-INVALIDATED CLONE, ANSWERED BY COUNTING INSTEAD OF ARGUING: **`Pos` is stale ZERO times in 856 M compares**, the two fields that DO go stale are both recomputed downstream, and the real bug next door is a SIZE mismatch, not a value one
 
 **16s handed on "`PerTriMeshClone` is never invalidated, five files write
@@ -131,6 +300,12 @@ those verts hand the shading kernel a NaN basis. Nothing in this round's battery
 moves because of it (all 44 hashes reproduce their pins), so it is either
 absorbed downstream or lands on pixels nobody has looked at. **Own round.**
 The census counts them: `--clone_stale_census` prints `NaN-live N` per mesh.
+**RESOLVED — see 2026-08-16u above.** One cause, 216/216: every one has
+`|N| == 0` (a zero-area authored triangle whose face normal `Compute_Face_Normals`
+deliberately leaves un-normalized), and `Compute_Vertex_Tangents`' fallback
+normalized that zero cross. Not the displacement bake, not the displaced stone,
+and not greets-only. Guarded; **0 pixels move at any pose**, because all three
+rasterizers reject a zero-area fan triangle before setup.
 
 ### THE OTHER CLONE-LIFETIME BUG, MEASURED: `--bake_tick_overlap` LEAKS **~400 MiB PER FRAME**
 

@@ -2039,8 +2039,10 @@ void Initialize_Greets()
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	InitTimelineMark("greets: DisplaceStoneSubdiv block end");
+	MeshOps_TangentNaNCensus(GreetSc, "post-DisplaceStoneSubdiv");
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 	InitTimelineMark("greets: MakeFacesIndependentByAngle end");
+	MeshOps_TangentNaNCensus(GreetSc, "post-MakeFacesIndependentByAngle");
 
 	// Displaced stone: re-SMOOTH the displaced surface normals. The pass above
 	// (MakeFacesIndependentByAngle, 30°) facets the new relief — adjacent cell
@@ -2054,6 +2056,7 @@ void Initialize_Greets()
 		const float sm = fds::FeatureFlags::greets_displace_smooth();
 		DisplaceStoneSmoothNormals(GreetSc, "rooms", sm);
 		DisplaceStoneSmoothNormals(GreetSc, "floor", sm);
+		MeshOps_TangentNaNCensus(GreetSc, "post-DisplaceStoneSmoothNormals");
 	}
 
 	// S1b PER-PIXEL SHELL (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md):
@@ -2852,6 +2855,7 @@ void Initialize_Greets()
 	// Split mirrored-UV faces onto handedness clones (after all robot/face
 	// retargeting, before the matID rebuild so the clones get IDs).
 	InitTimelineMark("greets: chunking/clustering end");
+	MeshOps_TangentNaNCensus(GreetSc, "post-Piramid-chunk-split");
 	GreetsFixBitangentHandedness(GreetSc);
 	// ── S1d-3 PRISM (--pom_prism, default 0 = OFF) ── BEGIN
 	// Here, and not next to PomShell_Build, for two reasons: the ::mirUV split
@@ -3236,6 +3240,9 @@ void Initialize_Greets()
 	// No-op without the flag. Last thing in init so the snapshot sees exactly
 	// the vertices the rasterizer will read.
 	rev::DisplaceRebuild_EndInit(GreetSc);
+	// Final sweep: everything after the chunk split (handedness clones, prism
+	// sides, disco ball, mirror clones, DisplaceRebuild) is in scope here.
+	MeshOps_TangentNaNCensus(GreetSc, "Initialize_Greets END");
 	InitTimelineMark("greets: Initialize_Greets END");
 }
 

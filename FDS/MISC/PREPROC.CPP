@@ -11,7 +11,10 @@
 #include "Base/TriMesh.h"
 #include "Base/Omni.h"
 #include "Base/Scene.h"
+#include "Base/FeatureFlags.h"
 #include <FILLERS/TheOtherBarry.h>
+#include <cmath>
+#include <vector>
 
 FILE *LogFile;
 
@@ -386,6 +389,61 @@ void Compute_Edges(TriMesh *T)
 	delete Nodebuf;
 }
 
+// --tangent_nan_census reporter. OUT-OF-LINE AND noinline ON PURPOSE: an earlier
+// version kept its counters and a std::vector as locals of Compute_Vertex_Tangents
+// itself, and that alone — flag-gated, never executed — moved the greets t=1588
+// pin (570a7b44 -> a045c99b). Under -ffp-contract=fast + thin LTO, extra live
+// state across those two hot loops is enough to change how the tangent solve
+// fuses. So the instrument re-derives everything from the mesh afterwards and
+// touches nothing the shipping path computes.
+//
+// Reports, per mesh: how many verts ended up in the degenerate-normal fallback
+// (|N| == 0 -> tangent pinned to +X; NaN before the guard), and the LARGEST
+// incident-face area over them. That last number is the whole question — the
+// three rasterizers reject a fan triangle whose screen determinant is ~0
+// (Mekalele.h / TheOtherBarry.h / ShadowMap.cpp), so a max of ~0 means those
+// verts corner nothing fillable and their tangent is unobservable.
+__attribute__((noinline))
+static void TangentDegenReport(TriMesh *T)
+{
+	if (!T->Verts || !T->Faces || !T->VIndex) return;
+	std::vector<float> maxArea(size_t(T->VIndex), 0.0f);
+	for (Face *F = T->Faces, *FE = T->Faces + T->FIndex; F < FE; ++F) {
+		if (!F->A || !F->B || !F->C) continue;
+		const float a = Tri_Surface(&F->A->Pos, &F->B->Pos, &F->C->Pos);
+		for (Vertex *cv : { F->A, F->B, F->C }) {
+			const size_t ci = size_t(cv - T->Verts);
+			if (ci < maxArea.size() && a > maxArea[ci]) maxArea[ci] = a;
+		}
+	}
+	long  nDegen = 0, nFillable = 0;
+	float worst = 0.0f;
+	static int shown = 0;
+	for (Vertex *V = T->Verts, *VE = T->Verts + T->VIndex; V < VE; ++V) {
+		if (Vector_Length(&V->N) > EPSILON) continue;
+		const size_t vi = size_t(V - T->Verts);
+		++nDegen;
+		if (maxArea[vi] > worst)  worst = maxArea[vi];
+		if (maxArea[vi] > 0.0f)   ++nFillable;
+		if (shown < 8) {
+			++shown;
+			fprintf(stderr, "[TANNAN-SRC] degenerate normal -> tangent pinned to +X: "
+			        "mesh=%p v%d pos=(%.6f,%.6f,%.6f) |N|=%g maxIncidentArea=%g\n",
+			        (void *)T, int(vi), (double)V->Pos.x, (double)V->Pos.y,
+			        (double)V->Pos.z, (double)Vector_Length(&V->N), (double)maxArea[vi]);
+		}
+	}
+	if (nDegen)
+		fprintf(stderr, "[TANNAN-SRC] Compute_Vertex_Tangents: mesh=%p %ld / %u verts "
+		        "with a DEGENERATE normal (|N|==0) -> tangent +X (was NaN before the "
+		        "guard); LARGEST incident face area over them = %g; %ld of them corner "
+		        "a face with NON-ZERO area (mat='%s' nmap=%d)\n",
+		        (void *)T, nDegen, T->VIndex, (double)worst, nFillable,
+		        (T->FIndex && T->Faces[0].Txtr && T->Faces[0].Txtr->Name)
+		            ? T->Faces[0].Txtr->Name : "?",
+		        (T->FIndex && T->Faces[0].Txtr && T->Faces[0].Txtr->NormalMap) ? 1 : 0);
+}
+
 // Per-vertex tangent vector from triangle UV gradients. Lengyel's
 // method: for each face, derive the world-space ∂P/∂u using the
 // face's two edges and their UV deltas, weight by face area, sum
@@ -467,9 +525,31 @@ void Compute_Vertex_Tangents(TriMesh *T)
 			Vector ref = (std::fabs(Vtx->N.y) < 0.9f)
 				? Vector(0, 1, 0) : Vector(1, 0, 0);
 			Cross_Product(&Vtx->N, &ref, &Vtx->Tangent);
-			Vector_Norm(&Vtx->Tangent);
+			// ...and guard THAT normalize the same way the branch above and
+			// Compute_Face_Normals guard theirs. The cross is zero exactly when
+			// N is zero, which is a real authored case: Compute_Face_Normals
+			// deliberately leaves a DEGENERATE (zero-area) face's N as the
+			// un-normalized zero cross, MakeFacesIndependent's per-face clone
+			// inherits it (its accumulator can't beat EPSILON either, so it
+			// returns face->N verbatim), and Vector_Norm on a zero vector is
+			// 0 * (1/0) = NaN in all three lanes. Unguarded, that handed the
+			// shading kernel a NaN tangent basis on every corner of every
+			// degenerate triangle in the scene (greets' Piramid.lwo: 72 such
+			// faces on 'amudim'/'momy-1'/'momy-2' -> 216 NaN verts).
+			// A zero N admits no perpendicular, so there is nothing to derive:
+			// take the world axis the ref choice above leaves free (+X is the
+			// one ref==(0,1,0) is perpendicular to, and ref is (0,1,0) whenever
+			// |N.y| < 0.9, which a zero N always satisfies). Finite, unit, and
+			// deterministic — the same three properties the other two branches
+			// guarantee. --tangent_nan_census counts what lands here.
+			if (Vector_Length(&Vtx->Tangent) > EPSILON) {
+				Vector_Norm(&Vtx->Tangent);
+			} else {
+				Vector_Form(&Vtx->Tangent, 1, 0, 0);
+			}
 		}
 	}
+	if (fds::FeatureFlags::tangent_nan_census()) TangentDegenReport(T);
 }
 
 // Update Trimesh T to contain The following Information:

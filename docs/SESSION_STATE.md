@@ -1,5 +1,106 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16u — THE 216 NaN TANGENTS ARE ONE CAUSE, AND IT IS NOT THE DISPLACEMENT BAKE: **every one is a zero-area authored triangle normalized without a guard.** Fixed; **0 pixels move**, and the reason is a rasterizer reject with a line number, not luck
+>
+> 16t handed on *"216 vertices of greets' displaced `Piramid` chunks carry a NaN
+> `Vertex::Tangent` — own round."* Instrumented (`--tangent_nan_census`),
+> classified, fixed at the source, quantified. Full write-up:
+> `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16u**.
+>
+> ### THE CAUSE, 216 / 216, ONE
+>
+> **All 216 have `|N| == 0`.** `Compute_Face_Normals` (`PREPROC.CPP:22`)
+> *deliberately* leaves a degenerate (zero-area) face's `N` as the un-normalized
+> zero cross; `MakeFacesIndependent`'s per-face clone returns `face->N` verbatim
+> (its angle-gated accumulator rejects every neighbour including itself when
+> `F->N == 0`); and `Compute_Vertex_Tangents`' perpendicular-axis fallback then
+> called `Vector_Norm` on `Cross_Product(N=0, ref)` — and `Vector_Norm` is
+> `Vector_Scale(V, 1.0/Vector_Length(V), V)`, so a zero vector is `0 * inf` =
+> **NaN in all three lanes**.
+>
+> **None of the hand-off's hypotheses were right.** Not the weld, not the mitre,
+> not the corner treatment, not the freed-border densification — and **not the
+> displacement bake at all**: the counts are identical with and without
+> `--greets_displace` (66 at load, 216 after `MakeFacesIndependentByAngle` = 72
+> degenerate faces × 3 per-face clones, unchanged by
+> `DisplaceStoneSmoothNormals`). Not even the displaced stone: the materials are
+> `amudim` 192 / `momy-1` 12 / `momy-2` 12; `rooms`/`floor` contribute zero. And
+> **not greets-only** — the same fallback fires 1386 times in `Initialize_City`
+> and 6 in crash. The clone census found greets' because greets is what it walked.
+>
+> ### WHY IT NEVER SHOWED, AND WHY THE FIX MOVES NOTHING
+>
+> Each of the 216 has **exactly one incident face** and the **largest incident
+> area over all of them is 1.54e-10**. All three rasterizers reject a fan
+> triangle whose screen determinant is ~0 before any setup — `Mekalele.h:4012`,
+> `TheOtherBarry.h:1098`, `ShadowMap.cpp:1156`, all `if (fabs(det) <= 0.01f)
+> continue;`. Zero fragments, deferred / forward / shadow alike. And even if one
+> had reached the lanes, `Mekalele.h:3189`'s `tLen2 > vEps` is **false for NaN**,
+> so the G-buffer tangent is written 0 and `DeferredSurfaceKernel.cpp:2719` takes
+> the Mikkelsen fallback — no black pixel, ever.
+>
+> ### THE FIX
+>
+> Length-guard the second normalize the way the branch above it and
+> `Compute_Face_Normals` guard theirs; when `N` carries no direction, pin the
+> tangent to **+X** (the axis the fallback's own `ref` choice leaves free). Twin
+> guard in `DisplaceStoneSmoothNormals`, whose comment already claims to match
+> PREPROC's — latent, 0 hits, kept in lockstep.
+>
+> ### LOOK DELTA: **0 px, and the value is unobservable, not merely equal**
+>
+> Differential, one worktree, one asset tree, run 1 discarded: **every arm
+> byte-identical** — the four greets acceptance poses, greets t=1588, a camera
+> parked on the `amudim` pillars so they fill the frame, two cameras on the
+> mummies, a 9-pose city sweep (colour **and** z), chase ×5, fountain, crash.
+> The poses are not blind: the census's post-render half projects the
+> degenerate-normal verts through the rendered frame and **744 of the 1080
+> copies land inside the 1920×1080 viewport at t=5743**, 40 distinct pixels,
+> bbox x[200..1833] y[221..479]. The strong control: a third binary whose
+> fallback emits **+Z instead of +X** is byte-identical to the +X one everywhere
+> — so the tangent there is read by nothing that reaches a pixel.
+>
+> Images: `docs/img/nantan/greets_t5743_nantan_{before,after,diff,where,crop_strip}.png`,
+> `docs/img/nantan/greets_amudim_nantan_{before,after,diff}.png` (`_where` marks
+> the 40 on-screen positions; `_diff` is black).
+>
+> ### TRAP EARNED — A FLAG-GATED INSTRUMENT IS NOT AUTOMATICALLY BYTE-NULL
+>
+> The first census kept its counters and a `std::vector<float>` as **locals of
+> `Compute_Vertex_Tangents`**, behind `if (tangent_nan_census())` and never
+> executed. **That alone moved greets t=1588, `570a7b44` → `a045c99b`, 3/3
+> stable on each binary**, while the acceptance poses, city, chase and fountain
+> did not move. `-ffp-contract=fast` + thin LTO: extra live state across that
+> function's two hot loops changes how the tangent solve fuses. Moving every
+> counter into a `noinline` reporter that re-derives its numbers afterwards
+> restored `570a7b44` exactly. Chase an unexplained pin move to its cause before
+> blaming the change under test — here the change under test was innocent.
+>
+> ### GATES
+>
+> * **12 pin recipes, base-vs-fix identical AND at their recorded values** —
+>   city `bd4ffbf8` / `4cb8d2ca`, chase `3bfd4244` / `42d79fad` / `622b96a2` /
+>   `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588 `570a7b44`, the
+>   four greets acceptance poses `26ad272a` / `10adec3a` / `418fc1fa` / `6d02f31b`.
+> * `--tangent_nan_census` **216 → 0** at all five greets stage boundaries.
+> * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+> * `--shadow_plane_hash` identical base-vs-fix, 2/2 stable each — `h=7f0f7d68…`,
+>   `cum=6aa86b38…`, the 16t values.
+>
+> ### HANDED ON
+>
+> 1. **The normal plane has no `tValid` equivalent** — `Mekalele.h:3159-3163`
+>    `approx_rsqrt(n2)` on the interpolated view normal, no zero guard, stored
+>    unmasked. The same verts carry `TN == (0,0,0)`. Unreachable today for the
+>    same reason the tangent was; the tangent had a mask and this does not.
+> 2. **Two tangent readers sit upstream of the mask** — the POM march
+>    (`Mekalele.h:1705`) and `--pom_normal` (`Mekalele.h:2438`, default 0).
+> 3. **City's 21 `bilding type 1 windows` meshes have 9 verts each with
+>    `|N| == 0` cornering a face of REAL area (1.22e-4)** — reachable geometry,
+>    inert only because that material has no `NormalMap`/`HeightMap` so
+>    `Mekalele.h:3816`'s `writeTangent` is false. An authoring accident, not a
+>    guarantee. Worth a census of why those normals cancel.
+>
 > ## 2026-08-16t — THE NEVER-INVALIDATED CLONE: **`Pos` IS STALE ZERO TIMES IN 856 MILLION COMPARES.** The two fields that DO go stale are both recomputed downstream, and the bug worth fixing next door is a SIZE mismatch, not a value one
 >
 > **16s handed on "`PerTriMeshClone` is never invalidated, five files write

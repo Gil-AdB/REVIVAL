@@ -333,6 +333,17 @@ const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t o
 // material. No-op when the material has no faces in the scene.
 void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngleDeg);
 
+// --tangent_nan_census (dev): report every vertex in the scene whose Tangent is
+// not finite, tagged with `stage`, so the bake stage that produced it is
+// identifiable by bisection over the call sites. Inert unless the flag is on.
+void MeshOps_TangentNaNCensus(Scene *Sc, const char *stage);
+
+// --tangent_nan_census (dev), post-render half: project the degenerate-normal
+// verts (|N| == 0 — the set that used to carry a NaN Tangent) through the frame
+// that was just rendered and report how many land inside the viewport, plus
+// their screen bbox. Call after a tick. Inert unless the flag is on.
+void MeshOps_TangentDegenScreenCensus(Scene *Sc, int xres, int yres);
+
 // S1b POM SHELL builder (docs/S1_PIXEL_DISPLACEMENT_PLAN.md §S1b): turn
 // matName's flat faces into the LID of a relief slab — push every vertex they
 // use out along its normal by (uvAmp × that face's world-per-UV-tile)/2 and

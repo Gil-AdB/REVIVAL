@@ -5752,7 +5752,35 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 		else {   // no usable UV gradient: any vector ⟂ N (matches PREPROC's fallback)
 			if (std::fabs(n.y) < 0.9f) { outT[i].x=-n.z; outT[i].y=0.0f; outT[i].z=n.x; }
 			else                       { outT[i].x=0.0f; outT[i].y=n.z; outT[i].z=-n.y; }
-			Vector_Norm(&outT[i]);
+			// Length-guarded, exactly like PREPROC's fallback (this branch's own
+			// perpendicular is the zero vector whenever `n` is — a corner whose
+			// only face is degenerate falls back to fN, and Compute_Face_Normals
+			// leaves a zero-area face's N as the zero cross — and Vector_Norm(0)
+			// is NaN). Latent here today: --tangent_nan_census reports 0 corners
+			// taking it on 'rooms'/'floor'. Kept in lockstep with PREPROC because
+			// the two fallbacks are meant to agree.
+			if (Vector_Length(&outT[i]) > EPSILON) {
+				Vector_Norm(&outT[i]);
+			} else {
+				Vector_Form(&outT[i], 1, 0, 0);
+				if (fds::FeatureFlags::tangent_nan_census()) {
+					static int shown = 0;
+					if (shown < 16) {
+						++shown;
+						std::fprintf(stderr, "[TANNAN-SRC] DisplaceStoneSmoothNormals: "
+						             "degenerate normal, tangent pinned to +X: mat='%s' "
+						             "corner %d pos=(%.6f,%.6f,%.6f) n=(%g,%g,%g) |n|=%g "
+						             "fN=(%g,%g,%g) |tAcc|=%g\n",
+						             matName, i,
+						             (double)corners[i].V->Pos.x, (double)corners[i].V->Pos.y,
+						             (double)corners[i].V->Pos.z,
+						             (double)n.x, (double)n.y, (double)n.z,
+						             (double)Vector_Length(&n),
+						             (double)fN.x, (double)fN.y, (double)fN.z,
+						             (double)Vector_Length(&tAcc));
+					}
+				}
+			}
 		}
 	}
 	// Commit (split mesh: exactly one corner per Vertex).
@@ -5764,6 +5792,165 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 		std::fprintf(stderr, "[STONE-GROOVE] '%s' %d carved corners re-shaded with "
 		             "their authored normal (--no-greets_displace_groove_shade for the "
 		             "ledge/mirror A/B)\n", matName, nGrooveShaded);
+}
+
+// --tangent_nan_census: walk the scene and report every vertex whose Tangent is
+// not finite. Called at the greets displacement bake's stage boundaries so the
+// PRODUCING stage is identifiable (a stage that reports 0 and whose successor
+// reports N is the producer). Prints the vertex normal alongside, because every
+// normalize in the tangent path divides by a length that is zero exactly when N
+// is zero — so |N| is the discriminator between "degenerate normal" and
+// "something else". Inert (nothing walked) unless the flag is on.
+void MeshOps_TangentNaNCensus(Scene *Sc, const char *stage)
+{
+	if (!fds::FeatureFlags::tangent_nan_census() || !Sc) return;
+	auto bad = [](const Vector &v) {
+		return !std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z);
+	};
+	long long total = 0, meshesHit = 0, printed = 0;
+	// TriMesh has no name of its own — the Object wrapper carries it.
+	std::unordered_map<const TriMesh *, const char *> meshName;
+	for (Object *O = Sc->ObjectHead; O; O = O->Next)
+		if (O->Type == Obj_TriMesh && O->Data && O->Name)
+			meshName.emplace((const TriMesh *)O->Data, O->Name);
+	auto nameOf = [&](const TriMesh *T) {
+		auto it = meshName.find(T);
+		return it != meshName.end() ? it->second : "(anon)";
+	};
+	// Incident faces per vertex — ALL of them, not the first. The distinction
+	// matters: a vertex whose ONLY faces are zero-area corners no rasterized
+	// triangle (the fan-triangle screen-determinant guard drops those), whereas
+	// a zero-normal vertex produced by two exactly-cancelling NON-degenerate
+	// faces (a zero-thickness fin) would corner a real one. So record the count
+	// and the LARGEST incident area, and report the maximum of that maximum.
+	std::unordered_map<const Vertex *, const Face *> owner;
+	std::unordered_map<const Vertex *, std::pair<int, float>> incid;   // {count, maxArea}
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (!T->Verts || !T->Faces) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face *F = &T->Faces[i];
+			if (!F->A || !F->B || !F->C) continue;
+			const float a = Tri_Surface(&F->A->Pos, &F->B->Pos, &F->C->Pos);
+			for (const Vertex *V : { F->A, F->B, F->C }) {
+				owner.emplace(V, F);
+				auto &e = incid[V];
+				++e.first; e.second = std::max(e.second, a);
+			}
+		}
+	}
+	// (material, is-the-incident-face-zero-area) tally over the whole scene.
+	std::map<std::string, std::pair<long long, long long>> byMat;   // {total, degenerate}
+	std::map<std::string, int> perMat;
+	float maxIncidentArea = -1.0f;
+	int   maxIncidentFaces = 0;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (!T->Verts) continue;
+		long long here = 0, nzeroN = 0;
+		for (int32_t v = 0; v < int32_t(T->VIndex); ++v)
+			if (bad(T->Verts[v].Tangent)) {
+				++here;
+				const Vertex &V = T->Verts[v];
+				const Vector &n = V.N;
+				if (!bad(n) && std::sqrt(n.x*n.x + n.y*n.y + n.z*n.z) < 1e-12f) ++nzeroN;
+				auto it = owner.find(&V);
+				const Face *F = (it != owner.end()) ? it->second : nullptr;
+				const char *mat = (F && F->Txtr && F->Txtr->Name)
+				                  ? F->Txtr->Name : "(no incident face)";
+				// Zero-area incident face = the degenerate-geometry class: its
+				// Face::N is the un-normalized near-zero cross (Compute_Face_Normals
+				// deliberately leaves it), which is what starves the tangent solve.
+				const float area = F ? Tri_Surface(&F->A->Pos, &F->B->Pos, &F->C->Pos) : -1.0f;
+				{
+					auto ii = incid.find(&V);
+					const int nf = (ii != incid.end()) ? ii->second.first : 0;
+					const float amax = (ii != incid.end()) ? ii->second.second : -1.0f;
+					maxIncidentArea = std::max(maxIncidentArea, amax);
+					maxIncidentFaces = std::max(maxIncidentFaces, nf);
+				}
+				const float fnl  = F ? std::sqrt(F->N.x*F->N.x + F->N.y*F->N.y + F->N.z*F->N.z) : -1.0f;
+				const bool degen = (area >= 0.0f && area < 1e-12f);
+				auto &slot = byMat[mat];
+				++slot.first; if (degen) ++slot.second;
+				if (printed < 32 || perMat[mat]++ < 6) {
+					std::fprintf(stderr, "[TANNAN]   %s v%d pos=(%.6f,%.6f,%.6f) "
+					             "N=(%g,%g,%g) |N|=%g mat='%s' faceArea=%g |F->N|=%g\n",
+					             nameOf(T), v,
+					             (double)V.Pos.x, (double)V.Pos.y, (double)V.Pos.z,
+					             (double)V.N.x, (double)V.N.y, (double)V.N.z,
+					             (double)std::sqrt(V.N.x*V.N.x + V.N.y*V.N.y + V.N.z*V.N.z),
+					             mat, (double)area, (double)fnl);
+					++printed;
+				}
+			}
+		if (here) {
+			++meshesHit;
+			total += here;
+			std::fprintf(stderr, "[TANNAN] %-28s %lld / %u verts non-finite Tangent "
+			             "(%lld of them with |N|==0)\n",
+			             nameOf(T), here, T->VIndex, nzeroN);
+		}
+	}
+	for (const auto &kv : byMat)
+		std::fprintf(stderr, "[TANNAN] by material: '%s' %lld (%lld on a ZERO-AREA "
+		             "incident face)\n", kv.first.c_str(), kv.second.first, kv.second.second);
+	if (total)
+		std::fprintf(stderr, "[TANNAN] worst incident face over ALL of them: area=%g "
+		             "(max incident-face count %d) — >0 here would mean a NaN vert "
+		             "corners a face the rasterizer can actually fill\n",
+		             (double)maxIncidentArea, maxIncidentFaces);
+	std::fprintf(stderr, "[TANNAN] stage='%s': %lld non-finite Tangent verts across "
+	             "%lld meshes\n", stage ? stage : "?", total, meshesHit);
+}
+
+// --tangent_nan_census, POST-RENDER half: where do the degenerate-normal verts
+// (|N| == 0 — exactly the set whose tangent used to be NaN) actually LAND on
+// screen? Called after a tick, so Transform_Objects has filled PX/PY/RZ. Reports
+// the screen bbox and how many are inside the viewport, which is the difference
+// between "the fix is invisible because nothing sees those verts" and "the fix
+// is invisible because the consumer discards the value".
+void MeshOps_TangentDegenScreenCensus(Scene *Sc, int xres, int yres)
+{
+	if (!fds::FeatureFlags::tangent_nan_census() || !Sc) return;
+	long long n = 0, onScreen = 0;
+	float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+	// Report DISTINCT rounded screen positions — the set is heavily coincident
+	// (a needle triangle's three corners land on ~one pixel), so the raw list is
+	// mostly repeats and the distinct set is what you'd overlay on a frame.
+	std::set<std::pair<int, int>> spots;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (!T->Verts) continue;
+		for (int32_t v = 0; v < int32_t(T->VIndex); ++v) {
+			const Vertex &V = T->Verts[v];
+			const float nl = std::sqrt(V.N.x*V.N.x + V.N.y*V.N.y + V.N.z*V.N.z);
+			if (!(nl < 1e-12f)) continue;
+			++n;
+			const bool in = (V.PX >= 0.0f && V.PX < float(xres)
+			              && V.PY >= 0.0f && V.PY < float(yres) && V.RZ > 0.0f);
+			if (in) {
+				++onScreen;
+				x0 = std::min(x0, V.PX); x1 = std::max(x1, V.PX);
+				y0 = std::min(y0, V.PY); y1 = std::max(y1, V.PY);
+			}
+			if (in) spots.emplace(int(V.PX + 0.5f), int(V.PY + 0.5f));
+		}
+	}
+	{
+		int shown = 0;
+		for (const auto &p : spots) {
+			if (shown++ >= 64) break;
+			std::fprintf(stderr, "[TANSCR]   spot (%d,%d)\n", p.first, p.second);
+		}
+		std::fprintf(stderr, "[TANSCR] %zu distinct on-screen pixel positions\n",
+		             spots.size());
+	}
+	if (onScreen)
+		std::fprintf(stderr, "[TANSCR] %lld degenerate-normal verts, %lld projected "
+		             "INSIDE the %dx%d viewport, screen bbox x[%.1f..%.1f] "
+		             "y[%.1f..%.1f]\n", n, onScreen, xres, yres,
+		             (double)x0, (double)x1, (double)y0, (double)y1);
+	else
+		std::fprintf(stderr, "[TANSCR] %lld degenerate-normal verts, NONE inside the "
+		             "%dx%d viewport\n", n, xres, yres);
 }
 
 // B4 residual height map (docs/ENVDYN_DISPLACEMENT_PLAN.md): the POM input for

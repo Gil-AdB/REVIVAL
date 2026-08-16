@@ -3,6 +3,7 @@
 #include "CITY.H"
 #include "ChaseEvents.h"
 #include "MaterialEditor.h"
+#include "MeshOps.h"
 #include "FillerTest.h"
 #include "GLAT.H"
 #include "Rev.h"
@@ -747,6 +748,10 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                 std::fprintf(stderr, "[EDITTEST] after two ticks: %s\n", cockpitSpec().c_str());
             }
         }
+
+        // --tangent_nan_census: where the degenerate-normal (formerly NaN-tangent)
+        // verts landed in the frame just rendered. Inert without the flag.
+        MeshOps_TangentDegenScreenCensus(CurScene, xres, yres);
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/greets_t%06d_color.ppm",
