@@ -393,6 +393,55 @@ inline int CubeShadow_SelectFace(float dx, float dy, float dz)
     return                            dz >= 0 ? 4 : 5;
 }
 
+// ─── Ablation ladder for the CUBE TAP INTERIOR (CubeShadow_Sample) ──────────
+// The omni ladder's stage 8→9 prices the WHOLE tap (0.60 Gi/f at greets t=5743,
+// 33 % of `DeferredLighting-call`); this one splits its interior, which no round
+// had an instrument for. COMPILE-TIME only: build with -DFDS_CUBE_ABLATE=n and
+// the tap returns early at staged depth n, so the Ginstr/f difference between
+// two builds prices exactly one stage. n=0 (shipping) emits literally nothing —
+// `cmp` the binaries to check.
+//
+//    1  the entry guard only            (call frame + cubeIdx bounds)
+//    2  + lightISource load, the 3 world-space subs
+//    3  + CubeShadow_SelectFace
+//    4  + the face map resolve (faceIdx[] load, &g_shadowMaps[..], dynBaked)
+//    5  + the viewToLight 3x3 matmul   -> (lx, ly, lz)
+//    6  + the lz <= 0.05 near reject
+//    7  + the two face-frustum rejects
+//    8  + 1/lz and the smX / smY projection
+//    9  + the int truncation and the iX/iY bounds reject
+//   10  + the PolyId uniformity-pyramid lookup and its two fast paths
+//   11  + the bilinear weights (and the uniform-OCCLUDING return)
+//   12  + the 2x2 tap addressing (swizzle test, offsets, plane base pointers)
+//    0  full  (so full - 12 = the four closestPacked + the weighted accumulate)
+//
+// Stages 1-12 return the CONSTANT 1.0f, but through a compare against a value
+// no tap can produce, so the work above the cut stays live instead of being
+// dead-stripped — the same problem the OMNI/PIX ladders solve with a sink, and
+// solved here without one because this function has a return value to route it
+// through. Read a stage delta as an UPPER bound for the same reason the 16g
+// method note gives: the cut materialises at one point what the shipping build
+// spreads across the body.
+//
+// MEASUREMENT HARNESS: build the caller with -DFDS_OMNI_ABLATE=9 as well, so
+// the omni loop `continue`s immediately after the tap. Then the only behaviour
+// the constant 1.0f changes downstream is the `cubeAtten <= 0.0f` early-out
+// (two instructions, taken only in stage 0) — everything else the loop would do
+// with the value is already cut away.
+#ifndef FDS_CUBE_ABLATE
+#define FDS_CUBE_ABLATE 0
+#endif
+#if FDS_CUBE_ABLATE
+#define CUBE_ABL_CUT(stage, expr) \
+    if constexpr ((FDS_CUBE_ABLATE) == (stage)) return (float(expr) > 1e30f) ? 0.0f : 1.0f;
+#else
+#define CUBE_ABL_CUT(stage, expr)  ((void)0)
+#endif
+
+__attribute__((always_inline)) inline float CubeShadow_Tail(const struct ShadowMap& sm, float smX, float smY,
+                             int iX, int iY, int surfaceMatId, bool dynamicOnly,
+                             float lz, int constBias, int slopeBiasInt);
+
 // Sample a cube shadow at the given view-space sample point. Returns
 // shadow attenuation in [0, 1] — 1.0 fully lit, 0.0 fully shadowed.
 //
@@ -423,15 +472,19 @@ inline float CubeShadow_Sample(int cubeIdx,
                                 bool  dynamicOnly  = false)
 {
     if (cubeIdx < 0 || size_t(cubeIdx) >= g_cubeShadowRefs.size()) return 1.0f;
+    CUBE_ABL_CUT(1, worldX + viewX);
     const CubeShadowRef& cr = g_cubeShadowRefs[cubeIdx];
     const float dwx = worldX - cr.lightISource.x;
     const float dwy = worldY - cr.lightISource.y;
     const float dwz = worldZ - cr.lightISource.z;
+    CUBE_ABL_CUT(2, dwx + dwy + dwz);
     const int face = CubeShadow_SelectFace(dwx, dwy, dwz);
+    CUBE_ABL_CUT(3, dwx + dwy + dwz + float(face));
     const ShadowMap& sm = g_shadowMaps[cr.faceIdx[face]];
     // dynamicOnly composite tap: nothing was baked into this face's dynamic
     // planes this frame → fully lit, skip the projection + PCF entirely.
     if (dynamicOnly && !sm.dynBaked) return 1.0f;
+    CUBE_ABL_CUT(4, sm.perspX + sm.cntrX);
     // Project view-space sample point into face-view space.
     const float lx = sm.viewToLight[0][0] * viewX + sm.viewToLight[0][1] * viewY +
                      sm.viewToLight[0][2] * viewZ + sm.viewToLightOffset.x;
@@ -439,12 +492,14 @@ inline float CubeShadow_Sample(int cubeIdx,
                      sm.viewToLight[1][2] * viewZ + sm.viewToLightOffset.y;
     const float lz = sm.viewToLight[2][0] * viewX + sm.viewToLight[2][1] * viewY +
                      sm.viewToLight[2][2] * viewZ + sm.viewToLightOffset.z;
+    CUBE_ABL_CUT(5, lx + ly + lz);
     // lz is the pixel's depth into light-space. lz<=0 = behind light;
     // lz~0 = at-the-light. Both produce a meaningless shadow lookup
     // and the latter explodes invLZ = 1/lz, making smX/smY saturate to
     // INT_MAX and walk off the shadow map. Reject anything closer than
     // 0.05 world units (matches the engine-wide zMin / near-plane).
     if (lz <= 0.05f) return 1.0f;
+    CUBE_ABL_CUT(6, lx + ly + lz);
     // Cube-face frustum check. For a 90°-padded face, valid pixels
     // have |lx|/lz and |ly|/lz ≤ ~1.18 (tan(π/4 · 1.10)). Pixels at
     // the face seam where another face's frustum was the correct one
@@ -455,9 +510,11 @@ inline float CubeShadow_Sample(int cubeIdx,
     constexpr float kFaceFrustumRatio = 1.5f;  // a bit of slack past 1.18
     if (lx >  kFaceFrustumRatio * lz || lx < -kFaceFrustumRatio * lz) return 1.0f;
     if (ly >  kFaceFrustumRatio * lz || ly < -kFaceFrustumRatio * lz) return 1.0f;
+    CUBE_ABL_CUT(7, lx + ly + lz);
     const float invLZ = 1.0f / lz;
     const float smX = sm.cntrX + sm.perspX * lx * invLZ;
     const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+    CUBE_ABL_CUT(8, smX + smY);
     // Diagnostic: with the lz>0.05 + face-frustum-ratio rejections
     // above, smX/smY should now always land in roughly [0, xres) /
     // [0, yres). NaN/inf or wildly out-of-range here means the
@@ -500,6 +557,30 @@ inline float CubeShadow_Sample(int cubeIdx,
     const int iX = int(smX);
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
+    CUBE_ABL_CUT(9, smX + smY + float(iX + iY));
+    return CubeShadow_Tail(sm, smX, smY, iX, iY, surfaceMatId, dynamicOnly,
+                           lz, constBias, slopeBiasInt);
+}
+
+// The tap's TAIL, split out of CubeShadow_Sample above at the iX/iY bounds
+// reject. Everything from the uniformity pyramid down: the pyramid's two fast
+// paths, the bilinear weights, the 2x2 addressing and the four packed taps.
+//
+// WHY IT IS A SEPARATE FUNCTION. --deferred_cube_prepass computes the tap's
+// PROLOGUE (face select, the viewToLight projection, the rejects, iX/iY)
+// 8-wide over PIXELS for a fixed light, where the matrix is a broadcast
+// instead of twelve per-lane loads; the tail is branchy and memory-bound and
+// stays scalar and lazy. Both paths call THIS body, so the tail is the same
+// code on both arms by construction and only the prologue has to be proved
+// bit-identical (--deferred_cube_prepass_verify does that).
+//
+// The split point is not arbitrary: it is the last place where the state is
+// small (one ShadowMap*, smX/smY, iX/iY) and the last place before the first
+// data-dependent memory read.
+__attribute__((always_inline)) inline float CubeShadow_Tail(const ShadowMap& sm, float smX, float smY,
+                             int iX, int iY, int surfaceMatId, bool dynamicOnly,
+                             float lz, int constBias, int slopeBiasInt)
+{
     // ─── PolyId uniformity pyramid: a verdict WITHOUT a tap ───────────────
     // A BRANCH AROUND the tap, not extra live state inside it. Split in two so
     // each fast path pays only what it needs: the block lookup runs FIRST (it
@@ -547,6 +628,7 @@ inline float CubeShadow_Sample(int cubeIdx,
             if (fds::FeatureFlags::shadow_polyid_no_pcf()) return 0.0f;
         }
     }
+    CUBE_ABL_CUT(10, smX + smY + float(uniC));
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
     const float w00 = (1.0f - fx) * (1.0f - fy);
@@ -561,6 +643,7 @@ inline float CubeShadow_Sample(int cubeIdx,
         occU += w00; occU += w10; occU += w01; occU += w11;
         return (occU >= 1.0f) ? 0.0f : (1.0f - occU);
     }
+    CUBE_ABL_CUT(11, w00 + w10 + w01 + w11);
     // Tap addressing: linear row-major, or 8×8-tiled under --shadow-swizzle
     // (halves the cache lines a 2×2 footprint touches; the tiled copies are
     // derived after each bake). Falls back to linear when a needed tiled
@@ -584,6 +667,9 @@ inline float CubeShadow_Sample(int cubeIdx,
         o01 = o00 + size_t(sm.xres); o11 = o01 + 1;
         psB = sm.packSD.data();  pdB = sm.packDyn.data();
     }
+    CUBE_ABL_CUT(12, smX + smY + float(o00 + o10 + o01 + o11)
+                     + float(reinterpret_cast<uintptr_t>(psB) >> 8)
+                     + float(reinterpret_cast<uintptr_t>(pdB) >> 8));
     float occ = 0.0f;
     if (surfaceMatId >= 0) {
         // PolyId mode: identity test. The ShadowBarry rasterizer writes
