@@ -2489,6 +2489,52 @@ static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P)
 	}
 }
 
+// ─── FDS_FOG_PUNT_CENSUS — how much of the composite goes SCALAR ───────────
+// Froxel_CompositeTileVec8 punts a WHOLE 8-lane group to the per-pixel scalar
+// path for any group holding one water-reflection lane (00b row 6's
+// `Froxel_CompositePixel` 3.4 % of self time). Whether "only punt the LANES"
+// is worth building depends entirely on the histogram of how many lanes in a
+// punted group are actually reflection lanes: k=8 groups gain nothing, k=1
+// groups pay 7 scalar pixels for one. Compile with -DFDS_FOG_PUNT_CENSUS=1,
+// gate --omni_census. Never shipped.
+#ifndef FDS_FOG_PUNT_CENSUS
+#define FDS_FOG_PUNT_CENSUS 0
+#endif
+#if FDS_FOG_PUNT_CENSUS
+// [0] full groups seen, [1] punted groups, [2] tail pixels (partial groups),
+// [3..10] punted groups with exactly k=1..8 reflection lanes.
+static std::atomic<uint64_t> g_fogPuntCen[16];
+static void FogPuntCensus_Report()
+{
+	uint64_t c[16];
+	for (int i = 0; i < 16; ++i) c[i] = g_fogPuntCen[i].load(std::memory_order_relaxed);
+	if (c[0] == 0) return;
+	const double g = double(c[0]);
+	uint64_t lanes = 0;
+	for (int k = 1; k <= 8; ++k) lanes += uint64_t(k) * c[2+k];
+	std::fprintf(stderr,
+	    "[FOGPUNT] groups %llu  PUNTED %llu (%.1f%%)  tail px %llu  |  refl lanes %llu "
+	    "of %llu punted-group lanes (%.1f%%)\n"
+	    "[FOGPUNT]   k-histogram (refl lanes per punted group): "
+	    "1:%llu 2:%llu 3:%llu 4:%llu 5:%llu 6:%llu 7:%llu 8:%llu\n",
+	    (unsigned long long)c[0], (unsigned long long)c[1], 100.0*double(c[1])/g,
+	    (unsigned long long)c[2], (unsigned long long)lanes,
+	    (unsigned long long)(8*c[1]), c[1] ? 100.0*double(lanes)/double(8*c[1]) : 0.0,
+	    (unsigned long long)c[3], (unsigned long long)c[4], (unsigned long long)c[5],
+	    (unsigned long long)c[6], (unsigned long long)c[7], (unsigned long long)c[8],
+	    (unsigned long long)c[9], (unsigned long long)c[10]);
+	for (int i = 0; i < 16; ++i) g_fogPuntCen[i].store(0, std::memory_order_relaxed);
+}
+#define FOGPUNT_CEN(idx) do { puntCen[(idx)] += 1; } while (0)
+#define FOGPUNT_DECL()   uint64_t puntCen[16] = {0}; (void)puntCen
+#define FOGPUNT_FLUSH()  do { for (int _i=0;_i<16;++_i) if (puntCen[_i]) \
+	g_fogPuntCen[_i].fetch_add(puntCen[_i], std::memory_order_relaxed); } while (0)
+#else
+#define FOGPUNT_CEN(idx) ((void)0)
+#define FOGPUNT_DECL()   ((void)0)
+#define FOGPUNT_FLUSH()  ((void)0)
+#endif
+
 // SIMD (AVX2 via simde) composite: 8 contiguous pixels per step. Vectorizes
 // the froxel bilinear blend (via emulated gathers) + the Beer-Lambert tail
 // and the dither/pack. iz (uint8 LUT), the zb slice boundaries, fastExpNeg
@@ -2530,6 +2576,7 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 	const __m256i iAlpha=_mm256_set1_epi32((int)0xFF000000u);
 	const __m256i lane = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
 	const float da = P.ditherAmp;
+	FOGPUNT_DECL();
 
 	for (int py = y1; py < y2; ++py) {
 		const size_t row = size_t(py) * size_t(XRes);
@@ -2544,11 +2591,17 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 		int px = x1;
 		for (; px + 8 <= x2; px += 8) {
 			const size_t i0 = row + size_t(px);
+			FOGPUNT_CEN(0);
 			// Punt any group holding a water-reflection lane to the scalar path.
 			if (gFrReflZ) {
 				bool punt = false;
 				for (int L=0;L<8;++L) if (zEnc[i0+L]==0 && gFrReflZ[i0+L]!=0){punt=true;break;}
-				if (punt) { for(int L=0;L<8;++L) Froxel_CompositePixel(px+L,py,P); continue; }
+				if (punt) {
+#if FDS_FOG_PUNT_CENSUS
+					int _k=0; for(int L=0;L<8;++L) if (zEnc[i0+L]==0 && gFrReflZ[i0+L]!=0) ++_k;
+					FOGPUNT_CEN(1); FOGPUNT_CEN(2+_k);
+#endif
+					for(int L=0;L<8;++L) Froxel_CompositePixel(px+L,py,P); continue; }
 			}
 			// ze, sky mask, z (= max(min(zSurf,far)|far, near))
 			__m256i ze = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)&zEnc[i0]));
@@ -2725,8 +2778,9 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			                               _mm256_or_si256(nB,iAlpha));
 			_mm256_storeu_si256((__m256i*)&out[i0], packed);
 		}
-		for (; px < x2; ++px) Froxel_CompositePixel(px, py, P);
+		for (; px < x2; ++px) { FOGPUNT_CEN(2); Froxel_CompositePixel(px, py, P); }
 	}
+	FOGPUNT_FLUSH();
 }
 
 void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
@@ -2849,8 +2903,23 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	constexpr int numTilesX = 12;
 	constexpr int numTilesY = 8;
 
-	auto runTiles = [&](int w, int h, auto&& body) {
-		const int tsx = (w + numTilesX - 1) / numTilesX;
+	// alignX8: round the tile's X span up to a multiple of 8 so every tile
+	// starts AND ends on an 8-lane group boundary. Only the SIMD composite
+	// wants this, and it wants it badly: tsx = ceil(1512/12) = 126 = 15 groups
+	// + 6 leftover pixels, and Froxel_CompositeTileVec8's tail loop hands each
+	// leftover to the per-pixel scalar path — 636 px per tile x 96 tiles =
+	// 61 056 px per composite pass, 4.76 % of the frame, for no reason but
+	// arithmetic. Rounding 126 up to 128 makes 11 tiles 128 wide and the last
+	// 1512 - 11*128 = 104 = 13 groups, so the tail loop runs ZERO times.
+	// 12*roundup8(ceil(w/12)) >= w always, so no column is ever dropped; a
+	// tile that starts past w gets x1 > x2 and both pixel loops no-op.
+	// BIT-EXACT BY CONSTRUCTION: which of the two composite implementations a
+	// pixel goes through cannot change its value (they are pinned identical),
+	// and no pixel reads another pixel's output.
+	auto runTiles = [&](int w, int h, auto&& body, bool alignX8 = false) {
+		int tsxr = (w + numTilesX - 1) / numTilesX;
+		if (alignX8) tsxr = (tsxr + 7) & ~7;
+		const int tsx = tsxr;
 		const int tsy = (h + numTilesY - 1) / numTilesY;
 		renderns::tileCounter = 0;
 		constexpr int n = numTilesX * numTilesY;
@@ -2959,12 +3028,16 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 #if FDS_FOG_ATAN_CENSUS
 		if (fds::FeatureFlags::omni_census()) FogAtanCensus_Report();
 #endif
+#if FDS_FOG_PUNT_CENSUS
+		if (fds::FeatureFlags::omni_census()) FogPuntCensus_Report();
+#endif
 		{ TailProf::ScopeTimer _tp("fog-composite");
 		// SIMD composite is on by default (bit-identical to scalar; measured
 		// ~0.5 ms/f faster on fog-composite). FDS_FOG_COMPOSITE_VEC=0 opts out.
 		static const bool sFogVec = [](){ const char* e=getenv("FDS_FOG_COMPOSITE_VEC"); return !(e && e[0]=='0'); }();
 		const bool useVec = sFogVec && nx>1 && ny>1;
-		if (useVec) runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTileVec8(a,b,c,d,P); });
+		if (useVec) runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTileVec8(a,b,c,d,P); },
+		                     fds::FeatureFlags::fog_composite_tile_align8());
 		else        runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); }); }
 		// This is the only path that populates g_hdrBuf; mark it so the tonemap
 		// runs (and doesn't blacken scenes/frames where the froxel composite

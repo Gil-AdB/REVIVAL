@@ -10,6 +10,255 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16z — 16b's LAST THREE CITY ITEMS, PRICED IN ONE ROUND: two are **below bar and closed with numbers**, and the census that refuted one of them found the item that pays — 61 056 pixels a pass taking the scalar composite because 1512/12 is not a multiple of 8
+
+**Result on `8cc5e5e7` in `/Users/gil-ad/work/rev-fogprice`, city under his arm
+(`--env_live_water --deferred --city_env_pixel`) at t=1961 / 2400 / 400,
+1512×848: ONE landing, BYTE-NULL at 12 pins; TWO refutations, both with the
+ladder that refutes them committed. Every instrument here is compile-time and
+proven null — the shipping `DEMO` md5s `44be69e4…` with all four of them
+compiled out, identical to its parent.**
+
+Method throughout: `--bench=scene@scene=city,t=<T>,iters=30,xres=1512,yres=848
+--profiler=1 --deferred_prof=5 --hw_prof`, `SDL_VIDEODRIVER=dummy`, 12 pool
+workers, every arm run once per round with the **arm order rotated by round**,
+round 0 dropped. Loads ran 7–18 across the session, so **`Ginstr/f` is the
+column that decides** and every verdict below is quoted from it.
+
+### ITEM 1 — `Froxel_GlowTile`'s per-(column × light × slice) `atanf`: BELOW BAR, CLOSED
+
+§00b row 10 priced the SYMBOL at 0.3 % of self time and never counted the
+calls. `-DFDS_FOG_ATAN_CENSUS=1` (new, committed, never shipped) counts them
+and classifies every slice the glow integral walks:
+
+| pose | coarse cols | (col,light) pairs | slice iters | skipped `b<=a` | **ATANS** | wasted after the atan | contributing |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| t=1961 | 576 | 18 553 | 610 366 | 19 705 | **609 214** | 2 522 (0.4 %) | 588 139 (**96.5 %**) |
+| t=2400 | 576 | 11 421 | 440 556 | 10 175 | 441 802 | 447 (0.1 %) | 429 934 (97.3 %) |
+| t=400  | 576 | 11 009 | 317 033 | 12 589 | 315 453 | 1 089 (0.3 %) | 303 355 (96.2 %) |
+
+**Both playbook questions answered by measurement.** *Low-cardinality /
+tableable?* **No** — 609 214 arguments a frame, all distinct: the argument is
+`(2αz+β)/√disc` with α, β and `disc` varying per (column, light) and `z` per
+slice. *Hoistable per column?* **No** — nothing in it is invariant at any loop
+level; `twoA`, `beta` and `invD` are functions of the column AND the light.
+
+**And the SSAO playbook's third move — push the cheap tests above the expensive
+one — is refuted by the census, without a build.** Only **0.4 %** of atans are
+computed for a slice a later test then discards, and deferring the atan costs
+an EXTRA one at every contiguous run of contributing slices (the loop carries
+`aPrev` across slice boundaries; recomputing it at a run start is bit-exact,
+but at 96.5 % contribution the runs are long and the extra dominates).
+
+**A second finding the census hands over: the OTHER atan site is dead in city.**
+`Froxel_ColumnTile`'s pass-2 glow loop made **zero** calls at all three poses —
+`pass2` needs a shadow-casting or flash light and the coarse glow grid covers
+every one of city's. So 100 % of the `atanf` self time §00b saw is the glow
+grid's, and `fog-columns`' copy of the loop cannot be a target here.
+
+**THE LADDER** (`-DFDS_GLOW_ATAN=n`, committed; **stage 0 builds a binary
+byte-identical to its parent**, md5 `44be69e4…`). 1 = a branch-light minimax
+polynomial in place of libm; 2 = the atan deleted outright (the ceiling).
+Min-of-7 over 8 interleaved rounds, three binaries in one worktree:
+
+| | t=1961 par → poly → **deleted** | t=400 par → poly → **deleted** |
+|---|---|---|
+| `fog-glow` Ginstr/f | 0.0920 → 0.0820 (−10.9 %) → **0.0610 (−33.7 %)** | 0.0480 → 0.0430 → **0.0320 (−33.3 %)** |
+| `fog-glow` wall ms | 0.719 → 0.653 → 0.517 | 0.401 → 0.370 → 0.293 |
+| `fastfog` Ginstr/f | 0.868 → 0.858 → 0.836 (−3.7 %) | 0.542 → 0.537 → 0.527 (−2.8 %) |
+| **`renderFrame` Ginstr/f** | 4.176 → 4.166 (**−0.24 %**) → 4.143 (**−0.79 %**) | 3.182 → 3.175 (**−0.22 %**) → 3.167 (**−0.47 %**) |
+| `renderFrame` wall ms | 38.15 → 37.81 → 37.47 | 27.66 → 27.65 → **27.69** |
+
+0.031 Gi over 609 214 calls = **51 instructions per `atanf`**, call included —
+and `otool` confirms the float overload is what is linked (`bl _atanf`, 24
+sites; no double conversion to recover).
+
+**VERDICT: BELOW BAR.** Deleting the atan *entirely* is 0.79 % of frame
+instructions at t=1961 and 0.47 % at t=400, and at t=400 the frame WALL does
+not resolve it at all (+0.12 %). The one attack the census leaves standing — a
+polynomial atan — collects **0.24 %**, under the campaign's 0.3 % bar, and it
+is not free: it is a numerics judge call on a *difference* of atans, where the
+approximation's absolute error is divided by a per-slice `dAtan` that is small
+by construction, so its relative error is amplified by the cancellation. Priced
+and not landed; the ladder is committed so nobody re-derives it.
+
+### ITEM 2 — THE `fastfog` PER-SYMBOL FOLLOW-UP: the punt is refuted, its census found the real item
+
+§00b row 6 left `Froxel_CompositePixel` at 3.4 % of self time with the note that
+`Froxel_CompositeTileVec8` "punts a whole 8-lane group to the scalar path for
+any group containing a water-reflection lane — most of city's lower half". The
+obvious follow-up is *punt only the LANES*. `-DFDS_FOG_PUNT_CENSUS=1` (new,
+committed, never shipped) prices it before it is built:
+
+| pose | groups | **punted** | refl lanes / punted-group lanes | groups with all 8 lanes reflective |
+|---|--:|--:|--:|--:|
+| t=1961 | 152 640 | 41 898 (27.4 %) | 315 647 / 335 184 = **94.2 %** | 36 753 (**87.7 %**) |
+| t=2400 | 152 640 | 22 846 (15.0 %) | **93.9 %** | 20 115 (88.0 %) |
+| t=400  | 152 640 | 31 625 (20.7 %) | **93.4 %** | 27 169 (85.9 %) |
+
+**REFUTED, no build.** A punted group is not a boundary artefact, it is the
+water region: 94 % of its lanes genuinely need the scalar path, so lane-level
+punting recovers at most 6 % of the punted work — and it would have to run the
+scalar lanes FIRST and mask the vector store, because the HDR path reads
+`h[3]` and then `h[0..2]`, which the vector pass would already have written.
+
+**BUT THE SAME CENSUS COUNTED SOMETHING NOBODY WAS LOOKING FOR: 61 056 TAIL
+PIXELS PER COMPOSITE PASS**, 4.76 % of the frame, going scalar for no reason
+but arithmetic. `runTiles` splits X into `tsx = ceil(XRes/12)`, which at 1512 is
+**126 = 15 groups + 6 leftover pixels**, and `Froxel_CompositeTileVec8`'s tail
+loop hands each leftover to `Froxel_CompositePixel`: 6 px × 106 rows × 96 tiles
+= 61 056, per pass, in BOTH composite passes (the reflection underlay punts
+nothing at all — `gFrReflZ` is only set for the main pass — so its 61 056 are
+pure loss).
+
+**`--fog_composite_tile_align8` (default ON, byte-null): round the composite's
+per-tile X span up to a multiple of 8.** At 1512 that makes eleven tiles 128
+wide and the last `1512 − 11·128 = 104 = 13 groups`, so the tail loop runs
+**zero** times. `12·roundup8(ceil(w/12)) ≥ w` always, so no column is ever
+dropped, and a tile that starts past `w` gets `x1 > x2` and both pixel loops
+no-op. **Bit-exact by construction and confirmed by pin**: which of the two
+composite implementations a pixel goes through cannot change its value (they
+are pinned identical and no pixel reads another's output).
+
+**READ THE RESOLUTION BEFORE QUOTING THIS ONE.** `tsx = ceil(XRes/12)` is
+*already* a multiple of 8 at **1920** (160), so at his stock `rev.cfg`
+resolution the flag is a measured NO-OP. It pays at 1512 (6 tail px/row), 1024
+(6), 640 (6), 800 (3), 1280 (3), 1366 (2), 2560 (6) — i.e. at the campaign's
+own 1512×848 measurement resolution and most windowed sizes, and not at the
+one the demo ships in.
+
+### ITEM 3 — the `--env_live_water` tilt's function POINTER: the call is NOT the cost
+
+§00b's "WHAT IS STILL SCALAR" left the tilt reaching the wave field through
+`fds::g_envLiveWater.slopeFn`, an indirect call inside
+`Render_DeferredLighting_Tile_OuterVec`'s per-lane loop, and the open question
+was whether the INDIRECTION or the ARITHMETIC is what the 0.041 Gi/f buys.
+`-DFDS_LWTILT_CENSUS=1` counts the calls and `-DFDS_LWTILT_ABLATE=n` splits the
+cost (both new, committed, never shipped; **stage 0 byte-identical to parent**).
+
+`EnvLiveWater_TiltDir` calls per frame: **94 483** at t=1961, 37 429 at t=2400,
+**103 538** at t=400 — **all of them in the MAIN pass**; the reflection underlay
+pass makes zero, which is why t=400 (more visible glass) costs more than t=1961.
+
+Stage 1 replaces the pointer with a DIRECT call to `pwater::WaveSlope` (a
+deliberate layering violation the ladder makes and the shipping tree must not —
+FDS never names a DEMO symbol; LTO is then free to inline it too, so this is the
+*upper* bound on devirtualization). Stage 2 zeroes the slope — the ceiling for
+any restructure. Min-of-6/7 over 8 interleaved rounds:
+
+| | t=1961 par → **direct** → **slope=0** | t=400 par → **direct** → **slope=0** |
+|---|---|---|
+| `lighting-w1` Ginstr/f | 0.9560 → 0.9520 (**−0.42 %**) → 0.9410 (**−1.57 %**) | 0.7260 → 0.7240 (**−0.28 %**) → 0.7100 (**−2.20 %**) |
+| `DeferredLighting-call` Gi | 0.9610 → 0.9580 → 0.9470 (−1.46 %) | 0.7320 → 0.7290 → 0.7150 (−2.32 %) |
+| **`renderFrame` Ginstr/f** | 4.1760 → 4.1720 (**−0.10 %**) → 4.1600 (**−0.38 %**) | 3.1800 → 3.1780 (**−0.06 %**) → 3.1620 (**−0.57 %**) |
+| `lighting-w1` wall ms | 7.257 → 7.268 → 7.108 | 5.685 → 5.666 → 5.340 |
+
+**THE ANSWER IS "THE ARITHMETIC", AND THE WHOLE ROW IS SMALL.** The indirect
+call is **0.0040 Gi/f = 27 % of the tilt's slope evaluation and 0.10 % of the
+frame** at t=1961 (0.06 % at t=400) — below bar on its own, and the only way to
+collect it is the layering violation above. The arithmetic is the other 73 %.
+
+**AND THE RESTRUCTURE IS REFUTED BEFORE BUILDING, WHICH IS WHAT THE PREDICTION
+WAS FOR.** The ceiling for *any* rewrite of the lane walk is stage 2:
+**0.38 % / 0.57 %** of frame instructions. 2026-08-16e measured this exact
+function's honest vector headroom at **3.6×** (clang had already SLP'd the
+scalar 2-wide), so an 8-wide batched form collects at most
+`0.015 × (1 − 1/3.6) ≈ 0.011 Gi/f = 0.26 %` at t=1961 — before paying for the
+lane-walk restructure of `Render_DeferredLighting_Tile_OuterVec`, whose three
+prior attempts in this kernel (2026-08-16h's scanline carry) came back **+8 %
+to +23 %** on register pressure and netted zero every time. Predicted net:
+negative. **Not built.**
+
+**A CORRECTION TO §00b WHILE WE ARE HERE.** "The cost is the wave-slope call,
+not the mask read" is only 37 % right at t=1961: of `--env_live_water`'s
++0.041 Gi/f on `lighting-w1`, the slope evaluation is **0.015** and the mask
+read + weight + the tilt's own plane-hit + the re-projection is **0.026**.
+
+### A BATTERY TRAP, REPRODUCED — the plain-city pin needs a WARM env cache
+
+`bd4ffbf8…` (`--snapshot=city@t=1961 --deferred --profiler=0`,
+`FDS_CITY_ENV_PIXEL=1`) does **not** reproduce on the first run in a fresh
+worktree. With `Runtime/cache/` removed the same binary and recipe gives
+**`31035019890c02083af0fb70c3384ed2`**, and the very next run — cache now
+written — gives `bd4ffbf8…`. Measured both ways, back to back, on `DEMO_lw0`.
+This is the pin the tracked battery runs FIRST, so a fresh worktree reads it as
+a one-row failure and the natural next move (blaming the `FDS_CITY_ENV_PIXEL=1`
+prefix, which is written as a `VAR=x shellfunc` form that *looks* wrong) is a
+dead end — bash does export that form, verified separately. The rule is the
+campaign's own "discard run 1", and it applies to the PINS, not only the bench.
+
+### GATES
+
+* **12 pin recipes 3/3 at their recorded values** on the default-ON binary and
+  on its parent, byte-identical arm to arm (city `bd4ffbf8` / `4cb8d2ca` /
+  `f473fe2b` / `d3374de6`, chase `3bfd4244` / `42d79fad` / `622b96a2` /
+  `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588 `570a7b44`,
+  greets acceptance `26ad272a` / `10adec3a` / `418fc1fa` / `6d02f31b`).
+* `render_gate.sh` **4/4 PASS** (`conetest` IS the fog path);
+  `--shadow_plane_hash` **`51344bf5f3816c23`** 2/2 on each binary.
+* The three ladders' stage 0 each build a binary byte-identical to the parent
+  (`44be69e4…`), and **the two refutation commits leave the shipping binary at
+  exactly that md5** — they are byte-null to the executable, not merely to the
+  pixels.
+* **PIN-VALUE NOTE AFTER THE REBASE:** these gates were run against parent
+  `8cc5e5e7`. This round was then rebased onto `7763281d`, which flips
+  `ssao_downscale` 1 → 2 and therefore MOVES the four greets acceptance pins.
+  The values quoted above are `8cc5e5e7`'s; the byte verdict for THIS round is
+  a differential against its own parent and is unaffected — **re-run pairwise on
+  the rebased base, all 11 recipes byte-identical between `7763281d` and this
+  tip, 0 mismatches**. For the next round's benefit, the four greets acceptance
+  pins **under `ssao_downscale=2`** are t=5743 **`440aa6bb`**, t=2845
+  **`00d17bc5`**, t=6097 **`135ea9dd`**, t=6133 **`aaeb89b6`** (same recipe,
+  stock 1920×1080, no `FDS_GREETS_CAM`); every other recipe still reads its
+  recorded value.
+
+### THE PERF TABLE FOR THE ONE LANDING
+
+`--fog_composite_tile_align8`, three arms in ONE worktree (parent binary /
+new binary with the flag OFF / new binary default ON), **min-of-11 over 12
+interleaved rounds, round 0 dropped, arm order rotated per round**, `iters=30`,
+1512×848. The par-vs-OFF column is the FLOOR and it behaves like one.
+
+| | t=1961 par → off → **ON** | t=2400 | t=400 |
+|---|---|---|---|
+| `fog-composite` Ginstr/f | 0.3760 → 0.3760 → **0.3650 (−2.93 %)** | 0.3010 → 0.3010 → **0.2890 (−3.99 %)** | 0.3340 → 0.3340 → **0.3230 (−3.29 %)** |
+| `fastfog` Ginstr/f | 0.8680 → 0.8670 → **0.8570 (−1.27 %)** | 0.4980 → 0.4980 → **0.4860 (−2.41 %)** | 0.5420 → 0.5420 → **0.5300 (−2.21 %)** |
+| **`renderFrame` Ginstr/f** | 4.1740 → 4.1730 → **4.1630 (−0.26 %)** | 2.2660 → 2.2660 → **2.2540 (−0.53 %)** | 3.1810 → 3.1800 → **3.1680 (−0.41 %)** |
+| FLOOR (par vs off), `renderFrame` Gi | −0.02 % | **0.00 %** | −0.03 % |
+| FLOOR (par vs off), `fog-composite` Gi | **0.00 %** | **0.00 %** | **0.00 %** |
+| `renderFrame` wall ms | 37.95 → 37.87 → 38.00 | 23.78 → 23.57 → 23.48 | 27.92 → 27.77 → 28.07 |
+
+**SAY THE WALL PART OUT LOUD: the frame does not resolve this.** Loads ran
+10–21 through the session and `renderFrame` wall moves +0.13 / −1.27 / +0.54 %
+— noise in both directions. The INSTRUCTION column resolves it at every pose,
+reproducibly, against a floor that is **exactly 0.00 %** on the row that
+carries the work. 0.0110–0.0120 Gi/f for 122 112 pixels moved off the scalar
+path = **≈92 instructions per pixel**, which is the honest unit price of the
+per-pixel composite against the 8-wide one.
+
+### WHAT IS LEFT IN THE CITY ARM AFTER THIS ROUND, RANKED
+
+1. **`Render_VolumetricCones_Tile` — `cones-call` 1.288 Gi/f, 30.9 % of
+   `renderFrame`.** Untouched by this round and still the largest single row;
+   §13's dependency chain, and "fewer (px × spot) pairs" is still the only
+   lever named.
+2. **`Render_DeferredLighting_Tile_OuterVec` — `lighting-w1` 0.956 Gi/f,
+   22.9 %.** Item 3 above prices its `--env_live_water` share at 0.015 and
+   refuses the restructure; the rest of the row is greets' 16g/16l territory
+   applied to city, which no round has done.
+3. **The composite's REMAINING scalar half — 335 184 punted px/frame at
+   t=1961, ≈0.030 Gi/f (0.72 %) at this round's measured 92 instr/px.** This
+   is the item the punt census sized. It needs the water-reflection branch
+   (`sqrt`, `fastExpNeg`'s table, `fogAntiderivG`) written 8-wide, with the
+   scalar lanes run FIRST and the vector store masked so the HDR read/write
+   order survives. Biggest remaining fastfog item by a wide margin.
+4. **`fog-columns` 0.400 Gi/f (9.6 %)** — §00 row 8's "the noise is the cost"
+   (`vFogNoise` + `vBlobNoise`) reproduces here; no new lever found.
+5. **`gbuffer` 0.443, `TBR-render` 0.531** — both already through their rounds.
+6. **CLOSED BELOW BAR by this round, do not reopen without new evidence:** the
+   glow `atanf` (ceiling 0.79 %, realistic 0.24 %), the live-water slope
+   indirection (0.10 %), lane-level composite punting (≤6 % of the punt).
+
 ## 2026-08-16x — THE COLLINEAR-NEEDLE CULL, BUILT: the population two rounds priced **is already free**, and the cull that pays is a different one — the SCREEN determinant, at the push. Byte-null by construction, **and the frame does not resolve it**
 
 16w parked *"a load-time collinearity classification, culled at the FList level;

@@ -1575,6 +1575,56 @@ the deferred kernel's per-lane loop, so batching it means restructuring
 0.041 Ginstr/f `--env_live_water` adds to `lighting-w1` at t=1961 (row 4 note
 below), and `lighting-w1` is unmoved by this round, as the table shows.
 
+**Amendment 2026-08-16z (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16z) — the
+remainder list's last three items are priced, and TWO OF THEM ARE BELOW BAR.**
+Row 10's `atanf` and row 4's note "the `--env_live_water` tilt is the one
+consumer still scalar" are both closed with numbers, not with a landing.
+
+* **`Froxel_GlowTile`'s `atanf` (row 6's "unpriced", row 10's 0.3 %) — BELOW
+  BAR.** `-DFDS_FOG_ATAN_CENSUS=1` counts **609 214 calls a frame** at t=1961
+  (576 coarse glow columns × 32.2 lights each × ~33 slices) and answers both
+  playbook questions NO: the argument `(2αz+β)/√disc` is all-distinct (not
+  tableable) and invariant at no loop level (not hoistable). It also kills the
+  reorder move without a build — **96.5 % of the atans CONTRIBUTE**, only 0.4 %
+  are thrown away by a later test, and deferring the atan costs an extra one per
+  contiguous run. `-DFDS_GLOW_ATAN=n` then prices it: deleting the atan
+  ENTIRELY is `fog-glow` 0.092 → 0.061 Gi/f (−33.7 %) and **`renderFrame`
+  −0.79 % at t=1961 / −0.47 % at t=400**, with the frame wall not resolving it
+  at t=400 at all; a polynomial atan — the only attack the census leaves —
+  collects **0.24 %**, under the bar, and is a numerics judge call on a
+  *difference* of atans where cancellation amplifies its relative error.
+  **Also: `Froxel_ColumnTile`'s pass-2 copy of the loop makes ZERO calls in
+  city** (it needs a shadow-casting or flash light), so 100 % of row 10's
+  `atanf` is the glow grid's.
+* **The `--env_live_water` tilt's function pointer (row 4's handover) —
+  REFUTED, and the note it hands over is corrected.** `-DFDS_LWTILT_CENSUS=1`:
+  **94 483 / 37 429 / 103 538** `EnvLiveWater_TiltDir` calls per frame at
+  t=1961 / 2400 / 400, ALL in the main pass (the reflection underlay makes
+  zero). `-DFDS_LWTILT_ABLATE=n` splits the cost: a DIRECT (devirtualized,
+  LTO-inlinable) call is `lighting-w1` −0.42 % / `renderFrame` **−0.10 %**,
+  while zeroing the slope outright — the ceiling for ANY lane-walk restructure
+  — is `lighting-w1` −1.57 % / `renderFrame` **−0.38 %** (t=400: −2.20 % /
+  **−0.57 %**). So **the call is 27 % of it and the arithmetic 73 %**, and an
+  8-wide form at 2026-08-16e's measured 3.6× headroom tops out at **0.26 % of
+  the frame** before paying for the restructure that 2026-08-16h measured at
+  +8 % to +23 % on register pressure. Not built.
+  **CORRECTION to this section's "the cost is the wave-slope call, not the mask
+  read":** of `--env_live_water`'s +0.041 Gi/f at t=1961 the slope evaluation
+  is **0.015** and the mask read + weight + plane-hit + re-projection is
+  **0.026**.
+* **Row 6's `Froxel_CompositePixel` (3.4 %) — the punt is REFUTED and the
+  census found the item that pays.** `-DFDS_FOG_PUNT_CENSUS=1`: 41 898 of
+  152 640 groups punt at t=1961 (27.4 %) and **87.7 % of them have all EIGHT
+  lanes reflective** (94.2 % of punted-group lanes are), so "punt only the
+  LANES" recovers ≤6 %. What it did find: **61 056 TAIL pixels per composite
+  pass** — `tsx = ceil(1512/12) = 126 = 15 groups + 6`, so
+  `Froxel_CompositeTileVec8`'s tail loop hands 6 px × 106 rows × 96 tiles to
+  the scalar path, 4.76 % of the frame, in both composite passes.
+  **`--fog_composite_tile_align8` (default ON, BYTE-NULL at 12 pins)** rounds
+  the composite's tile X span up to a multiple of 8. **It is a measured NO-OP
+  at 1920** (ceil(1920/12) = 160 is already aligned) and pays at 1512, 1280,
+  1024, 800, 640, 1366, 2560.
+
 ### THE RANKED TABLE UNDER THIS ARM — city t=1961
 
 Per-symbol shares are Instruments Time Profiler self time over a 400-iteration
@@ -1587,11 +1637,11 @@ bench (frame-dominated: init is ~3 s of ~28 s).
 | 3 | `FrustumClipper::Render` | **6.2 %** → **1.2 %** | inside `gbuffer` | **DONE 2026-08-16c (`c26c1c35` + `d9dfa527`), and the mechanism in this cell was only half right.** The walk was the smaller half: `--tile_bbox_cull` was **INERT on the mirror pass**, whose hand-written `Reflected_Transform` pushed a 2-field aggregate and left the cover-all bbox default on every entry — 621 180 (face, tile) clipper entries against the main pass's 29 671 on the same geometry. Stamping it + binning faces to tiles: this symbol **6.46 → 1.21 % of self time**, and with the walk row (2.53 → 0.16 %) **8.99 → 1.47 %**; `gbuffer` **0.658 → 0.444 Ginstr/f (−32.5 %)**, thrsum 79.3 → 43.1 core-ms; `renderFrame` 4.383 → 4.174 Ginstr/f. Byte-null. See §00c |
 | 4 | `pwater::waterWaveSlope` | **6.2 %** → ~5.4 % → **8-wide** | 0.451 → **0.351** (ripple + glints) | **DONE 2026-08-16e — `--water_slope_vec8`, BYTE-NULL.** 132 instructions/px → 293 for eight (36.6/px); the scalar was already SLP'd 2-wide so the real ceiling was 4x and 3.6x is taken. `water-ripple` **0.219 → 0.148 Ginstr/f (−32.4 %)**, wall 1.851 → 1.142; `water-glints` 0.229 → 0.203 (−11.4 %) but **Gcyc −34 %** (the serial chain is what went, not the `powf`), wall 2.423 → 1.590. Frame min **−2.7 / −3.7 / −5.2 %** at t=1961/2400/400 — all of it outside `renderFrame`, which is flat. Three contraction traps had to be pinned first (simde's fma is not an fma on arm64; LICM pre-rounding an invariant square; the caustic lerp re-contracting) — see the subsection above. The `--env_live_water` tilt is the one consumer still scalar: it goes through a function pointer inside the deferred kernel's lane loop |
 | 5 | `meka::TileRasterizer::apply_exact<false>` | 5.4 % | 0.659 (`gbuffer`, ×2) | `effPar` 8.5–8.7 of 12 — better than chase's 5.5, so §00 row 9's "half the pool is idle" does not hold in city |
-| 6 | fastfog lambdas + `Froxel_CompositePixel` + `FastFog_SampleGrid` + `SkyPaint` | 6.2 + 3.4 + 2.7 + 1.6 % | 0.869 (`fastfog`, ×1) | `fog-columns` 0.400 is the residue; `Froxel_GlowTile`'s per-(column × light × slice) `atanf` is unpriced |
+| 6 | fastfog lambdas + `Froxel_CompositePixel` + `FastFog_SampleGrid` + `SkyPaint` | 6.2 + 3.4 + 2.7 + 1.6 % | 0.869 → **0.857** (`fastfog`, ×1) | **PARTLY DONE 2026-08-16z.** The `atanf` is priced and BELOW BAR (ceiling 0.79 % of the frame, realistic attack 0.24 %; see the amendment above). `Froxel_CompositePixel`'s punt is REFUTED — 87.7 % of punted groups have all EIGHT lanes reflective — but the census found **61 056 TAIL px per composite pass** going scalar because `ceil(1512/12) = 126` is not a multiple of 8. **`--fog_composite_tile_align8`** (default ON, byte-null) removes them: `fog-composite` **0.376 → 0.365 Gi/f (−2.9 %)**, `fastfog` −1.3 %, `renderFrame` −0.26 / −0.53 / −0.41 % at t=1961/2400/400 against a 0.00 % floor — **and a measured NO-OP at 1920**, where the split is already aligned. What remains is the 335 184 punted px/frame ≈ **0.030 Gi/f**: the water-reflection branch written 8-wide |
 | 7 | `vFogNoise` + `vBlobNoise` | 4.7 + 0.8 % | inside `fog-columns` | §00 row 8's "the noise is the cost" reproduces exactly here |
 | 8 | `Render_DeferredTransparentLighting_Tile<0>` | 3.4 % | 0.531 (`TBR-render`, ×2) | |
 | 9 | `LightMeshVerts` | 1.7 % | none (outside `renderFrame`) | DONE above — the 1.7 %/6 ms split is the whole story |
-| 10 | `logf` / `powf` / `atanf` | 0.9 / 0.9 / 0.3 % | — | `logf` was the froxel composite (fixed); the rest is the glint lobe and the glow integral |
+| 10 | `logf` / `powf` / `atanf` | 0.9 / 0.9 / 0.3 % | — | `logf` was the froxel composite (fixed); the rest is the glint lobe and the glow integral. **`atanf` COUNTED 2026-08-16z: 609 214 calls a frame at t=1961, ALL of them `Froxel_GlowTile`'s** (`Froxel_ColumnTile`'s pass-2 copy makes zero in city), 51 instructions each, 0.031 Gi/f. Not tableable, not hoistable, 96.5 % of them contribute. **Closed below bar** |
 
 ---
 

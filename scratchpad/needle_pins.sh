@@ -24,6 +24,15 @@ for b in "$@"; do
   # The recorded plain-city recipe carries FDS_CITY_ENV_PIXEL=1 (the pin table
   # says so; without it the env cube is baked under a DIFFERENT cache key and the
   # pose legitimately hashes elsewhere). 16r's battery omitted it.
+  #
+  # 2026-08-16z — AND IT NEEDS A WARM CACHE, which is why this row "fails" on the
+  # first run in a FRESH WORKTREE. Measured back to back on one binary: with
+  # Runtime/cache/ removed this recipe gives 31035019890c02083af0fb70c3384ed2,
+  # and the very next run — cache now written — gives bd4ffbf8… . It is the FIRST
+  # row this script prints, so a cold worktree reads it as a one-row regression;
+  # the `VAR=x shellfunc` form below is NOT the culprit (bash does export it,
+  # verified separately). Run the battery twice and read the second pass, i.e.
+  # the campaign's own "discard run 1", applied to the pins.
   FDS_CITY_ENV_PIXEL=1 \
   hash_run "$b" city-t1961-plain  --snapshot=city@t=1961 --deferred --profiler=0
   hash_run "$b" city-t1961-arm    --snapshot=city@t=1961 --env_live_water --deferred --city_env_pixel --profiler=0

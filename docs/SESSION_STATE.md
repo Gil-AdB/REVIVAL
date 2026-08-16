@@ -1,5 +1,89 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16z — 16b's LAST THREE CITY ITEMS, ALL PRICED IN ONE ROUND: the `atanf` and the live-water function pointer are **below bar, closed with numbers**; the punt census that refuted the third **found the item that pays** — 61 056 px a pass going scalar because 1512/12 is not a multiple of 8
+>
+> Full write-up: `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16z**; `docs/PERF_STATE.md`
+> §00b carries the amendment. **One landing, byte-null at 12 pins; two
+> refutations, each with its ladder committed so nobody re-derives them.** All
+> four instruments are compile-time switches and proven null — the shipping
+> `DEMO` md5s `44be69e4…` with them compiled out, identical to its parent.
+>
+> ### ITEM 1 — the glow integral's `atanf`: 609 214 CALLS A FRAME, AND DELETING ALL OF THEM IS 0.79 % OF THE FRAME
+>
+> `-DFDS_FOG_ATAN_CENSUS=1` answers both playbook questions with counts:
+> **not tableable** (609 214 all-distinct arguments a frame at t=1961) and
+> **not hoistable** (`(2αz+β)/√disc` varies per column, per light AND per
+> slice). It also kills the reorder move without a build: **96.5 % of the atans
+> CONTRIBUTE**, 0.4 % are discarded by a later test, and deferring the atan
+> costs an extra one per contiguous run. `-DFDS_GLOW_ATAN=n` then prices it:
+> the atan deleted OUTRIGHT is `fog-glow` 0.092 → 0.061 Gi/f (−33.7 %) and
+> **`renderFrame` −0.79 % at t=1961, −0.47 % at t=400** — and the frame wall does
+> not resolve it at t=400 at all. A polynomial atan, the only attack left,
+> collects **0.24 %** and is a numerics judge call on a *difference* of atans.
+> **Below bar. Not landed.** Bonus: `Froxel_ColumnTile`'s pass-2 copy of the
+> loop makes **zero** calls in city, so all of §00b row 10's `atanf` is the
+> coarse glow grid's.
+>
+> ### ITEM 2 — the composite punt is REFUTED; its census found 61 056 free pixels a pass
+>
+> `-DFDS_FOG_PUNT_CENSUS=1`: 41 898 of 152 640 groups punt to the scalar
+> composite at t=1961 (27.4 %) and **87.7 % of them have all EIGHT lanes
+> reflective** — a punted group is the water region, not a boundary, so "punt
+> only the LANES" recovers ≤6 % and is refused before building. What the same
+> census counted: `tsx = ceil(1512/12) = 126 = 15 groups + 6 leftover`, so
+> `Froxel_CompositeTileVec8`'s tail loop hands **6 px × 106 rows × 96 tiles =
+> 61 056 px per composite pass** to the per-pixel path, in BOTH passes, 4.76 %
+> of the frame, for no reason but arithmetic.
+>
+> **`--fog_composite_tile_align8`, default ON, BYTE-NULL**: round the
+> composite's per-tile X span up to a multiple of 8 (eleven tiles of 128 + one
+> of 104 = 13 groups), tail loop runs zero times.
+>
+> **READ THE RESOLUTION BEFORE QUOTING IT.** `ceil(1920/12) = 160` is already
+> 8-aligned, so at his stock `rev.cfg` resolution this flag is a measured
+> NO-OP. It pays at the campaign's 1512×848 and at 1280 / 1024 / 800 / 640 /
+> 1366 / 2560.
+>
+> ### ITEM 3 — the live-water tilt's function pointer: THE CALL IS NOT THE COST
+>
+> `-DFDS_LWTILT_CENSUS=1`: **94 483 / 37 429 / 103 538** `EnvLiveWater_TiltDir`
+> calls a frame at t=1961 / 2400 / 400, **all in the main pass**.
+> `-DFDS_LWTILT_ABLATE=n` splits the cost: a DIRECT devirtualized call (LTO free
+> to inline; it needs a layering violation the shipping tree must not make) is
+> `renderFrame` **−0.10 %**, while zeroing the slope entirely — the ceiling for
+> ANY lane-walk restructure — is **−0.38 %** (t=400: −0.06 % / −0.57 %). So the
+> indirection is 27 % of it and the arithmetic 73 %, and an 8-wide form at
+> 16e's measured 3.6× headroom tops out at **0.26 % of the frame** before paying
+> for the restructure 16h measured at **+8 % to +23 %**. **Refuted, not built.**
+> Correction to §00b: of `--env_live_water`'s +0.041 Gi/f, the slope evaluation
+> is **0.015** and the mask read + weight + plane-hit + re-projection is 0.026.
+>
+> ### GATES
+>
+> * **11 pin recipes / 15 hashes 3/3 at their recorded values** on the
+>   default-ON binary and **2/2 with `--no-fog_composite_tile_align8`**,
+>   byte-identical arm to arm and to the parent.
+> * `render_gate.sh` **4/4 PASS** (`conetest` IS the fog path);
+>   `--shadow_plane_hash` **`51344bf5f3816c23`** 2/2 per binary.
+> * **The two refutation commits leave the shipping binary byte-identical to its
+>   parent** (`44be69e4…`) — null to the executable, not merely to the pixels.
+> * **After the rebase onto `7763281d`** (`ssao_downscale` 1 → 2): re-run
+>   pairwise, **all 11 recipes byte-identical between that parent and this tip,
+>   0 mismatches.** That commit moves the four greets acceptance pins, which now
+>   read t=5743 **`440aa6bb`**, t=2845 **`00d17bc5`**, t=6097 **`135ea9dd`**,
+>   t=6133 **`aaeb89b6`**; everything else is unchanged.
+>
+> ### A BATTERY TRAP, REPRODUCED — the plain-city pin needs a WARM env cache
+>
+> `bd4ffbf8…` does **not** reproduce on the first run in a fresh worktree: with
+> `Runtime/cache/` removed the same binary and recipe give
+> **`31035019890c02083af0fb70c3384ed2`**, and the very next run gives
+> `bd4ffbf8…`. It is the pin the tracked battery runs FIRST, so a fresh
+> worktree reads it as a one-row failure; the `FDS_CITY_ENV_PIXEL=1` prefix,
+> which *looks* like the culprit because it is written as `VAR=x shellfunc`, is
+> NOT (bash exports that form — verified separately). "Discard run 1" applies
+> to the pins, not only to the bench.
+
 > ## 2026-08-16y — **`--ssao_downscale=2` is the default**, countersigned. −9.6 ms of his greets frame, realized and measured, not projected; the flip is proved to be PURE DEFAULT MOTION in both directions
 >
 > **COUNTERSIGN, verbatim (Gil-Ad, 2026-08-16): "ssao downscale 2 is ok (no
