@@ -184,6 +184,9 @@ float g_envBakeSkipCX = 0.0f, g_envBakeSkipCY = 0.0f, g_envBakeSkipCZ = 0.0f;
 // scene tick (CITY) before renderFrame; consumed read-only by the deferred
 // env compose + the forward reflective vertex pass. See EnvBake.h.
 EnvLiveWaterState g_envLiveWater;
+#if FDS_LWTILT_CENSUS
+std::atomic<unsigned long long> g_lwTiltCalls{0};
+#endif
 
 // LEGACY (--no-env_bake_fix, the default): the old whole-mesh exclusion,
 // kept byte-identical for the pinned city baseline (its vehicle-glass

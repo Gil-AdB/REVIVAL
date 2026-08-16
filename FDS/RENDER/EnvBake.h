@@ -17,6 +17,37 @@
 
 #include "RENDER/EnvCube.h"   // --env_live_water mask: dir -> (face, u, v)
 
+// ─── FDS_LWTILT_ABLATE — what the --env_live_water tilt actually costs ─────
+// The tilt reaches the wave field through `g_envLiveWater.slopeFn`, a function
+// POINTER called per glass pixel inside the deferred kernel's per-lane loop
+// (00b "WHAT IS STILL SCALAR"). Before any restructure, split the 0.041 Gi/f
+// into "the indirect call" and "the arithmetic behind it":
+//   0 = shipping indirect call
+//   1 = DIRECT call to pwater::WaveSlope (devirtualized; LTO may also inline)
+//   2 = slope forced to zero (ceiling: the whole evaluation removed)
+// MEASUREMENT ONLY — 2 changes pixels; 1 may, if inlining re-contracts.
+// Stage 0 must build a binary byte-identical to its parent.
+#ifndef FDS_LWTILT_ABLATE
+#define FDS_LWTILT_ABLATE 0
+#endif
+#if (FDS_LWTILT_ABLATE) == 1
+// Deliberate layering violation, ladder-only: FDS never names DEMO symbols.
+namespace pwater {
+void WaveSlope(float wx, float wz, float t, float scale, float& bnx, float& bnz);
+}
+#endif
+// Per-frame tilt-call census (-DFDS_LWTILT_CENSUS=1, gate --omni_census).
+#ifndef FDS_LWTILT_CENSUS
+#define FDS_LWTILT_CENSUS 0
+#endif
+#if FDS_LWTILT_CENSUS
+#include <atomic>
+namespace fds { extern std::atomic<unsigned long long> g_lwTiltCalls; }
+#define LWTILT_CEN() fds::g_lwTiltCalls.fetch_add(1, std::memory_order_relaxed)
+#else
+#define LWTILT_CEN() ((void)0)
+#endif
+
 struct Scene;
 struct Vector;
 struct Texture;
@@ -375,7 +406,14 @@ inline void EnvLiveWater_TiltDir(float bakeX, float bakeY, float bakeZ,
     const float hx = bakeX + t * dx;
     const float hz = bakeZ + t * dz;
     float sx = 0.0f, sz = 0.0f;
+    LWTILT_CEN();
+#if (FDS_LWTILT_ABLATE) == 1
+    pwater::WaveSlope(hx, hz, lw.t, lw.scale, sx, sz);
+#elif (FDS_LWTILT_ABLATE) == 2
+    (void)hx; (void)hz;
+#else
     lw.slopeFn(hx, hz, lw.t, lw.scale, sx, sz);
+#endif
     // Tilt ∝ |dy| so grazing rays (huge t, tiny dy) don't overshoot: the
     // same slope reads as a gentler direction change near the horizon,
     // which also fades the effect exactly where the plane hit is least

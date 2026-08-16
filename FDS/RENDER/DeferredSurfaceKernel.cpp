@@ -8199,6 +8199,13 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 #endif
 	}
 
+#if FDS_LWTILT_CENSUS
+	if (fds::FeatureFlags::omni_census() && !inlineDispatch && ctx.xres >= 640) {
+		const unsigned long long n =
+		    fds::g_lwTiltCalls.exchange(0, std::memory_order_relaxed);
+		std::fprintf(stderr, "[LWTILT] EnvLiveWater_TiltDir calls this pass: %llu\n", n);
+	}
+#endif
 #if FDS_OMNI_CENSUS
 	// One line per main-view frame (offscreen bakes never reach the counters —
 	// the per-tile gate is xres >= 640, same rule as the tap census).
