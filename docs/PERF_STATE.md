@@ -355,6 +355,13 @@ means zero output there. The escape hatches agree too — city t=1961 under his
 arm gives `925ecd43…` on all four of default / `--no-face_tile_bin` /
 `--no-tile_bbox_cull` / both off.
 
+> **2026-08-16f — the `925ecd43…` here is HUD-BEARING and has been superseded.**
+> It was taken without `--profiler=0`, and `RunCitySnapshot` did not silence the
+> cfg-seeded profiler overlay, so the value carries 3 718 px of glyph text. The
+> byte-null verdict above is unaffected (both arms of this A/B carried the same
+> HUD). Current city his-arm pin: **`4cb8d2ca68b72f8a24627f42077eef25`**; see the
+> 2026-08-16f block at the top of `docs/SESSION_STATE.md`.
+
 ### WHAT THIS UNBLOCKS
 
 §00 row 9's refuted finer-grid experiment ("a 12×10 grid cost +139 %
@@ -565,14 +572,22 @@ Chase and greets are untouched by construction as well as by pin — chase's wat
 goes through `RenderGlintsVaried` / `waterWaveSlopeVaried`, a separate copy this
 round does not open.
 
-**NOTE ON THE RECORDED CITY PINS.** `4031ceec` (`--deferred`) and `925ecd43`
-(his arm) **no longer reproduce at `e99f5fed`, and that is not this change**: the
-untouched parent binary gives `bd4ffbf8` / `4cb8d2ca`, and so does the main
-worktree's own binary at the same tip with the same env cube on disk (the cube
-files are byte-identical, md5 `a896a47c`). Pre-existing drift somewhere between
-the 2026-08-16b/c rounds and the tip; chase ×5, fountain and greets all still sit
-on their recorded values, so it is city-specific. Whoever owns the city series
-should re-pin.
+**NOTE ON THE RECORDED CITY PINS — RESOLVED 2026-08-16f: THERE WAS NO DRIFT.**
+~~`4031ceec` (`--deferred`) and `925ecd43` (his arm) no longer reproduce…
+pre-existing drift somewhere between the 2026-08-16b/c rounds and the tip.~~
+**Wrong diagnosis, and no commit is responsible.** Both values reproduce
+byte-exactly at tip `eb5e57d9`, 3/3 each, when the recipe omits `--profiler=0` —
+which is how they were recorded. The `bd4ffbf8` / `4cb8d2ca` column above is the
+SAME binary WITH `--profiler=0`: `Runtime/rev.cfg` ships `ProfilerEnable 1`,
+`DEMO/CITY.CPP:3942` paints the FrameProfiler overlay into `VPage`, and
+`RunCitySnapshot` — unlike `RunChaseSnapshot` — never silenced it, so the older
+values carry **3 718 px of glyph text in a 114×221 block at x 0–113, y 15–235**
+(max |Δ| 245, mean 215; zero scene pixels). That is also why chase, which already
+had the silencer, was the one scene whose pins reproduced under both recipes.
+The overlay is silenced in all four narrative snapshot loops as of 2026-08-16f
+and the city pins are now **`bd4ffbf8`** / **`4cb8d2ca`** — reproducing with or
+without the flag. Full argument, quantification and picture: the 2026-08-16f
+block at the top of `docs/SESSION_STATE.md`.
 
 #### WHAT IS STILL SCALAR
 

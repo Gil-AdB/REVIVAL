@@ -164,6 +164,42 @@ bool initSnapshotEnvironment(int xres, int yres) {
     return true;
 }
 
+// Keep the on-screen profiler overlay out of snapshot BYTES.
+//
+// Every narrative scene's tick() paints the FrameProfiler overlay into VPage
+// when `g_profilerActive` — and `Runtime/rev.cfg` ships `ProfilerEnable 1`,
+// which REV.CPP seeds into the `profiler` FeatureFlag. Zeroing
+// `g_profilerActive` in initSnapshotEnvironment above is NOT enough:
+// FrameProfiler::beginFrame() re-mirrors the flag into the global every frame
+// (the P-key toggle path), so the overlay comes back on tick 1. The flag
+// itself has to go.
+//
+// WHY IT MATTERS, measured on city t=1961 (2026-08-16): with the overlay live
+// the dumped frame carries 3 718 px of white glyph text in a 114x221 block at
+// the top-left (x 0..113, y 15..235), max |Δ| 245, mean |Δ| 215 over the
+// changed pixels — 0.18 % of the frame, none of it scene content. Worse, it is
+// only DETERMINISTIC on the first tick of a process, where the profiler has no
+// accumulated frames and prints a constant 0-FPS / 0-ms table; every LATER pose
+// of a multi-timestamp sweep prints real wall-clock timings and flipped its md5
+// on every run (3 distinct values in 3 runs at city t=2400). A pin taken with
+// the overlay live measures the HUD, and a multi-pose one is not a pin at all.
+//
+// Scoped to the four narrative scenes whose ticks draw the overlay (city,
+// chase, fountain, greets). The synthetic test scenes — conetest, halotest,
+// mirrortest — render without a scene tick and are measured insensitive to the
+// flag, so render_gate.sh's baselines are untouched by this.
+//
+// PRECEDENCE: an EXPLICIT `--profiler` on a snapshot run is still honored (the
+// old HUD-bearing bytes stay reproducible), same idiom as REV.CPP's rev.cfg
+// seeding — only the cfg-seeded, unmarked value is cleared.
+void silenceProfilerOverlayForSnapshot() {
+    if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::profiler)) {
+        fds::FeatureFlags::setParamFromText("profiler", "0");
+        fds::FeatureFlags::clearSetMark("profiler");
+    }
+    g_profilerActive = fds::FeatureFlags::profiler();
+}
+
 void ensureOutDir(const std::string& outDir) {
     if (outDir.empty() || outDir == ".") return;
     // Recursive mkdir -p: walk the path creating each component. Plain
@@ -245,6 +281,10 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     Initialize_City();
     Initialize_Fountain();
     ApplyCinematicProfile(cine::kFountain);   // bloom-only; mirror the live factory
+    // Fountain's tick paints the overlay as well — see the helper. Its
+    // recorded pin `8db68ccb…` is the HUD-FREE image, so this makes the
+    // recipe's `--profiler=0` redundant rather than load-bearing.
+    silenceProfilerOverlayForSnapshot();
 
     std::vector<int32_t> timestamps = cfg.timestamps;
     if (timestamps.empty()) {
@@ -550,6 +590,10 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // Greets_JoinBakeThread). Run_Greets does this; the snapshot path
     // must too, else the dumped frame races the bake.
     Greets_JoinBakeThread();
+    // Greets' tick paints the overlay as well — see the helper. Its recorded
+    // pin `570a7b44…` is the HUD-FREE image, so this makes the recipe's
+    // `--profiler=0` redundant rather than load-bearing.
+    silenceProfilerOverlayForSnapshot();
 
     std::vector<int32_t> timestamps = cfg.timestamps;
     if (timestamps.empty()) {
@@ -1090,22 +1134,9 @@ int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     auto driver = createChaseScene();
     driver->init();
 
-    // The chase driver draws the interactive profiler overlay inside tick()
-    // when the `profiler` flag is on — and rev.cfg's ProfilerEnable=1 seeds
-    // that flag. Zeroing g_profilerActive here is NOT enough: FrameProfiler::
-    // beginFrame() re-mirrors the flag into the global EVERY frame (the
-    // P-key-less toggle path), so the overlay would come back on tick 1.
-    // The overlay's wall-clock timing text is non-deterministic and must
-    // never land in snapshot bytes (the first tick prints a constant 0-FPS
-    // line, every later tick prints real timings — pins would flip every
-    // run). Clear the FLAG, but only when it was cfg-seeded (unmarked): an
-    // EXPLICIT --profiler on a snapshot run stays honored, same precedence
-    // idiom as the rev.cfg seeding in REV.CPP.
-    if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::profiler)) {
-        fds::FeatureFlags::setParamFromText("profiler", "0");
-        fds::FeatureFlags::clearSetMark("profiler");
-    }
-    g_profilerActive = fds::FeatureFlags::profiler();
+    // The chase driver draws the interactive profiler overlay inside tick();
+    // keep it out of the dumped bytes (full argument on the helper).
+    silenceProfilerOverlayForSnapshot();
 
     // S0 music-sync foundation (default-off; flag-off leaves everything below
     // untouched, so the chase pins are byte-identical). When on, resolve an
@@ -1172,6 +1203,12 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // keep `--cinematic --snapshot=city` faithful to the demo.
     fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
     ApplyCinematicProfile(cine::kCity);   // mirror the live factory
+
+    // City's tick draws the profiler overlay too, and rev.cfg seeds the flag
+    // ON — see the helper. This is the leak that made `4031ceec…` / `925ecd43…`
+    // (the recorded city pins) HUD-BEARING values, and that made every pose
+    // after the first of a `--snapshot=city@t=a,b` sweep flip run to run.
+    silenceProfilerOverlayForSnapshot();
 
     const int32_t ctPart = getCityCTPartTime();
     std::fprintf(stderr, "[SNAPSHOT] City CTPartTime = %d (Timer must be < this for tick to render)\n",

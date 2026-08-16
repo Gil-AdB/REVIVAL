@@ -59,6 +59,15 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- scene presets: the committed gate recipes (docs/SESSION_STATE.md) ----
+# `--profiler=0` is on EVERY arm on purpose. It used to be on greets and
+# fountain but not city, and that asymmetry cost three rounds (2026-08-16f):
+# rev.cfg ships `ProfilerEnable 1`, each narrative tick paints the overlay into
+# VPage, and only RunChaseSnapshot silenced it — so the city recipe below and
+# the greets/fountain ones above were measuring two different things, and the
+# city pins recorded without the flag carried 3 718 px of HUD text. The
+# silencer now covers city/fountain/greets too (DEMO/Snapshot.cpp), which makes
+# the flag INERT rather than load-bearing; it stays written down so the recipe
+# cannot silently regress on an older binary.
 declare -a FLAGS
 case "$SCENE" in
   greets)
@@ -69,7 +78,7 @@ case "$SCENE" in
     ;;
   city)
     SNAP="city@t=1961"
-    FLAGS=(--deferred)
+    FLAGS=(--deferred --profiler=0)
     export FDS_CITY_ENV_PIXEL=1
     ;;
   fountain)

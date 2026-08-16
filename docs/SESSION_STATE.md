@@ -1,5 +1,114 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16f — THE CITY PINS NEVER MOVED: THERE IS NO MOVER COMMIT, THE INSTRUMENT WAS MEASURING ITS OWN HUD
+>
+> **VERDICT: NO CODE CHANGE MOVED CITY. Both recorded values reproduce byte-exactly
+> at tip `eb5e57d9`, 3/3 each.** The hunt for "the commit that moved the city pins"
+> (candidate span `b2de6323..e965dc26`) was called off before a single bisect build,
+> because the *first* control refuted the premise:
+>
+> ```
+> ./DEMO --snapshot=city@t=1961 --out=D --env_live_water --deferred --city_env_pixel
+>   → 925ecd43f45d8f0574acc9c9a5a958a1     ← the recorded pin, at TIP, 3/3
+> ./DEMO --snapshot=city@t=1961 --out=D --env_live_water --deferred --city_env_pixel --profiler=0
+>   → 4cb8d2ca68b72f8a24627f42077eef25     ← the "drifted" value, at TIP, 3/3
+> ```
+>
+> Same binary, same commit, same asset tree, same env cube. **The variable is
+> `--profiler=0`.** The recorded pins `4031ceec…` / `925ecd43…` were taken WITHOUT
+> it; every report that they "no longer reproduce" was taken WITH it, following the
+> `--profiler=0` harness rule that `0610ddbb`'s round had just (correctly, for
+> *greets*) established. Two rounds and two agents chased a nonexistent regression
+> through this.
+>
+> ### THE MECHANISM: THE CITY SNAPSHOT LOOP NEVER SILENCED THE OVERLAY
+>
+> `Runtime/rev.cfg` ships `ProfilerEnable 1`, which `DEMO/REV.CPP:1424` seeds into
+> the `profiler` FeatureFlag. `DEMO/CITY.CPP:3942` paints the FrameProfiler overlay
+> into `VPage` whenever that flag is live — and `RunCitySnapshot` writes its PPM
+> straight out of `VPage` after `driver->tick()`. `initSnapshotEnvironment` zeroes
+> `g_profilerActive`, but that is not enough: `FrameProfiler::beginFrame()`
+> re-mirrors the flag into the global every frame, so the overlay returns on tick 1.
+> **`RunChaseSnapshot` already had the fix and a comment saying exactly this
+> (`DEMO/Snapshot.cpp`); city, fountain and greets never got it** — which is why
+> chase was the one narrative scene insensitive to the flag, and why chase's pins
+> reproduced all along while the city report looked like drift.
+>
+> ### QUANTIFIED — city t=1961, HUD-bearing vs HUD-free, 1920×1080
+>
+> | | |
+> |---|---|
+> | changed px | **3 718 of 2 073 600 (0.179 %)** |
+> | bbox | **x 0–113, y 15–235** (114×221, top-left corner) |
+> | max \|Δ\| / mean \|Δ\| on changed | **245 / 215.1** — glyph pixels, not shading |
+> | scene pixels changed | **zero** |
+>
+> Identical to the pixel in *both* arms (`--deferred` and his `--env_live_water
+> --deferred --city_env_pixel`) — it is the same text block, not a render
+> difference. Picture:
+> `/Users/gil-ad/work/revival-fog/docs/img/citypin/city_t1961_profiler_ab_crop.png`
+> (left = the recorded `4031ceec`, right = `bd4ffbf8`; full-frame amplified diff at
+> `docs/img/citypin/city_t1961_profiler_diff.png`). The overlay reads
+> `0.000000 FPS`, `ZCLR 0.0ms (0.0%)` … `TOTL 0.0ms` — **all zeros**, which is the
+> whole reason `4031ceec` looked like a stable pin at all.
+>
+> ### AND THAT ACCIDENT WAS ONE POSE DEEP
+>
+> The zeros only hold on the **first tick of the process**, where the profiler has
+> no accumulated frames. Every later pose of a sweep prints real wall-clock
+> timings. Measured before the fix, `--snapshot=city@t=1961,2400`, cfg-seeded
+> profiler, three runs:
+>
+> ```
+> run1  t1961 4031ceec…   t2400 3ee3d676…
+> run2  t1961 4031ceec…   t2400 d214425266…
+> run3  t1961 4031ceec…   t2400 05df6d6f…      ← 3 distinct values in 3 runs
+> ```
+>
+> So the city snapshot was **non-deterministic at every pose but the first**, and
+> had been for as long as the overlay has been unsilenced. That is a live
+> instrument defect, not a recipe nit.
+>
+> ### THE FIX
+>
+> `silenceProfilerOverlayForSnapshot()` in `DEMO/Snapshot.cpp` — chase's existing
+> block lifted into a named helper and called from **city, fountain and greets**
+> too. It clears the flag only when it was **cfg-seeded** (unmarked), so an explicit
+> `--profiler` on a snapshot run is still honored: that is the control that proves
+> the change is the HUD and nothing else — **`--profiler` reproduces the old
+> `4031ceec…` / `925ecd43…` exactly, 2/2.** Scoped to the four scene ticks that
+> paint an overlay; `conetest` / `halotest` / `mirrortest` render without a scene
+> tick and are measured insensitive to the flag, so `render_gate.sh`'s baselines are
+> untouched.
+>
+> ### RE-PINNED — city, both arms, HUD-free (the render, not the HUD)
+>
+> | arm | recipe | OLD (HUD) | **NEW** |
+> |---|---|---|---|
+> | `--deferred` | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=D --deferred` | `4031ceec1a1090372575c4f9c39e2839` | **`bd4ffbf87d1492175a9b6c1111fb3f5f`** |
+> | his acceptance arm | `./DEMO --snapshot=city@t=1961 --out=D --env_live_water --deferred --city_env_pixel` | `925ecd43f45d8f0574acc9c9a5a958a1` | **`4cb8d2ca68b72f8a24627f42077eef25`** |
+>
+> Both now reproduce **with or without `--profiler=0`** — the flag is inert on
+> snapshots again, which is the point.
+>
+> ### GATES AT TIP, WITH THE FIX
+>
+> * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+> * chase t=100/400/800/1200/1600 `3bfd4244` / `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814` — **2/2, unmoved** (chase already had the fix).
+> * fountain t=2500 `8db68ccb` — now **both ways**; before the fix a cfg-seeded run gave `658cba5c…` (HUD).
+> * greets t=1588 `570a7b44` — both ways, and it reproduces on **committed** assets in a clean worktree.
+> * city his arm t=2400 `f473fe2b`, t=400 `d3374de6` — unmoved.
+> * city 2-pose sweep `t=1961,2400` now **3/3 identical** (`bd4ffbf8` / `a6d82ed9`).
+>
+> ### THE LESSON, SINCE IT HAS NOW COST THREE ROUNDS
+>
+> `--profiler=0` is a **byte-relevant argument on the narrative scenes**, not
+> hygiene — a recipe that omits it and a recipe that passes it are two different
+> measurements, and a pin is meaningless without knowing which one produced it.
+> After this commit that is no longer true, which is the durable fix. Until every
+> pin in these docs has been re-taken on a post-fix binary, treat any hash quoted
+> without its profiler state as ambiguous.
+
 > ## 2026-08-16 — THE MIRROR RTT'S PER-LAUNCH DITHER IS NOT THE PEEL LEAK: IT IS AN UNINITIALISED SHADOW MATRIX, AND THE WINDOW IS FRAME 1
 >
 > **VERDICT: A DIFFERENT BUG.** The parked `--repro_prescenes` dither is not
@@ -129,6 +238,13 @@
 >   and adds `FaceTileBin`), and the city pin is anyway documented as conditional
 >   on `Runtime/cache/city_envmap_cube.bin`. Differential control == arm on all
 >   eight rows; whoever owns that perf series should re-pin city.
+>   > **2026-08-16f:** this reading was right for the wrong reason. `4031ceec…`
+>   > was not a "move" at all — it is the correct value of the recorded
+>   > (`--profiler`-less) city recipe, which `3413028b…` predates by one round.
+>   > What no one caught is that `4031ceec…` is HUD-BEARING: this round's own
+>   > `--profiler=0` trap note applies to *city snapshots as a whole*, not just
+>   > greets, and `RunCitySnapshot` had no silencer. Current city pin
+>   > **`bd4ffbf8`**; see the 2026-08-16f block at the top.
 >
 > ### TWO TRAPS THIS ROUND, BOTH OF WHICH HAD ALREADY BITTEN
 >
@@ -4964,7 +5080,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 
 | gate | recipe | pin |
 |---|---|---|
-| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **⚠ THIS PIN IS CONDITIONAL ON THE ENV CUBE ON DISK — check `md5 Runtime/cache/city_envmap_cube.bin` BEFORE calling a mismatch a regression.** The cache key ignores FeatureFlags, so the cube is a hidden input the recipe does not state (full analysis + 2×2 matrix in the dated note above). `d1d67f0f84fb4af3713e15a64a1b827b` = pre-flip bake → the pins below hold. `63978a18ed31837348598014716f9932` = cold/current bake (mips ON) → **`5476be8c43864c761b94e2dd83f86aa8`** default and **`b88ecb7bbd0340145e35a80bc7a82f6b`** under the control; both are correct-for-that-cube, NOT drift. A **fresh worktree always cold-bakes**, so it lands in the second column unless you copy the cube in. Also: `DEMO` chdirs to its OWN directory (`ChdirToAssetRoot`, `DEMO/REV.CPP:503`) — launching a worktree binary from the main `Runtime/` does **not** render the main tree's assets or its cube. **Pending decision:** adopting the flip properly means `rm Runtime/cache/city_envmap_cube.bin` and re-pinning to `5476be8c…`; held for the user's eye on `docs/img/mipsel/city_t1961_envbake_crop.png` (max Δ 6/255, glass only). — **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2, pre-flip cube). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix` **on the pre-flip cube** (on a cold-baked cube that control arm is invalid — it measures a mips-ON bake under a mips-OFF frame). Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
+| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **CURRENT (2026-08-16f, tip `eb5e57d9`): `bd4ffbf87d1492175a9b6c1111fb3f5f`** — 3/3, and now insensitive to `--profiler=0` (the overlay is silenced in `RunCitySnapshot`; before that fix this recipe gave the HUD-bearing `4031ceec1a1090372575c4f9c39e2839`, which an explicit `--profiler` still reproduces exactly). **His acceptance arm** `./DEMO --snapshot=city@t=1961 --out=<dir> --env_live_water --deferred --city_env_pixel` → **`4cb8d2ca68b72f8a24627f42077eef25`** (t=2400 `f473fe2b2658fa0c1c290e1acf8265b9`, t=400 `d3374de6a0840a6927e00eb54b48b359`; one pose per process — a multi-pose sweep has its own temporal history and hashes differently). Cubes on disk for these values: `city_envmap_cube_c0c60c19.bin` md5 `adbac29c55fccc6919c04008ecff374a`, `city_envmap_cube_c0c60ff9.bin` md5 `a896a47c144fc23cff0e85e5c389d84b` (copy them into a fresh worktree or it cold-bakes). Everything below this sentence is history. — **⚠ THIS PIN IS CONDITIONAL ON THE ENV CUBE ON DISK — check `md5 Runtime/cache/city_envmap_cube.bin` BEFORE calling a mismatch a regression.** The cache key ignores FeatureFlags, so the cube is a hidden input the recipe does not state (full analysis + 2×2 matrix in the dated note above). `d1d67f0f84fb4af3713e15a64a1b827b` = pre-flip bake → the pins below hold. `63978a18ed31837348598014716f9932` = cold/current bake (mips ON) → **`5476be8c43864c761b94e2dd83f86aa8`** default and **`b88ecb7bbd0340145e35a80bc7a82f6b`** under the control; both are correct-for-that-cube, NOT drift. A **fresh worktree always cold-bakes**, so it lands in the second column unless you copy the cube in. Also: `DEMO` chdirs to its OWN directory (`ChdirToAssetRoot`, `DEMO/REV.CPP:503`) — launching a worktree binary from the main `Runtime/` does **not** render the main tree's assets or its cube. **Pending decision:** adopting the flip properly means `rm Runtime/cache/city_envmap_cube.bin` and re-pinning to `5476be8c…`; held for the user's eye on `docs/img/mipsel/city_t1961_envbake_crop.png` (max Δ 6/255, glass only). — **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2, pre-flip cube). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix` **on the pre-flip cube** (on a cold-baked cube that control arm is invalid — it measures a mips-ON bake under a mips-OFF frame). Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | **RE-PINNED 2026-08-14 (cone campaign round 6, the SAME change that moved chase — greets' disco beams are segmented cones and now take the 8-wide solve): `570a7b443f768393dc6647044a9e67b3`** (2/2 stable, differential against the parent binary in one worktree). **381 px of 2 073 600 (0.0184 %) at max |Δ| 1/255** — one LSB, nowhere near a look change. Bought greets cones 7.29 → 6.58 ms at this pose (−9.7 % wall, −9.6 % cycles); the user's t=3122 pose −1.5 % cycles. docs/HW_PROFILING.md §14. Prior value `778fa6acd85a69cf241babefcdaf598e` reproduces 2/2 on the parent commit `43ac3456`; its adjudication history follows and still stands for everything before this change. — **PREVIOUS, RE-ADJUDICATED 2026-08-12 at origin tip `3b00bbc7`: `778fa6acd85a69cf241babefcdaf598e` — 16 runs across FOUR content/code configurations (committed `GREETS.FLD`; the user's dirty `GREETS.FLD` under the same binary; an independent worktree+build with his content; and a build carrying the parent-commit control revert of `0b466b77`), ONE VALUE EVERY TIME. The pin is INVARIANT to his uncommitted authoring files at this pose. The rival value `2e96e91d9ce0188981cd71c3fdebb954` is this exact recipe run WITHOUT the `FDS_GREETS_CAM=` prefix (reproduced first try) — a recipe transcription error, not tree drift. Full adjudication in the 2026-08-12 block above.** Previously measured on the settled tree at `7b5f1f8`+ as the same value. Verified 4/4 before the `--shadow_lightmap_texel_density` flat-arm default, 4/4 after it, and 4/4 with the revert flag `--shadow_lightmap_texel_density=0` — **12 runs, one value; that change does not move this pin** (it is look-null at all 16 review poses too, see the dated block at the top). fountain `8db68ccb59416e9a44037e9f387b7bd9` 4/4 and city `3cbe42b166847e40f7071eedb48d613c` 4/4 alongside it, `render_gate` 3/3. NOTE for whoever reads the history below: the hashes in the older entries (`9eeaf860…`, `6ed5462e…`, `91ec081a…`) do **not** reproduce at HEAD — they were taken while other agents held uncommitted work in the shared tree, exactly the hazard the `2026-08-09c` note warns about. Trust the settled-tree value above. — history: **RE-PINNED 2026-08-09 (`hull`/`cockpit` removed from the Sobel normal-map name gate, `DEMO/GREETS.CPP:1951`; docs/SHADING_CONTRACT.md §11 row E8): `9eeaf860cb5a7f124884a89e0fc3ff5b`** (stable 3/3, across two binary revisions). REASON: `BakeNormalMapFromDiffuse` was Sobelling MECH_HUL.JPG / MECH_COK.JPG — camouflage PAINT — into geometric relief; the user compared the mech against the standalone Metal arm (which bakes no such map) and preferred the GPU's. Only four materials ever hit the gate (`!M->NormalMap` guard); `hull`, `hull not smooth` and `cockpit` are gone, `siling` remains. **AT THIS PIN POSE THE CHANGE IS 1 PIXEL AT 1 LSB** (702,172) — t=1588 barely shows the mech, so the pin move is not the measurement. The measurement is at the §11 mech pose (t=4871): **179 829 px (8.67 %), max channel Δ 164, 11 677 px > 10 luma**, hull pixel (767,723) Y **131.2 → 44.9** against the GPU's 41.0, canopy pixel (760,620) 146.4 → 157.4 against 161.4. Crop: `/tmp/fogwt/task1_mech_strip.png`. city `e1221676…` and fountain `8db68ccb…` do NOT move (greets-only, guarded on `M->RelScene != GreetSc`); fountain re-verified. Prior pin `6780642b30430efa4fd2f87810b2dfdb` reproduces by re-adding the two `strstr` terms. Preceding that: **RE-VERIFIED 2026-08-09c, 3/3 EACH, on a settled tree at HEAD `4f60493`** — these supersede every pin value recorded earlier today, several of which were taken while other agents held uncommitted work in the shared tree and are therefore not reproducible:
 > * greets   `778fa6acd85a69cf241babefcdaf598e`
 > * fountain `8db68ccb59416e9a44037e9f387b7bd9`  (the ONLY pin that held all day)

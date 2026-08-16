@@ -90,14 +90,18 @@ code.
   an `int()` truncation into the dispMap index, so it is a byte-risk item with a
   small prize.
 
-### NOTE ON THE RECORDED CITY PINS
+### NOTE ON THE RECORDED CITY PINS — CLOSED 2026-08-16f, THERE WAS NO DRIFT
 
-`4031ceec` (`--deferred`) and `925ecd43` (his arm) **no longer reproduce at
-`e99f5fed`, and it is not this change**: the untouched parent binary gives
-`bd4ffbf8` / `4cb8d2ca`, and so does the main worktree's own binary at the same
-tip against a byte-identical env cube (`a896a47c`). chase x5, fountain and greets
-all still sit on their recorded values, so the drift is city-specific and
-pre-existing. Whoever owns the city series should re-pin.
+~~`4031ceec` / `925ecd43` no longer reproduce; the drift is city-specific and
+pre-existing; whoever owns the city series should re-pin.~~ **No commit moved
+them.** Both reproduce byte-exactly at tip `eb5e57d9`, 3/3 each, under the recipe
+they were recorded with — i.e. **without `--profiler=0`**. `bd4ffbf8` /
+`4cb8d2ca` is the same binary WITH that flag: `RunCitySnapshot` never silenced
+the `ProfilerEnable 1` overlay `rev.cfg` seeds, so the older pins carry 3 718 px
+of HUD text (0.18 % of the frame, all of it in a 114×221 corner block, zero scene
+pixels). Fixed in `DEMO/Snapshot.cpp`; **current city pins `bd4ffbf8` /
+`4cb8d2ca`**, now insensitive to the flag. See the 2026-08-16f block at the top
+of `docs/SESSION_STATE.md`.
 
 ## 2026-08-16c — 00b ROW 3 (`FrustumClipper::Render`, 6.2 %): the tile cull was INERT on the mirror pass
 
@@ -268,6 +272,14 @@ expression, different fma grouping. Smaller than the caustic-sum-plane judge cal
 that shipped 2026-08-15e (7 px, also all |delta| = 1). **NEW CITY PINS**:
 `--deferred` `3413028bc70b99f4bc3ee9eec9de7c14` -> `4031ceec1a1090372575c4f9c39e2839`;
 his arm `1986f2df63a4585c5d05082f36f8722c` -> `925ecd43f45d8f0574acc9c9a5a958a1`.
+
+> **SUPERSEDED 2026-08-16f — these four hashes are all HUD-BEARING.** They were
+> taken before `RunCitySnapshot` silenced the `rev.cfg` profiler overlay, so each
+> carries the same 3 718 px of corner text. The 4-px A/B above is a *differential*
+> between two binaries measured under the same recipe, so the HUD is common-mode
+> and the result stands. Current, HUD-free: `--deferred`
+> **`bd4ffbf87d1492175a9b6c1111fb3f5f`**, his arm
+> **`4cb8d2ca68b72f8a24627f42077eef25`**.
 
 **3. `--env_live_water` projected the same direction twice — BIT-EXACT.**
 `EnvLiveWater_Weight` opens with `EnvCube_DirToFaceUV` on the UNPERTURBED
