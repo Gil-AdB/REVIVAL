@@ -1539,6 +1539,97 @@ static void Froxel_DensityBlock8(const FastFogParams& P, const float* zb, int iz
 // peak clamped into the lit sub-interval (slowly varying / not integrable).
 static constexpr int kFrMaxNz = 256;   // per-column stack scratch bound
 
+// ─── FDS_FOG_ATAN_CENSUS — how many atans, and how many are WASTED ──────────
+// The glow integral's `std::atan` is one libm call per (column × light × slice)
+// and §00b row 10 priced the SYMBOL at 0.3 % of self time without ever counting
+// the calls. Two questions decide whether it is attackable: how many are there,
+// and how many of them are computed for a slice that is then thrown away by one
+// of the four cheap tests BELOW the atan (g<=0, sShape<=0, vis<=0, and in the
+// per-column pass dens<=0). Compile with -DFDS_FOG_ATAN_CENSUS=1; runtime gate
+// --omni_census (shared with the other censuses). Never shipped.
+#ifndef FDS_FOG_ATAN_CENSUS
+#define FDS_FOG_ATAN_CENSUS 0
+#endif
+#if FDS_FOG_ATAN_CENSUS
+// glow pass [0..9], per-column pass 2 [10..19]:
+//  +0 columns entered      +1 (column,light) pairs surviving lightRayClip/disc
+//  +2 slice iterations     +3 skipped by b<=a (no atan)
+//  +4 atan calls           +5 dropped after atan by dens<=0 (pass 2 only)
+//  +6 dropped after atan by g<=0        +7 dropped after atan by sShape<=0
+//  +8 dropped after atan by vis<=0      +9 slices that CONTRIBUTE
+static std::atomic<uint64_t> g_fogAtanCen[20];
+static void FogAtanCensus_Report()
+{
+	uint64_t c[20];
+	for (int i = 0; i < 20; ++i) c[i] = g_fogAtanCen[i].load(std::memory_order_relaxed);
+	for (int p = 0; p < 2; ++p) {
+		const uint64_t* v = c + p*10;
+		if (v[4] == 0) continue;
+		const double a = double(v[4]);
+		std::fprintf(stderr,
+		    "[FOGATAN] %-6s cols %llu  (col,light) %llu  sliceIters %llu  skip(b<=a) %llu  "
+		    "ATANS %llu\n"
+		    "[FOGATAN]        wasted after atan: dens %llu (%.1f%%)  g %llu (%.1f%%)  "
+		    "shape %llu (%.1f%%)  vis %llu (%.1f%%)  |  CONTRIB %llu (%.1f%%)\n",
+		    p ? "col-p2" : "glow",
+		    (unsigned long long)v[0], (unsigned long long)v[1], (unsigned long long)v[2],
+		    (unsigned long long)v[3], (unsigned long long)v[4],
+		    (unsigned long long)v[5], 100.0*double(v[5])/a,
+		    (unsigned long long)v[6], 100.0*double(v[6])/a,
+		    (unsigned long long)v[7], 100.0*double(v[7])/a,
+		    (unsigned long long)v[8], 100.0*double(v[8])/a,
+		    (unsigned long long)v[9], 100.0*double(v[9])/a);
+	}
+	for (int i = 0; i < 20; ++i) g_fogAtanCen[i].store(0, std::memory_order_relaxed);
+}
+#define FOGATAN_CEN(base, idx) do { fogCen[(base)+(idx)] += 1; } while (0)
+#define FOGATAN_FLUSH(n) do { \
+	for (int _i = 0; _i < (n); ++_i) \
+		if (fogCen[_i]) g_fogAtanCen[_i].fetch_add(fogCen[_i], std::memory_order_relaxed); \
+	} while (0)
+#define FOGATAN_DECL(n) uint64_t fogCen[20] = {0}; (void)fogCen
+#else
+#define FOGATAN_CEN(base, idx) ((void)0)
+#define FOGATAN_FLUSH(n)       ((void)0)
+#define FOGATAN_DECL(n)        ((void)0)
+#endif
+
+// ─── FDS_GLOW_ATAN — the PRICE of the glow integral's libm atan ────────────
+// The census above says the argument is NOT low-cardinality (609 214 distinct
+// values a frame at t=1961) and NOT hoistable (twoA/beta/invD vary per
+// (column,light), the argument additionally per slice), so the only two
+// questions left are "how much is the libm call worth" and "how much is the
+// whole atan worth". This ladder answers both; stage 0 must build a binary
+// byte-identical to its parent. MEASUREMENT ONLY — stages 1/2 change pixels.
+//   0 = shipping std::atan   1 = branch-light polynomial   2 = identity (ceiling)
+#ifndef FDS_GLOW_ATAN
+#define FDS_GLOW_ATAN 0
+#endif
+#if FDS_GLOW_ATAN
+static inline float glowAtanPoly(float x) {
+#if (FDS_GLOW_ATAN) == 2
+	return x;                                    // ceiling: the atan deleted
+#else
+	// |x|<=1 minimax odd polynomial, else pi/2 - poly(1/x).
+	const float ax = std::fabs(x);
+	const float inv = ax > 1.0f;
+	const float z = inv ? 1.0f/ax : ax;
+	const float z2 = z*z;
+	float r = -0.0121323f;
+	r = r*z2 + 0.0536813f;
+	r = r*z2 - 0.1173503f;
+	r = r*z2 + 0.1938925f;
+	r = r*z2 - 0.3332985f;
+	r = r*z2*z + z;
+	if (inv) r = 1.5707963268f - r;
+	return x < 0.0f ? -r : r;
+#endif
+}
+#define GLOW_ATAN(x) glowAtanPoly(x)
+#else
+#define GLOW_ATAN(x) std::atan(x)
+#endif
+
 // Coarse glow pass: the per-light glow loop from Froxel_ColumnTile, run once
 // per COARSE column (div× fewer in each of X and Y → div² fewer light loops)
 // at full z resolution, storing pure RADIANCE (no density gating — the fine
@@ -1552,6 +1643,7 @@ static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogPar
 	const float invLogR = float(nz) / std::log(gFrFar / gFrNear);
 	const float invNear = 1.0f / gFrNear;
 	const ViewLightsSoA* L = P.lights;
+	FOGATAN_DECL(10);
 	for (int cy = cy0; cy < cy1; ++cy) {
 		const float sy = (float(cy)+0.5f) * invGy * float(YRes);
 		const float Y  = (CntrEY - sy) * P.invFOVY;
@@ -1560,6 +1652,7 @@ static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogPar
 			const float X  = (sx - CntrEX) * P.invFOVX;
 			float* out = gGlow.data() + (size_t(cy)*gGlX + cx) * nz * 3;
 			std::memset(out, 0, size_t(nz) * 3 * sizeof(float));
+			FOGATAN_CEN(0, 0);
 			const float uV = X*X + Y*Y + 1.0f;
 			for (int li = 0; li < P.numLights; ++li) {
 				if (L->mirrorId[li] != 0) continue;        // clones don't glow
@@ -1588,26 +1681,31 @@ static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogPar
 				int izHi = int(std::log(zHi * invNear) * invLogR) + 1;
 				if (izLo < 0)    izLo = 0;
 				if (izHi > nz-1) izHi = nz-1;
-				float aPrev = std::atan((twoA*zLo + beta) * invD);
+				FOGATAN_CEN(0, 1);
+				float aPrev = GLOW_ATAN((twoA*zLo + beta) * invD);
+				FOGATAN_CEN(0, 4);
 				for (int iz = izLo; iz <= izHi; ++iz) {
+					FOGATAN_CEN(0, 2);
 					const float a = zb[iz]   > zLo ? zb[iz]   : zLo;
 					const float b = zb[iz+1] < zHi ? zb[iz+1] : zHi;
-					if (b <= a) continue;
-					const float aCur = std::atan((twoA*b + beta) * invD);
+					if (b <= a) { FOGATAN_CEN(0, 3); continue; }
+					const float aCur = GLOW_ATAN((twoA*b + beta) * invD);
+					FOGATAN_CEN(0, 4);
 					const float dAtan = aCur - aPrev;
 					aPrev = aCur;
 					float g = 2.0f * invD * dAtan / (zb[iz+1] - zb[iz]);
-					if (g <= 0.0f) continue;
+					if (g <= 0.0f) { FOGATAN_CEN(0, 6); continue; }
 					const float zm = zStar < a ? a : (zStar > b ? b : zStar);
 					float sShape = lightAttenAt(L, li, X*zm, Y*zm, zm);
-					if (sShape <= 0.0f) continue;
+					if (sShape <= 0.0f) { FOGATAN_CEN(0, 7); continue; }
 					const float ddx = zm*X - Lx, ddy = zm*Y - Ly, ddz = zm - Lz;
 					sShape *= (ddx*ddx + ddy*ddy + ddz*ddz) * rr2 + 0.05f;
 					if (smi >= 0) {
 						const float vis = volSpotShadow(smi, X*zm, Y*zm, zm, P.shadowPcf);
-						if (vis <= 0.0f) continue;
+						if (vis <= 0.0f) { FOGATAN_CEN(0, 8); continue; }
 						sShape *= vis;
 					}
+					FOGATAN_CEN(0, 9);
 					g *= sShape;
 					out[iz*3+0] += L->colR[li] * g;
 					out[iz*3+1] += L->colG[li] * g;
@@ -1616,9 +1714,11 @@ static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogPar
 			}
 		}
 	}
+	FOGATAN_FLUSH(10);
 }
 
 static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogParams& P) {
+	FOGATAN_DECL(20);
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float invNx = 1.0f/float(nx), invNy = 1.0f/float(ny);
 	const float* zb = gFrZb.data();                   // exp slice boundaries [nz+1]
@@ -1830,6 +1930,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			// (exact shadow boundaries); unshadowed ones come from the grid.
 			const bool pass2 = glowOn && (!glowGrid || gFrHasShadowedLight || gFrHasFlashLight);
 			if (pass2) {
+				FOGATAN_CEN(10, 0);
 				for (int iz = 0; iz < nz; ++iz) {
 					glowR[iz] = glowG[iz] = glowB[iz] = 0.0f;
 					flashGlowR[iz] = flashGlowG[iz] = flashGlowB[iz] = 0.0f;
@@ -1861,29 +1962,34 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 					int izHi = int(std::log(zHi * invNear) * invLogR) + 1;
 					if (izLo < 0)    izLo = 0;
 					if (izHi > nz-1) izHi = nz-1;
+					FOGATAN_CEN(10, 1);
 					float aPrev = std::atan((twoA*zLo + beta) * invD);
+					FOGATAN_CEN(10, 4);
 					for (int iz = izLo; iz <= izHi; ++iz) {
+						FOGATAN_CEN(10, 2);
 						const float a = zb[iz]   > zLo ? zb[iz]   : zLo;
 						const float b = zb[iz+1] < zHi ? zb[iz+1] : zHi;
-						if (b <= a) continue;                  // outside [zLo,zHi]
+						if (b <= a) { FOGATAN_CEN(10, 3); continue; }  // outside [zLo,zHi]
 						const float aCur = std::atan((twoA*b + beta) * invD);
+						FOGATAN_CEN(10, 4);
 						const float dAtan = aCur - aPrev;
 						aPrev = aCur;
-						if (dens[iz] <= 0.0f) continue;        // empty froxel
+						if (dens[iz] <= 0.0f) { FOGATAN_CEN(10, 5); continue; }  // empty froxel
 						float g = 2.0f * invD * dAtan / (zb[iz+1] - zb[iz]);
-						if (g <= 0.0f) continue;
+						if (g <= 0.0f) { FOGATAN_CEN(10, 6); continue; }
 						// cutoff²·cone at the kernel peak clamped into the lit part
 						// (lightAttenAt × (dr²+0.05) strips its radial factor).
 						const float zm = zStar < a ? a : (zStar > b ? b : zStar);
 						float s = lightAttenAt(L, li, X*zm, Y*zm, zm);
-						if (s <= 0.0f) continue;
+						if (s <= 0.0f) { FOGATAN_CEN(10, 7); continue; }
 						const float ddx = zm*X - Lx, ddy = zm*Y - Ly, ddz = zm - Lz;
 						s *= (ddx*ddx + ddy*ddy + ddz*ddz) * rr2 + 0.05f;
 						if (smi >= 0) {
 							const float vis = volSpotShadow(smi, X*zm, Y*zm, zm, P.shadowPcf);
-							if (vis <= 0.0f) continue;
+							if (vis <= 0.0f) { FOGATAN_CEN(10, 8); continue; }
 							s *= vis;
 						}
+						FOGATAN_CEN(10, 9);
 						g *= s;
 						if (L->isFlash[li]) {            // transient → separate (not historied)
 							flashGlowR[iz] += L->colR[li] * g;
@@ -2050,6 +2156,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			}
 		}
 	}
+	FOGATAN_FLUSH(20);
 }
 
 // Legacy 1998 distance dim (fast_fog_dist_dim) — see FastFogParams::distDim.
@@ -2849,6 +2956,9 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		}
 		{ TailProf::ScopeTimer _tp("fog-columns");
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); }); }
+#if FDS_FOG_ATAN_CENSUS
+		if (fds::FeatureFlags::omni_census()) FogAtanCensus_Report();
+#endif
 		{ TailProf::ScopeTimer _tp("fog-composite");
 		// SIMD composite is on by default (bit-identical to scalar; measured
 		// ~0.5 ms/f faster on fog-composite). FDS_FOG_COMPOSITE_VEC=0 opts out.
