@@ -1752,23 +1752,21 @@ static volatile float g_w2AblSink = 0.0f;
 // ─── Ablation for WAVE 1's 8-bit LDR compose chain (lighting-w1) ────────────
 // Prices the `fdB/fdG/fdR` → `outB/outG/outR` → `out[i]` chain in
 // Render_DeferredLighting_Tile, which under `--hdr --hdr-linear` feeds only the
-// VPage (the linear radiance `rlB` at the HDR store is built from `dlB`, the
-// raw light accumulator, never from `fdB`). Unlike the PIX/OMNI ladders this is
-// a REMOVAL, not a `continue` — everything above the compose stays live because
+// VPage (the linear radiance `rlB` at the HDR store is built from `dlB`, the raw
+// light accumulator, never from `fdB`). Unlike the PIX/OMNI ladders this is a
+// REMOVAL, not a `continue` — everything above the compose stays live because
 // the HDR store still consumes texB/lB/sB.
-//    1  the WHOLE chain: fd + its metal and diffuse-energy scalings, out*,
-//       hB/hG/hR, the isWater gamma blend, the debug-viz stomps, the 8-bit
-//       clamps and the `out[i]` store. Byte-CHANGING by construction (it stops
-//       writing VPage) — a cost instrument, and exactly what a shipping skip
-//       would remove when its predicate holds.
-//    2  the TAIL only: viz + clamps + `out[i]`, with the fd/out arithmetic kept
-//       alive through a per-tile sink (3 fadd + 1 fadd/px of overhead), so
-//       stage 2 is an UPPER bound on what the arithmetic leaves behind.
+//    1  force `ldrSkip` on: the whole chain (fd and its metal + diffuse-energy
+//       scalings, out*, hB/hG/hR, the isWater gamma blend, the viz stomps, the
+//       8-bit clamps and the `out[i]` store) with NO flag read and NO predicate,
+//       so the number is the chain alone. Byte-CHANGING under any arm but
+//       --hdr --hdr-linear; a cost instrument, never a ship configuration.
+// Measured c0ccb40d: 1.570 -> 1.537 Gi/f at t=5743 (-2.10 %), 1.457 -> 1.425 at
+// t=2845 (-2.20 %). A stage 2 (tail only, arithmetic kept alive by a sink) was
+// tried and read ABOVE stage 0 — its sink cost more than the tail — so it is
+// gone and no split of the 0.033 is quotable.
 #ifndef FDS_W1LDR_ABLATE
 #define FDS_W1LDR_ABLATE 0
-#endif
-#if FDS_W1LDR_ABLATE
-static volatile float g_w1LdrAblSink = 0.0f;
 #endif
 
 // ─── Wave-2 fill census — where each odd cell goes ───────────────────────────
@@ -1935,6 +1933,38 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// recovers the true linear radiance. Contained to this write — no composite/
 	// overlay/tonemap change. Off → B1 gamma radiance.
 	const bool hdrLinear = hdrWrite && fds::FeatureFlags::hdr_linear();
+	// --deferred_shade_ldr_skip: wave 1's 8-bit VPage compose — fdB/fdG/fdR,
+	// outB/outG/outR, the isWater gamma blend, the debug-viz stomps, the clamps
+	// and the `out[i]` store — writes a value nothing reads when BOTH hold:
+	//   * `ctx.ldrDiscarded` — renderFrame's promise, built from the same three
+	//     gates the tonemap sits behind. Render_TonemapToVPage rewrites EVERY
+	//     VPage pixel from hdrBuf unconditionally (Hdr.cpp: no coverage test in
+	//     the tile body), so a VPage write issued before it is discarded. Same
+	//     promise as the wave-2 sibling --deferred_fill_ldr_skip; `hdrWrite`
+	//     alone would be a BUG — see that flag's text for CITY.CPP:3823.
+	//   * `hdrLinear` — this is the term wave 2 does NOT need. Under
+	//     --hdr_linear the shipped radiance `rlB` is built from `dlB`, the raw
+	//     light accumulator, and never from `fdB`. Under plain --hdr (B1 gamma)
+	//     `hB = fdB + sB` IS the radiance: the chain is live and must not be
+	//     skipped.
+	// The debug-viz stomps write out* and nothing else, so any of them forces
+	// the chain back on (constexpr-false unless FDS_DEV).
+#if FDS_DEV
+	const bool vizAnyTile = fds::FeatureFlags::viz_tangent() || fds::FeatureFlags::viz_normal()
+	    || fds::FeatureFlags::viz_geonormal() || fds::FeatureFlags::viz_matid()
+	    || fds::FeatureFlags::viz_pmid();
+#else
+	constexpr bool vizAnyTile = false;
+#endif
+#if FDS_W1LDR_ABLATE == 1
+	// Instrument (see the FDS_W1LDR_ABLATE block above): force the skip on
+	// regardless of the predicate, to price the chain with no flag read and no
+	// predicate at all. Byte-CHANGING under any arm but --hdr --hdr-linear.
+	constexpr bool ldrSkip = true;
+#else
+	const bool ldrSkip = fds::FeatureFlags::deferred_shade_ldr_skip()
+	    && hdrLinear && ctx.ldrDiscarded && !vizAnyTile;
+#endif
 
 	// Per-stage ablation gates. Set one of these on to short-circuit the
 	// stage so a bench harness can measure its cost from the frame-time
@@ -2112,9 +2142,6 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			    "hooks. Rebuild with: cmake -S . -B build-census -G Ninja "
 			    "-DFDS_SHADOW_TAP_CENSUS=ON\n");
 	}
-#endif
-#if FDS_W1LDR_ABLATE
-	float w1LdrSink = 0.0f;
 #endif
 	// ONE base pointer, not four: as four separate arrays the hot loop kept
 	// four extra stack bases live and cost 0.9 % of lighting-w1's instructions
@@ -3390,17 +3417,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// for reflective windows / additive fountain vortex; those
 			// pixels are skipped by the fog pass via the mat32 sentinel.
 
-			// Diffuse modulation: pixel = texel * light / 256.
-			// Reflective faces are dispatched to TheOtherBarry<OVERWRITE,
-			// TEXTURETEXTURE> in RenderInnerMekalele and never reach this
-			// code path — they're rendered by the forward filler (which
-			// does the env+tex/2 composite using forward's per-vertex
-			// interpolated eu/ev) and skipped here via the mat32 sentinel.
-#if FDS_W1LDR_ABLATE != 1
-			float fdB = (texB * lB) * (1.0f / 256.0f);
-			float fdG = (texG * lG) * (1.0f / 256.0f);
-			float fdR = (texR * lR) * (1.0f / 256.0f);
-#endif
+			// Diffuse modulation `fd = texel * light / 256` USED to be computed
+			// here and scaled in place by the metal and diffuse-energy blocks
+			// below. It now lives in the `if (!ldrSkip)` compose after them
+			// (--deferred_shade_ldr_skip) — the two scalings are applied there in
+			// the SAME order, and neither `texB/texG/texR`, `lB/lG/lR`, `metalM`
+			// nor `fresEC` is touched by anything in between (EnvSpecComposeScalar
+			// takes the texels and metalM BY VALUE and returns through sB/sG/sR),
+			// so moving it is a float identity, not a reordering.
 			// Metalness (--metal_map): m=1 pixels are conductors — no diffuse
 			// (the albedo becomes the REFLECTION tint below), and analytic
 			// highlights tint by the albedo instead of staying light-colored.
@@ -3409,12 +3433,6 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const byte *md = (miplevel < Mat->MetallicMap->numMipmaps)
 					? reinterpret_cast<const byte*>(Mat->MetallicMap->Mipmap[miplevel]) : nullptr;
 				if (md) metalM = float(md[swizzledUV]) * (1.0f/255.0f);
-#if FDS_W1LDR_ABLATE != 1
-				if (metalM > 0.0f) {
-					const float dk = 1.0f - metalM;
-					fdB *= dk; fdG *= dk; fdR *= dk;
-				}
-#endif
 			}
 			// Roughness map (cheap tier): per-pixel specular INTENSITY. White =
 			// rough → dimmer highlight, so the highlight breaks up across the
@@ -3453,26 +3471,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// position and the direction to that hit (from the bake point)
 			// indexes the pano — floors/walls track position instead of
 			// wearing a pasted-on picture.
+			// (1-F) diffuse energy conservation reads this after the compose
+			// moved down; declared here so it survives the block.
+			float fresEC = 0.0f;
 			if (hasEnvRefl) {
 				if (g_envVecStats) g_envCntWave1.fetch_add(1, std::memory_order_relaxed);
-				float fresEC = 0.0f;
 				EnvSpecComposeScalar(ctx, envP, Mat, miplevel, swizzledUV,
 				                     x, y, z, nx, ny, nz,
 				                     sampleWorldX, sampleWorldY, sampleWorldZ,
 				                     texB, texG, texR, gloss, metalM,
 				                     roughMapOnG, envReflGainG,
 				                     envBrdfAnalyticG, multiScatterG, metalTintLinG, sB, sG, sR, &fresEC);
-				// (1-F) diffuse energy conservation: the Fresnel-reflected
-				// fraction can't also diffuse. Scales BOTH the LDR combine
-				// (int(fdB)) and the HDR radiance (fdB+sB) below.
-#if FDS_W1LDR_ABLATE != 1
-				if (diffuseEnergyG) {
-					const float dc = 1.0f - fresEC;
-					fdB *= dc; fdG *= dc; fdR *= dc;
-				}
-#else
-				(void)fresEC;
-#endif
 			}
 			// Per-material specular response multiplier (Material::SpecMul,
 			// RVSF 0x800, editor 'specMul'): scales the FINAL specular —
@@ -3482,105 +3491,133 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (Mat->SpecMul != 1.0f) {
 				sB *= Mat->SpecMul; sG *= Mat->SpecMul; sR *= Mat->SpecMul;
 			}
-#if FDS_W1LDR_ABLATE != 1
-			int outB = int(fdB) + int(sB);
-			int outG = int(fdG) + int(sG);
-			int outR = int(fdR) + int(sR);
-			// HDR B1: unclamped float radiance (same gamma-space value, no 8-bit
-			// truncation/clamp), accumulated through the water blend below and
-			// written to g_hdrBuf before the debug-viz stomp.
-			float hB = fdB + sB, hG = fdG + sG, hR = fdR + sR;
-#endif
-
-			// Water-mesh transparent blend. Forward draws the water plane
-			// with TheOtherBarry<TRANSPARENT> after a pass-1 mirrored-world
-			// draw + dispMap distortion has populated VPage with a wavy
-			// reflection of the city. The transparent filler does
-			//   pixel = saturate(lit_water_texel + existing_VPage/2)
-			// (TheOtherBarry.h:392). We reproduce the same blend here:
-			// the existing VPage value at this pixel is the reflection
-			// preserved across the inter-pass Z-clear (which lets pass-2
-			// deferred shading skip non-water-mesh pixels via zEnc check
-			// on the freshly-cleared depth buffer).
-#if FDS_W1LDR_ABLATE != 1
-			if (isWater) {
-				const dword existing = out[i];
-				const int rB = int(existing & 0xFF);
-				const int rG = int((existing >> 8) & 0xFF);
-				const int rR = int((existing >> 16) & 0xFF);
-				outB += rB >> 1;
-				outG += rG >> 1;
-				outR += rR >> 1;
-				hB += float(rB) * 0.5f;
-				hG += float(rG) * 0.5f;
-				hR += float(rR) * 0.5f;
-			}
-#endif
-
-			// HDR B1/B2: stash the unclamped opaque radiance + coverage flag
-			// before the debug-viz stomp, so viz only affects the displayed (LDR)
-			// VPage. The froxel composite reads h[3] to take the scene from here
+			// HDR B2 (--hdr_linear): stash the unclamped opaque radiance +
+			// coverage flag. This arm is built from `dlB` — the raw light
+			// accumulator — and never from `fdB`, which is exactly why the LDR
+			// compose below can be skipped under it. It reads `out[i]` for the
+			// water underlay; this pixel has not been written yet either way, so
+			// sitting above the LDR block rather than below it reads the same
+			// word. The froxel composite reads h[3] to take the scene from here
 			// (opaque) vs the VPage (sky/forward content the kernel never wrote).
-			if (hdrWrite) {
+			if (hdrWrite && hdrLinear) {
 				fds::hdrf* h = ctx.hdrBuf + i * 4;
-				if (hdrLinear) {
-					// B2 + full coherence: linear lighting. albedo² (gamma-2.0
-					// decode) × light at power 1; specular is reflected light → a
-					// linear add. Store LINEAR radiance directly (the tonemap no
-					// longer decodes; T·scene + in-scatter compose in linear).
-					const float kN = 1.0f / 255.0f;
-					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
-					// --hdr_metal_kill (docs/SHADING_CONTRACT.md D1): a conductor
-					// has no diffuse lobe. The kernel computes that kill above
-					// (`fdB *= 1-metalM`) but it lands on the LDR combine only,
-					// while THIS — the shipped HDR frame — is built from the raw
-					// accumulator, so metals keep a diffuse term they should not
-					// have. Mode 2 spares the emissive the accumulator was seeded
-					// with (see the lB seed); mode 1 is the blunt whole-accumulator
-					// form. Default 0 = the historical behaviour, byte-null.
-					float dlB = lB, dlG = lG, dlR = lR;
-					const int metalKill = fds::FeatureFlags::hdr_metal_kill();
-					if (metalKill > 0 && metalM > 0.0f) {
-						const float dkH = 1.0f - metalM;
-						if (metalKill >= 2) {
-							const float lum = Mat->Luminosity;
-							const float eB2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.B);
-							const float eG2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.G);
-							const float eR2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.R);
-							dlB = eB2 + (lB - eB2) * dkH;
-							dlG = eG2 + (lG - eG2) * dkH;
-							dlR = eR2 + (lR - eR2) * dkH;
-						} else {
-							dlB = lB * dkH; dlG = lG * dkH; dlR = lR * dkH;
-						}
+				// B2 + full coherence: linear lighting. albedo² (gamma-2.0
+				// decode) × light at power 1; specular is reflected light → a
+				// linear add. Store LINEAR radiance directly (the tonemap no
+				// longer decodes; T·scene + in-scatter compose in linear).
+				const float kN = 1.0f / 255.0f;
+				const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
+				// --hdr_metal_kill (docs/SHADING_CONTRACT.md D1): a conductor
+				// has no diffuse lobe. The kernel computes that kill in the LDR
+				// compose below (`fdB *= 1-metalM`) but it lands on the LDR
+				// combine only, while THIS — the shipped HDR frame — is built
+				// from the raw accumulator, so metals keep a diffuse term they
+				// should not have. Mode 2 spares the emissive the accumulator
+				// was seeded with (see the lB seed); mode 1 is the blunt
+				// whole-accumulator form. Mode 0 is the historical behaviour and
+				// the old byte-pins; the shipping default is 2 since 2026-08-08
+				// (FeatureFlags.def has the evidence).
+				float dlB = lB, dlG = lG, dlR = lR;
+				const int metalKill = fds::FeatureFlags::hdr_metal_kill();
+				if (metalKill > 0 && metalM > 0.0f) {
+					const float dkH = 1.0f - metalM;
+					if (metalKill >= 2) {
+						const float lum = Mat->Luminosity;
+						const float eB2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.B);
+						const float eG2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.G);
+						const float eR2 = lum * (Mat->Txtr ? 255.0f : Mat->BaseCol.R);
+						dlB = eB2 + (lB - eB2) * dkH;
+						dlG = eG2 + (lG - eG2) * dkH;
+						dlR = eR2 + (lR - eR2) * dkH;
+					} else {
+						dlB = lB * dkH; dlG = lG * dkH; dlR = lR * dkH;
 					}
-					float rlB = aB*aB*dlB + sB, rlG = aG*aG*dlG + sG, rlR = aR*aR*dlR + sR;
-					if (isWater) {            // reflection underlay is gamma → linearize
-						const dword e = out[i];
-						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
-						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
-					}
-					h[0] = fds::HdrClamp(rlB); h[1] = fds::HdrClamp(rlG); h[2] = fds::HdrClamp(rlR);
-				} else {
-#if FDS_W1LDR_ABLATE == 1
-					// The gamma (B1) arm is built FROM fd, which stage 1 removes.
-					// This instrument is only meaningful on the --hdr_linear arm;
-					// zero here so it still compiles, and never quote a stage-1
-					// number taken without --hdr-linear.
-					h[0] = h[1] = h[2] = 0.0f;
-#else
-					h[0] = fds::HdrClamp(hB); h[1] = fds::HdrClamp(hG); h[2] = fds::HdrClamp(hR);   // B1 gamma radiance
-#endif
 				}
+				float rlB = aB*aB*dlB + sB, rlG = aG*aG*dlG + sG, rlR = aR*aR*dlR + sR;
+				if (isWater) {            // reflection underlay is gamma → linearize
+					const dword e = out[i];
+					const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
+					rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
+				}
+				h[0] = fds::HdrClamp(rlB); h[1] = fds::HdrClamp(rlG); h[2] = fds::HdrClamp(rlR);
 				h[3] = 1.0f;
 			}
+			// ── The 8-bit LDR compose ────────────────────────────────────────
+			// Everything from here to `out[i]` feeds the VPage and, through
+			// hB/hG/hR, the B1 GAMMA radiance. `ldrSkip` (hoisted per tile) is
+			// true only when the pass provably ends in the tonemap AND the
+			// radiance the tonemap reads is the LINEAR one, which is built from
+			// `dlB` above and never from `fdB` — see the hoist for the argument.
+			// The B2 store is deliberately ABOVE this block rather than after
+			// it: with nothing live across the branch the skip is a single
+			// forward jump, which is worth ~0.3 % of w1 over the shape that
+			// zero-initialised out*/h* outside it.
+			if (!ldrSkip) {
+				// Diffuse modulation: pixel = texel * light / 256.
+				// Reflective faces are dispatched to TheOtherBarry<OVERWRITE,
+				// TEXTURETEXTURE> in RenderInnerMekalele and never reach this
+				// code path — they're rendered by the forward filler (which
+				// does the env+tex/2 composite using forward's per-vertex
+				// interpolated eu/ev) and skipped here via the mat32 sentinel.
+				float fdB = (texB * lB) * (1.0f / 256.0f);
+				float fdG = (texG * lG) * (1.0f / 256.0f);
+				float fdR = (texR * lR) * (1.0f / 256.0f);
+				// Metalness kill (--metal_map): a conductor has no diffuse lobe.
+				if (metalM > 0.0f) {
+					const float dk = 1.0f - metalM;
+					fdB *= dk; fdG *= dk; fdR *= dk;
+				}
+				// (1-F) diffuse energy conservation: the Fresnel-reflected
+				// fraction can't also diffuse. Scales BOTH the LDR combine
+				// (int(fdB)) and the B1 gamma radiance (fdB+sB) below — the
+				// LINEAR arm has never applied it (rlB is built from dlB).
+				if (hasEnvRefl && diffuseEnergyG) {
+					const float dc = 1.0f - fresEC;
+					fdB *= dc; fdG *= dc; fdR *= dc;
+				}
+				int outB = int(fdB) + int(sB);
+				int outG = int(fdG) + int(sG);
+				int outR = int(fdR) + int(sR);
+				// HDR B1: unclamped float radiance (same gamma-space value, no 8-bit
+				// truncation/clamp), accumulated through the water blend below and
+				// written to g_hdrBuf before the debug-viz stomp.
+				float hB = fdB + sB, hG = fdG + sG, hR = fdR + sR;
 
-#if FDS_W1LDR_ABLATE == 2
-			// Stage 2 keeps the arithmetic and drops only the tail; the sink
-			// stops clang from folding out* / h* away with the store.
-			w1LdrSink += float(outB + outG + outR) + hB + hG + hR;
-#endif
-#if FDS_W1LDR_ABLATE == 0
+				// Water-mesh transparent blend. Forward draws the water plane
+				// with TheOtherBarry<TRANSPARENT> after a pass-1 mirrored-world
+				// draw + dispMap distortion has populated VPage with a wavy
+				// reflection of the city. The transparent filler does
+				//   pixel = saturate(lit_water_texel + existing_VPage/2)
+				// (TheOtherBarry.h:392). We reproduce the same blend here:
+				// the existing VPage value at this pixel is the reflection
+				// preserved across the inter-pass Z-clear (which lets pass-2
+				// deferred shading skip non-water-mesh pixels via zEnc check
+				// on the freshly-cleared depth buffer). The LINEAR arm reads the
+				// same VPage word itself, below, so this blend is LDR/B1 only.
+				if (isWater) {
+					const dword existing = out[i];
+					const int rB = int(existing & 0xFF);
+					const int rG = int((existing >> 8) & 0xFF);
+					const int rR = int((existing >> 16) & 0xFF);
+					outB += rB >> 1;
+					outG += rG >> 1;
+					outR += rR >> 1;
+					hB += float(rB) * 0.5f;
+					hG += float(rG) * 0.5f;
+					hR += float(rR) * 0.5f;
+				}
+
+				// HDR B1 (gamma, i.e. NOT --hdr_linear): hB/hG/hR IS the shipped
+				// radiance on this arm — which is why `ldrSkip` requires
+				// hdrLinear and this store is inside the LDR block, not beside
+				// the B2 one. Written before the debug-viz stomp, so viz only
+				// affects the displayed (LDR) VPage.
+				if (hdrWrite && !hdrLinear) {
+					fds::hdrf* h = ctx.hdrBuf + i * 4;
+					h[0] = fds::HdrClamp(hB); h[1] = fds::HdrClamp(hG); h[2] = fds::HdrClamp(hR);
+					h[3] = 1.0f;
+				}
+
 			// FDS_VIZ_NORMAL / FDS_VIZ_TANGENT: stomp final output with
 			// a (vec+1)*127.5 visualization. nx/ny/nz here is post-TBN
 			// (perturbed by the normal map); per-pixel tangent is decoded
@@ -3649,12 +3686,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (outR < 0)   outR = 0;
 
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
-#endif   // FDS_W1LDR_ABLATE == 0
+			}   // !ldrSkip
 		}
 	}
-#if FDS_W1LDR_ABLATE
-	g_w1LdrAblSink += w1LdrSink;
-#endif
 
 	if (tapCensus) {   // see the declaration block above for what each column means
 		const TileLights &tlc = ctx.tileLights[tileIndex];
@@ -5350,6 +5384,14 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	// buffer FROM that); radiance > 255 on PreferOuterVec scenes needs the
 	// scalar kernel. Lifting the cap here still recovers the 250→255 band
 	// and keeps vec/scalar lit math consistent pre-pack.
+	//
+	// ⚠ DO NOT PORT --deferred_shade_ldr_skip HERE. The scalar kernel's LDR
+	// compose is skippable because its --hdr_linear store already put the
+	// radiance in g_hdrBuf; THIS kernel writes no HDR at all, so its 8-bit pack
+	// IS the HDR transport — Hdr_ActivateNoFog lifts it (h[3] is left 0 here) on
+	// every PreferOuterVec scene (city, crash). Skipping the pack would tonemap
+	// those frames from a cleared buffer. The saving looks identical from the
+	// source; it is not the same code.
 	const bool  hdrWrite = fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr;
 	const TileLights &tl = ctx.tileLights[tileIndex];
 	const float  ambB_sc = float(ctx.Sc->Ambient.B);
