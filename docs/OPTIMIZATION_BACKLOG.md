@@ -10,6 +10,167 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16h — `lighting-w2` (the checkerboard fill, 16 % of the call): the edge fallback is 0.12 % of it, and the win was a write nobody reads
+
+**Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance
+arm: `lighting-w2` −7.0 to −7.4 % instructions at EVERY pose (0.293 → 0.272 at
+t=5743), `DeferredLighting-call` −1.1 to −1.3 %, `renderFrame` −0.4 to −0.5 %.
+`lighting-w1` flat to three decimals. BYTE-NULL: five poses under his own arm
+identical to the parent binary, nine pins 3/3 at their recorded values,
+`render_gate.sh` 4/4, plus a city control for the arm the gate excludes.**
+
+Commits `a51534dd` (instrument) · `66444117` (material hoist, no flag) ·
+`f11f3e0c` (`--deferred_fill_ldr_skip`, default ON).
+
+### THE MEASUREMENT 16g ASKED FOR, AND IT REFUTES ITS OWN HYPOTHESIS
+
+16g's item 2 was "unmeasured: how much of w2 is the full-shade fallback —
+`--deferred_checker_edge_full` is default OFF, so every material/normal/depth
+edge is re-shaded by a reduced kernel, light loop and all". Two instruments now
+answer it, `-DFDS_W2_CENSUS=ON` (cell census, shares the `--omni_census` runtime
+gate) and `-DFDS_W2_ABLATE=n` (a nine-stage `continue` ladder with a cumulative
+sink). Both committed, both byte-null at stage 0.
+
+```
+greets t=5743, 1512x848, his arm
+cells 641 088   AVERAGED 635 581 (99.14 %)   FULL-SHADE FALLBACK 768 (0.12 %)
+env-reflective drop 4 472 (0.70 %)   z=0 0.04 %   sentinel 0.00 %   border 0.00 %
+haveOwn 99.26 %   compatible neighbours 1.980 / averaged   sharp 1.980 / averaged
+```
+
+**768 cells.** The fallback is not a cost centre and no attack on the edge
+classification is justified on cost grounds. The corollary matters too: with
+1.980 of 2 possible neighbours compatible and nsharp == n to three decimals, the
+fill has essentially no rejects — **99 % of neighbour pairs go all the way
+through**, so every per-pair instruction is paid ~2× per cell.
+
+### THE LADDER — the two-neighbour loop is 54 % of the fill
+
+| stage | | w2 Gi/f | delta |
+|---|---|--:|--:|
+| 1 | parity test only (the loop skeleton) | 0.011 | |
+| 2 | + z alive test | 0.012 | +0.001 |
+| 3 | + mirrorId, mat32, sentinel, matIDc | 0.021 | +0.009 |
+| 4 | + envForceFull / `checker_env_full` drop | 0.026 | +0.005 |
+| 5 | **+ centre oct normal decode** | 0.052 | **+0.026** |
+| 6 | + neighbour index setup | 0.060 | +0.008 |
+| 7 | + centre `fetchTexel` | 0.079 | +0.019 |
+| 8 | **+ neighbour compat + accumulate loop** | 0.238 | **+0.159** |
+| 0 | FULL (write-out + the fallback) | 0.294 | +0.056 |
+
+**ONE oct normal decode is 0.026 Gi/f** and the fill does three per cell (centre
++ two neighbours). Stage 9 (0.308) reads ABOVE stage 0 — the top-of-body cut
+forces materialisation the shipping allocator spreads out, exactly 16g's method
+note. The fallback's cost is bounded by that artefact, not measured by it; the
+census is what settles it.
+
+### WHAT SHIPPED
+
+**The material hoist (16g's item 1), NO FLAG.** `fetchTexel` re-derived the
+neighbour's matID, bounds-checked it, loaded the table entry and null-tested the
+Material and its Texture — for a material `neighborCompatible`'s FIRST term had
+already proved equal to the centre's, and which the centre's own fetch had
+resolved. `fetchTexelNb` keeps that Texture. Bit-exact by construction.
+**−1.0 % of w2 at every pose.**
+
+**`--deferred_fill_ldr_skip` (default ON) — the mover, −6.2 % more.** The fill's
+8-bit VPage average is written into a buffer `Render_TonemapToVPage` then
+overwrites unconditionally (it never consults the coverage lane) — the "#1 HDR
+gotcha" in `docs/GRAPHICS_PIPELINE.md`, never applied here. 16g's
+`--deferred_fill_hdr_skip` had already killed the LDR *sharp* accumulators on
+the neighbouring argument and left the plain average alone because it IS
+written; the write is the part that does not matter. Drops the neighbour colour
+load + 3 extracts + 3 adds ×1.980, and the compose + store per cell.
+
+### THE PREDICATE IS THE COMMIT — `hdrWrite` WOULD HAVE BEEN A BUG
+
+Every VPage reader between the lighting call and the tonemap is either shut off
+by `g_hdrActive`/`Hdr_WritableFor` (SSAO `DeferredSSAO.cpp:973`, the xpar
+composite `DeferredSurfaceKernel.cpp:4568`, cones/halos
+`DeferredVolumetric.cpp:339`, rain `DeferredFastFog.cpp:3192`, the sprite
+fillers) or reads only where the coverage lane is ZERO (`Hdr_ActivateNoFog`
+`Hdr.cpp:91`, the froxel composite `DeferredFastFog.cpp:2220/2364/2592`) — and
+the fill sets `h[3] = 1.0f` on every arm that also writes VPage. So the write is
+dead **iff the tonemap fires**, and that is strictly stronger than `hdrWrite`:
+
+* **`DEMO/CITY.CPP:3823`'s water-reflection underlay** renders with
+  `skipVolumetric=true` into the **MAIN** VPage at the **MAIN** resolution, so
+  `hdrBuf` is live — but `renderFrame`'s tonemap sits inside `if
+  (!skipVolumetric)`, and `CITY.CPP:3848` reads that VPage straight back to
+  displace the reflection. **Its VPage IS the product.**
+* `--ssao --ssao_debug` returns before the tonemap with `hdrWrite` true.
+* `g_hdrDeferTonemap` (the fountain) re-runs the chain under a different
+  predicate.
+* Offscreen/override bakes are excluded outright — the shard bake and the greets
+  mirror RTT tonemap inline, but `GreetsMirror.cpp:3621` still carries a comment
+  claiming wave-2 fill pixels reach `g_hdrBuf` only via the VPage lift, and this
+  flag is not the place to adjudicate that. **Open item: that comment looks
+  stale against the current fill (all three HDR arms set `h[3]=1`) — somebody
+  should confirm and delete it.**
+
+So the kernel reads `ctx.ldrDiscarded`, a promise `renderFrame` sets from the
+same three gates the tonemap sits behind. **Control:** city t=1961 with
+`--env_live_water --deferred --hdr --city_env_pixel --deferred_checkerboard`
+(the underlay pass, checkerboard forced) is byte-identical parent-to-child,
+`56f6aff07f5981244463a5a7b23c2539` both.
+
+### REFUTED — and the refutation generalises
+
+**A scanline carry for the repeated neighbour gather. TRIED TWICE, BOTH NET
+ZERO.** The cell at px reads px−1 and px+1, the cell at px+2 reads px+1 and
+px+3, so every even pixel is gathered TWICE and everything gathered from it (its
+G-buffer word, its Z, its decoded normal, its texel) is a pure function of that
+pixel. Carrying it one step is bit-exact and should have removed one oct decode
+(0.026) and one texel fetch per cell. Measured, min-of-11, three arms:
+
+| form | w2 Gi/f, child OFF | child ON | parent |
+|---|--:|--:|--:|
+| `NbGather nbg[2]`, runtime `nc` | 0.361 (+23 %) | 0.312 | 0.293 |
+| same, trip count 2 + `unroll(full)` | 0.351 (+20 %) | 0.309 | 0.293 |
+| two one-slot index-keyed caches | 0.317 (+8.2 %) | 0.293 | 0.293 |
+
+The first two are SROA giving up (an indexed 2-element struct array lands on the
+stack); the third is clean code and still nets zero. **The lesson is the OFF
+column's, and it is the durable finding of this round: in this kernel a
+flag-guarded predicate or eight extra live values in the pixel body cost about
+what any of these mechanisms save.** That is also why the material hoist ships
+WITHOUT a flag — its first cut carried `--deferred_fill_mat_hoist` and read
+par 0.293 / off 0.300 / on 0.292, i.e. the flag ate the win.
+
+**Skipping the neighbour oct decode when its PACKED normal equals the centre's
+(dot would be ≥ 0.9999 ≥ `--quarter_normal_cos`, so the branch outcome is
+provably unchanged). REFUTED ON HIT RATE: 199 862 of 1 264 816 = 15.80 %.**
+Worth ≈0.009 Gi/f gross before the compare costs on the 84 % that miss. Counter
+kept in the census.
+
+### WHAT IS LEFT IN w2 (now 0.272 Gi/f = 15 % of the call)
+
+1. **The three oct normal decodes, ~0.078 Gi/f = 29 % of the fill.** The two
+   NEIGHBOUR decodes are independent and `fast_rsqrt` is `vrsqrte` + one Newton
+   step on a `float32x2_t` (`FDS/FILLERS/SimdHelpers.h:16`) — **lane-independent,
+   so a 2-wide `oct_decode_u32_x2` is bit-exact, not a judge call.** Needs the
+   two neighbours decoded together, which is the restructure that failed above;
+   the difference is that this one removes registers rather than adding them.
+2. **The 3-channel scalar arithmetic, est. ~0.03 Gi/f.** Per neighbour: three
+   `fmax` + three `fdiv` + three compares for the texel ratio, three fp16 loads,
+   three `fmla`, the texel byte unpack; per cell the HDR store. All of it is
+   (B,G,R,·) and fits one NEON vector, and 4-wide reduces live registers.
+   **Contraction hazard: clang already SLP-vectorises parts of this 2-wide
+   (`fmul.2s` ×50, `fmla.2s` ×22 in the shipping function), so a 4-wide rewrite
+   must be byte-gated, not assumed.**
+3. **`hsB/hsG/hsR` are dead whenever `nsharp > 0`**, which the census says is
+   ~always. Three `fadd` per neighbour ≈ 0.004 Gi/f. Needs a 2-bit "which
+   neighbours passed" mask to recompute in the rare `nsharp == 0` case.
+4. **THE SAME LDR ARGUMENT APPLIES TO WAVE 1, WHICH IS 1.570 Gi/f.** 16g's pixel
+   ladder priced "compose (after the loop)" at 0.060 Gi/f and that includes an
+   8-bit VPage combine + clamp + store per SHADED pixel, on the same
+   `ctx.ldrDiscarded` reasoning and with `ctx.ldrDiscarded` already plumbed.
+   **Not attempted here — out of this brief's scope — and it is the single
+   largest untried item the round leaves behind.**
+
+Renders (byte-identical to the parent, eyeballed at 1:1 for checker speckle):
+`docs/img/w2fill/w2_t{2845,3409,5743,5813,6097}_after.png`.
+
 ## 2026-08-16g — 00a ROW 1 (`DeferredLighting-call`, 41 %): the tap's WRAPPER was 7 % of the call, and the floor had never been measured
 
 **Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance

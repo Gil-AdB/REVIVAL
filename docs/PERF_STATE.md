@@ -698,6 +698,30 @@ then took the call to **1.877 Gi/f (−7.9 %)** and `renderFrame` to
 arm. Full table, the two refutations (the GGX hoist clang already does; the
 4×4 uniformity pyramid) and the ranked remainder are in the backlog entry.
 
+**Amendment 2026-08-16h (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16h) — row 1's
+`lighting-w2` line is now itemised, and 16g's guess about it is REFUTED.** The
+fill splits (t=5743, `-DFDS_W2_ABLATE`): skeleton + early tests 0.026, centre
+oct normal decode 0.026, neighbour index setup 0.008, centre `fetchTexel` 0.019,
+**the two-neighbour compat+accumulate loop 0.159 (54 %)**, write-out 0.056.
+`-DFDS_W2_CENSUS=ON` counts 641 088 cells at 1512×848 of which **99.14 % are
+AVERAGED and 768 — 0.12 % — take the full-shade fallback**: 16g's open question
+"how much of w2 is the edge fallback" answers *essentially none*, and the edge
+classification is not a cost target. 1.980 of 2 neighbours are compatible, so
+nearly every per-pair instruction is paid twice per cell, and ONE oct decode
+costs 0.026 Gi/f. Landed: the neighbour material hoist (16g's item 1, **no
+flag** — a flag in this loop costs what it saves) and **`--deferred_fill_ldr_skip`**,
+which drops the fill's 8-bit VPage average because the tonemap overwrites every
+VPage pixel unconditionally. Gated on a new `ctx.ldrDiscarded` promise, NOT on
+`hdrWrite` — `CITY.CPP:3823`'s water-reflection underlay has a live `hdrBuf`,
+never tonemaps, and reads its own VPage back. Together **`lighting-w2`
+0.293 → 0.272 (−7.2 %), `DeferredLighting-call` 1.876 → 1.855 (−1.1 %),
+`renderFrame` 4.826 → 4.804 (−0.5 %)**, −7.0 to −7.4 % at all five poses,
+byte-null at nine pins, `render_gate.sh` 4/4 and the five-pose arm diff. A
+scanline carry for the repeated neighbour gather was tried in three forms and
+**nets zero every time** — the backlog entry has the OFF columns. The same LDR
+argument applied to WAVE 1 (1.570 Gi/f) is untried and is the largest thing the
+round leaves behind.
+
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
 `cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and
