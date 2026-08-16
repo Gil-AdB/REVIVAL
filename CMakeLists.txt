@@ -127,6 +127,15 @@ else()
     add_compile_definitions(FDS_OMNI_CENSUS=0)
 endif()
 
+# Wave-2 (checkerboard fill) census: where each odd cell goes — averaged,
+# full-shade fallback, or dropped. Shares the --omni_census runtime gate.
+option(FDS_W2_CENSUS "Compile the deferred wave-2 fill census hooks (--omni_census)" OFF)
+if(FDS_W2_CENSUS)
+    add_compile_definitions(FDS_W2_CENSUS=1)
+else()
+    add_compile_definitions(FDS_W2_CENSUS=0)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.

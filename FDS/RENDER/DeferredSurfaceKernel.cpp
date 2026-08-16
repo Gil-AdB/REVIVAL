@@ -1723,6 +1723,73 @@ static volatile float g_omniAblSink = 0.0f;
 #define PIX_ABL_CUT(stage, expr)  ((void)0)
 #endif
 
+// ─── Ablation ladder for the WAVE-2 CHECKERBOARD FILL (lighting-w2) ──────────
+// Same cumulative-sink shape as PIX_ABL_CUT, aimed at
+// Render_DeferredLighting_TileFill's per-cell body. Cuts `continue` the pixel
+// loop, so stage n prices everything above cut n.
+//    1  parity test only (the w2 loop skeleton)
+//    2  + z alive test
+//    3  + mirrorId, mat32, forward sentinel, matIDc
+//    4  + envForceFull / checker_env_full drop
+//    5  + centre normal decode
+//    6  + neighbour index setup
+//    7  + centre fetchTexel (haveOwn)
+//    8  + the neighbour compatibility + accumulate loop
+//    9  + the average write-out (so full - 9 = the FULL-SHADE FALLBACK)
+//    0  full
+#ifndef FDS_W2_ABLATE
+#define FDS_W2_ABLATE 0
+#endif
+#if FDS_W2_ABLATE
+static volatile float g_w2AblSink = 0.0f;
+#define W2_ABL_CUT(stage, expr) \
+    w2Keep += (expr); \
+    if constexpr ((FDS_W2_ABLATE) == (stage)) { w2Sink += w2Keep; continue; }
+#else
+#define W2_ABL_CUT(stage, expr)  ((void)0)
+#endif
+
+// ─── Wave-2 fill census — where each odd cell goes ───────────────────────────
+// Build with -DFDS_W2_CENSUS=ON; runtime gate --omni_census (shared).
+#ifndef FDS_W2_CENSUS
+#define FDS_W2_CENSUS 0
+#endif
+// [0] cells entered (parity passed), [1] z==0, [2] forward sentinel,
+// [3] env-force-full early drop, [4] no neighbour (border), [5] AVERAGED,
+// [6] FULL-SHADE FALLBACK, [7] haveOwn, [8] compatible neighbours,
+// [9] sharp-usable neighbours, [10] fallback bailed (no material/texture),
+// [11] env-reflective cells seen, [12] edge-full drops.
+static constexpr int W2_CEN_N = 16;
+#if FDS_W2_CENSUS
+static std::atomic<uint64_t> g_w2Cen[W2_CEN_N];
+static void W2Census_Report()
+{
+	uint64_t c[W2_CEN_N];
+	for (int i = 0; i < W2_CEN_N; ++i) c[i] = g_w2Cen[i].load(std::memory_order_relaxed);
+	if (c[0] == 0) return;
+	const double e = double(c[0]);
+	std::fprintf(stderr,
+	    "[W2-CENSUS] cells %.0f  z0 %.2f%%  sentinel %.2f%%  envdrop %.2f%%  border %.2f%%  "
+	    "AVERAGED %.0f (%.2f%%)  FULLSHADE %.0f (%.2f%%)  bailed %.0f\n"
+	    "[W2-CENSUS]   haveOwn %.2f%% of entered; compatible neighbours %.3f/averaged; "
+	    "sharp %.3f/averaged; env cells %.0f; edgefull drops %.0f\n",
+	    e, 100.0*double(c[1])/e, 100.0*double(c[2])/e, 100.0*double(c[3])/e,
+	    100.0*double(c[4])/e, double(c[5]), 100.0*double(c[5])/e,
+	    double(c[6]), 100.0*double(c[6])/e, double(c[10]),
+	    100.0*double(c[7])/e,
+	    double(c[8])/double(c[5] ? c[5] : 1), double(c[9])/double(c[5] ? c[5] : 1),
+	    double(c[11]), double(c[12]));
+	std::fprintf(stderr,
+	    "[W2-CENSUS]   neighbour normal checks %.0f\n", double(c[13]));
+	for (int i = 0; i < W2_CEN_N; ++i) g_w2Cen[i].store(0, std::memory_order_relaxed);
+}
+#define W2_CEN(idx) do { ++w2cn[(idx)]; } while (0)
+#define W2_CEN_ADD(idx, v) do { w2cn[(idx)] += uint64_t(v); } while (0)
+#else
+#define W2_CEN(idx)         ((void)0)
+#define W2_CEN_ADD(idx, v)  ((void)0)
+#endif
+
 // ─── Per-PIXEL live-light census — the companion instrument to the ladder ────
 // The shadow-tap census (43ac3456) counts per (tile x light). This counts per
 // (pixel x light): where in the reject chain each of a tile's lights dies, and
@@ -6171,7 +6238,13 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	// below ever reads.
 	const bool sTexSharp   = fds::FeatureFlags::quarter_tex_sharp();
 	const bool fillLdrSharp = !(fds::FeatureFlags::deferred_fill_hdr_skip() && hdrWrite);
-
+#if FDS_W2_ABLATE
+	float w2Sink = 0.0f;
+#endif
+#if FDS_W2_CENSUS
+	uint64_t w2cn[W2_CEN_N] = {0};
+	const bool w2Census = fds::FeatureFlags::omni_census() && ctx.xres >= 640;
+#endif
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
 			if (quarter) {
@@ -6179,10 +6252,16 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			} else {
 				if (((px ^ py) & 1) == 0) continue;
 			}
+#if FDS_W2_ABLATE
+			float w2Keep = 0.0f;
+#endif
+			W2_ABL_CUT(1, float(px));
+			W2_CEN(0);
 
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
-			if (zEnc == 0) continue;
+			if (zEnc == 0) { W2_CEN(1); continue; }
+			W2_ABL_CUT(2, float(zEnc));
 
 			// Per-pixel mirror id — used by the wave-2 fallback shading
 			// to filter lights matching the pixel's mirror context.
@@ -6197,8 +6276,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// (deferred-quarter checker over the forward surface, HDR only; in
 			// LDR the forward filler overwrites VPage so it is invisible -> gate
 			// on hdrWrite to keep the LDR fill byte-exact).
-			if (hdrWrite && (mat32 == 0xFFFFFFFFu || mat32 == 0xFFFFFFFEu)) continue;  // both forward sentinels
+			if (hdrWrite && (mat32 == 0xFFFFFFFFu || mat32 == 0xFFFFFFFEu)) { W2_CEN(2); continue; }  // both forward sentinels
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
+			W2_ABL_CUT(3, float(matIDc + pmid));
 
 			// Env-reflective materials always take the full-shade fallback:
 			// BOTH averaging models break on them. The plain average carries
@@ -6210,10 +6290,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// reflections as alternating lit/dark columns. Reflective pixels
 			// are a small fraction of the frame; full shading them is cheap.
 			const bool envForceFull = envTabG && envTabG[matIDc] != nullptr;
+			if (envForceFull) W2_CEN(11);
 			// --deferred_checker_env_full: wave 1 already shaded this
 			// pixel with the REAL kernel (see the drop test there), so
 			// the reduced fallback below must not overwrite it.
-			if (envForceFull && checkerEnvFullG) continue;
+			if (envForceFull && checkerEnvFullG) { W2_CEN(3); continue; }
+			W2_ABL_CUT(4, float(envForceFull));
 
 			// Center normal decoded once; reused by every fill pattern's
 			// neighbor-similarity test below. Cheap enough vs the avoided
@@ -6222,8 +6304,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			if (quarterNormalCheck) {
 				meka::oct_decode_u32(gb.normal[i], ncX, ncY, ncZ);
 			}
+			W2_ABL_CUT(5, ncX + ncY + ncZ);
 			auto neighborNormalOk = [&](size_t ni) -> bool {
 				if (!quarterNormalCheck) return true;
+				W2_CEN(13);
 				float nx, ny, nz;
 				meka::oct_decode_u32(gb.normal[ni], nx, ny, nz);
 				return (ncX*nx + ncY*ny + ncZ*nz) >= quarterNormalCos;
@@ -6397,7 +6481,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				int    nc = 0;
 				if (px > 0)        nidx[nc++] = i - 1;
 				if (px < XRes - 1) nidx[nc++] = i + 1;
-				if (nc == 0) continue;
+				if (nc == 0) { W2_CEN(4); continue; }
+				W2_ABL_CUT(6, float(nc));
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
 				// C (texture/lighting decouple) — same divide-out + trust region
@@ -6406,6 +6491,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				// (measured |checker-full| 1.32 vs quarter+C 0.31 on greets).
 				float ownB=0, ownG=0, ownR=0;
 				const bool haveOwn = sTexSharp && fetchTexel(i, ownB, ownG, ownR);
+				if (haveOwn) W2_CEN(7);
+				W2_ABL_CUT(7, ownB + ownG + ownR);
 				float slB=0, slG=0, slR=0;                 // LDR reconstructed lighting
 				float ahB=0, ahG=0, ahR=0; int nsharp=0;   // HDR reconstructed radiance
 				int n = 0;
@@ -6441,7 +6528,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					}
 					++n;
 				}
+				W2_ABL_CUT(8, float(n + nsharp) + hsB + ahB + slB + float(sumB));
 				if (n > 0) {
+					W2_CEN(5); W2_CEN_ADD(8, n); W2_CEN_ADD(9, nsharp);
 					if (haveOwn && nsharp > 0 && !hdrWrite) {
 						const float inv = 1.0f / (float(nsharp) * 256.0f);
 						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
@@ -6469,6 +6558,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				}
 			}
 			if (matched) continue;
+			W2_ABL_CUT(9, 1.0f);
 			// --deferred_checker_edge_full: reaching here means NO neighbour was
 			// compatible — the exact condition wave 1's fillFallsBackHere()
 			// predicts — so wave 1 already shaded this pixel with the REAL
@@ -6476,7 +6566,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// the averaging having run at all (it is force-full by a different
 			// rule), and wave 1 leaves those to --deferred_checker_env_full.
 			// Free: no second predicate evaluation, `matched` IS the predicate.
-			if (checkerEdgeFullG && !envForceFull) continue;
+			if (checkerEdgeFullG && !envForceFull) { W2_CEN(12); continue; }
+			W2_CEN(6);
 
 			// Fallback path — replays the wave-1 kernel for this pixel.
 			// We don't expect this branch to be hot (most frame area is
@@ -6485,11 +6576,11 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const uint32_t miplevel    = (mat32 >> 28) & 0xF;
 			const uint32_t matID       = matIDc;
 			const uint32_t swizzledUV  = mat32 & 0xFFFFF;
-			if (matID >= ctx.matTable.count) continue;
+			if (matID >= ctx.matTable.count) { W2_CEN(10); continue; }
 			Material *Mat = ctx.matTable.data[matID];
-			if (!Mat || !Mat->Txtr) continue;
+			if (!Mat || !Mat->Txtr) { W2_CEN(10); continue; }
 			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
-			if (!texData) continue;
+			if (!texData) { W2_CEN(10); continue; }
 			const dword texel = texData[swizzledUV];
 			const float texB = float(texel & 0xFF)         * Mat->TintB;  // editor tint (see main kernel)
 			const float texG = float((texel >> 8) & 0xFF)  * Mat->TintG;
@@ -6774,6 +6865,15 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
 		}
 	}
+#if FDS_W2_CENSUS
+	if (w2Census) {
+		for (int i = 0; i < W2_CEN_N; ++i)
+			if (w2cn[i]) g_w2Cen[i].fetch_add(w2cn[i], std::memory_order_relaxed);
+	}
+#endif
+#if FDS_W2_ABLATE
+	g_w2AblSink = w2Sink;   // one volatile store per tile call
+#endif
 
 	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
 	// SKIPPED for an INLINE (offscreen-bake) dispatch: the calling thread would
@@ -7408,6 +7508,10 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			});
 			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2", 2, _w2q);
 		}
+#if FDS_W2_CENSUS
+		if (fds::FeatureFlags::omni_census() && !inlineDispatch && ctx.xres >= 640)
+			W2Census_Report();
+#endif
 	}
 
 #if FDS_OMNI_CENSUS
