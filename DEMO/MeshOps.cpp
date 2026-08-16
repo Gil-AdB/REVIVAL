@@ -5953,6 +5953,94 @@ void MeshOps_TangentDegenScreenCensus(Scene *Sc, int xres, int yres)
 		             "%dx%d viewport\n", n, xres, yres);
 }
 
+// --zero_normal_census, RENDER-TIME half. The build-time reporter in PREPROC
+// only sees meshes that go through Compute_Vertex_Normals/Tangents; a mesh whose
+// normals are written by a loader, a per-frame generator or a scene script never
+// passes there. And the rasterizer does not interpolate Vertex::N — it
+// interpolates the VIEW-SPACE Vertex::TN that Transform_Objects derives from it
+// each frame. So the plane's degenerate lanes are a property of TN after a tick,
+// which is what this walks: called after driver->tick(), it counts, per mesh,
+// verts with |N| == 0 and verts with |TN| == 0, and names the materials of the
+// faces that use them. Inert unless the flag is on.
+void MeshOps_ZeroNormalSceneSweep(Scene *Sc, const char *stage)
+{
+	if (!fds::FeatureFlags::zero_normal_census() || !Sc) return;
+	std::unordered_map<const TriMesh *, const char *> meshName;
+	for (Object *O = Sc->ObjectHead; O; O = O->Next)
+		if (O->Type == Obj_TriMesh && O->Data && O->Name)
+			meshName.emplace((const TriMesh *)O->Data, O->Name);
+	auto nameOf = [&](const TriMesh *T) {
+		auto it = meshName.find(T);
+		return it != meshName.end() ? it->second : "(anon)";
+	};
+	auto len = [](const Vector &v) {
+		return std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+	};
+	// Material id -> name, once per stage: the rasterizer's per-material
+	// counters (and every G-buffer matID plane) are numeric, and this is the
+	// only place the two can be joined.
+	{
+		static bool dumped = false;
+		if (!dumped) {
+			dumped = true;
+			for (Material *M = MatLib; M; M = M->Next)
+				if (M->RelScene == Sc)
+					std::fprintf(stderr, "[ZERONM] matID %4d '%s' nmap=%d hmap=%d\n",
+					             (int)M->ID, M->Name ? M->Name : "?",
+					             M->NormalMap ? 1 : 0, M->HeightMap ? 1 : 0);
+		}
+	}
+	long long totN = 0, totTN = 0;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (!T->Verts || !T->VIndex) continue;
+		long long nN = 0, nTN = 0;
+		for (int32_t v = 0; v < int32_t(T->VIndex); ++v) {
+			if (len(T->Verts[v].N)  < 1e-12f) ++nN;
+			if (len(T->Verts[v].TN) < 1e-12f) ++nTN;
+		}
+		if (!nN && !nTN) continue;
+		totN += nN; totTN += nTN;
+		// Materials of the faces that USE a zero-TN vertex — the surface a
+		// viewer would name, which the mesh's first face need not be.
+		std::map<std::string, long long> byMat;
+		float worstArea = 0.0f;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face *F = &T->Faces[i];
+			if (!F->A || !F->B || !F->C) continue;
+			const bool hit = len(F->A->TN) < 1e-12f || len(F->B->TN) < 1e-12f
+			              || len(F->C->TN) < 1e-12f;
+			if (!hit) continue;
+			const float a = Tri_Surface(&F->A->Pos, &F->B->Pos, &F->C->Pos);
+			worstArea = std::max(worstArea, a);
+			++byMat[(F->Txtr && F->Txtr->Name) ? F->Txtr->Name : "?"];
+		}
+		// Where do the zero-TN verts land on screen? (PX/PY are this frame's
+		// projection, written by the same transform that skipped TN.) That is
+		// how a mesh in the list is matched against a region of the frame.
+		float x0=1e30f,x1=-1e30f,y0=1e30f,y1=-1e30f; long long onScr=0;
+		for (int32_t v = 0; v < int32_t(T->VIndex); ++v) {
+			const Vertex &V = T->Verts[v];
+			if (len(V.TN) >= 1e-12f) continue;
+			if (!(V.RZ > 0.0f)) continue;
+			++onScr;
+			x0=std::min(x0,V.PX); x1=std::max(x1,V.PX);
+			y0=std::min(y0,V.PY); y1=std::max(y1,V.PY);
+		}
+		std::fprintf(stderr, "[ZERONV] %-24s Verts=%p..%p\n", nameOf(T),
+		             (void *)T->Verts, (void *)(T->Verts + T->VIndex));
+		std::fprintf(stderr, "[ZERONS@%s] %-28s %u verts: |N|==0 %lld, |TN|==0 "
+		             "%lld, flags=0x%x, %lld projected (bbox x[%.0f..%.0f] "
+		             "y[%.0f..%.0f]), faces touching a zero-TN vert by material:",
+		             stage, nameOf(T), T->VIndex, nN, nTN, (unsigned)T->Flags,
+		             onScr, (double)x0, (double)x1, (double)y0, (double)y1);
+		for (const auto &kv : byMat)
+			std::fprintf(stderr, " '%s'x%lld", kv.first.c_str(), kv.second);
+		std::fprintf(stderr, " (largest such face area %g)\n", (double)worstArea);
+	}
+	std::fprintf(stderr, "[ZERONS@%s] scene total: %lld verts |N|==0, %lld verts "
+	             "|TN|==0\n", stage, totN, totTN);
+}
+
 // B4 residual height map (docs/ENVDYN_DISPLACEMENT_PLAN.md): the POM input for
 // a DISPLACED material. Geometry now carries the low band of the relief
 // (amp*(h_lowMip - mean)), so if POM keeps marching the ORIGINAL map the block

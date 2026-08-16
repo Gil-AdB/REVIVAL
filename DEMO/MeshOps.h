@@ -344,6 +344,13 @@ void MeshOps_TangentNaNCensus(Scene *Sc, const char *stage);
 // their screen bbox. Call after a tick. Inert unless the flag is on.
 void MeshOps_TangentDegenScreenCensus(Scene *Sc, int xres, int yres);
 
+// --zero_normal_census (dev), RENDER-TIME half: after a tick, count per mesh the
+// verts whose Vertex::N and whose view-space Vertex::TN are zero, and name the
+// materials of the faces that use them. The rasterizer interpolates TN, so this
+// is the set that can hand the G-buffer normal plane a lane with no direction.
+// Inert unless the flag is on.
+void MeshOps_ZeroNormalSceneSweep(Scene *Sc, const char *stage);
+
 // S1b POM SHELL builder (docs/S1_PIXEL_DISPLACEMENT_PLAN.md §S1b): turn
 // matName's flat faces into the LID of a relief slab — push every vertex they
 // use out along its normal by (uvAmp × that face's world-per-UV-tile)/2 and

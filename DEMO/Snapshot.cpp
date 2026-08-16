@@ -1175,6 +1175,9 @@ int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
         RunEditorDumpHooks();
 
+        // --zero_normal_census: post-tick TN sweep (inert without the flag).
+        MeshOps_ZeroNormalSceneSweep(CurScene, "chase-post-tick");
+
         if (eventTest) {
             // PURE FUNCTION of t — reconstruct active set from the resolved
             // table (no accumulation), then stamp. This is the §8.B contract.

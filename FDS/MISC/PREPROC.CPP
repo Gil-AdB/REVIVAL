@@ -62,6 +62,157 @@ void Compute_FaceVertexIndices(TriMesh *T)
 	}
 }
 
+// --zero_normal_census reporter. OUT-OF-LINE AND noinline FOR THE SAME REASON
+// TangentDegenReport below is: a flag-gated instrument that keeps state inside
+// the function it measures is NOT automatically byte-null (2026-08-16u moved the
+// greets t=1588 pin that way). Everything here is re-derived from the mesh after
+// Compute_Vertex_Normals has finished; the caller passes nothing but T.
+//
+// The question it answers: a zero vertex normal has three possible causes, and
+// only one of them means the vertex corners geometry a rasterizer can fill.
+//   ORPHAN         — no face references this vertex, so the accumulator never
+//                    ran; N is still the (0,0,0) the first loop wrote. Nothing
+//                    can read it: no face, no fan triangle, no fragment.
+//   ALL-DEGENERATE — every incident face is zero-area, so Compute_Face_Normals
+//                    deliberately left F->N as the un-normalized zero cross
+//                    (see the guard at the top of this file). The greets
+//                    Piramid case: rejected by every rasterizer's determinant
+//                    test before setup.
+//   CANCEL         — at least one incident face has real area and a unit normal,
+//                    and the area-weighted sum vanishes anyway. That is a
+//                    zero-thickness fin / doubled surface, and it DOES corner
+//                    fillable triangles.
+__attribute__((noinline))
+static void ZeroNormalReport(TriMesh *T, const char *where)
+{
+	if (!T->Verts || !T->Faces || !T->VIndex) return;
+	// Per-vertex incident-face lists, re-derived (the shipping path keeps none).
+	std::vector<std::vector<const Face *>> inc(size_t(T->VIndex));
+	for (Face *F = T->Faces, *FE = T->Faces + T->FIndex; F < FE; ++F) {
+		if (!F->A || !F->B || !F->C) continue;
+		for (Vertex *cv : { F->A, F->B, F->C }) {
+			const size_t ci = size_t(cv - T->Verts);
+			if (ci < inc.size()) inc[ci].push_back(F);
+		}
+	}
+	const char *matName = (T->FIndex && T->Faces[0].Txtr && T->Faces[0].Txtr->Name)
+	                      ? T->Faces[0].Txtr->Name : "?";
+	// Detail is printed for the FIRST mesh of each material only — city ships 21
+	// identical copies of the same building and 35 window meshes in total.
+	static const char *seen[32];
+	static int nSeen = 0;
+	bool detail = true;
+	for (int i = 0; i < nSeen; ++i)
+		if (seen[i] && matName && !strcmp(seen[i], matName)) { detail = false; break; }
+	long  nOrphan = 0, nAllDegen = 0, nCancel = 0;
+	int   printed = 0;
+	float worstArea = 0.0f, worstHeight = 0.0f;   // over this mesh's zero-N verts
+	// Per-FACE material gates, which is what the rasterizer actually reads:
+	// writeTangent = (F->Txtr->NormalMap != nullptr) || heightData (Mekalele.h).
+	// The mesh-level material is the FIRST face's and can differ from the
+	// degenerate face's, so count the gate on the incident faces themselves.
+	long  nOnNmap = 0, nOnHmap = 0;
+	for (int32_t v = 0; v < int32_t(T->VIndex); ++v) {
+		Vertex &V = T->Verts[v];
+		if (Vector_Length(&V.N) > EPSILON) continue;
+		const std::vector<const Face *> &fl = inc[size_t(v)];
+		int   nZeroFaceN = 0;
+		float sumArea = 0.0f, maxArea = 0.0f;
+		Vector S; Vector_Form(&S, 0, 0, 0);
+		float  minDot = 2.0f;
+		std::vector<Vector> unitN;
+		bool anyNmap = false, anyHmap = false;
+		for (const Face *F : fl) {
+			const float a  = Tri_Surface(&F->A->Pos, &F->B->Pos, &F->C->Pos);
+			const float fl2 = Vector_Length(&const_cast<Face *>(F)->N);
+			if (F->Txtr && F->Txtr->NormalMap) anyNmap = true;
+			if (F->Txtr && F->Txtr->HeightMap) anyHmap = true;
+			if (a > maxArea) maxArea = a;
+			{   // thinnest-dimension bookkeeping for the mesh summary
+				Vector e0, e1, e2;
+				Vector_Sub(&F->B->Pos, &F->A->Pos, &e0);
+				Vector_Sub(&F->C->Pos, &F->B->Pos, &e1);
+				Vector_Sub(&F->A->Pos, &F->C->Pos, &e2);
+				const float base = std::fmax(Vector_Length(&e0),
+				                   std::fmax(Vector_Length(&e1), Vector_Length(&e2)));
+				const float h = (base > 0.0f) ? 2.0f * a / base : 0.0f;
+				if (a > worstArea)   worstArea = a;
+				if (h > worstHeight) worstHeight = h;
+			}
+			if (fl2 < 1e-6f) { ++nZeroFaceN; continue; }
+			sumArea += a;
+			Vector w; Vector_Scale(&const_cast<Face *>(F)->N, a, &w);
+			Vector_SelfAdd(&S, &w);
+			unitN.push_back(const_cast<Face *>(F)->N);
+		}
+		for (size_t i = 0; i + 1 < unitN.size(); ++i)
+			for (size_t j = i + 1; j < unitN.size(); ++j) {
+				const float d = Dot_Product(&unitN[i], &unitN[j]);
+				if (d < minDot) minDot = d;
+			}
+		if (anyNmap) ++nOnNmap;
+		if (anyHmap) ++nOnHmap;
+		const char *cls;
+		if (fl.empty())                       { cls = "ORPHAN";         ++nOrphan; }
+		else if (nZeroFaceN == (int)fl.size()){ cls = "ALL-DEGENERATE"; ++nAllDegen; }
+		else                                  { cls = "CANCEL";         ++nCancel; }
+		if (detail && printed < 40) {
+			++printed;
+			fprintf(stderr, "[ZERON@%s]   %-14s mesh=%p v%d pos=(%.6f,%.6f,%.6f) "
+			        "faces=%d zeroN=%d maxArea=%g sumArea=%g |S|=%g resid=%g "
+			        "minPairDot=%g mat='%s'\n",
+			        where, cls, (void *)T, v, (double)V.Pos.x, (double)V.Pos.y,
+			        (double)V.Pos.z, (int)fl.size(), nZeroFaceN, (double)maxArea,
+			        (double)sumArea, (double)Vector_Length(&S),
+			        (double)(sumArea > 0.0f ? Vector_Length(&S) / sumArea : 0.0f),
+			        (double)(minDot > 1.5f ? 0.0f : minDot), matName);
+			// The incident faces themselves for the first few — enough to see
+			// whether a CANCEL vertex is two coincident opposite-wound copies of
+			// one triangle (a doubled surface) or something else.
+			if (printed <= 12) {
+				for (size_t k = 0; k < fl.size() && k < 8; ++k) {
+					const Face *F = fl[k];
+					const float a = Tri_Surface(&F->A->Pos, &F->B->Pos, &F->C->Pos);
+					// Longest edge and the triangle's HEIGHT over it (2A/base).
+					// A needle is the interesting shape here: three DISTINCT
+					// collinear corners give a real edge length and a height at
+					// the float noise floor, which is what makes `area` non-zero
+					// while the face normal is the un-normalized zero cross.
+					Vector e0, e1, e2;
+					Vector_Sub(&F->B->Pos, &F->A->Pos, &e0);
+					Vector_Sub(&F->C->Pos, &F->B->Pos, &e1);
+					Vector_Sub(&F->A->Pos, &F->C->Pos, &e2);
+					const float l0 = Vector_Length(&e0), l1 = Vector_Length(&e1),
+					            l2 = Vector_Length(&e2);
+					const float base = std::fmax(l0, std::fmax(l1, l2));
+					fprintf(stderr, "[ZERON]       face#%zu area=%g |F->N|=%g "
+					        "edges=(%g,%g,%g) height=%g "
+					        "A=(%.5f,%.5f,%.5f) B=(%.5f,%.5f,%.5f) "
+					        "C=(%.5f,%.5f,%.5f) mat='%s'\n", k, (double)a,
+					        (double)Vector_Length(&const_cast<Face *>(F)->N),
+					        (double)l0, (double)l1, (double)l2,
+					        (double)(base > 0.0f ? 2.0f * a / base : 0.0f),
+					        (double)F->A->Pos.x, (double)F->A->Pos.y, (double)F->A->Pos.z,
+					        (double)F->B->Pos.x, (double)F->B->Pos.y, (double)F->B->Pos.z,
+					        (double)F->C->Pos.x, (double)F->C->Pos.y, (double)F->C->Pos.z,
+					        (F->Txtr && F->Txtr->Name) ? F->Txtr->Name : "?");
+				}
+			}
+		}
+	}
+	if (nOrphan + nAllDegen + nCancel) {
+		if (detail && nSeen < 32) seen[nSeen++] = matName;
+		fprintf(stderr, "[ZERON@%s] mesh=%p mat='%s' %u verts: ZERO NORMALS "
+		        "orphan=%ld all-degenerate=%ld CANCEL=%ld worstIncidentArea=%g "
+		        "worstIncidentHeight=%g onNmapFace=%ld onHmapFace=%ld "
+		        "(meshMat nmap=%d hmap=%d)\n",
+		        where, (void *)T, matName, T->VIndex, nOrphan, nAllDegen, nCancel,
+		        (double)worstArea, (double)worstHeight, nOnNmap, nOnHmap,
+		        (T->FIndex && T->Faces[0].Txtr && T->Faces[0].Txtr->NormalMap) ? 1 : 0,
+		        (T->FIndex && T->Faces[0].Txtr && T->Faces[0].Txtr->HeightMap) ? 1 : 0);
+	}
+}
+
 // Computes Vertex/Pseudo Approximated Surface Normals for Trimesh T.
 // Upgraded Version, Works well with meshes having non-aligned Triangularity
 void Compute_Vertex_Normals(TriMesh *T)
@@ -105,6 +256,8 @@ void Compute_Vertex_Normals(TriMesh *T)
 		}
 		else
 			Vector_Norm(&Vtx->N);
+
+	if (fds::FeatureFlags::zero_normal_census()) ZeroNormalReport(T, "vnormals");
 }
 
 // Computes the 'Normal Product' values for each Face for Trimesh T.
@@ -455,6 +608,13 @@ void Compute_Vertex_Tangents(TriMesh *T)
 {
 	Vertex *Vtx, *VEnd = T->Verts + T->VIndex;
 	Face   *F,   *FEnd = T->Faces + T->FIndex;
+
+	// --zero_normal_census also reports HERE, because a mesh's normals are not
+	// only built by Compute_Vertex_Normals: MakeFacesIndependent (MeshOps.cpp)
+	// rebuilds them per face clone and then calls this function, and so does the
+	// material importer. Reporting at both ends names the stage that produced a
+	// zero normal instead of only the ones the load-time path produced.
+	if (fds::FeatureFlags::zero_normal_census()) ZeroNormalReport(T, "vtangents");
 
 	for (Vtx = T->Verts; Vtx < VEnd; Vtx++) {
 		Vector_Form(&Vtx->Tangent, 0, 0, 0);
