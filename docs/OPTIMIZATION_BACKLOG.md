@@ -10,6 +10,254 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16n — THE 2-D SPOT TAP: no leaf is available, and it did not need one — the win is the 17-ARGUMENT CALL, and half of it is not the frame
+
+**16m parked "the 2-D spot tap `computeMapShadowAtten` is still not a leaf:
+505 instructions, one `bl` left, nine callee-save pairs, 160-byte frame — same
+method, find the `bl`". Found it. It is `CubeShadow_Sample` on the `srcCube`
+arm — a REAL callee that a per-call census says 83–99.7 % of surviving calls
+take — so 16m's publish-to-global does not apply and the leaf is not
+reachable: force-inlining the callee still leaves 8 pairs and a 128-byte
+frame. What IS deletable is the call itself, from the caller's side. Inlining
+the tap at its scalar call site is `lighting-w1` Gi/f −2.00 % at greets t=3409
+and −4.27 % at t=3122, Gcyc/f −2.61 % / −5.01 %, and ONE least-significant
+digit (+0.001 Gi/f) at the three acceptance poses where the tap barely runs.**
+Shipped FLAGLESS, BIT-EXACT, one statement attribute. Status: **DONE**
+(scalar-site inline) · **REFUTED, measured** (inline the callee) · **REFUTED
+BY ARITHMETIC, not built** (outline the `srcCube` arm).
+
+### FIRST, THE PRICE — and it is not one number, it is a 400x range across poses
+
+`-DFDS_SPOTCALL_CENSUS=1` counts ACTUAL calls (inside the function, so it sees
+both call sites and everything the scalar site's 3-plane guard lets through),
+per main-view frame, 1512x848, his greets arm:
+
+| pose | calls / frame | smIdx | srcSm | **srcCube** | vec-site calls |
+|---|--:|--:|--:|--:|--:|
+| t=6097 | **0** | — | — | — | 0 |
+| t=5813 | 3 984 | 100.00 % | 0 % | **0 %** | 0 |
+| t=5743 | 14 742 | 16.21 % | 0.47 % | **83.32 %** | 0 |
+| t=2845 | 49 368 | 80.99 % | 0.01 % | **19.01 %** | 0 |
+| t=3409 | **828 452** | 0.01 % | 0.28 % | **99.71 %** | 0 |
+| t=3122 (16k's cam) | **1 771 205** | 0.04 % | 6.61 % | **93.35 %** | 0 |
+| t=1588 (the 16f pin, its own arm) | 151 411 | 38.77 % | 9.58 % | **51.64 %** | 0 |
+
+Two facts fall out of that table before any optimisation:
+
+* **The three arms are mutually exclusive in practice** — the shares sum to
+  100.0 % at every pose.
+* **The VEC call site makes ZERO calls at every pose**, and **city (both
+  acceptance arms), chase (all five pin poses) and fountain make zero calls of
+  any kind**. The spot tap's home is greets and only greets, exactly as the
+  cube tap's is. So "measure it where it runs" means t=3409 and t=3122; the
+  other four acceptance poses are controls, and t=6097 is a perfect one.
+
+Priced as the task asks: the 160-byte frame is 22 instructions (11 prologue,
+11 epilogue), so the FRAME alone is 0.00008 / 0.0003 / 0.001 Gi/f at t=5813 /
+5743 / 2845 — **10x to 100x below the 0.01 Gi/f bar, close it there** — and
+0.018 / 0.039 Gi/f at t=3409 / t=3122, which is above it. One lever, two
+verdicts, decided per pose.
+
+### THE `bl`, AND WHY 16m's FIX DOES NOT TRANSPLANT
+
+```
+00000001001f20d4   bl   __Z17CubeShadow_Sampleiffffffiiib   <- the only call in 504
+```
+
+Not a guard. Not cold. It is the mirror-clone SOURCE-CUBE arm, taken by
+99.71 % of the calls at t=3409. There is no lazy `static` to publish and no
+never-taken branch to delete.
+
+### FOUR SHAPES, PRICED BEFORE BUILT, THREE OF THEM REFUSED OR REFUTED
+
+| shape | verdict |
+|---|---|
+| publish-to-global (the 16m fix) | **N/A** — the `bl` is a real callee |
+| outline the `srcCube` arm (16l's shape, transplanted) | **REFUTED BY ARITHMETIC, not built** |
+| **`inl`** — `always_inline` the CALLEE inside the tap | **BUILT, MEASURED, LOSES to `kin` on cycles at 5/5** |
+| **`kin`** — `always_inline` the TAP at its scalar call site | **SHIPPED** |
+
+**The outline is refused by its own census.** It buys a leaf for the calls that
+do NOT take the cube arm — 0.29 % of them at t=3409, 6.65 % at t=3122 — and
+adds a real call to the other 99.7 % / 93.3 %. At t=3409 that is ~30
+instructions x 826 050 = 0.0248 Gi/f = **+1.60 % predicted**, against a
+20-instruction frame removed from 2 402 calls (0.003 %). It cannot win, and
+that is the same arithmetic that killed 16l's `spl` — the shape is
+structurally identical, only the denominator moved.
+
+**The leaf is not available at all**, and the disassembly says so in one line.
+`otool -tvV`:
+
+| binary | `computeMapShadowAtten` | `bl` | callee-save pairs | frame | kernel `TileT<1>` |
+|---|--:|--:|--:|--:|--:|
+| **par** | 504 | 1 | **9** | 0xa0 (160 B) | 4827 |
+| `inl` | 825 | **0** | **8** | 0x80 (128 B) | 4827 |
+| **`kin`** | 504 (vec site only) | 1 | 9 | 0xa0 | **5357** (+530) |
+
+`inl` deletes the `bl` and is STILL NOT A LEAF: it keeps eight pairs and a
+128-byte frame, because the state live across the cube tap — x/y/z, wx/wy/wz,
+lenInv, nGeo\*, the bias ints, all needed by the `smIdx` block AFTER it — is
+real, not hypothetical. **That is the whole difference from 16m**: there the
+call was never taken, so deleting it deleted the need; here the call runs, so
+inlining it only moves the spills.
+
+### THE MECHANISM THAT DOES PAY — and it is not the frame
+
+`kin` removes, per call: an 11-instruction prologue, an 11-instruction
+epilogue, the `bl`, the **12 argument-shuffle `mov`s at the callee's entry**,
+and ~11 marshalling instructions at the call site. `computeMapShadowAtten`
+takes **SEVENTEEN arguments, ten of them floats** — two more floats than the
+ABI has registers for, so two travel by STACK (`stp s10, s11, [sp]` sits in
+the parent's call sequence). Total ~**46 instructions of ABI per call**.
+
+**Predicted before measuring, then measured:**
+
+| pose | calls/f | predicted (46/call) | measured `kin` | implied instr/call |
+|---|--:|--:|--:|--:|
+| t=3409 | 828 452 | 0.0381 Gi/f = **−2.45 %** | **−2.00 %** (0.031 Gi/f) | 37.4 |
+| t=3122 | 1 771 205 | 0.0815 Gi/f = **−4.58 %** | **−4.27 %** (0.076 Gi/f) | 42.9 |
+
+High by 18 % and 7 %, same sign, right magnitude, at call counts **2.14x
+apart** — which is the point: the model is per-call, and it holds across the
+range. **The frame alone (22 instructions) predicts only −1.17 % / −2.19 %,
+about HALF the measured win. On this tap the argument list costs as much as
+the frame does**, and no amount of leaf-hunting would have found that.
+
+### MEASURED — min over 11 order-rotated interleaved rounds, one pose per process
+
+1512x848, `--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao
+--greets-displace`, `--deferred_prof=1 --hw_prof --profiler=0`, 10 iters.
+**Both counter columns quoted, per 16l's caveat.**
+
+| pose | calls/f | row | par | `inl` | **`kin`** |
+|---|--:|---|--:|--:|--:|
+| **3409** | 828 452 | `lighting-w1` Gi/f | 1.552 | 1.528 (−1.55 %) | **1.521 (−2.00 %)** |
+| | | .. Gcyc/f | 0.422 | 0.415 (−1.66 %) | **0.411 (−2.61 %)** |
+| | | .. wall | 12.801 | 12.688 (−0.88 %) | **12.388 (−3.23 %)** |
+| | | `renderFrame` Gi/f | 4.959 | 4.934 (−0.50 %) | **4.927 (−0.65 %)** |
+| | | `renderFrame` Gcyc/f | 1.312 | 1.302 (−0.76 %) | **1.297 (−1.14 %)** |
+| | | `renderFrame` wall | 42.746 | 42.731 (−0.04 %) | **42.456 (−0.68 %)** |
+| **2845** | 49 368 | `lighting-w1` Gi/f | 1.391 | 1.390 (−0.07 %) | **1.389 (−0.14 %)** |
+| | | .. Gcyc/f | 0.360 | 0.365 (+1.39 %) | 0.363 (+0.83 %) |
+| | | `renderFrame` wall | 41.578 | 41.753 (+0.42 %) | **41.457 (−0.29 %)** |
+| **5743** | 14 742 | `lighting-w1` Gi/f | 1.475 | 1.475 (+0.00 %) | 1.476 (+0.07 %) |
+| | | .. Gcyc/f | 0.376 | 0.378 (+0.53 %) | **0.376 (+0.00 %)** |
+| | | `renderFrame` wall | 41.606 | 41.451 (−0.37 %) | **41.228 (−0.91 %)** |
+| **5813** | 3 984 | `lighting-w1` Gi/f | 1.430 | 1.429 (−0.07 %) | 1.431 (+0.07 %) |
+| | | .. Gcyc/f | 0.369 | 0.371 (+0.54 %) | 0.370 (+0.27 %) |
+| | | `renderFrame` wall | 39.588 | 39.848 (+0.66 %) | 39.790 (+0.51 %) |
+| **6097** | **0** | `lighting-w1` Gi/f | 1.288 | 1.288 (+0.00 %) | 1.289 (+0.08 %) |
+| | | .. Gcyc/f | 0.346 | 0.348 (+0.58 %) | **0.345 (−0.29 %)** |
+| | | `renderFrame` wall | 37.053 | 37.232 (+0.48 %) | **37.022 (−0.08 %)** |
+| **3122** | 1 771 205 | `lighting-w1` Gi/f | 1.781 | 1.731 (−2.81 %) | **1.705 (−4.27 %)** |
+| | | .. Gcyc/f | 0.479 | 0.480 (+0.21 %) | **0.455 (−5.01 %)** |
+| | | .. wall | 14.260 | 14.173 (−0.61 %) | **13.813 (−3.13 %)** |
+| | | `renderFrame` Gi/f | 6.583 | 6.533 (−0.76 %) | **6.507 (−1.15 %)** |
+| | | `renderFrame` Gcyc/f | 1.640 | 1.647 (+0.43 %) | **1.580 (−3.66 %)** |
+| | | `renderFrame` wall | 52.184 | 52.282 (+0.19 %) | **51.900 (−0.54 %)** |
+
+`lighting-w2` Gi/f is flat to four decimals everywhere except one LSB at
+t=3122 — the control that says this touched wave 1 alone.
+
+**THE NOISE FLOOR, stated so the small numbers are not over-read.** Spread of
+the 11 rounds within each arm: **Gi/f 0.00–0.14 %** (the counter's own quantum
+is 0.001 Gi/f = ±0.07 % here, so **every "+0.07 / +0.08 %" above is literally
+one least-significant digit**), **Gcyc/f 1.37–4.62 %** — so on the cycle
+column only t=3409 (−2.61 %) and t=3122 (−5.01 %) are resolvable at all, and
+the +0.83 % at t=2845 / +0.27 % at t=5813 are inside the spread and must not be
+read as losses. **`kin` beats `inl` on cycles at 5 of 5 acceptance poses** and
+by 5.2 points at t=3122, which is what settles the choice between them.
+
+### THE TAX, PRICED WHERE THE TAP CANNOT PAY
+
++530 instructions in the kernel is not free, so it was measured where the
+change can do nothing at all:
+
+* **greets t=6097 — ZERO calls, same scene, same arm**: Gi/f **+0.08 %** (one
+  LSB), Gcyc/f −0.29 %, `renderFrame` wall −0.08 %.
+* **city t=1961, his `--env_live_water --deferred --city_env_pixel` arm, 11
+  rounds** — a scene with zero spot taps AND zero cube taps: `lighting-w1`
+  Gi/f **+0.00 %**, Gcyc/f −0.84 %; `renderFrame` Gi/f +0.02 %, Gcyc/f
+  +0.54 %, wall +0.60 %.
+
+So the code growth costs at most one least-significant digit of instructions
+anywhere it cannot earn, and nothing measurable on the other scenes' kernels.
+
+### THE HATCH — refused structurally, not timed
+
+`always_inline` is a compile-time decision with no runtime dial. A `bool` flag
+would have to keep BOTH bodies live and the OFF arm would still make the call —
+the exact shape 16m timed as `hon` at +1.36 to +1.82 %. A TEMPLATE hatch (the
+`--deferred_cube_prepass` trick) would duplicate a **4827-instruction kernel**
+per arm to gate a one-line placement change. **Shipped FLAGLESS**, third time
+running, same reason.
+
+### BYTE VERDICT
+
+* **14 surfaces — the five acceptance poses + the nine 16f pins — bit-identical
+  parent-to-child on the FIRST pass, for all three built arms** (`par`, `inl`,
+  `kin`) and again for the shipped binary. One worktree, one asset tree. Pins
+  at their RECORDED values, not merely parent-matched: city `bd4ffbf8`,
+  city-his-arm `4cb8d2ca`, fountain `8db68ccb`, greets t=1588 `570a7b44`,
+  chase `622b96a2` / `31aa5203` / `ca07a814`.
+* **THE FOUNTAIN t=2500 FLIP DID NOT APPEAR THIS ROUND** — 4 clean passes,
+  `8db68ccb` every time. 16i / 16l / 16m each saw it; this round did not. That
+  is one more data point that it is intermittent and pre-existing, not that it
+  is gone.
+* **`--shadow_tap_census` spot-pyramid rows — the committed instrument that
+  actually reads this tap's interior — are IDENTICAL parent-to-child at all
+  five poses, to every digit**: t=2845 reached 0.040 M/f, uniform-lit 33.9 %,
+  uniform-occ 48.7 %, mixed 17.4 %; t=5743 0.002 M/f, 17.9 % / 79.6 % / 2.5 %;
+  t=5813 0.004 M/f, 97.4 % / 0.2 % / 2.3 %; t=3409 and t=6097 zero (their calls
+  take the `srcCube` arm, which is not the PolyId pyramid's path).
+* `--deferred_cube_prepass_verify`: **0 mismatches in 76.8 M taps** over the
+  five poses (16.0 / 14.0 / 16.9 / 16.6 / 13.3 M). **Stated honestly: this
+  counter does NOT cover the `srcCube` arm** — it verifies the light's OWN cube
+  against the prepass. The `srcCube` arm's coverage is the t=3409 frame itself,
+  which is 99.71 % `srcCube`-driven and byte-identical.
+* `render_gate.sh` **4/4 on both binaries**. **What it can discriminate here:
+  nothing.** 16m instrumented its four arms at zero cube taps; this round's
+  census adds that those arms and city / chase / fountain make **zero
+  `computeMapShadowAtten` calls**, so no gate arm executes one line of the
+  changed path. It is a regression net for the rest of the kernel, not evidence
+  for this change. The five poses, t=1588 and t=3122 are the coverage.
+* Instrument builds still compile: `-DFDS_SHADOW_TAP_CENSUS=ON`.
+* Eyeballed: `docs/img/spotleaf/inline_t3409.png` (greets t=3409, his arm — the
+  "adept" portal frame, which is exactly the mirror-clone content that makes
+  this pose 99.7 % `srcCube`).
+
+### WHAT IS LEFT ON THE SHADOW TAPS
+
+1. **THE CALL FRAME IS NOW CLOSED ON BOTH TAPS.** The cube tap is a leaf with a
+   zero-byte frame (16m). The spot tap's frame is gone from the only call site
+   that makes calls; the out-of-line body keeps its 160-byte frame but now
+   serves only the VEC site, which is measured at **zero calls in every scene**.
+   There is no third tap and no third frame.
+2. **The next thing on this tap is ARITHMETIC, not placement.** At t=3409 /
+   t=3122 the `srcCube` arm recomputes the full mirror reflection per (pixel x
+   light) — world position from the view matrix, the plane reflection, the
+   world→view rotation back, ~40 float ops — 828 k to 1.77 M times a frame,
+   and the SAME reflection is computed a second time by the `srcSm` arm above
+   it when both are live. That is a real lever and a different round; it will
+   need a bit-exactness argument that this one did not.
+3. **Any future spot-tap work must quote t=3409 / t=3122, never the five-pose
+   summary.** The call count spans **0 to 1.77 M per frame** across six greets
+   poses of the same scene. A lever measured only at t=5743 or t=6097 is being
+   measured where the function does not run.
+4. **`--ssao_downscale=2` is still the single largest lever on this arm**, and
+   still a look change nobody has approved.
+
+### METHOD NOTE
+
+16m's note said "count the `bl`s in the hot function first". That was right and
+it was not enough. **Also count the ARGUMENTS.** A 17-argument call with ten
+floats moves as much state as a nine-pair frame saves, and neither
+instruction-counting nor leaf-hunting sees it — only the call sequence in
+`otool -tvV` does. And **count the CALLS before either**: a per-call census
+(30 lines, one `#define`) turned "the tap is not a leaf" from a one-line
+grievance into a table that decided three of the four shapes without building
+them.
+
 ## 2026-08-16m — THE CUBE TAP'S CALL FRAME: 16l's fix is REFUTED, and the frame was never the PCF's fault — it was ONE cold call to a lazy `static`
 
 **16l parked "splitting the tail's RARE half into its own `noinline` function

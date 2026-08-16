@@ -837,6 +837,66 @@ hardest the other way (`renderFrame` Gcyc −2.40 %), i.e. the mirror image of
 pins at their recorded values, `render_gate.sh` 4/4 (and, exactly as 16l says,
 **it cannot discriminate a greets-only tap change**). Shipped FLAGLESS.
 
+**Amendment 2026-08-16n (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16n) — 16m's
+named remainder, the 2-D SPOT tap: NO LEAF IS AVAILABLE, and it did not need
+one.** 16m parked "`computeMapShadowAtten` is still not a leaf: 505
+instructions, one `bl` left, nine pairs, 160-byte frame — same method". The
+`bl` is `CubeShadow_Sample` on the mirror-clone `srcCube` arm: a **real hot
+callee**, not a lazy-static guard, so publish-to-global does not transplant.
+
+1. **PRICED FIRST, and it is a 400x range across poses.** A per-call census
+   (`-DFDS_SPOTCALL_CENSUS=1`, counted inside the function so it sees past the
+   scalar site's 3-plane guard), per main-view frame at 1512x848 on his arm:
+   **t=6097 0 calls · t=5813 3 984 · t=5743 14 742 · t=2845 49 368 · t=3409
+   828 452 · t=3122 1 771 205** (t=1588 pin: 151 411). The `srcCube` arm takes
+   99.71 % of them at t=3409 and 93.35 % at t=3122. **The VEC call site makes
+   ZERO calls at every pose, and city (both arms), chase (all five pin poses)
+   and fountain make zero calls of any kind** — the spot tap's home is greets
+   alone, like the cube tap's. So the 22-instruction frame is 0.00008–0.001
+   Gi/f at three of the five acceptance poses (**below the 0.01 Gi/f bar,
+   closed there**) and 0.018 / 0.039 Gi/f at t=3409 / t=3122.
+2. **The leaf is genuinely unavailable.** Force-inlining the CALLEE (`inl`)
+   deletes the `bl` and still keeps **8 callee-save pairs and a 128-byte
+   frame** — the state live across the cube tap is real, unlike 16m's
+   never-taken branch. Outlining the `srcCube` arm is refused by its own
+   census: it buys a leaf for 0.29 % of calls and adds a call to the other
+   99.7 %, ~+1.60 % predicted at t=3409 — 16l's `spl` arithmetic with a new
+   denominator.
+3. **What pays is deleting the CALL from the caller's side**
+   (`[[clang::always_inline]]` on the scalar call site — that site is 100 % of
+   the calls). `lighting-w1` **Gi/f −2.00 % at t=3409 and −4.27 % at t=3122**,
+   **Gcyc/f −2.61 % / −5.01 %**, `renderFrame` Gcyc −1.14 % / −3.66 %, wall
+   −0.68 % / −0.54 %; and **one least-significant digit (+0.001 Gi/f) at the
+   three poses where the tap barely runs**, with the Gcyc moves there (+0.83 %
+   at t=2845, +0.27 % at t=5813) inside the measured 1.4–4.6 % round-to-round
+   spread of that column. Min over 11 order-rotated interleaved rounds.
+4. **HALF THE WIN IS NOT THE FRAME.** The ABI accounting is 11 (prologue) + 11
+   (epilogue) + 1 (`bl`) + 12 (the callee's argument-shuffle `mov`s) + ~11
+   (caller marshalling) = **~46 instructions per call**, because the tap takes
+   **17 arguments, ten of them floats — two of which travel by STACK**.
+   Predicted −2.45 % / −4.58 % against measured −2.00 % / −4.27 % at call
+   counts **2.14x apart**; the frame alone would have predicted −1.17 % /
+   −2.19 %. **On this tap the argument list costs as much as the frame.**
+5. **THE TAX, measured where it cannot pay**: greets t=6097 (zero calls)
+   +0.08 % Gi/f — one LSB; **city t=1961 on his acceptance arm, 11 rounds:
+   `lighting-w1` Gi/f +0.00 %, `renderFrame` Gi/f +0.02 %**. The +530
+   kernel instructions cost nothing measurable outside greets.
+
+BIT-EXACT: 14 surfaces (five poses + the nine 16f pins) identical on the FIRST
+pass for all three built arms, pins at their RECORDED values; the committed
+`--shadow_tap_census` **spot-pyramid rows identical parent-to-child at all five
+poses**; `--deferred_cube_prepass_verify` 0 mismatches in 76.8 M taps (which
+does **not** cover the `srcCube` arm — the t=3409 frame, 99.71 % `srcCube` and
+byte-identical, is that arm's coverage); `render_gate.sh` 4/4 and **it cannot
+discriminate this change at all** — its four arms make zero
+`computeMapShadowAtten` calls. **The fountain t=2500 flip did NOT appear this
+round** (4 clean passes). Shipped FLAGLESS: `always_inline` has no runtime
+dial, and a template hatch would duplicate a 4827-instruction kernel to gate a
+one-line placement change. **THE CALL FRAME IS NOW CLOSED ON BOTH SHADOW
+TAPS**; what remains on the spot tap is the `srcCube` arm's mirror-reflection
+ARITHMETIC (~40 float ops x 0.83–1.77 M calls/frame), which is a different
+round.
+
 **The literal split was built and it LOSES at every pose** — `lighting-w1`
 +0.51 to +1.54 % instructions AND +0.23 to +1.42 % cycles — because it buys the
 leaf by adding a real call on the 19.6 % of taps that reach the PCF:

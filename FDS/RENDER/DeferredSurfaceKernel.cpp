@@ -579,6 +579,15 @@ static bool deferredLightingQuarterEnabled() {
 // [0,1]; 0.0 means fully shadowed (callers early-out). wx/wy/wz/lenInv are the
 // light→pixel vector + 1/|w| (used only by the smIdx slope bias). Byte-identical
 // to the inlined scalar code it replaced.
+//
+// THE OUT-OF-LINE BODY BELOW IS THE VEC PATH'S ONLY. The scalar call site
+// force-inlines this (`[[clang::always_inline]]`, 2026-08-16n) because a
+// 17-argument call — ten of them floats, two of which travel by STACK — costs
+// about as much in ABI as the 160-byte frame it opens, and that site makes
+// 100 % of the calls anything actually makes (the vec site measures ZERO at
+// every greets pose; city / chase / fountain take no spot tap at all). Kept as
+// ONE function on purpose: the two paths shadow identically by contract, and a
+// hand-copy at the scalar site would be two bodies to keep in step.
 static inline float computeMapShadowAtten(const TileLights& tl, int n,
                                           const DeferredLightingCtx& ctx,
                                           float x, float y, float z,
@@ -3394,9 +3403,44 @@ static void Render_DeferredLighting_TileT(const DeferredLightingCtx &ctx,
 						// is 1.0f, and 1.0f fails the `<= 0.0f` test below either
 						// way. The vec path needs no equivalent: it already tests
 						// the same planes 8-wide (`anyShadow`) before its lane loop.
+						//
+						// AND THE CALL THAT SURVIVES THE GUARD IS INLINED, because
+						// its remaining `bl` cannot be deleted (2026-08-16n). The
+						// 16m hoist left this tap with ONE `bl` — and unlike the
+						// cube tap's, it is not a cold lazy-static guard: it is
+						// `CubeShadow_Sample` on the srcCube arm, which a per-call
+						// census (-DFDS_SPOTCALL_CENSUS) says 83–99.7 % of the
+						// surviving calls actually take at the poses where this
+						// tap runs. So there is no publish-to-global here and no
+						// leaf to reach: force-inlining the CALLEE still leaves 8
+						// callee-save pairs and a 128-byte frame, because the state
+						// live across the cube tap is real, not hypothetical.
+						//
+						// What IS deletable is the call ITSELF, from the side that
+						// makes it. This site is 100 % of the calls in every scene
+						// that takes a spot tap (the vec site below measures ZERO;
+						// city / chase / fountain measure zero taps of any kind).
+						// Inlining here removes, per call: an 11-instruction
+						// prologue, an 11-instruction epilogue, the `bl`, and the
+						// 17-ARGUMENT marshalling on both sides — ten of those
+						// arguments are floats, so two of them travel by STACK
+						// (`stp s10, s11, [sp]` at the parent's call site). ~46
+						// instructions of ABI per call, against a measured 37–43.
+						// The frame is only about half of it: the argument list
+						// costs as much as the frame does.
+						//
+						// Priced before it was built, from the census: 828 452
+						// calls/frame at t=3409 and 1 771 205 at t=3122, against
+						// 14 742 / 49 368 / 3 984 / 0 at the other four acceptance
+						// poses. So this pays at exactly two poses and is one
+						// least-significant digit of Gi/f (+0.001) at the rest —
+						// t=6097 takes ZERO calls and still measures +0.08 %,
+						// which is the honest price of the +530 instructions this
+						// adds to the kernel. BIT-EXACT (code placement only).
 						float shadowAtten = 1.0f;
 						if ((tl.shadowMapIdx[n] & tl.srcShadowMapIdx[n]
 						                        & tl.srcCubeShadowIdx[n]) >= 0) {
+							[[clang::always_inline]]
 							shadowAtten = computeMapShadowAtten(
 								tl, n, ctx, x, y, z, wx, wy, wz, lenInv,
 								nGeoX, nGeoY, nGeoZ, surfaceShadowId,
