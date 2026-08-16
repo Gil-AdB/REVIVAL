@@ -244,7 +244,22 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 	// they reach fails the same `len2 > range2` test the per-pixel loop already
 	// applies — so this is the byte-null half of the parked per-tile early-out.
 	const bool sphereCull = fds::FeatureFlags::deferred_tile_sphere_cull();
-	static TileChunkSphere chunk[DEFERRED_NUM_TILES];
+	// PER-CALL, NOT `static`. This scratch is written for every tile of THIS
+	// call's grid and then read back across the light loop below, so a `static`
+	// makes it shared mutable state between every concurrent caller. That is a
+	// real race, not a theoretical one: the mirror-shard bake calls
+	// Render_DeferredLighting -> here from 12 pool workers at once
+	// (MirrorShatter::renderReflectionCameras), each with its own camera and its
+	// own per-tile zMin/zMax, all writing chunk[0..3] (a 64² cell grids 2x2 at
+	// --deferred_offscreen_tile_px=32) and then reading them back. Whoever wrote
+	// last decided the other eleven workers' sphere cull, so the surviving
+	// (tile x light) set — and therefore the shaded reflection — depended on
+	// thread interleaving. Measured: greets t=6293/6294 under the acceptance arm
+	// with FDS_GREETS_SHATTER=1 flipped 15 times in 49 launches with the static,
+	// 0 in 48 with it per-call. 96 x 20 B = 1.9 KB of stack, written before read
+	// in the guarded branch and never read outside it; the main frame is one
+	// caller on one thread, so its values are unchanged (byte-null there).
+	TileChunkSphere chunk[DEFERRED_NUM_TILES];
 	if (coneCull || sphereCull || sContribThr > 0.0f) {
 		for (int j = 0; j < numTilesY; ++j) {
 			for (int i = 0; i < numTilesX; ++i) {

@@ -10,6 +10,157 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16k — THE SHATTER NONDETERMINISM, CLOSED: one `static` scratch array shared by 12 shard workers. 15 flips in 49 → 0 in 48
+
+**16j handed on "the greets mirror shatter is nondeterministic, ~24.5 %, it lives
+in the 12-worker fan-out". It does, and it is not in `MirrorShatter.cpp` at all —
+it is one word in the tile-light builder the fan-out calls.**
+
+### THE WRITE
+
+`FDS/RENDER/DeferredLightLists.cpp:247`
+
+```c
+static TileChunkSphere chunk[DEFERRED_NUM_TILES];   // <- the bug
+```
+
+Written for every tile of THIS call's grid at `:252`, read back across the whole
+light loop at `:328-333` (the `sphereCull` branch) and `:340` (`.valid`, cone
+cull). `static`, not `thread_local`, not per-call — so it is **shared mutable
+state between every concurrent caller of `buildTileLightLists`**.
+
+The mirror-shard bake is exactly such a caller, ×12:
+`MirrorShatter::renderReflectionCameras` (`MirrorShatter.cpp:1073`) fans 238
+shards over 12 pool workers; each worker's `renderShardIntoCell`
+(`:1218`) calls `Render_DeferredLighting(dctx, &ov)` (`:1436`), which reaches
+`buildTileLightLists` at `DeferredSurfaceKernel.cpp:7380`. Every per-worker
+buffer that pass owns was correctly made per-worker — `ov.gb`, `ov.lights`,
+`ov.tileLights`, `ov.vpage`, the cull cone globals are `thread_local` — and this
+one array, two frames deeper in the call chain, was not. At
+`--deferred_offscreen_tile_px=32` a 64² cell grids **2×2**, so all twelve workers
+write `chunk[0..3]`: the same four structs, the same cache line. Whoever wrote
+last decided the other eleven workers' cull, and the surviving (tile × light) set
+— hence the shaded reflection — depended on thread interleaving.
+
+**FIX: drop the `static`.** `TileChunkSphere chunk[DEFERRED_NUM_TILES];`, 96 × 20 B
+= 1.9 KB of stack, written before read inside the guarded branch and never read
+outside it. Nothing else changes.
+
+### THE EVIDENCE CHAIN — every step run, none read off the source
+
+| # | arm (greets `t=6293,6294`, his acceptance arm, `FDS_GREETS_SHATTER=1`) | runs | result |
+|---|---|--:|---|
+| 1 | parent `6c3d38d8`, baseline | **49** | **15 flips, 13 distinct** — 30.6 %, reproduces 16j's 24.5 % |
+| 2 | parent + `--no-spot_cone_cull --no-deferred_tile_sphere_cull` | 24 | **0 flips** |
+| 3 | parent + `--no-deferred_tile_sphere_cull` ONLY | 24 | **0 flips, and BYTE-IDENTICAL to (2)** |
+| 4 | **fixed** binary, same arm as (1) | **48** | **0 flips** |
+| 5 | fixed, `FDS_SHARD_REFL_SERIAL=1` | 24 | 0 flips |
+
+**(3) is the localization, and it is exact.** The sphere cull is the *only*
+consumer of the corrupted array's DATA (the cone cull reads only `.valid`).
+Turning it alone off kills every flip and lands on the same hash as turning both
+off — so the cone cull's `.valid` read never decided anything here, and the race's
+entire effect goes through `chunk[idx].{cx,cy,cz,R}` at `:328-333`. Nothing was
+changed in `MirrorShatter.cpp` to get (2)/(3): they are pure flag arms on the
+parent binary.
+
+**(4) is the confirmation, and it is stronger than "0 flips".** The fixed binary
+is stable at **`852aabe6a4106182` / `f3c3a2018edfa609`** — *exactly the parent's
+modal hashes*, and exactly the parallel modal 16j recorded (`852aabe6…`). The
+modal was always the self-consistent answer (every worker reading its own write);
+the fix just makes that outcome the only one. (5) sits at **`0ff07c7305582656` /
+`467625dfdf34a4f7`** — 16j's recorded serial values, unmoved.
+
+**Size of the defect, imaged:** a flipped parent frame against the modal is
+**2 145 px of 2 073 600 (0.103 %), max Δ 1/255**. It is an LSB-level wobble in the
+shard reflections — small to the eye, fatal to byte-gating the arm.
+
+### GATES — parent-vs-fixed on one tree, and the recorded values
+
+| pin | parent | fixed | |
+|---|---|---|---|
+| city t=1961 `--deferred`, `FDS_CITY_ENV_PIXEL=1` | `bd4ffbf8` | `bd4ffbf8` | **recorded value** |
+| city t=1961 acceptance arm | `4cb8d2ca` | `4cb8d2ca` | **recorded value** |
+| city t=2400 / t=400 acceptance arm | `f473fe2b` / `d3374de6` | same | **recorded values** |
+| fountain t=2500 | `8db68ccb` | `8db68ccb` | **recorded value** |
+| greets t=1588 | `570a7b44` | `570a7b44` | identical (clean-worktree value) |
+| chase t=100/400/800/1200/1600 | 5 values | same 5 | identical 5/5 |
+
+`render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+Say what that gate is worth, again: **it cannot discriminate this fix** — no row
+runs a mirror shatter, and the change is inert on any single-threaded caller. The
+coverage that carries weight is the 49-vs-48 flip battery and the parent-identical
+pins.
+
+### PERF — no measurable cost, and the mechanism says there cannot be one
+
+`[SHARD-REFL]` wall, `FDS_SHARD_REFL_PROF=1`, split by call ordinal (call 1 = cold
+bake, call 2 = warm — pooling them is what made the first battery read
+"+10 %" nonsense), order-rotated A/B, run 1 discarded:
+
+| | parent | fixed | min Δ | median Δ |
+|---|--:|--:|--:|--:|
+| call 1, min-of-30 | 45.90 ms | 46.60 ms | +1.53 % | +0.10 % |
+| call 2, min-of-30 | 18.50 ms | 18.40 ms | −0.54 % | +1.01 % |
+| call 1, min-of-16 (independent) | 46.60 ms | 46.60 ms | +0.00 % | +0.10 % |
+| call 2, min-of-16 (independent) | 18.40 ms | 18.70 ms | +1.63 % | +0.00 % |
+
+**The sign flips across repetitions and across statistics, so this is noise, not a
+delta.** Paired per-round (n=30): call 1 **−0.33 ms** [95 % CI −2.31, +1.64], call
+2 **−0.82 ms** [−3.00, +1.36] — point estimates favour the FIXED binary, CI
+straddles zero. The instrument cannot bound this at 1 %; the mechanism can. The
+change removes a BSS array twelve threads were writing to the same cache line and
+replaces it with a stack-pointer adjustment; only 4 of the 96 entries are ever
+touched on this pass, and none is initialised. There is no work added.
+
+### THE SECOND DEFECT IN THE SAME FUNCTION — MEASURED, **NOT** LANDED
+
+`tileChunkSphere` (`DeferredCommon.h:496`) reads the **engine globals**
+`FOVX / FOVY / CntrEX / CntrEY`. It takes no projection parameters.
+`buildTileLightLists` shadows those four names with the caller's camera at
+`DeferredLightLists.cpp:211-212` — which reads as if the helper picks them up. It
+does not: it is a free function in a header and sees only the globals. So:
+
+* **SERIAL shard bake** — `renderReflectionCamerasSerial` assigns the globals per
+  shard (`MirrorShatter.cpp:833-838`), so the chunk spheres are correct.
+* **PARALLEL shard bake** — nothing assigns them; they hold the **main camera's**
+  1920×1080 projection while the tile rect is a 64² cell. The spheres are garbage.
+
+**Controlled, not argued.** On the serial arm, `--no-spot_cone_cull
+--no-deferred_tile_sphere_cull` is **byte-identical** to the culls on (6/6,
+`0ff07c73…`) — with the right projection the sphere cull rejects nothing, exactly
+as the flag's "BYTE-NULL" claim says. On the parallel arm the same flag **changes
+the frame**: `852aabe6…` → `63671ae3…`, **25 567 px (1.23 %), max Δ 1/255**. That
+difference is the sphere cull dropping (tile × light) pairs that do reach pixels,
+because it is testing against the wrong frustum.
+
+Not landed because it is a LOOK change in a scene under active tuning, and it is
+his call. The patch shape is mechanical: give `tileChunkSphere` four projection
+parameters and pass `cam.fovX/fovY/cntrEX/cntrEY` at
+`DeferredLightLists.cpp:252` and `:347`, and the in-scope projection at
+`DeferredVolumetric.cpp:3039`. **It does not close the serial-vs-parallel gap on
+its own** — parallel-with-culls-off `63671ae3…` still differs from serial
+`0ff07c73…`, because the two paths are different functions (global-swap
+`Render(ForceDeferred, skipVolumetric=true)` + `reflGB_` vs per-worker
+`Render_DeferredLighting` + `Render_VolumetricCones` + `w.gb`), exactly as 16j
+warned. Byte identity between those two arms is not available and never was.
+
+### METHOD NOTES THAT GENERALISE
+
+1. **The audit class is "function-local `static` scratch", and it is invisible to
+   a caller audit.** Everything `renderShardIntoCell` owns was already per-worker.
+   The race was two frames down the stack in a file whose author never imagined a
+   concurrent caller. Grep for `static` in every callee of a fan-out, not just the
+   fan-out.
+2. **A wall-clock A/B must be split by call ordinal.** The shatter's first bake is
+   cold (46 ms) and the second warm (18 ms); pooling them gave a median "+10.3 %"
+   that meant nothing.
+3. **`--repro` still is not a determinism instrument** (16j). Every number above
+   is `--snapshot`.
+4. Remaining open from 16j and untouched here: the `--hdr` cone/halo gate row that
+   `render_gate.sh` still lacks, which is what blocks landing 16j (b)'s
+   `VolCompositeAdd` predicate.
+
 ## 2026-08-16j — 16i's THREE HANDOVERS, RUN: one is REAL and fixed, one CANNOT FIRE, and the battery found a DIFFERENT live nondeterminism
 
 **16i (4) handed on two bugs "found by code reading, NOT verified by running

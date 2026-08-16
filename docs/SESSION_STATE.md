@@ -1,5 +1,57 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16k — THE SHATTER RACE IS CLOSED: `static TileChunkSphere chunk[]`, shared by 12 shard workers. 15/49 → 0/48
+>
+> **`FDS/RENDER/DeferredLightLists.cpp:247` — a function-local `static` scratch
+> array in `buildTileLightLists`, written per tile at `:252` and read back across
+> the light loop at `:328-333`.** The mirror-shard bake calls that function from
+> 12 pool workers at once (`MirrorShatter.cpp:1073` → `:1218` → `:1436` →
+> `DeferredSurfaceKernel.cpp:7380`), each with its own camera and its own tile
+> depth bounds, all writing `chunk[0..3]` (a 64² cell grids 2×2). Last writer
+> decided everyone's sphere cull. **Fix: drop the `static`** — 1.9 KB of stack,
+> nothing else changes. Full evidence: `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16k**.
+>
+> | arm (greets `t=6293,6294`, his acceptance arm, `FDS_GREETS_SHATTER=1`) | runs | flips |
+> |---|--:|---|
+> | parent `6c3d38d8` | 49 | **15 (30.6 %)**, 13 distinct |
+> | parent + `--no-deferred_tile_sphere_cull` (the only reader of the array's data) | 24 | **0** — and byte-identical to disabling both culls |
+> | **fixed** | **48** | **0** |
+> | fixed, `FDS_SHARD_REFL_SERIAL=1` | 24 | 0 |
+>
+> The fixed binary is stable at **`852aabe6…` / `f3c3a2018…`** — *the parent's own
+> modal hashes*, i.e. 16j's recorded parallel modal. The modal was always the
+> self-consistent outcome; the fix makes it the only one. Serial stays at 16j's
+> recorded `0ff07c73…` / `467625df…`. Size of the defect: a flipped frame vs the
+> modal is **2 145 px (0.103 %), max Δ 1/255**.
+>
+> ### GATES
+>
+> * city `bd4ffbf8` / `4cb8d2ca` / `f473fe2b` (t=2400) / `d3374de6` (t=400) and
+>   fountain `8db68ccb` — **all five at their recorded values**, parent-identical.
+> * greets t=1588 and chase t=100/400/800/1200/1600 — **identical parent-to-fixed**.
+> * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+>   It **cannot discriminate this fix** — no row shatters a mirror; the flip
+>   battery is the real coverage.
+> * Perf: `[SHARD-REFL]` wall split by call ordinal (cold 46 ms / warm 18 ms),
+>   order-rotated — **min Δ sign flips between two independent batteries**
+>   (+1.53 %/−0.54 % at n=30, +0.00 %/+1.63 % at n=16), paired means favour the
+>   fix. No measurable cost; the change removes a 12-thread shared cache line and
+>   adds no work. **Split a shatter wall by call ordinal — pooling cold+warm gave
+>   a meaningless "+10 %".**
+>
+> ### HANDS ON — a second, DETERMINISTIC defect in the same function, measured, NOT landed
+>
+> `tileChunkSphere` (`DeferredCommon.h:496`) takes no projection parameters: it
+> reads the **globals** `FOVX/FOVY/CntrEX/CntrEY`. `buildTileLightLists` shadows
+> those names with `cam`'s values at `:211-212`, which reads as if the helper uses
+> them — it does not. The SERIAL shard bake assigns the globals per shard
+> (`MirrorShatter.cpp:833-838`) so it is correct; the PARALLEL bake leaves the
+> MAIN camera's 1920×1080 projection in them while the tile rect is 64². Control:
+> on the serial arm `--no-deferred_tile_sphere_cull` is byte-identical (6/6); on
+> the parallel arm it **changes 25 567 px (1.23 %), max Δ 1/255**. It is a LOOK
+> change in a scene under tuning, so it is his call. It does NOT close the
+> serial-vs-parallel gap on its own — those are different functions, as 16j said.
+>
 > ## 2026-08-16j — THE BLACK CHECKERBOARD WAS REAL (city, crash, fountain), THE SHARD "RACE" ISSUES NO WRITES, AND THE SHATTER IS 24.5 % NONDETERMINISTIC
 >
 > **Three read-derived items from 16i, all run. One fixed, one refuted, one clean —
