@@ -1717,9 +1717,25 @@ struct TileRasterizer {
 						Vec8f vinv = approx_rsqrt(X*X + Y*Y + Z*Z);
 						Vec8f Vx = X * (-vinv), Vy = Y * (-vinv), Vz = Z * (-vinv);
 						// Normalize interpolated view N and T; B = N×T.
-						Vec8f nl = approx_rsqrt(p_nx*p_nx + p_ny*p_ny + p_nz*p_nz);
+						// Both normalizes are length-guarded, for the same reason
+						// and by the same rule as the G-buffer normal/tangent
+						// planes below (and as Compute_Vertex_Tangents' fallback,
+						// PREPROC.CPP): approx_rsqrt(0) is +inf and 0*inf is NaN,
+						// and this is the FIRST consumer of the interpolated frame
+						// — it runs BEFORE the plane masks, so a degenerate lane
+						// here reaches the march (and --pom_normal, which builds
+						// the bumped normal out of exactly these N/T/B) unmasked.
+						// A lane with no usable frame gets the IDENTITY: T and B
+						// collapse to zero, so VtT/VtB are zero and the march
+						// applies NO UV shift — the pixel keeps the geometric UV
+						// it would have had without a height map, which is the
+						// only defined answer when the tangent frame is missing.
+						const Vec8f frameEps = 1e-12f;
+						const Vec8f n2m = p_nx*p_nx + p_ny*p_ny + p_nz*p_nz;
+						Vec8f nl = select(n2m > frameEps, approx_rsqrt(n2m), Vec8f(0.0f));
 						Vec8f Nx = p_nx*nl, Ny = p_ny*nl, Nz = p_nz*nl;
-						Vec8f tl = approx_rsqrt(p_tx*p_tx + p_ty*p_ty + p_tz*p_tz);
+						const Vec8f t2m = p_tx*p_tx + p_ty*p_ty + p_tz*p_tz;
+						Vec8f tl = select(t2m > frameEps, approx_rsqrt(t2m), Vec8f(0.0f));
 						Vec8f Tx = p_tx*tl, Ty = p_ty*tl, Tz = p_tz*tl;
 						// B = handedness·(N×T) — the engine-wide convention
 						// (Base/Material.h). Without the sign the march walks a
