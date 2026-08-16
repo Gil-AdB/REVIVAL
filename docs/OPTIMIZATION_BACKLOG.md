@@ -10,6 +10,202 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16i — WAVE 1's dead LDR chain: the argument reaches it, the chain is 0.033 Gi/f, and the predicate needs one more term than wave 2's
+
+**Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance
+arm: `lighting-w1` −1.72 to −1.96 % instructions at EVERY pose (1.570 → 1.542 at
+t=5743), `DeferredLighting-call` −1.45 to −1.61 %, `renderFrame` −0.54 to
+−0.63 %. `lighting-w2` flat to four decimals at every pose. BYTE-NULL: five
+poses under his own arm identical parent-to-child 3/3, nine 2026-08-16f pins at
+their recorded values, `render_gate.sh` 4/4, the city underlay control
+`56f6aff0` on both binaries.**
+
+Commits `c0ccb40d` (instrument) · `2259c2f2` (`--deferred_shade_ldr_skip`,
+default ON) · `aee1e8d7` (the stale `GreetsMirror.cpp` lift comment,
+adjudicated).
+
+### FIRST, THE SIZE — because 16h's handoff invites the wrong reading
+
+16h left this as "**THE SAME LDR ARGUMENT APPLIES TO WAVE 1, WHICH IS
+1.570 Gi/f** … the single largest untried item the round leaves behind". The
+argument does apply, in full. The chain it reaches is **0.033 Gi/f**, not 1.570.
+
+`-DFDS_W1LDR_ABLATE=1` (committed; stage 0 builds a binary `cmp`-identical to
+the parent, which is what makes it quotable) removes exactly the chain:
+
+| | `lighting-w1` Gi/f | call | `renderFrame` |
+|---|--:|--:|--:|
+| t=5743 stage 0 (= parent) | 1.570 | 1.855 | 4.805 |
+| t=5743 stage 1 | **1.537 (−2.10 %)** | 1.822 | 4.772 (−0.69 %) |
+| t=2845 stage 0 | 1.457 | 1.746 | 4.819 |
+| t=2845 stage 1 | **1.425 (−2.20 %)** | 1.713 | 4.787 (−0.66 %) |
+
+**2.1 % of `lighting-w1`, 1.8 % of the call.** Consistent with 16g's pixel
+ladder, which priced "compose (after the loop)" at 0.060: 0.033 of that is the
+LDR half, the rest is the HDR store, which stays. A stage 2 (tail only,
+arithmetic held alive by a sink) read *above* stage 0 — its four sink `fadd`s
+cost more than the tail it removed — so the 0.033 does not split and nothing
+should be quoted from it. Same method note as 16g/16h; it is now three for
+three.
+
+### THE PREDICATE — `ctx.ldrDiscarded` IS NECESSARY BUT NOT SUFFICIENT
+
+Wave 2's flag is gated on `ctx.ldrDiscarded` alone. Wave 1 needs **one more
+term, `--hdr_linear`**, and the reason is not about readers at all:
+
+* Under `--hdr_linear` the shipped radiance is `rlB = aB²·dlB + sB`, built from
+  `dlB` — the **raw light accumulator** — and never from `fdB`. The whole
+  fd → out → `out[i]` chain feeds the VPage alone, and `Render_TonemapToVPage`
+  rewrites every byte of it (its tile body has no coverage test anywhere).
+* Under plain `--hdr` (B1 gamma) the shipped radiance **is** `hB = fdB + sB`.
+  The chain is LIVE. A `ldrDiscarded`-only gate would have blanked every
+  gamma-HDR frame. **The fill never had this hazard** — its HDR average is
+  built from the neighbours' `hdrBuf` on both arms — which is precisely why
+  16h's predicate could not be copied across.
+
+Plus a viz escape: the five debug-viz stomps write `out*` and nothing else, so
+any of them forces the chain back on (`constexpr false` unless `FDS_DEV`).
+
+**The reader audit that produced this was run blind and converged on the same
+predicate.** What it found, for wave 1's specific outputs (wave 2's audit only
+covered the fill's):
+
+| reader | verdict |
+|---|---|
+| the wave-2 FILL's neighbour gather (`out[nidx[k]]`) | reads wave-1 VPage — but only when `!fillLdrSkip`, i.e. under the same `ctx.ldrDiscarded`. Even with `--no-deferred_fill_ldr_skip` the average it builds is itself overwritten by the tonemap |
+| xpar / glass composite (`out[i]`, `sampleBgLdr`) | the xpar span starts at `RENDER.CPP:828`, **after** `hdr-activate` (:793), so `g_hdrActive` is true and the composite takes the `g_hdrBuf` arm; the LDR arm and `sampleBgLdr` are unreachable there |
+| the glass-refraction LDR snapshot (`RENDER.CPP:816`, `FILLERS.CPP:2099`) | copied unconditionally, but its ONLY reader is `sampleBgLdr` — dead, not gated |
+| `Hdr_ActivateNoFog` (`Hdr.cpp:91`) and its inline twin (:825) | `if (h[x*4+3] != 0.0f) continue` — lifts ONLY uncovered pixels, never one wave 1 wrote |
+| SSAO (`DeferredSSAO.cpp:969`) | the VPage arm is the `!useHdr` one; `useHdr = hdr() && Hdr_WritableFor` is implied by our predicate. `--ssao_debug` writes VPage and returns before the tonemap — excluded by `ldrDiscarded`'s third gate, and that gate is doing real work: the viz only writes where `zEnc != 0`, so without it the AO frame would show black sky |
+| cones/halos, froxels, rain, sprites, bloom, the LDR post stack | shut off by `g_hdrActive`/`Hdr_WritableFor`, or read only where coverage is 0 — re-verified from source, not from 16h's text |
+| all 22 `write_ppm` sites, `V_Flip`, the repro/mirrortest/cloak/displace harnesses | every one is `skipVolumetric=false` → tonemap runs first |
+| `EnvBake.cpp:490`, `GreetsMirror.cpp:3821`, `MirrorShatter.cpp:1468` | 8-bit readbacks that ARE the product — all have `ldrDiscarded=false` |
+| **`MirrorShatter.cpp:915`** | the serial reflection goes through `renderFrame` itself with `skipVolumetric=true` and reads its surface back with **no tonemap on that path**. Only the `!skipVolumetric` term protects it — an "is this an override bake?" test would have missed it |
+| `--env_ssr`'s prologue capture (`RENDER.CPP:579`) | reads the PREVIOUS frame's post-tonemap VPage |
+
+Three things hold today by code placement rather than by predicate and must
+stay that way: the skip must never reach `Render_DeferredLighting_Tile_OuterVec`
+(a warning comment now sits at its head — see below), the mip-viz store must
+stay above the skipped block, and an HDR-redirect of the legacy fog
+(`DeferredVolumetric.cpp:701`) or the unified volumetric would turn a currently
+dead wave-1 reader live.
+
+### MEASURED — parent / OFF / ON, one worktree, one asset tree
+
+Order-rotated interleaved, min over 11 rounds, one pose per process, 1512x848,
+`--profiler=0 --deferred_prof=1 --hw_prof`, 10 iters. Load ran 6.0–8.8, so
+`Gi/f` decides; `Gcyc/f` is quoted where it agrees and is visibly load-dirty at
+t=6097.
+
+| pose | row | par | off | **ON** |
+|---|---|--:|--:|--:|
+| **t=5743** | `lighting-w1` Gi/f | 1.570 | 1.580 (+0.64 %) | **1.542 (−1.78 %)** |
+| | .. Gcyc/f | 0.448 | 0.458 | **0.442 (−1.34 %)** |
+| | .. wall | 13.23 | 13.49 | **12.99 (−1.87 %)** |
+| | `lighting-w2` Gi/f | 0.272 | 0.272 | **0.272 (0.00 %)** |
+| | `DeferredLighting-call` Gi/f | 1.855 | 1.865 | **1.827 (−1.51 %)** |
+| | `renderFrame` Gi/f / wall | 4.804 / 43.55 | 4.815 / 43.51 | **4.777 (−0.56 %) / 43.23** |
+| **t=2845** | `lighting-w1` Gi/f | 1.457 | 1.467 (+0.69 %) | **1.430 (−1.85 %)** |
+| | `renderFrame` Gi/f | 4.818 | 4.829 | **4.791 (−0.56 %)** |
+| **t=6097** | `lighting-w1` Gi/f | 1.326 | 1.337 (+0.83 %) | **1.300 (−1.96 %)** |
+| | `renderFrame` Gi/f | 4.257 | 4.269 | **4.230 (−0.63 %)** |
+| **t=3409** | `lighting-w1` Gi/f | 1.571 | 1.583 (+0.76 %) | **1.544 (−1.72 %)** |
+| | `renderFrame` Gi/f | 4.977 | 4.989 | **4.950 (−0.54 %)** |
+| **t=5813** | `lighting-w1` Gi/f | 1.531 | 1.541 (+0.65 %) | **1.503 (−1.83 %)** |
+| | `renderFrame` Gi/f | 4.665 | 4.676 | **4.637 (−0.60 %)** |
+
+**The OFF column earns its place a third round running: the restructure costs
++0.64 to +0.83 % of w1 on its own**, so the mechanism is worth −2.5 % against
+its own OFF arm and −1.8 % against the parent. `lighting-w2` unmoved to four
+decimals at all five poses is the control that says this touched wave 1 and
+wave 1 only.
+
+### THE RESTRUCTURE, AND WHY IT IS A FLOAT IDENTITY
+
+`fd` used to be computed BEFORE the metal / roughness / metal-tint / env /
+SpecMul blocks and scaled in place by two of them. It now lives after them,
+inside the skipped block, with the two scalings applied **in the same order**.
+`EnvSpecComposeScalar` takes the texels and `metalM` **by value** and returns
+through `sB/sG/sR`; nothing between the old site and the new one touches
+`texB/lB/metalM/fresEC`. So it is a reordering of *statements*, not of
+*operations*.
+
+Shape matters and was measured: the `--hdr_linear` (B2) store moved **above**
+the block so nothing is live across the branch — worth ~0.3 % of w1 over the
+first shape, which zero-initialised `out*/h*` outside it — and the gamma (B1)
+store moved **inside** it, because `hB` is exactly what that arm ships.
+
+### WHAT THE GATE IS ACTUALLY WORTH — say it out loud
+
+`render_gate.sh` is **4/4 and cannot discriminate this flag**. Three of its four
+arms pass no `--hdr` at all and the fourth hashes an RTT surface from an
+override bake, so `ldrDiscarded && hdr_linear` is false in every one. The real
+coverage is the **greets t=1588 pin** (greets `setDefault`s `hdr_linear`, so the
+flag IS live there) and the **five-pose acceptance arm**, both parent-identical
+3/3. Quoting 4/4 as evidence for an LDR-skip is quoting a gate that could not
+have failed.
+
+### DO NOT PORT THIS TO `Render_DeferredLighting_Tile_OuterVec`
+
+A warning comment now sits at its head. That kernel writes **no** HDR at all —
+its 8-bit pack IS the HDR transport, because `Hdr_ActivateNoFog` lifts it (it
+leaves `h[3]` at 0). Skipping the pack would tonemap every `PreferOuterVec`
+scene (city, crash) from a cleared buffer. The saving looks identical in the
+source and is not the same code.
+
+### PRICED AT ZERO, NOT LANDED — the override-bake exclusion IS over-broad
+
+16h excluded every override/offscreen bake from `ldrDiscarded` outright. That is
+over-broad by exactly **two** passes, and the correct predicates are:
+
+* **greets mirror RTT** (`GreetsMirror.cpp:3582-3600`): `rttHdr && !rttTrace`.
+  `rttHdr` ⟹ `Hdr_BeginFramePass` ran ⟹ `Hdr_ActivateNoFog` (:3629) cannot
+  early-return ⟹ `g_hdrActive` ⟹ `Render_TonemapToVPage` (:3632) fires and
+  rewrites every pixel. Nothing between :3600 and :3632 reads a covered VPage
+  pixel. The `!rttTrace` term is real: :3606/:3616 digest and dump
+  `s_rttSurf.Data` **before** the tonemap, so the skip would silently change
+  what `--mirror_rtt_trace`'s LIGHTING stage measures.
+* **mirror shard bake** (`MirrorShatter.cpp:1415`): `hdrBake`, whose
+  `Render_TonemapToVPageInline` (:1447) has no `g_hdrActive` guard at all.
+  Academic today — `--shard_hdr` defaults 0, so `hdrWrite` is already false.
+
+**Not landed, because it is worth ~zero on this arm and the rule is measure
+each change.** greets' whole `RTT` phase is 0.025 Gi/f of a 4.80 Gi/f frame; 2 %
+of the lighting inside it is below the instrument's resolution. Recorded here so
+the next round doesn't re-derive it, and so nobody "extends the win" to the RTT
+without noticing the trace term.
+
+### WHAT IS LEFT
+
+1. **The gamma-HDR (`--hdr` without `--hdr_linear`) half of the same chain.**
+   `out*`, the clamps and the `out[i]` store are dead there too — only `fd` and
+   `hB` are live. That is a WEAKER skip needing its own predicate and a second
+   branch in the pixel body, for a smaller win on an arm nobody benches. 16h's
+   durable finding (a flag-guarded predicate in this kernel costs about what
+   these mechanisms save) says price the branch before writing it.
+2. **`lighting-w1` is still 1.542 Gi/f = 84 % of the call**, and 16g's split
+   still stands: the omni loop is 1.25 of it and **the cube tap is 0.747, 36.6 %
+   of the whole call**. Everything else in wave 1 is rounding error against
+   that. The next real lever on this arm is the tap or `--ssao_downscale=2`,
+   not another compose.
+3. **The fountain t=2500 pin is not 3/3-reliable.** One run in 43 on the
+   **PARENT** binary produced `b91cb2ba…` instead of `8db68ccb…`; a 24-run gate
+   on each binary then gave 24/24 `8db68ccb` on both. Pre-existing
+   non-determinism, ~2 %, unrelated to this round — but a battery that calls a
+   1-in-43 flip a regression will burn a session, so it is written down here.
+4. **Two bugs found by code reading during the audit, NOT verified by running
+   anything, handed on rather than sat on.** (a) `Render_DeferredLighting_Tile_OuterVec`
+   writes no `ctx.hdrBuf`, so on a `PreferOuterVec` scene (city `CITY.CPP:2537`,
+   crash `CRASH.CPP:25`) with `--hdr` **and** `--deferred_checkerboard`/`quarter`,
+   the fill would average all-zero neighbour radiance and then stamp `h[3]=1`,
+   which BLOCKS the `Hdr_ActivateNoFog` lift — predicted result, a black
+   checkerboard. Not reachable in any shipping config found. (b)
+   `VolCompositeAdd` (`DeferredVolumetric.cpp:327`) consults the GLOBAL
+   `g_hdrActive` and writes the GLOBAL `g_hdrBuf` while the shard bake's cone
+   pass runs on N workers against a 64² cell, and `renderReflectionCameras` is
+   called from the tick before `Render()`, when `g_hdrActive` still holds the
+   previous frame's `true`. Both need a run to confirm or kill.
+
 ## 2026-08-16h — `lighting-w2` (the checkerboard fill, 16 % of the call): the edge fallback is 0.12 % of it, and the win was a write nobody reads
 
 **Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance

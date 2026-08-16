@@ -722,6 +722,42 @@ scanline carry for the repeated neighbour gather was tried in three forms and
 argument applied to WAVE 1 (1.570 Gi/f) is untried and is the largest thing the
 round leaves behind.
 
+**Amendment 2026-08-16i (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16i) — the
+sentence directly above is TRUE ABOUT THE ARGUMENT AND MISLEADING ABOUT THE
+SIZE.** The LDR argument does reach wave 1, in full. The chain it reaches is
+**0.033 Gi/f**, not 1.570: `-DFDS_W1LDR_ABLATE=1` (committed; stage 0 builds a
+binary `cmp`-identical to its parent) removes `fdB/fdG/fdR` → `outB/outG/outR` →
+`out[i]` and everything hanging off them, and reads **1.570 → 1.537 at t=5743
+(−2.10 %)** and **1.457 → 1.425 at t=2845 (−2.20 %)** — 2.1 % of `lighting-w1`,
+1.8 % of the call. That agrees with 16g's own split, which priced "compose
+(after the loop)" at 0.060: the LDR half is 0.033, the HDR store is the rest.
+**`lighting-w1` is still 84 % of the call and the cube tap is still 36.6 % of
+it — nothing in this round moves that ranking.** Read the 1.570 above as "the
+wave the argument lands in", never as "the size of the prize".
+
+Landed: **`--deferred_shade_ldr_skip`** (default ON), which needs **one term
+more than the fill's** — `ctx.ldrDiscarded` **AND** `--hdr_linear`, because
+under plain `--hdr` the shipped B1 radiance *is* `hB = fdB + sB` and the chain
+is LIVE; only the linear arm builds `rlB` from `dlB`, the raw light accumulator.
+`lighting-w1` **1.570 → 1.542 (−1.78 %)**, `DeferredLighting-call`
+**1.855 → 1.827 (−1.51 %)**, `renderFrame` **4.804 → 4.777 (−0.56 %)**, −1.72 to
+−1.96 % of w1 at all five poses, `lighting-w2` flat to four decimals (the
+control that says this touched wave 1 alone). Its OFF arm costs +0.64 to
++0.83 %, so the mechanism is −2.5 % against itself. Byte-null: nine pins at
+their recorded values, five poses under his arm 3/3, the city underlay control
+`56f6aff0` on both binaries. **Read the gate claim carefully:**
+`render_gate.sh` is 4/4 but **none of its four arms puts `--hdr` on a main
+deferred pass**, so it cannot discriminate this flag at all — the greets t=1588
+pin (greets `setDefault`s `hdr_linear`, so the flag IS live there) and the
+five-pose arm are the only real coverage. `GreetsMirror.cpp`'s "wave-2 fill
+reaches g_hdrBuf only via the VPage lift" comment was adjudicated **STALE** (the
+fill has stamped `h[3]=1` on all three arms since 2026-07-02) and rewritten; the
+override-bake exclusion inside `ldrDiscarded` is over-broad by exactly two
+passes, both priced at ~zero here, both written up with their exact predicates
+in the backlog. Also recorded there: the **fountain t=2500 pin flipped once in
+43 PARENT runs** (24/24 on a clean re-gate, both binaries) — pre-existing, ~2 %,
+and a battery that reads that as a regression will burn a session.
+
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
 `cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and
