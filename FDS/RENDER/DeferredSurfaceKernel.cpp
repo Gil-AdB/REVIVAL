@@ -6347,13 +6347,30 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// far floor keeps its texture detail instead of averaging into mush.
 			// Returns false for untextured/missing (caller falls back to the
 			// plain colour average). texel fetch is ~free (measured).
+			const Texture *ownTexture = nullptr;   // resolved by the CENTRE fetch
 			auto fetchTexel = [&](size_t j, float &tb, float &tg, float &tr) -> bool {
 				const uint32_t m32 = gb.txtr[j];
 				const uint32_t mid = (m32 >> 20) & 0xFF;
 				if (mid >= ctx.matTable.count) return false;
 				const Material *M = ctx.matTable.data[mid];
 				if (!M || !M->Txtr) return false;
+				ownTexture = M->Txtr;
 				const dword *td = (const dword *)M->Txtr->Mipmap[(m32 >> 28) & 0xF];
+				if (!td) return false;
+				const dword t = td[m32 & 0xFFFFF];
+				tb = float(t & 0xFF); tg = float((t >> 8) & 0xFF); tr = float((t >> 16) & 0xFF);
+				return true;
+			};
+			// The NEIGHBOUR form. Only ever called
+			// under `haveOwn` (the centre fetch above returned true, so
+			// `ownTexture` is that material's non-null Texture) and only after
+			// neighborCompatible has proved `mID == matIDc` — i.e. the
+			// neighbour's material IS the centre's, and re-resolving it costs a
+			// bounds check, a table load and two null tests for a pointer we
+			// already hold. Same texture object, same mip word, same texel.
+			auto fetchTexelNb = [&](size_t j, float &tb, float &tg, float &tr) -> bool {
+				const uint32_t m32 = gb.txtr[j];
+				const dword *td = (const dword *)ownTexture->Mipmap[(m32 >> 28) & 0xF];
 				if (!td) return false;
 				const dword t = td[m32 & 0xFFFFF];
 				tb = float(t & 0xFF); tg = float((t >> 8) & 0xFF); tr = float((t >> 16) & 0xFF);
@@ -6420,7 +6437,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						// sharp reconstruction; it still counts in the plain radiance
 						// average, which handles the pixel when no neighbour qualifies.
 						float nrB, nrG, nrR;
-						if (fetchTexel(nidx[k], nb, ng, nr) &&
+						if (fetchTexelNb(nidx[k], nb, ng, nr) &&
 						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
 						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
 						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
@@ -6506,7 +6523,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr, nrB, nrG, nrR;
-						if (fetchTexel(nidx[k], nb, ng, nr) &&
+						if (fetchTexelNb(nidx[k], nb, ng, nr) &&
 						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
 						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
 						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
