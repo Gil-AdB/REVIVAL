@@ -1,5 +1,77 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16x — THE COLLINEAR-NEEDLE CULL: **the faces two rounds wanted to cull are already free**, and the cull that pays is the SCREEN determinant at the push. Landed default ON, byte-null by construction — **and the frame does not resolve it**. Plus: the greets acceptance pins were never orphaned
+>
+> Two items, two commits. Full write-ups: `docs/OPTIMIZATION_BACKLOG.md`
+> **2026-08-16x**; the pin recipe is now a row in the gates table below.
+>
+> ### ITEM 1 — THE PREMISE WAS WRONG BEFORE THE CULL WAS WORTH WRITING
+>
+> `-DFDS_NEEDLE_CENSUS=1` (new compile switch; shipping `DEMO` md5s identically
+> with its macros compiled out) classifies every face the transform WALKS in
+> **object space** and again at the push:
+>
+> * **chase has ZERO collinear faces** — 0 of 42 932 walked, at t=100 and t=800.
+>   Its **2 302 degenerate rejects a frame are 100 % pose-dependent** (edge-on
+>   quads, sub-pixel slivers). A load-time scan would have found nothing.
+> * **city HAS 182–203 a pass** (16v's `bilding type 1 windows`) **and not one
+>   is ever PUSHED**: a zero-area face keeps the un-normalized zero `N` that
+>   `Compute_Face_Normals` leaves it, so its backface test is `0 < 0` = false.
+>   They cost one dot product and nothing downstream — **the "525 needles paying
+>   transform + clip + sort every frame" reading was wrong.**
+> * The only place they cost anything is **greets' shadow bake**, where backface
+>   culling is off by design: **724 of the 5 408 faces culled there** are 3-D
+>   degenerate. That is the whole prize a load-time cull could have won.
+>
+> **So `--needle_cull` (default ON) does the rasterizers' OWN test one stage
+> earlier**: at the FList push, drop the face when its projected screen
+> determinant is `<= 0.01f` — verbatim the value `Mekalele.h`,
+> `TheOtherBarry.h` and `ShadowMap.cpp` all reject a fan triangle at. Live at
+> all three FList builders (`Transform_Objects` main/shadow/offscreen + both
+> `Reflected_Transform`s). **Byte-null BY CONSTRUCTION and the construction is
+> verified in code**: `FrustumClipper::FInterpolator`'s first line lerps PX/PY
+> **linearly in screen space**, so every clipped/subdivided polygon lies inside
+> the projected triangle and every fan triangle has `|det|` no larger than the
+> face's. Guards: all three verts in FRONT of the near plane (behind-near PX/PY
+> are stale), never sprites (A == B). Measured at the rasterizer: chase t=100
+> degenerate rejects **1 191 → 8** (main) and **1 111 → 7** (reflected) for
+> 1 183 + 1 104 faces culled, and the ACCEPTED triangle counts **19 420 → 19 420
+> / 19 092 → 19 092** — not one accepted triangle came from a culled face.
+>
+> **THE PRICE, honestly (1512×848, off/on/floor interleaved, 16 rounds/arm on
+> chase):** the row that carries the work moves — chase t=100 gbuffer
+> **−1.60 % instructions (exact, every round) and −0.30 ms** (−3.7 % median,
+> −4.9 % min) against floors of +0.5 % / −0.3 %; chase t=800 −0.60 %
+> instructions. **The FRAME does not resolve it**: `renderFrame`'s wall delta at
+> t=100 is −2.54 % in one ladder and **+1.12 % in the other**, its instruction
+> delta −0.13 %. city −0.07 %, greets **+0.00 %** frame instructions. **A row
+> win in one scene, frame-neutral elsewhere, nothing lost anywhere** — landed ON
+> because it is a strict work-remover that costs ~6 flops on values the push has
+> already loaded, not because the frame got faster by a quotable number.
+>
+> ### ITEM 2 — THE FOUR GREETS ACCEPTANCE PINS REPRODUCE, FIRST TRY
+>
+> 16w's "written down nowhere in `docs/`, eight arms tried, none reproduces" was
+> right about `docs/` and wrong about the pins. The recipe was in
+> **`scratchpad/xform_pins.sh`**, 16r's own untracked battery:
+> `./DEMO --snapshot=greets@t=<T> --out=<dir> --deferred --hdr --hdr-linear
+> --texture-filter=2 --ssao --ssao-gtao --greets-displace --profiler=0`, one
+> pose per process, stock 1920×1080 `rev.cfg`, **no `FDS_GREETS_CAM`**. 3/3 on
+> two binaries. **Nothing retired.** The three things that move it (measured):
+> `FDS_GREETS_CAM` set → `19d94f48…` (the likeliest thing the eight candidates
+> did — `docs/greets_review_poses.txt` lists a camera for all four t values, and
+> the t=1588 pin next door REQUIRES the prefix); an explicit `--profiler` →
+> `cb7f4a51…`; 1512×848 → a different self-consistent set, 2/2.
+>
+> ### GATES
+>
+> * **12 pin recipes at their recorded values on three binaries** — 3/3 OFF and
+>   3/3 ON on one binary (byte-identical arm to arm), 1/1 on the default-ON build.
+> * `render_gate.sh` **4/4 PASS** on all three arms.
+> * `--shadow_plane_hash` **`03587397…`** (recorded) 2/2 per arm — the gate that
+>   matters most, since the shadow bake is where the most faces are culled.
+> * **crash**, which no pin covers, byte-identical with and without the cull.
+
 > ## 2026-08-16w — 16v's 19 092 zero-TN triangles are **the whole reflected pass**: `Reflected_Transform` has never written a view normal, in chase OR city. Named, counted exactly, counterfactual rendered — **and NOT landed, because it is a look call and it exposes a second defect under it**
 >
 > Full write-up: `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16w**. The census and

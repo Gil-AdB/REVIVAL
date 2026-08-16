@@ -27,6 +27,7 @@
 #include <RENDER/EnvBake.h>        // city_env_pixel: register per-building env stores
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 #include <Base/FaceBBox.h>     // Reflected_Transform S2 tile pre-reject stamp
+#include <Base/FaceNeedle.h>   // Reflected_Transform --needle_cull pre-reject
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
 // T->Verts. Forward-declared locally; called after any post-init Face
@@ -462,6 +463,12 @@ static void Reflected_Transform(Scene *Sc)
 	// frustum), i.e. the same value Transform_Objects passes as cam.nearZ.
 	const bool  tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
 	const float bboxNearZ    = Sc->NZP;
+	// --needle_cull: degenerate-face pre-reject, same near plane, same read-once
+	// shape as the bbox flag above. See FDS/Base/FaceNeedle.h.
+	const bool  needleCull   = fds::FeatureFlags::needle_cull();
+#if FDS_NEEDLE_CENSUS
+	const int   needleCensusKind = fds::kNeedleMirror;
+#endif
 
 	TriMesh *TR;
 
@@ -789,12 +796,23 @@ OUT:
 
 		FEnd=T->Faces+T->FIndex;
 		for (F = T->Faces; F < FEnd; F++) {
+			FDS_NEEDLE_COUNT_SEEN();
 			if (!F->VisibilityFlagsAll()
 				&& ((F->Txtr->Flags & Mat_TwoSided) ||
 					//(1)
 					(AP.x * F->N.x + AP.y * F->N.y + AP.z * F->N.z < F->NormProd) //backface culling
 
 					)) {
+				// --needle_cull: this face's projected screen determinant is
+				// already at or below every rasterizer's fan reject, so it
+				// cannot paint a pixel of the water-reflection underlay
+				// either. 454 of city t=1961's 818 degenerate rejects a frame
+				// are THIS loop's (2026-08-16w). See FDS/Base/FaceNeedle.h.
+				FDS_NEEDLE_COUNT_TEST();
+				if (needleCull && fds::FaceNeedle_Reject(F, bboxNearZ)) {
+					FDS_NEEDLE_COUNT_CULL();
+					continue;
+				}
 				dz = F->A->TPos_AOS.z;
 				if (F->B->TPos_AOS.z > dz) dz = F->B->TPos_AOS.z;
 				if (F->C->TPos_AOS.z > dz) dz = F->C->TPos_AOS.z;

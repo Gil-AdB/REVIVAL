@@ -84,6 +84,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/FaceNeedle.h"   // --needle_cull threshold + contract + census
 #include "RENDER/EnvCube.h"   // env_cube: trig-free per-triangle face select
 #include "RENDER/EnvBake.h"   // --env_live_water: animated water in env lookups
 #include "RENDER/ChunkOcclusion.h"  // Phase B: conservative main-view chunk occlusion cull
@@ -2801,6 +2802,14 @@ AfterXForm:
 	// default -> the walk never rejects -> today's exact path, byte-identical).
 	// Read the flag + nearZ once per mesh.
 	const bool tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
+	// --needle_cull: the degenerate-face pre-reject (FDS/Base/FaceNeedle.h holds
+	// the threshold, the contract and the census). Read once per mesh, like the
+	// bbox flag beside it; the near plane it needs is bboxNearZ, already hoisted.
+	const bool needleCull = fds::FeatureFlags::needle_cull();
+#if FDS_NEEDLE_CENSUS
+	const int needleCensusKind = g_inShadowPass ? fds::kNeedleShadow
+	                           : (_offscreenPass ? fds::kNeedleOffscreen : fds::kNeedleMain);
+#endif
 	const float bboxNearZ   = cam.nearZ;
 	auto satI16 = [](float v) -> int16_t {
 		if (v < -32768.0f) return -32768;
@@ -2821,6 +2830,7 @@ AfterXForm:
 	// Ablation 32 (--xfrm_ablate=32): skip the per-face loop entirely.
 	if (!xabNoFace)
 	for (F=tFaces;F<FEnd;F++) {
+		FDS_NEEDLE_COUNT_SEEN();
 		// Ablation 16: pure loop + Face-pointer-walk overhead, nothing else.
 		if (xab && (_xablate & XAB_FACE_NOOP)) continue;
 		if (xp) ++g_xprof.facesTested;
@@ -2863,6 +2873,30 @@ AfterXForm:
 			// Ablation 8: run the visibility + backface test, then bail —
 			// isolates the cull test from the accepted-face work below.
 			if (xab && (_xablate & XAB_FACE_CULL)) continue;
+			// NEEDLE PRE-REJECT (--needle_cull, default off). This face's own
+			// projected screen determinant is already at or below the value
+			// every rasterizer rejects a fan triangle at, so no tile, no pass
+			// and no sub-section of it can paint a pixel — drop it before it
+			// costs an FList slot, a sort key and a clipper entry. Written out
+			// inline rather than calling fds::FaceNeedle_Reject for the reason
+			// FaceBBox.h states about its own body: a CALL inside this loop has
+			// moved the scene pins before. Guards, both mandatory: sprite/flare
+			// faces (A == B) carry a float in C, and behind-near verts have
+			// stale PX/PY (the projection skips the divide), so both are kept.
+			FDS_NEEDLE_COUNT_TEST();
+			if (needleCull && F->A != F->B) {
+				const Vertex* nva = F->A; const Vertex* nvb = F->B; const Vertex* nvc = F->C;
+				if (nva->TPos_AOS.z > bboxNearZ && nvb->TPos_AOS.z > bboxNearZ
+				    && nvc->TPos_AOS.z > bboxNearZ) {
+					const float ne1x = nvb->PX - nva->PX, ne1y = nvb->PY - nva->PY;
+					const float ne2x = nvc->PX - nva->PX, ne2y = nvc->PY - nva->PY;
+					const float ndet = ne1x * ne2y - ne1y * ne2x;
+					if (fabsf(ndet) <= fds::kNeedleDetReject) {
+						FDS_NEEDLE_COUNT_CULL();
+						continue;
+					}
+				}
+			}
 			if (0 != (F->Flags & Face_Reflective)) {
 				// clobber U1, V1, etc. with the equilateral-whatever coordinates matching
 				// the direction from camera to the specific vertex, reflected on the face's plane

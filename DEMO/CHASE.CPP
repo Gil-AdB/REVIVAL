@@ -14,6 +14,7 @@
 #include "ChaseEvents.h"       // B1: pure-t fire table + reconstruction
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 #include <Base/FaceBBox.h>     // Reflected_Transform S2 tile pre-reject stamp
+#include <Base/FaceNeedle.h>   // Reflected_Transform --needle_cull pre-reject
 #include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
 #if FDS_REFLTN_CENSUS
 #include <FILLERS/Mekalele.h>  // census build only: per-pass zero-TN reporter
@@ -281,6 +282,12 @@ static void Reflected_Transform(Scene *Sc)
 	// See the twin block in CITY.CPP's Reflected_Transform.
 	const bool  tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
 	const float bboxNearZ    = Sc->NZP;
+	// --needle_cull: degenerate-face pre-reject, same near plane, same read-once
+	// shape as the bbox flag above. See FDS/Base/FaceNeedle.h.
+	const bool  needleCull   = fds::FeatureFlags::needle_cull();
+#if FDS_NEEDLE_CENSUS
+	const int   needleCensusKind = fds::kNeedleMirror;
+#endif
 
 	TriMesh *TR;
 
@@ -620,7 +627,8 @@ static void Reflected_Transform(Scene *Sc)
 		VertexFrame_DumpFromAoS(T->frame, T->Verts, T->VIndex);
 
 		FEnd = T->Faces + T->FIndex;
-		for (F = T->Faces; F < FEnd; F++)
+		for (F = T->Faces; F < FEnd; F++) {
+			FDS_NEEDLE_COUNT_SEEN();
 			if ((!(F->A->Flags&F->B->Flags&F->C->Flags&Vtx_Visible))
 				&& ((F->Txtr->Flags&Mat_TwoSided) ||
 					//(1)
@@ -628,6 +636,17 @@ static void Reflected_Transform(Scene *Sc)
 
 					))
 			{
+				// --needle_cull: this face's projected screen determinant is
+				// already at or below every rasterizer's fan reject, so it
+				// cannot paint a pixel of the reflected pass either. Half of
+				// chase's 2 302 degenerate rejects a frame are THIS loop's
+				// (2026-08-16w counted 1 111 reflected vs 1 191 main).
+				// FDS/Base/FaceNeedle.h carries the contract.
+				FDS_NEEDLE_COUNT_TEST();
+				if (needleCull && fds::FaceNeedle_Reject(F, bboxNearZ)) {
+					FDS_NEEDLE_COUNT_CULL();
+					continue;
+				}
 				dz = F->A->TPos_AOS.z;
 				if (F->B->TPos_AOS.z > dz) dz = F->B->TPos_AOS.z;
 				if (F->C->TPos_AOS.z > dz) dz = F->C->TPos_AOS.z;
@@ -644,6 +663,7 @@ static void Reflected_Transform(Scene *Sc)
 				if (tileBboxCull) fds::FaceBBox_Stamp(e, F, bboxNearZ);
 				else { e->bbMinX = e->bbMinY = -32768; e->bbMaxX = e->bbMaxY = 32767; }
 			}
+		}
 	}
 	CPolys = Ins - FList;
 	for (O = Sc->OmniHead; O; O = O->Next)

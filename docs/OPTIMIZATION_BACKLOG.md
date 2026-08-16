@@ -10,6 +10,170 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16x — THE COLLINEAR-NEEDLE CULL, BUILT: the population two rounds priced **is already free**, and the cull that pays is a different one — the SCREEN determinant, at the push. Byte-null by construction, **and the frame does not resolve it**
+
+16w parked *"a load-time collinearity classification, culled at the FList level;
+chase is the scene, 2 302 degenerate rejects a frame."* Built the census first,
+and it refuted the premise before the cull was worth writing.
+
+Status: **LANDED, default ON** (`--needle_cull`, `FDS/Base/FaceNeedle.h`) —
+byte-null on 12 pin recipes × 3 on three binaries, `render_gate` 4/4, the shadow
+plane stream unmoved — **but priced honestly it is a ROW win, not a frame win**,
+and the load-time item it came from is closed as REFUTED rather than below-bar.
+
+### THE PREMISE IS WRONG: NOT ONE COLLINEAR FACE REACHES THE FLIST IN chase OR city
+
+`-DFDS_NEEDLE_CENSUS=1` (new compile switch, same shape and the same reason as
+`FDS_REFLTN_CENSUS` — atomics on the FList-build path; the shipping `DEMO` md5s
+IDENTICALLY with the census macros compiled out) classifies every face the
+transform WALKS in **object space** — `Compute_Face_Normals`' own
+`|(B-A)×(C-A)| < 1e-6` test, plus 16v's needle test (longest edge == the sum of
+the other two, relatively) — and again at the push.
+
+| pass | faces walked | 3-D degenerate | pushed | culled by the screen test | of THOSE, 3-D degenerate |
+|---|--:|--:|--:|--:|--:|
+| chase t=100 main | 42 932 | **0** | 20 092 | 1 183 | 0 |
+| chase t=100 mirror | 42 622 | **0** | 19 967 | 1 104 | 0 |
+| chase t=800 main | 54 962 | **0** | 25 839 | 768 | 0 |
+| chase t=800 mirror | 54 948 | **0** | 24 989 | 755 | 0 |
+| city t=1961 main | 52 979 | 182 | 20 420 | 222 | **0** |
+| city t=1961 mirror | 45 840 | 203 | 20 657 | 252 | **0** |
+| city arm offscreen | 2 835 114 | 42 140 | 717 354 | 8 854 | **0** |
+| city arm mirror | 2 790 318 | 43 195 | 743 643 | 12 490 | **0** |
+| fountain t=2500 main | 38 016 | 0 | 19 519 | 54 | 0 |
+| greets t=5743 main | 135 120 | 288 | 72 730 | 400 | 0 |
+| greets t=5743 shadow | 485 382 | 1 708 | 72 438 | 5 408 | **724** |
+| greets t=5743 offscreen | 736 725 | 2 552 | 63 493 | 12 984 | 0 |
+
+Read the last two columns together:
+
+* **chase has no collinear faces at all** — 0 of 42 932 walked, at either pose.
+  Its 2 302 rejects a frame are **100 % pose-dependent**: edge-on quads and
+  sub-pixel slivers. A load-time scan of `CHASE`'s meshes would have found
+  nothing, and 16w's "chase is the scene to build it for" was right about where
+  the waste is and wrong about what it is made of.
+* **city HAS them** (182 / 203 a pass — 16v's `bilding type 1 windows` family)
+  **and not one is ever pushed.** The reason is the chain 16u→16v already
+  established, one link further on: a zero-area face keeps the **un-normalized
+  zero** `N` that `Compute_Face_Normals` deliberately leaves it, so its backface
+  test is `AP·N < NormProd` = `0 < 0` = **false**, and a face that is not
+  two-sided never enters the FList. They cost one dot product per pass and
+  nothing downstream. **The 525 needles were never paying transform + clip +
+  sort; that reading of the 818 rejects was wrong.**
+* The one place they DO cost something is **greets' shadow bake**, where
+  backface culling is off by design (`shadowNoBackface` — single-sided walls
+  must still cast): **724 of the 5 408 faces culled there are 3-D degenerate.**
+  That is the entire prize a load-time classification could ever have won, in
+  one pass of one scene.
+
+### WHAT DOES PAY: the rasterizers' own test, one stage earlier
+
+`--needle_cull` (default ON) computes, at the FList push, the **same screen
+determinant the fan loop computes** and drops the face when
+`fabs(det) <= 0.01f` — verbatim the value `Mekalele.h`, `TheOtherBarry.h` and
+`ShadowMap.cpp` all reject at. Live at all three builders: `Transform_Objects`
+(main, shadow, every offscreen/bake pass) and the two hand-written mirror
+transforms (`CHASE.CPP` / `CITY.CPP` `Reflected_Transform` — half of chase's
+rejects live there, per 16w). A culled face costs no FList slot, no sort key, no
+per-tile walk entry and no `FrustumClipper::Render` (which copies 3 × 140 B per
+entry — ~1 MB a frame at chase's cull rate).
+
+### BYTE-NULL BY CONSTRUCTION — AND THE CONSTRUCTION IS VERIFIED IN CODE, NOT ASSUMED
+
+The clip and the mip subdivision build every new vertex through
+`FrustumClipper::FInterpolator`, whose **first line** is
+`lerp2(&V->PX, &_IA->PX, &_IB->PX, t)` — PX/PY interpolated **linearly in screen
+space** between two vertices of the polygon, i.e. a point ON the projected edge.
+So every polygon either stage emits lies inside the projected triangle's convex
+hull, and every fan triangle has `|det|` no larger than the face's own. Two
+guards make that argument legal: **all three verts must be in FRONT of the
+pass's near plane** (behind-near PX/PY are stale — this is exactly why the
+near-clip case must be excluded, not merely why it is conservative), and
+**sprite/flare faces (A == B) are never tested** (C is a float there).
+
+Measured, not just argued — the `REFLTN` census counts at the rasterizer:
+
+| pose / pass | degenerate rejects off → on | faces culled | ACCEPTED triangles off → on |
+|---|--:|--:|--:|
+| chase t=100 main | 1 191 → **8** | 1 183 | 19 420 → **19 420** |
+| chase t=100 reflected | 1 111 → **7** | 1 104 | 19 092 → **19 092** |
+| chase t=800 main | 791 → 23 | 768 | 28 355 → **28 355** |
+| chase t=800 reflected | 824 → 69 | 755 | 25 220 → **25 220** |
+| city t=1961 main | 361 → 135 | 222 | 22 498 → **22 498** |
+| city t=1961 reflected | 319 → 61 | 252 | 19 749 → **19 749** |
+
+Rejects fall by exactly the number of faces culled and **not one accepted
+triangle disappears**. The residue (7, 8, 23, 69) is the near-plane straddlers
+the guard keeps plus slivers that only become degenerate after clipping.
+
+### THE PRICE — 1512×848, three arms (off / on / floor), interleaved and rotated, min AND median
+
+`floor` is a second copy of `off`: the noise bar the `on−off` delta has to
+clear. chase pools 16 rounds/arm over two independent ladders; city and greets
+7 rounds. Instructions are the trustworthy column (the floor arm reproduces to
+±0.00 % on it every time); wall time at this scale is not.
+
+| pose | column | off | on | floor | on−off | floor−off |
+|---|---|--:|--:|--:|--:|--:|
+| chase t=100 | gbuffer Ginstr | 0.188 | **0.185** | 0.188 | **−1.60 %** | +0.00 % |
+| chase t=100 | gbuffer ms (min) | 8.113 | **7.718** | 8.093 | **−4.87 %** | −0.25 % |
+| chase t=100 | gbuffer ms (med) | 8.268 | **7.963** | 8.308 | **−3.68 %** | +0.49 % |
+| chase t=100 | renderFrame Ginstr | 3.704 | 3.699 | 3.703 | −0.13 % | −0.03 % |
+| chase t=100 | renderFrame ms (min/med) | 34.73 / 36.02 | 34.82 / 35.70 | 34.76 / 36.08 | **+0.26 / −0.89 %** | +0.06 / +0.18 % |
+| chase t=800 | gbuffer Ginstr | 0.333 | 0.331 | 0.333 | −0.60 % | +0.00 % |
+| chase t=800 | renderFrame ms (min/med) | 33.22 / 33.96 | 32.36 / 33.53 | 32.92 / 33.99 | −2.59 / −1.27 % | −0.92 / +0.09 % |
+| city t=1961 (his arm) | renderFrame Ginstr | 4.176 | 4.173 | 4.175 | −0.07 % | −0.02 % |
+| city t=1961 | frame min ms | 45.95 | 46.30 | 46.04 | +0.76 % | +0.20 % |
+| greets t=5743 (acceptance) | renderFrame Ginstr | 4.685 | 4.685 | 4.685 | **+0.00 %** | +0.00 % |
+| greets t=5743 | RNDR ms | 41.71 | 41.44 | 41.41 | −0.64 % | −0.72 % |
+
+**The honest reading.** The row that carries the work moves and keeps moving:
+chase t=100's gbuffer row is **−1.60 % instructions exactly, every round, on
+both ladders**, and **−0.30 ms** (−3.7 % median / −4.9 % min) against floors of
++0.5 % / −0.3 %. **The frame does not resolve it**: `renderFrame`'s wall delta
+at that pose is −2.54 % in one ladder and **+1.12 % in the other**, and its
+instruction delta is −0.13 % — 0.3 ms of a 36 ms frame is inside the ±1 % wall
+noise. city and greets show nothing either way (greets' frame instructions are
+identical to four decimals). **So: a row win in one scene, frame-neutral
+everywhere, and no scene loses.** It is landed default ON because it is a strict
+work-remover that is byte-null by construction and costs ~6 flops on values the
+push has already loaded — not because the frame got faster by a number worth
+quoting.
+
+### GATES
+
+* **12 pin recipes at their recorded values on THREE binaries** — 3/3 flag-OFF
+  and 3/3 flag-ON on the same binary (`79a11fba…`, byte-identical arm to arm),
+  and 1/1 on the default-ON build (`44be69e4…`): city `bd4ffbf8` (with
+  `FDS_CITY_ENV_PIXEL=1`, 4/4 both arms) / `4cb8d2ca` / `f473fe2b` / `d3374de6`,
+  chase `3bfd4244` / `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814`, fountain
+  `8db68ccb`, greets t=1588 `570a7b44`, greets acceptance `26ad272a` /
+  `10adec3a` / `418fc1fa` / `6d02f31b`.
+* `render_gate.sh` **4/4 PASS** on the OFF binary, under `FDS_NEEDLE_CULL=1`,
+  and on the default-ON binary (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+* `--shadow_plane_hash` **`03587397…`, the recorded value**, 2/2 on each arm and
+  on the final binary — the gate that matters most here, because the shadow pass
+  is where the most faces are culled (5 408 at greets t=5743) and a wrong reject
+  there shows up over TIME, not at one pose.
+* **crash**, which no pin covers, byte-identical with and without the cull.
+* The census build's own nullity: adding its (no-op) macros left the shipping
+  `DEMO` md5 unchanged at `79a11fba…`.
+
+### HANDED ON
+
+* **The load-time item is CLOSED, refuted.** There is nothing at load time worth
+  culling: the collinear faces exist only in city and greets, and only greets'
+  shadow bake ever pushes them (724). Anyone tempted to re-open it should read
+  the census table above first.
+* **The two populations should not be conflated again.** "Degenerate rasterizer
+  reject" is a per-POSE property (edge-on, sub-pixel) and dominates; "collinear
+  authored needle" is a per-MESH property and is already free. 16v/16w's 818 and
+  2 302 were the former; the 525 were the latter.
+* **A frame-level win, if one is wanted here, is upstream of this.** The rejects
+  cost the clipper entry, and the clipper entry is a 3 × 140 B vertex copy
+  (16p). Cutting the COPY is the row's real ceiling; this cull only removes 6 %
+  of the entries that pay it.
+
 ## 2026-08-16w — 16v's 19 092: **chase's reflected pass has never transformed a normal.** `Reflected_Transform` writes position, projection and flags into the shared AoS and no `TN` — the count is 100 % of that pass, exactly explained; the correction is a LOOK CALL and is NOT landed
 
 16v handed on *"chase rasterizes 19 092 of 38 512 triangles with all three
@@ -213,7 +377,7 @@ LOAD-TIME function (`Process_TriMesh` / `Scene_Computations`, both gated by
 `Tri_Processed`), not a per-frame one — measured by the warning firing exactly
 ONCE per greets process, not once per tick.
 
-### THE CITY NEEDLE CULL — PRICED, AND THE PRICE SAYS NO (status: **PARKED**)
+### THE CITY NEEDLE CULL — PRICED, AND THE PRICE SAYS NO (status: **PARKED** → **CLOSED 2026-08-16x, REFUTED**: the 525 collinear faces are never PUSHED at all — a zero-area face has a zero normal, so its backface test is `0 < 0` — and chase has ZERO collinear faces; its 2 302 rejects are pose-dependent slivers. A screen-determinant pre-reject at the push was built instead. See the 2026-08-16x block at the top.)
 
 16v's other remainder: *"525 collinear triangles of clipper/transform work per
 city frame that no rasterizer can ever fill."* Priced with a degenerate-reject
