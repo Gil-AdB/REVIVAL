@@ -758,6 +758,52 @@ in the backlog. Also recorded there: the **fountain t=2500 pin flipped once in
 43 PARENT runs** (24/24 on a clean re-gate, both binaries) — pre-existing, ~2 %,
 and a battery that reads that as a regression will burn a session.
 
+**Amendment 2026-08-16l (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16l) — the
+cube tap's interior is now measured, and the row is REDUCED, not closed.**
+16g/16i left "the cube tap is 36.6 % of the call" as the last big item with the
+interior unmeasured. `-DFDS_CUBE_ABLATE=n` (committed) splits it: at t=5743 the
+tap is **0.599 Gi/f over 2.943 M calls = 204 instructions**, of which **125
+(61 %) are a projection prologue** — face select, the `viewToLight` 3x3, the
+near/frustum/bounds rejects, 1/lz and two muls — and `otool -tvV` counts exactly
+125 instructions between the same two points, so ladder and disassembly agree.
+`--shadow_tap_census` adds that **81.1 % of taps never read a texel**: the
+branchy, memory-bound half is the rare half.
+
+**`--deferred_cube_prepass` (default ON) moves that prologue 8-wide over
+PIXELS for a fixed light**, once per tile row, and leaves the tail scalar and
+lazy behind the omni loop's own early-outs. It cannot go wide the other way:
+pixel-major means eight lights carry eight matrices, so the matrix would be
+GATHERED at exactly the cost of the scalar's loads; light-major makes it a
+BROADCAST. `lighting-w1` **1.542 → 1.479 (−4.1 %) at t=5743**, `Gcyc/f`
+0.442 → 0.381 (−13.8 %), core-ms 155.1 → 133.4 (−14.0 %),
+`DeferredLighting-call` 1.827 → 1.764 (−3.5 %), `renderFrame` 4.777 → 4.714
+(−1.3 %) and its wall 43.34 → 41.54. `lighting-w2` unmoved to four decimals at
+all five poses.
+
+**READ THE COLUMNS BEFORE QUOTING THIS ONE.** At **t=3409** the mechanism
+retires **+1.6 % MORE instructions** while taking **−4.2 % cycles and −5.5 %
+core time**, and the frame there is a WASH on wall. Cycles, core-ms and wall
+agree at all five poses; instructions agree at four. Confirmed on a quiet
+machine over three interleaved rounds, reproducing to ±0.001 Gi. IPC goes
+3.44 → 3.64 (t=3409) and 3.46 → 3.84 (t=5743): the change trades retired
+instructions for issue rate, converting twelve dependent loads and an 18-flop
+matmul per (pixel × light) into wide independent work. **A future round that
+watches `Ginstr/f` alone will read t=3409 as a regression — it is not.**
+
+BIT-EXACT, and by a counter: `--deferred_cube_prepass_verify` re-runs the whole
+scalar tap behind every cached one, with the pixel body's own view and world
+positions, and compares bit patterns — **0 mismatches in 47 M taps**. Five
+acceptance poses and nine 2026-08-16f pins identical parent-to-child.
+`render_gate.sh` is 4/4 and **cannot discriminate the flag**: instrumented, its
+four arms and city / chase / fountain take **zero** taps through the prepass,
+because the gate needs `lmKernelEnabled == false` (`--shadow_dynamic` without
+`--shadow_lm_dynamic`) plus PolyId, and greets is the only scene that sets it.
+The hatch is a TEMPLATE parameter, not a bool: as a runtime test it cost
++4.3 % of `lighting-w1` on the OFF arm — the register allocator, not the
+branch — and four shapes were tried before templating fixed it (OFF now +0.3 %).
+**The fountain t=2500 flip that 16i recorded appeared again**, on the PARENT
+binary, in this round's first three runs; 6/6 clean on re-gate, both binaries.
+
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
 `cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and

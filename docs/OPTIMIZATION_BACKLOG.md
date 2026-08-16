@@ -10,6 +10,267 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16l — THE CUBE TAP (33 % of the call): its interior is 61 % projection prologue, 8-wide over PIXELS is BIT-EXACT, and the instruction count is the wrong metric for it
+
+**Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance
+arm: `lighting-w1` CORE TIME −6.0 to −14.6 % and cycles −4.9 to −14.3 % at
+EVERY pose; instructions −4.9 to −0.8 % at four poses and **+1.5 % at t=3409**.
+`renderFrame` wall −1.3 to −4.2 % at every pose, instructions −1.6 to −0.2 % at
+four and +0.44 % at t=3409. BIT-EXACT, and by a counter rather than an
+argument: 0 mismatches in 47 M taps, five acceptance poses identical
+parent-to-child, nine 2026-08-16f pins at their recorded values.
+Flag `--deferred_cube_prepass`.**
+
+Commits `8cef558f` (the interior ladder + the tap's prologue/tail split)
+· `a1ce4b30` (the mechanism).
+
+### FIRST, THE INTERIOR — 16g called it "closed" from the outside
+
+`-DFDS_CUBE_ABLATE=n` (committed) is twelve staged early returns inside
+`CubeShadow_Sample`, each returning the constant 1.0f through a compare against
+a value no tap can produce, so the work above the cut stays live. Stage 0
+builds a `cmp`-identical binary. Driven with `-DFDS_OMNI_ABLATE=9` so the omni
+loop `continue`s immediately after the tap and the constant answer has nowhere
+downstream to go. At t=5743, over 2.943 M taps (`--omni_census`), the tap is
+0.599 Gi/f = **204 instructions**:
+
+| stage | Gi/f | instr/tap | % of tap |
+|---|--:|--:|--:|
+| call frame + cubeIdx guard | 0.069 | 23.4 | 11.5 % |
+| lightISource + 3 world subs | 0.040 | 13.6 | 6.7 % |
+| `CubeShadow_SelectFace` | 0.061 | 20.7 | 10.2 % |
+| face map resolve | 0.026 | 8.8 | 4.3 % |
+| `viewToLight` 3x3 matmul | 0.091 | 30.9 | 15.2 % |
+| lz near reject | 0.016 | 5.4 | 2.7 % |
+| 2 face-frustum rejects | 0.066 | 22.4 | 11.0 % |
+| 1/lz + smX/smY projection | 0.015 | 5.1 | 2.5 % |
+| int trunc + iX/iY bounds reject | 0.053 | 18.0 | 8.8 % |
+| **= the PROLOGUE (the eight rows above)** | **0.368** | **125** | **61.4 %** |
+| uniformity pyramid | 0.056 | 19.0 | 9.3 % |
+| bilinear weights | 0.012 | 4.1 | 2.0 % |
+| 2x2 tap addressing | 0.020 | 6.8 | 3.3 % |
+| 4 packed taps + accumulate | 0.074 | 25.1 | 12.4 % |
+
+`otool -tvV` counts exactly **125 instructions** between the same two points in
+the shipping binary — ladder and disassembly agree to the instruction. t=2845
+reproduces the shape on a 0.479 Gi/f tap. And `--shadow_tap_census` says
+**81.1 % of taps never read a texel** (26.1 % uniform-lit, 55.0 %
+uniform-occluding), so the branchy memory-bound half is the RARE half: the
+common cube tap is "project the pixel into a face and read one pyramid word".
+
+**Two stages of the first ladder lied, and the mechanism generalises.** A cut
+whose keep-expression is an INTEGER (`face`, `iX + iY`) folds — clang proves
+`float(int) > 1e30f` false, the cut collapses to `return 1.0f`, and since the
+only other exit above it is also `return 1.0f`, everything above dies. Both
+measured BELOW the no-tap baseline. Third variant of this after 16g's
+dead-strip and 16i's sink: sum integers into a float the compiler cannot bound.
+
+### THE MECHANISM — why the axis has to flip
+
+The loop is PIXEL-major. For a fixed pixel the eight lights carry eight cubes,
+eight faces and eight 3x3 matrices, so going wide over LIGHTS would GATHER
+twelve floats per lane, which is exactly what the scalar's twelve loads already
+cost. Fixed LIGHT x eight PIXELS makes the matrix a BROADCAST. So the prologue
+moves to a row pass: per tile row, reconstruct the row's view and world
+positions, then one 8-wide sweep per cube-carrying light into a lane-major slot
+plane; the omni loop's tap reads its 16-byte slot and runs `CubeShadow_Tail` —
+the SAME body `CubeShadow_Sample` reaches, split out of it `always_inline` so
+the scalar function's codegen stayed byte-identical.
+
+**Nothing about the accumulation changes.** The pixel loop still visits lights
+in the same order and adds in the same order; only WHERE the projection is
+computed moves. That is what makes bit-exactness reachable at all.
+
+The sweep is UNMASKED. The omni loop kills 45 % of pairs before the tap
+(mirrorId 4.4 %, N·L 20.8 %, range 8.7 %, cone 11.1 % — `--omni_census`), and
+three of those four are cheap to replicate; none is. The vector body runs all
+eight lanes either way, so a mask only pays when it empties a whole group, and
+the reject that would do that most often (N·L) needs the normal-mapped shading
+normal — 0.100 Gi/f of pixel-body work the row pass would have to duplicate.
+
+### THE HATCH HAD TO LEAVE THE LOOP — 16h's finding, paid for again
+
+As a runtime bool the hatch is one pointer test per pixel and one per tap,
+about eight instructions of the ~2 000 a pixel runs. It cost **`lighting-w1`
++0.065 Gi/f (+4.3 %) with the flag OFF** — half the win, on a branch never
+taken. It is not the tests: a build with the gate `constexpr false` reproduces
+the parent EXACTLY (1.543), so all of it is the register allocator in the
+largest function in the tree reacting to two extra live pointers. Four shapes
+were tried and none moved the OFF arm:
+
+| shape | OFF Gi/f | ON Gi/f |
+|---|--:|--:|
+| light-major slot plane + AoS positions read back by the body | 1.657 | 1.501 |
+| lane-major plane, six hoisted plane pointers, read-back | 1.605 | 1.464 |
+| lane-major, one row pointer, positions recomputed | 1.609 | 1.477 |
+| the per-tile setup outlined `noinline` | 1.612 | 1.481 |
+| **the tile kernel TEMPLATED on the hatch** | **1.548** | **1.480** |
+
+`Render_DeferredLighting_TileT<bool>` is instantiated twice and dispatched once
+per tile. The copies are never hot in the same frame, so the second costs
+I-cache footprint nobody walks and buys an OFF arm that is the parent's codegen
+to +0.3 %.
+
+### MEASURED — parent / OFF / ON, one worktree, one asset tree
+
+Order-rotated interleaved, min over 11 rounds, one pose per process, 1512x848,
+`--profiler=0 --deferred_prof=1 --hw_prof`, 10 iters. Load ran 4.8–13.9.
+
+| pose | row | par | off | **ON** | vs par | vs off |
+|---|---|--:|--:|--:|--:|--:|
+| **5743** | `lighting-w1` Gi/f | 1.542 | 1.547 (+0.32 %) | **1.479** | **-4.09 %** | -4.40 % |
+|  | .. Gcyc/f | 0.442 | 0.449 (+1.58 %) | **0.381** | **-13.80 %** | -15.14 % |
+|  | .. core-ms | 155.086 | 156.554 (+0.95 %) | **133.447** | **-13.95 %** | -14.76 % |
+|  | .. wall ms | 13.007 | 13.192 (+1.42 %) | **11.324** | **-12.94 %** | -14.16 % |
+|  | `lighting-w2` Gi/f | 0.272 | 0.272 (+0.00 %) | **0.272** | **+0.00 %** | +0.00 % |
+|  | `DeferredLighting-call` Gi/f | 1.827 | 1.832 (+0.27 %) | **1.764** | **-3.45 %** | -3.71 % |
+|  | `renderFrame` Gi/f | 4.777 | 4.782 (+0.10 %) | **4.714** | **-1.32 %** | -1.42 % |
+|  | `renderFrame` wall ms | 43.335 | 43.546 (+0.49 %) | **41.541** | **-4.14 %** | -4.60 % |
+| **2845** | `lighting-w1` Gi/f | 1.430 | 1.436 (+0.42 %) | **1.398** | **-2.24 %** | -2.65 % |
+|  | .. Gcyc/f | 0.412 | 0.416 (+0.97 %) | **0.371** | **-9.95 %** | -10.82 % |
+|  | .. core-ms | 142.692 | 143.770 (+0.76 %) | **130.046** | **-8.86 %** | -9.55 % |
+|  | .. wall ms | 12.140 | 12.298 (+1.30 %) | **10.909** | **-10.14 %** | -11.29 % |
+|  | `lighting-w2` Gi/f | 0.275 | 0.275 (+0.00 %) | **0.275** | **+0.00 %** | +0.00 % |
+|  | `DeferredLighting-call` Gi/f | 1.718 | 1.725 (+0.41 %) | **1.687** | **-1.80 %** | -2.20 % |
+|  | `renderFrame` Gi/f | 4.791 | 4.798 (+0.15 %) | **4.760** | **-0.65 %** | -0.79 % |
+|  | `renderFrame` wall ms | 43.051 | 43.042 (-0.02 %) | **41.718** | **-3.10 %** | -3.08 % |
+| **6097** | `lighting-w1` Gi/f | 1.300 | 1.304 (+0.31 %) | **1.290** | **-0.77 %** | -1.07 % |
+|  | .. Gcyc/f | 0.385 | 0.388 (+0.78 %) | **0.347** | **-9.87 %** | -10.57 % |
+|  | .. core-ms | 132.882 | 136.443 (+2.68 %) | **120.260** | **-9.50 %** | -11.86 % |
+|  | .. wall ms | 11.569 | 11.707 (+1.19 %) | **10.263** | **-11.29 %** | -12.33 % |
+|  | `lighting-w2` Gi/f | 0.277 | 0.277 (+0.00 %) | **0.277** | **+0.00 %** | +0.00 % |
+|  | `DeferredLighting-call` Gi/f | 1.590 | 1.594 (+0.25 %) | **1.580** | **-0.63 %** | -0.88 % |
+|  | `renderFrame` Gi/f | 4.231 | 4.236 (+0.12 %) | **4.221** | **-0.24 %** | -0.35 % |
+|  | `renderFrame` wall ms | 38.679 | 38.517 (-0.42 %) | **37.366** | **-3.39 %** | -2.99 % |
+| **3409** | `lighting-w1` Gi/f | 1.545 | 1.553 (+0.52 %) | **1.568** | **+1.49 %** | +0.97 % |
+|  | .. Gcyc/f | 0.451 | 0.457 (+1.33 %) | **0.429** | **-4.88 %** | -6.13 % |
+|  | .. core-ms | 157.871 | 158.790 (+0.58 %) | **148.410** | **-5.99 %** | -6.54 % |
+|  | .. wall ms | 13.571 | 13.876 (+2.25 %) | **12.983** | **-4.33 %** | -6.44 % |
+|  | `lighting-w2` Gi/f | 0.271 | 0.271 (+0.00 %) | **0.271** | **+0.00 %** | +0.00 % |
+|  | `DeferredLighting-call` Gi/f | 1.829 | 1.837 (+0.44 %) | **1.853** | **+1.31 %** | +0.87 % |
+|  | `renderFrame` Gi/f | 4.952 | 4.959 (+0.14 %) | **4.974** | **+0.44 %** | +0.30 % |
+|  | `renderFrame` wall ms | 43.278 | 43.555 (+0.64 %) | **42.720** | **-1.29 %** | -1.92 % |
+| **5813** | `lighting-w1` Gi/f | 1.503 | 1.508 (+0.33 %) | **1.430** | **-4.86 %** | -5.17 % |
+|  | .. Gcyc/f | 0.435 | 0.440 (+1.15 %) | **0.373** | **-14.25 %** | -15.23 % |
+|  | .. core-ms | 150.767 | 152.825 (+1.37 %) | **128.691** | **-14.64 %** | -15.79 % |
+|  | .. wall ms | 12.814 | 12.929 (+0.90 %) | **10.979** | **-14.32 %** | -15.08 % |
+|  | `lighting-w2` Gi/f | 0.270 | 0.270 (+0.00 %) | **0.270** | **+0.00 %** | +0.00 % |
+|  | `DeferredLighting-call` Gi/f | 1.787 | 1.792 (+0.28 %) | **1.713** | **-4.14 %** | -4.41 % |
+|  | `renderFrame` Gi/f | 4.638 | 4.643 (+0.11 %) | **4.564** | **-1.60 %** | -1.70 % |
+|  | `renderFrame` wall ms | 42.025 | 42.080 (+0.13 %) | **40.255** | **-4.21 %** | -4.34 % |
+
+### THE INSTRUCTION COUNT AND THE CLOCK DISAGREE, AND THAT IS THE FINDING
+
+At t=3409 — the pose 16g already flagged as having the lowest cube-tap share —
+the mechanism retires **1.5 % MORE instructions** and takes **4.9 % fewer
+cycles and 6.0 % less core time**. It is not a load artifact: `Gcyc/f` (a PMU
+counter), `core-ms` (Σ tile-task time) and `wall` all move the same way at all
+five poses, and the OFF arm sits at parent ±1.4 % at every pose as the control.
+IPC goes 3.42 → 3.86. The change converts a scalar dependent chain — twelve
+dependent loads and an 18-flop matmul per (pixel × light) — into wide
+independent work, so it trades retired instructions for issue rate.
+
+**This campaign quotes `Ginstr/f` because WALL is load-dirty, not because
+instructions are the goal.** When the proxy and the goal disagree this cleanly,
+the entry has to say so rather than pick the flattering column.
+
+Confirmed on a quiet machine (load 6.9–7.4, three interleaved rounds, the two
+poses that bracket the effect), because "wall is load-dirty" is exactly the
+objection this claim invites:
+
+| | `lighting-w1` Gi | Gcyc | core-ms | IPC | `renderFrame` wall |
+|---|--:|--:|--:|--:|--:|
+| t=3409 par | 1.545 | 0.450 | 157.6 | 3.44 | 43.83 |
+| t=3409 **ON** | **1.569 (+1.6 %)** | **0.431 (−4.2 %)** | **148.9 (−5.5 %)** | **3.64** | **43.53** |
+| t=5743 par | 1.542 | 0.446 | 155.8 | 3.46 | 43.17 |
+| t=5743 **ON** | **1.480 (−4.0 %)** | **0.385 (−13.7 %)** | **135.6 (−13.0 %)** | **3.84** | **41.57 (−3.7 %)** |
+
+Every column reproduces to ±0.001 Gi and ±0.005 Gcyc across the three rounds.
+**Say the weak pose plainly: at t=3409 the FRAME is a wash** — 43.95/43.53 ON
+against 43.95/43.83 parent, inside the run-to-run spread — not a win. The
+lighting phase there is −5.5 % of core time and the frame does not feel it,
+because at that pose lighting is a smaller share. On the goal (frame time) this
+is a win at four poses and neutral at the fifth; on the proxy (instructions) it
+is a win at four and a −1.6 % loss at the fifth. Both are above; neither was
+picked.
+
+### THE PRICE, STATED HONESTLY
+
+The ladder puts the prologue at 0.368 Gi/f and the mechanism nets 0.068 of
+instructions, so the row pass costs about **0.30 Gi/f to fill ~5.4 M lane-slots
+— ~55 instructions a slot**, four times what counting the vector body predicts.
+The eager/lazy ratio is the visible half (5.4 M slots filled for 2.943 M taps
+taken). Where the other 40 go was not isolated: four shapes of the inner loop
+were measured and the spread between best and worst is 2 %, so it is not the
+face scan and not the store.
+
+| inner-loop shape (all bit-exact) | ON Gi/f |
+|---|--:|
+| face scan + per-lane predicate store | **1.480** |
+| face scan + verdict folded into a packed slot | 1.508 |
+| all-same-face fast path + packed slot | 1.484 |
+| all-same-face fast path + per-lane store | 1.490 |
+
+The reduce that tests "all eight lanes on one face" costs more than the
+eight-iteration scan it skips, and folding the reject verdict into `mapIdx`
+with a vector select costs more than the per-lane branch it removes — that
+branch is perfectly predicted, because a rejected lane is rare and clustered.
+
+**~390 lines and a per-worker scratch buffer for −1.3 to −4.2 % of frame.**
+That ratio is the judge call and it is stated here, not buried.
+
+### THE BYTE VERDICT IS A COUNTER, NOT AN ARGUMENT
+
+`--deferred_cube_prepass_verify` re-runs the WHOLE SCALAR TAP behind every
+cached one — with the pixel BODY's own view and world positions, not the row
+pass's — and compares the two answers as bit patterns. That is deliberately
+wider than "is the vector maths right": it also catches the row pass's
+duplicate reconstruction of those six floats drifting a ULP from the body's,
+which is the other way this design could move a pixel.
+
+**0 mismatches in 47 M taps**: 23.9 M in the bench loop, 16.9 M at
+`--snapshot=greets@t=5743` under his arm, 6.3 M at the greets t=1588 pin.
+
+The vector maths is pinned to the scalar's own codegen, read off `otool -tvV`
+and not guessed: the matmul's MIDDLE product is a plain `fmul` with the first
+and third contracted into it and the offset add NOT contracted; `smY` is an
+`fmsub`. Written as clang `ext_vector_type` operators under `FP_CONTRACT_OFF`
+with `__builtin_elementwise_fma` at those sites — simde's spelling is not an
+fma on arm64 and a call-site pragma cannot reach it (2026-08-16e).
+
+### WHAT THE GATES ARE WORTH — the same warning as 16i, re-earned
+
+`render_gate.sh` is **4/4 with the flag on and off, and cannot discriminate it.**
+Instrumented, `mirrortest` / `conetest` / `halotest` / `rttslot` check **0 taps**
+through the prepass, and so do **city, chase and fountain** — the gate needs
+`lmKernelEnabled == false`, i.e. `--shadow_dynamic` without
+`--shadow_lm_dynamic`, plus ShadowMode::PolyId, and greets is the only scene
+that sets it. **The blast radius of this flag is greets.** The real coverage is
+the five acceptance poses and the greets t=1588 pin (6.3 M taps through the
+flag, `570a7b44` unmoved), all identical parent-to-child.
+
+**And the fountain flip appeared again, exactly as 16i predicted.** The first
+byte-gate run of the PARENT binary produced `b91cb2ba…` at fountain t=2500
+instead of `8db68ccb…` — the same alternate hash 16i recorded, on the parent,
+in this session's first three runs. Re-gated 6/6 `8db68ccb` on BOTH binaries.
+Without 16i's note this round would have spent a battery on it.
+
+### WHAT IS LEFT ON THE TAP
+
+1. **The call frame, 0.069 Gi/f (23.4/tap, 11.5 %).** `CubeShadow_Sample` still
+   spills nine callee-save pairs into a 144-byte frame, and 81 % of taps never
+   touch the state that forces them. Splitting the tail's RARE half (the 2x2
+   PCF, 18.9 % of taps) into its own `noinline` function would make the common
+   path a leaf. Not tried. Cheapest remaining item by far.
+2. **The eager/lazy ratio.** 5.4 M slots for 2.943 M taps. A group-level range
+   reject is cheap but is only SAFE if a skipped group writes a MISS sentinel
+   the consumer falls back on — a boundary disagreement on `len2 > r2` between
+   the row pass and the omni loop would otherwise read a stale slot. Unpriced.
+3. **The uniformity pyramid, 0.056 Gi/f** — a dependent load per tap; the 4x4
+   pyramid was priced and refused in 16g.
+4. **`--ssao_downscale=2` is still the single largest lever on this arm**, and
+   still a look change nobody has approved.
+
 ## 2026-08-16k — THE SHATTER NONDETERMINISM, CLOSED: one `static` scratch array shared by 12 shard workers. 15 flips in 49 → 0 in 48
 
 **16j handed on "the greets mirror shatter is nondeterministic, ~24.5 %, it lives

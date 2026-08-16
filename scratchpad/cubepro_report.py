@@ -4,7 +4,7 @@ import sys, re, glob
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else '/tmp/cube/ab'
 POSES = sys.argv[2].split(',') if len(sys.argv) > 2 else ['5743','2845','6097','3409','5813']
-ROWS = [('lighting-w1','gi'), ('lighting-w1','gc'), ('lighting-w1','wall'),
+ROWS = [('lighting-w1','gi'), ('lighting-w1','gc'), ('lighting-w1','wall'), ('lighting-w1','thr'),
         ('lighting-w2','gi'),
         ('DeferredLighting-call','gi'), ('DeferredLighting-call','wall'),
         ('renderFrame','gi'), ('renderFrame','wall')]
@@ -14,8 +14,13 @@ def parse(f):
     for line in open(f):
         m = re.match(r'\[DPROF\]\s+(\S[^|]*?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+\|\s+(\S+)\s+(\S+)\s+(\S+)', line)
         if not m: continue
-        try: d[m.group(1).strip()] = {'wall': float(m.group(3)), 'gi': float(m.group(7)), 'gc': float(m.group(8))}
+        try:
+            e = {'wall': float(m.group(3)), 'gi': float(m.group(7)), 'gc': float(m.group(8))}
+        except ValueError:
+            continue
+        try: e['thr'] = float(m.group(5))   # '-' on depth-0/1 rows
         except ValueError: pass
+        d[m.group(1).strip()] = e
     return d
 
 for pose in POSES:
