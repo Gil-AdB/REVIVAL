@@ -710,6 +710,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
+		// Promise to the kernel that this pass ends in the tonemap, so its 8-bit
+		// VPage writes are provably dead (--deferred_fill_ldr_skip). Mirrors the
+		// three gates the tonemap actually sits behind, below: `!skipVolumetric`
+		// (the underlay/RTT passes return before it), the --ssao_debug early
+		// return, and `deferred && hdr() && !g_hdrDeferTonemap`.
+		dctx.ldrDiscarded = !skipVolumetric && deferred
+		    && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap
+		    && !(fds::FeatureFlags::ssao() && fds::FeatureFlags::ssao_debug());
 		{ TailProf::ScopeTimer _tp("DeferredLighting-call", 1); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque

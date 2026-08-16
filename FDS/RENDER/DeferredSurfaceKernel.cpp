@@ -6238,6 +6238,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	// below ever reads.
 	const bool sTexSharp   = fds::FeatureFlags::quarter_tex_sharp();
 	const bool fillLdrSharp = !(fds::FeatureFlags::deferred_fill_hdr_skip() && hdrWrite);
+	// --deferred_fill_ldr_skip: when this pass ends in the tonemap, every VPage
+	// pixel is rewritten from hdrBuf, so the fill's 8-bit average is a value
+	// nothing reads. ctx.ldrDiscarded is the promise (see DeferredCommon.h) —
+	// hdrWrite alone is NOT sufficient and using it is a bug.
+	const bool fillLdrSkip = fds::FeatureFlags::deferred_fill_ldr_skip()
+	    && hdrWrite && ctx.ldrDiscarded;
 #if FDS_W2_ABLATE
 	float w2Sink = 0.0f;
 #endif
@@ -6418,10 +6424,13 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
-					const dword p = out[nidx[k]];
-					sumB += int(p & 0xFF);
-					sumG += int((p >> 8) & 0xFF);
-					sumR += int((p >> 16) & 0xFF);
+					dword p = 0;
+					if (!fillLdrSkip) {   // --deferred_fill_ldr_skip
+						p = out[nidx[k]];
+						sumB += int(p & 0xFF);
+						sumG += int((p >> 8) & 0xFF);
+						sumR += int((p >> 16) & 0xFF);
+					}
 					const fds::hdrf* nh = hdrWrite ? (ctx.hdrBuf + nidx[k]*4) : nullptr;
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
@@ -6461,7 +6470,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					++n;
 				}
 				if (n > 0) {
-					if (haveOwn && nsharp > 0 && !hdrWrite) {
+					if (fillLdrSkip) {
+						// --deferred_fill_ldr_skip: the tonemap overwrites it.
+					} else if (haveOwn && nsharp > 0 && !hdrWrite) {
 						const float inv = 1.0f / (float(nsharp) * 256.0f);
 						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
 						int oG = int(ownG * slG * inv + 0.5f); if (oG > 255) oG = 255;
@@ -6515,10 +6526,13 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
-					const dword p = out[nidx[k]];
-					sumB += int(p & 0xFF);
-					sumG += int((p >> 8) & 0xFF);
-					sumR += int((p >> 16) & 0xFF);
+					dword p = 0;
+					if (!fillLdrSkip) {   // --deferred_fill_ldr_skip
+						p = out[nidx[k]];
+						sumB += int(p & 0xFF);
+						sumG += int((p >> 8) & 0xFF);
+						sumR += int((p >> 16) & 0xFF);
+					}
 					const fds::hdrf* nh = hdrWrite ? (ctx.hdrBuf + nidx[k]*4) : nullptr;
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
@@ -6548,7 +6562,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				W2_ABL_CUT(8, float(n + nsharp) + hsB + ahB + slB + float(sumB));
 				if (n > 0) {
 					W2_CEN(5); W2_CEN_ADD(8, n); W2_CEN_ADD(9, nsharp);
-					if (haveOwn && nsharp > 0 && !hdrWrite) {
+					if (fillLdrSkip) {
+						// --deferred_fill_ldr_skip: the tonemap overwrites it.
+					} else if (haveOwn && nsharp > 0 && !hdrWrite) {
 						const float inv = 1.0f / (float(nsharp) * 256.0f);
 						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
 						int oG = int(ownG * slG * inv + 0.5f); if (oG > 255) oG = 255;

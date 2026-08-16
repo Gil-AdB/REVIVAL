@@ -348,6 +348,21 @@ struct DeferredLightingCtx {
 	// worker's OWN buffer — the bakes run N-concurrent, so this cannot be a
 	// global the way the serial mirror RTT's Hdr_BeginFramePass is.
 	fds::hdrf           *hdrBuf = nullptr;
+	// TRUE only when this pass is guaranteed to end in Render_TonemapToVPage,
+	// i.e. every 8-bit VPage byte the kernel writes will be overwritten from
+	// hdrBuf before anybody looks at it (docs/GRAPHICS_PIPELINE.md's "#1 HDR
+	// gotcha", stated as a promise instead of an assumption). Read by
+	// --deferred_fill_ldr_skip. `hdrBuf != nullptr` is NOT the same predicate
+	// and using it would be a bug: renderFrame's tonemap sits inside
+	// `if (!skipVolumetric)`, and CITY.CPP's water-reflection underlay renders
+	// with skipVolumetric=true into the MAIN VPage at the MAIN resolution —
+	// so hdrBuf is live, no tonemap runs, and that pass's VPage IS its product
+	// (CITY.CPP reads it straight back to displace the reflection). Also false
+	// for every offscreen/override bake: the shard bake and the greets mirror
+	// RTT do tonemap inline, but GreetsMirror.cpp's own comment claims wave-2
+	// fill pixels reach g_hdrBuf only via the VPage lift, and this flag is not
+	// the place to adjudicate that.
+	bool                 ldrDiscarded = false;
 };
 
 
