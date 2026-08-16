@@ -18,7 +18,7 @@ def parse(f):
     for line in open(f):
         m = re.match(r'\[DPROF\]\s+(\S[^|]*?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+\|\s+(\S+)\s+(\S+)\s+(\S+)', line)
         if not m: continue
-        try: d[m.group(1).strip()] = {'wall': float(m.group(2)), 'gi': float(m.group(7)), 'gc': float(m.group(8))}
+        try: d[m.group(1).strip()] = {'wall': float(m.group(3)), 'gi': float(m.group(7)), 'gc': float(m.group(8))}
         except ValueError: pass
     return d
 

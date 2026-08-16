@@ -59,6 +59,8 @@ extern float fastPow2(float x);
 #include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
 #include "RENDER/EnvBake.h"  // --env_refl: per-scene panorama for env-specular
 #include "RENDER/EnvCube.h"  // --env_cube: trig-free padded cube-face lookup
+#include "RENDER/CubeTapPrepass.h"  // --deferred_cube_prepass: the tap's
+                                    // prologue, 8-wide over pixels per light
 #include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
@@ -1875,7 +1877,194 @@ void OmniCensus_Report() {}
 // ONE pointer instead of seven locals across the per-light loop.
 struct HzFrame { const unsigned char *texel; float tx, ty, tz, bx, by, bz; };
 
-static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
+// --deferred_cube_prepass_verify counters. Process-wide atomics because they
+// are read once a frame from the tick thread and written only under the
+// instrument flag; the shipping arm never touches this cache line.
+static std::atomic<uint64_t> g_cubeProChecked{0};
+static std::atomic<uint64_t> g_cubeProBad{0};
+
+// ─── --deferred_cube_prepass scratch (see RENDER/CubeTapPrepass.h) ─────────
+// One per WORKER, grown once and reused for the session: a tile row is at most
+// the tile width, and the tile grid is fixed for a resolution. Thread-local
+// rather than per-tile stack because the slot plane is ~20 KB at greets
+// (21 cube lights x 128 padded lanes x 16 B) and a VLA that size on a worker
+// stack is how you find out the pool's stacks are not 8 MB.
+struct CubeProScratch {
+	// SoA for the 8-wide producer: six lane-contiguous planes.
+	std::vector<float>            vx, vy, vz;   // view-space pos
+	std::vector<float>            wx, wy, wz;   // world-space pos
+	// What the CONSUMER reads: one pointer per screen column, resolved by the
+	// row pass to that pixel's slot row (or null for a dropped column). A
+	// pointer table and not a lane index because the pixel body then holds a
+	// LOAD where it would otherwise hold a base, a stride and an index — and
+	// this loop pays about ten instructions a pair for every extra live value.
+	std::vector<const fds::CubeProSlot *> rowPtr;
+	std::vector<fds::CubeProSlot> slots;        // [lane * nLights + n]
+};
+
+// Per-TILE setup: size the row scratch and hand back the column->slot-row
+// table. `noinline` because it is not the work — it is a handful of capacity
+// tests and at most one allocation per worker per session — but leaving its
+// vector-resize code inside Render_DeferredLighting_Tile cost +0.029 Gi/f of
+// `lighting-w1` with the flag OFF, purely by making the pixel body's register
+// allocation worse. In a function this large, code that never executes is
+// still not free.
+//
+// Returns null (and leaves the outputs alone) for a tile the prepass will not
+// serve. A DEGENERATE tile is not hypothetical: the mirror-RTT and shard
+// passes dispatch a fixed tile grid over a target smaller than it, so `x2 < x1`
+// arrives here with a NEGATIVE width — and `size_t((x2 - x1 + 8) & ~7)` on that
+// is how a resize asks for 18 exabytes.
+__attribute__((noinline))
+static CubeProScratch *CubeProBeginTile(const DeferredLightingCtx &ctx, int tileIndex,
+                                        int x1, int x2, int &nLightsOut,
+                                        const fds::CubeProSlot *const *&rowsOut)
+{
+	static thread_local CubeProScratch s_cubePro;
+	const TileLights &tlp = ctx.tileLights[tileIndex];
+	if (x2 <= x1 || tlp.count <= 0) return nullptr;
+	const int wRow  = x2 - x1;
+	const int lanes = (wRow + 8) & ~7;          // padded lanes per row
+	CubeProScratch &S = s_cubePro;
+	if (int(S.rowPtr.size()) < wRow) S.rowPtr.resize(size_t(wRow));
+	if (int(S.vx.size()) < lanes) {
+		S.vx.resize(lanes); S.vy.resize(lanes); S.vz.resize(lanes);
+		S.wx.resize(lanes); S.wy.resize(lanes); S.wz.resize(lanes);
+	}
+	const size_t need = size_t(lanes) * size_t(tlp.count);
+	if (S.slots.size() < need) S.slots.resize(need);
+	nLightsOut = tlp.count;
+	rowsOut    = S.rowPtr.data();
+	return &S;
+}
+
+// Build one tile ROW's prologue plane: the per-pixel view/world positions the
+// row needs, then one 8-wide prologue sweep per cube-carrying light.
+//
+// The sweep is UNMASKED on purpose. The omni loop kills 45 % of (pixel x light)
+// pairs before the tap — mirrorId 4.4 %, N·L 20.8 %, range 8.7 %, cone 11.1 %
+// (--omni_census, t=5743) — and the prepass could apply the first, third and
+// fourth of those cheaply. It does not, because the vector body runs for all
+// eight lanes whichever way the mask goes, so a mask only saves work when it
+// empties a whole group of eight, and the reject that would empty groups most
+// often (N·L) is the one term the prepass CANNOT afford: it needs the
+// normal-mapped shading normal, which is 0.100 Gi/f of pixel-body work the row
+// pass would have to duplicate.
+//
+// PRICE IT HONESTLY. The ladder puts the prologue this replaces at 0.368 Gi/f
+// (125 instructions x 2.943 M taps) and the mechanism nets 0.068, so filling
+// ~5.4 M lane-slots costs about 0.30 Gi/f — roughly 55 instructions a slot,
+// four times what an instruction count of the vector body predicts, and the
+// reason this is a 4 % win and not a 20 % one. Where the other 40 go was not
+// isolated; four shapes of the inner loop were measured (see
+// CubeTap_Prologue8) and the spread between best and worst is only 2 %, so it
+// is not the scan and not the store.
+static void CubeProBuildRow(CubeProScratch &S, const DeferredLightingCtx &ctx,
+                            const TileLights &tl, int nLights,
+                            int x1, int x2, int py, bool checker, bool quarter,
+                            bool checkerEnvFull,
+                            const fds::EnvPanoLinear *const *envTabG)
+{
+	const int    XRes    = ctx.xres;
+	const word  *ZPage16 = ctx.zpage16;
+	const float  CntrEX  = ctx.cntrEX, CntrEY = ctx.cntrEY;
+	const meka::GBuffer &gb = *ctx.gb;
+	int c = 0;
+	for (int px = x1; px < x2; ++px) {
+		if (checker || quarter) {
+			const bool drop = checker ? (((px ^ py) & 1) != 0)
+			                          : (((px | py) & 1) != 0);
+			// The pixel loop's own --deferred_checker_env_full keep, in the
+			// same two operations: an ENV-REFLECTIVE pixel of the dropped
+			// parity IS shaded by wave 1 (the fill refuses to average those).
+			// This must agree bit for bit with the test at the top of the
+			// pixel body or the lane indices desynchronise.
+			if (drop) {
+				bool keep = false;
+				if (checkerEnvFull && envTabG) {
+					const uint32_t m32e = gb.txtr[size_t(py) * size_t(XRes) + size_t(px)];
+					keep = envTabG[(m32e >> 20) & 0xFF] != nullptr;
+				}
+				if (!keep) { S.rowPtr[px - x1] = nullptr; continue; }
+			}
+		}
+		S.rowPtr[px - x1] = S.slots.data() + size_t(c) * size_t(nLights);
+		// The pixel loop's own two expressions, verbatim. They are computed
+		// TWICE — here and again in the body — and that was a decision, not an
+		// oversight: a first shape had the body READ THESE BACK, which is one
+		// computation and cannot drift, and it cost more in register pressure
+		// than the thirteen flops it saved (`lighting-w1` 1.477 vs 1.480 Gi/f
+		// with the read-back, and +4 % on the OFF arm from the extra live
+		// pointer). What makes the duplicate safe is the verifier:
+		// --deferred_cube_prepass_verify compares the CACHED tap against a
+		// scalar tap taken with the BODY's own values, so a one-ULP
+		// disagreement between the two computations surfaces as a mismatch
+		// count and not as a moved pin. It reads 0 of 23.9 M.
+		const size_t i    = size_t(py) * size_t(XRes) + size_t(px);
+		const word   zEnc = ZPage16[i];
+		const float  z = float(0xFF80 - zEnc) * ctx.invZScale;
+		const float  x = (float(px) - CntrEX) * z * ctx.invFOVX;
+		const float  y = (CntrEY - float(py)) * z * ctx.invFOVY;
+		const float wxv = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y +
+		                  ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+		const float wyv = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y +
+		                  ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+		const float wzv = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
+		                  ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+		S.vx[c] = x;   S.vy[c] = y;   S.vz[c] = z;
+		S.wx[c] = wxv; S.wy[c] = wyv; S.wz[c] = wzv;
+		++c;
+	}
+	if (c == 0) return;
+	// Pad the tail group with lane 0. A stale lane would carry a world
+	// position from the previous row, select a different cube face and split
+	// the projection into a second pass for nothing — the same reason
+	// waveSlopeBatch pads rather than leaving its tail undefined.
+	const int cpad = (c + 7) & ~7;
+	for (int k = c; k < cpad; ++k) {
+		S.vx[k] = S.vx[0]; S.vy[k] = S.vy[0]; S.vz[k] = S.vz[0];
+		S.wx[k] = S.wx[0]; S.wy[k] = S.wy[0]; S.wz[k] = S.wz[0];
+	}
+#ifdef FDS_CUBEPRO_VEC8
+	fds::CubeProSlot *const base = S.slots.data();
+	for (int n = 0; n < nLights; ++n) {
+		const int32_t cubeIdx = tl.cubeShadowIdx[n];
+		if (cubeIdx < 0 || size_t(cubeIdx) >= g_cubeShadowRefs.size()) continue;
+		for (int g = 0; g < cpad; g += 8)
+			fds::CubeTap_Prologue8(cubeIdx,
+			                       &S.wx[g], &S.wy[g], &S.wz[g],
+			                       &S.vx[g], &S.vy[g], &S.vz[g],
+			                       base + size_t(g) * size_t(nLights) + size_t(n),
+			                       nLights);
+	}
+#else
+	// No clang vector extensions -> no prologue was computed, and the slot
+	// plane holds whatever the last row left in it. CubeProTileArmed() refuses
+	// to arm in that build for exactly this reason; the branch is here so the
+	// file still compiles, not so it can run.
+	(void)tl; (void)nLights;
+#endif
+}
+
+// The tile kernel is a TEMPLATE on whether --deferred_cube_prepass serves this
+// tile, and the reason is measured, not stylistic. As a runtime bool the hatch
+// is one pointer test per pixel and one per tap — about eight instructions of
+// the ~2 000 a pixel runs — and it cost `lighting-w1` +0.065 Gi/f (+4.3 %)
+// with the flag OFF. None of that is the tests: it is the register allocator
+// in the largest function in the tree, which loses more to two extra live
+// pointers than the branch itself ever costs. Three shapes were tried against
+// it (light-major slot plane, an AoS position record read back by the body,
+// the per-tile setup outlined) and none moved the OFF arm.
+//
+// Instantiated twice, dispatched once per tile by Render_DeferredLighting_Tile
+// below. The two copies are never hot in the same frame — the flag does not
+// change mid-frame — so the second instantiation costs I-cache footprint that
+// is never walked, and buys an OFF arm that is byte-for-byte the parent's
+// codegen. This is 16h's finding taken seriously: a flag-guarded predicate in
+// this loop costs about what these mechanisms save, so the predicate has to
+// leave the loop entirely.
+template <bool kCubePrepass>
+static void Render_DeferredLighting_TileT(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
 {
@@ -2091,6 +2280,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	    && !caFlags.profNoCubeTap
 	    && caFlags.shadowMode == ShadowMode::PolyId;
 
+	// --deferred_cube_prepass: armed for this tile by CubeProTileArmed(),
+	// which owns the whole predicate — see it for the terms and why.
+	constexpr bool cubeProTile = kCubePrepass;
+	const bool cubeProVerify = cubeProTile
+	    && fds::FeatureFlags::deferred_cube_prepass_verify();
+	(void)cubeProVerify;
+
 	// [DIAG] FDS_CONTRIB_CULL: per-light MAX linear diffuse contribution over this
 	// tile, matching the HDR-linear accumulation below (albedo²·intensity·color).
 	// After the pixel loop we count lights whose max contribution is below visible
@@ -2185,7 +2381,22 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 #endif
 	uint64_t ocn[OMNI_CEN_N] = {0};
 
+	// --deferred_cube_prepass: size the row scratch once per tile. The slot
+	// plane is indexed by the LIGHT SLOT n, not by a compacted cube-light
+	// index — greets' tile lists run 8-21 entries of which nearly all carry a
+	// cube, so compaction would buy a few kilobytes and cost the consumer an
+	// indirection in the one loop that cannot afford one.
+	int cubeProLights = 0;
+	const fds::CubeProSlot *const *cubeProRows = nullptr;
+	CubeProScratch *cubeProS = nullptr;
+	if constexpr (kCubePrepass)
+		cubeProS = CubeProBeginTile(ctx, tileIndex, x1, x2, cubeProLights, cubeProRows);
+
 	for (int py = y1; py < y2; ++py) {
+		if constexpr (kCubePrepass) if (cubeProS)
+			CubeProBuildRow(*cubeProS, ctx, ctx.tileLights[tileIndex],
+			                cubeProLights, x1, x2, py, checker, quarter,
+			                checkerEnvFull, envTabG);
 		for (int px = x1; px < x2; ++px) {
 			// Wave-1 of checkerboard: skip odd cells (filled by the
 			// fill-pass after all wave-1 tiles complete).
@@ -2490,6 +2701,23 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// Reconstruct view-space position. ZPage16 stores
 			// 0xFF80 - round(g_zscale * z), so:
 			//   z = (0xFF80 - zEnc) / g_zscale
+			//
+			// --deferred_cube_prepass: ONE pointer, and it is a LOAD, not a
+			// computation — the row pass has already resolved this px to its
+			// slot row (or to null) and `cubeDirect` is folded in, so the omni
+			// loop's hatch below is a single `cbz` on a register it already
+			// holds. Everything else in this body is byte-for-byte the parent's:
+			// two earlier shapes that ALSO read the view and world positions
+			// back out of the prepass cost +7.4 % and +4.0 % of `lighting-w1`
+			// on the OFF arm, all of it register pressure in the largest
+			// function in the file. The prepass now recomputes those six floats
+			// for itself, and --deferred_cube_prepass_verify is what makes that
+			// safe: it compares the CACHED tap against a scalar tap taken with
+			// THESE values, so a one-ULP disagreement between the two
+			// computations shows up as a mismatch rather than as a moved pin.
+			const fds::CubeProSlot *const cubeProRow =
+			    (kCubePrepass && cubeProRows && cubeDirect)
+			    ? cubeProRows[px - x1] : nullptr;
 			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
 			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
 			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
@@ -3185,7 +3413,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							// --deferred_cube_direct: this IS resolveCubeAtten's
 							// PolyId arm, called with the arguments it forwards,
 							// without the 20-argument frame around it.
-							const float cubeAtten = cubeDirect
+							// --deferred_cube_prepass: the projection this
+							// call would do has already been done 8-wide for
+							// this (pixel, light) by the row pass; what is
+							// left is the tail, and CubeShadow_SampleCached
+							// runs the SAME tail body this call would reach.
+							// One load + one test per tap for the hatch —
+							// 16h's lesson is that a FLAG read in this loop
+							// costs what it saves, so the flag is resolved
+							// per tile into a pointer and per LIGHT into a
+							// slot index, never re-read here.
+							const float cubeAtten =
+							    cubeProRow
+							    ? fds::CubeShadow_SampleCached(cubeProRow[n],
+								surfaceShadowId)
+							    : cubeDirect
 							    ? CubeShadow_Sample(cubeIdx,
 								sampleWorldX, sampleWorldY, sampleWorldZ,
 								x, y, z, /*constBias=*/0, /*slopeBias=*/0,
@@ -3197,6 +3439,23 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								sampleWorldX, sampleWorldY, sampleWorldZ,
 								x, y, z, kShadowBiasG, kSlopeBiasG,
 								surfaceShadowId);
+							// --deferred_cube_prepass_verify: the scalar tap,
+							// behind the vector one, on the same inputs. Not
+							// a spot check — every tap, every frame, and the
+							// counter is the landing bar. 2026-08-16e's
+							// vectorisation looked right and disagreed on
+							// 84 % of taps; nothing but this catches that.
+							if (cubeProVerify && cubeProRow) {
+								const float ref = CubeShadow_Sample(cubeIdx,
+									sampleWorldX, sampleWorldY, sampleWorldZ,
+									x, y, z, 0, 0, surfaceShadowId);
+								uint32_t a, b;
+								memcpy(&a, &cubeAtten, 4);
+								memcpy(&b, &ref, 4);
+								g_cubeProChecked.fetch_add(1, std::memory_order_relaxed);
+								if (a != b)
+									g_cubeProBad.fetch_add(1, std::memory_order_relaxed);
+							}
 							if (tapCensus) {
 								++tcL[n][1];
 								if (cubeAtten >= 1.0f)      ++tcL[n][2];
@@ -5335,6 +5594,56 @@ static inline void EnvComposeCityVec8(const DeferredLightingCtx &ctx,
 	// (1-F) diffuse energy conservation (--diffuse_energy): expose the raw
 	// per-lane Fresnel so the caller can scale diffuse by (1-fres).
 	if (outFres) _mm256_store_ps(outFres, fres);
+}
+
+// The armed test for --deferred_cube_prepass, and the whole predicate in one
+// place. Run once per tile by the dispatcher below.
+//
+//   * `cubeDirectTile`'s terms — PolyId mode, the lightmap kernel off, the tap
+//     not short-circuited. Same predicate that makes the direct call legal;
+//     outside it `resolveCubeAtten` carries arms (the static-lightmap sample,
+//     the two lightmap debug recomputes, Depth mode's slope bias) that the
+//     cached tail does not implement.
+//   * no --shadow_swizzle: a parked experiment, and keeping the tap's
+//     addressing on one code path is worth more than covering it.
+//   * no --deferred_checker_edge_full: it makes "is this pixel shaded" depend
+//     on a NEIGHBOUR SCAN, and the row pass must answer that with the same
+//     bits the pixel loop will. Default OFF. --deferred_checker_env_full IS
+//     supported (greets setDefaults it on) — its extra keeps are one G-buffer
+//     word and one table lookup, which CubeProBuildRow replicates verbatim.
+//   * a non-degenerate tile with lights: the mirror-RTT and shard passes
+//     dispatch a fixed tile grid over a smaller target, so `x2 <= x1` arrives.
+static bool CubeProTileArmed(const DeferredLightingCtx &ctx, int tileIndex,
+                             int x1, int x2)
+{
+#ifndef FDS_CUBEPRO_VEC8
+	(void)ctx; (void)tileIndex; (void)x1; (void)x2;
+	return false;          // no clang vector extensions -> no prologue exists
+#else
+	if (!fds::FeatureFlags::deferred_cube_prepass()) return false;
+	if (!fds::FeatureFlags::deferred_cube_direct())  return false;
+	if (fds::FeatureFlags::shadow_swizzle())         return false;
+	if (fds::FeatureFlags::shadow_dynamic() && !fds::FeatureFlags::shadow_lm_dynamic())
+		{ /* lmKernelEnabled == false: this is the arm we want */ }
+	else return false;
+	if (fds::FeatureFlags::prof_no_cube_tap())       return false;
+	if (g_shadowMode.load(std::memory_order_relaxed) != ShadowMode::PolyId) return false;
+	const bool quarter = deferredLightingQuarterEnabled();
+	const bool checker = deferredLightingCheckerboardEnabled() && !quarter;
+	if ((checker || quarter) && fds::FeatureFlags::deferred_checker_edge_full()) return false;
+	if (x2 <= x1) return false;
+	return ctx.tileLights[tileIndex].count > 0;
+#endif
+}
+
+static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
+                                         int tileIndex,
+                                         int x1, int y1, int x2, int y2)
+{
+	if (CubeProTileArmed(ctx, tileIndex, x1, x2))
+		Render_DeferredLighting_TileT<true>(ctx, tileIndex, x1, y1, x2, y2);
+	else
+		Render_DeferredLighting_TileT<false>(ctx, tileIndex, x1, y1, x2, y2);
 }
 
 static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx,
@@ -7679,6 +7988,15 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		std::fprintf(stderr,
 			"[SHADOW-CACHE] samples=%llu line-transitions=%llu (%.2f%%)\n",
 			(unsigned long long)s, (unsigned long long)t, pct);
+	}
+	// --deferred_cube_prepass_verify: the scalar-behind-vector tally. Printed
+	// per frame with the RUNNING total, because a mismatch rate of 1e-6 is
+	// still a mismatch and a per-frame delta would round it away.
+	if (fds::FeatureFlags::deferred_cube_prepass_verify()) {
+		const unsigned long long ck = g_cubeProChecked.load(std::memory_order_relaxed);
+		const unsigned long long bd = g_cubeProBad.load(std::memory_order_relaxed);
+		std::fprintf(stderr, "[CUBEPRO-VERIFY] taps checked %llu, MISMATCH %llu (%.6f%%)\n",
+			ck, bd, ck ? 100.0 * double(bd) / double(ck) : 0.0);
 	}
 #if FDS_SHARD_BAKE_LAB
 	dlAdd(fds::g_phDlTiles, _dlA, dlNow());
