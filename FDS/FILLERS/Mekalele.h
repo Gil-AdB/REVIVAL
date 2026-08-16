@@ -32,7 +32,24 @@ extern thread_local bool g_xparPeelReverse;
 #include <atomic>
 #include <cstdlib>
 
+// REACHABILITY CONTROL BUILD (compile-time, never defined in a shipping build):
+// -DFDS_ZERO_NORMAL_PROBE=1 makes the G-buffer normal plane store a LOUD code for
+// every lane the degenerate-normal guard masks, so a byte-compare against the
+// shipping guard answers "does any rasterized fragment actually carry a zero
+// interpolated normal?" — which the guard alone cannot answer on arm64, where the
+// unguarded NaN already quantizes to the same 0 the guard writes.
+#ifndef FDS_ZERO_NORMAL_PROBE
+#define FDS_ZERO_NORMAL_PROBE 0
+#endif
+
 namespace meka {
+
+// The word stored for a lane whose interpolated normal has no direction. 0 is
+// exactly oct_encode_u32_x8(0,0,1) — view-space +Z, a unit normal facing the
+// camera. The probe build swaps in a code that decodes to ~(0.707,0.707,0) so a
+// masked lane is impossible to miss in a rendered frame.
+inline constexpr uint32_t kZeroNormalCode      = 0u;
+inline constexpr uint32_t kZeroNormalProbeCode = 0x40004000u;
 
 // Diagnostic (FDS_MIRROR_CLAMP_STATS=1): lanes rejected by the clone
 // wall-depth clamp this frame + clone lanes that passed the tag gate at
@@ -3161,6 +3178,27 @@ struct TileRasterizer {
 					const Vec8f vnx = pnX * vInvN;
 					const Vec8f vny = pnY * vInvN;
 					const Vec8f vnz = pnZ * vInvN;
+					// Lane-valid mask for the NORMAL plane — the twin of tValid
+					// below, same test (`> 1e-12`), same convention (a degenerate
+					// lane's stored word is masked to 0). Without it a zero
+					// interpolated normal takes approx_rsqrt(0) = +inf, 0*inf =
+					// NaN through all three lanes, and the encode's
+					// float->int quantize decides what lands in the G-buffer:
+					// NaN converts to 0 on arm64/NEON (code 0) and to
+					// 0x80000000 on x86 (clamped to -32768 -> code 0x80008000).
+					// Those decode to view-space +Z and ~-Z respectively — the
+					// same scene lit from opposite sides depending on the host
+					// ISA. Masking to 0 makes the value a DECISION: code 0 is
+					// exactly oct_encode(0,0,1), a unit normal facing the
+					// camera, which is what the deferred kernel would want from
+					// a surface it cannot orient. (The tangent plane's consumer
+					// tests `packedT != 0` and falls back; the normal plane has
+					// no such sentinel — every code is a legal direction — so
+					// the guard's job here is a DEFINED unit normal, not a
+					// detectable one.)
+					const Vec8f nEps = 1e-12f;
+					alignas(32) int32_t nValid[8];
+					Vec8i(n2 > nEps).store_a(nValid);
 					alignas(32) uint32_t normalEnc[8];
 					_mm256_store_si256((__m256i*)normalEnc,
 						oct_encode_u32_x8(*(const __m256*)&vnx,
@@ -3203,9 +3241,25 @@ struct TileRasterizer {
 						// the dominant body of any tile that covers a wall
 						// or floor; partial-coverage stays on the scatter
 						// path below.
-						// Normal plane is 32-bit (oct 16.16): full-lane store.
+						// Normal plane is 32-bit (oct 16.16): full-lane store,
+						// masked by the degenerate-lane test above (AND, the
+						// same shape the tangent store below uses).
 						_mm256_storeu_si256((__m256i*)span.normal,
-							_mm256_load_si256((const __m256i*)normalEnc));
+#if FDS_ZERO_NORMAL_PROBE
+							// REACHABILITY CONTROL BUILD ONLY (never shipped):
+							// give the degenerate lanes a LOUD normal instead of
+							// the quiet 0, so "no pixel moves" is evidence that
+							// no lane is degenerate rather than evidence that
+							// the substituted value happened to agree.
+							_mm256_blendv_epi8(
+								_mm256_set1_epi32(int32_t(kZeroNormalProbeCode)),
+								_mm256_load_si256((const __m256i*)normalEnc),
+								_mm256_load_si256((const __m256i*)nValid)));
+#else
+							_mm256_and_si256(
+								_mm256_load_si256((const __m256i*)normalEnc),
+								_mm256_load_si256((const __m256i*)nValid)));
+#endif
 						if (wantTangent) {
 							const __m128i t16Raw = pack_lo16_x8(
 								_mm256_load_si256((const __m256i*)tangentEnc));
@@ -3264,7 +3318,13 @@ struct TileRasterizer {
 						}
 						for (int lane = 0; lane < 8; ++lane) {
 							if (!mask_l[lane]) continue;
-							span.normal[lane] = normalEnc[lane];
+							span.normal[lane] = nValid[lane]
+								? normalEnc[lane]
+#if FDS_ZERO_NORMAL_PROBE
+								: kZeroNormalProbeCode;
+#else
+								: kZeroNormalCode;
+#endif
 							if (wantTangent) {
 								span.tangent[lane] = tValid[lane]
 									? uint16_t(tangentEnc[lane]) : uint16_t(0);
