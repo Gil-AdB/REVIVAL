@@ -10,6 +10,226 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16v — 16u's THREE LOOSE ENDS: city's zero normals are **collinear authored triangles, 1575/1575, not cancellation**; and the normal plane's missing mask is **not latent — it fires 137 207 times a frame in chase**, where today's stored value is decided by the host ISA's NaN→int rule
+
+16u handed on three items. All three are closed here, and the middle one turned
+out to be the opposite of what "unreachable hardening" expected.
+Status: **DONE** · one instrument (`--zero_normal_census`, default 0) · three
+guards (`MakeFacesIndependent`'s degenerate-face clone, the G-buffer normal
+plane, the POM march's TBN normalizes) · **0 pixels change at every pin and
+acceptance pose**, and the reason is different for each one.
+
+### THE NORMAL PLANE HAS NO `tValid` (16u hand-off #1) — AND THE CASE IS LIVE
+
+*(taken first, because what it found renames the other two)*
+
+`Mekalele.h:3159` normalizes the interpolated view normal with
+`approx_rsqrt(n2)` and stores the oct code unmasked. What that produces for a
+zero normal is **not** a NaN in the G-buffer — it is a platform decision nobody
+made:
+
+| step | value |
+|---|---|
+| `approx_rsqrt(0)` | `+inf` (measured, this build's simde/NEON) |
+| `0 * inf` | `NaN` |
+| `_mm256_cvtps_epi32(NaN)` | **0 on arm64/NEON** (measured), `0x80000000` on x86 (Intel SDM: integer indefinite — *documented, not measured here*) |
+| packed oct code | **`0x00000000`** → decodes to view-space `(0,0,1)` · x86: `0x80008000` → `≈(0,0,-1)` |
+
+So the same frame is shaded with a camera-FACING normal on this machine and a
+camera-AVERTED one on an x86 build, at every pixel whose interpolated normal
+vanishes. The guard (`nValid = n2 > 1e-12`, stored word ANDed with it — the
+tangent plane's test and its masking shape, verbatim) makes that value a
+decision: code 0 *is* `oct_encode(0,0,1)`, so on arm64 it is byte-identical to
+what the accident produced, and every other target now agrees with it.
+
+**Byte-nullity therefore proves nothing about reachability here** — the masked
+value and the accidental value coincide. The control is a probe build
+(`-DFDS_ZERO_NORMAL_PROBE=1`) that stores `0x40004000` (≈`(0.707,0.707,0)`) in
+exactly the lanes the guard masks:
+
+| arm | probe vs shipping |
+|---|---|
+| city 9-pose sweep + acceptance arm, fountain, crash ×2, greets ×4 acceptance | **identical** |
+| **chase t=100** | **93 426 px (4.51 %)**, max \|Δ\| 27 |
+| **chase t=800** | 15 870 px (0.77 %), max 29 |
+| **chase t=1200** | 3 868 px (0.19 %), max 37 |
+| chase t=400 | 252 px (0.012 %), max 24 |
+| chase t=1600 | 0 px |
+
+Attribution, from the probe build's per-material counter at t=100:
+**137 207 degenerate-normal lane stores**, of which **131 804 (96 %) on matID 13
+`'moutines surface'`** — the island skirts where the mountains meet the sea —
+plus `'tower'` (lighthouse) 3 206 and the ship hull/engine materials in the
+hundreds. Images: `docs/img/zeronorm/chase_t000100_{shipping,probe,probe_diff,where}.png`
+and the t=000800 set; `_where` paints the affected pixels magenta over the
+shipped frame.
+
+**It is not an authoring defect and not the 16u family.** chase has **zero**
+vertices with `|N| == 0` (census below). The zero is in the VIEW-space `TN`, and
+it arrives whole-primitive: of the 38 512 triangles the single 1920-wide pass
+rasterized, **19 092 have all three corner `TN` at zero and not one has one or
+two**. See the hand-off at the bottom — that is its own round.
+
+### CITY'S 'bilding type 1 windows' VERTS (16u hand-off #3): **ALL-DEGENERATE 1575 / 1575, CANCEL 0, ORPHAN 0**
+
+`--zero_normal_census` (new, default 0, byte-null) classifies every vertex with
+`|N| <= EPSILON` at both normal-build sites by WHY it is zero: ORPHAN (no
+incident face), ALL-DEGENERATE (every incident face zero-area, i.e.
+`Compute_Face_Normals`' deliberate zero cross), or CANCEL (real-area faces whose
+area-weighted normals sum to zero — the only class that corners fillable
+geometry).
+
+City, `t=1961`: **1575 zero-normal verts over 35 meshes** — 21 × 27 (meshes whose
+first face is `'bilding type 1 windows'`), 11 × 63 (`'b7 windows'`), 3 × 105
+(`'b6 windows'`). Every one of them is **ALL-DEGENERATE**, with exactly ONE
+incident face, and that face is **collinear**:
+
+```
+face area=0          |F->N|=0 edges=(25,25,50)                height=0
+   A=(-40.00000,1001.61292,50.00000) B=(…,25.00000) C=(…,0.00000)
+face area=6.1e-05    |F->N|=0 edges=(51.3223,51.3223,102.645) height=1.18925e-06
+   A=(-40.00000,1001.61292,-50.00000) B=(5.00000,976.93549,-50.00000)
+   C=(50.00000,952.25806,-50.00000)
+```
+
+**The hand-off's "a face of REAL area 1.22e-4" is the float residue of a
+102-unit-long, 1.2e-6-thick needle** (longest edge = the sum of the other two, to
+the printed digit). It is authored data — three collinear points, the signature
+of an n-gon strip triangulated through a straight run of vertices — and the
+faces belong to the HULL/ROOF surfaces (`'bilding type 1 hull'`,
+`'bilding type 1 hull side 1'`, `'b7 roof'`), not to the window material the mesh
+is named after.
+
+**The stage is the same one greets used, one step later.** They do not exist at
+load (`vnormals` reports 0); they appear at `vtangents`, i.e. after
+`MakeFacesIndependentByAngle`. `computeSmoothedNormal` (`MeshOps.cpp:171`) sees
+`face->N == 0` for the degenerate clone, so its gate `Dot(face->N, adj->N) >=
+cos30` is `0 >= 0.866` for **every** neighbour *including the face itself*, the
+accumulator stays empty, and it returns `face->N` — zero. That is 16u's chain
+verbatim, with `MakeFacesIndependent` in place of `Compute_Vertex_Tangents`.
+
+**So it is the fixable-computation branch, and the fix is the guard family's:**
+when the accumulator is empty AND `face->N` has no direction, inherit
+`origVtx->N` — the normal this vertex HAD one stage earlier, computed by
+`Compute_Vertex_Normals` from the faces that do have area (the degenerate one
+contributed nothing to it). Nothing is invented; if the original is zero too
+(greets' Piramid corners, where every incident face is degenerate) the zero
+stands and PREPROC's tangent guard owns it, exactly as in 16u.
+
+| scene | zero-normal verts before | after |
+|---|--:|--:|
+| city (t=1961) | 1575 | **0** |
+| crash (t=200, `'screen'`) | 6 | **0** |
+| greets (acceptance t=5743) | 1074 | 1058 (216 → **200** on the displaced-stone chunk; the rest are momy-2 needles) |
+| chase | 0 | 0 |
+
+**Look delta: 0 px.** 12 pin recipes 3/3 at their recorded values, plus an
+18-arm differential (9-pose city sweep, city acceptance arm, fountain, crash ×2,
+four greets acceptance poses, chase 5-pose) — **byte-identical everywhere**.
+
+And the hand-off's "inert only because that material carries no NormalMap" is
+now counted on the FACE rather than the mesh: **0 of the 1575 sit on a face
+whose material has a NormalMap or a HeightMap**, so `Mekalele.h:3816`'s
+`writeTangent` is false for all of them.
+
+### THE TWO TANGENT READERS UPSTREAM OF THE MASK (16u hand-off #2)
+
+Both live in `if (ctx.heightData && wantTangent)`: the POM march
+(`Mekalele.h:1705`) and `--pom_normal` (`2438`, default 0, and it builds its
+bumped normal out of the same N/T/B). `heightData` needs `--parallax` — which is
+**default 1** — plus the FACE's material carrying a HeightMap, so the march is
+live in the shipping arms, not gated behind an opt-in.
+
+Counted per incident FACE (not per mesh — the mesh's first face lies):
+
+| scene | zero-normal verts on a NormalMap face | on a HeightMap face |
+|---|--:|--:|
+| city / fountain / crash / chase | 0 | **0** |
+| greets, his acceptance arm | 803 | **23** |
+
+So in greets a degenerate vertex IS on height-mapped geometry, and pre-16u those
+23 carried the NaN tangent into the march unmasked. Post-16u the vertex value is
+finite (+X), but the march's own two normalizes — of the interpolated NORMAL and
+the interpolated TANGENT — were still unguarded, and they run BEFORE the plane
+masks, so the march is the first consumer of the frame, not the last.
+
+Both are now length-guarded (`> 1e-12`) with the identity as the degenerate
+answer: `T` and `B` collapse to zero, `VtT`/`VtB` are zero, the march applies no
+UV shift and the pixel keeps the geometric UV it would have had without a height
+map. **Byte-null: 12 pins 3/3 at their recorded values with both this and the
+normal-plane mask in one binary.**
+
+### PERF — the normal-plane mask is in the hottest per-pixel store path
+
+Both guards are in per-pixel code: the normal-plane mask is one compare + one
+8-lane store + one AND per 8 pixels in `apply_exact`'s G-buffer body (the
+hottest store path in the renderer, run for every covered fragment of every
+opaque face), and the march guard is two compares + two selects per 8 pixels of
+every height-mapped face. Priced against the parent binary, **11 interleaved
+rounds, `--bench=scene` iters=20, min-of-arm, plus a FLOOR arm that is a
+byte-identical copy of the parent**:
+
+| pose | base (min ms/iter) | guard (min) | Δ | floor (base vs its own copy) |
+|---|--:|--:|--:|--:|
+| greets t=5743, his acceptance arm | 74.410 | 74.463 | **+0.053 (+0.07 %)** | −0.075 (−0.10 %) |
+| city t=1961, `--deferred` | 63.025 | 62.598 | **−0.427 (−0.68 %)** | +0.170 (+0.27 %) |
+
+**Not resolvable at this instrument's floor, and the two columns disagree in
+sign** — greets is +0.07 % against a floor that itself moves −0.10 %, city is
+−0.68 % against a floor of +0.27 %. Read that as "no measurable cost", not as a
+city speedup: the same-binary control moves a quarter of a percent on its own.
+What is certain is the negative claim the bar asks for: there is no measurable
+SLOWDOWN in either column, so nothing was traded for the hardening.
+
+### GATES
+
+* **12 pin recipes 3/3 at their recorded values on FOUR binaries** — the census
+  instrument, the city fix, the normal-plane guard, and guard+march-guard: city
+  `bd4ffbf8` / `4cb8d2ca`, chase `3bfd4244` / `42d79fad` / `622b96a2` /
+  `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588 `570a7b44`, the
+  four greets acceptance poses `26ad272a` / `10adec3a` / `418fc1fa` / `6d02f31b`.
+* `render_gate.sh` **RENDER_GATE_PLACEHOLDER**.
+* `--shadow_plane_hash` SPH_PLACEHOLDER.
+* `--zero_normal_census`: city **1575 → 0**, crash **6 → 0**, greets
+  **1074 → 1058**, chase 0 → 0.
+* The instrument build reproduces every pin (16u's trap, honoured: a flag-gated
+  census is not automatically byte-null, so it was gated *and then proven*).
+
+### HANDED ON — THE BIG ONE: **CHASE RASTERIZES HALF ITS TRIANGLES WITH NO VIEW NORMAL**
+
+Found by the probe, not looked for. At chase t=100, **19 092 of the 38 512
+triangles** the main 1920-wide pass rasterizes arrive with all three corner
+`TN == (0,0,0)`; none arrives with one or two, so it is whole primitives, not
+interpolation. `'moutines surface'` (the island skirts) is 96 % of the resulting
+degenerate lanes. What is known:
+
+* chase has **0** vertices with `|N| == 0` — the authored normals are fine.
+* The transform's own counters say every TN write it performed went to the AoS
+  `Vertex` (23 229 verts at t=100) and **none** of the four sites that skip the
+  write fired (shadow pass 0, SoA `mvOut` 0, cube-cull loop 0, refl-cull loop 0).
+* The rasterized zero-TN vertices are the clipper's `C_Verts` copies (stack
+  addresses), and `FrustumClipper::Render` whole-copies its source vertices while
+  `FInterpolator` does carry TN — so the zero comes from the SOURCE vertex.
+* The meshes whose LIVE `Verts[].TN` is zero after a tick (17 216 verts:
+  `m1..m5/mm7/big_m/lighthouse.lwo`) are all flagged `Tri_Invisible` with `RZ <= 0`,
+  i.e. a different set from the one being drawn.
+
+That is where the trail was left. The consequence is a real look question, not a
+hardening one: those pixels are currently shaded from a fabricated
+camera-facing normal, and giving them their true surface normal WILL move the
+frame — so it is a look call, with the guard already in place to make whatever
+lands deterministic.
+
+Two smaller ones:
+
+* `Compute_Vertex_Normals` still hands out a zero `N` with no diagnostic (16u's
+  item 4). `--zero_normal_census` is now that diagnostic, but it is opt-in; a
+  one-line scene-load warning would have surfaced all of this years ago.
+* The city needles themselves are still in `CITY.FLD` (the fix makes their
+  normals well-defined, it does not remove the geometry). 1575 verts and 525
+  collinear triangles of clipper/transform work per city frame that no rasterizer
+  can ever fill.
+
 ## 2026-08-16u — THE 216 NaN TANGENTS: **ONE cause, and it is not the displacement bake and not greets-only.** Every one of them is a zero-area authored triangle normalized without a guard; the fix is byte-null at every pose measured, and the reason is a rasterizer reject, not luck
 
 16t's loose end: *"216 vertices of greets' displaced `Piramid` chunks carry a NaN

@@ -1,5 +1,85 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16v — 16u's THREE LOOSE ENDS, CLOSED: city's zero normals are **collinear authored triangles (1575/1575), not cancellation** — and the normal plane's missing mask is **not latent: it fires 137 207 times a frame in chase**, where what gets stored today is decided by the host ISA's NaN→int rule
+>
+> Three guards landed, one instrument, **0 pixels move at every pin and every
+> acceptance pose** — and the reason is different for each. Full write-up:
+> `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16v**.
+>
+> ### THE NORMAL PLANE (hand-off #1) — GUARDED, AND THE CASE IS REACHABLE
+>
+> `Mekalele.h:3159` normalizes the interpolated view normal with no zero test.
+> What that stores is not a NaN: `approx_rsqrt(0)=+inf`, `0*inf=NaN`, and the
+> encode's `_mm256_cvtps_epi32(NaN)` is **0 on arm64/NEON** (measured) but the
+> integer indefinite `0x80000000` on x86 (Intel SDM) → oct code `0` vs
+> `0x80008000`, i.e. view-space **(0,0,1) here and ≈(0,0,−1) there**. The mask
+> (`n2 > 1e-12`, stored word ANDed with it — the tangent plane's convention
+> verbatim) makes that a decision instead of an ISA artifact, and code 0 IS
+> `oct_encode(0,0,1)`, so arm64 is byte-identical.
+>
+> **Byte-nullity therefore cannot prove unreachability here** (the masked value
+> and the accident coincide), so the control is a probe build
+> (`-DFDS_ZERO_NORMAL_PROBE=1`) storing a loud code in exactly the masked lanes:
+> city (9 poses + his arm), fountain, crash, greets ×4 **identical** — **chase
+> differs at 4 of 5 pins**: t=100 **93 426 px (4.51 %)**, t=800 15 870, t=1200
+> 3 868, t=400 252, t=1600 0. The probe's per-material counter: **137 207
+> degenerate-normal lane stores at t=100, 96 % of them on `'moutines surface'`**
+> — the island skirts at the waterline. Images:
+> `docs/img/zeronorm/chase_t000100_{shipping,probe,probe_diff,where}.png` (+ the
+> t=000800 set).
+>
+> ### CITY'S WINDOWS MESHES (hand-off #3) — CLASSIFIED, THEN FIXED
+>
+> `--zero_normal_census` (new, default 0) classifies every `|N|==0` vertex as
+> ORPHAN / ALL-DEGENERATE / CANCEL. City: **1575 verts over 35 meshes, 1575
+> ALL-DEGENERATE, 0 CANCEL, 0 ORPHAN.** Each has exactly one incident face and
+> that face is **collinear** — the hand-off's "REAL area 1.22e-4" is the float
+> residue of a **102-unit-long, 1.2e-6-thick needle** (longest edge = the sum of
+> the other two). They appear only AFTER `MakeFacesIndependentByAngle`: with
+> `face->N == 0` its gate `Dot(face->N, adj->N) >= cos30` is `0 >= 0.866` for
+> every neighbour including the face itself, so it returns `face->N` — 16u's
+> chain, one stage later. Fixed in the same guard family: an empty accumulator
+> plus a directionless `face->N` inherits `origVtx->N`, the normal the vertex had
+> one stage earlier. **city 1575 → 0, crash 6 → 0, greets 1074 → 1058**, 0 px
+> changed over 12 pins + an 18-arm differential.
+>
+> ### THE POM READERS (hand-off #2) — GUARDED
+>
+> Both sit inside `if (ctx.heightData && wantTangent)`, and `--parallax` is
+> **default 1**, so the march is live in the shipping arms. Counted on the
+> incident FACE: city/fountain/crash/chase have **0** zero-normal verts on a
+> height-mapped face; **greets has 23**. The march's own two normalizes (normal
+> AND tangent) were unguarded and run BEFORE the plane masks — it is the frame's
+> first consumer. Both now length-guarded, degenerate lanes get the identity
+> (T,B = 0 → no UV shift). Byte-null.
+>
+> ### PERF (both guards are per-pixel; 11 interleaved rounds, min-of-arm, floor arm)
+>
+> greets t=5743 **+0.053 ms (+0.07 %)** against a floor of −0.075 ms; city t=1961
+> **−0.427 ms (−0.68 %)** against a floor of +0.170 ms. Not resolvable, signs
+> disagree — no measurable slowdown, and the city figure is not a win to quote.
+>
+> ### GATES
+>
+> * **12 pin recipes 3/3 at their recorded values on four binaries** (census,
+>   city fix, normal guard, guard+march guard) and on the assembled tree.
+> * `render_gate.sh` **4/4 PASS**.
+> * `--shadow_plane_hash` identical base-vs-final, 2/2 stable each.
+> * `--zero_normal_census`: city 1575 → 0, crash 6 → 0, greets 1074 → 1058.
+>
+> ### HANDED ON — CHASE RASTERIZES HALF ITS TRIANGLES WITH NO VIEW NORMAL
+>
+> At chase t=100, **19 092 of the 38 512 triangles** of the single 1920-wide pass
+> arrive with all three corner `TN == (0,0,0)`; none has one or two, so it is
+> whole primitives, not interpolation. chase has **0** vertices with `|N| == 0`
+> — the authored normals are fine, the zero is in the view-space `TN`. The
+> transform's counters say all 23 229 of its TN writes went to the AoS `Vertex`
+> and none of the four skip sites fired; the zero-TN vertices the rasterizer sees
+> are the clipper's stack `C_Verts` copies, so the zero comes from their SOURCE.
+> Those pixels are shaded from a fabricated camera-facing normal today; giving
+> them their true normal WILL move the frame, so it is a look call — with the
+> guard already in place to make whatever lands deterministic.
+>
 > ## 2026-08-16u — THE 216 NaN TANGENTS ARE ONE CAUSE, AND IT IS NOT THE DISPLACEMENT BAKE: **every one is a zero-area authored triangle normalized without a guard.** Fixed; **0 pixels move**, and the reason is a rasterizer reject with a line number, not luck
 >
 > 16t handed on *"216 vertices of greets' displaced `Piramid` chunks carry a NaN
