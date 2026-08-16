@@ -3618,14 +3618,28 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                         g_rttLitDumpW = s.texW; g_rttLitDumpH = s.texH;
                     }
                 }
-                // Hdr_ActivateNoFog (not a bare g_hdrActive=true): with
-                // --deferred-quarter the kernel shades only wave-1 into g_hdrBuf;
-                // the wave-2 FILL pixels land in s_rttSurf (8-bit) but NOT g_hdrBuf,
-                // so a bare activate would tonemap them as 0 → a checkerboard
-                // garble (HDR only; the 8-bit surface is coherent). Lifting the
-                // uncovered (h[3]==0) pixels from s_rttSurf into g_hdrBuf first
-                // resolves the full image, THEN activates — so cones + tonemap see
-                // a complete buffer.
+                // Hdr_ActivateNoFog (not a bare g_hdrActive=true): the deferred
+                // kernel covers only the pixels it shades. Sky/void (zEnc==0) and
+                // forward or env-reflective content (the mat32 sentinels, drawn
+                // straight to the page) never reach g_hdrBuf, so a bare activate
+                // would tonemap them as 0 → black holes over the reflection.
+                // Lifting the uncovered (h[3]==0) pixels from s_rttSurf into
+                // g_hdrBuf first resolves the full image, THEN activates — so
+                // cones + tonemap see a complete buffer.
+                //
+                // 2026-08-16i — WHAT THIS USED TO SAY, AND WHY IT WAS WRONG. The
+                // original text blamed the wave-2 checkerboard/quarter FILL:
+                // "the kernel shades only wave-1 into g_hdrBuf; the wave-2 FILL
+                // pixels land in s_rttSurf (8-bit) but NOT g_hdrBuf". True when
+                // written (809d23b0, 2026-06-18) and STALE since 1f8315ed
+                // (quarter, 07-01) and 9f5cdd75 (checker, 07-02) gave the fill's
+                // averaging arms their own g_hdrBuf store. Today all three fill
+                // arms — quarter average, checker average, full-shade fallback —
+                // write radiance AND stamp h[3]=1.0f
+                // (DeferredSurfaceKernel.cpp:6588 / :6678 / :6980), and every
+                // VPage store in that function is paired with one, so the fill
+                // can no longer produce the checkerboard garble described. The
+                // call is still required — for the pixel set named above.
                 if (rttHdr) fds::Hdr_ActivateNoFog();
                 Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
                 if (rttHdr) {
