@@ -106,6 +106,23 @@
 > **0.280 ms/frame = 0.56 %**, 16s's number to two decimals. Full write-up in
 > `docs/OPTIMIZATION_BACKLOG.md` 2026-08-16t.
 >
+> **SECOND FINDING, SAME SUBJECT, MEASURED: `--bake_tick_overlap` (and
+> `--shadow_gbuffer_overlap`) leak ~400 MiB PER FRAME.** Clone lifetime is a
+> property of the THREAD — `ShadowScratchTLS` is a `static thread_local` that is
+> heap-allocated and deliberately never freed, which is correct only if the set
+> of baking threads is bounded. `ShadowBake_DispatchGreets` constructs a NEW
+> `std::thread` every frame under either flag (`Shadows.cpp:1516`).
+> `--mem_census` at greets t=5743, his arm + `--bake_tick_overlap`: tick 2 = 3
+> threads / 1 777 clones / **1.25 GiB**; tick 12 = 13 / 6 857 / **5.27 GiB**;
+> tick 24 = 25 / 12 953 / **10.13 GiB**. One thread per frame, ~403 MiB/frame,
+> unbounded; flat at 1 269 clones / 209.64 MiB without the flag. It also
+> **invalidates any timing taken under those flags** — a fresh thread means a
+> fresh clone set, so every frame pays the 1 269-clone init copy the design
+> assumes is one-time. Both flags default 0 and no scene `setDefault` sets them,
+> so nothing shipping is affected. Fix is one persistent orchestrator thread (the
+> join point already exists) or moving the scratch off `thread_local`; threading
+> work, own round, own gates.
+>
 > **Loose end, unrelated and NOT this round's item: 216 vertices of greets'
 > displaced `Piramid` chunks carry a NaN `Vertex::Tangent`** under
 > `--greets-displace` (`c149`, `c150`, `c162`, `c166`). `Tangent` → `TTangent` →

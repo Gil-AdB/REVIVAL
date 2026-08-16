@@ -132,6 +132,45 @@ moves because of it (all 44 hashes reproduce their pins), so it is either
 absorbed downstream or lands on pixels nobody has looked at. **Own round.**
 The census counts them: `--clone_stale_census` prints `NaN-live N` per mesh.
 
+### THE OTHER CLONE-LIFETIME BUG, MEASURED: `--bake_tick_overlap` LEAKS **~400 MiB PER FRAME**
+
+Found while establishing where the clones live, and it is the same subject:
+clone lifetime is a property of the THREAD. `ShadowScratchTLS` is a
+`static thread_local` that is heap-allocated, registered in a process-wide
+list and **deliberately never freed** (`Shadows.cpp:97-108`) — a design that is
+correct only if the set of threads that bake is bounded. It is not:
+`ShadowBake_DispatchGreets` constructs a **brand-new `std::thread` every frame**
+under either overlap flag (`Shadows.cpp:1516-1517`), and every one of those
+threads allocates a fresh full scratch set on first use.
+
+`--mem_census` at three ticks, greets t=5743, his arm + `--bake_tick_overlap`:
+
+| tick | threads | clones | FList+radix | clone Vertex[] | clone Face[] | clone SoA | **total** |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 2 | 3 | 1 777 | 710.81 MiB | 296.19 MiB | 122.78 MiB | 152.75 MiB | **1.25 GiB** |
+| 12 | 13 | 6 857 | 3.09 GiB | 1.13 GiB | 480.91 MiB | 598.97 MiB | **5.27 GiB** |
+| 24 | 25 | 12 953 | 5.97 GiB | 2.15 GiB | 910.67 MiB | 1.11 GiB | **10.13 GiB** |
+
+Exactly one thread per frame, **~403 MiB/frame**, unbounded — 24 GiB a minute at
+60 fps. Baseline without the flag is flat at 3 rows / 1 269 clones / 209.64 MiB
+however long it runs.
+
+**And it silently invalidates any timing taken under those flags**, which is the
+part that matters for this campaign: a fresh thread means a fresh clone set, so
+every frame pays the full 1 269-clone init copy the design assumes is a
+one-time cost. Anyone who has measured bake/tick overlap and concluded it does
+not pay may have been measuring cold clone construction.
+
+Both flags default 0 and no scene `setDefault` turns them on, so **nothing
+shipping is affected** — which is why this is recorded rather than fixed here.
+The fix is one persistent orchestrator thread (the join point already exists:
+`ShadowBake_JoinPending`) or moving the scratch off `thread_local` onto a
+pool-indexed structure; either is threading work that wants its own round and
+its own gates. **Silver lining for the round above: under these flags the clone
+is rebuilt every frame, so clone staleness is structurally impossible there —
+the census numbers above were correctly taken with the flags OFF, which is the
+harder case.**
+
 ### ITEM 2 — THE DENSE 32-BYTE OUT RECORD: **CEILING RE-CONFIRMED AT 0.56 %, NOT BUILT**, and two coherency requirements 16s's spec did not name
 
 16s's successor item ("`PerTriMeshClone` gains a dense out record; the shadow
