@@ -1784,6 +1784,10 @@ void OmniCensus_Report()
 void OmniCensus_Report() {}
 #endif
 
+// --pom_horizon's per-pixel relief record, gathered so the pixel body carries
+// ONE pointer instead of seven locals across the per-light loop.
+struct HzFrame { const unsigned char *texel; float tx, ty, tz, bx, by, bz; };
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
@@ -2618,27 +2622,38 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// Azimuth 0 is +U (= T), azimuth 2 is +V (= handedness·(N×T)) —
 			// the same axes the bake walks, and the handedness flip is what
 			// keeps the mirrored-UV clones' shadows from running backwards.
-			const PomHorizonMap *hzMap =
-				(pomHorizonOnG && !gb.tangent.empty()) ? Mat->PomHorizon : nullptr;
-			const unsigned char *hzTexel = nullptr;
-			float hzTx = 0, hzTy = 0, hzTz = 0, hzBx = 0, hzBy = 0, hzBz = 0;
-			if (hzMap && miplevel < hzMap->numMipmaps && hzMap->data) {
-				const meka::u16 packedT = gb.tangent[i];
-				if (packedT != 0) {
-					float tx, ty, tz;
-					meka::oct_decode_u16(packedT, tx, ty, tz);
-					const float tDotN = tx*nGeoX + ty*nGeoY + tz*nGeoZ;
-					tx -= nGeoX * tDotN; ty -= nGeoY * tDotN; tz -= nGeoZ * tDotN;
-					const float tLen2 = tx*tx + ty*ty + tz*tz;
-					if (tLen2 > 1e-12f) {
-						const float inv = fast_rsqrt(tLen2);
-						hzTx = tx*inv; hzTy = ty*inv; hzTz = tz*inv;
-						const float hs = Mat->TbnHandedness;
-						hzBx = (nGeoY*hzTz - nGeoZ*hzTy) * hs;
-						hzBy = (nGeoZ*hzTx - nGeoX*hzTz) * hs;
-						hzBz = (nGeoX*hzTy - nGeoY*hzTx) * hs;
-						hzTexel = hzMap->data
-						        + (hzMap->mipOfs[miplevel] + swizzledUV) * kPomHorizonAzimuths;
+			// The relief-horizon record, behind ONE pointer instead of seven
+			// per-pixel locals. It used to resolve Mat->PomHorizon and set six
+			// tangent-frame floats plus a texel pointer for EVERY shaded pixel,
+			// and all seven then stayed live across the whole per-light loop in
+			// a body the register allocator is already spilling. MEASURED by the
+			// per-pixel ablation ladder at greets t=5743: 0.034 Gi/f — 1.7 % of
+			// the entire DeferredLighting call — for a flag (--pom_horizon) that
+			// is OFF in every shipping scene. No hatch: nothing reads what this
+			// stops materialising, so there is no arm to compare.
+			HzFrame hzF;
+			const HzFrame *hzRec = nullptr;
+			if (pomHorizonOnG && !gb.tangent.empty()) {
+				const PomHorizonMap *hzMap = Mat->PomHorizon;
+				if (hzMap && miplevel < hzMap->numMipmaps && hzMap->data) {
+					const meka::u16 packedT = gb.tangent[i];
+					if (packedT != 0) {
+						float tx, ty, tz;
+						meka::oct_decode_u16(packedT, tx, ty, tz);
+						const float tDotN = tx*nGeoX + ty*nGeoY + tz*nGeoZ;
+						tx -= nGeoX * tDotN; ty -= nGeoY * tDotN; tz -= nGeoZ * tDotN;
+						const float tLen2 = tx*tx + ty*ty + tz*tz;
+						if (tLen2 > 1e-12f) {
+							const float inv = fast_rsqrt(tLen2);
+							hzF.tx = tx*inv; hzF.ty = ty*inv; hzF.tz = tz*inv;
+							const float hs = Mat->TbnHandedness;
+							hzF.bx = (nGeoY*hzF.tz - nGeoZ*hzF.ty) * hs;
+							hzF.by = (nGeoZ*hzF.tx - nGeoX*hzF.tz) * hs;
+							hzF.bz = (nGeoX*hzF.ty - nGeoY*hzF.tx) * hs;
+							hzF.texel = hzMap->data
+							          + (hzMap->mipOfs[miplevel] + swizzledUV) * kPomHorizonAzimuths;
+							hzRec = &hzF;
+						}
 					}
 				}
 			}
@@ -3106,8 +3121,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// of an octant off — invisible under a term whose whole
 						// point is a soft edge, and it costs one divide instead
 						// of a transcendental.
-						if (hzTexel) {
+						if (hzRec) {
 							const float lx = wx * lenInv, ly = wy * lenInv, lzv = wz * lenInv;
+							const float hzTx = hzRec->tx, hzTy = hzRec->ty, hzTz = hzRec->tz;
+							const float hzBx = hzRec->bx, hzBy = hzRec->by, hzBz = hzRec->bz;
+							const unsigned char *const hzTexel = hzRec->texel;
 							const float sinElev = lx*nGeoX + ly*nGeoY + lzv*nGeoZ;
 							if (sinElev <= 0.0f) { if (omniCensus) ++ocn[8]; continue; }   // below the plane
 							const float ltx = lx*hzTx + ly*hzTy + lzv*hzTz;
@@ -3252,7 +3270,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// the relief shadow's shape and its motion with the light read
 			// directly. A horizon pixel no light reaches shows mid grey; a
 			// non-horizon surface is left alone so the scene stays legible.
-			if (pomHorizonVizG && hzTexel) {
+			if (pomHorizonVizG && hzRec) {
 				const float v = hzVizWeight > 0.0f ? (hzVizSum / hzVizWeight) : 0.5f;
 				lB = lG = lR = 256.0f * v;
 				sB = sG = sR = 0.0f;
