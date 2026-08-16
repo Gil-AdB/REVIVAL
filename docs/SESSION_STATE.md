@@ -76,6 +76,61 @@
 > `_mm256_sqrt_ps`) are unaffected and stay in the backlog; note the denoise now
 > shrinks quadratically with the dial, so their absolute headroom is ~4× smaller
 > than the round priced them at.
+> ## 2026-08-16y — THE BULGE IS REAL, IT IS THE APPROVED ARM ITSELF, AND IT IS NOT A REGRESSION: bit-identical since the day the corner arm shipped; no single flag owns it
+>
+> His report: "so why the fuck there is still a fucking bulge?" — no pose given.
+> Hunted on tip `8cc5e5e7`, 27-pose battery (docs/greets_review_poses.txt + the
+> corner cams + the 08-12 five + t=1088), his acceptance arm, 1920×1080, plus a
+> flag-matrix at t=5970. Everything below is measured on renders; the battery
+> script is `scratchpad/bulge_battery.sh`.
+>
+> **WHERE IT SHOWS.** t=5970 and t=5975 (the doorway jamb): the block faces
+> round outward approaching the arris, the reveal carries a smeared vertical
+> band, the arris silhouette undulates — cushions, not dressed stone.
+> t=6001/t=6039 read as the approved notched masonry; t=1088's wall gap stays
+> sealed; the mirror/graze/corridor poses show nothing new. Full grid:
+> `docs/img/bulgehunt/` (arm vs no-displace vs all-off crops, 8× diff heat).
+>
+> **IT IS NOT A REGRESSION — measured three ways.**
+> tip-bare == bc823331+explicit-arm: **22 px differ of 2 073 600**. The bake's
+> [STONE] summary counts are identical, and tip with all five corner flags off
+> == bc823331-bare **byte-exact (0 px)** — the shared bake (incl. the
+> zero-normal/NaN fixes since) moved nothing at this pose. The look he is
+> seeing today is the look the arm shipped with on 2026-08-15; the cornerlvl
+> acceptance evidence was face-region crops that do not contain the jamb
+> cushions.
+>
+> **NO SINGLE FLAG OWNS IT — the one-off matrix at t=5970** (vs tip-bare):
+> `--no-…free_edge` 36.6% differs, `border_mean=0` 0.47%, `--no-…seam_weld`
+> **0.00% (inert here: the weld merges 0 verts at this junction)**,
+> `--no-…plane_normal` 84.1%, `--no-…mitre` 33.6% — and EVERY one of those
+> arms still cushions (crops in the grid). All five off = flat (the old dead
+> look). The cushion is an interaction of the arm, not a knob.
+>
+> **Interior facts that bound the mechanism:** the bake displaces
+> [-0.131..+0.033] — recess-dominant; a face can only stand +0.033 proud, so
+> the cushions are the roll from managed border levels down into deep grooves
+> spread across the face, not gross outward push. The 91.1° split seams at
+> this jamb are position-coincident pairs the seam weld does NOT merge
+> (nMerged=0), and [STONE-BMEAN]/[STONE-WELD] never fire in the bake log at
+> tip-bare — which of the border stages actually holds these border verts, and
+> at what level, is exactly what the next round must instrument.
+>
+> **METHOD TRAP RE-EARNED (cost this hunt an hour):** `git checkout <old>` in
+> a measurement worktree without `cmake --build` = every subsequent "tip"
+> render runs the OLD binary. A whole false "flag-machinery bug" was measured,
+> and died only on a rebuild. Check `git log -1` + rebuild before EVERY arm.
+>
+> **HANDED ON (the fix round):** (1) pairwise flag matrix at t=5970 to isolate
+> the interacting pair; (2) a border-band cross-section instrument (extend
+> [STONE-FREEV]: dump vert level vs its line's field profile along the jamb
+> border) to show the roll in numbers; (3) fix candidates, in order: border
+> level FOLLOWS the field along the line (level-shifted so plateau meets
+> stone-top — kills the constant-level roll while keeping 483ee71e's
+> flushness), narrow the roll band to the densification width, per-side
+> plane-normal ride at ≥90° junctions. Acceptance: his corner cams 5970/5975
+> read as dressed stone without losing 6001/6039's approved arris; the 08-12
+> gap/crack directive still holds at >90° grooves.
 
 > ## 2026-08-16x — THE COLLINEAR-NEEDLE CULL: **the faces two rounds wanted to cull are already free**, and the cull that pays is the SCREEN determinant at the push. Landed default ON, byte-null by construction — **and the frame does not resolve it**. Plus: the greets acceptance pins were never orphaned
 >
