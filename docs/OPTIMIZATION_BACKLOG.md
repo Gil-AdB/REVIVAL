@@ -10,6 +10,177 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16g — 00a ROW 1 (`DeferredLighting-call`, 41 %): the tap's WRAPPER was 7 % of the call, and the floor had never been measured
+
+**Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance
+arm: `DeferredLighting-call` −6.8 to −7.9 % instructions and −7.2 to −9.1 %
+cycles at every pose, `renderFrame` −2.7 to −3.2 % instructions. BYTE-NULL:
+nine pins unmoved 3/3, `render_gate.sh` 4/4, and five poses diffed under HIS
+OWN ARM (which the pin recipe does not exercise) identical parent-to-child.**
+
+### THE DECOMPOSITION, RE-MEASURED — do not quote the 2026-08-15 split on this arm
+
+Two new instruments, both committed and both byte-null at stage 0:
+`-DFDS_PIX_ABLATE=n` (ten staged `continue`s in the PIXEL body, cumulative
+sink) alongside the existing `-DFDS_OMNI_ABLATE=n`. Drivers
+`scratchpad/dfl_ladder.sh`, `scratchpad/dfl_pixladder.sh`, reports
+`scratchpad/dfl_ladder_report.py`, `scratchpad/dfl_pixreport.py`.
+
+`DeferredLighting-call` = **2.040 Gi/f = 41 % of `renderFrame`'s 4.991** at
+t=5743. The split, with the omni ladder's stage totals in the loop half and the
+pixel ladder's in the floor half:
+
+| item | Gi/f | % of the call |
+|---|--:|--:|
+| **`lighting-w1`** | **1.720** | **84.3 %** |
+| — omni loop | 1.247 | 61.1 % |
+|   — **cube tap** | **0.747** | **36.6 %** |
+|   — specular lobe (GGX) | 0.161 | 7.9 % |
+|   — `computeMapShadowAtten` | 0.079 | 3.9 % |
+|   — light vector + N·L reject | 0.078 | 3.8 % |
+|   — bounce portal | 0.037 | 1.8 % |
+|   — diffuse accumulate | 0.035 | 1.7 % |
+|   — len² + range reject | 0.034 | 1.7 % |
+|   — rsqrt / dist / attenuation k | 0.032 | 1.6 % |
+|   — mirrorId test | 0.026 | 1.3 % |
+|   — relief-horizon in-loop test | 0.025 | 1.2 % |
+|   — spot cone | ~0.000 | — |
+| — **per-pixel floor** | **0.473** | **23.2 %** |
+|   — view pos + SH ambient | 0.104 | 5.1 % |
+|   — normal decode + TBN | 0.100 | 4.9 % |
+|   — compose (after the loop) | 0.060 | 2.9 % |
+|   — view dir + PBR per-pixel consts | 0.038 | 1.9 % |
+|   — AO fetch | 0.036 | 1.8 % |
+|   — POM horizon record | 0.034 | 1.7 % |
+|   — mat32 decode + shadowMatID | 0.029 | 1.4 % |
+|   — pixel-loop floor (z alive test) | 0.027 | 1.3 % |
+|   — albedo fetch + tint | 0.020 | 1.0 % |
+|   — sample world position | 0.017 | 0.8 % |
+|   — lightmap ADDRESS resolve | 0.008 | 0.4 % |
+| **`lighting-w2`** (checkerboard fill) | **0.306** | **15.0 %** |
+| setup (light-list, depth-bounds, tile-cull, mirror-grid) | 0.013 | 0.6 % |
+
+t=2845 reproduces the shape: loop 1.108, floor 0.474, w2 0.310, cube tap 0.599.
+
+**Three things this re-measurement contradicts in the older write-ups, all
+because greets' flags moved under them:**
+
+1. **`--pbr` is ON at greets** (`GreetsApplyRunDefaults`, `GREETS.CPP:1321`).
+   The specular lobe is scalar Cook-Torrance GGX, not `pow_glossClass` — so
+   the 2026-08-15 note "no transcendentals to remove: `--pbr` is off at
+   greets" is stale.
+2. **`--shadow_dynamic` is ON at greets** (`GREETS.CPP:1281`) and
+   `--shadow_lm_dynamic` is not, so `lmKernelEnabled` is **false**: the
+   static-shadow lightmap is bypassed and every static-omni pixel takes a full
+   cube tap. The 2026-08-15 note "`--shadow_dynamic` defaults 0 and greets
+   never sets it" is stale, and its refutation (1) was reasoning about a plane
+   that is not empty here.
+3. **`lighting-w2` exists and is 15 % of the call.** `--deferred_checkerboard`
+   is a greets setDefault; no prior round profiled the fill wave at all.
+
+### WHAT SHIPPED
+
+**`--deferred_cube_direct` (default ON) — the mover.** `resolveCubeAtten` is
+NOT inlined: `-S` on the shipping TU shows a real `bl` to it from the omni
+loop, and `sample(1)` gives it 903 of the lighting stage's 15 653 steady-state
+samples in its own frame on top of `CubeShadow_Sample`'s 5 377. It takes
+twenty arguments and carries four arms — the static-lightmap sample, two
+lightmap debug-recompute arms, and Depth mode's slope-bias arithmetic — every
+one of which is unreachable when `lmKernelEnabled` is false and `g_shadowMode`
+is PolyId, i.e. greets' shipping configuration. Calling `CubeShadow_Sample`
+directly in that case passes 8 arguments instead of 20 and drops
+wx/wy/wz, `lenInv`, the geometric normal, the `PixelLightmap` and the
+`CubeAttenFlags` reference out of the innermost body's live set — which is the
+point, in a loop whose disassembly is full of `ldr sN, [sp, #…]` folded
+reloads. Predicate hoisted per TILE (the flags) × per PIXEL
+(`surfaceShadowId >= 0`); anything it does not cover still takes the wrapper.
+**BIT-EXACT by construction: same callee, same arguments, in the arm it
+replaces.**
+
+**`--deferred_fill_hdr_skip` (default ON).** Wave 2's `slB/slG/slR` are read
+only by its `haveOwn && nsharp > 0 && !hdrWrite` arm, so under `--hdr` they
+are three DIVISIONS per compatible neighbour — two neighbours per filled pixel
+in checkerboard — computing a value nothing reads. Also hoists
+`--quarter_tex_sharp`, which was a `FeatureFlags` read once per FILLED PIXEL.
+
+**`--deferred_lm_addr_skip` (default ON).** Resolve the per-pixel lightmap
+ADDRESS only when the lightmap kernel is live. **Measured −0.2 %: real,
+reproducible, inside the noise.** Kept because it removes provably dead work,
+not because it moved the number.
+
+**The relief-horizon record behind one pointer (`HzFrame`, no flag).** See its
+own commit: the ladder priced it at 0.034 Gi/f and it recovers 0.005.
+
+### REFUTED / PRICED, NOT LANDED
+
+* **Hoisting the GGX lobe's per-PIXEL `Gv` and `4·NdotV` out of the per-light
+  loop — REFUTED BEFORE IT WAS WRITTEN.** `Gv = NdotV/(NdotV·(1−k)+k)` is a
+  DIVISION recomputed per accumulated pair in the source, but `-S` on the
+  shipping TU shows exactly ONE `X/(X·omk+k)` fdiv and one reload of a
+  precomputed `4·NdotV` stack slot inside the depth-3 loop. **Clang's LICM
+  already hoists both.** Read the source, then read the assembly.
+* **A finer PolyId uniformity pyramid (`kShadowUniShift` 3 → 2, i.e. 4×4
+  blocks with a 5×5 apron) — PRICED, NOT LANDED.** `DeferredLighting-call`
+  1.877 → 1.858 (**−1.0 %**), `lighting-w1` 1.570 → 1.551 (−1.2 %), but
+  `shadow-bake` 0.216 → 0.224 (**+3.7 %**) and the pyramid's memory goes ×4
+  (≈1.9 MB → 7.4 MB across greets' 58 512² faces, both planes).
+  **Net `renderFrame` −0.35 %.** Reproducible to 0.001 Gi over three
+  interleaved rounds. Not worth 4× the memory on this evidence; recorded so
+  nobody re-derives it. The 8×8 shift is still the right default.
+* **A finer LIGHT tile grid (`DEFERRED_NUM_TILES_X/Y` beyond 12×8) — REFUTED
+  ANALYTICALLY, no build.** 8.32 lights are entered per pixel to shade 2.06,
+  which looks like slack, but the tile cull is conservative: a light a finer
+  tile would remove is one the per-pixel `len2 > r2` test already rejects, and
+  the census puts that at 8.36 % of pairs. Stages 2–4 cost 25.7 instructions
+  per pair, so the whole prize is **≈0.012 Gi/f**. The 21.5 % killed by N·L
+  and the 10.7 % killed by the cone are genuinely per-pixel and no tiling
+  reaches them.
+
+### WHAT IS LEFT, RANKED, ON THE NEW TIP (`DeferredLighting-call` = 1.877)
+
+1. **The cube tap, ~0.60 Gi/f = 32 % of the call.** The interior is still
+   closed — three independent measurements say any new predicate in it costs
+   more than it removes — and this round only removed the FRAME around it.
+   The remaining lever is still "called less". The 8×8 pyramid is in; 4×4 is
+   priced above and refused; what has NOT been tried is making the tap
+   8-wide over PIXELS for a fixed light (the projection prologue — 3×3 matmul,
+   two frustum rejects, `1/lz`, two muls — is the majority of the tap and is
+   pure SIMD), which means restructuring the loop from pixel-major to
+   light-major. Large, and the per-pixel early-outs fight it.
+2. **`lighting-w2`, 0.293 Gi/f = 16 % of the call, and still barely touched.**
+   455 instructions per filled pixel to average two neighbours. Untried and
+   bit-exact: `fetchTexel` re-resolves the neighbour's Material and Texture
+   although `neighborCompatible` has already proved `mID == matIDc`, i.e. the
+   neighbour's material IS the centre's — only `Mipmap[mip]` and the swizzled
+   UV differ. Unmeasured: how much of the 0.293 is the **full-shade fallback**
+   (`--deferred_checker_edge_full` is default OFF, so every material/normal/
+   depth edge is re-shaded by wave 2's reduced kernel, light loop and all).
+3. **The specular GGX lobe, 0.161 Gi/f (8.6 %).** The invariants are already
+   hoisted by the compiler; what is left is D, Gl, the Schlick quintic and two
+   divisions that genuinely vary per light.
+4. **View pos + SH ambient, 0.104 Gi/f (5.5 %).** `shEvalIrradiance` is 36
+   flops plus a 9-mul/6-add world-normal transform per pixel. Rotating the L2
+   SH coefficients into VIEW space once per frame would delete the transform
+   (~15 flops/px) — but SH rotation is a re-association, so it moves bytes.
+   **JUDGE-CALL, not free.**
+5. **Normal decode + TBN, 0.100 Gi/f (5.3 %).** Two `fast_rsqrt`, a
+   Gram-Schmidt, a cross and a normalise per normal-mapped pixel. No slack
+   found; it is already the cheap form.
+
+### METHOD NOTE THAT GENERALISES — read a PIX_ABLATE delta as an upper bound
+
+The pixel ladder priced the OFF relief-horizon record at 0.034 Gi/f; removing
+it recovered 0.005. A staged `continue` prices "everything above the cut", so
+for a stage whose outputs are consumed only INSIDE a later loop the cut forces
+them to be materialised at one point while the shipping build lets the
+register allocator spread them across the loop — sometimes rematerialising a
+constant instead of keeping it live. Stages whose outputs are consumed
+immediately (albedo, mat32 decode, the pixel-loop floor) do not have this
+problem. The FIRST build of this ladder had a worse version of the same
+disease — per-stage sinks let the compiler dead-strip earlier stages, and
+stages 9/10 measured LESS than stage 8. The shipped ladder uses a cumulative
+sink; if a future stage delta looks too good, check which of the two it is.
+
 ## 2026-08-16e — 00b ROW 4 (`waterWaveSlope`, ~5.4 %): 8-wide, BYTE-NULL, and three contraction traps on the way
 
 **Result at city t=1961 / 2400 / 400, 1512x848, his acceptance arm: frame min

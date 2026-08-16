@@ -680,6 +680,24 @@ inside the noise at frame level. It is kept because it is byte-null, because
 the city arm does gain from it, and because it is what unblocks the finer-grid
 experiment; it is NOT a greets win and nothing here should be quoted as one.
 
+**Amendment 2026-08-16g (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16g) — row 1 is
+now itemised end to end, and it MOVED.** `DeferredLighting-call` splits
+2.040 = `lighting-w1` 1.720 + `lighting-w2` 0.306 + setup 0.013; w1 splits into
+the omni loop 1.247 and a per-pixel FLOOR of 0.473 that no prior round had an
+instrument for (`-DFDS_PIX_ABLATE=n`, committed). Inside the loop the cube tap
+is **0.747 Gi/f = 36.6 % of the whole call**; inside the floor the two biggest
+items are view-pos + SH ambient (0.104) and the normal decode + TBN (0.100).
+**`lighting-w2` — the checkerboard fill — is 15 % of the call and had never
+been profiled.** Two flag facts the older text gets wrong on this arm: `--pbr`
+and `--shadow_dynamic` are BOTH setDefault-ON in `GREETS.CPP`, so the specular
+lobe is GGX (not `pow_glossClass`) and `lmKernelEnabled` is FALSE (the static
+shadow lightmap is bypassed; every static omni takes a full cube tap).
+`--deferred_cube_direct` + `--deferred_fill_hdr_skip` + `--deferred_lm_addr_skip`
+then took the call to **1.877 Gi/f (−7.9 %)** and `renderFrame` to
+**4.827 (−3.2 %)**, byte-null at nine pins and at five poses under this exact
+arm. Full table, the two refutations (the GGX hoist clang already does; the
+4×4 uniformity pyramid) and the ranked remainder are in the backlog entry.
+
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
 `cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and
