@@ -1,5 +1,82 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16y — **`--ssao_downscale=2` is the default**, countersigned. −9.6 ms of his greets frame, realized and measured, not projected; the flip is proved to be PURE DEFAULT MOTION in both directions
+>
+> **COUNTERSIGN, verbatim (Gil-Ad, 2026-08-16): "ssao downscale 2 is ok (no
+> downscale looks much better, but too slow)."** Full-res is preferred
+> aesthetically and rejected on cost. `FDS/Base/FeatureFlags.def`
+> `ssao_downscale` default **1 → 2**, and the help text now carries the
+> countersign and that rationale so the next round cannot re-open it as an
+> unowned look question.
+>
+> ### THE REALIZED WIN (not the round's projection)
+>
+> Interleaved parent-vs-child, two binaries in ONE worktree / ONE asset tree,
+> `prof1.py`, **12 rounds with round 0 dropped = min-of-11**, 1512×848 (his
+> window), his acceptance arm
+> (`--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao
+> --greets-displace --deferred_prof=1 --hw_prof --profiler=1`), load 16 → 7:
+>
+> | | frame min t=5743 | frame min t=6097 | `ssao` ms | `ssao` Ginstr/f | `renderFrame` Ginstr/f |
+> |---|--:|--:|--:|--:|--:|
+> | `ssao_downscale=1` (old default) | 49.25 | 41.39 | 14.55 / 14.23 | 1.650 / 1.652 | 4.686 / 4.191 |
+> | **`=2` (NEW DEFAULT)** | **39.62** | **31.86** | **4.96 / 4.93** | **0.603 / 0.604** | **3.639 / 3.143** |
+> | delta | **−9.63 ms (−19.6 %)** | **−9.53 ms (−23.0 %)** | −66 % / −65 % | −63.5 % | −22.3 % / −25.0 % |
+>
+> The 2026-08-16 dial round projected **−9.1 ms**; realized is **−9.6 ms** at
+> both poses. `gbuffer` and `DeferredLighting-call` are flat to three decimals
+> of Ginstr/f in the same batch — the only thing that moved is `ssao`, which is
+> what the change claims.
+>
+> ### THE FLIP IS PURE DEFAULT MOTION, PROVED IN BOTH DIRECTIONS
+>
+> * child + `--ssao_downscale=1` → the four **OLD** acceptance hashes, EXACTLY, 3/3.
+> * parent + `--ssao_downscale=2` → the four **NEW** acceptance hashes, EXACTLY, 3/3.
+>
+> A bijection between the two arms means no second edit rode along. `=1` still
+> restores full-res exactly, at both resolutions.
+>
+> ### NEW PINS (gates table below carries them, old values struck in place)
+>
+> 1920×1080 acceptance ×4: t=5743 **`440aa6bb…`**, t=2845 **`00d17bc5…`**,
+> t=6097 **`135ea9dd…`**, t=6133 **`aaeb89b6…`** (3/3 each).
+> 1512×848 sensitivity row, re-taken: **`4667aa83…` / `c250427…` /
+> `85bbb555…` / `15de194a…`** (3/3; the parent reproduced the recorded 1512×848
+> set 3/3 first, which is what licenses the re-take).
+>
+> ### GATES — nothing else moves, and it is proved DIFFERENTIALLY
+>
+> * **10 pin recipes, 3/3 on each binary, at their recorded values**: city plain
+>   `4a094fba` (no `FDS_CITY_ENV_PIXEL`), city arm `4cb8d2ca` / t=2400 `f473fe2b`
+>   / t=400 `d3374de6`, chase 5-pose `3bfd4244` / `42d79fad` / `622b96a2` /
+>   `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588 `570a7b44`.
+>   **Every one byte-identical parent-to-child** — ssao is greets-acceptance-arm-only
+>   today and this is the proof, not the argument.
+> * `render_gate.sh` **4/4 PASS on BOTH binaries** (`4ac809e5` / `826c09e6` /
+>   `b41894f9` / `166fa25a`).
+> * `--shadow_plane_hash` **`03587397…`** (the recorded value) — 3-line [SPH]
+>   stream byte-identical parent-to-child, 2/2 each.
+> * Eyeballed at t=5743 against the dial round's own crop region (located by
+>   multi-scale template match at (672,544), 192², the source of
+>   `dial_t5743_crop_d1_d2_d4.png`): **`docs/img/ssaoperf/default_flip_t5743_crop_d1_d2.png`**
+>   (d=1 | d=2 side by side, 3× nearest), full frame
+>   **`docs/img/ssaoperf/default_flip_t5743_full_d2.jpg`**. Quantitatively the
+>   render IS the accepted variant: 52.5 % of pixels moved, mean |Δ| **0.869**
+>   over channels on the moved, **max 74** — the dial round recorded 44–63 %,
+>   mean 0.53–0.87, max **74** at this exact pose; and the per-pixel delta field
+>   correlates **0.859** with the recorded d2−d1 delta (against 0.804 for
+>   d4−d1, the discriminating control).
+>
+> ### WHAT THIS DOES NOT TOUCH
+>
+> Nothing outside the SSAO pass. `--ssao` itself is still default OFF, so only
+> arms that already ask for SSAO see the dial at all — city, chase, fountain and
+> the whole gate suite are byte-identical across the flip. The remaining SSAO
+> items from the dial round (the per-lane scalar slice setup, the two
+> `_mm256_sqrt_ps`) are unaffected and stay in the backlog; note the denoise now
+> shrinks quadratically with the dial, so their absolute headroom is ~4× smaller
+> than the round priced them at.
+
 > ## 2026-08-16x — THE COLLINEAR-NEEDLE CULL: **the faces two rounds wanted to cull are already free**, and the cull that pays is the SCREEN determinant at the push. Landed default ON, byte-null by construction — **and the frame does not resolve it**. Plus: the greets acceptance pins were never orphaned
 >
 > Two items, two commits. Full write-ups: `docs/OPTIMIZATION_BACKLOG.md`
@@ -6030,7 +6107,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 > Two hazards that produced the bad values, both worth remembering: a shared tree with concurrent uncommitted edits makes an ABSOLUTE pin meaningless — certify byte-nullity DIFFERENTIALLY (two binaries from one tree, one with the diff reverted) instead; and the FIRST run after a rebuild can write a cache the later runs read, so discard it.
 
 **RE-PINNED 2026-08-09b (five more flags defaulted ON at the user's instruction: `metal_spec_f0`, `env_mip_chain=9`, `env_bake_linear`, `sh_bake_linear`, `env_bake_sh_first`): greets `6ed5462e38ced22ecc98b39730d2e915` (2/2), city `3cbe42b166847e40f7071eedb48d613c` (2/2), fountain `8db68ccb59416e9a44037e9f387b7bd9` UNCHANGED (stable 4/4 — but the FIRST run after a rebuild returned a different hash, a cold-bake artifact of the same class as the city env cube; always discard run 1). Preceding it: **RE-PINNED 2026-08-09 (the Sobel name gate DELETED + four flags defaulted ON: `deferred_checker_env_full`, `env_bake_include_animated`, `env_metal_tint_linear`, `shadow_noncaster_depth`): `91ec081a4211554de8f36975fe1ac171`** (stable 2/2). city `5476be8c` and fountain `8db68ccb` did NOT move. Preceding it: **`9eeaf860cb5a7f124884a89e0fc3ff5b`** (gate removal for hull/cockpit only), and before that **RE-PINNED 2026-08-08 (`--hdr_metal_kill` default 0→2, the conductor diffuse kill): `6780642b30430efa4fd2f87810b2dfdb`** (stable 2/2). city `e1221676…` and fountain `8db68ccb…` did NOT move — neither scene has a metallic-mapped material, so the fix is greets-only. Prior pin `adfba8ba3a1971a7c9cac0da689581b1` reproduces under `--hdr_metal_kill=0`. Preceding that: **RE-PINNED 2026-08-08 (`--mips` default 0→1): `adfba8ba3a1971a7c9cac0da689581b1`** (stable 2/2). Prior pin `f1297141611c484bac7cc10a8bdcf630` reproduces EXACTLY under `--no-mips --no-mip_fix` — note BOTH flags are required, because `--mip_fix` moves the subdivision cut lines and the `--mips` gate zeroes only the mip LEVEL, not the geometry. Superseded pin history follows: **RE-PINNED 2026-08-06: `f1297141611c484bac7cc10a8bdcf630`** (3/3 identical runs). Two intended overlay removals moved it in sequence, both pure screen text: `f5778c7b` → `06e1d4d1` (earlier work) → `ae358a6a` (the "Shadow: Depth\|PolyId [F3]" indicator deleted, commit `6b5556d`) → `f1297141` (the always-on centre-pixel `[MAT@…]` material probe moved behind `--mat_probe`, default off, commit `35ec295`; re-running that arm WITH `--mat_probe` reproduces `ae358a6a` byte-exact, which is what proves nothing else moved). Prior pin, for the record: **`f5778c7b78a4d70655291363e4119c66`** — taken over **128 sequential runs, 0 flips** (95 % UB on the flip rate 0.023) after the 8-bit-AO-map fix closed the nondeterminism. This supersedes both `de3e9a5fb3aa39e008ef41b83f2b8d1b` (pre-PBR-defaults) and the "NO VALID PIN" state. Includes the PBR scene defaults AND the user's uncommitted GREETS.FLD / momy textures / Piramid.lwo — a clean checkout hashes differently. Verify with `tools/flip_rate.sh -n 24` if a mismatch appears; a single differing run is now a real regression, not noise. |
-| greets (acceptance ×4) | ONE POSE PER PROCESS, from `Runtime/`, `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`, **stock committed `rev.cfg` (1920×1080, HiDPI 0)**, **no `FDS_GREETS_CAM`**, no other env:<br>`./DEMO --snapshot=greets@t=<T> --out=<dir> --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace --profiler=0` | **RECIPE RECOVERED AND RE-VERIFIED 2026-08-16x — the four hashes are NOT orphaned: t=5743 `26ad272aaa6cc9050c66e84cdaaf5436`, t=2845 `10adec3ab6a4443a1fe93da6fda32b3d`, t=6097 `418fc1fa2ac717aeffefecadf08e40a0`, t=6133 `6d02f31b0e9030a7a2d031d714f51768`** — reproduced **3/3 on two binaries** (tip `773fc45c` md5 `c9fb4f20…`, and the `--needle_cull` build md5 `79a11fba…`), first try, in a fresh clean worktree that cold-baked its own caches. The 2026-08-16w "DOC GAP / eight arms tried, none reproduces them" note was wrong about the pins, right about `docs/`: the recipe existed only in **`scratchpad/xform_pins.sh`**, the 2026-08-16r round's untracked battery script, which every later worktree carries but no committed file mentions. **THE THREE THINGS THAT MOVE IT** (measured here, so the next round does not have to re-derive them): (1) **`FDS_GREETS_CAM` must NOT be set** — the review-poses file `docs/greets_review_poses.txt` lists a camera for all four t values and prefixing it gives t=5743 `19d94f489542283d1bf2c562668e7a38`; this is the exact inverse of the greets t=1588 pin above, where the prefix IS required, and it is the likeliest thing the eight failed candidates did. (2) **profiler state**: `--profiler=0` and no profiler token at all are IDENTICAL (`26ad272a…` both), but an explicit `--profiler` gives `cb7f4a516a0b2c76821b47df6264052d` (the HUD). (3) **resolution**: at 1512×848 (his window, the bench harness's default, `rev.cfg` edited) the same four arms give a different self-consistent set, 2/2 stable — t=5743 `78d47fbb5f9a8ab68f48bae67475b422`, t=2845 `00fb8bc10d618deae5a17ce81ec7980f`, t=6097 `51c3de03dcf60131977ca6160bbf9fbb`, t=6133 `df2ae34e199630470ec3e3349cae88af`. The four poses and their cameras are the 2026-08-04/-05 review poses (`docs/greets_review_poses.txt`); the pin renders them from the SCENE's own camera, not from those. |
+| greets (acceptance ×4) | ONE POSE PER PROCESS, from `Runtime/`, `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`, **stock committed `rev.cfg` (1920×1080, HiDPI 0)**, **no `FDS_GREETS_CAM`**, no other env:<br>`./DEMO --snapshot=greets@t=<T> --out=<dir> --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace --profiler=0` | **RE-PINNED 2026-08-16y — `ssao_downscale` default 1→2, countersigned by Gil-Ad 2026-08-16: t=5743 `440aa6bbb350ae95fbacf339dd2ad957`, t=2845 `00d17bc5610624bd1fea698c4b096979`, t=6097 `135ea9dd4513bad466ec69129730eca4`, t=6133 `aaeb89b6f95e826eea361fe9ed6e6787`** — 3/3 each, differential (both binaries built in ONE worktree, ONE asset tree). **THE FLIP IS PURE DEFAULT MOTION AND IT IS PROVED BOTH WAYS**: the child binary under an explicit `--ssao_downscale=1` reproduces the four struck values below EXACTLY 3/3, and the parent binary under `--ssao_downscale=2` reproduces the four values above EXACTLY 3/3 — a bijection between the two arms, so nothing but the default moved. 1512×848 sensitivity row re-taken alongside (below). Realized price of the flip on his acceptance arm, min-of-11 interleaved at 1512×848: frame **49.25 → 39.62 ms** at t=5743 and **41.39 → 31.86 ms** at t=6097 (`ssao` 14.55 → 4.96 / 14.23 → 4.93, `renderFrame` Ginstr/f 4.686 → 3.639 / 4.191 → 3.143); image cost at t=5743 **52.5 % of pixels moved, mean |Δ| 0.869/255 over channels on the moved, max 74** — reproducing the 2026-08-16 dial round's measurement (44–63 % moved, mean 0.53–0.87, max 74 at this pose) to the digit. Crop at the dial round's own region: `docs/img/ssaoperf/default_flip_t5743_crop_d1_d2.png`, full frame `default_flip_t5743_full_d2.jpg`. — **SUPERSEDED (struck, kept for the `--ssao_downscale=1` control arm): ~~t=5743 `26ad272aaa6cc9050c66e84cdaaf5436`, t=2845 `10adec3ab6a4443a1fe93da6fda32b3d`, t=6097 `418fc1fa2ac717aeffefecadf08e40a0`, t=6133 `6d02f31b0e9030a7a2d031d714f51768`~~** — these four are the FULL-RES arm and reproduce today by appending `--ssao_downscale=1` to the recipe. History follows. — **RECIPE RECOVERED AND RE-VERIFIED 2026-08-16x — the four hashes are NOT orphaned** — reproduced **3/3 on two binaries** (tip `773fc45c` md5 `c9fb4f20…`, and the `--needle_cull` build md5 `79a11fba…`), first try, in a fresh clean worktree that cold-baked its own caches. The 2026-08-16w "DOC GAP / eight arms tried, none reproduces them" note was wrong about the pins, right about `docs/`: the recipe existed only in **`scratchpad/xform_pins.sh`**, the 2026-08-16r round's untracked battery script, which every later worktree carries but no committed file mentions. **THE THREE THINGS THAT MOVE IT** (measured here, so the next round does not have to re-derive them): (1) **`FDS_GREETS_CAM` must NOT be set** — the review-poses file `docs/greets_review_poses.txt` lists a camera for all four t values and prefixing it gives t=5743 `19d94f489542283d1bf2c562668e7a38`; this is the exact inverse of the greets t=1588 pin above, where the prefix IS required, and it is the likeliest thing the eight failed candidates did. (2) **profiler state**: `--profiler=0` and no profiler token at all are IDENTICAL (`26ad272a…` both), but an explicit `--profiler` gives `cb7f4a516a0b2c76821b47df6264052d` (the HUD). (3) **resolution**: at 1512×848 (his window, the bench harness's default, `rev.cfg` edited) the same four arms give a different self-consistent set. **RE-TAKEN 2026-08-16y under the `ssao_downscale`=2 default, 3/3 — t=5743 `4667aa83f06af64c5e1f07f9b41e9937`, t=2845 `c250427622e42c42e4f1ae110b790564`, t=6097 `85bbb55579730ac298724e3a40e8b76d`, t=6133 `15de194a54a1d30ef2e09c76a1a1922a`.** The prior full-res set is ~~t=5743 `78d47fbb5f9a8ab68f48bae67475b422`, t=2845 `00fb8bc10d618deae5a17ce81ec7980f`, t=6097 `51c3de03dcf60131977ca6160bbf9fbb`, t=6133 `df2ae34e199630470ec3e3349cae88af`~~ — struck as the default, but **re-verified 3/3 on the flipped binary today** (it was recorded 2/2) by appending `--ssao_downscale=1`, i.e. this row moved for exactly the same reason the 1920×1080 row did and for no other. The four poses and their cameras are the 2026-08-04/-05 review poses (`docs/greets_review_poses.txt`); the pin renders them from the SCENE's own camera, not from those. |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | **RE-PINNED 2026-08-08 (`--mips` default 0→1): `8db68ccb59416e9a44037e9f387b7bd9`** (stable 2/2). Prior pin `51fff7cd38767d619280afe0498a6f24` reproduces EXACTLY under `--no-mips --no-mip_fix`. Divergence: 266 063 px changed (12.83 %), mean \|d\| 9.27 on changed, 53 238 px >12/255, max 254. |
 | chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | **RE-PINNED 2026-08-14 (cone campaign round 6 — `--vol_cone_solve_vec` un-gated for SEGMENTED cones + `FDS_CONE_QUADEARLYOUT`; chase is 32 narrow beams of 34 spots, so 91 % of its cone work moved from the scalar solve to the 8-wide one): t100 `7678a6bc6ea964b3b859ecb11c0673c3` t400 `42d79fadd825a329b36143efe052edfb` t800 `b29c73f1c54f42a02e0dc2484780cc03` t1200 `31aa52039f9b228fa6307c12e14811eb` (UNMOVED) t1600 `1544b0e775900b099ac9e38d42fd750d` (UNMOVED)** — 2/2 stable each, differential (both binaries built in one worktree, one asset tree). THE MOVE IS 20/27/40 PIXELS of 2 073 600 at **max |Δ| 2/255**, nothing above 4/255; it is round 5's VP/DV fold (`fl(Y·Py + Pz)` fused where the scalar arm rounds `Y·Py` first) now reaching the narrow beams. Bought −18 to −21 % of chase's cone pass at t=100/400/800 and −9.4 % at t=1200. Images `docs/img/chasecone/chase_t{100,400,800}_{where,sbs}.png`, full write-up docs/HW_PROFILING.md §14. Prior (2026-08-08, `--mips` default 0→1): t100 `76e7cf68714666bda278f094be4f2c72` t400 `d458e82bf4514c4ff2850468aab5743c` t800 `c145c7a5861fba81d56746f7c10764ee` t1200 `31aa52039f9b228fa6307c12e14811eb` t1600 `1544b0e775900b099ac9e38d42fd750d`; those five reproduce 3/3 on the parent commit `43ac3456` in a clean worktree, which is how the move above was certified. History below.<br>per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>**RE-PINNED 2026-08-08 (`--mips` default 0→1):** t100 `76e7cf68714666bda278f094be4f2c72` t400 `d458e82bf4514c4ff2850468aab5743c` t800 `c145c7a5861fba81d56746f7c10764ee` t1200 `31aa52039f9b228fa6307c12e14811eb` t1600 `1544b0e775900b099ac9e38d42fd750d`.<br>Control under `--no-mips --no-mip_fix` reproduces the 2026-07-30 pins EXACTLY for t100/t400/t800/t1200 — **but t1600 gives `c8c93b886dd31fcc01363c806d7626de`, NOT the recorded `7265d7855bdaae74e39f3c21d4f7e612`. chase t1600 had ALREADY drifted before the mip work; cause unidentified, needs its own bisect.** Prior (2026-07-30): t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (cone-tile sky-clip fix; 3-run stable, byte==cull-off): **RE-PINNED 2026-08-08 (`--mips` default 0→1):** t800 `857d899d48ca55a6ae67f03e30b9bf02` t1600 `567e61532fb075b6e590b53a26cea2b6`.<br>Control under `--no-mips --no-mip_fix`: t800 `28e5a2a78d64ae98a1fcc4b739991be2` matches the 2026-07-30 pin, **t1600 gives `debdb1f435a14949b2e05be0bb53b1e7`, NOT the recorded `1cbde501c26d231a4295632dfbebd34b` — same pre-existing t1600 drift as the default arm.** |

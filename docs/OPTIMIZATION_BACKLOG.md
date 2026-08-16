@@ -2136,8 +2136,10 @@ running, same reason.
    summary.** The call count spans **0 to 1.77 M per frame** across six greets
    poses of the same scene. A lever measured only at t=5743 or t=6097 is being
    measured where the function does not run.
-4. **`--ssao_downscale=2` is still the single largest lever on this arm**, and
-   still a look change nobody has approved.
+4. ~~**`--ssao_downscale=2` is still the single largest lever on this arm**, and
+   still a look change nobody has approved.~~ **SPENT 2026-08-16y — countersigned
+   and landed as the DEFAULT** (realized −9.6 ms of frame; see the 2026-08-16y
+   entry at the top). Read this item as closed wherever it appears.
 
 ### METHOD NOTE
 
@@ -2333,8 +2335,10 @@ code-shape change whose flag would cost more than the change saves.
 3. **The eager/lazy ratio and the uniformity pyramid** — unchanged from 16l
    items 2 and 3, including "the one safe reject was tried and refuted, do not
    re-derive".
-4. **`--ssao_downscale=2` is still the single largest lever on this arm**, and
-   still a look change nobody has approved.
+4. ~~**`--ssao_downscale=2` is still the single largest lever on this arm**, and
+   still a look change nobody has approved.~~ **SPENT 2026-08-16y — countersigned
+   and landed as the DEFAULT** (realized −9.6 ms of frame; see the 2026-08-16y
+   entry at the top). Read this item as closed wherever it appears.
 
 ### METHOD NOTE, because it generalises
 
@@ -2622,8 +2626,10 @@ Without 16i's note this round would have spent a battery on it.
    16h says costs what it saves. Unpriced, and now unpromising.
 3. **The uniformity pyramid, 0.056 Gi/f** — a dependent load per tap; the 4x4
    pyramid was priced and refused in 16g.
-4. **`--ssao_downscale=2` is still the single largest lever on this arm**, and
-   still a look change nobody has approved.
+4. ~~**`--ssao_downscale=2` is still the single largest lever on this arm**, and
+   still a look change nobody has approved.~~ **SPENT 2026-08-16y — countersigned
+   and landed as the DEFAULT** (realized −9.6 ms of frame; see the 2026-08-16y
+   entry at the top). Read this item as closed wherever it appears.
 
 ## 2026-08-16k — THE SHATTER NONDETERMINISM, CLOSED: one `static` scratch array shared by 12 shard workers. 15 flips in 49 → 0 in 48
 
@@ -3158,7 +3164,8 @@ without noticing the trace term.
    still stands: the omni loop is 1.25 of it and **the cube tap is 0.747, 36.6 %
    of the whole call**. Everything else in wave 1 is rounding error against
    that. The next real lever on this arm is the tap or `--ssao_downscale=2`,
-   not another compose.
+   not another compose. (**The dial half of that sentence was spent 2026-08-16y**
+   — `ssao_downscale=2` is now the default; the tap is what is left.)
 3. **The fountain t=2500 pin is not 3/3-reliable.** One run in 43 on the
    **PARENT** binary produced `b91cb2ba…` instead of `8db68ccb…`; a 24-run gate
    on each binary then gave 24/24 `8db68ccb` on both. Pre-existing
@@ -3939,13 +3946,40 @@ the sector-units rung.
 
 ### THE BIG LEVER LEFT IS A DIAL, NOT A REFACTOR — `--ssao_downscale`
 
-Measured on the tip, same protocol, load 15–29. This is a **LOOK change** and is
-recorded here as an OPTION, not a default:
+> **RESOLVED 2026-08-16y — COUNTERSIGNED AND LANDED AS THE DEFAULT.** Gil-Ad,
+> verbatim: *"ssao downscale 2 is ok (no downscale looks much better, but too
+> slow)"* — full-res preferred aesthetically, rejected on cost.
+> `FDS/Base/FeatureFlags.def` `ssao_downscale` **1 → 2**; `--ssao_downscale=1`
+> still restores full-res EXACTLY (proved both directions: the flipped binary
+> under `=1` reproduces the four old greets acceptance hashes 3/3, and the
+> parent under `=2` reproduces the four new ones 3/3 — a bijection, so nothing
+> but the default moved). **Realized, min-of-11 interleaved, 1512×848, his
+> acceptance arm: frame 49.25 → 39.62 ms at t=5743 and 41.39 → 31.86 ms at
+> t=6097 (−9.63 / −9.53 ms), `ssao` 14.55 → 4.96 and 14.23 → 4.93 ms, `ssao`
+> Ginstr/f 1.650 → 0.603, `renderFrame` Ginstr/f −22.3 % / −25.0 %** — i.e. the
+> −9.1 ms projected in the table below was slightly conservative. Image cost
+> re-measured on the landing binary at t=5743: 52.5 % of pixels moved, mean |Δ|
+> 0.869/255 over channels on the moved, max 74 — reproducing the numbers below
+> to the digit. New pins, gates and look evidence
+> (`docs/img/ssaoperf/default_flip_t5743_crop_d1_d2.png`):
+> `docs/SESSION_STATE.md` 2026-08-16y.
+>
+> **What this closes and what it does not.** It closes the "biggest lever on
+> this arm" line that three consecutive rounds handed forward. It does NOT make
+> the three remaining SSAO items below more valuable — the opposite: the compute
+> and the denoise both shrink quadratically with the dial, so the slice-setup
+> and `sqrt` items are now worth ~1/4 of what this round priced them at, and
+> `DeferredLighting-call` (1.73 Ginstr/f against `ssao`'s 0.603) is row 1 of the
+> arm again by a wide margin.
+
+Measured on the tip, same protocol, load 15–29. This was recorded as a **LOOK
+change** and an OPTION when written; it has since been countersigned and is the
+default (note above):
 
 | arm | `ssao` ms t=5743 / t=6097 | `ssao` Ginstr/f | frame min t=5743 / t=6097 |
 |---|--:|--:|--:|
-| `--ssao_downscale=1` (default, what he runs) | 14.33 / 14.61 | 1.651 | 53.92 / 44.93 |
-| **`--ssao_downscale=2`** | **4.95 / 4.97** | **0.604** | **44.81 / 35.08** |
+| `--ssao_downscale=1` (~~default, what he runs~~ **NOW THE OPT-IN CONTROL ARM**) | 14.33 / 14.61 | 1.651 | 53.92 / 44.93 |
+| **`--ssao_downscale=2`** (**THE DEFAULT since 2026-08-16y**) | **4.95 / 4.97** | **0.604** | **44.81 / 35.08** |
 | `--ssao_downscale=4` | 2.19 / 2.17 | 0.291 | 42.15 / 32.22 |
 | `--ssao_gtao_steps=2` | 10.37 / 10.26 | 1.137 | 50.74 / 40.67 |
 | `--ssao_gtao_slices=1` | 8.89 / 8.77 | 1.016 | 48.80 / 39.34 |
@@ -3956,7 +3990,9 @@ four poses: 44–63 % of pixels move, but **mean |delta| on the moved pixels is
 0.53–0.87 / 255** and the peaks are local to contact creases (max 20 at t=2845,
 74 at t=5743; `d=4` reaches 102–109). Side-by-side crops:
 `docs/img/ssaoperf/dial_t{5743,6097,2845,6001}_crop_d1_d2_d4.png`, full frames
-`dial_t*_full_d1_d2_d4.jpg`. **Needs his eye before it goes near a default.**
+`dial_t*_full_d1_d2_d4.jpg`. ~~**Needs his eye before it goes near a default.**~~
+**IT GOT HIS EYE — countersigned 2026-08-16, landed as the default the same day
+(note at the top of this section).**
 
 ### What is left inside SSAO, ranked, after the four rungs
 

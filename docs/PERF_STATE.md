@@ -1601,9 +1601,30 @@ bench (frame-dominated: init is ~3 s of ~28 s).
 ./DEMO --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace
 ```
 
+> **AMENDED 2026-08-16y — THE DIAL LANDED. `ssao_downscale` now defaults to
+> `2`, countersigned by Gil-Ad verbatim: "ssao downscale 2 is ok (no downscale
+> looks much better, but too slow)."** Every wall figure in the tables below is
+> a **`--ssao_downscale=1`** number and stays valid only under an explicit
+> `--ssao_downscale=1`; the shipping arm is now ~9.6 ms faster than all of them.
+> **REALIZED, min-of-11 interleaved parent-vs-child, one worktree, 1512×848,
+> this exact arm:** frame **49.25 → 39.62 ms** at t=5743 and **41.39 → 31.86 ms**
+> at t=6097 (−19.6 % / −23.0 %); `ssao` **14.55 → 4.96** and **14.23 → 4.93 ms**;
+> `ssao` Ginstr/f **1.650 → 0.603**; `renderFrame` Ginstr/f **4.686 → 3.639**
+> (t=5743) and **4.191 → 3.143** (t=6097). `gbuffer` and
+> `DeferredLighting-call` flat to three decimals of Ginstr/f in the same batch.
+> The projection in the dial table (−9.1 ms) was slightly conservative; realized
+> is **−9.6 ms** at both poses. Pins, look evidence and the both-directions
+> proof that this is pure default motion: `docs/SESSION_STATE.md` 2026-08-16y.
+> **CONSEQUENCE FOR THE RANKING BELOW: `ssao` is no longer row 1 of this arm.**
+> At t=5743 it drops from 1.650 to 0.603 Ginstr/f, i.e. from 33 % of
+> `renderFrame` to ~17 %, and `DeferredLighting-call` (1.73) is row 1 again by a
+> wide margin. Re-read every "the biggest lever is the dial" sentence below as
+> spent.
+
 **This is a different frame from every table in 00 and 0.** No prior greets
-round carried `--ssao --ssao_gtao`; `--ssao_downscale` defaults to **1**, so
-GTAO runs at FULL resolution. Poses are the SCENE'S OWN scripted camera at
+round carried `--ssao --ssao_gtao`; `--ssao_downscale` defaulted to **1** when
+these tables were taken (it defaults to **2** since 2026-08-16y), so
+GTAO ran at FULL resolution here. Poses are the SCENE'S OWN scripted camera at
 t=2845 / 3409 / 5743 / 5813 / 6097 (no `FDS_GREETS_CAM`), 12 iters,
 `--deferred_prof=1 --hw_prof --profiler=1`, min-of-6 over 7 interleaved rounds
 with round 0 dropped. Loads ran 15–39 across the session, so **read `Ginstr/f`
@@ -1951,10 +1972,15 @@ it is 16h's item 2 (the 3-channel scalar arithmetic, ~0.03 Gi/f) and that one is
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
 `cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and
-the cube tap) are the next target on this arm too — **and the single largest
+the cube tap) are the next target on this arm too — ~~and the single largest
 lever of all is a dial, `--ssao_downscale=2`, worth another -9.1 ms of frame
-for a look change nobody has approved yet** (numbers + crops in
-docs/OPTIMIZATION_BACKLOG.md 2026-08-16).
+for a look change nobody has approved yet~~ **— SPENT 2026-08-16y: the dial was
+countersigned and is now the DEFAULT, realized −9.6 ms** (`ssao` 1.650 → 0.603
+Ginstr/f). With it spent, `DeferredLighting-call` at 1.73 is the unambiguous
+row 1 of this arm and there is no second dial of that size left; numbers, crops
+and the both-directions default-motion proof in
+docs/OPTIMIZATION_BACKLOG.md 2026-08-16 / 2026-08-16y and
+docs/SESSION_STATE.md 2026-08-16y.
 
 ---
 
