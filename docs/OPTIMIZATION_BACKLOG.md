@@ -78,6 +78,39 @@ because greets' flags moved under them:**
 3. **`lighting-w2` exists and is 15 % of the call.** `--deferred_checkerboard`
    is a greets setDefault; no prior round profiled the fill wave at all.
 
+### MEASURED — parent / OFF / ON, one worktree, one asset tree
+
+Interleaved, order-rotated, min over 11 rounds with round 1 dropped, one pose
+per process, 1512x848, `--profiler=0`, `--deferred_prof=1 --hw_prof`. Load ran
+6-13, so `Ginstr/f` and `Gcyc/f` are the columns that decide; `wall` is quoted
+because it agrees. `off` = the CHILD binary with all three flags off — the arm
+that prices the restructure by itself.
+
+| pose | row | par | off | **ON** |
+|---|---|--:|--:|--:|
+| **t=5743** | `DeferredLighting-call` Gi/f | 2.039 | 2.057 (+0.9 %) | **1.877 (−7.9 %)** |
+| | .. Gcyc/f | 0.558 | 0.565 (+1.3 %) | **0.516 (−7.5 %)** |
+| | .. wall | 17.59 | 17.78 (+1.1 %) | **16.31 (−7.3 %)** |
+| | `renderFrame` Gi/f | 4.989 | 5.007 | **4.827 (−3.2 %)** |
+| | `renderFrame` wall | 45.02 | 44.34 | **43.71 (−2.9 %)** |
+| **t=2845** | `DeferredLighting-call` Gi/f | 1.904 | 1.919 | **1.767 (−7.2 %)** |
+| | `renderFrame` Gi/f / wall | 4.977 / 44.13 | 4.993 / 44.73 | **4.840 (−2.8 %) / 43.13 (−2.3 %)** |
+| **t=6097** | `DeferredLighting-call` Gi/f | 1.759 | 1.773 | **1.638 (−6.9 %)** |
+| | `renderFrame` Gi/f / wall | 4.400 / 39.48 | 4.414 / 40.05 | **4.279 (−2.8 %) / 38.90 (−1.5 %)** |
+| **t=3409** | `DeferredLighting-call` Gi/f | 1.972 | 1.984 | **1.877 (−4.8 %)** |
+| | `renderFrame` Gi/f / wall | 5.094 / 44.62 | 5.106 / 45.06 | **4.999 (−1.9 %) / 44.08 (−1.2 %)** |
+| **t=5813** | `DeferredLighting-call` Gi/f | 1.995 | 2.012 | **1.836 (−8.0 %)** |
+| | `renderFrame` Gi/f / wall | 4.846 / 43.03 | 4.863 / 43.42 | **4.687 (−3.3 %) / 42.29 (−1.7 %)** |
+
+**The OFF column earns its place again: the restructure costs +0.2 to +0.9 %
+on its own**, so the mechanism is worth −8.7 % against its own OFF arm at
+t=5743 and −7.9 % against the parent. t=3409 is the weak pose (−4.8 %) — its
+cube-tap share is the lowest of the five.
+
+Per-flag, each alone against the same OFF baseline (t=5743, min-of-4):
+`cube_direct` 1.577 (**it is the whole w1 win**), `fill_hdr_skip` w2 0.293
+(**the whole w2 win**), `lm_addr_skip` −0.2 %.
+
 ### WHAT SHIPPED
 
 **`--deferred_cube_direct` (default ON) — the mover.** `resolveCubeAtten` is
