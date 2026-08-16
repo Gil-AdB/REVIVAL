@@ -37,6 +37,9 @@ dword  g_mipBigFace    = 0;
 dword  g_mipEnteredCum     = 0;
 dword  g_mipFastUniformCum = 0;
 dword  g_mipSplitCum       = 0;
+dword  g_shadowWalkCum     = 0;
+dword  g_shadowBboxRejCum  = 0;
+dword  g_shadowCoverAllCum = 0;
 // Cumulative, per-ClipSrc mirrors for the --clip_stats atexit report, for the
 // same reason the mip ones exist: Flush zeroes the per-scene buckets above and
 // a scene-end flush lands before atexit runs.
@@ -99,6 +102,9 @@ struct TlsHolder {
         fds_stats::g_mipNomip   += c.mipNomip;    c.mipNomip   = 0;
         fds_stats::g_mipNegArea += c.mipNegArea;  c.mipNegArea = 0;
         fds_stats::g_mipBigFace += c.mipBigFace;  c.mipBigFace = 0;
+        fds_stats::g_shadowWalkCum     += c.shadowWalk;     c.shadowWalk     = 0;
+        fds_stats::g_shadowBboxRejCum  += c.shadowBboxRej;  c.shadowBboxRej  = 0;
+        fds_stats::g_shadowCoverAllCum += c.shadowCoverAll; c.shadowCoverAll = 0;
         s_registry.erase(std::remove(s_registry.begin(), s_registry.end(), &c),
                          s_registry.end());
     }
@@ -157,6 +163,9 @@ void RenderStats_Flush() {
         fds_stats::g_mipNomip   += c->mipNomip;    c->mipNomip   = 0;
         fds_stats::g_mipNegArea += c->mipNegArea;  c->mipNegArea = 0;
         fds_stats::g_mipBigFace += c->mipBigFace;  c->mipBigFace = 0;
+        fds_stats::g_shadowWalkCum     += c->shadowWalk;     c->shadowWalk     = 0;
+        fds_stats::g_shadowBboxRejCum  += c->shadowBboxRej;  c->shadowBboxRej  = 0;
+        fds_stats::g_shadowCoverAllCum += c->shadowCoverAll; c->shadowCoverAll = 0;
     }
 }
 
@@ -244,6 +253,19 @@ void RenderStats_ClipReport() {
             fds_stats::g_clipNeedZCum,  100.0 * double(fds_stats::g_clipNeedZCum)  / double(ent),
             fds_stats::g_clipNeed2DCum, 100.0 * double(fds_stats::g_clipNeed2DCum) / double(ent),
             fds_stats::g_mipEnteredCum, fds_stats::g_mipFastUniformCum, fds_stats::g_mipSplitCum);
+    // The shadow raster's PRE-clipper walk. The rows above start at
+    // FrustumClipper::Render; this one says how many (face, tile) pairs the
+    // Shadows.cpp walk looked at before that, and how many --shadow_bbox_cull
+    // threw out ahead of the three Vertex copies. coverAll is the population
+    // the reject can NEVER touch (a vertex behind the light camera's near
+    // plane leaves the sentinel box), i.e. the ceiling on what is left.
+    if (fds_stats::g_shadowWalkCum) {
+        const double inv = 100.0 / double(fds_stats::g_shadowWalkCum);
+        fprintf(stderr, "[CLIP]   shadow walk %u  bbox-rejected %u (%.1f%%)  cover-all %u (%.1f%%)\n",
+                fds_stats::g_shadowWalkCum,
+                fds_stats::g_shadowBboxRejCum,  double(fds_stats::g_shadowBboxRejCum)  * inv,
+                fds_stats::g_shadowCoverAllCum, double(fds_stats::g_shadowCoverAllCum) * inv);
+    }
     fflush(stderr);
 }
 

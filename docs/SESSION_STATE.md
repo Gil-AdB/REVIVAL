@@ -1,5 +1,65 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16q — THE SHADOW RASTER HAD NO PRE-REJECT. 231 735 CLIPPER ENTRIES/FRAME → 41 787, AND THE LEVEL IS PER-TILE, NOT PER-MAP
+>
+> **16p's row: `Shadows.cpp`'s per-(light, tile) walk handed every survivor of
+> its four rejects straight to `FrustumClipper::Render` — 189 567 of 231 735
+> entries a frame clipped away to nothing. `--shadow_bbox_cull` (DEFAULT ON)
+> gives it `RenderInner`'s 4-compare screen-bbox test verbatim.** Entries
+> **231 735 → 41 787 (−82.0 %)**, clipped-away-to-nothing **189 567 → 22**,
+> `FrustumClipper::Render` self time **2.265 % → 1.429 %** of DEMO self samples,
+> `DynMeshes` bake RASTER **1.31 → 0.78 ms/frame (−40 %)**, frame minimum
+> **−0.8 to −2.3 %** across five greets poses. Evidence:
+> `docs/PERF_STATE.md` **00f**, `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16q**.
+>
+> ### 16p's THREE CAVEATS, ANSWERED
+>
+> | caveat | answer |
+> |---|---|
+> | "the per-light clone FList may not stamp bboxes" | **it does** — `Transform_Objects` stamps the shadow path too (its ablation gate is main-view-only), and the PX/PY are SHADOW-MAP pixels, so `RenderInner`'s test transplants unmodified. Nothing had to be built; the data was there and nobody read it. |
+> | "the shadow tile is often the WHOLE map — maybe a map-rect reject" | **a map-rect reject is worth exactly ZERO.** `FDS_SHADOW_TILE_GRID=1` → 0 rejectable faces in 42 bakes: the frustum-level cull is already done upstream. Every reject is INSIDE a map the face overlaps, and the yield is a pure function of `gridFor(res)` — 128² maps single-tile get nothing, 512² maps at 4×4 are the whole win. |
+> | "51 % of the clipper is the Z clip; the reject must run before it and be conservative" | it runs first and removes **zero** Z-clip work: `needZ` is **14 514/frame on both arms, to the unit** (behind-near faces keep the cover-all box). The `no-clip` population is likewise identical to the unit. It takes the cheap half and leaves the expensive one — which is why −82 % of entries is −37 % of the symbol. |
+>
+> ### BYTE-EXACTNESS — TWO INSTRUMENTS, NOT AN ARGUMENT
+>
+> * **`--shadow_plane_hash`** (landed, default OFF): FNV-1a over every packed
+>   shadow plane a bake wrote, depth AND polyId, one `[SPH]` line per bake.
+>   **43–59 bakes per pose IDENTICAL** default vs `--no-shadow_bbox_cull` at
+>   greets t=5743/2845/6097/6133/1588/3122/4871, at 640×360, without displace,
+>   with `--shadow-backface-cull`, with `--shadow-dynamic`, under
+>   `--no-tile_bbox_cull`, with `FDS_GREETS_SHATTER=1`, and on `conetest`.
+> * **`-DFDS_SHADOW_BBOX_VERIFY=ON`**: computes the reject, does NOT apply it,
+>   counts polygons the raster receives from a face it would have discarded —
+>   **79.7 M rejectable face-visits, 0 polygons.**
+>
+> ### GATES
+>
+> * **11 pin recipes 3/3, parent-identical** (`DEMO_base` = `5071cc37`): city
+>   `bd4ffbf8` / `4cb8d2ca` / `f473fe2b` / `d3374de6`, chase `3bfd4244` /
+>   `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814`, fountain `8db68ccb` — all
+>   ten at their recorded 16f values — plus greets t=1588 and the four greets
+>   acceptance poses, differential.
+> * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` /
+>   `166fa25a`), **and `conetest` discriminates**: its shadow clipper entries go
+>   **8 448 → 2 496 (−70.5 %)** and its reject rate **48.9 % → 6.7 %** while the
+>   surface stays byte-identical.
+> * **Only greets and `conetest` bake a shadow map at all** — city / chase /
+>   fountain / crash produce ZERO bake invocations even with `--shadows` on. Their
+>   ladders are the inertness control and they are inert.
+> * One render eyeballed per scene: `docs/img/shadowbbox/greets_t5743_shadowbbox.png`,
+>   `city_t1961_shadowbbox.png`, `chase_t800_shadowbbox.png`,
+>   `fountain_t2500_shadowbbox.png`.
+>
+> ### HANDS ON
+>
+> **A per-light face→tile BIN** (`--face_tile_bin` for the shadow pass) would
+> collapse the 237 609 (face, tile) pair-visits a frame to two list walks;
+> `FaceTileBin.cpp` and its order-preservation proof already exist. Not built —
+> the four-line reject took 80 % of the prize. Also: **`DynOmnis` is now the
+> bigger bake** (1.21 ms raster vs `DynMeshes`' 0.78) and this row does not touch
+> it, and **`Transform_Objects` is 3.35 % of DEMO self samples at greets t=5743**,
+> more than double what is left of the clipper.
+
 > ## 2026-08-16p — THE CLIPPER'S COPY IS 2.6 % OF THE CLIPPER: 16c's handover is refuted and the row is CLOSED BELOW BAR. greets' clipper is 83 % SHADOW
 >
 > **16c handed on "cutting it further means cutting the copy, not the traversal".

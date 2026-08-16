@@ -19,6 +19,232 @@
 
 ---
 
+## 00f. THE SHADOW RASTER GETS THE PRE-REJECT IT NEVER HAD — 2026-08-16q: 231 735 clipper entries/frame → 41 787, and the reject is per-TILE, not per-map
+
+**§00e handed on one row: `Shadows.cpp`'s depth raster is 83.4 % of greets'
+clipper entries and 81.8 % of ITS entries (189 567/frame) are clipped away to
+nothing, because that walk has no screen-bbox pre-reject at all. It has one now
+— `--shadow_bbox_cull`, DEFAULT ON.** At greets t=5743 on his acceptance arm the
+shadow raster's clipper population goes **231 735 → 41 787 entries a frame
+(−82.0 %)** and its clipped-away-to-nothing count goes **189 567 → 22**; the
+whole frame's clipper population goes 277 777 → 87 829. `FrustumClipper::Render`
+self time goes **2.265 % → 1.429 % of DEMO self samples** (§00e's 2.270 %
+reproduced to three decimals first). The `DynMeshes` bake's RASTER half goes
+**1.31 → 0.78 ms/frame (−40 %)**, and the frame minimum **−0.8 to −2.3 %**
+depending on pose.
+
+Byte-exact, and proved three ways rather than argued: **43–59 packed shadow
+planes per pose byte-identical** under a new `--shadow_plane_hash` across eight
+greets poses + conetest + the shatter; a **direct counter-example probe**
+(`-DFDS_SHADOW_BBOX_VERIFY=ON`) that computes the reject, does NOT apply it, and
+counts polygons the raster receives from a face the reject would have thrown
+away — **79.7 million rejectable face-visits, 0 polygons**; and the standard
+battery (11 pin recipes 3/3 parent-identical, `render_gate.sh` 4/4).
+
+### THE CENSUS, REPRODUCED FIRST — §00e's numbers land to the digit
+
+`--clip_stats`, `(iters=28 − iters=8)/20` on the `--bench` arm, greets t=5743,
+`--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao
+--greets-displace`. §00e's cumulative TOTAL of 8 499 390 at iters=28 reproduces
+EXACTLY on this box, and so does every shadow figure.
+
+| `Shadows.cpp` depth raster, per frame | parent `5071cc37` | child, `--no-shadow_bbox_cull` | **child, default** |
+|---|--:|--:|--:|
+| entries | 231 735 | 231 735 | **41 787 (−82.0 %)** |
+| no-clip (wholly inside the tile) | 31 120 | 31 120 | **31 120 — IDENTICAL** |
+| emitted (the clip made a vertex) | 11 048 | 11 048 | 10 645 |
+| **rejected (bought no pixels)** | **189 567 (81.8 %)** | 189 567 | **22 (0.05 %)** |
+| whole-frame clipper entries | 277 777 | 277 777 | **87 829** |
+| `needZ`, whole frame | 14 514 | 14 514 | **14 514 — IDENTICAL** |
+
+**The two IDENTICAL rows are the result, not decoration.** `no-clip` is the
+population that produces pixels with no clipping at all — not one of them is
+lost. `needZ` is the near/far clip, where §00e measured 51 % of greets' clipper
+self time — also not one lost, because a vertex behind the light camera's near
+plane leaves the cover-all sentinel box and can never be rejected. **The cull
+removes exactly the 2-D-reject population and nothing else**, which is why the
+time saved (−37 % of the symbol) is smaller than the entries removed (−82 %).
+
+`emitted` drops by 403/frame and that is not a loss either: `emitted` counts
+"the clip manufactured a vertex", NOT "the face drew". A face straddling the
+tile in X and wholly outside it in Y manufactures vertices at `Left`/`Right`
+and is then annihilated by `Up`/`Down` — it was always in the bought-no-pixels
+set, just filed under a different column.
+
+The pre-reject's own census (new `[CLIP] shadow walk` line): the walk sees
+**237 609 (face, tile) pairs a frame**, rejects **190 365 (80.1 %)**, and
+**9 338 (3.9 %)** carry the cover-all sentinel and are structurally unrejectable.
+
+### WHERE THE REJECT LANDED, AND WHY IT IS NOT WHERE §00e GUESSED
+
+§00e's caveat offered three levels — per-tile bbox, bbox-vs-map-rect, or a
+light-frustum reject — and warned the shadow "tile" is often the whole map.
+**Measured: it is the per-TILE reject, and the other two are worth exactly
+zero.** `FDS_SHADOW_TILE_GRID=1` forces one tile per map, i.e. makes the tile
+rect BE the map rect, and the counter-example probe then reports **0 rejectable
+face-visits in 42 bakes**. No face in a per-light FList has a box that misses
+its map: the light-frustum-level cull is ALREADY done upstream, by
+`Transform_Objects`' spot-cone / cube-face bsphere culls and the walk's own
+all-behind reject. Everything this row buys is *inside* a map the face really
+does overlap.
+
+Which makes the win a pure function of the tile grid, and `gridFor(res)` makes
+the grid a function of the map resolution (`res>>7`, clamped [1,4]):
+
+| greets bake | maps | res | tiles/map | rejectable visits (42 bakes) | raster Δ |
+|---|--:|--:|--:|--:|--:|
+| `DynOmnis` | 18 @128² + 10 @256² | 128/256 | 1 / 4 | small | **−4.0 %** (floor 1.65 %) |
+| `DynMeshes` | 14 | 512² | **16** | 4.2 M | **−40.0 %** |
+| `StaticOnce` (init) | 48 | 512² | **16** | — | entries ≈ 507 k → 104 k |
+| `FDS_SHADOW_TILE_GRID=8` (probe) | — | — | 64 | **43.1 M** | — |
+
+The 128² maps are single-tile and get nothing — which is exactly why the
+`DynOmnis` column does not move and the `DynMeshes` column moves by 40 %.
+
+### THE PRICE — min-of-11, order ROTATED, one pose per process
+
+`scratchpad/shadowbbox_ladder.sh` (new; `scratchpad/ladder.sh` is BLIND to this
+change by construction — the shadow bake is not inside `renderFrame`,
+`shadow-join` is 0.002 ms). Round 0 dropped, 12 rounds, 3 arms, 1512×848,
+`--profiler=1 --deferred_prof=4 --hw_prof --shadow-bake-time --shadow-prof`,
+`FDS_SHADOW_PROF_INTERVAL=5` and the MIN over the printed intervals. Noise floor
+per column = max over arms of (2nd-min − min)/min.
+
+| pose | column | parent | child OFF | **child ON** | floor |
+|---|---|--:|--:|--:|--:|
+| **greets t=5743** (his arm) | frame min ms | 49.92 | 50.10 | **49.51 (−0.82 % vs parent)** | 0.57 % |
+| | TOTL ms | 65.01 | 65.36 | 64.72 | 0.38 % |
+| | `DynMeshes` RASTER ms | 1.31 | 1.30 | **0.78 (−40.0 %)** | 3.85 % |
+| | `DynMeshes` bake ms | 1.55 | 1.55 | 1.03 (−33.6 %) | 2.91 % |
+| | `DynMeshes` XFORM ms | 0.20 | 0.21 | 0.21 | 5.00 % |
+| | `DynOmnis` RASTER ms | 1.24 | 1.26 | 1.21 (−4.0 %) | 1.65 % |
+| | `renderFrame` Ginstr/f | 4.682 | 4.681 | 4.682 | 0.02 % |
+| | `gbuffer` Ginstr/f | 0.992 | 0.992 | 0.992 | 0.00 % |
+| **greets t=1588** (`--deferred`) | frame min ms | 41.65 | 41.62 | **40.69 (−2.30 %)** | 0.10 % |
+| | `DynMeshes` RASTER ms | 2.06 | 2.08 | **1.21 (−41.3 %)** | 1.94 % |
+| **greets t=6097** | frame min ms | 41.76 | 41.55 | **41.30 (−1.10 %)** | 0.84 % |
+| | `DynMeshes` RASTER ms | 1.17 | 1.21 | 0.75 (−35.9 %) | 4.00 % |
+| **greets t=6133** | frame min ms | 41.85 | 42.18 | **41.47 (−0.91 %)** | 0.14 % |
+| | `DynMeshes` RASTER ms | 1.23 | 1.20 | 0.77 (−37.4 %) | 3.33 % |
+| **greets t=2845** | frame min ms | 50.55 | 50.72 | **49.78 (−1.52 %)** | 1.67 % |
+| | `DynMeshes` bake ms | 1.72 | 1.77 | 0.88 | 44 % — do not quote |
+| **city t=1961** (his arm) | frame min ms | 46.14 | 46.00 | 45.89 | 0.35 % |
+| | `renderFrame` Ginstr/f | 4.176 | 4.176 | 4.176 | 0.02 % |
+| **fountain t=2500** | frame min ms | 36.59 | 35.81 | 36.36 | 1.68 % |
+
+**city and fountain bake NO shadow map at these poses — zero bake invocations —
+so their rows are the inertness control, and they are inert.** So are chase and
+crash: `--shadows` on any of the four produces 0 bakes. The shadow depth raster
+runs at greets and at `render_gate.sh`'s `conetest`, and nowhere else in this
+battery — which is the same fact §00e reported as "city t=1961: zero shadow
+entries", now stated as a property of four scenes rather than one pose.
+
+**The instrument's own cost (parent → child OFF) is null**: the frame minimum
+moves −0.36 / +0.51 / −0.79 / +0.07 / +0.34 / −0.30 % across the six poses —
+both signs, all within or beside the floor — and `renderFrame` Ginstr/f never
+moves by more than one printed LSB. The OFF arm reproduces the parent's
+`--clip_stats` census to the digit (8 499 390 / 6 995 771 / 5 702 196).
+
+### THE SYMBOL, AFTER
+
+`sample <pid> 25` on the running bench, self samples as a share of DEMO's, one
+pose per process (`scratchpad/selftime2.sh` + `sumself.py`, §00e's instrument):
+
+| symbol, greets t=5743 | parent | child |
+|---|--:|--:|
+| `FrustumClipper::Render` | **2.265 %** (§00e: 2.270 %) | **1.429 %** |
+| `MekaleleShadowDepth` | 1.203 % | 1.159 % |
+| `Transform_Objects` | 3.195 % | 3.349 % |
+
+**greets' clipper row is now 1.43 %, against city's 1.28 % — the anomaly §00e
+opened is closed.** What is left of it is no longer the shadow pass's 2-D
+reject; it is §00e's own leftovers list (the Z clip at the top, then `YSort`,
+the UV stamp's `Face` load, the double `stats_tls`), each below 0.5 % of frame
+on its own. `MekaleleShadowDepth` barely moves, as it must: the rejected faces
+never reached it.
+
+### WHY IT IS BYTE-EXACT, AND THE PROBE THAT LOOKED FOR A COUNTER-EXAMPLE
+
+The test is `RenderInner.cpp`'s verbatim — `bbMaxX < tx1 || bbMinX >= tx2 ||
+bbMaxY < ty1 || bbMinY >= ty2` against the same rect the clipper was just given
+by `SetClippingExtents`. §00e's caveat said the per-light clone FList "may not
+stamp bboxes"; **it does.** The shadow FList is built by `Transform_Objects`,
+whose stamp is gated only on `--tile_bbox_cull` (its `--xfrm_ablate` escape is
+main-view-only: `xab = (_xablate != 0) && (xresOverride < 0)`, and the shadow
+path always passes `xresOverride = sm.xres`), and the PX/PY it stamps are
+SHADOW-MAP pixels because the light's `CameraContext` drives the projection. Box
+and rect are in the same space; `bboxNearZ = cam.nearZ` is the same near plane
+the clipper's `Near()` tests.
+
+The S2 argument, re-derived for the light frustum:
+
+* the box is a conservative superset of the un-clipped triangle (floor/ceil, 1 px
+  margin, int16-SATURATED — saturation only ever widens it);
+* it is a real box only when all three verts are in FRONT of the near plane, so
+  the faces whose manufactured vertices could land outside it — the near-clipped
+  ones — keep the cover-all sentinel and are never rejected. The guard is `z >
+  nearZ`, strictly stronger than `Vtx_VisNear`'s test, so the equality edge falls
+  on the safe side;
+* the FAR clip DOES manufacture vertices here (the geometry straddles each
+  light's range — that is §00e's `needZ`), but both endpoints of the interpolated
+  edge are in front of near, so the projection of any point on the 3-D segment
+  stays on the projected 2-D segment and therefore inside the box;
+* the 2-D clip only shrinks coverage.
+
+**And then it was searched for a counter-example instead of being trusted.**
+`-DFDS_SHADOW_BBOX_VERIFY=ON` builds a binary whose walk computes the reject and
+does NOT apply it, brackets every `clipper.Render` with a per-thread counter
+bumped at the top of `MekaleleShadowDepth`, and reports any polygon the raster
+received from a face the reject would have discarded:
+
+| arm | rejectable face-visits that reached the clipper | **polygons they produced** |
+|---|--:|--:|
+| greets t=5743 / 2845 / 6097 / 6133 | 4.01 M / 4.05 M / 3.83 M / 3.96 M | **0 / 0 / 0 / 0** |
+| greets t=1588 / 3122 / 4871 | 6.97 M / 2.56 M / 6.99 M | **0 / 0 / 0** |
+| greets `--shadow-backface-cull` | 2.11 M | **0** |
+| `FDS_SHADOW_TILE_GRID=8` | 43.1 M | **0** |
+| `FDS_SHADOW_TILE_GRID=1` | **0** (the map-rect finding above) | 0 |
+| `render_gate.sh conetest` | 5 952 | **0** |
+| **total** | **79.7 M** | **0** |
+
+### THE PLANE HASH — the gate this class of change actually needs
+
+Shadow maps feed every scene's lighting, so a wrong reject reads as acne or
+popping over TIME; four byte-identical snapshots do not prove the planes agree.
+**`--shadow_plane_hash`** (new, default OFF, one bool load per bake invocation)
+FNV-1a's the packed plane — depth AND polyId, every byte of every texel — of
+every map a bake wrote, in the tick thread's deterministic map order, and prints
+one `[SPH]` line per bake plus a running digest. Streams compared
+parent-configuration to child, default vs `--no-shadow_bbox_cull`:
+
+| arm | bakes | verdict |
+|---|--:|---|
+| greets t=5743 / 2845 / 6097 / 6133 / 1588 / 3122 / 4871, `--bench` iters=20 | 43 each | **IDENTICAL** |
+| greets t=5743 snapshot; 640×360; no-displace; `--shadow-dynamic`; `--shadow-backface-cull` | 3–43 | **IDENTICAL** |
+| greets t=6293,6294 with `FDS_GREETS_SHATTER=1` | 5 | **IDENTICAL** |
+| `render_gate.sh conetest` | 12 | **IDENTICAL** |
+| greets t=5743 under `--no-tile_bbox_cull` (cull inert) | 43 | **IDENTICAL** |
+| city / chase / fountain / crash, with and without `--shadows` | **0 — they bake none** | — |
+
+### GATES
+
+* **11 pin recipes, 3/3 each, parent-binary-identical** (`DEMO_base` = tip
+  `5071cc37` vs the child, one worktree, one asset tree): city `bd4ffbf8` /
+  `4cb8d2ca` / `f473fe2b` (t=2400) / `d3374de6` (t=400), chase `3bfd4244` /
+  `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814`, fountain `8db68ccb` — **all
+  ten at their recorded 16f values** — plus greets t=1588 and the four greets
+  acceptance poses, differential. The `--no-shadow_bbox_cull` arm was spot-checked
+  on city/greets/fountain, 3/3 at the same hashes.
+* `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` /
+  `166fa25a`). **`conetest` is the arm with teeth and it has them here**: its
+  shadow clipper entries go **8 448 → 2 496 (−70.5 %)** and its reject rate
+  **48.9 % → 6.7 %** while the rendered surface stays byte-identical.
+* One render eyeballed per scene — `docs/img/shadowbbox/greets_t5743_shadowbbox.png`,
+  `city_t1961_shadowbbox.png`, `chase_t800_shadowbbox.png`,
+  `fountain_t2500_shadowbbox.png` — all correct.
+
+---
+
 ## 00e. THE CLIPPER'S PER-FACE RESIDUE, PRICED — 2026-08-16p: the copy is 2.6 % of it, and the row §00c handed on is CLOSED BELOW BAR
 
 **§00c closed row 3 and handed on one sentence: "`FrustumClipper::Render`'s

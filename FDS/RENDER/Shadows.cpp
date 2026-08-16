@@ -43,6 +43,7 @@
 #include "TailProf.h"     // phase-1 barrier instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "Base/VertexScratch.h"
+#include "Base/RenderStats.h"     // --clip_stats shadow pre-reject census
 
 #ifdef FDS_SHADOW_CLEAR_CENSUS
 #include <atomic>
@@ -182,6 +183,15 @@ static bool shadowLooksEmissive(const char *n) {
 	}
 	return false;
 }
+
+#if FDS_SHADOW_BBOX_VERIFY
+// -DFDS_SHADOW_BBOX_VERIFY=ON: reach = faces --shadow_bbox_cull WOULD have
+// rejected that were nevertheless handed to the clipper by this build (the
+// reject is computed but not applied); bad = polygons the raster received from
+// one of them. The landing bar is bad == 0 with reach large.
+std::atomic<unsigned long long> g_shadowBboxVerifyReach{0};
+std::atomic<unsigned long long> g_shadowBboxVerifyBad{0};
+#endif
 
 bool Shadow_MaterialSkipsCasting(const Material *m) {
 	// Pack (material pointer | skip-bit) into ONE atomic so the pointer-match
@@ -860,6 +870,42 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 							return Shadow_MaterialSkipsCasting(m);
 						};
 						int kept = 0, skXpar = 0, skDegen = 0, skBack = 0, skNoTxtr = 0;
+						// ── S2/B5 pre-reject for the shadow raster ─────────────
+						// This walk never had one. Every survivor of the four
+						// rejects below went straight into FrustumClipper::Render,
+						// which copies 3x140 B of Vertex, stamps this face's UV and
+						// this tile's flags on the copies, and only THEN clips: at
+						// greets t=5743 that was 231 735 entries a frame with 81.8 %
+						// clipped away to nothing (docs/PERF_STATE.md 00e). The
+						// FListEntry already carries the box — Transform_Objects
+						// stamps it on the shadow path too (its --xfrm_ablate gate
+						// is main-view-only), and PX/PY there are SHADOW-MAP pixels
+						// because the light's CameraContext drives the projection,
+						// so this is RenderInner.cpp's test verbatim, in the same
+						// space, against the same rect the clipper was just given.
+						//
+						// BYTE-EXACT, by the S2 argument re-derived for the light
+						// frustum: the box is a conservative superset of the
+						// un-clipped triangle, and it is only a real box when all
+						// three verts are in front of the light camera's NEAR plane
+						// (same nearZ the clipper uses — Sc->NZP via the
+						// CameraContext) — a behind-near vertex leaves the cover-all
+						// sentinel, so the near-clipped faces, which are the ones
+						// whose manufactured vertices can land outside the box, are
+						// never rejected. The FAR clip does manufacture vertices
+						// here (the geometry straddles each light's range), but both
+						// its endpoints are in front of near, so the interpolated
+						// point's projection stays on the projected 2-D segment and
+						// therefore inside the box. The 2-D clip only shrinks
+						// coverage. A box that misses this tile means zero texels
+						// written here, so the reject is identical to clipping —
+						// checked, not just argued, with --shadow_plane_hash.
+						const bool bboxCull = fds::FeatureFlags::shadow_bbox_cull()
+						                   && fds::FeatureFlags::tile_bbox_cull();
+						const int tx1 = int(x1f), ty1 = int(y1f);
+						const int tx2 = int(x2f), ty2 = int(y2f);
+						const bool clipCensus = fds::FeatureFlags::clip_stats();
+						int skBbox = 0, nCoverAll = 0;
 						// Material flag census — one-shot dump of (Name,
 						// Flags) for the first 64 distinct material
 						// addresses we see during any static bake. Used
@@ -890,7 +936,26 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 							}
 						}
 						for (int i = 0; i < f.cAll; ++i) {
-							Face *const F = f.fList[i].face;
+							const fds::FListEntry *const ep = &f.fList[i];
+#if FDS_SHADOW_BBOX_VERIFY
+							// Counter-example probe (-DFDS_SHADOW_BBOX_VERIFY=ON):
+							// compute the reject, DON'T apply it, and see whether
+							// the clipper hands the raster a polygon for a face the
+							// reject would have thrown away. Any non-zero here is a
+							// refutation of the byte-exactness argument.
+							const bool _wouldRej =
+								(ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
+								 ep->bbMaxY < ty1 || ep->bbMinY >= ty2);
+							const unsigned _polys0 = g_shadowRasterPolys;
+#else
+							if (bboxCull && (ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
+							                 ep->bbMaxY < ty1 || ep->bbMinY >= ty2)) {
+								++skBbox; continue;
+							}
+#endif
+							if (clipCensus && ep->bbMinX == -32768 && ep->bbMaxX == 32767)
+								++nCoverAll;
+							Face *const F = ep->face;
 							if (!F) continue;
 							if (!F->Txtr) { ++skNoTxtr; continue; }
 							// Skip materials that don't act as solid occluders.
@@ -915,6 +980,16 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 							clipper.Render(F, MekaleleShadowDepth, false, rt, cam,
                                           /*skipMipLevel=*/true);
 							++kept;
+#if FDS_SHADOW_BBOX_VERIFY
+							{
+								const unsigned drew = g_shadowRasterPolys - _polys0;
+								g_shadowBboxVerifyReach.fetch_add(_wouldRej ? 1u : 0u,
+								                                  std::memory_order_relaxed);
+								if (_wouldRej && drew)
+									g_shadowBboxVerifyBad.fetch_add(drew,
+									                                std::memory_order_relaxed);
+							}
+#endif
 						}
 						// One stderr line per "completely empty tile" (the
 						// black-map signal) so we can see *why* — first 16
@@ -923,8 +998,19 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 							static std::atomic<int> sLogged{0};
 							if (sLogged.fetch_add(1) < 16) {
 								std::fprintf(stderr,
-								    "[SHADOW-TILE-EMPTY] cAll=%d  skNoTxtr=%d skXpar=%d skDegen=%d skBack=%d\n",
-								    f.cAll, skNoTxtr, skXpar, skDegen, skBack);
+								    "[SHADOW-TILE-EMPTY] cAll=%d  skBbox=%d skNoTxtr=%d skXpar=%d skDegen=%d skBack=%d\n",
+								    f.cAll, skBbox, skNoTxtr, skXpar, skDegen, skBack);
+							}
+						}
+						// --clip_stats: one bump per TILE JOB (not per face) —
+						// the pre-reject census the [CLIP] table's shadow row
+						// needs to be read against.
+						if (clipCensus) {
+							if constexpr (FDS_RENDER_STATS_ENABLED) {
+								fds::PerThreadRenderStats &_st = fds::stats_tls();
+								_st.shadowWalk     += dword(f.cAll);
+								_st.shadowBboxRej  += dword(skBbox);
+								_st.shadowCoverAll += dword(nCoverAll);
 							}
 						}
 						J.bx0 = g_shadowRasterBox[0]; J.by0 = g_shadowRasterBox[1];
@@ -1021,6 +1107,54 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 		if (J.by0 < sm.dirtyY0) sm.dirtyY0 = J.by0;
 		if (J.bx1 > sm.dirtyX1) sm.dirtyX1 = J.bx1;
 		if (J.by1 > sm.dirtyY1) sm.dirtyY1 = J.by1;
+	}
+#if FDS_SHADOW_BBOX_VERIFY
+	{
+		static std::atomic<int> sSeq{0};
+		std::fprintf(stderr, "[SBV] bake=%d wouldReject-reached-clipper=%llu  RASTER-POLYS-FROM-THEM=%llu\n",
+		             sSeq.fetch_add(1),
+		             (unsigned long long)g_shadowBboxVerifyReach.load(std::memory_order_relaxed),
+		             (unsigned long long)g_shadowBboxVerifyBad.load(std::memory_order_relaxed));
+	}
+#endif
+	// --shadow_plane_hash: the correctness gate for anything that touches the
+	// shadow raster or its culls. Shadow maps feed every scene's lighting, so
+	// a wrong reject reads as acne/popping over TIME, not as a pin diff at one
+	// pose — four byte-identical snapshots do NOT prove the planes agree.
+	// Hash the PACKED plane (depth+polyId, every byte of every texel) of every
+	// map THIS bake wrote, in swzMaps order, which is built serially on the
+	// tick thread and is therefore worker-order independent. One line per bake
+	// invocation plus a running digest: diff the two streams parent-to-child.
+	if (fds::FeatureFlags::shadow_plane_hash()) {
+		static std::atomic<uint64_t> sCum{0xcbf29ce484222325ull};
+		static std::atomic<int>      sSeq{0};
+		uint64_t h = 0xcbf29ce484222325ull;
+		auto mix = [&h](const void *p, size_t n) {
+			const uint8_t *b = (const uint8_t*)p;
+			for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001b3ull; }
+		};
+		size_t texels = 0;
+		for (size_t k = 0; k < swzMaps.size(); ++k) {
+			const ShadowMap &sm = g_shadowMaps[swzMaps[k]];
+			const uint32_t li32 = uint32_t(swzMaps[k]);
+			const uint32_t res[2] = { uint32_t(sm.xres), uint32_t(sm.yres) };
+			mix(&li32, sizeof(li32));
+			mix(res, sizeof(res));
+			const auto &buf = writeDynamicBuf ? sm.packDyn : sm.packSD;
+			mix(buf.data(), buf.size() * sizeof(uint32_t));
+			texels += buf.size();
+		}
+		uint64_t c = sCum.load(std::memory_order_relaxed);
+		const uint8_t *hb = (const uint8_t*)&h;
+		for (size_t i = 0; i < 8; ++i) { c ^= hb[i]; c *= 0x100000001b3ull; }
+		sCum.store(c, std::memory_order_relaxed);
+		std::fprintf(stderr,
+		    "[SPH] seq=%d mode=%s maps=%zu texels=%zu h=%016llx cum=%016llx\n",
+		    sSeq.fetch_add(1),
+		    mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" :
+		    (mode == ShadowBakeMode::DynamicOmnisPerFrame ? "DynOmnis" : "StaticOnce"),
+		    swzMaps.size(), texels,
+		    (unsigned long long)h, (unsigned long long)c);
 	}
 	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on
 	// the buffer this mode just wrote. Reports a tile flipping between

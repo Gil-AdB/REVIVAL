@@ -161,6 +161,20 @@ else()
     add_compile_definitions(FDS_W2_OCTPAIR_VERIFY=0)
 endif()
 
+# --shadow_bbox_cull's DIRECT verify, and the reason the flag could be defaulted
+# ON. The reject's byte-exactness argument is "a face whose screen bbox misses
+# this tile's rect produces no polygon here" — this build makes the walk compute
+# the reject but NOT apply it, then counts, per face, whether the clipper handed
+# MekaleleShadowDepth a polygon anyway. A single non-zero is a counter-example.
+# Compile-time because the probe sits at the top of the shadow raster, which is
+# called ~40 000 times a frame at greets. Landing bar is 0 violations.
+option(FDS_SHADOW_BBOX_VERIFY "Compile the shadow bbox pre-reject counter-example probe" OFF)
+if(FDS_SHADOW_BBOX_VERIFY)
+    add_compile_definitions(FDS_SHADOW_BBOX_VERIFY=1)
+else()
+    add_compile_definitions(FDS_SHADOW_BBOX_VERIFY=0)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.

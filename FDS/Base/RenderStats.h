@@ -57,6 +57,10 @@ extern dword  g_mipBigFace;    // faces with |pixArea| >= the 2%-screen threshol
 extern dword  g_mipEnteredCum;
 extern dword  g_mipFastUniformCum;
 extern dword  g_mipSplitCum;
+// --clip_stats, shadow pre-reject block. Cumulative like the mip mirrors.
+extern dword  g_shadowWalkCum;      // (face, tile) pairs the phase-B walk saw
+extern dword  g_shadowBboxRejCum;   // ... rejected by --shadow_bbox_cull
+extern dword  g_shadowCoverAllCum;  // ... carrying the cover-all sentinel box
 }
 
 namespace fds {
@@ -114,6 +118,15 @@ struct PerThreadRenderStats {
     dword  mipNomip          = 0;
     dword  mipNegArea        = 0;
     dword  mipBigFace        = 0;
+    // --shadow_bbox_cull census (Shadows.cpp phase-B walk, one bump per
+    // (face, tile) pair examined). shadowWalk counts the pairs the walk
+    // looked at, shadowBboxRej the ones the new 4-compare threw out before
+    // the Face deref, shadowCoverAll the ones whose FListEntry still carries
+    // the behind-near cover-all sentinel and therefore can NEVER be rejected
+    // — that last number is what bounds the remaining opportunity.
+    dword  shadowWalk        = 0;
+    dword  shadowBboxRej     = 0;
+    dword  shadowCoverAll    = 0;
 };
 
 // Returns the calling thread's TLS counter. Registers on first call.

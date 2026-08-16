@@ -58,6 +58,14 @@ void ShadowMap_BuildUniformity(struct ShadowMap &sm, bool dynPlane);
 // because the raster runs thousands of polygons per tile and four CAS loops
 // each would price the bake instead of the build. [0..3] = x0, y0, x1, y1.
 extern thread_local int g_shadowRasterBox[4];
+#if FDS_SHADOW_BBOX_VERIFY
+// -DFDS_SHADOW_BBOX_VERIFY=ON only. Bumped at the top of MekaleleShadowDepth,
+// i.e. once per polygon the clipper actually handed the shadow raster — a
+// strict SUPERSET of "wrote a texel". Shadows.cpp's walk brackets each
+// clipper.Render with it to prove no face --shadow_bbox_cull would have
+// rejected ever reaches the raster. See CMakeLists.txt.
+extern thread_local unsigned int g_shadowRasterPolys;
+#endif
 inline void ShadowRasterBoxReset() {
 	g_shadowRasterBox[0] = g_shadowRasterBox[1] = 0x7FFFFFFF;
 	g_shadowRasterBox[2] = g_shadowRasterBox[3] = -1;

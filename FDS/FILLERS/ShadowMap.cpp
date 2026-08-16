@@ -25,6 +25,9 @@ ShadowSwzShape g_shadowSwzShape{3, 3, 7, 7};   // 8x8 until the getter runs
 
 thread_local ShadowMap *g_currentShadowMap = nullptr;
 thread_local int g_shadowRasterBox[4] = {0x7FFFFFFF, 0x7FFFFFFF, -1, -1};
+#if FDS_SHADOW_BBOX_VERIFY
+thread_local unsigned int g_shadowRasterPolys = 0;
+#endif
 std::vector<ShadowMap> g_shadowMaps;
 std::vector<CubeShadowRef> g_cubeShadowRefs;
 
@@ -1027,6 +1030,9 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
                           const fds::RenderTarget& /*rt*/,
                           const fds::CameraContext& /*cam*/)
 {
+#if FDS_SHADOW_BBOX_VERIFY
+	++g_shadowRasterPolys;
+#endif
 	ShadowMap *sm = g_currentShadowMap;
 	if (!sm) return;
 	if (numVerts < 3) return;

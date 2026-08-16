@@ -10,6 +10,151 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16q — 16p's ROW: the shadow depth raster had NO pre-reject. It has one now — 231 735 clipper entries/frame → 41 787, and the level is per-TILE, not per-map
+
+**16p found `Shadows.cpp`'s per-(light, tile) face walk handing every survivor of
+its four rejects straight to `FrustumClipper::Render` — 231 735 entries a frame
+at greets t=5743, 83.4 % of the whole frame's, and 81.8 % of them (189 567)
+clipped away to NOTHING. `--shadow_bbox_cull` gives it `RenderInner`'s 4-compare
+screen-bbox test, verbatim, against the same rect the clipper was just handed.
+Entries 231 735 → 41 787 (−82.0 %), clipped-away-to-nothing 189 567 → 22,
+`FrustumClipper::Render` self time 2.265 % → 1.429 % of DEMO self samples, the
+`DynMeshes` bake's RASTER half 1.31 → 0.78 ms/frame (−40 %), frame minimum −0.8
+to −2.3 % across five greets poses. DEFAULT ON.**
+Status: **DONE** · 16p's new row is **CLOSED** · two instruments landed with it
+· three follow-ons opened, below.
+
+Full map, both counter columns, the census, the map-rect finding and the
+counter-example probe: `docs/PERF_STATE.md` **00f**.
+
+### THE CAVEATS 16p WROTE, ANSWERED IN ITS OWN ORDER
+
+1. **"the per-light clone FList may not stamp bboxes — check before assuming."**
+   It stamps them. The shadow FList is built by `Transform_Objects`, whose S2
+   stamp is gated only on `--tile_bbox_cull`; its `--xfrm_ablate` escape hatch is
+   main-view-only (`xab = (_xablate != 0) && (xresOverride < 0)`, and the shadow
+   path always passes `xresOverride = sm.xres`). The PX/PY stamped are
+   SHADOW-MAP pixels, because the light's `CameraContext` drives the projection —
+   so box and tile rect are already in the same space and `RenderInner`'s test
+   transplants with no adaptation at all. Nothing had to be built at FList-build
+   time; the data was there and nobody read it.
+2. **"the shadow tile is often the WHOLE map — the win may be a map-rect reject."**
+   Measured, and it is the OPPOSITE: the map-rect reject is worth exactly zero.
+   `FDS_SHADOW_TILE_GRID=1` makes the tile rect BE the map rect, and the
+   counter-example probe then finds **0 rejectable faces in 42 bakes** — no face
+   in a per-light FList has a box that misses its own map, because the
+   frustum-level cull is already done upstream by `Transform_Objects`' spot-cone
+   / cube-face bsphere culls plus the walk's all-behind reject. **Every one of
+   the 190 365 rejects a frame is a reject INSIDE a map the face overlaps**, and
+   the yield is a pure function of `gridFor(res)`: 128² maps are single-tile and
+   get nothing, 512² maps are 4×4 and are where the entire win is.
+3. **"51 % of the clipper's self time is the near/far Z clip — a pre-reject must
+   run BEFORE it and must be conservative."** It runs first, before the `Face`
+   deref, and it removes **zero** Z-clip work: `needZ` is **14 514/frame on both
+   arms, to the unit**, because a vertex behind the light camera's near plane
+   leaves the cover-all sentinel box and can never be rejected. That is also why
+   the time saved (−37 % of the symbol) is smaller than the entries removed
+   (−82 %) — the cull takes the cheap half and leaves the expensive one. The
+   `no-clip` population (the faces that draw with no clipping at all) is
+   likewise **31 120/frame on both arms, to the unit**.
+
+### THE CENSUS — `(iters=28 − iters=8)/20`, greets t=5743, his acceptance arm
+
+16p's cumulative TOTAL of 8 499 390 reproduced EXACTLY before anything changed.
+
+| `Shadows.cpp` depth raster, per frame | parent | **child** |
+|---|--:|--:|
+| entries | 231 735 | **41 787 (−82.0 %)** |
+| no-clip | 31 120 | **31 120 — IDENTICAL** |
+| emitted | 11 048 | 10 645 |
+| **rejected** | **189 567 (81.8 %)** | **22 (0.05 %)** |
+| whole-frame clipper entries | 277 777 | **87 829** |
+| `needZ`, whole frame | 14 514 | **14 514 — IDENTICAL** |
+
+`emitted` losing 403 is not a loss: it counts "the clip manufactured a vertex",
+not "the face drew". A face straddling the tile in X and wholly outside it in Y
+manufactures vertices at `Left`/`Right` and is then annihilated by `Up`/`Down`.
+
+### THE PRICE — min-of-11, order ROTATED, one pose per process
+
+`scratchpad/shadowbbox_ladder.sh` (new — `scratchpad/ladder.sh` is BLIND here:
+the shadow bake is not inside `renderFrame`, whose `shadow-join` row is 0.002 ms).
+Noise floor = max over arms of (2nd-min − min)/min.
+
+| pose | frame min, parent → child | `DynMeshes` RASTER ms | floor (frame) |
+|---|--:|--:|--:|
+| greets t=5743 (his arm) | 49.92 → **49.51 (−0.82 %)** | 1.31 → **0.78 (−40.0 %)** | 0.57 % |
+| greets t=1588 (`--deferred`) | 41.65 → **40.69 (−2.30 %)** | 2.06 → **1.21 (−41.3 %)** | 0.10 % |
+| greets t=6097 | 41.76 → **41.30 (−1.10 %)** | 1.17 → 0.75 (−35.9 %) | 0.84 % |
+| greets t=6133 | 41.85 → **41.47 (−0.91 %)** | 1.23 → 0.77 (−37.4 %) | 0.14 % |
+| greets t=2845 | 50.55 → **49.78 (−1.52 %)** | (bake only, floor 44 %) | 1.67 % |
+| city t=1961 (his arm) | 46.14 → 45.89 | **no shadow bake at all** | 0.35 % |
+| fountain t=2500 | 36.59 → 36.36 | **no shadow bake at all** | 1.68 % |
+
+`renderFrame` Ginstr/f never moves by more than one printed LSB at any pose —
+the correct control, since the bake is outside it. The `DynMeshes` XFORM half is
+flat (0.20 → 0.21 ms), so the move is the raster and only the raster.
+
+**WHICH POSES BAKE DYNAMIC SHADOWS — measured, because 16p asked.** Only greets,
+and `render_gate.sh`'s `conetest`. city / chase / fountain / crash produce **zero
+bake invocations**, with `--shadows` explicitly on as well as off. That is 16p's
+"city t=1961 bakes none" generalised: this row cannot help three of the five
+scenes, and cannot hurt them either.
+
+### BYTE-EXACTNESS: TWO INSTRUMENTS, NOT AN ARGUMENT
+
+* **`--shadow_plane_hash`** (landed, default OFF, one bool load per bake
+  invocation): FNV-1a over the packed plane — depth AND polyId, every byte of
+  every texel — of every map a bake wrote, in the tick thread's deterministic
+  order; one `[SPH]` line per bake plus a running digest. **43–59 bakes per pose,
+  IDENTICAL default vs `--no-shadow_bbox_cull`** at greets t=5743/2845/6097/6133/
+  1588/3122/4871, at 640×360, without `--greets-displace`, with
+  `--shadow-backface-cull`, with `--shadow-dynamic`, under `--no-tile_bbox_cull`,
+  with `FDS_GREETS_SHATTER=1` at t=6293,6294, and on `conetest`.
+* **`-DFDS_SHADOW_BBOX_VERIFY=ON`** (CMake option, compile-time — the probe sits
+  at the top of a function called ~40 000×/frame): the walk computes the reject
+  and does NOT apply it, then counts polygons the raster receives from a face the
+  reject would have discarded. **79.7 M rejectable face-visits across ten arms,
+  0 polygons.** The one arm that reports 0 rejectable visits is
+  `FDS_SHADOW_TILE_GRID=1`, which is finding (2) above.
+
+### GATES
+
+* **11 pin recipes, 3/3, parent-identical** (`DEMO_base` = `5071cc37`): city
+  `bd4ffbf8` / `4cb8d2ca` / `f473fe2b` / `d3374de6`, chase `3bfd4244` /
+  `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814`, fountain `8db68ccb` — all
+  ten at their recorded 16f values — plus greets t=1588 and the four acceptance
+  poses, differential.
+* `render_gate.sh` **4/4 PASS**, and **`conetest` discriminates**: shadow clipper
+  entries **8 448 → 2 496 (−70.5 %)**, reject rate **48.9 % → 6.7 %**, surface
+  byte-identical. That is 16p's "your one gate arm with teeth", used.
+* Instrument cost (parent → `--no-shadow_bbox_cull`) is null at six poses: frame
+  min moves both signs inside the floor, `renderFrame` Ginstr/f ≤1 LSB, and the
+  OFF arm reproduces the parent's `--clip_stats` census to the digit.
+* One render eyeballed per scene: `docs/img/shadowbbox/`.
+
+### WHAT THIS ROW HANDS ON
+
+1. **`FDS_SHADOW_TILE_GRID` is now the wrong shape and nobody has re-asked it.**
+   The 4×4 grid was tuned when every tile re-walked the whole FList for free;
+   §00d re-ran exactly that question for the FRAME raster grid and found the
+   answer had moved. Here the reject changes the trade in the opposite
+   direction — more tiles are now cheap to ADD (a rejected face costs one
+   sequential `FListEntry` read) but the 512² maps at grid 4 still leave 16
+   whole-list walks per map. A per-light FACE→TILE BIN, i.e. `--face_tile_bin`
+   for the shadow pass, would collapse the 237 609 pair-visits a frame to two
+   list walks; `FaceTileBin.cpp` already exists and its order-preservation proof
+   already covers this shape. Not built — the reject took 80 % of the prize for
+   four lines.
+2. **The `DynOmnis` bake is now the bigger of the two and is untouched by this
+   row** — 1.21 ms raster against `DynMeshes`' 0.78, over 28 maps of which 18 are
+   single-tile 128². Its cost is per-map fixed overhead and raster, not clipper
+   population; a different row.
+3. **`Transform_Objects` is 3.35 % of DEMO self samples at greets t=5743, more
+   than double what is left of the clipper.** The shadow pass runs it once per
+   light per frame. That is the next number on this path, and this round did not
+   touch it.
+
 ## 2026-08-16p — 16c's HANDOVER ("cutting it further means cutting the copy"): the copy is 2.6 % of the clipper, the row is CLOSED BELOW BAR, and greets' clipper is 83 % SHADOW
 
 **16c closed 00b row 3 and handed on one sentence about what was left:
@@ -125,7 +270,7 @@ the same single increment.
 row.** Per-frame figures are `(iters=28 − iters=8)/20` on the same `--bench`
 arm, which subtracts init, the env bake and the shadow prebake exactly.
 
-### THE NEW ROW — greets' clipper is 83 % SHADOW RASTER, and 82 % of THOSE entries are thrown away. TODO
+### THE NEW ROW — greets' clipper is 83 % SHADOW RASTER, and 82 % of THOSE entries are thrown away. **DONE 2026-08-16q** — `--shadow_bbox_cull`, 231 735 entries/frame → 41 787, default ON, byte-exact. The three caveats below are answered one by one in that entry; the short version is that the FList DOES carry bboxes, the reject is per-TILE (a map-rect reject is worth exactly zero), and it removes no `needZ` work at all.
 
 **greets t=5743, his arm — 277 777 clipper entries per frame (4.4x city's):**
 
