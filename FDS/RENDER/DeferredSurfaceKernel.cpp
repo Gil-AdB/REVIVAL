@@ -1680,8 +1680,16 @@ static inline bool fillFallsBackHere(const meka::GBuffer &gb, const word *ZPage1
 #ifndef FDS_OMNI_ABLATE
 #define FDS_OMNI_ABLATE 0
 #endif
-#if FDS_OMNI_ABLATE
+#ifndef FDS_PIX_ABLATE
+#define FDS_PIX_ABLATE 0
+#endif
+#if FDS_OMNI_ABLATE || FDS_PIX_ABLATE
+#define FDS_ABL_SINK 1
 static volatile float g_omniAblSink = 0.0f;
+#else
+#define FDS_ABL_SINK 0
+#endif
+#if FDS_OMNI_ABLATE
 // NB: no do/while(0) wrapper — the `continue` has to reach the per-light `for`.
 #define OMNI_ABL_CUT(stage, expr) \
     if constexpr ((FDS_OMNI_ABLATE) == (stage)) { ablSink += (expr); continue; }
@@ -1690,6 +1698,29 @@ static volatile float g_omniAblSink = 0.0f;
 #else
 #define OMNI_ABL_CUT(stage, expr)  ((void)0)
 #define OMNI_ABL_CUT_BARE(stage)   ((void)0)
+#endif
+
+// ─── Ablation ladder for the PER-PIXEL BODY (the omni loop's "floor") ────────
+// Same shape, aimed at the 0.473 Gi/f the omni ladder's stage 1 leaves behind:
+// everything the pixel body does BEFORE the per-light loop, plus the compose
+// after it. Cuts `continue` the PIXEL loop, so stage n = the cost of everything
+// above cut n (the light loop and the compose are cut away with it).
+//    1  z alive test               2  + mirrorId, mat32 decode, shadowMatID
+//    3  + albedo fetch + tint      4  + the static-lightmap ADDRESS resolve
+//    5  + normal decode / TBN      6  + view pos + SH ambient
+//    7  + view dir + PBR consts    8  + AO fetch
+//    9  + sample world position   10  + POM horizon record
+//    0  full (light loop + compose)
+#if FDS_PIX_ABLATE
+// The sink is CUMULATIVE: each boundary adds its own outputs to a running
+// per-pixel accumulator and the cut sinks that, so a late cut cannot let the
+// compiler dead-strip an early stage's work. Costs one fadd per boundary
+// crossed, which is why every stage is quoted against the same ladder.
+#define PIX_ABL_CUT(stage, expr) \
+    ablKeep += (expr); \
+    if constexpr ((FDS_PIX_ABLATE) == (stage)) { ablSink += ablKeep; continue; }
+#else
+#define PIX_ABL_CUT(stage, expr)  ((void)0)
 #endif
 
 // ─── Per-PIXEL live-light census — the companion instrument to the ladder ────
@@ -1757,7 +1788,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
 {
-#if FDS_OMNI_ABLATE
+#if FDS_ABL_SINK
 	float ablSink = 0.0f;
 #endif
 	// Render-target addressing from ctx, not globals (RenderContext
@@ -2064,6 +2095,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
 			if (zEnc == 0) continue;  // pixel not touched by Mekalele
+#if FDS_PIX_ABLATE
+			float ablKeep = 0.0f;
+#endif
+			PIX_ABL_CUT(1, float(zEnc));
 
 			// Per-pixel mirror id (0 = original world, >0 = mirror N's
 			// reflected world). The light-loop filters below skip any
@@ -2135,6 +2170,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (noncasterDepthG
 			    && ((ctx.shadowSkipMask[matID >> 6] >> (matID & 63)) & 1u))
 				surfaceShadowId = -1;
+			PIX_ABL_CUT(2, float(surfaceShadowId) + float(pmid) + float(miplevelForFade));
 
 			// Texture sample: Mekalele's apply_exact already wrote a
 			// swizzled offset into mat32, so it's a direct lookup into
@@ -2190,11 +2226,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// texture pixels did; MECH_HUL.JPG serves hull+canons+legs).
 			// x*1.0f is bit-exact, so untinted materials are unchanged.
 			texB *= Mat->TintB; texG *= Mat->TintG; texR *= Mat->TintR;
+			PIX_ABL_CUT(3, texB + texG + texR + texA);
 
 			// Static-shadow lightmap address for this pixel — resolved
 			// once, used by all cube-shadow taps in the per-omni loops
 			// below via resolveCubeAtten().
 			const PixelLightmap pixelLM = resolvePixelLightmap(gb, i, ctx.Sc);
+			PIX_ABL_CUT(4, float(pixelLM.faceIdx) + float(pixelLM.sB) + float(pixelLM.tB)
+			                + float(pixelLM.lm != nullptr));
 			// Lightmap kernel branch is disabled when the dynamic-mesh
 			// shadow pass is on: the lightmap only encodes the static-
 			// occluder polyId, but `--shadow-dynamic` puts moving meshes
@@ -2301,6 +2340,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				}
 			}
 
+			PIX_ABL_CUT(5, nx + ny + nz + nGeoX + nGeoY + nGeoZ);
+
 			// Reconstruct view-space position. ZPage16 stores
 			// 0xFF80 - round(g_zscale * z), so:
 			//   z = (0xFF80 - zEnc) / g_zscale
@@ -2340,6 +2381,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				lG = Mat->Luminosity * Mat->BaseCol.G + Mat->Diffuse * ctx.Sc->Ambient.G;
 				lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * ctx.Sc->Ambient.R;
 			}
+			PIX_ABL_CUT(6, lB + lG + lR + x + y + z);
 
 			// View direction (pixel -> camera) in view space. Camera is at
 			// the view-space origin, so view_dir = -pos / |pos|. Used by
@@ -2386,6 +2428,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				pbrNdotV = nx*vx + ny*vy + nz*vz;
 				if (pbrNdotV < 1e-3f) pbrNdotV = 1e-3f;
 			}
+			PIX_ABL_CUT(7, pbrA2 + pbrK + pbrNdotV + vx + vy + vz + gloss);
 
 			// Specular accumulator — kept separate from diffuse so it can
 			// be added AFTER texture modulation (highlights are independent
@@ -2519,6 +2562,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					lB *= ao; lG *= ao; lR *= ao;
 				}
 			}
+			PIX_ABL_CUT(8, aoRaw + lB + float(isWater) + float(hasEnvRefl)
+			                + float(useVecHere) + float(hasAoMap) + float(tl.count));
 
 			// Sample's world-space position. Computed here (outside the
 			// vec/scalar split) so both light paths can use it for cube
@@ -2533,6 +2578,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const float sampleWorldZ =
 				ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
 				ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+			PIX_ABL_CUT(9, sampleWorldX + sampleWorldY + sampleWorldZ);
 
 			// ── S1c HORIZON-MAP RELIEF SELF-SHADOW (--pom_horizon) ──────────
 			// Resolve this pixel's horizon record (8 azimuths of u8
@@ -2578,6 +2624,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// actually reach this pixel, so the shadow's shape (and its motion
 			// with the light) is visible without albedo or ambient hiding it.
 			float hzVizSum = 0.0f, hzVizWeight = 0.0f;
+			PIX_ABL_CUT(10, hzTx + hzTy + hzTz + hzBx + hzBy + hzBz
+			                 + float(hzTexel != nullptr));
 
 			if (tapCensus) ++tcPixels;
 			int nLiveOmni = 0;
@@ -3619,7 +3667,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (ocn[i]) g_omniCen[i].fetch_add(ocn[i], std::memory_order_relaxed);
 	}
 #endif
-#if FDS_OMNI_ABLATE
+#if FDS_ABL_SINK
 	g_omniAblSink = ablSink;   // one volatile store per tile call
 #endif
 
