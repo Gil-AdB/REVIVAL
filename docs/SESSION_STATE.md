@@ -1,6 +1,6 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
-> ## 2026-08-16s — SoA PHASE 5, PRICED BY REBUILDING THE LOOP INSTEAD OF THE STRUCT: **0.61 % OF A GREETS FRAME, NOT 1.25 %** — AND NEITHER HALF OF THE SPLIT PAYS ALONE
+> ## 2026-08-16s — SoA PHASE 5, PRICED BY REBUILDING THE LOOP INSTEAD OF THE STRUCT: **0.6 % OF A GREETS FRAME, NOT 1.25 %** — AND NEITHER HALF OF THE SPLIT PAYS ALONE
 >
 > **16r handed Phase 5 on at 1.25 % and said "argue against this number, not
 > 0.3 %". The number is an extrapolation of a byte-slope calibrated by
@@ -16,16 +16,20 @@
 >
 > ### THE LADDER — greets t=5743, his arm, DynOmnis phase-A `xform`, face loop ablated
 >
-> | arm | `Pos` read from | outputs written to | wall ms |
-> |---|---|---|--:|
-> | **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.85** |
-> | **288** — replica CONTROL | same | same | **0.85** |
-> | 544 | clone `Vertex` | dense 32 B/vert | 0.99 **(+16 %)** |
-> | 1056 | shared `T->Verts` | clone `Vertex` | 1.13 **(+33 %)** |
-> | 2080 | compact shared 12 B/vert `Pos` | clone `Vertex` | 0.87 **(0 %)** |
-> | **1568 — Phase 5's END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.59 (−31 %)** |
+> | arm | `Pos` read from | outputs written to | wall ms | floor |
+> |---|---|---|--:|--:|
+> | **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.870** | 0.00 % |
+> | **288** — replica CONTROL | same | same | **0.840** | 1.19 % |
+> | 544 | clone `Vertex` | dense 32 B/vert | 0.99 **(+16 %)** | 1.01 % |
+> | 1056 | shared `T->Verts` | clone `Vertex` | 1.13 **(+33 %)** | 1.77 % |
+> | 2080 | compact shared 12 B/vert `Pos` | clone `Vertex` | 0.87 **(0 %)** | 0.00 % |
+> | **1568 — Phase 5's END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.600 (−28.6 %)** | 1.67 % |
 >
-> **Read the control first** (0.85 vs 0.85) — the replica IS the shipping loop,
+> Verdict rows **min-of-11, order rotated, floors quoted** — signal-to-floor 17×;
+> half-arms min-of-5. `DynMeshes` on the same runs **0.170 → 0.130 (−23.5 %)**;
+> the core-ms column agrees (7.130 / 7.200 / … / **4.870**, −32.4 %).
+>
+> **Read the control first** (0.840 vs 0.870, opposite sign on the core column) — the replica IS the shipping loop,
 > so any branch it carries cancels across arms. **Then read the three middle
 > rows: each is one HALF of Phase 5, and every half alone is neutral or worse.**
 > A `sizeof(Vertex)` model cannot produce that: arm 544 takes the 28 written
@@ -42,12 +46,13 @@
 > single `T->Verts` (~15 MiB, warm across all 42 bakes) while the write goes
 > dense. **That pair is the whole −31 %.**
 >
-> ### PREDICTION vs MEASUREMENT — over-predicted 2.05×
+> ### PREDICTION vs MEASUREMENT — over-predicted 2.0–2.2×
 >
-> | | ms/frame | % of frame |
+> | | ms/frame | % of a 49.59 ms frame |
 > |---|--:|--:|
 > | PREDICTED (16r: 72 B × 0.0086 ms/B) | 0.62 | **1.25 %** |
-> | **MEASURED** | **0.30** | **0.61 %** |
+> | **MEASURED** (min-of-11, vs the replica control) | **0.28** | **0.56 %** |
+> | same, vs the shipping arm | 0.31 | 0.63 % |
 >
 > Reproduces at t=5743 / 2845 / 1588 / 6097 → **0.61 / 0.61 / 0.66 / 0.68 %**.
 > **The MAIN VIEW is ±5 %, neutral** (replica control 0.911 → 0.882 ms VERT;
@@ -61,7 +66,7 @@
 > whole alternative transform pipelines that must each learn to write the out
 > array **or the image breaks silently**, which is precisely the Phase 6.1/6.2
 > bug list plus the one it never found. That is past "Vertex layout + the
-> transform/filler readers". **0.61 % of one scene's frame does not buy it.**
+> transform/filler readers". **0.6 % of one scene's frame does not buy it.**
 >
 > ### THE SUCCESSOR ITEM, IF ANYONE RE-OPENS IT — shadow-only, does NOT touch `Vertex`
 >
@@ -70,7 +75,7 @@
 > (`Transform_Objects`' face loop, `FrustumClipper::Render`'s `*A = *F->A`
 > entry) source from it. `F->frame` / `F->A_idx` are **already plumbed for
 > clone-backed faces**. No filler, no DEMO scene file, no layout change. Ceiling
-> 0.61 %; the risk is that a runtime branch in that face loop is not byte-null
+> 0.6 %; the risk is that a runtime branch in that face loop is not byte-null
 > under `-ffp-contract=fast` (`docs/VISIBILITY_PLAN.md` §8).
 >
 > ### TWO THINGS TO CARRY FORWARD
@@ -95,15 +100,19 @@
 >   `622b96a2` / `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588
 >   `570a7b44`) plus the four greets acceptance poses (t=5743 `26ad272a`,
 >   t=2845 `10adec3a`, t=6097 `418fc1fa`, t=6133 `6d02f31b`).
-> * `render_gate.sh` **4/4 PASS**; `--shadow_plane_hash` stable 2/2.
-> * Harness note: `city-t1961-plain`'s recorded `bd4ffbf8` needs
->   `FDS_CITY_ENV_PIXEL=1` in the environment — dropping it gives a
->   self-consistent `4a094fba`. Recipe transcription, not drift.
+> * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` /
+>   `166fa25a`); `--shadow_plane_hash` stable 2/2 (`03587397…`, all 43 bakes).
+> * Renders eyeballed, one per scene, all four matching their pins:
+>   `docs/img/soa5/{greets_t_5743,city_t_1961,chase_t_800,fountain_t_2500}.png`.
+> * Harness note (cost one confused reading): `city-t1961-plain`'s recorded
+>   `bd4ffbf8` needs **`FDS_CITY_ENV_PIXEL=1` in the environment** — dropping it
+>   gives a perfectly self-consistent `4a094fba` at every run. Recipe
+>   transcription, not drift. Battery: `scratchpad/soa5_pins.sh <binA> <binB>`.
 >
 > ## 2026-08-16r — `Transform_Objects` (16q's 3.35 % ROW) IS NOT SHARED MACHINERY: IT IS GREETS' SHADOW BAKE, 42 OF ITS 45 CALLS A FRAME
 >
 > > **AMENDED 2026-08-16s (block above): the "Phase 5 is 1.25 %" hand-on is
-> > refuted — built and timed, the end state is 0.61 %, and the variable is the
+> > refuted — built and timed, the end state is 0.56-0.63 %, and the variable is the
 > > 209.6 MiB per-light clone, not `sizeof(Vertex)`. Everything else below
 > > stands and is what located the clone.**
 >

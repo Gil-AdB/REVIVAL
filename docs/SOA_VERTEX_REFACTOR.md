@@ -2,7 +2,7 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
-## MEASURED 2026-08-16s — PHASE 5's END STATE WAS BUILT AS A LADDER AND TIMED. It is **0.61 % of a greets frame, not 1.25 %**, the byte-slope that produced 1.25 % is the wrong model, and the item is **BLOCKED ON SCOPE** — with the scope counted, not estimated.
+## MEASURED 2026-08-16s — PHASE 5's END STATE WAS BUILT AS A LADDER AND TIMED. It is **0.6 % of a greets frame, not 1.25 %**, the byte-slope that produced 1.25 % is the wrong model, and the item is **BLOCKED ON SCOPE** — with the scope counted, not estimated.
 
 `16r` re-opened Phase 5 at **1.25 % of frame** by extrapolating a slope
 (0.0086 ms per byte of `sizeof(Vertex)`, calibrated by *inflating* the struct
@@ -21,20 +21,26 @@ only**, which is what makes this a memory measurement and not an arithmetic one.
 
 ### THE LADDER — greets t=5743, his acceptance arm, 1920×1080, DynOmnis phase-A `xform`, face loop ablated (`|32`) so the vertex loop is isolated
 
-Per-frame min over 24, min over 5 order-rotated rounds, dummy drivers.
+Per-frame min over 24 frames, one pose per process, order ROTATED, dummy
+drivers. The three arms that carry the verdict are **min-of-11 with their noise
+floors** (floor = (2nd-min − min)/min); the two half-arms are min-of-5.
 
-| arm | `Pos` read from | outputs written to | wall ms | core-ms |
-|---|---|---|--:|--:|
-| **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.85** | **6.90** |
-| **288** — replica CONTROL | same | same | **0.85** | 7.08 |
-| **544** | clone `Vertex` | a dense **32 B/vert** array | 0.99 **(+16 %)** | 8.86 |
-| **1056** | **shared `T->Verts`** | clone `Vertex` | 1.13 **(+33 %)** | 9.86 |
-| **2080** | a compact **shared 12 B/vert** `Pos` array | clone `Vertex` | 0.87 **(0 %)** | 7.51 |
-| **1568 — Phase 5's END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.59 (−31 %)** | **4.79 (−32 %)** |
+| arm | `Pos` read from | outputs written to | DynOmnis wall | floor | DynOmnis core | floor |
+|---|---|---|--:|--:|--:|--:|
+| **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.870** | 0.00 % | **7.130** | 0.70 % |
+| **288** — replica CONTROL | same | same | **0.840** | 1.19 % | **7.200** | 0.42 % |
+| 544 | clone `Vertex` | a dense **32 B/vert** array | 0.99 **(+16 %)** | 1.01 % | 8.86 | 0.45 % |
+| 1056 | **shared `T->Verts`** | clone `Vertex` | 1.13 **(+33 %)** | 1.77 % | 9.86 | 0.20 % |
+| 2080 | a compact **shared 12 B/vert** `Pos` array | clone `Vertex` | 0.87 **(0 %)** | 0.00 % | 7.51 | 2.04 % |
+| **1568 — Phase 5's END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.600 (−28.6 %)** | 1.67 % | **4.870 (−32.4 %)** | 2.26 % |
 
-**Read the control row first.** The replica reproduces the shipping loop to
-0.85/0.85 wall and 6.90/7.08 core — so the ladder is faithful, and any branch
-the replica carries is carried by *every* arm and cancels.
+`DynMeshes`, same runs: **0.170 → 0.130 wall (−23.5 %)**, floors 0.00 % both.
+**Signal-to-floor on the verdict row is 17×.**
+
+**Read the control row first.** The replica reproduces the shipping loop —
+0.840 vs 0.870 wall, 7.200 vs 7.130 core, i.e. inside 3.5 % on a 0–1.2 % floor
+in opposite directions on the two columns — so the ladder is faithful, and any
+branch the replica carries is carried by *every* arm and cancels.
 
 **Then read 544, 1056 and 2080 together, because they are the finding.** Each is
 *half* of Phase 5. **Every half, alone, is neutral or worse.** Only the pair
@@ -85,18 +91,21 @@ both directions.**
 
 ### PREDICTION vs MEASUREMENT
 
-| | ms/frame | % of frame |
+| | ms/frame | % of a 49.59 ms frame |
 |---|--:|--:|
 | **PREDICTED** (16r: 72 B × 0.0086 ms/B) | 0.62 | **1.25 %** |
-| **MEASURED** (t=5743: DynOmnis −0.26, DynMeshes −0.04, main view ~−0.01 realised) | **0.30** | **0.61 %** |
+| **MEASURED**, min-of-11 vs the replica control (DynOmnis −0.240, DynMeshes −0.040) | **0.28** | **0.56 %** |
+| same, vs the shipping arm (DynOmnis −0.270, DynMeshes −0.040) | 0.31 | 0.63 % |
 
-**Over-predicted by 2.05×** — outside this campaign's ±20 % bar, and the gap has
+**Over-predicted by 2.0–2.2×** — outside this campaign's ±20 % bar, and the gap has
 a named cause rather than an excuse: the slope was calibrated by *stretching* a
 one-stream walk and then extrapolated to a *two-stream* end state, which is a
 different access pattern, not a shorter one.
 
 Reproduces at every bake-heavy pose (arm 32 → arm 1568, DynOmnis / DynMeshes
 wall ms; frame minimums from 16r):
+
+Cross-pose consistency (min-of-3/5 per pose, arm 32 → arm 1568):
 
 | pose | DynOmnis | DynMeshes | Δ ms/frame | frame min | **% of frame** |
 |---|--:|--:|--:|--:|--:|
@@ -166,7 +175,7 @@ the list Phase 6.1/6.2 recorded below (`MakeFacesIndependent`, `BuildSkyCube`,
 there's at least one more transform path not yet found").
 
 That is past "Vertex layout + the transform/filler readers". **Not started, and
-that is the recommendation: 0.61 % of one scene's frame, greets-only, for a
+that is the recommendation: 0.6 % of one scene's frame, greets-only, for a
 refactor of the most-shared struct in the engine and three scene pipelines.**
 
 ### IF IT IS EVER RE-OPENED, THIS IS THE SHAPE — and it is NOT the doc's Phase 5
@@ -187,7 +196,7 @@ scene file:
    (`Transform.cpp:2833`), and `Shadows.cpp` already reads
    `F->frame->TPos_z[A_idx]` — so the machinery exists.
 
-Its ceiling is the 0.61 % above. Its risk is step 3: a runtime branch inside
+Its ceiling is the 0.6 % above. Its risk is step 3: a runtime branch inside
 `Transform_Objects`' face loop is **not byte-null** under `-ffp-contract=fast`
 (`docs/VISIBILITY_PLAN.md` §8 — 216 bytes on city from a never-taken `if`), so
 it has to be built branch-free the way the `--xfrm_par` block test was.
@@ -198,7 +207,7 @@ it has to be built branch-free the way the `--xfrm_par` block test was.
 
 > **SUPERSEDED 2026-08-16s by the section above: the 1.25 % is an
 > extrapolation of a slope measured in the wrong direction, and the end state
-> it prices measures 0.61 %. The 16r decomposition it rests on — 42 of 45 calls
+> it prices measures 0.56-0.63 %. The 16r decomposition it rests on — 42 of 45 calls
 > are the shadow bake — stands and is what pointed the ladder at the clone.**
 
 `docs/PERF_STATE.md` §00g decomposed `Transform_Objects` by invocation source for

@@ -19,11 +19,11 @@
 
 ---
 
-## 00h. SoA PHASE 5, PRICED BY BUILDING THE LOOP INSTEAD OF THE STRUCT — 2026-08-16s: **0.61 % of a greets frame, not 1.25 %**, and the variable is the 209.6 MiB shadow CLONE, not `sizeof(Vertex)`
+## 00h. SoA PHASE 5, PRICED BY BUILDING THE LOOP INSTEAD OF THE STRUCT — 2026-08-16s: **0.6 % of a greets frame, not 1.25 %**, and the variable is the 209.6 MiB shadow CLONE, not `sizeof(Vertex)`
 
 **§00g handed Phase 5 on at 1.25 % of frame by extrapolating a byte-slope
 (0.0086 ms/B) from a struct that had been *inflated* 140 → 192 down to the
-140 → 68 end state. That extrapolation is refuted. Measured end state: 0.61 %.**
+140 → 68 end state. That extrapolation is refuted. Measured end state: 0.56-0.63 %.**
 The extrapolation was never testable in-tree — nothing can shrink `Vertex`
 without the refactor — so the **per-vertex loop was rebuilt as a ladder** and the
 end state timed directly. Status: **Phase 5 BLOCKED ON SCOPE** (274 of the
@@ -45,18 +45,25 @@ is what makes the ladder a memory measurement.
 
 Per-frame min over 24 frames, min over 5 order-rotated rounds, dummy drivers.
 
-| arm | `Pos` read from | outputs written to | wall ms | core-ms |
-|---|---|---|--:|--:|
-| **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.85** | **6.90** |
-| **288** — replica CONTROL | same | same | **0.85** | 7.08 |
-| 544 | clone `Vertex` | dense **32 B/vert** | 0.99 **(+16 %)** | 8.86 |
-| 1056 | **shared `T->Verts`** | clone `Vertex` | 1.13 **(+33 %)** | 9.86 |
-| 2080 | compact **shared 12 B/vert** `Pos` | clone `Vertex` | 0.87 **(0 %)** | 7.51 |
-| **1568 — the END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.59 (−31 %)** | **4.79 (−32 %)** |
+The three arms that carry the verdict are **min-of-11 with their noise floors**
+(floor = (2nd-min − min)/min); the two half-arms are min-of-5.
 
-**The control row is what licenses the rest** (0.85 vs 0.85 wall, 6.90 vs 7.08
-core): the replica is the shipping loop, and any branch it carries is carried by
-every arm and cancels. **Then read 544 / 1056 / 2080 — each is one HALF of
+| arm | `Pos` read from | outputs written to | DynOmnis wall | floor | core-ms | floor |
+|---|---|---|--:|--:|--:|--:|
+| **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.870** | 0.00 % | **7.130** | 0.70 % |
+| **288** — replica CONTROL | same | same | **0.840** | 1.19 % | **7.200** | 0.42 % |
+| 544 | clone `Vertex` | dense **32 B/vert** | 0.99 **(+16 %)** | 1.01 % | 8.86 | 0.45 % |
+| 1056 | **shared `T->Verts`** | clone `Vertex` | 1.13 **(+33 %)** | 1.77 % | 9.86 | 0.20 % |
+| 2080 | compact **shared 12 B/vert** `Pos` | clone `Vertex` | 0.87 **(0 %)** | 0.00 % | 7.51 | 2.04 % |
+| **1568 — the END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.600 (−28.6 %)** | 1.67 % | **4.870 (−32.4 %)** | 2.26 % |
+
+`DynMeshes`, same runs: **0.170 → 0.130 wall (−23.5 %)**, floor 0.00 % both.
+**Signal-to-floor on the verdict row is 17×.**
+
+**The control row is what licenses the rest** (0.840 vs 0.870 wall, 7.200 vs
+7.130 core — inside 3.5 %, and in opposite directions on the two columns): the
+replica is the shipping loop, and any branch it carries is carried by every arm
+and cancels. **Then read 544 / 1056 / 2080 — each is one HALF of
 Phase 5, and every half alone is neutral or worse.** A `sizeof(Vertex)` model
 predicts monotone improvement as the walked record shrinks; arm 544 takes the
 28 written bytes *out* of the record and costs **+16 %**.
@@ -88,14 +95,17 @@ Phase 5 neither pays nor regresses here.
 
 ### PREDICTION vs MEASUREMENT, and it reproduces at every bake-heavy pose
 
-| | ms/frame | % of frame |
+| | ms/frame | % of a 49.59 ms frame |
 |---|--:|--:|
 | **PREDICTED** (§00g: 72 B × 0.0086 ms/B) | 0.62 | **1.25 %** |
-| **MEASURED** (t=5743) | **0.30** | **0.61 %** |
+| **MEASURED**, min-of-11 vs the replica control | **0.28** | **0.56 %** |
+| same, vs the shipping arm | 0.31 | 0.63 % |
 
-**Over-predicted 2.05×**, outside the ±20 % bar, with a named cause: the slope
+**Over-predicted 2.0–2.2×**, outside the ±20 % bar, with a named cause: the slope
 was calibrated by *stretching a one-stream walk* and extrapolated to a
 *two-stream* end state — a different access pattern, not a shorter one.
+
+Cross-pose consistency (min-of-3/5 per pose, arm 32 → arm 1568):
 
 | pose | DynOmnis | DynMeshes | Δ ms/f | frame min | **% of frame** |
 |---|--:|--:|--:|--:|--:|
@@ -129,6 +139,8 @@ enforces it.
   `418fc1fa` / `6d02f31b`).
 * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
 * `--shadow_plane_hash` stable 2/2 (`03587397…` over all 43 bakes).
+* Renders eyeballed, one per scene:
+  `docs/img/soa5/{greets_t_5743,city_t_1961,chase_t_800,fountain_t_2500}.png`.
 
 ---
 
@@ -136,7 +148,7 @@ enforces it.
 
 > **AMENDED 2026-08-16s (§00h above): this section's hand-on — "Phase 5's
 > ceiling is 1.25 %" — is an extrapolation of the byte-slope below in the
-> direction it was never measured. Built and timed, the end state is 0.61 %,
+> direction it was never measured. Built and timed, the end state is 0.56-0.63 %,
 > and the variable is the 209.6 MiB per-light clone, not `sizeof(Vertex)`.
 > Everything else here (42 of 45 calls, the ablation ladder, the six
 > refutations) stands and is what located the clone.**
