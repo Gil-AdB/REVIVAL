@@ -3,8 +3,11 @@
 #include "Rev.h"
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
+#include <Base/FPContract.h>   // waterWaveSlope8 pins its own contraction — see
+                               // the block comment on the 8-wide form.
 #include <RENDER/TailProf.h>   // --deferred_prof: the water passes run OUTSIDE
                                // renderFrame, so they had no phase row at all.
+
 
 #include <algorithm>
 #include <atomic>
@@ -119,6 +122,224 @@ static inline void waterWaveSlope(float wx, float wz, float t, float scale, int 
 	bnz = (n1z + n2z*0.6f) * 1.6f;
 }
 
+// ───────── 8-wide waterWaveSlope (--water_slope_vec8) ─────────
+// The scalar above is the 4th-hottest symbol of the city acceptance frame and
+// it is NOT inlined into either hot consumer — both `updateRippleDispMap`'s
+// band and `RenderGlints`' band `bl` the one out-of-line copy at
+// `pwater::waterWaveSlope`. That is what makes an 8-wide form safe to write
+// BIT-EXACTLY: there is exactly ONE scalar codegen to match, not one per
+// inline context.
+//
+// WHAT THE SCALAR ACTUALLY COMPILES TO (arm64, -O3 -flto -ffp-contract=fast,
+// read off the disassembly — this is the contract this function reproduces):
+//   * clang has ALREADY SLP-vectorized it 2-wide: the two scroll layers live in
+//     the two lanes of `.2s` vectors. So "8-wide" buys 4x here, not 8x.
+//   * rx/rz are FUSED:  rx = fmsub(wx, .87, wz*.5)   (`fnmsub`)
+//                       rz = fmadd(wx, .5,  wz*.87)  (`fmadd`)
+//   * the four scroll coords are NOT fused — each is (world product) ± (t*k)
+//     with both products separately rounded, then a plain fadd/fsub:
+//       u1 = wx*base + 16t     v1 = wz*base - 12t
+//       u2 = 1.7*(rx*base) - 10t   v2 = 1.7*(rz*base) + 14t
+//   * the wrap IS fused: fu = u - floor(u*(1/128))*128 via `fmls`.
+//   * `if (i0 >= N) i0 = 0` is branchless `cmge #127` + `and`.
+//   * THE BILINEAR USES NO FMA AT ALL — plain `fmul`/`fadd`:
+//       p = (1-du)*a + du*b ;  q = (1-du)*c + du*d ;  n = (1-dv)*p + dv*q
+//     This is the single most important line here. The 2026-08-16b modulo
+//     round moved 4 px purely because an edit let clang RE-contract this
+//     chain; writing the vector form with plain mul/add under an explicit
+//     FP_CONTRACT_OFF is what makes this change byte-null instead.
+//   * the layer mix IS fused: bn = fmadd(0.6, n2, n1) * 1.6.
+// FP_CONTRACT_OFF below pins all of that: nothing fuses unless it is written
+// as an explicit fma intrinsic, and every explicit fma corresponds to a fused
+// instruction in the scalar disassembly.
+//
+// The gather is the only structural difference, and the 129-stride halo
+// (2026-08-16b) is what makes it cheap: (i0, i0+1) are CONTIGUOUS and the two
+// components are interleaved, so one corner PAIR of a row is 4 consecutive
+// floats — a single 128-bit load. Eight lanes therefore cost 4 quad-loads +
+// an 8x4 transpose per row instead of 32 scalar loads, and the whole tap is
+// 32 loads + 4 transposes instead of 8 x (8 loads + address math).
+#if defined(__clang__)
+#define PWATER_VEC8 1
+#endif
+
+#ifdef PWATER_VEC8
+// WHY CLANG VECTOR EXTENSIONS AND NOT THE simde `_mm256_*` SPELLING THE REST OF
+// THE TREE USES: `#pragma clang fp contract` is LEXICALLY scoped, and every
+// `_mm256_mul_ps` / `_mm256_add_ps` is a function body inside simde's headers,
+// compiled under the file-scope -ffp-contract=fast. A pragma at the CALL site
+// therefore does not reach the arithmetic — measured: the bilinear below still
+// came out as `fmla.4s` with FP_CONTRACT_OFF wrapped around it, and the tap
+// disagreed with the scalar on 84 % of pixels, some by a whole neighbouring
+// texel (6e-4, not a rounding). Written as native vector operators in THIS
+// file, the pragma binds to the arithmetic and the contraction is actually
+// pinned. Same reason the fused sites use __builtin_elementwise_fma rather
+// than simde's fmadd: simde's is `a*b + c` in a header, i.e. fused only by
+// grace of the build flag.
+typedef float   pwf4 __attribute__((ext_vector_type(4)));
+typedef float   pwf8 __attribute__((ext_vector_type(8)));
+typedef int32_t pwi8 __attribute__((ext_vector_type(8)));
+
+static inline pwf4 pwLd4(const float* p) { pwf4 v; __builtin_memcpy(&v, p, sizeof v); return v; }
+static inline pwf8 pwLd8(const float* p) { pwf8 v; __builtin_memcpy(&v, p, sizeof v); return v; }
+static inline void pwSt8(float* p, pwf8 v) { __builtin_memcpy(p, &v, sizeof v); }
+// a*b + c, GUARANTEED fused (the sites the scalar emits as fmla/fmls/fnmsub).
+static inline pwf8 pwFma(pwf8 a, pwf8 b, pwf8 c) {
+#if __has_builtin(__builtin_elementwise_fma)
+	return __builtin_elementwise_fma(a, b, c);
+#else
+	FP_CONTRACT_FAST
+	return a * b + c;
+#endif
+}
+
+// Load 4 lanes' corner quads {a0,a1,b0,b1} and transpose to lane-major. Pure
+// data movement — no arithmetic, so nothing here can perturb a bit.
+static inline void wnQuad4(const float* fld, const int32_t* ofs,
+                           pwf4& A0, pwf4& A1, pwf4& B0, pwf4& B1) {
+	const pwf4 r0 = pwLd4(fld + ofs[0]);
+	const pwf4 r1 = pwLd4(fld + ofs[1]);
+	const pwf4 r2 = pwLd4(fld + ofs[2]);
+	const pwf4 r3 = pwLd4(fld + ofs[3]);
+	const pwf4 t0 = __builtin_shufflevector(r0, r1, 0, 4, 1, 5);
+	const pwf4 t1 = __builtin_shufflevector(r2, r3, 0, 4, 1, 5);
+	const pwf4 t2 = __builtin_shufflevector(r0, r1, 2, 6, 3, 7);
+	const pwf4 t3 = __builtin_shufflevector(r2, r3, 2, 6, 3, 7);
+	A0 = __builtin_shufflevector(t0, t1, 0, 1, 4, 5);
+	A1 = __builtin_shufflevector(t0, t1, 2, 3, 6, 7);
+	B0 = __builtin_shufflevector(t2, t3, 0, 1, 4, 5);
+	B1 = __builtin_shufflevector(t2, t3, 2, 3, 6, 7);
+}
+static inline pwf8 wnJoin(pwf4 lo, pwf4 hi) {
+	return __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7);
+}
+
+// 8-wide sampleWaterNrm. Same wrap, same clamp, same bilinear order.
+static inline void sampleWaterNrm8(pwf8 u, pwf8 v, pwf8& nx, pwf8& nz) {
+	const pwf8 kN   = float(WNRM);
+	const pwf8 kOne = 1.0f;
+	// fu = u - floor(u/N)*N — the scalar's FUSED `fmls`.
+	pwf8 fu, fv;
+	{
+		FP_CONTRACT_OFF
+		fu = pwFma(-__builtin_elementwise_floor(u * (1.0f / float(WNRM))), kN, u);
+		fv = pwFma(-__builtin_elementwise_floor(v * (1.0f / float(WNRM))), kN, v);
+	}
+	// i0 = int(fu); if (i0 >= N) i0 = 0 — the scalar's `cmge #127` + `and`.
+	pwi8 i0 = __builtin_convertvector(fu, pwi8);
+	pwi8 j0 = __builtin_convertvector(fv, pwi8);
+	i0 &= (i0 < WNRM);
+	j0 &= (j0 < WNRM);
+	// float index of corner a = (j0*WNRM_S + i0)*2; j0*129 = (j0<<7)+j0, the
+	// scalar's `add x9, x9, x9, lsl #7`.
+	const pwi8 idx = (((j0 << 7) + j0) + i0) << 1;
+	int32_t ofsA[8], ofsC[8];
+	__builtin_memcpy(ofsA, &idx, sizeof ofsA);
+	for (int k = 0; k < 8; ++k) ofsC[k] = ofsA[k] + WNRM_S * 2;   // row j0+1
+	const float* const fld = g_waterNrm.data();
+	pwf4 a0l,a1l,b0l,b1l, a0h,a1h,b0h,b1h, c0l,c1l,d0l,d1l, c0h,c1h,d0h,d1h;
+	wnQuad4(fld, ofsA + 0, a0l, a1l, b0l, b1l);
+	wnQuad4(fld, ofsA + 4, a0h, a1h, b0h, b1h);
+	wnQuad4(fld, ofsC + 0, c0l, c1l, d0l, d1l);
+	wnQuad4(fld, ofsC + 4, c0h, c1h, d0h, d1h);
+	// THE BILINEAR — plain mul/add, exactly the scalar's fmul/fmul/fadd shape.
+	// This is the block that must NOT fuse; the 2026-08-16b modulo round moved
+	// 4 px purely because an edit let clang re-contract this chain.
+	{
+		FP_CONTRACT_OFF
+		const pwf8 du   = fu - __builtin_convertvector(i0, pwf8);
+		const pwf8 dv   = fv - __builtin_convertvector(j0, pwf8);
+		const pwf8 omdu = kOne - du;
+		const pwf8 omdv = kOne - dv;
+		{
+			const pwf8 A = wnJoin(a0l, a0h), B = wnJoin(b0l, b0h);
+			const pwf8 C = wnJoin(c0l, c0h), D = wnJoin(d0l, d0h);
+			const pwf8 p = omdu * A + du * B;
+			const pwf8 q = omdu * C + du * D;
+			nx = omdv * p + dv * q;
+		}
+		{
+			const pwf8 A = wnJoin(a1l, a1h), B = wnJoin(b1l, b1h);
+			const pwf8 C = wnJoin(c1l, c1h), D = wnJoin(d1l, d1h);
+			const pwf8 p = omdu * A + du * B;
+			const pwf8 q = omdu * C + du * D;
+			nz = omdv * p + dv * q;
+		}
+	}
+}
+
+// 8-wide waterWaveSlope. `wxs`/`wzs` are 8 world positions; lanes are independent.
+static inline void waterWaveSlope8(const float* wxs, const float* wzs,
+                                   float t, float scale,
+                                   float* bnxs, float* bnzs) {
+	const float base = 0.02f * scale;
+	const pwf8 kBase = base;
+	const pwf8 kT16  = t * 16.0f;
+	const pwf8 kT12  = t * 12.0f;
+	const pwf8 kT10  = t * 10.0f;
+	const pwf8 kT14  = t * 14.0f;
+	const pwf8 k17   = 1.7f;
+	const pwf8 wx = pwLd8(wxs);
+	const pwf8 wz = pwLd8(wzs);
+	pwf8 u1, v1, u2, v2;
+	{
+		FP_CONTRACT_OFF
+		// rx = wx*ca - wz*sa  /  rz = wx*sa + wz*ca — both FUSED in the scalar
+		// (`fnmsub` / `fmadd`), with only the SECOND product rounded.
+		const pwf8 kCa = 0.87f, kSa = 0.5f;
+		const pwf8 rx = pwFma(wx, kCa, -(wz * kSa));
+		const pwf8 rz = pwFma(wx, kSa,   wz * kCa);
+		// The four scroll coords — NOT fused in the scalar: each is
+		// (world product) +/- (t product) with BOTH separately rounded.
+		u1 = wx * kBase + kT16;
+		v1 = wz * kBase - kT12;
+		u2 = k17 * (rx * kBase) - kT10;
+		v2 = k17 * (rz * kBase) + kT14;
+	}
+	pwf8 n1x, n1z, n2x, n2z;
+	sampleWaterNrm8(u1, v1, n1x, n1z);
+	sampleWaterNrm8(u2, v2, n2x, n2z);
+	// bn = (n1 + n2*0.6) * 1.6 — the mix IS fused in the scalar (`fmla`).
+	{
+		FP_CONTRACT_OFF
+		const pwf8 k06 = 0.6f;
+		pwSt8(bnxs, pwFma(k06, n2x, n1x) * 1.6f);
+		pwSt8(bnzs, pwFma(k06, n2z, n1z) * 1.6f);
+	}
+}
+#endif  // PWATER_VEC8
+
+// The dispatcher both screen passes call. `n` is 1..8 and every array is 8
+// floats wide regardless. Lanes >= n are PADDED with lane 0 rather than left
+// stale: a garbage float there would sail through the wrap (floor(inf) -> inf,
+// cvttps -> INT_MIN, which the `i0 < N` clamp KEEPS because it is negative) and
+// index the field out of bounds. Cheap insurance, paid only on a row's tail.
+static inline void waveSlopeBatch(const float* wxs, const float* wzs, int n,
+                                  float t, float scale, float* bnxs, float* bnzs) {
+	if (g_waterNrm.empty()) {
+		for (int k = 0; k < n; ++k) { bnxs[k] = 0.0f; bnzs[k] = 0.0f; }
+		return;
+	}
+#ifdef PWATER_VEC8
+	if (fds::FeatureFlags::water_slope_vec8()) {
+		if (n >= 8) {
+			waterWaveSlope8(wxs, wzs, t, scale, bnxs, bnzs);
+		} else {
+			float px[8], pz[8], qx[8], qz[8];
+			for (int k = 0; k < 8; ++k) {
+				const int s = k < n ? k : 0;
+				px[k] = wxs[s]; pz[k] = wzs[s];
+			}
+			waterWaveSlope8(px, pz, t, scale, qx, qz);
+			for (int k = 0; k < n; ++k) { bnxs[k] = qx[k]; bnzs[k] = qz[k]; }
+		}
+		return;
+	}
+#endif
+	for (int k = 0; k < n; ++k)
+		waterWaveSlope(wxs[k], wzs[k], t, scale, /*nOct=*/0, bnxs[k], bnzs[k]);
+}
+
 // VARIED wave slope (water_variation ON — chase only). A SEPARATE function from
 // the byte-identical waterWaveSlope() above (touching that reshapes its fmadd
 // chain under -ffp-contract=fast+LTO → city moves). Adds a low-frequency world
@@ -225,6 +446,35 @@ static inline float sampleWaterCell(float u, float v) {
 	const float A = g_waterCell[size_t(j0)*W + i0], B = g_waterCell[size_t(j0)*W + i1];
 	const float C = g_waterCell[size_t(j1)*W + i0], D = g_waterCell[size_t(j1)*W + i1];
 	return (A*(1-du)+B*du)*(1-dv) + (C*(1-du)+D*du)*dv;
+}
+
+// RenderGlints' OWN cell tap, with the interpolation's fma grouping PINNED.
+// Same arithmetic as sampleWaterCell above and deliberately a separate copy —
+// the shared one stays exactly as chase's causticCellVaried and the env-bake
+// CausticModulation compiled it, which is the same "separate function so the
+// default path stays byte-identical" rule RenderGlintsVaried already follows.
+//
+// WHY IT HAS TO EXIST: batching the wave slope moves this tap into an outlined
+// flush, and clang then contracts the final lerp the other way round —
+// `fma(dv, q, p*(1-dv))` instead of the pre-batch `fma(1-dv, p, dv*q)`. Same
+// algebra, opposite choice of which product keeps its extra bits, and it lands
+// on `int(colour*mod + blueLine)` where a 1-LSB shift is a changed pixel.
+static inline float sampleWaterCellGlints(float u, float v) {
+	const int W = g_waterTexW, H = g_waterTexH;
+	float fu = u - std::floor(u / W) * W;                       // wrap
+	float fv = v - std::floor(v / H) * H;
+	int i0 = int(fu), j0 = int(fv); if (i0 >= W) i0 = 0; if (j0 >= H) j0 = 0;
+	const float du = fu - i0, dv = fv - j0;
+	const int i1 = (i0 + 1) % W, j1 = (j0 + 1) % H;
+	const float A = g_waterCell[size_t(j0)*W + i0], B = g_waterCell[size_t(j0)*W + i1];
+	const float C = g_waterCell[size_t(j1)*W + i0], D = g_waterCell[size_t(j1)*W + i1];
+	{
+		FP_CONTRACT_OFF
+		const float omdu = 1.0f - du, omdv = 1.0f - dv;
+		const float p = __builtin_fmaf(B, du, A * omdu);
+		const float q = __builtin_fmaf(D, du, C * omdu);
+		return __builtin_fmaf(omdv, p, dv * q);
+	}
 }
 
 // VARIED caustic cell value (water_variation ON — chase only). SEPARATE from the
@@ -335,6 +585,11 @@ void WaveSlope(float wx, float wz, float t, float scale, float& bnx, float& bnz)
 	waterWaveSlope(wx, wz, t, scale, /*nOct=*/0, bnx, bnz);
 }
 
+void WaveSlope8(const float* wxs, const float* wzs, int n,
+                float t, float scale, float* bnxs, float* bnzs) {
+	waveSlopeBatch(wxs, wzs, n, t, scale, bnxs, bnzs);
+}
+
 // See ProceduralWater.h — RenderGlints' texMix block as a standalone helper
 // (same constants, same all-octaves slope warp) for the city env-bake water
 // re-shade. Kept OUT of RenderGlints' loop so the screen pass still computes
@@ -422,30 +677,21 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 	const uint16_t* const oz = ZPage16;
 	const int xr = XRes;
 	auto band = [=](int y0, int y1) {
+		// The wave slope is evaluated 8 pixels at a time (see waterWaveSlope8).
+		// Only pixels that SURVIVE all three rejects enter a batch — 44.6 % of
+		// the scan at city t=1961 ([WCENSUS]) — so the vector call never pays
+		// for the above-horizon half or for pixels behind buildings. Everything
+		// downstream of the slope stays per-pixel and verbatim.
+		int   bIdx[8];
+		float bWx[8] = {0}, bWz[8] = {0}, bFade[8] = {0}, bNx[8], bNz[8];
+		int   nB = 0;
 		for (int y = y0; y < y1; ++y) {
 			dword* row = vp + size_t(y) * size_t(xr);
 			const uint16_t* orow = oz + size_t(y) * size_t(xr);
-			for (int x = 0; x < xr; ++x) {
-				// Ray-cast this pixel to the water plane — a peel-independent mask
-				// (the transparent G-buffer's front layer doesn't hold the water
-				// under a multi-pass xpar peel). View ray dir per unit depth:
-				const float xn = (float(x) - cex) * invFX;
-				const float yn = (cey - float(y)) * invFY;
-				const float D = m01*xn + m11*yn + m21;            // d(world.y)/d(view-z)
-				if (D == 0.0f) continue;
-				const float sd = (wYplane - ey) / D;              // view-z of the plane hit
-				if (sd <= 1.0f || sd >= fzp) continue;            // behind the eye / past the far plane
-				const float distFade = sd <= fadeStart ? 1.0f : (fzp - sd) * invFadeRange;
-				const float wx = ex + sd * (m00*xn + m10*yn + m20);
-				const float wz = ez + sd * (m02*xn + m12*yn + m22);
-				// NB: the water mesh's local bounds don't map to its world
-				// placement, and the city sits in the water (everything below
-				// the horizon that isn't opaque is water), so we gate on the
-				// plane hit + opaque occlusion rather than an XZ rect.
-				const uint16_t oe = orow[x];                      // opaque-Z occlusion
-				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;   // opaque in front
-				float bnx, bnz;
-				waterWaveSlope(wx, wz, t, scale, 6, bnx, bnz);   // all octaves (fine detail)
+			// The per-pixel tail, unchanged — each pixel touches only its own
+			// row[x], so deferring it to the flush cannot reorder any write.
+			auto shade = [&](int x, float wx, float wz, float distFade,
+			                 float bnx, float bnz) {
 				// Field-warped texture: sample the generated cell texture at a UV
 				// distorted by the SAME wave slope → it ripples with the waves
 				// (coherent). MODULATE the water brightness by the cell value
@@ -456,8 +702,8 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 					// Warp = ripple-in-place (wave slope); flow = translate with the
 					// field at its world velocity (same scroll as the glints) so the
 					// caustics ride the waves instead of standing still.
-					const float cell = sampleWaterCell(wx*texScale + bnx*texWarp + flowU,
-					                                   wz*texScale + bnz*texWarp + flowV) * (1.0f/765.0f);
+					const float cell = sampleWaterCellGlints(wx*texScale + bnx*texWarp + flowU,
+					                                         wz*texScale + bnz*texWarp + flowV) * (1.0f/765.0f);
 					const float cellHi = cell - 0.40f;                   // + on lines, - in base
 					// Uniform (hue-preserving) brightness contrast keeps the base blue
 					// instead of warming it...
@@ -477,19 +723,62 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 				const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
 				Nx*=nInv; Ny*=nInv; Nz*=nInv;
 				float Vx = ex-wx, Vy = ey-wYplane, Vz = ez-wz;   // view dir (worldPos.y = plane)
-				const float vInv = 1.0f / std::sqrt(Vx*Vx + Vy*Vy + Vz*Vz);
+				// PINNED CONTRACTION — do NOT "simplify" this back to
+				// `Vx*Vx + Vy*Vy + Vz*Vz`. Vy is loop-INVARIANT (ey and the water
+				// plane are both constants of the pass). The pre-batch loop
+				// compiled that sum to `fmul Vx,Vx` + `fmadd Vy,Vy,·` +
+				// `fmadd Vz,Vz,·` — only the FIRST product rounded, the other two
+				// absorbed by -ffp-contract=fast. Once the slope moved to a batch
+				// flush, LICM hoisted the invariant `Vy*Vy` out of the loop, which
+				// ROUNDS it and leaves `Vx*Vx` fused instead. Same algebra,
+				// swapped rounding — and it moved 143 px by 1 LSB through the
+				// `int(g*255 + 0.5)` truncation below. Spelling the chain out with
+				// contraction off restores the pre-batch grouping exactly, which
+				// is what makes this pass byte-null.
+				float vLen2;
+				{ FP_CONTRACT_OFF vLen2 = __builtin_fmaf(Vz, Vz, __builtin_fmaf(Vy, Vy, Vx*Vx)); }
+				const float vInv = 1.0f / std::sqrt(vLen2);
 				Vx*=vInv; Vy*=vInv; Vz*=vInv;
 				float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
 				const float hInv = 1.0f / std::sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
 				const float ndh = (Nx*Hx + Ny*Hy + Nz*Hz) * hInv;
-				if (ndh < ndhMin) continue;    // provably add == 0 (see ndhMin)
+				if (ndh < ndhMin) return;      // provably add == 0 (see ndhMin)
 				const float g = std::pow(ndh, shin) * strength * distFade;
-				int add = int(g * 255.0f + 0.5f); if (add <= 0) continue; if (add > 255) add = 255;
+				int add = int(g * 255.0f + 0.5f); if (add <= 0) return; if (add > 255) add = 255;
 				const dword p = row[x];
 				int B = int(p & 0xFFu) + add, G = int((p>>8)&0xFFu) + add, R = int((p>>16)&0xFFu) + add;
 				if (B>255)B=255; if (G>255)G=255; if (R>255)R=255;
 				row[x] = dword(B) | (dword(G)<<8) | (dword(R)<<16) | 0xFF000000u;
+			};
+			auto flush = [&]() {
+				waveSlopeBatch(bWx, bWz, nB, t, scale, bNx, bNz);   // all octaves (fine detail)
+				for (int k = 0; k < nB; ++k)
+					shade(bIdx[k], bWx[k], bWz[k], bFade[k], bNx[k], bNz[k]);
+				nB = 0;
+			};
+			for (int x = 0; x < xr; ++x) {
+				// Ray-cast this pixel to the water plane — a peel-independent mask
+				// (the transparent G-buffer's front layer doesn't hold the water
+				// under a multi-pass xpar peel). View ray dir per unit depth:
+				const float xn = (float(x) - cex) * invFX;
+				const float yn = (cey - float(y)) * invFY;
+				const float D = m01*xn + m11*yn + m21;            // d(world.y)/d(view-z)
+				if (D == 0.0f) continue;
+				const float sd = (wYplane - ey) / D;              // view-z of the plane hit
+				if (sd <= 1.0f || sd >= fzp) continue;            // behind the eye / past the far plane
+				// NB: the water mesh's local bounds don't map to its world
+				// placement, and the city sits in the water (everything below
+				// the horizon that isn't opaque is water), so we gate on the
+				// plane hit + opaque occlusion rather than an XZ rect.
+				const uint16_t oe = orow[x];                      // opaque-Z occlusion
+				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;   // opaque in front
+				bFade[nB] = sd <= fadeStart ? 1.0f : (fzp - sd) * invFadeRange;
+				bWx[nB]   = ex + sd * (m00*xn + m10*yn + m20);
+				bWz[nB]   = ez + sd * (m02*xn + m12*yn + m22);
+				bIdx[nB]  = x;
+				if (++nB == 8) flush();
 			}
+			if (nB) flush();   // rows are independent; never carry a batch over
 		}
 	};
 	runRowBands("water-glints", band);

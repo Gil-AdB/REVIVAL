@@ -3521,30 +3521,49 @@ struct CityScene : SceneDriver {
 		int* const dm = dispMap.data();
 		const int xr1 = XRes_1, yr1 = YRes_1, xr = XRes;
 		auto band = [=](int y0, int y1) {
+			// The wave slope is evaluated 8 pixels at a time (pwater::WaveSlope8
+			// → waterWaveSlope8, --water_slope_vec8). Only pixels that hit the
+			// water plane enter a batch — 81.4 % of the scan at t=1961
+			// ([WCENSUS]) — and the clamp/write tail below stays per-pixel and
+			// verbatim, so the only thing that moved is where bnx/bnz come from.
+			int   bIdx[8];
+			float bWx[8] = {0}, bWz[8] = {0}, bNx[8], bNz[8];
+			int   nB = 0;
 			for (int y = y0; y < y1; ++y) {
 				int* row = dm + size_t(y) * size_t(xr);
+				auto emit = [&](int x, int tx, int ty) {
+					if (tx < 0) tx = -tx; if (tx > xr1) tx = 2 * xr1 - tx;
+					if (ty < 0) ty = -ty; if (ty > yr1) ty = 2 * yr1 - ty;
+					if (tx < 0) tx = 0; else if (tx > xr1) tx = xr1;   // belt + suspenders
+					if (ty < 0) ty = 0; else if (ty > yr1) ty = yr1;
+					row[x] = ty * xr + tx;
+				};
+				auto flush = [&]() {
+					// coarse → coherent with glints
+					pwater::WaveSlope8(bWx, bWz, nB, t, scale, bNx, bNz);
+					for (int k = 0; k < nB; ++k) {
+						const int x = bIdx[k];
+						emit(x, x + int(amp * bNx[k]), y + int(amp * bNz[k]));
+					}
+					nB = 0;
+				};
 				for (int x = 0; x < xr; ++x) {
-					int tx = x, ty = y;
 					const float xn = (float(x) - cex) * invFX;
 					const float yn = (cey - float(y)) * invFY;
 					const float D = m01*xn + m11*yn + m21;
 					if (D != 0.0f) {
 						const float sd = (wYplane - ey) / D;     // view-z of the plane hit
 						if (sd > 1.0f) {
-							const float wx = ex + sd * (m00*xn + m10*yn + m20);
-							const float wz = ez + sd * (m02*xn + m12*yn + m22);
-							float bnx, bnz;
-							pwater::WaveSlope(wx, wz, t, scale, bnx, bnz);   // coarse → coherent with glints
-							tx = x + int(amp * bnx);
-							ty = y + int(amp * bnz);
+							bWx[nB]  = ex + sd * (m00*xn + m10*yn + m20);
+							bWz[nB]  = ez + sd * (m02*xn + m12*yn + m22);
+							bIdx[nB] = x;
+							if (++nB == 8) flush();
+							continue;
 						}
 					}
-					if (tx < 0) tx = -tx; if (tx > xr1) tx = 2 * xr1 - tx;
-					if (ty < 0) ty = -ty; if (ty > yr1) ty = 2 * yr1 - ty;
-					if (tx < 0) tx = 0; else if (tx > xr1) tx = xr1;   // belt + suspenders
-					if (ty < 0) ty = 0; else if (ty > yr1) ty = yr1;
-					row[x] = ty * xr + tx;
+					emit(x, x, y);                               // not water: identity
 				}
+				if (nB) flush();   // rows are independent; never carry a batch over
 			}
 		};
 		pwater::runRowBands("water-ripple", band);

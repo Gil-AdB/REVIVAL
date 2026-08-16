@@ -83,6 +83,15 @@ void BuildField();
 // time (Timer * 0.02 * ripple_speed).
 void WaveSlope(float wx, float wz, float t, float scale, float& bnx, float& bnz);
 
+// BATCH form of WaveSlope — the 8-wide evaluation (--water_slope_vec8, on by
+// default; off falls back to n scalar WaveSlope calls, same results). `n` is
+// 1..8 and the caller's four arrays are 8 floats wide regardless. Exists
+// because the scalar is the 4th-hottest symbol of the city acceptance frame
+// and is called out-of-line from both screen passes; the consumers batch their
+// LIVE pixels (the ray-cast rejects never reach it) and flush in eights.
+void WaveSlope8(const float* wx, const float* wz, int n,
+                float t, float scale, float* bnx, float* bnz);
+
 // Screen-space caustic-texture + specular-glint post-pass over VPage. `waterY`
 // is the water plane height; [minX,maxX]/[minZ,maxZ] are the plane extent (used
 // only as a "water set up yet" early-out). No-op when water_bump is off / extent

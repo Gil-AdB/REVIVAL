@@ -474,6 +474,115 @@ cold bake itself and 0.88 s the live-water re-shade. That is the prize for
 must also persist the mask plane). 2d/2e/2f are LOOK items and stay in his
 queue — priced here, not landed.
 
+### ROW 4 — `waterWaveSlope` 8-WIDE (2026-08-16e). BYTE-NULL, AND THE BYTE STORY IS THE FINDING
+
+`--water_slope_vec8`, default ON. Three arms in one worktree (parent binary
+`e99f5fed` / new `--no-water_slope_vec8` / new default), `--bench=scene@scene=city,
+t=<T>,iters=30,xres=1512,yres=848 --profiler=1 --deferred_prof=5 --hw_prof`,
+**min-of-11 over 12 interleaved rounds with r0 dropped and the arm order rotated
+per round**.
+
+| | t=1961 par → **off** → **ON** | t=2400 | t=400 |
+|---|---|---|---|
+| **frame min** | 47.510 → 46.890 → **46.220** (−2.7 %) | 30.730 → 30.120 → **29.590** (−3.7 %) | 35.490 → 34.340 → **33.660** (−5.2 %) |
+| **TOTL** | 52.161 → 51.313 → **50.400** (−3.4 %) | 35.355 → 34.850 → **34.212** (−3.2 %) | 39.283 → 38.402 → **37.483** (−4.6 %) |
+| `water-ripple` wall | 1.851 → 1.577 → **1.142** (−38.3 %) | 1.482 → 1.292 → **0.923** (−37.7 %) | 2.159 → 1.838 → **1.319** (−38.9 %) |
+| `water-ripple` thrsum | 19.83 → 17.23 → **12.13** (−38.8 %) | 16.15 → 13.82 → **10.28** (−36.3 %) | 24.36 → 21.02 → **14.67** (−39.8 %) |
+| `water-ripple` Ginstr/f | 0.219 → **0.243** → **0.148** (−32.4 %) | 0.179 → 0.197 → **0.126** (−29.6 %) | 0.257 → 0.285 → **0.169** (−34.2 %) |
+| `water-glints` wall | 2.423 → 1.891 → **1.590** (−34.4 %) | 1.968 → 1.557 → **1.345** (−31.7 %) | 2.509 → 1.960 → **1.667** (−33.6 %) |
+| `water-glints` thrsum | 26.77 → 20.68 → **17.18** (−35.8 %) | 21.26 → 16.76 → **14.61** (−31.3 %) | 28.48 → 22.18 → **19.00** (−33.3 %) |
+| `water-glints` Ginstr/f | 0.229 → 0.254 → **0.203** (−11.4 %) | 0.179 → 0.202 → **0.163** (−8.9 %) | 0.239 → 0.266 → **0.212** (−11.3 %) |
+| `renderFrame` Ginstr/f | 4.175 → 4.172 → 4.175 | 2.266 → 2.267 → 2.267 | 3.180 → 3.178 → 3.180 |
+| `lighting-w1` / `gbuffer` / `fastfog` / `cones-call` Ginstr/f | unmoved | unmoved | unmoved |
+
+`renderFrame` is FLAT by construction — both water passes run outside it — so
+the frame-level number is the whole prize: **−1.3 / −1.1 / −1.8 ms of frame min,
+−1.76 / −1.14 / −1.80 ms of TOTL**, which is the two water rows' combined wall
+(4.27 → 2.73 ms at t=1961) landing on the frame.
+
+**THE OFF COLUMN IS NOT A NULL, AND THAT IS WHY IT IS WORTH A COLUMN.** Batching
+alone — the same loops, the flag off, eight scalar `waterWaveSlope` calls per
+flush — *costs* instructions (`water-ripple` 0.219 → 0.243, +11 %: the batch
+bookkeeping) while *winning* wall (1.851 → 1.577, −15 %): eight independent
+calls back to back overlap in the out-of-order window where the pre-batch loop
+interleaved each call with its own branchy tail. The vector form then takes
+0.243 → 0.148 on top. Quoting only par-vs-default would have credited the
+restructure's wall win to the vectorization.
+
+Cycles fall further than instructions in the glints row — **Gcyc/f 0.082 → 0.054
+(−34 %) against Ginstr −11 %** — because the scalar tap is one long serial chain
+per pixel (fmul → frintm → fmls → fcvtzs → scvtf → bilinear) and the 8-wide form
+is one chain for eight pixels. That is also why `water-glints` wall moves 34 %
+on an 11 % instruction cut: its instruction count is dominated by the `powf`
+lobe and the caustic tap, which this change does not touch.
+
+**Ceiling reached, and it is 4x not 8x**: `pwater::waterWaveSlope` is **132
+instructions for one pixel**; `waterWaveSlope8` is **293 for eight**, i.e. 36.6
+per pixel. clang had ALREADY SLP-vectorized the scalar 2-wide (the two scroll
+layers occupy the two lanes of `.2s` vectors), so the honest headroom over the
+existing code was 4x and 3.6x of it is taken.
+
+#### THE BYTE BATTERY — three separate contraction traps, all of them found by disassembly
+
+Every pin is unmoved (below), but getting there needed three fixes, and none of
+them was in the arithmetic the round set out to change:
+
+1. **simde's `_mm256_fnmadd_ps` is not an fma on arm64.** Outside
+   `SIMDE_X86_FMA_NATIVE` it is a plain `-(a*b) + c` loop body in
+   `simde/x86/fma.h`, fused only because the build carries `-ffp-contract=fast`.
+   Worse, `#pragma clang fp contract` is LEXICALLY scoped, so a `FP_CONTRACT_OFF`
+   at the *call site* reaches neither simde's fma nor its `_mm256_mul_ps` /
+   `_mm256_add_ps`. The first cut wrapped the whole function in `FP_CONTRACT_OFF`
+   and the bilinear still compiled to `fmla.4s`: **84 % of 2.6 M taps disagreed
+   with the scalar, some by 6e-4 — a whole neighbouring texel, not a rounding**,
+   because a 1-ULP `fu` crosses a texel boundary. Rewritten with clang
+   `ext_vector_type` operators in our own file (and `__builtin_elementwise_fma`
+   for the sites the scalar fuses) the pragma binds to the arithmetic:
+   **0 mismatches in 2 612 962 taps**.
+2. **LICM hoisted a loop-invariant square out of `RenderGlints`' specular tail.**
+   `Vy = ey - waterY` is invariant, and once the slope moved to a batch flush
+   clang pre-computed `Vy*Vy` — which ROUNDS it, where the pre-batch code emitted
+   `fmul Vx,Vx` + `fmadd Vy,Vy,·` + `fmadd Vz,Vz,·` and left it unrounded. Same
+   algebra, swapped rounding, **143 px at 1 LSB** through `int(g*255 + 0.5)`.
+   Pinned with an explicit `__builtin_fmaf` chain.
+3. **The caustic tap's final lerp re-contracted the other way.** Moving the tap
+   into the outlined flush turned `fma(1-dv, p, dv*q)` into `fma(dv, q, p*(1-dv))`.
+   Fixed with `sampleWaterCellGlints`, a pinned copy used only by `RenderGlints`
+   — the shared `sampleWaterCell` is left exactly as chase's `causticCellVaried`
+   and the env-bake `CausticModulation` compiled it, the same "separate function
+   so the default path stays byte-identical" rule `RenderGlintsVaried` follows.
+
+The lesson worth carrying: on this tree a vectorization is byte-null when it is
+written where the contraction pragma can *reach*, and the pins move for
+optimizer decisions **around** the edit at least as often as for the edit.
+
+**PINS — BYTE-NULL, all three arms identical at all three poses.** city his arm
+t=1961 / 2400 / 400 `4cb8d2ca` / `f473fe2b` / `d3374de6` on parent, `--no-water_slope_vec8`
+and default alike; city `--deferred` `bd4ffbf8` 3/3; chase t=100/400/800/1200/1600
+`3bfd4244` / `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814` 2/2; fountain
+`8db68ccb` 2/2; greets t=1588 `570a7b44` 2/2; `render_gate.sh` **4/4 PASS**.
+Chase and greets are untouched by construction as well as by pin — chase's water
+goes through `RenderGlintsVaried` / `waterWaveSlopeVaried`, a separate copy this
+round does not open.
+
+**NOTE ON THE RECORDED CITY PINS.** `4031ceec` (`--deferred`) and `925ecd43`
+(his arm) **no longer reproduce at `e99f5fed`, and that is not this change**: the
+untouched parent binary gives `bd4ffbf8` / `4cb8d2ca`, and so does the main
+worktree's own binary at the same tip with the same env cube on disk (the cube
+files are byte-identical, md5 `a896a47c`). Pre-existing drift somewhere between
+the 2026-08-16b/c rounds and the tip; chase ×5, fountain and greets all still sit
+on their recorded values, so it is city-specific. Whoever owns the city series
+should re-pin.
+
+#### WHAT IS STILL SCALAR
+
+The **`--env_live_water` tilt**, the third consumer. It reaches the field through
+`fds::g_envLiveWater.slopeFn`, a function POINTER called per glass pixel inside
+the deferred kernel's per-lane loop, so batching it means restructuring
+`Render_DeferredLighting_Tile_OuterVec`'s lane walk, not this file. It is the
+0.041 Ginstr/f `--env_live_water` adds to `lighting-w1` at t=1961 (row 4 note
+below), and `lighting-w1` is unmoved by this round, as the table shows.
+
 ### THE RANKED TABLE UNDER THIS ARM — city t=1961
 
 Per-symbol shares are Instruments Time Profiler self time over a 400-iteration
@@ -484,7 +593,7 @@ bench (frame-dominated: init is ~3 s of ~28 s).
 | 1 | `Render_VolumetricCones_Tile` | **20.6 %** | 1.288 (`cones-call`, ×1) | rounds 6–7 took −29 % of chase's; city's is §13's dependency chain. Only "fewer (px × spot) pairs" is left |
 | 2 | `Render_DeferredLighting_Tile_OuterVec` | **15.3 %** | 0.957 (`lighting-w1`, ×2) | of which `--city_env_pixel` +0.129, the env compose +0.089, `--env_live_water` +0.041 |
 | 3 | `FrustumClipper::Render` | **6.2 %** → **1.2 %** | inside `gbuffer` | **DONE 2026-08-16c (`c26c1c35` + `d9dfa527`), and the mechanism in this cell was only half right.** The walk was the smaller half: `--tile_bbox_cull` was **INERT on the mirror pass**, whose hand-written `Reflected_Transform` pushed a 2-field aggregate and left the cover-all bbox default on every entry — 621 180 (face, tile) clipper entries against the main pass's 29 671 on the same geometry. Stamping it + binning faces to tiles: this symbol **6.46 → 1.21 % of self time**, and with the walk row (2.53 → 0.16 %) **8.99 → 1.47 %**; `gbuffer` **0.658 → 0.444 Ginstr/f (−32.5 %)**, thrsum 79.3 → 43.1 core-ms; `renderFrame` 4.383 → 4.174 Ginstr/f. Byte-null. See §00c |
-| 4 | `pwater::waterWaveSlope` | **6.2 %** → ~5.4 % | 0.451 (ripple + glints) | −12 % / −7 % taken; what is left is an 8-wide form of the two bilinear taps |
+| 4 | `pwater::waterWaveSlope` | **6.2 %** → ~5.4 % → **8-wide** | 0.451 → **0.351** (ripple + glints) | **DONE 2026-08-16e — `--water_slope_vec8`, BYTE-NULL.** 132 instructions/px → 293 for eight (36.6/px); the scalar was already SLP'd 2-wide so the real ceiling was 4x and 3.6x is taken. `water-ripple` **0.219 → 0.148 Ginstr/f (−32.4 %)**, wall 1.851 → 1.142; `water-glints` 0.229 → 0.203 (−11.4 %) but **Gcyc −34 %** (the serial chain is what went, not the `powf`), wall 2.423 → 1.590. Frame min **−2.7 / −3.7 / −5.2 %** at t=1961/2400/400 — all of it outside `renderFrame`, which is flat. Three contraction traps had to be pinned first (simde's fma is not an fma on arm64; LICM pre-rounding an invariant square; the caustic lerp re-contracting) — see the subsection above. The `--env_live_water` tilt is the one consumer still scalar: it goes through a function pointer inside the deferred kernel's lane loop |
 | 5 | `meka::TileRasterizer::apply_exact<false>` | 5.4 % | 0.659 (`gbuffer`, ×2) | `effPar` 8.5–8.7 of 12 — better than chase's 5.5, so §00 row 9's "half the pool is idle" does not hold in city |
 | 6 | fastfog lambdas + `Froxel_CompositePixel` + `FastFog_SampleGrid` + `SkyPaint` | 6.2 + 3.4 + 2.7 + 1.6 % | 0.869 (`fastfog`, ×1) | `fog-columns` 0.400 is the residue; `Froxel_GlowTile`'s per-(column × light × slice) `atanf` is unpriced |
 | 7 | `vFogNoise` + `vBlobNoise` | 4.7 + 0.8 % | inside `fog-columns` | §00 row 8's "the noise is the cost" reproduces exactly here |
