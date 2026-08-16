@@ -315,6 +315,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	static thread_local double sRasterAcc[3] = {0.0, 0.0, 0.0};
 	static thread_local int sLightCount[3] = {0, 0, 0};
 	const int sProfMi = int(mode);
+	// Phase-A CORE time: the sum of the per-light Transform_Objects durations
+	// across whatever worker ran them, against the phase's WALL time. The ratio
+	// is the phase's effective parallelism, and it is the number this phase was
+	// never measured by (2026-08-16r). Two clock reads per light per frame,
+	// only under --shadow-prof; the accumulator is atomic because the phase-A
+	// jobs run on pool workers. Reset per mode at each dump.
+	static std::atomic<int64_t> sXformCoreNs[3] = {};
+	std::atomic<int64_t> &xformCoreNs = sXformCoreNs[sProfMi];
 
 	// Per-light scratch: one FaceListContext + VertexScratch + Camera +
 	// CameraContext per shadow-casting light. Kept across frames so the
@@ -495,7 +503,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 	static thread_local std::vector<PhaseAJob> sPhaseAJobs;
 	sPhaseAJobs.clear();
 	const bool dynBakeForLambda = writeDynamicBuf;
-	auto runPhaseAXform = [dynBakeForLambda](const PhaseAJob &J) {
+	auto runPhaseAXform = [dynBakeForLambda, sProfShadow, &xformCoreNs](const PhaseAJob &J) {
 		Scene *const ScPtr = J.Sc;
 		ShadowMap *const smPtr = J.sm;
 		fds::CameraContext *const ctxPtr = J.ctx;
@@ -532,8 +540,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 				// the face axis. (raster lambda already sets this; mirror
 				// it here so the xform task has the same context.)
 				g_currentShadowMap = smPtr;
+				const auto tXf0 = sProfShadow ? clk::now() : clk::time_point{};
 				Transform_Objects(ScPtr, *ctxPtr, *facesPtr,
 				                  smPtr->xres, smPtr->yres, scratchPtr);
+				if (sProfShadow) {
+					xformCoreNs.fetch_add(
+					    std::chrono::duration_cast<std::chrono::nanoseconds>(
+					        clk::now() - tXf0).count(),
+					    std::memory_order_relaxed);
+				}
 				g_currentShadowMap = nullptr;
 				g_currentShadowOmni = nullptr;
 				g_inDynamicShadowBake = false;
@@ -1387,19 +1402,23 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 			const double rasterAvg = sRasterAcc[sProfMi] / sInterval;
 			const double perLightX = sLightCount[sProfMi] ? sXformAcc[sProfMi] / sLightCount[sProfMi] : 0.0;
 			const double perLightR = sLightCount[sProfMi] ? sRasterAcc[sProfMi] / sLightCount[sProfMi] : 0.0;
+			const double xformCore = double(xformCoreNs.load(std::memory_order_relaxed))
+			                       / 1e6 / double(sInterval);
 			std::fprintf(stderr,
 				"[SHADOW-PROF] last %d frame(s): %s: xform=%.2fms raster=%.2fms "
 				"sum=%.2fms  per-light: xform=%.2fms raster=%.2fms  "
-				"(N=%d lights/frame)\n",
+				"(N=%d lights/frame)  xformCore=%.2fms effPar=%.2f\n",
 				sInterval,
 				mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" : "DynOmnis",
 				xformAvg, rasterAvg, xformAvg + rasterAvg,
 				perLightX, perLightR,
-				int(sLightCount[sProfMi] / sInterval));
+				int(sLightCount[sProfMi] / sInterval),
+				xformCore, xformAvg > 0.0 ? xformCore / xformAvg : 0.0);
 			std::fflush(stderr);
 			sXformAcc[sProfMi] = 0.0;
 			sRasterAcc[sProfMi] = 0.0;
 			sLightCount[sProfMi] = 0;
+			xformCoreNs.store(0, std::memory_order_relaxed);
 		}
 	}
 

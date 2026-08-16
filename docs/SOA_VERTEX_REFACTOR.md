@@ -2,6 +2,46 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## AMENDED 2026-08-16r — PHASE 5's CEILING IS **1.25 % of frame**, NOT 0.24–0.31 %. The section below measured the MAIN VIEW ONLY.
+
+`docs/PERF_STATE.md` §00g decomposed `Transform_Objects` by invocation source for
+the first time. At greets t=5743 on the user's acceptance arm the symbol runs
+**45× a frame and 42 of those calls are the shadow bake** — 596 446 of the
+frame's 904 111 transformed vertices, **81 % of the core time**. The section
+below prices Phase 5 off `--xfrm_prof`'s buckets, and those are **main-view only
+by construction** (the gate is `_mainView && xresOverride < 0`), so it costed the
+19 % and called the row closed.
+
+Re-measured where the vertices actually are, with the `-DFDS_VERTEX_PAD_BYTES`
+hook §3 below already shipped — this time on the SHADOW pass's phase-A wall time:
+
+| `sizeof(Vertex)` | 140 (shipping) | 144 | 160 | **192 (64-byte aligned)** |
+|---|--:|--:|--:|--:|
+| `DynOmnis` xform ms/f | **1.21** | 1.23 | 1.33 | **1.58** |
+| xform core-ms/f | 10.37 | 10.83 | 11.59 | 12.37 |
+
+**Monotone in SIZE, and the 64-ALIGNED arm is the worst of the four** — which
+also kills the obvious rival theory (the shadow pass touches `[0,28)` written +
+`[52,64)` read, a 64-byte hot window at a 140-byte stride that straddles two
+lines ~98 % of the time; aligning it made things worse, not better). §3's
+conclusion — *`sizeof(Vertex)` is the ONLY variable this loop responds to* —
+reproduces exactly, in a pass it had never been run in.
+
+Slope **0.0086 ms per byte** across both bakes. Phase 5's 140 → 68 is therefore
+**72 × 0.0086 = 0.62 ms/frame = 1.25 % of a 49.5 ms greets frame**, four to five
+times the ceiling the section below closed it on.
+
+**The VERDICT below may still stand** — 11 files, two alternative transform
+pipelines, and a requirement to find every transform writer or the image breaks
+silently. **The NUMBER does not.** Anyone re-opening Phase 5 should argue against
+1.25 %, not 0.3 %. Also note what §00g refuted on the way: the ALU is not the
+limit (the whole projection block is 0.01–0.03 ms of 1.22, and
+`--shadow_cube_vert_cull`, which removes the 3-FMA matmul for out-of-pyramid
+vertices, moves core time 10.67 → 10.77), and neither is scheduling (effPar
+8.4–8.7 on an 8 P-core + 4 E-core box).
+
+---
+
 ## MEASURED 2026-08-09 — PHASE 5 IS CLOSED. Re-measured on the current tree, its ceiling is 0.24–0.31 % of frame, and the effort went to a struct 15× bigger.
 
 Phase 5 (`sizeof(Vertex)` 140 → 68 for mesh storage, or §6's interleaved 64-byte

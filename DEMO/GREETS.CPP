@@ -2763,6 +2763,19 @@ void Initialize_Greets()
 					// displaced faces are dropped per-face by Face_MainOnly.
 					if (mainOnlyFaces > 0 && mainOnlyFaces == chunkFaces) {
 						chunk->Flags |= Tri_NoShadowCast;
+						// ...and the same argument for EVERY other offscreen
+						// pass. Tri_NoShadowCast is gated on g_inShadowPass, so
+						// it spared the shadow bake and nothing else: the mirror
+						// RTT bakes and the env/SH probes kept transforming
+						// these chunks in full and then dropped every one of
+						// their faces on Face_MainOnly. Tri_AllFacesMainOnly is
+						// the offscreen-wide form of the same fact. Hatched at
+						// SCENE INIT rather than in Transform_Objects' mesh loop
+						// on purpose — a runtime flag read inside that
+						// -ffp-contract=fast function is not byte-null even when
+						// never taken (docs/VISIBILITY_PLAN.md §8).
+						if (fds::FeatureFlags::greets_displace_offscreen_skip())
+							chunk->Flags |= Tri_AllFacesMainOnly;
 						++g_s1PureChunks; g_s1PureChunkFaces += int(chunkFaces);
 					} else if (mainOnlyFaces > 0) {
 						++g_s1MixedChunks; g_s1MixedMainFaces += int(mainOnlyFaces);

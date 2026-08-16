@@ -186,6 +186,21 @@ enum TrimeshFlags
 	// faces instead of the ~81k displaced detail. Gated in Transform_Objects on
 	// the offscreen predicate (g_inShadowPass || g_offscreenViewDepth > 0).
 	Tri_OffscreenProxy	= 1 << 16,
+
+	// S1 offscreen proxy, the OTHER half: EVERY face of this mesh carries
+	// Face_MainOnly, so in any offscreen/bake pass the face loop drops all of
+	// them and the mesh emits not one FList entry. Its per-vertex transform
+	// there is therefore output nobody reads — the same "no faces => no
+	// output" invariant the FIndex == 0 skip rests on, one flag state along.
+	// Set by the greets chunk split on chunks that are 100 % displaced
+	// rooms/floor (the flat Tri_OffscreenProxy stand-in casts and reflects for
+	// them). Those chunks already carried Tri_NoShadowCast, which covers the
+	// SHADOW bake only; the mirror RTT and the env/SH probes are offscreen too
+	// and were transforming them in full (measured 2026-08-16r, greets t=5743
+	// --greets-displace: 54 073 of the mirror RTT's 100 618 verts/frame and
+	// 151 500 of the env probes' 257 604). Gated in Transform_Objects on the
+	// offscreen predicate (g_inShadowPass || g_offscreenViewDepth > 0).
+	Tri_AllFacesMainOnly = 1 << 17,
 };
 
 enum SortPriority

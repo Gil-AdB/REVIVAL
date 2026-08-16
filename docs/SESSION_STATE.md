@@ -1,5 +1,101 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16r — `Transform_Objects` (16q's 3.35 % ROW) IS NOT SHARED MACHINERY: IT IS GREETS' SHADOW BAKE, 42 OF ITS 45 CALLS A FRAME
+>
+> **16q handed on "`Transform_Objects` at 3.35 % is now more than double what is
+> left of the clipper". Reproduced (3.363 %) — and it is 0.309 % at city and
+> 0.190 % at chase.** Decomposed by invocation source, then by ablation, then to
+> the instruction. **Six attacks refuted by measurement, one landed.** Evidence:
+> `docs/PERF_STATE.md` **00g**, `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16r**.
+>
+> | pass, greets t=5743 his arm | calls/f | core-ms | verts xformed |
+> |---|--:|--:|--:|
+> | MAIN | 1 | 1.93 | 201 751 |
+> | MIRROR-RTT | 2 | 0.83 | 105 914 |
+> | **SHADOW** | **42** | **11.78 (81 %)** | **596 446** |
+> | OFFSCREEN probes (intermittent) | 0–2.7 | 0–2.29 | 257 604 |
+>
+> `DynOmnis` xform 1.22 ms/f splits: **vertex loops 0.83, per-face
+> `VisibilityFlagsAll` 0.26, accepted-face work 0.05, Face walk 0.01, residue
+> 0.07** — and the four sum to the total.
+>
+> ### REFUTED, EACH WITH THE MEASUREMENT
+>
+> * **SIMD width / ALU** — the whole projection block is 0.01–0.03 of 1.22 ms;
+>   `--shadow_cube_vert_cull` (removes the 3-FMA matmul for out-of-pyramid verts)
+>   moves core time 10.67 → **10.77**. Not ALU-bound.
+> * **Scheduling** — new `--shadow-prof` columns `xformCore`/`effPar`: **8.4–8.7**,
+>   and this box is **8 P-cores + 4 E-cores**. At the P-core count.
+> * **`--shadow_cone_cull`** (default OFF) — ON: 10.67 → 10.55. Null.
+> * **`--shadow_cube_face_cull`** — OFF: 10.67 → **13.15 (+23 %)**. The cull is
+>   live; nothing dead to reclaim.
+> * **More main-view shards** — `--xfrm_par` 26/52/104 → WORK 0.445/0.450/0.443.
+>   Flat.
+> * **The 3 dead SoA arrays in the shadow pass** (only `TPos_z` has a reader
+>   there) — removing all four buys 0.10 ms ⇒ three of four ≈ **0.15 % of frame**.
+>   Refused by arithmetic.
+>
+> ### THE PREDICTION THAT FAILED — and it corrects a closed doc by 4×
+>
+> The shadow pass touches a 64-byte hot window at a 140-byte stride (straddles two
+> lines ~98 % of the time). Predicted: pad `sizeof(Vertex)` to 192 and halve the
+> lines. Measured (`-DFDS_VERTEX_PAD_BYTES`): **140 → 1.21 ms, 144 → 1.23,
+> 160 → 1.33, 192 (aligned) → 1.58.** Monotone in SIZE; the aligned arm is the
+> WORST. Slope **0.0086 ms/byte**. **SoA Phase 5 was closed 2026-08-09 at
+> "0.24–0.31 % of frame" on a MAIN-VIEW-ONLY instrument; at this slope 140 → 68 is
+> 0.62 ms/f = 1.25 % of a greets frame.** `docs/SOA_VERTEX_REFACTOR.md` is amended
+> in place at its top.
+>
+> ### WHAT LANDED — `--greets_displace_offscreen_skip` (default ON), byte-exact
+>
+> `--greets_displace` marks the **149 chunks that are 100 % displaced**
+> `Tri_NoShadowCast`, which is gated on `g_inShadowPass` — so it spared the shadow
+> bake **and nothing else**. The mirror RTT bakes and the env/SH probes are
+> offscreen passes too and were transforming those chunks in full, then dropping
+> every one of their faces on `Face_MainOnly`: **54 073 verts/f (51 % of the RTT's)
+> and 151 500 verts/f (59 % of the probes')**. New `Tri_AllFacesMainOnly` is the
+> offscreen-wide form of the same fact; byte-exact by the same "no faces ⇒ no
+> output" invariant the `FIndex == 0` skip rests on. The hatch is at SCENE INIT,
+> not in the mesh loop (a runtime flag read in that `-ffp-contract=fast` function
+> is not byte-null even when never taken).
+>
+> **ANIM (where greets' mirror RTT lives) −16.3 / −12.4 / −14.6 %** at t=5743 /
+> 2845 / 1588 on his arm, **0 % at both poses where the RTT does not run**
+> (t=6097, ANIM 0.041 ms; t=1588 bare `--deferred`, nothing sets `Face_MainOnly`).
+> TOTL −1.67 / −2.00 / −2.64 %; `renderFrame` Ginstr/f never moves by more than
+> one printed LSB, which is the correct control — the change is outside it.
+>
+> ### GATES
+>
+> * 11 pin recipes **3/3, parent `8dde99fd` vs child, identical** — all ten at
+>   their recorded 16f values plus greets t=1588 `570a7b44`; and the four greets
+>   ACCEPTANCE poses (`--greets-displace`, the only arm where this does anything)
+>   differential-identical: t=5743 `26ad272a`, t=2845 `10adec3a`, t=6097
+>   `418fc1fa`, t=6133 `6d02f31b`.
+> * `--shadow_plane_hash` identical (43 bakes, running digest equal at every seq).
+> * `render_gate.sh` 4/4 PASS. Measured, not assumed: no gate scene sets
+>   `Face_MainOnly`, so the gate is an inertness control here, not a
+>   discriminator; the acceptance pins are the discriminator.
+> * Renders eyeballed: `docs/img/xform/{greets_t005743,city_t001961,chase_t000800,fountain_t002500}_color_xform.png`.
+>
+> ### TRAP RE-EARNED
+>
+> **chase's recorded pins reproduce WITHOUT `--profiler=0`.** Adding it gives a
+> different, self-consistent set of five. 16f's "the flag is inert on snapshots"
+> holds for city/fountain/greets and NOT for chase — run chase's recipe verbatim.
+>
+> ### WHAT IS LEFT (nothing clears 0.5 % of frame on its own)
+>
+> 1. shadow per-vertex loops **0.91 ms (1.8 %)** — memory-bound to the byte; only
+>    lever is Phase 5, priced above at 1.25 %.
+> 2. main-view `Transform_Objects` **0.48 ms (1.0 %)** — same wall.
+> 3. per-face `VisibilityFlagsAll` **0.26 ms (0.53 %)** — a compact per-mesh
+>    `uint8_t` flags array moves only the rejected half (the accepted half needs
+>    the same line for the bbox stamp) ⇒ ceiling ≈0.32 % of frame. PARKED.
+> 4. the **13.2 MB/frame shadow plane clear** (0.51 core-ms) — `sm.dirtyX0..Y1`
+>    already records the previous bake's texel rect, so a dirty-rect clear is
+>    byte-exact and available. ≈0.1 ms. Below bar.
+>
 > ## 2026-08-16q — THE SHADOW RASTER HAD NO PRE-REJECT. 231 735 CLIPPER ENTRIES/FRAME → 41 787, AND THE LEVEL IS PER-TILE, NOT PER-MAP
 >
 > **16p's row: `Shadows.cpp`'s per-(light, tile) walk handed every survivor of

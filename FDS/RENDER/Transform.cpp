@@ -152,6 +152,7 @@ enum : int {
 	XAB_FACE_NOOP = 16,
 	XAB_NO_FACE   = 32,
 	XAB_NO_BBOX   = 64,
+	XAB_NO_VERT   = 128,   // census build only (2026-08-16r)
 };
 
 // --xfrm_rcp: the per-vertex 1/z used by the projection. Mode 0 reproduces
@@ -216,6 +217,24 @@ struct XPassAcc {
 	std::atomic<int64_t> meshesSeen{0}, meshesXformed{0};
 	std::atomic<int64_t> vertsSeen{0}, vertsXformed{0};
 	std::atomic<int64_t> facesPushed{0};
+	// 2026-08-16r: the FACE-loop split, per pass. The offset histogram puts
+	// 31.6 % of Transform_Objects' self time on ONE instruction — the loop
+	// advance right after `tst w11,#0x3f; b.eq` — i.e. the per-face
+	// VisibilityFlagsAll() test's three random Vertex::Flags derefs plus the
+	// branch that decides on them. These counters say how many faces reach
+	// that test, how many it throws away, and (facesFlagFree) how many of them
+	// belong to a mesh whose vertices carry NO out-of-frustum bit at all, where
+	// the test's answer is a constant and the three loads buy nothing.
+	std::atomic<int64_t> facesTested{0};
+	std::atomic<int64_t> facesVisRej{0};     // rejected by VisibilityFlagsAll
+	std::atomic<int64_t> facesFlagFree{0};   // tested under a mesh with orAll==0
+	std::atomic<int64_t> vInside{0}, vAhead{0}, vRegular{0};
+	// S1 offscreen-proxy accounting: face-visits dropped by the
+	// `_offscreenPass && Face_MainOnly` test, and the vertex work spent on
+	// meshes where EVERY face is Face_MainOnly (i.e. meshes that are faceless
+	// in an offscreen pass and whose per-vertex transform buys nothing there).
+	std::atomic<int64_t> facesMainOnly{0};
+	std::atomic<int64_t> meshAllMainOnly{0}, vertsAllMainOnly{0};
 };
 XPassAcc g_xpass[XPK_NUM];
 std::atomic<int> g_xpassMainFrames{0};
@@ -238,8 +257,27 @@ void xpassDump(int frames) {
 		        ? 100.0 * double(a.vertsSeen.load() - a.vertsXformed.load()) / double(a.vertsSeen.load())
 		        : 0.0,
 		    a.facesPushed.load() / f);
+		const int64_t ft = a.facesTested.load();
+		if (ft > 0) {
+			std::fprintf(stderr,
+			    "[XFRM-PASS]   %-11s   fTested %9.1f  visRej %9.1f (%5.1f%%)  "
+			    "flagFree %9.1f (%5.1f%%)  vLoop In/Ah/Rg %9.1f/%9.1f/%9.1f\n",
+			    kXPassName[k], ft / f, a.facesVisRej.load() / f,
+			    100.0 * double(a.facesVisRej.load()) / double(ft),
+			    a.facesFlagFree.load() / f,
+			    100.0 * double(a.facesFlagFree.load()) / double(ft),
+			    a.vInside.load() / f, a.vAhead.load() / f, a.vRegular.load() / f);
+			std::fprintf(stderr,
+			    "[XFRM-PASS]   %-11s   mainOnlyFaces %9.1f (%5.1f%%)  "
+			    "allMainOnly meshes %7.1f verts %9.1f\n",
+			    kXPassName[k], a.facesMainOnly.load() / f,
+			    100.0 * double(a.facesMainOnly.load()) / double(ft),
+			    a.meshAllMainOnly.load() / f, a.vertsAllMainOnly.load() / f);
+		}
 		a.ns = 0; a.calls = 0; a.meshesSeen = 0; a.meshesXformed = 0;
 		a.vertsSeen = 0; a.vertsXformed = 0; a.facesPushed = 0;
+		a.facesTested = 0; a.facesVisRej = 0; a.facesFlagFree = 0;
+		a.vInside = 0; a.vAhead = 0; a.vRegular = 0;
 	}
 	std::fprintf(stderr, "[XFRM-PASS]   %-11s %30.3f ms/frame\n", "TOTAL", totMs);
 }
@@ -1351,9 +1389,21 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// probe renders. Timer locals live at FUNCTION scope so the
 	// Inside/Ahead/Regular `goto`s never jump over an initialisation.
 	const int  _xprofN   = (_mainView && !_shard) ? fds::FeatureFlags::xfrm_prof() : 0;
+#if FDS_VIS_CENSUS
+	// CENSUS BUILD ONLY — the ablations run in EVERY pass here. The shipping
+	// gate below is main-view + non-overridden-resolution, and the pass that
+	// dominates this symbol is the SHADOW bake, which is neither: measured
+	// 2026-08-16r, SHADOW is 42 of 45 calls and 11.8 of 14.5 core-ms a frame at
+	// greets t=5743. Read the shadow deltas off --shadow-prof's `xform` column.
+	// Measurement only: the ablations change pixels by construction, and this
+	// whole block is preprocessed out of the shipping build.
+	const int  _xablate  = fds::FeatureFlags::xfrm_ablate();
+	const bool xab       = (_xablate != 0);
+#else
 	const int  _xablate  = _mainView ? fds::FeatureFlags::xfrm_ablate() : 0;
-	const bool xp        = (_xprofN > 0) && (xresOverride < 0);
 	const bool xab       = (_xablate != 0) && (xresOverride < 0);
+#endif
+	const bool xp        = (_xprofN > 0) && (xresOverride < 0);
 	const bool xabNoTN   = xab && (_xablate & XAB_NO_TN);
 	const bool xabNoProj = xab && (_xablate & XAB_NO_PROJ);
 	const bool xabNoSoa  = xab && (_xablate & XAB_NO_SOA);
@@ -1373,6 +1423,13 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	                   : (_inShadowPass ? XPK_SHADOW : XPK_OFFSCREEN));
 	const int64_t xpassT0 = xpass ? xpNow() : 0;
 	int64_t xpassMeshSeen = 0, xpassMeshX = 0, xpassVSeen = 0, xpassVX = 0;
+	int64_t xpassFTest = 0, xpassFVisRej = 0, xpassFFlagFree = 0;
+	int64_t xpassVIn = 0, xpassVAh = 0, xpassVRg = 0;
+	int64_t xpassFMainOnly = 0, xpassMAllMO = 0, xpassVAllMO = 0;
+	// Per-mesh: OR of every transformed vertex's frustum bits. Recomputed by a
+	// separate sweep (census build only — cost is irrelevant here, and putting
+	// it in the vertex loops would change their codegen).
+	uint32_t xpassMeshOrAll = 0;
 	// Per-mesh / per-material decomposition of the same census. `_xms` lives
 	// at FUNCTION scope for the same reason the xprof timers do: the mesh loop
 	// below contains Inside/Ahead/Regular gotos and must not jump over an
@@ -1451,6 +1508,22 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// double-draws over the displaced detail. Inert unless --greets_displace
 		// built one (nothing sets Tri_OffscreenProxy otherwise).
 		if (!_offscreenPass && (T->Flags & Tri_OffscreenProxy)) continue;
+
+		// ...and its mirror image. EVERY face of this mesh carries
+		// Face_MainOnly, so in an offscreen pass the face loop below `continue`s
+		// on all of them and the mesh emits not one FList entry — which makes
+		// its per-vertex transform here output that nothing will ever read, the
+		// same argument the FIndex == 0 skip above rests on. The predicate is
+		// the OFFSCREEN one, not `_inShadowPass`: the shadow bake was already
+		// spared by Tri_NoShadowCast on the line above, and the passes that were
+		// not are the mirror RTT bakes and the env/SH probes (measured
+		// 2026-08-16r at greets t=5743 --greets-displace: 54 073 of the RTT's
+		// 100 618 verts/frame and 151 500 of the probes' 257 604). Flag-free
+		// here on purpose — the hatch is at scene init
+		// (--greets_displace_offscreen_skip), because a runtime flag read in
+		// this -ffp-contract=fast function is not byte-null even when never
+		// taken. Inert unless --greets_displace built the chunks.
+		if (_offscreenPass && (T->Flags & Tri_AllFacesMainOnly)) continue;
 
 		uint32_t frustumFlags = 0;  // Tri_Invisible | Tri_Ahead | Tri_Inside, racy
 		                            // when T->Flags is shared across N parallel
@@ -1704,6 +1777,13 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				soaZ = FI_->TPos_z; soaPY = FI_->PY;
 			}
 		}
+#if FDS_VIS_CENSUS
+		// Ablation 4 (census build): with the INLINE store live, `xabNoSoa`
+		// only suppressed the (already dead) post-pass sweep. Null the pointers
+		// so the ablation actually removes the four per-vertex SoA stores —
+		// the arm that prices the SoA half of this loop's write traffic.
+		if (xabNoSoa) { soaX = soaY = soaZ = soaPY = nullptr; }
+#endif
 
 		MatrixXMatrix(cam.view->Mat,T->RotMat,M);
 		Matrix_Copy(IM,M);
@@ -2076,6 +2156,13 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// which is why that function keeps its stores.
 		// Removing them drops 2 loads (U,V at offsets 104..111), 2 muls and
 		// 2 stores (offsets 12..19) per vertex per pass.
+#if FDS_VIS_CENSUS
+		// Ablation 128 (census build only): skip every per-vertex loop, keeping
+		// the object walk, the per-mesh setup + culls, the clone/SoA resolve and
+		// the face loop. The complement of ablation 32, so the two bracket the
+		// two halves of this function from opposite sides.
+		if (xab && (_xablate & XAB_NO_VERT)) goto AfterXForm;
+#endif
 		//    Main vertex loop,in case no restrictions apply.
 		if (!(T->Flags&Tri_Phong))
 		{
@@ -2344,6 +2431,23 @@ ERegular:
 		}
 AfterXForm:
 		if (xp) { xpTS = xpNow(); g_xprof.cur[XP_VERT] += xpTS - xpTV; }
+#if FDS_VIS_CENSUS
+		xpassMeshOrAll = 0;
+		if (xpass && _offscreenPass) {
+			bool allMO = (T->FIndex > 0);
+			for (Face *f_ = tFaces; f_ < tFaces + T->FIndex; ++f_)
+				if (!(f_->Flags & Face_MainOnly)) { allMO = false; break; }
+			if (allMO) { ++xpassMAllMO; xpassVAllMO += int64_t(VEnd - tVerts); }
+		}
+		if (xpass) {
+			for (Vertex *v_ = tVerts; v_ < VEnd; ++v_) xpassMeshOrAll |= v_->Flags;
+			xpassMeshOrAll &= Vtx_Visible;
+			const int64_t nv_ = int64_t(VEnd - tVerts);
+			if (frustumFlags & Tri_Inside)      xpassVIn += nv_;
+			else if (frustumFlags & Tri_Ahead)  xpassVAh += nv_;
+			else                                xpassVRg += nv_;
+		}
+#endif
 		FEnd=tFaces+T->FIndex;
 		// SoA refactor Phase 1+4: dual-write the transformed-vertex
 		// outputs into the per-mesh OR per-clone VertexFrame SoA
@@ -2467,6 +2571,14 @@ AfterXForm:
 		// Ablation 16: pure loop + Face-pointer-walk overhead, nothing else.
 		if (xab && (_xablate & XAB_FACE_NOOP)) continue;
 		if (xp) ++g_xprof.facesTested;
+#if FDS_VIS_CENSUS
+		if (xpass) {
+			++xpassFTest;
+			if (F->VisibilityFlagsAll()) ++xpassFVisRej;
+			if (!xpassMeshOrAll) ++xpassFFlagFree;
+			if (_offscreenPass && (F->Flags & Face_MainOnly)) ++xpassFMainOnly;
+		}
+#endif
 		// S1 offscreen proxy: the displaced stone detail (Face_MainOnly) is
 		// main-camera only. In any offscreen/bake pass the flat proxy mesh
 		// casts/reflects instead, so drop these faces here. Inert unless
@@ -2989,6 +3101,15 @@ AfterXForm:
 		// the -ffp-contract=fast codegen of the surrounding vertex/face work
 		// and measurably moved pixels: 216 bytes / 1920x1080 city, max 44).
 		a.facesPushed.fetch_add(faces.cPolys, std::memory_order_relaxed);
+		a.facesTested.fetch_add(xpassFTest, std::memory_order_relaxed);
+		a.facesVisRej.fetch_add(xpassFVisRej, std::memory_order_relaxed);
+		a.facesFlagFree.fetch_add(xpassFFlagFree, std::memory_order_relaxed);
+		a.vInside.fetch_add(xpassVIn, std::memory_order_relaxed);
+		a.vAhead.fetch_add(xpassVAh, std::memory_order_relaxed);
+		a.vRegular.fetch_add(xpassVRg, std::memory_order_relaxed);
+		a.facesMainOnly.fetch_add(xpassFMainOnly, std::memory_order_relaxed);
+		a.meshAllMainOnly.fetch_add(xpassMAllMO, std::memory_order_relaxed);
+		a.vertsAllMainOnly.fetch_add(xpassVAllMO, std::memory_order_relaxed);
 		if (xpKind == XPK_MAIN) {
 			const int fr = g_xpassMainFrames.fetch_add(1, std::memory_order_relaxed) + 1;
 			if (fr >= _xpassN) {
