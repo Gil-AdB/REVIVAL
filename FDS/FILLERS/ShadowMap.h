@@ -356,6 +356,41 @@ void CubeShadowMaps_Rebuild(struct Scene *Sc, int res);
 // the extra per-tap int ops + the bake-side swizzle cost against the line-
 // traffic saving (see docs/SHADOWMAP_TILING_PLAN.md for measured results).
 struct ShadowSwzShape { int a, b, maskX, maskY; };   // tile = 2^a × 2^b texels
+
+// The shape, published as a PLAIN GLOBAL — read this from hot taps, never the
+// getter below.
+//
+// WHY. The getter holds a function-local static whose initialiser calls getenv
+// + sscanf + fprintf, so clang must emit a thread-safe guard around it: a load,
+// a test, and on the cold arm `bl __cxa_guard_acquire`. A potential call is a
+// call to the register allocator. Inlined into a shadow tap it forced every
+// value live across it into a callee-save register — measured, that one branch
+// (never taken in any shipping run: --shadow_swizzle is default OFF) cost
+// `CubeShadow_Sample` EIGHT callee-save pairs and a 144-byte frame, in a
+// prologue that ran before every one of the tap's five early rejects.
+//
+// SAFE BY THE PLANES' OWN INVARIANT, not by luck. Every hot reader is gated on
+// `!sm.packSDSw.empty()`, and the only code that makes those planes non-empty
+// is ShadowMap_SwizzlePlanes (RENDER/Shadows.cpp), which calls ShadowSwzGetShape
+// — publishing this global — before it fills them. So a tap that can see the
+// tiled planes has already been preceded by the write below. The initialiser
+// is the 8x8 default, so even a read that somehow beat the getter would get the
+// shape the getter almost always publishes rather than garbage.
+//
+// MEASURED (`otool -tvV`, greets acceptance arm, docs/OPTIMIZATION_BACKLOG.md
+// 2026-08-16m). `CubeShadow_Sample` 410 -> 387 instructions, ONE `bl` -> none,
+// EIGHT callee-save pairs -> none, 144-byte frame -> none: it is a leaf, with
+// the 2x2 PCF still inlined and no call added anywhere. `computeMapShadowAtten`
+// (the 2-D spot tap, same wart) 10 -> 9 pairs, 0xc0 -> 0xa0 frame.
+// `lighting-w1` Gcyc/f -1.2 to -2.9 % at all five acceptance poses.
+//
+// DO NOT "simplify" this back into the getter. The obvious alternative — split
+// the tap's rare half into its own noinline function so the common path is a
+// leaf — was built and measured, and it LOSES: it buys the same leaf by adding
+// a real call on the 19.6 % of taps that reach the 2x2 PCF, which costs
+// `lighting-w1` +0.5 to +1.5 % of instructions AND cycles at every pose.
+extern ShadowSwzShape g_shadowSwzShape;
+
 inline const ShadowSwzShape& ShadowSwzGetShape()
 {
     static const ShadowSwzShape s = [] {
@@ -366,7 +401,8 @@ inline const ShadowSwzShape& ShadowSwzGetShape()
         const int a = lg(std::min(std::max(w, 2), 64));
         const int b = lg(std::min(std::max(h, 2), 64));
         std::fprintf(stderr, "[SHADOW-SWZ] tile shape %dx%d\n", 1 << a, 1 << b);
-        return ShadowSwzShape{a, b, (1 << a) - 1, (1 << b) - 1};
+        g_shadowSwzShape = ShadowSwzShape{a, b, (1 << a) - 1, (1 << b) - 1};
+        return g_shadowSwzShape;
     }();
     return s;
 }
@@ -654,7 +690,8 @@ __attribute__((always_inline)) inline float CubeShadow_Tail(const ShadowMap& sm,
     size_t o00, o10, o01, o11;
     const uint32_t *psB, *pdB;
     if (swz) {
-        const ShadowSwzShape &shp = ShadowSwzGetShape();
+        // the GLOBAL, not the getter — see g_shadowSwzShape above
+        const ShadowSwzShape &shp = g_shadowSwzShape;
         const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
         o00 = ShadowSwzOffset(iX,     iY,     tpr, shp);
         o10 = ShadowSwzOffset(iX + 1, iY,     tpr, shp);

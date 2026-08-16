@@ -10,6 +10,201 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16m — THE CUBE TAP'S CALL FRAME: 16l's fix is REFUTED, and the frame was never the PCF's fault — it was ONE cold call to a lazy `static`
+
+**16l parked "splitting the tail's RARE half into its own `noinline` function
+would make the common path a leaf — cheapest remaining item by far". Built and
+measured: it makes the leaf and it LOSES at every pose. The frame it was aimed
+at is real, but its cause is a `bl __cxa_guard_acquire` behind
+`ShadowSwzGetShape()`, and deleting THAT buys the same leaf for nothing —
+`lighting-w1` Gcyc/f −1.2 to −2.9 % at all five acceptance poses, zero new
+calls, 30 lines, BIT-EXACT.** Shipped FLAGLESS. Status: **DONE** (hoist) ·
+**PARKED, measured negative** (the split).
+
+### FIRST, 16l's PREMISE IS STALE AND THE NUMBER IS 0.43 %
+
+16l item 1 reads "`CubeShadow_Sample` still spills nine callee-save pairs into a
+144-byte frame, and 81 % of taps never touch the state that forces them". Two
+corrections, both measured on the tip rather than read off the old round:
+
+* **It is EIGHT pairs, not nine** — `stp` of d13/d12, d11/d10, d9/d8, x26/x25,
+  x24/x23, x22/x21, x20/x19, x29/x30, plus `sub sp, sp, #0x90` (`otool -tvV`).
+* **That frame is no longer on the hot path at all.** 16l's own
+  `--deferred_cube_prepass` (default ON) routes greets through
+  `CubeShadow_SampleCached`, which is INLINED into the tile kernel. A per-call
+  counter in each entry (`-DFDS_TAPPATH_CENSUS`) at greets t=5743, his arm:
+
+  | path | taps / frame | share |
+  |---|--:|--:|
+  | `CubeShadow_SampleCached` (prepass, inlined in the kernel) | 2 943 120 | **99.57 %** |
+  | `CubeShadow_Sample` (the out-of-line scalar tap, the one with the frame) | 12 593 | **0.43 %** |
+  | ... of all taps, reaching the 2x2 PCF (`CubeShadow_Tail`'s mixed arm) | 577 296 | 19.53 % |
+
+  So a round that optimises the 144-byte frame is optimising 0.43 % of taps.
+  What is actually hot is the SAME BODY inlined into
+  `Render_DeferredLighting_TileT<1>` — and there the identical wart costs
+  register pressure and I-cache in the largest function in the tree.
+
+### THE DISASSEMBLY, WHICH IS THE WHOLE FINDING
+
+`CubeShadow_Sample` contains **exactly one `bl`**, and it is not in the PCF:
+
+```
+00000001001f4a48   bl   __Z17ShadowSwzGetShapev     <- the only call in 410 instructions
+```
+
+`ShadowSwzGetShape()` returns a function-local `static const ShadowSwzShape`
+whose initialiser runs `getenv` + `sscanf` + `fprintf`, so clang must emit a
+thread-safe guard: a load, a test, and on the cold arm
+`bl __cxa_guard_acquire`. **A potential call is a call to the register
+allocator.** Every value live across it has to sit in a callee-save register,
+so the function opens a 144-byte frame and stores eight pairs — and it does
+that BEFORE the `dynBaked`, `lz <= 0.05`, two face-frustum and iX/iY rejects,
+i.e. 80 % of taps save and restore sixteen registers for a branch that
+`--shadow_swizzle` (default OFF) can never take.
+
+Only the `cubeIdx` bounds guard is shrink-wrapped past the prologue; every
+other reject branches to the full eight-pair epilogue.
+
+### WHAT WAS BUILT — four shapes, one worktree, one asset tree
+
+| shape | what it does |
+|---|---|
+| **`spl`** | 16l's literal ask: the 2x2 PCF moved to `noinline CubeShadow_TapMixed`, tail-called |
+| **`hoi`** | the shape published to a plain global; hot taps read the global, nothing outlined |
+| **`both`** | `spl` + `hoi` |
+| **`hon`** | `spl` behind a FeatureFlags hatch, flag ON |
+
+`otool -tvV`, and this table alone decides it:
+
+| binary | kernel `TileT<1>` | `CubeShadow_Sample` | `bl` | callee-save pairs | frame | spot tap pairs |
+|---|--:|--:|--:|--:|--:|--:|
+| **par** | 4762 | 410 | 1 | **8** | 144 B | 10 |
+| `spl` | 4535 | 168 | 0 | **0** | none | 10 |
+| **`hoi`** | 4828 | **387** | **0** | **0** | **none** | **9** |
+| `both` | 4697 | 168 | 0 | 0 | none | 9 |
+| `hon` | 4745 | 421 | 5 | **6** | yes | 10 |
+
+`spl` reaches the leaf by EXPORTING the rare half — `CubeShadow_TapMixed` is
+285 instructions with **nine** callee-save pairs and a 160-byte frame of its
+own, now paid on the 19.6 % of taps that reach it. `hoi` reaches the same leaf
+by DELETING the call, keeps the PCF inlined, and fixes the 2-D spot tap
+(`computeMapShadowAtten`, 515 → 505, 2 `bl` → 1, 10 → 9 pairs, 0xc0 → 0xa0)
+for free, because it had the identical wart.
+
+### MEASURED — min over 11 order-rotated interleaved rounds, one pose per process
+
+1512x848, `--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao
+--greets-displace`, `--deferred_prof=1 --hw_prof --profiler=0`, 10 iters.
+**Both columns quoted, per 16l's caveat.**
+
+| pose | row | par | `spl` | **`hoi`** | `both` | `hon` |
+|---|---|--:|--:|--:|--:|--:|
+| **5743** | `lighting-w1` Gi/f | 1.479 | 1.500 (+1.42 %) | **1.475 (−0.27 %)** | 1.485 (+0.41 %) | 1.503 (+1.62 %) |
+| | .. Gcyc/f | 0.385 | 0.387 (+0.52 %) | **0.378 (−1.82 %)** | 0.390 (+1.30 %) | 0.389 (+1.04 %) |
+| | .. core-ms | 134.49 | 135.25 (+0.57 %) | **132.23 (−1.68 %)** | 136.54 (+1.53 %) | 137.03 (+1.89 %) |
+| | `renderFrame` Gcyc/f | 1.285 | 1.289 (+0.31 %) | **1.275 (−0.78 %)** | 1.293 (+0.62 %) | 1.291 (+0.47 %) |
+| | `renderFrame` wall | 41.93 | 41.77 (−0.37 %) | **41.46 (−1.12 %)** | 41.93 (0.00 %) | 41.82 (−0.27 %) |
+| **2845** | `lighting-w1` Gi/f | 1.398 | 1.415 (+1.22 %) | **1.391 (−0.50 %)** | 1.398 (0.00 %) | 1.417 (+1.36 %) |
+| | .. Gcyc/f | 0.372 | 0.376 (+1.08 %) | **0.366 (−1.61 %)** | 0.376 (+1.08 %) | 0.376 (+1.08 %) |
+| | `renderFrame` wall | 42.16 | 42.00 (−0.37 %) | **41.52 (−1.50 %)** | 41.95 (−0.48 %) | 42.16 (+0.01 %) |
+| **6097** | `lighting-w1` Gi/f | 1.290 | 1.307 (+1.32 %) | **1.288 (−0.16 %)** | 1.295 (+0.39 %) | 1.309 (+1.47 %) |
+| | .. Gcyc/f | 0.351 | 0.356 (+1.42 %) | **0.341 (−2.85 %)** | 0.355 (+1.14 %) | 0.355 (+1.14 %) |
+| | `renderFrame` Gcyc/f | 1.168 | 1.173 (+0.43 %) | **1.140 (−2.40 %)** | 1.167 (−0.09 %) | 1.168 (0.00 %) |
+| | `renderFrame` wall | 37.28 | 37.35 (+0.18 %) | 37.55 (+0.72 %) | 37.53 (+0.66 %) | 37.69 (+1.09 %) |
+| **3409** | `lighting-w1` Gi/f | 1.568 | 1.576 (+0.51 %) | **1.553 (−0.96 %)** | 1.565 (−0.19 %) | 1.591 (+1.47 %) |
+| | .. Gcyc/f | 0.428 | 0.429 (+0.23 %) | **0.423 (−1.17 %)** | 0.433 (+1.17 %) | 0.439 (+2.57 %) |
+| | `renderFrame` wall | 43.11 | 43.34 (+0.53 %) | **42.72 (−0.90 %)** | 43.40 (+0.67 %) | 43.43 (+0.74 %) |
+| **5813** | `lighting-w1` Gi/f | 1.430 | 1.452 (+1.54 %) | **1.430 (0.00 %)** | 1.440 (+0.70 %) | 1.456 (+1.82 %) |
+| | .. Gcyc/f | 0.374 | 0.375 (+0.27 %) | **0.368 (−1.60 %)** | 0.378 (+1.07 %) | 0.379 (+1.34 %) |
+| | `renderFrame` wall | 40.66 | 40.15 (−1.26 %) | **40.14 (−1.26 %)** | 40.86 (+0.50 %) | 40.18 (−1.17 %) |
+
+`lighting-w2` Gi/f is **flat to four decimals at every pose on every arm** —
+the control that says this touched wave 1 alone.
+
+**`hoi` wins `Gcyc/f` at 5 of 5 poses (−1.17 to −2.85 %), `Ginstr/f` at 4 of 5
+(flat at the fifth), and wall at 4 of 5.** The one wall miss is **t=6097
+(+0.72 %)**, and at that pose the two counter columns move the other way
+hardest (`lighting-w1` Gcyc −2.85 %, `renderFrame` Gcyc −2.40 %) — read it as
+load-dirt, not as a regression, and note that this is the OPPOSITE direction of
+16l's t=3409 disagreement, so quote the pose, not the summary.
+
+**`spl` loses on BOTH columns at all five poses** (`lighting-w1` Gi +0.51 to
++1.54 %, Gcyc +0.23 to +1.42 %), so no column-picking rescues it.
+
+### WHY `spl` LOSES, TO THE INSTRUCTION
+
+The mixed arm runs 577 296 times a frame at t=5743. `spl`'s
+`CubeShadow_TapMixed` opens a 160-byte frame and stores nine pairs, so the
+per-call overhead is ~34 instructions:
+
+  577 296 × 34 = **0.0196 Gi/f = +1.33 % of `lighting-w1`** — against a
+  measured **+1.42 %**.
+
+`both` shrinks `TapMixed` to two pairs and no `bl` (~18 instructions of
+overhead): predicted **+0.70 %**, measured **+0.41 %**. The arithmetic and the
+counter agree twice, which is what makes this a refutation rather than a null
+result: **the split's cost IS the call it introduces, and there is no version
+of the split that does not introduce it.**
+
+### THE HATCH — refuted in the disassembly BEFORE it was timed
+
+A flag here has to keep the inlined body in the kernel, because that is what
+the OFF arm switches to. `hon`'s kernel is 4745 instructions with all **7**
+`ShadowSwzGetShape` references still present, against `spl`'s 4535 and 0 — the
+ON arm structurally cannot collect the win. Timed anyway: `hon` is **+1.36 to
++1.82 % of `lighting-w1` instructions at every pose**, the worst arm in the
+table. Its OFF arm reproduced the parent to −0.14 % (3 rounds), so the build is
+a valid control; it is the ON arm that cannot pay.
+
+**Shipped FLAGLESS**, same call as the material hoist: a behaviour-identical
+code-shape change whose flag would cost more than the change saves.
+
+### BYTE VERDICT
+
+* **Five acceptance poses + the nine 16f pins = 14 surfaces. 13 bit-identical
+  parent-to-child on the first pass**, one worktree, one asset tree; the 14th is
+  the fountain flip below. And the pins are at their RECORDED values, not merely
+  parent-matched: city `bd4ffbf8`, city-his-arm `4cb8d2ca`, fountain `8db68ccb`,
+  greets t=1588 `570a7b44`, chase `622b96a2` / `31aa5203` / `ca07a814`.
+* **`--deferred_cube_prepass_verify`: 0 mismatches in 76.8 M taps** over the
+  five poses (16.9 / 16.0 / 13.3 / 14.0 / 16.6 M).
+* `render_gate.sh` **4/4**. Same warning as 16l, re-earned: it **cannot
+  discriminate this change** — none of its four arms is a greets frame, and
+  16l instrumented city / chase / fountain / all four gate arms at **zero**
+  taps through the prepass. The five poses and greets t=1588 are the coverage.
+* **THE FOUNTAIN FLIP APPEARED A THIRD TIME**, again on the **PARENT**:
+  `b91cb2ba…` instead of `8db68ccb…` in the first gate pass. Re-gated **8/8
+  `8db68ccb` on BOTH binaries**. 16i predicted it, 16l saw it, this round saw
+  it. **It is pre-existing and it is not yours** — do not spend a battery.
+* Instrument builds still compile: `-DFDS_CUBE_ABLATE=10` and
+  `-DFDS_SHADOW_TAP_CENSUS=ON`.
+* Eyeballed: `docs/img/tapleaf/hoist_t5743.png`.
+
+### WHAT IS LEFT ON THE TAP
+
+1. **The 2-D SPOT tap, `computeMapShadowAtten`, is still not a leaf**: 505
+   instructions, **one `bl` left**, nine callee-save pairs, 160-byte frame. The
+   hoist took one of its two calls; the other was not chased. Same method
+   (find the `bl`, ask what it is doing in a hot tap) — unpriced, and the tap
+   is smaller than the cube tap's.
+2. **The call frame as a lever is now CLOSED for the cube tap.** It is a leaf
+   with a zero-byte frame; there is nothing left to remove.
+3. **The eager/lazy ratio and the uniformity pyramid** — unchanged from 16l
+   items 2 and 3, including "the one safe reject was tried and refuted, do not
+   re-derive".
+4. **`--ssao_downscale=2` is still the single largest lever on this arm**, and
+   still a look change nobody has approved.
+
+### METHOD NOTE, because it generalises
+
+Three rounds running (16h's hatch, 16l's four shapes, this one) the answer has
+been *the register allocator, not the arithmetic*. The instrument that settles
+it in one build is `otool -tvV`: **count the `bl`s in the hot function first.**
+A cold call in a hot leaf is worth more than any amount of instruction
+counting, because its cost is not in the branch — it is in the sixteen
+registers the branch forces everyone else to spill.
+
 ## 2026-08-16l — THE CUBE TAP (33 % of the call): its interior is 61 % projection prologue, 8-wide over PIXELS is BIT-EXACT, and the instruction count is the wrong metric for it
 
 **Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance

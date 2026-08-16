@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <mutex>
 
+ShadowSwzShape g_shadowSwzShape{3, 3, 7, 7};   // 8x8 until the getter runs
+
 thread_local ShadowMap *g_currentShadowMap = nullptr;
 thread_local int g_shadowRasterBox[4] = {0x7FFFFFFF, 0x7FFFFFFF, -1, -1};
 std::vector<ShadowMap> g_shadowMaps;

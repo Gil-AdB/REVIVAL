@@ -804,6 +804,48 @@ branch — and four shapes were tried before templating fixed it (OFF now +0.3 %
 **The fountain t=2500 flip that 16i recorded appeared again**, on the PARENT
 binary, in this round's first three runs; 6/6 clean on re-gate, both binaries.
 
+**Amendment 2026-08-16m (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16m) — 16l's
+"cheapest remaining item" is REFUTED, and its premise had gone stale under its
+own win.** 16l parked "`CubeShadow_Sample` still spills nine callee-save pairs
+into a 144-byte frame; split the tail's RARE half into a `noinline` function to
+make the common path a leaf". Three corrections, all measured on the tip:
+
+1. **It is eight pairs, not nine** (`otool -tvV`).
+2. **That function is 0.43 % of taps.** A per-entry counter
+   (`-DFDS_TAPPATH_CENSUS`) at greets t=5743 on his arm: 2 943 120 taps/frame
+   go through `CubeShadow_SampleCached` — *inlined into the tile kernel* by
+   16l's own `--deferred_cube_prepass` — against **12 593** through the
+   out-of-line `CubeShadow_Sample` that owns the frame. 19.53 % of all taps
+   reach the 2x2 PCF.
+3. **The frame was never the PCF's register pressure.** `CubeShadow_Sample`
+   contains exactly ONE `bl`, and it is `ShadowSwzGetShape()` — a function-local
+   `static` whose getenv/sscanf/fprintf initialiser forces a thread-safe guard
+   and a cold `bl __cxa_guard_acquire`. That one never-taken branch
+   (`--shadow_swizzle` is default OFF) is what pins sixteen registers callee-save
+   across a body whose five early rejects all run before it.
+
+**Publishing the shape to a plain global** (30 lines, `g_shadowSwzShape`) makes
+`CubeShadow_Sample` a **leaf: 8 callee-save pairs → 0, 144-byte frame → none,
+410 → 387 instructions, and no call added anywhere.** It fixes the 2-D spot tap
+`computeMapShadowAtten` in passing (2 `bl` → 1, 10 → 9 pairs, 0xc0 → 0xa0
+frame). `lighting-w1` **Gcyc/f −1.17 to −2.85 % at ALL FIVE poses**, Gi/f −0.96
+to 0.00 % (win at four, flat at the fifth), `renderFrame` wall −0.90 to −1.50 %
+at four poses and **+0.72 % at t=6097** — where both counter columns move
+hardest the other way (`renderFrame` Gcyc −2.40 %), i.e. the mirror image of
+16l's t=3409, so **quote the pose, not the summary**. BIT-EXACT: 0 mismatches in
+76.8 M taps under `--deferred_cube_prepass_verify`, five poses and the nine 16f
+pins at their recorded values, `render_gate.sh` 4/4 (and, exactly as 16l says,
+**it cannot discriminate a greets-only tap change**). Shipped FLAGLESS.
+
+**The literal split was built and it LOSES at every pose** — `lighting-w1`
++0.51 to +1.54 % instructions AND +0.23 to +1.42 % cycles — because it buys the
+leaf by adding a real call on the 19.6 % of taps that reach the PCF:
+577 296 calls × ~34 instructions = 0.0196 Gi/f = +1.33 % predicted against
++1.42 % measured. A hatched version is worse still (+1.36 to +1.82 %) and the
+disassembly says why before the clock does: a flag has to keep the inlined body
+in the kernel for its OFF arm to switch to, so its ON arm cannot collect the
+win. **The call frame is now CLOSED as a lever on the cube tap.**
+
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
 `cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and
@@ -1630,6 +1672,15 @@ Memory tag `project_strict_fill_test_no_payoff` notes that adding normal/depth c
 the fill pass cost ~2.5 ms with no visible quality gain; that route is parked.
 
 ## 4. Cube shadow tap — `CubeShadow_Sample` at `FILLERS/ShadowMap.h:210`
+
+> **STALE (2026-05) — mechanism only, and even some of that has moved.** The
+> four separate `sm.polyId` / `sm.depth` (+`_dynamic`) planes below are now ONE
+> interleaved `packSD`/`packDyn` word per texel; the line numbers are wrong; and
+> the tap has since grown an 8x8 uniformity pyramid that resolves 80.4 % of taps
+> without reading a texel at all. For the current shape and its costs read
+> §00a's 2026-08-16l and 16m amendments: 16l splits the tap into a vectorised
+> prologue (`--deferred_cube_prepass`) plus a scalar `CubeShadow_Tail`, and 16m
+> makes `CubeShadow_Sample` a zero-frame leaf.
 
 Steps per call:
 

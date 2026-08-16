@@ -794,7 +794,10 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 				size_t o00, o10, o01, o11;
 				const uint32_t *psB, *pdB;
 				if (swz) {
-					const ShadowSwzShape &shp = ShadowSwzGetShape();
+					// the GLOBAL, not the getter (ShadowMap.h) — the guarded
+					// static behind the getter is a CALL, and a call inlined
+					// here prices this tap's whole prologue.
+					const ShadowSwzShape &shp = g_shadowSwzShape;
 					const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
 					o00 = ShadowSwzOffset(iX,     iY,     tpr, shp);
 					o10 = ShadowSwzOffset(iX + 1, iY,     tpr, shp);
