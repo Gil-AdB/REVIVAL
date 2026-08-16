@@ -136,6 +136,31 @@ else()
     add_compile_definitions(FDS_W2_CENSUS=0)
 endif()
 
+# Wave-2 fill oct-decode pairing (2026-08-16o). MODE 4 = one 4-wide
+# meka::oct_decode_u32_x4 for the checkerboard cell's two NEIGHBOURS and its
+# CENTRE; 2 = the two neighbours only (2026-08-16h's named candidate); 0 = the
+# parent's three scalar decodes. HATCH=ON keeps --deferred_fill_oct_pair as a
+# runtime flag so a round can price parent / OFF / ON — the shipping form is
+# OFF (flagless), because a flag in this pixel body costs what it saves.
+set(FDS_W2_OCTPAIR_MODE "4" CACHE STRING "Wave-2 fill oct-decode pairing width: 0|2|4")
+set_property(CACHE FDS_W2_OCTPAIR_MODE PROPERTY STRINGS 0 2 4)
+add_compile_definitions(FDS_W2_OCTPAIR_MODE=${FDS_W2_OCTPAIR_MODE})
+option(FDS_W2_OCTPAIR_HATCH "Keep --deferred_fill_oct_pair as a runtime flag (measurement only)" OFF)
+if(FDS_W2_OCTPAIR_HATCH)
+    add_compile_definitions(FDS_W2_OCTPAIR_HATCH=1)
+else()
+    add_compile_definitions(FDS_W2_OCTPAIR_HATCH=0)
+endif()
+# Runs the SCALAR oct_decode_u32 behind every lane of the wide one and counts
+# bit-pattern disagreements (--omni_census gates the print). The landing bar is
+# 0 mismatches. Compile-time for the same reason the wave-2 census is.
+option(FDS_W2_OCTPAIR_VERIFY "Compile the wave-2 oct-pair bit-pattern verify counters (--omni_census)" OFF)
+if(FDS_W2_OCTPAIR_VERIFY)
+    add_compile_definitions(FDS_W2_OCTPAIR_VERIFY=1)
+else()
+    add_compile_definitions(FDS_W2_OCTPAIR_VERIFY=0)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.

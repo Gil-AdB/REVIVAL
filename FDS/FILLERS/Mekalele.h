@@ -15,6 +15,7 @@
 #include "simde/x86/avx2.h"
 #include <simd/vectorclass.h>
 #include <cassert>
+#include <cstring>
 #include <array>
 #include <vector>
 #include <iostream>
@@ -343,6 +344,11 @@ inline __m256i oct_encode_u32_x8(__m256 nx, __m256 ny, __m256 nz) {
     return _mm256_or_si256(qx, _mm256_slli_epi32(qy, 16));
 }
 
+// Bit pattern of a float, for verify counters that must compare EXACT results
+// rather than "close enough" (a == b would pass +0.0 against -0.0 and fail on
+// two NaNs that are the same NaN).
+inline u32 fbits(float f) { u32 b; std::memcpy(&b, &f, sizeof b); return b; }
+
 // Inverse of oct_encode_u32_x8's per-lane code (normal plane).
 inline void oct_decode_u32(u32 packed, float &nx, float &ny, float &nz) {
 	int qx = int16_t(packed & 0xffff);
@@ -360,6 +366,91 @@ inline void oct_decode_u32(u32 packed, float &nx, float &ny, float &nz) {
 	ny = oy * invLen;
 	nz = az * invLen;
 }
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+// ─── 4-WIDE oct_decode_u32. BIT-EXACT WITH THE SCALAR, PER LANE. ────────────
+//
+// Every operation the scalar above compiles to is an ELEMENT-WISE operation on
+// AArch64, so lane l of this function executes the identical instruction on the
+// identical bits and produces the identical result. The scalar's codegen at
+// -O3 -ffp-contract=fast (otool on Render_DeferredLighting_TileFill, and the
+// same shape in the -S listing) is:
+//
+//   sxth / asr #16        -> the two int16 halves          (integer, per lane)
+//   scvtf ; fmul kQ       -> ox, oy                        (per lane)
+//   fabs ; fsub ; fsub    -> az = (1-|ox|) - |oy|          (per lane, ORDERED)
+//   fcmp az,0 ; b.pl      -> the fold, as fneg + fcsel     (per lane; SELECTED
+//                            here because two lanes can disagree -- both arms
+//                            are finite for every input word, so the selected
+//                            bits are the branch's bits)
+//   fmul  len, ox, ox
+//   fmadd len, oy, oy, len    <- FUSED
+//   fmadd len, az, az, len    <- FUSED
+//   frsqrte.2s / fmul.2s / frsqrts.2s / fmul.2s   (fast_rsqrt, already vector
+//                            and already lane-independent -- SimdHelpers.h:16)
+//   fmul x3               -> nx, ny, nz
+//
+// The multiply-adds are reproduced with vfmaq_f32 (fused, same operand order)
+// and the length is accumulated in the same order, so no reassociation is
+// introduced. FRSQRTE/FRSQRTS are architecturally specified element-wise ops:
+// the .4s form gives each lane exactly what the .2s form gives it.
+//
+// `ox` can never be -0.0f (it is scvtf of an integer times a positive scale),
+// so the `ox >= 0` select needs no negative-zero special case.
+inline void oct_decode_u32_x4(uint32x4_t packed,
+                              float32x4_t &nx, float32x4_t &ny, float32x4_t &nz) {
+	const int32x4_t p  = vreinterpretq_s32_u32(packed);
+	const int32x4_t qx = vshrq_n_s32(vshlq_n_s32(p, 16), 16);  // int16_t(packed & 0xffff)
+	const int32x4_t qy = vshrq_n_s32(p, 16);                   // int16_t(packed >> 16)
+	const float32x4_t kQ   = vdupq_n_f32(1.0f / 32767.0f);
+	const float32x4_t one  = vdupq_n_f32(1.0f);
+	const float32x4_t zero = vdupq_n_f32(0.0f);
+	float32x4_t ox = vmulq_f32(vcvtq_f32_s32(qx), kQ);
+	float32x4_t oy = vmulq_f32(vcvtq_f32_s32(qy), kQ);
+	const float32x4_t t  = vsubq_f32(one, vabsq_f32(ox));      // 1 - |ox|
+	const float32x4_t az = vsubq_f32(t, vabsq_f32(oy));        // (1-|ox|) - |oy|
+	const float32x4_t fx = vsubq_f32(one, vabsq_f32(oy));      // 1 - |oy|
+	const uint32x4_t  fold = vcltq_f32(az, zero);              // az < 0
+	ox = vbslq_f32(fold, vbslq_f32(vcgeq_f32(ox, zero), fx, vnegq_f32(fx)), ox);
+	oy = vbslq_f32(fold, vbslq_f32(vcgeq_f32(oy, zero), t,  vnegq_f32(t )), oy);
+	float32x4_t len = vmulq_f32(ox, ox);
+	len = vfmaq_f32(len, oy, oy);
+	len = vfmaq_f32(len, az, az);
+	float32x4_t e = vrsqrteq_f32(len);                         // fast_rsqrt, 4-wide
+	e = vmulq_f32(vrsqrtsq_f32(vmulq_f32(e, e), len), e);
+	nx = vmulq_f32(ox, e);
+	ny = vmulq_f32(oy, e);
+	nz = vmulq_f32(az, e);
+}
+
+// The 2-wide form. Same argument, same guarantees; the .2s ops are the ones
+// fast_rsqrt itself already uses.
+inline void oct_decode_u32_x2(uint32x2_t packed,
+                              float32x2_t &nx, float32x2_t &ny, float32x2_t &nz) {
+	const int32x2_t p  = vreinterpret_s32_u32(packed);
+	const int32x2_t qx = vshr_n_s32(vshl_n_s32(p, 16), 16);
+	const int32x2_t qy = vshr_n_s32(p, 16);
+	const float32x2_t kQ   = vdup_n_f32(1.0f / 32767.0f);
+	const float32x2_t one  = vdup_n_f32(1.0f);
+	const float32x2_t zero = vdup_n_f32(0.0f);
+	float32x2_t ox = vmul_f32(vcvt_f32_s32(qx), kQ);
+	float32x2_t oy = vmul_f32(vcvt_f32_s32(qy), kQ);
+	const float32x2_t t  = vsub_f32(one, vabs_f32(ox));
+	const float32x2_t az = vsub_f32(t, vabs_f32(oy));
+	const float32x2_t fx = vsub_f32(one, vabs_f32(oy));
+	const uint32x2_t  fold = vclt_f32(az, zero);
+	ox = vbsl_f32(fold, vbsl_f32(vcge_f32(ox, zero), fx, vneg_f32(fx)), ox);
+	oy = vbsl_f32(fold, vbsl_f32(vcge_f32(oy, zero), t,  vneg_f32(t )), oy);
+	float32x2_t len = vmul_f32(ox, ox);
+	len = vfma_f32(len, oy, oy);
+	len = vfma_f32(len, az, az);
+	float32x2_t e = vrsqrte_f32(len);
+	e = vmul_f32(vrsqrts_f32(vmul_f32(e, e), len), e);
+	nx = vmul_f32(ox, e);
+	ny = vmul_f32(oy, e);
+	nz = vmul_f32(az, e);
+}
+#endif  // __ARM_NEON
 
 // Inverse of oct_encode_u16. Output is unit-length (mod quantization
 // error). Used by the TANGENT plane and legacy callers.

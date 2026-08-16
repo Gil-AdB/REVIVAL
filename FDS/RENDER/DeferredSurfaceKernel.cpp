@@ -1824,6 +1824,61 @@ static void W2Census_Report()
 #define W2_CEN_ADD(idx, v)  ((void)0)
 #endif
 
+// ─── --deferred_fill_oct_pair build switches ────────────────────────────────
+// FDS_W2_OCTPAIR_MODE   2 = pair the two NEIGHBOUR decodes (16h's named
+//                           candidate); 4 = neighbours + the CENTRE, one
+//                           4-wide decode for all three the fill does.
+// FDS_W2_OCTPAIR_HATCH  1 = read the runtime flag, so a round can measure
+//                           parent / OFF / ON; 0 = flagless (shipping form,
+//                           chosen because in this kernel a flag costs about
+//                           what a micro-mechanism saves — 2026-08-16h).
+#ifndef FDS_W2_OCTPAIR_MODE
+#define FDS_W2_OCTPAIR_MODE 4
+#endif
+#ifndef FDS_W2_OCTPAIR_HATCH
+#define FDS_W2_OCTPAIR_HATCH 0
+#endif
+#if !(defined(__ARM_NEON) || defined(__aarch64__))
+#undef  FDS_W2_OCTPAIR_MODE
+#define FDS_W2_OCTPAIR_MODE 0
+#define FDS_W2_OCTPAIR_ON   false
+#elif FDS_W2_OCTPAIR_HATCH
+#define FDS_W2_OCTPAIR_ON   fds::FeatureFlags::deferred_fill_oct_pair()
+#else
+#define FDS_W2_OCTPAIR_ON   true
+#endif
+
+// [INSTRUMENT] -DFDS_W2_OCTPAIR_VERIFY=ON, runtime gate --omni_census. Runs the
+// SCALAR oct_decode_u32 behind every lane of the wide one and counts bit-pattern
+// disagreements. Compile-time, not a FeatureFlag, for the same reason the wave-2
+// census and ablate ladder are compile-time: a runtime predicate in this pixel
+// body costs about what a micro-mechanism saves (2026-08-16h).
+#ifndef FDS_W2_OCTPAIR_VERIFY
+#define FDS_W2_OCTPAIR_VERIFY 0
+#endif
+// [0] centre decodes checked, [1] centre bit mismatches, [2] neighbour lanes
+// checked, [3] neighbour normal bit mismatches, [4] dot bit mismatches,
+// [5] VERDICT mismatches, [6] lanes whose az < 0 (the fold the scalar BRANCHES
+// over and the wide form SELECTS — this is what the select costs).
+static constexpr int W2V_N = 8;
+#if FDS_W2_OCTPAIR_VERIFY
+static std::atomic<uint64_t> g_w2Ver[W2V_N];
+static void W2Verify_Report()
+{
+	uint64_t c[W2V_N];
+	for (int i = 0; i < W2V_N; ++i) c[i] = g_w2Ver[i].load(std::memory_order_relaxed);
+	if (c[0] == 0 && c[2] == 0) return;
+	std::fprintf(stderr,
+	    "[W2-OCTPAIR-VERIFY] centre lanes %llu mismatch %llu | neighbour lanes %llu "
+	    "normal-bits %llu dot-bits %llu VERDICT %llu | az<0 fold lanes %llu (%.2f%%)\n",
+	    (unsigned long long)c[0], (unsigned long long)c[1], (unsigned long long)c[2],
+	    (unsigned long long)c[3], (unsigned long long)c[4], (unsigned long long)c[5],
+	    (unsigned long long)c[6],
+	    100.0 * double(c[6]) / double((c[0] + c[2]) ? (c[0] + c[2]) : 1));
+	for (int i = 0; i < W2V_N; ++i) g_w2Ver[i].store(0, std::memory_order_relaxed);
+}
+#endif
+
 // ─── Per-PIXEL live-light census — the companion instrument to the ladder ────
 // The shadow-tap census (43ac3456) counts per (tile x light). This counts per
 // (pixel x light): where in the reject chain each of a tile's lights dies, and
@@ -6716,12 +6771,25 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	// hdrWrite alone is NOT sufficient and using it is a bug.
 	const bool fillLdrSkip = fds::FeatureFlags::deferred_fill_ldr_skip()
 	    && hdrWrite && ctx.ldrDiscarded;
+	// --deferred_fill_oct_pair: decode the checkerboard cell's TWO NEIGHBOUR
+	// normals (mode 4: and the CENTRE, on lane 2) in one wide oct_decode
+	// instead of one scalar decode per neighbour inside neighborNormalOk.
+	// See meka::oct_decode_u32_x4 for the bit-exactness argument. Checkerboard
+	// only — quarter's neighbour count is 2 or 4 and its shape is different.
+	const bool octPairG  = FDS_W2_OCTPAIR_ON && !quarter && quarterNormalCheck;
+	const bool octPair4  = octPairG && (FDS_W2_OCTPAIR_MODE == 4);
+	// The centre decode moves into the wide decode only in mode 4.
+	const bool centreDecodeScalar = quarterNormalCheck && !octPair4;
 #if FDS_W2_ABLATE
 	float w2Sink = 0.0f;
 #endif
 #if FDS_W2_CENSUS
 	uint64_t w2cn[W2_CEN_N] = {0};
 	const bool w2Census = fds::FeatureFlags::omni_census() && ctx.xres >= 640;
+#endif
+#if FDS_W2_OCTPAIR_VERIFY
+	uint64_t w2vn[W2V_N] = {0};
+	const bool w2Verify = fds::FeatureFlags::omni_census() && ctx.xres >= 640;
 #endif
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -6778,8 +6846,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// Center normal decoded once; reused by every fill pattern's
 			// neighbor-similarity test below. Cheap enough vs the avoided
 			// full shading that we always decode (even if matID fails).
+			// --deferred_fill_oct_pair: on the CHECKERBOARD path the centre
+			// rides lane 2 of the paired decode below, so it is not decoded
+			// here (and env-force-full cells stop paying for a decode their
+			// fallback never reads).
 			float ncX = 0, ncY = 0, ncZ = 0;
-			if (quarterNormalCheck) {
+			if (centreDecodeScalar) {
 				meka::oct_decode_u32(gb.normal[i], ncX, ncY, ncZ);
 			}
 			W2_ABL_CUT(5, ncX + ncY + ncZ);
@@ -6983,6 +7055,86 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				if (px < XRes - 1) nidx[nc++] = i + 1;
 				if (nc == 0) { W2_CEN(4); continue; }
 				W2_ABL_CUT(6, float(nc));
+				// --deferred_fill_oct_pair: one wide oct decode for the whole
+				// cell instead of one scalar decode per neighbour (plus, in
+				// mode 4, the centre's). `nidx[nc-1]` is nidx[1] in the 99.93 %
+				// of cells with both neighbours and nidx[0] on the two screen
+				// columns that have one — that lane is then simply not read,
+				// so no branch is needed for the border case. The verdicts are
+				// carried as a 2-BIT MASK, not a bool[2]: an indexed 2-element
+				// array in this pixel body lands on the stack (2026-08-16h's
+				// three refuted carries all died that way).
+				unsigned normOkBits = 3u;
+#if FDS_W2_OCTPAIR_MODE
+				if (octPairG) {
+					uint32x2_t pk = vdup_n_u32(gb.normal[nidx[0]]);
+					pk = vset_lane_u32(gb.normal[nidx[nc - 1]], pk, 1);
+					float32x2_t nx2, ny2, nz2, cx, cy, cz;
+#if FDS_W2_OCTPAIR_MODE == 4
+					// Lane 2 = the CENTRE. Lane 3 duplicates it (unread).
+					const uint32x4_t pk4 = vcombine_u32(pk, vdup_n_u32(gb.normal[i]));
+					float32x4_t nx4, ny4, nz4;
+					meka::oct_decode_u32_x4(pk4, nx4, ny4, nz4);
+					nx2 = vget_low_f32(nx4); ny2 = vget_low_f32(ny4); nz2 = vget_low_f32(nz4);
+					cx = vdup_laneq_f32(nx4, 2); cy = vdup_laneq_f32(ny4, 2); cz = vdup_laneq_f32(nz4, 2);
+					ncX = vget_lane_f32(cx, 0); ncY = vget_lane_f32(cy, 0); ncZ = vget_lane_f32(cz, 0);
+#else
+					meka::oct_decode_u32_x2(pk, nx2, ny2, nz2);
+					cx = vdup_n_f32(ncX); cy = vdup_n_f32(ncY); cz = vdup_n_f32(ncZ);
+#endif
+					// The scalar dot is fmul(ncY,ny) -> fmadd(ncX,nx,·) ->
+					// fmadd(ncZ,nz,·) at -ffp-contract=fast; reproduced here
+					// term for term so the compare sees the same bits.
+					float32x2_t d = vmul_f32(cy, ny2);
+					d = vfma_f32(d, cx, nx2);
+					d = vfma_f32(d, cz, nz2);
+					const uint32x2_t ok = vcge_f32(d, vdup_n_f32(quarterNormalCos));
+					normOkBits = vaddv_u32(vand_u32(ok, vcreate_u32(0x0000000200000001ull)));
+#if FDS_W2_OCTPAIR_VERIFY
+					// Build with -DFDS_W2_OCTPAIR_VERIFY=ON, gate with
+					// --omni_census. Re-runs the SCALAR decode behind every
+					// lane and compares BIT PATTERNS of nx/ny/nz, the dot and
+					// the verdict. The landing bar is 0 mismatches: 2026-08-16e
+					// shipped a vectorisation whose bilinear disagreed on 84 %
+					// of taps, and only a counter like this one caught it.
+					if (w2Verify) {
+						const float ncSx = vget_lane_f32(cx, 0);
+						const float ncSy = vget_lane_f32(cy, 0);
+						const float ncSz = vget_lane_f32(cz, 0);
+						float rx, ry, rz;
+						meka::oct_decode_u32(gb.normal[i], rx, ry, rz);
+						++w2vn[0];
+						auto foldNeeded = [](uint32_t pw) {
+							const float ox = float(int16_t(pw & 0xffff)) * (1.0f/32767.0f);
+							const float oy = float(int16_t((pw >> 16) & 0xffff)) * (1.0f/32767.0f);
+							return (1.0f - std::fabs(ox) - std::fabs(oy)) < 0.0f;
+						};
+						if (foldNeeded(gb.normal[i])) ++w2vn[6];
+						if (meka::fbits(rx) != meka::fbits(ncSx) ||
+						    meka::fbits(ry) != meka::fbits(ncSy) ||
+						    meka::fbits(rz) != meka::fbits(ncSz)) ++w2vn[1];
+						const size_t vj[2] = { nidx[0], nidx[nc - 1] };
+						const float vnx[2] = { vget_lane_f32(nx2,0), vget_lane_f32(nx2,1) };
+						const float vny[2] = { vget_lane_f32(ny2,0), vget_lane_f32(ny2,1) };
+						const float vnz[2] = { vget_lane_f32(nz2,0), vget_lane_f32(nz2,1) };
+						const float vd[2]  = { vget_lane_f32(d,0),   vget_lane_f32(d,1)   };
+						for (int L = 0; L < nc; ++L) {
+							float sx, sy, sz;
+							meka::oct_decode_u32(gb.normal[vj[L]], sx, sy, sz);
+							const float sd = ncSx*sx + ncSy*sy + ncSz*sz;
+							++w2vn[2];
+							if (foldNeeded(gb.normal[vj[L]])) ++w2vn[6];
+							if (meka::fbits(sx) != meka::fbits(vnx[L]) ||
+							    meka::fbits(sy) != meka::fbits(vny[L]) ||
+							    meka::fbits(sz) != meka::fbits(vnz[L])) ++w2vn[3];
+							if (meka::fbits(sd) != meka::fbits(vd[L])) ++w2vn[4];
+							const bool sOk = sd >= quarterNormalCos;
+							if (sOk != bool((normOkBits >> L) & 1u)) ++w2vn[5];
+						}
+					}
+#endif
+				}
+#endif
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
 				// C (texture/lighting decouple) — same divide-out + trust region
@@ -6997,7 +7149,24 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				float ahB=0, ahG=0, ahR=0; int nsharp=0;   // HDR reconstructed radiance
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
+#if FDS_W2_OCTPAIR_MODE == 0
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
+#else
+#if FDS_W2_OCTPAIR_HATCH
+					if (!octPairG) { if (!neighborCompatible(nidx[k], matIDc)) continue; } else
+#endif
+					{
+						// neighborCompatible, with the normal term read out of
+						// the paired decode's mask. matID still short-circuits
+						// first — the decode above is unconditional, which costs
+						// a wasted lane on the ~1 % of pairs matID rejects and
+						// buys the pairing.
+						if (((gb.txtr[nidx[k]] >> 20) & 0xFF) != matIDc) continue;
+						if (quarterNormalCheck) W2_CEN(13);
+						if (!((normOkBits >> k) & 1u)) continue;
+						if (!neighborZOk(nidx[k])) continue;
+					}
+#endif
 					dword p = 0;
 					if (!fillLdrSkip) {   // --deferred_fill_ldr_skip
 						p = out[nidx[k]];
@@ -7374,6 +7543,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	if (w2Census) {
 		for (int i = 0; i < W2_CEN_N; ++i)
 			if (w2cn[i]) g_w2Cen[i].fetch_add(w2cn[i], std::memory_order_relaxed);
+	}
+#endif
+#if FDS_W2_OCTPAIR_VERIFY
+	if (w2Verify) {
+		for (int i = 0; i < W2V_N; ++i)
+			if (w2vn[i]) g_w2Ver[i].fetch_add(w2vn[i], std::memory_order_relaxed);
 	}
 #endif
 #if FDS_W2_ABLATE
@@ -8016,6 +8191,10 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 #if FDS_W2_CENSUS
 		if (fds::FeatureFlags::omni_census() && !inlineDispatch && ctx.xres >= 640)
 			W2Census_Report();
+#endif
+#if FDS_W2_OCTPAIR_VERIFY
+		if (fds::FeatureFlags::omni_census() && !inlineDispatch && ctx.xres >= 640)
+			W2Verify_Report();
 #endif
 	}
 

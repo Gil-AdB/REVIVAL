@@ -906,6 +906,71 @@ disassembly says why before the clock does: a flag has to keep the inlined body
 in the kernel for its OFF arm to switch to, so its ON arm cannot collect the
 win. **The call frame is now CLOSED as a lever on the cube tap.**
 
+**Amendment 2026-08-16o (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-16o) — 16h's
+item 1 is DONE, and its own named form was a quarter of the prize.** 16h left
+"the three oct normal decodes, ~0.078 Gi/f = 29 % of the fill" with a
+`oct_decode_u32_x2` over the TWO NEIGHBOURS as the bit-exact candidate. Both
+were built. The 2-wide is **−2.6 to −3.6 % of `lighting-w2`**; a **4-wide that
+also carries the CENTRE on lane 2** (`meka::oct_decode_u32_x4`, one decode where
+the fill did three) is **−11.9 to −13.4 % at six poses**: `lighting-w2`
+**0.272 → 0.239** at t=5743, `DeferredLighting-call` **1.762 → 1.729 (−1.87 %)**,
+`renderFrame` **4.712 → 4.680 (−0.68 %)**, −1.87 to −2.28 % of the call and
+−0.58 to −0.85 % of the frame at t=2845 / 3409 / 5743 / 5813 / 6097 / 3122.
+`lighting-w1` **flat to four decimals at all six** — the control that says only
+wave 2 moved.
+
+**Why the widths differ is a LIVE RANGE, not a lane count** (a `.2s` and a `.4s`
+op cost the same on this core). Per cell, from the disassembly: parent 110
+instructions, 2-wide child 82, 4-wide child 54. The 4-wide delivers its
+arithmetic in full — 51 predicted against 51.9 measured (0.0330 Gi/f over
+636 349 cells), ladder and `otool` agreeing to 2 %. The 2-wide delivers **55 %**
+of its 23/cell, because it leaves `ncX/ncY/ncZ` decoded at the top of the cell
+body and live across the whole neighbour loop; the 4-wide consumes the centre
+inside the block (by-element, `fmul.2s v0, v0, v0[2]`) and the three scalars die
+at once. **16h's "this one removes registers rather than adding them" was right
+about the mechanism and wrong about which version has it.**
+
+BIT-EXACT, and read from the disassembly before it was claimed: every operation
+the scalar `oct_decode_u32` compiles to is element-wise on AArch64, the two
+fused `fmadd`s of the length and the compiler's chosen dot order
+(`fma(ncZ,nz, fma(ncX,nx, ncY*ny))`) are reproduced term for term with
+intrinsics, and `fast_rsqrt` was already `vrsqrte` + one Newton step on a
+`float32x2_t`. The one shape change is the `az < 0` fold — a BRANCH in the
+scalar, a SELECT in the vector because the lanes disagree — and both arms are
+finite for every input word. Checked, not just argued:
+`-DFDS_W2_OCTPAIR_VERIFY=ON` (committed) runs the scalar behind every lane and
+compares BIT PATTERNS — **0 mismatches in 57.3 M lanes** on normals, dot and
+verdict. The same counter prices the fold at **62.8–95.2 % of lanes**, i.e. the
+branch the vector gives up was mostly being taken anyway.
+
+**READ THE FLOORS.** The parent's own round-to-round spread over 11 kept rounds:
+`lighting-w2` Gi/f **0.00–0.37 %**, Gcyc/f 3.5–5.6 %, wall 3.4–16.6 %;
+`renderFrame` Gi/f 0.02–0.12 %, Gcyc/f 0.9–1.9 %, wall 3.1–5.6 %. The
+**instruction column is what resolves this change at every level**; the w2 cycle
+win (−7 to −13 %) is 2–3x its floor and real; **`Gcyc/f` and `wall` at
+`renderFrame` are inside their floors and prove nothing here** — the OFF arm,
+which can only add work, reads −3.6 % and −6.5 % frame cycles at two poses in
+this batch. Do not quote a frame-level time number from this round.
+
+Shipped **FLAGLESS** — and for a different reason than 16h's hoist. Here the
+hatch is **free**: `--deferred_fill_oct_pair` ON measures identical to the
+flagless build to four decimals at all six poses, because the predicate is
+loop-invariant and hoists out of the pixel body, where 16h's sat inside the
+k-loop. So the flag buys no speed, the change is bit-exact so it needs no look
+dial, and the only thing the dial can do is cost +0.7 to +1.1 % of the fill. The
+three arms survive as CMake switches (`-DFDS_W2_OCTPAIR_MODE=0|2|4`,
+`-DFDS_W2_OCTPAIR_HATCH=ON`). BYTES: five poses at BOTH 1920x1080 and the
+1512x848 measurement resolution, t=3122, the nine 16f pins at their recorded
+values 3/3, the city `--deferred_checkerboard` control `7eb0f8c4`, and every
+`--omni_census` wave-2 census row identical parent-to-child. `render_gate.sh`
+4/4 and **instrumented rather than trusted: all four of its arms take ZERO cells
+through the fill** (no `[W2-CENSUS]` line on a census build) — the greets t=1588
+pin, which takes 1 036 800 cells, plus the six-pose arm diff are the coverage.
+The fountain t=2500 flip appeared once in five PARENT runs and never in five
+child runs. **`lighting-w2` is now 0.239 = 13.8 % of the call**; what is left in
+it is 16h's item 2 (the 3-channel scalar arithmetic, ~0.03 Gi/f) and that one is
+**NOT** bit-exact by construction — clang already SLP-vectorises parts of it.
+
 t=5743: `DeferredLighting-call` 2.041 (41 % of `renderFrame`'s 4.999),
 **`ssao` 1.651 (33 %)**, `gbuffer` 1.002 (20 %), `bloom-chain` 0.136,
 `cones` 0.084, `tonemap-post` 0.037. So 00's rows 1 and 5 (the omni loop and

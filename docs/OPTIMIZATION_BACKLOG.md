@@ -10,6 +10,248 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16o — 16h's ITEM 1, the three oct decodes: the 2-wide pairing it named is REAL but a quarter of the prize — the win needs the CENTRE in the same vector
+
+**16h left "the three oct normal decodes, ~0.078 Gi/f = 29 % of the fill" as its
+item 1 and named a `oct_decode_u32_x2` over the TWO NEIGHBOURS as the bit-exact
+candidate. Built both. The 2-wide is worth −2.6 to −3.6 % of `lighting-w2`; a
+4-wide that also carries the CENTRE on lane 2 is worth −11.9 to −13.4 %, at
+every one of six poses. Shipped FLAGLESS and BIT-EXACT — 0 mismatches in 57.3 M
+lanes under a bit-pattern verify counter, plus 26 byte-identical surfaces.**
+Status: **DONE** (the 4-wide) · **MEASURED AND SUPERSEDED** (16h's named 2-wide)
+· **REFUTED BY CONSTRUCTION, not built** (16h's skip-when-equal fast path).
+
+Commit: this one. `lighting-w2` **0.272 → 0.239 Gi/f at t=5743**, so the row
+16g opened at 0.306 and 16h took to 0.272 now stands at **0.239 = 13.8 % of
+`DeferredLighting-call`, 5.1 % of `renderFrame`**.
+
+### THE BIT-EXACTNESS ARGUMENT IS THE DISASSEMBLY, AND IT IS READ BEFORE IT IS CLAIMED
+
+`otool -tvV` on the SHIPPING binary's `Render_DeferredLighting_TileFill` (four
+`sxth` sites: the centre decode, the checkerboard neighbour decode, the quarter
+neighbour decode, and the wave-1 replay's) gives the scalar's exact codegen at
+`-O3 -ffp-contract=fast`. Every operation in it is ELEMENT-WISE on AArch64:
+
+```
+sxth / asr #16          the two int16 halves                    (integer)
+scvtf ; fmul kQ         ox, oy
+fabs ; fsub ; fsub      az = (1-|ox|) - |oy|                    (ORDERED)
+fcmp az,0 ; b.pl        the fold, as fneg + fcsel               (7 instructions)
+fmul  len, ox, ox
+fmadd len, oy, oy, len  <- FUSED, and the ORDER matters
+fmadd len, az, az, len  <- FUSED
+frsqrte.2s / fmul.2s / frsqrts.2s / fmul.2s      fast_rsqrt, ALREADY vector
+fmul x3                 nx, ny, nz
+fmul  s22, s1, s22      ncY*ny        <- the dot the compiler chose:
+fmadd s22, s0, s23, s22   + ncX*nx       fma(ncZ,nz, fma(ncX,nx, ncY*ny))
+fmadd s22, s2, s24, s22   + ncZ*nz
+fcmp ; b.lt             dot >= --quarter_normal_cos
+```
+
+`meka::oct_decode_u32_x4` reproduces that sequence with intrinsics — `vfmaq_f32`
+for the two fused adds, in the same order, so no reassociation is introduced;
+`vrsqrteq_f32` + `vrsqrtsq_f32` for `fast_rsqrt`, which are architecturally
+element-wise (the `.4s` form gives each lane what the `.2s` form gives it); and
+`vmulq/vfmaq` for the dot, term for term. **The one shape change is the `az < 0`
+fold: the scalar BRANCHES over it and the vector must SELECT, because the lanes
+disagree.** Both arms are finite for every input word (`|ox|,|oy| <= 1`), and
+`ox` can never be `-0.0f` (it is `scvtf` of an integer times a positive scale),
+so the selected bits are the branch's bits. `b.pl` and `b.lt` are the ordered
+forms, matching `>=` on NaN — which cannot arise here anyway.
+
+**And it is checked, not just argued.** `-DFDS_W2_OCTPAIR_VERIFY=ON` (committed,
+runtime gate `--omni_census`) runs the scalar decode behind every lane and
+compares BIT PATTERNS of `nx/ny/nz`, of the dot, and of the verdict:
+
+```
+greets, his arm, 1512x848, six poses x 5 frames
+centre lanes 19.1 M   neighbour lanes 38.2 M   mismatches 0 / 0 / 0
+```
+
+**57.3 M lanes, zero disagreements** — normal bits, dot bits and verdict alike.
+
+### THE FOLD IS THE COMMON CASE, WHICH IS WHY THE SELECT IS CHEAP
+
+The same counter prices the branch the vector gives up: the `az < 0` fold is
+taken on **62.8 % (t=5813) to 95.2 % (t=6097)** of lanes — 72.4 % at t=5743.
+So the scalar's `b.pl` is a data-dependent branch that *falls through* only
+5–37 % of the time, and the seven instructions the wide form always pays are
+seven the scalar mostly paid anyway. **This is the opposite of what a
+"branchless costs extra work" instinct predicts, and it is why the fold was
+never the thing to worry about.**
+
+### MEASURED — six poses, five arms, one worktree, one asset tree
+
+Interleaved, order-rotated, **min over 11 kept rounds of 12** (round 1 dropped),
+one pose per process, 1512x848, `--profiler=0 --deferred_prof=1 --hw_prof`, his
+acceptance arm. Load ran **4.9–10.9**. `off` = the HATCHED child with
+`--no-deferred_fill_oct_pair`, i.e. the restructure priced by itself.
+`x2` = 16h's named two-neighbour pairing, flagless.
+
+| pose | `lighting-w2` Gi/f par | off | **x4 ON** | x2 | Gcyc/f par -> ON |
+|---|--:|--:|--:|--:|--:|
+| t=2845 | 0.2750 | 0.2780 (+1.09 %) | **0.2400 (−12.73 %)** | 0.2660 (−3.27 %) | 0.0550 -> 0.0490 (−10.91 %) |
+| t=3409 | 0.2710 | 0.2740 (+1.11 %) | **0.2360 (−12.92 %)** | 0.2620 (−3.32 %) | 0.0570 -> 0.0510 (−10.53 %) |
+| t=5743 | 0.2720 | 0.2740 (+0.74 %) | **0.2390 (−12.13 %)** | 0.2640 (−2.94 %) | 0.0550 -> 0.0510 (−7.27 %) |
+| t=5813 | 0.2700 | 0.2730 (+1.11 %) | **0.2380 (−11.85 %)** | 0.2630 (−2.59 %) | 0.0540 -> 0.0490 (−9.26 %) |
+| t=6097 | 0.2770 | 0.2790 (+0.72 %) | **0.2400 (−13.36 %)** | 0.2670 (−3.61 %) | 0.0560 -> 0.0500 (−10.71 %) |
+| t=3122 | 0.2760 | 0.2790 (+1.09 %) | **0.2400 (−13.04 %)** | 0.2670 (−3.26 %) | 0.0550 -> 0.0500 (−9.09 %) |
+
+| pose | `DeferredLighting-call` Gi/f | `renderFrame` Gi/f | `lighting-w1` Gi/f |
+|---|--:|--:|--:|
+| t=2845 | 1.6770 -> **1.6420 (−2.09 %)** | 4.7510 -> **4.7160 (−0.74 %)** | 1.3890 -> 1.3890 (0.00 %) |
+| t=3409 | 1.8060 -> **1.7710 (−1.94 %)** | 4.9290 -> **4.8930 (−0.73 %)** | 1.5210 -> 1.5210 (0.00 %) |
+| t=5743 | 1.7620 -> **1.7290 (−1.87 %)** | 4.7120 -> **4.6800 (−0.68 %)** | 1.4770 -> 1.4770 (0.00 %) |
+| t=5813 | 1.7150 -> **1.6830 (−1.87 %)** | 4.5670 -> **4.5350 (−0.70 %)** | 1.4320 -> 1.4310 (−0.07 %) |
+| t=6097 | 1.5790 -> **1.5430 (−2.28 %)** | 4.2210 -> **4.1850 (−0.85 %)** | 1.2890 -> 1.2890 (0.00 %) |
+| t=3122 | 1.7370 -> **1.7000 (−2.13 %)** | 6.2430 -> **6.2070 (−0.58 %)** | 1.4470 -> 1.4470 (0.00 %) |
+
+**`lighting-w1` is flat to four decimals at all six poses** — the control that
+says this touched wave 2 alone. Against its own OFF arm the mechanism is
+**−13.5 to −14.0 %**.
+
+**NOISE FLOORS, per column, from the parent's own spread over the 11 kept
+rounds (max−min)/min — read them before reading a delta:**
+
+| row | Gi/f | Gcyc/f | wall |
+|---|--:|--:|--:|
+| `lighting-w2` | **0.00–0.37 %** | 3.5–5.6 % | 3.4–16.6 % |
+| `DeferredLighting-call` | 0.06–0.13 % | 0.9–2.3 % | 3.8–8.3 % |
+| `renderFrame` | 0.02–0.12 % | 0.9–1.9 % | 3.1–5.6 % |
+
+So **the instruction column is the one that resolves this change** at every
+level: −12 % of w2 against a 0.0–0.4 % floor, −2 % of the call against 0.1 %,
+−0.7 % of the frame against 0.1 %. The `Gcyc/f` win on w2 (−7 to −13 %) is two
+to three times its own floor and is real; **`Gcyc/f` and `wall` at `renderFrame`
+are INSIDE their floors and prove nothing here** — the OFF arm, which can only
+add work, reads −3.6 % and −6.5 % renderFrame cycles at two poses in this batch,
+which is the floor talking. Do not quote a frame-level time number from this
+round.
+
+### WHY 16h's 2-WIDE IS ONLY A QUARTER OF IT — the answer is a live range, not a lane count
+
+Instruction counts from the disassembly, per checkerboard cell:
+
+| | parent | x2 child | **x4 child** |
+|---|--:|--:|--:|
+| centre decode | 33 | 33 | — |
+| neighbour decode + dot + compare, x2 | 38 + 39 | 47 (one 2-wide block) | — |
+| the wide block (3 decodes, 2 dots, the mask) | — | — | **52** |
+| mask tests in the k-loop | — | 2 | 2 |
+| **total** | **110** | **82** | **54** |
+
+At t=5743 the fold is taken on 72.4 % of lanes, so the parent's effective count
+is ~105. **x4 predicts 105 − 54 = 51 instructions/cell saved; the clock says
+0.0330 Gi/f over 636 349 cells = 51.9. Ladder and disassembly agree to 2 %.**
+
+x2 does NOT deliver its arithmetic: it predicts 105 − 82 = 23/cell and measures
+**0.0080 Gi/f = 12.6/cell — 55 % of what the static count promises.** The
+difference between the two forms is not the vector width (a `.2s` op and a `.4s`
+op cost the same on this core). **It is that x4 also DELETES the centre normal's
+live range.** In the parent `ncX/ncY/ncZ` are decoded at the top of the cell body
+and stay live across the whole neighbour loop; x2 leaves them exactly there and
+merely rearranges the neighbour work, so it pays 16h's tax — *"in this kernel a
+flag-guarded predicate or eight extra live values in the pixel body cost about
+what any of these mechanisms save"*. x4 consumes the centre inside the block (as
+lane 2, by-element: `fmul.2s v0, v0, v0[2]`) and the three scalars die
+immediately, so the allocator gets registers back instead of paying for them.
+**16h's hypothesis that "this one removes registers rather than adding them" was
+right about the mechanism and wrong about which version has it.**
+
+Two small byte-null bonuses fall out of the same move: the centre decode no
+longer runs on the 0.06–0.70 % of cells that are env-force-full (their fallback
+never reads it), and the neighbour decodes stop being gated behind the matID
+test — which costs a wasted lane on the ~1 % of pairs matID rejects and is what
+makes the pairing possible at all.
+
+### FLAGLESS, AND THE REASON IS MEASURED — the hatch is FREE here, and that is not 16h's story
+
+16h's material hoist shipped flagless because *the flag ate the win* (par 0.293 /
+off 0.300 / **on 0.292**). That is NOT what happens here: `h4on` and `f4` — the
+same mechanism with and without a runtime predicate — measure **identical Gi/f
+to four decimals at all six poses** (0.2400 / 0.2360 / 0.2390 / 0.2380 / 0.2400 /
+0.2400 both). The predicate is loop-invariant and hoists out of the pixel body;
+16h's did not, because it sat inside the neighbour loop. **Report the mechanism,
+not the slogan: a flag in this kernel is expensive when it is inside the k-loop
+and free when it is above it.**
+
+So the decision is made on other grounds, all three pointing the same way: the
+hatch buys **no speed**; the change is **bit-exact**, so there is no look to
+dial; and the only thing the dial can do is **cost +0.7 to +1.1 % of the fill**.
+Shipped **FLAGLESS**, with the three arms preserved as CMake switches
+(`-DFDS_W2_OCTPAIR_MODE=0|2|4`, `-DFDS_W2_OCTPAIR_HATCH=ON`) so any future round
+can rebuild par / off / on without re-deriving them. `--deferred_fill_oct_pair`
+stays in `FeatureFlags.def` but is **INERT in a default build** — the same shape
+as `--omni_census`, and its description says so.
+
+### BYTES — 26 surfaces, and the gate is instrumented rather than trusted
+
+* **Five acceptance poses under HIS OWN ARM, at BOTH resolutions**: 1920x1080
+  (the snapshot's own) and **1512x848 (the measurement resolution)** —
+  identical parent-to-child, and identical for the x2 and hatched builds too.
+* **t=3122 under the same arm** — `4b59d3d0…` on all four binaries.
+* **The nine 16f pins at their RECORDED values, 3/3 on the child**: greets
+  t=1588 `570a7b44`, city `bd4ffbf8` / `4cb8d2ca`, chase `3bfd4244` / `42d79fad`
+  / `622b96a2` / `31aa5203` / `ca07a814`, fountain `8db68ccb`.
+* **The city checkerboard control** (t=1961, `--env_live_water --deferred --hdr
+  --city_env_pixel --deferred_checkerboard` — the fill on a non-tonemapped
+  transport, off greets): `7eb0f8c4…` on both binaries.
+* **`--omni_census` census rows IDENTICAL parent-to-child** at t=5743 / 2845 /
+  6097, every row including `[13] neighbour normal checks` (1 264 816 /
+  1 272 044 / 1 277 453), whose semantics were deliberately preserved by
+  counting where the verdict is CONSUMED, not where the decode now happens.
+  The parent also reproduces 16h's recorded census exactly (641 088 cells,
+  99.14 % averaged, 768 full-shade, 1.980 compatible neighbours).
+* **`render_gate.sh` 4/4 PASS** — and **INSTRUMENTED, not assumed: all four of
+  its arms take ZERO cells through the wave-2 fill.** A census build with
+  `--omni_census` added to each of `mirrortest`, `rttslot`, `conetest`,
+  `halotest` prints no `[W2-CENSUS]` line at all; `--deferred_checkerboard` is a
+  greets `setDefault` and no gate row is a greets row. **The greets t=1588 pin
+  DOES exercise it — 1 036 800 cells at 1920x1080 — so that pin plus the
+  six-pose arm diff is the real coverage, not the gate.**
+* **Eyeballed at 1:1 and at 3x nearest-neighbour** on t=5743 (mech legs over the
+  cracked stone floor, the classic speckle surface): no parity pattern. The
+  by-parity census the black-checkerboard round (16j) used as its instrument
+  agrees — wave-1 parity mean luma 100.178 against wave-2's 100.556 at t=5743
+  (+0.378), 108.583/109.079 at t=2845, 89.934/90.275 at t=6097. That small
+  positive bias is the fill's own and is on BOTH binaries, which are
+  byte-identical; 16j's defect signature was 175.36 against ~0.
+* **The fountain t=2500 flip appeared once in five PARENT runs** and never in
+  five child runs. Pre-existing, recorded in 16i and 16l, running total now
+  ~2 %. **A battery that reads that as a regression will burn a session.**
+
+Renders: `docs/img/w2oct/w2oct_t{2845,5743,6097}_after.png` (byte-identical to
+the parent).
+
+### REFUTED BY CONSTRUCTION, and this is the honest form of "don't conflate"
+
+16h left a counter for *"skip the neighbour oct decode when its PACKED normal
+equals the centre's"* — **15.80 % hit rate per PAIR**, worth ~0.009 Gi/f gross.
+**The 4-wide makes that fast path strictly worse and it was not built.** There
+are no longer three decodes to skip individually: there is one block, and a lane
+cannot be skipped out of it. To skip the block you would need *both* neighbours
+to match the centre — if the two events were independent that is ~2.5 % of
+cells, and it would buy 52 instructions on those while costing a compare and a
+branch on the other 97.5 %. The premise the counter was measured under
+(per-decode skipping) no longer exists. **Not "measured and lost" — dissolved.**
+
+### WHAT IS LEFT IN w2 (now 0.239 Gi/f = 13.8 % of the call)
+
+1. **The 3-channel scalar arithmetic, est. ~0.03 Gi/f** — 16h's item 2, now the
+   largest remaining item and **the only one big enough to matter**. Per
+   neighbour: three `fmax` + three `fdiv` + three compares for the texel ratio,
+   three fp16 loads, three `fmla`, the texel byte unpack; per cell the HDR
+   store. All of it is (B,G,R,·) and fits one NEON vector. **Read 16h's warning
+   before starting: clang already SLP-vectorises parts of this 2-wide
+   (`fmul.2s` x50, `fmla.2s` x22 in the shipping function), so a 4-wide rewrite
+   is NOT bit-exact by construction the way this round's was — it must be
+   byte-gated, and the `fdiv` reassociation is where it will break.**
+2. **`hsB/hsG/hsR` are dead whenever `nsharp > 0`** — ~0.004 Gi/f. Below this
+   campaign's 0.01 bar on its own; only worth doing inside item 1.
+3. **Nothing else in this row is worth a round.** After items 1 and 2 the fill
+   is ~0.20 Gi/f = 11 % of the call, and `lighting-w1` at 1.43–1.52 is where
+   84 % of the call still lives.
+
 ## 2026-08-16n — THE 2-D SPOT TAP: no leaf is available, and it did not need one — the win is the 17-ARGUMENT CALL, and half of it is not the frame
 
 **16m parked "the 2-D spot tap `computeMapShadowAtten` is still not a leaf:
