@@ -218,7 +218,33 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 			             &w);
 			Vector_SelfAdd(&accum, &w);
 		}
-		if (Vector_Length(&accum) < EPSILON) return face->N;
+		if (Vector_Length(&accum) < EPSILON) {
+			// The gate rejected every neighbour. Normally that is the crease
+			// case and face->N is the right answer — but when the FACE is
+			// degenerate (zero-area) face->N is the un-normalized zero cross
+			// that Compute_Face_Normals deliberately leaves (PREPROC.CPP:33),
+			// and returning it hands this clone a normal with no direction.
+			// The gate could not have done anything else: with F->N == 0 the
+			// test `Dot(face->N, adj->N) >= cos` is 0 >= cos for EVERY
+			// neighbour, itself included, so the accumulator was empty by
+			// construction, not by geometry.
+			//
+			// The original SHARED vertex still carries the mesh's own
+			// area-weighted normal (Compute_Vertex_Normals ran before this
+			// pass and the degenerate face contributed nothing to it), so
+			// inherit that instead of propagating the zero. Nothing is
+			// invented: it is the normal this vertex HAD one stage earlier,
+			// and it is what every non-degenerate face sharing the corner
+			// agreed on. If that is zero too (greets' Piramid needles: every
+			// incident face degenerate), the zero stands and
+			// Compute_Vertex_Tangents' guard takes it from there.
+			// --zero_normal_census counts what lands here.
+			if (Vector_Length(&const_cast<Face *>(face)->N) < EPSILON && origVtx
+			    && Vector_Length(&origVtx->N) > EPSILON) {
+				return origVtx->N;
+			}
+			return face->N;
+		}
 		Vector_Norm(&accum);
 		return accum;
 	};
