@@ -248,6 +248,17 @@ collinearity scan of one `.FLD`.
   (`26ad272a` / `10adec3a` / `418fc1fa` / `6d02f31b`) is not written down
   anywhere in `docs/`; eight candidate arms were tried and none reproduces them.
   Worth recording next to those hashes before the next round needs them.
+  > **2026-08-16x — CLOSED. The pins were never orphaned; the recipe was in
+  > `scratchpad/xform_pins.sh`, 16r's own untracked battery script, and it
+  > reproduces all four 3/3 on two binaries first try:**
+  > `./DEMO --snapshot=greets@t=<T> --out=<dir> --deferred --hdr --hdr-linear
+  > --texture-filter=2 --ssao --ssao-gtao --greets-displace --profiler=0`,
+  > one pose per process, **no `FDS_GREETS_CAM`**, stock 1920×1080 `rev.cfg`.
+  > The likeliest thing the eight candidates did is set `FDS_GREETS_CAM` —
+  > `docs/greets_review_poses.txt` carries a camera for all four t values and
+  > the t=1588 pin next door REQUIRES the prefix, but here it moves the hash
+  > (t=5743 → `19d94f48…`). Now in the SESSION_STATE gates table as its own
+  > row, with the profiler and resolution sensitivities beside it.
 * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` /
   `166fa25a`).
 * `--shadow_plane_hash` **identical parent vs final, 2/2 stable each** —
