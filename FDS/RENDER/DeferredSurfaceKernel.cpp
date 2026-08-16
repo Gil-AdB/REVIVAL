@@ -6303,10 +6303,29 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	// kernel drops on parity alone — so skipping here under OuterVec would
 	// leave those cells shaded by neither wave (the hole class this commit
 	// closes for the env row). Fall back to the reduced re-shade there.
+	const bool outerVecG = deferredLightingOuterVecEnabled();
 	const bool checkerEdgeFullG = (checker || quarter)
 	    && fds::FeatureFlags::deferred_checker_edge_full()
-	    && !deferredLightingOuterVecEnabled();
-	const bool hdrWrite     = fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr;   // HDR B1: see main kernel
+	    && !outerVecG;
+	// ⚠ WAVE-1 TRANSPORT MUST MATCH. Render_DeferredLighting_Tile_OuterVec
+	// writes NO ctx.hdrBuf at all — its 8-bit pack IS the HDR transport, lifted
+	// by Hdr_ActivateNoFog precisely because it leaves h[3] at 0 (see the
+	// warning comment at that kernel's head). This fill used to average
+	// neighbour RADIANCE out of ctx.hdrBuf and then stamp h[3]=1.0f, so on a
+	// PreferOuterVec scene (city CITY.CPP:2537, crash CRASH.CPP:25, fountain
+	// FOUNTAIN.CPP:1029) under --hdr + --deferred_checkerboard/--deferred_quarter
+	// every wave-2 cell got an ALL-ZERO average stamped as covered — which
+	// BLOCKS the lift, so the tonemap read a cleared buffer and printed a BLACK
+	// CHECKERBOARD. Measured before this line existed, city t=1961 1920x1080
+	// `--deferred --hdr --deferred_checkerboard`: 91 764 pixels below luma 4,
+	// 99.2 % of them on the wave-2 parity (wave-1 parity mean luma bit-identical
+	// to the non-checkerboard arm, 175.36). Under `--hdr_linear`: 80 973, 100 %
+	// on wave-2 parity. Fix = take the SAME transport wave 1 took: 8-bit only,
+	// h[3] left 0, Hdr_ActivateNoFog lifts both halves the same way. This also
+	// clears fillLdrSkip below (it is `&& hdrWrite`), which is required — with
+	// no HDR write the VPage average IS the product on this path.
+	const bool hdrWrite     = fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr
+	                          && !outerVecG;   // HDR B1: see main kernel
 	const bool hdrLinear    = hdrWrite && fds::FeatureFlags::hdr_linear();  // HDR B2
 	// Normal-similarity threshold for the quarter fill predicate. matID
 	// equality alone is too loose — same hull material on a curved

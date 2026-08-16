@@ -10,6 +10,211 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16j — 16i's THREE HANDOVERS, RUN: one is REAL and fixed, one CANNOT FIRE, and the battery found a DIFFERENT live nondeterminism
+
+**16i (4) handed on two bugs "found by code reading, NOT verified by running
+anything" plus one recorded ~2 % pin flip. All three were run. Verdicts:**
+
+| item | verdict |
+|---|---|
+| (a) OuterVec + `--hdr` + checkerboard black checkerboard | **CONFIRMED by rendering, FIXED** (`DeferredSurfaceKernel.cpp:6309`) |
+| (b) `VolCompositeAdd` racing on `g_hdrActive` / `g_hdrBuf` from shard workers | **REFUTED as written** — the precondition is real and measured, the write is never issued |
+| (c) fountain t=2500 1-in-43 flip | **0 flips in 49** on the parent at tip `aa60d0ce` — stays an open singleton |
+| — | **NEW: the greets mirror SHATTER is nondeterministic, 12 flips in 49 (24.5 %), and it is not (b)** |
+
+### (a) THE BLACK CHECKERBOARD IS REAL, AND IT IS TOTAL — city AND crash
+
+16i predicted it from the source and could not find a shipping config that
+reaches it. Reached with two flags, and it is not subtle. **city t=1961,
+1920×1080, `--deferred --hdr --deferred_checkerboard --profiler=0`**, censused
+by the wave parity `(x^y)&1` (wave 1 shades parity 0, the fill covers parity 1):
+
+| arm | mean luma | wave-1 half | wave-2 half | Δ | px < luma 4 on wave-2 half |
+|---|--:|--:|--:|--:|--:|
+| `--hdr` (full rate, control) | 175.36 | 175.36 | 175.35 | **0.01** | 723 (of 1 036 800) |
+| `--deferred_checkerboard` (no HDR, control) | 89.61 | 89.64 | 89.57 | **0.06** | 134 |
+| **`--hdr --deferred_checkerboard`** | 166.85 | **175.36** | **158.33** | **17.03** | **91 764** |
+| **`--hdr --hdr_linear --deferred_checkerboard`** | 197.06 | 206.79 | 187.32 | **19.46** | **80 973 (100 % of them on wave-2 parity)** |
+
+The wave-1 half is **bit-identical to the full-rate arm** (175.36 both), which is
+the control that says this is the FILL and nothing else. **crash f120** (a dark
+scene, so read the ratio not the absolute): wave-1 half 4.47, wave-2 half
+**0.14**, and 1 036 081 of 1 036 800 wave-2 pixels below luma 4 — the whole half
+of the frame is black. Pictures, before/after:
+
+* `docs/img/ovchk/city_t1961_chk_crop8x_before.png` / `..._after.png` — 64×64 at
+  (1376,128), nearest-8× so the lattice is a lattice and not a grey.
+* `docs/img/ovchk/city_t1961_hdrchk_before.png` / `..._after.png` (full frame),
+  `..._hdr_fullrate.png` (the control), `..._hdrlin_chk_before/after.png`,
+  `docs/img/ovchk/crash_f120_chk_before/after.png`.
+
+**THE MECHANISM, AND WHY THE FIX IS NOT AT THE KERNEL 16i WARNED ABOUT.**
+`Render_DeferredLighting_Tile_OuterVec` writes **no** `ctx.hdrBuf` — its 8-bit
+pack IS the HDR transport, and `Hdr_ActivateNoFog` lifts it precisely because it
+leaves `h[3]` at 0 (16i put the warning comment at that kernel's head; it is
+right and it stays). The wave-2 fill did not know that: it averaged neighbour
+RADIANCE out of `ctx.hdrBuf` — all zero, because OuterVec never wrote it — and
+then stamped `h[3] = 1.0f` (`DeferredSurfaceKernel.cpp:6588 / :6678 / :6980`).
+That stamp is what does the damage: `Hdr_ActivateNoFog`'s `if (h[x*4+3] != 0.0f)
+continue` skips the pixel, so the lift never reaches it and the tonemap prints a
+cleared buffer.
+
+**FIX** (`DeferredSurfaceKernel.cpp:6309`): one term on the fill's `hdrWrite`,
+`&& !outerVecG`. Wave 2 then takes the SAME transport wave 1 took — 8-bit only,
+`h[3]` left 0, `Hdr_ActivateNoFog` lifts both halves identically. It also clears
+`fillLdrSkip` for free (that is `&& hdrWrite`), which is *required*: with no HDR
+write the VPage average IS the product on this path. After: city parity Δ
+**17.03 → 0.05** and **91 764 → 733** dark wave-2 pixels (against 722 legitimately
+dark ones on the wave-1 half); under `--hdr_linear` Δ **19.46 → 0.03** and
+**80 973 → 0**; crash f120 4.47 vs 4.47 both halves.
+
+**REACHABILITY — it is two flags, not exotic.** `PreferOuterVec = 1` is set by
+**three** scenes, not the two 16i named: city (`CITY.CPP:2537`), crash
+(`CRASH.CPP:25`) and **fountain (`FOUNTAIN.CPP:1029`)**. None of them
+`setDefault`s checkerboard or quarter, so the shipping demo never hits it — but
+`--cinematic` turns HDR on per scene, so `--cinematic --deferred_checkerboard`
+(or `--deferred_quarter`) on any of those three was a black-latticed frame.
+greets is the scene that DOES `setDefault(deferred_checkerboard, true)` and it is
+not a `PreferOuterVec` scene, which is why this never showed up in the arm
+everything is benched on.
+
+**BYTE-NULL OFF ITS PREDICATE, and this was run, not argued:** city `--hdr`
+alone `4b0e31bf…` and city `--deferred_checkerboard` alone `58644ea7…` are
+identical parent-to-fixed; four 16f city pins at their recorded values
+(`bd4ffbf8` / `4cb8d2ca` / `f473fe2b` / `d3374de6`); fountain t=2500 `8db68ccb`;
+chase t=100/400/800/1200/1600 identical parent-to-fixed 5/5; greets t=1588
+identical parent-to-fixed; `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6`
+/ `b41894f9` / `166fa25a`).
+
+> **Note on quoting that gate, in 16i's own spirit.** `render_gate.sh` **cannot
+> discriminate this flag** either: no arm passes `--deferred_checkerboard`. The
+> real coverage is the city/crash census above plus the parent-identical control
+> arms. And the chase / greets pin values in a clean worktree are NOT the
+> recorded ones (greets' pin keys on uncommitted authoring files, and the chase
+> figures in 16f were taken one-pose-per-process); **parent-vs-fixed identity on
+> the same tree** is the control that carries the weight there, and it holds.
+
+### (b) `VolCompositeAdd`: THE PRECONDITION IS REAL. THE WRITE IS NEVER ISSUED.
+
+16i's reading was half right, and the half it got right is worth keeping:
+**`g_hdrActive` really is stale-`true` while the shard workers run.**
+Instrumented and printed from inside the bake, greets under his acceptance arm,
+`FDS_GREETS_SHATTER=1`, two ticks:
+
+```
+[VOLCONES] inline=1 64x64 spots=50 hdrActive=0   <- tick 1 (nothing has activated yet)
+[VOLCONES] inline=1 64x64 spots=50 hdrActive=1   <- tick 2, x238 shards, 12 workers
+```
+
+`Hdr_BeginFrame` clears the flag only inside `renderFrame` (`RENDER.CPP:698`),
+and `renderReflectionCameras` runs in the greets TICK, before it — so from frame
+2 on, every shard worker sees the previous frame's `true`. If `VolCompositeAdd`
+were reached there it would do exactly what 16i predicted: take the HDR arm and
+add into `fds::g_hdrBuf` — the MAIN frame's 1920×1080 buffer — at cell-local
+indices 0..4095, from 12 threads at once.
+
+**It is never reached.** A counter on both arms of `VolCompositeAdd`, over
+238 shards × 2 frames: **0 HDR-arm calls and 0 LDR-arm calls**, at the scripted
+shatter camera, at the scene camera, with `--draw_cones`, and with
+`--fast_fog --fast_fog_density=3 --draw_cones`. The instrument is not broken —
+the same counter reads **4 381 429 … 5 055 038 LDR-arm calls per frame** on
+`--snapshot=conetest`. The reason is upstream of the composite: every call site
+is guarded by `if (accB <= 0 && accG <= 0 && accR <= 0) continue`
+(`DeferredVolumetric.cpp:2436 / :2759 / :3418 / :3765`), and in greets the cone
+integration accumulates **zero everywhere — in the shard cells AND in the
+1920×1080 main frame**, with 50–62 spots in the prefilter. So the shard bake's
+`Render_VolumetricCones` (`MirrorShatter.cpp:1457`) is a pass that runs and
+composites nothing.
+
+**NOT FIXED, deliberately.** The correct predicate is known and is the one this
+codebase already adopted for the kernels — "am I the pass that owns the global
+buffer?", i.e. `fds::g_hdrActive && !g_hdrBuf.empty() && ctx.hdrBuf ==
+g_hdrBuf.data()` instead of the bare `g_hdrActive` at
+`DeferredVolumetric.cpp:327`. `ctx.hdrBuf` is already correct at all three
+callers (main frame → `g_hdrBuf.data()`; mirror RTT → `g_hdrBuf.data()`, sized to
+the slot by its own `Hdr_BeginFramePass`; shard bake → `ov.hdr`, i.e. the
+per-worker buffer or null). **What blocks landing it is that nothing can gate
+it:** `render_gate.sh`'s conetest and halotest rows both run WITHOUT `--hdr`
+(4.4 M calls, all on the LDR arm), so a mistake in the HDR arm passes 4/4
+silently. **Prerequisite for the next round: an `--hdr` cone/halo gate row.**
+Until then this is a dormant misroute behind a pass that composites nothing, and
+`GreetsMirror.cpp:3648` already carries the sibling mitigation with the comment
+that names this exact hazard ("clear the active flag so a later pass (e.g.
+parallel shards) can't accumulate into this RTT-sized buffer at its own dims").
+
+### (c) FOUNTAIN t=2500: 0 FLIPS IN 49 — the 1-in-43 stays a singleton
+
+`./DEMO --snapshot=fountain@t=2500 --out=D --deferred --hdr --glass-refract=1
+--glass-test --profiler=0`, parent binary at tip `aa60d0ce`, 49 launches:
+**49/49 `8db68ccb59416e9a44037e9f387b7bd9`**. Recorded so 16i (3)'s 1-in-43
+`b91cb2ba…` stays a documented singleton rather than becoming a ghost. Running
+total on that pin across rounds: 1 flip in 43 + 24 + 24 + 49 = **1 in 140**.
+
+### THE FIND THE BATTERY ACTUALLY MADE: THE SHATTER IS NONDETERMINISTIC
+
+Hunting (b) turned up something (b) does not explain. **greets, his acceptance
+arm, `--snapshot=greets@t=6293,6294` (two ticks, one process), parent binary:**
+
+| arm | runs | result |
+|---|--:|---|
+| no shatter | 25 | **25/25 identical**, both poses (`9f5e2400…` / `a32db3f3…`) |
+| no shatter, single pose t=6293 | 48 | **48/48 identical** (`9f5e2400…`) |
+| **`FDS_GREETS_SHATTER=1`** | **49** | **37 modal + 12 flips over 10 distinct values — 24.5 %** |
+| `FDS_GREETS_SHATTER=1`, per pose | 25 | t=6293 **16/25 modal**, t=6294 **16/25 modal** (9 flips each, 8 distinct values each) |
+| **`FDS_GREETS_SHATTER=1 FDS_SHARD_REFL_SERIAL=1`** | **25** | **25/25 identical, BOTH poses** (`0ff07c73…` / `467625df…`) |
+
+Same binary, same tree, same two poses, one environment variable apart. So greets
+is deterministic and **the mirror-shard bake is not** — a live nondeterminism in
+the arm he actually runs, whenever the shatter has fired.
+
+**TWO THINGS ARE ALREADY LOCALIZED, BOTH BY MEASUREMENT.**
+
+1. **It is not (b), and not anything HDR.** The per-pose split shows **tick 1
+   flips at the same rate as tick 2** (16/25 modal each) — and on tick 1
+   `g_hdrActive` is `false` during the bake (printed above). A mechanism that
+   needs the stale `true` cannot produce a flip on the frame that does not have
+   it. Every piece of shard state that looked like a candidate is already
+   `thread_local` anyway (`FrameState.cpp:36-60`: `g_offAxisFrustumCull`,
+   `g_reflVertCull`, the cone / census / phase accumulators).
+2. **It is in the FAN-OUT, not in the per-shard math.**
+   `FDS_SHARD_REFL_SERIAL=1` is **25/25 identical on both poses**. Read that with
+   one caveat stated rather than buried: the serial arm is a different function
+   (`renderReflectionCamerasSerial`, the global-swap deferred bake) and its
+   hashes differ from the parallel modal ones (`0ff07c73…` vs `852aabe6…`), so
+   this is "the serial implementation is stable", not a same-code A/B. It is
+   still the right first bisect: whatever is unstable is reached only when 12
+   workers run `renderShardIntoCell` concurrently.
+
+**Unproven candidates, listed as hypotheses and NOT as findings:** the per-worker
+`Transform_Objects(sc, w.camCtx, w.faces, …, &w.scratch)` at
+`MirrorShatter.cpp:1374` walks the SHARED scene meshes from 12 threads with 12
+different cameras — any mesh-level cache it touches (`T->worldVerts` is read at
+`Transform.cpp:2021`) would be shared storage; and the shards' `mesh->Flags`
+visibility toggle brackets the whole pass. Neither has been measured. Do not
+quote them until they are.
+
+**NOT the `--repro` harness's own nondeterminism, and worth stating because the
+first battery of this round was thrown away on it:** `--repro=greets@t=3122
+--repro_from=3112 --repro_settle=0` gave **48 DISTINCT hashes in 48 launches**,
+but that harness deliberately leaves `g_fineSceneClock` at its interactive
+default (`ReproHarness.cpp` says so in as many words), so it is wall-clock
+dependent BY DESIGN and cannot be used as a determinism instrument. The
+`--snapshot` path pins that clock, which is why the 25/25 control above is worth
+something.
+
+**NEXT ROUND — TODO, and this is the one to take.** Localize the shard-bake
+nondeterminism with the RTT-dither stage-digest method: digest each worker's cell
+(`w.surf.Data`) at each phase boundary in `renderShardIntoCell`
+(`MirrorShatter.cpp` — setup / `Transform_Objects` / `MekaleleFillRegionInline` /
+`Render_DeferredLighting` / cones / glaze / text), keyed by shard index so the
+work-stealing `cursor` order does not itself perturb the digest, dump post-hoc,
+and diff a flipping launch against a modal one to find the first diverging stage.
+The free first bisect is already spent (serial is 25/25), so start from the
+fan-out: digest per shard index, then bisect the phases inside
+`renderShardIntoCell`. A second cheap discriminator before that: dump the atlas
+(`FDS_SHARD_ATLAS_DUMP`) across launches to establish whether the flip is already
+present IN the atlas (the bake) or only in the frame that samples it.
+
 ## 2026-08-16i — WAVE 1's dead LDR chain: the argument reaches it, the chain is 0.033 Gi/f, and the predicate needs one more term than wave 2's
 
 **Result at greets t=5743 / 2845 / 6097 / 3409 / 5813, 1512x848, his acceptance

@@ -1,5 +1,75 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16j — THE BLACK CHECKERBOARD WAS REAL (city, crash, fountain), THE SHARD "RACE" ISSUES NO WRITES, AND THE SHATTER IS 24.5 % NONDETERMINISTIC
+>
+> **Three read-derived items from 16i, all run. One fixed, one refuted, one clean —
+> and the battery that refuted the second found a live nondeterminism nobody was
+> looking for.** Full evidence, censuses and images: `docs/OPTIMIZATION_BACKLOG.md`
+> **2026-08-16j**.
+>
+> | item | verdict |
+> |---|---|
+> | OuterVec + `--hdr` + `--deferred_checkerboard`/`--deferred_quarter` | **CONFIRMED by rendering, FIXED** — `DeferredSurfaceKernel.cpp:6309` |
+> | `VolCompositeAdd` racing `g_hdrActive`/`g_hdrBuf` from shard workers | **REFUTED** — precondition real, **0 calls issued** at every pose/arm tried |
+> | fountain t=2500 ~2 % flip | **0 in 49** on the parent at tip `aa60d0ce`; running total 1 in 140 |
+> | **NEW — greets mirror shatter** | **12 flips in 49 (24.5 %)**, deterministic without the shatter, **25/25 stable serial** |
+>
+> ### THE FIX, AND WHY IT WAS NOT AT THE KERNEL THE WARNING COMMENT GUARDS
+>
+> `Render_DeferredLighting_Tile_OuterVec` writes no `ctx.hdrBuf` on purpose — its
+> 8-bit pack IS the HDR transport, lifted by `Hdr_ActivateNoFog` because it leaves
+> `h[3]` at 0. The **wave-2 fill** did not honour that: it averaged all-zero
+> neighbour radiance out of `ctx.hdrBuf` and stamped `h[3]=1.0f`, which BLOCKS the
+> lift, so the tonemap printed a cleared buffer on exactly half the pixels.
+> Measured, city t=1961 1920×1080 `--deferred --hdr --deferred_checkerboard`:
+> **91 764 pixels below luma 4, 99.2 % of them on the wave-2 parity**, wave-1 half
+> bit-identical to the full-rate arm (175.36). Under `--hdr_linear`: 80 973, 100 %
+> on wave-2 parity. crash f120: the wave-2 half is 0.14 luma against 4.47.
+> The fix adds one term (`&& !outerVecG`) so wave 2 takes wave 1's transport:
+> parity Δ **17.03 → 0.05**, dark wave-2 pixels **91 764 → 733** (against 722
+> legitimately dark on the wave-1 half); `--hdr_linear` **80 973 → 0**.
+>
+> **`PreferOuterVec = 1` is THREE scenes, not the two the handoff named** — city
+> `CITY.CPP:2537`, crash `CRASH.CPP:25`, **fountain `FOUNTAIN.CPP:1029`**. None
+> `setDefault`s checkerboard, so the shipping demo never hit it; `--cinematic
+> --deferred_checkerboard` on any of the three did.
+> Images: `docs/img/ovchk/city_t1961_chk_crop8x_before.png` /
+> `..._after.png` (64×64 at (1376,128), nearest-8×), plus full frames
+> `city_t1961_hdrchk_before/after.png`, `city_t1961_hdr_fullrate.png`,
+> `city_t1961_hdrlin_chk_before/after.png`, `crash_f120_chk_before/after.png`.
+>
+> ### GATES AT THIS COMMIT
+>
+> * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+> * city **`bd4ffbf8`** (`--deferred`, `FDS_CITY_ENV_PIXEL=1`) and **`4cb8d2ca`** /
+>   **`f473fe2b`** (t=2400) / **`d3374de6`** (t=400) on his acceptance arm — all
+>   four at their recorded 16f values.
+> * fountain t=2500 **`8db68ccb`** — recorded value, and 49/49 on the parent.
+> * city `--hdr`-only `4b0e31bf…` and city `--deferred_checkerboard`-only
+>   `58644ea7…`: **identical parent-to-fixed** (the byte-null controls for the fix).
+> * chase t=100/400/800/1200/1600 and greets t=1588: **identical parent-to-fixed**.
+>   Their absolute values in a clean worktree are NOT the 16f figures — greets'
+>   pin keys on uncommitted authoring files (`render_gate.sh` says so) and the 16f
+>   chase values were taken one-pose-per-process. Parent-vs-fixed identity on the
+>   same tree is the control that carries weight there.
+>
+> **Say what the gate is worth, again:** `render_gate.sh` passes no
+> `--deferred_checkerboard` on any arm, so 4/4 could not have failed for this fix.
+> The city/crash parity censuses are the real coverage.
+>
+> ### THE SHATTER NONDETERMINISM — the open item this round hands on
+>
+> `--snapshot=greets@t=6293,6294`, his arm, parent binary: **25/25 identical
+> without the shatter** (and 48/48 at the single pose), **37/49 modal with
+> `FDS_GREETS_SHATTER=1`**. One environment variable apart. **Tick 1 flips at the
+> same rate as tick 2**, and tick 1 has `g_hdrActive == false` during the bake, so
+> no HDR-global mechanism can be the cause. **`FDS_SHARD_REFL_SERIAL=1` is 25/25**,
+> so it lives in the 12-worker fan-out of `renderReflectionCameras`
+> (`MirrorShatter.cpp:1073`), not in the per-shard math. Method note for whoever
+> takes it: `--repro` is **not** a determinism instrument — it leaves
+> `g_fineSceneClock` free-running by design and gave 48 distinct hashes in 48
+> launches. Use `--snapshot`.
+
 > ## 2026-08-16f — THE CITY PINS NEVER MOVED: THERE IS NO MOVER COMMIT, THE INSTRUMENT WAS MEASURING ITS OWN HUD
 >
 > **VERDICT: NO CODE CHANGE MOVED CITY. Both recorded values reproduce byte-exactly
