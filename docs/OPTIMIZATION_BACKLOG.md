@@ -200,9 +200,11 @@ The ladder puts the prologue at 0.368 Gi/f and the mechanism nets 0.068 of
 instructions, so the row pass costs about **0.30 Gi/f to fill ~5.4 M lane-slots
 — ~55 instructions a slot**, four times what counting the vector body predicts.
 The eager/lazy ratio is the visible half (5.4 M slots filled for 2.943 M taps
-taken). Where the other 40 go was not isolated: four shapes of the inner loop
-were measured and the spread between best and worst is 2 %, so it is not the
-face scan and not the store.
+taken at t=5743; 4.9 M for 1.600 M at t=3409, and 4.7 M for 2.871 M at t=5813 —
+`--omni_census`, and that ordering is exactly the ordering of the result).
+Where the other 40 go was not isolated: four shapes of the inner loop were
+measured and the spread between best and worst is 2 %, so it is not the face
+scan and not the store.
 
 | inner-loop shape (all bit-exact) | ON Gi/f |
 |---|--:|
@@ -262,10 +264,27 @@ Without 16i's note this round would have spent a battery on it.
    touch the state that forces them. Splitting the tail's RARE half (the 2x2
    PCF, 18.9 % of taps) into its own `noinline` function would make the common
    path a leaf. Not tried. Cheapest remaining item by far.
-2. **The eager/lazy ratio.** 5.4 M slots for 2.943 M taps. A group-level range
-   reject is cheap but is only SAFE if a skipped group writes a MISS sentinel
-   the consumer falls back on — a boundary disagreement on `len2 > r2` between
-   the row pass and the omni loop would otherwise read a stale slot. Unpriced.
+2. **The eager/lazy ratio — and the one reject that IS safe was TRIED AND
+   REFUTED.** The sweep fills 5.4 M slots for 2.943 M taps at t=5743 and
+   4.9 M for **1.600 M** at t=3409, which is exactly why t=3409 is the weak
+   pose: it is the MIRROR pose, `--omni_census` puts 28.1 % of its pairs on the
+   mirrorId reject and another 9.4 % on the 2-D map shadow, so the row pass was
+   filling three slots per tap there instead of 1.8. The mirrorId test is the
+   only reject the row pass can replicate SAFELY — it is an INTEGER compare, so
+   its copy agrees with the loop's at every input, where `len2 > r2`, N·L and
+   the cone are float compares whose one-ULP disagreement would make the sweep
+   skip a group whose slot the loop then reads. Implemented as a group-granular
+   `any lane matches` skip (mirror pixels are the mirror's screen rect, so
+   groups go the same way): **it made things worse.** `lighting-w1` at t=5743
+   1.479 → 1.523 and at t=5813 1.430 → 1.474, against 1.569 → 1.564 at the pose
+   it was written for. The per-pixel `pmid` plane and the per (group × light)
+   test cost about ten times what the arithmetic says they should — the same
+   discrepancy as the ~55-instructions-a-slot above, and the fifth shape in this
+   round to lose to it. Reverted; do not re-derive.
+
+   What is left of the idea: a range/N·L skip needs a MISS sentinel the consumer
+   falls back on, which puts a second test back in the omni loop — the thing
+   16h says costs what it saves. Unpriced, and now unpromising.
 3. **The uniformity pyramid, 0.056 Gi/f** — a dependent load per tap; the 4x4
    pyramid was priced and refused in 16g.
 4. **`--ssao_downscale=2` is still the single largest lever on this arm**, and
