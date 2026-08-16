@@ -55,6 +55,18 @@ struct PerTriMeshClone {
     // requests in the same frame reuse the storage (Transform_Objects
     // rewrites the per-pass projection fields in place).
     bool initialized = false;
+
+#if FDS_VIS_CENSUS
+    // DIAGNOSTIC ONLY (census build, --xfrm_ablate bits 256/512/1024).
+    // A compact 32-byte-per-vertex stand-in for the shadow pass's written
+    // block (PX, PY, Flags, TPos.xyz, RZ + 4 B pad) so the per-vertex loop
+    // can be re-timed writing DENSE instead of writing into the 140-byte
+    // clone Vertex. Nothing reads it — the arms change pixels by
+    // construction and exist only to price an out-array split before it is
+    // built. Sized lazily on first ablation use, so a normal census run
+    // allocates nothing.
+    std::vector<float> diagOut;
+#endif
 };
 
 struct VertexScratch {

@@ -10,7 +10,102 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16s — SoA PHASE 5, PRICED BY BUILDING THE LOOP INSTEAD OF THE STRUCT: **0.61 % of a greets frame, not 1.25 %**. The variable is the 209.6 MiB shadow CLONE, not `sizeof(Vertex)` — and neither half of the split pays alone
+
+**16r handed Phase 5 on at "1.25 % of frame, quote this not 0.3 %". That number
+is an extrapolation of a byte-slope calibrated by *inflating* `sizeof(Vertex)`
+140 → 192, run in the direction it was never measured. Nothing in the tree can
+shrink `Vertex` without the refactor, so the PER-VERTEX LOOP was rebuilt as a
+ladder and the end state timed. It is 0.61 %.**
+Status: **PARKED / BLOCKED ON SCOPE** · one instrument landed · a better-shaped
+successor item specified below. Evidence: `docs/PERF_STATE.md` **00h**,
+`docs/SOA_VERTEX_REFACTOR.md` (top section).
+
+### THE LADDER — and every HALF of Phase 5 is neutral or worse
+
+`--xfrm_ablate` bits 256/512/1024/2048 (shadow) and 4096/8192/16384 (main view),
+census build only: replicas of the per-vertex loop differing **only in where the
+read and the write land** — identical FP sequence in the disassembly, read-source
+select unswitched out of the loop. greets t=5743, his arm, 1920×1080, DynOmnis
+phase-A `xform`, face loop ablated, min-of-24 × 5 rotated rounds:
+
+| arm | `Pos` read from | outputs written to | wall ms |
+|---|---|---|--:|
+| **32** — ships | per-light clone `Vertex` (140 B) | the same record | **0.85** |
+| **288** — replica CONTROL | same | same | **0.85** |
+| 544 | clone `Vertex` | dense 32 B/vert | 0.99 **(+16 %)** |
+| 1056 | shared `T->Verts` | clone `Vertex` | 1.13 **(+33 %)** |
+| 2080 | compact shared 12 B/vert `Pos` | clone `Vertex` | 0.87 **(0 %)** |
+| **1568 — END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.59 (−31 %)** |
+
+### THE MECHANISM — `--mem_census` names it
+
+`shadow.scratch/per-light mesh clones (Vertex[])` = **209.64 MiB, 1 269 (map ×
+mesh) clones**, of which **68 of every 140 bytes are read-only duplicates**. The
+shadow loop is ONE stream over that. Splitting only the write keeps the cold
+209.6 MiB and adds a second stream; splitting only the read gives two 140-byte
+strides. Doing both collapses the read onto one shared 15 MiB array warm across
+all 42 bakes. **The lever is the clone, not the struct** — which is also why the
+MAIN VIEW, where no clone exists, measures **±5 % (neutral)** on the same arms.
+
+### PREDICTION vs MEASUREMENT
+
+Predicted 0.62 ms/f = **1.25 %**; measured 0.30 ms/f = **0.61 %** — over-predicted
+**2.05×**, outside the ±20 % bar. Reproduces at t=5743 / 2845 / 1588 / 6097 at
+**0.61 / 0.61 / 0.66 / 0.68 %**. city and chase bake no per-frame shadow map;
+their half is the neutral main-view row.
+
+### BLOCKED ON SCOPE — counted, not estimated
+
+`->FIELD` derefs of the 72 bytes Phase 5 deletes, excluding clipper transients:
+`Transform.cpp` 155, **`CITY.CPP` 128**, `FRUSTRUM.CPP` 99, **`CHASE.CPP` 95**,
+**`FOUNTAIN.CPP` 51**, `Snapshot.cpp` 17, `Clipper.cpp` 11, `CAMERAS.CPP` 10,
+`Raytracer.cpp` 9, `ShadowMap.cpp` 8, `GREETS.CPP` 6, then 1–5 each across
+`RENDER.CPP` / `Lighting.cpp` / `RADIO.CPP` / `TheOtherBarry.h` / `SkyCube.cpp` /
+`RenderInner.cpp` / `IMGGENR.CPP` / `FaceBBox.h` / `VertexFrame.*` /
+`PREPROC.CPP` / `SceneBuilder.cpp`. **274 of them are DEMO scene code**,
+including three alternative transform pipelines that must each learn to write
+the out array or the image breaks silently — the Phase 6.1/6.2 bug list plus the
+one it never found. **0.61 % of one scene's frame does not buy that.**
+
+### THE SUCCESSOR ITEM — shadow-only, and it does NOT touch `Vertex`
+
+Since the prize is entirely in the clone: give `PerTriMeshClone` a dense 32-byte
+out record, have the shadow vertex loops write it and read `Pos` from
+`T->Verts`, and teach the two clone-backed readers (`Transform_Objects`' face
+loop; `FrustumClipper::Render`'s `*A = *F->A` entry) to source from it.
+`F->frame` / `F->A_idx` are **already plumbed for clone-backed faces** and
+`Shadows.cpp` already reads `F->frame->TPos_z[A_idx]`. No filler, no DEMO scene
+file, no layout change. Ceiling **0.61 %**; the risk is that a runtime branch in
+that face loop is not byte-null under `-ffp-contract=fast`
+(`docs/VISIBILITY_PLAN.md` §8), so it must be built branch-free.
+
+### TWO FACTS WORTH KEEPING
+
+* **The read half is byte-null and worth 0 %.** Sourcing `Pos` from `T->Verts`
+  instead of the clone gives identical snapshots (greets t=5743 `818f0336…`,
+  t=1588 `756790e4…`, control repeated) and moves nothing (arm 2080). The read
+  was already free — the line comes in for the write.
+* **`PerTriMeshClone` is NEVER invalidated** (nothing clears
+  `VertexScratch::clones` or resets `initialized`), so its `verts` — `Pos`
+  included — is a snapshot from that mesh's first shadow bake, while
+  `DisplaceRebuild.cpp`, `MeshOps.cpp`, `GreetsDisco.cpp`, `MirrorShatter.cpp`
+  and `FOUNTAIN.CPP` all write `Vertex::Pos`. Not stale at the poses measured;
+  nothing enforces it. **Own round.**
+
+### GATES
+
+Instrument is census-only: **the shipping binary is byte-identical to the
+parent's** (`md5 f5cc3479…`). 11 pin recipes 3/3 parent-identical, ten at their
+recorded 16f/16r values plus the four greets acceptance poses; `render_gate.sh`
+4/4; `--shadow_plane_hash` stable 2/2.
+
 ## 2026-08-16r — 16q's ROW (`Transform_Objects` at 3.35 %): it is not shared machinery, it is greets' shadow bake — 42 of 45 calls, 81 % of the core time. Six mechanisms refuted, one flag state of dead work landed, and Phase 5's ceiling corrected 4×
+
+> **AMENDED 2026-08-16s (block above): this entry's hand-on — "quote 1.25 %,
+> not 0.3 %" — is refuted. Built and timed, Phase 5's end state is 0.61 %, and
+> the variable is the 209.6 MiB per-light clone rather than `sizeof(Vertex)`.
+> Everything else here stands.**
 
 **16q handed on "`Transform_Objects` is 3.35 % of DEMO self samples at greets
 t=5743, more than double what is left of the clipper". Reproduced to three

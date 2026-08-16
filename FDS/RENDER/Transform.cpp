@@ -153,7 +153,70 @@ enum : int {
 	XAB_NO_FACE   = 32,
 	XAB_NO_BBOX   = 64,
 	XAB_NO_VERT   = 128,   // census build only (2026-08-16r)
+	// SoA Phase 5 pricing ladder (census build only, 2026-08-16s). Three
+	// REPLICAS of the shadow pass's per-vertex loop that differ ONLY in where
+	// the read and the write land, so the prize of an out-array split can be
+	// measured before it is built. All three change pixels.
+	XAB_SH_REPLICA = 256,   // control: read clone Vertex, write clone Vertex
+	XAB_SH_DENSEW  = 512,   // read clone Vertex, write a dense 32 B/vert array
+	XAB_SH_SHAREDR = 1024,  // read SHARED T->Verts, write the dense array
+	XAB_SH_CMPCTR  = 2048,  // read a compact SHARED 12 B/vert Pos array
+	// Same ladder for the MAIN view, which has NO clone — the half of Phase 5
+	// that must not regress. Its loop reads Pos+N+Tangent and writes 52 bytes.
+	XAB_MV_REPLICA = 4096,  // control: read T->Verts, write T->Verts
+	XAB_MV_DENSEW  = 8192,  // read T->Verts, write a dense 64 B/vert array
+	XAB_MV_CMPCTR  = 16384, // read a compact 36 B/vert in-array, write dense
 };
+
+#if FDS_VIS_CENSUS
+// Per-mesh scratch for the MAIN-VIEW pricing arms above. Persistent across
+// frames (so the arms pay realistic cold/warm memory, not a fresh-alloc
+// artifact) and only ever populated when one of the arms is selected, so a
+// normal census run allocates nothing. Serial by construction: the arms are
+// documented as --xfrm_par=0 only.
+std::unordered_map<const TriMesh*, std::vector<float>> &xabMvOutMap() {
+	static std::unordered_map<const TriMesh*, std::vector<float>> m; return m;
+}
+std::unordered_map<const TriMesh*, std::vector<float>> &xabMvInMap() {
+	static std::unordered_map<const TriMesh*, std::vector<float>> m; return m;
+}
+// Compact SHARED per-mesh object-space Pos (12 B/vert), built once per mesh.
+// The shadow passes are threaded, so the build happens under a mutex on the
+// miss path only and publishes through TriMesh::DiagPos (release/acquire).
+std::mutex &xabPosMtx() { static std::mutex m; return m; }
+const float *xabDiagPos(TriMesh *T) {
+	if (float *p = T->DiagPos.load(std::memory_order_acquire)) return p;
+	std::lock_guard<std::mutex> lk(xabPosMtx());
+	if (float *p = T->DiagPos.load(std::memory_order_relaxed)) return p;
+	float *p = new float[size_t(T->VIndex) * 3];
+	for (DWord i = 0; i < T->VIndex; i++) {
+		p[3*size_t(i)+0] = T->Verts[i].Pos.x;
+		p[3*size_t(i)+1] = T->Verts[i].Pos.y;
+		p[3*size_t(i)+2] = T->Verts[i].Pos.z;
+	}
+	T->DiagPos.store(p, std::memory_order_release);
+	return p;
+}
+float *xabMvOut(const TriMesh *T, int n) {
+	auto &v = xabMvOutMap()[T];
+	if (v.size() < size_t(n) * 16) v.assign(size_t(n) * 16, 0.0f);
+	return v.data();
+}
+const float *xabMvIn(const TriMesh *T, int n) {
+	auto &v = xabMvInMap()[T];
+	if (v.size() < size_t(n) * 9) {
+		v.assign(size_t(n) * 9, 0.0f);
+		for (int i = 0; i < n; i++) {
+			const Vertex &s = T->Verts[i];
+			float *p = v.data() + size_t(i) * 9;
+			p[0]=s.Pos.x; p[1]=s.Pos.y; p[2]=s.Pos.z;
+			p[3]=s.N.x;   p[4]=s.N.y;   p[5]=s.N.z;
+			p[6]=s.Tangent.x; p[7]=s.Tangent.y; p[8]=s.Tangent.z;
+		}
+	}
+	return v.data();
+}
+#endif
 
 // --xfrm_rcp: the per-vertex 1/z used by the projection. Mode 0 reproduces
 // today's code EXACTLY (the Ahead/Regular loops write `1.0/z` — a DOUBLE
@@ -2162,6 +2225,146 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// the face loop. The complement of ablation 32, so the two bracket the
 		// two halves of this function from opposite sides.
 		if (xab && (_xablate & XAB_NO_VERT)) goto AfterXForm;
+
+		// ── SoA Phase 5 pricing ladder (2026-08-16s) ───────────────────────
+		// Three replicas of the SHADOW pass's per-vertex loop (the `Regular`
+		// shape with _inShadowPass true: read Pos, project, write PX/PY/Flags/
+		// TPos/RZ, store the four SoA fields). They differ ONLY in the memory
+		// the loop touches:
+		//   256  read clone Vertex (140 B stride), write clone Vertex  — CONTROL.
+		//        If this does not reproduce the shipping arm's time the replica
+		//        is not faithful and the other two mean nothing.
+		//   512  read clone Vertex, write a DENSE 32 B/vert array (what an
+		//        out-array split makes the write side look like).
+		//   1024 read the SHARED T->Verts instead of the clone (what the split
+		//        makes the read side look like: one array for all 42 passes),
+		//        write the dense array. Pos is byte-identical in the two
+		//        arrays — the clone copies it and nothing writes it — so this
+		//        arm computes the same values as 512, only from elsewhere.
+		// All three CHANGE PIXELS downstream (nothing reads the dense array),
+		// so they are measurement-only. Shadow pass only: elsewhere they fall
+		// through to the shipping loops.
+		if (xab && _inShadowPass
+		        && (_xablate & (XAB_SH_REPLICA | XAB_SH_DENSEW | XAB_SH_SHAREDR))
+		        && !(T->Flags & Tri_Phong)) {
+			const bool denseW  = (_xablate & XAB_SH_DENSEW) != 0;
+			const bool sharedR = (_xablate & XAB_SH_SHAREDR) != 0;
+			float *dst = nullptr;
+			if (denseW && scratch) {
+				auto &cl = scratch->cloneOf(T);
+				if (cl.diagOut.size() < size_t(T->VIndex) * 8)
+					cl.diagOut.assign(size_t(T->VIndex) * 8, 0.0f);
+				dst = cl.diagOut.data();
+			}
+			const Vertex *src = sharedR ? T->Verts : tVerts;
+			const float *posC = (_xablate & XAB_SH_CMPCTR) ? xabDiagPos(T) : nullptr;
+			for (vfi = 0; vfi < int(T->VIndex); vfi++) {
+				const Vertex *R = src + vfi;
+				const float vpx = posC ? posC[3*size_t(vfi)+0] : R->Pos.x;
+				const float vpy = posC ? posC[3*size_t(vfi)+1] : R->Pos.y;
+				const float vpz = posC ? posC[3*size_t(vfi)+2] : R->Pos.z;
+				Vec4f tpos = mul_add(m34_col_x, Vec4f(vpx), m34_col_w);
+				tpos       = mul_add(m34_col_y, Vec4f(vpy), tpos);
+				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
+				alignas(16) float tposArr[4];
+				tpos.store_a(tposArr);
+				float px = 0.0f, py = 0.0f, rz = 0.0f;
+				DWord fl = 0;
+				if (tposArr[2] > cam.nearZ) {
+					rz = xfrmRcpD(tposArr[2], rcpMode);
+					px = tposArr[0] * rz;
+					py = tposArr[1] * rz;
+					if (px < 0)   fl |= Vtx_VisLeft;
+					if (px >= xr) fl |= Vtx_VisRight;
+					if (py < 0)   fl |= Vtx_VisUp;
+					if (py >= yr) fl |= Vtx_VisDown;
+					if (tposArr[2] > cam.farZ) fl |= Vtx_VisFar;
+				} else fl |= Vtx_VisNear;
+				if (dst) {
+					float *o = dst + size_t(vfi) * 8;
+					o[0] = px; o[1] = py;
+					std::memcpy(o + 2, &fl, 4);
+					o[3] = tposArr[0]; o[4] = tposArr[1]; o[5] = tposArr[2];
+					o[6] = rz;
+				} else {
+					Vertex *W = tVerts + vfi;
+					W->TPos_AOS.x = tposArr[0];
+					W->TPos_AOS.y = tposArr[1];
+					W->TPos_AOS.z = tposArr[2];
+					W->PX = px; W->PY = py; W->RZ = rz;
+					W->Flags = fl;
+				}
+				if (soaX) { soaX[vfi]=tposArr[0]; soaY[vfi]=tposArr[1]; soaZ[vfi]=tposArr[2]; soaPY[vfi]=py; }
+			}
+			goto AfterXForm;
+		}
+
+		// ── The same ladder for the MAIN view (no clone exists there) ──────
+		// Phase 5's other half. The main-view loop reads Pos+N+Tangent (36 B)
+		// and writes TPos/TN/TTangent/PX/PY/RZ/Flags (52 B) of ONE 140-byte
+		// record — a single stream. Splitting it makes two, with no 42-way
+		// sharing to win back, so this is the arm that decides whether Phase 5
+		// is a net win at all. Same three shapes: 4096 control, 8192 dense
+		// write, 16384 dense write + compact read. Run with --xfrm_par=0.
+		if (xab && !_inShadowPass && _mainView
+		        && (_xablate & (XAB_MV_REPLICA | XAB_MV_DENSEW | XAB_MV_CMPCTR))
+		        && !(T->Flags & Tri_Phong)) {
+			const bool mvDense   = (_xablate & (XAB_MV_DENSEW | XAB_MV_CMPCTR)) != 0;
+			const bool mvCompact = (_xablate & XAB_MV_CMPCTR) != 0;
+			float *mvOut = mvDense   ? xabMvOut(T, int(T->VIndex))     : nullptr;
+			const float *mvIn = mvCompact ? xabMvIn(T, int(T->VIndex)) : nullptr;
+			for (vfi = 0; vfi < int(T->VIndex); vfi++) {
+				const Vertex *R = tVerts + vfi;
+				float vpx, vpy, vpz, nx, ny, nz, gx, gy, gz;
+				if (mvIn) {
+					const float *p = mvIn + size_t(vfi) * 9;
+					vpx=p[0]; vpy=p[1]; vpz=p[2];
+					nx =p[3]; ny =p[4]; nz =p[5];
+					gx =p[6]; gy =p[7]; gz =p[8];
+				} else {
+					vpx=R->Pos.x; vpy=R->Pos.y; vpz=R->Pos.z;
+					nx =R->N.x;   ny =R->N.y;   nz =R->N.z;
+					gx =R->Tangent.x; gy=R->Tangent.y; gz=R->Tangent.z;
+				}
+				Vec4f tpos = mul_add(m34_col_x, Vec4f(vpx), m34_col_w);
+				tpos       = mul_add(m34_col_y, Vec4f(vpy), tpos);
+				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
+				alignas(16) float tposArr[4]; tpos.store_a(tposArr);
+				Vec4f tn = im_col_x * Vec4f(nx);
+				tn       = mul_add(im_col_y, Vec4f(ny), tn);
+				tn       = mul_add(im_col_z, Vec4f(nz), tn);
+				alignas(16) float tnArr[4];  tn.store_a(tnArr);
+				Vec4f tt = im_col_x * Vec4f(gx);
+				tt       = mul_add(im_col_y, Vec4f(gy), tt);
+				tt       = mul_add(im_col_z, Vec4f(gz), tt);
+				alignas(16) float ttArr[4];  tt.store_a(ttArr);
+				float px = 0.0f, py = 0.0f, rz = 0.0f; DWord fl = 0;
+				if (tposArr[2] > cam.nearZ) {
+					rz = xfrmRcpD(tposArr[2], rcpMode);
+					px = tposArr[0] * rz; py = tposArr[1] * rz;
+					if (px < 0)   fl |= Vtx_VisLeft;
+					if (px >= xr) fl |= Vtx_VisRight;
+					if (py < 0)   fl |= Vtx_VisUp;
+					if (py >= yr) fl |= Vtx_VisDown;
+					if (tposArr[2] > cam.farZ) fl |= Vtx_VisFar;
+				} else fl |= Vtx_VisNear;
+				if (mvOut) {
+					float *o = mvOut + size_t(vfi) * 16;
+					o[0]=tposArr[0]; o[1]=tposArr[1]; o[2]=tposArr[2];
+					o[3]=tnArr[0];   o[4]=tnArr[1];   o[5]=tnArr[2];
+					o[6]=ttArr[0];   o[7]=ttArr[1];   o[8]=ttArr[2];
+					o[9]=px; o[10]=py; o[11]=rz; std::memcpy(o+12,&fl,4);
+				} else {
+					Vertex *W = tVerts + vfi;
+					W->TPos_AOS.x=tposArr[0]; W->TPos_AOS.y=tposArr[1]; W->TPos_AOS.z=tposArr[2];
+					W->TN.x=tnArr[0]; W->TN.y=tnArr[1]; W->TN.z=tnArr[2];
+					W->TTangent.x=ttArr[0]; W->TTangent.y=ttArr[1]; W->TTangent.z=ttArr[2];
+					W->PX=px; W->PY=py; W->RZ=rz; W->Flags=fl;
+				}
+				if (soaX) { soaX[vfi]=tposArr[0]; soaY[vfi]=tposArr[1]; soaZ[vfi]=tposArr[2]; soaPY[vfi]=py; }
+			}
+			goto AfterXForm;
+		}
 #endif
 		//    Main vertex loop,in case no restrictions apply.
 		if (!(T->Flags&Tri_Phong))

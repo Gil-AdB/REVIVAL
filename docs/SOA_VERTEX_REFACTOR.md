@@ -2,7 +2,204 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-08-16s — PHASE 5's END STATE WAS BUILT AS A LADDER AND TIMED. It is **0.61 % of a greets frame, not 1.25 %**, the byte-slope that produced 1.25 % is the wrong model, and the item is **BLOCKED ON SCOPE** — with the scope counted, not estimated.
+
+`16r` re-opened Phase 5 at **1.25 % of frame** by extrapolating a slope
+(0.0086 ms per byte of `sizeof(Vertex)`, calibrated by *inflating* the struct
+140 → 192 with `-DFDS_VERTEX_PAD_BYTES`) down to the 140 → 68 end state. That
+extrapolation was never tested, because nothing in the tree can shrink `Vertex`
+without the refactor itself. **So the loop was rebuilt instead of the struct.**
+
+`--xfrm_ablate` gains a pricing ladder (census build only, bits 256/512/1024/
+2048 for the shadow pass, 4096/8192/16384 for the main view): **replicas of the
+per-vertex loop that differ ONLY in where the read and the write land.** Same
+three `fmla.4s`, same `fdiv`, same `fmul` pair — verified in the disassembly,
+and the read source is unswitched OUT of the loop (`tbz w10,#0xa` above the
+back-edge) with both strides advanced per iteration (`#0x8c` = the 140-byte
+Vertex, `#0x20` = the dense 32-byte record). **The arms differ in addressing
+only**, which is what makes this a memory measurement and not an arithmetic one.
+
+### THE LADDER — greets t=5743, his acceptance arm, 1920×1080, DynOmnis phase-A `xform`, face loop ablated (`|32`) so the vertex loop is isolated
+
+Per-frame min over 24, min over 5 order-rotated rounds, dummy drivers.
+
+| arm | `Pos` read from | outputs written to | wall ms | core-ms |
+|---|---|---|--:|--:|
+| **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.85** | **6.90** |
+| **288** — replica CONTROL | same | same | **0.85** | 7.08 |
+| **544** | clone `Vertex` | a dense **32 B/vert** array | 0.99 **(+16 %)** | 8.86 |
+| **1056** | **shared `T->Verts`** | clone `Vertex` | 1.13 **(+33 %)** | 9.86 |
+| **2080** | a compact **shared 12 B/vert** `Pos` array | clone `Vertex` | 0.87 **(0 %)** | 7.51 |
+| **1568 — Phase 5's END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.59 (−31 %)** | **4.79 (−32 %)** |
+
+**Read the control row first.** The replica reproduces the shipping loop to
+0.85/0.85 wall and 6.90/7.08 core — so the ladder is faithful, and any branch
+the replica carries is carried by *every* arm and cancels.
+
+**Then read 544, 1056 and 2080 together, because they are the finding.** Each is
+*half* of Phase 5. **Every half, alone, is neutral or worse.** Only the pair
+pays. A model in which per-vertex time is a function of `sizeof(Vertex)` cannot
+produce that shape: it predicts monotone improvement as the walked record
+shrinks, and 544 shrinks the written window out of the record for **+16 %**.
+
+### THE MECHANISM, NAMED — it is the CLONE, not the struct
+
+`--mem_census`, greets t=5743, his arm:
+
+```
+[MEM] 219 818 480  209.64 MiB  shadow.scratch/per-light mesh clones (Vertex[])
+                                1269 live (shadow map x mesh) clones x VIndex x sizeof(Vertex)=140
+```
+
+The shadow bake gives every (light-face × mesh) pair its **own full copy** of the
+mesh's `Vertex[]` (`fds::PerTriMeshClone::verts`), because 42 concurrent passes
+cannot write one shared `Vertex`. **68 of every 140 bytes in those 209.6 MiB are
+`Pos`/`N`/`Tangent`/UV/bary — read-only, byte-identical in all 1 269 copies.**
+
+So the shadow loop today is **one** stream over 209.6 MiB of cold, duplicated
+memory. Splitting the write out of it (544) makes **two** streams without
+shrinking the first — hence +16 %. Moving the read to the shared array (1056)
+makes two 140-byte strides — hence +33 %. Doing both (1568) leaves two streams
+of which the read one collapses onto the single `T->Verts` (~15 MiB scene-wide,
+warm across all 42 bakes) and the write one is dense. **That is the whole −31 %,
+and it is a property of the clone, not of `sizeof(Vertex)`.**
+
+Which is also why the main view — where no clone exists — cannot win it.
+
+### THE MAIN VIEW — ±5 %, i.e. NEUTRAL. It does not regress, and it does not pay either.
+
+`--xfrm_par=0 --xfrm_prof`, VERT bucket, greets t=5743, min over 5 rotated rounds:
+
+| arm | | VERT ms | vs control |
+|---|---|--:|--:|
+| 0 | what ships | 0.963 | |
+| **4096** | replica CONTROL (read + write `T->Verts`) | **0.911** | — |
+| 8192 | write a dense 64 B/vert array | 0.959 | **+5.3 %** |
+| **16384** | + read a compact 36 B/vert in-array | **0.882** | **−3.2 %** |
+
+The main-view loop reads 36 B and writes 52 B of **one** record — a single
+stream — and Phase 5 makes it two with nothing to share. −0.029 ms serial, and
+the shipping path is parallel (`--xfrm_par`, 0.48 ms wall for the whole call),
+so the realised main-view delta is smaller still. **It is inside the noise in
+both directions.**
+
+### PREDICTION vs MEASUREMENT
+
+| | ms/frame | % of frame |
+|---|--:|--:|
+| **PREDICTED** (16r: 72 B × 0.0086 ms/B) | 0.62 | **1.25 %** |
+| **MEASURED** (t=5743: DynOmnis −0.26, DynMeshes −0.04, main view ~−0.01 realised) | **0.30** | **0.61 %** |
+
+**Over-predicted by 2.05×** — outside this campaign's ±20 % bar, and the gap has
+a named cause rather than an excuse: the slope was calibrated by *stretching* a
+one-stream walk and then extrapolated to a *two-stream* end state, which is a
+different access pattern, not a shorter one.
+
+Reproduces at every bake-heavy pose (arm 32 → arm 1568, DynOmnis / DynMeshes
+wall ms; frame minimums from 16r):
+
+| pose | DynOmnis | DynMeshes | Δ ms/frame | frame min | **% of frame** |
+|---|--:|--:|--:|--:|--:|
+| t=5743 | 0.85 → 0.59 | 0.17 → 0.13 | −0.30 | 49.59 | **0.61 %** |
+| t=2845 | 0.89 → 0.61 | 0.17 → 0.14 | −0.31 | 50.51 | **0.61 %** |
+| t=1588 | 1.05 → 0.70 | 0.19 → 0.14 | −0.40 | 60.78 | **0.66 %** |
+| t=6097 (no RTT) | 0.87 → 0.63 | 0.17 → 0.13 | −0.28 | 41.26 | **0.68 %** |
+
+city (0.309 % of self samples) and chase (0.190 %) bake no per-frame shadow map
+and their half of this is the main-view row above — **nothing**.
+
+### THE ONE HALF THAT IS BIT-EXACT IS ALSO THE ONE WORTH 0 %
+
+Worth recording, because it is the obvious cheap shortcut and it is dead:
+swapping the shadow loop's `Pos` read from the clone to the shared `T->Verts`
+is **byte-null** — greets t=5743 `818f0336…` and t=1588 `756790e4…`, arm 256 vs
+arm 1024, control repeated, identical — so the clone's `Pos` is not stale at
+these poses. And it is worth **0 %** (arm 2080, 0.87 vs 0.86). The read was
+already free: the line comes in for the *write* regardless. **There is no
+bit-exact subset of Phase 5 that pays.** The paying arm needs the outputs out of
+the mesh vertex, which is the whole refactor.
+
+> **Latent hazard found on the way, unrelated to perf:** `PerTriMeshClone` is
+> **never invalidated** — `cloneOf` sets `initialized = true` on first use and
+> nothing in the tree clears `VertexScratch::clones` or resets that flag
+> (grepped). A clone's `verts` is therefore a snapshot of `T->Verts` taken at
+> that mesh's *first* shadow bake, `Pos` included, while five files
+> (`DisplaceRebuild.cpp`, `MeshOps.cpp`, `GreetsDisco.cpp`, `MirrorShatter.cpp`,
+> `FOUNTAIN.CPP`) write `Vertex::Pos`. The equality test above says it is not
+> stale at the greets poses measured; **nothing enforces it.** Worth its own
+> round.
+
+### SCOPE — counted, not estimated, and it is why this stops here
+
+Phase 5 deletes the 72 bytes of `out` fields from `Vertex`. Every **mesh-side**
+reader of one has to be re-pointed at the out array (clipper-transient readers
+do not — `C_Verts` keeps the full type). Counted in this tree, `->FIELD` derefs
+of `PX|PY|TPos_AOS|RZ|TN|TTangent|UZ|VZ|EUZ|EVZ|BGRA|LR|LG|LB|LA`:
+
+| file | refs | |
+|---|--:|---|
+| `FDS/FILLERS/FILLERS.CPP` | 349 | clipper transients — **no migration** |
+| `FDS/RENDER/Transform.cpp` | 155 | the vertex + face loops |
+| **`DEMO/CITY.CPP`** | **128** | `Reflected_Transform` — an alternative transform pipeline |
+| `FDS/FRUSTRUM/FRUSTRUM.CPP` | 99 | clipper internals + the `*A = *F->A` entry |
+| **`DEMO/CHASE.CPP`** | **95** | its own face loop + `Reflected_Transform` |
+| **`DEMO/FOUNTAIN.CPP`** | **51** | water / particle projection |
+| `FDS/FRUSTRUM/FL.CPP` | 33 | not in CMakeLists — dead |
+| `DEMO/FillerTest.cpp` | 30 | dev-gated |
+| `DEMO/Snapshot.cpp` | 17 | |
+| `FDS/Clipper.cpp` | 11 | `_2DClipper` + hand-built quads |
+| `FDS/CAMERAS/CAMERAS.CPP` | 10 | plane / portal test |
+| `DEMO/Raytracer.cpp` | 9 | |
+| `FDS/FILLERS/ShadowMap.cpp` | 8 | |
+| `DEMO/GREETS.CPP` | 6 | |
+| `RENDER.CPP` / `Lighting.cpp` / `RADIO.CPP` / `TheOtherBarry.h` | 5 each | |
+| `SkyCube.cpp` / `RenderInner.cpp` / `IMGGENR.CPP` | 4 each | |
+| `FaceBBox.h` | 3 | |
+| `VertexFrame.{h,cpp}` / `VertexScratch.h` / `PREPROC.CPP` / `SceneBuilder.cpp` / `FRUSTRUM.H` | 1–2 each | |
+
+**274 of those are in DEMO scene code**, and three of them are whole alternative
+transform pipelines that must each learn to write the out array **or the image
+breaks silently in a way no gate in this project catches** — which is exactly
+the list Phase 6.1/6.2 recorded below (`MakeFacesIndependent`, `BuildSkyCube`,
+`tessellateWaterGrid`, `Reflected_Transform`) plus the one it never found
+("Greets forward-mode wall fragments still missing after all those fixes —
+there's at least one more transform path not yet found").
+
+That is past "Vertex layout + the transform/filler readers". **Not started, and
+that is the recommendation: 0.61 % of one scene's frame, greets-only, for a
+refactor of the most-shared struct in the engine and three scene pipelines.**
+
+### IF IT IS EVER RE-OPENED, THIS IS THE SHAPE — and it is NOT the doc's Phase 5
+
+The ladder says the prize lives entirely in the **clone**, so the version worth
+building is **shadow-only** and does not touch `Vertex`, any filler, or any DEMO
+scene file:
+
+1. `PerTriMeshClone` gains a dense out record (PX, PY, Flags, TPos.xyz, RZ — 32 B).
+2. The shadow vertex loops write it and read `Pos` from `T->Verts` (proven
+   byte-null above). All three loop shapes (Inside / Ahead / Regular) must keep
+   their own `Flags` semantics — the ladder's single generic replica does **not**
+   preserve them and is a pricing device only.
+3. The two clone-backed readers learn to source from it: `Transform_Objects`'
+   face loop (`VisibilityFlagsAll`, SortZ, the tile-bbox stamp) and
+   `FrustumClipper::Render`'s entry, which overrides the `*A = *F->A` copy.
+   `F->frame` and `F->A_idx` are **already plumbed for clone-backed faces**
+   (`Transform.cpp:2833`), and `Shadows.cpp` already reads
+   `F->frame->TPos_z[A_idx]` — so the machinery exists.
+
+Its ceiling is the 0.61 % above. Its risk is step 3: a runtime branch inside
+`Transform_Objects`' face loop is **not byte-null** under `-ffp-contract=fast`
+(`docs/VISIBILITY_PLAN.md` §8 — 216 bytes on city from a never-taken `if`), so
+it has to be built branch-free the way the `--xfrm_par` block test was.
+
+---
+
 ## AMENDED 2026-08-16r — PHASE 5's CEILING IS **1.25 % of frame**, NOT 0.24–0.31 %. The section below measured the MAIN VIEW ONLY.
+
+> **SUPERSEDED 2026-08-16s by the section above: the 1.25 % is an
+> extrapolation of a slope measured in the wrong direction, and the end state
+> it prices measures 0.61 %. The 16r decomposition it rests on — 42 of 45 calls
+> are the shadow bake — stands and is what pointed the ladder at the clone.**
 
 `docs/PERF_STATE.md` §00g decomposed `Transform_Objects` by invocation source for
 the first time. At greets t=5743 on the user's acceptance arm the symbol runs

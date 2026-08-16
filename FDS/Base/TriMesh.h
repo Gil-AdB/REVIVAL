@@ -1,6 +1,9 @@
 #ifndef REVIVAL_TRIMESH_H
 #define REVIVAL_TRIMESH_H
 
+#if FDS_VIS_CENSUS
+#include <atomic>
+#endif
 #include "BaseDefs.h"
 #include "Color.h"
 #include "Vertex.h"
@@ -154,6 +157,15 @@ struct TriMesh
 
     TriMesh      * Next             = nullptr;
     TriMesh      * Prev             = nullptr;
+
+#if FDS_VIS_CENSUS
+    // DIAGNOSTIC ONLY (--xfrm_ablate bit 2048). A compact, SHARED, 12 B/vert
+    // copy of this mesh's object-space Pos, so the shadow pass's per-vertex
+    // loop can be re-timed reading it instead of reading Pos out of its
+    // per-light 140-byte clone Vertex. Built once per mesh, never written
+    // again. Absent from the shipping build.
+    std::atomic<float*> DiagPos { nullptr };
+#endif
 };
 
 #pragma pack(pop)

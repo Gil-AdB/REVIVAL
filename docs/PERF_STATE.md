@@ -19,7 +19,127 @@
 
 ---
 
+## 00h. SoA PHASE 5, PRICED BY BUILDING THE LOOP INSTEAD OF THE STRUCT — 2026-08-16s: **0.61 % of a greets frame, not 1.25 %**, and the variable is the 209.6 MiB shadow CLONE, not `sizeof(Vertex)`
+
+**§00g handed Phase 5 on at 1.25 % of frame by extrapolating a byte-slope
+(0.0086 ms/B) from a struct that had been *inflated* 140 → 192 down to the
+140 → 68 end state. That extrapolation is refuted. Measured end state: 0.61 %.**
+The extrapolation was never testable in-tree — nothing can shrink `Vertex`
+without the refactor — so the **per-vertex loop was rebuilt as a ladder** and the
+end state timed directly. Status: **Phase 5 BLOCKED ON SCOPE** (274 of the
+migration's references live in DEMO scene code, including three alternative
+transform pipelines); one instrument landed; a better-shaped successor item
+specified. Full write-up: `docs/SOA_VERTEX_REFACTOR.md`, top section.
+
+### THE INSTRUMENT — `--xfrm_ablate` bits 256…16384, census build only
+
+Replicas of the per-vertex loop that differ **only in where the read and the
+write land**. Verified in the disassembly of `_Transform_Objects`: identical FP
+sequence (3× `fmla.4s`, `fdiv`, 2× `fmul`) in every arm, and the read-source
+select is **unswitched out of the loop** (`tbz w10,#0xa` above the back-edge)
+with both strides advanced per iteration — `#0x8c` (the 140-byte `Vertex`) and
+`#0x20` (the dense 32-byte record). So the arms are an addressing change, which
+is what makes the ladder a memory measurement.
+
+### THE LADDER — greets t=5743, his acceptance arm, 1920×1080, DynOmnis phase-A `xform`, face loop ablated (`|32`)
+
+Per-frame min over 24 frames, min over 5 order-rotated rounds, dummy drivers.
+
+| arm | `Pos` read from | outputs written to | wall ms | core-ms |
+|---|---|---|--:|--:|
+| **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.85** | **6.90** |
+| **288** — replica CONTROL | same | same | **0.85** | 7.08 |
+| 544 | clone `Vertex` | dense **32 B/vert** | 0.99 **(+16 %)** | 8.86 |
+| 1056 | **shared `T->Verts`** | clone `Vertex` | 1.13 **(+33 %)** | 9.86 |
+| 2080 | compact **shared 12 B/vert** `Pos` | clone `Vertex` | 0.87 **(0 %)** | 7.51 |
+| **1568 — the END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.59 (−31 %)** | **4.79 (−32 %)** |
+
+**The control row is what licenses the rest** (0.85 vs 0.85 wall, 6.90 vs 7.08
+core): the replica is the shipping loop, and any branch it carries is carried by
+every arm and cancels. **Then read 544 / 1056 / 2080 — each is one HALF of
+Phase 5, and every half alone is neutral or worse.** A `sizeof(Vertex)` model
+predicts monotone improvement as the walked record shrinks; arm 544 takes the
+28 written bytes *out* of the record and costs **+16 %**.
+
+### WHY — `--mem_census` names it in one line
+
+```
+[MEM] 219 818 480  209.64 MiB  shadow.scratch/per-light mesh clones (Vertex[])
+                                1269 live (shadow map x mesh) clones x VIndex x sizeof(Vertex)=140
+```
+
+42 concurrent bakes cannot write one shared `Vertex`, so each (light-face ×
+mesh) pair gets a **full copy** — and **68 of every 140 bytes of those 209.6 MiB
+are read-only duplicates** (`Pos`/`N`/`Tangent`/UV/bary). Today's loop is ONE
+stream over that. Splitting only the write makes two streams over the same cold
+209.6 MiB (+16 %); moving only the read gives two 140-byte strides (+33 %);
+doing both collapses the read onto the single `T->Verts` (~15 MiB, warm across
+all 42 bakes) and makes the write dense — **that pair, and only that pair, is
+the −31 %.** The lever is the clone.
+
+### THE MAIN VIEW — ±5 %, neutral. No clone exists there, so there is nothing to collapse.
+
+`--xfrm_par=0 --xfrm_prof`, VERT bucket, greets t=5743, min over 5 rotated rounds:
+ships **0.963**; replica control (4096) **0.911**; dense write only (8192)
+**0.959 (+5.3 %)**; dense write + compact read (16384) **0.882 (−3.2 %)**.
+−0.029 ms serial, and the shipping path is parallel (0.48 ms wall for the whole
+call), so the realised delta is smaller. **Inside noise in both directions** —
+Phase 5 neither pays nor regresses here.
+
+### PREDICTION vs MEASUREMENT, and it reproduces at every bake-heavy pose
+
+| | ms/frame | % of frame |
+|---|--:|--:|
+| **PREDICTED** (§00g: 72 B × 0.0086 ms/B) | 0.62 | **1.25 %** |
+| **MEASURED** (t=5743) | **0.30** | **0.61 %** |
+
+**Over-predicted 2.05×**, outside the ±20 % bar, with a named cause: the slope
+was calibrated by *stretching a one-stream walk* and extrapolated to a
+*two-stream* end state — a different access pattern, not a shorter one.
+
+| pose | DynOmnis | DynMeshes | Δ ms/f | frame min | **% of frame** |
+|---|--:|--:|--:|--:|--:|
+| t=5743 | 0.85 → 0.59 | 0.17 → 0.13 | −0.30 | 49.59 | **0.61 %** |
+| t=2845 | 0.89 → 0.61 | 0.17 → 0.14 | −0.31 | 50.51 | **0.61 %** |
+| t=1588 | 1.05 → 0.70 | 0.19 → 0.14 | −0.40 | 60.78 | **0.66 %** |
+| t=6097 (no RTT) | 0.87 → 0.63 | 0.17 → 0.13 | −0.28 | 41.26 | **0.68 %** |
+
+### THE CHEAP SHORTCUT IS BYTE-NULL **AND** WORTH ZERO
+
+Swapping the shadow loop's `Pos` read from the clone to the shared `T->Verts` is
+**byte-null** — greets t=5743 `818f0336…`, t=1588 `756790e4…`, arm 256 vs arm
+1024, control repeated, identical — and worth **0 %** (arm 2080). The read was
+already free; the line comes in for the *write* regardless. **No bit-exact
+subset of Phase 5 pays.**
+
+Latent hazard found on the way, unrelated to perf: **`PerTriMeshClone` is never
+invalidated** (grepped — nothing clears `VertexScratch::clones` or resets
+`initialized`), so a clone's `verts` is a first-bake snapshot including `Pos`,
+while five files write `Vertex::Pos`. Not stale at the poses measured; nothing
+enforces it.
+
+### GATES (the instrument is census-only)
+
+* **The shipping binary is byte-identical to the parent's** — `md5 f5cc3479…`
+  before and after, which is a stronger statement than any pin.
+* 11 pin recipes **3/3, parent-identical**; ten at their recorded 16f/16r values
+  (city `4cb8d2ca` / `f473fe2b` / `d3374de6`, chase `3bfd4244` / `42d79fad` /
+  `622b96a2` / `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588
+  `570a7b44`) plus the four greets acceptance poses (`26ad272a` / `10adec3a` /
+  `418fc1fa` / `6d02f31b`).
+* `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`).
+* `--shadow_plane_hash` stable 2/2 (`03587397…` over all 43 bakes).
+
+---
+
 ## 00g. `Transform_Objects` DECOMPOSED — 2026-08-16r: the row is not shared machinery, it is greets' shadow bake (81 % of it), and what is left is memory-bound to the byte
+
+> **AMENDED 2026-08-16s (§00h above): this section's hand-on — "Phase 5's
+> ceiling is 1.25 %" — is an extrapolation of the byte-slope below in the
+> direction it was never measured. Built and timed, the end state is 0.61 %,
+> and the variable is the 209.6 MiB per-light clone, not `sizeof(Vertex)`.
+> Everything else here (42 of 45 calls, the ablation ladder, the six
+> refutations) stands and is what located the clone.**
 
 **16q handed on "`Transform_Objects` is 3.35 % of DEMO self samples at greets
 t=5743, more than double what is left of the clipper". It is — and at city it is

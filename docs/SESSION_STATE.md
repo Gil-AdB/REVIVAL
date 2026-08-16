@@ -1,6 +1,111 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16s — SoA PHASE 5, PRICED BY REBUILDING THE LOOP INSTEAD OF THE STRUCT: **0.61 % OF A GREETS FRAME, NOT 1.25 %** — AND NEITHER HALF OF THE SPLIT PAYS ALONE
+>
+> **16r handed Phase 5 on at 1.25 % and said "argue against this number, not
+> 0.3 %". The number is an extrapolation of a byte-slope calibrated by
+> INFLATING `sizeof(Vertex)` 140 → 192, run in the direction it was never
+> measured.** Nothing in the tree can shrink `Vertex` without doing the
+> refactor, so instead of arguing, the **per-vertex loop was rebuilt as a ladder**
+> — replicas that differ ONLY in where the read and the write land (identical FP
+> sequence in the disassembly; the read-source select unswitched out of the
+> loop) — and the end state timed. Evidence: `docs/PERF_STATE.md` **00h**,
+> `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16s**, `docs/SOA_VERTEX_REFACTOR.md`
+> top section. **Status: PARKED / BLOCKED ON SCOPE.** Nothing shipped but the
+> instrument, and the shipping binary is byte-identical to the parent's.
+>
+> ### THE LADDER — greets t=5743, his arm, DynOmnis phase-A `xform`, face loop ablated
+>
+> | arm | `Pos` read from | outputs written to | wall ms |
+> |---|---|---|--:|
+> | **32** — what ships | per-light clone `Vertex` (140 B) | the same record | **0.85** |
+> | **288** — replica CONTROL | same | same | **0.85** |
+> | 544 | clone `Vertex` | dense 32 B/vert | 0.99 **(+16 %)** |
+> | 1056 | shared `T->Verts` | clone `Vertex` | 1.13 **(+33 %)** |
+> | 2080 | compact shared 12 B/vert `Pos` | clone `Vertex` | 0.87 **(0 %)** |
+> | **1568 — Phase 5's END STATE** | **shared `T->Verts`** | **dense 32 B/vert** | **0.59 (−31 %)** |
+>
+> **Read the control first** (0.85 vs 0.85) — the replica IS the shipping loop,
+> so any branch it carries cancels across arms. **Then read the three middle
+> rows: each is one HALF of Phase 5, and every half alone is neutral or worse.**
+> A `sizeof(Vertex)` model cannot produce that: arm 544 takes the 28 written
+> bytes OUT of the walked record and costs **+16 %**.
+>
+> ### THE VARIABLE IS THE CLONE, NOT THE STRUCT — `--mem_census` names it in one line
+>
+> `shadow.scratch/per-light mesh clones (Vertex[])` = **209.64 MiB across 1 269
+> (shadow-map × mesh) clones**, and **68 of every 140 of those bytes are
+> read-only duplicates** (`Pos`/`N`/`Tangent`/UV/bary) — 42 concurrent bakes
+> cannot share one `Vertex`. Today's loop is ONE stream over that. Split only
+> the write and you keep the cold 209.6 MiB and add a stream; split only the
+> read and you get two 140-byte strides. Do BOTH and the read collapses onto the
+> single `T->Verts` (~15 MiB, warm across all 42 bakes) while the write goes
+> dense. **That pair is the whole −31 %.**
+>
+> ### PREDICTION vs MEASUREMENT — over-predicted 2.05×
+>
+> | | ms/frame | % of frame |
+> |---|--:|--:|
+> | PREDICTED (16r: 72 B × 0.0086 ms/B) | 0.62 | **1.25 %** |
+> | **MEASURED** | **0.30** | **0.61 %** |
+>
+> Reproduces at t=5743 / 2845 / 1588 / 6097 → **0.61 / 0.61 / 0.66 / 0.68 %**.
+> **The MAIN VIEW is ±5 %, neutral** (replica control 0.911 → 0.882 ms VERT;
+> write-split alone +5.3 %) — no clone there, so nothing to collapse, and no
+> regression either.
+>
+> ### BLOCKED ON SCOPE, COUNTED NOT ESTIMATED
+>
+> Of the mesh-side `out`-field derefs Phase 5 must migrate, **274 are in DEMO
+> scene code** — `CITY.CPP` 128, `CHASE.CPP` 95, `FOUNTAIN.CPP` 51 — i.e. three
+> whole alternative transform pipelines that must each learn to write the out
+> array **or the image breaks silently**, which is precisely the Phase 6.1/6.2
+> bug list plus the one it never found. That is past "Vertex layout + the
+> transform/filler readers". **0.61 % of one scene's frame does not buy it.**
+>
+> ### THE SUCCESSOR ITEM, IF ANYONE RE-OPENS IT — shadow-only, does NOT touch `Vertex`
+>
+> A dense 32-byte out record on `PerTriMeshClone`; the shadow vertex loops write
+> it and read `Pos` from `T->Verts`; the two clone-backed readers
+> (`Transform_Objects`' face loop, `FrustumClipper::Render`'s `*A = *F->A`
+> entry) source from it. `F->frame` / `F->A_idx` are **already plumbed for
+> clone-backed faces**. No filler, no DEMO scene file, no layout change. Ceiling
+> 0.61 %; the risk is that a runtime branch in that face loop is not byte-null
+> under `-ffp-contract=fast` (`docs/VISIBILITY_PLAN.md` §8).
+>
+> ### TWO THINGS TO CARRY FORWARD
+>
+> * **The cheap half is byte-null AND worth zero.** Sourcing `Pos` from
+>   `T->Verts` instead of the clone gives IDENTICAL snapshots (greets t=5743
+>   `818f0336…`, t=1588 `756790e4…`, control repeated) and moves nothing (arm
+>   2080). The read was already free — the line comes in for the write.
+> * **`PerTriMeshClone` is NEVER invalidated.** Nothing in the tree clears
+>   `VertexScratch::clones` or resets `initialized`, so a clone's `verts` —
+>   `Pos` included — is a snapshot from that mesh's FIRST shadow bake, while
+>   `DisplaceRebuild.cpp`, `MeshOps.cpp`, `GreetsDisco.cpp`, `MirrorShatter.cpp`
+>   and `FOUNTAIN.CPP` all write `Vertex::Pos`. Not stale at the poses measured;
+>   nothing enforces it. **Deserves its own round.**
+>
+> ### GATES
+>
+> * **Shipping binary byte-identical to the parent** (`md5 f5cc3479…`) — the
+>   instrument is `#if FDS_VIS_CENSUS` and textually absent. Stronger than a pin.
+> * 11 pin recipes **3/3 parent-identical**; ten at their recorded 16f/16r values
+>   (city `4cb8d2ca` / `f473fe2b` / `d3374de6`, chase `3bfd4244` / `42d79fad` /
+>   `622b96a2` / `31aa5203` / `ca07a814`, fountain `8db68ccb`, greets t=1588
+>   `570a7b44`) plus the four greets acceptance poses (t=5743 `26ad272a`,
+>   t=2845 `10adec3a`, t=6097 `418fc1fa`, t=6133 `6d02f31b`).
+> * `render_gate.sh` **4/4 PASS**; `--shadow_plane_hash` stable 2/2.
+> * Harness note: `city-t1961-plain`'s recorded `bd4ffbf8` needs
+>   `FDS_CITY_ENV_PIXEL=1` in the environment — dropping it gives a
+>   self-consistent `4a094fba`. Recipe transcription, not drift.
+>
 > ## 2026-08-16r — `Transform_Objects` (16q's 3.35 % ROW) IS NOT SHARED MACHINERY: IT IS GREETS' SHADOW BAKE, 42 OF ITS 45 CALLS A FRAME
+>
+> > **AMENDED 2026-08-16s (block above): the "Phase 5 is 1.25 %" hand-on is
+> > refuted — built and timed, the end state is 0.61 %, and the variable is the
+> > 209.6 MiB per-light clone, not `sizeof(Vertex)`. Everything else below
+> > stands and is what located the clone.**
 >
 > **16q handed on "`Transform_Objects` at 3.35 % is now more than double what is
 > left of the clipper". Reproduced (3.363 %) — and it is 0.309 % at city and
