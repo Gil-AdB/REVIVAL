@@ -59,13 +59,16 @@ namespace renderns {
 }
 
 void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2,
-                 Face* const* binFaces, int32_t binCount) {
+                 Face* const* binFaces, int32_t binCount, bool inlineRegion) {
 	// Forward raster of ctx's face list into ctx's target — all per-pass
 	// state from ctx, no globals, so a worker can run this on its own
 	// surface/face-list concurrently (RenderContext migration; the parallel
 	// shard/shadow/RTT bakes are the consumers). renderFrame passes the
 	// primary context (= the old globals → byte-identical).
 	FrustumClipper clipper;
+	// --clip_stats attribution (fds::ClipSrc); one store per tile job.
+	clipper.SetClipSource(inlineRegion ? fds::ClipSrc::ForwardInline
+	                                   : fds::ClipSrc::ForwardTiled);
 	// Near/far from ctx.camera, NOT ctx.scene: the scene's NZP/FZP are
 	// shared mutable state, so concurrent offscreen workers (Slice 6 shard
 	// pass) can't each stamp a different mirror-plane near-Z into it. The
@@ -178,7 +181,7 @@ void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, fl
 // populated, CurScene + surface globals (VPage/ZPage16/XRes) set.
 void RenderForwardRegionInline(const fds::RenderContext& ctx,
                                float x1, float y1, float x2, float y2) {
-	RenderInner(ctx, x1, y1, x2, y2, nullptr, 0);
+	RenderInner(ctx, x1, y1, x2, y2, nullptr, 0, /*inlineRegion=*/true);
 	renderns::tileDone.acquire();   // drain RenderInner's release (non-blocking)
 }
 
@@ -196,6 +199,7 @@ void RenderForwardRegionInline(const fds::RenderContext& ctx,
 void MekaleleFillRegionInline(const fds::RenderContext& ctx,
                               float x1, float y1, float x2, float y2) {
 	FrustumClipper clipper;
+	clipper.SetClipSource(fds::ClipSrc::DeferredInline);
 	clipper.InitViewport(ctx.camera);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
 	const auto rt  = ctx.target;     // G-buffer KEPT (deferred fill)
@@ -230,6 +234,7 @@ void MekaleleFillRegionInline(const fds::RenderContext& ctx,
 void RenderInnerMekalele(float x1, float y1, float x2, float y2,
                          Face* const* binFaces, int32_t binCount) {
 	FrustumClipper clipper;
+	clipper.SetClipSource(fds::ClipSrc::DeferredTiled);
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
 	const auto rt  = fds::MainRenderTargetFromGlobals();
@@ -365,6 +370,7 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
                                      TriMesh* parentFilter,
                                      XparFaceSel faceSel = XparFaceSel::Both) {
 	FrustumClipper clipper;
+	clipper.SetClipSource(fds::ClipSrc::DeferredXpar);
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
 	const auto rt  = fds::MainRenderTargetFromGlobals();

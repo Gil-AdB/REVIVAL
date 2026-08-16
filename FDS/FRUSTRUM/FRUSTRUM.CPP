@@ -1226,7 +1226,11 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
                              bool skipMipLevel)
 {
 	FDS_STATS_SCOPE();
-	FDS_STATS_INC_S(clipperEntered);
+	const unsigned clipSrcIdx = unsigned(clipSrc);
+	FDS_STATS_INC_S(clipperEntered[clipSrcIdx]);
+	// --clip_stats: arm the atexit census. One bool load per face-visit when
+	// off; same pattern as MiplevelClipper's --mip_stats arming.
+	if (fds::FeatureFlags::clip_stats()) fds::RenderStats_ClipReportAtExit();
 	// g_clipperTileRect was published once at InitViewport /
 	// SetClippingExtents time and stays valid for the duration of this
 	// worker's clipper. The FrustumClipper destructor resets to
@@ -1239,6 +1243,15 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 	Vertex* B = &C_Verts[1];
 	Vertex* C = &C_Verts[2];
 
+	// The three whole-Vertex copies. 3 x 140 B, 43 arm64 instructions
+	// (5 ldr/str q pairs + the pointer load per vertex). They exist because
+	// the clipper MUTATES what it is handed — this FACE's U/V/UZ/VZ over the
+	// vertex's own, and this TILE's visibility flags — while several tile
+	// workers hold the same source Vertex at once, so aliasing the mesh
+	// vertex is a data race, not an optimisation. Priced 2026-08-16p
+	// (docs/PERF_STATE.md 00e): 0.03-0.35 % of frame across the acceptance
+	// poses, and cutting the payload to 52 of the 140 bytes moves renderFrame
+	// instructions by less than one printed LSB. Do not spend a round here.
 	*A = *F->A;
 	*B = *F->B;
 	*C = *F->C;
@@ -1334,6 +1347,15 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 		if (vis2D & Vtx_VisUp)    Up();
 		if (vis2D & Vtx_VisDown)  Down();
 	}
+
+	// --clip_stats census (see RenderStats.h). `newVert` advanced past
+	// C_Verts[3] iff Near/Far/Left/Right/Up/Down manufactured a vertex, so
+	// this is the exact "did the clip actually emit" test — not a proxy.
+	// The no-clip arm is the pass-through path: the filler receives the three
+	// copies verbatim, which is the population any copy-elision scheme
+	// would target.
+	if (!(C_Flags & (kZFlags | kClipFlags2D))) FDS_STATS_INC_S(clipNoClip[clipSrcIdx]);
+	else if (newVert != &C_Verts[3])           FDS_STATS_INC_S(clipEmitted[clipSrcIdx]);
 
 	// Clipping process may have eliminated the entire polygon
 	if (!C_numVerts) return;

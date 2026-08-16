@@ -1,5 +1,54 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16p — THE CLIPPER'S COPY IS 2.6 % OF THE CLIPPER: 16c's handover is refuted and the row is CLOSED BELOW BAR. greets' clipper is 83 % SHADOW
+>
+> **16c handed on "cutting it further means cutting the copy, not the traversal".
+> Priced at all five acceptance poses, that is wrong by 10-40x.** The three
+> 140-byte `Vertex` copies in `FrustumClipper::Render` are **2.6 % of the
+> symbol's self time — 0.033 % of frame at city t=1961, 0.35 % at their worst
+> pose**; copies + `MiplevelClipper`, the residue exactly as 16c named it, is
+> **0.25 / 0.25 / 0.48 % of frame** at city t=1961 / chase t=800 / greets t=5743.
+> Below the 0.5 % bar everywhere. Landed: the instrument only — **`--clip_stats`**.
+> Evidence: `docs/PERF_STATE.md` **00e**, `docs/OPTIMIZATION_BACKLOG.md`
+> **2026-08-16p**.
+>
+> | mechanism | verdict |
+> |---|---|
+> | (a) copy elision / copy-on-clip | **structurally impossible** — the clipper mutates the copies per-FACE (`A->U = F->U1`, UVs live on the face) and per-TILE (`Calc_Flags`), 4 instructions after the copy, from 12 pool workers at once |
+> | (b) shrink the payload | **audited safe at 104 B, refuted by measurement** — a 52-B ceiling probe (63 % of the payload gone) moves `renderFrame` Ginstr/f by less than one printed LSB at all three poses, exactly as the disassembly predicts (43 instructions/visit → 0.027 % of frame) |
+> | (c) SIMD the copy | clang already emits 128-bit `ldr q`/`str q` pairs — the widest arm64 has |
+>
+> ### THE NEW ROW, and it is bigger than the one that closed
+>
+> `--clip_stats` splits the census by dispatcher, and that split is what found it.
+> **greets t=5743: 277 777 clipper entries per frame, 83.4 % of them from
+> `Shadows.cpp`'s depth raster, and 81.8 % of THOSE (189 567/frame) are clipped
+> away to nothing** — three 140-byte copies, the UV stamp and `Calc_Flags` paid
+> for zero pixels. That path has no screen-bbox / tile pre-reject at all;
+> `--tile_bbox_cull` and `--face_tile_bin` serve `RenderInner*` only. Same SHAPE
+> as 16c's `Reflected_Transform` finding, different function. city t=1961 for
+> contrast: 63 418 entries/f, **zero** shadow entries, G-buffer pass rejecting
+> 3.3 %.
+>
+> ### GATES
+>
+> * **11 pin recipes, 3/3 each, parent-binary-identical** (`DEMO_base` = tip
+>   `dc752523` vs the instrumented child, one worktree, one asset tree): city
+>   `bd4ffbf8` / `4cb8d2ca` / `f473fe2b` (t=2400) / `d3374de6` (t=400), chase
+>   `3bfd4244` / `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814`, fountain
+>   `8db68ccb` — **all ten at their recorded 16f values** — plus greets t=1588 and
+>   the four greets acceptance poses t=5743 / 2845 / 6097 / 6133, differential
+>   only (greets' absolute pin keys on uncommitted authoring files).
+> * `render_gate.sh` **4/4 PASS** (`4ac809e5` / `826c09e6` / `b41894f9` /
+>   `166fa25a`) — **and this round says what that is worth, measured**: the four
+>   arms issue **21 857 clipper entries** between them (`mirrortest` 3 872,
+>   `rttslot` 3 947, `conetest` 13 764, `halotest` 274) reaching 4 of the 7
+>   `ClipSrc` buckets. `conetest` is the ONLY arm that rasterises a shadow map
+>   (8 448 entries, 48.9 % rejected — the greets finding in miniature).
+>   `ForwardInline` is exercised by nothing in this round's battery.
+> * One render eyeballed per scene (city t=1961, chase t=800, greets t=5743,
+>   fountain t=2500) — all correct.
+
 > ## 2026-08-16k — THE SHATTER RACE IS CLOSED: `static TileChunkSphere chunk[]`, shared by 12 shard workers. 15/49 → 0/48
 >
 > **`FDS/RENDER/DeferredLightLists.cpp:247` — a function-local `static` scratch

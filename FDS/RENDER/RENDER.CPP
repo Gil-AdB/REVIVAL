@@ -132,7 +132,8 @@ void renderDeferredTransparentTile_Back (const DeferredLightingCtx &ctx,
 // Defined in RenderInner.cpp. binFaces/binCount: optional dense per-tile face
 // run from the --face_tile_bin pass (nullptr = walk the whole FList, legacy).
 void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2,
-                 Face* const* binFaces = nullptr, int32_t binCount = 0);
+                 Face* const* binFaces = nullptr, int32_t binCount = 0,
+                 bool inlineRegion = false);
 void RenderInnerMekalele(float x1, float y1, float x2, float y2,
                          Face* const* binFaces = nullptr, int32_t binCount = 0);
 void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,

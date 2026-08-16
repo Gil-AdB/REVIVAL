@@ -19,6 +19,284 @@
 
 ---
 
+## 00e. THE CLIPPER'S PER-FACE RESIDUE, PRICED — 2026-08-16p: the copy is 2.6 % of it, and the row §00c handed on is CLOSED BELOW BAR
+
+**§00c closed row 3 and handed on one sentence: "`FrustumClipper::Render`'s
+residue is the per-(face, tile) clip itself — three 140-byte `Vertex` copies,
+the UV/UZ stamp, and `MiplevelClipper`'s subdivision … Cutting it further means
+cutting the copy, not the traversal." That sentence is WRONG, and it is wrong by
+a factor of 10 to 40.** The copies are **2.6 % of the clipper symbol's self time
+at city t=1961 (0.033 % of frame)**; `MiplevelClipper` is another 0.13–0.17 %.
+Together — the residue exactly as §00c named it — they price at **0.25 % of
+frame (city t=1961), 0.25 % (chase t=800), 0.48 % (greets t=5743)**, below the
+0.5 % bar at every acceptance pose. **All three candidate mechanisms are dead:
+copy elision is structurally impossible, payload shrink is refuted by direct
+measurement, and SIMD-ing a copy that costs 43 instructions has nothing to buy.**
+
+Landed: the instrument only — **`--clip_stats`**, a per-(face, tile) census
+split by dispatcher. Byte-null (11 pin recipes identical parent-to-child,
+`render_gate.sh` 4/4).
+
+### WHAT THE SYMBOL COSTS, AT EVERY POSE
+
+`sample <pid> 25` on the running bench, leaf histogram, share of DEMO self
+samples — the same unprivileged instrument and the same denominator §00c used
+(`scratchpad/selftime2.sh`, which also handles chase's no-`--bench` case by
+repeating one snapshot timestamp 200×). One pose per process, tip `dc752523`.
+**`MiplevelClipper` does not appear as a symbol: it is inlined into `Render`, so
+this one number IS the whole per-(face, tile) clip.**
+
+| pose | `FrustumClipper::Render` self | DEMO self samples |
+|---|--:|--:|
+| city t=1961 (his arm) | **1.279 %** | 112 068 |
+| city t=2400 | 1.360 % | 43 027 |
+| city t=400 | 0.740 % | 65 791 |
+| chase t=800 | 1.012 % | 16 692 |
+| chase t=1600 | 0.847 % | 3 897 — thin, do not quote the LSB |
+| **greets t=5743 (his arm)** | **2.270 %** | 116 992 |
+
+§00c's 1.21 % at city t=1961 reproduces here at 1.279 %. **greets is the biggest,
+at 2.27 %** — which §00c did not know, because the binning round measured greets
+as neutral and stopped looking.
+
+### THE SPLIT — two independent instruments, and they disagree about the copy in the way that decides the row
+
+**(1) PC-offset histogram on the SHIPPING (inlined) binary.** `sample`'s call
+tree carries `+offset [0xaddr]` on every frame; summing *self* samples (node
+count − Σ children) by offset and mapping onto `otool -tvV`'s disassembly of
+`FrustumClipper::Render` (9 512 bytes, 2 378 instructions) attributes the symbol
+to source blocks with **no code change at all**. Landmarks that fix the block
+boundaries, all verified in the disassembly rather than guessed: `clipperEntered++`
+at `+76`, the three copies `+100..+284` (5 `ldr q`/`str q` pairs + one pointer
+load per vertex = 43 instructions), the Face UV load `ldr d3, [x23, #0x30]` at
+`+296`, `clipNeedZ++` at `+680`, `clipNeed2D++` at `+2136`, YSort's two
+pointer-rotation loops `+3436..+3508`, `mipEntered++` at `+3556`.
+
+**(2) a throwaway `__attribute__((noinline))` probe** on `YSort`,
+`MiplevelClipper` and a `ProbeCopy3(F)` wrapper around the three copies, so each
+becomes its own `sample` symbol and skid cannot move work across a call boundary.
+
+| component | city t=1961 | chase t=800 | greets t=5743 |
+|---|--:|--:|--:|
+| `Render`, the rest (UV stamp, `Calc_Flags`, `Near`/`Far`, L/R/U/D) | 0.726 % | 0.638 % | **1.583 %** |
+| `YSort` | 0.299 % | 0.238 % | 0.264 % |
+| `MiplevelClipper` | 0.162 % | 0.169 % | 0.133 % |
+| **the three `Vertex` copies** | **0.095 %** | **0.077 %** | **0.347 %** |
+| `FInterpolator` | 0.045 % | 0.046 % | 0.044 % |
+| `fds::stats_tls` (two calls per visit) | 0.039 % | 0.100 % | 0.087 % |
+| sum | 1.366 % | 1.268 % | 2.458 % |
+
+The two instruments bracket the copy: the noinline column **over-states** it
+(forcing the copy out of line serialises three scattered vertex loads that the
+inlined build overlaps with the UV stamp, and adds a call per visit), the offset
+histogram on the shipping binary reads **0.033 % / 0.066 % / 0.009 %**. Take the
+noinline figure as the ceiling. Either way the copy is **0.03–0.35 % of frame**,
+and §00c's residue (copies + `MiplevelClipper`) is **0.25 / 0.25 / 0.48 %**.
+
+**Read the greets column, because it is the one that matters.** greets' clipper
+is 2.27 % and only 0.48 % of it is what §00c pointed at. Half of the rest —
+1.16 % of frame by the offset histogram — sits in the Z-clip block `+660..+2128`,
+and the census below says why: greets' clipper is 83 % SHADOW raster.
+
+### MECHANISM (a), COPY ELISION: STRUCTURALLY IMPOSSIBLE, NOT MERELY UNPROFITABLE
+
+The brief asked whether the clipper only READS the source vertices on the
+no-clip path. It does not. `Render` writes to what it copies, twice over, and
+both writes are the reason the copy exists:
+
+* **per FACE** — `A->U = F->U1; A->UZ = F->U1 * aRZ;` (+ `EU/EV/EUZ/EVZ` under
+  `Face_Reflective`). UVs live on the *face*, not the vertex, because one mesh
+  vertex is shared by faces with different UVs. Stamping them into the mesh
+  vertex would corrupt every other face that shares it.
+* **per TILE** — `Calc_Flags(A/B/C)` recomputes `Vertex::Flags` against *this
+  tile's* `ClipX1..ClipY2`. The same face is visited by 1.45 tiles on average
+  (§00c), each wanting different flags.
+
+And the two hazards compound: the tile jobs run on **12 pool workers at once**,
+so any write to a shared mesh `Vertex` is a data race between tiles, not just a
+correctness question within one. There is no "point until first mutation"
+window — the first mutation is 4 instructions after the copy. The idea is dead
+before the census is consulted; the census (below) only says how large the
+population would have been.
+
+### MECHANISM (b), SHRINK THE PAYLOAD: AUDITED SAFE, THEN REFUTED BY MEASUREMENT
+
+A full field audit of every route into the clipper's copies — the clipper's own
+`C_Prim`/`C_Scnd`/`_IA`/`_IB`/`newVert`, every `RasterFunc` (`MekaleleImpl<>` ×3,
+all 15 `TheOtherBarry<>` instantiations, `MekaleleShadowDepth`), and the `vc[]`
+re-copies inside them — says the copy can safely drop the **36-byte object-space
+`Pos`/`N`/`Tangent` block at `[52, 88)`**: no reader anywhere reaches those
+through a clipper copy. (`Mekalele.h:1016-1019` reads `F->B->Pos.x - F->A->Pos.x`
+— that is the ORIGINAL mesh vertex through `F->A`, not the copy. `Vertex::i` is
+likewise dead: `FRUSTRUM.CPP`'s `V->i = _IA->i` is the only read of that field in
+the tree.) Two `memcpy`s instead of one assignment, 104 of 140 bytes.
+
+Three binaries from one worktree, differing only in the copy width:
+
+| arm | copy | correct? |
+|---|--:|---|
+| `cp0` | 140 B — `*A = *F->A` ×3, the shipping form | yes |
+| `cp1` | **104 B** — `[0,52)` + `[88,140)`, the audited-safe cut | yes |
+| `cp2` | 52 B — head only | **no** — a timing CEILING that removes 63 % of the payload |
+
+**min-of-11, round 0 dropped, arm order ROTATED per round, one pose per process,
+`--deferred_prof=4 --hw_prof`, 1512×848** (`scratchpad/ladder.sh`). Noise floor
+per column = the largest `(2nd-min − min)/min` across the three arms; the
+instruction columns are printed to 3–4 significant digits, so **one printed LSB
+is 0.02 % on `renderFrame` and 0.10–0.30 % on `gbuffer`** — do not read below it.
+
+| pose | column | cp0 (140 B) | cp1 (104 B) | cp2 (52 B) | noise floor | 1 LSB |
+|---|---|--:|--:|--:|--:|--:|
+| **city t=1961** | `renderFrame` Ginstr/f | 4.1760 | 4.1740 (−0.05 %) | 4.1730 (−0.07 %) | 0.05 % | 0.02 % |
+| | `renderFrame` Gcyc/f | 1.1070 | 1.1060 (−0.09 %) | 1.1070 (0.00 %) | 0.27 % | 0.09 % |
+| | `gbuffer` Ginstr/f | 0.4450 | 0.4450 (0.00 %) | 0.4440 (−0.22 %) | 0.00 % | 0.22 % |
+| | frame min (ms) | 46.14 | 46.16 | 46.01 | 0.37 % | — |
+| **greets t=5743** | `renderFrame` Ginstr/f | 4.6790 | 4.6800 (+0.02 %) | 4.6780 (−0.02 %) | 0.00 % | 0.02 % |
+| | `renderFrame` Gcyc/f | 1.2720 | 1.2670 (−0.39 %) | 1.2690 (−0.24 %) | 0.32 % | 0.08 % |
+| | `gbuffer` Ginstr/f | 0.9920 | 0.9920 (0.00 %) | 0.9910 (−0.10 %) | 0.00 % | 0.10 % |
+| | frame min (ms) | 50.06 | 49.85 | 49.96 | 0.28 % | — |
+| **chase t=800** | `renderFrame` Ginstr/f | 3.4670 | 3.4680 (+0.03 %) | 3.4660 (−0.03 %) | 0.00 % | 0.03 % |
+| | `renderFrame` Gcyc/f | 0.7890 | 0.7840 (−0.63 %) | 0.7920 (+0.38 %) | 0.25 % | 0.13 % |
+| | `gbuffer` Ginstr/f | 0.3350 | 0.3350 (0.00 %) | 0.3340 (−0.30 %) | 0.00 % | 0.30 % |
+| | frame min (ms) | 43.39 | 43.42 | 42.74 | 1.99 % | — |
+
+**Every INSTRUCTION reading is within one printed LSB** — `renderFrame` Ginstr/f
+prints to 3 decimals, so one LSB is 0.024 %, and `gbuffer` Ginstr/f's is
+0.10–0.30 %. **The cycle column moves further than that at chase, and in an
+order that cannot be a mechanism:** `cp2` cuts 63 % of the payload where `cp1`
+cuts 26 %, yet at chase `cp1` reads **−0.63 %** on `renderFrame` Gcyc and `cp2`
+reads **+0.38 %**. A cut 2.4× larger cannot be 1.6× worse. The same inversion
+appears at city (cp1 −0.09 %, cp2 0.00 %), and `cp1`'s `renderFrame` Ginstr
+delta flips sign between city (−0.05 %) and greets/chase (+0.02 / +0.03 %).
+That is the signature of noise, not of a mechanism.
+
+**THE DISASSEMBLY SAYS THE SAME THING BEFORE THE STOPWATCH DOES, and this is the
+number to quote.** The copy is 43 instructions. `cp1` removes one `ldr q` +
+one `str q` per vertex (≈6 per face-visit); `cp2` removes ≈18. At the measured
+entry counts:
+
+| pose | visits/frame | `cp1` saves | `cp2` saves | as a share of `renderFrame` Ginstr/f |
+|---|--:|--:|--:|--:|
+| city t=1961 | 63 418 | 0.38 Minstr | 1.14 Minstr | **0.009 % / 0.027 %** of 4.176 G |
+| greets t=5743 | 277 777 | 1.67 Minstr | 5.00 Minstr | **0.036 % / 0.107 %** of 4.679 G |
+
+The whole mechanism is worth **three hundredths of one percent** at the pose it
+was named for. It cannot be measured on this box because there is nothing there
+to measure. **(c), SIMD-ing the copy, is the same arithmetic with a smaller
+numerator** — `clang` already emits 128-bit `ldr q`/`str q` pairs for the
+`pack(1)` 140-byte struct assignment, which is the widest load-store arm64 has,
+so there is no wider form to reach for.
+
+### THE CENSUS — `--clip_stats`, the instrument this round lands
+
+`FrustumClipper::Render` bumps one indexed per-thread counter per visit (the
+SAME single increment the flat counter cost, so tagging is free) and
+`--clip_stats` prints an atexit table split by **which dispatcher** built the
+clipper — `fds::ClipSrc`, set once per tile job, never per face. Per-frame
+figures below are `(iters=28 − iters=8) / 20` on the same `--bench` arm, which
+subtracts init, the env bake and the shadow prebake exactly.
+
+**city t=1961, his arm — 63 418 clipper entries per frame:**
+
+| dispatcher | entries/f | no-clip | emitted | rejected |
+|---|--:|--:|--:|--:|
+| `RenderInnerMekalele` (gbuffer) | 47 681 | 78.4 % | 18.3 % | 3.3 % |
+| xpar strip raster (surface kernel) | 15 442 | 0.7 % | 97.1 % | 2.2 % |
+| `RenderInner` (fwd, tile job) | 295 | — | — | — |
+| `Shadows.cpp` depth raster | **0** | — | — | — |
+| **all** | **63 418** | **59.2 %** | **37.8 %** | **3.0 %** |
+
+city bakes no deferred shadow map at this pose, which is exactly why its clipper
+is half greets'. The 2.69 M `RenderInner` entries the census reports are the env
+cube bake and are constant in `iters` — they are init, not frame.
+
+**greets t=5743, his arm — 277 777 clipper entries per frame, 4.4× city:**
+
+| dispatcher | entries/f | no-clip | emitted | **rejected** |
+|---|--:|--:|--:|--:|
+| **`Shadows.cpp` depth raster** | **231 735 (83.4 %)** | 13.4 % | 4.8 % | **81.8 %** |
+| `RenderInnerMekalele` (gbuffer) | 44 629 | 71.8 % | 26.7 % | 1.5 % |
+| xpar strip raster (surface kernel) | 1 300 | 13.8 % | 50.8 % | 35.4 % |
+| `MekaleleFillRegionInline` (RTT) | 113 | 21.2 % | 78.8 % | 0.0 % |
+| **all** | **277 777** | **22.8 %** | **8.5 %** | **68.7 %** |
+
+`rejected` = the clip threw the polygon away entirely (`C_numVerts == 0`): the
+three copies and the UV stamp were paid and bought no pixels. **The whole
+"greets' clipper is expensive" story is the shadow raster**, and 189 567 of its
+231 735 entries per frame produce nothing. That is the row this one hands on —
+see backlog **2026-08-16p**, not this section, for what to do about it.
+
+Controls: `--no-tile_bbox_cull` takes greets' cumulative entries 8.50 M → 39.84 M
+(the cull IS live, removing 79 %), and `--no-face_tile_bin` reproduces the
+default count EXACTLY (8 499 390 both ways), which is the binning round's
+order-preservation claim re-verified from a different direction.
+
+### WHAT THE INSTRUMENT ITSELF COSTS — the OFF-arm control, because it lives in the hot path
+
+`--clip_stats` puts a `FeatureFlags` bool load in `FrustumClipper::Render` on
+every face-visit, and turns the flat `clipperEntered++` into an indexed
+`clipperEntered[src]++`. Parent (`dc752523`, no instrument) vs child, one
+worktree, min-of-11, order rotated:
+
+| column | city t=1961 | greets t=5743 | noise floor |
+|---|--:|--:|--:|
+| `renderFrame` Ginstr/f | 4.1740 → 4.1750 (**+0.02 %**) | 4.6800 → 4.6810 (**+0.02 %**) | 0.02–0.05 % |
+| `renderFrame` Gcyc/f | 1.1090 → 1.1120 (+0.27 %) | 1.2760 → 1.2720 (−0.31 %) | 0.08–0.18 % |
+| `gbuffer` Ginstr/f | 0.4440 → 0.4450 | 0.9910 → 0.9920 | 1 LSB |
+| frame min | 46.18 → 46.23 | 50.16 → 50.66 | 0.26–0.35 % |
+
+**+1 printed LSB on instructions at both poses; the cycle column changes sign
+between them.** That is the floor, not a cost.
+
+### WHAT `render_gate.sh` ACTUALLY EXERCISES HERE — measured, not assumed
+
+4/4 PASS is worth stating precisely, because "the gate passed" says nothing
+about a clipper change unless the gate runs the clipper. Each arm re-run with
+`--clip_stats`:
+
+| gate arm | clipper entries | buckets it reaches |
+|---|--:|---|
+| `mirrortest` | 3 872 | `DeferredTiled` 3 440, `DeferredXpar` 432 |
+| `rttslot` | 3 947 | `DeferredTiled` 3 612, `DeferredXpar` 324, `DeferredInline` 11 |
+| `conetest` | 13 764 | `DeferredTiled` 5 316, **`ShadowMap` 8 448** |
+| `halotest` | 274 | `DeferredTiled` 274 |
+
+**21 857 clipper entries across the four arms, reaching 4 of the 7 `ClipSrc`
+buckets.** `conetest` is the only arm that rasterises a shadow map at all, and
+it does so at a **48.9 % reject rate** — a small-scale replica of the greets
+finding below. `ForwardTiled`, `ForwardInline` and `DeferredStrip` are NOT
+covered by the gate; the city / chase / greets pin recipes cover the first and
+the third (city's xpar strip raster alone is 15 442 entries/frame), and no gate
+or pin in this round exercises `ForwardInline` (the mirror-shard forward bake).
+
+### WHAT THE REST OF THE SYMBOL IS, FOR WHOEVER COMES BACK
+
+Ranked by the noinline probe, the parts of the clipper that are NOT the copy and
+NOT `MiplevelClipper`:
+
+1. **the inlined Z clip `Near()`/`Far()`** — 1.164 % of frame at greets t=5743
+   by the offset histogram (51 % of the symbol), against 0.115 % at city. It runs
+   on only 5.2 % of greets' entries, so this is a per-call cost (a ~20-field
+   lerp plus `Calc_Flags` per manufactured vertex), and it is concentrated in the
+   shadow pass, whose light frusta the scene geometry straddles.
+2. **`YSort`** — 0.24–0.30 % of frame, stable across all three poses. A pointer
+   rotation over ≤7 entries with two variable-trip loops; `nVerts == 3` is the
+   overwhelming case and a branchless 3-way specialisation would be a pure
+   permutation, i.e. trivially bit-exact. Below bar on its own.
+3. **the UV stamp's first Face load** (`+296`, `ldr d3, [x23, #0x30]`) — the
+   single hottest instruction in the symbol at city (13.2 % of its self time).
+   It is a cache miss on the `Face`, not arithmetic.
+4. **two `fds::stats_tls()` calls per visit** — 0.04–0.10 % of frame. `Render`
+   captures the block once (`FDS_STATS_SCOPE`) and `MiplevelClipper` captures it
+   AGAIN because it is a separate function even when inlined, so the opaque
+   cross-TU call is issued 107 122 times per frame at city. Bit-exact to remove
+   (pass the captured reference down). Below bar.
+
+None of these clears 0.5 % on its own at more than one pose. The clipper is not
+one expensive thing any more; it is six cheap ones.
+
+---
+
 ## 00d. THE FINER RASTER GRID, RE-RUN — 2026-08-16d: §00 row 9's refutation is dead, and the winning shape is not the one that was tried
 
 **§00 row 9 refuted a finer frame raster grid at "+41 % wall, +139 % instructions"

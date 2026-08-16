@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Base/Face.h"     // RasterFunc, Face, Vertex, Viewport, dword, mword
+#include "Base/RenderStats.h"  // fds::ClipSrc (census attribution only)
 struct Scene;
 
 #define CLIPPER_MAXVERTS 48
@@ -19,6 +20,12 @@ public:
 	FrustumClipper() {
 		Init();
 	}
+	// --clip_stats attribution only (see fds::ClipSrc). Set ONCE per
+	// dispatcher call — i.e. per tile job, not per face — so the census can
+	// say which pass a clipper entry came from. Untagged clippers land in the
+	// "(untagged)" row rather than silently joining someone else's, which is
+	// what made the shadow raster's 84 % share at greets visible at all.
+	void SetClipSource(fds::ClipSrc s) { clipSrc = s; }
 	// Resets thread_local fds::g_clipperTileRect to the "no clamp"
 	// default. The rect is published by InitViewport / SetClippingExtents
 	// once per worker (out of FrustumClipper::Render's per-triangle hot
@@ -104,6 +111,7 @@ private:
 	                     const fds::CameraContext& cam);
 	float PolyArea();
 
+	fds::ClipSrc clipSrc = fds::ClipSrc::Unknown;   // --clip_stats only
 	dword g_MipLevel;
 
 	Viewport C_VP;

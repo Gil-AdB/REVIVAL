@@ -781,6 +781,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 						const auto rt  = fds::MainRenderTargetFromGlobals();
 						const auto& cam = *camPtr;
 						FrustumClipper clipper;
+						clipper.SetClipSource(fds::ClipSrc::ShadowMap);
 						clipper.InitViewport(*camPtr);
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
 						ShadowRasterBoxReset();

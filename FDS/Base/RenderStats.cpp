@@ -20,6 +20,8 @@ namespace fds_stats {
 dword g_clipperEntered = 0;
 dword g_clipNeedZ      = 0;
 dword g_clipNeed2D     = 0;
+dword g_clipNoClip     = 0;
+dword g_clipEmitted    = 0;
 dword g_mipEntered     = 0;
 dword g_mipFastUniform = 0;
 dword g_mipSplit       = 0;
@@ -35,6 +37,14 @@ dword  g_mipBigFace    = 0;
 dword  g_mipEnteredCum     = 0;
 dword  g_mipFastUniformCum = 0;
 dword  g_mipSplitCum       = 0;
+// Cumulative, per-ClipSrc mirrors for the --clip_stats atexit report, for the
+// same reason the mip ones exist: Flush zeroes the per-scene buckets above and
+// a scene-end flush lands before atexit runs.
+dword  g_clipEnteredSrcCum[unsigned(fds::ClipSrc::Count)] = {0};
+dword  g_clipNoClipSrcCum [unsigned(fds::ClipSrc::Count)] = {0};
+dword  g_clipEmittedSrcCum[unsigned(fds::ClipSrc::Count)] = {0};
+dword  g_clipNeedZCum      = 0;
+dword  g_clipNeed2DCum     = 0;
 }
 
 namespace fds {
@@ -79,6 +89,13 @@ struct TlsHolder {
         fds_stats::g_mipEnteredCum     += c.mipEntered;
         fds_stats::g_mipFastUniformCum += c.mipFastUniform;
         fds_stats::g_mipSplitCum       += c.mipSplit;
+        for (unsigned k = 0; k < kClipSrcCount; ++k) {
+            fds_stats::g_clipEnteredSrcCum[k] += c.clipperEntered[k];
+            fds_stats::g_clipNoClipSrcCum[k]  += c.clipNoClip[k];
+            fds_stats::g_clipEmittedSrcCum[k] += c.clipEmitted[k];
+        }
+        fds_stats::g_clipNeedZCum  += c.clipNeedZ;
+        fds_stats::g_clipNeed2DCum += c.clipNeed2D;
         fds_stats::g_mipNomip   += c.mipNomip;    c.mipNomip   = 0;
         fds_stats::g_mipNegArea += c.mipNegArea;  c.mipNegArea = 0;
         fds_stats::g_mipBigFace += c.mipBigFace;  c.mipBigFace = 0;
@@ -98,6 +115,7 @@ void RenderStats_Flush() {
     // Reset bucket totals; readers sum the per-thread contributions
     // accumulated since the last flush.
     fds_stats::g_clipperEntered = fds_stats::g_clipNeedZ = fds_stats::g_clipNeed2D = 0;
+    fds_stats::g_clipNoClip = fds_stats::g_clipEmitted = 0;
     fds_stats::g_mipEntered = fds_stats::g_mipFastUniform = fds_stats::g_mipSplit = 0;
     for (auto* c : s_registry) {
         if (c->polysRendered) {
@@ -111,7 +129,16 @@ void RenderStats_Flush() {
                        std::memory_order_relaxed)) {}
             c->fillerPixelcount = 0.0;
         }
-        fds_stats::g_clipperEntered += c->clipperEntered;   c->clipperEntered = 0;
+        for (unsigned k = 0; k < kClipSrcCount; ++k) {
+            fds_stats::g_clipEnteredSrcCum[k] += c->clipperEntered[k];
+            fds_stats::g_clipNoClipSrcCum[k]  += c->clipNoClip[k];
+            fds_stats::g_clipEmittedSrcCum[k] += c->clipEmitted[k];
+            fds_stats::g_clipperEntered += c->clipperEntered[k]; c->clipperEntered[k] = 0;
+            fds_stats::g_clipNoClip     += c->clipNoClip[k];     c->clipNoClip[k]     = 0;
+            fds_stats::g_clipEmitted    += c->clipEmitted[k];    c->clipEmitted[k]    = 0;
+        }
+        fds_stats::g_clipNeedZCum   += c->clipNeedZ;
+        fds_stats::g_clipNeed2DCum  += c->clipNeed2D;
         fds_stats::g_clipNeedZ      += c->clipNeedZ;        c->clipNeedZ      = 0;
         fds_stats::g_clipNeed2D     += c->clipNeed2D;       c->clipNeed2D     = 0;
         fds_stats::g_mipEnteredCum     += c->mipEntered;
@@ -164,6 +191,67 @@ void RenderStats_MipReportAtExit() {
     std::call_once(once, [] { std::atexit(&RenderStats_MipReport); });
 }
 
+const char* ClipSrcName(ClipSrc s) {
+    switch (s) {
+    case ClipSrc::ForwardTiled:   return "RenderInner (fwd, tile job)";
+    case ClipSrc::ForwardInline:  return "RenderForwardRegionInline";
+    case ClipSrc::DeferredTiled:  return "RenderInnerMekalele (gbuffer)";
+    case ClipSrc::DeferredXpar:   return "RenderInnerDeferredTransparent";
+    case ClipSrc::DeferredInline: return "MekaleleFillRegionInline (RTT)";
+    case ClipSrc::DeferredStrip:  return "xpar strip raster (surf kernel)";
+    case ClipSrc::ShadowMap:      return "Shadows.cpp depth raster";
+    default:                      return "(untagged)";
+    }
+}
+
+void RenderStats_ClipReport() {
+    RenderStats_Flush();
+    dword ent = 0, none = 0, emit = 0;
+    for (unsigned k = 0; k < kClipSrcCount; ++k) {
+        ent  += fds_stats::g_clipEnteredSrcCum[k];
+        none += fds_stats::g_clipNoClipSrcCum[k];
+        emit += fds_stats::g_clipEmittedSrcCum[k];
+    }
+    if (!ent) return;
+    fprintf(stderr,
+        "[CLIP] per-(face, tile) clipper census — cumulative over every\n"
+        "[CLIP] FrustumClipper::Render this process. Each entry copies 3x140 B of\n"
+        "[CLIP] Vertex into the worker clipper's scratch, stamps this FACE's UV on\n"
+        "[CLIP] the copies and this TILE's visibility flags, then clips.\n");
+    fprintf(stderr, "[CLIP] %-32s %11s %11s %6s %11s %6s %11s %6s\n",
+            "dispatcher", "entered", "no-clip", "%", "emitted", "%", "rejected", "%");
+    for (unsigned k = 0; k < kClipSrcCount; ++k) {
+        const dword e = fds_stats::g_clipEnteredSrcCum[k];
+        if (!e) continue;
+        const dword n = fds_stats::g_clipNoClipSrcCum[k];
+        const dword m = fds_stats::g_clipEmittedSrcCum[k];
+        const dword r = (e > n + m) ? (e - n - m) : 0;
+        const double inv = 100.0 / double(e);
+        fprintf(stderr, "[CLIP] %-32s %11u %11u %5.1f%% %11u %5.1f%% %11u %5.1f%%\n",
+                ClipSrcName(ClipSrc(k)), e, n, n * inv, m, m * inv, r, r * inv);
+    }
+    {
+        const dword r = (ent > none + emit) ? (ent - none - emit) : 0;
+        const double inv = 100.0 / double(ent);
+        fprintf(stderr, "[CLIP] %-32s %11u %11u %5.1f%% %11u %5.1f%% %11u %5.1f%%\n",
+                "TOTAL", ent, none, none * inv, emit, emit * inv, r, r * inv);
+    }
+    fprintf(stderr, "[CLIP]   no-clip  = wholly inside this tile rect (no Z and no 2D bit)\n");
+    fprintf(stderr, "[CLIP]   emitted  = the clip manufactured at least one vertex\n");
+    fprintf(stderr, "[CLIP]   rejected = clipped away to nothing; the copy + stamp bought no pixels\n");
+    fprintf(stderr, "[CLIP]   needZ %u (%.1f%%)  need2D %u (%.1f%%)  |  mip entered %u"
+                    " fastUniform %u split %u\n",
+            fds_stats::g_clipNeedZCum,  100.0 * double(fds_stats::g_clipNeedZCum)  / double(ent),
+            fds_stats::g_clipNeed2DCum, 100.0 * double(fds_stats::g_clipNeed2DCum) / double(ent),
+            fds_stats::g_mipEnteredCum, fds_stats::g_mipFastUniformCum, fds_stats::g_mipSplitCum);
+    fflush(stderr);
+}
+
+void RenderStats_ClipReportAtExit() {
+    static std::once_flag once;
+    std::call_once(once, [] { std::atexit(&RenderStats_ClipReport); });
+}
+
 }  // namespace fds
 
 #else  // FDS_RENDER_STATS_ENABLED == 0
@@ -177,6 +265,9 @@ PerThreadRenderStats& stats_tls() {
 void RenderStats_Flush() {}
 void RenderStats_MipReport() {}
 void RenderStats_MipReportAtExit() {}
+void RenderStats_ClipReport() {}
+void RenderStats_ClipReportAtExit() {}
+const char* ClipSrcName(ClipSrc) { return ""; }
 }  // namespace fds
 
 #endif

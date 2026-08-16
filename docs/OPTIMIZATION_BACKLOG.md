@@ -10,6 +10,174 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16p — 16c's HANDOVER ("cutting it further means cutting the copy"): the copy is 2.6 % of the clipper, the row is CLOSED BELOW BAR, and greets' clipper is 83 % SHADOW
+
+**16c closed 00b row 3 and handed on one sentence about what was left:
+"`FrustumClipper::Render`'s residue is the per-(face, tile) clip itself — three
+140-byte `Vertex` copies … Cutting it further means cutting the copy, not the
+traversal." Priced at the five acceptance poses, that sentence is wrong by a
+factor of 10 to 40. The three copies are 2.6 % of the clipper symbol's self time
+(0.033 % of frame at city t=1961, 0.35 % at its worst pose); copies +
+`MiplevelClipper` — the residue exactly as 16c named it — is 0.25 / 0.25 / 0.48 %
+of frame at city t=1961 / chase t=800 / greets t=5743, BELOW the 0.5 % bar at
+every pose. All three candidate mechanisms are dead. Landed: the instrument
+only, `--clip_stats`. BYTE-NULL — 11 pin recipes identical parent-to-child 3/3,
+`render_gate.sh` 4/4.**
+Status: **DONE (closed below bar)** · the copy row is **CLOSED, do not reopen** ·
+one NEW row opened, below.
+
+Full map, both instruments, both counter columns and the disassembly prediction:
+`docs/PERF_STATE.md` **00e**.
+
+### THE PRICE — `sample` self time, share of DEMO self samples, one pose per process
+
+`MiplevelClipper` is inlined into `Render`, so the symbol IS the whole
+per-(face, tile) clip. 16c's 1.21 % at city t=1961 reproduces at 1.279 %.
+
+| pose | `FrustumClipper::Render` |
+|---|--:|
+| city t=1961 (his arm) | 1.279 % |
+| city t=2400 | 1.360 % |
+| city t=400 | 0.740 % |
+| chase t=800 | 1.012 % |
+| chase t=1600 | 0.847 % (thin sample) |
+| **greets t=5743 (his arm)** | **2.270 %** |
+
+Split by a throwaway `noinline` probe (`YSort`, `MiplevelClipper`, and a
+`ProbeCopy3` wrapper each forced to their own symbol) and cross-checked against
+a PC-offset histogram taken on the SHIPPING inlined binary — `sample`'s call
+tree carries `+offset`, so summing self samples per offset and mapping onto
+`otool -tvV` attributes the symbol with no code change at all:
+
+| component | city t=1961 | chase t=800 | greets t=5743 |
+|---|--:|--:|--:|
+| `Render`, the rest (UV stamp, `Calc_Flags`, Z clip, 2D clip) | 0.726 % | 0.638 % | **1.583 %** |
+| `YSort` | 0.299 % | 0.238 % | 0.264 % |
+| `MiplevelClipper` | 0.162 % | 0.169 % | 0.133 % |
+| **the three `Vertex` copies** | **0.095 %** | **0.077 %** | **0.347 %** |
+| `FInterpolator` | 0.045 % | 0.046 % | 0.044 % |
+| `fds::stats_tls` (TWO calls per visit) | 0.039 % | 0.100 % | 0.087 % |
+
+The `noinline` column OVER-states the copy (it serialises three scattered vertex
+loads the inlined build overlaps with the UV stamp, and adds a call per visit);
+the offset histogram on the shipping binary reads 0.033 / 0.066 / 0.009 %. The
+noinline figure is the ceiling and it is still below bar.
+
+### WHY (a) COPY ELISION IS IMPOSSIBLE, NOT MERELY UNPROFITABLE
+
+The brief's precondition — "if the clipper only READS the source vertices on the
+common no-clip path" — is false. `Render` mutates what it copies, twice, and
+both mutations are the reason the copy exists at all:
+
+* **per FACE**: `A->U = F->U1; A->UZ = F->U1 * aRZ` (+ `EU/EV/EUZ/EVZ` when
+  reflective). UVs live on the FACE; one mesh vertex is shared by faces with
+  different UVs, so stamping into the source corrupts its neighbours.
+* **per TILE**: `Calc_Flags` recomputes `Vertex::Flags` against THIS tile's
+  rect, and a face is visited by 1.45 tiles on average.
+
+Both writes land 4 instructions after the copy, so there is no
+"pointer-until-first-mutation" window — and the tile jobs run on 12 pool workers
+at once, so a write to a shared mesh `Vertex` is a data race between tiles as
+well as wrong. Census-independent; the census only sizes a population that could
+never have been used.
+
+### WHY (b) SHRINK THE PAYLOAD IS REFUTED, WITH THE PREDICTION THAT SAID SO FIRST
+
+A full field audit (the clipper's own `C_Prim`/`C_Scnd`/`_IA`/`_IB`/`newVert`,
+`MekaleleImpl<>` ×3, all 15 `TheOtherBarry<>` instantiations,
+`MekaleleShadowDepth`, and their internal `vc[]` re-copies) finds the 36-byte
+object-space `Pos`/`N`/`Tangent` block at `[52,88)` is never read through a
+clipper copy — `Mekalele.h:1016-1019`'s `F->A->Pos` is the ORIGINAL vertex via
+`F->A`, a different pointer. So a 104-byte copy is SAFE. Three binaries from one
+worktree, min-of-11, order ROTATED per round, one pose per process:
+
+| pose | column | 140 B | 104 B (safe) | 52 B (ceiling, incorrect) | 1 printed LSB |
+|---|---|--:|--:|--:|--:|
+| city t=1961 | `renderFrame` Ginstr/f | 4.1760 | 4.1740 | 4.1730 | 0.02 % |
+| | `renderFrame` Gcyc/f | 1.1070 | 1.1060 | 1.1070 | 0.09 % |
+| greets t=5743 | `renderFrame` Ginstr/f | 4.6790 | 4.6800 | 4.6780 | 0.02 % |
+| | `renderFrame` Gcyc/f | 1.2720 | 1.2670 | 1.2690 | 0.08 % |
+| chase t=800 | `renderFrame` Ginstr/f | 3.4670 | 3.4680 | 3.4660 | 0.03 % |
+| | `renderFrame` Gcyc/f | 0.7890 | 0.7840 | 0.7920 | 0.13 % |
+
+Every instruction reading is inside one printed LSB (0.024 % on `renderFrame`
+Ginstr/f), and the cycle column's larger moves are in an impossible order — at
+chase the 26 % cut reads −0.63 % and the 63 % cut reads +0.38 %. **The
+disassembly says it before the stopwatch does:** the copy is 43 arm64
+instructions; the 52-byte ceiling removes ~18 of them per face-visit, which at
+city's 63 418 visits/frame is 1.14 Minstr against `renderFrame`'s 4.176 G =
+**0.027 %**. There is nothing there to measure. **(c) SIMD is the same
+arithmetic with a smaller numerator** — clang already emits 128-bit `ldr q` /
+`str q` pairs for the `pack(1)` struct assignment, the widest arm64 has.
+
+### THE INSTRUMENT THAT LANDED — `--clip_stats`
+
+Default OFF, changes no pixel, one bool load per face-visit when off. Prints an
+atexit per-(face, tile) census SPLIT BY DISPATCHER (`fds::ClipSrc`, stamped once
+per tile job via `FrustumClipper::SetClipSource`, never per face): entries,
+`no-clip` (wholly inside this tile rect), `emitted` (the clip manufactured a
+vertex), `rejected` (clipped away to nothing — the copy and the stamp bought no
+pixels), plus `needZ` / `need2D` and the mip branch split. The per-face cost is
+unchanged: the flat `clipperEntered++` became an indexed `clipperEntered[src]++`,
+the same single increment.
+
+**The split is the whole point of the instrument, and it is what found the next
+row.** Per-frame figures are `(iters=28 − iters=8)/20` on the same `--bench`
+arm, which subtracts init, the env bake and the shadow prebake exactly.
+
+### THE NEW ROW — greets' clipper is 83 % SHADOW RASTER, and 82 % of THOSE entries are thrown away. TODO
+
+**greets t=5743, his arm — 277 777 clipper entries per frame (4.4x city's):**
+
+| dispatcher | entries/f | no-clip | emitted | **rejected** |
+|---|--:|--:|--:|--:|
+| **`Shadows.cpp` depth raster** | **231 735 (83.4 %)** | 13.4 % | 4.8 % | **81.8 % = 189 567/f** |
+| `RenderInnerMekalele` (gbuffer) | 44 629 | 71.8 % | 26.7 % | 1.5 % |
+| xpar strip raster (surface kernel) | 1 300 | 13.8 % | 50.8 % | 35.4 % |
+| `MekaleleFillRegionInline` (RTT) | 113 | 21.2 % | 78.8 % | 0.0 % |
+| **all** | **277 777** | 22.8 % | 8.5 % | **68.7 %** |
+
+city t=1961 for contrast: **63 418 entries/f and ZERO shadow entries** — it bakes
+no deferred shadow map at that pose — split `RenderInnerMekalele` 47 681 (3.3 %
+rejected), xpar strip raster 15 442 (2.2 % rejected), forward tile job 295. The
+tiled G-buffer pass is healthy in BOTH scenes; the shadow pass is not, and it is
+the only reason greets' clipper is 2.27 % where city's is 1.28 %.
+
+`Shadows.cpp:894` walks the whole per-light face list and hands every survivor
+of its four rejects (no-`Txtr`, non-occluder material, degenerate, all-behind)
+straight to `clipper.Render`. **There is no screen-bbox / tile pre-reject on that
+path at all** — the S2/B5 `--tile_bbox_cull` and `--face_tile_bin` that 16c
+built serve `RenderInner*` only. Every one of those 189 567 rejected entries per
+frame pays three 140-byte copies, the UV stamp and `Calc_Flags` before the 2-D
+clip discards the polygon. This is the same SHAPE of defect 16c found in
+`Reflected_Transform` (a pass the cull never reached), in a different function,
+and it is the reason greets' clipper is 2.27 % where city's is 1.28 %.
+
+Caveats for whoever takes it, stated up front so the round is not lost to them:
+the shadow FList is built per LIGHT by a per-light clone transform, so the
+`FListEntry` bbox may not be stamped there — check before assuming
+`fds::FaceBBox_Stamp` can just be called; and the shadow raster's "tile" is
+often the whole map, in which case the win is a per-face reject against the
+map rect, not a per-tile one. Byte-exactness should follow from the same S2
+argument 16c used (a conservative superset box, and the clipper only shrinks
+coverage) but must be re-derived for the light frustum, whose near/far the
+geometry straddles — `needZ` is where 51 % of greets' clipper self time sits.
+
+### THE OTHER LEFTOVERS, ALL BELOW BAR ON THEIR OWN — PARKED
+
+* **`YSort`, 0.24–0.30 % of frame** at all three poses. Two variable-trip loops
+  rotating ≤7 pointers; `nVerts == 3` dominates and a branchless 3-way
+  specialisation is a pure permutation, i.e. trivially bit-exact.
+* **two `fds::stats_tls()` calls per visit, 0.04–0.10 % of frame** — `Render`
+  captures the per-thread block with `FDS_STATS_SCOPE`, then `MiplevelClipper`
+  captures it AGAIN (separate function, opaque cross-TU call even when inlined):
+  107 122 calls/frame at city t=1961. Passing the captured reference down is
+  bit-exact.
+* **the UV stamp's first `Face` load** (`ldr d3, [x23, #0x30]`) is the single
+  hottest instruction in the symbol at city — 13.2 % of its self time. It is a
+  cache miss on the `Face`, not arithmetic, so it is a layout question, not an
+  instruction-selection one.
+
 ## 2026-08-16o — 16h's ITEM 1, the three oct decodes: the 2-wide pairing it named is REAL but a quarter of the prize — the win needs the CENTRE in the same vector
 
 **16h left "the three oct normal decodes, ~0.078 Gi/f = 29 % of the fill" as its
@@ -2073,10 +2241,20 @@ there. On its own: `gbuffer` wall -8.1 % city / -6.8 % greets, thrsum -11.7 % /
   +139 % instructions *because each clipper tile re-walked the whole face list* —
   that traversal is gone. Worth re-running on chase (`gbuffer` `effPar` 5.5 of
   12). Caveat: it moves tile boundaries, so it will NOT be byte-null.
-* **`FrustumClipper::Render`'s residue is the per-(face, tile) clip itself** —
+* **~~`FrustumClipper::Render`'s residue is the per-(face, tile) clip itself —
   three 140-byte `Vertex` copies, the UV/UZ stamp, and `MiplevelClipper`'s
   subdivision, redone for each tile a face straddles (now 1.45 on average
-  instead of 30). Cutting it further means cutting the copy, not the traversal.
+  instead of 30). Cutting it further means cutting the copy, not the
+  traversal.~~ DONE 2026-08-16p — PRICED AND CLOSED BELOW BAR, and the last
+  sentence was wrong by 10-40x.** The copies are **2.6 %** of the clipper
+  symbol (0.033 % of frame at city t=1961, 0.35 % worst case at greets t=5743);
+  copies + `MiplevelClipper` = **0.25 / 0.25 / 0.48 % of frame** at city t=1961 /
+  chase t=800 / greets t=5743. Copy elision is structurally impossible (the
+  clipper mutates the copies per-face AND per-tile, from 12 workers at once);
+  a 63 %-payload-cut ceiling probe moves `renderFrame` instructions by less than
+  one printed LSB, exactly as the disassembly predicts (0.027 %). Instrument
+  landed: `--clip_stats`. Full evidence `docs/PERF_STATE.md` **00e**; the row
+  that replaces it is the SHADOW raster — backlog **2026-08-16p**.
 
 ## 2026-08-16b — CITY UNDER HIS ACCEPTANCE ARM (`--env_live_water --deferred --city-env-pixel`): re-ranked, and the biggest row in it had no instrument
 

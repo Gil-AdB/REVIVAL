@@ -5382,6 +5382,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	// strip gets exactly the lights overlapping its 8 rows.
 	auto rasterAndComposite = [&](int passIdx) {
 		FrustumClipper clipper;
+		clipper.SetClipSource(fds::ClipSrc::DeferredStrip);
 		clipper.InitViewport(CurScene);
 		clipper.SetClippingExtents(0.0f, float(strip_y),
 		                            float(XRes), float(strip_y + strip_h));
