@@ -56,6 +56,15 @@ exactly the lanes the guard masks:
 | chase t=400 | 252 px (0.012 %), max 24 |
 | chase t=1600 | 0 px |
 
+**EYEBALLED, and it does not look like 4.5 % of a frame.** The affected surface
+is the SUBMERGED part of the islands, seen through the water — dark, low
+contrast, and at max \|Δ\| 27/255 the shipping and probe frames read the same at
+a glance (`chase_t000100_shipping.png` vs `chase_t000100_probe.png`; the `_where`
+overlay is what makes the extent legible). That is the honest size of it: a
+large, ISA-dependent region that nobody would catch by looking, which is exactly
+why it survived — and why the guard is worth having even though no reviewed pose
+moves.
+
 Attribution, from the probe build's per-material counter at t=100:
 **137 207 degenerate-normal lane stores**, of which **131 804 (96 %) on matID 13
 `'moutines surface'`** — the island skirts where the mountains meet the sea —

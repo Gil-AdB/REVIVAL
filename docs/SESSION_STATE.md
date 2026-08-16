@@ -24,7 +24,10 @@
 > differs at 4 of 5 pins**: t=100 **93 426 px (4.51 %)**, t=800 15 870, t=1200
 > 3 868, t=400 252, t=1600 0. The probe's per-material counter: **137 207
 > degenerate-normal lane stores at t=100, 96 % of them on `'moutines surface'`**
-> — the island skirts at the waterline. Images:
+> — the island skirts at the waterline. **Eyeballed: it does not look like 4.5 %
+> of a frame** — the surface is the SUBMERGED island geometry seen through the
+> water, dark and low-contrast, and at max \|Δ\| 27/255 the two frames read the
+> same at a glance. Which is why it survived. Images:
 > `docs/img/zeronorm/chase_t000100_{shipping,probe,probe_diff,where}.png` (+ the
 > t=000800 set).
 >
