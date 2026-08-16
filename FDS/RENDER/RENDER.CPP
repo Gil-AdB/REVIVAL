@@ -430,7 +430,8 @@ bool WaterProceduralEffective() {
 //     mesh's object space; we transform once per frame into view space
 //     and reconstruct pixel positions there).
 //
-// Parallelism: same 6×4 tile-job model the rasterizer uses. Per-frame
+// Parallelism: its own 12×8 tile-job model (DEFERRED_NUM_TILES_X/Y), NOT the
+// rasterizer's frame grid (--frame_tile_x/y, 6×5 by default). Per-frame
 // setup (matTable, view-space omni list, screen-projection constants)
 // happens once on the demo thread; per-tile work is enqueued onto the
 // ThreadPool. Tiles are independent (each writes a disjoint slice of
@@ -441,6 +442,11 @@ bool WaterProceduralEffective() {
 // they fail both the dot >= 0 and len2 <= range2 tests, contributing
 // zero — no need to round numLights up to a multiple of 8 explicitly.
 
+// Upper bound on --frame_tile_x / --frame_tile_y. Sizes the four per-tile
+// bound arrays + the compaction list the transparent peel declares on the
+// stack (5 × 24×24 × 4 B = 11.5 KiB), and keeps every tile index inside the
+// 8-bit fields FaceTileBin packs its per-face (i0,i1,j0,j1) range into.
+static constexpr int kFrameTileMax = 24;
 
 void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 {
@@ -450,8 +456,17 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// RMW at apply_exact:459 — TSan-confirmed flicker source. Round
 	// tileSize down to mult-of-8; the last tile in each row/col absorbs
 	// the remainder.
-	constexpr auto		numTilesX = 6;
-	constexpr auto		numTilesY = 5;
+	//
+	// --frame_tile_x / --frame_tile_y make the grid a tunable (default 6×5 =
+	// the historical constant, so a default run is byte-identical). The
+	// rounding above is what makes ANY grid safe: tileSize is masked & ~7, so
+	// every INTERIOR boundary is 8-aligned no matter how many tiles there are,
+	// and the last row/column absorbs the remainder. kFrameTileMax caps the
+	// stack arrays the transparent peel below declares (tbX0..tbY1, tileList)
+	// and keeps the FaceTileBin per-face packed tile range inside its 8 bits.
+	// NOT the 12×8 deferred LIGHTING grid — see FeatureFlags.def.
+	const int numTilesX = std::clamp(fds::FeatureFlags::frame_tile_x(), 1, kFrameTileMax);
+	const int numTilesY = std::clamp(fds::FeatureFlags::frame_tile_y(), 1, kFrameTileMax);
 	const int rawTileX = (XRes + (numTilesX - 1)) / numTilesX;
 	const int rawTileY = (YRes + (numTilesY - 1)) / numTilesY;
 	const auto			tileSizeX = rawTileX & ~7;
@@ -643,7 +658,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// thread; see dispatchIndexed). Tile kernels release tileDone per tile.
 	const TailProf::Stamp _profGbuf("gbuffer");
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
-	    [&fctx, &bins, deferred, tileSizeX, tileSizeY, useBins](int t) {
+	    [&fctx, &bins, deferred, tileSizeX, tileSizeY, useBins,
+	     numTilesX, numTilesY](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
 		const int y1 = tileSizeY * j;
 		const int y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
@@ -909,13 +925,16 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// composites every batch across all 30 tiles (4-5× full screen, 99.5%
 		// empty). Each enqueued tile job is clamped to its tb box. Default =
 		// whole tile until flushBatch narrows it.
-		constexpr int NT = numTilesX * numTilesY;
-		int tbX0[NT], tbY0[NT], tbX1[NT], tbY1[NT];
+		// NT is the live tile count (--frame_tile_x/y); the arrays are sized to
+		// the kFrameTileMax cap so they stay on the stack at any grid.
+		const int NT = numTilesX * numTilesY;
+		int tbX0[kFrameTileMax * kFrameTileMax], tbY0[kFrameTileMax * kFrameTileMax];
+		int tbX1[kFrameTileMax * kFrameTileMax], tbY1[kFrameTileMax * kFrameTileMax];
 		auto runTilePass = [&](auto workFn) {
 			// Compact the non-empty tiles first, then work-steal across
 			// them — dispatchIndexed enqueues min(pool, enq) tasks, never
 			// more than the old task-per-non-empty-tile loop.
-			int tileList[NT];
+			int tileList[kFrameTileMax * kFrameTileMax];
 			int enq = 0;
 			for (int tileIdx = 0; tileIdx < NT; ++tileIdx) {
 				if (tbX0[tileIdx] >= tbX1[tileIdx] ||

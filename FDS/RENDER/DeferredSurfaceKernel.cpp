@@ -3714,18 +3714,26 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const float xpRoughK        = fds::FeatureFlags::roughness_strength();
 	const bool  xpMetalOn       = xparPbrOn && fds::FeatureFlags::metal_map();
 	// ── LIGHT TILE RESOLUTION (see DeferredLightingCtx::ltNumX) ───────────────
-	// `tileIndex` is this job's ordinal in renderFrame's 6x5 FRAME tiler
-	// (RENDER.CPP runTilePass, NT = numTilesX*numTilesY = 30). ctx.tileLights[]
-	// is built on the deferred 12x8 LIGHTING grid (96 entries). Subscripting the
-	// second array with the first grid's ordinal is a category error that never
-	// trips a bounds check (30 < 96) and never crashes — it just lights every
-	// transparent pixel from a FOREIGN region of the screen. The mis-map is
-	// constant within a frame-tile row, so at 1512x848 it lands as horizontal
-	// bands of wrong lighting exactly tileSizeY = (848+4)/5 & ~7 = 168 rows tall,
-	// visible only on transparent surfaces — i.e. on the greets mirror.
-	// Resolve the light tile from the PIXEL instead. A 6x5 frame tile is
+	// `tileIndex` is this job's ordinal in renderFrame's FRAME tiler
+	// (RENDER.CPP runTilePass, NT = numTilesX*numTilesY, default 6x5 = 30 and
+	// tunable via --frame_tile_x/y). ctx.tileLights[] is built on the deferred
+	// 12x8 LIGHTING grid (96 entries). Subscripting the second array with the
+	// first grid's ordinal is a category error that never trips a bounds check
+	// (30 < 96) and never crashes — it just lights every transparent pixel from
+	// a FOREIGN region of the screen. The mis-map is constant within a
+	// frame-tile row, so at 1512x848 it lands as horizontal bands of wrong
+	// lighting exactly tileSizeY = (848+4)/5 & ~7 = 168 rows tall, visible only
+	// on transparent surfaces — i.e. on the greets mirror.
+	// Resolve the light tile from the PIXEL instead. A default 6x5 frame tile is
 	// 248x168 px and a 12x8 light tile is 128x106, so one dispatch rect spans
 	// several light tiles: the lookup has to be per pixel, not per job.
+	// THIS IS ALSO WHY --frame_tile_x/y CANNOT DESYNC THE LIGHT GRID: the fixed
+	// path reads ltNumX/ltSizeY, which travel with the light ARRAY (set from the
+	// 12x8 grid at the bottom of Render_DeferredLighting, and from the strip
+	// geometry on the TBR path), never from the frame tiler. Only the LEGACY
+	// --no-xpar_tile_lights fallback below reads the frame ordinal, and a grid
+	// finer than 96 tiles makes its clamp collapse every tile past 95 onto the
+	// last light list — one more reason that arm is not the shipping one.
 	const bool xparTileFix = fds::FeatureFlags::xpar_tile_lights();
 	const int  ltNumX  = ctx.ltNumX  > 0 ? ctx.ltNumX  : 1;
 	const int  ltNumY  = ctx.ltNumY  > 0 ? ctx.ltNumY  : 1;

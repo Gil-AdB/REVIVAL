@@ -140,28 +140,35 @@ range** before guessing (SSAO has `FDS_SSAO_STATS=1` for exactly this).
 
 ## 6. The canonical tiled post-pass
 
-Every full-screen deferred post-pass uses the same 6×4 tile-job pattern over the shared
-threadpool. Template (from `DeferredFastFog.cpp` and `DeferredSSAO.cpp`):
+Every full-screen deferred post-pass uses the same **12×8 = 96** tile-job pattern over the
+shared threadpool, dispatched through `dispatchIndexed` (one enqueue per *worker*, then
+work-stealing off an atomic cursor — the old enqueue-per-tile loop cost ~12 µs of serial
+mutex+notify per pass). Template (from `DeferredFastFog.cpp` and `DeferredSSAO.cpp`):
 
 ```cpp
 namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; } // DeferredFastFog.cpp:50
 
-constexpr int numTilesX = 6, numTilesY = 4;
+constexpr int numTilesX = 12, numTilesY = 8;
 const int tsx = (XRes + numTilesX - 1) / numTilesX;
 const int tsy = (YRes + numTilesY - 1) / numTilesY;
-for (int tj = 0; tj < numTilesY; ++tj) {
+dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int t) {   // capture BY VALUE
+    const int tj = t / numTilesX, ti = t - tj * numTilesX;
     const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
-    for (int ti = 0; ti < numTilesX; ++ti) {
-        const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
-        ThreadPool::instance().enqueue([=]() {        // capture BY VALUE — no dangling refs
-            for (int py = y1; py < y2; ++py)
-              for (int px = x1; px < x2; ++px) { /* ... per-pixel ... */ }
-            renderns::tileDone.release();
-        });
-    }
-}
+    const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
+    for (int py = y1; py < y2; ++py)
+      for (int px = x1; px < x2; ++px) { /* ... per-pixel ... */ }
+    renderns::tileDone.release();     // the kernel posts its own permit
+});
 for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 ```
+
+**Three grids, do not confuse them.** (a) The **frame raster** grid in
+`RENDER.CPP:renderFrame` — 6×5 by default, `--frame_tile_x`/`--frame_tile_y`, tile sizes
+masked `& ~7`; it also bounds the transparent peel's per-batch composite. (b) The
+**deferred lighting** grid, `DEFERRED_NUM_TILES_X/Y` = 12×8, which owns `ctx.tileLights[]`
+and every `TileLights` array. (c) The **post-pass** grid above, which happens to be 12×8
+too but is its own local constant per pass. Subscripting one with another's ordinal is a
+real bug this project has shipped — see `--xpar_tile_lights`.
 
 Notes:
 - Capture `[=]` (by value); the enqueuing thread's stack frame is gone by the time tiles run.
@@ -326,7 +333,7 @@ A complete, recent post-pass that exercises every section above:
 
 ### SSAO performance — what was done, and what didn't pay
 
-Three passes (compute → denoise → apply), tiled 6×4 over the threadpool. Cost levers,
+Three passes (compute → denoise → apply), tiled 12×8 over the threadpool. Cost levers,
 in the order they were applied (greets 1080p quarter-res, `FDS_SSAO_STATS=1`):
 
 | change | effect |

@@ -71,7 +71,7 @@ The sequence inside a scene loop iteration is roughly:
 | Transform             | `RENDER.CPP:Transform_Objects`             | 4×3 FP world→view→screen, per-vertex visibility flags, backface culling, bounding-sphere culling.           |
 | Light                 | `RENDER.CPP:Lighting` (default)            | Per-vertex ambient + diffuse (+ optional specular). Uses the scene's `OmniHead` list plus `Cam_HeadLight`.  |
 | Sort                  | `RENDER.CPP:Radix_Sorting` (SORTS.H)       | 256-bucket 4-pass radix on `Face::SortZ`. Front-to-back (`FRONT_TO_BACK_SORTING`) to exploit the Z-buffer.  |
-| Render (tiled)        | `RENDER.CPP:Render`                        | Splits screen into 6×4 tiles, enqueues `RenderInner(x1,y1,x2,y2)` per tile onto `ThreadPool`, waits all.    |
+| Render (tiled)        | `RENDER.CPP:Render`                        | Splits screen into **6×5 = 30** tiles (`--frame_tile_x` / `--frame_tile_y`, default 6×5), work-steals `RenderInner(x1,y1,x2,y2)` per tile across the `ThreadPool`, waits all. |
 | Sprites/TBR           | `TBR_Render(CurScene)` if `Scn_SpriteTBR`  | Tile-Based-Rendering pass for sprites that weren't batched with the triangle faces. See "What's *not* done". |
 | Flip                  | `Flip(Screen)` → `SDL_UnlockTexture` + `RenderCopy` (engine) or `UpdateTexture+RenderCopy` (child surfaces) | Present. Engine surface is dual-mode lock-render: writes go straight into the `SDL_Texture` lock pointer, V_Flip just unlocks/presents/re-locks for the next frame. See "Display backend". Motion blur path (`ScM`) renders into a blurred copy first. |
 
@@ -174,9 +174,17 @@ Other rasterizers in `FILLERS/`:
   lambda calls `FPU_LPrecision()` so every worker has low-precision FPU
   and `InitPolyStats`. `HintHighPerfThread` runs in the worker prologue
   to bias the macOS scheduler toward P-cores.
-- `Render()` enqueues 24 jobs (6×4 tiles) and waits on
-  `renderns::tileCounter == numTilesX*numTilesY` with a
-  condition variable in `renderns::condition`.
+- `Render()` covers the screen with **30 tiles (6×5)** and hands them to
+  `dispatchIndexed`, which enqueues one chunk task per worker rather than
+  one per tile; the tile kernels release `renderns::tileDone` and the
+  caller drains 30 permits. The grid is `--frame_tile_x` /
+  `--frame_tile_y` (default 6×5, capped at 24×24). Tile sizes are rounded
+  DOWN to a multiple of 8 (`& ~7`) and the last row/column absorbs the
+  remainder, so every *interior* boundary stays 8-aligned at any grid —
+  that alignment is what keeps two adjacent clipper workers off the same
+  8×8 `blendv` read-modify-write. **This is not the 12×8 deferred
+  *lighting* grid** (`DEFERRED_NUM_TILES_X/Y`); confusing the two is a bug
+  the project has actually shipped (see `--xpar_tile_lights`).
 - Each worker thread has a `thread_local FrustumClipper clipper;`
   (RENDER.CPP top), avoiding contention on the clip buffers.
 - `parallel_memset(p, v, n)` (FDS/Threads.h) splits across the pool above

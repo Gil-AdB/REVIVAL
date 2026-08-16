@@ -19,6 +19,184 @@
 
 ---
 
+## 00d. THE FINER RASTER GRID, RE-RUN — 2026-08-16d: §00 row 9's refutation is dead, and the winning shape is not the one that was tried
+
+**§00 row 9 refuted a finer frame raster grid at "+41 % wall, +139 % instructions"
+because each raster tile re-walked the whole face list. `c26c1c35` +
+`d9dfa527` removed that traversal (§00c), so the refutation was re-run from
+scratch. Two things came out of it, and the second one is the result:**
+
+1. **The stated cost is gone.** The identical 12×10 probe now costs **+2.7 %**
+   `gbuffer` instructions at chase t=800, not +139 %. Nobody should quote row 9
+   as a reason again — but 12×10 also **buys almost nothing** (`effPar`
+   2.9 → 3.4), so the shape row 9 tried is simply not the interesting one.
+2. **The win is entirely in the Y axis, and it is worth −11.7 % of chase's
+   `renderFrame`.** At a FIXED 120 tiles, `6×20` beats `12×10` by 35 % of the
+   `gbuffer` wall and beats `24×5` by 33 %. Shape dominates count.
+
+Landed as **`--frame_tile_x` / `--frame_tile_y`, DEFAULT 6×5 = the historical
+constant.** The default path is byte-null (8/8 pins identical to the parent
+binary, `render_gate.sh` 4/4) and **nothing is switched on**. What follows is
+the evidence for a judge call, not a change that was made.
+
+### THE COUNTER COLUMN — what row 9's mechanism actually costs today
+
+chase t=800, 1920×1080, snapshot harness, `--deferred_prof=1 --hw_prof`,
+min-of-13 over 14 interleaved rotated rounds.
+
+| | row 9 (2026-08-14) | today, 6×5 | today, 12×10 |
+|---|--:|--:|--:|
+| `gbuffer` Ginstr/f | 0.597 → **1.424 (+139 %)** | 0.334 | **0.343 (+2.7 %)** |
+| `gbuffer` thrsum (core-ms) | 57.2 → **141.9 (+148 %)** | 25.5 | **28.0 (+9.8 %)** |
+| `gbuffer` wall | 10.22 → 14.41 (+41 %) | 8.50 | 8.05 |
+| `gbuffer` `effPar` | 5.2 → 9.1 | 2.9 | 3.4 |
+
+Note the 6×5 column has itself moved since row 9 — `effPar` reads **2.9, not
+5.5**, because §00c took 57.2 → 25.5 core-ms out of the phase without moving the
+barrier. The idle fraction got *worse* as the work got cheaper, which is why the
+question was worth re-asking.
+
+### THE SHAPE SWEEP — at a fixed tile count, the aspect ratio decides
+
+chase t=800, same harness, min-of-11 over 12 rotated rounds, `gbuffer` wall / its
+`Ginstr/f`:
+
+| grid | tiles | `gbuffer` wall | `effPar` | `gbuffer` Ginstr/f | `renderFrame` wall |
+|---|--:|--:|--:|--:|--:|
+| **6×5 (default)** | 30 | **8.50** | 2.9 | 0.334 | **33.69** |
+| 12×10 | 120 | 8.05 | 3.4 | 0.343 | 32.83 |
+| 24×5 | 120 | 7.78 | — | 0.364 | 32.57 |
+| **6×20** | **120** | **5.22 (−38.5 %)** | **5.1** | **0.350 (+4.8 %)** | **29.75 (−11.7 %)** |
+| 6×16 | 96 | 8.60 | 3.0 | — | 32.79 |
+| 16×13 | 208 | 6.04 | 4.7 | 0.354 | 30.69 |
+| 12×20 | 240 | 5.82 | — | 0.360 | 30.64 |
+| 24×10 | 240 | 7.16 | — | 0.365 | 31.68 |
+| 24×20 | 480 | 5.19 | 6.0 | 0.384 (+15 %) | 30.10 |
+
+**Three tilings of 120 tiles land 35 % apart on wall.** `6×20` gets the whole
+win of `24×20` at a third of its extra instructions, and `6×16` — four fewer
+rows — gets none of it. `24×5` (all the extra tiles spent on columns) costs
+nearly twice `6×20`'s instructions for a quarter of its win: chase's geometry is
+wide and short, so an extra COLUMN re-clips faces that already spanned the row
+while an extra ROW splits them.
+
+**The 16→20 row cliff is NOT explained.** A plausible mechanism — with 6 columns
+and 12 workers the pool covers two tile ROWS per wave, averaging two screen bands
+instead of one — was not tested. Recorded as an open question, not a finding.
+
+### ACROSS THE ACCEPTANCE ARMS — `6×20` vs the default
+
+Clean-load window (load 3.0 → 17), min-of-11 over 12 rotated rounds, one pose per
+process, 1512×848 for the bench poses. Arms: city `--env_live_water --deferred
+--city_env_pixel`; greets `--deferred --hdr --hdr-linear --texture-filter=2
+--ssao --ssao-gtao --greets-displace`; chase/fountain as §00.
+`par` = the PARENT binary at 6×5, the control that prices the runtime-grid
+refactor itself.
+
+| pose | number | par (6×5) | 6×5 | **6×20** | 24×20 |
+|---|---|--:|--:|--:|--:|
+| **chase t=800** | `renderFrame` wall | 32.96 | 33.69 | **29.75 (−11.7 %)** | 30.10 |
+| chase t=1600 | `renderFrame` wall | 17.36 | 17.28 | **16.57 (−4.1 %)** | 16.66 |
+| **city t=1961** | frame min | 47.67 | 47.49 | **46.63 (−1.8 %)** | 47.48 |
+| **greets t=5743** | frame min | 54.34 | 54.02 | **54.23 (+0.4 %)** | 56.08 (+3.8 %) |
+| fountain t=2500 | frame min | 36.19 | 37.56 | 36.39 | 36.67 |
+
+`par` vs `6×5` is the noise floor: they are the same code and read 2.2 % apart on
+chase and 3.8 % apart on fountain, so **fountain's column says nothing** and
+chase's −11.7 % / city's −1.8 % are outside it.
+
+Instruction cost of `6×20`, frame-wide (`renderFrame` Ginstr/f):
+**chase +0.5 %, city +1.5 %, fountain +2.0 %, greets +2.1 %** — the `gbuffer`
+row pays +4.8 / +13.5 / +11.7 / +10.6 % respectively. `--face_tile_bin`'s arena
+grows 403 KiB → 851 KiB at city (1.22 MiB at 24×20).
+
+### THE BYTES — and this is what decides it
+
+Tile boundaries move, so every face is clipped against different rects and
+`MiplevelClipper` subdivides a different sub-polygon. Diff of the DEFAULT grid
+against `6×20`, at each pin's acceptance arm, 1920×1080:
+
+| pin | changed px | % | max \|Δ\| | mean \|Δ\| over changed | localisation |
+|---|--:|--:|--:|--:|---|
+| chase t=100 | 58 | 0.003 % | 71 | 4.5 | scattered |
+| chase t=400 | 562 | 0.027 % | 73 | 7.0 | **seam: 4.8× enriched in ±8 px of a 6×5 boundary** |
+| chase t=800 | 337 | 0.016 % | 33 | 3.0 | **seam: 2.3× enriched in ±8 px of a 6×20 boundary** |
+| chase t=1200 | 1 738 | 0.084 % | 190 | 1.6 | 1 673 of 1 738 are \|Δ\|=1 |
+| chase t=1600 | 59 | 0.003 % | 52 | 3.0 | scattered |
+| fountain t=2500 | 810 | 0.039 % | 231 | 13.3 | 1.6× enriched at seams |
+| **city t=1961** | **38 430** | **1.85 %** | 160 | 2.2 | **NOT seam-local (1.0–1.2× — i.e. uniform)** |
+| **greets t=5743** | **339 472** | **16.37 %** | 122 | 4.8 | **NOT seam-local (1.1–1.4×)** |
+
+**greets is the veto case and its mechanism is measured, not guessed.** Re-running
+the same 6×5-vs-6×20 diff with single flags removed:
+
+| greets arm | changed px | % |
+|---|--:|--:|
+| his full arm | 339 472 | 16.37 % |
+| `--texture-filter=0` instead of 2 | 144 319 | **6.96 %** |
+| without `--ssao --ssao-gtao` | 347 100 | 16.74 % |
+| without `--greets_displace` | 92 527 | **4.46 %** |
+
+Trilinear filtering carries ~58 % of it and displacement most of the rest: both
+make the mip level a function of the clipped sub-polygon, so a different tiling
+re-selects mips over whole SURFACES, not just at seams. SSAO is not involved.
+**greets moves a sixth of the frame for +0.4 % wall — there is no trade there.**
+
+Images (before / after / amplified diff), full paths:
+`docs/img/tilegrid/{chase_t800,chase_t400,city_t1961,greets_t5743,fount_t2500}_6x5_before.png`,
+`…_6x20_after.png`, `…_6x20_diff.png`.
+
+### THE JUDGE CALL — Gil-Ad's, not taken here
+
+The flag is in at the historical default and **the shipping look is unchanged**.
+The recommendation, in order of confidence:
+
+* **chase is a real, cheap win** — −11.7 % of `renderFrame` at t=800 and −4.1 %
+  at t=1600 for +0.5 % instructions, and its bytes move by 58–1 738 px at max
+  \|Δ\| ≤ 190 (mostly \|Δ\|=1), seam-local where they are enriched at all. If
+  the chase pins are acceptable at that scale, `FF::setDefault(frame_tile_y, 20)`
+  in `CHASE.CPP` is the whole change. **Per-scene, not global.**
+* **greets: no.** Flat wall, 16 % of pixels moved. Do not enable it there.
+* **city: marginal.** −1.8 % frame min is real but 1.85 % of pixels move and the
+  change is uniform, not seam-local. Not worth it without a look review.
+* **A GLOBAL default change is NOT recommended** on this evidence.
+
+### WHAT THE CENSUS FOUND (frame grid vs the other three)
+
+`--frame_tile_x/y` moves ONLY `RENDER.CPP:renderFrame`'s tiler, what
+`--face_tile_bin` bins into, and the bound of the transparent peel's per-batch
+composite. It cannot reach:
+
+| grid | where | value | coupling to the frame grid |
+|---|---|---|---|
+| deferred LIGHTING | `DeferredCommon.h:76` `DEFERRED_NUM_TILES_X/Y` | 12×8 | none — `ctx.lt{NumX,NumY,SizeX,SizeY}` are set from THIS grid (`DeferredSurfaceKernel.cpp:7107`) and travel with the light array |
+| TBR strip lights | `DeferredSurfaceKernel.cpp:4865` | 1 × (YRes/8) | none — same mechanism, set from the strip geometry |
+| SSAO | `DeferredSSAO.cpp:228` etc. (5 sites) | 12×8 | none, own constant |
+| fast fog | `DeferredFastFog.cpp:2742` etc. (6 sites) | 12×8 | none, own constant |
+| shadow maps | `Shadows.cpp:726` | 4×4 | none, own constant |
+| volumetric cones | `--cone_fine_tiles` | 12×8 / 6×4 | none |
+
+The ONE coupling is the **legacy `--no-xpar_tile_lights` fallback**
+(`DeferredSurfaceKernel.cpp:3735`), which subscripts the 96-entry light array
+with the frame-tile ordinal and clamps: past 96 frame tiles every further tile
+collapses onto light list 95. That arm is already the known-wrong one (the fix is
+default ON); the clamp means a fine grid cannot read out of bounds.
+
+Things that are NOT hardcoded and were checked: the peel-floor restore is sized
+by `g_xparZCount` (the plane's own length, `RENDER.CPP:875`), not by tiles; the
+xpar strip path is 8-row bands off `DEFERRED_MAX_STRIPS`; `ClipperTileRect` is
+derived from the viewport, so it follows any tiling. The 168-row figure that
+appears in `DeferredSurfaceKernel.cpp:3724` is a WORKED EXAMPLE of the
+`(848+4)/5 & ~7` rule at 1512×848, not a constant — it is now labelled as the
+default.
+
+**Stale docs corrected in this round:** `ENGINE.md` said the raster grid was 6×4
+= 24 jobs (it has been 6×5 = 30, dispatched by `dispatchIndexed`, not one enqueue
+per tile); `GRAPHICS_PIPELINE.md` §6's canonical post-pass template said 6×4 with
+a per-tile `enqueue` loop (the real passes are 12×8 via `dispatchIndexed`).
+
+---
+
 ## 00c. THE G-BUFFER FILL — 2026-08-16c: the mirror pass had no tile cull at all
 
 **§00b row 3 (`FrustumClipper::Render`, 6.2 %) is closed, and its stated
@@ -184,6 +362,14 @@ instructions, because each clipper tile re-walks the whole face list") was
 blocked on exactly the traversal that is now gone. It is worth re-running on
 chase, whose `gbuffer` `effPar` is 5.5 of 12 — but note it moves tile
 boundaries, so unlike everything above it will not be byte-null.
+
+> **DONE — §00d (2026-08-16d).** Both halves of that paragraph came out true and
+> one came out incomplete: the refutation is dead (12×10 now costs +2.7 %
+> instructions, not +139 %), it is NOT byte-null (greets moves 16.4 % of its
+> pixels), and the shape that wins is **6×20, not 12×10** — the same tile count
+> spent on rows instead of a square, worth −11.7 % of chase's `renderFrame`.
+> Landed as `--frame_tile_x/y` at the historical 6×5 default; the enable is a
+> judge call, per scene.
 
 ---
 
@@ -413,7 +599,7 @@ against 12 workers, and per-symbol self time.
 | 6 | **non-light kernel remainder** (G-buffer decode, matID→`Material*`, normal/metal/rough/AO/horizon fetches, ambient+SH, env compose, store) | greets t=5743 flat | **9.9** | 0.801 | compute; IPC ~2.6 in this slice | 1–2 ms | this is the one interior slice that **grew** since 2026-08-08 (8.28 → 9.88 ms). Not root-caused. Bisect it before optimising it |
 | 7 | **water simulation + glints** | chase t=800 / city t=1961 | ~~chase 16.9 % of CPU~~ → chase **14.195 → 10.021**; city glints **7.720 → 4.602**, city ripple **4.015 → 3.117** | chase 1.128, city 0.434 + 0.406 | **was PARALLELISM** — contiguous row bands over a screen whose top half is a 10-instruction reject; now compute, `effPar` 11.1/12 | — | **DONE 2026-08-15d, docs/SESSION_STATE.md.** The passes had no phase row at all (they run outside `renderFrame`); `--water_census` + `runRowBands`' `effPar` column are the instruments that land with the fix. **−4.174 ms chase / −4.016 ms city / −3.550 ms of city's FRAME, BIT-EXACT** (eight pins 3/3, render_gate 4/4): 8-row dynamic chunks off an atomic cursor, plus a provable `ndhMin` skip ahead of `powf`. **This cell's premise was wrong twice**: greets has NO water, and the full-screen scan is NOT the fountain 198M-px pattern — the reject path is ~10 instructions against ~1050 per LIVE pixel, so all three bit-exact scan-side levers measured flat (0.7–1.4 %). **2026-08-15e** then took the caustic sampler (three bilinear channel taps collapsed to one number by every caller) for a further −16.9 % chase / −11.4 % city — a judge call at **7 px of 12.4 M, all |Δ|=1/255**, moving four pin values. **End to end: chase 17.559 → 9.175 (−47.7 %), city glints 8.035 → 4.574 (−43.1 %), city ripple 4.561 → 3.557 (−22.0 %).** What is left is **five libm calls per live pixel** in the chase path, priced at −20.1 % instructions for the four swell transcendentals |
 | 8 | **fastfog** | city t=1961 | **10.0** | 1.105 | compute; IPC 3.51 | 1–2 ms | **never per-symbol profiled before this round.** It resolves: `FastFog_SampleGrid` 4.3 %, `Froxel_CompositePixel` 4.1 %, `vFogNoise` 3.9 %, the three `Render_DeferredFastFog` tile lambdas 5.9 %, `SkyPaint` 1.8 %, `vBlobNoise` 0.7 %. **The noise is the cost** — `vFogNoise`+`vBlobNoise` ≈ 4.6 % of city's CPU |
-| 9 | **G-buffer fill parallelism** | chase t=800 | 11.3 ms at `effPar` **5.5 of 12** | 0.602 | **parallelism**, not compute — half the pool is idle | **NOT 3–5 ms: the uniform-finer-grid fix is REFUTED (2026-08-14)** | the raster grid is a fixed **6×5 = 30 tiles** (`RENDER.CPP:449`). A 12×10 probe build does raise `effPar` 5.2 → 9.1 on chase t=800 — and costs **+41 % wall, +139 % instructions** (thrsum 57.2 → 141.9 ms), because each clipper tile re-walks the whole face list. Not a serial section. What is left: split only the HEAVY tiles, or cut per-tile traversal. Numbers in `docs/SESSION_STATE.md` 2026-08-14c |
+| 9 | **G-buffer fill parallelism** | chase t=800 | 11.3 ms at `effPar` **5.5 of 12** | 0.602 | **parallelism**, not compute — half the pool is idle | ~~NOT 3–5 ms: the uniform-finer-grid fix is REFUTED~~ **THIS CELL'S REFUTATION IS OBSOLETE — see §00d (2026-08-16d)** | the raster grid was a fixed **6×5 = 30 tiles** (`RENDER.CPP:449`); it is now `--frame_tile_x/y`, still defaulting to 6×5. **The 2026-08-14 refutation ("+41 % wall, +139 % instructions, because each clipper tile re-walks the whole face list") died with `c26c1c35`+`d9dfa527`: the same 12×10 probe now costs +2.7 % instructions.** But 12×10 was also the wrong SHAPE — it buys `effPar` 2.9 → 3.4 and nothing else. **`6×20` (the same 120 tiles, spent on rows) takes `renderFrame` −11.7 % here for +0.5 % instructions.** Not landed: greets moves 16 % of its pixels for +0.4 % wall, so this is a per-scene judge call, priced in full in §00d. Also note this cell's `effPar` 5.5 is stale — §00c took 57 → 26 core-ms out of the phase without moving the barrier, so it reads **2.9** today |
 | 10 | **`lighting-w2`** (checkerboard fill wave 2) | greets t=5743 flat | **3.2** | 0.498 | compute; per-symbol `Render_DeferredLighting_TileFill` 7.3 % | 0.5–1 ms | `TileFill` is always scalar and its fallback replays the full wave-1 kernel. Turning checkerboard OFF costs 53.1 → 79.3 ms — do not propose that |
 | 11 | `shadow-bake` | greets t=5743 | 2.4 | 0.205 | compute, `effPar` 8.3/12 | — | mature |
 | 12 | `bloom-chain` | greets t=5743 | 1.78 | 0.220 | compute, IPC 4.28 | — | unattacked; sat outside every timer until 2026-08 |
