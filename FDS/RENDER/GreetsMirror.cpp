@@ -1881,7 +1881,17 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
             MM->IScale = {1.0f, 1.0f, 1.0f};
             MM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
             // Same Noshading rationale as the base-mirror clone mesh.
-            MM->Flags |= HTrack_Visible | Tri_Noshading;
+            // Tri_NoShadowCast for the same reason too, and it was MISSING
+            // here while its base-mirror twin (~line 872) has always carried
+            // it. A compound clone is re-mirrored every frame by the same
+            // UpdateMirror (it lands in the same `mirrors` vector), so without
+            // this flag it is a mesh whose Verts[].Pos is CPU-rewritten every
+            // frame that the shadow bake would clone once and then read
+            // forever — the exact staleness trap `--clone_stale_census`
+            // exists to catch, on top of the camera-dependent-shadow bug the
+            // flag was introduced for. Inert today: BuildCompoundMirrors has
+            // no caller anywhere in the tree. Armed for when it gets one.
+            MM->Flags |= HTrack_Visible | Tri_Noshading | Tri_NoShadowCast;
             // Field-wise (NOT brace-init): Pos/AA are Quaternion-layout
             // {W,x,y,z} — see the qkey comment in the first-order RTT
             // block for the degenerate-RotMat failure this causes.

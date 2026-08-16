@@ -84,7 +84,58 @@ struct VertexScratch {
     // Lazily build (or reuse) the clone for `T`. Returns a reference
     // valid until this VertexScratch is destroyed.
     PerTriMeshClone& cloneOf(TriMesh* T);
+
+    // True when the call that just returned did the FIRST-USE copy for this
+    // mesh (so the clone's read-only inputs are trivially in sync). Set on
+    // both cloneOf paths; the staleness census reads it to skip fresh clones,
+    // which cannot be stale by construction.
+    bool lastFresh = false;
 };
+
+// ── CLONE INPUT STALENESS (--clone_stale_census / --clone_refresh_inputs) ──
+//
+// THE INVARIANT THIS MACHINERY GUARDS. `cloneOf` snapshots the WHOLE Vertex
+// (and the whole Face) on first use and never refreshes it, but Transform_
+// Objects only ever REWRITES the projection outputs (PX, PY, Flags, TPos_AOS,
+// RZ, TN, TTangent — Vertex.h offsets [0,52)). Everything from offset 52 on —
+// Pos, N, Tangent, BGRA, UZ/VZ, EUZ/EVZ, U/V, EU/EV, i, OrigBary, ShellH — is
+// an INPUT the clone carries verbatim from the first bake forever. So:
+//
+//   any CPU write to TriMesh::Verts[i].<input field> or to TriMesh::Faces[j]
+//   AFTER that mesh's first clone is invisible to every clone-backed pass.
+//
+// That is only safe because no shadow-casting mesh mutates those fields per
+// frame today: rigid animation moves IPos / RotMat (which the transform reads
+// from the TriMesh, not the clone), and the two greets meshes that DO rewrite
+// vertex state every tick — the mirror clones (Pos, GreetsMirror.cpp
+// UpdateMirror) and the disco ball (LR/LG/LB, GreetsDisco.cpp UpdateDiscoBall)
+// — both carry Tri_NoShadowCast and are skipped by every shadow occluder pass.
+// The invariant is UNENFORCED by the type system, so it is enforced by these
+// two instruments instead. If you animate vertex data on a caster, or clear
+// Tri_NoShadowCast on one of those two, --clone_stale_census is what tells you
+// and --clone_refresh_inputs is what makes it correct while you decide.
+#if FDS_VIS_CENSUS
+// Compare a REUSED clone's input fields against the live mesh and accumulate
+// per-mesh counters. Census build only; called from Transform_Objects right
+// after cloneOf, where the Object name is in scope.
+void CloneStale_Check(TriMesh *T, const char *name, const PerTriMeshClone &c);
+// Print the cumulative report (one line per mesh that ever diverged, plus a
+// totals line) and reset. Called every N main-view frames from
+// Transform_Objects' census epilogue.
+void CloneStale_Dump();
+#endif
+
+// Re-copy a reused clone's INPUT fields (and its Face array, A/B/C remapped)
+// from the live mesh. Available in every build behind --clone_refresh_inputs
+// so the "do stale reads reach pixels" question can be answered on a
+// SHIPPING-shaped binary rather than only on the census one. Not a per-frame
+// cost when the flag is off: the call site is one predicate.
+void CloneRefreshInputs(TriMesh *T, PerTriMeshClone &c);
+// The Face half of the same refresh (--clone_refresh_inputs=2). Split out
+// because re-copying the Face array also resets LastMip, the per-face mip
+// HYSTERESIS state the clone legitimately owns per pass — so folding it into
+// level 1 would let a mip-flicker change masquerade as a staleness finding.
+void CloneRefreshFaces(TriMesh *T, PerTriMeshClone &c);
 
 } // namespace fds
 

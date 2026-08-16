@@ -1301,6 +1301,25 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// on pool workers and would nest dispatches), resolution-overridden probe
 	// renders, and scratch (clone) passes.
 	const XfrmShard *const _shard = g_xfrmShard;
+#if FDS_VIS_CENSUS
+	// --clone_stale_census reporting cadence. Dumped from the MAIN-VIEW entry
+	// (the once-a-frame tick-thread call), and it has to be HERE rather than in
+	// the epilogue: with --xfrm_par on — the default — that call hands off to
+	// the sharded driver and returns four lines below, so an epilogue hook
+	// never runs on the main view at all. Dumping at the top of frame N+1
+	// reports frame N's clone-backed passes, which is what a cumulative census
+	// wants anyway.
+	{
+		const int _cloneCensusN = fds::FeatureFlags::clone_stale_census();
+		if (_cloneCensusN > 0 && _mainView && !_shard && !scratch) {
+			static std::atomic<int> sCloneFrames{0};
+			if (sCloneFrames.fetch_add(1, std::memory_order_relaxed) + 1 >= _cloneCensusN) {
+				sCloneFrames.store(0, std::memory_order_relaxed);
+				fds::CloneStale_Dump();
+			}
+		}
+	}
+#endif
 	if (!_shard && _mainView && !scratch && xresOverride < 0 && yresOverride < 0) {
 		const int _parN = fds::FeatureFlags::xfrm_par();
 		if (_parN != 0) {
@@ -1320,6 +1339,15 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// worth it for a debug counter; --vis_stats simply reports nothing under
 	// --xfrm_par. Same reasoning for --xfrm_prof / --xfrm_pass_prof below.
 	const bool _visStats   = _mainView && fds::g_visStatsActive && !_shard;
+	// Clone input invalidation + its census. Read ONCE here so the per-mesh
+	// site below is a register test, not a flag lookup — and so a shipping
+	// run (both zero) carries one already-loaded compare per CLONE-BACKED
+	// mesh and nothing at all in the per-vertex or per-face loops. Only
+	// clone-backed passes can be affected, so `scratch` gates the load too.
+	const int _cloneRefresh = scratch ? fds::FeatureFlags::clone_refresh_inputs() : 0;
+#if FDS_VIS_CENSUS
+	const int _cloneCensus  = scratch ? fds::FeatureFlags::clone_stale_census() : 0;
+#endif
 	const bool coneCull = g_inShadowPass
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
@@ -1811,6 +1839,21 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		Face   *tFaces;
 		if (scratch) {
 			auto& clone = scratch->cloneOf(T);
+			// CLONE INPUT STALENESS. `clone` carries this mesh's Pos / N /
+			// Tangent / colour / UV / Face[] as they were at its FIRST use in
+			// this scratch, forever — see the block comment in
+			// Base/VertexScratch.h. Both hooks are inert at their defaults
+			// (`_cloneRefresh` 0, and the census is textually absent outside
+			// -DFDS_VIS_CENSUS=ON); they exist so the invariant is checkable
+			// and repairable rather than assumed.
+			if (_cloneRefresh && !scratch->lastFresh) {
+				fds::CloneRefreshInputs(T, clone);
+				if (_cloneRefresh > 1) fds::CloneRefreshFaces(T, clone);
+			}
+#if FDS_VIS_CENSUS
+			if (_cloneCensus && !scratch->lastFresh)
+				fds::CloneStale_Check(T, Obj->Name, clone);
+#endif
 			tVerts = clone.verts.data();
 			tFaces = clone.faces.data();
 		} else {

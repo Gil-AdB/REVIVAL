@@ -19,6 +19,57 @@
 
 ---
 
+## 00i. THE SHADOW CLONE'S STALENESS, COUNTED — 2026-08-16t: `Pos` diverges **0 times in 856 M compares**, the item is a CORRECTNESS row not a perf row, and §00h's ceiling re-confirms at **0.56 %**
+
+§00h's hand-on ("`PerTriMeshClone` is never invalidated — worth its own round")
+resolved by measurement rather than argument. It is not a perf row: nothing
+this round landed moves time, and the perf question it *does* answer is whether
+§00h's END-STATE price survives the correctness fix. **It does, to two decimals.**
+
+### The perf gate on what landed (min-of-11, order-rotated, greets t=5743 his arm)
+
+| | DynOmnis wall | floor | DynOmnis core | floor | DynMeshes wall | DynMeshes core |
+|---|--:|--:|--:|--:|--:|--:|
+| parent | 1.190 | 0.00 % | **10.250** | 0.78 % | 0.210 | 0.680 |
+| child | 1.200 | 0.00 % | **10.250** | 0.49 % | 0.210 | 0.670 |
+
+Core-ms — the column with the resolution, being a sum over 42 passes — is
+**identical**. The wall column moves one printed LSB and the four columns
+disagree in sign, which is what "neutral" looks like here. Mechanism bounds it
+independently: the added work is one already-loaded register test per
+CLONE-BACKED MESH (~2 226 mesh-visits/frame at this pose) plus two integer
+compares on the `cloneOf` map-MISS path — **nothing in any per-vertex or
+per-face loop**, which is where §00g showed the time actually is.
+
+### §00h's END-STATE ladder, re-run on the post-fix tree
+
+| arm | DynOmnis wall | floor | DynOmnis core | floor | DynMeshes wall |
+|---|--:|--:|--:|--:|--:|
+| **32** — ships | 0.870 | 0.00 % | 7.340 | 0.68 % | 0.170 |
+| **288** — replica CONTROL | 0.860 | 0.00 % | 7.180 | 2.09 % | 0.170 |
+| **1568** — END STATE | **0.610** | 1.64 % | **4.980** | 0.00 % | **0.140** |
+
+**−29.1 % wall / −30.6 % core vs the control**; Δ 0.250 + 0.030 = **0.280
+ms/frame = 0.56 % of a 49.6 ms greets frame** — §00h measured 0.56–0.63 %.
+The correctness work does not move the price, and it strengthens the read half's
+byte case (see below), so if the row is ever re-opened it re-opens at 0.56 %.
+
+### The correctness numbers, for the record
+
+`--clone_stale_census`, greets, his arm, 13-pose sweep with `FDS_GREETS_SHATTER=1`
+(so the shatter's 238-shard / 12-worker reflection bake — the second clone-backed
+pass — is live): **630 622 clone reuses, 856 176 679 vertex compares,
+285 626 101 face compares. `Pos` = 0, `N` = 0, `Tangent` = 0, size-drift = 0.**
+Only `BGRA` (355 630 633) and `Face::EU1..EV3` (644 742, all `__discoBall`)
+diverge, and both are rewritten downstream. Refreshing every one of them
+(`--clone_refresh_inputs`) is byte-identical across 8 greets configurations.
+**city / chase / fountain run ZERO clone-backed passes** — the inertness control
+for this whole subject, and the same greets-only blast radius §00g measured.
+
+Full account: `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16t**.
+
+---
+
 ## 00h. SoA PHASE 5, PRICED BY BUILDING THE LOOP INSTEAD OF THE STRUCT — 2026-08-16s: **0.6 % of a greets frame, not 1.25 %**, and the variable is the 209.6 MiB shadow CLONE, not `sizeof(Vertex)`
 
 **§00g handed Phase 5 on at 1.25 % of frame by extrapolating a byte-slope

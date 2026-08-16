@@ -137,6 +137,23 @@ the mesh vertex, which is the whole refactor.
 > `FOUNTAIN.CPP`) write `Vertex::Pos`. The equality test above says it is not
 > stale at the greets poses measured; **nothing enforces it.** Worth its own
 > round.
+>
+> > **RESOLVED 2026-08-16t — and the byte-null note above is now measured, not
+> > sampled.** `--clone_stale_census` counted a REUSED clone against the live
+> > mesh field by field across a 13-pose greets sweep with the shatter's
+> > second clone-backed pass live: **`Pos`, `N` and `Tangent` diverge 0 times in
+> > 856 176 679 vertex compares over 630 622 clone reuses**, and the clone's
+> > array size never disagrees with the live `VIndex`/`FIndex`. The only fields
+> > that do go stale are `BGRA` (rewritten every frame on the LIVE mesh by
+> > `Lighting(Scene*)`) and `Face::EU1..EV3` (stamped per pass by the
+> > transform's own face loop, all on `__discoBall`) — and refreshing every one
+> > of them (`--clone_refresh_inputs=1/2`) is byte-identical across 8 greets
+> > configurations. The invariant holds because the only per-frame `Pos` writer
+> > targets `Tri_NoShadowCast` meshes, which every shadow pass skips ~245 lines
+> > before `cloneOf`. What DID need fixing was structural, not value-based: the
+> > transform walks the clone to the LIVE `T->VIndex` while the storage is
+> > first-use-sized, so `cloneOf` now rebuilds on size drift. Full account:
+> > `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16t**.
 
 ### SCOPE — counted, not estimated, and it is why this stops here
 
@@ -200,6 +217,25 @@ Its ceiling is the 0.6 % above. Its risk is step 3: a runtime branch inside
 `Transform_Objects`' face loop is **not byte-null** under `-ffp-contract=fast`
 (`docs/VISIBILITY_PLAN.md` §8 — 216 bytes on city from a never-taken `if`), so
 it has to be built branch-free the way the `--xfrm_par` block test was.
+
+> **RE-PRICED 2026-08-16t on the post-clone-invalidation tree, and STILL NOT
+> BUILT.** The ladder reproduces: arm 32 / 288 / **1568** = 0.870 / 0.860 /
+> **0.610** DynOmnis wall, 7.340 / 7.180 / **4.980** core, DynMeshes 0.170 /
+> 0.170 / **0.140**, min-of-11 order-rotated — **0.280 ms/frame = 0.56 %**, the
+> same number to two decimals. Two coherency requirements step 2 above does NOT
+> cover, both found by reading the three loops for this round:
+>
+> 1. **`Vtx_Spike` (0x0040) shares the `Vertex::Flags` word.** Stamped at scene
+>    init (`PREPROC.CPP:213-221`), read by `RENDER.CPP:1569` and
+>    `CAMERAS.CPP:344`, and it survives the transform only because the mask is
+>    `~Vtx_Visible` (0x003F). A dense record with a fresh `Flags` drops it.
+> 2. **The `Ahead` loop does not always write `PX`/`PY`/`RZ`** — a vertex behind
+>    `nearZ` gets only `Vtx_VisNear` and keeps the PREVIOUS pass's projection.
+>    So the dense array must be per-clone, persistent, and SEEDED from the clone
+>    `Vertex` at first use; zero-initialising it changes near-plane pixels.
+>
+> Both break the image silently, for 0.56 % of ONE scene's frame — city, chase
+> and fountain run **zero** clone-backed passes (measured, `reuses=0`).
 
 ---
 

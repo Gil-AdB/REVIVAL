@@ -10,6 +10,175 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-16t — THE NEVER-INVALIDATED CLONE, ANSWERED BY COUNTING INSTEAD OF ARGUING: **`Pos` is stale ZERO times in 856 M compares**, the two fields that DO go stale are both recomputed downstream, and the real bug next door is a SIZE mismatch, not a value one
+
+**16s handed on "`PerTriMeshClone` is never invalidated, five files write
+`Vertex::Pos`, nothing enforces it — worth its own round."** Built the census,
+counted, and then made the divergence go away to see whether it had ever
+mattered. Status: **DONE** · two switches landed, one latent trap closed ·
+`--clone_stale_census` (instrument), `--clone_refresh_inputs` (armed fix),
+size-drift invalidation in `cloneOf` (default ON, byte-null).
+
+### WHAT IS ACTUALLY STALE — `--clone_stale_census`, census build
+
+The clone snapshots the whole `Vertex` and the whole `Face` on first use.
+`Transform_Objects` rewrites only the projection OUTPUTS (`Vertex` offsets
+`[0,52)`: PX, PY, Flags, TPos_AOS, RZ, TN, TTangent), so **everything from
+offset 52 on plus the entire cloned `Face[]` is frozen at first use forever.**
+The census compares a REUSED clone against the live mesh, field by field, and
+counts. Hardest arm — greets, his acceptance flags, 13-pose timeline sweep with
+`FDS_GREETS_SHATTER=1` so the shatter's 238-shard / 12-worker reflection bake
+(the SECOND clone-backed pass, `MirrorShatter.cpp:1375`) is live:
+
+| | compares | diverged |
+|---|--:|--:|
+| clone reuses | 630 622 | 330 401 |
+| **`Pos`** | 856 176 679 | **0** |
+| **`N`** | 856 176 679 | **0** |
+| **`Tangent`** | 856 176 679 | **0** |
+| tail (`BGRA` … `ShellH`) | 856 176 679 | 355 630 633 — **all `BGRA`** |
+| `Face` inputs | 285 626 101 | 644 742 — **all `EU1..EV3`** |
+| clone size vs live `VIndex`/`FIndex` | 630 622 | **0** |
+
+Zero in `UZ/VZ`, `EUZ/EVZ`, `U/V`, `EU/EV`, `i`, `OrigBary`, `ShellH`,
+`N`/`NormProd`, `U1..V3`, `LwDU/DV`, `Filler`/`Txtr`/`ReflectionTexture`, ids.
+
+**The two that do move are both fields something downstream rewrites**: `BGRA`
+is the per-vertex lit colour, rewritten on the LIVE mesh every frame by
+`Lighting(Scene*)` (`Lighting.cpp:416`); `EU1..EV3` are the env-map coords the
+transform's own face loop stamps per pass, and every one of the 644 742 is on
+`__discoBall`. Neither is an input the clone-backed pass consumes.
+
+**A trap for the next person who writes this census: compare BYTES.** The first
+version used `!=` on floats and reported a permanent `Tangent` divergence on
+four displaced-stone chunks. It was NaN — 216 verts of greets' displaced
+`Piramid` chunks carry a NaN `Tangent`, and NaN is `!=` itself, so a frozen,
+byte-identical clone reads as diverged forever. (**The NaN itself is real and
+unrelated — see the loose end at the bottom.**)
+
+### DOES ANY OF IT REACH PIXELS — `--clone_refresh_inputs`, SHIPPING-shaped binary
+
+Level 1 re-copies the 88-byte vertex input block from the live mesh on every
+clone reuse; level 2 also re-copies the `Face[]`. One binary, three arms, eight
+greets configurations: the four acceptance poses, the t=1588 pin recipe, the
+13-pose sweep, the 13-pose sweep under `FDS_GREETS_SHATTER=1`, and the shatter
+at t=5743 — **44 md5s per level, and levels 0 / 1 / 2 are byte-identical
+everywhere.** The staleness that exists is unreachable.
+
+### THE VERDICT, AND WHY THE INVARIANT HOLDS
+
+Not luck, and not "no one writes `Pos`" — five files do. It holds because the
+only per-frame writer of a live mesh's `Verts[].Pos` is `UpdateMirror`
+(`GreetsMirror.cpp:2134`), and its targets — the `__mirrorClone_*` meshes —
+carry `Tri_NoShadowCast`, which `Transform.cpp:1567` honours ~245 lines BEFORE
+`cloneOf` is ever reached. Same for the disco ball's per-tick `LR/LG/LB`
+(`GreetsDisco.cpp:753`). Every other `Pos` writer is scene-load-time, and rigid
+animation moves `IPos`/`RotMat`, which the transform reads off the `TriMesh`,
+never off the clone.
+
+**One flag was missing.** `BuildCompoundMirrors` (`GreetsMirror.cpp:1884`) built
+its clone with `HTrack_Visible | Tri_Noshading` and NOT `Tri_NoShadowCast`,
+unlike its base-mirror twin — a mesh re-mirrored every frame by the same
+`UpdateMirror` that the shadow bake would have cloned once and read forever.
+Inert today (the function has no caller anywhere in the tree) and **the fix is
+binary-identical after LTO**; landed so the trap is closed before it is wired up.
+
+### THE BUG THE ROUND WAS AIMED AT WAS NOT A VALUE BUG — IT IS A SIZE BUG
+
+`Transform_Objects` walks the clone to the **LIVE** bound (`VEnd = tVerts +
+T->VIndex`, face loop likewise to `T->FIndex`) while the storage is whatever
+FIRST use sized it to. A mesh that grows after being cloned is read AND WRITTEN
+past its allocation. Two editor paths do exactly that to a live mesh —
+`MeshOps_ResmoothSurface` grows `VIndex` to `FIndex*3` (`MeshOps.cpp:249`) and
+`DisplaceRebuild_Apply` re-runs the whole subdivision bake (`DisplaceRebuild.cpp:240`)
+— both reachable from the material editor mid-session, both on meshes
+(`rooms`, `floor`, the `Piramid` chunks) that ARE shadow casters and ARE cloned.
+**Not reproduced at runtime** (both are init-time-only headless; the editor
+trigger is interactive), so this is a code-level finding, not a caught crash.
+
+Fixed in `cloneOf`: a reused clone whose `verts.size()`/`faces.size()` no longer
+match `T->VIndex`/`T->FIndex` is rebuilt instead of returned. **Two integer
+compares on the map-MISS path** — the one-pointer-compare fast path is
+untouched — and the condition fired **0 times in 630 622 reuses**, so it is
+free and byte-null by construction.
+
+### GATES
+
+* **11 pin recipes 3/3, parent-identical, all ten at their recorded 16f/16r
+  values** (city `bd4ffbf8` / `4cb8d2ca` / `f473fe2b` / `d3374de6`, chase
+  `3bfd4244` / `42d79fad` / `622b96a2` / `31aa5203` / `ca07a814`, fountain
+  `8db68ccb`, greets t=1588 `570a7b44`) plus the four greets acceptance poses
+  (t=5743 `26ad272a`, t=2845 `10adec3a`, t=6097 `418fc1fa`, t=6133 `6d02f31b`).
+* `render_gate.sh` **4/4 PASS on BOTH binaries** (`4ac809e5` / `826c09e6` /
+  `b41894f9` / `166fa25a`).
+* `--shadow_plane_hash` **identical between base and child and 2/2 stable on
+  each** — `h=7f0f7d68…`, `cum=6aa86b38…`, all bakes.
+* **Perf neutral**, min-of-11 order-rotated, greets t=5743 his arm: `DynOmnis`
+  core **10.250 → 10.250** ms (floors 0.78 % / 0.49 %), `DynMeshes` wall
+  **0.210 → 0.210**, `DynMeshes` core 0.680 → 0.670; `DynOmnis` wall
+  1.190 → 1.200, one printed LSB, and the two columns disagree in direction.
+  Mechanism bounds it: the added work is one register test per CLONE-BACKED
+  MESH (~2 226 mesh-visits/frame) plus two integer compares on the `cloneOf`
+  miss path — nothing in any per-vertex or per-face loop.
+
+### LOOSE END, FOUND ON THE WAY AND NOT THIS ROUND'S ITEM
+
+**216 vertices of greets' displaced `Piramid` chunks (`c149`, `c150`, `c162`,
+`c166`) carry a NaN `Vertex::Tangent`** under `--greets-displace` — 1 968–53 388
+NaN-vertex hits per census dump depending on how many (map × mesh) pairs are
+walked. `Tangent` feeds `TTangent`, which feeds tangent-space normal mapping, so
+those verts hand the shading kernel a NaN basis. Nothing in this round's battery
+moves because of it (all 44 hashes reproduce their pins), so it is either
+absorbed downstream or lands on pixels nobody has looked at. **Own round.**
+The census counts them: `--clone_stale_census` prints `NaN-live N` per mesh.
+
+### ITEM 2 — THE DENSE 32-BYTE OUT RECORD: **CEILING RE-CONFIRMED AT 0.56 %, NOT BUILT**, and two coherency requirements 16s's spec did not name
+
+16s's successor item ("`PerTriMeshClone` gains a dense out record; the shadow
+vertex loops write it and read `Pos` from the shared `T->Verts`") was NOT
+blocked by anything this round landed — it is made *easier*, since the
+"read from the shared array is byte-null" half is now measured at 856 M
+compares instead of asserted at two poses, and the size-drift guard enforces
+the structural precondition the dense record would also depend on. The ladder
+was therefore re-run on the post-fix architecture to check the price had not
+moved. **It has not.** greets t=5743, his arm, 1920x1080, `--xfrm_ablate`,
+min-of-11 order-rotated, floors quoted:
+
+| arm | DynOmnis wall | floor | DynOmnis core | floor | DynMeshes wall |
+|---|--:|--:|--:|--:|--:|
+| **32** — ships | 0.870 | 0.00 % | 7.340 | 0.68 % | 0.170 |
+| **288** — replica CONTROL | 0.860 | 0.00 % | 7.180 | 2.09 % | 0.170 |
+| **1568** — END STATE | **0.610** | 1.64 % | **4.980** | 0.00 % | **0.140** |
+
+**−29.1 % wall / −30.6 % core vs the control**, ΔDynOmnis 0.250 + ΔDynMeshes
+0.030 = **0.280 ms/frame = 0.56 % of a 49.6 ms greets frame** — 16s's number to
+two decimals, on the new tree.
+
+**Not built this round.** The reason is not the ceiling, it is what the build
+has to get exactly right, and this round found two requirements the spec's
+"all three loop shapes must keep their own `Flags` semantics" does not cover:
+
+1. **`Vtx_Spike` (0x0040) lives in the same `Vertex::Flags` word** and is
+   stamped at scene init (`PREPROC.CPP:213-221`), then read by `RENDER.CPP:1569`
+   and `CAMERAS.CPP:344`. The transform's `Flags &= ~Vtx_Visible` (mask 0x003F)
+   preserves it *by construction of the mask*. A dense out record with a fresh
+   `Flags` field silently drops it.
+2. **The `Ahead` loop does not always write `PX`/`PY`/`RZ`.** For a vertex
+   behind `nearZ` it writes only `Vtx_VisNear` and leaves the PREVIOUS PASS's
+   projection live in the record. So the dense array cannot be
+   zero-initialised, and it cannot be per-pass — it has to be per-clone,
+   persistent, and SEEDED from the clone `Vertex` at first use.
+
+Add the already-known hazard that the face-loop reader is **not byte-null under
+`-ffp-contract=fast`** even for a never-taken branch (`docs/VISIBILITY_PLAN.md`
+§8, 216 bytes on city), and the shape is: three loop bodies plus two readers,
+every one of which breaks the image *silently* if a bit is dropped, for
+**0.56 % of ONE scene's frame** — city, chase, fountain and all four
+`render_gate` arms run ZERO clone-backed passes (measured this round with
+`--clone_stale_census`: `reuses=0` on all three scenes). Half-done coherency
+here is exactly how the next stale-clone bug gets written, so it stays PARKED
+with the price and the requirements written down rather than half-built.
+
 ## 2026-08-16s — SoA PHASE 5, PRICED BY BUILDING THE LOOP INSTEAD OF THE STRUCT: **0.6 % of a greets frame, not 1.25 %**. The variable is the 209.6 MiB shadow CLONE, not `sizeof(Vertex)` — and neither half of the split pays alone
 
 **16r handed Phase 5 on at "1.25 % of frame, quote this not 0.3 %". That number
