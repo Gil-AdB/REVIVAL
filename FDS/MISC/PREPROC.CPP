@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <atomic>
+#include <cstdio>
 #include <stdlib.h>
 #include <math.h>
 #include <memory.h>
@@ -249,13 +251,47 @@ void Compute_Vertex_Normals(TriMesh *T)
 		//      F->C->Faces++;
 	}
 	
+	int32_t nZeroN = 0;
 	for(Vtx=T->Verts;Vtx<VEnd;Vtx++)
 		if (Vector_Length(&Vtx->N)<EPSILON)
 		{
 			//      printf ("WARNING! 256 - divided by WARNING! (VERTEX %d)\n",Vtx-T->Vertex);
+			++nZeroN;
 		}
 		else
 			Vector_Norm(&Vtx->N);
+
+	// 16u item 4 / 16v hand-off: this function has always been able to hand out
+	// a directionless N, and it has never said so. Everything downstream —
+	// tangents, the smoothed-normal clone, the G-buffer normal plane, the POM
+	// march — inherits the zero and has to guard against it, and three rounds
+	// were spent finding those guards from the far end. ONE line at the site
+	// that creates the value. Unconditional (a defect nobody sees is a defect
+	// nobody fixes) but self-limiting, and stderr-only: no pixel moves.
+	// The material named is the one on the first face that TOUCHES a
+	// zero-normal vertex, not T->Faces[0]'s — 16v measured that the mesh's
+	// first face lies about which surface the defect is on.
+	if (nZeroN) {
+		static std::atomic<int> sWarned{0};
+		const int seen = sWarned.fetch_add(1, std::memory_order_relaxed);
+		if (seen < 10) {
+			const char *matName = "?";
+			for (F = T->Faces; F < FEnd; ++F) {
+				if (Vector_Length(&F->A->N) >= EPSILON
+				 && Vector_Length(&F->B->N) >= EPSILON
+				 && Vector_Length(&F->C->N) >= EPSILON) continue;
+				if (F->Txtr && F->Txtr->Name) matName = F->Txtr->Name;
+				break;
+			}
+			std::fprintf(stderr, "[MESH] %d of %u verts have NO normal after "
+			             "Compute_Vertex_Normals (every incident face is "
+			             "zero-area) — first affected surface '%s'\n",
+			             (int)nZeroN, (unsigned)T->VIndex, matName);
+		} else if (seen == 10) {
+			std::fprintf(stderr, "[MESH] (further zero-normal warnings "
+			             "suppressed; --zero_normal_census for the full list)\n");
+		}
+	}
 
 	if (fds::FeatureFlags::zero_normal_census()) ZeroNormalReport(T, "vnormals");
 }

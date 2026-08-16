@@ -1273,6 +1273,13 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
                         int xresOverride, int yresOverride,
                         fds::VertexScratch *scratch)
 {
+#if FDS_REFLTN_CENSUS
+	// Census build only: how many Transform_Objects calls (of any pass —
+	// main, shadow bake, mirror RTT, env probe) have already written TN into
+	// the shared AoS before the scene's reflected pass rasterizes.
+	extern std::atomic<long long> g_rtXformCalls;
+	g_rtXformCalls.fetch_add(1, std::memory_order_relaxed);
+#endif
 	extern thread_local bool g_inShadowPass;
 	// Hoist the thread_local load out of the per-vertex hot loops below
 	// (Aft / Ahead / Regular paths). macOS TLS access goes through

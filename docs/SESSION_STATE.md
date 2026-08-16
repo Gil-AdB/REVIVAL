@@ -1,5 +1,108 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-16w — 16v's 19 092 zero-TN triangles are **the whole reflected pass**: `Reflected_Transform` has never written a view normal, in chase OR city. Named, counted exactly, counterfactual rendered — **and NOT landed, because it is a look call and it exposes a second defect under it**
+>
+> Full write-up: `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16w**. The census and
+> both counterfactual arms are compile-time-gated and **byte-null to the binary
+> itself** — the shipping `DEMO` md5s identically before and after
+> (`45e9aa34…`). The one landed change that does alter codegen (the `[MESH]`
+> load warning) clears the ordinary 12-pin bar.
+>
+> ### THE MECHANISM — `DEMO/CHASE.CPP:260`
+>
+> chase mirrors its GEOMETRY, not its camera: each tick is
+> `Reflected_Transform` → sort → `Render()`, then `Transform_Objects` → sort →
+> `Render()` (`CHASE.CPP:1447` / `1470`). `Reflected_Transform` is a **second,
+> demo-side transform** — a 1998 copy of the main one — whose three non-Phong
+> vertex loops write `TPos_AOS`, `RZ`, `PX`, `PY`, `Flags` **and no `TN`, and no
+> `TTangent`**, into the SAME `T->Verts[]` the main pass uses. So 16v's audit was
+> right and looking in the wrong function: the reflected pass is not a
+> `Transform_Objects` call site, so no counter inside `Transform.cpp` can ever
+> see it. `CITY.CPP:439` is the same function with the same omission.
+>
+> ### THE COUNT IS EXACT
+>
+> `-DFDS_REFLTN_CENSUS=1` (new, compile switch, never shipped, proven pixel-null)
+> counts at the triangle the tiled rasterizer accepts, and the scene calls a
+> `noinline` reporter after each `Render()`. chase t=100: **REFLECTED 19 092
+> tris, 19 092 all-TN-zero (100 %); MAIN 19 420, 0.** **19 092 + 19 420 =
+> 38 512** — 16v's two numbers are one pass each. t=100 is 100 % because
+> `RunChaseSnapshot` ticks once per timestamp, so it is the process's FIRST tick
+> and nothing has written `TN` yet; later poses keep only the meshes the previous
+> main pass skipped (`'moutines surface'`, the terrain scrolling through
+> `Tri_Invisible`). In continuous play the zero form is first-frame-only
+> (t=98,99,100,101,102 → 19 078, then **0, 0, 0, 0**); the STALE form survives
+> every frame.
+>
+> **Why city never showed it, measured:** **71** `Transform_Objects` calls have
+> already run before city's first reflected pass (its init bakes), against **3**
+> for chase — and chase's 3 are shadow-pass calls, which skip the TN write by
+> design. City has the identical defect in its stale-normal form, permanently.
+>
+> ### THE COUNTERFACTUAL — NOT LANDED, HIS CALL
+>
+> `-DFDS_REFLTN_FIX=1` gives the three loops `MatrixXVector(IM, &Vtx->N,
+> &Vtx->TN)` (+ tangent), `IM` staged exactly as `Transform.cpp:1901` stages the
+> main pass's. **all-TN-zero → 0 at all five pins, triangle totals unmoved.** But
+> the pixels: **t=100 94 804 px (4.57 %), t=800 181 591 (8.76 %), t=1000 269 669
+> (13.00 %), t=1300 137 473 (max \|Δ\| 125), t=1600 9 206 — and t=1600 had ZERO
+> zero-TN triangles.** The 19 092 was the tip; the reflected pass has never had a
+> CORRECT normal at any pose, only an occasionally non-zero one.
+>
+> **Eyeballed, and it cuts both ways.** The reflected SHIPS gain their shading —
+> today a black silhouette, corrected a lit hull with panel detail
+> (`docs/img/refltn/chase_t000800_threeway.png`, the clearest single image). The
+> reflected ISLAND skirts LOSE theirs — today a pale milky wedge under the
+> waterline, corrected dark and gone (`chase_t000100_sbs.png`,
+> `chase_t001300_sbs.png`). Full frames + magenta extent overlay:
+> `docs/img/refltn/chase_t000{100,800}_{shipping,corrected}.png`,
+> `chase_t000100_where.png`; mountains-dominant pose `chase_t001000_sbs.png`.
+>
+> ### AND THE REASON IT IS NOT A ONE-LINE FIX
+>
+> A third arm (`-DFDS_REFLTN_FIX=2`, the UNMIRRORED rotation = today's stale
+> value made deterministic) reads like shipping (t=800: mean \|Δ\| 3.6 vs arm 1's
+> 11.8). So the delta is dominated by the mirrored-vs-unmirrored **basis**, not
+> by the zero — and the deferred light list is built in MAIN view space
+> (`DeferredSurfaceKernel.cpp:7686`) and is **not** mirrored with the geometry.
+> Arm 1 therefore lights a mirrored world with unmirrored lights: `N·L` flips
+> where a real mirror would preserve it. **A correct reflected pass needs the
+> LIGHTS mirrored too** — bigger than this round, and the reason the two-line
+> write should not be landed on its own.
+>
+> ### ALSO LANDED (byte-null) / PRICED
+>
+> * **`[MESH]` load-time zero-normal warning** at `PREPROC.CPP:220`, the site
+>   that creates the value (16u item 4). Unconditional, self-limiting at 10,
+>   stderr only. Fires **once in the whole demo**: greets `66 of 3704 verts …
+>   'momy-2'`. city / chase / fountain silent.
+> * **city's 525 needles: PARKED, priced.** Degenerate rasterizer rejects/frame:
+>   city 818 of 55 929 setups (**1.46 %**), **chase 2 302 of 38 512 (6.0 %)**.
+>   Not worth a load-time geometry edit that perturbs the FList — and if one is
+>   ever built, **chase is the scene**, keyed on the runtime reject rather than a
+>   collinearity scan of `CITY.FLD`.
+>
+> ### GATES
+>
+> * **12 pin recipes 3/3 at their recorded values** (city `bd4ffbf8` /
+>   `4cb8d2ca`, chase `3bfd4244` / `42d79fad` / `622b96a2` / `31aa5203` /
+>   `ca07a814`, fountain `8db68ccb`, greets t=1588 `570a7b44`) + a four-pose
+>   greets displaced-stone arm run differentially, 3/3.
+>   **DOC GAP:** the flag list behind the recorded greets acceptance pins
+>   (`26ad272a` / `10adec3a` / `418fc1fa` / `6d02f31b`) is written down nowhere
+>   in `docs/`; eight candidate arms were tried, none reproduces them.
+> * `render_gate.sh` **4/4 PASS**. `--shadow_plane_hash` identical parent vs
+>   final, 2/2 stable each (`03587397…`).
+> * No perf arm: the binary is byte-identical, so there is nothing to price.
+>
+> ### HANDED ON
+>
+> **The look call is his.** Arm 1 vs shipping at seven poses, images above. If
+> the brighter reflected ships are wanted, the landing shape is the two-line
+> write PLUS mirroring the light list for the reflected `Render()` (chase and
+> city both) — not the write alone.
+>
+
 > ## 2026-08-16v — 16u's THREE LOOSE ENDS, CLOSED: city's zero normals are **collinear authored triangles (1575/1575), not cancellation** — and the normal plane's missing mask is **not latent: it fires 137 207 times a frame in chase**, where what gets stored today is decided by the host ISA's NaN→int rule
 >
 > Three guards landed, one instrument, **0 pixels move at every pin and every

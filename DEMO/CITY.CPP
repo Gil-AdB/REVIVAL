@@ -2,6 +2,9 @@
 #include "Rev.h"
 #include "MaterialImport.h"
 #include <Base/RenderStats.h>
+#if FDS_REFLTN_CENSUS
+#include <FILLERS/Mekalele.h>  // census build only: per-pass zero-TN reporter
+#endif
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
 #include <FILLERS/TheOtherBarry.h>
@@ -3822,6 +3825,9 @@ struct CityScene : SceneDriver {
 			g_mipLastMipWrite = false;
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
 			g_mipLastMipWrite = true;
+#if FDS_REFLTN_CENSUS
+			meka::ReflTnCensus_Report("REFLECTED");
+#endif
 			{
 				TailProf::ScopeTimer _tp("dispmap-resample", 3);
 				// Row-band parallel resample (mirrors updateRippleDispMap's
@@ -3913,6 +3919,9 @@ struct CityScene : SceneDriver {
 		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
+#if FDS_REFLTN_CENSUS
+		meka::ReflTnCensus_Report("MAIN");
+#endif
 		// Bump-mapped specular glints on the water (post-tonemap, on the final
 		// image). zRefl marks the water-reflection pixels from the pass-1 resample.
 		if (fds::FeatureFlags::water_bump())

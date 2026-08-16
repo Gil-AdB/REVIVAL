@@ -31,6 +31,9 @@ extern thread_local bool g_xparPeelReverse;
 
 #include <atomic>
 #include <cstdlib>
+#include <map>
+#include <mutex>
+#include <string>
 
 // REACHABILITY CONTROL BUILD (compile-time, never defined in a shipping build):
 // -DFDS_ZERO_NORMAL_PROBE=1 makes the G-buffer normal plane store a LOUD code for
@@ -42,7 +45,79 @@ extern thread_local bool g_xparPeelReverse;
 #define FDS_ZERO_NORMAL_PROBE 0
 #endif
 
+// CENSUS BUILD (compile-time, never defined in a shipping build):
+// -DFDS_REFLTN_CENSUS=1 tallies, at the exact triangle the tiled rasterizer
+// accepts, how many arrive with all three corner TN == 0 — and on which
+// material. The shipping binary must not carry the counters at all (they are
+// atomics in the hottest setup path), which is why this is a compile switch and
+// not a FeatureFlag: the census answers a question about a build, not about a
+// frame, so nothing is lost by rebuilding for it.
+#ifndef FDS_REFLTN_CENSUS
+#define FDS_REFLTN_CENSUS 0
+#endif
+
+#if FDS_REFLTN_CENSUS
+// Defined in FRUSTRUM.CPP; bumped at Transform_Objects' entry.
+extern std::atomic<long long> g_rtXformCalls;
+#endif
+
 namespace meka {
+
+#if FDS_REFLTN_CENSUS
+// Per-pass tallies of rasterizer-accepted triangles by how many of their three
+// corner view normals have no direction. Reset by the reporter, which the scene
+// calls once after each Render() so the reflected and the main pass are
+// separable — the whole point of the instrument.
+inline std::atomic<long long> g_rtTriTotal{0};
+// Triangles rejected by the |det| <= 0.01 area test — the work that reached the
+// rasterizer and bought no pixel. Prices the "load-time needle cull" remainder.
+inline std::atomic<long long> g_rtTriDegen{0};
+inline std::atomic<long long> g_rtTriAllZero{0};
+inline std::atomic<long long> g_rtTriSomeZero{0};
+inline std::mutex             g_rtMatMutex;
+inline std::map<std::string, long long> g_rtByMat;
+
+inline void ReflTnCensus_Tri(int nZeroCorners, const char *matName)
+{
+	g_rtTriTotal.fetch_add(1, std::memory_order_relaxed);
+	if (nZeroCorners == 0) return;
+	if (nZeroCorners == 3) {
+		g_rtTriAllZero.fetch_add(1, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lk(g_rtMatMutex);
+		++g_rtByMat[matName ? matName : "?"];
+	} else {
+		g_rtTriSomeZero.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+// noinline + externally-visible side effect: the reporter must never be folded
+// into its caller, or the "instrument moved the pin" trap fires through
+// inlining alone. (Census build only, so the shipping codegen is untouched
+// either way — this is belt and braces.)
+__attribute__((noinline)) inline void ReflTnCensus_Report(const char *tag)
+{
+	const long long tot = g_rtTriTotal.exchange(0, std::memory_order_relaxed);
+	const long long all = g_rtTriAllZero.exchange(0, std::memory_order_relaxed);
+	const long long som = g_rtTriSomeZero.exchange(0, std::memory_order_relaxed);
+	const long long deg = g_rtTriDegen.exchange(0, std::memory_order_relaxed);
+	std::map<std::string, long long> byMat;
+	{
+		std::lock_guard<std::mutex> lk(g_rtMatMutex);
+		byMat.swap(g_rtByMat);
+	}
+	std::fprintf(stderr, "[REFLTN] %-10s tris=%lld allTNzero=%lld someTNzero=%lld "
+	             "degenReject=%lld xformCalls=%lld",
+	             tag, tot, all, som, deg,
+	             (long long)::g_rtXformCalls.load(std::memory_order_relaxed));
+	// Descending by count: the surface a viewer would name comes first.
+	std::vector<std::pair<long long, std::string>> v;
+	for (const auto &kv : byMat) v.emplace_back(kv.second, kv.first);
+	std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+	for (size_t i = 0; i < v.size() && i < 8; ++i)
+		std::fprintf(stderr, " '%s'x%lld", v[i].second.c_str(), v[i].first);
+	std::fprintf(stderr, "\n");
+}
+#endif  // FDS_REFLTN_CENSUS
 
 // The word stored for a lane whose interpolated normal has no direction. 0 is
 // exactly oct_encode_u32_x8(0,0,1) — view-space +Z, a unit normal facing the
@@ -4085,7 +4160,26 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 			v3.PX - v1.PX, v3.PY - v1.PY
 		};
 		const float det = m[0] * m[3] - m[1] * m[2];
+#if FDS_REFLTN_CENSUS
+		if (fabs(det) <= 0.01f) {
+			meka::g_rtTriDegen.fetch_add(1, std::memory_order_relaxed);
+			continue;
+		}
+#else
 		if (fabs(det) <= 0.01f) continue;
+#endif
+#if FDS_REFLTN_CENSUS
+		{
+			// Counted AFTER the degenerate-area reject, so `tris` is exactly
+			// the set the tiled rasterizer goes on to shade.
+			auto tnDead = [](const Vector &n) {
+				return n.x * n.x + n.y * n.y + n.z * n.z < 1e-12f;
+			};
+			const int nDead = int(tnDead(v1.TN)) + int(tnDead(v2.TN)) + int(tnDead(v3.TN));
+			meka::ReflTnCensus_Tri(nDead,
+				(F && F->Txtr && F->Txtr->Name) ? F->Txtr->Name : "?");
+		}
+#endif
 		// One reciprocal instead of four divides (item 1). The inverse
 		// Jacobian maps screen-space (dx, dy) deltas to (1/A, 1/B) face-edge
 		// barycentric rates.

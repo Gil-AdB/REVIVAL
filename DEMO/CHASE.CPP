@@ -15,6 +15,9 @@
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 #include <Base/FaceBBox.h>     // Reflected_Transform S2 tile pre-reject stamp
 #include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
+#if FDS_REFLTN_CENSUS
+#include <FILLERS/Mekalele.h>  // census build only: per-pass zero-TN reporter
+#endif
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -213,6 +216,47 @@ static void Reflective_Mapper_Setup()
 
 ///////////////////////////////////////////////////////////////////////
 // PRIMARY TRANSFORMATION PIPELINE, FOR USE WITH REFLECTIONS
+// COUNTERFACTUAL BUILD (compile-time, NOT shipped, NOT a FeatureFlag):
+// -DFDS_REFLTN_FIX=1 gives the reflected pass the view-space normal + tangent it
+// has never had. Reflected_Transform writes TPos_AOS/PX/PY/RZ/Flags into the
+// SAME AoS Vertex the main pass uses, but no TN/TTangent — so the reflected
+// world is rasterized with whatever the PREVIOUS Transform_Objects left there
+// (zero on the first tick of a process, otherwise last frame's MAIN-view
+// normals, which are in the unmirrored basis). `IM` is this pass's
+// model→reflected-view rotation, staged exactly like Transform_Objects'
+// (Transform.cpp:1894 `MatrixXMatrix(cam.view->Mat, T->RotMat, M); Matrix_Copy(IM, M)`),
+// so this is the same transform the main pass applies, with ReflMat in place of
+// RotMat. A reflection is orthogonal, so its inverse-transpose is itself and the
+// normal takes the position matrix unchanged.
+#ifndef FDS_REFLTN_FIX
+#define FDS_REFLTN_FIX 0
+#endif
+// FDS_REFLTN_FIX=1 — MIRRORED arm: the normal takes the same matrix as the
+//   position (IM = View->Mat * ReflMat). Self-consistent with the G-buffer depth
+//   the same loop writes.
+// FDS_REFLTN_FIX=2 — UNMIRRORED arm: the normal takes View->Mat * T->RotMat,
+//   i.e. the normal the MAIN pass writes for this vertex. This is what the
+//   shipping engine already feeds the reflected pass in continuous play (last
+//   frame's leftover TN), made deterministic. It exists to separate "the
+//   reflected pass has no normal" from "the reflected pass's normal is in the
+//   wrong basis" — the deferred light list is built in MAIN view space
+//   (DeferredSurfaceKernel.cpp:7686, `MatrixXVector(View->Mat, &u, &w)` off
+//   View->ISource), so it is NOT mirrored with the geometry, and arm 1's
+//   mirrored normals meet unmirrored lights.
+#if FDS_REFLTN_FIX == 1
+#define REFLTN_WRITE(V) do { \
+		MatrixXVector(IM, &(V)->N, &(V)->TN); \
+		MatrixXVector(IM, &(V)->Tangent, &(V)->TTangent); \
+	} while (0)
+#elif FDS_REFLTN_FIX == 2
+#define REFLTN_WRITE(V) do { \
+		MatrixXVector(IMU, &(V)->N, &(V)->TN); \
+		MatrixXVector(IMU, &(V)->Tangent, &(V)->TTangent); \
+	} while (0)
+#else
+#define REFLTN_WRITE(V) ((void)0)
+#endif
+
 static void Reflected_Transform(Scene *Sc)
 {
 	TriMesh *T;
@@ -258,6 +302,11 @@ static void Reflected_Transform(Scene *Sc)
 		Matrix_Copy(ReflMat, T->RotMat);
 		//Vector_SelfScale(W2+1,-1.0f);
 		ReflMat[0][1] *= -1.0f; ReflMat[1][1] *= -1.0f; ReflMat[2][1] *= -1.0f;
+#if FDS_REFLTN_FIX == 2
+		// Counterfactual arm 2 only: the UNMIRRORED model->view rotation, i.e.
+		// Transform_Objects' own IM for this mesh.
+		Matrix IMU; MatrixXMatrix(View->Mat, T->RotMat, IMU);
+#endif
 		MatrixXMatrix(View->Mat, ReflMat, M);
 		Matrix_Copy(IM, M);
 		// Advanced Matrix...(watch this)
@@ -389,6 +438,7 @@ static void Reflected_Transform(Scene *Sc)
 				Vtx->TPos_AOS.x = M34[0][0] * Vtx->Pos.x + M34[0][1] * Vtx->Pos.y + M34[0][2] * Vtx->Pos.z + M34[0][3];
 				Vtx->TPos_AOS.y = M34[1][0] * Vtx->Pos.x + M34[1][1] * Vtx->Pos.y + M34[1][2] * Vtx->Pos.z + M34[1][3];
 				Vtx->TPos_AOS.z = M34[2][0] * Vtx->Pos.x + M34[2][1] * Vtx->Pos.y + M34[2][2] * Vtx->Pos.z + M34[2][3];
+				REFLTN_WRITE(Vtx);
 
 				Vtx->Flags &= 0xFFFFFFFF - Vtx_Visible;
 				Vtx->RZ = 1.0 / Vtx->TPos_AOS.z;
@@ -412,6 +462,7 @@ static void Reflected_Transform(Scene *Sc)
 				Vtx->TPos_AOS.x = M34[0][0] * Vtx->Pos.x + M34[0][1] * Vtx->Pos.y + M34[0][2] * Vtx->Pos.z + M34[0][3];
 				Vtx->TPos_AOS.y = M34[1][0] * Vtx->Pos.x + M34[1][1] * Vtx->Pos.y + M34[1][2] * Vtx->Pos.z + M34[1][3];
 				Vtx->TPos_AOS.z = M34[2][0] * Vtx->Pos.x + M34[2][1] * Vtx->Pos.y + M34[2][2] * Vtx->Pos.z + M34[2][3];
+				REFLTN_WRITE(Vtx);
 
 				Vtx->RZ = 1.0 / Vtx->TPos_AOS.z;
 				Vtx->PX = Vtx->TPos_AOS.x*Vtx->RZ;
@@ -438,6 +489,7 @@ static void Reflected_Transform(Scene *Sc)
 				Vtx->TPos_AOS.x = M34[0][0] * Vtx->Pos.x + M34[0][1] * Vtx->Pos.y + M34[0][2] * Vtx->Pos.z + M34[0][3];
 				Vtx->TPos_AOS.y = M34[1][0] * Vtx->Pos.x + M34[1][1] * Vtx->Pos.y + M34[1][2] * Vtx->Pos.z + M34[1][3];
 				Vtx->TPos_AOS.z = M34[2][0] * Vtx->Pos.x + M34[2][1] * Vtx->Pos.y + M34[2][2] * Vtx->Pos.z + M34[2][3];
+				REFLTN_WRITE(Vtx);
 
 				Vtx->Flags &= 0xFFFFFFFF - Vtx_Visible;
 				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
@@ -1402,6 +1454,9 @@ struct ChaseScene : SceneDriver {
 			Render();
 			prof.leave(PROF_RNDR);
 		}
+#if FDS_REFLTN_CENSUS
+		meka::ReflTnCensus_Report("REFLECTED");
+#endif
 
 		// B1 (§8.E): reflect the bolt streaks on the water — mirrored, dimmed
 		// additive billboards drawn AFTER the reflection Render and BEFORE the
@@ -1420,6 +1475,9 @@ struct ChaseScene : SceneDriver {
 		prof.switchTo(PROF_RNDR);
 		Render();
 		prof.leave(PROF_RNDR);
+#if FDS_REFLTN_CENSUS
+		meka::ReflTnCensus_Report("MAIN");
+#endif
 
 		// Procedural caustic texture + specular glints over the water plane
 		// (shared with city). Screen-space, peel-independent, occlusion-tested.

@@ -48,6 +48,10 @@ namespace meka { extern thread_local float g_tlsMipFrac; }
 // reference aliases in FrameState.cpp.
 
 std::atomic<dword> g_renderedPolys;
+#if FDS_REFLTN_CENSUS
+// Census build only (see Transform.cpp's entry and Mekalele.h's reporter).
+std::atomic<long long> g_rtXformCalls{0};
+#endif
 std::atomic<bool> g_HideInnerXpar{false};
 std::atomic<bool> g_HideOuterXpar{false};
 
