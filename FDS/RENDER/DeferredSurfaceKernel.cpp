@@ -1928,6 +1928,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// on. --no-shadow_lm_dynamic restores the old full-tap fallback for A/B.
 	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic()
 	                            || fds::FeatureFlags::shadow_lm_dynamic();
+	// --deferred_lm_addr_skip / --deferred_cube_direct:
+	// hoisted here so the per-pixel body reads a register, not the flag array.
+	const bool lmAddrSkip       = fds::FeatureFlags::deferred_lm_addr_skip();
 	// Normal-map LOD fade. The texture mip-chain averages cleanly, but
 	// averaged normals shorten + rotate toward the surface average, so
 	// at distance the bump's perturbation becomes high-frequency lighting
@@ -1955,6 +1958,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	    /*profNoCubeTap        */ fds::FeatureFlags::prof_no_cube_tap(),
 	    /*shadowMode           */ g_shadowMode.load(std::memory_order_relaxed),
 	};
+	// --deferred_cube_direct: the tile half of the predicate. resolveCubeAtten
+	// reduces to one CubeShadow_Sample call — same arguments, no bias math —
+	// exactly when the lightmap arm is unreachable (lmKernelEnabled off), the
+	// tap is not short-circuited, and the mode is PolyId. The per-pixel half is
+	// `surfaceShadowId >= 0`, which is the same test the wrapper makes.
+	const bool cubeDirectTile = fds::FeatureFlags::deferred_cube_direct()
+	    && !lmKernelEnabled
+	    && !caFlags.profNoCubeTap
+	    && caFlags.shadowMode == ShadowMode::PolyId;
 
 	// [DIAG] FDS_CONTRIB_CULL: per-light MAX linear diffuse contribution over this
 	// tile, matching the HDR-linear accumulation below (albedo²·intensity·color).
@@ -2170,6 +2182,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (noncasterDepthG
 			    && ((ctx.shadowSkipMask[matID >> 6] >> (matID & 63)) & 1u))
 				surfaceShadowId = -1;
+			// --deferred_cube_direct (see cubeDirectTile).
+			const bool cubeDirect = cubeDirectTile && surfaceShadowId >= 0;
 			PIX_ABL_CUT(2, float(surfaceShadowId) + float(pmid) + float(miplevelForFade));
 
 			// Texture sample: Mekalele's apply_exact already wrote a
@@ -2231,7 +2245,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// Static-shadow lightmap address for this pixel — resolved
 			// once, used by all cube-shadow taps in the per-omni loops
 			// below via resolveCubeAtten().
-			const PixelLightmap pixelLM = resolvePixelLightmap(gb, i, ctx.Sc);
+			// --deferred_lm_addr_skip: the address is read ONLY behind
+			// resolveCubeAtten's `useLightmap && pl.lm` guard and useLightmap is
+			// lmKernelEnabled, so with the lightmap kernel off this whole resolve
+			// (two G-buffer planes, a scene-table index, two pointer chases) is
+			// dead — and its four results otherwise stay live across the entire
+			// pixel body. Byte-null by construction.
+			const PixelLightmap pixelLM = (lmKernelEnabled || !lmAddrSkip)
+			    ? resolvePixelLightmap(gb, i, ctx.Sc)
+			    : PixelLightmap{};
 			PIX_ABL_CUT(4, float(pixelLM.faceIdx) + float(pixelLM.sB) + float(pixelLM.tB)
 			                + float(pixelLM.lm != nullptr));
 			// Lightmap kernel branch is disabled when the dynamic-mesh
@@ -3026,7 +3048,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						//  - Otherwise → per-pixel cube tap.
 						const int32_t cubeIdx = tl.cubeShadowIdx[n];
 						if (cubeIdx >= 0) {
-							const float cubeAtten = resolveCubeAtten(
+							// --deferred_cube_direct: this IS resolveCubeAtten's
+							// PolyId arm, called with the arguments it forwards,
+							// without the 20-argument frame around it.
+							const float cubeAtten = cubeDirect
+							    ? CubeShadow_Sample(cubeIdx,
+								sampleWorldX, sampleWorldY, sampleWorldZ,
+								x, y, z, /*constBias=*/0, /*slopeBias=*/0,
+								surfaceShadowId)
+							    : resolveCubeAtten(
 								pixelLM, cubeIdx, lmKernelEnabled, caFlags,
 								wx, wy, wz, lenInv,
 								nGeoX, nGeoY, nGeoZ,
@@ -6117,6 +6147,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const float quarterZJump  = (quarter || checker)
 	    ? fds::FeatureFlags::quarter_z_jump() : 0.0f;
 	const bool  quarterZCheck = (quarter || checker) && quarterZJump > 0.0f;
+	// --deferred_fill_hdr_skip: hoist --quarter_tex_sharp (it was read once per
+	// FILLED PIXEL) and gate the LDR sharp-reconstruction accumulators, which
+	// are three divisions per compatible neighbour that only the !hdrWrite arm
+	// below ever reads.
+	const bool sTexSharp   = fds::FeatureFlags::quarter_tex_sharp();
+	const bool fillLdrSharp = !(fds::FeatureFlags::deferred_fill_hdr_skip() && hdrWrite);
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -6221,8 +6257,6 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				tb = float(t & 0xFF); tg = float((t >> 8) & 0xFF); tr = float((t >> 16) & 0xFF);
 				return true;
 			};
-			const bool sTexSharp = fds::FeatureFlags::quarter_tex_sharp();
-
 			bool matched = false;
 			if (envForceFull) {
 				// fall through to the full-shade fallback below
@@ -6288,9 +6322,13 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
 						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
 						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
+							// --deferred_fill_hdr_skip: these three DIVISIONS feed
+							// only the `!hdrWrite` arm below.
+							if (fillLdrSharp) {
 							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
 							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
 							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
+							}
 							if (nh) {
 								// radiance ∝ texel^exp (2 = hdr_linear albedo², 1 = gamma);
 								// re-apply own texel: R_i = R_n·(texel_i/texel_n)^exp.
@@ -6367,9 +6405,13 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
 						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
 						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
+							// --deferred_fill_hdr_skip: these three DIVISIONS feed
+							// only the `!hdrWrite` arm below.
+							if (fillLdrSharp) {
 							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
 							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
 							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
+							}
 							if (nh) {
 								// radiance ∝ texel^exp; re-apply own texel (see quarter path)
 								float rB=nrB, rG=nrG, rR=nrR;
