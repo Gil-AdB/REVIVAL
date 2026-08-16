@@ -1749,6 +1749,28 @@ static volatile float g_w2AblSink = 0.0f;
 #define W2_ABL_CUT(stage, expr)  ((void)0)
 #endif
 
+// ─── Ablation for WAVE 1's 8-bit LDR compose chain (lighting-w1) ────────────
+// Prices the `fdB/fdG/fdR` → `outB/outG/outR` → `out[i]` chain in
+// Render_DeferredLighting_Tile, which under `--hdr --hdr-linear` feeds only the
+// VPage (the linear radiance `rlB` at the HDR store is built from `dlB`, the
+// raw light accumulator, never from `fdB`). Unlike the PIX/OMNI ladders this is
+// a REMOVAL, not a `continue` — everything above the compose stays live because
+// the HDR store still consumes texB/lB/sB.
+//    1  the WHOLE chain: fd + its metal and diffuse-energy scalings, out*,
+//       hB/hG/hR, the isWater gamma blend, the debug-viz stomps, the 8-bit
+//       clamps and the `out[i]` store. Byte-CHANGING by construction (it stops
+//       writing VPage) — a cost instrument, and exactly what a shipping skip
+//       would remove when its predicate holds.
+//    2  the TAIL only: viz + clamps + `out[i]`, with the fd/out arithmetic kept
+//       alive through a per-tile sink (3 fadd + 1 fadd/px of overhead), so
+//       stage 2 is an UPPER bound on what the arithmetic leaves behind.
+#ifndef FDS_W1LDR_ABLATE
+#define FDS_W1LDR_ABLATE 0
+#endif
+#if FDS_W1LDR_ABLATE
+static volatile float g_w1LdrAblSink = 0.0f;
+#endif
+
 // ─── Wave-2 fill census — where each odd cell goes ───────────────────────────
 // Build with -DFDS_W2_CENSUS=ON; runtime gate --omni_census (shared).
 #ifndef FDS_W2_CENSUS
@@ -2090,6 +2112,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			    "hooks. Rebuild with: cmake -S . -B build-census -G Ninja "
 			    "-DFDS_SHADOW_TAP_CENSUS=ON\n");
 	}
+#endif
+#if FDS_W1LDR_ABLATE
+	float w1LdrSink = 0.0f;
 #endif
 	// ONE base pointer, not four: as four separate arrays the hot loop kept
 	// four extra stack bases live and cost 0.9 % of lighting-w1's instructions
@@ -3371,9 +3396,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// code path — they're rendered by the forward filler (which
 			// does the env+tex/2 composite using forward's per-vertex
 			// interpolated eu/ev) and skipped here via the mat32 sentinel.
+#if FDS_W1LDR_ABLATE != 1
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
+#endif
 			// Metalness (--metal_map): m=1 pixels are conductors — no diffuse
 			// (the albedo becomes the REFLECTION tint below), and analytic
 			// highlights tint by the albedo instead of staying light-colored.
@@ -3382,10 +3409,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const byte *md = (miplevel < Mat->MetallicMap->numMipmaps)
 					? reinterpret_cast<const byte*>(Mat->MetallicMap->Mipmap[miplevel]) : nullptr;
 				if (md) metalM = float(md[swizzledUV]) * (1.0f/255.0f);
+#if FDS_W1LDR_ABLATE != 1
 				if (metalM > 0.0f) {
 					const float dk = 1.0f - metalM;
 					fdB *= dk; fdG *= dk; fdR *= dk;
 				}
+#endif
 			}
 			// Roughness map (cheap tier): per-pixel specular INTENSITY. White =
 			// rough → dimmer highlight, so the highlight breaks up across the
@@ -3436,10 +3465,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				// (1-F) diffuse energy conservation: the Fresnel-reflected
 				// fraction can't also diffuse. Scales BOTH the LDR combine
 				// (int(fdB)) and the HDR radiance (fdB+sB) below.
+#if FDS_W1LDR_ABLATE != 1
 				if (diffuseEnergyG) {
 					const float dc = 1.0f - fresEC;
 					fdB *= dc; fdG *= dc; fdR *= dc;
 				}
+#else
+				(void)fresEC;
+#endif
 			}
 			// Per-material specular response multiplier (Material::SpecMul,
 			// RVSF 0x800, editor 'specMul'): scales the FINAL specular —
@@ -3449,6 +3482,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (Mat->SpecMul != 1.0f) {
 				sB *= Mat->SpecMul; sG *= Mat->SpecMul; sR *= Mat->SpecMul;
 			}
+#if FDS_W1LDR_ABLATE != 1
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);
@@ -3456,6 +3490,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// truncation/clamp), accumulated through the water blend below and
 			// written to g_hdrBuf before the debug-viz stomp.
 			float hB = fdB + sB, hG = fdG + sG, hR = fdR + sR;
+#endif
 
 			// Water-mesh transparent blend. Forward draws the water plane
 			// with TheOtherBarry<TRANSPARENT> after a pass-1 mirrored-world
@@ -3467,6 +3502,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// preserved across the inter-pass Z-clear (which lets pass-2
 			// deferred shading skip non-water-mesh pixels via zEnc check
 			// on the freshly-cleared depth buffer).
+#if FDS_W1LDR_ABLATE != 1
 			if (isWater) {
 				const dword existing = out[i];
 				const int rB = int(existing & 0xFF);
@@ -3479,6 +3515,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				hG += float(rG) * 0.5f;
 				hR += float(rR) * 0.5f;
 			}
+#endif
 
 			// HDR B1/B2: stash the unclamped opaque radiance + coverage flag
 			// before the debug-viz stomp, so viz only affects the displayed (LDR)
@@ -3525,11 +3562,25 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					}
 					h[0] = fds::HdrClamp(rlB); h[1] = fds::HdrClamp(rlG); h[2] = fds::HdrClamp(rlR);
 				} else {
+#if FDS_W1LDR_ABLATE == 1
+					// The gamma (B1) arm is built FROM fd, which stage 1 removes.
+					// This instrument is only meaningful on the --hdr_linear arm;
+					// zero here so it still compiles, and never quote a stage-1
+					// number taken without --hdr-linear.
+					h[0] = h[1] = h[2] = 0.0f;
+#else
 					h[0] = fds::HdrClamp(hB); h[1] = fds::HdrClamp(hG); h[2] = fds::HdrClamp(hR);   // B1 gamma radiance
+#endif
 				}
 				h[3] = 1.0f;
 			}
 
+#if FDS_W1LDR_ABLATE == 2
+			// Stage 2 keeps the arithmetic and drops only the tail; the sink
+			// stops clang from folding out* / h* away with the store.
+			w1LdrSink += float(outB + outG + outR) + hB + hG + hR;
+#endif
+#if FDS_W1LDR_ABLATE == 0
 			// FDS_VIZ_NORMAL / FDS_VIZ_TANGENT: stomp final output with
 			// a (vec+1)*127.5 visualization. nx/ny/nz here is post-TBN
 			// (perturbed by the normal map); per-pixel tangent is decoded
@@ -3598,8 +3649,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (outR < 0)   outR = 0;
 
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+#endif   // FDS_W1LDR_ABLATE == 0
 		}
 	}
+#if FDS_W1LDR_ABLATE
+	g_w1LdrAblSink += w1LdrSink;
+#endif
 
 	if (tapCensus) {   // see the declaration block above for what each column means
 		const TileLights &tlc = ctx.tileLights[tileIndex];
