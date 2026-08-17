@@ -167,6 +167,8 @@ set(RENDER
     RENDER/FaceTileBin.h
     RENDER/RenderInner.cpp
     RENDER/RenderPipeline.h
+    RENDER/ReflMirror.cpp
+    RENDER/ReflMirror.h
     RENDER/Shadows.cpp
     RENDER/SORTS.H
     RENDER/SQRTTBL.H

@@ -58,6 +58,210 @@ is a perf decision, not a correctness one. The scalar reference is available for
 A/B at zero cost (`FDS_SSAO_NOSIMD=1`), and the deltas above are what it buys.
 
 ---
+## 2026-08-17 — THE COMMISSION LANDS: `--refl_correct`, default ON. chase's reflected pass gets a normal AND a mirrored light for the first time; **city's pins could never have seen it** (its water is empty on tick 1), and the guard that matters most is one nobody asked for — the nested probe bake
+
+**Commissioned by Gil-Ad 2026-08-16** ("for chase — commission the correct
+look. there is no '98 look to compare to anyway"). 16w characterised the defect
+and refused to land it because the direction was a look call; this round lands
+it behind `--refl_correct` (`FeatureFlags.def:182`, **default 1**), re-pins the
+seven chase hashes, and leaves `--no-refl_correct` as an exact escape hatch —
+**12/12 pin recipes byte-identical to the parent binary with the flag off.**
+
+Parent `DEMO_par` md5 `6acb2ebf54eb2cabd37006dfcb656670`, child `DEMO_new2`
+md5 `411af80098affd91e89d34f7c8acd182`, both built in one worktree on
+`cb6aad4c`, one asset tree, warm cube cache.
+
+### WHAT LANDED — two halves, and they are in different files
+
+1. **NORMALS + TANGENTS in `Reflected_Transform`.** 16w's two-line arm 1,
+   promoted to a runtime flag, in **all SIX vertex loops of each scene** — the
+   three non-Phong loops 16w patched *and the three `Tri_Phong` else-branches it
+   flagged and did not* (`CHASE.CPP` 459/483/510/552/576/605, `CITY.CPP`
+   641/665/692/732/756/785). `IM` is the pass's model→reflected-view rotation,
+   copied **before** the FOV row-scaling, so it is the unscaled rotation, staged
+   exactly as `Transform.cpp` stages the main pass's. The predicate is hoisted
+   once per call, so it is loop-invariant, not a per-vertex branch.
+2. **MIRRORED LIGHTS** (`FDS/RENDER/ReflMirror.cpp`, new TU). The scene arms the
+   state around its reflected `Render()`; `Render_DeferredLighting` calls
+   `ReflMirror_MirrorLights` right after the per-omni SoA build, which rewrites
+   each entry's view-space position, world position and spot axis from the light
+   **reflected about the same plane the geometry is mirrored about** — `P −
+   2(P·N)N` through the world ORIGIN, `d = 0`, which is what `Reflected_Transform`
+   actually does (`CHASE.CPP:341`, `CITY.CPP:527`), **not** city's `RflSurfOfs`
+   (that is the FastFog plane). Nothing is appended: light count, tile binning and
+   every per-pixel loop are untouched. `noinline`, own TU, so it cannot
+   re-schedule `Render_DeferredLighting`'s FP.
+
+### THE GUARD NOBODY ASKED FOR, AND IT WAS NOT HYPOTHETICAL
+
+`renderFrame`'s prologue runs `EnvReflection_FramePrep` gated on
+`g_offscreenViewDepth == 0` (`RENDER.CPP:520`) — and city's reflected `Render()`
+**is** a depth-0 `renderFrame`. So the env-probe bake fires INSIDE the armed
+mirrored pass, and its six cube-face renders reach `Render_DeferredLighting`
+again. Without a guard those faces are lit by MIRRORED lights and then written
+to the **on-disk** cube cache — damage that outlives the process and that no pin
+catches, because pins run one tick against an already-warm cache.
+
+`ReflMirror_MirrorLights` now returns early when `g_offscreenViewDepth != 0`.
+The gate is exact, not conservative: the reflected pass IS depth 0 and stays
+mirrored; every nested bake is depth > 0 and stays main-space.
+
+**It fires.** Measured, not argued: the unguarded child moved city's
+acceptance pin at t=2400 to `9a13d69f…` (22 px, max |Δ| 2); with the guard the
+same recipe returns **exactly the parent's `f473fe2b…`**. Those 22 pixels were
+mirrored lights leaking out of a probe. The two pinned cubes on disk are intact
+(`adbac29c…`, `a896a47c…`); one cube baked during this round's unguarded runs
+was deleted rather than trusted.
+
+Related, and NOT `env_refl()` being dormant: greets' PBR metallic import calls
+`setDefault(env_refl, true)` **process-globally** (`MaterialImport.cpp:865`),
+greets inits FIRST, and `setDefault` is one-way — so **a full demo run has
+`--env_refl` ON in city and chase**, contrary to what the flag text claimed
+before this round. `--snapshot=<scene>` does not reproduce that state (only the
+requested scene inits), so every pin in this campaign measures a configuration
+the shipping demo does not have.
+
+### THE PIXELS — chase moves at every pose, city moves only when it is allowed to
+
+`--snapshot=chase@t=100,400,800,1000,1300,1600 --deferred`, one 6-pose sweep per
+binary (the PERF_STATE chase arm), 1920×1080:
+
+| pose | changed px | % | max \|Δ\| | mean on changed |
+|---|--:|--:|--:|--:|
+| chase t=100 | 176 184 | 8.50 % | 51 | 7.67 |
+| chase t=400 | 184 900 | 8.92 % | 36 | 3.10 |
+| chase t=800 | **559 567** | **26.99 %** | 38 | 2.34 |
+| chase t=1000 | 270 805 | 13.06 % | 40 | 5.61 |
+| chase t=1300 | 173 217 | 8.35 % | 73 | 4.28 |
+| chase t=1600 | 9 079 | 0.44 % | 30 | 6.20 |
+
+city, **his acceptance arm** `--env_live_water --deferred --city_env_pixel`,
+five CONSECUTIVE ticks ending on the pose:
+
+| pose | changed px | % | max \|Δ\| | mean on changed |
+|---|--:|--:|--:|--:|
+| city t=1961 | 277 214 | 13.37 % | 85 | 4.82 |
+| city t=2400 | 149 074 | 7.19 % | 44 | 3.16 |
+
+### **CITY'S PINS ARE STRUCTURALLY BLIND TO THIS** — the trap of the round
+
+city t=1961 and t=2400 are **byte-identical** under the shipping flag when run
+the way the pin recipes run them, and that is not evidence of a null change:
+
+* `RunCitySnapshot` ticks **once per timestamp**. Measured ladder at t=1961,
+  same recipe, deeper history: **1 tick → parent == child byte-identical;
+  2 ticks → they differ; 3 ticks → they differ.**
+* The cause is visible in the frames: on the FIRST tick of a process city's
+  water carries **no mirrored content at all** (`docs/img/reflmir/` — the
+  tick-1 frame's water is a smooth caramel sheet; by tick 2 the mech's
+  reflection and the reflected facades are in it). chase composites its
+  reflection immediately, which is why chase's pins move and city's do not.
+* So: **judge city from a warm multi-tick run, never from its pins**, and do not
+  read "city pin unmoved" as "look unchanged in city" — continuous play moves
+  13.4 % of the frame at t=1961.
+
+### EYEBALLED, MY OWN WORDS, PER POSE (images `docs/img/reflmir/`)
+
+Every pose below: `*_before.png` / `*_after.png` (full frame), `*_where.png`
+(magenta = changed), `*_crop.png` (before | after at full resolution on the
+hottest reflection window).
+
+* **chase t=100** — the pale, flat, milky wedges hanging under each island
+  vanish. Before, the water below the islands reads like frosted glass laid on
+  the surface; after, it is dark water with a legible reflection.
+* **chase t=400** — the whitish veil across the mid-water (the reflected
+  island sheet) thins out; the reflected lighthouse at the left edge deepens
+  from washed pink to its actual red banding.
+* **chase t=800** — the biggest mover (27 % of the frame) and the one to look
+  at first. The reflected lighthouse in the water gains saturation and
+  contrast: its red/white stripes read as stripes instead of a fogged ghost.
+* **chase t=1000** — the pale reflected-terrain sheet across the mid-water goes
+  dark; the hero ship reads with more contrast *because the water behind it
+  stopped being washed out*. **The ship's own pixels are untouched** — verified
+  on the where-map; there is no main-pass contamination at this pose.
+* **chase t=1300** — the clearest "reflections gain identity" pose: the
+  foreground island's reflection stops being a milky white-blue wedge and picks
+  up the island's own rock tone, and the distant lighthouse's reflection
+  resolves into readable red/white bands instead of a pale smear.
+* **chase t=1600** — the smallest change (0.44 %, and 16w measured ZERO
+  zero-TN triangles here): the reflected ship is slightly better defined and
+  the pale ghost sheets dim a little. Subtle.
+* **city t=1961** — the mech's reflection in the wet street gains its cockpit
+  tint, individually legible limbs and hotter, more saturated engine glows;
+  the reflected facade behind it recovers its window grid.
+* **city t=2400** — reflected building facades stop being pale smears: the
+  striped block's banding is legible in the water and the green accent lights
+  come through the reflection.
+
+### WHAT READS **WORSE** — flagged, not buried
+
+**chase's lighthouse light shafts get thinner, and one disappears.**
+`Render_DeferredVolumetric` reads **only** `ctx.lights` (zero `OmniHead`/`IPos`
+reads in `DeferredVolumetric.cpp` / `DeferredFastFog.cpp`), so cones, halos and
+froxel glow **inherit the mirror for free** — correctly, in the sense that a
+mirrored world should carry mirrored shafts. chase does **not** pass
+`skipVolumetric` (city does, `CITY.CPP:3880`), so its reflected pass was
+painting a SECOND, unmirrored shaft from each lighthouse **across the sky above
+the horizon**. Those ghost shafts now follow the mirrored light and leave the
+sky: at t=800 the left lighthouse's beam reads visibly thinner and the right
+one's sky shaft is gone entirely (`chase_t000800_before.png` vs `_after.png`).
+
+More correct — a reflection has no business above the waterline — but it is a
+visible dimming of a signature 1998 element, and it is the user's call, not
+mine. `--no-refl_correct` restores it exactly.
+
+### NOT MIRRORED, DELIBERATELY — each with its consequence, not a claim of correctness
+
+| consumer | space | status |
+|---|---|---|
+| specular eye vector | pixel's own view space | **correct, no action** — V is derived from the pixel's own view-space position and the mirrored geometry went through the same `View->Mat` |
+| forward per-vertex `Lighting()` | true world | **correct by mirror-equivalence** — this is why the flag is deferred-only |
+| cones / halos / froxel | the SoA | **mirrored for free**, visible consequence above |
+| shadow tap (`srcShadowMapIdx`/`mirN*`/`mirD`) | reflected receiver | wired; **unreachable in chase** (it never calls `ShadowMaps_Rebuild` — zero `shadow` lines in `CHASE.CPP`), double-gated off in city (`city_test_spots` + `shadows`, both 0) |
+| **env-cube tap + parallax** | mirrored-world via unmirrored `viewToWorld` | **LIVE**, not inert (see `env_refl` above). city routes its `city_env_pixel` glass through the forward filler for this reason; that helper uses the REAL camera eye, an approximation of size `2·dist(camera, water)` |
+| city DEFAULT-arm mirrored glass | forward, UVs from **last frame's** `Transform_Objects` | pre-existing stale-state defect one field over; **not fixed here** |
+| `--sh_ambient` | same unmirrored `viewToWorld` | inert (default 0, nothing in `DEMO/` sets it) |
+| SSR history | screen | inert (`env_ssr` 0); chase's capture keys on `skipVolumetric`, which chase never passes — would misbehave if enabled |
+| city per-frame shadow bakes (`CITY.CPP:3856/3861`) | unmirrored world | remainder, gated off by default |
+| reflected FLARE loops | hardcoded `y = -y` | **outside this flag** — `--no-refl_correct` still gives mirrored flares over unmirrored lighting. There are FIVE spellings of the mirror in the tree; they agree only while `RflSurfNorm` stays axis-aligned through the origin |
+| froxel fog temporal history | reprojected | chase defeats city's `skipVolumetric` carve-out; live under `--cinematic`/`--fast_fog`, pre-existing |
+
+### GATES
+
+* **Escape hatch exact:** child + `--no-refl_correct` reproduces the parent on
+  **all 12 recipes, byte-identical** (chase ×2 arms, city ×3, fountain, greets
+  ×5).
+* **greets and fountain do not move — proven by pin, not by argument:** greets
+  t=1588 `570a7b44…`, greets acceptance ×4 `440aa6bb…` / `00d17bc5…` /
+  `135ea9dd…` / `aaeb89b6…`, fountain `8db68ccb…` — all identical parent vs
+  child. Neither scene has a `Reflected_Transform`.
+* **city pins do not move either** (see the blindness note): city plain
+  `bd4ffbf8…`, acceptance t=1961 `4cb8d2ca…`, t=2400 `f473fe2b…`.
+* **chase re-pinned, 7 hashes** — see `docs/SESSION_STATE.md`'s gates table.
+* Every row 2/3 runs stable (run 1 discarded), one pose per process where the
+  recipe says so, stock 1920×1080 `rev.cfg`, warm cube cache.
+* `--shadow_plane_hash` unchanged (`51344bf5f3816c23`): the bake is main-space
+  and the mirrored-shadow path is unreachable in both scenes.
+* **`tools/render_gate.sh` has ZERO coverage of this change** — its four scenes
+  have no `Reflected_Transform`. Stated plainly rather than run for a green
+  tick that would mean nothing.
+
+### PRICE
+
+See `docs/PERF_STATE.md` §00j. Measured `on` vs `off` on the SAME binary (LTO
+layout held fixed), min-of-rounds.
+
+### HANDED ON
+
+* The **look call on chase's lighthouse shafts** (above) — the one thing that
+  arguably reads worse.
+* **city's default-arm mirrored glass rasterizes with last frame's env UVs** —
+  the same class of defect this round fixed for normals, one field over,
+  untouched.
+* **chase never passes `skipVolumetric`**, so its reflected pass re-runs SSAO,
+  bloom, tonemap, rain, DoF and the froxel populate a second time. That is both
+  a correctness hazard (fog temporal history) and, on its face, the largest
+  single perf item left in chase.
 
 ## 2026-08-16z — 16b's LAST THREE CITY ITEMS, PRICED IN ONE ROUND: two are **below bar and closed with numbers**, and the census that refuted one of them found the item that pays — 61 056 pixels a pass taking the scalar composite because 1512/12 is not a multiple of 8
 

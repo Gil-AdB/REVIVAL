@@ -19,6 +19,72 @@
 
 ---
 
+## 00j. THE PRICE OF `--refl_correct` — 2026-08-17: the mirrored-list build is **1 microsecond a frame**; the cost that exists is the per-vertex normal, and it lives OUTSIDE `renderFrame`
+
+The commissioned look change (`docs/OPTIMIZATION_BACKLOG.md` **2026-08-17**)
+has two halves in two places, and they price three orders of magnitude apart.
+Parent `DEMO_par` `6acb2ebf…`, child `DEMO_new2` `411af800…`, both built in one
+worktree on `cb6aad4c`. **The arm that means anything is `on` vs `off` on the
+SAME binary** (flag flipped, LTO layout held fixed); `par` is carried only to
+expose the between-binary floor.
+
+### THE MIRRORED-LIST BUILD — 0.001 ms/frame, and that is the whole answer
+
+`--bench=scene@scene=city,t=1961,iters=30 --deferred --profiler=0
+--deferred_prof=1`, 5 rounds alternating, min-of-rounds, `wall_avg` ms **per
+frame** (the row covers both passes):
+
+| `[DPROF]` row | off | on | delta |
+|---|--:|--:|--:|
+| **`light-list`** | **0.0100** | **0.0110** | **+0.0010 ms/f (+10 %)** |
+| `DeferredLighting-call` | 11.010 | 11.290 | +0.280 ms/f (+2.54 %) |
+| `renderFrame` | 55.747 | 56.015 | +0.268 ms/f (+0.48 %) |
+
+**One microsecond a frame**, 0.0018 % of the frame — `ReflMirror_MirrorLights`
+is one pass over ~40 lights that appends nothing, so the light count, the tile
+binning and every per-pixel loop are untouched. Negligible is the correct word
+here and it is measured, not assumed.
+
+Note what the other two rows say: the whole `renderFrame` delta (+0.268) is
+inside `DeferredLighting-call` (+0.280), and only 0.001 of that is the list
+build. The remaining ~0.279 ms is the per-pixel lighting doing **different
+work on different data** — the lights are at mirrored positions, so per-tile
+light sets and per-pixel branches differ. That is the feature, not overhead.
+
+### THE COST THAT EXISTS IS THE NORMAL, AND `renderFrame` CANNOT SEE IT
+
+`renderFrame` moves +0.48 % but the whole tick moves ~5× that, because the
+`TN`/`TTangent` writes are in `Reflected_Transform` — demo-side, **outside**
+`renderFrame`, invisible to every `[DPROF]` row. Two independent whole-tick
+instruments, 9 rounds each, interleaved, min-of-rounds:
+
+| instrument | off | on | on vs off | within-arm floor |
+|---|--:|--:|--:|--:|
+| city `--bench` t=1961, 40 iters (ms/iter) | 71.419 | 73.098 | **+2.35 %** (≈ +1.7 ms/f) | off 1.99 %, on 5.25 % |
+| chase two-point wall clock, pose 800, 16→160 frames (ms/frame) | 56.869 | 59.170 | **+4.05 %** (≈ +2.3 ms/f) | off 0.21 %, on −1.32 % |
+
+**Read those floors before quoting the numbers.** The between-binary floor is
+larger than the effect in both columns — `par` runs 6.46 % (city) and 6.26 %
+(chase) faster than `off` doing *strictly the same work* — and the within-arm
+floor reaches 5.25 %. chase's `on` floor came out **negative** (the 2nd-best
+sample beat the estimator), which is the two-point estimator telling you it is
+not monotone at this precision. So:
+
+* the **direction** is consistent across two instruments and two scenes (`on`
+  is slower), and the **mechanism** predicts it — two extra `MatrixXVector`
+  per vertex over the reflected pass's ~20–30 k vertices, every frame;
+* the **magnitude**, ~2 ms/frame, is real enough to state plainly and is NOT
+  dismissed as noise — but it is quoted at one significant figure, because a
+  2–4 % effect measured against a 2–7 % floor does not support more;
+* the split between the two halves is **not resolvable by this instrument**.
+  It does not need to be: the list build is priced directly above at 0.001
+  ms/f, so essentially all of the ~2 ms is the per-vertex normal + tangent
+  transform. That work IS the feature — it is what a reflected pass needs to
+  have a normal at all — and `--no-refl_correct` buys it back exactly.
+
+Machine was under load (1-min average 8.55 at start), which inflates the
+floors; the mins are the estimator for that reason.
+
 ## 00i. THE SHADOW CLONE'S STALENESS, COUNTED — 2026-08-16t: `Pos` diverges **0 times in 856 M compares**, the item is a CORRECTNESS row not a perf row, and §00h's ceiling re-confirms at **0.56 %**
 
 §00h's hand-on ("`PerTriMeshClone` is never invalidated — worth its own round")

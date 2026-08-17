@@ -68,6 +68,7 @@ extern float fastPow2(float x);
 #include "FILLERS/FILLERS.H"
 #include "FRUSTRUM.H"
 #include "Threads.h"
+#include "RENDER/ReflMirror.h"   // --refl_correct: mirrored-pass light state
 
 // Defined in Transform.cpp; used by RenderXparClumpInStrip.
 bool IsFrontFacingInViewSpace(const Face* F);
@@ -7841,6 +7842,16 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		lights.mirrorId      [numLights] = O->mirrorId;
 		++numLights;
 	}
+	// --refl_correct: chase / city draw their water reflection by mirroring the
+	// GEOMETRY, and this list was built in MAIN world space off O->IPos — so a
+	// mirrored world was being lit by unmirrored lights and N·L flipped where a
+	// real mirror preserves it. When the scene has armed the reflected pass,
+	// re-place every light at its reflection about the same plane the geometry
+	// was mirrored about. In place: nothing is appended, so numLights, the tile
+	// binning below and every per-pixel loop are unchanged. noinline, in its
+	// own TU, so it cannot re-schedule this function's FP (see ReflMirror.h).
+	if (fds::ReflMirror_Active())
+		fds::ReflMirror_MirrorLights(lights, numLights, Sc, View);
 	TailProf::mark("light-list", _llist);   // SoA build: per-light xform + linear shadow-map scans
 #if FDS_SHARD_BAKE_LAB
 	{ const auto _b = dlNow(); dlAdd(fds::g_phDlLights, _dlA, _b); _dlA = _b;

@@ -16,6 +16,7 @@
 #include <Base/FaceBBox.h>     // Reflected_Transform S2 tile pre-reject stamp
 #include <Base/FaceNeedle.h>   // Reflected_Transform --needle_cull pre-reject
 #include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
+#include <RENDER/ReflMirror.h>  // --refl_correct: mirrored-pass light state
 #if FDS_REFLTN_CENSUS
 #include <FILLERS/Mekalele.h>  // census build only: per-pass zero-TN reporter
 #endif
@@ -255,7 +256,15 @@ static void Reflective_Mapper_Setup()
 		MatrixXVector(IMU, &(V)->Tangent, &(V)->TTangent); \
 	} while (0)
 #else
-#define REFLTN_WRITE(V) ((void)0)
+// SHIPPING (2026-08-16): --refl_correct, DEFAULT ON, is arm 1 promoted to a
+// runtime flag — the LOOK CHANGE Gil-Ad commissioned. `reflTN` is hoisted once
+// per call below, so this is a loop-invariant predicate, not a per-vertex
+// branch. --no-refl_correct restores the 1998 behaviour exactly (no write at
+// all → last main pass's leftover TN), which is what the flag is for.
+#define REFLTN_WRITE(V) do { if (reflTN) { \
+		MatrixXVector(IM, &(V)->N, &(V)->TN); \
+		MatrixXVector(IM, &(V)->Tangent, &(V)->TTangent); \
+	} } while (0)
 #endif
 
 static void Reflected_Transform(Scene *Sc)
@@ -285,6 +294,8 @@ static void Reflected_Transform(Scene *Sc)
 	// --needle_cull: degenerate-face pre-reject, same near plane, same read-once
 	// shape as the bbox flag above. See FDS/Base/FaceNeedle.h.
 	const bool  needleCull   = fds::FeatureFlags::needle_cull();
+	// --refl_correct: read once, so REFLTN_WRITE below is loop-invariant.
+	const bool  reflTN       = fds::FeatureFlags::refl_correct();
 #if FDS_NEEDLE_CENSUS
 	const int   needleCensusKind = fds::kNeedleMirror;
 #endif
@@ -538,6 +549,7 @@ static void Reflected_Transform(Scene *Sc)
 			{
 				MatrixXVector(M, &Vtx->Pos, &U);
 				Vector_Add(&U, &V, &Vtx->TPos_AOS);
+				REFLTN_WRITE(Vtx);
 
 				Vtx->Flags = 0;
 				Vtx->RZ = 1.0 / Vtx->TPos_AOS.z;
@@ -561,6 +573,7 @@ static void Reflected_Transform(Scene *Sc)
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M, &Vtx->Pos, &U);
 				Vector_Add(&U, &V, &Vtx->TPos_AOS);
+				REFLTN_WRITE(Vtx);
 
 				Vtx->RZ = 1.0 / Vtx->TPos_AOS.z;
 
@@ -589,6 +602,7 @@ static void Reflected_Transform(Scene *Sc)
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M, &Vtx->Pos, &U);
 				Vector_Add(&U, &V, &Vtx->TPos_AOS);
+				REFLTN_WRITE(Vtx);
 
 				Vtx->Flags = 0;
 				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
@@ -1471,7 +1485,16 @@ struct ChaseScene : SceneDriver {
 			prof.enter(PROF_SORT);
 			Radix_Sort(FList, SList, CAll);
 			prof.switchTo(PROF_RNDR);
+			// --refl_correct: this Render() IS a complete second renderFrame
+			// (RENDER.CPP:1868) with its own G-buffer and its own deferred
+			// light list, so the whole pass can be told it is mirrored. The
+			// plane is the one Reflected_Transform ACTUALLY mirrors geometry
+			// about — `P - 2(P·RflSurfNorm)RflSurfNorm`, i.e. through the world
+			// ORIGIN, d = 0. Passing anything else would desynchronise the
+			// lights from the geometry they are lighting.
+			fds::ReflMirror_Begin(RflSurfNorm, 0.0f);
 			Render();
+			fds::ReflMirror_End();
 			prof.leave(PROF_RNDR);
 		}
 #if FDS_REFLTN_CENSUS
