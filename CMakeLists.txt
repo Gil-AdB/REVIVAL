@@ -437,16 +437,16 @@ add_subdirectory(FDS)
 add_subdirectory(DEMO)
 add_subdirectory(tests)
 
-# Standalone Metal GPU benchmark / ground-truth instrument (macOS only).
+# Standalone GPU benchmark / ground-truth instrument (macOS/Metal + Windows/D3D11).
 # NOT a shipping backend, NOT part of the demo — see docs/GPU_BENCHMARK_PLAN.md.
 # Default OFF so `cmake --build build` and DEMO are untouched:
 #   cmake -S . -B build-gpu -G Ninja -DFDS_GPU_BENCH=ON
-option(FDS_GPU_BENCH "Build the standalone Metal deferred benchmark (macOS only)" OFF)
+option(FDS_GPU_BENCH "Build the standalone GPU deferred benchmark" OFF)
 if(FDS_GPU_BENCH)
-    if(APPLE AND NOT EMSCRIPTEN)
+    if((APPLE OR WIN32) AND NOT EMSCRIPTEN)
         add_subdirectory(GpuBench)
     else()
-        message(WARNING "FDS_GPU_BENCH=ON ignored: the GPU benchmark is macOS/Metal only")
+        message(WARNING "FDS_GPU_BENCH=ON ignored: the GPU benchmark is macOS/Windows only")
     endif()
 endif()
 

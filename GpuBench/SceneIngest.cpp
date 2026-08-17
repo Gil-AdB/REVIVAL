@@ -13,6 +13,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,7 +32,7 @@
 // engine file is touched. Anything else that reads `dTime` in this process is
 // reading the value FreeCamStep last wrote, which is correct — GpuBench has
 // exactly one camera integrator.
-float dTime = 0.0f;
+// float dTime = 0.0f;  // defined in FDS.lib (RENDER.CPP)
 
 namespace gpubench {
 namespace {
