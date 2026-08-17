@@ -437,7 +437,7 @@ float4 ps_resolve(QUAD_VS_OUTPUT input) : SV_TARGET
         float3 diff = baseCol * diffuseK * metalKill;
         float3 specTint = lerp(float3(1.0f, 1.0f, 1.0f), tintAlbedo, metal);
 
-        float shadow = shadowsOn ? evalShadow(Li, wpos, dza, dzb) : 1.0f;
+        float shadow = shadowsOn ? evalShadow(Li, pw, dza, dzb) : 1.0f;
         directLight += (diff + spec1 * specTint) * Li.color.rgb * (NoL * atten * shadow);
     }
 

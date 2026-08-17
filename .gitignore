@@ -323,3 +323,7 @@ Runtime/SCENES/.backups/
 .claude/
 build-*/
 Runtime/*.ppm
+
+.aider*
+.aider.tags.cache.v3
+

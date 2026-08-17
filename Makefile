@@ -44,11 +44,11 @@ help:
 
 build:
 	cmake -S . -B $(BUILD_DIR) -G Ninja
-	cmake --build $(BUILD_DIR)
+	command cmake --build $(BUILD_DIR)
 
 build-debug:
 	cmake -S . -B $(BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Debug
-	cmake --build $(BUILD_DIR)
+	command cmake --build $(BUILD_DIR)
 
 install: build
 	cp $(BUILD_DIR)/DEMO/DEMO $(RUNTIME_DIR)/DEMO
@@ -77,7 +77,7 @@ wasm: _fix-node-options
 		exit 1; \
 	}
 	emcmake cmake -S . -B $(WASM_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Release
-	cmake --build $(WASM_BUILD_DIR)
+	command cmake --build $(WASM_BUILD_DIR)
 
 serve: wasm
 	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
@@ -98,7 +98,7 @@ wasm-profile:
 		exit 1; \
 	}
 	emcmake cmake -S . -B $(WASM_PROFILE_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Release -DWASM_PROFILE=ON
-	cmake --build $(WASM_PROFILE_BUILD_DIR)
+	command cmake --build $(WASM_PROFILE_BUILD_DIR)
 
 serve-profile: wasm-profile
 	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
