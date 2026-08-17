@@ -70,6 +70,9 @@ struct PerTriMeshClone {
 };
 
 struct VertexScratch {
+    VertexScratch() = default;
+    VertexScratch(VertexScratch&&) = default;
+    VertexScratch& operator=(VertexScratch&&) = default;
     std::unordered_map<TriMesh*, PerTriMeshClone> clones;
 
     // One-entry cache for the most-recent (T, clone) pair. Transform_

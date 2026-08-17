@@ -1,7 +1,11 @@
 set(PROJECT_NAME DEMO)
 
 if(NOT EMSCRIPTEN)
-    find_package(SDL2 REQUIRED)
+    if(WIN32)
+        set(SDL2_LIBRARIES SDL2::SDL2)
+    else()
+        find_package(SDL2 REQUIRED)
+    endif()
 endif()
 
 set(DEMO_SOURCES

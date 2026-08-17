@@ -23,6 +23,18 @@
 // actually called.
 
 #include <cstdio>
+#include <string>
+
+// Stubs for FDS and DEMO symbols used by MeshOps / MaterialImport
+float dTime = 0.0f;
+struct Material;
+Material* Materialize(void* data, int x, int y) {
+    return nullptr;
+}
+namespace rev {
+    std::string Editor_BaseSurfName(const char*) { return ""; }
+    std::string Editor_ChunkBaseObjName(const char*) { return ""; }
+}
 #include <cstring>
 #include <cstdint>
 #include <string>

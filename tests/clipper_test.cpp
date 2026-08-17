@@ -23,6 +23,13 @@
 #include "FRUSTRUM.H"
 
 #include <cstdio>
+#include <vector>
+
+// Stub for FDS symbol defined in DEMO but used by FDS.lib
+struct Material;
+Material* Materialize(void* data, int x, int y) {
+    return nullptr;
+}
 #include <cstring>
 #include <vector>
 

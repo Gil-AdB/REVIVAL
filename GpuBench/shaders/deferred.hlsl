@@ -45,17 +45,21 @@ cbuffer BatchUniforms : register(b1)
     float4 xpar;
 };
 
-struct GpuLight
-{
-    float4 pos;        // xyz = world pos, w = range
-    float4 color;      // xyz = (color/255)*intensity, w = 1/range
-    float4 dir;        // xyz = spot direction, w = isSpot (1 or 0)
-    float4 params;     // x = cosInner, y = cosOuter
+struct GpuLight {
+    float4 pos;       // xyz = pos, w = range
+    float4 color;     // xyz = color * intensity, w = invRange
+    float4 dir;       // xyz = dir, w = isSpot
+    float4 params;    // x = cosInner, y = cosOuter, z = shadowIndex, w = pad
+    float4 sRow0;     // .w = 1/tan(halfFov) for spots
+    float4 sRow1;
+    float4 sRow2;
+    float shadowNear;
+    float shadowFar;
+    float2 pad;
 };
 
-cbuffer LightUniforms : register(b2)
-{
-    GpuLight g_lights[64];
+cbuffer LightUniforms : register(b2) {
+    GpuLight lights[64];
 };
 
 // --------------------------------------------------------------------------
@@ -117,6 +121,55 @@ Texture2D g_normalTex : register(t1);
 Texture2D g_roughTex  : register(t2);
 Texture2D g_aoTex     : register(t3);
 Texture2D g_metalTex  : register(t4);
+Texture2D<float4> reflTex   : register(t5);
+Texture2DArray<float4> mirrorTex : register(t6);
+
+TextureCube<float> shadowCubes[16] : register(t7);
+Texture2D<float> shadowSpots[16]   : register(t23);
+SamplerComparisonState shadowSamp  : register(s1);
+
+float sampleSpotShadow(int sIdx, float2 uv, float refZ) {
+    switch (sIdx) {
+        case 0: return shadowSpots[0].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 1: return shadowSpots[1].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 2: return shadowSpots[2].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 3: return shadowSpots[3].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 4: return shadowSpots[4].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 5: return shadowSpots[5].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 6: return shadowSpots[6].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 7: return shadowSpots[7].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 8: return shadowSpots[8].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 9: return shadowSpots[9].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 10: return shadowSpots[10].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 11: return shadowSpots[11].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 12: return shadowSpots[12].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 13: return shadowSpots[13].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 14: return shadowSpots[14].SampleCmpLevelZero(shadowSamp, uv, refZ);
+        case 15: return shadowSpots[15].SampleCmpLevelZero(shadowSamp, uv, refZ);
+    }
+    return 1.0f;
+}
+
+float evalShadow(GpuLight L, float3 wpos, float dza, float dzb) {
+    if (L.params.z < 0) return 1.0f;
+    int sIdx = (int)L.params.z;
+    if (L.dir.w > 0.5f) { // isSpot
+        float3 rel = wpos - L.pos.xyz;
+        float3 vp = float3(
+            L.sRow0.x * rel.x + L.sRow0.y * rel.y + L.sRow0.z * rel.z,
+            L.sRow1.x * rel.x + L.sRow1.y * rel.y + L.sRow1.z * rel.z,
+            L.sRow2.x * rel.x + L.sRow2.y * rel.y + L.sRow2.z * rel.z
+        );
+        float2 uv = vp.xy * L.sRow0.w * (0.5f / vp.z) + 0.5f;
+        uv.y = 1.0f - uv.y;
+        if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f || vp.z <= 0.0f) return 1.0f;
+        
+        float refZ = saturate((dza * vp.z + dzb) / vp.z) - 1e-4f;
+        return sampleSpotShadow(sIdx, uv, refZ);
+    }
+    return 1.0f; // omni cube shadows not implemented in shader yet
+}
+
 SamplerState g_sampler : register(s0);
 
 // Octahedral normal encoding/decoding (matches deferred.metal oct_encode/oct_decode)
@@ -290,7 +343,7 @@ float4 ps_resolve(QUAD_VS_OUTPUT input) : SV_TARGET
     // See deferred.metal:594-618 for the rationale.
     float3 directLight = 0.0f;
     for (uint i = 0; i < numLights && i < 64; ++i) {
-        GpuLight Li = g_lights[i];
+        GpuLight Li = lights[i];
 
         // Light position in view space
         float3 lRel = Li.pos.xyz - camSrc.xyz;
@@ -337,7 +390,8 @@ float4 ps_resolve(QUAD_VS_OUTPUT input) : SV_TARGET
         float3 diff = baseCol * diffuseK * metalKill;
         float3 specTint = lerp(float3(1.0f, 1.0f, 1.0f), tintAlbedo, metal);
 
-        directLight += (diff + spec1 * specTint) * Li.color.rgb * (NoL * atten);
+        float shadow = shadowsOn ? evalShadow(Li, wpos, dza, dzb) : 1.0f;
+        directLight += (diff + spec1 * specTint) * Li.color.rgb * (NoL * atten * shadow);
     }
 
     // ---- Ambient ----
@@ -369,6 +423,15 @@ float4 ps_resolve(QUAD_VS_OUTPUT input) : SV_TARGET
 
     // Sqrt gamma encoding for hdr_linear mode (matching Metal's fs_tonemap)
     if (hdrMode.x > 0.5f) color = sqrt(color);
+
+
+    if (mirrorCount > 0) {
+        uint mid = (uint)(g_gbufMirror.Load(int3(px, 0)).x * 255.0f + 0.5f);
+        if (mid > 0 && mid <= mirrorCount) {
+            float3 r = mirrorTex.Load(int4(px.x, px.y, mid - 1, 0)).rgb;
+            color += r * 0.5f;
+        }
+    }
 
     return float4(color, 1.0f);
 }

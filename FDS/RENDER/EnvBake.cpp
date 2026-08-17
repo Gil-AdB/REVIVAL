@@ -2743,8 +2743,9 @@ void EnvDynamic_Overlay(Scene* sc) {
             for (int f = 0; f < 6; ++f) {
                 if (faceCull && !S.reflFaceMask[f]) continue;
                 const Vector op = envOverlayPoint(env, S);
+                const float op_f[3] = { op.x, op.y, op.z };
                 const Frustum fp = fds::Frustum_FromProbeFace(
-                    (const float[3]){ op.x, op.y, op.z }, f, range);
+                    op_f, f, range);
                 for (const auto& m : movers)
                     if (!fds::Frustum_CullsSphere(fp, m.c, m.r)) {
                         c.mask[f] = true; ++c.touched; break;

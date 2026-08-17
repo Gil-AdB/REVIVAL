@@ -43,7 +43,11 @@ add_dependencies(GpuBenchShaders ${PROJECT_NAME})
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE SIMDE_ENABLE_NATIVE_ALIASES)
 
-find_package(SDL2 REQUIRED)
+if(WIN32 AND NOT EMSCRIPTEN)
+    set(SDL2_LIBRARIES SDL2::SDL2)
+else()
+    find_package(SDL2 REQUIRED)
+endif()
 target_include_directories(${PROJECT_NAME} PRIVATE ${SDL2_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/FDS ${CMAKE_SOURCE_DIR})
 
 if(APPLE)

@@ -11,8 +11,16 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <iostream>
 
 #include <SDL.h>
+
+// Stubs for FDS symbols defined in DEMO but used by FDS.lib
+float dTime = 0.0f;
+struct Material;
+Material* Materialize(void* data, int x, int y) {
+    return nullptr;
+}
 
 namespace {
 

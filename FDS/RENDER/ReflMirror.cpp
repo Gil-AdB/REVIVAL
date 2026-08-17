@@ -32,7 +32,11 @@ void ReflMirror_End()
 
 // noinline + its own TU: this must not be allowed to perturb the code
 // generation of Render_DeferredLighting (see the header's last paragraph).
+#if defined(_MSC_VER) && !defined(__clang__)
+__declspec(noinline)
+#else
 __attribute__((noinline))
+#endif
 void ReflMirror_MirrorLights(ViewLightsSoA &lights, int numLights,
                              Scene *Sc, Camera *View)
 {

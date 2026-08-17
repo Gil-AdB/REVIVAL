@@ -11,6 +11,9 @@ project(REVIVAL CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(MSVC)
+    add_compile_options(/Zc:__cplusplus)
+endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Thin LTO for Release / RelWithDebInfo only. Cross-TU inlining matters for
@@ -430,6 +433,21 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 # browser).
 if(NOT EMSCRIPTEN)
     enable_testing()
+endif()
+
+# Inject SDL2 target for Windows using local prebuilt binaries and FetchContent for includes
+if(WIN32 AND NOT EMSCRIPTEN)
+    include(FetchContent)
+    FetchContent_Declare(
+        SDL2
+        URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.28.5.zip
+    )
+    FetchContent_Populate(SDL2)
+    add_library(SDL2::SDL2 INTERFACE IMPORTED)
+    set_target_properties(SDL2::SDL2 PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${sdl2_SOURCE_DIR}/include"
+        INTERFACE_LINK_LIBRARIES "${CMAKE_SOURCE_DIR}/SDL2-dev/SDL2-2.30.9/lib/x64/SDL2.lib"
+    )
 endif()
 
 add_subdirectory(Modplayer)

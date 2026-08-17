@@ -2,6 +2,9 @@
 #define REVIVAL_STATIC_SHADOW_LIGHTMAP_H
 
 #include "BaseDefs.h"
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
 
 #include <atomic>
 #include <cstdint>
@@ -98,8 +101,12 @@ struct StaticShadowLightmap {
         // the kernel then skips an omni that DOES light that face
         // (TSan-confirmed, nondeterministic shading). Relaxed is enough:
         // readers only run after the bake thread is joined.
+#if defined(_MSC_VER) && !defined(__clang__)
+        _InterlockedOr8((volatile char*)&coverageBits[bit >> 3], char(1u << (bit & 7)));
+#else
         __atomic_fetch_or(&coverageBits[bit >> 3],
                           uint8_t(1u << (bit & 7)), __ATOMIC_RELAXED);
+#endif
     }
 
     // Sized allocation. Re-callable if scene contents change; existing
