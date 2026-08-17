@@ -17,6 +17,7 @@
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <RENDER/SpotlightCones.h>
+#include <RENDER/ReflMirror.h>  // --refl_correct: mirrored-pass light state
 #include <RENDER/TailProf.h>   // FDS_TAIL_PROF: dispMap-resample attribution
 #include <algorithm>
 #include <memory>
@@ -437,6 +438,24 @@ void Reflective_Mapper_Setup()
 
 ///////////////////////////////////////////////////////////////////////
 // PRIMARY TRANSFORMATION PIPELINE, FOR USE WITH REFLECTIONS
+//
+// --refl_correct (DEFAULT ON; LOOK CHANGE commissioned by Gil-Ad 2026-08-16).
+// The twin of CHASE.CPP's block — read that one for the full account. In short:
+// this function writes TPos_AOS / RZ / PX / PY / Flags into the SAME AoS Vertex
+// storage the main pass uses and NO `TN` and NO `TTangent`, so the reflected
+// world has always shaded from whatever the previous `Transform_Objects` left
+// behind — in city permanently the STALE form (its init bakes run 71
+// Transform_Objects calls before the first reflected pass, so city never shows
+// chase's zero form; docs/OPTIMIZATION_BACKLOG.md 2026-08-16w). `IM` is this
+// pass's model→reflected-view rotation, staged below exactly as
+// Transform.cpp stages the main pass's; a reflection is orthogonal, so its
+// inverse-transpose is itself and the normal takes the position matrix
+// unchanged. `reflTN` is hoisted once per call, so this is loop-invariant.
+#define REFLTN_WRITE(V) do { if (reflTN) { \
+		MatrixXVector(IM, &(V)->N, &(V)->TN); \
+		MatrixXVector(IM, &(V)->Tangent, &(V)->TTangent); \
+	} } while (0)
+
 static void Reflected_Transform(Scene *Sc)
 {
 	TriMesh *T;
@@ -466,6 +485,8 @@ static void Reflected_Transform(Scene *Sc)
 	// --needle_cull: degenerate-face pre-reject, same near plane, same read-once
 	// shape as the bbox flag above. See FDS/Base/FaceNeedle.h.
 	const bool  needleCull   = fds::FeatureFlags::needle_cull();
+	// --refl_correct: read once, so REFLTN_WRITE above is loop-invariant.
+	const bool  reflTN       = fds::FeatureFlags::refl_correct();
 #if FDS_NEEDLE_CENSUS
 	const int   needleCensusKind = fds::kNeedleMirror;
 #endif
@@ -617,6 +638,7 @@ static void Reflected_Transform(Scene *Sc)
 				Vtx->TPos_AOS.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos_AOS.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos_AOS.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
+				REFLTN_WRITE(Vtx);
 				
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
@@ -640,6 +662,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->TPos_AOS.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos_AOS.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos_AOS.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
+				REFLTN_WRITE(Vtx);
 				
 				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
 				Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
@@ -666,6 +689,7 @@ Regular:
 				Vtx->TPos_AOS.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos_AOS.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos_AOS.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
+				REFLTN_WRITE(Vtx);
 				
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
@@ -705,6 +729,7 @@ Regular:
 			{
 				MatrixXVector(M,&Vtx->Pos,&U);
 				Vector_Add(&U,&V,&Vtx->TPos_AOS);
+				REFLTN_WRITE(Vtx);
 				
 				Vtx->Flags=0;
 				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
@@ -728,6 +753,7 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
 				Vector_Add(&U,&V,&Vtx->TPos_AOS);
+				REFLTN_WRITE(Vtx);
 				
 				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
 
@@ -756,6 +782,7 @@ ERegular:
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
 				Vector_Add(&U,&V,&Vtx->TPos_AOS);
+				REFLTN_WRITE(Vtx);
 				
 				Vtx->Flags = 0;
 				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
@@ -3841,7 +3868,17 @@ struct CityScene : SceneDriver {
 			// distances pick different mips; letting them overwrite the
 			// state would feed the main pass's mip hysteresis garbage.
 			g_mipLastMipWrite = false;
+			// --refl_correct: this Render() is a complete second renderFrame
+			// with its own G-buffer and its own deferred light list, so the
+			// whole pass takes MIRRORED lights. The plane is the one the
+			// geometry is ACTUALLY mirrored about a few hundred lines above —
+			// `P - 2(P·RflSurfNorm)RflSurfNorm`, through the world ORIGIN, so
+			// d = 0. NOT `RflSurfOfs`: that offset is city's FastFog
+			// reflection plane (FastFog_SetReflectionZ below), and the lights
+			// must follow the GEOMETRY or the two desynchronise.
+			fds::ReflMirror_Begin(RflSurfNorm, 0.0f);
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
+			fds::ReflMirror_End();
 			g_mipLastMipWrite = true;
 #if FDS_REFLTN_CENSUS
 			meka::ReflTnCensus_Report("REFLECTED");
