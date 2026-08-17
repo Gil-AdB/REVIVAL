@@ -43,6 +43,7 @@
 extern float fastLog2(float x);
 extern float fastPow2(float x);
 #include "Base/FeatureFlags.h"
+#include "Base/Compiler.h"   // FDS_NOINLINE / FDS_ALWAYS_INLINE / FDS_PRINTF_FMT
 #include "Base/Scene.h"
 #include "Base/StaticShadowLightmap.h"
 #include "Base/TriMesh.h"
@@ -1982,7 +1983,7 @@ struct CubeProScratch {
 // passes dispatch a fixed tile grid over a target smaller than it, so `x2 < x1`
 // arrives here with a NEGATIVE width — and `size_t((x2 - x1 + 8) & ~7)` on that
 // is how a resize asks for 18 exabytes.
-__attribute__((noinline))
+FDS_NOINLINE
 static CubeProScratch *CubeProBeginTile(const DeferredLightingCtx &ctx, int tileIndex,
                                         int x1, int x2, int &nLightsOut,
                                         const fds::CubeProSlot *const *&rowsOut)

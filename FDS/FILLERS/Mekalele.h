@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include "Base/Compiler.h"   // FDS_NOINLINE
 
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"
@@ -94,7 +95,7 @@ inline void ReflTnCensus_Tri(int nZeroCorners, const char *matName)
 // into its caller, or the "instrument moved the pin" trap fires through
 // inlining alone. (Census build only, so the shipping codegen is untouched
 // either way — this is belt and braces.)
-__attribute__((noinline)) inline void ReflTnCensus_Report(const char *tag)
+FDS_NOINLINE inline void ReflTnCensus_Report(const char *tag)
 {
 	const long long tot = g_rtTriTotal.exchange(0, std::memory_order_relaxed);
 	const long long all = g_rtTriAllZero.exchange(0, std::memory_order_relaxed);
@@ -3160,7 +3161,12 @@ struct TileRasterizer {
 
 					auto p_offset = tu + tv;
 					auto packedTxtrData = v8_TxtrIdMask | p_offset;
-					_mm256_maskstore_ps(span.txtr, *(__m256i*)(&p_mask), *(__m256*)(&packedTxtrData));
+					// (float*) cast: the REAL _mm256_maskstore_ps takes float*,
+					// which is what an x86-64 build resolves this to. simde's
+					// arm64 macro reinterpret_casts the pointer itself, so the
+					// cast is a no-op there — same as the three sibling call
+					// sites in this file and TheOtherBarry.h, which spell it.
+					_mm256_maskstore_ps((float*)span.txtr, *(__m256i*)(&p_mask), *(__m256*)(&packedTxtrData));
 
 					// Texture filtering: sample the diffuse texel with the
 					// sub-texel FRACTION (only present here, pre-swizzle-pack)

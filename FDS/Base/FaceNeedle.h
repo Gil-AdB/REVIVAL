@@ -1,5 +1,6 @@
 #ifndef FDS_FACE_NEEDLE_H_INCLUDED
 #define FDS_FACE_NEEDLE_H_INCLUDED
+#include "Compiler.h"   // FDS_NOINLINE
 
 // CENSUS BUILD (compile-time, never defined in a shipping build), same shape
 // and the same reason as FDS_REFLTN_CENSUS in Mekalele.h: the counters would
@@ -99,7 +100,7 @@ struct NeedleCensusState {
 	// part — edge-on quads and sub-pixel slivers, which no load-time scan sees.
 	std::atomic<long long> culledZeroN[kNeedlePassKinds]{};
 	std::atomic<long long> culledThin[kNeedlePassKinds]{};
-	__attribute__((noinline)) void report() const {
+	FDS_NOINLINE void report() const {
 		static const char *nm[kNeedlePassKinds] = { "main", "shadow", "offscreen", "mirror" };
 		for (int k = 0; k < kNeedlePassKinds; ++k) {
 			const long long t = tested[k].load(), c = culled[k].load();

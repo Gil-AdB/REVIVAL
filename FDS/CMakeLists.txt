@@ -251,6 +251,14 @@ target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # and don't pull these flags into the cargo build.
 target_link_libraries(${PROJECT_NAME} PUBLIC pgo_flags)
 
+# FDS/Base/TuneServer.cpp is a small localhost HTTP console over BSD sockets;
+# on Windows those live in ws2_32 rather than libc. (MSVC also picks this up
+# from the #pragma comment(lib) in that file — this makes MinGW-w64 work and
+# keeps the dependency visible in the build system.)
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PUBLIC ws2_32)
+endif()
+
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     _CRT_SECURE_NO_WARNINGS
     _LIB
@@ -266,12 +274,36 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 # `-Wno-parentheses` silences ~200 vendored-simd warnings (the
 # `& has lower precedence than >` shape inside vectorclass) that we
 # don't own; without this the bug-catcher warnings drown in noise.
-target_compile_options(${PROJECT_NAME} PUBLIC
-    -Wself-assign
-    -Wuninitialized
-    -Wsometimes-uninitialized
-    -Werror=return-type
-    -Wno-parentheses)
+#
+# PORTABILITY: `-Wself-assign` and `-Wsometimes-uninitialized` are clang-only
+# spellings — GCC (MinGW-w64) hard-errors on an unrecognized -W option, and
+# MSVC's driver takes /W-style flags. The Clang arm below is verbatim what
+# AppleClang got before this was split, so the macOS build is unchanged.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    target_compile_options(${PROJECT_NAME} PUBLIC
+        -Wself-assign
+        -Wuninitialized
+        -Wsometimes-uninitialized
+        -Werror=return-type
+        -Wno-parentheses)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # GCC equivalents: -Wmaybe-uninitialized is the closest analogue of
+    # clang's -Wsometimes-uninitialized; self-assign is folded into -Wextra
+    # there and not separable, so it is simply absent.
+    target_compile_options(${PROJECT_NAME} PUBLIC
+        -Wuninitialized
+        -Wmaybe-uninitialized
+        -Werror=return-type
+        -Wno-parentheses)
+elseif(MSVC)
+    # C4700 "uninitialized local variable used" is on at /W3 and is the
+    # bug class this block exists for; make it an error like return-type.
+    # C4715 = "not all control paths return a value" (the -Werror=return-type
+    # analogue). /wd4244 /wd4305 silence the float/double narrowing noise this
+    # 1998-era codebase produces by the thousand.
+    target_compile_options(${PROJECT_NAME} PUBLIC
+        /we4700 /we4715 /wd4244 /wd4305 /wd4267)
+endif()
 
 # -ffp-contract=fast is enabled GLOBALLY at the top-level CMakeLists.
 # No per-file pinning needed. FDS/Base/FPContract.h provides

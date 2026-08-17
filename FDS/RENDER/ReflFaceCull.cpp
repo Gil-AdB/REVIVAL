@@ -35,6 +35,7 @@
 #include <vector>
 
 #include <Base/FDS_DEFS.H>
+#include <Base/Compiler.h>   // FDS_NOINLINE
 #include <Base/FDS_DECS.H>
 #include <Base/FDS_VARS.H>
 #include <Base/FeatureFlags.h>
@@ -63,7 +64,7 @@ bool EnvBake_FaceExcluded(const Face* F, TriMesh* T);
 // proves invisible. Face_MainOnly is the one that matters for cost — under
 // --greets_displace the displaced stone detail is main-camera only (the flat
 // proxy reflects instead) and it is 16× the face count of everything else.
-__attribute__((noinline))
+FDS_NOINLINE
 void ReflFaceCull_Mark(const TriMesh *T, const Face *tFaces, const Vertex *tVerts,
                        const Vector &AP, bool offscreenPass,
                        const uint8_t *&keepOut) {

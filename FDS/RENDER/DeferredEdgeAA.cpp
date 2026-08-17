@@ -34,7 +34,12 @@
 #include <cstdlib>
 #include <semaphore>
 
+// arm64 only — the NEON fast paths below are already `#if defined(__aarch64__)`
+// gated and every one has a scalar fallback, so an x86-64 build simply takes
+// the scalar road. Guard spelling matches FDS/FILLERS/SimdHelpers.h.
+#if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
+#endif
 #include "simde/x86/fma.h"   // pulls in avx2; gives _mm256_* on arm64 + x86
 
 #include "Base/FDS_VARS.H"

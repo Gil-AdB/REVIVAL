@@ -20,8 +20,12 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#ifdef _WIN32
+#include <Base/WinCompat.h>  // mkdir(path,mode) -> _mkdir(path)
+#else
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 #include <vector>
 
 #ifndef __EMSCRIPTEN__

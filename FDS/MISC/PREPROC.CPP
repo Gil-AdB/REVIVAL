@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <memory.h>
+#include <Base/Compiler.h>   // FDS_NOINLINE
 #include <string.h>
 
 #include "Base/FDS_DEFS.H"
@@ -84,7 +85,7 @@ void Compute_FaceVertexIndices(TriMesh *T)
 //                    and the area-weighted sum vanishes anyway. That is a
 //                    zero-thickness fin / doubled surface, and it DOES corner
 //                    fillable triangles.
-__attribute__((noinline))
+FDS_NOINLINE
 static void ZeroNormalReport(TriMesh *T, const char *where)
 {
 	if (!T->Verts || !T->Faces || !T->VIndex) return;
@@ -592,7 +593,7 @@ void Compute_Edges(TriMesh *T)
 // three rasterizers reject a fan triangle whose screen determinant is ~0
 // (Mekalele.h / TheOtherBarry.h / ShadowMap.cpp), so a max of ~0 means those
 // verts corner nothing fillable and their tangent is unobservable.
-__attribute__((noinline))
+FDS_NOINLINE
 static void TangentDegenReport(TriMesh *T)
 {
 	if (!T->Verts || !T->Faces || !T->VIndex) return;

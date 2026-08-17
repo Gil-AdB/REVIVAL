@@ -491,6 +491,25 @@ material global ID or ptr
 #include "MainLoop.h"
 #endif
 #ifndef __EMSCRIPTEN__
+#ifdef _WIN32
+// chdir/getcwd/access/realpath/setenv shims (Windows has no <libgen.h> and
+// no realpath(); MSVC has no <unistd.h> at all). Only dirname() is local —
+// nothing else in the tree needs it.
+#include <Base/WinCompat.h>
+// Minimal dirname(): strips the last component in place, accepting either
+// separator (Win32 APIs and the CRT both take '/', and argv[0] may carry
+// it). Matches POSIX dirname's contract closely enough for the three
+// candidate paths probed below — including its "no separator -> ." case.
+static char* dirname(char* path) {
+	char* last = nullptr;
+	for (char* p = path; *p; ++p)
+		if (*p == '\\' || *p == '/') last = p;
+	if (!last) { path[0] = '.'; path[1] = '\0'; return path; }
+	if (last == path) { path[1] = '\0'; return path; }  // root
+	*last = '\0';
+	return path;
+}
+#else
 #include <unistd.h>
 #include <libgen.h>
 #include <sys/stat.h>
@@ -498,6 +517,7 @@ material global ID or ptr
 #include <string.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
 #endif
 #endif
 
@@ -543,6 +563,9 @@ static void ChdirToAssetRoot(const char* argv0)
 #elif defined(__linux__)
 	ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
 	if (n <= 0) strncpy(exe, argv0, sizeof(exe) - 1);
+#elif defined(_WIN32)
+	if (GetModuleFileNameA(nullptr, exe, (DWORD)sizeof(exe)) == 0)
+		strncpy(exe, argv0, sizeof(exe) - 1);
 #else
 	strncpy(exe, argv0, sizeof(exe) - 1);
 #endif
@@ -1358,6 +1381,13 @@ demo_exit:;
 
 int main(int argc, const char *argv[])
 {
+#ifdef _WIN32
+	// We build with SDL_MAIN_HANDLED (top-level CMakeLists.txt), so SDL did
+	// not wrap this entry point and does not know the C runtime is up.
+	// Without this SDL_Init() fails with "Application didn't initialize
+	// properly, did you include SDL_main.h in the file containing main()?".
+	SDL_SetMainReady();
+#endif
 	if (WantChdirToAssetRoot(argc, argv)) {
 		ChdirToAssetRoot(argc > 0 ? argv[0] : "");
 	} else {

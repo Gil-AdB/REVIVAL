@@ -1,4 +1,5 @@
 #include "ProceduralWater.h"
+#include <Base/Compiler.h>   // FDS_FMAF
 
 #include "Rev.h"
 #include <Threads.h>
@@ -471,9 +472,9 @@ static inline float sampleWaterCellGlints(float u, float v) {
 	{
 		FP_CONTRACT_OFF
 		const float omdu = 1.0f - du, omdv = 1.0f - dv;
-		const float p = __builtin_fmaf(B, du, A * omdu);
-		const float q = __builtin_fmaf(D, du, C * omdu);
-		return __builtin_fmaf(omdv, p, dv * q);
+		const float p = FDS_FMAF(B, du, A * omdu);
+		const float q = FDS_FMAF(D, du, C * omdu);
+		return FDS_FMAF(omdv, p, dv * q);
 	}
 }
 
@@ -736,7 +737,7 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 				// contraction off restores the pre-batch grouping exactly, which
 				// is what makes this pass byte-null.
 				float vLen2;
-				{ FP_CONTRACT_OFF vLen2 = __builtin_fmaf(Vz, Vz, __builtin_fmaf(Vy, Vy, Vx*Vx)); }
+				{ FP_CONTRACT_OFF vLen2 = FDS_FMAF(Vz, Vz, FDS_FMAF(Vy, Vy, Vx*Vx)); }
 				const float vInv = 1.0f / std::sqrt(vLen2);
 				Vx*=vInv; Vy*=vInv; Vz*=vInv;
 				float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;

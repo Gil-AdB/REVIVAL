@@ -84,6 +84,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/Compiler.h"   // FDS_NOINLINE / FDS_ALWAYS_INLINE / FDS_PRINTF_FMT
 #include "Base/FaceNeedle.h"   // --needle_cull threshold + contract + census
 #include "RENDER/EnvCube.h"   // env_cube: trig-free per-triangle face select
 #include "RENDER/EnvBake.h"   // --env_live_water: animated water in env lookups
@@ -372,7 +373,7 @@ struct XMeshSlot {
 };
 XMeshSlot g_xm[XM_CAP];
 
-__attribute__((noinline))
+FDS_NOINLINE
 XMeshSlot *xmSlotFor(const TriMesh *T, const char *nm)
 {
 	size_t h = size_t(reinterpret_cast<uintptr_t>(T) >> 4) * size_t(0x9E3779B97F4A7C15ull);
@@ -620,7 +621,7 @@ inline bool censusSphereOutsideRect(const Vector &S, float R2,
 // differing bytes (max |delta| 44) on the 1920x1080 city pin with the flag
 // OFF. A diagnostic must be byte-null off; keeping it behind a call boundary
 // restores that (city 37e62845 exact).
-__attribute__((noinline))
+FDS_NOINLINE
 void mirrorCensusMesh(const TriMesh *T, const Matrix &IM, const Vector &OS,
                       float L2, const fds::CameraContext &cam,
                       float px, float py, int xr, int yr)

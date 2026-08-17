@@ -732,6 +732,15 @@ inline Vector operator * (const Matrix M, const Vector &V)
 }
 
 
+// FPCR is an AArch64 system register. Both bodies below are AArch64-only —
+// `mrs/msr fpcr` is AArch64 assembly, and _ReadStatusReg(ARM64_FPCR) only
+// exists in MSVC's ARM64 intrinsic set — so the whole pair must be gated on
+// the ARCHITECTURE, not on the compiler. Without the outer guard an x86-64
+// build compiles the asm arm and the assembler rejects `mrs`.
+//
+// On x86-64 there is no FPCR; the analogous control register is MXCSR.
+// FPU_LPrecision() below is a documented no-op there — see its comment.
+#if defined(__aarch64__) || defined(_M_ARM64)
 static uint64_t GetFPCR()
 {
 #ifdef _MSC_VER
@@ -751,6 +760,7 @@ static void SetFPCR(uint64_t fpcr)
   __asm__ __volatile__("msr fpcr, %0" : : "ri"(fpcr));
 #endif
 }
+#endif  // aarch64
 
 inline void FPU_LPrecision()
 {
@@ -785,7 +795,26 @@ inline void FPU_LPrecision()
 	const uint64_t base = default_fpcr & ~(flush_to_zero_mask | rounding_mode_mask);
 	SetFPCR(base | FZ | AH);
 #else
-// #error "Unsopported arch"
+	// x86-64 / anything else: NO-OP, and deliberately so.
+	//
+	// The arm64 arm above selects round-to-nearest-even (already the x86
+	// default) plus FZ|AH — flush DENORMAL OUTPUTS to zero, let denormal
+	// INPUTS through. The exact x86-64 analogue is MXCSR FTZ=1 with DAZ=0,
+	// i.e. `_mm_setcsr((_mm_getcsr() & ~0x6000u) | 0x8000u)`.
+	//
+	// It is NOT enabled here, because enabling it would silently change
+	// rendered output on a platform this engine has never been run on, and
+	// no pin exists to check it against. Leaving it off means an x86-64
+	// build computes denormals normally instead of flushing them — a
+	// difference confined to values below ~1e-38, but a REAL difference
+	// from the shipping arm64 build. See docs/BUILDING_WINDOWS.md
+	// ("Known behavioural gap on x86-64") before changing this.
+	//
+	// The `#ifdef _MSVC` arm at the top of this function is a typo for
+	// _MSC_VER and has therefore never compiled on any compiler. It is left
+	// exactly as found: its body is the 1998 Watcom round-toward-+infinity
+	// setup, which the comment above records as ABANDONED in favour of
+	// RTNE. "Fixing" the typo would resurrect the wrong rounding mode.
 #endif
 }
 

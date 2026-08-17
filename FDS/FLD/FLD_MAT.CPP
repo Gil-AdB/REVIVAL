@@ -12,6 +12,7 @@
 #include <math.h>
 
 #include <cstdint>
+#include <cstring>   // std::memcpy (libc++ pulls it in via <string>, libstdc++ does not)
 #include <string>
 #include <unordered_map>
 #include <vector>

@@ -35,7 +35,11 @@
 // atlases. POSIX dirent, present on macOS and in the emscripten sysroot (the
 // wasm build finds an empty /tmp and the mode simply reports none — no
 // native-only call, so `make wasm` keeps building).
+#ifdef _WIN32
+#include <Base/WinCompat.h>  // opendir/readdir/closedir over FindFirstFileA
+#else
 #include <dirent.h>
+#endif
 
 // Build_YOffs_Table is commented out in FDS_DECS.H; declared extern wherever
 // an offscreen surface is shaped (see DEMO/GreetsMirror.cpp).

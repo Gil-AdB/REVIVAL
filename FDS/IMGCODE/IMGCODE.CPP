@@ -1,6 +1,9 @@
 #include <stdio.h>
 //#include <conio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <malloc.h>   // alloca (MSVC spells it _alloca and declares it here)
+#endif
 //#include <dos.h>
 //#include <io.h>
 #include <string.h>

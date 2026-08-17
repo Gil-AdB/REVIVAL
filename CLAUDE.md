@@ -29,6 +29,8 @@ Prerequisites:
 
 Stale/obsolete build trees that may still be on disk from pre-Tier-1 work (`CMake/`, `cmake-build-*`, `build.local/`) are gitignored — delete them freely.
 
+**Windows:** see `docs/BUILDING_WINDOWS.md` — MSVC/VS2022 and MinGW-w64 recipes, the x86-64 AVX2 requirement, the "which SDL2" conflict with the Rust modplayer's bundled copy, and an explicit TESTED/UNTESTED label on every step.
+
 ### Running
 
 The demo **must be run from `Runtime/`** — all asset paths (`rev.cfg`, `Revival.xM`, `SCENES/`, `TEXTURES/`, `FONTS/`) are resolved relative to CWD. Either `cmake --install build` (installs into `Runtime/`) or copy/symlink the binary then:

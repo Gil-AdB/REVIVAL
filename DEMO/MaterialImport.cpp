@@ -23,7 +23,11 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#ifdef _WIN32
+#include <Base/WinCompat.h>  // opendir/readdir/closedir over FindFirstFileA
+#else
 #include <dirent.h>
+#endif
 
 // PREPROC.CPP — recompute per-vertex tangents from current Faces + maps.
 void Compute_Vertex_Tangents(TriMesh *T);

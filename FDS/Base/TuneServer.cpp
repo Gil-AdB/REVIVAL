@@ -4,10 +4,30 @@
 
 #ifndef __EMSCRIPTEN__
 
+#ifdef _WIN32
+// Winsock is BSD sockets with three differences that matter here: the
+// headers, closesocket() instead of close(), and SO_RCVTIMEO taking a DWORD
+// of MILLISECONDS instead of a struct timeval. Socket handles are declared
+// as SOCKET (a UINT_PTR) but Microsoft documents them as fitting in 32 bits,
+// so the `int fd` the body uses is safe and INVALID_SOCKET still compares
+// as < 0 after truncation.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <sys/types.h>
+#if defined(_MSC_VER)
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;     // MSVC has no ssize_t; MinGW-w64 does
+#pragma comment(lib, "ws2_32.lib")
+#endif
+// NOT `::closesocket` — every call site already writes `::close(...)`, so the
+// replacement must be the bare name or it expands to `::::closesocket`.
+#define close(fd) closesocket(fd)
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include <cstdio>
 #include <cstring>
@@ -229,10 +249,19 @@ void respond(int fd, const char *status, const char *ctype, const std::string &b
 void handleConn(int fd);
 
 void serveLoop(int port) {
-	const int srv = ::socket(AF_INET, SOCK_STREAM, 0);
+#ifdef _WIN32
+	// Winsock must be started before the first socket() in the process.
+	// Function-local static: initialized exactly once, thread-safely.
+	static const bool wsaUp = []{
+		WSADATA wsa{};
+		return ::WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+	}();
+	if (!wsaUp) return;
+#endif
+	const int srv = (int)::socket(AF_INET, SOCK_STREAM, 0);
 	if (srv < 0) return;
 	int one = 1;
-	::setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	::setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
 	sockaddr_in addr{};
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(uint16_t(port));
@@ -244,7 +273,7 @@ void serveLoop(int port) {
 	}
 	fprintf(stderr, "[TUNE] live tuning console: http://localhost:%d\n", port);
 	for (;;) {
-		const int fd = ::accept(srv, nullptr, nullptr);
+		const int fd = (int)::accept(srv, nullptr, nullptr);
 		if (fd < 0) continue;
 		// One detached thread per connection: browsers open SPECULATIVE
 		// connections that never send a request — a serial loop blocks in
@@ -256,8 +285,13 @@ void serveLoop(int port) {
 
 void handleConn(int fd) {
 	{
+#ifdef _WIN32
+		const DWORD tv = 2000;   // Winsock: milliseconds, not a timeval
+		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+#else
 		timeval tv{2, 0};
 		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
 	}
 	char req[8192];
 	const ssize_t n = ::recv(fd, req, sizeof req - 1, 0);

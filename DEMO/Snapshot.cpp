@@ -31,7 +31,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
+#ifdef _WIN32
+#include <Base/WinCompat.h>  // mkdir(path,mode) -> _mkdir(path), setenv -> _putenv_s
+#else
 #include <sys/stat.h>
+#endif
 
 #ifndef __EMSCRIPTEN__
 #include <SDL.h>

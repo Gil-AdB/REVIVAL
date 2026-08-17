@@ -25,6 +25,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/Compiler.h"   // FDS_POPCOUNT
 #include "Base/Scene.h"
 #include "Base/Omni.h"
 #include "Base/Camera.h"
@@ -1306,7 +1307,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         }
                         spotAlive = aliveBits != 0;
                         if (g_coneDiag) {
-                            g_dLanes.fetch_add(__builtin_popcount(unsigned(aliveBits)),
+                            g_dLanes.fetch_add(FDS_POPCOUNT(unsigned(aliveBits)),
                                                std::memory_order_relaxed);
                             if (!spotAlive)
                                 g_dDead.fetch_add(1, std::memory_order_relaxed);
@@ -1544,7 +1545,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const int aliveBits = _mm256_movemask_ps(mAlive);
                         spotAlive = aliveBits != 0;
                         if (g_coneDiag) {
-                            g_dLanes.fetch_add(__builtin_popcount(unsigned(aliveBits)),
+                            g_dLanes.fetch_add(FDS_POPCOUNT(unsigned(aliveBits)),
                                                std::memory_order_relaxed);
                             if (!spotAlive)
                                 g_dDead.fetch_add(1, std::memory_order_relaxed);

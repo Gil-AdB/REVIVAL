@@ -249,10 +249,36 @@ if(EMSCRIPTEN)
     )
     set_target_properties(DEMO_snapshot PROPERTIES SUFFIX ".js")
 else()
-    target_link_libraries(${PROJECT_NAME} PRIVATE
-        FDS
-        Modplayer
-        SDL2::SDL2)
+    # SDL2 ON WINDOWS: HEADERS ONLY, symbols come from Modplayer.
+    #
+    # `modplayer-lib` depends on the `sdl2` crate with features
+    # ["bundled", "static-link"], so cargo compiles a COMPLETE SDL2 from source
+    # and archives it into libmodplayer.a. Linking SDL2::SDL2 as well puts a
+    # SECOND SDL2 in the same executable, and the link dies with hundreds of
+    # `multiple definition of SDL_CreateWindow` (etc.) — measured, not feared.
+    #
+    # There is exactly one SDL2 in the binary either way; this picks the one
+    # that is already there. find_package(SDL2) is still what supplies the
+    # headers the C++ side compiles against, so keep it pointed at an SDL2 of
+    # the same major version as the crate's (2.x).
+    #
+    # The alternative — building modplayer with
+    # `--no-default-features --features external-audio`, as the emscripten
+    # build does — removes the crate's SDL2 instead, but the C++ side has no
+    # native audio pump (DEMO/SDL2.cpp's Modplayer_FillBufferPlanar path is
+    # inside `#ifdef __EMSCRIPTEN__`), so it would ship Windows without music.
+    if(WIN32)
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            FDS
+            Modplayer)
+        target_include_directories(${PROJECT_NAME} PRIVATE
+            $<TARGET_PROPERTY:SDL2::SDL2,INTERFACE_INCLUDE_DIRECTORIES>)
+    else()
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            FDS
+            Modplayer
+            SDL2::SDL2)
+    endif()
 
     install(TARGETS ${PROJECT_NAME}
             RUNTIME DESTINATION "${CMAKE_SOURCE_DIR}/Runtime")

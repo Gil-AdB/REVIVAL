@@ -248,7 +248,94 @@ endif()
 # DeferredLighting.cpp:2099). Block-scoped FP_CONTRACT_OFF macros
 # in FDS/Base/FPContract.h are preserved as infrastructure for any
 # future real-FMA-sensitive site that's properly identified first.
-add_compile_options(-ffp-contract=fast)
+#
+# PORTABILITY: MSVC's driver spells this /fp:contract; clang-cl takes the
+# clang spelling only through the /clang: passthrough. The plain form below
+# is what AppleClang, ordinary clang and GCC (incl. MinGW-w64) all take, so
+# the macOS command line is unchanged.
+if(MSVC AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_compile_options(/clang:-ffp-contract=fast)
+    else()
+        add_compile_options(/fp:contract)
+    endif()
+else()
+    add_compile_options(-ffp-contract=fast)
+endif()
+
+# ----------------------------------------------------------------------------
+# x86-64 instruction set floor: AVX2 + FMA.
+#
+# The rasterizers and the deferred lighting kernels are written against
+# `_mm256_*` intrinsics and Agner Fog's vectorclass. On arm64 those reach
+# NEON through the vendored simde shim, which needs no flag. On x86-64
+# SIMDE_ENABLE_NATIVE_ALIASES resolves them to the REAL Intel intrinsics,
+# and GCC/clang refuse to inline an AVX2 intrinsic into a function compiled
+# without the corresponding -m flag ("target specific option mismatch"), so
+# an x86-64 build does not merely run slower without this — it does not
+# compile. MSVC does not gate intrinsics that way, but /arch:AVX2 is still
+# what lets it emit VEX encodings (and it implies FMA, which is why the
+# GCC/clang arm asks for -mfma alongside -mavx2).
+#
+# Consequence for the shipped binary: an x86-64 build requires a Haswell
+# (2013) or newer CPU. That is already true of the engine's design.
+# arm64 (Apple Silicon, Windows-on-ARM) is untouched by this block.
+if(NOT EMSCRIPTEN)
+    set(_fds_x86 FALSE)
+    if(APPLE)
+        # Multi-arch capable; key off the requested architectures.
+        if(CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
+            set(_fds_x86 TRUE)
+        endif()
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
+        set(_fds_x86 TRUE)
+    endif()
+
+    if(_fds_x86)
+        if(MSVC AND NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+            add_compile_options(/arch:AVX2)
+        else()
+            add_compile_options(-mavx2 -mfma)
+        endif()
+        message(STATUS "x86-64 target: AVX2 + FMA baseline enabled")
+    endif()
+endif()
+
+# Windows hygiene — applies to MSVC, clang-cl AND MinGW-w64 alike.
+if(WIN32)
+    # windows.h is reachable from DEMO/REV.CPP (GetModuleFileNameA) and from
+    # SDL.h. Its min/max macros collide with std::min/std::max, which this
+    # tree uses everywhere; M_PI is not declared by <cmath> on MSVC without
+    # _USE_MATH_DEFINES.
+    # NOGDI: wingdi.h #defines TRANSPARENT and OPAQUE, which collide with
+    # barry::TBlendMode's enumerators of the same name and turn every
+    # TheOtherBarry<> instantiation into a parse error. Nothing in this tree
+    # uses GDI. NOMINMAX: windows.h's min/max macros vs std::min/std::max.
+    # _USE_MATH_DEFINES: MSVC's <cmath> hides M_PI without it (EnvBake.cpp).
+    add_compile_definitions(NOMINMAX NOGDI WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES)
+    # SDL2 on Windows #defines main to SDL_main and expects to link
+    # SDL2main's WinMain. DEMO's main() is `int main(int, const char**)` —
+    # a signature SDL_main's prototype rejects — and the demo is a console
+    # program by design (it prints diagnostics throughout). So we opt out of
+    # the hijack and call SDL_SetMainReady() ourselves (DEMO/REV.CPP).
+    add_compile_definitions(SDL_MAIN_HANDLED)
+endif()
+
+# MSVC-only driver hygiene.
+if(MSVC)
+    # 1998-era sources with big switch bodies and heavy template
+    # instantiation blow the 65 279-section object limit without /bigobj.
+    add_compile_options(/bigobj)
+    # The engine uses standard C++ exceptions; without /EHsc MSVC warns on
+    # every <vector>/<string> include and generates no unwind tables.
+    add_compile_options(/EHsc)
+    # The tree already defines this per-target; make it global so DEMO and
+    # the tests get it too (fopen/sprintf/strcpy are used throughout).
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    # Source files are UTF-8 and some carry non-ASCII in comments/strings;
+    # without this MSVC reads them in the system codepage and warns (C4819).
+    add_compile_options(/utf-8)
+endif()
 
 # ----------------------------------------------------------------------------
 # Profile-Guided Optimization (PGO) — clang IR-based, 2-build flow.

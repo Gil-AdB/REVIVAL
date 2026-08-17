@@ -2,7 +2,11 @@
 
 const float log2conv = 1.0 / log(2.0);
 
-#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+// Legacy shim for platforms whose <math.h> predates a float log2 overload.
+// Windows is NOT one of them — MSVC and MinGW-w64 both provide
+// `float log2(float)` from <cmath>, so declaring it here is a redeclaration
+// conflict (and then an ambiguous overload at every call site).
+#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 inline float log2(float x) noexcept
 {
 	return log(x)*log2conv;

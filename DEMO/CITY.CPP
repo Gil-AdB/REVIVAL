@@ -10,6 +10,7 @@
 #include <FILLERS/TheOtherBarry.h>
 #include <FILLERS/ShadowMap.h>
 #include "CITY.H"
+#include <Base/Compiler.h>   // FDS_POPCOUNT
 #include "CityPanoramaCache.h"
 #include "FrameProfiler.h"
 #include "MeshOps.h"
@@ -2882,7 +2883,7 @@ void Initialize_City()
 				size_t set = 0, n = 0;
 				for (const auto& b : buildings)
 					for (uint8_t m : b.waterMask) {
-						set += size_t(__builtin_popcount((unsigned)m));
+						set += size_t(FDS_POPCOUNT((unsigned)m));
 						n   += 8;
 					}
 				fprintf(stderr, "[CITY] env_live_water: per-texel water verdict for "

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Base/Vector.h"
+#include "Base/Compiler.h"   // FDS_ALWAYS_INLINE
 #include "Base/Matrix.h"
 #include "Base/Camera.h"
 #include "Base/Face.h"
@@ -482,7 +483,7 @@ inline int CubeShadow_SelectFace(float dx, float dy, float dz)
 #define CUBE_ABL_CUT(stage, expr)  ((void)0)
 #endif
 
-__attribute__((always_inline)) inline float CubeShadow_Tail(const struct ShadowMap& sm, float smX, float smY,
+FDS_ALWAYS_INLINE inline float CubeShadow_Tail(const struct ShadowMap& sm, float smX, float smY,
                              int iX, int iY, int surfaceMatId, bool dynamicOnly,
                              float lz, int constBias, int slopeBiasInt);
 
@@ -621,7 +622,7 @@ inline float CubeShadow_Sample(int cubeIdx,
 // The split point is not arbitrary: it is the last place where the state is
 // small (one ShadowMap*, smX/smY, iX/iY) and the last place before the first
 // data-dependent memory read.
-__attribute__((always_inline)) inline float CubeShadow_Tail(const ShadowMap& sm, float smX, float smY,
+FDS_ALWAYS_INLINE inline float CubeShadow_Tail(const ShadowMap& sm, float smX, float smY,
                              int iX, int iY, int surfaceMatId, bool dynamicOnly,
                              float lz, int constBias, int slopeBiasInt)
 {

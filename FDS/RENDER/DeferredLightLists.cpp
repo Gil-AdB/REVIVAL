@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <cstring>   // std::memcpy — <string.h> alone does not put it in std::
 #include <math.h>
 #include <algorithm>
 #include <limits>

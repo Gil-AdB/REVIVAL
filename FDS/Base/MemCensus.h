@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include "Compiler.h"   // FDS_PRINTF_FMT
 
 // ── --mem_census: a walk of every LARGE allocation the engine holds ─────────
 //
@@ -67,7 +68,7 @@ public:
     // "faces=%u x lmRes=%d^2 x omnis=%d" — not "big".
     static void add(const char *subsystem, const char *name, size_t bytes,
                     bool touched, const char *formulaFmt, ...)
-        __attribute__((format(printf, 5, 6)));
+        FDS_PRINTF_FMT(5, 6);
 
     // Self-registration. See FDS_MEMCENSUS_REPORTER below.
     using Reporter = void (*)();

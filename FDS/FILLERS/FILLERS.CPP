@@ -1679,7 +1679,11 @@ void Spriter32(float x, float y,float width,float height,void *txtr,void *VPage,
 		for(int j = 0;j<LineWidth; j++)
 		{
 			__m64 mm0 = { 0 };
-#ifdef __clang__
+			// __m64 is a GCC-style vector type on clang, clang-cl AND gcc
+			// (subscriptable); `.m64_u32` is the MSVC union spelling and
+			// exists only there. __GNUC__ is the exact discriminator —
+			// clang defines it, real MSVC does not.
+#ifdef __GNUC__
 			((dword*)ScanLine)[j] = (dword)mm0[0];
 #else
 			((dword*)ScanLine)[j] = mm0.m64_u32[0];

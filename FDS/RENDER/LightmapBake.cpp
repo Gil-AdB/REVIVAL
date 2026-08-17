@@ -31,7 +31,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#ifdef _WIN32
+#include <Base/WinCompat.h>  // isatty/fileno -> _isatty/_fileno
+#else
 #include <unistd.h>  // isatty for progress-bar carriage-return gating
+#endif
 #include <semaphore>
 #include <Threads.h>  // ThreadPool — fan the per-face bake across cores
 #include <vector>

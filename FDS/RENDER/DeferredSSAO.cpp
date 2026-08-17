@@ -45,11 +45,17 @@
 #include <cstdlib>
 #include <semaphore>
 
+// arm64 only — the NEON fast paths below are already `#if defined(__aarch64__)`
+// gated and every one has a scalar fallback, so an x86-64 build simply takes
+// the scalar road. Guard spelling matches FDS/FILLERS/SimdHelpers.h.
+#if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
+#endif
 #include "simde/x86/fma.h"
 
 #include "Base/FDS_VARS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/Compiler.h"   // FDS_NOINLINE / FDS_ALWAYS_INLINE / FDS_PRINTF_FMT
 #include "Base/MemCensus.h"
 #include "FILLERS/Mekalele.h"
 #include "RENDER/DeferredCommon.h"
@@ -177,7 +183,7 @@ std::vector<float> g_aoDumpPlane, g_aoDumpZ, g_aoDumpN;
 // noinline so the writer never inlines into the apply's tile lambda and so the
 // dump is a leaf the profile can attribute; called once per frame, off the hot
 // path, after every tile has drained.
-__attribute__((noinline))
+FDS_NOINLINE
 void WriteAoDump(const float* plane, const float* zplane, const float* nplane,
                  int w, int h) {
 	const char* env = std::getenv("FDS_SSAO_DUMP_PATH");
@@ -388,7 +394,7 @@ void Render_SSAO() {
 									}
 								}
 							}
-							vis += 1.0f - float(__builtin_popcount(mask)) / 32.0f;
+							vis += 1.0f - float(FDS_POPCOUNT(mask)) / 32.0f;
 						}
 						vis /= float(slices);
 						float ao = 1.0f - (1.0f - vis) * strength;
@@ -523,7 +529,7 @@ void Render_SSAO() {
 								}
 							}
 							alignas(32) uint32_t mk[8]; _mm256_store_si256((__m256i*)mk,maskV);
-							for (int k=0;k<8;++k) visAcc[k]+=1.0f-float(__builtin_popcount(mk[k]))/32.0f;
+							for (int k=0;k<8;++k) visAcc[k]+=1.0f-float(FDS_POPCOUNT(mk[k]))/32.0f;
 						}
 						const float invS=1.0f/float(slices);
 						for (int k=0;k<8;++k){

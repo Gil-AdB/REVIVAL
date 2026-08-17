@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#ifdef _WIN32
+#include "WinCompat.h"   // realpath(), PATH_MAX
+#endif
 
 namespace fds {
 namespace {
