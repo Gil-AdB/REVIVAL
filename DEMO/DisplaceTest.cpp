@@ -429,6 +429,278 @@ DTestScene buildJunction(int mapId, int vizMode) {
     return d;
 }
 
+// ── SPLIT-VERTEX CORNER rig — the t=5968 pier arris, isolated ────────────────
+// TWO sheets in ONE TriMesh meeting along the vertical edge at (0,y,0) with the
+// exact greets topology: the corner columns are POSITION-COINCIDENT and
+// INDEX-DISTINCT (each sheet owns its own copy — the [STONE-JUNC] split-seam
+// population), the sheet normals are 59° apart like the real pier (A=(+1,0,0),
+// B=(+0.514,0,+0.858)), and the u phases CONFLICT at the border by
+// construction: B's border column sits exactly ON a vertical mortar groove of
+// the synthetic block map (u=0.5), A's just OFF one (u=0.7455) — so one sheet
+// reads "joint", the other "stone", at every course. That is the maximal
+// version of the disagreement measured at world (17.898,y,-58.014). Scale
+// matches greets: 0.167 tiles/world-u → 1.5 u block courses at amp 0.3.
+// Green backdrops sit behind the wedge so corner punch-through is a colour
+// count, not a judgement call.
+struct CornerMetrics {
+    float gapMax = -1.0f, gapMean = -1.0f;   // between the two displaced border polylines
+    int   nGapSamples = 0;
+    int   nFlips = 0;                        // twisted strip faces (geo normal vs authored)
+    int   nEdgeA = 0, nEdgeB = 0;            // classified boundary edges in the corner cylinder
+};
+DTestScene buildCorner(int mapId, CornerMetrics *M) {
+    using namespace fds::scene_builder;
+    FF::setDefault(FF::IntId::displace_viz, 0);
+
+    SceneBuilder b;
+    b.SetNearFar(0.5f, 300.0f);
+    b.SetAmbient(60, 60, 60);
+
+    Texture *hm = makeHeight8(mapId);
+    Texture *tex = b.AddSolidColorTexture(8, 8, 0xFFB0B0B0u);
+    Material *mat = b.AddMaterial("dtest", tex, {176, 176, 176, 255}, 0);
+    mat->HeightMap = hm;
+
+    // Sheet A via AddQuad (full engine setup): plane x=0, N=(+1,0,0). The
+    // sheets SEGMENT the corner differently — A breaks at y=3.7, B at
+    // y=2.6/5.9 — because that is what makes the greets corner a SPLIT seam:
+    // the endpoint weld can only merge coincident AUTHORED verts, so
+    // mismatched interior breaks leave each sheet its own index-distinct
+    // corner column (the t=1088 "different segmenting along the corner").
+    // A single full-height edge per sheet would weld into ONE shared interior
+    // edge and the rig would be vacuous (measured: dihedral 59.08 len 8.0,
+    // 0 split seams).
+    const Vector aV[4] = {
+        Vector(0.0f, 0.0f, 0.0f), Vector(0.0f, 0.0f, -6.0f),
+        Vector(0.0f, 3.7f, -6.0f), Vector(0.0f, 3.7f, 0.0f),
+    };
+    TriMesh *T = b.AddQuad("corner", aV, mat);
+
+    // Sheet B: N = normalize(0.514,0,0.858), extends from the corner along
+    // (-0.858,0,+0.514) — the real pier's second wall. Its corner column
+    // DUPLICATES A's positions with fresh indices (split seam).
+    float nBx = 0.514f, nBz = 0.858f;
+    { const float l = std::sqrt(nBx*nBx + nBz*nBz); nBx /= l; nBz /= l; }
+    const Vector nB{nBx, 0.0f, nBz};
+    const Vector farCol{-nBz * 6.0f, 0.0f, nBx * 6.0f};   // (-5.148, y, 3.084)
+
+    // 14 verts: A = corner col y{0,3.7,8} + far col y{0,3.7,8} (0..5),
+    // B = corner col y{0,2.6,5.9,8} (6..9) + far col y{0,2.6,5.9,8} (10..13).
+    Vertex *nv = new Vertex[14];
+    std::memcpy(nv, T->Verts, sizeof(Vertex) * 4);
+    delete[] T->Verts;
+    T->Verts = nv; T->VIndex = 14;
+    const float aBreak[3] = { 0.0f, 3.7f, 8.0f };
+    const float bBreak[4] = { 0.0f, 2.6f, 5.9f, 8.0f };
+    const Vector extraV[10] = {
+        Vector(0.0f, 8.0f, 0.0f), Vector(0.0f, 8.0f, -6.0f),          // 4,5: A top
+        Vector(0.0f, bBreak[0], 0.0f), Vector(0.0f, bBreak[1], 0.0f), // 6,7: B corner col
+        Vector(0.0f, bBreak[2], 0.0f), Vector(0.0f, bBreak[3], 0.0f), // 8,9
+        Vector(farCol.x, bBreak[0], farCol.z), Vector(farCol.x, bBreak[1], farCol.z),  // 10,11: B far col
+        Vector(farCol.x, bBreak[2], farCol.z), Vector(farCol.x, bBreak[3], farCol.z),  // 12,13
+    };
+    (void)aBreak;
+    for (int k = 0; k < 10; ++k) {
+        Vertex &V = nv[4 + k];
+        std::memset(&V, 0, sizeof(Vertex));
+        V.Pos = extraV[k];
+        const bool isB = k >= 2;
+        V.N = isB ? nB : Vector{1.0f, 0.0f, 0.0f};
+        V.TN = V.N;
+        V.LR = V.LG = V.LB = 200; V.LA = 255;
+    }
+    // 10 faces: A quad y0-3.7 (from AddQuad, rebound) + A quad 3.7-8 + B's 3 quads.
+    Face *nf = new Face[10];
+    std::memcpy(nf, T->Faces, sizeof(Face) * 2);
+    delete[] T->Faces;
+    T->Faces = nf; T->FIndex = 10;
+    const int aIdx[2][3] = { {0,1,2}, {0,2,3} };
+    for (int f = 0; f < 2; ++f) {
+        nf[f].A = nv + aIdx[f][0]; nf[f].B = nv + aIdx[f][1]; nf[f].C = nv + aIdx[f][2];
+    }
+    // Per-face UVs. Course scale 0.167 tiles/u both axes; v runs down with y
+    // (greets convention). A: u = 0.7455 - z*0.167 (border z=0 → 0.7455, just
+    // off the 0.75 groove). B: u = 0.5 + 0.167*(in-plane distance from the
+    // corner) (border → 0.5000, ON a groove).
+    auto uvA = [](const Vector &p, float &u, float &v){ u = 0.7455f - p.x * 0.0f - p.z * 0.167f; v = 2.0f - p.y * 0.167f; };
+    auto uvB = [&](const Vector &p, float &u, float &v){
+        const float w = std::sqrt(p.x*p.x + p.z*p.z);   // distance from the corner line
+        u = 0.5f + w * 0.167f; v = 2.0f - p.y * 0.167f; };
+    auto stampF = [&](Face &F, int ai, int bi, int ci, bool sheetB){
+        F.A = nv + ai; F.B = nv + bi; F.C = nv + ci;
+        F.Txtr = mat; F.Filler = nf[0].Filler; F.frame = nullptr;
+        if (sheetB) { uvB(nv[ai].Pos, F.U1, F.V1); uvB(nv[bi].Pos, F.U2, F.V2); uvB(nv[ci].Pos, F.U3, F.V3); }
+        else        { uvA(nv[ai].Pos, F.U1, F.V1); uvA(nv[bi].Pos, F.U2, F.V2); uvA(nv[ci].Pos, F.U3, F.V3); }
+        F.EU1=F.U1;F.EV1=F.V1; F.EU2=F.U2;F.EV2=F.V2; F.EU3=F.U3;F.EV3=F.V3;
+        F.N = sheetB ? nB : Vector{1.0f, 0.0f, 0.0f};
+        F.NormProd = -(F.N.x*F.A->Pos.x + F.N.y*F.A->Pos.y + F.N.z*F.A->Pos.z);
+    };
+    // Vert order is CLOCKWISE per the FLD convention the bake measures against
+    // (MeshOps 2026-08-13: authored cross(e1,e2) points INTO the wall; the veto
+    // negates it for the rendered side). AddQuad's own convention is the
+    // opposite — stamped counter-clockwise, the veto's convexity test read
+    // sheet B as IN FRONT of sheet A (a concave inside corner) and pinned the
+    // whole corner (measured: OPEN-border(pins) far-side:dtest on every
+    // segment). F.N stays the render normal.
+    stampF(nf[0], 0, 2, 1, false); stampF(nf[1], 0, 3, 2, false);   // A y 0..3.7
+    stampF(nf[2], 3, 5, 2, false); stampF(nf[3], 3, 4, 5, false);   // A y 3.7..8
+    stampF(nf[4], 6, 11, 7, true); stampF(nf[5], 6, 10, 11, true);  // B y 0..2.6
+    stampF(nf[6], 7, 12, 8, true); stampF(nf[7], 7, 11, 12, true);  // B y 2.6..5.9
+    stampF(nf[8], 8, 13, 9, true); stampF(nf[9], 8, 12, 13, true);  // B y 5.9..8
+    Vector ctr{0,0,0}; for (int i=0;i<14;++i){ ctr.x+=nv[i].Pos.x; ctr.y+=nv[i].Pos.y; ctr.z+=nv[i].Pos.z; }
+    ctr.x/=14; ctr.y/=14; ctr.z/=14; float radSq=0;
+    for (int i=0;i<14;++i){ const float dx=nv[i].Pos.x-ctr.x,dy=nv[i].Pos.y-ctr.y,dz=nv[i].Pos.z-ctr.z; radSq=std::max(radSq,dx*dx+dy*dy+dz*dz); }
+    T->BSphereCtr=ctr; T->BSphereRad=radSq; T->BSphereRadius=std::sqrt(radSq);
+    Compute_FaceVertexIndices(T);
+
+    // Green backdrops behind the wedge: punch-through at the corner reads as
+    // saturated green from any camera in front of the pier.
+    Texture *btex = b.AddSolidColorTexture(8, 8, 0xFF00C000u);
+    Material *bmat = b.AddMaterial("dtestback", btex, {0, 192, 0, 255}, 0);
+    // Backdrops INSET inside the sheets' footprint (z∈[-5.8,2.8], y∈[0.1,7.9])
+    // so no ray AROUND the pier can see green — any green is punch-through.
+    const Vector backA[4] = {   // behind sheet A, facing +x
+        Vector(-0.8f, 0.1f, 2.8f), Vector(-0.8f, 0.1f, -5.8f),
+        Vector(-0.8f, 7.9f, -5.8f), Vector(-0.8f, 7.9f, 2.8f),
+    };
+    b.AddQuad("dtest_backA", backA, bmat);
+    const Vector bOff{-nBx * 0.8f, 0.0f, -nBz * 0.8f};   // behind sheet B, facing +nB
+    const Vector backB[4] = {
+        Vector(bOff.x + 0.2f*nBz, 0.1f, bOff.z - 0.2f*nBx),
+        Vector(bOff.x + 0.2f*nBz, 7.9f, bOff.z - 0.2f*nBx),
+        Vector(bOff.x + farCol.x*0.95f, 7.9f, bOff.z + farCol.z*0.95f),
+        Vector(bOff.x + farCol.x*0.95f, 0.1f, bOff.z + farCol.z*0.95f),
+    };
+    b.AddQuad("dtest_backB", backB, bmat);
+    Texture *ftex = b.AddSolidColorTexture(8, 8, 0xFF404040u);
+    Material *fmat = b.AddMaterial("dtestfloor", ftex, {64, 64, 64, 255}, 0);
+    const Vector floorV[4] = {
+        Vector(-20.0f, -0.02f, -20.0f), Vector(-20.0f, -0.02f, 40.0f),
+        Vector( 20.0f, -0.02f,  40.0f), Vector( 20.0f, -0.02f, -20.0f),
+    };
+    b.AddQuad("dtest_floor", floorV, fmat);
+    // Light + camera on the FRONT side of both sheets (positive dot with both
+    // render normals (1,0,0) and (0.514,0,0.858)) — the pier read.
+    b.AddOmni(Vector(5.0f, 9.0f, 4.0f), {255, 255, 255, 0}, 1.6f, 80.0f);
+    b.SetCamera(Vector(2.3f, 3.4f, 1.3f), Vector(0.0f, 3.2f, 0.0f), 55.0f);
+    b.Finalize();
+
+    DTestScene d; d.sc = b.scene(); d.wall = T; d.hm = hm;
+
+    DisplaceStoneSubdiv(d.sc, "dtest", FF::greets_stone_subdiv(),
+                        FF::greets_displace_amp(), FF::greets_displace_mip(),
+                        FF::greets_displace_adapt(), FF::greets_displace_cpb());
+
+    // ── metrics, BEFORE MakeFacesIndependentByAngle touches normals ──
+    if (M) {
+        TriMesh *W = d.wall;
+        // face sheet classifier: the u VALUE at the face's corner-nearest vert.
+        // The rig authors the borders at exact u: sheet A 0.7455, sheet B
+        // 0.5000, both increasing INTO the sheet — so u < 0.62 near the corner
+        // is B, else A. (A u-GRADIENT classifier was tried first and shuffles
+        // on ladder cells, whose u-span is a few milli-tiles.)
+        auto sheetOf = [&](const Face &F) -> int {
+            const Vector *P[3] = { &F.A->Pos, &F.B->Pos, &F.C->Pos };
+            const float  U[3] = { F.U1, F.U2, F.U3 };
+            int best = 0; float bestR = 1e30f;
+            for (int k = 0; k < 3; ++k) {
+                const float r = P[k]->x*P[k]->x + P[k]->z*P[k]->z;
+                if (r < bestR) { bestR = r; best = k; }
+            }
+            return (U[best] < 0.62f) ? 1 : 0;   // 0=A, 1=B
+        };
+        // boundary edges via index pairs
+        std::map<uint64_t, int> edgeCnt;
+        std::map<uint64_t, int> edgeSheet;
+        auto vidx = [&](const Vertex *v) -> uint32_t { return uint32_t(v - W->Verts); };
+        for (int f = 0; f < W->FIndex; ++f) {
+            const Face &F = W->Faces[f];
+            const uint32_t i0=vidx(F.A), i1=vidx(F.B), i2=vidx(F.C);
+            const int s = sheetOf(F);
+            const uint32_t e[3][2] = {{i0,i1},{i1,i2},{i2,i0}};
+            for (int k = 0; k < 3; ++k) {
+                const uint64_t key = (uint64_t(std::min(e[k][0],e[k][1])) << 32) | std::max(e[k][0],e[k][1]);
+                edgeCnt[key]++;
+                if (s >= 0) edgeSheet[key] = s;
+            }
+            // twisted-face census inside the corner cylinder
+            auto nearC = [](const Vector &P){ return P.x*P.x + P.z*P.z < 0.8f*0.8f && P.y > 0.4f && P.y < 7.6f; };
+            if (nearC(F.A->Pos) || nearC(F.B->Pos) || nearC(F.C->Pos)) {
+                const float ex1=F.B->Pos.x-F.A->Pos.x, ey1=F.B->Pos.y-F.A->Pos.y, ez1=F.B->Pos.z-F.A->Pos.z;
+                const float ex2=F.C->Pos.x-F.A->Pos.x, ey2=F.C->Pos.y-F.A->Pos.y, ez2=F.C->Pos.z-F.A->Pos.z;
+                const float cx=ey1*ez2-ez1*ey2, cy=ez1*ex2-ex1*ez2, cz=ex1*ey2-ey1*ex2;
+                if (cx*F.N.x + cy*F.N.y + cz*F.N.z < 0.0f) ++M->nFlips;
+            }
+        }
+        // border polylines: boundary edges inside the cylinder, split by sheet
+        struct Seg { Vector a, b; };
+        std::vector<Seg> segA, segB;
+        // y-window [0.5,7.0]: excludes the top-border free-relief cluster at
+        // y≈7.5-8 and the floor-pinned course, so the number is the CORNER's.
+        auto inCyl = [](const Vector &P){ return P.x*P.x + P.z*P.z < 0.6f*0.6f && P.y > 0.5f && P.y < 7.0f; };
+        // exclude POSITION-SEALED pairs: two index-distinct boundary edges at
+        // the same midpoint are a sealed seam (the ladder's chord-pinned inner
+        // chain, or a perfectly welded corner), not a gap.
+        std::map<std::array<int64_t,3>, int> midCnt;
+        auto midKey = [](const Vector &A, const Vector &B){
+            return std::array<int64_t,3>{
+                int64_t(std::llround(double(A.x+B.x)*5000.0)),
+                int64_t(std::llround(double(A.y+B.y)*5000.0)),
+                int64_t(std::llround(double(A.z+B.z)*5000.0)) };
+        };
+        for (const auto &kv : edgeCnt) {
+            if (kv.second != 1) continue;
+            const uint32_t ia = uint32_t(kv.first >> 32), ib = uint32_t(kv.first & 0xFFFFFFFFu);
+            midCnt[midKey(W->Verts[ia].Pos, W->Verts[ib].Pos)]++;
+        }
+        for (const auto &kv : edgeCnt) {
+            if (kv.second != 1) continue;
+            const uint32_t ia = uint32_t(kv.first >> 32), ib = uint32_t(kv.first & 0xFFFFFFFFu);
+            const Vector &A = W->Verts[ia].Pos, &B = W->Verts[ib].Pos;
+            if (!inCyl(A) && !inCyl(B)) continue;
+            if (midCnt[midKey(A, B)] >= 2) continue;   // sealed pair
+            auto it = edgeSheet.find(kv.first);
+            if (it == edgeSheet.end()) continue;
+            (it->second == 0 ? segA : segB).push_back({A, B});
+        }
+        M->nEdgeA = int(segA.size()); M->nEdgeB = int(segB.size());
+        if (std::getenv("FDS_DISPLACETEST_CORNER_DUMP")) {
+            for (const Seg &S : segA)
+                std::fprintf(stderr, "[DTEST-CORNER-EDGE] A (%.3f,%.3f,%.3f)-(%.3f,%.3f,%.3f)\n",
+                    double(S.a.x),double(S.a.y),double(S.a.z),double(S.b.x),double(S.b.y),double(S.b.z));
+            for (const Seg &S : segB)
+                std::fprintf(stderr, "[DTEST-CORNER-EDGE] B (%.3f,%.3f,%.3f)-(%.3f,%.3f,%.3f)\n",
+                    double(S.a.x),double(S.a.y),double(S.a.z),double(S.b.x),double(S.b.y),double(S.b.z));
+        }
+        auto ptSegDist = [](const Vector &P, const Seg &S) -> float {
+            const float dx=S.b.x-S.a.x, dy=S.b.y-S.a.y, dz=S.b.z-S.a.z;
+            const float l2 = dx*dx+dy*dy+dz*dz;
+            float t = l2 > 1e-12f ? ((P.x-S.a.x)*dx + (P.y-S.a.y)*dy + (P.z-S.a.z)*dz)/l2 : 0.0f;
+            t = std::max(0.0f, std::min(1.0f, t));
+            const float qx=S.a.x+t*dx-P.x, qy=S.a.y+t*dy-P.y, qz=S.a.z+t*dz-P.z;
+            return std::sqrt(qx*qx+qy*qy+qz*qz);
+        };
+        float gmx = 0.0f; double gsum = 0.0; int gn = 0;
+        auto scan = [&](const std::vector<Seg> &from, const std::vector<Seg> &to){
+            for (const Seg &S : from)
+                for (const Vector *P : {&S.a, &S.b}) {
+                    if (!inCyl(*P)) continue;
+                    float best = 1e30f;
+                    for (const Seg &Q : to) best = std::min(best, ptSegDist(*P, Q));
+                    if (best < 1e29f) { gmx = std::max(gmx, best); gsum += best; ++gn; }
+                }
+        };
+        if (!segA.empty() && !segB.empty()) { scan(segA, segB); scan(segB, segA); }
+        M->gapMax = gn ? gmx : -1.0f;
+        M->gapMean = gn ? float(gsum / gn) : -1.0f;
+        M->nGapSamples = gn;
+    }
+
+    MakeFacesIndependentByAngle(d.sc, 30.0f);
+    Scene_RebuildMatTable(d.sc);
+    return d;
+}
+
 // ── FOLD/INVERSION rig (--greets_displace_fold_relax) — the t=6097 sliver ────
 // Reproduces the REAL greets mechanism (measured at the repro pose): a NARROW
 // RETURN strip at a wall corner whose verts carry corner-SMOOTHED vertex
@@ -1012,6 +1284,77 @@ void Run_DisplaceTest() {
                              ? "PASS (fix closed holes, removed no wall)"
                              : (totFilled == 0 ? "no holes detected at these poses"
                                                : "REVIEW (fix removed wall pixels)"));
+        }
+        return;
+    }
+
+    // ── SPLIT-VERTEX CORNER headless A/B (FDS_DISPLACETEST_CORNER=1) ────────
+    // The t=5968 pier arris, isolated. Bakes the two-sheet corner under the
+    // approved umbrella arm for --greets_displace_profile_agree = 0/1/2 and
+    // prints per-mode: the max/mean gap between the two displaced border
+    // polylines (the CONTINUITY number — this is what must be ~0), twisted
+    // strip faces, and green punch-through px from a t=5968-like grazing
+    // camera + a frontal. PASS = gap ≤ 0.002 u, 0 flips, 0 green.
+    if (std::getenv("FDS_DISPLACETEST_CORNER")) {
+        const int cmap = std::getenv("FDS_DISPLACETEST_MAP")
+                             ? std::atoi(std::getenv("FDS_DISPLACETEST_MAP")) : 0;
+        // the approved umbrella arm, forced explicitly so the rig matches greets
+        FF::setParamFromText("greets_displace_free_edge",    "1");
+        FF::setParamFromText("greets_displace_border_mean",  "2");
+        FF::setParamFromText("greets_displace_seam_weld",    "1");
+        FF::setParamFromText("greets_displace_plane_normal", "1");
+        FF::setParamFromText("greets_displace_block_level",  "1");
+        FF::setParamFromText("greets_displace_geom_bisector","1");
+        FF::setParamFromText("greets_displace_amp",          "0.3");
+        // Green counted only in the central 20 % of screen width — the corner
+        // column. The sheets' OUTER free borders legitimately carve silhouette
+        // relief that shows backdrop near the frame edges; that is greets
+        // behavior, not corner punch-through.
+        auto greenCount = [](const char *path) -> long {
+            std::FILE *f = std::fopen(path, "rb");
+            if (!f) return -1;
+            int w = 0, h = 0, mx = 0;
+            if (std::fscanf(f, "P6 %d %d %d", &w, &h, &mx) != 3) { std::fclose(f); return -1; }
+            std::fgetc(f);
+            std::vector<unsigned char> px(size_t(w) * size_t(h) * 3);
+            const size_t got = std::fread(px.data(), 1, px.size(), f);
+            std::fclose(f);
+            long n = 0;
+            const int x0 = w * 2 / 5, x1 = w * 3 / 5;
+            for (int y = 0; y < h; ++y)
+                for (int x = x0; x < x1; ++x) {
+                    const size_t i = (size_t(y) * w + x) * 3;
+                    if (i + 2 >= got) continue;
+                    if (px[i+1] > 100 && px[i] < 60 && px[i+2] < 60) ++n;
+                }
+            return n;
+        };
+        std::fprintf(stderr, "[DTEST-CORNER] map=%d(%s) split-vertex 59° corner, "
+                     "approved arm, amp 0.3 — modes: 0=double-valued 1=agree-MAX 2=agree-MIN\n",
+                     cmap, mapName(cmap));
+        for (int mode = 0; mode <= 2; ++mode) {
+            char mstr[2] = { char('0' + mode), 0 };
+            FF::setParamFromText("greets_displace_profile_agree", mstr);
+            CornerMetrics M;
+            DTestScene d = buildCorner(cmap, &M);
+            SetCurrentScene(d.sc); sizeFaceLists(d.sc);
+            char pGraze[96], pFront[96];
+            std::snprintf(pGraze, sizeof(pGraze), "/tmp/displace_corner_graze_m%d.ppm", mode);
+            std::snprintf(pFront, sizeof(pFront), "/tmp/displace_corner_frontal_m%d.ppm", mode);
+            // Both poses on the FRONT side of both sheets. "graze" hugs sheet
+            // B's plane (the t=5968 read: one face near edge-on, the other at
+            // an angle); "front" looks down the wedge bisector.
+            renderPose(d, Vector(2.6f, 3.6f, 0.2f), Vector(0.0f, 3.2f, 0.0f), 55.0f, 0, pGraze);
+            const long gGraze = greenCount(pGraze);
+            renderPose(d, Vector(2.3f, 4.0f, 1.3f), Vector(0.0f, 3.6f, 0.0f), 55.0f, 0, pFront);
+            const long gFront = greenCount(pFront);
+            const bool pass = M.gapMax >= 0.0f && M.gapMax <= 0.002f && M.nFlips == 0
+                              && gGraze == 0 && gFront == 0;
+            std::fprintf(stderr, "[DTEST-CORNER] mode=%d  border-gap max=%.4f mean=%.4f "
+                         "(%d samples, edges A/B %d/%d)  flips=%d  green graze/front=%ld/%ld  — %s\n",
+                         mode, double(M.gapMax), double(M.gapMean), M.nGapSamples,
+                         M.nEdgeA, M.nEdgeB, M.nFlips, gGraze, gFront,
+                         pass ? "PASS" : "FAIL");
         }
         return;
     }

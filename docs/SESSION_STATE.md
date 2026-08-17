@@ -1,5 +1,70 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-18 — THE CORNER HAS A TEST SCENE NOW, THE LADDER IS ADJUDICATED
+> AGAINST ON THE REAL MESH, and the fix that remains standing is a border-
+> pipeline STAGE REORDER nobody should attempt as an add-on pass
+>
+> Commissioned in anger: *"HOW HARD COULD IT BE TO MAKE SURE THAT WE HAVE A
+> CONTINUOUS HEIGHT OVER A CORNER? YOU CAN ALSO CREATE A TEST SCENE AND TEST
+> THIS EXACT SCENARIO."* Both done; the second half of the first is a refusal
+> with numbers. **Shipping arm untouched: default t=5968 `bf75aa27…` == parent
+> byte-exact, acceptance pin t=5743 `440aa6bb…` reproduces, all new machinery
+> flag- or census-gated.**
+>
+> **THE TEST SCENE — `FDS_DISPLACETEST_CORNER=1 ./DEMO --scene-displacetest`.**
+> Two sheets, ONE TriMesh, normals 59° apart like the pier (A=(+1,0,0),
+> B=(+0.514,0,+0.858)), corner segmented DIFFERENTLY per sheet (A breaks at
+> y=3.7, B at 2.6/5.9 — identical full-height edges weld into one shared
+> interior edge and the rig goes vacuous; the split-vertex population needs
+> mismatched authored segmentation, the t=1088 comment's own mechanism), u
+> phases in maximal conflict at the border (B's column ON a vertical groove
+> u=0.5000, A's just off one at 0.7455), authored winding CLOCKWISE (the FLD
+> convention the veto's convexity test measures against — counter-clockwise
+> reads as a concave corner and pins everything; the rig's other builders are
+> counter-clockwise and never noticed because a flat quad never asks). It
+> reproduces the exact greets machinery: same mitre bisector (+0.87,0,+0.49),
+> cosHalf 0.870, split columns, fan-sliver bands. VERDICT LINE per arm:
+> border-polyline gap max/mean, twisted-face count, green punch-through from
+> two poses against inset backdrops. Census upgrades that made it usable:
+> `FDS_STONE_CENSUS_BOX="x0,x1,z0,z1,y0,y1"` retargets [STONE-FREEV]/[FINALV]/
+> [CORNERF] off the hard-coded greets coordinates; new [STONE-MITRE-CAND]
+> prints WHICH filter rejected a candidate (found: the authored BREAK verts sit
+> unfreed mid-line — zero-pop candidates the weld skips).
+>
+> **WHAT THE RIG ESTABLISHED (all measured, at the approved arm, amp 0.3):**
+> * mode comparison (no ladder): agree-MAX gap max/mean **0.094/0.020**,
+>   double-valued 0.152/0.056, agree-MIN 0.150/0.038 — **MAX is the right
+>   profile semantics**, twice confirmed (scene: it closes the joint-row shear).
+> * the punch-through floor (graze 667 px, all arms) is the UNWELDED END
+>   COURSES: the weld span runs 1.28–7.51 of 0–8 because the densification
+>   recursion only splits segments with BOTH endpoints freed, banding only
+>   exists where the pre-split ran at authored scale, and the corner's first/
+>   last course has neither.
+> * fan slivers twist and cull exactly as diagnosed 08-17b (491 flipped faces
+>   at the corner cylinder).
+>
+> **THE LADDER — BUILT, FOUR VARIANTS, ADJUDICATED AGAINST.**
+> `--greets_displace_band_ladder` (default OFF, byte-null, KEPT as the A/B
+> instrument): frees authored break verts between freed same-line edges, then
+> rebuilds each banded strip as border-pitch quads bounded to the inner
+> polyline's span. Rig: front punch-through 156 → 112. **Greets t=5968: 3 346
+> → 5 086 px of z==0 — REGRESSION, thin cull-stripes down the whole channel**
+> (`docs/img/fogwt/arris5968_crop_m1_ladder.png`). Mechanism: near-vertical
+> cells trip fold-relax, which halves welded verts PER SHEET and re-splits the
+> weld. Variants killed on the rig: chord-pinning the inner nodes (the
+> interior side is a CELL polyline, not a chord), one-freed-endpoint end
+> densification (mega-fans to interior apexes, green ×20), post-hoc re-band
+> (per-face micro-bands, green ×30).
+>
+> **THE FIX THAT REMAINS STANDING — a stage REORDER of the border pipeline:**
+> densify freed borders full-length FIRST (ends included), band ONCE at that
+> density against the cell-tessellated interior, then tessellate strips as
+> cells of the same lattice, then weld with the single-valued (MAX) profile.
+> Everything measured this round says each stage is individually sound and the
+> ORDER is what breaks the corner. That is a bake-pipeline redesign with the
+> pin battery as its gate — next session's work, with the corner rig as the
+> inner loop.
+
 > ## 2026-08-17b — THE t=5968 PIER ARRIS IS DIAGNOSED TO THE VERTEX AND **NOT FIXED**: the split-vertex corner's mitre profile is DOUBLE-VALUED, both single-valued repairs are look calls his eye has not judged, and the thing his screenshot actually shows is the band's FAN-SLIVER tessellation
 >
 > Commissioned by the 2026-08-17 screenshot (`FDS_GREETS_CAM=

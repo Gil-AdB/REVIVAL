@@ -656,6 +656,23 @@ Texture *MakeConeMap(Texture *height) {
 // Threaded over rows. Caller owns the result.
 namespace {
 
+// Census-dump window override (diagnostic, census-gated code only; same env
+// pattern as FDS_SSAO_DUMP_PATH). The [STONE-FREEV]/[STONE-FINALV]/
+// [STONE-CORNERF] windows default to the t=5968 greets pier in WORLD coords,
+// which blinds them on any other scene — the DisplaceTest corner rig sits at
+// the origin. FDS_STONE_CENSUS_BOX="x0,x1,z0,z1,y0,y1" retargets all three.
+struct StoneCensusBox { bool set = false; float x0,x1,z0,z1,y0,y1; };
+const StoneCensusBox &stoneCensusBox() {
+    static StoneCensusBox B = []{
+        StoneCensusBox b;
+        if (const char *e = std::getenv("FDS_STONE_CENSUS_BOX"))
+            b.set = std::sscanf(e, "%f,%f,%f,%f,%f,%f",
+                                &b.x0,&b.x1,&b.z0,&b.z1,&b.y0,&b.y1) == 6;
+        return b;
+    }();
+    return B;
+}
+
 // Hard ceiling on the ring scan. The band bound normally stops it in a handful
 // of rings; this only bites on unusually smooth regions, and beyond it the same
 // band bound is applied as a CONSERVATIVE cap on the answer, so truncating the
@@ -3114,6 +3131,9 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// own-face exclusion is keyed on authored endpoints), and the comb pass
 		// needs to group dense border verts back to their authored edge.
 		std::vector<uint64_t> freeEdgeKA(nOrig, 0), freeEdgeKB(nOrig, 0);
+		// Band-inner verts (the a2/b2 the band pre-split inserts) — the ladder
+		// pass below needs to recognize a strip's inner side.
+		std::vector<char> bandInner(nOrig, 0);
 		for (uint32_t i = 0; i < nOrig; ++i)
 			if (origNonTargetVert[i] || coincidentOrig[i]) pinnedZero[i] = 1;
 		// canonical shared edge vertex (keyed by min-corner, max-corner, param bits)
@@ -3889,7 +3909,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// survive the split. Faces already narrower than 1.6x the band are
 			// left to the recursion unchanged.
 			constexpr float kBandWidth = 0.02f;   // world units: the RETURN FACE width (rung 2; was 0.10)
-			{
+			// Wrapped in a lambda so the ladder arm can re-run it AFTER the
+			// profile densification: the end-course borders only become freed
+			// there, and fans born there need banding before the ladder pass.
+			auto runBandPreSplit = [&]() -> int {
 				int nBand = 0;
 				bool didBand = true;
 				for (int pass = 0; didBand && pass < 8; ++pass) {
@@ -3934,6 +3957,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 								recessOnly.resize(verts.size(), 0);
 								freeEdgeDir.resize(verts.size(), Vector{0.0f,0.0f,0.0f});
 								freeEdgeKA.resize(verts.size(), 0); freeEdgeKB.resize(verts.size(), 0);
+								bandInner.resize(verts.size(), 0);
 								const bool sideIsBorder =
 									s < recessOnly.size() && c < recessOnly.size() &&
 									recessOnly[s] && recessOnly[c] &&
@@ -3949,6 +3973,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 										freeEdgeKA[mid] = freeEdgeKA[s]; freeEdgeKB[mid] = freeEdgeKB[s];
 									}
 								}
+								if (!pinnedZero[mid] && !recessOnly[mid]) bandInner[mid] = 1;
 								return mid;
 							};
 							const uint32_t a2 = sideVert(a);
@@ -3981,6 +4006,64 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				if (nBand)
 					std::fprintf(stderr, "[STONE] '%s' border band pre-split: %d faces banded "
 						"at width %.2f (fan bound)\n", matName, nBand, kBandWidth);
+				return nBand;
+			};
+			runBandPreSplit();
+			// ── ladder arm precondition (--greets_displace_band_ladder): FREE the
+			// authored interior BREAK verts. An authored border vert with freed
+			// same-line neighbours on both sides (the segment endpoints of a
+			// multi-segment corner) is otherwise left to displace by its own
+			// field with no weld — a pop in the middle of a welded line — and
+			// the recursion below can never densify a segment it bounds. The
+			// abut veto is re-run at the vert; a genuinely abutted vert stays.
+			if (fds::FeatureFlags::greets_displace_band_ladder()) {
+				struct BreakCand { uint32_t nbr = 0; int sides = 0; };
+				std::map<uint32_t, BreakCand> cand;
+				for (size_t i = 0; i < faces.size(); ++i) {
+					if (!(faces[i].Txtr && faces[i].Txtr->Name &&
+					      !std::strcmp(faces[i].Txtr->Name, matName))) continue;
+					for (int k = 0; k < 3; ++k) {
+						const uint32_t a = fIdx[i][k], b = fIdx[i][(k+1)%3];
+						if (a >= verts.size() || b >= verts.size()) continue;
+						auto tryEdge = [&](uint32_t fr, uint32_t nf2){
+							if (fr >= recessOnly.size() || !recessOnly[fr]) return;
+							if (fr >= freeEdgeKA.size() || !freeEdgeKA[fr]) return;
+							if (nf2 < recessOnly.size() && recessOnly[nf2]) return;
+							if (nf2 < pinnedZero.size() && pinnedZero[nf2]) return;
+							Vector d = freeEdgeDir[fr];
+							const float dl = std::sqrt(d.x*d.x+d.y*d.y+d.z*d.z);
+							if (dl < 1e-9f) return;
+							d.x/=dl; d.y/=dl; d.z/=dl;
+							const Vector &Pf = verts[fr].Pos, &Pn = verts[nf2].Pos;
+							const float ex=Pf.x-Pn.x, ey=Pf.y-Pn.y, ez=Pf.z-Pn.z;
+							const float el = std::sqrt(ex*ex+ey*ey+ez*ez);
+							if (el < 1e-9f) return;
+							const float proj = (ex*d.x+ey*d.y+ez*d.z)/el;
+							if (std::fabs(proj) < 0.98f) return;   // not along the line
+							BreakCand &C = cand[nf2];
+							C.nbr = fr;
+							C.sides |= (proj > 0.0f) ? 1 : 2;
+						};
+						tryEdge(a, b); tryEdge(b, a);
+					}
+				}
+				int nBreakFreed = 0;
+				for (const auto &kv : cand) {
+					if (kv.second.sides != 3) continue;   // freed neighbour on BOTH sides
+					const uint32_t v = kv.first, n2 = kv.second.nbr;
+					if (v >= recessOnly.size()) continue;
+					const Vector fn = verts[v].N;
+					if (abutPointMat(verts[v].Pos, freeEdgeKA[n2], freeEdgeKB[n2], &fn)) continue;
+					recessOnly[v] = 1;
+					freeEdgeDir[v] = freeEdgeDir[n2];
+					if (v >= freeEdgeKA.size()) { freeEdgeKA.resize(v+1, 0); freeEdgeKB.resize(v+1, 0); }
+					freeEdgeKA[v] = freeEdgeKA[n2]; freeEdgeKB[v] = freeEdgeKB[n2];
+					++nBreakFreed;
+				}
+				if (nBreakFreed)
+					std::fprintf(stderr, "[STONE-LADDER] '%s': %d authored break verts "
+						"freed between freed same-line edges (weld can now cover them)\n",
+						matName, nBreakFreed);
 			}
 			int nProfSplit = 0, nProfPin = 0;
 			bool didSplit = true;
@@ -3993,10 +4076,43 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					for (int k = 0; k < 3; ++k) {
 						const uint32_t a = fIdx[i][k], b = fIdx[i][(k+1)%3];
 						if (a >= recessOnly.size() || b >= recessOnly.size()) continue;
-						if (!recessOnly[a] || !recessOnly[b]) continue;
 						if (a >= freeEdgeKA.size() || b >= freeEdgeKA.size()) continue;
-						if (!freeEdgeKA[a] || freeEdgeKA[a] != freeEdgeKA[b] ||
-						    freeEdgeKB[a] != freeEdgeKB[b]) continue;   // same authored edge only
+						const bool fa = recessOnly[a] && freeEdgeKA[a];
+						const bool fb = recessOnly[b] && freeEdgeKA[b];
+						uint32_t src = a;   // key/dir source for the midpoint
+						if (fds::FeatureFlags::greets_displace_band_ladder()) {
+							// ladder arm: a segment with ONE freed endpoint whose
+							// other end is UNKEYED (an authored corner end or a
+							// seam-weld-merged interior vert) still densifies —
+							// otherwise the weld can never reach the corner's
+							// first and last course. Two freed endpoints accept
+							// collinear DIRECTIONS (the freed break verts carry
+							// one side's keys); the midpoint veto re-checks.
+							// Both endpoints freed; keys may differ across a freed
+							// BREAK vert — accept collinear directions.
+							// (An end-course variant — split with one freed
+							// endpoint — was tried TWICE and reverted twice: raw
+							// it manufactures mega-fans to interior apexes
+							// (green 156 -> 3 146); with a post-hoc re-band it
+							// makes per-face micro-bands (green -> 4 853). The
+							// end courses keep their coarse originals; covering
+							// them needs banding to run AFTER a full-length
+							// densification, a stage reorder for another day.)
+							if (!fa || !fb) continue;
+							if (freeEdgeKA[a] != freeEdgeKA[b] ||
+							    freeEdgeKB[a] != freeEdgeKB[b]) {
+								Vector da = freeEdgeDir[a], db = freeEdgeDir[b];
+								const float la = std::sqrt(da.x*da.x+da.y*da.y+da.z*da.z);
+								const float lb = std::sqrt(db.x*db.x+db.y*db.y+db.z*db.z);
+								if (la < 1e-9f || lb < 1e-9f) continue;
+								const float c = (da.x*db.x+da.y*db.y+da.z*db.z)/(la*lb);
+								if (std::fabs(c) < 0.995f) continue;   // not one line
+							}
+						} else {
+							if (!fa || !fb) continue;
+							if (freeEdgeKA[a] != freeEdgeKA[b] ||
+							    freeEdgeKB[a] != freeEdgeKB[b]) continue;   // same authored edge only
+						}
 						const Vector A = verts[a].Pos, B = verts[b].Pos;
 						const float ex=B.x-A.x, ey=B.y-A.y, ez=B.z-A.z;
 						const float el = std::sqrt(ex*ex+ey*ey+ez*ez);
@@ -4014,14 +4130,15 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						recessOnly.resize(verts.size(), 0);
 						freeEdgeDir.resize(verts.size(), Vector{0.0f,0.0f,0.0f});
 						freeEdgeKA.resize(verts.size(), 0); freeEdgeKB.resize(verts.size(), 0);
-						// per-point veto at the new position (mixed spans pin here)
+						// per-point veto at the new position (mixed spans pin here);
+						// key/dir source = the freed endpoint (src == a off-ladder)
 						const Vector fn = faces[i].N;
-						if (abutPointMat(verts[mid].Pos, freeEdgeKA[a], freeEdgeKB[a], &fn)) {
+						if (abutPointMat(verts[mid].Pos, freeEdgeKA[src], freeEdgeKB[src], &fn)) {
 							pinnedZero[mid] = 1; ++nProfPin;
 						} else {
 							recessOnly[mid] = 1;
-							freeEdgeDir[mid] = freeEdgeDir[a];
-							freeEdgeKA[mid] = freeEdgeKA[a]; freeEdgeKB[mid] = freeEdgeKB[a];
+							freeEdgeDir[mid] = freeEdgeDir[src];
+							freeEdgeKA[mid] = freeEdgeKA[src]; freeEdgeKB[mid] = freeEdgeKB[src];
 						}
 						// split face i: (a,b,c) -> (a,m,c) + (m,b,c), UVs per corner
 						const int kc = (k+2)%3;
@@ -4047,6 +4164,238 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (nProfSplit)
 				std::fprintf(stderr, "[STONE] '%s' border profile densified: +%d verts "
 					"(%d vetoed to pin) at pitch %.2f\n", matName, nProfSplit, nProfPin, kProfilePitch);
+			// (A post-densification re-band was tried here and REVERTED: the
+			// pre-split is authored-scale-only — on densified slivers it makes
+			// one micro-band PER FACE (1 530 bands, 2 757 cells, green 4 853),
+			// not a shared inner polyline.)
+		}
+		// ── BAND LADDER (--greets_displace_band_ladder, 2026-08-18, the t=5968
+		// pier arris part 2). The pre-split + densification above leave every
+		// freed-border strip as a FAN: dense border side, one-or-two inner
+		// apexes, slivers spanning up to 1.4 u of 0.043-pitch border. The
+		// slivers smear texels across their span and TWIST (backface-cull, the
+		// z==0 holes) whenever the welded border level differs from the apex's
+		// field level. Rebuild each strip as a LADDER: one inner node under
+		// every border vert, interpolated along the strip's inner polyline,
+		// quads between. The nodes are CHORD-PINNED post-displacement to their
+		// parent inner segment, so the strip cannot open against the un-split
+		// interior face.
+		struct LadderPin { uint32_t v, lo, hi; float t; };
+		std::vector<LadderPin> ladderPins;
+		if (freeEdge && fds::FeatureFlags::greets_displace_band_ladder()) {
+			// strip faces: every vert either a freed border vert of ONE authored
+			// edge E or a band-inner vert; ≥1 of each. Grouped by E.
+			auto isFreedOf = [&](uint32_t v, uint64_t &ka, uint64_t &kb) -> bool {
+				if (v >= recessOnly.size() || !recessOnly[v]) return false;
+				if (v >= freeEdgeKA.size() || !freeEdgeKA[v]) return false;
+				ka = freeEdgeKA[v]; kb = freeEdgeKB[v];
+				return true;
+			};
+			auto isInner = [&](uint32_t v) -> bool {
+				return v < bandInner.size() && bandInner[v];
+			};
+			struct Strip { std::vector<uint32_t> P, Q; std::vector<size_t> faces; };
+			std::map<std::pair<uint64_t,uint64_t>, Strip> strips;
+			for (size_t f = 0; f < faces.size(); ++f) {
+				if (!(faces[f].Txtr && faces[f].Txtr->Name &&
+				      !std::strcmp(faces[f].Txtr->Name, matName))) continue;
+				const uint32_t v0=fIdx[f][0], v1=fIdx[f][1], v2=fIdx[f][2];
+				uint64_t ka=0, kb=0, ka2=0, kb2=0;
+				int nBorder = 0, nInner = 0; uint64_t eKA=0, eKB=0; bool mixed=false;
+				for (uint32_t v : {v0,v1,v2}) {
+					if (isFreedOf(v, ka2, kb2)) {
+						++nBorder;
+						if (nBorder == 1) { eKA=ka2; eKB=kb2; }
+						else if (eKA!=ka2 || eKB!=kb2) mixed = true;
+					} else if (isInner(v)) ++nInner;
+				}
+				(void)ka; (void)kb;
+				if (mixed || nBorder < 1 || nInner < 1 || nBorder + nInner != 3) continue;
+				Strip &S = strips[{eKA,eKB}];
+				S.faces.push_back(f);
+				for (uint32_t v : {v0,v1,v2}) {
+					uint64_t xa, xb;
+					if (isFreedOf(v, xa, xb)) S.P.push_back(v);
+					else S.Q.push_back(v);
+				}
+			}
+			int nLadderStrips = 0, nLadderCells = 0, nLadderVerts = 0;
+			std::vector<char> removeFace(faces.size(), 0);
+			std::vector<Face> addF; std::vector<std::array<uint32_t,3>> addI;
+			std::vector<char> addE;
+			for (auto &kv : strips) {
+				Strip &S = kv.second;
+				std::sort(S.P.begin(), S.P.end()); S.P.erase(std::unique(S.P.begin(),S.P.end()), S.P.end());
+				std::sort(S.Q.begin(), S.Q.end()); S.Q.erase(std::unique(S.Q.begin(),S.Q.end()), S.Q.end());
+				// dedup by POSITION too: the pre-split + densification leave 2-3
+				// index-copies per border station (measured triples at the rig
+				// corner); threading cells through coincident copies shreds the
+				// strip into degenerate micro-cells. One representative each —
+				// the dropped copies lose their faces with the strip rebuild.
+				auto posDedup = [&](std::vector<uint32_t> &V){
+					std::map<std::array<int64_t,3>, uint32_t> seen;
+					std::vector<uint32_t> out; out.reserve(V.size());
+					for (uint32_t v : V) {
+						const Vector &P = verts[v].Pos;
+						const std::array<int64_t,3> k3{
+							int64_t(std::llround(double(P.x)*5000.0)),
+							int64_t(std::llround(double(P.y)*5000.0)),
+							int64_t(std::llround(double(P.z)*5000.0)) };
+						if (seen.emplace(k3, v).second) out.push_back(v);
+					}
+					V.swap(out);
+				};
+				posDedup(S.P); posDedup(S.Q);
+				if (S.P.size() < 3 || S.Q.size() < 2) continue;
+				// direction along the border line, sign-canonical
+				Vector dir = freeEdgeDir[S.P[0]];
+				{
+					const float l = std::sqrt(dir.x*dir.x+dir.y*dir.y+dir.z*dir.z);
+					if (l < 1e-9f) continue;
+					dir.x/=l; dir.y/=l; dir.z/=l;
+					const float ax=std::fabs(dir.x), ay=std::fabs(dir.y), az=std::fabs(dir.z);
+					const float sgn = (az>=ax && az>=ay) ? (dir.z<0?-1.f:1.f)
+					                 : (ay>=ax)          ? (dir.y<0?-1.f:1.f)
+					                 :                     (dir.x<0?-1.f:1.f);
+					dir.x*=sgn; dir.y*=sgn; dir.z*=sgn;
+				}
+				auto sOf = [&](uint32_t v){ const Vector &P=verts[v].Pos; return P.x*dir.x+P.y*dir.y+P.z*dir.z; };
+				auto byS = [&](uint32_t a, uint32_t b){ return sOf(a) < sOf(b); };
+				std::sort(S.P.begin(), S.P.end(), byS);
+				std::sort(S.Q.begin(), S.Q.end(), byS);
+				// per-vert UV from the strip's own faces
+				std::map<uint32_t, std::pair<float,float>> uvOf;
+				for (size_t f : S.faces) {
+					const Face &F = faces[f];
+					const float us[3]={F.U1,F.U2,F.U3}, vs[3]={F.V1,F.V2,F.V3};
+					for (int k=0;k<3;++k) uvOf.emplace(fIdx[f][k], std::make_pair(us[k],vs[k]));
+				}
+				// the ladder covers ONLY the region the inner polyline spans —
+				// outside it (the corner's first/last course has no banding) the
+				// original tessellation stays, or the end cells degenerate into
+				// new fans (measured: 2 767 cells, flips ×9).
+				const float sQ0 = sOf(S.Q.front()), sQ1 = sOf(S.Q.back());
+				float pitchP = 0.08f;
+				if (S.P.size() > 1) {
+					float sum = 0.0f;
+					for (size_t i = 0; i + 1 < S.P.size(); ++i)
+						sum += sOf(S.P[i+1]) - sOf(S.P[i]);
+					pitchP = std::max(0.01f, sum / float(S.P.size()-1));
+				}
+				{
+					std::vector<uint32_t> pIn;
+					pIn.reserve(S.P.size());
+					for (uint32_t v : S.P) {
+						const float s = sOf(v);
+						if (s >= sQ0 - 0.5f*pitchP && s <= sQ1 + 0.5f*pitchP) pIn.push_back(v);
+					}
+					S.P.swap(pIn);
+					if (S.P.size() < 3) continue;
+				}
+				// inner node under each border vert
+				std::vector<uint32_t> QQ(S.P.size());
+				for (size_t i = 0; i < S.P.size(); ++i) {
+					const float s = sOf(S.P[i]);
+					size_t j = 0;
+					while (j+2 < S.Q.size() && sOf(S.Q[j+1]) < s) ++j;
+					const uint32_t qa = S.Q[j], qb = S.Q[j+1];
+					const float sa = sOf(qa), sb = sOf(qb);
+					float t = (sb-sa) > 1e-9f ? (s-sa)/(sb-sa) : 0.0f;
+					if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+					if (t < 1e-3f)       { QQ[i] = qa; continue; }
+					else if (t > 1.0f-1e-3f) { QQ[i] = qb; continue; }
+					Vertex m = verts[qa];
+					m.Pos.x = meshLerpf(verts[qa].Pos.x, verts[qb].Pos.x, t);
+					m.Pos.y = meshLerpf(verts[qa].Pos.y, verts[qb].Pos.y, t);
+					m.Pos.z = meshLerpf(verts[qa].Pos.z, verts[qb].Pos.z, t);
+					float nx = meshLerpf(verts[qa].N.x, verts[qb].N.x, t);
+					float ny = meshLerpf(verts[qa].N.y, verts[qb].N.y, t);
+					float nz = meshLerpf(verts[qa].N.z, verts[qb].N.z, t);
+					const float nl = std::sqrt(nx*nx+ny*ny+nz*nz);
+					if (nl > 1e-6f) { m.N.x=nx/nl; m.N.y=ny/nl; m.N.z=nz/nl; }
+					const uint32_t id = uint32_t(verts.size());
+					verts.push_back(m);
+					pinnedZero.resize(verts.size(), 0);
+					recessOnly.resize(verts.size(), 0);
+					freeEdgeDir.resize(verts.size(), Vector{0.0f,0.0f,0.0f});
+					freeEdgeKA.resize(verts.size(), 0); freeEdgeKB.resize(verts.size(), 0);
+					bandInner.resize(verts.size(), 0);
+					bandInner[id] = 1;
+					ladderPins.push_back({id, qa, qb, t});
+					auto ua = uvOf.find(qa), ub = uvOf.find(qb);
+					if (ua != uvOf.end() && ub != uvOf.end())
+						uvOf[id] = { meshLerpf(ua->second.first,  ub->second.first,  t),
+						             meshLerpf(ua->second.second, ub->second.second, t) };
+					QQ[i] = id;
+					++nLadderVerts;
+				}
+				// winding template: the strip's first face's geometric cross
+				const Face tmpl = faces[S.faces[0]];
+				auto crossOf = [&](uint32_t a, uint32_t b, uint32_t c, Vector &out){
+					const Vector &A=verts[a].Pos, &B=verts[b].Pos, &C=verts[c].Pos;
+					out.x = (B.y-A.y)*(C.z-A.z)-(B.z-A.z)*(C.y-A.y);
+					out.y = (B.z-A.z)*(C.x-A.x)-(B.x-A.x)*(C.z-A.z);
+					out.z = (B.x-A.x)*(C.y-A.y)-(B.y-A.y)*(C.x-A.x);
+				};
+				Vector tCross;
+				crossOf(fIdx[S.faces[0]][0], fIdx[S.faces[0]][1], fIdx[S.faces[0]][2], tCross);
+				auto emit = [&](uint32_t a, uint32_t b, uint32_t c){
+					if (a==b || b==c || a==c) return;
+					Vector g; crossOf(a,b,c,g);
+					if (g.x*tCross.x + g.y*tCross.y + g.z*tCross.z < 0.0f) std::swap(b,c);
+					Face F = tmpl;   // A/B/C stay the template's (stale) — every
+					                 // consumer between here and the final rebind
+					                 // reads indices via fIdx, like the pre-split's
+					                 // own children.
+					auto ua=uvOf.find(a), ub=uvOf.find(b), uc=uvOf.find(c);
+					if (ua!=uvOf.end()) { F.U1=ua->second.first; F.V1=ua->second.second; }
+					if (ub!=uvOf.end()) { F.U2=ub->second.first; F.V2=ub->second.second; }
+					if (uc!=uvOf.end()) { F.U3=uc->second.first; F.V3=uc->second.second; }
+					F.EU1=F.U1;F.EV1=F.V1; F.EU2=F.U2;F.EV2=F.V2; F.EU3=F.U3;F.EV3=F.V3;
+					addF.push_back(F); addI.push_back({a,b,c});
+					addE.push_back(faceFromEdge[S.faces[0]]);
+					++nLadderCells;
+				};
+				// remove only faces fully inside the rebuilt span — out-of-span
+				// strip faces (the unbanded first/last course) keep their
+				// original tessellation.
+				for (size_t f : S.faces) {
+					bool inside = true;
+					for (int k = 0; k < 3 && inside; ++k) {
+						const uint32_t v = fIdx[f][k];
+						uint64_t xa, xb;
+						if (isFreedOf(v, xa, xb)) {
+							const float s = sOf(v);
+							if (s < sQ0 - 0.5f*pitchP || s > sQ1 + 0.5f*pitchP) inside = false;
+						}
+					}
+					if (inside) removeFace[f] = 1;
+				}
+				for (size_t i = 0; i + 1 < S.P.size(); ++i) {
+					emit(S.P[i], S.P[i+1], QQ[i+1]);
+					emit(S.P[i], QQ[i+1], QQ[i]);
+				}
+				++nLadderStrips;
+			}
+			if (nLadderStrips) {
+				// compact + append (keep relative order for determinism)
+				std::vector<Face> nf2; std::vector<std::array<uint32_t,3>> ni2;
+				std::vector<char> ne2;
+				nf2.reserve(faces.size() + addF.size());
+				ni2.reserve(nf2.capacity()); ne2.reserve(nf2.capacity());
+				for (size_t f = 0; f < faces.size(); ++f) {
+					if (removeFace[f]) continue;
+					nf2.push_back(faces[f]); ni2.push_back(fIdx[f]); ne2.push_back(faceFromEdge[f]);
+				}
+				for (size_t f = 0; f < addF.size(); ++f) {
+					nf2.push_back(addF[f]); ni2.push_back(addI[f]); ne2.push_back(addE[f]);
+				}
+				faces.swap(nf2); fIdx.swap(ni2); faceFromEdge.swap(ne2);
+				std::fprintf(stderr, "[STONE-LADDER] '%s': %d strips rebuilt as "
+					"ladders — %d cells (2 tris per border pitch), %d inner nodes "
+					"chord-pinned to their parent inner segment\n",
+					matName, nLadderStrips, nLadderCells, nLadderVerts);
+			}
 		}
 		// ── displacement (per-vertex height averaged over incident target faces,
 		// pushed along the vertex normal; authored-border verts pinned to zero) ──
@@ -4523,20 +4872,33 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			};
 			struct MCand { uint32_t v; Vector nOwn, nAbut, dir; float s; };
 			std::vector<MCand> mc;
+			// candidate-rejection census: says WHICH filter dropped a vert inside
+			// the census box (the rig's mitre span holes were invisible without it)
+			const bool candCensus = fds::FeatureFlags::greets_displace_junction_census()
+			                        && stoneCensusBox().set;
+			auto candRej = [&](uint32_t i, const char *why){
+				if (!candCensus) return;
+				const StoneCensusBox &CB = stoneCensusBox();
+				const Vector &P = basePos[i];
+				if (P.x > CB.x0 && P.x < CB.x1 && P.z > CB.z0 && P.z < CB.z1
+				    && P.y > CB.y0 && P.y < CB.y1)
+					std::fprintf(stderr, "[STONE-MITRE-CAND] '%s' (%.3f,%.3f,%.3f) REJ %s\n",
+						matName, double(P.x), double(P.y), double(P.z), why);
+			};
 			for (uint32_t i = 0; i < nV; ++i) {
-				if (i >= recessOnly.size() || !recessOnly[i]) continue;
-				if (i >= freeEdgeKA.size() || !freeEdgeKA[i]) continue;
-				if (hCnt[i] == 0) continue;
+				if (i >= recessOnly.size() || !recessOnly[i]) { candRej(i, "not-freed"); continue; }
+				if (i >= freeEdgeKA.size() || !freeEdgeKA[i]) { candRej(i, "no-edge-key"); continue; }
+				if (hCnt[i] == 0) { candRej(i, "no-height"); continue; }
 				auto itF = fanN.find(i);
-				if (itF == fanN.end()) continue;
+				if (itF == fanN.end()) { candRej(i, "no-fan"); continue; }
 				Vector nO = itF->second;
 				float l = std::sqrt(nO.x*nO.x + nO.y*nO.y + nO.z*nO.z);
-				if (l < 1e-9f) continue;
+				if (l < 1e-9f) { candRej(i, "zero-fan"); continue; }
 				nO.x/=l; nO.y/=l; nO.z/=l;
 				const Vector &sm = verts[i].N;
 				if (nO.x*sm.x + nO.y*sm.y + nO.z*sm.z < 0.0f) { nO.x=-nO.x; nO.y=-nO.y; nO.z=-nO.z; }
 				Vector nB;
-				if (!convexPartnerN(basePos[i], freeEdgeKA[i], freeEdgeKB[i], nO, sm, nB)) continue;
+				if (!convexPartnerN(basePos[i], freeEdgeKA[i], freeEdgeKB[i], nO, sm, nB)) { candRej(i, "no-partner"); continue; }
 				Vector d = freeEdgeDir[i];
 				l = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
 				if (l < 1e-9f) continue;
@@ -4953,7 +5315,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				// no sign clamp can touch it, and this print says so.
 				if (fds::FeatureFlags::greets_displace_junction_census()) {
 					const Vector &P = verts[i].Pos;
-					if (P.x > 17.4f && P.x < 18.4f && P.z > -63.5f && P.z < -57.5f)
+					const StoneCensusBox &CB = stoneCensusBox();
+					const bool inW = CB.set
+						? (P.x > CB.x0 && P.x < CB.x1 && P.z > CB.z0 && P.z < CB.z1
+						   && P.y > CB.y0 && P.y < CB.y1)
+						: (P.x > 17.4f && P.x < 18.4f && P.z > -63.5f && P.z < -57.5f);
+					if (inW)
 						std::fprintf(stderr, "[STONE-FREEV] '%s' pos(%.3f,%.3f,%.3f) "
 							"ride(%+.3f,%+.3f,%+.3f) N(%+.3f,%+.3f,%+.3f) dsp %+.4f\n",
 							matName, double(P.x), double(P.y), double(P.z),
@@ -5104,8 +5471,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				// phase is measurable per vert.
 				// 2026-08-17b: y floor 2.9 -> 0.0 — the t=5968 slit lives below the
 				// old window (the pier's lower half); weld status was invisible there.
-				if (Pq.x > 16.0f && Pq.x < 19.5f && Pq.z > -63.5f && Pq.z < -54.5f
-				    && Pq.y > 0.0f && Pq.y < 4.9f) {
+				const StoneCensusBox &CBf = stoneCensusBox();
+				const bool inWf = CBf.set
+					? (Pq.x > CBf.x0 && Pq.x < CBf.x1 && Pq.z > CBf.z0 && Pq.z < CBf.z1
+					   && Pq.y > CBf.y0 && Pq.y < CBf.y1)
+					: (Pq.x > 16.0f && Pq.x < 19.5f && Pq.z > -63.5f && Pq.z < -54.5f
+					   && Pq.y > 0.0f && Pq.y < 4.9f);
+				if (inWf) {
 					const float uAvg = hCnt[i] ? uSum[i]/float(hCnt[i]) : -1.0f;
 					const float vAvg = hCnt[i] ? vSum[i]/float(hCnt[i]) : -1.0f;
 					std::fprintf(stderr, "[STONE-FINALV] '%s' pos(%.3f,%.3f,%.3f) "
@@ -5135,6 +5507,19 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			}
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
 		}
+		// ── ladder chord-pins: inner nodes ride their parent inner segment's
+		// displaced chord, so the strip cannot open against the un-split
+		// interior face. Re-applied after fold relax (which moves parents).
+		// v2: the chord-pin is retired — the interior side of a band is the CELL
+		// polyline (groove rows and all), not one straight chord, and pinning to
+		// the chord tilted every cell against the welded border: mass inversion,
+		// fold relax marking hundreds of corner verts, per-sheet halving
+		// splitting the weld (measured: flips 491 -> 4450, green 156 -> 3169).
+		// Inner nodes now ride their own field + band blend — the same rules as
+		// the interior cell verts beside them.
+		auto applyLadderPins = [&]{};
+		(void)ladderPins;
+		applyLadderPins();
 		// ── CORNER FACE CENSUS (2026-08-17b, census-only): every target face
 		// touching the t=5968 slit's corner line (17.898, y, -58.014), verts as
 		// base -> final with weld status. The vert-level dumps agree across the
@@ -5147,10 +5532,15 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				const uint32_t ia=fIdx[f][0], ib=fIdx[f][1], ic=fIdx[f][2];
 				if (ia>=nV||ib>=nV||ic>=nV) continue;
 				bool near2 = false;
+				const StoneCensusBox &CBc = stoneCensusBox();
 				for (uint32_t v : {ia,ib,ic}) {
 					const Vector &P = basePos[v];
-					if (std::fabs(P.x-17.898f)<0.03f && std::fabs(P.z+58.014f)<0.03f
-					    && P.y>0.5f && P.y<2.5f) { near2 = true; break; }
+					const bool hit = CBc.set
+						? (P.x > CBc.x0 && P.x < CBc.x1 && P.z > CBc.z0 && P.z < CBc.z1
+						   && P.y > CBc.y0 && P.y < CBc.y1)
+						: (std::fabs(P.x-17.898f)<0.03f && std::fabs(P.z+58.014f)<0.03f
+						   && P.y>0.5f && P.y<2.5f);
+					if (hit) { near2 = true; break; }
 				}
 				if (!near2) continue;
 				++nCF;
@@ -5334,6 +5724,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					"camera — the see-through sliver)\n",
 					matName, nFoldFaces, nFoldPasses);
 		}
+		applyLadderPins();   // fold relax may have moved the pin parents
 
 		// ── cross-patch crack pinning: on each interior side shared by two
 		// patches whose vertex PARAM LISTS differ (level boundary, or edge-
