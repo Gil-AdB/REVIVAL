@@ -171,52 +171,6 @@ float evalShadow(GpuLight L, float3 wpos, float dza, float dzb) {
 }
 
 
-TextureCube<float> shadowCubes[16] : register(t7);
-Texture2D<float> shadowSpots[16]   : register(t23);
-SamplerComparisonState shadowSamp  : register(s1);
-
-float sampleSpotShadow(int sIdx, float2 uv, float refZ) {
-    switch (sIdx) {
-        case 0: return shadowSpots[0].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 1: return shadowSpots[1].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 2: return shadowSpots[2].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 3: return shadowSpots[3].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 4: return shadowSpots[4].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 5: return shadowSpots[5].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 6: return shadowSpots[6].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 7: return shadowSpots[7].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 8: return shadowSpots[8].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 9: return shadowSpots[9].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 10: return shadowSpots[10].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 11: return shadowSpots[11].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 12: return shadowSpots[12].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 13: return shadowSpots[13].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 14: return shadowSpots[14].SampleCmpLevelZero(shadowSamp, uv, refZ);
-        case 15: return shadowSpots[15].SampleCmpLevelZero(shadowSamp, uv, refZ);
-    }
-    return 1.0f;
-}
-
-float evalShadow(GpuLight L, float3 wpos, float dza, float dzb) {
-    if (L.params.z < 0) return 1.0f;
-    int sIdx = (int)L.params.z;
-    if (L.dir.w > 0.5f) { // isSpot
-        float3 rel = wpos - L.pos.xyz;
-        float3 vp = float3(
-            L.sRow0.x * rel.x + L.sRow0.y * rel.y + L.sRow0.z * rel.z,
-            L.sRow1.x * rel.x + L.sRow1.y * rel.y + L.sRow1.z * rel.z,
-            L.sRow2.x * rel.x + L.sRow2.y * rel.y + L.sRow2.z * rel.z
-        );
-        float2 uv = vp.xy * L.sRow0.w * (0.5f / vp.z) + 0.5f;
-        uv.y = 1.0f - uv.y;
-        if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f || vp.z <= 0.0f) return 1.0f;
-        
-        float refZ = saturate((dza * vp.z + dzb) / vp.z) - 1e-4f;
-        return sampleSpotShadow(sIdx, uv, refZ);
-    }
-    return 1.0f; // omni cube shadows not implemented in shader yet
-}
-
 SamplerState g_sampler : register(s0);
 
 // Octahedral normal encoding/decoding (matches deferred.metal oct_encode/oct_decode)
