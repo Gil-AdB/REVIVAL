@@ -427,16 +427,7 @@ float4 ps_resolve(QUAD_VS_OUTPUT input) : SV_TARGET
 
 
     if (mirrorCount > 0) {
-        uint mid = (uint)(g_gbufMirror.Load(int3(px, 0)).x * 255.0f + 0.5f);
-        if (mid > 0 && mid <= mirrorCount) {
-            float3 r = mirrorTex.Load(int4(px.x, px.y, mid - 1, 0)).rgb;
-            color += r * 0.5f;
-        }
-    }
-
-
-    if (mirrorCount > 0) {
-        uint mid = (uint)(g_gbufMirror.Load(int3(px, 0)).x * 255.0f + 0.5f);
+        uint mid = (uint)(g_gbufMirror.Load(int3(px.x, px.y, 0)).x * 255.0f + 0.5f);
         if (mid > 0 && mid <= mirrorCount) {
             float3 r = mirrorTex.Load(int4(px.x, px.y, mid - 1, 0)).rgb;
             color += r * 0.5f;
