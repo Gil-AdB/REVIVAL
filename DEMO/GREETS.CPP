@@ -1247,6 +1247,10 @@ static void GreetsApplyInitDefaults()
 		// rule as the four above.
 		FF::setDefault(FF::BoolId::greets_displace_block_level,  true);
 		FF::setDefault(FF::BoolId::greets_displace_geom_bisector, true);
+		// 2026-08-17b: --greets_displace_profile_agree (single-valued mitre
+		// profile, t=5968 pier) deliberately does NOT join the approved arm —
+		// mode 1 exposes the band fan-slivers (3 346 px of z==0 at t=5968) and
+		// mode 2 is an unjudged 17 % frame move; see the flag text. A/B only.
 		std::fprintf(stderr, "[STONE] --greets_displace defaults its two perf "
 			"companions ON: --greets_shadow_proxy=%d (offscreen passes rasterise "
 			"the flat stone, -5.9 ms, DOES move shadow occlusion at wall "

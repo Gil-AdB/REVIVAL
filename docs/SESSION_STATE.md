@@ -1,5 +1,72 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-17b — THE t=5968 PIER ARRIS IS DIAGNOSED TO THE VERTEX AND **NOT FIXED**: the split-vertex corner's mitre profile is DOUBLE-VALUED, both single-valued repairs are look calls his eye has not judged, and the thing his screenshot actually shows is the band's FAN-SLIVER tessellation
+>
+> Commissioned by the 2026-08-17 screenshot (`FDS_GREETS_CAM=
+> "18.9410915,3.36436033,-60.2976227,-0.501057684,-0.0739506483,0.862247944"`
+> t=5968, his full umbrella arm). Images: `docs/img/fogwt/arris5968_*`.
+> **NOTHING CHANGED UNDER HIS COMMAND LINE — landed byte-null, twice proven**
+> (below). What landed is an A/B instrument + census extensions + this diagnosis.
+>
+> **THE DISCRIMINATOR LADDER** (his exact recipe ± one flag, z==0 punch-through
+> px at 1920×1080): full arm **105** + the smeared channel + a mid-height shear;
+> `--no-greets-displace` **0** (clean arris — the defect is entirely the
+> displacement's); `--no-greets_displace_block_level` **4 029** (block_level was
+> PARTIALLY PAPERING over this corner, not fixing it);
+> `--no-greets_displace_geom_bisector` = full arm (73 px differ, not the driver);
+> `--no-greets_displace_free_edge` **0** (carve-on-freed-borders is the enabling
+> stage — the 16y minimal pair again).
+>
+> **ROOT CAUSE, measured to the vertex** (`--greets_displace_junction_census`):
+> 1. The corner is a **SPLIT-VERTEX seam** — 'rooms' local (±2.469,y,-4.937),
+>    this one at world (17.898,y,-58.014), the [STONE-JUNC] 91.1° population:
+>    two index-distinct border columns, one per sheet, interleaved 3–5 milli-u
+>    apart in y.
+> 2. Both columns DO join mitre line 9 (bis +0.870,0,+0.493 — the one-sided-line
+>    fix works) — but the shared profile is the UNION of both columns' samples,
+>    and at one s the sides disagree about stone-vs-joint because each carries
+>    its OWN u-column of the height field (u=+0.5000 vs u=-3.2545): welded dsp
+>    **-0.1104 at s=3.200 against -0.0532 at s=3.204** — a sawtooth the weld
+>    itself wrote. Each sheet's border chords its OWN subsequence → the two
+>    welded polylines diverge up to ~0.06 u mid-chord → the joint-row shear and
+>    the 105 px slit.
+> 3. **What his eye actually reads — the wide stretched-texel channel — is the
+>    band TESSELLATION**, not the profile: [STONE-CORNERF] (new census) shows
+>    the 0.02 band strip triangulated as MEGA-SLIVER FANS — single authored
+>    apexes (y=0.307, 1.652, 2.316, 2.413…) each serving up to **1.4 u of
+>    0.043-pitch corner line** (~30× density mismatch). Those slivers smear the
+>    texels; their twist is what opens holes when corner and apex depths differ.
+>
+> **TWO SINGLE-VALUED REPAIRS BUILT, NEITHER LANDED AS DEFAULT —
+> `--greets_displace_profile_agree` (INT, default 0 = byte-null):**
+> * **=1 MAX** ("carve only where both sheets agree", the 2026-08-14 rule
+>   enforced): census-verified — paired welds agree to ≤4 milli-u, the
+>   joint-row shear closes. **But punch-through grows 105 → 3 346 px**: the
+>   proud corner vs its own carving fan apex twists the slivers into backface
+>   culls. Mode 1 fails on the TESSELLATION, not the rule.
+>   `arris5968_crop_mode1_max.png`, wireframe `arris5968_wire_mode1.png`.
+> * **=2 MIN** (a joint on either sheet cuts through): 105 px, look near the
+>   double-valued arm. `arris5968_crop_mode2_min.png`.
+> * Both modes move ≥11 % of the t=5968 frame (SSAO ripple included) — LOOK
+>   CALLS, his per the ledger; deliberately NOT umbrella-defaulted (the
+>   umbrella-implies-features rule cuts the other way here: defaulting an
+>   unjudged look change under his flags would be worse than the opt-in).
+>
+> **THE STRUCTURAL FIX, next session's work: the band LADDER.** Densify the
+> band's INNER polyline to the border pitch (the border side already densified
+> to 0.043; the inner side kept authored density — `MeshOps.cpp` band pre-split
+> at ~3872, "fan bound"), re-triangulating the 0.02 strip as quads; the
+> existing T-junction-pin and seam-union machinery (214 pins / 565 splits) are
+> the tools for the interior side. That kills the smear AND makes either
+> agreement mode safe. Then re-judge mode 1 vs 2 with his eye.
+>
+> **GATES:** default arm t=5968 `bf75aa27…` == parent binary byte-exact;
+> mode 1/2 reproduce their experiment renders exactly (`bcbd44d0…`/`b84838d7…`);
+> greets acceptance pin t=5743 `440aa6bbb350ae95fbacf339dd2ad957` reproduces on
+> the landed binary. Census extensions (all `--greets_displace_junction_census`-
+> gated, byte-null off): [STONE-FINALV] y-window widened 2.9→0.0, new
+> [STONE-CORNERF] face dump at the t=5968 corner cylinder.
+
 > ## 2026-08-17a — THE GPU ARM HAS GTAO, and the port matches to **100.000 %** at two of four poses — the residual is the CPU's OWN 8-wide reciprocal
 >
 > Commissioned: *"make the gpu test have gtao"*. Full write-up:

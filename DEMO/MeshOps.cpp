@@ -4732,6 +4732,49 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				}
 				std::sort(G.prof.begin(), G.prof.end());
 				if (G.prof.empty()) { nMitreSolo += int(vs.size()); continue; }
+				// ── PAIRED-SAMPLE AGREEMENT COLLAPSE (--greets_displace_profile_agree,
+				// 2026-08-17, the t=5968 pier arris). On a SPLIT-VERTEX corner the
+				// two sheets contribute index-distinct border columns interleaved a
+				// few milli-u apart in s, and the union profile above is DOUBLE-
+				// VALUED: each side's sample carries its own u-column of the height
+				// field, so at one s the sides disagree about stone-vs-joint
+				// (measured on the (17.898,y,-58.014) line: welded dsp -0.1104 at
+				// s=3.200 against -0.0532 at s=3.204). Each sheet's border then
+				// chords its OWN subsequence of that sawtooth and the two welded
+				// polylines diverge mid-chord — the stretched-texel channel and the
+				// z==0 slit. Collapse every s-cluster (eps well over the pair gap,
+				// under half the vert pitch) to ONE sample at the cluster's mean s
+				// holding the MAX h: a joint cuts the arris only where BOTH sheets
+				// carry it — the 2026-08-14 phase round's stated rule, enforced
+				// single-valuedly before the envelope/notch/level stages. Size-1
+				// clusters pass through, so a line without paired columns is
+				// bit-identical.
+				// Mode 1 = MAX (straight arris where the sheets disagree — the
+				// 2026-08-14 rule). Mode 2 = MIN (a joint on EITHER face cuts
+				// through the arris). Both verified single-valued; neither is the
+				// default because at t=5968 mode 1 exposes the band fan-slivers
+				// (3 346 px of z==0, see the flag text) and mode 2 is a 17 % frame
+				// move that has not been eyeballed. The structural cure is the band
+				// ladder re-tessellation, not this profile knob.
+				if (fds::FeatureFlags::greets_displace_profile_agree() != 0 && G.prof.size() > 1) {
+					const bool agreeMin = fds::FeatureFlags::greets_displace_profile_agree() == 2;
+					constexpr float kPairEps = 0.02f;
+					std::vector<std::pair<float,float>> collapsed;
+					collapsed.reserve(G.prof.size());
+					for (size_t i2 = 0; i2 < G.prof.size(); ) {
+						size_t j2 = i2 + 1;
+						float sSum = G.prof[i2].first, hAgree = G.prof[i2].second;
+						while (j2 < G.prof.size() && G.prof[j2].first - G.prof[i2].first <= kPairEps) {
+							sSum += G.prof[j2].first;
+							hAgree = agreeMin ? std::min(hAgree, G.prof[j2].second)
+							                  : std::max(hAgree, G.prof[j2].second);
+							++j2;
+						}
+						collapsed.push_back({sSum/float(j2-i2), hAgree});
+						i2 = j2;
+					}
+					G.prof.swap(collapsed);
+				}
 				{
 					const float kEnvWin = 0.30f;   // half-window, world u (< course, > groove)
 					std::vector<float> env(G.prof.size());
@@ -5059,8 +5102,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				// the PARTNER wall of the t=6001 corner; include both sheets and
 				// print the vert's UV + its own bilinear h so carve-vs-drawn
 				// phase is measurable per vert.
+				// 2026-08-17b: y floor 2.9 -> 0.0 — the t=5968 slit lives below the
+				// old window (the pier's lower half); weld status was invisible there.
 				if (Pq.x > 16.0f && Pq.x < 19.5f && Pq.z > -63.5f && Pq.z < -54.5f
-				    && Pq.y > 2.9f && Pq.y < 4.9f) {
+				    && Pq.y > 0.0f && Pq.y < 4.9f) {
 					const float uAvg = hCnt[i] ? uSum[i]/float(hCnt[i]) : -1.0f;
 					const float vAvg = hCnt[i] ? vSum[i]/float(hCnt[i]) : -1.0f;
 					std::fprintf(stderr, "[STONE-FINALV] '%s' pos(%.3f,%.3f,%.3f) "
@@ -5089,6 +5134,38 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				                              meshF2bits(Pd.z) }] = rec;
 			}
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
+		}
+		// ── CORNER FACE CENSUS (2026-08-17b, census-only): every target face
+		// touching the t=5968 slit's corner line (17.898, y, -58.014), verts as
+		// base -> final with weld status. The vert-level dumps agree across the
+		// two columns yet the render opens — so the disagreement must live in
+		// the FACES: which verts each sheet's bridge actually references.
+		if (fds::FeatureFlags::greets_displace_junction_census()) {
+			int nCF = 0;
+			for (size_t f = 0; f < faces.size() && nCF < 90; ++f) {
+				if (!isTargetNew(faces[f])) continue;
+				const uint32_t ia=fIdx[f][0], ib=fIdx[f][1], ic=fIdx[f][2];
+				if (ia>=nV||ib>=nV||ic>=nV) continue;
+				bool near2 = false;
+				for (uint32_t v : {ia,ib,ic}) {
+					const Vector &P = basePos[v];
+					if (std::fabs(P.x-17.898f)<0.03f && std::fabs(P.z+58.014f)<0.03f
+					    && P.y>0.5f && P.y<2.5f) { near2 = true; break; }
+				}
+				if (!near2) continue;
+				++nCF;
+				std::fprintf(stderr, "[STONE-CORNERF] face %zu:", f);
+				for (uint32_t v : {ia,ib,ic}) {
+					const Vector &B = basePos[v]; const Vector &Q = verts[v].Pos;
+					std::fprintf(stderr, "  v%u %s(%.3f,%.3f,%.3f)->(%.3f,%.3f,%.3f)",
+						v, mitreOf[v] >= 0 ? "W" : (v<recessOnly.size()&&recessOnly[v]) ? "F" : "p",
+						double(B.x), double(B.y), double(B.z),
+						double(Q.x), double(Q.y), double(Q.z));
+				}
+				std::fprintf(stderr, "\n");
+			}
+			std::fprintf(stderr, "[STONE-CORNERF] '%s': %d faces touch the corner cylinder\n",
+				matName, nCF);
 		}
 		if (bowCensus && !bowDist.empty()) {
 			static const float ed[] = {0.f,.001f,.05f,.1f,.2f,.35f,.6f,1.f,1.6f,2.5f,4.f,6.f,99.f};
