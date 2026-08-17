@@ -223,6 +223,9 @@ struct Light {
     // silhouettes near the cone edge get a few pixels of context).
     float shadowRot[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
     float shadowTanHalfFov = 1.0f;
+    int   shadowIndex = -1;
+    float shadowNear = 0.01f;
+    float shadowFar = 150.0f;
     // Flare sprite (Omni::F). Under --hdr the flare adds into the float radiance
     // buffer (FILLERS.CPP Spriter<Res,true,true>), additively, with the colour
     // taken from the FLARE TEXTURE — not from the light colour. Half-size in

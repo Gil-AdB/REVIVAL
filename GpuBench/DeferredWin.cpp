@@ -402,7 +402,6 @@ bool RunAlbedoWin(Scene &scene, const DeferredOptions &opt, const std::string &o
         context->PSSetConstantBuffers(1, 1, &batchCB);
         context->PSSetSamplers(0, 1, &sampler);
 
-        if (qDisjoint) context->Begin(qDisjoint);
         if (q1) context->End(q1);
 
         for (size_t i = 0; i < scene.batches.size(); ++i) {
@@ -675,6 +674,11 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
         float color[4];      // xyz = color * intensity / 255.0, w = invRange
         float dir[4];        // xyz = dir, w = isSpot
         float params[4];     // x = cosInner, y = cosOuter, z = shadowIndex, w = pad
+        float sRow0[4];      // Shadow rotation matrix row 0
+        float sRow1[4];      // Shadow rotation matrix row 1
+        float sRow2[4];      // Shadow rotation matrix row 2
+        float shadowNear, shadowFar;
+        float pad[2];
     };
 
     struct LightUniformsWin {
@@ -776,7 +780,15 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
 
         g.params[0] = L.cosInner;
         g.params[1] = L.cosOuter;
-        g.params[2] = 0.0f;
+        g.params[2] = L.shadowIndex;
+        g.sRow0[0] = L.shadowRot[0][0]; g.sRow0[1] = L.shadowRot[0][1]; g.sRow0[2] = L.shadowRot[0][2];
+        g.sRow1[0] = L.shadowRot[1][0]; g.sRow1[1] = L.shadowRot[1][1]; g.sRow1[2] = L.shadowRot[1][2];
+        g.sRow2[0] = L.shadowRot[2][0]; g.sRow2[1] = L.shadowRot[2][1]; g.sRow2[2] = L.shadowRot[2][2];
+        g.sRow0[3] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f);
+        g.sRow1[3] = 0.0f;
+        g.sRow2[3] = 0.0f;
+        g.shadowNear = L.shadowNear;
+        g.shadowFar = L.shadowFar;
         g.params[3] = 0.0f;
     }
     fu.numLights = (UINT)numActiveLights;
@@ -903,7 +915,194 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
     ID3D11RasterizerState *rsState = nullptr;
     device->CreateRasterizerState(&rsDesc, &rsState);
 
+
+    // --- Shadow Allocations ---
+    std::string vsShadowSource = FindShaderFile("vs_shadow.hlsl");
+    if (vsShadowSource.empty()) Die("Could not find vs_shadow.hlsl shader file");
+    ID3DBlob *vsShadowBlob = CompileHLSL(vsShadowSource, "vs_shadow", "vs_5_0");
+    ID3D11VertexShader *vsShadow = nullptr;
+    device->CreateVertexShader(vsShadowBlob->GetBufferPointer(), vsShadowBlob->GetBufferSize(), nullptr, &vsShadow);
+
+    D3D11_INPUT_ELEMENT_DESC layoutShadowDesc[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, px), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    ID3D11InputLayout *layoutShadow = nullptr;
+    device->CreateInputLayout(layoutShadowDesc, 1, vsShadowBlob->GetBufferPointer(), vsShadowBlob->GetBufferSize(), &layoutShadow);
+    vsShadowBlob->Release();
+
+    struct ShadowUniformsWin {
+        float row0[4];
+        float row1[4];
+        float row2[4];
+        float lightPos[4];
+        float sNearFar[4]; // x=dza, y=dzb, z=projScale, w=pad
+    };
+    D3D11_BUFFER_DESC scbDesc = {};
+    scbDesc.Usage = D3D11_USAGE_DEFAULT;
+    scbDesc.ByteWidth = (UINT(sizeof(ShadowUniformsWin)) + 15) & ~15;
+    scbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    ID3D11Buffer *shadowCB = nullptr;
+    device->CreateBuffer(&scbDesc, nullptr, &shadowCB);
+
+    const int shadowDim = 1024;
+    ID3D11Texture2D *shadowSpotTex[16] = { nullptr };
+    ID3D11DepthStencilView *shadowSpotDSVs[16] = { nullptr };
+    ID3D11ShaderResourceView *shadowSpotSRVs[16] = { nullptr };
+    for (int i = 0; i < 16; ++i) {
+        D3D11_TEXTURE2D_DESC sDesc = {};
+        sDesc.Width = shadowDim;
+        sDesc.Height = shadowDim;
+        sDesc.MipLevels = 1;
+        sDesc.ArraySize = 1;
+        sDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        sDesc.SampleDesc.Count = 1;
+        sDesc.Usage = D3D11_USAGE_DEFAULT;
+        sDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        if (SUCCEEDED(device->CreateTexture2D(&sDesc, nullptr, &shadowSpotTex[i]))) {
+            D3D11_DEPTH_STENCIL_VIEW_DESC sDsvDesc = {};
+            sDsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+            sDsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+            device->CreateDepthStencilView(shadowSpotTex[i], &sDsvDesc, &shadowSpotDSVs[i]);
+            
+            D3D11_SHADER_RESOURCE_VIEW_DESC sSrvDesc = {};
+            sSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            sSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sSrvDesc.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(shadowSpotTex[i], &sSrvDesc, &shadowSpotSRVs[i]);
+        }
+    }
+
+    ID3D11Texture2D *shadowCubeTex[16] = { nullptr };
+    ID3D11DepthStencilView *shadowCubeDSVs[16][6] = { { nullptr } };
+    ID3D11ShaderResourceView *shadowCubeSRVs[16] = { nullptr };
+    for (int i = 0; i < 16; ++i) {
+        D3D11_TEXTURE2D_DESC cDesc = {};
+        cDesc.Width = shadowDim;
+        cDesc.Height = shadowDim;
+        cDesc.MipLevels = 1;
+        cDesc.ArraySize = 6;
+        cDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        cDesc.SampleDesc.Count = 1;
+        cDesc.Usage = D3D11_USAGE_DEFAULT;
+        cDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        cDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+        if (SUCCEEDED(device->CreateTexture2D(&cDesc, nullptr, &shadowCubeTex[i]))) {
+            for (int face = 0; face < 6; ++face) {
+                D3D11_DEPTH_STENCIL_VIEW_DESC cDsvDesc = {};
+                cDsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+                cDsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+                cDsvDesc.Texture2DArray.FirstArraySlice = face;
+                cDsvDesc.Texture2DArray.ArraySize = 1;
+                device->CreateDepthStencilView(shadowCubeTex[i], &cDsvDesc, &shadowCubeDSVs[i][face]);
+            }
+            D3D11_SHADER_RESOURCE_VIEW_DESC cSrvDesc = {};
+            cSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            cSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+            cSrvDesc.TextureCube.MipLevels = 1;
+            device->CreateShaderResourceView(shadowCubeTex[i], &cSrvDesc, &shadowCubeSRVs[i]);
+        }
+    }
+
+    D3D11_SAMPLER_DESC sSampDesc = {};
+    sSampDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    sSampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sSampDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sSampDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sSampDesc.ComparisonFunc = D3D11_COMPARISON_LESS;
+    ID3D11SamplerState *shadowSampler = nullptr;
+    device->CreateSamplerState(&sSampDesc, &shadowSampler);
+
+    // --- Mirror map allocations ---
+    const int kMaxMirrors = 4;
+    const int nMirrors = std::min<int>((int)scene.mirrors.size(), kMaxMirrors);
+    ID3D11Texture2D *mirrorTex = nullptr;
+    ID3D11ShaderResourceView *mirrorTexSRV = nullptr;
+    ID3D11RenderTargetView *mirrorTexRTVs[4] = {};
+    if (nMirrors > 0) {
+        D3D11_TEXTURE2D_DESC mDesc = {};
+        mDesc.Width = W;
+        mDesc.Height = H;
+        mDesc.MipLevels = 1;
+        mDesc.ArraySize = kMaxMirrors;
+        mDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        mDesc.SampleDesc.Count = 1;
+        mDesc.Usage = D3D11_USAGE_DEFAULT;
+        mDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (SUCCEEDED(device->CreateTexture2D(&mDesc, nullptr, &mirrorTex))) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC mSrvDesc = {};
+            mSrvDesc.Format = mDesc.Format;
+            mSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+            mSrvDesc.Texture2DArray.ArraySize = kMaxMirrors;
+            mSrvDesc.Texture2DArray.FirstArraySlice = 0;
+            mSrvDesc.Texture2DArray.MipLevels = 1;
+            device->CreateShaderResourceView(mirrorTex, &mSrvDesc, &mirrorTexSRV);
+            
+            for (int i = 0; i < kMaxMirrors; ++i) {
+                D3D11_RENDER_TARGET_VIEW_DESC mRtvDesc = {};
+                mRtvDesc.Format = mDesc.Format;
+                mRtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+                mRtvDesc.Texture2DArray.FirstArraySlice = i;
+                mRtvDesc.Texture2DArray.ArraySize = 1;
+                device->CreateRenderTargetView(mirrorTex, &mRtvDesc, &mirrorTexRTVs[i]);
+            }
+        }
+    }
     auto renderDeferredFrame = [&](ID3D11Query *q1, ID3D11Query *q2, ID3D11Query *qDisjoint) {
+
+        
+        // --- 0. SHADOW PASS ---
+        if (vsShadow) {
+            context->IASetInputLayout(layoutShadow);
+            context->VSSetShader(vsShadow, nullptr, 0);
+            context->PSSetShader(nullptr, nullptr, 0); // pure depth pass
+            
+            // Clear all active spot shadow maps
+            for (size_t i = 0; i < scene.lights.size() && i < 16; ++i) {
+                const auto &L = scene.lights[i];
+                if (L.shadowIndex < 0 || !L.isSpot) continue;
+                context->ClearDepthStencilView(shadowSpotDSVs[L.shadowIndex], D3D11_CLEAR_DEPTH, 1.0f, 0);
+            }
+
+            for (size_t i = 0; i < scene.lights.size() && i < 16; ++i) {
+                const auto &L = scene.lights[i];
+                if (L.shadowIndex < 0 || !L.isSpot) continue;
+                int sIdx = L.shadowIndex;
+                
+                ShadowUniformsWin su = {};
+                for(int c=0; c<3; ++c) {
+                    su.row0[c] = L.shadowRot[0][c];
+                    su.row1[c] = L.shadowRot[1][c];
+                    su.row2[c] = L.shadowRot[2][c];
+                    su.lightPos[c] = L.pos[c];
+                }
+                float sn = L.shadowNear, sf = L.shadowFar;
+                su.sNearFar[0] = -sn / (sf - sn); // dza
+                su.sNearFar[1] = sn * sf / (sf - sn); // dzb
+                su.sNearFar[2] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f); // projScale
+                
+                context->UpdateSubresource(shadowCB, 0, nullptr, &su, 0, 0);
+                context->VSSetConstantBuffers(2, 1, &shadowCB);
+                
+                context->OMSetRenderTargets(0, nullptr, shadowSpotDSVs[sIdx]);
+                D3D11_VIEWPORT vp = {0, 0, (float)shadowDim, (float)shadowDim, 0.0f, 1.0f};
+                context->RSSetViewports(1, &vp);
+                
+                for (size_t bidx = 0; bidx < scene.batches.size(); ++bidx) {
+                    if (scene.batches[bidx].transparent) continue;
+                    context->VSSetConstantBuffers(1, 1, &batchCB); // Assuming batchCB is correctly updated
+                    // Wait, batchCB is updated per batch in the G-Buffer loop!
+                    // In the previous version, I used `bus[bidx]`!
+                    context->UpdateSubresource(batchCB, 0, nullptr, &bus[bidx], 0, 0);
+                    context->Draw(scene.batches[bidx].vertexCount, scene.batches[bidx].firstVertex);
+                }
+            }
+            
+            // Clear OM state
+            ID3D11RenderTargetView* nullRTV = nullptr;
+            context->OMSetRenderTargets(1, &nullRTV, nullptr);
+        }
+        // --- END SHADOW PASS ---
+
         // --- Pass 1: G-Buffer ---
         float clearGbuf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         for (int i = 0; i < 4; ++i) context->ClearRenderTargetView(gbufRTVs[i], clearGbuf);
@@ -929,7 +1128,6 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
         context->PSSetConstantBuffers(1, 1, &batchCB);
         context->PSSetSamplers(0, 1, &sampler);
 
-        if (qDisjoint) context->Begin(qDisjoint);
         if (q1) context->End(q1);
 
         for (size_t i = 0; i < scene.batches.size(); ++i) {
@@ -956,6 +1154,110 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
             context->Draw(b.vertexCount, b.firstVertex);
         }
 
+
+        // --- Mirror Lighting/Resolve Pass ---
+        for (int mIdx = 0; mIdx < nMirrors; ++mIdx) {
+            auto &mirror = scene.mirrors[mIdx];
+            
+            FrameUniforms mfu = fu; // Copy frame uniforms
+            // Create reflection matrix
+            float R[3][3] = {
+                {1.0f - 2.0f * mirror.n[0] * mirror.n[0], -2.0f * mirror.n[0] * mirror.n[1], -2.0f * mirror.n[0] * mirror.n[2]},
+                {-2.0f * mirror.n[1] * mirror.n[0], 1.0f - 2.0f * mirror.n[1] * mirror.n[1], -2.0f * mirror.n[1] * mirror.n[2]},
+                {-2.0f * mirror.n[2] * mirror.n[0], -2.0f * mirror.n[2] * mirror.n[1], 1.0f - 2.0f * mirror.n[2] * mirror.n[2]}
+            };
+            
+            float newRot[3][3];
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    newRot[r][c] = fu.camRow0[c] * R[0][r] + fu.camRow1[c] * R[1][r] + fu.camRow2[c] * R[2][r];
+                }
+            }
+            for(int c=0; c<3; ++c) {
+                mfu.camRow0[c] = newRot[0][c];
+                mfu.camRow1[c] = newRot[1][c];
+                mfu.camRow2[c] = newRot[2][c];
+            }
+            float d = mirror.d;
+            float dotP = fu.camSrc[0]*mirror.n[0] + fu.camSrc[1]*mirror.n[1] + fu.camSrc[2]*mirror.n[2];
+            for(int c=0; c<3; ++c) mfu.camSrc[c] -= 2.0f * (dotP + d) * mirror.n[c];
+            
+            mfu.clipPlane[0] = mirror.n[0];
+            mfu.clipPlane[1] = mirror.n[1];
+            mfu.clipPlane[2] = mirror.n[2];
+            mfu.clipPlane[3] = d;
+            
+            context->UpdateSubresource(frameCB, 0, nullptr, &mfu, 0, 0);
+            context->VSSetConstantBuffers(0, 1, &frameCB);
+            context->PSSetConstantBuffers(0, 1, &frameCB);
+            
+            float clearGbufM[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            for (int i = 0; i < 4; ++i) context->ClearRenderTargetView(gbufRTVs[i], clearGbufM);
+            context->ClearDepthStencilView(depthDSV, D3D11_CLEAR_DEPTH, 0.0f, 0);
+            
+            context->RSSetState(rsState);
+            context->OMSetDepthStencilState(dsState, 0);
+            context->RSSetViewports(1, &viewport);
+            context->OMSetRenderTargets(4, gbufRTVs, depthDSV);
+            context->IASetInputLayout(layout);
+            UINT strideM = sizeof(Vertex);
+            UINT offsetM = 0;
+            context->IASetVertexBuffers(0, 1, &vb, &strideM, &offsetM);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(vsGbuf, nullptr, 0);
+            context->PSSetShader(psGbuf, nullptr, 0);
+    
+            for (size_t bidx = 0; bidx < scene.batches.size(); ++bidx) {
+                const auto &b = scene.batches[bidx];
+                context->UpdateSubresource(batchCB, 0, nullptr, &bus[bidx], 0, 0);
+                context->VSSetConstantBuffers(1, 1, &batchCB);
+                context->PSSetConstantBuffers(1, 1, &batchCB);
+                
+                ID3D11ShaderResourceView *batchSRVs[5] = { nullptr };
+                if (b.textureIndex >= 0 && b.textureIndex < (int)texSRVs.size()) batchSRVs[0] = texSRVs[b.textureIndex];
+                else if (!texSRVs.empty()) batchSRVs[0] = texSRVs[0];
+                if (b.normalTexIndex >= 0 && b.normalTexIndex < (int)texSRVs.size()) batchSRVs[1] = texSRVs[b.normalTexIndex];
+                if (b.roughTexIndex >= 0 && b.roughTexIndex < (int)texSRVs.size()) batchSRVs[2] = texSRVs[b.roughTexIndex];
+                if (b.aoTexIndex >= 0 && b.aoTexIndex < (int)texSRVs.size()) batchSRVs[3] = texSRVs[b.aoTexIndex];
+                if (b.metalTexIndex >= 0 && b.metalTexIndex < (int)texSRVs.size()) batchSRVs[4] = texSRVs[b.metalTexIndex];
+                context->PSSetShaderResources(0, 5, batchSRVs);
+                context->Draw(b.vertexCount, b.firstVertex);
+            }
+            
+            // Mirror Resolve
+            ID3D11RenderTargetView *nullRTVsM[4] = { nullptr };
+            context->OMSetRenderTargets(4, nullRTVsM, nullptr);
+            float clearBlackM[4] = { 0.02f, 0.02f, 0.04f, 1.0f };
+            context->ClearRenderTargetView(mirrorTexRTVs[mIdx], clearBlackM);
+            context->OMSetDepthStencilState(dsOffState, 0);
+            context->OMSetRenderTargets(1, &mirrorTexRTVs[mIdx], nullptr);
+            
+            context->IASetInputLayout(nullptr);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(vsQuad, nullptr, 0);
+            context->PSSetShader(psResolve, nullptr, 0);
+            
+            context->PSSetConstantBuffers(0, 1, &frameCB);
+            context->PSSetConstantBuffers(2, 1, &lightCB);
+            context->PSSetShaderResources(0, 5, gbufSRVs);
+            context->PSSetShaderResources(7, 16, shadowCubeSRVs);
+            context->PSSetShaderResources(23, 16, shadowSpotSRVs);
+            ID3D11SamplerState* samplers[2] = { sampler, shadowSampler };
+            context->PSSetSamplers(0, 2, samplers);
+            
+            context->Draw(3, 0);
+            
+            ID3D11ShaderResourceView *nullSRVs[39] = { nullptr };
+            context->PSSetShaderResources(0, 39, nullSRVs);
+        }
+        
+        // Restore Main Frame Uniforms
+        fu.mirrorCount = nMirrors;
+        context->UpdateSubresource(frameCB, 0, nullptr, &fu, 0, 0);
+        context->VSSetConstantBuffers(0, 1, &frameCB);
+        context->PSSetConstantBuffers(0, 1, &frameCB);
+        // --- END MIRROR PASS ---
+
         // --- Pass 2: Lighting / Resolve ---
         // 1. Unbind G-Buffer RTVs & DSV to resolve D3D11 resource hazards
         ID3D11RenderTargetView *nullRTVs[4] = { nullptr, nullptr, nullptr, nullptr };
@@ -977,7 +1279,11 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
         context->PSSetConstantBuffers(0, 1, &frameCB);
         context->PSSetConstantBuffers(2, 1, &lightCB);
         context->PSSetShaderResources(0, 5, gbufSRVs);
-        context->PSSetSamplers(0, 1, &sampler);
+        context->PSSetShaderResources(6, 1, &mirrorTexSRV);
+        context->PSSetShaderResources(7, 16, shadowCubeSRVs);
+        context->PSSetShaderResources(23, 16, shadowSpotSRVs);
+        ID3D11SamplerState* samplersMain[2] = { sampler, shadowSampler };
+        context->PSSetSamplers(0, 2, samplersMain);
 
         context->Draw(3, 0);
 
@@ -1080,7 +1386,15 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
 
                 g.params[0] = L.cosInner;
                 g.params[1] = L.cosOuter;
-                g.params[2] = 0.0f;
+                g.params[2] = L.shadowIndex;
+                g.sRow0[0] = L.shadowRot[0][0]; g.sRow0[1] = L.shadowRot[0][1]; g.sRow0[2] = L.shadowRot[0][2];
+                g.sRow1[0] = L.shadowRot[1][0]; g.sRow1[1] = L.shadowRot[1][1]; g.sRow1[2] = L.shadowRot[1][2];
+                g.sRow2[0] = L.shadowRot[2][0]; g.sRow2[1] = L.shadowRot[2][1]; g.sRow2[2] = L.shadowRot[2][2];
+                g.sRow0[3] = 1.0f / std::max(L.shadowTanHalfFov, 1e-4f);
+                g.sRow1[3] = 0.0f;
+                g.sRow2[3] = 0.0f;
+                g.shadowNear = L.shadowNear;
+                g.shadowFar = L.shadowFar;
                 g.params[3] = 0.0f;
             }
             fu.numLights = (UINT)numActiveLights;
@@ -1240,6 +1554,23 @@ bool RunDeferredWin(Scene &scene, const DeferredOptions &opt,
     if (swapChain) swapChain->Release();
     if (sdlWindow) SDL_DestroyWindow(sdlWindow);
 
+    if (vsShadow) vsShadow->Release();
+    if (layoutShadow) layoutShadow->Release();
+    if (shadowCB) shadowCB->Release();
+    if (shadowSampler) shadowSampler->Release();
+    for (int i=0; i<16; ++i) {
+        if(shadowSpotTex[i]) shadowSpotTex[i]->Release();
+        if(shadowSpotDSVs[i]) shadowSpotDSVs[i]->Release();
+        if(shadowSpotSRVs[i]) shadowSpotSRVs[i]->Release();
+        if(shadowCubeTex[i]) shadowCubeTex[i]->Release();
+        for(int f=0; f<6; ++f) if(shadowCubeDSVs[i][f]) shadowCubeDSVs[i][f]->Release();
+        if(shadowCubeSRVs[i]) shadowCubeSRVs[i]->Release();
+    }
+    if (mirrorTex) mirrorTex->Release();
+    if (mirrorTexSRV) mirrorTexSRV->Release();
+    for (int i = 0; i < kMaxMirrors; ++i) {
+        if (mirrorTexRTVs[i]) mirrorTexRTVs[i]->Release();
+    }
     for (auto srv : texSRVs) if (srv) srv->Release();
     if (sampler) sampler->Release();
     if (batchCB) batchCB->Release();
