@@ -77,7 +77,7 @@ or `-mavx2 -mfma` (GCC/clang) automatically for x86-64 targets — see the
 
 5. **SDL2 development libraries** — see A.3.
 
-### A.2 Clone — UNTESTED (the same commands are TESTED on macOS)
+### A.2 Clone — TESTED (on macOS: a fresh clone of this branch was built and run)
 
 The Rust player lives in a submodule. A clone without it **fails at configure
 time** with an explicit error from `Modplayer/CMakeLists.txt`.
@@ -92,6 +92,18 @@ Already cloned without `--recurse-submodules`:
 ```bat
 git submodule update --init --recursive
 ```
+
+> **Everything the demo needs is committed — verified.** A fresh
+> `git clone --recurse-submodules` of this branch into an empty directory,
+> on a machine with none of the working-tree's untracked files, configured,
+> built, and rendered the `fountain` pin to its recorded
+> `8db68ccb59416e9a44037e9f387b7bd9`, and passed `tools/render_gate.sh` 4/4
+> at the recorded baselines. So no untracked file is load-bearing: if a clone
+> works for you, you have everything.
+>
+> One caveat that is *normal* and not a failure: **the first run wrote a cache
+> and hashed differently** (`b91cb2ba…`); runs 2 and 3 both gave the recorded
+> value. See [Expected first-run cache bakes](#expected-first-run-cache-bakes).
 
 ### A.3 SDL2 — UNTESTED
 
@@ -441,6 +453,12 @@ anyway, set `CFLAGS=-std=gnu17` in the environment before building.
 Point `CMAKE_PREFIX_PATH` at the directory *containing* `lib/cmake/SDL2/`. For
 the MinGW tarball that is the per-triple subdirectory
 (`SDL2-2.32.10/x86_64-w64-mingw32`), not the top of the archive.
+
+**A `git worktree` fails to configure with "modplayer not found"**
+`git worktree add` does not populate submodules. Run
+`git submodule update --init --recursive` inside the new worktree, or pass
+`-DMODPLAYER_DIR=/path/to/an/existing/modplayer`. — TESTED (hit during this
+port).
 
 **The demo starts and immediately reports missing assets**
 You are running a binary whose neighbouring directories contain no `rev.cfg`.
