@@ -5699,6 +5699,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
 					if (gx*bx+gy*by+gz*bz >= 0.0f) continue;    // still on its base side
 					bool canRelax=false;
+					// (A weld-sacred variant — skip mitre-welded verts here under the
+					// single-valued profile — was tried 2026-08-18 and measured ×70
+					// WORSE on the corner rig (front punch-through 154 → 11 290 px):
+					// strip slivers whose only movable lever IS the welded border
+					// stay inverted and cull. The relax IS load-bearing for them.
+					// The weld/relax conflict resolves only in the border-pipeline
+					// reorder — see docs/STONE_BORDER_REORDER.md.)
 					for (uint32_t vi2 : {a,b,c})
 						if (!pinnedZero[vi2] && (verts[vi2].Pos.x!=basePos[vi2].x ||
 						     verts[vi2].Pos.y!=basePos[vi2].y || verts[vi2].Pos.z!=basePos[vi2].z))
