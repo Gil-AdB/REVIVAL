@@ -4599,25 +4599,95 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					continue;
 				}
 				Vector bis{0,0,0};
-				Vector ref{0,0,0}; bool haveRef = false;
-				for (size_t k : vs) {
-					Vector b{ mc[k].nOwn.x + mc[k].nAbut.x,
-					          mc[k].nOwn.y + mc[k].nAbut.y,
-					          mc[k].nOwn.z + mc[k].nAbut.z };
-					const float l = std::sqrt(b.x*b.x + b.y*b.y + b.z*b.z);
-					if (l < 1e-6f) continue;
-					b.x/=l; b.y/=l; b.z/=l;
-					if (!haveRef) { ref = b; haveRef = true; }
-					else if (b.x*ref.x + b.y*ref.y + b.z*ref.z < 0.0f) { b.x=-b.x; b.y=-b.y; b.z=-b.z; }
-					bis.x += b.x; bis.y += b.y; bis.z += b.z;
-				}
-				const float bl = std::sqrt(bis.x*bis.x + bis.y*bis.y + bis.z*bis.z);
-				if (bl < 1e-6f) { nMitreSolo += int(vs.size()); continue; }
-				bis.x/=bl; bis.y/=bl; bis.z/=bl;
 				float ch = 0.0f;
-				for (size_t k : vs)
-					ch += std::fabs(bis.x*mc[k].nOwn.x + bis.y*mc[k].nOwn.y + bis.z*mc[k].nOwn.z);
-				ch /= float(vs.size());
+				bool geomBis = false;
+				if (fds::FeatureFlags::greets_displace_geom_bisector()) {
+					// GEOMETRIC BISECTOR (--greets_displace_geom_bisector, 2026-08-17
+					// jamb-cushion fix, part 2). The fan-average bisector below is
+					// built from per-index fan normals, and at a corner whose indices
+					// are SHARED between the walls the fan STRADDLES: measured at the
+					// t=5970 jamb ([STONE-MITRE-POP]), population A averages
+					// (+0.447,0,+0.894) — one +x face plus two +z faces — against a
+					// pure (+1,0,0) population B. The bisector of a polluted fan and
+					// a clean plane is (0.85,0,0.53): its projection onto the two
+					// GEOMETRIC wall planes is 0.85 vs 0.53, so one wall receives
+					// 62% of every cut and level — the faces overhang their own
+					// arris and the reveal smears (the cushions). Here the two wall
+					// planes are recovered from the incident FACE geometry itself:
+					// cluster every target face touching a line vert by plane normal
+					// (>30° apart = distinct wall, same threshold the partner probe
+					// uses), take the two dominant clusters, bisect THOSE. Each wall
+					// then sees the same fraction of the ride by construction, and
+					// dsp/cosHalf restores full depth on BOTH sheets.
+					std::vector<char> onLine(nV, 0);
+					for (size_t k : vs) onLine[mc[k].v] = 1;
+					Vector w1{0,0,0}, w2{0,0,0}; int c1 = 0, c2 = 0, cDrop = 0;
+					for (size_t f = 0; f < faces.size(); ++f) {
+						if (!isTargetNew(faces[f])) continue;
+						const uint32_t a3=fIdx[f][0], b3=fIdx[f][1], c3=fIdx[f][2];
+						if (a3>=nV||b3>=nV||c3>=nV) continue;
+						if (!onLine[a3] && !onLine[b3] && !onLine[c3]) continue;
+						const Vector &A3=basePos[a3], &B3=basePos[b3], &C3=basePos[c3];
+						const float e1x=B3.x-A3.x, e1y=B3.y-A3.y, e1z=B3.z-A3.z;
+						const float e2x=C3.x-A3.x, e2y=C3.y-A3.y, e2z=C3.z-A3.z;
+						float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+						const float gl=std::sqrt(gx*gx+gy*gy+gz*gz);
+						if (gl < 1e-12f) continue;
+						gx/=gl; gy/=gl; gz/=gl;
+						const uint32_t vr = onLine[a3] ? a3 : onLine[b3] ? b3 : c3;
+						const Vector &sm = verts[vr].N;
+						if (gx*sm.x + gy*sm.y + gz*sm.z < 0.0f) { gx=-gx; gy=-gy; gz=-gz; }
+						auto tryC = [&](Vector &w, int &c) -> bool {
+							if (!c) { w.x=gx; w.y=gy; w.z=gz; c=1; return true; }
+							const float wl=std::sqrt(w.x*w.x+w.y*w.y+w.z*w.z);
+							if ((gx*w.x+gy*w.y+gz*w.z)/wl > 0.866f) {
+								w.x+=gx; w.y+=gy; w.z+=gz; ++c; return true;
+							}
+							return false;
+						};
+						if (!tryC(w1,c1) && !tryC(w2,c2)) ++cDrop;
+					}
+					if (c1 && c2) {
+						auto nrm3 = [](Vector &v){ const float l=std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z);
+							if (l>1e-9f){v.x/=l;v.y/=l;v.z/=l;} };
+						nrm3(w1); nrm3(w2);
+						bis = Vector{ w1.x+w2.x, w1.y+w2.y, w1.z+w2.z };
+						const float bl2 = std::sqrt(bis.x*bis.x+bis.y*bis.y+bis.z*bis.z);
+						if (bl2 > 1e-6f) {
+							bis.x/=bl2; bis.y/=bl2; bis.z/=bl2;
+							ch = 0.5f*(std::fabs(bis.x*w1.x+bis.y*w1.y+bis.z*w1.z)
+							         + std::fabs(bis.x*w2.x+bis.y*w2.y+bis.z*w2.z));
+							geomBis = true;
+							if (mitreCensus)
+								std::fprintf(stderr, "[STONE-MITRE-GEOM] w1(%+.3f,%+.3f,%+.3f)x%d "
+									"w2(%+.3f,%+.3f,%+.3f)x%d drop %d bis(%+.3f,%+.3f,%+.3f) ch %.3f\n",
+									double(w1.x),double(w1.y),double(w1.z),c1,
+									double(w2.x),double(w2.y),double(w2.z),c2,cDrop,
+									double(bis.x),double(bis.y),double(bis.z),double(ch));
+						}
+					}
+				}
+				if (!geomBis) {
+					Vector ref{0,0,0}; bool haveRef = false;
+					for (size_t k : vs) {
+						Vector b{ mc[k].nOwn.x + mc[k].nAbut.x,
+						          mc[k].nOwn.y + mc[k].nAbut.y,
+						          mc[k].nOwn.z + mc[k].nAbut.z };
+						const float l = std::sqrt(b.x*b.x + b.y*b.y + b.z*b.z);
+						if (l < 1e-6f) continue;
+						b.x/=l; b.y/=l; b.z/=l;
+						if (!haveRef) { ref = b; haveRef = true; }
+						else if (b.x*ref.x + b.y*ref.y + b.z*ref.z < 0.0f) { b.x=-b.x; b.y=-b.y; b.z=-b.z; }
+						bis.x += b.x; bis.y += b.y; bis.z += b.z;
+					}
+					const float bl = std::sqrt(bis.x*bis.x + bis.y*bis.y + bis.z*bis.z);
+					if (bl < 1e-6f) { nMitreSolo += int(vs.size()); continue; }
+					bis.x/=bl; bis.y/=bl; bis.z/=bl;
+					ch = 0.0f;
+					for (size_t k : vs)
+						ch += std::fabs(bis.x*mc[k].nOwn.x + bis.y*mc[k].nOwn.y + bis.z*mc[k].nOwn.z);
+					ch /= float(vs.size());
+				}
 				if (ch < 0.35f) ch = 0.35f;   // θ→180° guard: cap the 1/cos blowup at ~2.9×
 				MitreGroup G;
 				G.dir = mc[vs[0]].dir; G.bis = bis; G.cosHalf = ch;
@@ -4691,10 +4761,60 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						std::nth_element(ecopy.begin(), ecopy.begin()+ecopy.size()/2, ecopy.end());
 						medEnv = ecopy[ecopy.size()/2];
 					}
+					// PER-BLOCK LEVEL (--greets_displace_block_level, 2026-08-17).
+					// The one-median-per-line constant above was the retreat from the
+					// pointwise env(s) ride (which bowed the arris at grazing: the
+					// envelope's slow ±0.05 wobble is an S-curve at 1/cosHalf gain).
+					// But ONE constant per line re-created the cushion the other way:
+					// each stone block's own top differs from the line median by that
+					// same wobble, so every block either overhangs the corner or shows
+					// a raised lip — the per-block pillowing measured at the t=5970
+					// jamb (weld level +18 milli-u vs block tops ±15 of it, [STONE-BOW]
+					// / xsec cross-section, 2026-08-16y). A masonry arris is straight
+					// PER BLOCK and steps at the JOINTS: so the level is piecewise
+					// constant — one median of env(s) per notch-bounded segment — and
+					// the steps land inside the groove cuts where the eye expects a
+					// joint. Notch samples take the nearest block's level so a joint
+					// cuts relative to the course it sits in. Falls back to the line
+					// median when a line has no notch-free run (all groove).
+					constexpr float kWobble = 0.08f;   // stone-band wobble vs real groove
+					std::vector<float> lvl(G.prof.size(), medEnv);
+					if (fds::FeatureFlags::greets_displace_block_level()) {
+						const size_t nS = G.prof.size();
+						std::vector<char> isNotch(nS, 0);
+						for (size_t i2 = 0; i2 < nS; ++i2)
+							isNotch[i2] = (G.prof[i2].second - env[i2]) < -kWobble;
+						struct BlockRun { size_t lo, hi; float med; };
+						std::vector<BlockRun> runs;
+						for (size_t i2 = 0; i2 < nS; ) {
+							if (isNotch[i2]) { ++i2; continue; }
+							size_t j2 = i2;
+							while (j2 < nS && !isNotch[j2]) ++j2;
+							std::vector<float> seg(env.begin()+long(i2), env.begin()+long(j2));
+							std::nth_element(seg.begin(), seg.begin()+seg.size()/2, seg.end());
+							runs.push_back({i2, j2, seg[seg.size()/2]});
+							i2 = j2;
+						}
+						if (!runs.empty()) {
+							size_t r = 0;
+							for (size_t i2 = 0; i2 < nS; ++i2) {
+								while (r+1 < runs.size() && i2 >= runs[r].hi) ++r;
+								if (i2 >= runs[r].lo && i2 < runs[r].hi) { lvl[i2] = runs[r].med; continue; }
+								// notch sample: nearest run by s-distance to run edges
+								float best = 1e30f; float m = medEnv;
+								for (const BlockRun &R : runs) {
+									const float dl = std::fabs(G.prof[i2].first - G.prof[R.lo].first);
+									const float dh = std::fabs(G.prof[i2].first - G.prof[R.hi-1].first);
+									const float d3 = std::min(dl, dh);
+									if (d3 < best) { best = d3; m = R.med; }
+								}
+								lvl[i2] = m;
+							}
+						}
+					}
 					const float s0 = G.prof.front().first, s1 = G.prof.back().first;
 					for (size_t i2 = 0; i2 < G.prof.size(); ++i2) {
 						const float deficit = G.prof[i2].second - env[i2];   // pointwise, <= 0
-						constexpr float kWobble = 0.08f;   // stone-band wobble vs real groove
 						const float notch = (deficit < -kWobble) ? deficit : 0.0f;
 						// END TAPER: the line's ends abut CROSS-MATERIAL geometry
 						// (lintel cap, floor course) that never displaces; a proud
@@ -4704,7 +4824,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						constexpr float kEndTaper = 0.30f;
 						const float dEnd = std::min(G.prof[i2].first - s0, s1 - G.prof[i2].first);
 						const float ramp = std::max(0.0f, std::min(1.0f, dEnd / kEndTaper));
-						G.prof[i2].second = (medEnv - mipMean)*ramp + notch;
+						G.prof[i2].second = (lvl[i2] - mipMean)*ramp + notch;
 					}
 				}
 				const int32_t gid = int32_t(mitreGroups.size());
@@ -4722,6 +4842,15 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					nrm(aA); nrm(aB);
 					vA = bis.x*aA.x + bis.y*aA.y + bis.z*aA.z;
 					vB = bis.x*aB.x + bis.y*aB.y + bis.z*aB.z;
+					// population GEOMETRY (2026-08-17 cushion round): the sides'
+					// average fan normals verbatim — the bisector is symmetric
+					// against THESE; whether they match the walls' geometric
+					// planes decides whether the weld is geometrically lopsided.
+					if (mitreCensus)
+						std::fprintf(stderr, "[STONE-MITRE-POP] line %d avgN_A(%+.3f,%+.3f,%+.3f) "
+							"avgN_B(%+.3f,%+.3f,%+.3f)\n", gid,
+							double(aA.x), double(aA.y), double(aA.z),
+							double(aB.x), double(aB.y), double(aB.z));
 				}
 				if (mitreCensus || vA < 0.05f || vB < 0.05f) {
 					std::fprintf(stderr, "[STONE-MITRE] '%s' line %d: dir(%+.2f,%+.2f,%+.2f) "

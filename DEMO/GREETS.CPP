@@ -1242,6 +1242,11 @@ static void GreetsApplyInitDefaults()
 		FF::setDefault(FF::IntId ::greets_displace_border_mean,  2);
 		FF::setDefault(FF::BoolId::greets_displace_seam_weld,    true);
 		FF::setDefault(FF::BoolId::greets_displace_plane_normal, true);
+		// 2026-08-17: the jamb-cushion fix (per-block mitre level + geometric
+		// bisector) joins the approved arm — same umbrella-implies-features
+		// rule as the four above.
+		FF::setDefault(FF::BoolId::greets_displace_block_level,  true);
+		FF::setDefault(FF::BoolId::greets_displace_geom_bisector, true);
 		std::fprintf(stderr, "[STONE] --greets_displace defaults its two perf "
 			"companions ON: --greets_shadow_proxy=%d (offscreen passes rasterise "
 			"the flat stone, -5.9 ms, DOES move shadow occlusion at wall "
