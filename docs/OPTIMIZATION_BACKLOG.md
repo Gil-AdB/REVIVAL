@@ -10,6 +10,55 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-17a — THE 8-WIDE GTAO's TWO RECIPROCALS: the shipped SSAO path disagrees with **its own scalar reference** on up to 24 % of pixels, systematically darker. REPORTED, NOT FIXED
+
+Found while porting GTAO into the GPU arm (`docs/SHADING_CONTRACT.md` §13); the
+GPU is only the instrument that made it visible — the finding is CPU-internal and
+needs no GPU to reproduce.
+
+`Render_SSAO`'s 8-wide GTAO (`FDS/RENDER/DeferredSSAO.cpp:358-489`) computes the
+two horizon cosines with
+
+```cpp
+const __m256 dinv = _mm256_rsqrt_ps(dl2);
+const __m256 binv = _mm256_rsqrt_ps(bx*bx + by*by + bz*bz + 1e-12f);
+```
+
+— **no Newton-Raphson**. The scalar reference 80 lines above it uses `fast_rsqrt`,
+which has the NR step (~16 bits). On arm64 simde lowers a bare `_mm256_rsqrt_ps`
+to `vrsqrteq_f32`, an **~8-bit** estimate; on x86 it is the native 12-bit
+`rsqrtps`. GTAO then feeds those cosines into a **hard 32-sector visibility
+bitmask**, which has no tolerance for an 8-bit reciprocal: a horizon that lands
+within the estimate's error of a sector boundary sets a different bit.
+
+**MEASURED**, greets 1920×1080, `--ssao --ssao-gtao` at defaults, the shipped
+binary against itself with `FDS_SSAO_NOSIMD=1` (the file's own escape hatch), per
+pixel against the contract's `|Δ| ≤ 0.005·max + 1e-4`:
+
+| pose | pixels agreeing | AO mean, 8-wide vs scalar |
+|---|--:|---|
+| t=4871 | 75.85 % | 0.85431 vs 0.85601 (**darker**) |
+| t=5743 | 88.29 % | 0.82507 vs 0.82556 |
+| t=2845 | 98.00 % | 0.94410 vs 0.94468 |
+| t=6097 | 99.83 % | 0.91863 vs 0.91870 |
+
+With the denoise off so each cell is a raw bitmask, the difference is **exactly
+integral in sector bits**: 82.60 % of pixels bit-identical, 4.94 % off by −1 bit,
+11.79 % by +1, 0.65 % by ±2, **0.0037 % not an integer number of bits**. The +1
+side outnumbers −1 by 2.4:1, which is the systematic darkening.
+
+The **hemisphere** path has the same defect twice (`_mm256_rcp_ps` for `invSZ` and
+for `radius/(dz+eps)`) and **no escape hatch** — `FDS_SSAO_NOSIMD` guards only the
+GTAO branch. Same-inputs CPU-vs-GPU there is 98.22 %.
+
+**This is §12.4's `--deferred_vec` GGX finding in a second kernel**, and the same
+fix: one NR step on each reciprocal. Not taken here because `DeferredSSAO.cpp` is
+contended and SSAO is ~40 % of his acceptance frame — the price of the refinement
+is a perf decision, not a correctness one. The scalar reference is available for
+A/B at zero cost (`FDS_SSAO_NOSIMD=1`), and the deltas above are what it buys.
+
+---
+
 ## 2026-08-16z — 16b's LAST THREE CITY ITEMS, PRICED IN ONE ROUND: two are **below bar and closed with numbers**, and the census that refuted one of them found the item that pays — 61 056 pixels a pass taking the scalar composite because 1512/12 is not a multiple of 8
 
 **Result on `8cc5e5e7` in `/Users/gil-ad/work/rev-fogprice`, city under his arm

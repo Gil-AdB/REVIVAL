@@ -365,6 +365,46 @@ struct DeferredOptions {
     // post-tessellation vertex function is invoked once per VERTEX or once per
     // triangle CORNER — the triangle count depends on both.
     int   tessUniform = 0;
+    // ---- SCREEN-SPACE AMBIENT OCCLUSION -----------------------------------
+    // A PORT of FDS/RENDER/DeferredSSAO.cpp, flag for flag. Every default here
+    // is the CPU flag's own default (FDS/Base/FeatureFlags.def, category
+    // "ssao"), so `--ssao --ssao-gtao` drives the same algorithm at the same
+    // settings on both arms and the two AO fields are the SAME QUANTITY.
+    // Defaults read at fog-wt 8cc5e5e7; --ssao_downscale is the one a
+    // concurrent round is moving (1 -> 2), so it is stated rather than assumed.
+    bool  ssao = false;              // FeatureFlags ssao, default 0
+    bool  ssaoGtao = false;          // ssao_gtao, default 0
+    int   ssaoDownscale = 1;         // ssao_downscale, default 1
+    int   ssaoSamples = 16;          // ssao_samples, default 16
+    float ssaoRadius = 4.0f;         // ssao_radius, default 4
+    float ssaoStrength = 1.5f;       // ssao_strength, default 1.5
+    float ssaoBias = 0.1f;           // ssao_bias, default 0.1
+    float ssaoPower = 1.0f;          // ssao_power, default 1
+    int   ssaoBlur = 2;              // ssao_blur, default 2
+    int   ssaoGtaoSlices = 2;        // ssao_gtao_slices, default 2
+    int   ssaoGtaoSteps = 4;         // ssao_gtao_steps, default 4
+    float ssaoGtaoThickness = 1.0f;  // ssao_gtao_thickness, default 1
+    // --ssao_dump=PATH. Writes the FULL-RES applied AO multiplier as a float32
+    // plane with an "AOF1" + w + h header — the same file the CPU's
+    // --ssao_dump writes — so the two AO fields can be differenced directly
+    // instead of inferred from a lit frame. Adds one extra untimed pass.
+    std::string ssaoDumpPath;
+    // --ssao_ref=PATH. LOCALISATION INSTRUMENT, and the whole reason the dump
+    // carries the AO's INPUTS as well as its output: load a CPU --ssao_dump file
+    // and drive this arm's AO from the CPU's OWN depth and geometric-normal
+    // planes instead of this arm's G-buffer. With it on, every remaining
+    // CPU-vs-GPU AO difference is ARITHMETIC; with it off, the difference is
+    // arithmetic PLUS two different rasterisers writing two different
+    // G-buffers. Only the AO pass is affected — the lit frame is not a valid
+    // render under it, so never use it for an image.
+    std::string ssaoRefPath;
+    // --slow_math. MEASUREMENT ONLY, default OFF. Compile the Metal library with
+    // fastMathEnabled = NO. Metal's default is ON, which makes divide and sqrt
+    // approximate and lets the compiler contract to FMA freely; a CPU-parity
+    // comparison of a HARD-QUANTIZED quantity (the GTAO 32-sector visibility
+    // bitmask) is sensitive to exactly that. Moves every pixel of every pass, so
+    // every md5 recorded for this arm is a fast-math one.
+    bool slowMath = false;
     std::string outPath;
 };
 

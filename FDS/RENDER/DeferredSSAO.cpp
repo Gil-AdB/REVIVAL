@@ -41,6 +41,8 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <semaphore>
 
 #include <arm_neon.h>
@@ -166,6 +168,39 @@ inline __m256 gtaoAcos_x8(__m256 x) {
 // per cell (< 0 == sky / no surface).
 std::vector<float> g_aoRaw, g_aoBlur, g_aoZ;
 
+// --ssao_dump (DIAGNOSTIC, default off). Full-res plane holding the AO
+// MULTIPLIER the apply pass used, so the CPU's AO field can be differenced
+// against the GPU arm's (GpuBench --ssao_dump writes the identical file). Empty
+// unless the flag is on; see the flag's help for the instrument-state note.
+std::vector<float> g_aoDumpPlane, g_aoDumpZ, g_aoDumpN;
+
+// noinline so the writer never inlines into the apply's tile lambda and so the
+// dump is a leaf the profile can attribute; called once per frame, off the hot
+// path, after every tile has drained.
+__attribute__((noinline))
+void WriteAoDump(const float* plane, const float* zplane, const float* nplane,
+                 int w, int h) {
+	const char* env = std::getenv("FDS_SSAO_DUMP_PATH");
+	const char* path = (env && *env) ? env : "/tmp/fds_ssao_ao.f32";
+	FILE* f = fopen(path, "wb");
+	if (!f) { fprintf(stderr, "[ssao-dump] cannot open %s\n", path); return; }
+	const size_t n = size_t(w) * size_t(h);
+	const int32_t hdr[2] = { int32_t(w), int32_t(h) };
+	fwrite("AOF3", 1, 4, f);
+	fwrite(hdr, sizeof(int32_t), 2, f);
+	fwrite(plane, sizeof(float), n, f);
+	fwrite(zplane, sizeof(float), n, f);
+	fwrite(nplane, sizeof(float), n * 3, f);          // nx, ny, nz interleaved
+	fclose(f);
+	double sum = 0.0; size_t occ = 0, cov = 0;
+	for (size_t i = 0; i < n; ++i)
+		if (zplane[i] >= 0.0f) { ++cov; sum += plane[i]; if (plane[i] < 0.9f) ++occ; }
+	fprintf(stderr, "[ssao-dump] wrote %s (%dx%d f32)  covered=%.1f%%  "
+	        "meanAO(covered)=%.4f  ao<0.9=%.1f%%\n", path, w, h,
+	        100.0 * double(cov) / double(n), cov ? sum / double(cov) : 1.0,
+	        cov ? 100.0 * double(occ) / double(cov) : 0.0);
+}
+
 } // namespace
 
 void Render_SSAO() {
@@ -194,6 +229,18 @@ void Render_SSAO() {
 	const float bias     = fds::FeatureFlags::ssao_bias();
 	const float power    = fds::FeatureFlags::ssao_power();
 	const bool  dbg      = fds::FeatureFlags::ssao_debug();
+	// --ssao_dump: materialise the applied full-res AO so it can be differenced
+	// against the GPU arm's. Pre-filled with 1.0 because the apply SKIPS sky
+	// (`continue`), and 1.0 is what "skipped" means as a multiplier.
+	const bool  dumpAo   = fds::FeatureFlags::ssao_dump();
+	if (dumpAo) {
+		g_aoDumpPlane.assign(N, 1.0f);
+		g_aoDumpZ.assign(N, -1.0f);
+		g_aoDumpN.assign(N * 3, 0.0f);
+	}
+	float* aoDump = dumpAo ? g_aoDumpPlane.data() : nullptr;
+	float* aoDumpZ = dumpAo ? g_aoDumpZ.data() : nullptr;
+	float* aoDumpN = dumpAo ? g_aoDumpN.data() : nullptr;
 
 	buildKernel(nSamp);
 	buildRot();
@@ -901,7 +948,12 @@ void Render_SSAO() {
 					// this is bit-identical to the branch, not an approximation of
 					// it. Coverage (lane 3) is left alone, as before.
 #if defined(__aarch64__) && !defined(FDS_HDR_F32)
-					if (down == 1 && useHdr && !dbg) {
+					// !dumpAo: the vld4/vst4 path has nowhere to write the dump
+					// plane, so the instrument takes the generic loop below. The
+					// two are bit-identical by construction (see the commit that
+					// introduced this path), so the dumped field is the field the
+					// un-instrumented frame applies.
+					if (down == 1 && useHdr && !dbg && !dumpAo) {
 						for (int py = y1; py < y2; ++py) {
 							const size_t row = size_t(py) * size_t(W);
 							int px = x1;
@@ -962,6 +1014,16 @@ void Render_SSAO() {
 								ao = wsum > 1e-6f ? sum / wsum : 1.0f;
 							}
 
+							if (aoDump) {
+								aoDump[i] = ao;
+								aoDumpZ[i] = float(0xFF80 - ze) * invZScale;
+								// The RAW stored G-buffer normal, NOT sign-flipped
+								// — the flip toward the viewer is the AO kernel's
+								// own step and the GPU arm must apply its own, or
+								// the comparison would be pre-agreeing on it.
+								meka::oct_decode_u32(nrm[i], aoDumpN[i * 3],
+								                     aoDumpN[i * 3 + 1], aoDumpN[i * 3 + 2]);
+							}
 							if (dbg) {
 								int g = (int)(ao * 255.0f + 0.5f);
 								const byte gb = (byte)(g < 0 ? 0 : (g > 255 ? 255 : g));
@@ -983,6 +1045,9 @@ void Render_SSAO() {
 		});
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 	}
+
+	if (dumpAo) WriteAoDump(g_aoDumpPlane.data(), g_aoDumpZ.data(),
+	                        g_aoDumpN.data(), W, H);
 
 	const auto t1 = std::chrono::steady_clock::now();
 	g_ssaoLastMs = std::chrono::duration<double, std::milli>(t1 - t0).count();

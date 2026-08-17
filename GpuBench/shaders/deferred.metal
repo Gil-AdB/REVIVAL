@@ -178,7 +178,23 @@ struct GBufVertexOut {
 struct GBufOut {
     // rgb albedo, a = AO already reduced by the strength dial (see fs_gbuffer)
     float4 albedo [[color(0)]];
-    float2 normal [[color(1)]];   // oct-packed VIEW-space shading normal
+    // .xy oct-packed VIEW-space SHADING normal (normal-map perturbed);
+    // .zw oct-packed VIEW-space GEOMETRIC normal (interpolated vertex normal,
+    //     BEFORE the normal-map perturbation).
+    //
+    // WHY BOTH. The CPU carries exactly ONE normal in its G-buffer and it is the
+    // GEOMETRIC one (FDS/FILLERS/Mekalele.h:3294 encodes the interpolated
+    // `vnx/vny/vnz`; the tangent rides a separate plane and the normal map is
+    // applied INSIDE the lighting kernel, DeferredSurfaceKernel.cpp:1720-1727).
+    // This arm bakes the perturbed normal instead, which is right for lighting
+    // and WRONG for a port of Render_SSAO — FDS/RENDER/DeferredSSAO.cpp reads
+    // `g_gbuffer->normal`, i.e. the geometric one, and GTAO's horizon reference
+    // angle is a first-order function of it. Feeding the AO a bump-perturbed
+    // normal would be a different quantity, not a tighter one, so the plane
+    // widened from RG16Snorm to RGBA16Snorm and the AO pass reads .zw.
+    // The .xy half is bit-for-bit what it was (same 16-bit snorm encode), which
+    // is what keeps every recorded md5 in the plan document valid.
+    float4 normal [[color(1)]];
     float4 params [[color(2)]];   // diffuse, specular, lobe rough, luminosity/4
     // .x mirror panel id (1-based; 0 = none), .y metalness x 255,
     // .z ENV PROBE index (1-based; 0 = none), .w F0 x 255.
@@ -247,6 +263,7 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
     const float ao = saturate(1.0f - b.misc.w * (1.0f - aoRaw));
 
     float3 n = normalize(in.viewNormal);
+    const float3 geoN = n;            // pre-perturbation; the SSAO pass's input
     if (b.mapFlags.x > 0.5f) {
         // The ENGINE's tangent frame, term for term the deferred kernel's
         // normal-map path (DeferredSurfaceKernel.cpp:1680-1727): per-vertex
@@ -288,7 +305,7 @@ fragment GBufOut fs_gbuffer(GBufVertexOut in [[stage_in]],
 
     GBufOut o;
     o.albedo = float4(alb.rgb, ao);
-    o.normal = oct_encode(n);
+    o.normal = float4(oct_encode(n), oct_encode(geoN));
     // LUMINOSITY encoding. This plane is RGBA8Unorm, so the emissive has to be
     // squeezed into 8 bits. It used to be saturate(Lum*0.25) with a *4 decode —
     // a hard clamp at Lum = 4, which is fine for greets (hottest 2.25) and
@@ -1259,6 +1276,335 @@ fragment float4 fs_xpar(XparVertexOut in [[stage_in]],
     // the legacy `lit + dst*dw` pipeline takes dw from the blend colour and
     // ignores this.
     return float4(max(lit, 0.0f), b.misc2.z);
+}
+
+// ---------------------------------------------------------------------------
+// SCREEN-SPACE AMBIENT OCCLUSION — a PORT of FDS/RENDER/DeferredSSAO.cpp.
+//
+// This is not "an SSAO for the GPU arm". It is the CPU pass re-expressed in MSL
+// with the CPU as the AUTHORITY on every expression: the same GTAO +
+// visibility-bitmask horizon integration (Therrien & Levesque 2023), the same
+// 32-sector mask, the same Eberly acos fit, the same atan2 polynomial, the same
+// 16-entry 4x4 tiling rotation, the same per-frame slice-azimuth TABLE (the host
+// fills it from the identical expression, so the float that reached cosf on the
+// CPU is the float that reaches this shader), the same matched 4x4 depth-only
+// denoise, the same 4-tap depth-aware bilinear upsample, and the same
+// multiply-into-linear-radiance apply point (after the lighting kernel, BEFORE
+// flares / cones / transparents / bloom — RENDER.CPP:730).
+//
+// THREE THINGS THIS PORT DOES **NOT** INHERIT, stated up front:
+//   1. --ssao_temporal. Its CPU default is 0, and the brief pins it off. The
+//      reprojection history has no analogue here and is not implemented.
+//   2. fast_rsqrt. The CPU's is NEON vrsqrte + ONE Newton-Raphson step, ~12
+//      bits (FDS/FILLERS/SimdHelpers.h:16). MSL `rsqrt` is the hardware's, which
+//      is FINER. That is a rounding difference in the CPU's favour of noise, not
+//      an algorithm difference, and it is the floor of the residual.
+//   3. The 8-wide tail-overlap trick (DeferredSSAO.cpp:491-513). It exists to
+//      make the SIMD remainder cheap on a 12x8 tile grid; a GPU has no tail.
+//
+// COORDINATES. Deliberately the CPU's, not this arm's:
+//     P = ((px - cntrEX) * Z / perspX,  (cntrEY - py) * Z / perspY,  Z)
+// with px/py the INTEGER pixel index and no half-texel. This arm's own
+// reconstruction (fs_lighting:776-778) puts pixel centres at px+0.5, so the two
+// differ by half a pixel; inside AO that cancels out of the sample DIFFERENCE
+// except through 0.5*(sz-z)/perspX, which is ~4e-4 of a view unit here. Matching
+// the CPU keeps this a port rather than a re-derivation.
+// ---------------------------------------------------------------------------
+
+struct SsaoUniforms {
+    int   W, H, lowW, lowH;
+    int   down, halfPx, slices, steps;
+    int   nSamp, blurR, gtao, rotPhase;
+    float cx, cy, fovX, fovY;          // CntrEX, CntrEY, FOVX(perspX), FOVY(perspY)
+    float dza, dzb;                    // depth decode: Z = dzb / (zEnc - dza)
+    float radius, strength;
+    float bias, power, thickness, invDepthK;
+    float invDown, kSec, r2max, pad0;
+    // --ssao_ref=PATH (LOCALISATION INSTRUMENT, default 0). 1 = read the AO's
+    // depth and geometric normal from the CPU-dumped planes bound at texture 2
+    // and 3 instead of from this arm's own G-buffer. It is the only way to
+    // separate "the two ports compute different AO" from "the two ports were
+    // handed different depth and normals" — with the CPU's own inputs on both
+    // sides, every remaining difference is arithmetic, and with this off the
+    // difference is arithmetic PLUS two rasterisers.
+    int   refGbuf, pad1, pad2, pad3;
+    float2 rot[16];                    // g_rotCos / g_rotSin
+    float2 slice[128];                 // g_sliceCos[s][ri] / g_sliceSin[s][ri]
+    float4 kern[64];                   // hemisphere kernel (g_kx/g_ky/g_kz)
+};
+
+// DeferredSSAO.cpp:145 — Eberly acos fit, ~0.18 deg max error.
+static inline float ssaoAcos(float x) {
+    x = clamp(x, -1.0f, 1.0f);
+    const float ax = abs(x);
+    const float r = (-0.156583f * ax + 1.57079633f) * sqrt(1.0f - ax);
+    return x >= 0.0f ? r : 3.14159265f - r;
+}
+
+// FDS/FILLERS/SimdHelpers.h:36-77 — the same 5-term minimax atan and the same
+// quadrant reduction. The GTAO slice's horizon reference angle goes through it,
+// so a stock `atan2` here would be a DIFFERENT function, not a better one.
+static inline float ssaoAtanUnit(float x) {
+    const float x2 = x * x;
+    return x * (1.0f + x2 * (-0.330299f + x2 * (0.180142f
+              + x2 * (-0.085133f + x2 * 0.020835f))));
+}
+static inline float ssaoAtan2(float y, float x) {
+    const float kPi = 3.14159265358979323846f, kHalfPi = 1.57079632679489661923f;
+    const float ax = abs(x), ay = abs(y);
+    float r;
+    if (ax >= ay) {
+        const float a = (ax > 0.0f) ? (y / x) : 0.0f;
+        r = ssaoAtanUnit(a);
+        if (x < 0.0f) r += (y >= 0.0f) ? kPi : -kPi;
+    } else {
+        const float a = x / y;
+        r = (y >= 0.0f ? kHalfPi : -kHalfPi) - ssaoAtanUnit(a);
+    }
+    return r;
+}
+
+// Reconstruct the CPU's view-space point for an INTEGER pixel, given its depth.
+static inline float3 ssaoViewPos(constant SsaoUniforms &s, int px, int py, float Z) {
+    return float3((float(px) - s.cx) * Z / s.fovX,
+                  (s.cy - float(py)) * Z / s.fovY,
+                  Z);
+}
+
+// The AO's two G-buffer reads, funnelled so --ssao_ref can swap the source
+// without a second copy of the sampling logic. Returns view Z, < 0 == sky.
+static inline float ssaoDepthAt(constant SsaoUniforms &s, depth2d<float> gDepth,
+                                texture2d<float> zRef, int px, int py) {
+    const uint2 p = uint2(uint(px), uint(py));
+    if (s.refGbuf != 0) return zRef.read(p).r;      // CPU plane: < 0 already means sky
+    const float ze = gDepth.read(p);
+    return (ze <= 0.0f) ? -1.0f : s.dzb / (ze - s.dza);
+}
+static inline float3 ssaoNormalAt(constant SsaoUniforms &s, texture2d<float> gNormal,
+                                  texture2d<float> nRef, int px, int py) {
+    const uint2 p = uint2(uint(px), uint(py));
+    // .zw is the GEOMETRIC normal — the plane the CPU's SSAO reads. See GBufOut.
+    return (s.refGbuf != 0) ? nRef.read(p).xyz : oct_decode(gNormal.read(p).zw);
+}
+
+// ---- pass 1: the AO field on the low-res grid -----------------------------
+// Output is RG32Float: .r = AO in 0..1, .g = the cell's view Z (< 0 == sky),
+// which is aoRaw[] and aoZ[] of the CPU, in one plane because the denoise and
+// the upsample both want the pair.
+fragment float2 fs_ssao(FsQuadOut in [[stage_in]],
+                        constant SsaoUniforms &s [[buffer(1)]],
+                        texture2d<float> gNormal [[texture(0)]],
+                        depth2d<float>   gDepth  [[texture(1)]],
+                        texture2d<float> zRef    [[texture(2)]],
+                        texture2d<float> nRef    [[texture(3)]])
+{
+    const int lx = int(in.position.x), ly = int(in.position.y);
+    const int px = min(lx * s.down + s.halfPx, s.W - 1);
+    const int py = min(ly * s.down + s.halfPx, s.H - 1);
+
+    const float z = ssaoDepthAt(s, gDepth, zRef, px, py);
+    if (z < 0.0f) return float2(1.0f, -1.0f);         // sky: AO open, z sentinel
+
+    const float3 P = ssaoViewPos(s, px, py, z);
+    float3 N = ssaoNormalAt(s, gNormal, nRef, px, py);
+    if (dot(N, P) > 0.0f) N = -N;
+
+    const int ri = (((ly & 3) * 4 + (lx & 3)) + s.rotPhase) & 15;
+
+    if (s.gtao != 0) {
+        // ---- GTAO + Visibility Bitmask (DeferredSSAO.cpp:274-351) ----------
+        const float vinv = rsqrt(dot(P, P) + 1e-12f);
+        const float3 V = -P * vinv;
+        float srad = s.radius * s.fovX / z;
+        srad = clamp(srad, 2.0f, 256.0f);
+        const float jit = s.rot[ri].x * 0.5f + 0.5f;
+        const float kHalfPI = 1.57079633f;
+
+        float vis = 0.0f;
+        for (int sl = 0; sl < s.slices; ++sl) {
+            const float dcx = s.slice[sl * 16 + ri].x;
+            const float dsy = s.slice[sl * 16 + ri].y;
+            const float d3x = dcx, d3y = -dsy;
+            float3 sn = float3(d3y * V.z, -d3x * V.z, d3x * V.y - d3y * V.x);
+            sn *= rsqrt(dot(sn, sn) + 1e-12f);
+            const float ndotsn = dot(N, sn);
+            const float3 pn = N - sn * ndotsn;                 // NOT normalized (CPU)
+            const float3 tg = cross(sn, V);
+            const float nAng = ssaoAtan2(dot(pn, tg), dot(pn, V));
+            // SECTOR UNITS: the horizon angle is only ever consumed as h*32, so
+            // 32/PI rides the per-slice constant (the CPU's own fold, :254-263).
+            const float kang = (kHalfPI - nAng) * s.kSec;
+
+            uint mask = 0u;
+            for (int sgn = -1; sgn <= 1; sgn += 2) {
+                const float cSgn = float(sgn) * s.kSec;
+                for (int j = 0; j < s.steps; ++j) {
+                    const float t = (float(j) + 0.5f + jit * 0.5f) / float(s.steps) * srad;
+                    const int sx = px + int(float(sgn) * dcx * t + 0.5f);
+                    const int sy = py + int(float(sgn) * dsy * t + 0.5f);
+                    if (sx < 0 || sy < 0 || sx >= s.W || sy >= s.H) continue;
+                    const float sz = ssaoDepthAt(s, gDepth, zRef, sx, sy);
+                    if (sz < 0.0f) continue;
+                    const float3 d = ssaoViewPos(s, sx, sy, sz) - P;
+                    const float dl2 = dot(d, d);
+                    if (dl2 > s.r2max || dl2 < 1e-8f) continue;
+                    const float dinv = rsqrt(dl2);
+                    const float3 bk = d - V * s.thickness;
+                    const float binv = rsqrt(dot(bk, bk) + 1e-12f);
+                    const float fa = ssaoAcos(dot(d, V) * dinv);
+                    const float ba = ssaoAcos(dot(bk, V) * binv);
+                    float h0 = clamp(kang - fa * cSgn, 0.0f, 32.0f);
+                    float h1 = clamp(kang - ba * cSgn, 0.0f, 32.0f);
+                    const float mn = min(h0, h1), mx = max(h0, h1);
+                    uint startBit = uint(mn);
+                    const int angBits = int(ceil(mx - mn));
+                    if (angBits > 0) {
+                        if (startBit > 31u) startBit = 31u;
+                        const uint bf = (angBits >= 32) ? 0xFFFFFFFFu
+                                                        : (0xFFFFFFFFu >> uint(32 - angBits));
+                        mask |= bf << startBit;
+                    }
+                }
+            }
+            vis += 1.0f - float(popcount(mask)) / 32.0f;
+        }
+        vis /= float(s.slices);
+        float ao = 1.0f - (1.0f - vis) * s.strength;
+        ao = clamp(ao, 0.0f, 1.0f);
+        if (s.power != 1.0f) ao = pow(ao, s.power);
+        return float2(ao, z);
+    }
+
+    // ---- hemisphere point sampler (DeferredSSAO.cpp:531-666) ---------------
+    const float ca = s.rot[ri].x, sa = s.rot[ri].y;
+    float3 h = float3(0.0f, 0.0f, 1.0f);
+    if (abs(N.z) > 0.999f) h = float3(1.0f, 0.0f, 0.0f);
+    float3 t0 = cross(h, N);
+    t0 *= rsqrt(dot(t0, t0) + 1e-12f);
+    const float3 b0 = cross(N, t0);
+    const float3 T = t0 * ca + b0 * sa;
+    const float3 B = -t0 * sa + b0 * ca;
+
+    float occ = 0.0f;
+    for (int k = 0; k < s.nSamp; ++k) {
+        const float3 ks = s.kern[k].xyz;
+        const float3 o = (T * ks.x + B * ks.y + N * ks.z) * s.radius;
+        const float3 sp = P + o;
+        if (sp.z <= 1e-3f) continue;
+        const int spx = int(s.cx + (sp.x / sp.z) * s.fovX + 0.5f);
+        const int spy = int(s.cy - (sp.y / sp.z) * s.fovY + 0.5f);
+        if (spx < 0 || spy < 0 || spx >= s.W || spy >= s.H) continue;
+        const float sceneZ = ssaoDepthAt(s, gDepth, zRef, spx, spy);
+        if (sceneZ < 0.0f) continue;
+        if (sceneZ <= sp.z - s.bias) {
+            const float dz = abs(P.z - sceneZ);
+            occ += min(s.radius / (dz + 1e-4f), 1.0f);
+        }
+    }
+    float ao = 1.0f - (occ / float(s.nSamp)) * s.strength;
+    ao = clamp(ao, 0.0f, 1.0f);
+    if (s.power != 1.0f) ao = pow(ao, s.power);
+    return float2(ao, z);
+}
+
+// ---- pass 2: MATCHED 4x4 depth-aware box denoise (DeferredSSAO.cpp:698-717)
+// Fixed offsets -2..+1 in both axes = exactly one period of the 16-entry 4x4
+// rotation tiling, which is what cancels the rotation "hatch" on flat surfaces.
+// Depth-ONLY weight; the CPU measured and DROPPED both the plane-distance and
+// the cos^4 shading-normal terms, so adding either here would be a different
+// filter.
+fragment float2 fs_ssao_blur(FsQuadOut in [[stage_in]],
+                             constant SsaoUniforms &s [[buffer(1)]],
+                             texture2d<float> aoIn [[texture(0)]])
+{
+    const int lx = int(in.position.x), ly = int(in.position.y);
+    const float2 c = aoIn.read(uint2(uint(lx), uint(ly))).rg;
+    const float zc = c.g;
+    if (zc < 0.0f) return c;
+    const int bx0 = max(0, lx - 2), bx1 = min(s.lowW - 1, lx + 1);
+    const int by0 = max(0, ly - 2), by1 = min(s.lowH - 1, ly + 1);
+    float sum = 0.0f, wsum = 0.0f;
+    for (int yy = by0; yy <= by1; ++yy) {
+        for (int xx = bx0; xx <= bx1; ++xx) {
+            const float2 tp = aoIn.read(uint2(uint(xx), uint(yy))).rg;
+            if (tp.g < 0.0f) continue;
+            const float dz = zc - tp.g;
+            const float w = 1.0f - dz * dz * s.invDepthK;
+            if (w <= 0.0f) continue;
+            sum += tp.r * w; wsum += w;
+        }
+    }
+    return float2(wsum > 1e-6f ? sum / wsum : c.r, zc);
+}
+
+// ---- pass 3: apply (DeferredSSAO.cpp:932-980) ------------------------------
+// down == 1: the cell IS the pixel. down > 1: 4-tap depth-aware bilinear.
+// rgb is the AO MULTIPLIER; the pipeline that writes hdrTex has blending set to
+// (srcRGB = DestinationColor, dstRGB = Zero), so the frame becomes
+// radiance * ao exactly as `h[0..2] *= ao` does on the CPU, and the frame's own
+// alpha (coverage) lane is left alone by (srcA = Zero, dstA = One).
+//
+// ALPHA CARRIES THE VIEW Z (< 0 == sky). The blend PROVABLY discards it, so it
+// costs the frame nothing; the --ssao_dump resolve pipeline binds an RGBA32Float
+// target with no blending and gets the (AO, coverage) pair out of the very same
+// invocation. Without it a differencing tool cannot tell "AO 1.0 because open"
+// from "AO 1.0 because sky", and the two arms' rasterisers do not agree pixel
+// for pixel on which pixels are sky.
+// Sky returns 1.0, which is the CPU's `continue`.
+fragment float4 fs_ssao_apply(FsQuadOut in [[stage_in]],
+                              constant SsaoUniforms &s [[buffer(1)]],
+                              texture2d<float> aoIn  [[texture(0)]],
+                              depth2d<float>   gDepth [[texture(1)]],
+                              texture2d<float> zRef  [[texture(2)]],
+                              texture2d<float> nRef  [[texture(3)]])
+{
+    const int px = int(in.position.x), py = int(in.position.y);
+    const float zFull = ssaoDepthAt(s, gDepth, zRef, px, py);
+    if (zFull < 0.0f) return float4(1.0f, 1.0f, 1.0f, -1.0f);
+
+    float ao;
+    if (s.down == 1) {
+        ao = aoIn.read(uint2(uint(px), uint(py))).r;
+    } else {
+        const float zf = zFull;
+        const float gx = (float(px) - float(s.halfPx)) * s.invDown;
+        const float gy = (float(py) - float(s.halfPx)) * s.invDown;
+        int x0 = int(floor(gx)), y0 = int(floor(gy));
+        const float fxs = gx - float(x0), fys = gy - float(y0);
+        int x1c = x0 + 1, y1c = y0 + 1;
+        x0 = clamp(x0, 0, s.lowW - 1); x1c = clamp(x1c, 0, s.lowW - 1);
+        y0 = clamp(y0, 0, s.lowH - 1); y1c = clamp(y1c, 0, s.lowH - 1);
+        const float bw00 = (1.0f - fxs) * (1.0f - fys), bw10 = fxs * (1.0f - fys);
+        const float bw01 = (1.0f - fxs) * fys,          bw11 = fxs * fys;
+        float sum = 0.0f, wsum = 0.0f;
+        const int2 tapXY[4] = { int2(x0, y0), int2(x1c, y0), int2(x0, y1c), int2(x1c, y1c) };
+        const float tapW[4] = { bw00, bw10, bw01, bw11 };
+        for (int k = 0; k < 4; ++k) {
+            const float2 tp = aoIn.read(uint2(uint(tapXY[k].x), uint(tapXY[k].y))).rg;
+            if (tp.g < 0.0f) continue;
+            const float dz = zf - tp.g;
+            const float wd = 1.0f - dz * dz * s.invDepthK;
+            if (wd <= 0.0f) continue;
+            const float w = tapW[k] * wd;
+            sum += tp.r * w; wsum += w;
+        }
+        ao = wsum > 1e-6f ? sum / wsum : 1.0f;
+    }
+    return float4(ao, ao, ao, zFull);
+}
+
+// --ssao_dump's SECOND resolve: the geometric normal the AO pass actually read,
+// so the dumped file carries the same five planes the CPU's does and the two
+// arms' AO INPUTS can be differenced as directly as their outputs. Four lines,
+// and it reads through the same accessor the AO does — there is no second
+// convention here to get wrong.
+fragment float4 fs_ssao_norm(FsQuadOut in [[stage_in]],
+                             constant SsaoUniforms &s [[buffer(1)]],
+                             texture2d<float> gNormal [[texture(0)]],
+                             texture2d<float> nRef    [[texture(3)]])
+{
+    const int px = int(in.position.x), py = int(in.position.y);
+    return float4(ssaoNormalAt(s, gNormal, nRef, px, py), 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -2369,7 +2715,7 @@ fragment GBufOut fs_gbuffer_fragcount(GBufVertexOut in [[stage_in]],
     atomic_fetch_add_explicit(&stats[6], 1u, memory_order_relaxed);
     GBufOut o;
     o.albedo = float4(0.0f);
-    o.normal = float2(0.0f);
+    o.normal = float4(0.0f);
     o.params = float4(0.0f);
     o.mirror = uint4(0u);
     return o;

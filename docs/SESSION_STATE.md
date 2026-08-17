@@ -1,5 +1,78 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-17a — THE GPU ARM HAS GTAO, and the port matches to **100.000 %** at two of four poses — the residual is the CPU's OWN 8-wide reciprocal
+>
+> Commissioned: *"make the gpu test have gtao"*. Full write-up:
+> `docs/SHADING_CONTRACT.md` **§13**. Images: `docs/img/gpugtao/`.
+>
+> `GpuBench` had **no ambient occlusion at all**; `FDS/RENDER/DeferredSSAO.cpp`
+> had no second implementation to be checked against. It has one now —
+> `fs_ssao` / `fs_ssao_blur` / `fs_ssao_apply` in `GpuBench/shaders/deferred.metal`,
+> a port with the CPU as the authority on every expression: same 32-sector
+> visibility bitmask, same Eberly acos, same 5-term minimax atan2 (**not** MSL's
+> `atan2`), same 16-entry 4x4 rotation, same per-frame slice-azimuth table (the
+> host fills it from `buildSliceTrig`'s own expression), same matched 4x4 denoise,
+> same depth-aware upsample, same apply point (multiply the linear radiance right
+> after lighting, before flares/cones/xpar/bloom, main view only). Hemisphere
+> fallback ported too. `--ssao_temporal` is NOT ported (CPU default 0) and warns.
+>
+> **CLI mirrors the FDS names and defaults**, with FDS's own `-`->`_`
+> normalisation, so ONE command line drives both renderers:
+> `--ssao --ssao-gtao --ssao-downscale=N --ssao_radius/strength/bias/power/blur/samples
+> --ssao_gtao_slices/steps/thickness`.
+>
+> **THE COMPARABLE QUANTITY IS THE AO FIELD, NOT THE FRAME** — D1/D3/D6/D7/E6/E7/E8
+> all move the same pixels. Both arms now dump the applied AO multiplier **and its
+> inputs** in one shared format (`AOF3`: AO + view-Z + geometric normal): CPU
+> `--ssao_dump` (new, **default OFF**, path from `FDS_SSAO_DUMP_PATH`, noinline
+> reporter, instrument state declared in the flag help), GPU `--ssao_dump=PATH`.
+>
+> **RESULT** (4 greets poses, 1920x1080, contract line
+> `|gpu-cpu| <= 0.005*max + 1e-4`, per pixel over 2 073 600):
+>
+> | pose | as shipped | same inputs, CPU 8-wide | **same inputs, CPU scalar ref** |
+> |---|--:|--:|--:|
+> | t=4871 | 51.93 % | 75.79 % | **99.979 %** |
+> | t=5743 | 31.10 % | 88.15 % | **99.931 %** |
+> | t=2845 | 49.41 % | 98.01 % | **100.000 %** |
+> | t=6097 | 19.09 % | 99.83 % | **100.000 %** |
+>
+> Column 3 is the verdict on the port: same function, mean |d| 7-9e-5, every
+> failing pixel off by at most ONE sector bit out of 64. Column 1 -> column 2 is
+> the **G-buffer** (new `--ssao_ref=PATH` drives the GPU AO from the CPU's own
+> depth+normal planes; t=6097 goes 19.09 -> 99.83 % on that switch alone — the two
+> arms' depth planes differ by rel |dZ| mean 0.005 and their normals by 2.55 deg).
+>
+> **Column 2 -> column 3 is a CPU-INTERNAL divergence and it is the biggest term.**
+> The 8-wide GTAO uses `_mm256_rsqrt_ps` with **no Newton-Raphson** for the two
+> horizon cosines; simde lowers that to bare `vrsqrteq_f32` on arm64, ~8 bits.
+> Differencing the CPU against ITSELF (`FDS_SSAO_NOSIMD=1`, the file's own escape
+> hatch) gives 75.85 / 88.29 / 98.00 / 99.83 % — **the same numbers as column 2 to
+> a tenth of a percent**. The shipped path is systematically DARKER than its own
+> scalar reference (AO mean 0.85431 vs 0.85601 at t=4871). Blur off, the
+> difference is exactly integral: 82.60 % bit-identical, 4.94 % -1 bit, 11.79 %
+> +1, 0.65 % +/-2, 0.0037 % non-integer. **This is §12.4's `--deferred_vec`
+> finding in a second kernel.** REPORTED, NOT FIXED — contended file, perf
+> decision on ~40 % of his acceptance frame. Backlog item.
+>
+> **Ruled out, measured:** MSL fast math. New `--slow_math` (fastMathEnabled = NO)
+> moves the arithmetic-only comparison by **three pixels** out of 360 790.
+>
+> **BYTE-NULL, twice over.** ABSOLUTE: the recorded greets acceptance pin
+> reproduces exactly with this diff in — t=5743 `26ad272aaa6cc9050c66e84cdaaf5436`.
+> DIFFERENTIAL (taken first): two DEMO binaries from the identical tree with and
+> without the FDS diff — greets t=5743 `ff2169dfa37317081b60b3d63d0aba49`,
+> t=2845 `7e0dba9dfca9149992e0ef1cf5f25f83` (same recipe minus
+> `--greets-displace`), identical on both. GPU: with `--ssao`
+> off the §11 pose is still `d3a8301a22495c80dfdd5c3f8509f771` — the recorded E6
+> value — even though the normal plane widened `RG16Snorm` -> `RGBA16Snorm` (`.xy`
+> shading normal bit-for-bit, `.zw` the GEOMETRIC normal, because the CPU's SSAO
+> reads geometric normals and this arm only had perturbed ones).
+>
+> **COST** (t=5743, median of 120 after 50 warmup): `ssao` pass 1.94 ms at
+> downscale 1 / 1.57 ms at 2 / 2.04 ms hemisphere; FRAME TOTAL 4.83 -> 5.79 / 5.29 / 6.32 ms.
+>
+
 > ## 2026-08-16z — 16b's LAST THREE CITY ITEMS, ALL PRICED IN ONE ROUND: the `atanf` and the live-water function pointer are **below bar, closed with numbers**; the punt census that refuted the third **found the item that pays** — 61 056 px a pass going scalar because 1512/12 is not a multiple of 8
 >
 > Full write-up: `docs/OPTIMIZATION_BACKLOG.md` **2026-08-16z**; `docs/PERF_STATE.md`
@@ -215,7 +288,6 @@
 > plane-normal ride at ≥90° junctions. Acceptance: his corner cams 5970/5975
 > read as dressed stone without losing 6001/6039's approved arris; the 08-12
 > gap/crack directive still holds at >90° grooves.
-
 > ## 2026-08-16x — THE COLLINEAR-NEEDLE CULL: **the faces two rounds wanted to cull are already free**, and the cull that pays is the SCREEN determinant at the push. Landed default ON, byte-null by construction — **and the frame does not resolve it**. Plus: the greets acceptance pins were never orphaned
 >
 > Two items, two commits. Full write-ups: `docs/OPTIMIZATION_BACKLOG.md`

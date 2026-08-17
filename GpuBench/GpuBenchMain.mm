@@ -345,6 +345,37 @@ const char *kUsage =
     "  --tess_uniform=F  CALIBRATION: force every tessellation factor to F and report the\n"
     "                    vertex count against both hypotheses (deduplicated vs per-corner).\n"
     "                    Settles the hardware's real factor ceiling. Implies --tess_stats.\n"
+    "  --ssao / --ssao_gtao   SCREEN-SPACE AMBIENT OCCLUSION, a PORT of the CPU's\n"
+    "                    FDS/RENDER/DeferredSSAO.cpp. Every flag below carries the FDS\n"
+    "                    flag's OWN name and OWN default, and dashes normalise to\n"
+    "                    underscores as FDS does, so ONE command line drives both\n"
+    "                    renderers: `--deferred --hdr --hdr-linear --ssao --ssao-gtao`\n"
+    "                    means the same thing on DEMO and here. --ssao_gtao implies\n"
+    "                    --ssao. Applied where the CPU applies it: multiplying the\n"
+    "                    LINEAR radiance right after the lighting pass and before\n"
+    "                    flares/cones/transparents/bloom/tonemap (RENDER.CPP:730), and\n"
+    "                    on the MAIN view only -- never in a mirror, order-2 or env\n"
+    "                    probe pass, which is the CPU's !skipVolumetric gate.\n"
+    "  --ssao_downscale=N  compute resolution divisor (CPU default 1)\n"
+    "  --ssao_radius=F --ssao_strength=F --ssao_power=F --ssao_blur=N\n"
+    "  --ssao_gtao_slices=N --ssao_gtao_steps=N --ssao_gtao_thickness=F\n"
+    "  --ssao_samples=N --ssao_bias=F   hemisphere fallback (when --ssao_gtao is off)\n"
+    "  --ssao_dump=PATH  write the AO field AND ITS INPUTS as float32: \"AOF3\" +\n"
+    "                    int32 w + int32 h + w*h AO + w*h view-Z (<0 = sky) + 3*w*h\n"
+    "                    geometric normal. Byte-identical layout to the CPU's own\n"
+    "                    --ssao_dump, so the two arms' AO fields -- and the two arms'\n"
+    "                    AO INPUTS -- can be differenced directly instead of inferred\n"
+    "                    from a lit frame. Implies --ssao. Untimed extra passes.\n"
+    "  --ssao_ref=PATH   LOCALISATION: drive the AO from the CPU dump's depth and\n"
+    "                    normal planes instead of this arm's G-buffer. With it on,\n"
+    "                    every CPU-vs-GPU AO difference is ARITHMETIC; with it off the\n"
+    "                    difference is arithmetic PLUS two rasterisers. The lit frame\n"
+    "                    under it is NOT a valid render -- never use it for an image.\n"
+    "                    NOT PORTED: --ssao_temporal (CPU default is off).\n"
+    "  --slow_math       MEASUREMENT ONLY: compile the Metal library with fast math\n"
+    "                    OFF (Metal's default is ON: approximate divide/sqrt + free FMA\n"
+    "                    contraction). Moves every pixel of every pass; exists so the\n"
+    "                    GTAO sector-boundary residual can be attributed.\n"
     "  --help\n";
 
 }  // namespace
@@ -382,7 +413,49 @@ int main(int argc, const char *argv[]) {
             // still matches instead of falling through to "unknown arg".
             return (a.size() >= n && a.compare(0, n, k) == 0) ? a.c_str() + n : nullptr;
         };
+        // DASH -> UNDERSCORE normalisation, for the --ssao* family only.
+        // FDS does exactly this (FeatureFlags.cpp:284) so `--ssao-gtao` and
+        // `--ssao_gtao` are the same flag there; the whole point of mirroring
+        // the names is that ONE command line drives both renderers, and that
+        // fails on spelling if this arm only accepts one of the two.
+        std::string an = a;
+        for (size_t k = 2; k < an.size(); ++k) if (an[k] == '-') an[k] = '_';
+        auto valn = [&](const char *k) -> const char * {
+            size_t n = std::strlen(k);
+            return (an.size() >= n && an.compare(0, n, k) == 0) ? an.c_str() + n : nullptr;
+        };
         if (a == "--help" || a == "-h") { std::fputs(kUsage, stdout); return 0; }
+        // ---- SSAO / GTAO — the FDS flag names, verbatim --------------------
+        else if (an == "--ssao")                    dopt.ssao = true;
+        else if (an == "--no_ssao")                 dopt.ssao = false;
+        else if (an == "--ssao_gtao")               { dopt.ssao = true; dopt.ssaoGtao = true; }
+        else if (an == "--no_ssao_gtao")            dopt.ssaoGtao = false;
+        else if (const char *v = valn("--ssao_downscale=")) dopt.ssaoDownscale = std::atoi(v);
+        else if (const char *v = valn("--ssao_samples="))   dopt.ssaoSamples = std::atoi(v);
+        else if (const char *v = valn("--ssao_radius="))    dopt.ssaoRadius = float(std::atof(v));
+        else if (const char *v = valn("--ssao_strength="))  dopt.ssaoStrength = float(std::atof(v));
+        else if (const char *v = valn("--ssao_bias="))      dopt.ssaoBias = float(std::atof(v));
+        else if (const char *v = valn("--ssao_power="))     dopt.ssaoPower = float(std::atof(v));
+        else if (const char *v = valn("--ssao_blur="))      dopt.ssaoBlur = std::atoi(v);
+        else if (const char *v = valn("--ssao_gtao_slices=")) dopt.ssaoGtaoSlices = std::atoi(v);
+        else if (const char *v = valn("--ssao_gtao_steps="))  dopt.ssaoGtaoSteps = std::atoi(v);
+        else if (const char *v = valn("--ssao_gtao_thickness=")) dopt.ssaoGtaoThickness = float(std::atof(v));
+        else if (const char *v = valn("--ssao_dump="))      { dopt.ssao = true; dopt.ssaoDumpPath = v; }
+        else if (const char *v = valn("--ssao_ref="))       { dopt.ssao = true; dopt.ssaoRefPath = v; }
+        else if (an == "--slow_math")                       dopt.slowMath = true;
+        // The CPU's --ssao_temporal is NOT ported (its CPU default is 0 and the
+        // reprojection history has no analogue here). Accepted so a shared
+        // command line does not die on it, and LOUD so nobody reads a
+        // non-temporal GPU field as a temporal one.
+        else if (an == "--ssao_temporal" || valn("--ssao_temporal_blend=")) {
+            std::fprintf(stderr, "[SSAO] WARNING: %s is NOT implemented in the GPU arm "
+                                 "(temporal accumulation is not ported); ignoring.\n", a.c_str());
+        }
+        else if (an == "--ssao_debug") {
+            std::fprintf(stderr, "[SSAO] --ssao_debug is not a GPU-arm mode; use "
+                                 "--ssao_dump=PATH, which writes the same AO field as "
+                                 "float32 instead of an 8-bit greyscale.\n");
+        }
         else if (const char *v = val("--fld="))     { static std::string s; s = v; opt.fldPath = s.c_str(); }
         else if (const char *v = val("--t="))       { opt.demoT = std::atoi(v); opt.demoTExplicit = true; }
         else if (const char *v = val("--cam="))     { opt.camPose = v; camExplicit = true; }

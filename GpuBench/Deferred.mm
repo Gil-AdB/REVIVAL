@@ -115,6 +115,25 @@ struct ShadowUniforms {
     float projScale, pad1;
 };
 
+// SSAO/GTAO. Mirror of `struct SsaoUniforms` in shaders/deferred.metal; the
+// trig tables are filled HOST-SIDE from the CPU pass's own expressions
+// (buildRot / buildSliceTrig / buildKernel in FDS/RENDER/DeferredSSAO.cpp) so
+// the float that reached cosf on the CPU is the float this shader reads.
+struct SsaoUniforms {
+    int32_t W, H, lowW, lowH;
+    int32_t down, halfPx, slices, steps;
+    int32_t nSamp, blurR, gtao, rotPhase;
+    float cx, cy, fovX, fovY;
+    float dza, dzb;
+    float radius, strength;
+    float bias, power, thickness, invDepthK;
+    float invDown, kSec, r2max, pad0;
+    int32_t refGbuf, pad1, pad2, pad3;
+    float rot[16][2];
+    float slice[128][2];
+    float kern[64][4];
+};
+
 struct BloomUniforms {
     float srcSize[2];
     float dstSize[2];
@@ -310,8 +329,21 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         std::fprintf(stderr, "[DEFERRED] cannot read %s\n", shaderPath.c_str());
         return false;
     }
+    // MEASUREMENT-ONLY (--slow_math). Metal compiles source with fast math ON by
+    // default: approximate divide and sqrt, and free FMA contraction. That is
+    // fine for a lit frame and NOT fine when a quantity is compared against a
+    // CPU kernel whose divides and sqrts are IEEE — see the GTAO sector-flip
+    // analysis in docs/SHADING_CONTRACT.md. Turning it off changes EVERY pixel
+    // of EVERY pass, so it is a diagnostic and never a default; the recorded
+    // md5s in this arm are all fast-math ones.
+    MTLCompileOptions *copt = [MTLCompileOptions new];
+    if (opt.slowMath) {
+        copt.fastMathEnabled = NO;
+        std::fprintf(stderr, "[DEFERRED] --slow_math: MSL fast math OFF "
+                             "(DIAGNOSTIC — every pass's numerics move)\n");
+    }
     id<MTLLibrary> lib = [dev newLibraryWithSource:@(src.c_str())
-                                           options:[MTLCompileOptions new]
+                                           options:copt
                                              error:&err];
     if (!lib) {
         std::fprintf(stderr, "[DEFERRED] MSL compile failed: %s\n",
@@ -335,7 +367,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     gpd.fragmentFunction = [lib newFunctionWithName:@"fs_gbuffer"];
     gpd.vertexDescriptor = vd;
     gpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    gpd.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
+    gpd.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Snorm;
     gpd.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
     gpd.colorAttachments[3].pixelFormat = MTLPixelFormatRGBA8Uint;  // mirror id, metalness, env probe, F0
     gpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
@@ -441,6 +473,43 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         if (!psoCones) { std::fprintf(stderr, "[DEFERRED] cone pso: %s\n",
                                       [[e localizedDescription] UTF8String]); return false; }
     }
+    // ---- SSAO / GTAO (a port of FDS/RENDER/DeferredSSAO.cpp) ---------------
+    // compute + denoise write RG32Float (.r = AO, .g = the cell's view Z, < 0 =
+    // sky) — the CPU's aoRaw[] and aoZ[] planes, paired because the denoise and
+    // the upsample both want them together.
+    //
+    // THE APPLY IS A BLEND, NOT A PING-PONG. The CPU does `h[0..2] *= ao` in
+    // place over g_hdrBuf; the exact analogue here is a full-screen draw with
+    // srcRGB = DestinationColor and dstRGB = Zero, which evaluates to
+    // dst.rgb * ao.rgb with no copy of the HDR target. The alpha (coverage)
+    // lane is preserved by srcA = Zero / dstA = One, matching the CPU's "lane 3
+    // is left alone".
+    id<MTLRenderPipelineState> psoSsao      = makeFsPso(@"fs_ssao",      MTLPixelFormatRG32Float);
+    id<MTLRenderPipelineState> psoSsaoBlur  = makeFsPso(@"fs_ssao_blur", MTLPixelFormatRG32Float);
+    // Same fragment function, two pipelines: the blended apply into hdrTex, and
+    // an UNBLENDED resolve into an R32Float plane for --ssao_dump. One shader,
+    // so the dumped field is by construction the field the frame applied.
+    id<MTLRenderPipelineState> psoSsaoResolve = makeFsPso(@"fs_ssao_apply", MTLPixelFormatRGBA32Float);
+    id<MTLRenderPipelineState> psoSsaoNorm    = makeFsPso(@"fs_ssao_norm",  MTLPixelFormatRGBA32Float);
+    id<MTLRenderPipelineState> psoSsaoApply;
+    {
+        MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+        p.vertexFunction = fn_(@"vs_fullscreen");
+        p.fragmentFunction = fn_(@"fs_ssao_apply");
+        p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        p.colorAttachments[0].blendingEnabled = YES;
+        p.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        p.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorDestinationColor;
+        p.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        p.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError *e = nil;
+        psoSsaoApply = [dev newRenderPipelineStateWithDescriptor:p error:&e];
+        if (!psoSsaoApply) { std::fprintf(stderr, "[DEFERRED] ssao-apply pso: %s\n",
+                                          [[e localizedDescription] UTF8String]); return false; }
+    }
+
     id<MTLRenderPipelineState> psoBloomBright = makeFsPso(@"fs_bloom_bright", MTLPixelFormatRGBA16Float);
     id<MTLRenderPipelineState> psoBloomBlur   = makeFsPso(@"fs_bloom_blur",   MTLPixelFormatRGBA16Float);
     id<MTLRenderPipelineState> psoBloomAdd;
@@ -628,7 +697,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         return [dev newTextureWithDescriptor:td];
     };
     id<MTLTexture> gAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
-    id<MTLTexture> gNormal = mkTarget(MTLPixelFormatRG16Snorm,   MTLStorageModePrivate);
+    id<MTLTexture> gNormal = mkTarget(MTLPixelFormatRGBA16Snorm,   MTLStorageModePrivate);
     id<MTLTexture> gParams = mkTarget(MTLPixelFormatRGBA8Unorm,  MTLStorageModePrivate);
     // RGBA8Uint, not RG8Uint: .x mirror panel id, .y metalness*255, and since
     // the env-reflection work .z the 1-based ENV PROBE index and .w F0*255.
@@ -637,6 +706,89 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     id<MTLTexture> hdrTex  = mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate);
     id<MTLTexture> ldrTex  = mkTarget(MTLPixelFormatBGRA8Unorm,  MTLStorageModePrivate);
     id<MTLTexture> stageTex = mkTarget(MTLPixelFormatBGRA8Unorm, MTLStorageModeShared);
+
+    // ---- SSAO planes -------------------------------------------------------
+    // lowW/lowH are the CPU's own ceil-divide (DeferredSSAO.cpp:201-202), so
+    // --ssao_downscale=N covers the frame identically on both arms.
+    const int ssaoDown = std::max(1, std::min(4, opt.ssaoDownscale));
+    const int ssaoLowW = (W + ssaoDown - 1) / ssaoDown;
+    const int ssaoLowH = (H + ssaoDown - 1) / ssaoDown;
+    id<MTLTexture> ssaoA = nil, ssaoB = nil, ssaoDumpTex = nil, ssaoDumpNrm = nil;
+    // --ssao_ref: the CPU's own AO inputs, uploaded. Always allocated (1x1 when
+    // unused) because a Metal draw must bind every texture its function
+    // declares.
+    id<MTLTexture> ssaoZRef = nil, ssaoNRef = nil;
+    bool ssaoRefLoaded = false;
+    if (opt.ssao) {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG32Float
+                                                              width:NSUInteger(ssaoLowW)
+                                                             height:NSUInteger(ssaoLowH)
+                                                          mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        ssaoA = [dev newTextureWithDescriptor:td];
+        ssaoB = [dev newTextureWithDescriptor:td];
+        if (!opt.ssaoDumpPath.empty()) {
+            ssaoDumpTex = mkTarget(MTLPixelFormatRGBA32Float, MTLStorageModeShared);
+            ssaoDumpNrm = mkTarget(MTLPixelFormatRGBA32Float, MTLStorageModeShared);
+        }
+    }
+    {
+        auto mkPlane = [&](MTLPixelFormat f, int w, int h) -> id<MTLTexture> {
+            MTLTextureDescriptor *td =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f
+                                                                  width:NSUInteger(w)
+                                                                 height:NSUInteger(h)
+                                                              mipmapped:NO];
+            td.usage = MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModeShared;
+            return [dev newTextureWithDescriptor:td];
+        };
+        if (opt.ssao && !opt.ssaoRefPath.empty()) {
+            // AOF3: "AOF3" + int32 w + int32 h + w*h AO + w*h viewZ + 3*w*h normal.
+            FILE *f = std::fopen(opt.ssaoRefPath.c_str(), "rb");
+            char magic[4] = {0}; int32_t rw = 0, rh = 0;
+            if (f && std::fread(magic, 1, 4, f) == 4 &&
+                std::memcmp(magic, "AOF3", 4) == 0 &&
+                std::fread(&rw, sizeof(int32_t), 1, f) == 1 &&
+                std::fread(&rh, sizeof(int32_t), 1, f) == 1 && rw == W && rh == H) {
+                const size_t n = size_t(W) * size_t(H);
+                std::vector<float> skipAo(n), zp(n), np(n * 3);
+                std::fread(skipAo.data(), sizeof(float), n, f);
+                std::fread(zp.data(), sizeof(float), n, f);
+                std::fread(np.data(), sizeof(float), n * 3, f);
+                std::vector<float> np4(n * 4, 0.0f);
+                for (size_t i = 0; i < n; ++i) {
+                    np4[i * 4 + 0] = np[i * 3 + 0];
+                    np4[i * 4 + 1] = np[i * 3 + 1];
+                    np4[i * 4 + 2] = np[i * 3 + 2];
+                }
+                ssaoZRef = mkPlane(MTLPixelFormatR32Float, W, H);
+                ssaoNRef = mkPlane(MTLPixelFormatRGBA32Float, W, H);
+                [ssaoZRef replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(W), NSUInteger(H))
+                            mipmapLevel:0 withBytes:zp.data()
+                            bytesPerRow:size_t(W) * sizeof(float)];
+                [ssaoNRef replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(W), NSUInteger(H))
+                            mipmapLevel:0 withBytes:np4.data()
+                            bytesPerRow:size_t(W) * 4 * sizeof(float)];
+                ssaoRefLoaded = true;
+                std::fprintf(stderr,
+                    "[SSAO] --ssao_ref: driving the AO from the CPU's OWN depth + "
+                    "geometric normal planes (%s, %dx%d). The lit frame under this "
+                    "is NOT a valid render — it exists to separate arithmetic from "
+                    "G-buffer inputs.\n", opt.ssaoRefPath.c_str(), rw, rh);
+            } else {
+                std::fprintf(stderr,
+                    "[SSAO] --ssao_ref: could not read %s as an AOF3 plane at %dx%d "
+                    "(got '%.4s' %dx%d) — ignoring.\n",
+                    opt.ssaoRefPath.c_str(), W, H, magic, rw, rh);
+            }
+            if (f) std::fclose(f);
+        }
+        if (!ssaoZRef) ssaoZRef = mkPlane(MTLPixelFormatR32Float, 1, 1);
+        if (!ssaoNRef) ssaoNRef = mkPlane(MTLPixelFormatRGBA32Float, 1, 1);
+    }
     // Transparent peel scratch: the per-layer resolved depth, and the previous
     // layer's resolved depth (the CPU's g_xparPeelFloor). Both are depth
     // textures so the resolve can render into them AND the shader can read them.
@@ -673,7 +825,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         for (int i = 0; i < nMirrors; ++i)
             reflHdr.push_back(mkTarget(MTLPixelFormatRGBA16Float, MTLStorageModePrivate));
         mAlbedo = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
-        mNormal = mkTarget(MTLPixelFormatRG16Snorm,    MTLStorageModePrivate);
+        mNormal = mkTarget(MTLPixelFormatRGBA16Snorm,    MTLStorageModePrivate);
         mParams = mkTarget(MTLPixelFormatRGBA8Unorm,   MTLStorageModePrivate);
         mMirror = mkTarget(MTLPixelFormatRGBA8Uint,    MTLStorageModePrivate);
         mDepth  = mkTarget(MTLPixelFormatDepth32Float, MTLStorageModePrivate);
@@ -718,7 +870,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
         for (int i = 0; i < nMirrors; ++i)
             refl2.push_back(mkTargetWH(MTLPixelFormatRGBA16Float, W2, H2));
         m2Albedo = mkTargetWH(MTLPixelFormatRGBA8Unorm,   W2, H2);
-        m2Normal = mkTargetWH(MTLPixelFormatRG16Snorm,    W2, H2);
+        m2Normal = mkTargetWH(MTLPixelFormatRGBA16Snorm,    W2, H2);
         m2Params = mkTargetWH(MTLPixelFormatRGBA8Unorm,   W2, H2);
         m2Mirror = mkTargetWH(MTLPixelFormatRGBA8Uint,    W2, H2);
         m2Depth  = mkTargetWH(MTLPixelFormatDepth32Float, W2, H2);
@@ -765,7 +917,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             envCubes.push_back([dev newTextureWithDescriptor:td]);
         }
         eAlbedo = mkSquare(MTLPixelFormatRGBA8Unorm,   envRes);
-        eNormal = mkSquare(MTLPixelFormatRG16Snorm,    envRes);
+        eNormal = mkSquare(MTLPixelFormatRGBA16Snorm,    envRes);
         eParams = mkSquare(MTLPixelFormatRGBA8Unorm,   envRes);
         eMirror = mkSquare(MTLPixelFormatRGBA8Uint,    envRes);
         eDepth  = mkSquare(MTLPixelFormatDepth32Float, envRes);
@@ -933,6 +1085,73 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     // gamma composite and its tonemap does NOT sqrt-encode.
     fu.hdrMode[0] = opt.hdrLinear ? 1.0f : 0.0f;
     fu.hdrMode[1] = fu.hdrMode[2] = fu.hdrMode[3] = 0.0f;
+
+    // ---- SSAO uniforms, and the THREE TABLES the CPU builds per frame ------
+    // Every expression below is copied out of FDS/RENDER/DeferredSSAO.cpp, not
+    // re-derived: buildRot() (:111), buildSliceTrig() (:132) and buildKernel()
+    // (:72). The point of tabling them host-side is not speed — it is that the
+    // GPU then consumes the SAME 32 azimuths the CPU's loop consumed, computed
+    // by the same libm on the same machine, so a slice-direction mismatch
+    // cannot be the explanation for any residual.
+    SsaoUniforms su{};
+    {
+        su.W = W; su.H = H; su.lowW = ssaoLowW; su.lowH = ssaoLowH;
+        su.down = ssaoDown; su.halfPx = ssaoDown >> 1;
+        su.slices = std::max(1, std::min(8, opt.ssaoGtaoSlices));
+        su.steps  = std::max(1, std::min(16, opt.ssaoGtaoSteps));
+        su.nSamp  = std::max(1, std::min(64, opt.ssaoSamples));
+        su.blurR  = std::max(0, std::min(8, opt.ssaoBlur));
+        su.gtao   = opt.ssaoGtao ? 1 : 0;
+        su.rotPhase = 0;                       // --ssao_temporal is not ported
+        su.refGbuf = ssaoRefLoaded ? 1 : 0;
+        su.cx = scene.camera.cntrEX; su.cy = scene.camera.cntrEY;
+        su.fovX = scene.camera.perspX; su.fovY = scene.camera.perspY;
+        su.dza = fu.dza; su.dzb = fu.dzb;
+        su.radius = opt.ssaoRadius; su.strength = opt.ssaoStrength;
+        su.bias = opt.ssaoBias; su.power = opt.ssaoPower;
+        su.thickness = opt.ssaoGtaoThickness;
+        const float depthSig = std::max(su.radius, 1.0f);
+        su.invDepthK = 1.0f / (4.0f * depthSig * depthSig);
+        su.invDown = 1.0f / float(su.down);
+        su.kSec = 32.0f / 3.14159265f;
+        su.r2max = su.radius * su.radius;
+        for (int i = 0; i < 16; ++i) {         // buildRot()
+            float f = float(i) * 0.6180339887f; f -= std::floor(f);
+            const float a = f * 6.2831853f;
+            su.rot[i][0] = std::cos(a); su.rot[i][1] = std::sin(a);
+        }
+        for (int s = 0; s < su.slices; ++s)    // buildSliceTrig()
+            for (int ri = 0; ri < 16; ++ri) {
+                const float jit = su.rot[ri][0] * 0.5f + 0.5f;
+                const float phi = (float(s) + jit) * (3.14159265f / float(su.slices));
+                su.slice[s * 16 + ri][0] = std::cos(phi);
+                su.slice[s * 16 + ri][1] = std::sin(phi);
+            }
+        const float golden = 2.39996323f;      // buildKernel()
+        for (int i = 0; i < su.nSamp; ++i) {
+            const float u = (float(i) + 0.5f) / float(su.nSamp);
+            const float cosT = std::sqrt(1.0f - u), sinT = std::sqrt(u);
+            const float phi = float(i) * golden;
+            const float t = float(i) / float(su.nSamp);
+            const float scale = 0.1f + 0.9f * t * t;
+            su.kern[i][0] = sinT * std::cos(phi) * scale;
+            su.kern[i][1] = sinT * std::sin(phi) * scale;
+            su.kern[i][2] = cosT * scale;
+        }
+        if (opt.ssao)
+            std::fprintf(stderr,
+                "[SSAO] %dx%d /%d (%dx%d), %s, radius=%.2f strength=%.2f power=%.2f "
+                "blur=%d%s\n", W, H, su.down, su.lowW, su.lowH,
+                su.gtao ? "GTAO+bitmask" : "hemisphere", su.radius, su.strength,
+                su.power, su.blurR,
+                su.gtao ? "" : "");
+        if (opt.ssao && su.gtao)
+            std::fprintf(stderr, "[SSAO] gtao slices=%d steps=%d thickness=%.2f\n",
+                         su.slices, su.steps, su.thickness);
+        else if (opt.ssao)
+            std::fprintf(stderr, "[SSAO] hemisphere samples=%d bias=%.3f\n",
+                         su.nSamp, su.bias);
+    }
     fu.diffuseFactor = 1.0f;
     fu.specularFactor = 1.0f;
     fu.lightRangeScale = opt.lightRangeScale;
@@ -1509,7 +1728,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                                                               : @"fs_gbuffer");
             p.vertexDescriptor = tvd;
             p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-            p.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Snorm;
+            p.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Snorm;
             p.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
             p.colorAttachments[3].pixelFormat = MTLPixelFormatRGBA8Uint;
             p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
@@ -1625,8 +1844,9 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
     const bool haveStageCounters =
         tsSet && [dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary];
 
-    // shadow, gbuffer, lighting, tonemap, mirror, tessellation-factor compute
-    const int kPasses = 7;
+    // shadow, gbuffer, lighting, tonemap, mirror, tessellation-factor compute,
+    // mirror2, ssao
+    const int kPasses = 8;
     id<MTLCounterSampleBuffer> sampleBuf = nil;
     if (haveStageCounters) {
         MTLCounterSampleBufferDescriptor *d = [MTLCounterSampleBufferDescriptor new];
@@ -3514,6 +3734,47 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
             [enc endEncoding];
         }
 
+        // --- pass 2a: SSAO / GTAO ---
+        // PLACEMENT IS THE CPU'S: RENDER.CPP:730 runs Render_SSAO immediately
+        // after Render_DeferredLighting and BEFORE the skybox / fog / cones /
+        // transparents / bloom / tonemap, and it is MAIN-PASS ONLY
+        // (`!skipVolumetric`, RENDER.CPP:729) — which is why the mirror,
+        // order-2 and env-probe lighting passes above deliberately do not get
+        // one. So AO occludes the opaque radiance and nothing that is added
+        // after it, exactly as the CPU's flag doc states.
+        if (opt.ssao && !viz && opt.stages >= 2) {
+            auto ssaoDraw = [&](id<MTLRenderPipelineState> pso, id<MTLTexture> dst,
+                                id<MTLTexture> src0, id<MTLTexture> src1,
+                                bool clear, int counterIdx) {
+                MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp.colorAttachments[0].texture = dst;
+                rp.colorAttachments[0].loadAction = clear ? MTLLoadActionClear
+                                                          : MTLLoadActionLoad;
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(1, -1, 0, 1);
+                if (counterIdx >= 0) attachCounters(rp, counterIdx);
+                id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                [e setRenderPipelineState:pso];
+                [e setFragmentBytes:&su length:sizeof(su) atIndex:1];
+                [e setFragmentTexture:src0 atIndex:0];
+                if (src1) [e setFragmentTexture:src1 atIndex:1];
+                [e setFragmentTexture:ssaoZRef atIndex:2];
+                [e setFragmentTexture:ssaoNRef atIndex:3];
+                [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [e endEncoding];
+            };
+            ssaoDraw(psoSsao, ssaoA, gNormal, gDepth, true, 7);
+            id<MTLTexture> aoField = ssaoA;
+            if (su.blurR > 0) { ssaoDraw(psoSsaoBlur, ssaoB, ssaoA, nil, true, -1); aoField = ssaoB; }
+            ssaoDraw(psoSsaoApply, hdrTex, aoField, gDepth, false, -1);
+            // --ssao_dump: the SAME fragment function into an R32Float plane,
+            // unblended. Untimed and outside the counter range.
+            if (ssaoDumpTex) {
+                ssaoDraw(psoSsaoResolve, ssaoDumpTex, aoField, gDepth, true, -1);
+                ssaoDraw(psoSsaoNorm, ssaoDumpNrm, gNormal, nil, true, -1);
+            }
+        }
+
         // --- pass 2b: flare sprites, additive into the HDR target ---
         // BRACES MATTER HERE. They were missing until the particle pass was
         // measured against a real dump: `encodePcl` sat outside the `if` and so
@@ -4253,7 +4514,7 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
 
     const char *passNames[kPasses] = {"shadow-bake", "gbuffer", "lighting",
                                       "tonemap", "mirror", "tess-factors",
-                                      "mirror2"};
+                                      "mirror2", "ssao"};
     std::vector<double> frameMs;
     std::vector<std::vector<double>> passMs(kPasses);
 
@@ -4333,6 +4594,49 @@ bool RunDeferred(Scene &scene, const DeferredOptions &opt,
                fromRegion:MTLRegionMake2D(0, 0, NSUInteger(W), NSUInteger(H)) mipmapLevel:0];
         if (WritePPM(opt.outPath, pix.data(), W, H, rowBytes))
             std::fprintf(stderr, "[DEFERRED] wrote %s\n", opt.outPath.c_str());
+    }
+    // --ssao_dump: the full-res AO multiplier + the view-Z coverage plane, in
+    // the CPU's own file shape ("AOF2" + int32 w + int32 h + w*h float32 AO +
+    // w*h float32 view Z, < 0 == sky; row major, top-left origin). Both arms
+    // emit the identical layout so the fields can be differenced without either
+    // side re-deriving the other's.
+    if (ssaoDumpTex && !opt.ssaoDumpPath.empty()) {
+        const size_t rowBytes = size_t(W) * 4 * sizeof(float);
+        const size_t n = size_t(W) * size_t(H);
+        std::vector<float> rgba(n * 4), nrgba(n * 4);
+        [ssaoDumpTex getBytes:rgba.data() bytesPerRow:rowBytes
+                   fromRegion:MTLRegionMake2D(0, 0, NSUInteger(W), NSUInteger(H))
+                  mipmapLevel:0];
+        [ssaoDumpNrm getBytes:nrgba.data() bytesPerRow:rowBytes
+                   fromRegion:MTLRegionMake2D(0, 0, NSUInteger(W), NSUInteger(H))
+                  mipmapLevel:0];
+        std::vector<float> ao(n), zp(n), np(n * 3);
+        for (size_t i = 0; i < n; ++i) {
+            ao[i] = rgba[i * 4]; zp[i] = rgba[i * 4 + 3];
+            np[i * 3 + 0] = nrgba[i * 4 + 0];
+            np[i * 3 + 1] = nrgba[i * 4 + 1];
+            np[i * 3 + 2] = nrgba[i * 4 + 2];
+        }
+        if (FILE *f = std::fopen(opt.ssaoDumpPath.c_str(), "wb")) {
+            const int32_t hdr[2] = {int32_t(W), int32_t(H)};
+            std::fwrite("AOF3", 1, 4, f);
+            std::fwrite(hdr, sizeof(int32_t), 2, f);
+            std::fwrite(ao.data(), sizeof(float), n, f);
+            std::fwrite(zp.data(), sizeof(float), n, f);
+            std::fwrite(np.data(), sizeof(float), n * 3, f);
+            std::fclose(f);
+            double sum = 0; size_t occ = 0, cov = 0;
+            for (size_t i = 0; i < n; ++i)
+                if (zp[i] >= 0.0f) { ++cov; sum += ao[i]; if (ao[i] < 0.9f) ++occ; }
+            std::fprintf(stderr,
+                "[SSAO] wrote %s (%dx%d f32)  covered=%.1f%%  meanAO(covered)=%.4f  "
+                "ao<0.9=%.1f%%\n", opt.ssaoDumpPath.c_str(), W, H,
+                100.0 * double(cov) / double(n), cov ? sum / double(cov) : 1.0,
+                cov ? 100.0 * double(occ) / double(cov) : 0.0);
+        } else {
+            std::fprintf(stderr, "[SSAO] could not open %s for writing\n",
+                         opt.ssaoDumpPath.c_str());
+        }
     }
     return true;
 }
