@@ -3134,6 +3134,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// Band-inner verts (the a2/b2 the band pre-split inserts) — the ladder
 		// pass below needs to recognize a strip's inner side.
 		std::vector<char> bandInner(nOrig, 0);
+		// v2 STRIP-INNER CHORD PINS (--greets_displace_border_v2): {node, lo, hi}.
+		// The lockstep's inner node is the MIDPOINT of its parent strip edge and
+		// stays one: re-imposed after the displacement loop and again after the
+		// fold relax, so the strip's inner boundary is exactly the segment the
+		// un-split interior face still spans and the T-junction cannot open.
+		std::vector<std::array<uint32_t,3>> v2Chord;
 		for (uint32_t i = 0; i < nOrig; ++i)
 			if (origNonTargetVert[i] || coincidentOrig[i]) pinnedZero[i] = 1;
 		// canonical shared edge vertex (keyed by min-corner, max-corner, param bits)
@@ -3909,25 +3915,93 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// survive the split. Faces already narrower than 1.6x the band are
 			// left to the recursion unchanged.
 			constexpr float kBandWidth = 0.02f;   // world units: the RETURN FACE width (rung 2; was 0.10)
+			// ── v2 BAND PAIRING (--greets_displace_border_v2, docs/STONE_BORDER_REORDER
+			// stage 1). The pre-split already knows, for every border segment it
+			// bands, which two inner verts it planted and which three faces it left
+			// behind; it just threw that away. Record it, keyed by the border
+			// SEGMENT: the design sketch says (vert, authored edge) -> inner, but a
+			// border STATION shared by two banded faces has TWO inner partners (both
+			// at kBandWidth perpendicular offset, at different positions ALONG the
+			// border, because each rides toward its own face's opposite corner), so
+			// only the segment names one pair. fT1 = the border band tri (bA,bB,iB),
+			// fT2 = the return band tri (bA,iB,iA), fT3 = the interior tri across the
+			// band's inner edge (iA,iB,*). The densification below splits all three
+			// in lockstep.
+			const bool borderV2 = fds::FeatureFlags::greets_displace_border_v2();
+			struct BandPair { uint32_t bA, bB, iA, iB, fT1, fT2, fT3; };
+			std::map<uint64_t, BandPair> bandPair;
+			auto bpKey = [](uint32_t x, uint32_t y) -> uint64_t {
+				return (uint64_t(std::min(x,y)) << 32) | uint64_t(std::max(x,y)); };
 			// Wrapped in a lambda so the ladder arm can re-run it AFTER the
 			// profile densification: the end-course borders only become freed
 			// there, and fans born there need banding before the ladder pass.
 			auto runBandPreSplit = [&]() -> int {
-				int nBand = 0;
+				int nBand = 0, nBandEnd = 0;
 				bool didBand = true;
 				for (int pass = 0; didBand && pass < 8; ++pass) {
 					didBand = false;
 					const size_t nf = faces.size();
+					// v2 END-COURSE banding needs to know a border edge from an
+					// interior one that happens to run parallel to it: single use
+					// among TARGET faces is that test, and it is the same rule the
+					// authored-border classification itself uses. Rebuilt per pass
+					// because the pass before it changed the face list.
+					std::map<uint64_t,int> tgtEdgeUse;
+					if (borderV2) {
+						for (size_t f = 0; f < faces.size(); ++f) {
+							if (!(faces[f].Txtr && faces[f].Txtr->Name &&
+							      !std::strcmp(faces[f].Txtr->Name, matName))) continue;
+							for (int q = 0; q < 3; ++q)
+								++tgtEdgeUse[bpKey(fIdx[f][q], fIdx[f][(q+1)%3])];
+						}
+					}
 					for (size_t i = 0; i < nf; ++i) {
 						if (!(faces[i].Txtr && faces[i].Txtr->Name &&
 						      !std::strcmp(faces[i].Txtr->Name, matName))) continue;
 						for (int k = 0; k < 3; ++k) {
 							const uint32_t a = fIdx[i][k], b = fIdx[i][(k+1)%3], c = fIdx[i][(k+2)%3];
 							if (a >= recessOnly.size() || b >= recessOnly.size()) continue;
-							if (!recessOnly[a] || !recessOnly[b]) continue;
 							if (a >= freeEdgeKA.size() || b >= freeEdgeKA.size()) continue;
-							if (!freeEdgeKA[a] || freeEdgeKA[a] != freeEdgeKA[b] ||
-							    freeEdgeKB[a] != freeEdgeKB[b]) continue;   // same authored edge only
+							const bool fa = recessOnly[a] && freeEdgeKA[a];
+							const bool fb = recessOnly[b] && freeEdgeKA[b];
+							bool endCourse = false;
+							if (fa && fb && freeEdgeKA[a] == freeEdgeKA[b] &&
+							    freeEdgeKB[a] == freeEdgeKB[b]) {
+								// same authored edge — the shipping rule, unchanged
+							} else if (borderV2 && (fa != fb)) {
+								// v2 END COURSE: the corner's first/last course. Its
+								// far end is the authored line END (never freed: the
+								// break-vert pass needs a freed neighbour on BOTH
+								// sides) or a vert the abut veto pinned, so the
+								// shipping rule leaves it unbanded AND undensified —
+								// which is the 667 px punch-through floor the rig
+								// measures on every arm. Band it so stage 3 has a
+								// quad to split inside; without the band the split
+								// makes the mega-fans that killed the standalone
+								// one-freed variant (green x20).
+								const uint32_t fr = fa ? a : b, ot = fa ? b : a;
+								if (ot < recessOnly.size() && recessOnly[ot]) continue;
+								// the far end must be a real line END — an authored corner end
+								// or a seam-weld-merged interior vert. NOT a band-inner node
+								// this pass itself planted (that is a cascade, not a course),
+								// and NOT a vert the abut veto PINNED: a pinned end means there
+								// really IS a far side there, and densifying into it frees
+								// midpoints that recess away from it. Measured at t=5968: with
+								// pinned ends allowed, a 182 px black slit opens along the
+								// wall/floor junction at x 1750-1920 that no other arm has.
+								if (ot < bandInner.size() && bandInner[ot]) continue;
+								if (ot < pinnedZero.size() && pinnedZero[ot]) continue;
+								auto ue = tgtEdgeUse.find(bpKey(a,b));
+								if (ue == tgtEdgeUse.end() || ue->second != 1) continue;
+								Vector d = freeEdgeDir[fr];
+								const float dl = std::sqrt(d.x*d.x+d.y*d.y+d.z*d.z);
+								const Vector &Pf = verts[fr].Pos, &Po = verts[ot].Pos;
+								const float qx=Po.x-Pf.x, qy=Po.y-Pf.y, qz=Po.z-Pf.z;
+								const float ql = std::sqrt(qx*qx+qy*qy+qz*qz);
+								if (dl < 1e-9f || ql < 1e-9f) continue;
+								if (std::fabs((qx*d.x+qy*d.y+qz*d.z)/(dl*ql)) < 0.98f) continue;
+								endCourse = true;
+							} else continue;
 							const Vector A = verts[a].Pos, B = verts[b].Pos, C = verts[c].Pos;
 							const float ex=B.x-A.x, ey=B.y-A.y, ez=B.z-A.z;
 							const float el2 = ex*ex+ey*ey+ez*ez;
@@ -3936,7 +4010,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							const float t0 = (cxr*ex+cyr*ey+czr*ez)/el2;
 							const float px=cxr-t0*ex, py=cyr-t0*ey, pz=czr-t0*ez;
 							const float hC = std::sqrt(px*px+py*py+pz*pz);
-							if (hC <= kBandWidth*1.6f) continue;   // band already narrow
+							// One band per SEGMENT: the pairing is its own stop condition, so a
+							// band tri is never re-banded on a later pass (without it the pass
+							// loop runs away — measured 6 078 bands against 94 real ones).
+							if (borderV2 && bandPair.count(bpKey(a,b))) continue;
+							if (hC <= kBandWidth*1.6f) continue;   // band already narrow — under
+							                                       // v2 the QUAD-PAIR pass below
+							                                       // adopts the cell it already is
 							const float t = kBandWidth / hC;       // param along s->c
 							// insert a vert on side edge (s,c); if that edge is itself a
 							// qualifying border edge, the new vert subdivides it and must
@@ -3996,8 +4076,18 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							// face i becomes the border band tri (a,b,b2)
 							setUV(faces[i],(k+2)%3,ub2,vb2);
 							fIdx[i][(k+2)%3]=b2;
+							const uint32_t fBase = uint32_t(faces.size());
 							faces.push_back(f1); fIdx.push_back(i1); faceFromEdge.push_back(faceFromEdge[i]);
 							faces.push_back(f2); fIdx.push_back(i2); faceFromEdge.push_back(faceFromEdge[i]);
+							if (borderV2) {
+								// stage 1: remember the pair this segment now owns.
+								// (a,b) may already have a pairing if a previous pass
+								// banded the same segment from the other side — the
+								// later one is the strip actually attached to it.
+								bandPair[bpKey(a,b)] = BandPair{ a, b, a2, b2,
+									uint32_t(i), fBase, fBase + 1u };
+								if (endCourse) ++nBandEnd;
+							}
 							++nBand; didBand = true;
 							break;   // face i's edges changed; rescan
 						}
@@ -4005,18 +4095,149 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				}
 				if (nBand)
 					std::fprintf(stderr, "[STONE] '%s' border band pre-split: %d faces banded "
-						"at width %.2f (fan bound)\n", matName, nBand, kBandWidth);
+						"at width %.2f (fan bound)%s\n", matName, nBand, kBandWidth,
+						nBandEnd ? " [v2: incl. end courses]" : "");
+				if (borderV2 && nBandEnd)
+					std::fprintf(stderr, "[STONE-V2] '%s': %d END-COURSE segments banded "
+						"(one freed endpoint, collinear single-use border edge) — the "
+						"unwelded first/last course now has a lockstep quad to split\n",
+						matName, nBandEnd);
 				return nBand;
 			};
 			runBandPreSplit();
-			// ── ladder arm precondition (--greets_displace_band_ladder): FREE the
-			// authored interior BREAK verts. An authored border vert with freed
-			// same-line neighbours on both sides (the segment endpoints of a
+			// ── v2 QUAD PAIRING (stage 1b) ───────────────────────────────────────
+			// The pre-split only bands a border face WIDER than 1.6x the band, and
+			// on real content most border faces are not: the edge-aligned
+			// tessellation lands a groove shoulder within a few hundredths of the
+			// border, so the border cell is already a thin strip. Measured on the
+			// corner rig, every corner face runs hC 0.0146-0.0293 against a 0.032
+			// threshold, so 94 of ~700 segments carried a pairing and 2 178 splits
+			// fell back to fans. Sub-banding those faces anyway was tried and is
+			// WORSE (rig: 3 443/3 458 in lockstep but 0.007-deep strips, flips 492 ->
+			// 9 700, green 667/156 -> 667/662): a strip that thin inverts under any
+			// relief at all. So adopt the cell the face ALREADY sits in: the border
+			// face plus its neighbour across one of the two side edges form the
+			// strip's quad, and its far edge is the inner edge the lockstep splits.
+			// Two diagonals are possible; the second is re-cut onto the first so one
+			// restructure serves both.
+			if (borderV2) {
+				std::map<uint64_t, std::vector<uint32_t>> eF;
+				for (size_t f = 0; f < faces.size(); ++f) {
+					if (!(faces[f].Txtr && faces[f].Txtr->Name &&
+					      !std::strcmp(faces[f].Txtr->Name, matName))) continue;
+					for (int q = 0; q < 3; ++q) eF[bpKey(fIdx[f][q], fIdx[f][(q+1)%3])].push_back(uint32_t(f));
+				}
+				auto otherFace = [&](uint64_t key, uint32_t self) -> uint32_t {
+					auto it = eF.find(key);
+					if (it == eF.end()) return UINT32_MAX;
+					uint32_t r = UINT32_MAX; int n = 0;
+					for (uint32_t f : it->second) if (f != self) { r = f; ++n; }
+					return n == 1 ? r : UINT32_MAX;
+				};
+				auto cornerOfQ = [&](uint32_t f, uint32_t v)->int{
+					for (int q=0;q<3;++q) if (fIdx[f][q]==v) return q; return -1; };
+				auto thirdOfQ = [&](uint32_t f, uint32_t u, uint32_t v)->uint32_t{
+					for (int q=0;q<3;++q) if (fIdx[f][q]!=u && fIdx[f][q]!=v) return fIdx[f][q];
+					return UINT32_MAX; };
+				std::vector<char> quadUsed(faces.size(), 0);
+				int nQuadPair = 0, nQuadFlip = 0;
+				for (size_t f = 0; f < faces.size(); ++f) {
+					if (!(faces[f].Txtr && faces[f].Txtr->Name &&
+					      !std::strcmp(faces[f].Txtr->Name, matName))) continue;
+					if (quadUsed[f]) continue;
+					for (int k = 0; k < 3; ++k) {
+						const uint32_t a = fIdx[f][k], b = fIdx[f][(k+1)%3], X = fIdx[f][(k+2)%3];
+						if (a >= recessOnly.size() || b >= recessOnly.size()) continue;
+						if (a >= freeEdgeKA.size() || b >= freeEdgeKA.size()) continue;
+						const bool fa = recessOnly[a] && freeEdgeKA[a];
+						const bool fb = recessOnly[b] && freeEdgeKA[b];
+						if (!fa && !fb) continue;
+						if (bandPair.count(bpKey(a,b))) continue;   // already banded
+						const uint32_t fr = fa ? a : b;
+						if (!fa || !fb) {
+							const uint32_t ot = fa ? b : a;
+							if (ot < bandInner.size() && bandInner[ot]) continue;
+							if (ot < pinnedZero.size() && pinnedZero[ot]) continue;
+						} else if (freeEdgeKA[a] != freeEdgeKA[b] || freeEdgeKB[a] != freeEdgeKB[b]) {
+							Vector da = freeEdgeDir[a], db = freeEdgeDir[b];
+							const float la = std::sqrt(da.x*da.x+da.y*da.y+da.z*da.z);
+							const float lb = std::sqrt(db.x*db.x+db.y*db.y+db.z*db.z);
+							if (la < 1e-9f || lb < 1e-9f) continue;
+							if (std::fabs((da.x*db.x+da.y*db.y+da.z*db.z)/(la*lb)) < 0.995f) continue;
+						}
+						// the segment must lie ON the freed end's border line
+						Vector d = freeEdgeDir[fr];
+						const float dl = std::sqrt(d.x*d.x+d.y*d.y+d.z*d.z);
+						if (dl < 1e-9f) continue;
+						d.x/=dl; d.y/=dl; d.z/=dl;
+						const Vector &PA = verts[a].Pos, &PB = verts[b].Pos;
+						const float qx=PB.x-PA.x, qy=PB.y-PA.y, qz=PB.z-PA.z;
+						const float ql = std::sqrt(qx*qx+qy*qy+qz*qz);
+						if (ql < 1e-9f || std::fabs((qx*d.x+qy*d.y+qz*d.z)/ql) < 0.995f) continue;
+						// the strip's inner nodes must be OFF the border line
+						auto offLine = [&](uint32_t v)->bool{
+							const Vector &P = verts[v].Pos;
+							const float rx=P.x-PA.x, ry=P.y-PA.y, rz=P.z-PA.z;
+							const float pr = rx*d.x+ry*d.y+rz*d.z;
+							const float ox=rx-pr*d.x, oy=ry-pr*d.y, oz=rz-pr*d.z;
+							return ox*ox+oy*oy+oz*oz > 1e-6f; };
+						if (!offLine(X)) continue;
+						uint32_t T2 = UINT32_MAX, iA = 0, iB = 0;
+						// case (i): the neighbour across (a,X) closes the quad a->b->X->Y
+						const uint32_t c1 = otherFace(bpKey(a,X), uint32_t(f));
+						if (c1 != UINT32_MAX && !quadUsed[c1]) {
+							const uint32_t Y = thirdOfQ(c1, a, X);
+							const int ca = cornerOfQ(c1, a), cx = cornerOfQ(c1, X);
+							if (Y != UINT32_MAX && ca >= 0 && cx == (ca+1)%3 && Y != b && offLine(Y)) {
+								T2 = c1; iB = X; iA = Y;
+							}
+						}
+						if (T2 == UINT32_MAX) {
+							// case (ii): the quad is cut on the OTHER diagonal — the
+							// neighbour across (b,X) gives a->b->Y'->X. Re-cut the pair
+							// onto the (a,Y') diagonal so one restructure serves both.
+							const uint32_t c2 = otherFace(bpKey(b,X), uint32_t(f));
+							if (c2 == UINT32_MAX || quadUsed[c2]) continue;
+							const uint32_t Yp = thirdOfQ(c2, b, X);
+							const int cx = cornerOfQ(c2, X), cb = cornerOfQ(c2, b);
+							if (Yp == UINT32_MAX || cx < 0 || cb != (cx+1)%3) continue;
+							if (Yp == a || !offLine(Yp)) continue;
+							const int cyp = cornerOfQ(c2, Yp);
+							// f: (a,b,X) -> (a,b,Yp); c2: (X,b,Yp) -> (X,a,Yp)
+							const float uY = (cyp==0?faces[c2].U1:(cyp==1?faces[c2].U2:faces[c2].U3));
+							const float vY = (cyp==0?faces[c2].V1:(cyp==1?faces[c2].V2:faces[c2].V3));
+							const float uA = (k==0?faces[f].U1:(k==1?faces[f].U2:faces[f].U3));
+							const float vA = (k==0?faces[f].V1:(k==1?faces[f].V2:faces[f].V3));
+							setUV(faces[f], (k+2)%3, uY, vY);  fIdx[f][(k+2)%3] = Yp;
+							setUV(faces[c2], cb, uA, vA);      fIdx[c2][cb] = a;
+							eF[bpKey(a,Yp)].push_back(uint32_t(f));
+							eF[bpKey(a,Yp)].push_back(c2);
+							eF[bpKey(a,X)].push_back(c2);
+							T2 = c2; iB = Yp; iA = X;
+							++nQuadFlip;
+						}
+						const uint32_t T3 = otherFace(bpKey(iA,iB), T2);
+						if (T3 == uint32_t(f) || T3 == T2) continue;
+						bandPair[bpKey(a,b)] = BandPair{ a, b, iA, iB, uint32_t(f), T2, T3 };
+						quadUsed[f] = 1; quadUsed[T2] = 1;
+						++nQuadPair;
+						break;
+					}
+				}
+				if (nQuadPair)
+					std::fprintf(stderr, "[STONE-V2] '%s': %d unbanded border faces paired with "
+						"their own cell quad (%d re-cut onto the other diagonal); %u pairings total\n",
+						matName, nQuadPair, nQuadFlip, unsigned(bandPair.size()));
+			}
+			// ── ladder / v2 precondition (--greets_displace_band_ladder,
+			// --greets_displace_border_v2 — stage 2 of docs/STONE_BORDER_REORDER):
+			// FREE the authored interior BREAK verts. An authored border vert with
+			// freed same-line neighbours on both sides (the segment endpoints of a
 			// multi-segment corner) is otherwise left to displace by its own
 			// field with no weld — a pop in the middle of a welded line — and
 			// the recursion below can never densify a segment it bounds. The
 			// abut veto is re-run at the vert; a genuinely abutted vert stays.
-			if (fds::FeatureFlags::greets_displace_band_ladder()) {
+			if (fds::FeatureFlags::greets_displace_band_ladder() || borderV2) {
 				struct BreakCand { uint32_t nbr = 0; int sides = 0; };
 				std::map<uint32_t, BreakCand> cand;
 				for (size_t i = 0; i < faces.size(); ++i) {
@@ -4052,6 +4273,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					if (kv.second.sides != 3) continue;   // freed neighbour on BOTH sides
 					const uint32_t v = kv.first, n2 = kv.second.nbr;
 					if (v >= recessOnly.size()) continue;
+					// v2: a BAND-INNER node is not an authored break vert. It sits
+					// kBandWidth off the border, so the 0.98 along-the-line test
+					// passes for any neighbour further than ~0.1 u away and the whole
+					// inner polyline gets freed — measured on the rig: 6 "break"
+					// verts freed, ALL of them inner nodes on sheet B's far column,
+					// after which the recursion densified the inner polyline as if it
+					// were a border (+2 513 verts against ~700 of actual border).
+					if (borderV2 && v < bandInner.size() && bandInner[v]) continue;
 					const Vector fn = verts[v].N;
 					if (abutPointMat(verts[v].Pos, freeEdgeKA[n2], freeEdgeKB[n2], &fn)) continue;
 					recessOnly[v] = 1;
@@ -4065,7 +4294,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						"freed between freed same-line edges (weld can now cover them)\n",
 						matName, nBreakFreed);
 			}
-			int nProfSplit = 0, nProfPin = 0;
+			int nProfSplit = 0, nProfPin = 0, nProfLock = 0;
 			bool didSplit = true;
 			for (int pass = 0; didSplit && pass < 8; ++pass) {
 				didSplit = false;
@@ -4080,7 +4309,76 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						const bool fa = recessOnly[a] && freeEdgeKA[a];
 						const bool fb = recessOnly[b] && freeEdgeKA[b];
 						uint32_t src = a;   // key/dir source for the midpoint
-						if (fds::FeatureFlags::greets_displace_band_ladder()) {
+						// v2 stage 3: does this segment carry a band pairing whose
+						// three faces are still the ones the pre-split left? If so
+						// the split below is a LOCKSTEP quad split, not a fan.
+						BandPair bp{}; bool haveBP = false;
+						if (borderV2) {
+							auto itb = bandPair.find(bpKey(a,b));
+							if (itb != bandPair.end()) {
+								const BandPair &P = itb->second;
+								auto has = [&](uint32_t f, uint32_t v)->bool{
+									return f < fIdx.size() && (fIdx[f][0]==v || fIdx[f][1]==v || fIdx[f][2]==v); };
+								// Keep the record's OWN orientation. fT1 is (bA,bB,iB) and
+								// fT2 is (bA,iB,iA), so re-labelling iA/iB to this face's
+								// (a,b) order MIRRORS the pair and every corner lookup
+								// below misses — measured: every segment whose face order
+								// ran b-then-a went stale and fell back to a fan.
+								bp = P;
+								const bool ok =
+									((bp.bA==a && bp.bB==b) || (bp.bA==b && bp.bB==a)) &&
+									bp.fT1 == uint32_t(i) &&
+									bp.fT2 != bp.fT3 && bp.fT2 != bp.fT1 && bp.fT1 != bp.fT3 &&
+									has(bp.fT1,bp.bA) && has(bp.fT1,bp.bB) && has(bp.fT1,bp.iB) &&
+									has(bp.fT2,bp.bA) && has(bp.fT2,bp.iB) && has(bp.fT2,bp.iA) &&
+											has(bp.fT3,bp.iA) && has(bp.fT3,bp.iB) &&
+									bp.iA != bp.iB && bp.iA != a && bp.iA != b &&
+									bp.iB != a && bp.iB != b;
+								if (ok) haveBP = true; else bandPair.erase(itb);
+							}
+						}
+						if (borderV2) {
+							// v2: both endpoints freed on ONE line (keys may differ
+							// across a freed break vert — accept collinear
+							// directions), OR the END COURSE: exactly one endpoint
+							// freed, allowed ONLY where the segment carries a band
+							// pairing. That gate is the whole difference from the
+							// standalone one-freed variant this campaign already
+							// adjudicated against (green x20): a paired segment has
+							// no interior apex to fan to, because the split below
+							// rebuilds its quad instead of its triangle.
+							// The segment must LIE ON the border line it claims, not
+							// merely run parallel to it: measured on the rig, testing
+							// only dir(a) vs dir(b) accepts an edge that CROSSES the
+							// sheet between two parallel borders (the corner column and
+							// the far column are both vertical), and the recursion then
+							// densifies the sheet's interior — +2 516 verts against the
+							// +296 the border alone needs, 2 178 of them plain fans.
+							{
+								const Vector &Pa2 = verts[a].Pos, &Pb2 = verts[b].Pos;
+								const float qx=Pb2.x-Pa2.x, qy=Pb2.y-Pa2.y, qz=Pb2.z-Pa2.z;
+								const float ql = std::sqrt(qx*qx+qy*qy+qz*qz);
+								if (ql < 1e-9f) continue;
+								const uint32_t ref = fa ? a : b;
+								Vector d = freeEdgeDir[ref];
+								const float dl = std::sqrt(d.x*d.x+d.y*d.y+d.z*d.z);
+								if (dl < 1e-9f) continue;
+								if (std::fabs((qx*d.x+qy*d.y+qz*d.z)/(dl*ql)) < 0.995f) continue;
+							}
+							if (fa && fb) {
+								if (freeEdgeKA[a] != freeEdgeKA[b] ||
+								    freeEdgeKB[a] != freeEdgeKB[b]) {
+									Vector da = freeEdgeDir[a], db = freeEdgeDir[b];
+									const float la = std::sqrt(da.x*da.x+da.y*da.y+da.z*da.z);
+									const float lb = std::sqrt(db.x*db.x+db.y*db.y+db.z*db.z);
+									if (la < 1e-9f || lb < 1e-9f) continue;
+									const float c = (da.x*db.x+da.y*db.y+da.z*db.z)/(la*lb);
+									if (std::fabs(c) < 0.995f) continue;   // not one line
+								}
+							} else if ((fa || fb) && haveBP) {
+								src = fa ? a : b;
+							} else continue;
+						} else if (fds::FeatureFlags::greets_displace_band_ladder()) {
 							// ladder arm: a segment with ONE freed endpoint whose
 							// other end is UNKEYED (an authored corner end or a
 							// seam-weld-merged interior vert) still densifies —
@@ -4140,22 +4438,120 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							freeEdgeDir[mid] = freeEdgeDir[src];
 							freeEdgeKA[mid] = freeEdgeKA[src]; freeEdgeKB[mid] = freeEdgeKB[src];
 						}
-						// split face i: (a,b,c) -> (a,m,c) + (m,b,c), UVs per corner
-						const int kc = (k+2)%3;
-						Face nfc = faces[i];
 						const float mu = 0.5f*(faceU(faces[i],k)+faceU(faces[i],(k+1)%3));
 						const float mv = 0.5f*(faceV(faces[i],k)+faceV(faces[i],(k+1)%3));
-						// new face (m,b,c): corner k=m, k+1=b (kept), kc=c (kept)
-						setUV(nfc, k, mu, mv);
-						std::array<uint32_t,3> nidx = fIdx[i];
-						nidx[k] = mid;
-						faces.push_back(nfc);
-						fIdx.push_back(nidx);
-						faceFromEdge.push_back(faceFromEdge[i]);
-						// face i keeps corner k=a, corner k+1 becomes m
-						setUV(faces[i], (k+1)%3, mu, mv);
-						fIdx[i][(k+1)%3] = mid;
-						(void)kc;
+						if (haveBP) {
+							// ── v2 LOCKSTEP QUAD SPLIT (stage 3) ─────────────────────
+							// The band pair is the quad (a,b,iB,iA) carried as two tris
+							// fT1=(a,b,iB) and fT2=(a,iB,iA), plus the interior tri
+							// fT3=(iA,iB,*) across the band's inner edge. Insert m2 on
+							// (iA,iB) at the same parameter as m on (a,b) and rebuild:
+							// quad (a,m,m2,iA) + quad (m,b,iB,m2), plus one plain edge
+							// split of fT3 across m2. Every strip cell then spans exactly
+							// one border pitch and every border step has its own inner
+							// node, so no sliver bridges a welded step — the whole point
+							// of the reorder. The interior tri is authored-scale, so its
+							// split is one face, not a cascade.
+							const uint32_t aa = bp.bA, bb = bp.bB;   // the record's own order
+							const uint32_t a2 = bp.iA, b2 = bp.iB;
+							const uint32_t f1 = bp.fT1, f2 = bp.fT2, f3 = bp.fT3;
+							auto cornerOf = [&](uint32_t f, uint32_t v)->int{
+								for (int q=0;q<3;++q) if (fIdx[f][q]==v) return q; return -1; };
+							const int k1a=cornerOf(f1,aa), k1b=cornerOf(f1,bb), k1c=cornerOf(f1,b2);
+							const int j_a=cornerOf(f2,aa), j_b2=cornerOf(f2,b2), j_a2=cornerOf(f2,a2);
+							const int l_a2 = cornerOf(f3,a2), l_b2 = cornerOf(f3,b2);
+							if (k1a<0||k1b<0||k1c<0||j_a<0||j_b2<0||j_a2<0||l_a2<0||l_b2<0) {
+								bandPair.erase(bpKey(a,b));
+								continue;   // pairing stale — leave the segment alone
+							}
+							// The inner midpoint inherits BORDER status only where both of
+							// its parents are freed border verts of one authored edge (the
+							// corner-face case, where the pre-split's side point landed on
+							// a second border); otherwise it is a plain band-inner node.
+							const Vector PA2 = verts[a2].Pos, PB2 = verts[b2].Pos;
+							Vertex m2 = verts[a2];
+							m2.Pos.x = 0.5f*(PA2.x+PB2.x); m2.Pos.y = 0.5f*(PA2.y+PB2.y);
+							m2.Pos.z = 0.5f*(PA2.z+PB2.z);
+							{
+								float qx = verts[a2].N.x+verts[b2].N.x, qy = verts[a2].N.y+verts[b2].N.y,
+								      qz = verts[a2].N.z+verts[b2].N.z;
+								const float ql = std::sqrt(qx*qx+qy*qy+qz*qz);
+								if (ql > 1e-6f) { m2.N.x=qx/ql; m2.N.y=qy/ql; m2.N.z=qz/ql; }
+							}
+							const uint32_t mid2 = uint32_t(verts.size());
+							verts.push_back(m2);
+							pinnedZero.resize(verts.size(), 0);
+							recessOnly.resize(verts.size(), 0);
+							freeEdgeDir.resize(verts.size(), Vector{0.0f,0.0f,0.0f});
+							freeEdgeKA.resize(verts.size(), 0); freeEdgeKB.resize(verts.size(), 0);
+							bandInner.resize(verts.size(), 0);
+							const bool innerIsBorder =
+								recessOnly[a2] && recessOnly[b2] && freeEdgeKA[a2] &&
+								freeEdgeKA[a2] == freeEdgeKA[b2] && freeEdgeKB[a2] == freeEdgeKB[b2];
+							if (innerIsBorder) {
+								const Vector fn2 = faces[f3].N;
+								if (abutPointMat(verts[mid2].Pos, freeEdgeKA[a2], freeEdgeKB[a2], &fn2))
+									pinnedZero[mid2] = 1;
+								else {
+									recessOnly[mid2] = 1;
+									freeEdgeDir[mid2] = freeEdgeDir[a2];
+									freeEdgeKA[mid2] = freeEdgeKA[a2]; freeEdgeKB[mid2] = freeEdgeKB[a2];
+								}
+							} else bandInner[mid2] = 1;
+							// UVs: all four faces descend from one authored triangle's
+							// affine map, so a midpoint's UV is the mean of its parents'
+							// wherever it is read. Taken per face anyway.
+							const float uA2=faceU(faces[f2],j_a2), vA2=faceV(faces[f2],j_a2);
+							const float uB2=faceU(faces[f1],k1c),  vB2=faceV(faces[f1],k1c);
+							const float mu2 = 0.5f*(uA2+uB2), mv2 = 0.5f*(vA2+vB2);
+							const float mu3 = 0.5f*(faceU(faces[f3],l_a2)+faceU(faces[f3],l_b2));
+							const float mv3 = 0.5f*(faceV(faces[f3],l_a2)+faceV(faces[f3],l_b2));
+							// right halves cloned BEFORE the in-place left edits
+							Face rT1 = faces[f1]; std::array<uint32_t,3> rI1 = fIdx[f1];
+							setUV(rT1, k1a, mu, mv);    rI1[k1a] = mid;          // (m,b,b2)
+							Face rT2 = faces[f2]; std::array<uint32_t,3> rI2 = fIdx[f2];
+							setUV(rT2, j_a, mu, mv);    rI2[j_a] = mid;          // (m,b2,m2)
+							setUV(rT2, j_a2, mu2, mv2); rI2[j_a2] = mid2;
+							Face rT3 = faces[f3]; std::array<uint32_t,3> rI3 = fIdx[f3];
+							setUV(rT3, l_a2, mu3, mv3); rI3[l_a2] = mid2;        // (m2,b2,c)
+							// left halves in place
+							setUV(faces[f1], k1b, mu, mv);    fIdx[f1][k1b]  = mid;    // (a,m,m2)
+							setUV(faces[f1], k1c, mu2, mv2);  fIdx[f1][k1c]  = mid2;
+							setUV(faces[f2], j_b2, mu2, mv2); fIdx[f2][j_b2] = mid2;   // (a,m2,a2)
+							setUV(faces[f3], l_b2, mu3, mv3); fIdx[f3][l_b2] = mid2;   // (a2,m2,c)
+							const uint32_t g1 = uint32_t(faces.size());
+							faces.push_back(rT1); fIdx.push_back(rI1); faceFromEdge.push_back(faceFromEdge[f1]);
+							const uint32_t g2 = uint32_t(faces.size());
+							faces.push_back(rT2); fIdx.push_back(rI2); faceFromEdge.push_back(faceFromEdge[f2]);
+							const uint32_t g3 = uint32_t(faces.size());
+							faces.push_back(rT3); fIdx.push_back(rI3); faceFromEdge.push_back(faceFromEdge[f3]);
+							// m2 rides the MIDPOINT of its parent strip edge for the rest of
+							// the bake. That is what makes the interior split safe: the two
+							// halves of the interior face stay exactly COPLANAR with the
+							// triangle they came from, whatever their parents do, so a thin
+							// interior sliver can never twist, invert or crack. Without it,
+							// splitting the interior face turns the cell into the mega-sliver
+							// fan this campaign is trying to kill, one band inward — measured
+							// on the rig, green graze/front 667/156 -> 1 930/1 899.
+							v2Chord.push_back({mid2, a2, b2});
+							bandPair.erase(bpKey(aa,bb));
+							bandPair[bpKey(aa,mid)] = BandPair{ aa, mid, a2, mid2, f1, f2, f3 };
+							bandPair[bpKey(mid,bb)] = BandPair{ mid, bb, mid2, b2, g1, g2, g3 };
+							++nProfLock;
+						} else {
+							// split face i: (a,b,c) -> (a,m,c) + (m,b,c), UVs per corner
+							Face nfc = faces[i];
+							// new face (m,b,c): corner k=m, k+1=b (kept), k+2=c (kept)
+							setUV(nfc, k, mu, mv);
+							std::array<uint32_t,3> nidx = fIdx[i];
+							nidx[k] = mid;
+							faces.push_back(nfc);
+							fIdx.push_back(nidx);
+							faceFromEdge.push_back(faceFromEdge[i]);
+							// face i keeps corner k=a, corner k+1 becomes m
+							setUV(faces[i], (k+1)%3, mu, mv);
+							fIdx[i][(k+1)%3] = mid;
+						}
 						++nProfSplit; didSplit = true;
 						break;   // face i's edges changed; revisit on the next pass
 					}
@@ -4164,6 +4560,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (nProfSplit)
 				std::fprintf(stderr, "[STONE] '%s' border profile densified: +%d verts "
 					"(%d vetoed to pin) at pitch %.2f\n", matName, nProfSplit, nProfPin, kProfilePitch);
+			if (borderV2 && nProfLock)
+				std::fprintf(stderr, "[STONE-V2] '%s': %d of %d border splits ran in "
+					"LOCKSTEP with their band (2 band tris -> 4, plus 1 interior split each); "
+					"%d fell back to the plain fan split (no live pairing)\n",
+					matName, nProfLock, nProfSplit, nProfSplit - nProfLock);
 			// (A post-densification re-band was tried here and REVERTED: the
 			// pre-split is authored-scale-only — on densified slivers it makes
 			// one micro-band PER FACE (1 530 bands, 2 757 cells, green 4 853),
@@ -5517,7 +5918,20 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// splitting the weld (measured: flips 491 -> 4450, green 156 -> 3169).
 		// Inner nodes now ride their own field + band blend — the same rules as
 		// the interior cell verts beside them.
-		auto applyLadderPins = [&]{};
+		auto applyLadderPins = [&]{
+			// The ladder's own chord pins are retired (its inner side is a CELL
+			// polyline, not one chord). v2's are not the same object: each node
+			// has exactly ONE parent segment, the cell edge it was inserted on,
+			// so the midpoint rule is exact. Applied in creation order, which is
+			// parent-first by construction (a node's parents exist before it).
+			for (const std::array<uint32_t,3> &P : v2Chord) {
+				if (P[0] >= verts.size() || P[1] >= verts.size() || P[2] >= verts.size()) continue;
+				const Vector A = verts[P[1]].Pos, B = verts[P[2]].Pos;
+				verts[P[0]].Pos.x = 0.5f*(A.x+B.x);
+				verts[P[0]].Pos.y = 0.5f*(A.y+B.y);
+				verts[P[0]].Pos.z = 0.5f*(A.z+B.z);
+			}
+		};
 		(void)ladderPins;
 		applyLadderPins();
 		// ── CORNER FACE CENSUS (2026-08-17b, census-only): every target face

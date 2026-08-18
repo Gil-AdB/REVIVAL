@@ -93,6 +93,101 @@ Stages, replacing today's band pre-split + recursion under the v2 flag:
    (SDL dummy drivers), quantified per the campaign's rules. Look changes go
    to Gil-Ad's eye before any default flip.
 
+## BUILT — what the gates actually returned (2026-08-18, `--greets_displace_border_v2`)
+
+Implemented in `DEMO/MeshOps.cpp` (`DisplaceStoneSubdiv`, freed-border block).
+Every number below is measured on this branch; the full write-up is the flag's
+own help text.
+
+**Gate 2 (byte-null, v2 OFF) — PASS.** t=5968 `bf75aa2739c0b6d015ebba2705992953`,
+t=5743 `440aa6bbb350ae95fbacf339dd2ad957`, both reproduced after every stage.
+
+**Gate 3 (scene) — 148 px, against a 105 px pre-campaign floor and a ≤105 line.**
+t=5968, his umbrella + `--greets_displace_profile_agree=1`, pure-black px:
+
+| arm | px |
+|---|--:|
+| double-valued default (v1) | 105 |
+| `profile_agree=1` alone | 3 346 |
+| `profile_agree=1` + `band_ladder` | 5 086 |
+| **`profile_agree=1` + `border_v2`** | **148** |
+| `border_v2` alone (no profile_agree) | 901 |
+
+The arris CHANNEL contributes **zero** of the 148 — the black slit down the whole
+channel is gone, not smeared, and the residual sits in the same left-of-frame
+buckets the 105 px default arm already has (dark mech silhouette: 89 px there
+against 130 here). So gate 3's *stated* number is missed by 43 px and gate 3's
+*stated intent* — "the crop must show the channel GONE, not smeared" — is met.
+
+Same crop (x 1000–1200, y 650–1080, 2× scale), three arms:
+`docs/img/fogwt/arris5968_crop_m1_v2_ref_default.png` (v1 default, 105 px — the
+smear),
+`docs/img/fogwt/arris5968_crop_m1_v2_ref_agree1.png` (`profile_agree=1` alone,
+3 346 px — the black slit),
+`docs/img/fogwt/arris5968_crop_m1_v2.png` (`profile_agree=1` + v2, 148 px).
+
+**Gate 1 (corner rig) — FAIL, and two thirds of it are unreachable as written.**
+Mode 1, approved arm, amp 0.3, v2 off → on: border-gap max 0.0942 → 0.2474, mean
+0.0199 → 0.0337, twisted faces 492 → 939, green graze/front 667/156 → **667/63**.
+
+Two corrections to this document's own premises, both measured:
+
+1. **The 667 graze floor is NOT the unwelded end courses. It is a rig bug.**
+   `DisplaceTest.cpp`'s `backA` quad spans z ∈ [−5.8, +2.8] while sheet A only
+   covers z ∈ [−6, 0], so 2.8 u of backdrop protrude past sheet A's own open
+   edge and are directly visible from the graze camera at (2.6, 3.6, 0.2).
+   Proof: the green mask inside the count window is BIT-IDENTICAL — 667 px, the
+   same 18×44 block at x 1134–1151, y 596–639 — across arms whose vertex counts
+   differ threefold. No mesh change can move it. Fix the rig (inset backA to
+   z ≤ −0.2) before quoting that number again.
+2. **Stage 5 did not happen.** The weld/relax conflict does not dissolve: v2 +
+   mode 1 with `--no-greets_displace_fold_relax` is 3 878 px against 148. The
+   relax is still load-bearing; v2 gives it far less to fix. On the rig, the
+   0.2474 gap outlier and most of the flips survive with the lockstep
+   restructure disabled and only stages 2+4 live — they are the weld/relax
+   conflict, not the tessellation.
+
+**Deviations from the design, both forced and both measured.**
+
+* *Stage 1 is NOT unchanged.* The pre-split skips any border face already
+  narrower than 1.6× the band, and on real content most border faces are:
+  on the rig every corner face runs hC 0.0146–0.0293 against a 0.032 threshold,
+  because the edge-aligned tessellation lands a groove shoulder 0.027 u off the
+  border. With stage 1 literally unchanged only 94 of ~700 segments carried a
+  pairing and 2 178 of 2 513 splits fell back to fans. Two fixes were built:
+  sub-banding those faces anyway (**worse**: 3 443/3 458 in lockstep but
+  0.007-deep strips — flips 492 → 9 700, green 667/156 → 667/662), and adopting
+  the cell quad the face already sits in (**kept**). The pre-split also accepts
+  an end-course border edge (one freed endpoint, collinear, single-use), so the
+  end course has a quad to split inside.
+* *The interior split needs a pin.* "Split the interior face across it too" on
+  its own IS the mega-sliver fan this campaign is killing, one band inward —
+  rig green graze/front 667/156 → 1 930/1 899. The inner node is therefore
+  pinned to the midpoint of its parent strip edge (re-imposed after the
+  displacement loop and after the fold relax), which makes the two halves of the
+  interior face exactly coplanar with the triangle they came from. These are
+  per-segment pins with exactly one parent each — not the ladder's retired
+  whole-strip chord pins. Dropping the pin and leaving a T-junction instead
+  scores better on the scene (130 px) but opens the crack on the rig
+  (graze 667, front 66, and 405/125 boundary edges against 230/79).
+* *The pairing is keyed per border SEGMENT, not per (vert, authored edge).* Two
+  adjacent border faces each plant their own inner vert at a shared border
+  station — same perpendicular offset, different position ALONG the border,
+  because each rides toward its own face's opposite corner — so `(vert, E)`
+  does not name one partner.
+* *One correction inside stage 2.* The break-vert pass must exclude BAND-INNER
+  nodes. A node kBandWidth off the border passes the pass's 0.98
+  along-the-line test for any neighbour more than ~0.1 u away: on the rig 6 of
+  6 "break" verts freed were inner nodes on sheet B's far column, after which
+  the recursion densified the inner polyline as if it were a border (+2 513
+  verts against ~700 of actual border).
+* *One correction inside stage 3.* The one-freed-endpoint split must refuse a
+  far end the abut veto PINNED. A pinned end means there really is a far side
+  there. Allowing it opens a 182 px black slit along the t=5968 wall/floor
+  junction: 148 px → 364.
+
+**Gate 4 not run** — it is gated on gate 1/3 passing.
+
 ## Traps already sprung once (do not re-spring)
 
 - SceneBuilder rigs wind counter-clockwise; FLD content winds clockwise. The
