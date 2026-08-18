@@ -29,6 +29,21 @@
 > The trade as it stands is HIS call: the commissioned corner closes to zero
 > channel pixels; the cost is base-course hairlines under 0.01 % of frame at
 > two thirds of the review poses. Flags remain default OFF.
+>
+> **ADDENDUM — the hairline MECHANISM IS LOCATED** (census box
+> "11,17,-61,-56,-0.2,0.8" at the t=6097 base seam, FINALV diffed per vert
+> across arms): v2 adds **116 verts** in the base band the default arm never
+> had — **93 of them PROUD (field level, cls '-', unwelded)** and ZERO shared
+> verts changed. The stone field's proudness now reaches down to the PINNED
+> base border; the bottom cells slope proud→0 over one pitch and the proud
+> course's unmodeled underside silhouettes as the black hairline against the
+> floor. (The earlier pinned-midpoint taper never fired because these verts
+> are not lockstep midpoints at all — they are the densified field verts
+> above the pinned border.) The correctly-scoped fix: a FIELD end-taper —
+> scale displacement to 0 over ~0.3 u of distance to an abut-pinned border,
+> the exact rule the mitre profile already applies at its own line ends
+> ("kEndTaper", the t=6039 blue-sliver fix) — applied to v2's densified
+> strip verts. Gate stays the 15-pose battery.
 
 > ## 2026-08-18b — **THE ARRIS CHANNEL CLOSES**: the lockstep reorder lands as
 > `--greets_displace_border_v2`, the t=5968 slit contributes ZERO pixels, and
