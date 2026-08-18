@@ -5686,6 +5686,77 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			}
 		}
 		const bool grooveShadeOn = fds::FeatureFlags::greets_displace_groove_shade();
+		// ── v2 FIELD END-TAPER (2026-08-18c, third scoping — the first two are
+		// refuted in SESSION_STATE with byte-identity proofs, and the [STONE-PROV]
+		// census that fixed the population is right below). The t=6097 base band's
+		// proud verts are 92/93 BAND-INNER nodes of bands only v2's eligibility
+		// creates, plus 23 v2-freed formerly-pinned verts — none are v2-CREATED
+		// midpoints, which is why the v2New filter fired 201 times and changed
+		// nothing. Filter now: any BAKE-CREATED (i >= nOrig) or band-inner vert,
+		// unwelded, unpinned, within kV2Taper of a pinned vert that borders freed
+		// geometry, scales its displacement to zero at the pinned line — the
+		// mitre profile's own kEndTaper rule applied to the field. borderV2-gated:
+		// the shipping arm never reaches this.
+		constexpr float kV2Taper = 0.3f;
+		const bool v2TaperOn = fds::FeatureFlags::greets_displace_border_v2();
+		int nV2Tapered = 0;
+		std::unordered_map<uint64_t, std::vector<uint32_t>> v2PinGrid;
+		if (v2TaperOn) {
+			for (size_t f = 0; f < faces.size(); ++f) {
+				if (!isTargetNew(faces[f])) continue;
+				const uint32_t vi3[3] = {fIdx[f][0], fIdx[f][1], fIdx[f][2]};
+				bool anyFree = false, anyPin = false;
+				for (uint32_t v : vi3) {
+					if (v < recessOnly.size() && recessOnly[v]) anyFree = true;
+					if (v < pinnedZero.size() && pinnedZero[v]) anyPin = true;
+				}
+				if (!anyFree || !anyPin) continue;
+				for (uint32_t v : vi3)
+					if (v < pinnedZero.size() && pinnedZero[v])
+						v2PinGrid[abutCellKey(std::floor(verts[v].Pos.x/kAbutCell)*kAbutCell,
+						                      std::floor(verts[v].Pos.y/kAbutCell)*kAbutCell,
+						                      std::floor(verts[v].Pos.z/kAbutCell)*kAbutCell)].push_back(v);
+			}
+		}
+		auto v2PinDist = [&](const Vector &P) -> float {
+			float best = kV2Taper;
+			for (int gx = -1; gx <= 1; ++gx)
+			for (int gy = -1; gy <= 1; ++gy)
+			for (int gz = -1; gz <= 1; ++gz) {
+				auto it = v2PinGrid.find(abutCellKey(
+					(std::floor(P.x/kAbutCell)+float(gx))*kAbutCell,
+					(std::floor(P.y/kAbutCell)+float(gy))*kAbutCell,
+					(std::floor(P.z/kAbutCell)+float(gz))*kAbutCell));
+				if (it == v2PinGrid.end()) continue;
+				for (uint32_t v : it->second) {
+					const Vector &Q = verts[v].Pos;
+					const float ddx=P.x-Q.x, ddy=P.y-Q.y, ddz=P.z-Q.z;
+					const float d = std::sqrt(ddx*ddx+ddy*ddy+ddz*ddz);
+					if (d < best) best = d;
+				}
+			}
+			return best;
+		};
+		// ── PROVENANCE CENSUS ([STONE-PROV], census+box gated): every vert in
+		// the box WITH its classification, printed BEFORE the displacement loop
+		// so pinned verts show too — FINALV can only ever show displacing verts,
+		// which is exactly why the t=6097 base band's 93 "v2-only" verts were
+		// unattributable: in the default arm they are skipped before any print.
+		if (fds::FeatureFlags::greets_displace_junction_census() && stoneCensusBox().set) {
+			const StoneCensusBox &CB = stoneCensusBox();
+			for (uint32_t i = 0; i < nV; ++i) {
+				const Vector &P = verts[i].Pos;
+				if (!(P.x > CB.x0 && P.x < CB.x1 && P.z > CB.z0 && P.z < CB.z1
+				      && P.y > CB.y0 && P.y < CB.y1)) continue;
+				std::fprintf(stderr, "[STONE-PROV] '%s' pos(%.3f,%.3f,%.3f) idx %u "
+					"pin %d free %d inner %d hCnt %d orig %d\n",
+					matName, double(P.x), double(P.y), double(P.z), i,
+					int(i < pinnedZero.size() && pinnedZero[i]),
+					int(i < recessOnly.size() && recessOnly[i]),
+					int(i < bandInner.size() && bandInner[i]),
+					hCnt[i], int(i < nOrig));
+			}
+		}
 		for (uint32_t i=0;i<nV;++i){
 			if (pinnedZero[i]||hCnt[i]==0) continue;
 			const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
@@ -5899,6 +5970,17 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						mitreOf[i] >= 0 ? " WELD" : "");
 				}
 			}
+			// v2 FIELD END-TAPER (grid above; population fixed by [STONE-PROV])
+			if (v2TaperOn && mitreOf[i] < 0 && dsp != 0.0f
+			    && (i >= nOrig || (i < bandInner.size() && bandInner[i]))) {
+				const float dmin = v2PinDist(verts[i].Pos);
+				if (dmin < kV2Taper) {
+					float w = dmin / kV2Taper;
+					w = w*w*(3.0f - 2.0f*w);
+					dsp *= w;
+					++nV2Tapered;
+				}
+			}
 			verts[i].Pos.x+=dx*dsp; verts[i].Pos.y+=dy*dsp; verts[i].Pos.z+=dz*dsp;
 			// Carved below the reference: record the AUTHORED normal this vert
 			// rode (pre-displacement — the wall plane on a flat wall) and a
@@ -6000,6 +6082,9 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					double(ed[k]), double(ed[k+1]), n, nf, sa/n, amax, so/n, si/n, imin);
 			}
 		}
+		if (v2TaperOn)
+			std::fprintf(stderr, "[STONE-V2TAPER] '%s': %d verts field-tapered near "
+				"pinned borders\n", matName, nV2Tapered);
 		if (nFreeVerts)
 			std::fprintf(stderr, "[STONE-FREE] '%s': %d freed border verts, %d "
 				"clamped to 0 (would have bulged outward), deepest carve %.4f u; %d "

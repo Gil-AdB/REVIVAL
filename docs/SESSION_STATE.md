@@ -58,6 +58,22 @@
 > one-off provenance census keyed on the 93 positions) under both arms, and
 > diff pinnedZero/recessOnly per position. Reverted; the tree carries no
 > dead taper code.
+>
+> **ADDENDUM 3 — provenance answered, and the METRIC is now the suspect.**
+> [STONE-PROV] (prints every boxed vert's classification BEFORE the
+> displacement loop, both arms): the proud population is **92/93 BAND-INNER
+> nodes of bands only v2's eligibility creates** (pin0 free0 inner1, absent
+> in def) plus 23 v2-freed formerly-pinned verts. Taper v3 (population =
+> bake-created OR band-inner, unwelded, unpinned) FIRES on 481 verts at
+> t=6097 and **visibly changes the render (md5 moves) while the pure-black
+> count stays exactly 715** — the black pixels are not made by these verts'
+> displacement. Three refuted geometry levers + one pixel-neutral hit means
+> the "pure-black px" metric may be counting a SHADING seam (groove-shade /
+> lightmap keyed off displaced positions?), not holes. NEXT INSTRUMENT:
+> classify the 263 delta px at t=6097 as z==0 hole vs shaded geometry
+> (--face_id_dump or a z-plane dump), BEFORE any further lever. Taper v3 is
+> KEPT inside the opt-in v2 arm (counter printed as [STONE-V2TAPER]); its
+> look effect is unjudged.
 
 > ## 2026-08-18b — **THE ARRIS CHANNEL CLOSES**: the lockstep reorder lands as
 > `--greets_displace_border_v2`, the t=5968 slit contributes ZERO pixels, and
