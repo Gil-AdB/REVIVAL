@@ -44,6 +44,20 @@
 > the exact rule the mitre profile already applies at its own line ends
 > ("kEndTaper", the t=6039 blue-sliver fix) — applied to v2's densified
 > strip verts. Gate stays the 15-pose battery.
+>
+> **ADDENDUM 2 — the end-taper AS SCOPED is refuted, and the scoping is the
+> finding.** Built it (v2-created verts — end-course band inners + lockstep
+> midpoints — scale dsp→0 within 0.3 u of a pinned-bordering-freed vert,
+> weld excluded): it FIRES on 201 verts at t=6097 and changes **zero
+> pixels** — 15/15 battery renders and a direct t=6097 md5 byte-identical
+> to the taper-less v2 arm. Therefore the 93 proud base verts are NOT
+> v2-CREATED verts. Sharpened hypothesis: they are v2-FREED — verts pinned
+> in the default arm (so FINALV never prints them there) that one of v2's
+> classification changes lets displace. Next instrument, before ANY further
+> lever: print the vert INDEX + creation class in [STONE-FINALV] (or a
+> one-off provenance census keyed on the 93 positions) under both arms, and
+> diff pinnedZero/recessOnly per position. Reverted; the tree carries no
+> dead taper code.
 
 > ## 2026-08-18b — **THE ARRIS CHANNEL CLOSES**: the lockstep reorder lands as
 > `--greets_displace_border_v2`, the t=5968 slit contributes ZERO pixels, and
