@@ -1,5 +1,35 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-18c — THE REVIEW-POSE BATTERY IS IN: v2 closes the commissioned
+> corner and pays 100–180 px of WALL-BASE HAIRLINES at 10 of 15 poses — the
+> end-case residual, localized and named, gating the default flip
+>
+> All 15 poses of `docs/greets_review_poses.txt`, his umbrella arm vs
+> + `--greets_displace_profile_agree=1 --greets_displace_border_v2`,
+> pure-black px (default → v2): t=2845 18→18, t=5534 1474→1556, t=5743
+> 251→363, t=5773 284→278, t=5813 228→311, t=5814 355→429, t=5843 390→491,
+> t=5854 394→509, t=5958 232→244, t=5963 307→441, t=5967 458→538, t=5987
+> 218→387, t=6097 532→715, t=6133 1064→1061, t=6293 456→460. (These are
+> REVIEW-pose cameras — the acceptance-pin recipes, which use the scene
+> camera, are byte-identical under v2-off and were re-verified 4/4 alongside
+> `render_gate` 4/4 after the merge.)
+>
+> **Every worse pose's new black is the same population**: thin hairlines
+> along the WALL-BASE / floor junction plus small base-course sliver notches
+> (diffed per pixel at t=6097/5987/5963 — bboxes all y>697, bottom of frame;
+> crop `docs/img/fogwt/battery_v2_newblack_t6097.png` vs `…_t6097_ref.png`).
+> This is the end-case residual the v2 build already halved once by refusing
+> abut-pinned far ends: the base border is floor-pinned while its band strip
+> now densifies in lockstep, and the strip's bottom cells bridge
+> pinned-to-freed. Next lever, scoped: terminate the lockstep strip one cell
+> above a pinned end (taper the band to the pinned border instead of
+> bridging), then re-run this battery — the corner rig will not see it (its
+> floor edge pins the whole bottom course); the battery is the gate.
+>
+> The trade as it stands is HIS call: the commissioned corner closes to zero
+> channel pixels; the cost is base-course hairlines under 0.01 % of frame at
+> two thirds of the review poses. Flags remain default OFF.
+
 > ## 2026-08-18b — **THE ARRIS CHANNEL CLOSES**: the lockstep reorder lands as
 > `--greets_displace_border_v2`, the t=5968 slit contributes ZERO pixels, and
 > what stands between this and the umbrella default is Gil-Ad's eye plus the
