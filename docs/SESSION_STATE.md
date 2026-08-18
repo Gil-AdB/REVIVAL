@@ -1,5 +1,47 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-18b — **THE ARRIS CHANNEL CLOSES**: the lockstep reorder lands as
+> `--greets_displace_border_v2`, the t=5968 slit contributes ZERO pixels, and
+> what stands between this and the umbrella default is Gil-Ad's eye plus the
+> battery
+>
+> Implemented by a worktree agent from `docs/STONE_BORDER_REORDER.md` (its
+> "BUILT" section is the full gate record); **independently re-verified in the
+> main tree**: byte-null t=5968 default `bf75aa27…` and pin t=5743 `440aa6bb…`
+> reproduce, and the headline arm reproduces exactly.
+>
+> **THE NUMBER: t=5968, his umbrella + `--greets_displace_profile_agree=1
+> --greets_displace_border_v2` → 148 pure-black px** (double-valued default
+> 105, agree-alone 3 346, +ladder 5 086), **and the arris channel contributes
+> 0 of the 148** — the slit is gone, not smeared; the residual lives in the
+> left-of-frame buckets the default arm also has. My own eyes on the verified
+> crop: continuous arris, no sawtooth shear, no wide smear; a narrow soft band
+> transition remains — HIS look call. Crops (same region, three arms):
+> `docs/img/fogwt/arris5968_crop_m1_v2_ref_default.png` /
+> `…_ref_agree1.png` / `…_m1_v2.png`.
+>
+> **What v2 is** (all in `DisplaceStoneSubdiv`, flag default OFF): band
+> pairings recorded per border segment; narrow border faces adopt their cell
+> quad; break verts freed (band-inner excluded); the densification splits
+> border and inner edge in LOCKSTEP (2 band tris → 4, interior tri split,
+> chord-pin to the parent midpoint); end-course one-freed-endpoint splits only
+> with a live pairing and never against an abut-pinned far end.
+>
+> **Two design premises overturned by measurement** (recorded in the design
+> doc): the rig's 667-px "unwelded end-course floor" was a RIG BUG — backA
+> protruded 2.8 u past sheet A's own edge; inset (this commit), the graze
+> count is now a true metric and reads **0** on every sane arm. And fold-relax
+> does NOT become dispensable under v2 (without it: 3 878 px) — the
+> weld/relax conflict shrank to a residual (the rig's 0.2474 gap outlier),
+> it did not dissolve.
+>
+> **Corner-rig truth table after the backdrop fix** (mode 1): v2 off gap
+> 0.0942/0.0199, flips 492, green 0/156 → v2 on gap 0.2474/0.0337, flips 939,
+> green 0/**63**. Mode 2 under v2 is pathological (5 088) — MIN is dead,
+> thrice over. Gate 1's thresholds need re-adjudication against what the
+> backdrop fix revealed; gate 4 (25-pose battery, acceptance ×4, t=1588,
+> render_gate) is NOT yet run — it gates any default flip, after his eye.
+
 > ## 2026-08-18 — THE CORNER HAS A TEST SCENE NOW, THE LADDER IS ADJUDICATED
 > AGAINST ON THE REAL MESH, and the fix that remains standing is a border-
 > pipeline STAGE REORDER nobody should attempt as an add-on pass

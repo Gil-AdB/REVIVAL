@@ -557,11 +557,15 @@ DTestScene buildCorner(int mapId, CornerMetrics *M) {
     // saturated green from any camera in front of the pier.
     Texture *btex = b.AddSolidColorTexture(8, 8, 0xFF00C000u);
     Material *bmat = b.AddMaterial("dtestback", btex, {0, 192, 0, 255}, 0);
-    // Backdrops INSET inside the sheets' footprint (z∈[-5.8,2.8], y∈[0.1,7.9])
-    // so no ray AROUND the pier can see green — any green is punch-through.
+    // Backdrops INSET inside the sheets' footprint (y∈[0.1,7.9]) so no ray
+    // AROUND the pier can see green — any green is punch-through. backA must
+    // stay inside SHEET A's own span z∈[-6,0]: its first cut reached z=+2.8
+    // and the 2.8 u sticking past the wall's open corner edge was a constant
+    // 667 px "punch-through floor" bit-identical across every mesh arm — a
+    // rig bug adjudicated as if it were the unwelded end courses.
     const Vector backA[4] = {   // behind sheet A, facing +x
-        Vector(-0.8f, 0.1f, 2.8f), Vector(-0.8f, 0.1f, -5.8f),
-        Vector(-0.8f, 7.9f, -5.8f), Vector(-0.8f, 7.9f, 2.8f),
+        Vector(-0.8f, 0.1f, -0.2f), Vector(-0.8f, 0.1f, -5.8f),
+        Vector(-0.8f, 7.9f, -5.8f), Vector(-0.8f, 7.9f, -0.2f),
     };
     b.AddQuad("dtest_backA", backA, bmat);
     const Vector bOff{-nBx * 0.8f, 0.0f, -nBz * 0.8f};   // behind sheet B, facing +nB
