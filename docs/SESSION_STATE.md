@@ -1,5 +1,40 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-18d — **THE CROSS-BAKE GUARD LANDS AND THE BATTERY FLIPS TO A
+> CLEAN SWEEP**: v2+guard beats the default arm at ALL 15 review poses, the
+> base slits are gone, and the corner pose falls to 60 px against the
+> default's 105
+>
+> The addendum-4 mechanism, implemented: `foreignCoincident(P)` — any
+> foreign-material face within kAbutEps, convexity deliberately ignored —
+> applied at v2's four vert-creation/classification sites (end-course
+> sideVert pair, lockstep m2, recursion midpoints, break-free). A vert
+> created at another bake's junction pins, so the 'rooms' bake can no longer
+> diverge from the separately-baked floor at their shared seam.
+>
+> **THE BATTERY (default → v2+guard, pure-black px):** 2845 18→4, 5534
+> 1474→1127, 5743 251→147, 5773 284→127, 5813 228→191, 5814 355→308, 5843
+> 390→215, 5854 394→214, 5958 232→112, 5963 307→192, 5967 458→283, 5987
+> 218→118, **6097 532→198**, 6133 1064→731, 6293 456→278. Better at 15/15
+> (12 by >50 px), worse at ZERO. The guard closes base holes the DEFAULT arm
+> always had: the guarded dense base geometry seals seams the coarse default
+> merely straddled. t=5968 (the commissioned corner): **60 px** vs default
+> 105, channel still zero. Base crop after:
+> `docs/img/fogwt/battery_v2guard_base_t6097.png`.
+>
+> **Gates:** default t=5968 `bf75aa27…` byte-identical, pin t=5743
+> `440aa6bb…` — both re-verified on this exact binary. Flags remain
+> default-OFF: what stands between `--greets_displace_profile_agree=1
+> --greets_displace_border_v2` and the umbrella default is now ONLY Gil-Ad's
+> eye (the acceptance ×4 re-pin under the new arm is mechanical once he
+> approves the look).
+>
+> The night's chain, for the record: census box → [STONE-PROV] provenance →
+> face-ownership plane → foreignCoincident. Three refuted levers (two
+> tapers, one relax exemption) are documented in the addenda with
+> byte-identity proofs; every refutation narrowed the population until the
+> fix was one lambda.
+
 > ## 2026-08-18c — THE REVIEW-POSE BATTERY IS IN: v2 closes the commissioned
 > corner and pays 100–180 px of WALL-BASE HAIRLINES at 10 of 15 poses — the
 > end-case residual, localized and named, gating the default flip

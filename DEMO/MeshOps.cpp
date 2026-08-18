@@ -2250,6 +2250,25 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 	//   CONCAVE abutment (front)-> abuts (inside corner: freeing opens a slit)
 	//   CONVEX abutment (behind)-> does NOT abut (outside corner/reveal: the
 	//                              relief must carry; t=5928)
+	// v2 creation-time guard (2026-08-18c addendum 4): is ANY foreign-material
+	// face within kAbutEps of P — convexity deliberately NOT consulted. The
+	// pier base meets the floor CONVEXLY from the visible side, so the veto
+	// above frees verts there; but a vert created at another BAKE's junction
+	// must pin regardless, or the two bakes diverge and the shared seam opens
+	// as through-slits (263/263 face-plane-verified holes at t=6097).
+	auto foreignCoincident = [&](const Vector &P) -> bool {
+		if (abutTris.empty()) return false;
+		auto it = abutGrid.find(abutCellKey(std::floor(P.x/kAbutCell)*kAbutCell,
+		                                    std::floor(P.y/kAbutCell)*kAbutCell,
+		                                    std::floor(P.z/kAbutCell)*kAbutCell));
+		if (it == abutGrid.end()) return false;
+		for (uint32_t id : it->second) {
+			const AbutTri &T2 = abutTris[id];
+			if (T2.mat && !std::strcmp(T2.mat, matName)) continue;   // own material
+			if (pointTriDistSq(P, T2.a, T2.b, T2.c) < kAbutEps*kAbutEps) return true;
+		}
+		return false;
+	};
 	auto abutPointMat = [&](const Vector &P, uint64_t kA, uint64_t kB,
 	                        const Vector *ownN) -> const char * {
 		if (abutTris.empty()) return nullptr;
@@ -4058,6 +4077,17 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							};
 							const uint32_t a2 = sideVert(a);
 							const uint32_t b2 = sideVert(b);
+							if (endCourse) {
+								// v2 creation-time cross-bake guard (addendum 4): a vert
+								// created at another bake's junction pins, convexity
+								// notwithstanding, or the two bakes diverge.
+								for (uint32_t vv : {a2, b2})
+									if (!pinnedZero[vv] && foreignCoincident(verts[vv].Pos)) {
+										pinnedZero[vv] = 1; recessOnly[vv] = 0;
+										if (vv < bandInner.size()) bandInner[vv] = 0;
+										if (vv < freeEdgeKA.size()) { freeEdgeKA[vv] = 0; freeEdgeKB[vv] = 0; }
+									}
+							}
 							// face-local UVs at the side points
 							const float ua=faceU(faces[i],k),        va=faceV(faces[i],k);
 							const float ub=faceU(faces[i],(k+1)%3),  vb=faceV(faces[i],(k+1)%3);
@@ -4283,6 +4313,9 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					if (borderV2 && v < bandInner.size() && bandInner[v]) continue;
 					const Vector fn = verts[v].N;
 					if (abutPointMat(verts[v].Pos, freeEdgeKA[n2], freeEdgeKB[n2], &fn)) continue;
+					// v2 creation-time cross-bake guard (addendum 4): never free a
+					// vert coinciding with another bake's geometry.
+					if (foreignCoincident(verts[v].Pos)) continue;
 					recessOnly[v] = 1;
 					freeEdgeDir[v] = freeEdgeDir[n2];
 					if (v >= freeEdgeKA.size()) { freeEdgeKA.resize(v+1, 0); freeEdgeKB.resize(v+1, 0); }
@@ -4438,6 +4471,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							freeEdgeDir[mid] = freeEdgeDir[src];
 							freeEdgeKA[mid] = freeEdgeKA[src]; freeEdgeKB[mid] = freeEdgeKB[src];
 						}
+						// v2 creation-time cross-bake guard (addendum 4)
+						if (borderV2 && recessOnly[mid] && foreignCoincident(verts[mid].Pos)) {
+							pinnedZero[mid] = 1; recessOnly[mid] = 0; ++nProfPin;
+							freeEdgeKA[mid] = 0; freeEdgeKB[mid] = 0;
+						}
 						const float mu = 0.5f*(faceU(faces[i],k)+faceU(faces[i],(k+1)%3));
 						const float mv = 0.5f*(faceV(faces[i],k)+faceV(faces[i],(k+1)%3));
 						if (haveBP) {
@@ -4498,6 +4536,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 									freeEdgeKA[mid2] = freeEdgeKA[a2]; freeEdgeKB[mid2] = freeEdgeKB[a2];
 								}
 							} else bandInner[mid2] = 1;
+							// v2 creation-time cross-bake guard (addendum 4)
+							if (!pinnedZero[mid2] && foreignCoincident(verts[mid2].Pos)) {
+								pinnedZero[mid2] = 1; recessOnly[mid2] = 0; bandInner[mid2] = 0;
+								freeEdgeKA[mid2] = 0; freeEdgeKB[mid2] = 0;
+							}
 							// (A base-course TAPER — pin m2 whenever mid was veto-pinned,
 							// skip its chord ride — was built here 2026-08-18c against the
 							// battery's wall-base hairlines and NEVER FIRED: all 15 v2
