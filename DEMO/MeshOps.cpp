@@ -4498,6 +4498,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 									freeEdgeKA[mid2] = freeEdgeKA[a2]; freeEdgeKB[mid2] = freeEdgeKB[a2];
 								}
 							} else bandInner[mid2] = 1;
+							// (A base-course TAPER — pin m2 whenever mid was veto-pinned,
+							// skip its chord ride — was built here 2026-08-18c against the
+							// battery's wall-base hairlines and NEVER FIRED: all 15 v2
+							// renders byte-identical with it in. pinnedZero[mid] does not
+							// occur inside a lockstep split; the hairlines' mechanism is
+							// NOT the pinned-midpoint cell and remains unlocated. Next
+							// instrument: FDS_STONE_CENSUS_BOX aimed at the t=6097 crop's
+							// unprojected base seam, then the face census.)
 							// UVs: all four faces descend from one authored triangle's
 							// affine map, so a midpoint's UV is the mean of its parents'
 							// wherever it is read. Taken per face anyway.
