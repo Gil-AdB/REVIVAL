@@ -74,6 +74,25 @@
 > (--face_id_dump or a z-plane dump), BEFORE any further lever. Taper v3 is
 > KEPT inside the opt-in v2 arm (counter printed as [STONE-V2TAPER]); its
 > look effect is unjudged.
+>
+> **ADDENDUM 4 — CLASSIFIED, AND THE MECHANISM IS COMPLETE.** The face plane
+> (`--face_id_dump`, snapshot writes `_face.u32`) says **263/263 new-black px
+> have NO FACE — genuine holes**, not shading. And the [STONE-PROV] overlay
+> across the 'rooms' and 'floor' bakes at those positions (y=0.000/0.020,
+> wall-base line) shows the def arm PINNED in both bakes while under v2 the
+> 'rooms' bake displaces there (band-inner nodes + freed verts) and the
+> separately-baked floor still pins — **the two bakes diverge at their shared
+> junction and the seam opens: the exact through-slit class the 2026-08-15
+> FOREIGN-FAMILY guard exists for.** Root cause: v2's three vert-creation
+> paths (end-course sideVert, lockstep m2, break-free) classify with
+> `abutPointMat` alone — the pier base meets the floor CONVEXLY from the
+> visible side, so the veto frees — and never consult the cross-bake
+> coincidence rules (ndVert / neighbor-pin / foreign-family contact) that pin
+> exactly these junctions everywhere else. THE FIX (next cycle, fully
+> specified): route v2's creation-time classification through the same
+> coincidence guards the classifier uses; a new vert coinciding with another
+> mesh's geometry at a junction pins, convexity notwithstanding. Gate: the
+> 15-pose battery — expect the +74..+183 column to collapse.
 
 > ## 2026-08-18b — **THE ARRIS CHANNEL CLOSES**: the lockstep reorder lands as
 > `--greets_displace_border_v2`, the t=5968 slit contributes ZERO pixels, and
