@@ -1,0 +1,92 @@
+[JCENSUS] plane  0 mat=rooms n=( 1.000,-0.000, 0.000) d=  17.898
+[JCENSUS] plane  1 mat=rooms n=( 0.000, 0.000, 1.000) d= -75.913
+[JCENSUS] plane  2 mat=rooms n=( 0.000, 0.000,-1.000) d=  49.374
+[JCENSUS] plane  3 mat=floor n=( 0.000, 1.000,-0.000) d=   0.000
+[JCENSUS] plane  4 mat=rooms n=(-1.000, 0.000, 0.000) d= -49.374
+[JCENSUS] plane  5 mat=rooms n=( 0.854, 0.000, 0.521) d= -22.211
+[JCENSUS] plane  6 mat=rooms n=( 0.999, 0.000, 0.039) d=   3.475
+[JCENSUS] plane  7 mat=rooms n=(-0.888, 0.000,-0.459) d=  13.908
+[JCENSUS] plane  8 mat=rooms n=(-1.000, 0.000, 0.000) d=  -9.875
+[JCENSUS] plane  9 mat=rooms n=( 0.445, 0.000, 0.895) d= -48.402
+[JCENSUS] plane 10 mat=rooms n=(-0.514,-0.000,-0.858) d=  40.549
+[JCENSUS] plane 11 mat=rooms n=( 0.000, 0.000, 1.000) d= -56.163
+[JCENSUS] plane 12 mat=rooms n=( 1.000,-0.000, 0.000) d= -12.344
+[JCENSUS] plane 13 mat=rooms n=(-1.000, 0.000, 0.000) d=   4.937
+[JCENSUS] plane 14 mat=rooms n=( 1.000, 0.000, 0.000) d=  -9.875
+[JCENSUS] plane 15 mat=rooms n=( 0.000, 0.000, 1.000) d= -61.421
+[JCENSUS] plane 16 mat=rooms n=( 1.000, 0.000, 0.000) d=  -2.469
+[JCENSUS] plane 17 mat=rooms n=(-1.000, 0.000, 0.000) d=  -2.469
+[JCENSUS] plane 18 mat=rooms n=(-0.000, 0.000, 1.000) d= -37.030
+[JCENSUS] plane 19 mat=rooms n=(-1.000, 0.000, 0.000) d= -12.344
+[JCENSUS] plane 20 mat=rooms n=( 1.000, 0.000, 0.000) d= -13.578
+[JCENSUS] plane 21 mat=rooms n=( 0.447, 0.000,-0.894) d=  11.040
+[JCENSUS] plane 22 mat=rooms n=( 0.447,-0.894, 0.000) d= -12.144
+[JCENSUS] plane 23 mat=rooms n=(-1.000, 0.000, 0.000) d= -13.578
+[JCENSUS] plane 24 mat=rooms n=(-0.447,-0.000,-0.894) d=  11.040
+[JCENSUS] plane 25 mat=rooms n=(-0.447,-0.894, 0.000) d= -12.144
+[JCENSUS] plane 26 mat=rooms n=(-0.333,-0.667,-0.667) d=   3.703
+[JCENSUS] plane 27 mat=rooms n=( 0.447, 0.894, 0.000) d=  -3.312
+[JCENSUS] plane 28 mat=rooms n=( 0.333, 0.667,-0.667) d=  10.286
+[JCENSUS] plane 29 mat=rooms n=(-0.447, 0.894, 0.000) d=  -3.312
+[JCENSUS] plane 30 mat=rooms n=( 0.447, 0.000, 0.894) d= -27.601
+[JCENSUS] plane 31 mat=rooms n=(-0.447, 0.000, 0.894) d= -27.601
+[JCENSUS] plane 32 mat=rooms n=( 0.000, 0.000,-1.000) d=   5.555
+[JCENSUS] plane 33 mat=rooms n=( 0.447, 0.000,-0.894) d=   3.312
+[JCENSUS] plane 34 mat=rooms n=(-0.447,-0.000,-0.894) d=   3.312
+[JCENSUS] plane 35 mat=rooms n=( 0.000,-0.610,-0.793) d=  -0.640
+[JCENSUS] plane 36 mat=rooms n=( 1.000,-0.000, 0.000) d=  -3.673
+[JCENSUS] plane 37 mat=rooms n=( 0.886, 0.000, 0.464) d=  -4.479
+[JCENSUS] plane 38 mat=rooms n=( 0.899,-0.439,-0.000) d=  -5.494
+[JCENSUS] plane 39 mat=rooms n=(-1.000, 0.000, 0.000) d=  -3.673
+[JCENSUS] plane 40 mat=rooms n=(-0.886,-0.000, 0.464) d=  -4.479
+[JCENSUS] plane 41 mat=rooms n=(-0.899,-0.439, 0.000) d=  -5.494
+[JCENSUS] plane 42 mat=rooms n=( 0.903, 0.430,-0.000) d=  -2.229
+[JCENSUS] plane 43 mat=rooms n=(-0.903, 0.430, 0.000) d=  -2.229
+[JCENSUS] plane 44 mat=rooms n=( 0.770,-0.338,-0.541) d=  -6.432
+[JCENSUS] plane 45 mat=rooms n=( 0.759, 0.000,-0.651) d=  -5.089
+[JCENSUS] plane 46 mat=rooms n=(-0.759,-0.000,-0.651) d=  -5.089
+[JCENSUS] plane 47 mat=rooms n=(-0.770,-0.338,-0.541) d=  -6.432
+[JCENSUS] plane 48 mat=rooms n=( 0.000, 0.000,-1.000) d=  -4.937
+[JCENSUS] plane 49 mat=rooms n=( 0.723, 0.303,-0.621) d=  -4.084
+[JCENSUS] plane 50 mat=rooms n=(-0.723, 0.303,-0.621) d=  -4.084
+[JCENSUS] plane 51 mat=rooms n=( 0.000,-0.530,-0.848) d=  -7.098
+[JCENSUS] faces rooms=196 floor=30 planes=52 junction-edges=117 complex(>2-plane)=0 cross-mesh=0
+[JCENSUS] class rooms-rooms:
+[JCENSUS]    80- 90 deg:     4 edges, len    25.92
+[JCENSUS]    90-100 deg:    11 edges, len   102.45
+[JCENSUS]   100-110 deg:     6 edges, len     9.07
+[JCENSUS]   110-120 deg:     8 edges, len    34.56
+[JCENSUS]   120-130 deg:     2 edges, len     4.66
+[JCENSUS]   130-140 deg:    10 edges, len    14.64
+[JCENSUS]   140-150 deg:    10 edges, len    35.40
+[JCENSUS]   150-160 deg:     9 edges, len    38.40
+[JCENSUS]   160-170 deg:     2 edges, len     3.70
+[JCENSUS]   200-210 deg:     1 edges, len     4.94
+[JCENSUS]   210-220 deg:     2 edges, len    12.34
+[JCENSUS]   220-230 deg:     2 edges, len     5.63
+[JCENSUS]   250-260 deg:     2 edges, len     1.75
+[JCENSUS]   260-270 deg:     2 edges, len     9.87
+[JCENSUS]   270-280 deg:    13 edges, len    39.62
+[JCENSUS] class rooms-floor:
+[JCENSUS]    80- 90 deg:     5 edges, len    42.71
+[JCENSUS]    90-100 deg:    24 edges, len   273.51
+[JCENSUS]   110-120 deg:     4 edges, len    17.28
+[JCENSUS] class floor-floor:
+[JCENSUS] junction LINES with mean visible angle > 200 (the reflex class), by length:
+[JCENSUS]   planes(33,37) mean= 271.1 deg edges=   3 len=   7.47 bbox=(-2.5,0.0,-4.9)..(-2.5,7.5,-4.9)
+[JCENSUS]   planes(34,40) mean= 271.1 deg edges=   3 len=   7.47 bbox=(2.5,0.0,-4.9)..(2.5,7.5,-4.9)
+[JCENSUS]   planes(32,35) mean= 217.6 deg edges=   1 len=   7.41 bbox=(-3.7,8.3,-5.6)..(3.7,8.3,-5.6)
+[JCENSUS]   planes(2,14) mean= 270.0 deg edges=   1 len=   4.94 bbox=(-9.9,0.0,-49.4)..(-9.9,4.9,-49.4)
+[JCENSUS]   planes(6,18) mean= 267.7 deg edges=   1 len=   4.94 bbox=(4.9,0.0,-37.0)..(4.9,4.9,-37.0)
+[JCENSUS]   planes(7,8) mean= 207.3 deg edges=   1 len=   4.94 bbox=(9.9,0.0,-49.4)..(9.9,4.9,-49.4)
+[JCENSUS]   planes(7,10) mean= 211.7 deg edges=   1 len=   4.94 bbox=(12.7,0.0,-54.9)..(12.7,4.9,-54.9)
+[JCENSUS]   planes(8,18) mean= 270.0 deg edges=   1 len=   4.94 bbox=(9.9,0.0,-37.0)..(9.9,4.9,-37.0)
+[JCENSUS]   planes(13,18) mean= 270.0 deg edges=   2 len=   4.94 bbox=(-4.9,0.0,-37.0)..(-4.9,4.9,-37.0)
+[JCENSUS]   planes(14,18) mean= 270.0 deg edges=   2 len=   4.94 bbox=(-9.9,0.0,-37.0)..(-9.9,4.9,-37.0)
+[JCENSUS]   planes(16,18) mean= 270.0 deg edges=   1 len=   4.94 bbox=(-2.5,0.0,-37.0)..(-2.5,4.9,-37.0)
+[JCENSUS]   planes(17,18) mean= 270.0 deg edges=   1 len=   4.94 bbox=(2.5,0.0,-37.0)..(2.5,4.9,-37.0)
+[JCENSUS]   planes(16,49) mean= 223.7 deg edges=   1 len=   2.82 bbox=(-2.5,0.0,3.7)..(-2.5,2.5,4.9)
+[JCENSUS]   planes(17,50) mean= 223.7 deg edges=   1 len=   2.82 bbox=(2.5,0.0,3.7)..(2.5,2.5,4.9)
+[JCENSUS]   planes(12,28) mean= 250.5 deg edges=   1 len=   0.87 bbox=(-12.3,2.5,-19.1)..(-12.3,3.1,-18.5)
+[JCENSUS]   planes(19,26) mean= 250.5 deg edges=   1 len=   0.87 bbox=(12.3,6.8,-19.1)..(12.3,7.4,-18.5)
+[JCENSUS] done — exiting before first frame.

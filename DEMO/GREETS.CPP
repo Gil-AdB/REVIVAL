@@ -22,6 +22,180 @@
 
 #include "GREETS.H"
 #include "GreetsDisco.h"
+#include <unordered_map>
+#include <unordered_set>
+#include <map>
+#include <cmath>
+
+// ─── [JCENSUS] rev-dispv3 design instrument (docs/DISPLACE_V3_DESIGN.md) ────
+// Enumerates the junction edges between distinct wall PLANES of the 'rooms'
+// and 'floor' materials, BEFORE any subdivision/displacement, and histograms
+// the visible-side angle between the joined planes. Angle convention is
+// Gil-Ad's: swept on the back-cull (visible) side — 180 = flat continuation,
+// 90 = interior corner, 270 = exterior/reflex (the pier). Prints to stderr,
+// then exits — the process never reaches the first frame.
+static void GreetsJunctionCensus(Scene *Sc)
+{
+	struct PlaneRec { Vector n; float d; int mat; };
+	struct FaceRec  { int plane; int mesh; Vector n; Vector c; };
+	struct ERec     { int p0, p1; std::vector<int> f; };
+
+	std::vector<PlaneRec> planes;
+	std::vector<FaceRec>  frecs;
+	std::unordered_map<unsigned long long, int> posId;
+	std::vector<Vector> posPt;
+	std::unordered_map<unsigned long long, int> edgeId;
+	std::vector<ERec> erecs;
+
+	auto pid = [&](const Vector &p) -> int {
+		const long long qx = llroundf(p.x * 1024.0f) + (1ll << 20);
+		const long long qy = llroundf(p.y * 1024.0f) + (1ll << 20);
+		const long long qz = llroundf(p.z * 1024.0f) + (1ll << 20);
+		const unsigned long long k = ((unsigned long long)qx << 42)
+		                           | ((unsigned long long)qy << 21)
+		                           | (unsigned long long)qz;
+		auto it = posId.find(k);
+		if (it != posId.end()) return it->second;
+		posId.emplace(k, (int)posPt.size());
+		posPt.push_back(p);
+		return (int)posPt.size() - 1;
+	};
+
+	int meshIdx = 0, nRooms = 0, nFloor = 0;
+	for (TriMesh *M = Sc->TriMeshHead; M; M = M->Next, ++meshIdx) {
+		for (DWord i = 0; i < M->FIndex; ++i) {
+			Face *F = &M->Faces[i];
+			if (!F->Txtr || !F->Txtr->Name) continue;
+			const bool isRooms = !std::strcmp(F->Txtr->Name, "rooms");
+			const bool isFloor = !std::strcmp(F->Txtr->Name, "floor");
+			if (!isRooms && !isFloor) continue;
+			(isRooms ? nRooms : nFloor)++;
+			const Vector a = F->A->Pos, b = F->B->Pos, c = F->C->Pos;
+			// Engine winding: the A,B,C cross product points ANTI-visible
+			// (verified: the floor plane's winding normal is (0,-1,0) while
+			// its visible side faces up). Swap the cross order so n is the
+			// VISIBLE-side normal and theta is Gil-Ad's convention directly.
+			Vector n = (c - a) ^ (b - a);
+			const float nl = n.length();
+			if (nl < 1e-8f) continue;               // degenerate sliver
+			n /= nl;
+			const Vector cent = (a + b + c) / 3.0f;
+			const float d = n * cent;
+			const int mat = isRooms ? 0 : 1;
+			int pl = -1;
+			for (int p = 0; p < (int)planes.size(); ++p)
+				if (planes[p].mat == mat && planes[p].n * n > 0.9995f
+				    && std::fabs(planes[p].d - d) < 0.05f) { pl = p; break; }
+			if (pl < 0) { pl = (int)planes.size(); planes.push_back({n, d, mat}); }
+			const int fi = (int)frecs.size();
+			frecs.push_back({pl, meshIdx, n, cent});
+			const int ia = pid(a), ib = pid(b), ic = pid(c);
+			const int eps[3][2] = { {ia,ib}, {ib,ic}, {ic,ia} };
+			for (auto &ep : eps) {
+				const int lo = ep[0] < ep[1] ? ep[0] : ep[1];
+				const int hi = ep[0] < ep[1] ? ep[1] : ep[0];
+				if (lo == hi) continue;
+				const unsigned long long k =
+					((unsigned long long)(unsigned)lo << 32) | (unsigned)hi;
+				auto it = edgeId.find(k);
+				int ei;
+				if (it != edgeId.end()) ei = it->second;
+				else {
+					ei = (int)erecs.size();
+					edgeId.emplace(k, ei);
+					erecs.push_back({lo, hi, {}});
+				}
+				erecs[ei].f.push_back(fi);
+			}
+		}
+	}
+
+	// class 0 = rooms-rooms, 1 = rooms-floor, 2 = floor-floor
+	double histLen[3][36] = {{0}};
+	int    histCnt[3][36] = {{0}};
+	int    complexEdges = 0, crossMesh = 0, junctionEdges = 0;
+	struct PairStat { double angSum = 0, len = 0; int cnt = 0;
+	                  Vector lo{ 1e9f, 1e9f, 1e9f}, hi{-1e9f,-1e9f,-1e9f}; };
+	std::map<std::pair<int,int>, PairStat> pairs;
+
+	for (const ERec &e : erecs) {
+		int plA = frecs[e.f[0]].plane, fA = e.f[0], fB = -1;
+		std::unordered_set<int> pls;
+		for (int fi : e.f) pls.insert(frecs[fi].plane);
+		if (pls.size() < 2) continue;
+		if (pls.size() > 2) { complexEdges++; continue; }
+		for (int fi : e.f) if (frecs[fi].plane != plA) { fB = fi; break; }
+		const Vector P0 = posPt[e.p0], P1 = posPt[e.p1];
+		Vector ed = P1 - P0;
+		const float el = ed.length();
+		if (el < 1e-6f) continue;
+		ed /= el;
+		auto uOf = [&](const FaceRec &fr, bool &ok) {
+			Vector v = fr.c - P0; v -= ed * (v * ed);
+			const float l = v.length();
+			ok = l > 1e-6f; if (ok) v /= l; return v;
+		};
+		bool okA = false, okB = false;
+		const Vector uA = uOf(frecs[fA], okA), uB = uOf(frecs[fB], okB);
+		if (!okA || !okB) continue;
+		float th = std::atan2(uB * frecs[fA].n, uB * uA) * 57.2957795f;
+		if (th < 0) th += 360.0f;
+		const int matA = planes[frecs[fA].plane].mat, matB = planes[frecs[fB].plane].mat;
+		const int cls = matA + matB;                 // 0 rr, 1 rf, 2 ff
+		const int bin = th >= 360.0f ? 35 : (int)(th / 10.0f);
+		histCnt[cls][bin]++; histLen[cls][bin] += el;
+		junctionEdges++;
+		if (frecs[fA].mesh != frecs[fB].mesh) crossMesh++;
+		const int pa = frecs[fA].plane < frecs[fB].plane ? frecs[fA].plane : frecs[fB].plane;
+		const int pb = frecs[fA].plane < frecs[fB].plane ? frecs[fB].plane : frecs[fA].plane;
+		PairStat &ps = pairs[{pa, pb}];
+		ps.angSum += th; ps.len += el; ps.cnt++;
+		auto ext = [&](const Vector &p) {
+			if (p.x < ps.lo.x) ps.lo.x = p.x; if (p.x > ps.hi.x) ps.hi.x = p.x;
+			if (p.y < ps.lo.y) ps.lo.y = p.y; if (p.y > ps.hi.y) ps.hi.y = p.y;
+			if (p.z < ps.lo.z) ps.lo.z = p.z; if (p.z > ps.hi.z) ps.hi.z = p.z;
+		};
+		ext(P0); ext(P1);
+	}
+
+	for (int p = 0; p < (int)planes.size(); ++p)
+		std::fprintf(stderr, "[JCENSUS] plane %2d mat=%s n=(%6.3f,%6.3f,%6.3f) "
+		             "d=%8.3f\n", p, planes[p].mat ? "floor" : "rooms",
+		             planes[p].n.x, planes[p].n.y, planes[p].n.z, planes[p].d);
+	std::fprintf(stderr, "[JCENSUS] faces rooms=%d floor=%d planes=%d "
+	             "junction-edges=%d complex(>2-plane)=%d cross-mesh=%d\n",
+	             nRooms, nFloor, (int)planes.size(),
+	             junctionEdges, complexEdges, crossMesh);
+	const char *clsName[3] = { "rooms-rooms", "rooms-floor", "floor-floor" };
+	for (int c = 0; c < 3; ++c) {
+		std::fprintf(stderr, "[JCENSUS] class %s:\n", clsName[c]);
+		for (int b = 0; b < 36; ++b)
+			if (histCnt[c][b])
+				std::fprintf(stderr, "[JCENSUS]   %3d-%3d deg: %5d edges, "
+				             "len %8.2f\n", b * 10, b * 10 + 10,
+				             histCnt[c][b], histLen[c][b]);
+	}
+	std::fprintf(stderr, "[JCENSUS] junction LINES with mean visible angle > 200 "
+	             "(the reflex class), by length:\n");
+	std::vector<std::pair<double, std::pair<std::pair<int,int>, PairStat>>> refl;
+	for (auto &kv : pairs)
+		if (kv.second.angSum / kv.second.cnt > 200.0)
+			refl.push_back({kv.second.len, kv});
+	std::sort(refl.rbegin(), refl.rend(),
+	          [](auto &a, auto &b){ return a.first < b.first; });
+	int printed = 0;
+	for (auto &r : refl) {
+		const PairStat &ps = r.second.second;
+		std::fprintf(stderr, "[JCENSUS]   planes(%d,%d) mean=%6.1f deg edges=%4d "
+		             "len=%7.2f bbox=(%.1f,%.1f,%.1f)..(%.1f,%.1f,%.1f)\n",
+		             r.second.first.first, r.second.first.second,
+		             ps.angSum / ps.cnt, ps.cnt, ps.len,
+		             ps.lo.x, ps.lo.y, ps.lo.z, ps.hi.x, ps.hi.y, ps.hi.z);
+		if (++printed >= 40) break;
+	}
+	std::fprintf(stderr, "[JCENSUS] done — exiting before first frame.\n");
+	std::exit(0);
+}
 #include "BlasterBolts.h"
 #include <RENDER/GreetsMirror.h>
 #include <RENDER/MirrorShatter.h>
@@ -1985,6 +2159,8 @@ void Initialize_Greets()
 	// S1 offscreen shadow proxy: captured here (rooms/floor still FLAT), built
 	// after the displace/smooth passes below, finalized after the clustering.
 	InitTimelineMark("greets: displace block begin");
+	if (fds::FeatureFlags::greets_junction_census())
+		GreetsJunctionCensus(GreetSc);
 	StoneProxySnapshot g_stoneProxySnap;
 	TriMesh *g_stoneProxyMesh = nullptr;
 	{
