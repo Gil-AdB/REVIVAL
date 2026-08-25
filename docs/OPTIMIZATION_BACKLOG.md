@@ -10,6 +10,73 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-25b — **SSAO IS SILENTLY DISCARDED IN CITY AND FOUNTAIN UNDER `--hdr`**: the pass runs, costs 5.6 ms, and its output never reaches the frame. REPORTED, NOT FIXED — TODO
+
+Found while landing the `ssao_radius_zfloor` default flip (SESSION_STATE
+2026-08-25). Not a regression from that flip — it predates it and the flip is
+merely the thing that made it visible, because the flip's city/fountain look-delta
+came back *byte-null under `--hdr`* and that was too clean to be true.
+
+**THE SYMPTOM, MEASURED.** city `t=1961`, `FDS_CITY_ENV_PIXEL=1 ... --city_env_pixel`,
+one pose per process, dummy drivers. All three of these are the SAME hash
+`b3372d0f6ef2a6dba78a7095ef5d36cd`:
+
+* `--deferred --hdr --hdr-linear --texture-filter=2` (no SSAO at all)
+* `... --ssao --ssao-gtao --ssao_strength=8 --ssao_power=4`
+* `... --ssao --ssao-gtao --ssao_radius_zfloor=0 --ssao_radius=200`
+
+A **50× radius and an 8× strength change nothing**. fountain `t=2500` behaves
+identically (`8db68ccb…` with and without `--ssao --ssao-gtao --ssao_strength=8`).
+
+**SSAO IS DEFINITELY RUNNING.** The pass reports itself:
+`[ssao] 1920x1080 /2 (960x540), GTAO+bitmask, HDR g_hdrBuf: 5.61 ms` — full main
+resolution, the GTAO producer, and it believes it is writing the HDR buffer. And
+`--ssao_debug` (which paints the AO term to VPage and returns before the tonemap)
+produces a correct, different frame `e5048e48…`. So the AO field is computed and
+then lost between `Render_SSAO` and the dumped image. **city and fountain have
+been rendering with no ambient occlusion at all in every `--hdr` arm.**
+
+**WHAT IS RULED OUT.** The froxel/fog composite is **EXONERATED**: `--deferred
+--hdr --no-fast_fog` is byte-identical with and without
+`--ssao --ssao-gtao --ssao_strength=8` (`928c7791…` both). So it is not the fog
+pass rebuilding `g_hdrBuf` over the AO multiply.
+
+**WHAT IS NOT RULED OUT / WHERE TO LOOK.** chase keeps its AO under the same
+`--hdr --hdr-linear` (measured: `0f581ab7…` no-ssao vs `63d1613e…` ssao at
+t=1105), and greets keeps it too, so this is scene-conditional. Prime suspect is
+the ordering around HDR *activation*: `Render_SSAO` picks its write target from
+`useHdr = hdr() && Hdr_WritableFor(...)`, and `Hdr_WritableFor` tests that the
+buffer is **sized for this view**, NOT that `g_hdrActive` is set. If `g_hdrBuf` is
+merely sized-but-not-yet-active when SSAO runs, SSAO takes the HDR arm, and the
+later `Hdr_ResolveActivate` (RENDER.CPP, "Fog-off HDR activation", which resolves
+VPage → `g_hdrBuf` when HDR is not yet active) would overwrite the AO wholesale.
+That is a hypothesis, not a measurement — the discriminator is to log
+`g_hdrActive` alongside the existing `[ssao]` line in all four scenes and see
+which ones have it false at SSAO time.
+
+**WHY IT MATTERS.** SSAO is ~39 % of his greets acceptance frame; in city and
+fountain he is paying 5.6 ms for a pass whose output is thrown away, and getting
+none of the look. Either fix the target selection or skip the pass — both are
+wins, and they are opposite wins, so this needs the measurement above before any
+patch.
+
+## 2026-08-25a — MEASUREMENT TRAP: `--ssao_dump` inflates the `[ssao]` pass ~3.5×
+
+`--ssao_dump` materialises the applied full-res AO plane, and doing so **forces
+the scalar apply loop**. Measured at chase `t=1105`, 1920×1080,
+`--ssao_downscale=2`: the `[ssao]` pass reports **13.7 / 16.0 / 15.4 ms** with the
+dump against **~4.1–4.4 ms** without it. **Timings taken from a dumping run are
+not pass timings** — the dump is a correctness instrument only.
+
+This trap already produced one wrong number that shipped in a flag description:
+the `ssao_radius_zfloor` cost was recorded as **+0.17 ms min / +0.05 ms median**
+(6 runs per arm, un-interleaved). Re-measured at the default flip with **14 runs
+per arm interleaved**, the arms are indistinguishable — k=0 min 4.15 / median 4.25
+/ mean 4.264 ms vs k=48 min 4.07 / median 4.26 / mean 4.238, i.e. delta min −0.08,
+median +0.01, mean −0.03, **sign flipping between statistics**. The +0.17 figure is
+retracted as run-to-run noise. Standing rule for SSAO A/Bs: interleave the arms,
+report min AND median AND mean, and never dump while timing.
+
 ## 2026-08-17a — THE 8-WIDE GTAO's TWO RECIPROCALS: the shipped SSAO path disagrees with **its own scalar reference** on up to 24 % of pixels, systematically darker. REPORTED, NOT FIXED
 
 Found while porting GTAO into the GPU arm (`docs/SHADING_CONTRACT.md` §13); the

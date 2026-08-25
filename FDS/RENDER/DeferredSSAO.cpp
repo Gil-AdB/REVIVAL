@@ -230,16 +230,33 @@ void Render_SSAO() {
 	const bool temporal = fds::FeatureFlags::ssao_temporal();
 	static uint32_t sTemporalFrame = 0;
 	g_ssaoRotPhase = temporal ? int(((++sTemporalFrame) * 7u) & 15u) : 0;
-	// --ssao_radius_zfloor (default 0 = OFF, byte-null): raise the EFFECTIVE AO
-	// radius to a floor proportional to the ZPage16 depth QUANTUM, 1/g_zscale.
+	// --ssao_radius_zfloor (DEFAULT 48 since 2026-08-25, Gil-Ad's order: "the
+	// moire was fixed - we need to pin the per-scene radius"): raise the
+	// EFFECTIVE AO radius to a floor proportional to the ZPage16 depth QUANTUM,
+	// 1/g_zscale.  --ssao_radius_zfloor=0 turns it off and is the exact
+	// pre-flip arm.
 	// The AO radius is authored in view units but the depth it integrates is a
 	// 16-bit LINEAR encoding of [0, FZP*1.1], so the radius's real resolving
-	// power is radius/quantum -- and that ratio is per-SCENE, not per-flag:
-	// greets (FZP 150) gives 1583 quanta at --ssao_radius=4, chase (FZP 50000)
-	// gives 4.75. Below ~20 quanta the horizon march reads a depth STAIRCASE
-	// instead of a surface and the AO field turns to moire. This floor makes
-	// the flag mean the same thing in every scene; it costs nothing (no extra
-	// samples) and is inert wherever the quantum is already fine.
+	// power is radius/quantum -- and that ratio is per-SCENE, not per-flag.
+	// Below ~20 quanta the horizon march reads a depth STAIRCASE instead of a
+	// surface and the AO field turns to moire. This floor is what makes
+	// --ssao_radius mean the same thing in every scene, and it is what PINS the
+	// per-scene radius; at k=48 and --ssao_radius=4.0 the pin is
+	//   greets   FZP   150  quantum 0.00252757  1582.6 quanta ->  4.000000 INERT
+	//   crash          2000          0.03370098   118.7       ->  4.000000 INERT
+	//   fountain       5000          0.08425245    47.5       ->  4.044117
+	//   city           7500          0.12637867    31.6       ->  6.066176
+	//   chase         50000          0.84252453     4.75      -> 40.441177
+	// so it is byte-null in greets and crash BY CONSTRUCTION. It adds no
+	// samples (the march step count is unchanged, only its world extent), and
+	// re-measured at the flip -- chase t=1105, 1920x1080, --ssao_downscale=2,
+	// 14 runs per arm INTERLEAVED -- the two arms are INDISTINGUISHABLE:
+	// k=0 min 4.15 / median 4.25 / mean 4.264 ms, k=48 min 4.07 / median 4.26 /
+	// mean 4.238; delta min -0.08, median +0.01, mean -0.03, sign flipping
+	// between statistics. Not "free" as a claim -- "below what 14x14 can
+	// resolve". The hunt's earlier +0.17 ms min figure does not reproduce.
+	// Do NOT time this pass from an --ssao_dump run: the dump forces the scalar
+	// apply loop and inflates it to 13.7-16.0 ms, ~3.5x the real cost.
 	float radius         = fds::FeatureFlags::ssao_radius();
 	{
 		const float zq = (g_zscale != 0.0f) ? 1.0f / g_zscale : 0.0f;

@@ -1,5 +1,109 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-25 — **THE PER-SCENE SSAO RADIUS IS PINNED**: `ssao_radius_zfloor`
+> defaults to 48, the chase moire is gone in the arm he runs, and the flip is
+> byte-null at **every single pinned gate row** — which is a finding, not a relief
+>
+> Gil-Ad approved the chase `zfloor=48` arm by eye and ordered the pin: *"the
+> moire was fixed - we need to pin the per-scene radius."* `origin/rev-moire`
+> fast-forwarded into `fog-wt` (it sat directly on `7cd8503d`, touched three
+> source files and no docs, so there was nothing to union-resolve), and
+> `ssao_radius_zfloor`'s default went **0 → 48** — the standing
+> umbrella-flags-imply-features rule: a fix he approved has to be live in
+> `--ssao --ssao-gtao`, not a dark opt-in. `--ssao_radius_zfloor=0` is the OFF
+> switch and the exact pre-flip arm; every claim below is differential against
+> it on ONE binary.
+>
+> **WHAT THE PIN ACTUALLY PINS.** The floor is `k × ZPage16 quantum`, and the
+> quantum is `FZP*1.1/0xff00` — per-SCENE. At k=48 and `--ssao_radius=4.0` the
+> effective radius is therefore:
+>
+> | scene | FZP | quantum | quanta @ r=4 | **effective radius @ k=48** | |
+> |---|---|---|---|---|---|
+> | greets | 150 | 0.00252757 | 1582.6 | **4.000000** | floor INERT |
+> | crash | 2000 | 0.03370098 | 118.7 | **4.000000** | floor INERT |
+> | fountain | 5000 | 0.08425245 | 47.5 | **4.044117** | +1.10 % |
+> | city | 7500 | 0.12637867 | 31.6 | **6.066176** | +51.7 % |
+> | chase | 50000 | 0.84252453 | **4.75** | **40.441177** | ×10.11 — the defect |
+>
+> **Every row of that table is MEASURED, not computed-and-hoped**: for each
+> scene, the default arm is byte-identical to
+> `--ssao_radius_zfloor=0 --ssao_radius=<effective>`. That is a bijection —
+> greets/crash confirmed at 4.0 (floor inert by construction, `k*q` never
+> reaches 4.0), fountain at 4.0441175, city at 6.0661764, chase at 40.441177.
+> The flag now means the same thing in every scene, which is the whole point of
+> the pin.
+>
+> **THE GATE RESULT IS THE SURPRISE: NOTHING MOVES. 0 of 13 pinned hashes.**
+> The brief expected the chase rows to move. They do not, and the mechanism is
+> mechanical: `ssao` defaults to **0** and no scene `setDefault`s it on, so
+> `Render_SSAO` early-returns in every gate recipe except one — none of
+> `chase (default)`, `chase (cinematic)`, `city`, `fountain`, `greets t=1588`
+> passes `--ssao`. The single row that does, `greets (acceptance ×4)`, is one of
+> the two scenes the construction exempts. Differential, verbatim recipes,
+> `--ssao_radius_zfloor=0` vs default, all in one clean worktree:
+>
+> * chase default t100/400/800/1200/1600 `f16bedd0…` `fcc9d561…` `397b878d…`
+>   `3539492d…` `0622d56e…` — all five identical across arms **and all five
+>   reproduce the 2026-08-17 pins exactly**
+> * chase cinematic t800 `b61b3397…` t1600 `4d70fdbd…` — identical, pins hold
+> * city `bd4ffbf8…`, fountain `8db68ccb…`, greets t=1588 `570a7b44…` — identical,
+>   pins hold
+> * greets acceptance ×4 t5743 `440aa6bb…` t2845 `00d17bc5…` t6097 `29c1e7fb…`
+>   t6133 `bc1b0a8a…` — identical, pins hold. **The t=5743/t=2845 byte-identity
+>   claim the hunt made by construction is now measured, and it holds.**
+>
+> So **no row is re-pinned and no old value is struck** — the table below is
+> unchanged by this flip, and that statement is itself now a gated fact.
+>
+> **`render_gate.sh`: ALL PASS 4/4 on the flipped binary** (`mirrortest
+> 4ac809e5…`, `rttslot 826c09e6…`, `conetest b41894f9…`, `halotest 166fa25a…`),
+> run from a worktree carrying the STOCK committed `rev.cfg`. Run from the main
+> tree it fails 4/4 — **and that is his `rev.cfg` (1384×768 vs the baselines'
+> 1920×1080), not this change.** Proved two ways: the same four hashes come back
+> byte-identical with `FDS_SSAO_RADIUS_ZFLOOR=0`, and the MAIN tree's own binary
+> pointed at stock assets (`--no-chdir_assets`) reproduces `4ac809e5…` exactly.
+> New trap recorded below; his `rev.cfg` was not touched.
+>
+> **THE LOOK, EVERY PAIR EYEBALLED.** chase, his arm
+> (`--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao`), at
+> t=400/800/1105/1300: the herringbone weave and the isoline contours are gone
+> and the rock faces lose their mottled AO grime — 11.10 / 18.32 / 91.91 /
+> 19.33 % of pixels move, mean |Δ| 4.92 / 4.93 / 7.96 / 6.24 on the moved, max
+> 128 / 171 / 68 / 185. This is the approved look and it was not retuned beyond
+> k=48. Crops: `docs/img/moire/pin48_chase_t00{0400,0800,1105,1300}_crop_{before,after}.png`.
+>
+> **city and fountain: NO look-delta, and the reason is a defect worth its own
+> round.** On the LDR deferred+SSAO arm the flip is visible in the numbers and
+> invisible to the eye — city 37.38 % of pixels at mean |Δ| **1.132**/255 (only
+> 1337 px above 12/255), fountain 2.17 % at mean **0.442**, max 9. I looked at
+> both pairs at the densest-change window; they are indistinguishable.
+> `docs/img/moire/pin48_{city_t1961,fountain_t2500}_ldr_crop_{before,after}.png`.
+> **But under `--hdr` the question is moot, because SSAO does not reach those
+> frames at all**: city and fountain are byte-identical with `--no-ssao` and with
+> `--ssao --ssao-gtao --ssao_strength=8`, and even at `--ssao_radius=200`. SSAO
+> demonstrably RUNS (`[ssao] 1920x1080 /2, GTAO+bitmask, HDR g_hdrBuf: 5.61 ms`,
+> and `--ssao_debug` paints a correct AO frame) — its HDR write is simply lost
+> before the dump. **`--no-fast_fog` does NOT recover it, so the froxel composite
+> is EXONERATED**; chase under the same `--hdr --hdr-linear` keeps its AO fine.
+> Filed to OPTIMIZATION_BACKLOG; NOT fixed here, and it means his HDR city and
+> fountain have been running with no ambient occlusion at all.
+>
+> **COST, RE-MEASURED AND HONESTLY DOWNGRADED.** chase t=1105, 1920×1080,
+> `--ssao_downscale=2`, **14 runs per arm interleaved**, `[ssao]` pass wall, no
+> `--ssao_dump`: k=0 min 4.15 / median 4.25 / mean 4.264 ms; k=48 min 4.07 /
+> median 4.26 / mean 4.238. Delta min **−0.08**, median **+0.01**, mean
+> **−0.03** — the sign flips between statistics and the distributions sit on top
+> of each other. The honest quote is **no resolvable cost at 14×14**, |Δ| ≤ 0.08
+> ms on a ~4.25 ms pass. The hunt's original **+0.17 ms min / +0.05 ms median
+> (6 runs, un-interleaved) DOES NOT REPRODUCE** and is retracted as noise — the
+> flag description and the code comment now carry the interleaved numbers.
+>
+> **MEASUREMENT TRAP, and it burned the hunt's cost figure once already:
+> `--ssao_dump` forces the scalar apply loop and inflates the `[ssao]` pass to
+> 13.7–16.0 ms against a real ~4.2 ms — ~3.5×. Timings from a dumping run are
+> not pass timings.** Recorded in the traps list below and in the backlog.
+
 > ## 2026-08-18d — **THE CROSS-BAKE GUARD LANDS AND THE BATTERY FLIPS TO A
 > CLEAN SWEEP**: v2+guard beats the default arm at ALL 15 review poses, the
 > base slits are gone, and the corner pose falls to 60 px against the
@@ -6736,6 +6840,19 @@ Range covered here: `1ca269d..7282f7a` (~60 commits, 2026-07-08..11).
 
 All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 
+> **2026-08-25 — `ssao_radius_zfloor` default 0 → 48 moves NOTHING in this table.**
+> Certified differentially on one binary in one clean worktree, each row's
+> recipe VERBATIM (note chase's rows carry no `--profiler=0`; they were run as
+> written), arm A appending `--ssao_radius_zfloor=0` (the exact pre-flip arm)
+> and arm B taking the new default: **13 of 13 pose hashes identical across the
+> arms, and all 13 reproduce the pins recorded below.** No row is re-pinned and
+> no value is struck. The mechanism is that `ssao` itself defaults to 0 and no
+> scene `setDefault`s it on, so `Render_SSAO` early-returns in every recipe here
+> except `greets (acceptance ×4)` — and greets is one of the two scenes
+> (with crash) where the floor is INERT by construction, `48 × 0.00252757 =
+> 0.121` never reaching `--ssao_radius=4.0`. Full account + the per-scene
+> effective-radius table: the 2026-08-25 entry at the top of this file.
+
 | gate | recipe | pin |
 |---|---|---|
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | **2026-08-17 — THIS PIN IS STRUCTURALLY BLIND TO `--refl_correct` (and so is the acceptance arm): `RunCitySnapshot` ticks ONCE per timestamp, and city's water carries NO mirrored content on the first tick of a process (measured ladder, same recipe: 1 tick → parent == child byte-identical; 2 ticks → they differ). So the value below is UNMOVED by the commissioned look change, while continuous play moves 277 214 px / 13.4 % at this pose. Judge city's reflection from a warm multi-tick run, never from this pin.** **CURRENT (2026-08-16f, tip `eb5e57d9`): `bd4ffbf87d1492175a9b6c1111fb3f5f`** — 3/3, and now insensitive to `--profiler=0` (the overlay is silenced in `RunCitySnapshot`; before that fix this recipe gave the HUD-bearing `4031ceec1a1090372575c4f9c39e2839`, which an explicit `--profiler` still reproduces exactly). **His acceptance arm** `./DEMO --snapshot=city@t=1961 --out=<dir> --env_live_water --deferred --city_env_pixel` → **`4cb8d2ca68b72f8a24627f42077eef25`** (t=2400 `f473fe2b2658fa0c1c290e1acf8265b9`, t=400 `d3374de6a0840a6927e00eb54b48b359`; one pose per process — a multi-pose sweep has its own temporal history and hashes differently). Cubes on disk for these values: `city_envmap_cube_c0c60c19.bin` md5 `adbac29c55fccc6919c04008ecff374a`, `city_envmap_cube_c0c60ff9.bin` md5 `a896a47c144fc23cff0e85e5c389d84b` (copy them into a fresh worktree or it cold-bakes). Everything below this sentence is history. — **⚠ THIS PIN IS CONDITIONAL ON THE ENV CUBE ON DISK — check `md5 Runtime/cache/city_envmap_cube.bin` BEFORE calling a mismatch a regression.** The cache key ignores FeatureFlags, so the cube is a hidden input the recipe does not state (full analysis + 2×2 matrix in the dated note above). `d1d67f0f84fb4af3713e15a64a1b827b` = pre-flip bake → the pins below hold. `63978a18ed31837348598014716f9932` = cold/current bake (mips ON) → **`5476be8c43864c761b94e2dd83f86aa8`** default and **`b88ecb7bbd0340145e35a80bc7a82f6b`** under the control; both are correct-for-that-cube, NOT drift. A **fresh worktree always cold-bakes**, so it lands in the second column unless you copy the cube in. Also: `DEMO` chdirs to its OWN directory (`ChdirToAssetRoot`, `DEMO/REV.CPP:503`) — launching a worktree binary from the main `Runtime/` does **not** render the main tree's assets or its cube. **Pending decision:** adopting the flip properly means `rm Runtime/cache/city_envmap_cube.bin` and re-pinning to `5476be8c…`; held for the user's eye on `docs/img/mipsel/city_t1961_envbake_crop.png` (max Δ 6/255, glass only). — **RE-PINNED 2026-08-08 (`--mips` default 0→1): `e1221676372e0bba6f65343f6d85b8e7`** (stable 2/2, pre-flip cube). Prior pin `37e62845c4d30eefa321730c5bb7e0b8` reproduces EXACTLY under `--no-mips --no-mip_fix` **on the pre-flip cube** (on a cold-baked cube that control arm is invalid — it measures a mips-ON bake under a mips-OFF frame). Divergence: 133 854 px changed (6.46 %), mean \|d\| 7.04 on changed, 24 761 px >12/255, max 192 — building facades, see `docs/img/mipsel/city_t1961_worst_crop.png`. |
@@ -6755,6 +6872,26 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | wasm | `make wasm` | links |
 
 Traps:
+- **`tools/render_gate.sh` IS RESOLUTION-SENSITIVE, and the main tree cannot
+  pass it while `Runtime/rev.cfg` carries the user's window size.** The four
+  baselines are 1920x1080 DUMMY-mode hashes; his uncommitted `rev.cfg`
+  (1384x768 as of 2026-08-25) makes ALL FOUR rows FAIL with perfectly
+  deterministic wrong hashes — `mirrortest 3e85645e…`, `rttslot 45d8f216…`,
+  `conetest 11877fc6…`, `halotest f6ad21fe…`. **That is not a regression and
+  must not be bisected.** Two ways to tell in under a minute, both used on
+  2026-08-25: run the gate from a worktree with the stock committed `rev.cfg`
+  (ALL PASS 4/4), or point the MAIN tree's own binary at stock assets —
+  `cd <worktree>/Runtime && FDS_MIRRORTEST_MULTI_DUMP=1 <main>/build/DEMO/DEMO
+  --no-chdir_assets --scene-mirrortest` reproduces `4ac809e5…` exactly. Never
+  edit his `rev.cfg` to make the gate pass; gate elsewhere.
+- **`--ssao_dump` is not a free observer — it inflates the pass it measures.**
+  The dump forces the SCALAR apply loop, taking the `[ssao]` pass from ~4.2 ms
+  to **13.7–16.0 ms** (~3.5×) at chase t=1105, 1920×1080, `--ssao_downscale=2`.
+  **Never quote an `[ssao]` timing from a run carrying `--ssao_dump`** — it is a
+  correctness instrument, not a perf one. This already cost one wrong cost
+  figure. Related: when comparing two SSAO arms, INTERLEAVE the runs — the
+  zfloor flip's original +0.17 ms was 6 un-interleaved runs per arm and
+  evaporated at 14×14 interleaved (2026-08-25).
 - **`DEMO` ignores your shell's CWD.** `ChdirToAssetRoot` (`DEMO/REV.CPP:503`)
   chdirs to the *binary's own* directory (first of `<bindir>`,
   `<bindir>/../Runtime`, `<bindir>/../../Runtime` holding a `rev.cfg`). The build
