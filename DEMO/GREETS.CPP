@@ -22,6 +22,7 @@
 
 #include "GREETS.H"
 #include "GreetsDisco.h"
+#include "DisplaceV3.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
@@ -2165,15 +2166,25 @@ void Initialize_Greets()
 	TriMesh *g_stoneProxyMesh = nullptr;
 	{
 		const int  L        = fds::FeatureFlags::greets_stone_subdiv();
-		const bool displace = fds::FeatureFlags::greets_displace();
+		const bool v3       = fds::FeatureFlags::greets_displace_v3();
+		const bool displace = fds::FeatureFlags::greets_displace() && !v3;
+		if (v3 && fds::FeatureFlags::greets_displace())
+			std::fprintf(stderr, "[DISPV3] --greets_displace_v3 REPLACES the "
+			             "legacy --greets_displace bake this run.\n");
+		if (v3) {
+			const int L3 = fds::FeatureFlags::greets_displace_v3_level();
+			SubdivideMaterialFaces(GreetSc, "rooms", L3, /*phong=*/false);
+			SubdivideMaterialFaces(GreetSc, "floor", L3, /*phong=*/false);
+			DisplaceV3_Run(GreetSc);
+		}
 		if (displace && fds::FeatureFlags::greets_shadow_proxy())
 			CaptureStoneProxySnapshot(GreetSc, g_stoneProxySnap);
-		if (!displace && L > 0) {
+		if (!v3 && !displace && L > 0) {
 			// Legacy pure-density knob (no bake): linear midpoint split only.
 			SubdivideMaterialFaces(GreetSc, "rooms", L, /*phong=*/false);
 			SubdivideMaterialFaces(GreetSc, "floor", L, /*phong=*/false);
 		}
-		if (!displace && fds::FeatureFlags::displace_viz())
+		if (!v3 && !displace && fds::FeatureFlags::displace_viz())
 			std::fprintf(stderr, "[DISPLACE-VIZ] --displace_viz is on but "
 				"--greets_displace is OFF — no bake runs, so the overlay has "
 				"nothing to draw. Add --greets_displace.\n");

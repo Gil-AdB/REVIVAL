@@ -15,6 +15,8 @@ set(DEMO_SOURCES
     Config.h
     CloakTest.cpp
     DisplaceTest.cpp
+    DisplaceV3.cpp
+    DisplaceV3.h
     CRASH.CPP
     CRASH.H
     PBRTEST.CPP
