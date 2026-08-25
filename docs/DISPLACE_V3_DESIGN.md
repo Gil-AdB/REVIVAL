@@ -200,6 +200,10 @@ At Gil-Ad's poses — t=5965 cam A
   (e.g. planes(2,4) vertical at (49.4, 0..18.5, −49.4)), obtuse 120–170,
   gentle reflex 200–230 (planes(7,10) at (12.7, 0..4.9, −54.9) — the line
   nearest his cams), sharp reflex 250–280 (the z=−37 colonnade arrises).
+  Per his Q2 drawings, **the sharp-reflex class (19 edges) carries the
+  acceptance weight**: every one of those lines inside any battery frame
+  must pass the castellated-profile check, and the M3+ evidence set must
+  include a close crop of at least three of them.
 - **The look gate is his eye**, not the metrics; the metrics only decide
   whether a build is worth showing him.
 
@@ -264,12 +268,20 @@ before the first frame). Full output: `docs/jcensus_greets.txt`.
 - **Q1 — corner treatment:** sharp mitred arris with both faces parallel to
   their walls (sketch panel 1/4 left), or interlocking quoin blocks
   alternating per course?
-- **Q2 — name the broken junction:** the line nearest your t=5965 cams
-  measures 207–212° visible-side (bbox (12.7, 0..4.9, −54.9)); the scene's
-  sharpest class is 270°. Is the junction you call broken this ~210° one,
-  or a 270° arris also in frame? (Decides acceptance emphasis, not the
-  algorithm.) If you measure the angle differently than §1's convention,
-  one concrete number for one named line calibrates it.
+- **Q2 — ANSWERED (2026-08-25, his two plan drawings, viewer dot marked):**
+  "works today" = a MILD reflex turn, ~200–220° visible-side by his drawing —
+  the census's gentle-reflex class (200–230, 5 edges; the near jamb at
+  207–212 by his cameras). "Not working today" = an ACUTE solid wedge
+  (~55–60° between the walls, viewer outside) — ~300° visible-side
+  schematic; its real-scene population is the census's sharp-reflex 250–280
+  bucket (19 edges, incl. the 270° colonnade at z=−37). Calibration: the
+  OK/broken boundary lies somewhere in (≈215, ≈300); the scene's empty
+  230–250 gap makes the exact threshold unobservable, so the design must be
+  CORRECT FOR BOTH reflex classes — no branch on a magic number (the mitre
+  construction already is). The broken line in his t=5965 frame is the
+  sharp-reflex arris class, not the near jamb; **acceptance emphasis for
+  M3+ goes on the 19 sharp-reflex edges**. His earlier "~240" was an
+  estimate inside the unobservable gap — superseded by these drawings.
 - **Q3 — ANSWERED (2026-08-25, his drawings):** the grout recesses carve
   through the junction — the corner silhouette is castellated, notch per
   grout course, block ends proud between them. Encoded in §2.5 and §5.
