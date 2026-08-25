@@ -230,7 +230,22 @@ void Render_SSAO() {
 	const bool temporal = fds::FeatureFlags::ssao_temporal();
 	static uint32_t sTemporalFrame = 0;
 	g_ssaoRotPhase = temporal ? int(((++sTemporalFrame) * 7u) & 15u) : 0;
-	const float radius   = fds::FeatureFlags::ssao_radius();
+	// --ssao_radius_zfloor (default 0 = OFF, byte-null): raise the EFFECTIVE AO
+	// radius to a floor proportional to the ZPage16 depth QUANTUM, 1/g_zscale.
+	// The AO radius is authored in view units but the depth it integrates is a
+	// 16-bit LINEAR encoding of [0, FZP*1.1], so the radius's real resolving
+	// power is radius/quantum -- and that ratio is per-SCENE, not per-flag:
+	// greets (FZP 150) gives 1583 quanta at --ssao_radius=4, chase (FZP 50000)
+	// gives 4.75. Below ~20 quanta the horizon march reads a depth STAIRCASE
+	// instead of a surface and the AO field turns to moire. This floor makes
+	// the flag mean the same thing in every scene; it costs nothing (no extra
+	// samples) and is inert wherever the quantum is already fine.
+	float radius         = fds::FeatureFlags::ssao_radius();
+	{
+		const float zq = (g_zscale != 0.0f) ? 1.0f / g_zscale : 0.0f;
+		const float k  = fds::FeatureFlags::ssao_radius_zfloor();
+		if (k > 0.0f && zq > 0.0f && k * zq > radius) radius = k * zq;
+	}
 	const float strength = fds::FeatureFlags::ssao_strength();
 	const float bias     = fds::FeatureFlags::ssao_bias();
 	const float power    = fds::FeatureFlags::ssao_power();

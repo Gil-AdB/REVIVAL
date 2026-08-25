@@ -1646,6 +1646,13 @@ void fds::RenderPipeline::setCurrentScene(Scene *Sc)
 	clipper.InitViewport(Sc);
 	CurScene = Sc;
 	g_zscale = (float)0xff00 / (CurScene->FZP * 1.1);
+	// --ssao_zprec_probe: DIAGNOSTIC depth-quantum sharpener, default 1.0 =
+	// byte-null. Separates "AO radius too small" from "depth too coarse" for
+	// the chase moire hunt; far geometry wraps past 0xFF80, see the flag doc.
+	{
+		const float zp = fds::FeatureFlags::ssao_zprec_probe();
+		if (zp > 0.0f && zp != 1.0f) g_zscale *= zp;
+	}
 	g_zscale256 = g_zscale / 256.0f;
 
 	C_FZP = Sc->FZP;
