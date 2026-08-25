@@ -1,5 +1,45 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-25 — **THE BULGE IS NAMED AND IT WAS NEVER THE CLASSIFIER: the
+> cpb=1 lattice cannot represent the height map's flat-top-plus-groove profile
+> and aliases every stone block into a PYRAMID** — the dome is fabricated at
+> the reconstruction layer, and `--greets_displace_mip=0 --greets_displace_cpb=3`
+> restores dressed stone at both of his t=5965 bulge poses
+>
+> His redirect ("the bare wall is flat. the tesselation reads the depth map...
+> you are just wasting tokens") cancelled the arm-comparison and ordered a
+> height-FIELD cross-section. The three curves (docs/img/bulge2/
+> cross_section_row128.png, row 128 of TEXTURES/greets_wall_h.png):
+> **(a) SOURCE is FLAT-TOPPED** — plateau h≈0.59 ±0.01 with per-block dome
+> metric |center−ring| ≤ 0.024 u at amp 0.3 (16/16 blocks measured), grooves
+> narrow (~10–20 of 256 texels/block) dipping to h≈0.0–0.4; **(b) the SAMPLE
+> is faithful** — bake mip2 still has 64 texels/block (block pitch 64×64 @mip2
+> per the [STONE] log), bilinear, mipMean 0.549; **(c) the LATTICE is the
+> defect** — cpb=1 caps the cell footprint at one full block pitch, so a block
+> is one fan cell: corner verts ON the groove lines at d≈−0.05..−0.07 u, ONE
+> apex at block center at d≈+0.015 u, and linear interpolation fabricates a
+> triangle wave (his poly-ownership screenshot shows exactly the 4-tri fans).
+> The plateau NEVER EXISTS in the mesh. Every seam/border/taper lever of the
+> campaign iterated the layer downstream of these colliding pyramids.
+>
+> **Lever (flags that already exist, no code):** `--greets_displace_mip=0
+> --greets_displace_cpb=3` on his judging arm. Before/after at his cams:
+> docs/img/bulge2/pair_A_before_after.png, pair_B_before_after.png (full frames
+> judge_[AB].png vs lev_mip0cpb3_[AB].png). Faces flat, mortar straight, arris
+> steps like cut stone. Ladder: cpb=3 alone flattens most of it; mip0 adds the
+> crisp bevel; amp=0.15 and mip1/cpb2 measured and inferior (lev_*.png).
+> **Cost:** post-bake scene faces 100,295 → 163,101 (+63 %); per-frame ms
+> UNMEASURED — his call, and the dials are per-0.5 steps if he wants a cheaper
+> point. **Residual, stated:** a black base-seam gash at the pier base at cam A
+> (lev_mip0cpb3_A.png, x≈810–840 y≈500–620) — the cross-bake/border machinery
+> was tuned at the cpb=1 lattice and needs one re-pass at the new density
+> BEFORE any default flip; smaller corner slivers remain at cam B.
+>
+> Defaults NOT flipped; nothing merged to fog-wt. Side branch `rev-bulge2`
+> carries the evidence, this entry, and the two new bulge poses in
+> docs/greets_review_poses.txt. His eyes gate the default; then the seam
+> re-pass and the 15-pose battery re-run at the new lattice.
+
 > ## 2026-08-18d — **THE CROSS-BAKE GUARD LANDS AND THE BATTERY FLIPS TO A
 > CLEAN SWEEP**: v2+guard beats the default arm at ALL 15 review poses, the
 > base slits are gone, and the corner pose falls to 60 px against the

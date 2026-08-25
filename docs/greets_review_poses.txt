@@ -38,3 +38,7 @@
 
 # Campaign synthetic benches (keep, but they are NOT review poses):
 #   t=5780 wall+statues bench, t=4200 wide vista, t=1867/2145 look poses.
+
+# --- 2026-08-25 review: the bulge (blocks read as pillows/pyramids; corner pier) ---
+5965  22.5084476,3.87992334,-61.8882256,-0.829246342,-0.20816116,0.518670499      # bulge, corridor + pier
+5965  20.7104416,3.05759621,-59.807045,-0.863270998,-0.251949817,0.437360346      # bulge, pier close-up (worst)
