@@ -1,8 +1,23 @@
 # DISPLACE v3 — clean-room design for junction-correct stone displacement
 
-> Status: DESIGN ONLY (2026-08-25). No implementation exists. Implementation is
-> gated on Gil-Ad's verdict on the compare-notes sketch
-> (`docs/img/bulge3/corner_intent_sketch.svg`) and on the open questions in §8.
+> Status: M1+M2 GREEN-LIT (2026-08-25, Gil-Ad's sketch feedback). M3+ (mitred
+> rings) stays gated on his confirmation of the CASTELLATED-junction sketch
+> (`docs/img/bulge3/corner_intent_sketch_v2.svg`) and the open questions in §8.
+>
+> **2026-08-25 CORRECTION from his hand drawings (overrides anywhere the doc
+> conflicts): the junction is NOT a single straight mitred arris.** His words:
+> "the recesses between the blocks move the polys at the recesses inside the
+> wall." The grout recesses carve THROUGH the junction: at every grout course
+> the recess polys displace INSIDE the wall (−g below both base planes) all
+> the way to the junction line, so the corner silhouette is **CASTELLATED** —
+> proud block-end segments alternating with cut-in notches, one per course
+> (see the v2 sketch). His drawing of the CURRENT render shows the junction
+> edge as a near-straight/bulged continuous line — i.e. today's bake
+> pins/averages the corner into one continuous edge and the recesses never
+> reach it. That is the defect statement in his own terms; the
+> height-profiled ring below makes the recesses reach the junction by
+> construction. (His third drawing — top view, "left works, right don't" —
+> arrived as a duplicate paste and is unconfirmed; §8 Q2 stays open.)
 >
 > Clean-room rule honored: this design was produced WITHOUT reading the
 > internals of `DisplaceStoneSubdiv` or the classifier/border/mitre machinery
@@ -109,14 +124,24 @@ that machinery applied per height sample:
      chamfer, not to an exploding spike. The bevel strip doubles as the
      chamfered-arris LOOK option (§8 Q4).
 
-5. **One height value per ring vert.** Both panels sample the SAME scalar at
-   a shared ring vert (the crack-free rule from the tessellation
-   literature): the junction line is parameterized by arclength `t`; the
-   bake evaluates `hA(t)` and `hB(t)` in each panel's UV frame, takes ONE
-   agreed value `H(t)` (if the authored maps disagree across the joint,
-   average once — the ring stores a single value, so the surfaces agree
-   whatever the maps do), and uses it for the single ring vert. Displaced
-   position: `P'(t) = P(t) + a·(H(t) − h0) · d · s`.
+5. **One height value per ring vert — and the ring is HEIGHT-PROFILED (the
+   castellated corner).** Both panels sample the SAME scalar at a shared
+   ring vert (the crack-free rule): the junction line is parameterized by
+   arclength `t`; the bake evaluates `hA(t)` and `hB(t)` in each panel's UV
+   frame, takes ONE agreed value `H(t)` (average once if the authored maps
+   disagree — the ring stores a single value, so the surfaces agree
+   whatever the maps do), and uses it for the single ring vert:
+   `P'(t) = P(t) + a·(H(t) − h0) · d · s`, with `(H(t) − h0)` SIGNED.
+   Ring verts at block-course heights (H above h0) take the OUTER mitre
+   offset `+a·(H−h0)·bisector/cos(δ/2)`; ring verts at grout-course heights
+   (H below h0) take the INNER offset `−g·bisector/cos(δ/2)` — the same
+   construction, sign and magnitude straight from the height sample. The
+   corner silhouette therefore alternates proud block ends and cut-in
+   notches course by course (Gil-Ad's v2 sketch,
+   `docs/img/bulge3/corner_intent_sketch_v2.svg`); a straight vertical
+   arris is NOT the target and would only occur if H(t) were constant.
+   Ring tessellation must place verts at every block/grout transition along
+   the junction (the block grid crossing points), or the notches round off.
 
 6. **Tessellation.** Per-panel regular grid in panel UV, cell borders
    snapped to the 4×4 block grid (cells-per-block a flag, as today).
@@ -160,10 +185,14 @@ At Gil-Ad's poses — t=5965 cam A
 `docs/greets_review_poses.txt`, "the bulge" block) and cam B — plus the
 15-pose battery:
 
-- **Arris straightness (J-LEAN kill):** every displaced junction ring fits a
-  straight line within ε = 1% of block pitch (measured on the baked verts,
-  not pixels), and each displaced face's normal deviates < 0.5° from its
-  panel's offset plane.
+- **Junction profile (J-LEAN kill, castellated):** NO straight vertical
+  arris. The displaced junction ring must reproduce the height profile
+  H(t): within each block course the ring segment is straight and at the
+  outer mitre depth (deviation < 1% of block pitch from the fitted
+  per-course line); within each grout course it is straight at the inner
+  (−g) depth; the silhouette alternates course by course (the v2 sketch).
+  Each displaced face's normal deviates < 0.5° from its panel's offset
+  plane.
 - **No slits (J-SLIT kill):** the face-plane/z-hole scan (`--face_id_dump`)
   at all battery poses shows zero new no-face pixels vs the undisplaced arm.
 - **Junction-class coverage:** at least one named representative line per
@@ -186,9 +215,14 @@ with the old bake for A/B. Old flags untouched.
 - **M2 — interiors only.** Panel-normal displacement, junction rings PINNED
   at zero. Gate: zero lean anywhere (including the pier); slits allowed at
   rings (they're pinned); the bulge must already be dead on panel faces.
-- **M3 — mitred rings.** Shared rings + mitre + miter-limit bevel. Gate:
-  straight arrises at the 250–280 class and the 200–230 class; zero
-  wall↔wall slits; his look pass on the pier.
+  The ring set is built and carried as first-class data in M2 (each ring
+  vert already knows its junction, its arclength t, and its H(t) sample) —
+  pinning is one branch at the offset step, so the M3 height-profiled
+  offset drops in without rework.
+- **M3 — mitred rings (castellated).** Shared rings + signed height-profiled
+  mitre + miter-limit bevel. Gate: the course-by-course notched silhouette
+  of §5 at the 250–280 class and the 200–230 class; zero wall↔wall slits;
+  his look pass on the pier. BLOCKED until he confirms the v2 sketch.
 - **M4 — floor rings.** Wall↔floor junction rings. Gate: zero base slits at
   the battery; base look per Q5.
 - **M5 — his acceptance** at the full arm, then the default-flip decision.
@@ -236,9 +270,11 @@ before the first frame). Full output: `docs/jcensus_greets.txt`.
   or a 270° arris also in frame? (Decides acceptance emphasis, not the
   algorithm.) If you measure the angle differently than §1's convention,
   one concrete number for one named line calibrates it.
-- **Q3 — grout at the arris:** does a grout groove wrap around the corner
-  (recessed vertical joint ON the arris), or does the corner block run
-  continuous around the bend (as sketched)?
+- **Q3 — ANSWERED (2026-08-25, his drawings):** the grout recesses carve
+  through the junction — the corner silhouette is castellated, notch per
+  grout course, block ends proud between them. Encoded in §2.5 and §5.
+  (The remaining sub-question — a VERTICAL joint on the arris itself, i.e.
+  quoin-style alternation — is Q1.)
 - **Q4 — chamfer option:** the miter-limit bevel strip can double as a
   small chamfered arris on EVERY reflex corner (dressed-stone look). Want
   it as a dial, or sharp arrises only?

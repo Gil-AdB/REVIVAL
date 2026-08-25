@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="740" viewBox="0 0 1180 740" font-family="Helvetica, Arial, sans-serif">
+  <rect x="0" y="0" width="1180" height="740" fill="#ffffff"/>
+  <text x="40" y="34" font-size="18" font-weight="bold" fill="#111827">CORNER INTENT v2 — corrected from your drawings: the recesses CARVE INTO the junction (no straight arris)</text>
+  <text x="40" y="54" font-size="13" fill="#64748b">v1's "straight vertical arris" was wrong. New reading: at every grout course the recess polys move INSIDE the wall, so the corner silhouette is notched, course by course.</text>
+
+  <!-- ============ P1: ELEVATION, INTENDED ============ -->
+  <g transform="translate(40,80)">
+    <text x="0" y="14" font-size="15" font-weight="bold" fill="#166534">1 — ELEVATION at the junction, INTENDED (your #7, redrawn)</text>
+    <!-- receding wall -->
+    <polygon points="10,40 150,80 150,340 10,300" fill="#f0ebdf"/>
+    <!-- front wall -->
+    <rect x="150" y="80" width="280" height="260" fill="#ece6d8"/>
+    <!-- receding wall course lines (diagonals) -->
+    <g stroke="#b8ad97" stroke-width="4">
+      <line x1="150" y1="143" x2="10" y2="103"/>
+      <line x1="150" y1="215" x2="10" y2="175"/>
+      <line x1="150" y1="287" x2="10" y2="247"/>
+    </g>
+    <!-- front wall grout: horizontal bands + staggered verticals -->
+    <g stroke="#b8ad97" stroke-width="6">
+      <line x1="164" y1="143" x2="430" y2="143"/>
+      <line x1="164" y1="215" x2="430" y2="215"/>
+      <line x1="164" y1="287" x2="430" y2="287"/>
+    </g>
+    <g stroke="#b8ad97" stroke-width="4">
+      <line x1="250" y1="80"  x2="250" y2="135"/> <line x1="340" y1="80"  x2="340" y2="135"/>
+      <line x1="205" y1="152" x2="205" y2="207"/> <line x1="295" y1="152" x2="295" y2="207"/> <line x1="385" y1="152" x2="385" y2="207"/>
+      <line x1="250" y1="224" x2="250" y2="279"/> <line x1="340" y1="224" x2="340" y2="279"/>
+      <line x1="205" y1="296" x2="205" y2="340"/> <line x1="295" y1="296" x2="295" y2="340"/> <line x1="385" y1="296" x2="385" y2="340"/>
+    </g>
+    <!-- top edges -->
+    <line x1="10" y1="40" x2="150" y2="80" stroke="#111827" stroke-width="2"/>
+    <line x1="150" y1="80" x2="430" y2="80" stroke="#111827" stroke-width="2"/>
+    <!-- notch shadows at grout courses -->
+    <g fill="#6b6154">
+      <rect x="150" y="135" width="14" height="17"/>
+      <rect x="150" y="207" width="14" height="17"/>
+      <rect x="150" y="279" width="14" height="17"/>
+    </g>
+    <!-- castellated corner edge -->
+    <polyline points="150,80 150,135 164,135 164,152 150,152 150,207 164,207 164,224 150,224 150,279 164,279 164,296 150,296 150,340"
+              fill="none" stroke="#166534" stroke-width="3" stroke-linejoin="miter"/>
+    <!-- annotations -->
+    <line x1="164" y1="143" x2="238" y2="120" stroke="#b45309" stroke-width="1"/>
+    <text x="200" y="112" font-size="12.5" fill="#b45309">grout course: silhouette steps INSIDE the wall —</text>
+    <text x="200" y="127" font-size="12.5" fill="#b45309">you see the block END faces at the corner</text>
+    <text x="0" y="380" font-size="12.5" fill="#166534">the recess polys are displaced into the wall (−g), and that displacement REACHES the junction —</text>
+    <text x="0" y="396" font-size="12.5" fill="#166534">so the corner is a stack of proud block-ends separated by cut-in notches, one per course.</text>
+  </g>
+
+  <!-- ============ P2: PLAN SLICES ============ -->
+  <g transform="translate(600,80)">
+    <text x="0" y="14" font-size="15" font-weight="bold" fill="#111827">2 — PLAN slices through the SAME junction, two heights</text>
+
+    <!-- slice at block height -->
+    <g transform="translate(0,30)">
+      <text x="0" y="14" font-size="13" font-weight="bold" fill="#166534">slice at BLOCK height: faces proud (+a) — OUTER mitre corner</text>
+      <rect x="20" y="60" width="120" height="110" fill="#ece6d8"/>
+      <line x1="20" y1="60" x2="140" y2="60" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <line x1="140" y1="60" x2="140" y2="170" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <polyline points="20,46 154,46 154,170" fill="none" stroke="#166534" stroke-width="2.5"/>
+      <circle cx="154" cy="46" r="4" fill="none" stroke="#166534" stroke-width="1.5"/>
+      <text x="170" y="50" font-size="12" fill="#166534">outer corner pt</text>
+      <text x="170" y="66" font-size="12" fill="#334155">= base corner + a·bisector/cos(δ/2)</text>
+    </g>
+
+    <!-- slice at grout height -->
+    <g transform="translate(0,240)">
+      <text x="0" y="14" font-size="13" font-weight="bold" fill="#0e7490">slice at GROUT height: faces recessed (−g) INSIDE the wall — INNER mitre corner</text>
+      <rect x="20" y="60" width="120" height="110" fill="#ece6d8"/>
+      <line x1="20" y1="60" x2="140" y2="60" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <line x1="140" y1="60" x2="140" y2="170" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <polyline points="20,70 130,70 130,170" fill="none" stroke="#0e7490" stroke-width="2.5"/>
+      <circle cx="130" cy="70" r="4" fill="none" stroke="#0e7490" stroke-width="1.5"/>
+      <text x="150" y="74" font-size="12" fill="#0e7490">inner corner pt = base corner − g·bisector/cos(δ/2)</text>
+    </g>
+
+    <text x="0" y="480" font-size="12.5" fill="#334155">the 3D junction edge ALTERNATES outer ↔ inner following the height profile along the</text>
+    <text x="0" y="496" font-size="12.5" fill="#334155">junction line — that alternation IS panel 1's notched silhouette. Same mitre construction</text>
+    <text x="0" y="512" font-size="12.5" fill="#334155">at every height; only the sampled height h(s) changes sign/magnitude.</text>
+  </g>
+
+  <!-- ============ P3: TOP VIEW — my guess ============ -->
+  <g transform="translate(40,540)">
+    <text x="0" y="14" font-size="15" font-weight="bold" fill="#111827">3 — TOP VIEW, my best guess at your #8 (please confirm)</text>
+    <!-- L works -->
+    <g transform="translate(0,30)">
+      <line x1="10" y1="20" x2="110" y2="62" stroke="#111827" stroke-width="2.5"/>
+      <line x1="110" y1="62" x2="250" y2="62" stroke="#111827" stroke-width="2.5"/>
+      <circle cx="130" cy="130" r="4" fill="#334155"/>
+      <text x="142" y="134" font-size="12" fill="#334155">viewer</text>
+      <text x="10" y="110" font-size="13" fill="#166534">L — works: gentle turn (visible-side ~200–230)</text>
+    </g>
+    <!-- R broken -->
+    <g transform="translate(560,30)">
+      <line x1="20" y1="120" x2="110" y2="42" stroke="#111827" stroke-width="2.5"/>
+      <line x1="110" y1="42" x2="250" y2="42" stroke="#111827" stroke-width="2.5"/>
+      <circle cx="60" cy="150" r="4" fill="#334155"/>
+      <text x="72" y="154" font-size="12" fill="#334155">viewer</text>
+      <text x="10" y="180" font-size="13" fill="#b91c1c">R — broken: sharp reflex turn (visible-side ~250–280, the pier/colonnade class)</text>
+    </g>
+    <text x="0" y="160" font-size="12" fill="#b45309">NOTE: your #8 arrived as the same drawing as #7 (pasted twice?). If the real top view was a</text>
+    <text x="0" y="175" font-size="12" fill="#b45309">different drawing, re-paste it — this panel is inferred, not read.</text>
+  </g>
+</svg>
