@@ -5605,10 +5605,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				// (the partner wall's border pinned or absent) stay plain-freed:
 				// a lone mitre would pull off its wall against a straight partner.
 				const Vector n0 = mc[vs[0]].nOwn;
+				const bool frontOrient = fds::FeatureFlags::greets_displace_front_orient();
 				std::vector<size_t> A, B;
 				for (size_t k : vs) {
 					const Vector &n = mc[k].nOwn;
-					((n.x*n0.x + n.y*n0.y + n.z*n0.z > 0.9f) ? A : B).push_back(k);
+					// front_orient: cluster by AXIS (|dot|) — a per-vert smN flip
+					// must not move a vert to the wrong wall population.
+					const float dd = n.x*n0.x + n.y*n0.y + n.z*n0.z;
+					(((frontOrient ? std::fabs(dd) : dd) > 0.9f) ? A : B).push_back(k);
 				}
 				if (A.empty() || B.empty()) {
 					nMitreSolo += int(vs.size());
@@ -5627,7 +5631,95 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				Vector bis{0,0,0};
 				float ch = 0.0f;
 				bool geomBis = false;
-				if (fds::FeatureFlags::greets_displace_geom_bisector()) {
+				// ── MAJORITY-FRONT BISECTOR (--greets_displace_front_orient,
+				// 2026-08-28 root-cause fix). The fan/partner path below orients
+				// BOTH wall normals by the vert's smoothed normal, and PREPROC's
+				// ungated average pollutes that normal at exactly the corners
+				// (measured at the pier seam: smN=(0.909,+0.391,-0.145), the
+				// orientation dot goes -0.343, the partner flips and the applied
+				// bisector lands 90.0 deg from the true one — the seam column
+				// displaces IN-PLANE along the wall). Here the two wall AXES come
+				// from the incident-face geometry (winding crosses, sign-
+				// canonicalised — sign-free), and each wall's FRONT sign comes
+				// from the area-weighted MAJORITY of its faces' stored authored
+				// normals: per-face Face::N follows the FLD's inconsistent
+				// winding (~17% flipped, measured 220:46 / 414:83 at the pier's
+				// two walls) but the area majority is unambiguous. The smoothed
+				// vertex normal is not consulted anywhere.
+				if (frontOrient) {
+					std::vector<char> onLine(nV, 0);
+					for (size_t k : vs) onLine[mc[k].v] = 1;
+					Vector w1{0,0,0}, w2{0,0,0};
+					int c1 = 0, c2 = 0, cDrop = 0;
+					struct FRec { Vector g; Vector fn; float area; };
+					std::vector<FRec> frecs;
+					for (size_t f = 0; f < faces.size(); ++f) {
+						if (!isTargetNew(faces[f])) continue;
+						const uint32_t a3=fIdx[f][0], b3=fIdx[f][1], c3=fIdx[f][2];
+						if (a3>=nV||b3>=nV||c3>=nV) continue;
+						if (!onLine[a3] && !onLine[b3] && !onLine[c3]) continue;
+						const Vector &A3=basePos[a3], &B3=basePos[b3], &C3=basePos[c3];
+						const float e1x=B3.x-A3.x, e1y=B3.y-A3.y, e1z=B3.z-A3.z;
+						const float e2x=C3.x-A3.x, e2y=C3.y-A3.y, e2z=C3.z-A3.z;
+						float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+						const float gl=std::sqrt(gx*gx+gy*gy+gz*gz);
+						if (gl < 1e-12f) continue;
+						const float area = 0.5f*gl;
+						gx/=gl; gy/=gl; gz/=gl;
+						// axis accumulation, sign-canonical against the cluster
+						auto tryC = [&](Vector &w, int &c) -> bool {
+							if (!c) { w.x=gx; w.y=gy; w.z=gz; c=1; return true; }
+							const float wl=std::sqrt(w.x*w.x+w.y*w.y+w.z*w.z);
+							const float d3=(gx*w.x+gy*w.y+gz*w.z)/wl;
+							if (std::fabs(d3) > 0.866f) {
+								const float sg = d3 < 0 ? -1.f : 1.f;
+								w.x+=sg*gx; w.y+=sg*gy; w.z+=sg*gz; ++c; return true;
+							}
+							return false;
+						};
+						if (!tryC(w1,c1) && !tryC(w2,c2)) { ++cDrop; continue; }
+						frecs.push_back({Vector{gx,gy,gz}, faces[f].N, area});
+					}
+					if (c1 && c2) {
+						auto nrm3 = [](Vector &v){ const float l=std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z);
+							if (l>1e-9f){v.x/=l;v.y/=l;v.z/=l;} };
+						nrm3(w1); nrm3(w2);
+						// pass 2: area-weighted front vote per cluster from the
+						// STORED authored Face::N (parent-plane normals).
+						float vote1 = 0.0f, vote2 = 0.0f;
+						for (const FRec &r : frecs) {
+							const float d1 = std::fabs(r.g.x*w1.x+r.g.y*w1.y+r.g.z*w1.z);
+							const float d2 = std::fabs(r.g.x*w2.x+r.g.y*w2.y+r.g.z*w2.z);
+							Vector &w = (d1 >= d2) ? w1 : w2;
+							float &vt  = (d1 >= d2) ? vote1 : vote2;
+							const float fl = std::sqrt(r.fn.x*r.fn.x+r.fn.y*r.fn.y+r.fn.z*r.fn.z);
+							if (fl < 1e-9f) continue;
+							const float dv = (r.fn.x*w.x+r.fn.y*w.y+r.fn.z*w.z)/fl;
+							vt += r.area * (dv < 0 ? -1.f : 1.f);
+						}
+						if (vote1 != 0.0f && vote2 != 0.0f) {
+							if (vote1 < 0) { w1.x=-w1.x; w1.y=-w1.y; w1.z=-w1.z; }
+							if (vote2 < 0) { w2.x=-w2.x; w2.y=-w2.y; w2.z=-w2.z; }
+							bis = Vector{ w1.x+w2.x, w1.y+w2.y, w1.z+w2.z };
+							const float bl2 = std::sqrt(bis.x*bis.x+bis.y*bis.y+bis.z*bis.z);
+							if (bl2 > 1e-6f) {
+								bis.x/=bl2; bis.y/=bl2; bis.z/=bl2;
+								ch = 0.5f*(std::fabs(bis.x*w1.x+bis.y*w1.y+bis.z*w1.z)
+								         + std::fabs(bis.x*w2.x+bis.y*w2.y+bis.z*w2.z));
+								geomBis = true;
+								if (mitreCensus)
+									std::fprintf(stderr, "[STONE-MITRE-FRONT] f1(%+.3f,%+.3f,%+.3f)x%d "
+										"f2(%+.3f,%+.3f,%+.3f)x%d vote %.2f/%.2f drop %d "
+										"bis(%+.3f,%+.3f,%+.3f) ch %.3f\n",
+										double(w1.x),double(w1.y),double(w1.z),c1,
+										double(w2.x),double(w2.y),double(w2.z),c2,
+										double(vote1),double(vote2),cDrop,
+										double(bis.x),double(bis.y),double(bis.z),double(ch));
+							}
+						}
+					}
+				}
+				if (!geomBis && fds::FeatureFlags::greets_displace_geom_bisector()) {
 					// GEOMETRIC BISECTOR (--greets_displace_geom_bisector, 2026-08-17
 					// jamb-cushion fix, part 2). The fan-average bisector below is
 					// built from per-index fan normals, and at a corner whose indices

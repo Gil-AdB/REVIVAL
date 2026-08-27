@@ -1,5 +1,44 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28b — **THE FIX LANDS: majority-front mitre bisector
+> (--greets_displace_front_orient, default ON) — the seam rides the TRUE
+> bisector (median 0.4 deg) and the pier renders as flat dressed stone**
+>
+> Approved on the root-cause diagnosis ("let's try"). The mitre group's
+> bisector is rebuilt smN-free: wall AXES from incident-face winding crosses
+> (sign-canonicalised), each wall's FRONT sign from the area-weighted
+> MAJORITY of stored authored Face::N (per-face ~17% winding-flipped —
+> 220:46 / 414:83 measured — majority unambiguous); side clustering |dot|.
+> The polluted smoothed vertex normal is no longer load-bearing anywhere in
+> the bisector: convexPartnerN's orientation output is ignored (candidacy
+> gate only), fanN only clusters (sign-insensitive).
+>
+> ACCEPTANCE, all measured on this binary:
+> - Prediction closes: pier seam column 210 displaced verts, applied vs the
+>   TRUE bisector (0.493,0,-0.870): median 0.4 deg, p90 4.4 (was 29.5 off on
+>   an axis 90.0 deg wrong); 88.6 deg from the old wrong axis. Tail max 53.6
+>   at line-end verts joining a third plane — noted, not chased.
+> - Jamb (207 deg, good class): 15/15 matched dump verts byte-unchanged.
+> - --no-greets_displace_front_orient restores the pre-fix camA render
+>   BYTE-EXACTLY (md5 dbe2d4c2... both).
+> - Locality sweep t=5400..6280 step 55, both arms: 10/17 byte-identical;
+>   all 7 diffs begin when the scene camera reaches the pier corners, and
+>   the t=6005 mask is the corner column + its two flanking faces only
+>   (sweep_t6005_diffmask.png).
+> - pom_shell scoping: the --pom_shell arm is byte-identical pre/post fix
+>   (ae20bd70...) — PomShell_Build consumes Vertex::N directly, NOT the
+>   mitre path; the first-era shell slits are a separate follow-up.
+> - LOOK at his cams (fix_camA_tex.png / fix_camB_tex.png): the pier blocks
+>   read FLAT, mortar courses run straight and wrap the corner, the arris is
+>   a straight vertical line at both cams. Honest residuals: the curved
+>   wall's gentle relief (separate item), a small black notch at the pier
+>   base floor junction (wall-floor class, separate), faint silhouette
+>   waviness at the pier's grazing left edge at cam B.
+>
+> Evidence under docs/img/rootnormals/ (fix_* renders, sweep/, diff mask,
+> displace_dump_FIXED analysis in the report). His fly-through is the
+> verdict; nothing merged to fog-wt.
+
 > ## 2026-08-28 — **THE ROOT CAUSE IS NAMED AND MEASURED: the mitre's
 > partner-orientation test trusts PREPROC's polluted smoothed normal, flips
 > the partner wall, and the corner bisector comes out 90.0 deg WRONG — the
