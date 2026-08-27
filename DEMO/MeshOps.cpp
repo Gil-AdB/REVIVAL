@@ -2669,6 +2669,169 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			}
 		}
 
+		// ── SHARP-REFLEX CORNER WELD, stage 1: detection + vertex split ──────
+		// (--greets_displace_reflex_weld, 2026-08-27 — the >240° wall-connection
+		// defect.) Same-material corner lines whose walls meet SHARP-REFLEX from
+		// the visible side are index-INTERIOR (authored shared, or merged by the
+		// seam-weld pass below), so the border machinery never sees them: not
+		// freed, never welded — both sheets ride the full field along smoothed
+		// normals that straddle the corner and the connection tears. The gentle
+		// lines are authored split and take the mitre weld, which is why they
+		// work. This pass splits the shared verts per wall sheet so the sharp
+		// lines flow into that SAME proven pipeline; the sets below carry the
+		// exemptions (seam-weld merge, split-vertex-seam pin) and the line list
+		// forces the paired-sample MAX collapse on the weld groups it creates.
+		std::unordered_set<uint64_t> reflexEdgePos;   // authored corner-edge position keys
+		std::unordered_set<uint64_t> reflexVertPos;   // line-vert position keys
+		struct ReflexLine { Vector foot, dir; };
+		std::vector<ReflexLine> reflexLines;
+		const bool reflexWeld = fds::FeatureFlags::greets_displace_reflex_weld()
+		                     && fds::FeatureFlags::greets_displace_free_edge()
+		                     && fds::FeatureFlags::greets_displace_mitre();
+		if (reflexWeld) {
+			Vertex *V0 = T->Verts; const uint32_t nV0 = uint32_t(T->VIndex);
+			auto vix = [&](const Vertex *v){ return uint32_t(v - V0); };
+			const float minVis = fds::FeatureFlags::greets_displace_reflex_min_vis();
+			const float cosMax = std::cos((minVis - 180.0f) * 0.017453293f);
+			auto faceCentroid = [](const Face &F) {
+				return Vector{ (F.A->Pos.x+F.B->Pos.x+F.C->Pos.x)*(1.0f/3.0f),
+				               (F.A->Pos.y+F.B->Pos.y+F.C->Pos.y)*(1.0f/3.0f),
+				               (F.A->Pos.z+F.B->Pos.z+F.C->Pos.z)*(1.0f/3.0f) };
+			};
+			// Reflex test across an edge: RENDERED normals (Face::N — never the
+			// raw winding cross, which is the anti-visible normal), >minVis
+			// visible ⟺ normals more than (minVis−180)° apart, and OUTSIDE
+			// corner ⟺ each face's interior lies BEHIND the other's plane.
+			auto reflexPair = [&](const Face &F1, const Face &F2, const Vector &mid) -> bool {
+				const Vector &n1 = F1.N, &n2 = F2.N;
+				const float d = n1.x*n2.x + n1.y*n2.y + n1.z*n2.z;
+				if (d >= cosMax) return false;                 // not sharp enough / coplanar
+				const Vector c1 = faceCentroid(F1), c2 = faceCentroid(F2);
+				const float s1 = n1.x*(c2.x-mid.x) + n1.y*(c2.y-mid.y) + n1.z*(c2.z-mid.z);
+				const float s2 = n2.x*(c1.x-mid.x) + n2.y*(c1.y-mid.y) + n2.z*(c1.z-mid.z);
+				return s1 < -0.01f && s2 < -0.01f;             // both behind: outside corner
+			};
+			// edge -> incident target faces, by index pair
+			std::map<std::pair<uint32_t,uint32_t>, std::vector<int32_t>> e2f;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				const Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+				const uint32_t a = vix(F.A), b = vix(F.B), c = vix(F.C);
+				if (a >= nV0 || b >= nV0 || c >= nV0) continue;
+				auto add = [&](uint32_t x, uint32_t y){ e2f[{std::min(x,y),std::max(x,y)}].push_back(i); };
+				add(a,b); add(b,c); add(c,a);
+			}
+			auto noteLine = [&](const Vector &A, const Vector &B) {
+				reflexEdgePos.insert(edgeKey(A, B));
+				reflexVertPos.insert(seamKey(A)); reflexVertPos.insert(seamKey(B));
+				Vector d{ B.x-A.x, B.y-A.y, B.z-A.z };
+				const float l = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
+				if (l < 1e-6f) return;
+				d.x/=l; d.y/=l; d.z/=l;
+				const float t0 = A.x*d.x + A.y*d.y + A.z*d.z;
+				const Vector foot{ A.x - t0*d.x, A.y - t0*d.y, A.z - t0*d.z };
+				for (const ReflexLine &L : reflexLines) {
+					if (std::fabs(d.x*L.dir.x + d.y*L.dir.y + d.z*L.dir.z) < 0.999f) continue;
+					const Vector e{ foot.x-L.foot.x, foot.y-L.foot.y, foot.z-L.foot.z };
+					const float tp = e.x*L.dir.x + e.y*L.dir.y + e.z*L.dir.z;
+					const float px = e.x-tp*L.dir.x, py = e.y-tp*L.dir.y, pz = e.z-tp*L.dir.z;
+					if (px*px + py*py + pz*pz < 4e-4f) return;   // same line
+				}
+				reflexLines.push_back({foot, d});
+			};
+			// (a) SHARED edges (2 target faces, reflex): split their verts below.
+			// (b) PAIRED-SPLIT edges (2 single-use border edges, position-
+			//     coincident, reflex): already split — exempt them so the seam
+			//     weld doesn't merge them and the split-vertex-seam guard doesn't
+			//     pin them (they then free + weld like the jamb lines).
+			std::set<uint32_t> splitVerts;
+			std::map<uint32_t, std::pair<int32_t,int32_t>> vertSeed;  // vert -> the reflex face pair
+			std::unordered_map<uint64_t, std::vector<std::pair<std::pair<uint32_t,uint32_t>,int32_t>>> posE;
+			int nSharedLines = 0, nPairedLines = 0;
+			for (const auto &kv : e2f) {
+				const Vector &A = V0[kv.first.first].Pos, &B = V0[kv.first.second].Pos;
+				if (kv.second.size() == 1)
+					posE[edgeKey(A, B)].push_back({kv.first, kv.second[0]});
+				if (kv.second.size() != 2) continue;
+				const Face &F1 = T->Faces[kv.second[0]], &F2 = T->Faces[kv.second[1]];
+				const Vector mid{ (A.x+B.x)*0.5f, (A.y+B.y)*0.5f, (A.z+B.z)*0.5f };
+				if (!reflexPair(F1, F2, mid)) continue;
+				noteLine(A, B); ++nSharedLines;
+				for (uint32_t v : {kv.first.first, kv.first.second}) {
+					splitVerts.insert(v);
+					vertSeed.emplace(v, std::make_pair(kv.second[0], kv.second[1]));
+				}
+			}
+			for (const auto &kv : posE) {
+				if (kv.second.size() != 2) continue;
+				if (kv.second[0].first == kv.second[1].first) continue;   // same index edge
+				const Face &F1 = T->Faces[kv.second[0].second], &F2 = T->Faces[kv.second[1].second];
+				const uint32_t a = kv.second[0].first.first, b = kv.second[0].first.second;
+				const Vector &A = V0[a].Pos, &B = V0[b].Pos;
+				const Vector mid{ (A.x+B.x)*0.5f, (A.y+B.y)*0.5f, (A.z+B.z)*0.5f };
+				if (!reflexPair(F1, F2, mid)) continue;
+				noteLine(A, B); ++nPairedLines;
+			}
+			// SPLIT: each selected vert clusters its incident target faces around
+			// the reflex pair's two rendered normals; the side-2 cluster gets a
+			// coincident duplicate. Faces off both seeds (a third plane at the
+			// line end) stay on the original, so gentle junctions to a third wall
+			// keep their shared-index path untouched.
+			int nDup = 0;
+			if (!splitVerts.empty()) {
+				std::vector<Vertex> grown(V0, V0 + nV0);
+				std::map<uint32_t, uint32_t> dupOf;
+				for (uint32_t v : splitVerts) {
+					const auto &seed = vertSeed[v];
+					const Vector n1 = T->Faces[seed.first].N;
+					const Vector n2 = T->Faces[seed.second].N;
+					bool made = false;
+					for (int32_t i = 0; i < T->FIndex && !made; ++i) {
+						const Face &F = T->Faces[i];
+						if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+						if (vix(F.A) != v && vix(F.B) != v && vix(F.C) != v) continue;
+						const float d1 = F.N.x*n1.x + F.N.y*n1.y + F.N.z*n1.z;
+						const float d2 = F.N.x*n2.x + F.N.y*n2.y + F.N.z*n2.z;
+						if (d2 > 0.866f && d2 > d1) {          // side-2 sheet exists here
+							dupOf[v] = uint32_t(grown.size()); grown.push_back(grown[v]);
+							made = true; ++nDup;
+						}
+					}
+				}
+				if (nDup) {
+					Vertex *nv = new Vertex[grown.size()];
+					std::memcpy(nv, grown.data(), grown.size()*sizeof(Vertex));
+					for (int32_t i = 0; i < T->FIndex; ++i) {
+						Face &F = T->Faces[i];
+						if (!F.A || !F.B || !F.C) continue;
+						const uint32_t a = vix(F.A), b = vix(F.B), c = vix(F.C);
+						if (a >= nV0 || b >= nV0 || c >= nV0) continue;   // never expected; guard
+						F.A = nv + a; F.B = nv + b; F.C = nv + c;
+						if (!isTarget(&F)) continue;
+						auto rehome = [&](Vertex *&P, uint32_t x) {
+							auto it = dupOf.find(x);
+							if (it == dupOf.end()) return;
+							const auto &seed = vertSeed[x];
+							const Vector n1 = T->Faces[seed.first].N;
+							const Vector n2 = T->Faces[seed.second].N;
+							const float d1 = F.N.x*n1.x + F.N.y*n1.y + F.N.z*n1.z;
+							const float d2 = F.N.x*n2.x + F.N.y*n2.y + F.N.z*n2.z;
+							if (d2 > 0.866f && d2 > d1) P = nv + it->second;
+						};
+						rehome(F.A, a); rehome(F.B, b); rehome(F.C, c);
+					}
+					T->Verts = nv; T->VIndex = int32_t(grown.size());
+					Compute_FaceVertexIndices(T);
+				}
+			}
+			if (nSharedLines || nPairedLines)
+				std::fprintf(stderr, "[STONE-REFLEX] '%s': %d shared corner edges SPLIT "
+					"(%d verts duplicated), %d paired-split edges exempted, %zu reflex "
+					"lines (visible > %g deg) routed into the mitre weld\n",
+					matName, nSharedLines, nDup, nPairedLines, reflexLines.size(),
+					double(minVis));
+		}
+
 		Vertex *const oldV = T->Verts;
 		const uint32_t nOrig = uint32_t(T->VIndex);
 		auto vidx = [&](const Vertex *v) { return uint32_t(v - oldV); };
@@ -2728,6 +2891,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			for (uint32_t i = 0; i < nOrig; ++i) {
 				if (!anyTarget[i] || !onlyTarget[i]) continue;
 				const uint64_t k = seamKey(oldV[i].Pos);
+				// Sharp-reflex corner lines stay SPLIT: merging them is what made
+				// the >240° connections index-interior and unweldable (the
+				// reflex-weld pre-pass above split/exempted them on purpose).
+				if (reflexWeld && reflexVertPos.count(k)) continue;
 				auto it = canon.find(k);
 				if (it == canon.end()) { canon.emplace(k, i); continue; }
 				remap[i] = it->second; ++nMerged;
@@ -2780,6 +2947,18 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (!isTarget(&F)) { origNonTargetVert[a] = origNonTargetVert[b] = origNonTargetVert[c] = 1; continue; }
 			auto add = [&](uint32_t x, uint32_t y){ origEdgeUse[{std::min(x,y),std::max(x,y)}]++; };
 			add(a,b); add(b,c); add(c,a);
+		}
+		if (fds::FeatureFlags::greets_displace_junction_census() && stoneCensusBox().set) {
+			const StoneCensusBox &CBo = stoneCensusBox();
+			for (const auto &eu : origEdgeUse) {
+				const Vector &A = oldV[eu.first.first].Pos, &B = oldV[eu.first.second].Pos;
+				const float mx=(A.x+B.x)*0.5f, my=(A.y+B.y)*0.5f, mz=(A.z+B.z)*0.5f;
+				if (mx > CBo.x0 && mx < CBo.x1 && mz > CBo.z0 && mz < CBo.z1
+				    && my > CBo.y0 && my < CBo.y1)
+					std::fprintf(stderr, "[STONE-ORIGEDGE] '%s' (%.3f,%.3f,%.3f)-(%.3f,%.3f,%.3f) use %d\n",
+						matName, double(A.x), double(A.y), double(A.z),
+						double(B.x), double(B.y), double(B.z), eu.second);
+			}
 		}
 		// Cross-material SEAM classification (position-coincidence; the sliver-gap
 		// fix). A target ORIGINAL vertex coincident with non-displaced geometry is
@@ -2863,7 +3042,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			const uint64_t pk = edgeKey(oldV[x].Pos, oldV[y].Pos);
 			if (ndEdge.count(pk)) return false;               // non-displaced geometry shares it
 			auto it = posEdgeCount.find(pk);
-			if (it != posEdgeCount.end() && it->second > 1) return false;   // split-vertex seam
+			if (it != posEdgeCount.end() && it->second > 1
+			    && !reflexEdgePos.count(pk)) return false;    // split-vertex seam (reflex corners exempt: their pair IS the weld's clientele)
 			// GEOMETRIC ABUTTAL VETO (2026-08-13, the user's t=1088 wall corner):
 			// coincidence tests above are blind to a neighbour that touches this
 			// border without sharing vertex positions (different segmenting along
@@ -3185,25 +3365,41 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// THIS vertex's own position, so a mixed edge pins exactly where it
 			// abuts and carries the field where it is open.
 			bool pinHere = false, freeHere = false;
+			const char *pinWhy = "none";
 			{
 				auto ue = origEdgeUse.find({lo, hi});
 				const bool singleUse = borderPin && ue != origEdgeUse.end() && ue->second == 1;
 				if (singleUse && freeEdge && !isSeamBorderEdge(lo, hi)) {
 					const uint64_t pk = edgeKey(A, B);
 					bool cand = !ndEdge.count(pk);
+					if (!cand) pinWhy = "nd-edge";
 					if (cand) {
 						auto pc = posEdgeCount.find(pk);
-						cand = !(pc != posEdgeCount.end() && pc->second > 1);   // split-vertex seam
+						cand = !(pc != posEdgeCount.end() && pc->second > 1
+						         && !reflexEdgePos.count(pk));   // split-vertex seam (reflex corners exempt)
+						if (!cand) pinWhy = "split-vertex-seam";
 					}
 					if (cand) {
 						const auto itN = borderEdgeN.find(pk);
 						const Vector *nn = (itN != borderEdgeN.end()) ? &itN->second : nullptr;
-						if (abutPointMat(m.Pos, seamKey(A), seamKey(B), nn)) pinHere = true;
+						if (const char *am = abutPointMat(m.Pos, seamKey(A), seamKey(B), nn)) {
+							pinHere = true;
+							pinWhy = !nn ? "abut-veto-NO-OWNN"
+							        : std::strcmp(am, matName) ? "abut-veto-foreign" : "abut-veto-same";
+						}
 						else freeHere = true;
 					} else pinHere = true;
 				}
-				else if (isBorderEdge(lo, hi)) pinHere = true;
+				else if (isBorderEdge(lo, hi)) { pinHere = true; pinWhy = "border-edge-multiuse"; }
 				else if (isFreedBorderEdge(lo, hi)) freeHere = true;
+			}
+			if (fds::FeatureFlags::greets_displace_junction_census() && stoneCensusBox().set) {
+				const StoneCensusBox &CBe = stoneCensusBox();
+				if (m.Pos.x > CBe.x0 && m.Pos.x < CBe.x1 && m.Pos.z > CBe.z0
+				    && m.Pos.z < CBe.z1 && m.Pos.y > CBe.y0 && m.Pos.y < CBe.y1)
+					std::fprintf(stderr, "[STONE-EDGEVERT] '%s' (%.3f,%.3f,%.3f) %s%s\n",
+						matName, double(m.Pos.x), double(m.Pos.y), double(m.Pos.z),
+						pinHere ? "PIN " : freeHere ? "FREE " : "interior ", pinWhy);
 			}
 			if (pinHere) { if (id >= pinnedZero.size()) pinnedZero.resize(id+1,0); pinnedZero[id] = 1; }
 			else if (freeHere) {
@@ -5243,6 +5439,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			float  cosHalf;  // dot(bis, wall normal), guarded away from 0
 			std::vector<std::pair<float,float>> prof;   // owner side (s, h), sorted
 			int nA, nB;      // population per wall
+			bool reflex = false;   // reflex-weld line: widened corner-band blend
 		};
 		std::vector<MitreGroup> mitreGroups;
 		int nMitreVerts = 0, nMitreSolo = 0, nMitreApplied = 0, nBandBlend = 0;
@@ -5511,6 +5708,18 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const float t0 = Pf.x*G.dir.x + Pf.y*G.dir.y + Pf.z*G.dir.z;
 					G.foot = Vector{ Pf.x - t0*G.dir.x, Pf.y - t0*G.dir.y, Pf.z - t0*G.dir.z };
 				}
+				// Is this group one of the reflex-weld pre-pass's lines? Those
+				// force the paired-sample MAX collapse below (their two sheets'
+				// columns are position-paired by construction, so the union
+				// profile is double-valued exactly like the t=5968 case).
+				bool reflexGroup = false;
+				for (const ReflexLine &L : reflexLines) {
+					if (std::fabs(G.dir.x*L.dir.x + G.dir.y*L.dir.y + G.dir.z*L.dir.z) < 0.999f) continue;
+					const Vector e{ G.foot.x-L.foot.x, G.foot.y-L.foot.y, G.foot.z-L.foot.z };
+					const float tp = e.x*L.dir.x + e.y*L.dir.y + e.z*L.dir.z;
+					const float px = e.x-tp*L.dir.x, py = e.y-tp*L.dir.y, pz = e.z-tp*L.dir.z;
+					if (px*px + py*py + pz*pz < 4e-4f) { reflexGroup = true; break; }
+				}
 				// PHASE ROUND 2026-08-14: this sampled only the LARGER side,
 				// forcing that chart's course grid onto the partner. Measured at
 				// the t=6001 corner: the two authored charts' mortar rows
@@ -5570,7 +5779,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				// (3 346 px of z==0, see the flag text) and mode 2 is a 17 % frame
 				// move that has not been eyeballed. The structural cure is the band
 				// ladder re-tessellation, not this profile knob.
-				if (fds::FeatureFlags::greets_displace_profile_agree() != 0 && G.prof.size() > 1) {
+				if ((fds::FeatureFlags::greets_displace_profile_agree() != 0 || reflexGroup)
+				    && G.prof.size() > 1) {
+					// Reflex-weld groups force MAX (mode-1 semantics): measured on
+					// the pilaster close-up, MAX 1433 / MIN 8792 / no collapse 8792
+					// pure-black px — a joint cuts the reflex arris only where BOTH
+					// sheets carry it.
 					const bool agreeMin = fds::FeatureFlags::greets_displace_profile_agree() == 2;
 					constexpr float kPairEps = 0.02f;
 					std::vector<std::pair<float,float>> collapsed;
@@ -5724,6 +5938,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 							double(G.prof[k].first), double(G.prof[k].second),
 							double(amp*G.prof[k].second/ch));
 				}
+				G.reflex = reflexGroup;
 				mitreGroups.push_back(std::move(G));
 				for (size_t k : vs) { mitreOf[mc[k].v] = gid; ++nMitreVerts; }
 			}
@@ -5924,6 +6139,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				                                   // until kBlendW of the line, then a
 				                                   // steep smoothstep drop to the weld.
 				                                   // The ease WAS the wrap (was 0.12 linear).
+				// NEAREST line wins (2026-08-27, reflex-weld): first-match let a
+				// narrow pilaster strip inside two reflex lines' widened blend
+				// radii split its allegiance mid-strip — neighbours riding
+				// different lines shear and the strip gashes (measured 1433 →
+				// 5395 px at the pilaster close-up before this rule).
+				const MitreGroup *best = nullptr; float bestD2 = 1e30f; float bestS = 0.0f;
 				for (const MitreGroup &G : mitreGroups) {
 					if (G.prof.empty()) continue;
 					const Vector &P0 = basePos[i];
@@ -5934,7 +6155,21 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const float ry = P0.y - G.foot.y - s*G.dir.y;
 					const float rz = P0.z - G.foot.z - s*G.dir.z;
 					const float d2 = rx*rx + ry*ry + rz*rz;
-					if (d2 >= kBlendW*kBlendW) continue;
+					// (A widened reflex blend was built and REFUTED here: 0.25 u on
+					// reflex lines took the pilaster close-up 1433 → 5395 black px
+					// with either first-match or nearest-wins allegiance — the
+					// narrow strip between two reflex lines cannot serve two
+					// masters at any width. The strip's mega-fan tessellation is
+					// the pre-existing [STONE-CORNERF] debt, not this weld's.)
+					const float bw = kBlendW;
+					if (d2 >= bw*bw) continue;
+					if (d2 < bestD2) { bestD2 = d2; best = &G; bestS = s; }
+				}
+				if (best) {
+					const MitreGroup &G = *best;
+					const float s = bestS;
+					const float bw = kBlendW;
+					const float d2 = bestD2;
 					const auto &PR = G.prof;
 					float hp;
 					if (s <= PR.front().first)      hp = PR.front().second;
@@ -5946,7 +6181,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						const float t = dt > 1e-9f ? (s - PR[lo].first)/dt : 0.0f;
 						hp = PR[lo].second + (PR[hi].second - PR[lo].second)*t;
 					}
-					float w = 1.0f - std::sqrt(d2)/kBlendW;           // 1 at the line
+					float w = 1.0f - std::sqrt(d2)/bw;                // 1 at the line
 					w = w*w*(3.0f - 2.0f*w);                          // smoothstep: C1 at both ends
 					const float dspM = amp*hp/G.cosHalf;
 					const float vx = w*G.bis.x*dspM + (1.0f-w)*dx*dsp;
@@ -5961,7 +6196,6 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						dsp = sgn*vl;
 					} else { dsp = 0.0f; }
 					++nBandBlend;
-					break;
 				}
 			}
 			// BOW CENSUS: the doorway-jamb wall plane is x=17.898 (normal +x), its

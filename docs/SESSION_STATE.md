@@ -1,5 +1,73 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-27b — **THE SHARP-REFLEX CORNERS JOIN THE MITRE WELD**: the >240°
+> wall connections were index-INTERIOR — never freed, never welded, riding
+> straddled smoothed normals — and `--greets_displace_reflex_weld` splits them
+> into the proven jamb pipeline; the west-270° tear closes, both his t=5965
+> cams are byte-identical, and `--no-` reproduces the acceptance pin exactly
+>
+> **THE MECHANISM, measured before any code** (census box on the 270° colonnade
+> line at (9.875, 0..4.937, −37.03)): every mitre candidate there is rejected
+> `not-freed` — the corner edge is ONE authored edge with `use 2` (both walls'
+> target faces share it; the seam-weld pass merges the rest of the class), so
+> the border machinery classifies it INTERIOR: no free, no weld, and both
+> sheets displace the FULL height field along smoothed vertex normals that
+> straddle the corner (measured `dir(−0.918,+0.153,+0.367)` on a (−1,0,0)
+> wall). The two sheets travel divergently and the connection tears and leans —
+> HIS broken class, exactly as his top-view drawings said. The gentle lines
+> (207° jamb at (9.875,y,−49.374)) are authored split, get freed by the convex
+> abut veto and take the matched mitre with the signed per-block level — 83
+> welded verts measured — which is why they work.
+>
+> **THE FIX** (`greets_displace_reflex_weld`, default ON; float threshold
+> `greets_displace_reflex_min_vis` = 240, inside the scene's empty 230–250
+> census gap): a pre-pass detects same-material target edges whose two faces
+> meet outside-convex with visible angle > threshold (rendered `Face::N`, both
+> centroids behind each other's plane — never the raw winding cross, the
+> anti-visible trap), SPLITS the shared verts per wall sheet (11 shared corner
+> edges split, 20 verts duplicated, 6 paired-split edges exempted, 11 lines),
+> exempts those lines from the seam-weld merge and the split-vertex-seam pin,
+> and the standard pipeline takes over: freed border → matched mitre →
+> castellated signed course level. Reflex weld groups force the paired-sample
+> MAX collapse (measured on the pilaster close-up: MAX 1433 / MIN 8792 / no
+> collapse 8792 pure-black px — a joint cuts the reflex arris only where BOTH
+> sheets carry it). The corner-band blend now picks the NEAREST line instead of
+> first-match (semantics-equal at 0.06 u, proven by the pin below).
+>
+> **GATES:** `--no-greets_displace_reflex_weld` reproduces the acceptance pin
+> t=5743 `440aa6bbb350ae95fbacf339dd2ad957` BYTE-EXACTLY on the final binary.
+> Camera-path sweep, 18 poses × both arms: 10/18 byte-identical; the 8 that
+> differ were eyeballed as amplified masks (t=5400/5640/5760 saved) — every
+> changed region hugs a reflex arris column and its adjacent block ends;
+> gentle junctions, interiors, floor, base untouched. BOTH his t=5965 bulge
+> cams are byte-identical under the fix — the junctions in those frames are the
+> gentle class, out of scope by his own calibration; his cam-A/B residual is a
+> DIFFERENT defect (the curved-section relief question). t=5743 pure-black
+> unchanged 251→251 (hash moves → the acceptance ×4 will need a mechanical
+> re-pin if this defaults on fog-wt).
+>
+> **LOOK, my eye:** west-270° arris (`docs/img/dispfix/reflexweld_pair_west270
+> .png`): the old arm's black tear hanging off the corner is GONE, the arris is
+> straight, and the mortar courses now continue around the corner; residual
+> faint hairline scratches on the side face (26 black px vs 0). Colonnade pair
+> and pilaster pair saved alongside. The after-viz
+> (`reflexweld_viz_west270_after.png`): the flush/absent corner column now
+> rides the MITRE (yellow) over a dense welded line, sheets stay green — the
+> exact picture the falsification round said was missing.
+>
+> **HONEST RESIDUAL, and its mechanism seen in the viz:** close-range corner
+> views grow black sliver gashes (pilaster close-up 41→1433 px; colonnade
+> 558→865) — the corner STRIP is still the [STONE-CORNERF] mega-fan
+> tessellation (one authored apex serving the whole 0.043-pitch welded line),
+> and those fans twist against a corner that now MOVES. That debt predates this
+> fix and is exposed by it, not created: two scoped levers were built and
+> REFUTED by render (widened 0.25 u reflex blend: 1433→5395 with either
+> allegiance rule; `--greets_displace_border_v2` on top: 3770). The structural
+> cure remains the border-pipeline reorder the docs already name. His
+> fly-through decides whether the trade (tears closed vs close-up slivers)
+> ships.
+
+
 > ## 2026-08-27 — **THE DIRECTION HYPOTHESIS IS FALSIFIED BY THE NEW VIZ, AND
 > THE INSTRUMENT THAT FALSIFIED IT FOUND WHY EVERY LEVER MISSED**: the walls
 > under review were invisible to the campaign's own overlay — the post-bake
