@@ -223,12 +223,33 @@ with the old bake for A/B. Old flags untouched.
   vert already knows its junction, its arclength t, and its H(t) sample) —
   pinning is one branch at the offset step, so the M3 height-profiled
   offset drops in without rework.
-- **M3 — mitred rings (castellated).** Shared rings + signed height-profiled
-  mitre + miter-limit bevel. Gate: the course-by-course notched silhouette
-  of §5 at the 250–280 class and the 200–230 class; zero wall↔wall slits;
-  his look pass on the pier. BLOCKED until he confirms the v2 sketch.
-- **M4 — floor rings.** Wall↔floor junction rings. Gate: zero base slits at
-  the battery; base look per Q5.
+- **M3 — mitred rings (castellated). LANDED 2026-08-25.** Implemented as the
+  exact k-plane offset solve per ring vert: find d with `n_i·d = rel_i` for
+  every incident panel (k=1 interior, k=2 the mitre — reduces to
+  bisector/cos(δ/2) when rel_A=rel_B — k=3 Cramer at triple corners; ~832/22
+  in scene), miter-limit clamp (greets_displace_v3_miter, fires 6× on
+  near-parallel curved-wall pairs with differing rel). Castellation falls
+  straight out of the signed rel at each ring sample.
+  **Implementation findings, for the record:** (1) a tolerance weld pass
+  (union-find, 2e-3) merged ZERO positions — the FLD junctions are exactly
+  welded; kept as cheap insurance. (2) The t=5743 doorway tears were NOT
+  ring folds and NOT unwelded splits (both refuted by construction) — they
+  are VIEW SLITS where ring carve-in recedes below an authored border line
+  (the ceiling slab): amp=0 kills them, border-taper 3.0 kills them, 0.5
+  does not (thinner than one subdiv cell). Fix: **asymmetric border taper**
+  (greets_displace_v3_border_taper, default 2.0 world units): only the
+  RECEDING component of displacement fades near authored borders; proud
+  block ends stay proud to the edge. Black px at t=5743: old 251 → v3 46
+  (46 ≈ the pose's non-wall dark baseline).
+- **M3b — POM residual (landed with M3):** geometry now carries the height
+  band up to the bake's median cell size (measured per material:
+  residMip=6/6 at L=3), so POM marches MakeResidualHeight(HeightMap, 6) —
+  same B4 contract as the legacy bake, at v3's own cell size; cone maps
+  rebaked from the residual.
+- **M4 — floor rings. LANDED 2026-08-25** (free with M3: the k-plane solve
+  makes wall↔floor rings the same mechanism, differing rel per material map
+  handled exactly). The M2 base taper band at t=5743 is replaced by the
+  castellated base junction. Gate result: battery table in SESSION_STATE.
 - **M5 — his acceptance** at the full arm, then the default-flip decision.
 
 Cost note: v3's face count is driven by the same cells-per-block dial as

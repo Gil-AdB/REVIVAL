@@ -2176,6 +2176,30 @@ void Initialize_Greets()
 			SubdivideMaterialFaces(GreetSc, "rooms", L3, /*phong=*/false);
 			SubdivideMaterialFaces(GreetSc, "floor", L3, /*phong=*/false);
 			DisplaceV3_Run(GreetSc);
+			// POM double-count fix (design §M-scope): the geometry now carries
+			// the height content up to the bake's cell size, so POM must march
+			// only the RESIDUAL above the measured per-material mip — same
+			// contract as the legacy bake's B4 step, at v3's own cell size.
+			for (Material *M = MatLib; M; M = M->Next) {
+				if (M->RelScene != GreetSc || !M->Name || !M->HeightMap) continue;
+				int mat = -1;
+				if      (!std::strcmp(M->Name, "rooms")) mat = 0;
+				else if (!std::strcmp(M->Name, "floor")) mat = 1;
+				if (mat < 0) continue;
+				const int rm = DisplaceV3_ResidualMip(mat);
+				if (rm < 0) continue;
+				if (Texture *resid = MakeResidualHeight(M->HeightMap, rm)) {
+					M->HeightMap = resid;   // original leaks (init-time, matches loaders)
+					if (M->ConeMap) {
+						const int coneExact = fds::FeatureFlags::pom_cone_exact();
+						M->ConeMap = coneExact > 0
+						    ? LoadOrBakeConeMapExact(M->HeightMap, coneExact, M->Name)
+						    : MakeConeMap(M->HeightMap);
+					}
+					std::fprintf(stderr, "[DISPV3] '%s' POM input -> residual "
+					             "height map (mip %d)\n", M->Name, rm);
+				}
+			}
 		}
 		if (displace && fds::FeatureFlags::greets_shadow_proxy())
 			CaptureStoneProxySnapshot(GreetSc, g_stoneProxySnap);

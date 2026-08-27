@@ -15,4 +15,10 @@ struct Scene;
 
 void DisplaceV3_Run(Scene *Sc);
 
+// After DisplaceV3_Run: the mip level whose texel size matches the bake's
+// median cell size for material mat (0='rooms', 1='floor') — the low band the
+// GEOMETRY now carries, i.e. the argument for MakeResidualHeight so POM
+// marches only the residual. -1 if the bake didn't run for that material.
+int DisplaceV3_ResidualMip(int mat);
+
 #endif // REVIVAL_DISPLACEV3_H

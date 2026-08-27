@@ -1,5 +1,66 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-25 — **DISPLACE v3 M3+M4 LAND ON rev-dispv3: the castellated
+> junction ring, the k-plane offset solve, and a 17/18 battery** (branch
+> rev-dispv3, NOT merged — Gil-Ad's eyes gate)
+>
+> **M3 (castellated rings):** the M2 ring pin is deleted. Every junction
+> ring vert takes the exact k-plane offset: solve `n_i·d = rel_i` over its
+> incident panels (k=2 mitre — reduces to the bisector/cos(δ/2) form when
+> rel_A=rel_B; k=3 Cramer at triple corners; scene: 832/22, fallback 12,
+> clamp 6). Convex/reflex is branchless in the solve; miter limit
+> `greets_displace_v3_miter=2.0` (never binds at δ≤90°). Castellation falls
+> straight out of the signed height sample — no invented geometry at
+> junctions. **M4** came free: wall↔floor rings are the same solve with
+> per-material rel; the M2 base taper at t=5743 is gone.
+>
+> **The tear hunt (honest trail):** M3 first opened arrow-shaped holes at
+> the t=5743 doorway header (147 px). Refuted in order: ring↔boundary fold
+> pinning (no change), tolerance weld (0 near-coincident positions in the
+> FLD — junctions are exactly welded), legacy-stage interaction (pure-v3
+> run identical). Wireframe + amp=0 + taper-radius bisection nailed it:
+> **view slits where ring carve-in recedes below an AUTHORED border line**
+> (ceiling slab); a 0.5u taper is thinner than one L3 cell (~1.1–1.6u) and
+> did nothing. Fix: **asymmetric border taper**
+> (`greets_displace_v3_border_taper=2.0` world units): only the RECEDING
+> displacement component fades near authored borders; proud block ends stay
+> proud. t=5743: 46 px (the pose's non-wall dark baseline).
+>
+> **POM double-count resolved (measured, documented):** geometry now
+> carries the height band up to the bake's MEASURED median cell
+> (residMip=6/6 at L=3, logged); POM marches
+> `MakeResidualHeight(HeightMap, 6)` and cone maps rebake from the residual
+> — the legacy B4 contract at v3's own cell size. No silent look change.
+>
+> **BATTERY (old default arm → v3, pure-black px, 18 poses of
+> greets_review_poses.txt):** 5743 251→46, 5773 284→0, 5813 228→142, 5843
+> 390→21, 5963 307→1, 6133 1064→5, 6293 456→2, 5958a 133→**170**, 5958b
+> 118→14, 5958c 2450→2242, 5958d 232→1, 6097 532→0, 2845 18→0, 5534
+> 1474→758, 5814 355→38, 5854 394→0, 5967 458→0, 5987 218→34. **Totals
+> 9362→3474, v3 ≤ old at 17/18.** The one regression (5958a +37) is the
+> castellation itself: the proud corner block digs a crevice against the
+> background wall and GTAO drives crevice px to pure black — a shadow, not
+> a hole (`docs/img/dispv3/m5_bat/p8_cluster_pair.png`).
+>
+> **Perf, t=5743 full judging arm, min-of-11 order-rotated
+> `--bench=scene`:** old 56.075 ms / v3 56.315 ms (+0.24 ms, +0.4%;
+> spreads 56.08–56.36 vs 56.32–57.21). Geometry: old bake 95,931 scene
+> faces vs v3 19,770 (uniform L3) — 5× lighter; the frame is pixel-bound,
+> so the face win doesn't show at this pose. The +0.24 ms is real ms and
+> stays on the ledger (suspect: residual cone maps march slightly longer).
+>
+> **Evidence** (all under `docs/img/dispv3/`): pier pairs `m5_pair_camA.png`
+> `m5_pair_camB.png` (castellated arris vs old's slit+tilt), battery frames
+> + per-pose pngs `m5_bat/`, arris close-crops
+> `m5_bat/crop_arris_pier25_pair.png` (270° colonnade class — NOTE: this is
+> the curved-wall section; v3 gives it real block-wise relief where old
+> kept it flat — the map's own value, but a LOOK CHANGE on the gentle-reflex
+> class for Gil-Ad to judge), `m5_bat/crop_arris_colonnade_pair.png`
+> (interior corner), `m3_wire_tear.png` (the slit mechanism), triptychs
+> `m3_triptych_camA/B.png`. **Open for his eyes:** the curved-wall relief
+> change; the 5958a crevice-shadow class; L3 vs L4 density (castellation
+> sharpness = ring sampling density).
+
 > ## 2026-08-18d — **THE CROSS-BAKE GUARD LANDS AND THE BATTERY FLIPS TO A
 > CLEAN SWEEP**: v2+guard beats the default arm at ALL 15 review poses, the
 > base slits are gone, and the corner pose falls to 60 px against the

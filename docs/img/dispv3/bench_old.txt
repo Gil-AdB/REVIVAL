@@ -1,0 +1,22 @@
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1404.63 ms  mean=56.185 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1408.68 ms  mean=56.347 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1407.37 ms  mean=56.295 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1402.42 ms  mean=56.097 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1408.70 ms  mean=56.348 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1409.05 ms  mean=56.362 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1408.95 ms  mean=56.358 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1406.90 ms  mean=56.276 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1401.87 ms  mean=56.075 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1406.27 ms  mean=56.251 ms/iter
+[BENCH] scene=greets res=1920x1080
+[BENCH] scene=greets t=5743 iters=25 total=1408.30 ms  mean=56.332 ms/iter
