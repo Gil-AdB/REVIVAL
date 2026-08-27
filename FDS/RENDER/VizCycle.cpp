@@ -47,6 +47,7 @@ bool availAlbedo()   { return FF::deferred() && EngineGBuffer_HasAlbedoPlane(); 
 bool availGbNormal() { return FF::deferred() && NormalViz_Available(); }
 bool availDisp1()    { return DisplaceViz_HasData(); }
 bool availDisp2()    { return DisplaceViz_HasErrorData(); }
+bool availDisp3()    { return DisplaceViz_HasVecData(); }
 bool availSeam()     { return PomSeamViz_HasData(); }
 bool availHorizon()  { return FF::deferred() && FF::pom_horizon(); }
 bool availShadowLm() { return FF::deferred() && LightmapViz_Available(); }
@@ -88,6 +89,12 @@ const VizEntry kEntries[] = {
     { "DISPLACE height error",   "displace_viz",        2, availDisp2,    false,
       "no height-error data - the bake computes it only when --displace_viz=2 "
       "was already set at STARTUP (MeshOps gates the whole computation)" },
+    { "DISPLACE dir/height",     "displace_viz",        3, availDisp3,    false,
+      "no displacement vectors recorded - needs --greets_displace plus "
+      "--viz_arm (or --displace_viz) at STARTUP; the bake runs at scene init" },
+    { "DISPLACE needles",        "displace_viz",        4, availDisp3,    false,
+      "no displacement vectors recorded - needs --greets_displace plus "
+      "--viz_arm (or --displace_viz) at STARTUP; the bake runs at scene init" },
     { "POLY ownership",          "poly_viz",            1, availAlbedo,   false,
       "needs the filtered-albedo G-buffer plane: --viz_arm or --texture_filter "
       "at STARTUP (it is allocated at framebuffer resize)" },

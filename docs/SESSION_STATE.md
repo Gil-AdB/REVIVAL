@@ -1,5 +1,60 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-27 — **THE DIRECTION HYPOTHESIS IS FALSIFIED BY THE NEW VIZ, AND
+> THE INSTRUMENT THAT FALSIFIED IT FOUND WHY EVERY LEVER MISSED**: the walls
+> under review were invisible to the campaign's own overlay — the post-bake
+> ::mirUV split hid them — and the bulge is the OLD bake's flush corner
+> machinery, with displacement directions proven clean everywhere
+>
+> The debug view Gil-Ad asked for by name ("the normal/height combination
+> should be visible in debug view") now exists on the old bake:
+> `--displace_viz=3` fills each displaced triangle by the WORST corner angle
+> between the APPLIED displacement vector (recorded per vert at bake, final −
+> base) and the triangle's BASE wall plane (GREEN 0° = rode the wall normal,
+> YELLOW ~45° = legitimate mitre, RED 90° = slid along the wall; SOLID BLUE =
+> FLUSH, carries <2% of max push — no height, a different failure than a wrong
+> direction), brightness = |displacement|. `--displace_viz=4` draws the vectors
+> as ×3 needles. Both live in the X/Shift+X cycle (armed by --viz_arm) and in
+> headless snapshots. Legend derived from the code, per the house rule.
+>
+> **FINDING 1 (the campaign's blind spot, measured):** the overlay — old mode 1
+> included — filtered faces by recorded Material POINTER, and
+> GreetsFixBitangentHandedness (GREETS.CPP:2868) runs AFTER the bake
+> (GREETS.CPP:2019), moving every mirrored-UV face onto `::mirUV` clone
+> materials. At his t=5965 cam A the pier is 92% `rooms::mirUV`, the curved
+> wall 79%, the floor 100% (per-pixel matID census, FDS_SNAPSHOT_GBUFDUMP) —
+> the month's viz literally could not draw on the walls he was reviewing. Modes
+> 3/4 now bypass the pointer filter (position-key lookups are the filter).
+>
+> **FINDING 2 (the falsification, measured):** with the walls visible, the
+> direction-error population at the broken sharp-reflex junctions DOES NOT
+> EXIST — every wall including the pier reads GREEN (plane-normal ride), no
+> red, no wrong-branch class. The surgical direction fix this branch was
+> commissioned for is therefore NOT the fix and was not built (three burned
+> rounds say don't ship on an unconfirmed mechanism).
+>
+> **FINDING 3 (where the bulge actually lives, by elimination + the viz):**
+> the junction columns and wall base read FLUSH (blue) — the old bake's
+> deliberate deficit-only mitre (MeshOps: "bulges stay impossible (deficit <=
+> 0)") holds every corner column at flush-or-recessed while interiors stand
+> proud, and the corner-band blend ramps proud→flush over ~0.06u — the ramp
+> and the stretched side strips of the flush column ARE the leaning/pillowed
+> connection he flagged. Shading is exonerated by render: --no_nmap,
+> --no-parallax, --no-greets_tbn_fix each leave the bulge unchanged
+> (docs/img/dispfix/pier_discriminators.png). Density is exonerated for the
+> CORNER: --greets_displace_cpb=3 --greets_displace_mip=0 flattens block
+> interiors but the corner column keeps its slits and torn strips
+> (docs/img/dispfix/pier_base_vs_cpb3.png).
+>
+> The fix that follows — NOT implemented, his call: carry the SIGNED
+> course-level profile through the mitre (the castellated corner of his
+> sketch, docs/img/bulge3/corner_intent_sketch_v3.svg) instead of the
+> deficit-only clamp, on same-material sharp-reflex lines — the bisector and
+> plane-ride machinery the viz just proved green stays. Evidence:
+> docs/img/dispfix/dirviz_camA_v2.png (the green/blue read),
+> docs/img/dispfix/magviz_camA.png + dirviz_camA.png (the blind overlay
+> before the filter fix), needles_camA.png, dirviz_camB.png, lit_*.png.
+
 > ## 2026-08-26 — **CITY AND FOUNTAIN HAVE AMBIENT OCCLUSION FOR THE FIRST
 > TIME**: the discard is `Scene::PreferOuterVec`, not the tonemap — the
 > outer-vec lighting kernel writes NO HDR radiance, so SSAO was multiplying a

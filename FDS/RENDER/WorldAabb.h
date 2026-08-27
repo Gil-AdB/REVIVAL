@@ -109,6 +109,20 @@ void WorldAabb_DrawOverlay(Scene* sc);
 // is set (the bake gates the call), so the flag-off path allocates nothing.
 void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs);
 
+// --displace_viz=3/4 (DIRECTION/HEIGHT combination): called by the bake for
+// every displaced vertex with its FINAL model-space position (exact bits, same
+// keying as DisplaceViz_Record) and the full displacement VECTOR final − base
+// (model space). Mode 3 tints each displaced triangle by the WORST corner's
+// angle between its displacement vector and the triangle's BASE-plane normal
+// (reconstructed as base = final − vec, so the pre-bake wall plane, not the
+// displaced one); mode 4 draws the vectors themselves as depth-tested needles.
+// This is the "which normal did this vertex actually ride, and how much height
+// did it carry" view: interiors must read 0° (green), a legitimate mitre reads
+// ~45° (yellow), a slide along the wall reads 90° (red), and a vertex carrying
+// ~no displacement at all reads solid BLUE (flush — no height), which is a
+// different failure than a wrong direction. Gated like Record (--viz_arm arms).
+void DisplaceViz_RecordVec(const Material* M, const Vector& finalLocal, const Vector& dispLocal);
+
 // --displace_viz=2 (HEIGHT-ERROR field): called by the bake once per emitted
 // displaced triangle with its FINAL centroid (model space, exact bits — same
 // keying rationale as DisplaceViz_Record) and the SIGNED height error there =
@@ -152,6 +166,7 @@ void PomSeamViz_DrawOverlay(Scene* sc);
 // time, which is long before a live key press.
 bool DisplaceViz_HasData();        // --displace_viz=1: per-vertex magnitudes
 bool DisplaceViz_HasErrorData();   // --displace_viz=2: per-triangle height error
+bool DisplaceViz_HasVecData();     // --displace_viz=3/4: per-vertex vectors
 bool PomSeamViz_HasData();         // --pom_seam_viz: classified boundary edges
 
 // ── --wire_viz: whole-scene triangle wireframe ─────────────────────────────

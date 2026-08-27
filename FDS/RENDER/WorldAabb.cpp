@@ -388,6 +388,11 @@ struct DispPosHash {
 std::unordered_map<DispPosKey, float, DispPosHash> g_dispMag;   // pos bits -> |offset|
 std::unordered_set<const Material*>                g_dispMats;  // displaced materials
 float g_dispMax = 0.0f;                                          // for normalization
+// --displace_viz=3/4: per-displaced-vertex full displacement VECTOR
+// (final − base, model space), keyed by the FINAL position bits like g_dispMag.
+// base is recoverable as final − vec, which is how the overlay reconstructs
+// the pre-bake wall plane per triangle.
+std::unordered_map<DispPosKey, Vector, DispPosHash> g_dispVec;
 // --displace_viz=2: per-displaced-triangle SIGNED height error (truth − carried,
 // world units), keyed by the triangle's final centroid position bits.
 std::unordered_map<DispPosKey, float, DispPosHash> g_dispErr;
@@ -490,6 +495,14 @@ void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs
     if (dispAbs > g_dispMax) g_dispMax = dispAbs;
 }
 
+void DisplaceViz_RecordVec(const Material* M, const Vector& finalLocal, const Vector& dispLocal) {
+    // Same arming rule as DisplaceViz_Record: --viz_arm records with the viz
+    // flag off so the runtime cycle can switch into mode 3/4 mid-flight.
+    if (!FeatureFlags::displace_viz() && !FeatureFlags::viz_arm()) return;
+    if (M) g_dispMats.insert(M);
+    g_dispVec[posKey(finalLocal)] = dispLocal;
+}
+
 // signedErrFrac is PRE-NORMALIZED by the bake to an absolute fraction where
 // ±1 = the map's full peak-to-valley relief missing (see MeshOps viz-2 record).
 // We store it as-is and tint by the absolute value — no global-max rescale (the
@@ -521,7 +534,14 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
         }
         return;
     }
-    const int     mode   = FeatureFlags::displace_viz();   // 1 = magnitude, 2 = error
+    const int     mode   = FeatureFlags::displace_viz();   // 1=magnitude 2=error 3=dir/height 4=needles
+    // mode 4: one needle per unique vertex even though verts are visited once
+    // per incident face. Rebuilt every frame (the set is tiny next to the draw).
+    std::unordered_set<const void*> seenNeedle;
+    // mode 3/4 flush rule: a vertex carrying under 2% of the bake's max push is
+    // "flush" — it has NO height, which is a different defect than a wrong
+    // direction, so it gets its own colour (solid blue) instead of a hue.
+    const float flushEps = 0.02f * g_dispMax;
     const Matrix& VM = View->Mat;
     const Vector  P  = View->ISource;
     const float   nearZ  = sc->NZP > 0.01f ? sc->NZP : 0.01f;
@@ -549,7 +569,16 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             const Face& F = T->Faces[fi];
             if (!F.A || !F.B || !F.C) continue;
-            if (g_dispMats.find(F.Txtr) == g_dispMats.end()) continue;  // not a displaced material
+            // Modes 3/4 must NOT trust this filter: the greets ::mirUV
+            // handedness split (GREETS.CPP GreetsFixBitangentHandedness) runs
+            // AFTER the bake and moves displaced faces onto clone Materials the
+            // recorder never saw — the pier at the user's t=5965 cams is 92%
+            // 'rooms::mirUV' and the pointer filter made the overlay skip
+            // exactly the walls under review. For 3/4 the per-corner position
+            // lookups are the filter (a face whose corners weren't recorded
+            // draws nothing); for 1/2 keep the original pointer gate.
+            const bool matKnown = g_dispMats.find(F.Txtr) != g_dispMats.end();
+            if (!matKnown && !(mode == 3 || mode == 4)) continue;
             Vertex* const corner[3] = { F.A, F.B, F.C };
 
             // Local → world (RotMat * Pos + IPos) then project like the AABB
@@ -605,6 +634,102 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
                     if (ok[e[0]] && ok[e[1]])
                         drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
                                   sx[e[1]], sy[e[1]], vzs[e[1]], 0x00303030u);
+            } else if (mode == 3 || mode == 4) {
+                // DIRECTION/HEIGHT combination. Per corner: the displacement
+                // VECTOR the bake actually applied (final − base), judged
+                // against the triangle's BASE plane (base = final − vec), i.e.
+                // the pre-bake wall plane. Deviation is measured against the
+                // plane's AXIS (|dot|), so winding orientation cannot flip it:
+                // 0° = rode the wall normal (interiors must read this), ~45° =
+                // a legitimate mitre at a square corner, 90° = sliding ALONG
+                // the wall. A corner carrying ~no displacement at all is FLUSH
+                // (solid blue) — no height, a different failure than direction.
+                Vector dv[3]; bool have = true;
+                for (int k = 0; k < 3; ++k) {
+                    auto it = g_dispVec.find(posKey(corner[k]->Pos));
+                    if (it == g_dispVec.end()) { have = false; break; }
+                    dv[k] = it->second;
+                }
+                if (have) {
+                    Vector bp[3];
+                    for (int k = 0; k < 3; ++k)
+                        bp[k] = Vector{ corner[k]->Pos.x - dv[k].x,
+                                        corner[k]->Pos.y - dv[k].y,
+                                        corner[k]->Pos.z - dv[k].z };
+                    const float e1x=bp[1].x-bp[0].x, e1y=bp[1].y-bp[0].y, e1z=bp[1].z-bp[0].z;
+                    const float e2x=bp[2].x-bp[0].x, e2y=bp[2].y-bp[0].y, e2z=bp[2].z-bp[0].z;
+                    float nbx=e1y*e2z-e1z*e2y, nby=e1z*e2x-e1x*e2z, nbz=e1x*e2y-e1y*e2x;
+                    const float nbl = std::sqrt(nbx*nbx+nby*nby+nbz*nbz);
+                    if (nbl > 1e-9f) {
+                        nbx/=nbl; nby/=nbl; nbz/=nbl;
+                        float dev[3], m[3]; bool flush[3];
+                        for (int k = 0; k < 3; ++k) {
+                            m[k] = std::sqrt(dv[k].x*dv[k].x + dv[k].y*dv[k].y + dv[k].z*dv[k].z);
+                            flush[k] = m[k] < flushEps;
+                            if (flush[k]) { dev[k] = 0.0f; continue; }
+                            float c = std::fabs((dv[k].x*nbx + dv[k].y*nby + dv[k].z*nbz) / m[k]);
+                            if (c > 1.0f) c = 1.0f;
+                            dev[k] = std::acos(c) * 57.29578f;
+                        }
+                        if (mode == 3) {
+                            if (ok[0] && ok[1] && ok[2]) {
+                                if (flush[0] && flush[1] && flush[2]) {
+                                    fillTriZ(sx, sy, vzs, 0x002858D0u, 0.45f);   // FLUSH: no height
+                                } else {
+                                    float maxDev = 0.0f, meanM = 0.0f; int nM = 0;
+                                    for (int k = 0; k < 3; ++k) {
+                                        if (flush[k]) continue;
+                                        if (dev[k] > maxDev) maxDev = dev[k];
+                                        meanM += m[k]; ++nM;
+                                    }
+                                    meanM = nM ? meanM / float(nM) : 0.0f;
+                                    const float t = 0.5f + 0.5f * (maxDev > 90.0f ? 1.0f : maxDev / 90.0f);
+                                    uint32_t col = rampColor(t);                 // green→red
+                                    const float br = 0.35f + 0.65f * (g_dispMax > 1e-9f ? meanM / g_dispMax : 0.0f);
+                                    const int r = int(((col>>16)&0xFF) * br), g = int(((col>>8)&0xFF) * br), b = int((col&0xFF) * br);
+                                    col = (uint32_t(r)<<16)|(uint32_t(g)<<8)|uint32_t(b);
+                                    fillTriZ(sx, sy, vzs, col, 0.55f);
+                                }
+                            }
+                            for (auto& e : e3)
+                                if (ok[e[0]] && ok[e[1]])
+                                    drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
+                                              sx[e[1]], sy[e[1]], vzs[e[1]], 0x00303030u);
+                        } else {   // mode 4: needles
+                            for (auto& e : e3)
+                                if (ok[e[0]] && ok[e[1]])
+                                    drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
+                                              sx[e[1]], sy[e[1]], vzs[e[1]], 0x00282828u);
+                            for (int k = 0; k < 3; ++k) {
+                                if (!seenNeedle.insert(corner[k]).second) continue;
+                                // world base → world tip (vector ×3 for legibility)
+                                Vector tipL = { bp[k].x + dv[k].x*3.0f, bp[k].y + dv[k].y*3.0f, bp[k].z + dv[k].z*3.0f };
+                                const Vector* lp[2] = { &bp[k], &tipL };
+                                int nsx[2], nsy[2]; float nvz[2]; bool nok[2];
+                                for (int q = 0; q < 2; ++q) {
+                                    Vector ww; MatrixXVector(T->RotMat, lp[q], &ww);
+                                    ww.x += T->IPos.x; ww.y += T->IPos.y; ww.z += T->IPos.z;
+                                    Vector dd = { ww.x - P.x, ww.y - P.y, ww.z - P.z };
+                                    Vector ss; MatrixXVector(VM, &dd, &ss);
+                                    if (ss.z > nearZ) {
+                                        nsx[q] = int(CntrEX + FOVX * ss.x / ss.z + 0.5f);
+                                        nsy[q] = int(CntrEY - FOVY * ss.y / ss.z + 0.5f);
+                                        nok[q] = true;
+                                    } else nok[q] = false;
+                                    nvz[q] = ss.z;
+                                }
+                                if (!nok[0] || !nok[1]) continue;
+                                uint32_t col;
+                                if (flush[k]) col = 0x004080FFu;                 // FLUSH marker
+                                else {
+                                    const float t = 0.5f + 0.5f * (dev[k] > 90.0f ? 1.0f : dev[k] / 90.0f);
+                                    col = rampColor(t);
+                                }
+                                drawLineZ(nsx[0], nsy[0], nvz[0], nsx[1], nsy[1], nvz[1], col);
+                            }
+                        }
+                    }
+                }
             } else {
                 for (auto& e : e3)
                     if (ok[e[0]] && ok[e[1]])
@@ -694,6 +819,7 @@ void PomSeamViz_DrawOverlay(Scene* sc) {
 // ── Arming probes (runtime viz cycle) ─────────────────────────────────────
 bool DisplaceViz_HasData()      { return !g_dispMag.empty(); }
 bool DisplaceViz_HasErrorData() { return !g_dispErr.empty(); }
+bool DisplaceViz_HasVecData()   { return !g_dispVec.empty(); }
 bool PomSeamViz_HasData()       { return !g_seamSegs.empty(); }
 
 // ── --wire_viz overlay: whole-scene triangle wireframe ────────────────────
@@ -1003,6 +1129,18 @@ int DisplaceViz_Legend(VizLegendRow* rows, int maxRows) {
         n = legendRow(rows, n, maxRows, nullptr, 0,
             "NO fill = matched, |err| < %.0f%%; opacity grows with |err|; worst here %.2f",
             (double)(kDispMatchThresh * 100.0f), (double)g_dispErrMax);
+    } else if (mode == 3 || mode == 4) {
+        const uint32_t dir[3] = { rampColor(0.5f), rampColor(0.75f), rampColor(1.0f) };
+        n = legendRow(rows, n, maxRows, dir, 3,
+            mode == 3
+              ? "fill = WORST corner's angle: displacement vs the BASE wall plane normal"
+              : "needle = the applied displacement vector x3; colour = angle vs BASE plane");
+        n = legendRow(rows, n, maxRows, nullptr, 0,
+            "GREEN 0 = rode the wall normal, YELLOW ~45 = mitre, RED 90 = slid ALONG the wall");
+        const uint32_t flushC = 0x002858D0u;
+        n = legendRow(rows, n, maxRows, &flushC, 1,
+            "BLUE = FLUSH: carries <2%% of max push %.3fu - no height, not a direction error",
+            (double)g_dispMax);
     } else {
         const uint32_t ramp[3] = { rampColor(0.0f), rampColor(0.5f), rampColor(1.0f) };
         n = legendRow(rows, n, maxRows, ramp, 3,

@@ -6336,7 +6336,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				for (int k=0;k<3;++k) if (fIdx[i][k]<nV) tv[fIdx[i][k]]=1; }
 			for (uint32_t i=0;i<nV;++i) if (tv[i]){
 				const float dx=verts[i].Pos.x-basePos[i].x,dy=verts[i].Pos.y-basePos[i].y,dz=verts[i].Pos.z-basePos[i].z;
-				fds::DisplaceViz_Record(targetMat, verts[i].Pos, std::sqrt(dx*dx+dy*dy+dz*dz)); }
+				fds::DisplaceViz_Record(targetMat, verts[i].Pos, std::sqrt(dx*dx+dy*dy+dz*dz));
+				// modes 3/4: the FULL vector, so the overlay can reconstruct the
+				// base wall plane (base = final − vec) and judge direction+height.
+				fds::DisplaceViz_RecordVec(targetMat, verts[i].Pos, Vector{dx,dy,dz}); }
 		}
 
 		// ── viz record (--displace_viz=2 HEIGHT-ERROR field): per emitted target

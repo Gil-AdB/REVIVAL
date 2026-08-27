@@ -1,0 +1,63 @@
+[GREETSSNAP] gbuf-mat -> ../docs/img/dispfix/mat/greets_t005965_mat.u32
+[GBUFDUMP] id=0 name=cockpit
+[GBUFDUMP] id=1 name=hull not smooth
+[GBUFDUMP] id=2 name=linght
+[GBUFDUMP] id=3 name=sing
+[GBUFDUMP] id=4 name=canons
+[GBUFDUMP] id=5 name=hull
+[GBUFDUMP] id=6 name=momy-2
+[GBUFDUMP] id=7 name=screen 4
+[GBUFDUMP] id=8 name=floor
+[GBUFDUMP] id=9 name=siling
+[GBUFDUMP] id=10 name=rooms
+[GBUFDUMP] id=11 name=stairs
+[GBUFDUMP] id=12 name=screen 3
+[GBUFDUMP] id=13 name=screen emiter
+[GBUFDUMP] id=14 name=screen emiter fance
+[GBUFDUMP] id=15 name=lamp light
+[GBUFDUMP] id=16 name=lamp
+[GBUFDUMP] id=17 name=sss
+[GBUFDUMP] id=18 name=amudim
+[GBUFDUMP] id=19 name=screen handle
+[GBUFDUMP] id=20 name=screen2
+[GBUFDUMP] id=21 name=momy-1
+[GBUFDUMP] id=22 name=(unnamed)
+[GBUFDUMP] id=23 name=(unnamed)
+[GBUFDUMP] id=24 name=Hull2.lwo::hull
+[GBUFDUMP] id=25 name=Hull.lwo::hull
+[GBUFDUMP] id=26 name=Hull.lwo::canons_body
+[GBUFDUMP] id=27 name=Hull.lwo::sing_body
+[GBUFDUMP] id=28 name=Hull.lwo::linght_body
+[GBUFDUMP] id=29 name=Hull.lwo::hull not smooth_upper
+[GBUFDUMP] id=30 name=Hull.lwo::cockpit_upper
+[GBUFDUMP] id=31 name=Hull.lwo::cockpit_body
+[GBUFDUMP] id=32 name=L_leg1.lwo::hull
+[GBUFDUMP] id=33 name=L_leg1.lwo::hull not smooth
+[GBUFDUMP] id=34 name=L_leg2.lwo::hull not smooth
+[GBUFDUMP] id=35 name=L_leg2.lwo::hull
+[GBUFDUMP] id=36 name=R_leg1.lwo::hull
+[GBUFDUMP] id=37 name=R_leg1.lwo::hull not smooth
+[GBUFDUMP] id=38 name=R_leg2.lwo::hull not smooth
+[GBUFDUMP] id=39 name=R_leg2.lwo::hull
+[GBUFDUMP] id=40 name=rooms::mirUV
+[GBUFDUMP] id=41 name=floor::mirUV
+[GBUFDUMP] id=42 name=amudim::mirUV
+[GBUFDUMP] id=43 name=momy-1::mirUV
+[GBUFDUMP] id=44 name=momy-2::mirUV
+[GBUFDUMP] id=45 name=stairs::mirUV
+[GBUFDUMP] id=46 name=screen emiter::mirUV
+[GBUFDUMP] id=47 name=disco_ball
+[GBUFDUMP] id=48 name=teleporter
+[GBUFDUMP] id=49 name=screen 3
+[GBUFDUMP] id=50 name=screen 4
+[GBUFDUMP] id=51 name=screen 4
+[GBUFDUMP] id=52 name=__mirrorRtt_1_2_0
+[GBUFDUMP] id=53 name=__mirrorRtt_1_3_0
+[GBUFDUMP] id=54 name=__mirrorRtt_1_4_0
+[GBUFDUMP] id=55 name=__mirrorRtt_2_1_0
+[GBUFDUMP] id=56 name=__mirrorRtt_2_3_0
+[GBUFDUMP] id=57 name=__mirrorRtt_2_4_0
+[GBUFDUMP] id=58 name=__mirrorRtt_3_2_0
+[GBUFDUMP] id=59 name=__mirrorRtt_4_1_0
+[GBUFDUMP] id=60 name=greets_shard
+[GBUFDUMP] id=61 name=shard_refl_atlas0
