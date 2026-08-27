@@ -1,5 +1,66 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-27 — **THE ARRIS WOBBLE IS UNDERSAMPLING, NOT GRAIN — M3b
+> lands course-aligned castellated rings** (rev-dispv3, salvage session;
+> default ON inside the v3 arm, fog-wt untouched)
+>
+> Gil-Ad's verdict on the M3 render ("I think it's still useless" — the
+> arris and block ends wobble) hunted by instrument, not hypothesis. The
+> 1-D cross-section of junction (13,18) (theta=270, wall height as s;
+> `docs/img/dispv3/wobble_xsec.png`) REFUTED the grain-amplification
+> hypothesis: the raw height signal along the junction is already a
+> near-clean two-level square wave (grain is minor), but the implemented
+> ring had ~3 verts/course against 0.05–0.1u grooves — narrow grooves hit
+> at RANDOM PHASE: one becomes a wide shallow V, the next is missed
+> entirely, transitions land wherever a vert happens to sit. Linear
+> interpolation between sparse phase-random samples IS the wobble. The
+> two-level snap alone (test flag `greets_displace_v3_ring_twolevel`)
+> changed nothing by eye (`docs/img/dispv3/wobble_2lvl_pair_camA.png`) —
+> confirming sampling, not values, as the mechanism.
+>
+> **The fix (`greets_displace_v3_ring_courses`, default ON):** a pre-pass
+> inserts ring verts AT the course transitions of each junction CHAIN
+> (connected collinear run of junction edges — per-EDGE classification was
+> refuted by render: a course spanning two subdiv edges got two medians →
+> a bulge per half-course), two verts per transition 0.02u apart, faces
+> fan-split in the SubdivideMaterialFaces array-rebuild style; ring verts
+> then displace by their COURSE'S level (per-segment median of the map —
+> per-block character preserved, grain excluded from the silhouette).
+> After: `docs/img/dispv3/wobble_xsec_after.png` — the implemented ring is
+> the square wave. At the true 270 junction the raw ring's zigzag elbow
+> collapses to a straight, cleanly stepped arris
+> (`docs/img/dispv3/m3b_arris1318_pair.png`).
+>
+> **Two refuted scope attempts, for the record:** castellating ALL chains
+> opened black slivers at the base bed-joints (t=5743: 46→1142 px; the
+> epsilon-pair notch walls are long thin ring→interior strips that invert
+> at this pose's grazing view — amp=0 renders clean, so topology exonerated,
+> `docs/img/dispv3/m3b_tear_localize.png`); unifying cross-material rel to
+> the wall level made it WORSE (2082). Final scope: full castellation only
+> on same-material SHARP-REFLEX chains (visible-side theta > 240 — exactly
+> the class Gil-Ad named broken; 51 transitions, 98 verts, 88 splits);
+> gentle same-material chains get LEVELS ONLY (collinear per-course ring,
+> no inserted strips); cross-material (wall<->floor) untouched. This
+> matches his datum by construction: the working class is left alone.
+>
+> **BATTERY (18 poses, old default arm / M3-raw / M3b):** totals
+> 9362 / 3474 / 3635; better-than-old at 17/18 all arms. M3b vs raw moves
+> three poses up (5814 38→124, 5958a 170→186, 5958c 2242→2303, 5958d
+> 1→18) — diffed per pixel at 5814: the new black is the notch's INNER
+> WALL in GTAO/shadow (`docs/img/dispv3/m3b_5814_delta.png`), the
+> crevice-shadow class the 08-25 battery already named at 5958a — shading
+> the castellation legitimately creates, not holes. t=5743 byte-holds 46.
+> `--no-greets_displace_v3_ring_courses` is byte-identical to the M3 raw
+> ring (verified 1849a445). Instrument added: ringvert dump in the viz
+> graph (position, per-side UV+rel, solved d).
+>
+> **Open for his eyes:** the castellated arris look at his cams
+> (`docs/img/dispv3/m3b_pair_camA.png` / `_camB.png` — right pane; note
+> cam A's near silhouette is the CURVED pier25 section, interior relief,
+> not a junction ring — judged separately), the crevice-shadow darkening,
+> and the L3 ring density (castellation sharpness now decoupled from it).
+
+
 > ## 2026-08-25 — **DISPLACE v3 M3+M4 LAND ON rev-dispv3: the castellated
 > junction ring, the k-plane offset solve, and a 17/18 battery** (branch
 > rev-dispv3, NOT merged — Gil-Ad's eyes gate)

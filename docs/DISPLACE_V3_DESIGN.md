@@ -250,6 +250,20 @@ with the old bake for A/B. Old flags untouched.
   makes wall↔floor rings the same mechanism, differing rel per material map
   handled exactly). The M2 base taper band at t=5743 is replaced by the
   castellated base junction. Gate result: battery table in SESSION_STATE.
+- **M3c — course-aligned rings (the wobble fix). LANDED 2026-08-27.**
+  Gil-Ad's "still useless" verdict on the M3 arris, closed by instrument:
+  the ring undersampled the course structure (~3 verts/course vs 0.05-0.1u
+  grooves — phase-random hits; cross-section docs/img/dispv3/wobble_xsec.png
+  vs _after.png). Grain-amplification hypothesis REFUTED (two-level snap
+  changed nothing); per-EDGE classification REFUTED (level jump per
+  half-course); castellating gentle/cross-material chains REFUTED by render
+  (grazing-view sliver inversions at the base bed-joints, 46→1142→2082 px).
+  Final rule (greets_displace_v3_ring_courses, default ON): per-CHAIN course
+  classification; sharp-reflex same-material chains (theta>240, his broken
+  class) get transition-pair vert insertion + per-course level displacement;
+  gentle same-material chains get levels only; wall<->floor rings keep the
+  raw k-plane solve. The silhouette is the course structure; grain stays on
+  the faces.
 - **M5 — his acceptance** at the full arm, then the default-flip decision.
 
 Cost note: v3's face count is driven by the same cells-per-block dial as
