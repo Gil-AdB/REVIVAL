@@ -521,6 +521,73 @@ void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, flo
     if (a > g_dispErrMax) g_dispErrMax = a;
 }
 
+// --displace_dump: one-shot text dump of every recorded bake vert, ranked
+// offline. Per unique FINAL position: |dv|, deviation vs the reconstructed
+// base plane (worst/best across incident faces — spread = the faces disagree
+// about their base plane, the sheet-divergence/tear signature), face count,
+// material. Iterates WITHOUT view culling: the dump must see what the eye
+// can't frame.
+static void DisplaceViz_DumpRecords(Scene* sc) {
+    struct Agg { Vector w, dv; float m; float devMax, devMin; int nf; const char* mat; };
+    std::unordered_map<DispPosKey, Agg, DispPosHash> agg;
+    for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh* T = (TriMesh*)Obj->Data;
+        if (!T || T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            const Face& F = T->Faces[fi];
+            if (!F.A || !F.B || !F.C) continue;
+            Vertex* const corner[3] = { F.A, F.B, F.C };
+            Vector dv[3]; bool have = true;
+            for (int k = 0; k < 3; ++k) {
+                auto it = g_dispVec.find(posKey(corner[k]->Pos));
+                if (it == g_dispVec.end()) { have = false; break; }
+                dv[k] = it->second;
+            }
+            if (!have) continue;
+            Vector bp[3];
+            for (int k = 0; k < 3; ++k)
+                bp[k] = Vector{ corner[k]->Pos.x - dv[k].x,
+                                corner[k]->Pos.y - dv[k].y,
+                                corner[k]->Pos.z - dv[k].z };
+            const float e1x=bp[1].x-bp[0].x, e1y=bp[1].y-bp[0].y, e1z=bp[1].z-bp[0].z;
+            const float e2x=bp[2].x-bp[0].x, e2y=bp[2].y-bp[0].y, e2z=bp[2].z-bp[0].z;
+            float nbx=e1y*e2z-e1z*e2y, nby=e1z*e2x-e1x*e2z, nbz=e1x*e2y-e1y*e2x;
+            const float nbl = std::sqrt(nbx*nbx+nby*nby+nbz*nbz);
+            if (nbl <= 1e-9f) continue;
+            nbx/=nbl; nby/=nbl; nbz/=nbl;
+            for (int k = 0; k < 3; ++k) {
+                const float m = std::sqrt(dv[k].x*dv[k].x + dv[k].y*dv[k].y + dv[k].z*dv[k].z);
+                float dev = 0.0f;
+                if (m > 1e-9f) {
+                    float c = std::fabs((dv[k].x*nbx + dv[k].y*nby + dv[k].z*nbz) / m);
+                    if (c > 1.0f) c = 1.0f;
+                    dev = std::acos(c) * 57.29578f;
+                }
+                Vector w; MatrixXVector(T->RotMat, &corner[k]->Pos, &w);
+                w.x += T->IPos.x; w.y += T->IPos.y; w.z += T->IPos.z;
+                auto& a = agg[posKey(corner[k]->Pos)];
+                if (a.nf == 0) { a.w = w; a.dv = dv[k]; a.m = m;
+                                 a.devMax = dev; a.devMin = dev; a.nf = 1;
+                                 a.mat = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "?"; }
+                else { if (dev > a.devMax) a.devMax = dev;
+                       if (dev < a.devMin) a.devMin = dev; ++a.nf; }
+            }
+        }
+    }
+    FILE* f = std::fopen("displace_dump.txt", "w");
+    if (!f) { std::fprintf(stderr, "[DISPLACE-DUMP] cannot open displace_dump.txt\n"); return; }
+    std::fprintf(f, "# wx wy wz  dvx dvy dvz  mag  devMax devMin  nfaces  mat\n");
+    for (auto& kv : agg) {
+        const Agg& a = kv.second;
+        std::fprintf(f, "%.5f %.5f %.5f  %.6f %.6f %.6f  %.6f  %.2f %.2f  %d  %s\n",
+                     a.w.x, a.w.y, a.w.z, a.dv.x, a.dv.y, a.dv.z, a.m,
+                     a.devMax, a.devMin, a.nf, a.mat);
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[DISPLACE-DUMP] wrote %zu verts to displace_dump.txt\n", agg.size());
+}
+
 void DisplaceViz_DrawOverlay(Scene* sc) {
     if (!sc || !View || !VPage || XRes <= 0 || YRes <= 0) return;
     if (g_offscreenViewDepth > 0) return;
@@ -533,6 +600,10 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
                 "(the stone-displacement bake) ON.\n");
         }
         return;
+    }
+    if (FeatureFlags::displace_dump()) {
+        static bool dumped = false;
+        if (!dumped) { dumped = true; DisplaceViz_DumpRecords(sc); }
     }
     const int     mode   = FeatureFlags::displace_viz();   // 1=magnitude 2=error 3=dir/height 4=needles
     // mode 4: one needle per unique vertex even though verts are visited once

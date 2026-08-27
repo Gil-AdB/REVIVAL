@@ -1,5 +1,40 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28 — TEAR HUNT: his out-of-wall needles are REAL, PRE-EXISTING, and
+> named to the geometry — tilted SIDE-STRIP/skirt faces displacing along their
+> OWN plane at near-max amplitude; the reflex weld is exonerated
+>
+> Instrument: `--displace_dump` (one-shot text dump of every recorded bake vert:
+> position, applied vector, magnitude, deviation vs reconstructed base plane
+> worst/best across incident faces, material). 52,275 verts dumped under his
+> judging arm at t=5965.
+>
+> **Measured:** (1) NO oversized magnitudes exist — max |dv| = 0.164u = the bake
+> max, in BOTH arms; the x3 needle scaling + newly-unflushed mitre verts explain
+> "large". (2) The tear-signature population (dev spread >25 deg) drops 144->117
+> verts under the weld — the colonnade z=-37 clusters the weld targeted are GONE;
+> survivors sit at the curve arc x=+-13..14, z=-18..-25, the tall line
+> (17.9,-49.3), (18,-76), (+-2,-61.4), (+-12,-6). (3) The smoking gun at the
+> bend seam: dense diagonal rows of verts displacing along EXACT (1,-2,0)/sqrt5
+> = 63 deg DOWNWARD out of the wall at 0.131u (80% of max), devMax=devMin=0 —
+> whole sliver strips riding their OWN tilted strip plane, slaved to NEITHER
+> wall sheet. Scene-wide steep-out-of-wall population (|u_y|>0.5, m>0.08):
+> **293 (weld ON) vs 294 (weld OFF) at identical clusters — pre-existing, not
+> weld-created.** Close-up `tearhunt_curve_tex_needle.png`: course lines break
+> at the bend seams exactly where the needle clusters lie sideways.
+>
+> Producer as named by the data: the junction/bend SIDE-STRIP (skirt/mega-fan)
+> faces are treated as first-class displaceable panels along their own tilted
+> normals at full course amplitude, instead of being slaved to the wall sheets
+> they connect. Flush corners used to hide them (~0 amplitude); anywhere real
+> amplitude flows (curve bends always; welded corners now) they fire and tear.
+> The exact emitting code path in MeshOps.cpp is NOT yet traced (candidates:
+> the [STONE-CORNERF] fan strips, the weld-era "boundary skirt" near :9816) —
+> that trace is the next step, then the scoped lever: slave strip verts to the
+> adjacent wall sheets' displacement (interpolate the two sheets' offsets along
+> the strip) instead of displacing along the strip's own plane. Evidence:
+> docs/img/dispfix/tearhunt_* (dumps, cluster tables in the session log).
+
 > ## 2026-08-27b — **THE SHARP-REFLEX CORNERS JOIN THE MITRE WELD**: the >240°
 > wall connections were index-INTERIOR — never freed, never welded, riding
 > straddled smoothed normals — and `--greets_displace_reflex_weld` splits them
