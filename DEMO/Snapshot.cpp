@@ -856,6 +856,25 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                          "rows as ambiguous)\n", present.size(), printed, collisions);
         }
 
+        // --bulge_dump (DIAGNOSTIC, default OFF): raw deferred G-buffer
+        // SHADING-NORMAL plane (u32[xres*yres], oct 16.16 view-space; decode =
+        // oct_decode_u32, Mekalele.h) beside the color PPM. Data path for the
+        // bulge-detector instrument tools/bulge_detect.py: arrows over the
+        // render + scanline plots + panel-rotation metric. Snapshot-path only,
+        // nothing reads it at runtime.
+        if (fds::FeatureFlags::bulge_dump() && g_gbuffer
+            && g_gbuffer->normal.size() >= size_t(xres) * yres) {
+            char np[1024];
+            std::snprintf(np, sizeof(np), "%s/greets_t%06d_norm.u32",
+                          cfg.outDir.c_str(), ts);
+            if (FILE* nf = std::fopen(np, "wb")) {
+                std::fwrite(g_gbuffer->normal.data(), sizeof(uint32_t),
+                            size_t(xres) * yres, nf);
+                std::fclose(nf);
+                std::fprintf(stderr, "[GREETSSNAP] normals -> %s\n", np);
+            }
+        }
+
         // FDS_DUMP_TXTR: dump the finalized per-pixel parallax UV (uf,vf) that the
         // march recorded during this tick (see g_pomDbgUV set before the tick).
         // Diffing two runs' UV bins isolates the MARCH output (spatial texel

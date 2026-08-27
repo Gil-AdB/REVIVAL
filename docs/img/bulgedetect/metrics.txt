@@ -1,0 +1,29 @@
+bulge_detect.py calibration + attribution matrix (2026-08-28, t=5965, cams A/B)
+Dumped plane = deferred G-buffer normals = PRE-NMAP interpolated VERTEX normals
+(proved: full == nonmap bit-identical on every metric).
+Quiet reference = undisplaced authored flat wall (A/B_nodisp pierfront): GBI 0.00, SWEEP 0.00.
+Threshold: GBI >= 2 deg/100px OR planar-panel SWEEP >= 4 deg fires. Separation quiet 0.00 vs fired 2.5-62.7.
+
+arm        region         GBI  SWEEPh  SWEEPv  GEOMBOW       px
+A_full     curved       13.29     nan   16.25   0.5644   104751
+A_full     pierfront     4.98    6.52    1.97   0.1038   468525
+A_full     pierside     62.71     nan   12.12   0.4038    30818
+A_nonmap   (== A_full on all rows: dumped plane carries no nmap)
+A_nodisp   curved        3.32     nan    3.96   0.5226   104491
+A_nodisp   pierfront     0.00    0.00    0.00   0.0001   474374
+A_nodisp   pierside      0.00     nan    5.07   0.0584    37665
+B_full     curved        7.88   21.37   14.26   0.4842   179914
+B_full     pierfront     2.54    8.89    2.80   0.0850   745557
+B_nonmap   (== B_full on all rows)
+B_nodisp   curved        2.46   36.61    6.22   0.4942   179784
+B_nodisp   pierfront     0.00    0.00    0.00   0.0002   745611
+
+GBI     = median per-64px-cell fitted normal-field gradient, deg per 100 px (depth-coherent cells)
+SWEEP   = mean-normal rotation left-vs-right third / top-vs-bottom third (curved wall's SWEEPh is authored arc curvature, not defect)
+GEOMBOW = max low-pass residual of perspective-plane fit to depth, world units (block relief ~0.16u)
+Attribution: GEOMBOW stays at relief/arc scale in every arm -> positions do NOT bow.
+Displacement ON turns 0.00-flat vertex-normal fields into 2.5-62.7 drift -> the bulge is
+SHADING-BORNE: the displaced mesh's vertex normals roll smoothly across block faces
+(worst at seam columns), and the eye reads the rolling shading as pillowed stone.
+Bare curved wall (GBI 3.3/SWEEPv 4.0) carries a mild pre-existing version = the pre-
+tessellation-era residual (supported, not exhaustively traced).

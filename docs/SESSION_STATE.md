@@ -1,5 +1,45 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28b — **THE BULGE DETECTOR IS CALIBRATED AND THE BULGE IS
+> NAMED IN PIXELS: the displaced walls' VERTEX NORMALS roll — geometry is
+> flat, shading is not** — his "overlay the pic with vectors" instrument,
+> built and fired
+>
+> `--bulge_dump` (new, default OFF) writes the deferred G-buffer normal
+> plane beside a greets snapshot; `tools/bulge_detect.py` decodes it and
+> produces arrow overlays, scanline plots, and three metrics (GBI =
+> per-cell normal-field gradient deg/100px; SWEEP = panel-thirds mean-normal
+> rotation; GEOMBOW = low-pass depth residual vs perspective-plane fit,
+> world units). Key fact discovered on the way: the dumped plane is the
+> PRE-NMAP interpolated VERTEX normal (full == --no_nmap bit-identical on
+> every metric) — the exact suspect field, uncontaminated.
+>
+> **Calibration:** quiet reference = the undisplaced authored wall:
+> GBI 0.00 / SWEEP 0.00 / GEOMBOW 0.0001 at both cams. His ground-truth
+> bulged renders (t=5965 cams A/B, the images he failed twice): pierfront
+> GBI 4.98 SWEEPh 6.52, curved GBI 13.29 SWEEPv 16.25, seam column GBI
+> 62.71. Separation 0.00 vs 2.5–62.7 — threshold GBI≥2 or SWEEP≥4 deg.
+>
+> **Attribution (measured):** GEOMBOW stays at block-relief/authored-arc
+> scale in EVERY arm — the positions do not bow. Displacement ON turns the
+> 0.00-flat vertex-normal field into 2.5–62.7 deg drift — **the bulge is
+> shading-borne: after the bake, vertex normals roll smoothly across each
+> block face and panel instead of flat-per-face-with-bevel-steps**, worst
+> at seam columns (62.7), and the eye reads the rolling shading as pillowed
+> stone. The scanline pair is the whole story in one image: bare wall =
+> ruler-flat nx/ny/nz; displaced = drifting baselines that never return to
+> level (`docs/img/bulgedetect/scanline_B_{full,nodisp}_pierfront_y300.png`).
+> The bare CURVED wall carries a mild pre-existing version (GBI 3.3) — the
+> pre-tessellation-era residual, supported not traced. This also names why
+> every earlier instrument missed: displace_viz judged bake-time
+> DISPLACEMENT directions (which are correct); the renderer shades with
+> Vertex::N, which nothing ever re-derived crease-aware after displacement.
+>
+> Evidence: `docs/img/bulgedetect/overlay_{A,B}_{full,nodisp}.png` (arrow
+> fields: uniform green bare vs red/orange swirl displaced), `metrics.txt`
+> (full matrix). Instrument only — no fix built this round.
+
+
 > ## 2026-08-28b — **THE FIX LANDS: majority-front mitre bisector
 > (--greets_displace_front_orient, default ON) — the seam rides the TRUE
 > bisector (median 0.4 deg) and the pier renders as flat dressed stone**
