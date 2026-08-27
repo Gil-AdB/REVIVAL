@@ -5194,6 +5194,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		const bool groovePlaneOn = fds::FeatureFlags::greets_displace_groove_shade()
 		                        && fds::FeatureFlags::greets_displace_groove_shade_plane();
 		std::vector<Vector> grooveTgtN;      // unit patch plane per vert (sign-ambiguous), empty when off
+		std::vector<char>   grooveTgtFront;  // 1 = grooveTgtN already majority-front oriented (part 3)
 		const int   bmeanMode  = fds::FeatureFlags::greets_displace_border_mean();
 		const float bmeanScale = fds::FeatureFlags::greets_displace_border_mean_scale();
 		const bool  wantBMean  = bmeanMode != 0;
@@ -5263,6 +5264,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			planeKey.assign(nV, 0);
 			for (uint32_t v=0; v<nV; ++v) {
 				if (!have[v] || corner[v]) continue;
+				// (planeKey built below; the majority-front pass after this loop
+				// reuses it, so keep this loop's body unchanged.)
 				// The PLANE IDENTITY is deliberately NOT subject to the twin
 				// guard: a twin still lies in a well-defined authored plane, and
 				// the mean is a scalar reference level, not a direction — nothing
@@ -5270,6 +5273,55 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				const Vector &Q = acc[v];
 				planeKey[v] = planeKeyOf(Q.x, Q.y, Q.z,
 					Q.x*basePos[v].x + Q.y*basePos[v].y + Q.z*basePos[v].z);
+			}
+			// ── part 3: PER-PATCH MAJORITY FRONT for the groove-blend target ──
+			// (--greets_displace_groove_front_majority). acc[v]'s sign is the
+			// FIRST incident face's winding — arbitrary — and the record site
+			// resolved it by dot with the polluted RIDE, which points past 90°
+			// off the true front exactly where the pollution is worst (seam
+			// columns): the blend target flipped INWARD and stage-D normals
+			// inverted (vf med 22.6°/max 176° measured). Orient each patch ONCE
+			// by the area-weighted majority of its authored Face::N — the
+			// mitre's own validated rule (windings disagree ~17% per face; the
+			// patch-wide majority measured 220:46 / 414:83, unambiguous).
+			if (groovePlaneOn && fds::FeatureFlags::greets_displace_groove_front_majority()) {
+				std::unordered_map<uint64_t, Vector> patchFront;
+				patchFront.reserve(256);
+				for (size_t f=0; f<faces.size(); ++f) {
+					if (!isTargetNew(faces[f])) continue;
+					const uint32_t a=fIdx[f][0], b=fIdx[f][1], c=fIdx[f][2];
+					if (a>=nV||b>=nV||c>=nV) continue;
+					const Vector &A=basePos[a],&B=basePos[b],&C=basePos[c];
+					const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z;
+					const float e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+					const float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+					const float area2 = std::sqrt(gx*gx+gy*gy+gz*gz);   // 2*area
+					if (area2 < 1e-12f) continue;
+					const Vector &fn = faces[f].N;                       // authored winding N
+					for (uint32_t v : {a,b,c}) {
+						if (v>=nV || planeKey[v]==0) continue;
+						Vector &fa = patchFront[planeKey[v]];
+						fa.x += fn.x*area2; fa.y += fn.y*area2; fa.z += fn.z*area2;
+					}
+				}
+				grooveTgtFront.assign(nV, 0);
+				int nOr=0, nFlip=0, nWeak=0;
+				for (uint32_t v=0; v<nV; ++v) {
+					if (planeKey[v]==0) continue;
+					Vector &pn = grooveTgtN[v];
+					if (pn.x==0.0f && pn.y==0.0f && pn.z==0.0f) continue;
+					auto it = patchFront.find(planeKey[v]);
+					if (it == patchFront.end()) continue;
+					const Vector &fa = it->second;
+					const float fl = std::sqrt(fa.x*fa.x+fa.y*fa.y+fa.z*fa.z);
+					if (fl < 1e-9f) { ++nWeak; continue; }   // exact 50/50: leave ride-signed
+					const float d = pn.x*fa.x + pn.y*fa.y + pn.z*fa.z;
+					if (d < 0.0f) { pn.x=-pn.x; pn.y=-pn.y; pn.z=-pn.z; ++nFlip; }
+					grooveTgtFront[v] = 1; ++nOr;
+				}
+				std::fprintf(stderr, "[STONE-GROOVEFRONT] '%s' %d patch-plane targets "
+				             "majority-front oriented (%d flipped, %d ambiguous kept "
+				             "ride-signed)\n", matName?matName:"?", nOr, nFlip, nWeak);
 			}
 			if (!wantPlaneN) planeN.clear();          // mean-only: leave the ride alone
 			else {
@@ -6399,8 +6451,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const Vector &pn = grooveTgtN[i];
 					const float pl2 = pn.x*pn.x + pn.y*pn.y + pn.z*pn.z;
 					if (pl2 > 0.25f) {
-						const float s = (pn.x*rec.wallN.x + pn.y*rec.wallN.y
-						               + pn.z*rec.wallN.z) < 0.0f ? -1.0f : 1.0f;
+						// part 3: a majority-front-oriented patch target is used
+						// AS-IS — the ride-dot sign rule is exactly what inverted
+						// the seam columns (see greets_displace_groove_front_majority).
+						const float s = (i < grooveTgtFront.size() && grooveTgtFront[i])
+						    ? 1.0f
+						    : ((pn.x*rec.wallN.x + pn.y*rec.wallN.y
+						               + pn.z*rec.wallN.z) < 0.0f ? -1.0f : 1.0f);
 						rec.wallN.x = pn.x*s; rec.wallN.y = pn.y*s; rec.wallN.z = pn.z*s;
 					} else {
 						// Corner vert: no single patch plane. Blending toward the

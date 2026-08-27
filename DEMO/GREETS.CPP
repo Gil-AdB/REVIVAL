@@ -2101,6 +2101,32 @@ void Initialize_Greets()
 		DisplaceStoneSmoothNormals(GreetSc, "rooms", sm);
 		DisplaceStoneSmoothNormals(GreetSc, "floor", sm);
 		MeshOps_TangentNaNCensus(GreetSc, "post-DisplaceStoneSmoothNormals");
+		// ── --normchain_dump stage D: the FINAL shading normals — stage C runs
+		// BEFORE this weld (it caught the 30°-facet field), so a defect in the
+		// weld/groove-blend itself is invisible there. Same format as stage C.
+		if (fds::FeatureFlags::normchain_dump()) {
+			if (FILE *nf = std::fopen("normchain_final.txt", "w")) {
+				std::fprintf(nf, "# x y z  nx ny nz  fnx fny fnz  mat\n");
+				for (TriMesh *T = GreetSc->TriMeshHead; T; T = T->Next) {
+					if (!T->Faces || !T->FIndex) continue;
+					for (int32_t i = 0; i < T->FIndex; ++i) {
+						Face &F = T->Faces[i];
+						const char *mn = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "";
+						if (std::strncmp(mn, "rooms", 5) && std::strncmp(mn, "floor", 5)) continue;
+						const Vertex *vv[3] = { F.A, F.B, F.C };
+						for (int k = 0; k < 3; ++k) {
+							if (!vv[k]) continue;
+							std::fprintf(nf, "%.5f %.5f %.5f  %.6f %.6f %.6f  %.6f %.6f %.6f  %s\n",
+								vv[k]->Pos.x, vv[k]->Pos.y, vv[k]->Pos.z,
+								vv[k]->N.x, vv[k]->N.y, vv[k]->N.z,
+								F.N.x, F.N.y, F.N.z, mn);
+						}
+					}
+				}
+				std::fclose(nf);
+				std::fprintf(stderr, "[NORMCHAIN] wrote normchain_final.txt\n");
+			}
+		}
 	}
 
 	// S1b PER-PIXEL SHELL (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md):
