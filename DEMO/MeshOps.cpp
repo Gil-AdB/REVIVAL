@@ -5154,6 +5154,21 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		}
 		std::vector<Vector> basePos(nV);
 		for (uint32_t i=0;i<nV;++i) basePos[i]=verts[i].Pos;
+		// ── --normchain_dump stage A: the PRE-DISPLACEMENT per-vert normal the
+		// ride below consumes (PREPROC's ungated corner average on originals,
+		// the subdivision interpolant on created verts). One file per bake call.
+		if (fds::FeatureFlags::normchain_dump()) {
+			char fn[128]; std::snprintf(fn, sizeof(fn), "normchain_ride_%s.txt", matName);
+			if (FILE *nf = std::fopen(fn, "w")) {
+				std::fprintf(nf, "# x y z  nx ny nz   (pre-displacement Vertex::N = bake ride input)\n");
+				for (uint32_t i=0;i<nV;++i)
+					std::fprintf(nf, "%.5f %.5f %.5f  %.6f %.6f %.6f\n",
+						verts[i].Pos.x, verts[i].Pos.y, verts[i].Pos.z,
+						verts[i].N.x, verts[i].N.y, verts[i].N.z);
+				std::fclose(nf);
+				std::fprintf(stderr, "[NORMCHAIN] wrote %s (%u verts)\n", fn, nV);
+			}
+		}
 		// ── PLANE-NORMAL RIDE (--greets_displace_plane_normal, default OFF) ───
 		// The ride direction is the smoothed VERTEX normal, which on this mesh is
 		// averaged across the room's corners and therefore is NOT the normal of
@@ -6566,14 +6581,35 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		for (size_t i=0;i<faces.size();++i) if (isTargetNew(faces[i])){ targetMat=faces[i].Txtr; break; }
 		{
 			std::vector<char> tv(nV,0);
+			// Attribution tag (2026-08-28 tear hunt): at this point every target
+			// face still carries its PARENT's authored N (the commit that
+			// overwrites N with the displaced facet plane runs later, see the
+			// parent-plane stamping comment below). Per vert: the steepest
+			// authored |n_y| among incident target faces (walls ~0, tilted
+			// sliver strips large) and the count of DISTINCT authored parents
+			// (quantized 1/16, the stamping grid).
+			std::vector<float>   tagNy(nV, -1.0f);
+			std::vector<uint8_t> tagNp(nV, 0);
+			std::vector<uint32_t> tagKey(nV, 0xFFFFFFFFu);   // last distinct parent key seen
 			for (size_t i=0;i<faces.size();++i){ if(!isTargetNew(faces[i])) continue;
-				for (int k=0;k<3;++k) if (fIdx[i][k]<nV) tv[fIdx[i][k]]=1; }
+				const Face &F=faces[i];
+				const float nl=std::sqrt(F.N.x*F.N.x+F.N.y*F.N.y+F.N.z*F.N.z);
+				const float ny = nl>1e-6f ? std::fabs(F.N.y)/nl : -1.0f;
+				const uint32_t pk = nl>1e-6f
+					? (uint32_t(int(F.N.x/nl*16.0f+16.5f))<<16)
+					| (uint32_t(int(F.N.y/nl*16.0f+16.5f))<<8)
+					|  uint32_t(int(F.N.z/nl*16.0f+16.5f)) : 0xFFFFFFFEu;
+				for (int k=0;k<3;++k){ const uint32_t v=fIdx[i][k]; if (v>=nV) continue;
+					tv[v]=1;
+					if (ny>tagNy[v]) tagNy[v]=ny;
+					if (tagKey[v]!=pk){ if (tagNp[v]<255) ++tagNp[v]; tagKey[v]=pk; } } }
 			for (uint32_t i=0;i<nV;++i) if (tv[i]){
 				const float dx=verts[i].Pos.x-basePos[i].x,dy=verts[i].Pos.y-basePos[i].y,dz=verts[i].Pos.z-basePos[i].z;
 				fds::DisplaceViz_Record(targetMat, verts[i].Pos, std::sqrt(dx*dx+dy*dy+dz*dz));
 				// modes 3/4: the FULL vector, so the overlay can reconstruct the
 				// base wall plane (base = final − vec) and judge direction+height.
-				fds::DisplaceViz_RecordVec(targetMat, verts[i].Pos, Vector{dx,dy,dz}); }
+				fds::DisplaceViz_RecordVec(targetMat, verts[i].Pos, Vector{dx,dy,dz});
+				fds::DisplaceViz_RecordTag(verts[i].Pos, tagNy[i], tagNp[i], i>=nOrig); }
 		}
 
 		// ── viz record (--displace_viz=2 HEIGHT-ERROR field): per emitted target

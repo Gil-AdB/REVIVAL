@@ -122,6 +122,11 @@ void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs
 // ~no displacement at all reads solid BLUE (flush — no height), which is a
 // different failure than a wrong direction. Gated like Record (--viz_arm arms).
 void DisplaceViz_RecordVec(const Material* M, const Vector& finalLocal, const Vector& dispLocal);
+// --displace_dump attribution tag: authored-parent fingerprint per vert
+// (steepest |n_y| of incident target faces' AUTHORED parent planes, distinct
+// parent count, bake-created flag). Recorded by the bake's viz block.
+void DisplaceViz_RecordTag(const Vector& finalLocal, float parentNyMax,
+                           unsigned nParents, bool created);
 
 // --displace_viz=2 (HEIGHT-ERROR field): called by the bake once per emitted
 // displaced triangle with its FINAL centroid (model space, exact bits — same

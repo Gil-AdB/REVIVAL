@@ -2052,6 +2052,34 @@ void Initialize_Greets()
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 	InitTimelineMark("greets: MakeFacesIndependentByAngle end");
 	MeshOps_TangentNaNCensus(GreetSc, "post-MakeFacesIndependentByAngle");
+	// ── --normchain_dump stage C: the SHADING normals as re-derived above —
+	// per face corner: position, corner N, face winding N. Stage A (the bake
+	// ride input) is normchain_ride_*.txt in MeshOps; stage B (the applied
+	// ride vector) is --displace_dump. Diffing the three against the wall
+	// planes names the stage that owns a bad normal.
+	if (fds::FeatureFlags::normchain_dump()) {
+		if (FILE *nf = std::fopen("normchain_shading.txt", "w")) {
+			std::fprintf(nf, "# x y z  nx ny nz  fnx fny fnz  mat\n");
+			for (TriMesh *T = GreetSc->TriMeshHead; T; T = T->Next) {
+				if (!T->Faces || !T->FIndex) continue;
+				for (int32_t i = 0; i < T->FIndex; ++i) {
+					Face &F = T->Faces[i];
+					const char *mn = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "";
+					if (std::strncmp(mn, "rooms", 5) && std::strncmp(mn, "floor", 5)) continue;
+					const Vertex *vv[3] = { F.A, F.B, F.C };
+					for (int k = 0; k < 3; ++k) {
+						if (!vv[k]) continue;
+						std::fprintf(nf, "%.5f %.5f %.5f  %.6f %.6f %.6f  %.6f %.6f %.6f  %s\n",
+							vv[k]->Pos.x, vv[k]->Pos.y, vv[k]->Pos.z,
+							vv[k]->N.x, vv[k]->N.y, vv[k]->N.z,
+							F.N.x, F.N.y, F.N.z, mn);
+					}
+				}
+			}
+			std::fclose(nf);
+			std::fprintf(stderr, "[NORMCHAIN] wrote normchain_shading.txt\n");
+		}
+	}
 
 	// Displaced stone: re-SMOOTH the displaced surface normals. The pass above
 	// (MakeFacesIndependentByAngle, 30°) facets the new relief — adjacent cell

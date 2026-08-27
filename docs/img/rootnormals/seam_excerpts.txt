@@ -1,0 +1,20 @@
+ROOT-CAUSE EVIDENCE EXCERPTS (2026-08-28, his two t=5965 poses)
+Stage A = normchain_ride_<mat>.txt (pre-displacement Vertex::N, PREPROC ungated average)
+Stage B = displace_dump.txt (applied ride vector), weld OFF (shipping arm)
+
+PIER seam (BAD, framed by both cams; junction plane0 x=17.898 with plane10 n=(-0.514,0,-0.858)):
+  stage A mid-column: N=(0.909,0.391,-0.145)  <- +0.39 Y pollution (lid/floor averaged
+    through the coarse authored quads, then interpolated into every subdivided vert);
+    24 deg off wall A, 82 deg off wall B. NOT the two-wall average.
+  stage B seam column (187 verts, |z-seam|<0.05): applied dv = +-(0.882,0,0.471),
+    med=p90=max 29.5 deg off wall A -- UNIFORM, systematic.
+  stage B wall interiors (|z-seam|>0.05): 0.0 deg (median AND max) -- interiors perfect.
+  THE MATCH: orientation test dot(partner_front, smN) = -0.343 < 0 -> partner FLIPPED ->
+    bisector USED (0.870,0,0.493) vs measured applied: 1.7 deg apart (prediction confirmed).
+    bisector TRUE (0.493,0,-0.870): USED is 90.0 deg wrong -- the seam displaces IN-PLANE,
+    sideways along wall A; twins take opposite signs (per-vert orientation) -> sheets shear.
+
+JAMB seam (GOOD, 207 deg, x=9.875 z=-49.374):
+  stage A at y=3.2: N=(-0.971,-0.183,-0.156); orientation dots +0.934 / +0.971 -> no flip,
+  bisector (-0.972,0,-0.236) outward correct -> jamb works. The angle-dependence he saw is
+  the orientation test's safety margin: shallow turns keep both dots strongly positive.

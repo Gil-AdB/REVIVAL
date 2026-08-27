@@ -1,5 +1,65 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28 — **THE ROOT CAUSE IS NAMED AND MEASURED: the mitre's
+> partner-orientation test trusts PREPROC's polluted smoothed normal, flips
+> the partner wall, and the corner bisector comes out 90.0 deg WRONG — the
+> seam column displaces IN-PLANE, sideways along the wall**
+>
+> His redirect ("the bulge is happening because the vertex/face/whatever
+> normals are fucked up between walls that have large angle between them...
+> use the poses I gave you, debug using the viz, and find the actual root
+> cause") is confirmed, one level deeper. The chain, every stage dumped at
+> his two t=5965 cams (--normchain_dump, new):
+>
+> 1. `Compute_Vertex_Normals` (PREPROC.CPP:221, 1998) is an UNGATED
+>    area-weighted average over every incident face — no crease gate. On the
+>    coarse authored quads the wall verts average with the lid/floor and the
+>    partner walls; subdivision interpolates that into every created vert.
+>    Measured at the pier seam (junction plane0 x=17.898 / plane10
+>    n=(-0.514,0,-0.858), the corner both his cams frame): mid-column ride
+>    normal (0.909, +0.391, -0.145) — +0.39 of LID pollution at y=1.7.
+> 2. The bake CORRECTS interiors perfectly: applied dv on wall interiors is
+>    0.0 deg off the wall normal (median AND max) — the month's "interiors
+>    are green" was real.
+> 3. At the seam the matched-mitre weld orients the partner wall's normal by
+>    that polluted smoothed normal (MeshOps convexPartnerN: "its dot with the
+>    partner's front direction is positive on either wall" — the assumption).
+>    At the pier: dot(true partner front, smN) = -0.343 < 0 → partner
+>    FLIPPED → bisector (0.870,0,0.493) instead of the true (0.493,0,-0.870)
+>    — 90.0 deg wrong, and the measured applied seam vectors sit 1.7 deg
+>    from the PREDICTED wrong bisector (187 verts, uniformly ±(0.882,0,0.471),
+>    29.5 deg off wall A). Twins take opposite signs (per-vert orientation
+>    at the ride) — the two sheets SHEAR APART along the wall: the lean, the
+>    pillowed pier, the wandering mortar. His works/broken angle split is the
+>    orientation test's safety margin: at the 207-deg jamb the dots are
+>    +0.934/+0.971 (never flips, bisector correct, jamb works); sharp reflex
+>    corners + pollution cross zero.
+> 4. The existing [STONE-MITRE] sign validation cannot catch it: it checks
+>    dot(bis, avg nOwn) against populations whose nOwn was ALREADY oriented
+>    by the same polluted normal — circular — and the failure is AXIS-wrong
+>    (90 deg), not sign-wrong.
+> 5. The pre-tessellation era (claim 1 of his redirect): PomShell_Build
+>    extrudes along the same Vertex::N (weldN accumulates vv[k]->N). His arm
+>    minus displacement renders CLEAN flat walls (camB_notess.png — "the bare
+>    wall is flat", as he said); adding --pom_shell brings back the first-era
+>    black panel slits (camB_notess_shell.png) — same root data through the
+>    shell consumer. Labeled: supported, not exhaustively traced.
+>
+> Evidence: docs/img/rootnormals/ (seam_excerpts.txt with the numbers;
+> camA/camB tex + nmap_viz + needle + viz3; the no-tess cross-checks;
+> normchain_ride_rooms.txt.gz). Instrument: --normchain_dump (stage A
+> normchain_ride_<mat>.txt at the top of DisplaceStoneSubdiv, stage C
+> normchain_shading.txt post-MakeFacesIndependentByAngle; stage B is
+> --displace_dump). greets_displace_reflex_weld DEFAULT OFF (his fly:
+> added tears, didn't fix the real issue; kept for A/B).
+>
+> THE FIX, sketched for his go (NOT built): orient BOTH wall normals in the
+> mitre by an eye-independent solid-side test (each normal points away from
+> the OTHER wall's face centroids — the both-centroids-behind rule the
+> reflex-weld detector already uses) and bisect those; audit the second
+> smN-oriented site (fanN). One code site each; the polluted smoothed normal
+> stops being load-bearing anywhere in the corner machinery.
+
 > ## 2026-08-28 — TEAR HUNT: his out-of-wall needles are REAL, PRE-EXISTING, and
 > named to the geometry — tilted SIDE-STRIP/skirt faces displacing along their
 > OWN plane at near-max amplitude; the reflex weld is exonerated

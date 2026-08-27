@@ -393,6 +393,13 @@ float g_dispMax = 0.0f;                                          // for normaliz
 // base is recoverable as final − vec, which is how the overlay reconstructs
 // the pre-bake wall plane per triangle.
 std::unordered_map<DispPosKey, Vector, DispPosHash> g_dispVec;
+// --displace_dump attribution tag (2026-08-28 tear hunt): per vert, the
+// AUTHORED-parent-plane fingerprint of its incident target faces at bake time
+// — steepest |n_y| (walls ~0, sliver strips large), distinct parent count, and
+// whether the vert is bake-created (i >= nOrig). Proves WHICH geometry class a
+// dump population belongs to without trusting code reading.
+struct DispTag { float parentNyMax; uint8_t nParents; uint8_t created; };
+std::unordered_map<DispPosKey, DispTag, DispPosHash> g_dispTag;
 // --displace_viz=2: per-displaced-triangle SIGNED height error (truth − carried,
 // world units), keyed by the triangle's final centroid position bits.
 std::unordered_map<DispPosKey, float, DispPosHash> g_dispErr;
@@ -503,6 +510,13 @@ void DisplaceViz_RecordVec(const Material* M, const Vector& finalLocal, const Ve
     g_dispVec[posKey(finalLocal)] = dispLocal;
 }
 
+void DisplaceViz_RecordTag(const Vector& finalLocal, float parentNyMax,
+                           unsigned nParents, bool created) {
+    if (!FeatureFlags::displace_viz() && !FeatureFlags::viz_arm()) return;
+    g_dispTag[posKey(finalLocal)] = DispTag{ parentNyMax,
+        uint8_t(nParents > 255 ? 255 : nParents), uint8_t(created ? 1 : 0) };
+}
+
 // signedErrFrac is PRE-NORMALIZED by the bake to an absolute fraction where
 // ±1 = the map's full peak-to-valley relief missing (see MeshOps viz-2 record).
 // We store it as-is and tint by the absolute value — no global-max rescale (the
@@ -577,12 +591,17 @@ static void DisplaceViz_DumpRecords(Scene* sc) {
     }
     FILE* f = std::fopen("displace_dump.txt", "w");
     if (!f) { std::fprintf(stderr, "[DISPLACE-DUMP] cannot open displace_dump.txt\n"); return; }
-    std::fprintf(f, "# wx wy wz  dvx dvy dvz  mag  devMax devMin  nfaces  mat\n");
+    std::fprintf(f, "# wx wy wz  dvx dvy dvz  mag  devMax devMin  nfaces  mat  pNy nPar created\n");
     for (auto& kv : agg) {
         const Agg& a = kv.second;
-        std::fprintf(f, "%.5f %.5f %.5f  %.6f %.6f %.6f  %.6f  %.2f %.2f  %d  %s\n",
+        float pNy = -1.0f; int nPar = 0, created = -1;
+        auto tt = g_dispTag.find(kv.first);
+        if (tt != g_dispTag.end()) { pNy = tt->second.parentNyMax;
+                                     nPar = tt->second.nParents;
+                                     created = tt->second.created; }
+        std::fprintf(f, "%.5f %.5f %.5f  %.6f %.6f %.6f  %.6f  %.2f %.2f  %d  %s  %.3f %d %d\n",
                      a.w.x, a.w.y, a.w.z, a.dv.x, a.dv.y, a.dv.z, a.m,
-                     a.devMax, a.devMin, a.nf, a.mat);
+                     a.devMax, a.devMin, a.nf, a.mat, pNy, nPar, created);
     }
     std::fclose(f);
     std::fprintf(stderr, "[DISPLACE-DUMP] wrote %zu verts to displace_dump.txt\n", agg.size());
