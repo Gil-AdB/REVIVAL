@@ -1,5 +1,46 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28c — **THE PANEL BULGE CLOSES: groove-shade was blending every
+> grout band toward the POLLUTED smoothed ride field, and retargeting it to
+> the patch plane flattens the walls — the commissioned crease gate is
+> built, measured, and REFUTED as a default**
+>
+> The detector matrix (metrics.txt) decomposed 2026-08-28b's rolling
+> normals into three owners: (1) `greets_displace_groove_shade` blended
+> carved-band shading toward the vert's pre-bake SMOOTHED ride normal — the
+> root-cause round's polluted field — and interpolation between grout bands
+> spread that roll panel-wide (groove shade OFF: SWEEPh 5.85→0.97); (2) the
+> default-density pyramid geometry (GBI residual ~2.8, cpb-bound, separate
+> item); (3) the corner-fan strip (pre-existing debt). The commissioned
+> crease30 gate was built (`greets_displace_crease_normals` +
+> `_crease_deg`) and the matrix REFUTED it as a default: with the retarget
+> in place, the 80° weld beats crease30 on every region (pier front 2.82
+> vs 3.50 GBI, curved 8.56 vs 13.74) — the 80° smooth is the correct
+> anti-facet heal for rough relief; the angle was never the mechanism
+> (sensitivity 20/30/45: 6.39/6.40/6.08, flat). Kept default-OFF as an A/B
+> instrument with the refutation in its description.
+>
+> **The fix that ships** (`greets_displace_groove_shade_plane`, default ON):
+> the carved-band restore targets the vert's authored PATCH-PLANE normal
+> (the bake's own per-vert plane accumulation — already computed under the
+> approved corner arm — sign-oriented by the ride; authored-corner verts
+> skip the blend). `--no-` restores the pre-fix render byte-exactly
+> (md5 5081d8b5 twice-proven). **Detector closure at his cams: pier front
+> SWEEPh 6.52→1.42 / GBI 4.98→2.82 (cam A), GBI 1.47 = detector-QUIET (cam
+> B); curved wall SWEEPv 16.25→4.21 vs bare-wall 3.96.** Looked at four
+> views: the pier reads as flat dressed stone at both t=5965 cams, the
+> colonnade room is coherent with no faceting, the t=5958 grazing pose
+> shows crisp bevel steps with no cushion roll and no env-lobe band (the
+> protection groove_shade exists for survives the retarget). Residuals,
+> named, not chased: the edge-on corner-fan strip (GBI ~80, the
+> STONE-CORNERF debt, unmasked by clean panels), curved-wall relief GBI
+> ~8.6 vs bare 3.3, pyramid-density GBI 2.82 (cpb item). Scope: wall/floor
+> shading moves scene-wide (that is the fix); off-wall materials see only
+> 0.18% of px at ≤10/255 — half-res AO/bloom bleed, no direct change. Cost:
+> init-only, and the plane pass already runs under the approved corner arm
+> — zero added per-frame work.
+
+
 > ## 2026-08-28b — **THE BULGE DETECTOR IS CALIBRATED AND THE BULGE IS
 > NAMED IN PIXELS: the displaced walls' VERTEX NORMALS roll — geometry is
 > flat, shading is not** — his "overlay the pic with vectors" instrument,

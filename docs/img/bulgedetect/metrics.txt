@@ -27,3 +27,21 @@ SHADING-BORNE: the displaced mesh's vertex normals roll smoothly across block fa
 (worst at seam columns), and the eye reads the rolling shading as pillowed stone.
 Bare curved wall (GBI 3.3/SWEEPv 4.0) carries a mild pre-existing version = the pre-
 tessellation-era residual (supported, not exhaustively traced).
+
+=== FIX ROUND (2026-08-28, same day): groove-shade retarget + crease refutation ===
+Commissioned crease30 gate: BUILT and REFUTED as default by this matrix (kept as A/B flag):
+arm                              pierfront GBI/SWEEPh    curved GBI/SWEEPv   pierside GBI
+before (80deg + polluted target)      4.98 / 6.52          13.29 / 16.25        62.71
+crease30 only                         3.50*/ 0.89*         13.97 / 5.03*        84.33   (*with retarget)
+crease30+retarget (fix2/3)            3.50 / 0.89          13.74 / 4.08         84.33
+SHIP: 80deg + retarget                2.82 / 1.42           8.56 / 4.21         80.66
+SHIP cam B                            1.47 / 2.84           4.30 / 5.24           -
+bare wall reference                   0.00 / 0.00           3.32 / 3.96          0.00 (flat panel)
+Attribution splits measured: groove_shade OFF -> SWEEPh 0.97 (panel bulge = the blend TARGET);
+cpb3 -> pierfront GBI 3.96->halves pyramid residual (density-bound, separate item);
+crease sensitivity 20/30/45: pierfront 6.39/6.40/6.08 (insensitive; not the mechanism).
+SHIP config: greets_displace_groove_shade_plane=1 (retarget to patch plane, corner verts skip),
+greets_displace_crease_normals=0 (kept as instrument). Byte-exact restore proven:
+--no-greets_displace_groove_shade_plane == pre-fix md5 5081d8b5. Residuals, named: pierside
+corner-fan strip ~80 (pre-existing STONE-CORNERF debt, unmasked by clean panels); curved-wall
+GBI ~8.6 vs bare 3.3 (relief-on-arc, partly pre-existing); pierfront GBI 2.82 (pyramid density).

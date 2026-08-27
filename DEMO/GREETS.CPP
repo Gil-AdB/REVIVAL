@@ -2090,7 +2090,14 @@ void Initialize_Greets()
 	// the seams vanish, while authored 90° corners (and material borders) stay
 	// hard. No-op when --greets_displace is off.
 	if (fds::FeatureFlags::greets_displace()) {
-		const float sm = fds::FeatureFlags::greets_displace_smooth();
+		// --greets_displace_crease_normals (default ON): the weld's angle gate
+		// drops from greets_displace_smooth (80: block tops re-merge with their
+		// bevels and the shading normals roll = THE BULGE) to the crease
+		// threshold (30: tops heal internally, top->bevel edges stay hard).
+		// Same pass, same TBN weld — only the gate. --no- = the 80° path.
+		const float sm = fds::FeatureFlags::greets_displace_crease_normals()
+		               ? fds::FeatureFlags::greets_displace_crease_deg()
+		               : fds::FeatureFlags::greets_displace_smooth();
 		DisplaceStoneSmoothNormals(GreetSc, "rooms", sm);
 		DisplaceStoneSmoothNormals(GreetSc, "floor", sm);
 		MeshOps_TangentNaNCensus(GreetSc, "post-DisplaceStoneSmoothNormals");

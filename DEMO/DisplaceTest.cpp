@@ -322,7 +322,10 @@ DTestScene build(int mapId, float span, int vizMode, bool bake = true,
     // to preview the production shading.
     MakeFacesIndependentByAngle(d.sc, 30.0f);
     if (std::getenv("FDS_DISPLACETEST_SMOOTH"))
-        DisplaceStoneSmoothNormals(d.sc, "dtest", FF::greets_displace_smooth());
+        DisplaceStoneSmoothNormals(d.sc, "dtest",
+                                   FF::greets_displace_crease_normals()
+                                     ? FF::greets_displace_crease_deg()
+                                     : FF::greets_displace_smooth());
 
     Scene_RebuildMatTable(d.sc);
     return d;

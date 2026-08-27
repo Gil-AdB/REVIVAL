@@ -5187,6 +5187,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		std::vector<uint64_t> planeKey;      // per-vert PATCH identity, for the mean
 		int nPlaneRide = 0, nPlaneSkipCorner = 0, nPlaneSkipTwin = 0, nPlaneSkipForeign = 0;
 		const bool wantPlaneN = fds::FeatureFlags::greets_displace_plane_normal();
+		// --greets_displace_groove_shade_plane: the carved-band shading restore
+		// targets the vert's PATCH-PLANE normal, not the polluted smoothed ride
+		// (the ride field rolls across panels; re-injecting it at every grout
+		// band spread the roll panel-wide — the measured SWEEPh 5.85° bulge).
+		const bool groovePlaneOn = fds::FeatureFlags::greets_displace_groove_shade()
+		                        && fds::FeatureFlags::greets_displace_groove_shade_plane();
+		std::vector<Vector> grooveTgtN;      // unit patch plane per vert (sign-ambiguous), empty when off
 		const int   bmeanMode  = fds::FeatureFlags::greets_displace_border_mean();
 		const float bmeanScale = fds::FeatureFlags::greets_displace_border_mean_scale();
 		const bool  wantBMean  = bmeanMode != 0;
@@ -5214,7 +5221,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			k = (k<<20) | q(d , 128.0,524288,0xFFFFFu);
 			return k ? k : 1u;                    // 0 is reserved for "no plane"
 		};
-		if (wantPlaneN || wantBMean) {
+		if (wantPlaneN || wantBMean || groovePlaneOn) {
 			std::vector<Vector> acc(nV, Vector{0.0f,0.0f,0.0f});
 			std::vector<char>   have(nV, 0), corner(nV, 0);
 			for (size_t f=0; f<faces.size(); ++f) {
@@ -5242,6 +5249,15 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			for (uint32_t v=0; v<nV; ++v) {
 				auto it = posSeen.emplace(seamKey(basePos[v]), v);
 				if (!it.second) { twin[v] = 1; twin[it.first->second] = 1; }
+			}
+			if (groovePlaneOn) {
+				// Patch plane per vert for the groove-shade retarget: acc[v] is
+				// the FIRST incident face's unit normal (corner detection only
+				// compares the rest against it), which IS the patch plane for
+				// every non-corner vert. Corners keep the zero → old target.
+				grooveTgtN.assign(nV, Vector{0.0f,0.0f,0.0f});
+				for (uint32_t v=0; v<nV; ++v)
+					if (have[v] && !corner[v]) grooveTgtN[v] = acc[v];
 			}
 			planeN.assign(nV, Vector{0.0f,0.0f,0.0f});
 			planeKey.assign(nV, 0);
@@ -6375,10 +6391,31 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				const float gw = std::min(1.0f, -dsp / (0.35f*std::fabs(amp) + 1e-6f));
 				GrooveShadeRec rec;
 				rec.wallN.x = N.x/nl; rec.wallN.y = N.y/nl; rec.wallN.z = N.z/nl;
+				// --greets_displace_groove_shade_plane: target the PATCH PLANE
+				// (sign-oriented by the ride) instead of the rolled smoothed
+				// field. Plane-less verts (corners) keep the ride target.
+				bool grooveSkip = false;
+				if (i < grooveTgtN.size()) {
+					const Vector &pn = grooveTgtN[i];
+					const float pl2 = pn.x*pn.x + pn.y*pn.y + pn.z*pn.z;
+					if (pl2 > 0.25f) {
+						const float s = (pn.x*rec.wallN.x + pn.y*rec.wallN.y
+						               + pn.z*rec.wallN.z) < 0.0f ? -1.0f : 1.0f;
+						rec.wallN.x = pn.x*s; rec.wallN.y = pn.y*s; rec.wallN.z = pn.z*s;
+					} else {
+						// Corner vert: no single patch plane. Blending toward the
+						// polluted ride here made the seam column WORSE once its
+						// panel neighbours went clean (measured GBI 62.7→84.3) —
+						// skip the blend and let the crease-gated geometric
+						// normal stand.
+						grooveSkip = true;
+					}
+				}
 				rec.w = gw;
 				const Vector &Pd = verts[i].Pos;
-				g_grooveShade[GrooveShadeKey{ meshF2bits(Pd.x), meshF2bits(Pd.y),
-				                              meshF2bits(Pd.z) }] = rec;
+				if (!grooveSkip)
+					g_grooveShade[GrooveShadeKey{ meshF2bits(Pd.x), meshF2bits(Pd.y),
+					                              meshF2bits(Pd.z) }] = rec;
 			}
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
 		}
