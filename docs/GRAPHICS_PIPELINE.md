@@ -98,7 +98,8 @@ end. greets/`--cinematic` default to HDR. So a surface-modulating pass must writ
 `g_hdrBuf` when HDR is active and VPage otherwise:
 
 ```cpp
-const bool useHdr = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(W, H);
+const bool useHdr = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(W, H)
+                    && fds::Deferred_KernelWritesHdrRadiance();
 // useHdr → multiply g_hdrBuf[i*4 + 0..2] (B,G,R linear); leave h[3] (coverage) alone.
 // else   → modulate VPage (8-bit BGRA) in place.
 ```
@@ -106,6 +107,24 @@ const bool useHdr = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(W, H);
 Gate on `Hdr_WritableFor(W,H)` (buffer sized for *this* view), **not** `g_hdrActive` —
 right after the lighting kernel the radiance is present but activation hasn't run yet.
 `Render_SSAO` in `DeferredSSAO.cpp` is the worked example.
+
+**…and the third term is not optional — "sized" is not "populated".** Only the
+**scalar** wave-1 kernel writes radiance into `g_hdrBuf`. On a `Scene::PreferOuterVec`
+scene — **city, fountain, crash** — `Render_DeferredLighting_Tile_OuterVec` runs
+instead, and it stores **8-bit VPage only**, leaving the coverage lane `h[3]` at 0
+*on purpose*: its pack **IS** the HDR transport, lifted afterwards either by the froxel
+composite (`h[3] > 0 ? h : VPage`) or by `Hdr_ActivateNoFog`. Between the kernel and
+that lift `g_hdrBuf` is **sized and cleared**. A pass that modulates surfaces there and
+takes the HDR arm on `Hdr_WritableFor` alone multiplies a buffer of **zeros**, and the
+lift then seeds the buffer from the **un-occluded** VPage — the pass runs, costs its
+milliseconds, and produces literally nothing. That is exactly what happened to SSAO in
+city and fountain for every `--hdr` arm until 2026-08-26 (backlog `2026-08-25b`); the
+wave-2 checkerboard fill kernel carries the same warning ("⚠ WAVE-1 TRANSPORT MUST
+MATCH") for the same reason, one call site earlier. Ask
+`Deferred_KernelWritesHdrRadiance()` (`DeferredCommon.h`), which is the question you
+actually mean. `FDS_HDR_SCAN=1` is the instrument: it prints an FNV of `g_hdrBuf`, the
+coverage population and a VPage FNV per pipeline tag, so `cov=0` right after the kernel
+tells you instantly which transport this frame is on.
 
 ---
 
@@ -281,8 +300,12 @@ A complete, recent post-pass that exercises every section above:
 - Reconstructs view position with the §5 math; samples a hemisphere kernel, re-projects
   each sample to a pixel, compares stored depth → occlusion.
 - Output target auto-selects per §4: multiplies **linear `g_hdrBuf`** under `--hdr`
-  (physically correct — AO scales radiance before ACES, and glow added later isn't
-  occluded), else multiplies VPage.
+  **when this frame's kernel actually wrote radiance there** (physically correct — AO
+  scales radiance before ACES, and glow added later isn't occluded), else multiplies
+  VPage. On the `PreferOuterVec` scenes (city / fountain / crash) VPage **is** the HDR
+  transport, so the VPage arm is the correct one under `--hdr` too and the later lift
+  carries the occlusion into the radiance — see §4's "sized is not populated".
+  `--no-ssao_hdr_transport` restores the pre-2026-08-26 predicate for A/B.
 - Reduced-res ladder: `--ssao_downscale 1|2|4` computes AO on a `W/d × H/d` grid and
   depth-aware-bilinear-upsamples; the depth buffer is always full-res so edges stay crisp.
 - **Noise/denoise (the floor-banding saga — read before touching it):** the kernel

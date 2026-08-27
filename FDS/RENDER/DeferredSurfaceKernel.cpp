@@ -545,6 +545,18 @@ static bool deferredLightingOuterVecEnabled() {
 	return CurScene && CurScene->PreferOuterVec != 0;
 }
 
+// Does THIS frame's opaque lighting kernel put linear radiance into the HDR
+// buffer? The scalar wave-1 kernel does (`hdrWrite && hdrLinear` store, coverage
+// lane stamped 1). The OUTER-VEC kernel does NOT: it stores 8-bit only, leaves
+// h[3] at 0, and its VPage pack IS the HDR transport, lifted afterwards by the
+// froxel composite (`h[3] > 0 ? h : VPage`) or by Hdr_ActivateNoFog. So on a
+// PreferOuterVec scene (city CITY.CPP:2586, crash CRASH.CPP:25, fountain
+// FOUNTAIN.CPP:1029) g_hdrBuf is merely SIZED between the kernel and that lift,
+// not populated — the same "wave-1 transport must match" trap the wave-2 fill
+// kernel already carries a warning about. Any pass that modulates surface
+// radiance BEFORE the lift (Render_SSAO) has to ask this, not Hdr_WritableFor.
+bool Deferred_KernelWritesHdrRadiance() { return !deferredLightingOuterVecEnabled(); }
+
 // FDS_DEFERRED_CHECKERBOARD=1 enables half-rate lighting: only pixels
 // where (px + py) & 1 == 0 (the "even" cells of a checkerboard) get the
 // full per-pixel omni evaluation; the odd cells are filled in a second

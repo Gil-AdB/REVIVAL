@@ -197,9 +197,41 @@ void Hdr_DebugScan(const char* tag) {
         else if (v > mx) { mx = v; mxI = i; }
     }
     const int W = g_hdrBufW > 0 ? g_hdrBufW : 1;
-    std::fprintf(stderr, "[HDR-SCAN] %-14s inf=%zu nan=%zu maxFinite=%.0f @(%d,%d)%s\n",
+    // FNV-1a over the raw g_hdrBuf bytes and over VPage, plus the coverage-lane
+    // population and the ZPage16 coverage. Diffing the per-tag lines of two runs
+    // names the exact stage at which a surface-modulating pass stops being
+    // visible — this is the instrument that resolved the 2026-08-25b "SSAO is
+    // discarded under --hdr in city/fountain" defect: `cov=0 maxFinite=0` right
+    // after the lighting kernel on a PreferOuterVec scene (its 8-bit VPage pack
+    // is the HDR transport) against `cov=2072779` on greets, and the AO multiply
+    // leaving the g_hdrBuf hash unchanged in the first case.
+    uint64_t hh = 1469598103934665603ull;
+    {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(g_hdrBuf.data());
+        const size_t nb = n * sizeof(hdrf);
+        for (size_t i = 0; i < nb; ++i) { hh ^= p[i]; hh *= 1099511628211ull; }
+    }
+    size_t nCov = 0;
+    for (size_t i = 3; i < n; i += 4) if (float(g_hdrBuf[i]) != 0.0f) ++nCov;
+    uint64_t vh = 1469598103934665603ull;
+    {
+        const RenderTarget rt = MainRenderTargetFromGlobals();
+        if (rt.vpage && rt.xres > 0 && rt.yres > 0) {
+            const int stride = rt.bytesPerScanline / 4;
+            for (int y = 0; y < rt.yres; ++y) {
+                const unsigned char* r = reinterpret_cast<const unsigned char*>(rt.vpage + size_t(y) * size_t(stride));
+                for (size_t i = 0, nb = size_t(rt.xres) * 4; i < nb; ++i) { vh ^= r[i]; vh *= 1099511628211ull; }
+            }
+        }
+    }
+    size_t nZ = 0;
+    if (ZPage16 && XRes > 0 && YRes > 0)
+        for (size_t i = 0, np = size_t(XRes) * size_t(YRes); i < np; ++i) if (ZPage16[i]) ++nZ;
+    std::fprintf(stderr, "[HDR-SCAN] %-14s inf=%zu nan=%zu maxFinite=%.0f @(%d,%d)%s  hdr=%016llx cov=%zu zcov=%zu vpage=%016llx  dims=%dx%d act=%d\n",
                  tag, nInf, nNan, mx, int((mxI/4)%W), int((mxI/4)/W),
-                 firstBad != SIZE_MAX ? " <-- BAD" : "");
+                 firstBad != SIZE_MAX ? " <-- BAD" : "",
+                 (unsigned long long)hh, nCov, nZ, (unsigned long long)vh,
+                 g_hdrBufW, g_hdrBufH, (int)g_hdrActive);
 }
 
 void Render_BloomPass() {

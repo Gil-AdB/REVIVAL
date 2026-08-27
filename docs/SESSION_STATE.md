@@ -1,5 +1,100 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-26 — **CITY AND FOUNTAIN HAVE AMBIENT OCCLUSION FOR THE FIRST
+> TIME**: the discard is `Scene::PreferOuterVec`, not the tonemap — the
+> outer-vec lighting kernel writes NO HDR radiance, so SSAO was multiplying a
+> buffer that was merely SIZED. `--ssao_hdr_transport` defaults ON; 13/13 pins
+> and `render_gate` 4/4 reproduce
+>
+> **THE MECHANISM, NAMED.** `Render_DeferredLighting_Tile_OuterVec` — the kernel
+> city, fountain and crash select through `Scene::PreferOuterVec = 1` — stores
+> **8-bit VPage only** and deliberately leaves the HDR coverage lane `h[3]` at
+> **0**: its pack *is* the HDR transport, lifted afterwards by the froxel
+> composite (`h[3] > 0 ? h : VPage`) or by `Hdr_ActivateNoFog`. greets and chase
+> run the SCALAR wave-1 kernel, which does write `g_hdrBuf` and does stamp
+> coverage. `Render_SSAO` picked its target on `hdr() && Hdr_WritableFor(W,H)` —
+> **"is the buffer SIZED for this view"**, true in both cases — so on
+> city/fountain the AO multiply landed on a sized, cleared, **all-zero** buffer
+> and the lift then seeded that buffer from the **un-occluded** VPage. The pass
+> ran, cost ~5 ms, and produced nothing. It is the same defect the wave-2
+> checkerboard fill kernel already carries a "⚠ WAVE-1 TRANSPORT MUST MATCH"
+> warning about, one call site further downstream.
+>
+> **THE ONE-RENDER PROOF** (`FDS_HDR_SCAN=1`, extended this round to print an FNV
+> of `g_hdrBuf`, the coverage population, the ZPage coverage and a VPage FNV per
+> pipeline tag). One arm, `--deferred --hdr --hdr-linear --texture-filter=2
+> --ssao --ssao-gtao`:
+>
+> | scene | tag `kernel` | tag `ssao-post` | who overwrites |
+> |---|---|---|---|
+> | fountain t=2500 | `cov=0 maxFinite=0 zcov=396687` | hash **UNCHANGED** | `activate` (`maxFinite 0 → 255`) |
+> | city t=1961 (main) | `cov=0 maxFinite=0 zcov=1116488` | hash **UNCHANGED** | `fog-post` (froxel, `act 0→1`, `0 → 2478`) |
+> | greets t=5743 | `cov=2072779 maxFinite=617` | hash **CHANGES** | nobody — AO survives |
+> | chase t=1105 | `cov=1957160 maxFinite=24256` | hash **CHANGES** | nobody |
+>
+> `zcov` proves the frames have opaque coverage; `cov=0` proves none of it
+> reached `g_hdrBuf`. **This also explains why the hunt's `--no-fast_fog` control
+> "EXONERATED" the fog and found nothing**: dropping the froxel composite merely
+> hands the same VPage lift to `Hdr_ActivateNoFog`. Two different overwriters,
+> one upstream cause.
+>
+> **THE FIX IS ONE PREDICATE.** `Deferred_KernelWritesHdrRadiance()`
+> (`= !deferredLightingOuterVecEnabled()`, exported in `DeferredCommon.h`) now
+> gates SSAO's HDR arm. When the kernel wrote no HDR, SSAO modulates **VPage** —
+> the same 8-bit buffer the whole frame is shaded into — and the lift carries the
+> occlusion into the radiance. `--no-ssao_hdr_transport` restores the old
+> predicate EXACTLY and is the pre-fix A/B arm. `docs/GRAPHICS_PIPELINE.md` §4
+> was actively recommending the broken test and now carries the "sized is not
+> populated" rule.
+>
+> **ACCEPTANCE.** city t=1961 `--city_env_pixel`: no-ssao `b3372d0f…` (the exact
+> hash the defect report recorded), ssao **`6964d6e8…`**, `--ssao_strength=8`
+> **`3256a72f…`**, OFF arm back to `b3372d0f…`. fountain t=2500: no-ssao
+> `32ff5896…`, ssao **`4e831ea0…`**, strength=8 **`d0a95fe9…`**, OFF arm back to
+> `32ff5896…`. Look: city 44.95 % px moved, mean |Δ| 4.77 on the moved, max 145;
+> fountain 15.33 %, mean 5.30, max 107. **Eyeballed at 1×**: fountain reads as
+> real contact AO — the pod housings darken under the pods, the pylon shafts pick
+> up modelling, the ship gets grime; no halo, no rim, no over-darkening. city is
+> a broad, low-amplitude facade dimming (the scene is blown out, so AO has little
+> room) and the water plane is essentially untouched — in the `--env_live_water
+> --city_env_pixel` arm the water band moves 12.5 % of its pixels at **max Δ
+> 12/255**, all of it on the quay and the poles, none on the water itself. At 10×
+> amplification the city facade shows the known low-amplitude SSAO diagonal hatch
+> (GRAPHICS_PIPELINE §9's documented residual); at 1× I cannot see it.
+> **LOOK-DELTA FOR HIS EYE**, since these two scenes have never rendered with AO:
+> `docs/img/hdrssao/{city_t1961_ao,fountain_t2500_ao}_{before,after,diff}.png`,
+> full frames `{city,fountain}_full_sbs.png`, water band
+> `city_t1961_waterband_{before,after,diff8x}.png`, facade zoom
+> `city_t1961_facade_{before,after,diff10x}.png`.
+>
+> **THE `ssao_radius_zfloor=48` PIN IS NOW A VISIBLE FACT IN THESE SCENES, and
+> its bijection re-verifies AS AN IMAGE.** city default == `--ssao_radius_zfloor=0
+> --ssao_radius=6.0661764` **byte-identical**, `zfloor=0` alone (effective 4.0) a
+> different image (22.65 % px, mean 1.54, 412 px > 12/255). fountain default ==
+> `zfloor=0 --ssao_radius=4.0441175` byte-identical, `zfloor=0` alone differs
+> (1.61 % px, mean 1.18, max 8). The 2026-08-25 effective-radius table was
+> derived from an arm where the AO never reached the frame; it now reproduces on
+> the frame itself.
+>
+> **COST, min-of-11 INTERLEAVED arms, `--bench=scene`, no `--ssao_dump`.**
+> fountain t=2500 `[ssao]` pass **4.12 min / 4.16 median** (fix) vs **4.07 /
+> 4.11** (pre-fix) → **+0.05 ms**; apply stage alone 0.56 vs 0.52 → **+0.04 ms**.
+> city t=1961 pass **5.50 / 5.58** vs **5.48 / 5.59** → **+0.02 ms min, −0.01
+> median**; apply 1.10 vs 1.06 → **+0.04 ms**. The **+0.04 ms on the apply** is
+> the real reproducible term (8-bit RMW with three int converts + pack against
+> the f16 RMW) and it is the entire price. It is not nothing — but the other ~4
+> to 5.5 ms of that pass was previously being paid for a discarded result.
+>
+> **GATES: 13/13 pinned poses reproduce, plus the city acceptance arm, plus
+> `render_gate.sh` ALL PASS 4/4** (from this worktree's stock `rev.cfg`). city
+> `bd4ffbf8…`, city acceptance `4cb8d2ca…`, greets t=1588 `570a7b44…`, greets
+> acceptance ×4 `440aa6bb… 00d17bc5… 29c1e7fb… bc1b0a8a…`, fountain `8db68ccb…`,
+> chase default ×5 `f16bedd0… fcc9d561… 397b878d… 3539492d… 0622d56e…`, chase
+> cinematic `b61b3397… 4d70fdbd…`. Byte-nullity on greets/chase is also proved
+> DIFFERENTIALLY on one binary: chase t=1105 his arm `63d1613e…` and greets
+> t=5743 `440aa6bb…` are identical with and without `--no-ssao_hdr_transport`.
+> **No pin is re-pinned and no value is struck.**
+
 > ## 2026-08-25 — **THE PER-SCENE SSAO RADIUS IS PINNED**: `ssao_radius_zfloor`
 > defaults to 48, the chase moire is gone in the arm he runs, and the flip is
 > byte-null at **every single pinned gate row** — which is a finding, not a relief
@@ -6839,6 +6934,19 @@ Range covered here: `1ca269d..7282f7a` (~60 commits, 2026-07-08..11).
 ## Verification protocol (THE gates — run before/after everything)
 
 All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
+
+> **2026-08-26 — the `ssao_hdr_transport` fix (SSAO reaches city/fountain under
+> `--hdr` for the first time) moves NOTHING in this table.** All 13 pose hashes
+> below reproduce on the fixed binary, plus the city acceptance arm
+> `4cb8d2ca…`, plus `render_gate.sh` ALL PASS 4/4 from a stock-`rev.cfg`
+> worktree. The reason is structural, not luck: the fix only changes SSAO's
+> write target on `Scene::PreferOuterVec` scenes (city / fountain / crash), and
+> the only row here that passes `--ssao` at all is `greets (acceptance ×4)` —
+> greets runs the SCALAR kernel, keeps the HDR arm, and is byte-identical by
+> construction (verified differentially: t=5743 `440aa6bb…` identical with and
+> without `--no-ssao_hdr_transport`). The city / fountain rows below carry no
+> `--ssao`, so they never enter the changed path. Full account: the 2026-08-26
+> entry at the top of this file.
 
 > **2026-08-25 — `ssao_radius_zfloor` default 0 → 48 moves NOTHING in this table.**
 > Certified differentially on one binary in one clean worktree, each row's

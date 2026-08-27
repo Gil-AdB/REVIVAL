@@ -302,11 +302,30 @@ void Render_SSAO() {
 	float* aoZ    = g_aoZ.data();
 	const int half = down >> 1;
 
+	// WHICH BUFFER CARRIES THIS FRAME'S RADIANCE — the SSAO apply must modulate
+	// that one, and only that one.
+	//
 	// HDR: AO multiplies linear radiance in g_hdrBuf (correct + survives the
 	// tonemap). Gate on Hdr_WritableFor (buffer sized for THIS view) not
 	// g_hdrActive — at our call site the kernel has written opaque radiance but
 	// activation runs later. LDR: multiply VPage in place.
-	const bool useHdr = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(W, H);
+	//
+	// ...but "sized for this view" is NOT "holds radiance". On a PreferOuterVec
+	// scene (city / fountain / crash) the OUTER-VEC lighting kernel stores 8-bit
+	// VPage ONLY and leaves the coverage lane 0 — its pack IS the HDR transport,
+	// lifted afterwards by the froxel composite (`h[3] > 0 ? h : VPage`) or by
+	// Hdr_ActivateNoFog. Between the kernel and that lift g_hdrBuf is sized and
+	// CLEARED. Taking the HDR arm there multiplied a buffer of zeros and the lift
+	// then seeded it from the UN-OCCLUDED VPage: measured at city t=1961 and
+	// fountain t=2500, `--deferred --hdr --hdr-linear --ssao --ssao-gtao` was
+	// byte-identical to `--no-ssao`, to `--ssao_strength=8` and to
+	// `--ssao_radius=200` while the pass still cost ~5 ms
+	// (docs/OPTIMIZATION_BACKLOG.md 2026-08-25b). Same class as the wave-2 fill
+	// kernel's "⚠ WAVE-1 TRANSPORT MUST MATCH" warning, one call site further on.
+	// --no-ssao_hdr_transport restores the old (broken) predicate exactly.
+	const bool kernelHdr = Deferred_KernelWritesHdrRadiance()
+	                       || !fds::FeatureFlags::ssao_hdr_transport();
+	const bool useHdr = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(W, H) && kernelHdr;
 	fds::hdrf* hbuf = useHdr ? fds::g_hdrBuf.data() : nullptr;
 	dword* out  = reinterpret_cast<dword*>(VPage);
 

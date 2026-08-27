@@ -726,8 +726,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// surfaces. MAIN pass only (!skipVolumetric) — skip the mirror RTT /
 		// water-reflection underlay passes (cost + the static AO scratch buffer
 		// isn't re-entrant). No-op unless --ssao.
+		fds::Hdr_DebugScan(skipVolumetric ? "ssao-pre(SKIP)" : "ssao-pre");
 		if (!skipVolumetric)
 			{ TailProf::ScopeTimer _tp("ssao", 1); Render_SSAO(); }
+		fds::Hdr_DebugScan(skipVolumetric ? "ssao-post(SKIP)" : "ssao-post");
 
 		// --ssao-debug self-isolation: Render_SSAO has written the greyscale AO
 		// term to VPage; STOP here so the downstream compositing (skybox, fog,
@@ -781,6 +783,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			} else
 				{ TailProf::ScopeTimer _tp("fog-legacy", 1); Render_DeferredFogPass(dctx); }
 		}
+		fds::Hdr_DebugScan("fog-post");
 
 		// Fog-off HDR activation: a no-fog scene (greets) never ran the froxel
 		// composite, so g_hdrActive is still false — the transparent peel below
@@ -1413,7 +1416,9 @@ xpar_done: ;
 			fds::Render_LensGhostPass();    // ghost discs + halo into g_hdrBuf BEFORE the tonemap (no-op unless --lens_ghosts)
 		}
 		{ TailProf::ScopeTimer _tp("tonemap-post", 1);
+			fds::Hdr_DebugScan("pre-tonemap");
 			fds::Render_TonemapToVPage();
+			fds::Hdr_DebugScan("post-tonemap");
 			fds::Render_LensPostPass();     // CA + vignette (no-op unless --chromatic/--vignette)
 			fds::Render_GradeGrainPass();   // grade + grain (no-op unless --grade/--grain)
 			}

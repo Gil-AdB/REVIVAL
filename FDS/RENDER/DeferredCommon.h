@@ -396,6 +396,14 @@ struct DeferredOverride {
 // pool-tiled). ov!=nullptr → offscreen bake into ov's target (see above).
 void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *ov = nullptr);
 
+// TRUE when this frame's opaque lighting kernel writes linear radiance into the
+// HDR buffer (scalar wave-1 kernel + its checkerboard fill). FALSE on a
+// PreferOuterVec scene, where the outer-vec kernel writes 8-bit VPage only and
+// leaves the coverage lane 0 so a later lift (froxel composite / Hdr_ActivateNoFog)
+// seeds g_hdrBuf FROM VPage. `Hdr_WritableFor()` answers "is the buffer sized for
+// me", which is NOT the same question — see the definition's comment.
+bool Deferred_KernelWritesHdrRadiance();
+
 // Volumetric spotlight cones (disco beams etc.). Reads its render target from
 // ctx (xres/vpage/zpage16/invFOVX…), so after a per-worker deferred bake the
 // shard reflection can run it to draw the beams. inlineDispatch=true runs the
