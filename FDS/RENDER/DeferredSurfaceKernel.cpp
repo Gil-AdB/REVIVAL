@@ -6016,6 +6016,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	    && fds::FeatureFlags::deferred_ovec_nomirror();
 	// C7 — see the 8-wide pack before the lane loop.
 	const bool  ovecVecPack = fds::FeatureFlags::deferred_ovec_vec_pack();
+	// C3 — see the uniform-group material resolve in the gather.
+	const bool  ovecMatUniform = fds::FeatureFlags::deferred_ovec_mat_uniform();
 #if FDS_OVEC_ABLATE || FDS_OVEC_OMNI_ABLATE
 	float ovecSink = 0.0f;
 #endif
@@ -6204,7 +6206,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// matID AND MIP together: two lanes of one material at different mip
 			// levels resolve DIFFERENT texData and must take the slow path.
 			bool uniformDone = false;
-			if (_mm256_movemask_epi8(mask_alive) == -1) {
+			if (ovecMatUniform && _mm256_movemask_epi8(mask_alive) == -1) {
 				const uint32_t midmip0 = lane_mat32[0] >> 20;
 				if (_mm256_movemask_epi8(_mm256_cmpeq_epi32(
 				        _mm256_srli_epi32(mat32v, 20),
