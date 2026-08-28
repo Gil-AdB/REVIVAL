@@ -304,13 +304,11 @@ static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) { return _mm256_m
 #ifndef FDS_CONE_ANYLANE
 #define FDS_CONE_ANYLANE 1
 #endif
-#if FDS_CONE_ANYLANE && (defined(__ARM_NEON) || defined(__aarch64__))
-static inline bool anyLane_x8(const __m256 &m) {
-    simde__m256_private p = simde__m256_to_private(m);
-    const int32x4_t o = vorrq_s32(p.m128_private[0].neon_i32,
-                                  p.m128_private[1].neon_i32);
-    return vminvq_s32(o) < 0;
-}
+// Promoted to DeferredCommon.h as `simdAnyLane_ps8` once the same defect was
+// found in the fog and lighting kernels; this stays only to keep
+// -DFDS_CONE_ANYLANE=0, the exact pre-landing A/B arm, buildable.
+#if FDS_CONE_ANYLANE
+static inline bool anyLane_x8(const __m256 &m) { return simdAnyLane_ps8(m); }
 #else
 static inline bool anyLane_x8(const __m256 &m) { return _mm256_movemask_ps(m) != 0; }
 #endif

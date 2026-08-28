@@ -690,4 +690,84 @@ static inline __m256 rsqrt_nr_x8(__m256 x) {
     return rsqrt_step_x8(x, _mm256_rsqrt_ps(x));
 }
 
+// ─── movemask on arm64: the systemic simde lowering defect ──────────────────
+//
+// `_mm256_movemask_ps` / `_mm256_movemask_epi8` are ONE instruction on x86.
+// arm64 has no equivalent, so simde builds the sign-bit word by hand, and the
+// shipping binary pays ~25 instructions per site: ext.16b, two adrp +
+// two constant-table ldr q, ushl.4s, and.16b, ext.16b, orr.8b, then FIVE
+// vector->GPR moves and nine scalar lsr/orr to pack the bits. The v->GPR moves
+// are ~6-10 cycle latency each and typically sit between a SIMD dependency
+// chain and the branch that consumes them, so it costs LATENCY as well as
+// issue slots. `docs/HW_PROFILING.md:1128-1152`'s simde audit (round 7, B12)
+// checked blendv, the unordered predicates, mask chains, set1, cmp-vs-zero,
+// andnot and faddp -- movemask was never in that list.
+//
+// The overwhelming majority of uses never want the BITS; they want one of two
+// predicates. Both have a 3-instruction NEON form, and both are EXACT for
+// arbitrary inputs (not merely for the all-ones/all-zeros masks a compare
+// produces), so substituting them is control flow only -- BIT-EXACT.
+//
+//   movemask(m) != 0   <=>  some lane's sign bit is set
+//   movemask(m) == -1  <=>  every lane's sign bit is set
+//
+// WHERE IT PAYS, AND WHERE IT MEASURABLY DOES NOT -- read this before citing
+// the helpers as a perf win (city t=1961, his arm, interleaved min-of-11, two
+// batteries, quiet box; full account docs/OPTIMIZATION_BACKLOG.md 2026-08-29):
+//
+//   * volumetric cone kernel (2 sites)  Ginstr -4.4/-4.5%   WALL -5.1/-5.2%
+//   * DeferredSurfaceKernel   (5 sites) Ginstr -1.9/-2.0%   Gcyc +0.7/+1.4%
+//   * DeferredFastFog         (3 sites) Ginstr -0.3/-0.4%   Gcyc  no effect
+//
+// Only the cone sites convert to time. `lighting-w1` reproducibly loses ~2% of
+// its instructions and pays the SAME cycles -- its IPC goes 4.08 -> 3.94, i.e.
+// the slots those 12-instruction sequences occupied were not the constraint,
+// so removing them merely exposes the latency chain underneath. That is
+// `docs/HW_PROFILING.md:1011-1014` ("everything that reduces instructions on
+// the OTHER pipes will keep measuring as zero") landing for the second time.
+// The fog sites are simply cold -- they are per-column-block early-outs, not
+// per-lane ones. Both are kept anyway: they are bit-exact, they cost nothing,
+// and one spelling engine-wide beats two. But they are NOT a time win and
+// nothing downstream should be sized as if they were.
+//
+// NAMING: `Lane` = 32-bit element (movemask_ps), `Byte` = 8-bit element
+// (movemask_epi8). They are NOT interchangeable -- movemask_epi8 tests every
+// byte, so a 32-bit mask of 0x00000080 makes it nonzero while movemask_ps
+// leaves it clear.
+// -DFDS_SIMD_ANYLANE=0 rebuilds the exact pre-sweep arm (every site back on
+// _mm256_movemask_*) in the SAME worktree, which is the A/B these landed on.
+#ifndef FDS_SIMD_ANYLANE
+#define FDS_SIMD_ANYLANE 1
+#endif
+#if FDS_SIMD_ANYLANE && (defined(__ARM_NEON) || defined(__aarch64__))
+// == `_mm256_movemask_ps(m) != 0`. The bitwise OR preserves each lane
+// position's sign bit; a signed horizontal min is negative iff some lane is.
+static inline bool simdAnyLane_ps8(const __m256 &m) {
+    simde__m256_private p = simde__m256_to_private(m);
+    const int32x4_t o = vorrq_s32(p.m128_private[0].neon_i32,
+                                  p.m128_private[1].neon_i32);
+    return vminvq_s32(o) < 0;
+}
+// == `_mm256_movemask_epi8(v) != 0`. Bytewise OR then an unsigned horizontal
+// max: >= 0x80 iff some byte has its top bit set.
+static inline bool simdAnyByte_epi8(const __m256i &v) {
+    simde__m256i_private p = simde__m256i_to_private(v);
+    const uint8x16_t o = vorrq_u8(p.m128i_private[0].neon_u8,
+                                  p.m128i_private[1].neon_u8);
+    return vmaxvq_u8(o) >= 0x80;
+}
+// == `_mm256_movemask_epi8(v) == -1`. Bytewise AND then an unsigned
+// horizontal min: >= 0x80 iff EVERY byte has its top bit set.
+static inline bool simdAllBytes_epi8(const __m256i &v) {
+    simde__m256i_private p = simde__m256i_to_private(v);
+    const uint8x16_t a = vandq_u8(p.m128i_private[0].neon_u8,
+                                  p.m128i_private[1].neon_u8);
+    return vminvq_u8(a) >= 0x80;
+}
+#else
+static inline bool simdAnyLane_ps8(const __m256 &m)  { return _mm256_movemask_ps(m)   != 0;  }
+static inline bool simdAnyByte_epi8(const __m256i &v){ return _mm256_movemask_epi8(v) != 0;  }
+static inline bool simdAllBytes_epi8(const __m256i &v){return _mm256_movemask_epi8(v) == -1; }
+#endif
+
 #endif // FDS_RENDER_DEFERRED_COMMON_H_INCLUDED
