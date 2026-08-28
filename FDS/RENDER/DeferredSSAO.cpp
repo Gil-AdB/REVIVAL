@@ -73,6 +73,112 @@
 #ifndef FDS_SSAO_CENSUS
 #define FDS_SSAO_CENSUS 0
 #endif
+
+// ─── Slice-setup cost ladder (-DFDS_SSAO_DIAG=n) ────────────────────────────
+// The per-lane slice setup inside gtaoRow8 (two cross products, a fast_rsqrt,
+// two dots and an atan2_approx, PER LANE PER SLICE) is the one structural item
+// PERF_STATE names as never attempted, estimated there at ~20 % of the march.
+// BYTE-CHANGING — a cost instrument only, same status as FDS_W1LDR_ABLATE.
+//   1  replace the atan2_approx call with a constant (prices the atan alone)
+//   2  replace the WHOLE per-lane slice setup with constants
+//   0  full
+#ifndef FDS_SSAO_DIAG
+#define FDS_SSAO_DIAG 0
+#endif
+
+// [INSTRUMENT] -DFDS_SSAO_VERIFY=ON: run the SCALAR slice setup behind the
+// 4-wide one and count bit-pattern disagreements per TERM, so a divergence can
+// be localised instead of guessed at. Compile-time, like the wave-2 oct-pair
+// verify it is modelled on.
+#ifndef FDS_SSAO_VERIFY
+#define FDS_SSAO_VERIFY 0
+#endif
+#if FDS_SSAO_VERIFY
+// [0] lanes checked, [1] snl, [2] nd, [3] dt, [4] dv, [5] atan2, [6] aNang
+static std::atomic<unsigned long long> g_ssVer[8];
+__attribute__((noinline)) static void SsaoVerify_Report() {
+	unsigned long long c[8];
+	for (int i=0;i<8;++i) c[i]=g_ssVer[i].load(std::memory_order_relaxed);
+	if (!c[0]) return;
+	std::fprintf(stderr,
+	  "[SSAO-VERIFY] lanes %llu | LEN %llu  RSQRT-only %llu  snl %llu  nd %llu  dt %llu  dv %llu  aNang %llu\n",
+	  c[0],c[5],c[7],c[1],c[2],c[3],c[4],c[6]);
+	for (int i=0;i<8;++i) g_ssVer[i].store(0,std::memory_order_relaxed);
+}
+static inline bool bitne(float a, float b) {
+	uint32_t x,y; std::memcpy(&x,&a,4); std::memcpy(&y,&b,4); return x!=y;
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+// ─── S1 (2026-08-29): BIT-EXACT 4-WIDE GTAO SLICE SETUP ─────────────────────
+// The per-lane slice setup inside gtaoRow8 — two cross products, a fast_rsqrt,
+// a normal projection, a second cross product, two dots and an atan2_approx,
+// once PER LANE PER SLICE — is the one structural item PERF_STATE §00l names as
+// never attempted ("estimated ~20 % of the compute"). MEASURED with the
+// -DFDS_SSAO_DIAG ladder built for this round: it is **22.5 % of `ssao-march`**
+// (0.621 -> 0.481 Gi/f at greets t=5743), of which the atan2 alone is 7.6 %
+// (0.621 -> 0.574). That is 135 instructions per (lane x slice), 1.04 M of them
+// a frame.
+//
+// This is written in PLAIN NEON, not simde, for one reason: bit-exactness with
+// the scalar `fast_rsqrt`, which is `vrsqrte_f32` + ONE Newton step
+// (`e = vrsqrts(e*e, v) * e`). simde's `_mm256_rsqrt_ps` is free to add
+// refinement steps to match SSE's accuracy spec, which would silently move
+// every AO value; `vrsqrteq_f32` shares the estimate table with `vrsqrte_f32`
+// lane for lane, so this form cannot drift.
+//
+// atan2_approx's three branches become `vbslq_f32` selects over BOTH arms.
+// Two divides are evaluated unconditionally and one is always discarded:
+//   * `y/x` is discarded where `ax > 0` is false — and x == 0 there, so the
+//     dead lane holds inf/NaN, which `vbslq` drops BITWISE (no propagation).
+//   * `x/y` is discarded where `ax >= ay` — and y == 0 forces ay == 0 <= ax, so
+//     that lane is always the discarded one.
+// The divides stay REAL `vdivq_f32`. Using a reciprocal estimate here (as the
+// existing `atan_approx_x8` does, with `_mm256_rcp_ps`) would change AO values,
+// which is a LOOK call in the same family as the 8-wide GTAO rsqrt item already
+// in Gil-Ad's stack (backlog 2026-08-17a) — not a perf lever, and not taken.
+static FDS_ALWAYS_INLINE float32x4_t gtaoAtan2Approx_x4(float32x4_t y, float32x4_t x)
+{
+	const float32x4_t zero = vdupq_n_f32(0.0f);
+	const float32x4_t kPi  = vdupq_n_f32(3.14159265358979323846f);
+	const float32x4_t kHPi = vdupq_n_f32(1.57079632679489661923f);
+	const float32x4_t ax = vabsq_f32(x), ay = vabsq_f32(y);
+	const uint32x4_t  axGE = vcgeq_f32(ax, ay);      // |x| >= |y|
+	const uint32x4_t  axPos = vcgtq_f32(ax, zero);   // |x| > 0
+	// a = axGE ? ((ax>0) ? y/x : 0) : x/y
+	const float32x4_t a = vbslq_f32(axGE,
+	                                vbslq_f32(axPos, vdivq_f32(y, x), zero),
+	                                vdivq_f32(x, y));
+	// atan_approx_unit(a), same nesting so -ffp-contract picks the same FMAs
+	const float32x4_t a2 = vmulq_f32(a, a);
+	float32x4_t p = vfmaq_f32(vdupq_n_f32(-0.085133f), a2, vdupq_n_f32(0.020835f));
+	p = vfmaq_f32(vdupq_n_f32(0.180142f),  a2, p);
+	p = vfmaq_f32(vdupq_n_f32(-0.330299f), a2, p);
+	p = vfmaq_f32(vdupq_n_f32(1.0f),       a2, p);
+	// NOTE the final `a * poly` is NOT materialised on its own in either branch
+	// that adds to it: clang contracts `signedHalfPi - a*poly` into ONE fmsub and
+	// `a*poly + (+-PI)` into ONE fmadd, so rounding it separately and then adding
+	// diverges. Verified against the scalar with -DFDS_SSAO_VERIFY: this form is
+	// 0 mismatches in 1 036 800 lanes, the two-rounding form was 32 196.
+	const uint32x4_t yNonNeg = vcgeq_f32(y, zero);
+	// branch A: r = a*poly, and if x<0, r = a*poly + (y>=0 ? PI : -PI) [fused]
+	const float32x4_t rA = vbslq_f32(vcltq_f32(x, zero),
+	                                 vfmaq_f32(vbslq_f32(yNonNeg, kPi, vnegq_f32(kPi)), a, p),
+	                                 vmulq_f32(a, p));
+	// branch B: r = (y>=0 ? HALFPI : -HALFPI) - a*poly [fused]
+	const float32x4_t rB = vfmsq_f32(vbslq_f32(yNonNeg, kHPi, vnegq_f32(kHPi)), a, p);
+	return vbslq_f32(axGE, rA, rB);
+}
+
+// fast_rsqrt, 4 lanes, byte-for-byte the scalar's vrsqrte + one Newton step.
+static FDS_ALWAYS_INLINE float32x4_t gtaoFastRsqrt_x4(float32x4_t v)
+{
+	float32x4_t e = vrsqrteq_f32(v);
+	return vmulq_f32(vrsqrtsq_f32(vmulq_f32(e, e), v), e);
+}
+#endif
+
 static constexpr int SSC_N = 8;
 #if FDS_SSAO_CENSUS
 static std::atomic<unsigned long long> g_ssCen[SSC_N];
@@ -551,12 +657,82 @@ void Render_SSAO() {
 						for (int s = 0; s < slices; ++s) {
 							// per-lane slice setup (scalar trig; slices×8 only)
 							alignas(32) float aDcx[8],aDsy[8],aNang[8];
+							// S1: the slice trig itself is a per-lane GATHER
+							// (g_sliceCos[s][aRi[k]], aRi differs per lane), so it
+							// stays scalar — 16 loads. Everything downstream of it
+							// is elementwise and goes 4-wide, twice. See
+							// gtaoAtan2Approx_x4 for the bit-exactness argument.
 							for (int k=0;k<8;++k){
-								// phi = (s+jit)*(PI/slices) has only slices*16 values —
-								// tabled once a frame (buildSliceTrig), not 5.1 M libm
-								// calls. Invalid lanes take entry 0 and are discarded.
-								const float dcx=g_sliceCos[s][aRi[k]],dsy=g_sliceSin[s][aRi[k]];
-								aDcx[k]=dcx;aDsy[k]=dsy;
+								aDcx[k]=g_sliceCos[s][aRi[k]];
+								aDsy[k]=g_sliceSin[s][aRi[k]];
+							}
+#if defined(__ARM_NEON) || defined(__aarch64__)
+							for (int h=0; h<8; h+=4) {
+								const float32x4_t dcx=vld1q_f32(aDcx+h), dsy=vld1q_f32(aDsy+h);
+								const float32x4_t Vx=vld1q_f32(aVx+h), Vy=vld1q_f32(aVy+h), Vz=vld1q_f32(aVz+h);
+								const float32x4_t Nx=vld1q_f32(aNx+h), Ny=vld1q_f32(aNy+h), Nz=vld1q_f32(aNz+h);
+								// d3 = (dcx, -dsy); sn = d3 x V  (same term order as the scalar)
+								const float32x4_t d3x=dcx, d3y=vnegq_f32(dsy);
+								float32x4_t snx=vmulq_f32(d3y,Vz);
+								float32x4_t sny=vnegq_f32(vmulq_f32(d3x,Vz));
+								float32x4_t snz=vfmaq_f32(vnegq_f32(vmulq_f32(d3y,Vx)),d3x,Vy);
+#if FDS_SSAO_VERIFY
+								const float32x4_t snx0=snx, sny0=sny, snz0=snz;
+#endif
+								const float32x4_t snl=gtaoFastRsqrt_x4(
+									vaddq_f32(vfmaq_f32(vfmaq_f32(vmulq_f32(sny,sny),snx,snx),snz,snz),
+									          vdupq_n_f32(1e-12f)));
+								snx=vmulq_f32(snx,snl); sny=vmulq_f32(sny,snl); snz=vmulq_f32(snz,snl);
+								const float32x4_t nd=vfmaq_f32(vfmaq_f32(vmulq_f32(Ny,sny),Nx,snx),Nz,snz);
+								const float32x4_t pnx=vfmsq_f32(Nx,snx,nd);
+								const float32x4_t pny=vfmsq_f32(Ny,sny,nd);
+								const float32x4_t pnz=vfmsq_f32(Nz,snz,nd);
+								// t = sn x V
+								const float32x4_t tx=vfmaq_f32(vnegq_f32(vmulq_f32(snz,Vy)),sny,Vz);
+								const float32x4_t ty=vfmaq_f32(vnegq_f32(vmulq_f32(snx,Vz)),snz,Vx);
+								const float32x4_t tz=vfmaq_f32(vnegq_f32(vmulq_f32(sny,Vx)),snx,Vy);
+								const float32x4_t dt=vfmaq_f32(vfmaq_f32(vmulq_f32(pny,ty),pnx,tx),pnz,tz);
+								const float32x4_t dv=vfmaq_f32(vfmaq_f32(vmulq_f32(pny,Vy),pnx,Vx),pnz,Vz);
+								vst1q_f32(aNang+h,
+									vmulq_f32(vsubq_f32(vdupq_n_f32(kHalfPI),
+									                    gtaoAtan2Approx_x4(dt,dv)),
+									          vdupq_n_f32(kSec)));
+#if FDS_SSAO_VERIFY
+								{
+									alignas(16) float vsnl[4],vnd[4],vdt[4],vdv[4],vlen[4];
+									vst1q_f32(vlen,vaddq_f32(vfmaq_f32(vfmaq_f32(vmulq_f32(sny0,sny0),snx0,snx0),snz0,snz0),vdupq_n_f32(1e-12f)));
+									vst1q_f32(vsnl,snl); vst1q_f32(vnd,nd);
+									vst1q_f32(vdt,dt);   vst1q_f32(vdv,dv);
+									for (int q=0;q<4;++q) {
+										const int k=h+q;
+										const float dcx=aDcx[k],dsy=aDsy[k];
+										const float d3x=dcx,d3y=-dsy;
+										float sx=d3y*aVz[k],sy=-d3x*aVz[k],sz=d3x*aVy[k]-d3y*aVx[k];
+										const float lenS=sx*sx+sy*sy+sz*sz+1e-12f;
+										if (bitne(vlen[q],lenS)) g_ssVer[5].fetch_add(1,std::memory_order_relaxed);
+										const float sl=fast_rsqrt(lenS);
+										if (!bitne(vlen[q],lenS) && bitne(vsnl[q],sl))
+											g_ssVer[7].fetch_add(1,std::memory_order_relaxed);
+										sx*=sl;sy*=sl;sz*=sl;
+										const float ndS=aNx[k]*sx+aNy[k]*sy+aNz[k]*sz;
+										const float px_=aNx[k]-sx*ndS,py_=aNy[k]-sy*ndS,pz_=aNz[k]-sz*ndS;
+										const float tx_=sy*aVz[k]-sz*aVy[k],ty_=sz*aVx[k]-sx*aVz[k],tz_=sx*aVy[k]-sy*aVx[k];
+										const float dtS=px_*tx_+py_*ty_+pz_*tz_;
+										const float dvS=px_*aVx[k]+py_*aVy[k]+pz_*aVz[k];
+										const float anS=(kHalfPI-atan2_approx(dtS,dvS))*kSec;
+										g_ssVer[0].fetch_add(1,std::memory_order_relaxed);
+										if (bitne(vsnl[q],sl))  g_ssVer[1].fetch_add(1,std::memory_order_relaxed);
+										if (bitne(vnd[q],ndS))  g_ssVer[2].fetch_add(1,std::memory_order_relaxed);
+										if (bitne(vdt[q],dtS))  g_ssVer[3].fetch_add(1,std::memory_order_relaxed);
+										if (bitne(vdv[q],dvS))  g_ssVer[4].fetch_add(1,std::memory_order_relaxed);
+										if (bitne(aNang[k],anS))g_ssVer[6].fetch_add(1,std::memory_order_relaxed);
+									}
+								}
+#endif
+							}
+#else
+							for (int k=0;k<8;++k){
+								const float dcx=aDcx[k],dsy=aDsy[k];
 								const float d3x=dcx,d3y=-dsy;
 								float snx=d3y*aVz[k],sny=-d3x*aVz[k],snz=d3x*aVy[k]-d3y*aVx[k];
 								const float snl=fast_rsqrt(snx*snx+sny*sny+snz*snz+1e-12f); snx*=snl;sny*=snl;snz*=snl;
@@ -566,6 +742,7 @@ void Render_SSAO() {
 								aNang[k]=(kHalfPI-atan2_approx(pnx*tx+pny*ty+pnz*tz,
 								                               pnx*aVx[k]+pny*aVy[k]+pnz*aVz[k]))*kSec;
 							}
+#endif
 							const __m256 dcxV=_mm256_load_ps(aDcx), dsyV=_mm256_load_ps(aDsy), kangV=_mm256_load_ps(aNang);
 							const __m256 jitV=_mm256_load_ps(aJit);
 							const __m256 srStep=_mm256_mul_ps(sradV,_mm256_set1_ps(1.0f/float(steps)));
@@ -674,6 +851,9 @@ void Render_SSAO() {
 		                "ssao-march", 2, _scmarch);
 #if FDS_SSAO_CENSUS
 		if (fds::FeatureFlags::omni_census()) SsaoCensus_Report();
+#endif
+#if FDS_SSAO_VERIFY
+		if (fds::FeatureFlags::omni_census()) SsaoVerify_Report();
 #endif
 	} else
 	{
