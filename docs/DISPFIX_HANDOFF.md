@@ -152,3 +152,18 @@ the plateau ref → plateau bias −0.018, bevel 0.000, marks p90 0.28/0.36,
 protrusion frac 18.9/8.5% (crisp shoulders vs the blurred reference —
 his eye). Remaining dial: kPlatIns (the inset still samples the blur tail).
 Default arm byte-identical f7ecefe2 (part 5 on, shoulder OFF).
+
+## UPDATE 2026-08-28l (the TEARS round — base junction closed)
+Ground-truth tear detector: tools/tear_detect.py (HOLE = z16==0 where the
+reference has wall/floor; SEE-THROUGH is silhouette-contaminated at grazing
+— gate on HOLES). Battery driver tools/tear_battery.sh + docs/tears_poses.txt
+(51 poses), table tools/tear_table.py, cluster→verts join tools/tear_verts.py,
+bisection tools/tear_bisect.sh. Raws under docs/img/tears/raw (gitignored,
+~8 GB, regenerable). Verdict: no default flag owns the tears; the base rows
+were FREED because abutPointMat's own-face exclusion skipped the floor face
+sharing both endpoints. greets_displace_sibling_abut (default ON) pins them
+via the veto's side test: holes 21 479 → 7 467, none worse, his marks
+untouched, --no- byte-exact f7ecefe2. REMAINDER: vertical seam columns at
+wall ends (t≥6060 corridor end, P5963/P6133/P6293) = the corner-strip debt;
+the pier-base notch at cam A (116 px). Next round: run tear_verts.py on
+sab_S6120 / sab_P6133 to join those columns to their strip verts.

@@ -1,5 +1,90 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28l — THE TEARS NEAR THE WALLS: the base-junction class is CLOSED
+> by one material-blind exclusion in the abuttal veto. A ground-truth TEAR
+> detector (52-pose battery) finds 21 479 z==0 hole px, the flag bisection
+> clears every default flag, the bake census names the producer — the FLOOR
+> face along a wall base shares the wall's authored edge and was skipped as
+> "the edge's own face", so every base row was FREED and rode the polluted
+> smoothed normal while the floor bake pinned its side — and
+> `--greets_displace_sibling_abut` (default ON) drops holes 21 479 → 7 467
+> with zero poses worse, his marked regions untouched
+>
+> His verdict after flying the shoulder/ride rounds: "for the first time, we
+> can see wall in a fairly correct way. I still see tears near the wall - not
+> sure anymore if any other default flag causes it or what".
+>
+> **TEAR DETECTOR** (`--bulge_dump`+`FDS_SNAPSHOT_ZDUMP/GBUFDUMP` raws →
+> `tools/tear_detect.py`, same authored-plane+heightfield reference as
+> refdiff): a tear is a pixel where the reference has wall/floor but the
+> engine rasterised NOTHING (HOLE, z16==0 — the primary, unambiguous class)
+> or a surface far behind it (SEE-THROUGH: > max(0.35 u, 0.30/|n·r|) behind,
+> scored only at incidence cos ≥ 0.2, away from reference depth
+> discontinuities, and only when the arm/bare registration median |dz| ≤
+> 0.2 u — the pier silhouette at grazing otherwise reads as a false
+> see-through band; P6097 is UNSCORED for it). Tears classify by the
+> reference planes within 6 px: BASE (wall+floor), SEAM (two walls), PANEL.
+> Bare wall reads 20 px (floor). Battery: his two cams, grazing t=5958 ×4,
+> the 15-pose review list, scene-camera sweep t=5400–6300 step 30 (51
+> poses, `docs/tears_poses.txt`, driver `tools/tear_battery.sh`, table
+> `tools/tear_table.py` → `docs/img/tears/tears_table.txt`). Default arm:
+> **21 479 hole px** (base 11 997 / seam 5 819 / panel 25 321 incl.
+> see-through), holes at 49/51 poses, cam A 791, cam B 486.
+>
+> **FLAG BISECTION** (`tools/tear_bisect.sh`, 20 arms × cams A/B, table in
+> tears_table.txt): NO default flag creates the base holes — every displace
+> sub-flag and every branch fix toggled OFF leaves cam A at 473–1 667 holes
+> (no_border_pin 473, no_fold_relax WORSE 1 667, no_plane_front 1 120);
+> --no-ssao / --no-hdr / --no-parallax byte-identical on the count (shading
+> exonerated); seam_weld/free_edge ON: identical. His question "any other
+> default flag?" — answer: none; the tears are in the base bake itself.
+>
+> **MECHANISM (measured):** `tools/tear_verts.py` joins hole clusters to
+> bake verts: cam A's base holes sit on the wall base row. Scene census of
+> `--displace_dump`: **288 base-row (authored y=0) wall verts displaced
+> > 0.02 u, ALL created, ALL with a downward y component, sinking to y =
+> −0.078**, 195 cells = every wall base; the floor's verts within 0.03 u of
+> them: |dv| median 0.000 (pinned). [STONE-FINALV]/[STONE-FREEV] in box
+> 14.0,15.1,-61.7,-60.9: every base-row vert is FREEV (recessOnly) riding
+> dir(+0.36,+0.55,+0.75) — the de-slid POLLUTED smoothed normal, 35° off the
+> wall plane (0.445,0,0.895) — with the wall's field (plateau +0.01 lifts
+> the wall bottom off the floor edge, groove −0.064/−0.10 sinks and recedes
+> it). [STONE-EDGEVERT]: "FREE none". Replicating `abutPointMat` offline at
+> P=(14.30,0,−61.16) with the authored faces: the floor face is at d=0.000
+> and its centroid is in FRONT of the wall's rendered plane (concave → pin)
+> — the C++ never reached the side test because the floor face shares BOTH
+> endpoint keys of the base edge and the own-face exclusion (`hasA && hasB`)
+> skipped it. The veto's own comment already knew ("the pier base meets the
+> floor CONVEXLY ... a vert created at another BAKE's junction must pin
+> regardless") but guarded it only under border_v2 (OFF). Freed base edges
+> are also DENSIFIED by the profile pass: 7 908 freed border verts.
+>
+> **FIX** `--greets_displace_sibling_abut` (default ON): the same-endpoints
+> skip applies to OWN-material faces only; a foreign-material face sharing
+> the whole edge falls through to the side test → concave → PIN. Census:
+> freed border verts 7 908 → 1 664; base-row displaced verts 288 → **0**
+> (>0.003 u: 2 717 → 0), min final y 0.000; bake faces 90 730 → 83 868
+> (−7.6 %), fold-relax inverted faces 1 793 → 633; bake wall-clock 499/492/
+> 506 → 492/497/495 ms (no change). `--no-` restores md5 f7ecefe2 byte-
+> exactly at cam A.
+>
+> **GATE:** holes **21 479 → 7 467** (34.8 % remain), poses worse: NONE;
+> base-class tears 11 997 → 2 696 (the remainder is see-through at grazing
+> registration, not holes — base HOLES: cam A 453 → 1, cam B 418 → 0,
+> P5743 535 → 0, S5760 614 → 1). Refdiff at his marks: rect 13.5 % / p90
+> 0.395, ellipse 6.7 % / p90 0.503 — UNCHANGED to the digit; quiet planes
+> 43/48/45/41 LF identical ±0.05. Locality (`locality_def_vs_sab.txt`,
+> masks `locality_*_diffmask.png`): 0.02–0.61 % px per pose, every band on
+> a wall↔floor junction. See-through unchanged (21 658 → 21 659).
+>
+> **REMAINDER, named:** the 7 467 holes left are the t≥6060 corridor end and
+> P5963/P6133/P6293 — vertical SEAM COLUMNS at wall ends (S6120 1 101,
+> P6133 967, S6150 768: base 0, seam/panel), the corner-strip (STONE-CORNERF)
+> debt the ledger already carries; plus the pier-base notch at cam A (116).
+> Evidence: `docs/img/tears/sab_pair_{A,B,G1,S5880,P5743}.png` (def | sab),
+> `tears_def_*.png` / `tears_sab_*.png` overlays, `holes_def_vs_sab.txt`,
+> `refdiff_gate.log`, `tear_verts_def_A.txt`.
+
 > ## 2026-08-28k — ROUND 3, THE SCENE-WIDE RECESSION MEASURED IN NORMAL SPACE:
 > the plateaus sit 0.036 u behind the field on EVERY wall plane because the
 > lattice spans each block from the groove SHOULDER lines (rep 0.42, the

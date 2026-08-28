@@ -323,3 +323,6 @@ Runtime/SCENES/.backups/
 .claude/
 build-*/
 Runtime/*.ppm
+docs/img/tears/raw/
+docs/img/tears/dump_sab/
+docs/img/tears/tearmask_*.npy

@@ -1,0 +1,23 @@
+--- gate run def vs sab ---
+def_A MARK-rect: geo n=15756 dz med -0.1424 p90|dz| 0.3952 frac(dz>+0.08) 13.5% frac(|dz|>0.08) 71.7% ; LF med 9.08 (n=4931)
+def_A MARK-ellipse: geo n=43089 dz med -0.1746 p90|dz| 0.5026 frac(dz>+0.08) 6.7% frac(|dz|>0.08) 60.8% ; LF med 7.43 (n=18362)
+  plane 43 n=650162 LF med 3.23 p90 14.54
+  plane 48 n=254847 LF med 2.32 p90 9.86
+  plane 41 n=36047 LF med 3.86 p90 7.66
+  plane 45 n=222631 LF med 2.81 p90 6.74
+def_A: cam(half=0.5,ys=-1) planar[n=1163687] raw 4.30/45.49 LF 2.93/11.91 dz -0.0532 | curved[n=27218] raw 3.90/39.16 LF 2.86/17.54 dz -0.1429 | WORSTPLANE 43 LF med 3.23 p90 14.54
+sab_A MARK-rect: geo n=15756 dz med -0.1424 p90|dz| 0.3952 frac(dz>+0.08) 13.5% frac(|dz|>0.08) 71.7% ; LF med 9.08 (n=4931)
+sab_A MARK-ellipse: geo n=43129 dz med -0.1734 p90|dz| 0.5026 frac(dz>+0.08) 6.7% frac(|dz|>0.08) 60.9% ; LF med 7.44 (n=18387)
+  plane 43 n=650162 LF med 3.23 p90 14.54
+  plane 48 n=255461 LF med 2.38 p90 9.84
+  plane 41 n=36049 LF med 3.90 p90 7.67
+  plane 45 n=222785 LF med 2.78 p90 6.70
+sab_A: cam(half=0.5,ys=-1) planar[n=1164457] raw 4.31/45.48 LF 2.94/11.91 dz -0.0532 | curved[n=27552] raw 4.03/39.17 LF 2.96/17.27 dz -0.1429 | WORSTPLANE 43 LF med 3.23 p90 14.54
+  plane 48 n=150814 LF med 2.30 p90 9.55
+  plane 45 n=359466 LF med 3.04 p90 9.25
+  plane 41 n=33139 LF med 3.71 p90 6.93
+def_B: cam(half=0.5,ys=-1) planar[n=543419] raw 4.28/41.96 LF 2.85/9.19 dz -0.0475 | curved[n=1120] raw 139.09/141.62 LF 139.19/140.06 dz -0.0882 | WORSTPLANE 48 LF med 2.30 p90 9.55
+  plane 48 n=150942 LF med 2.32 p90 9.48
+  plane 45 n=359723 LF med 3.00 p90 9.28
+  plane 41 n=33143 LF med 3.79 p90 6.93
+sab_B: cam(half=0.5,ys=-1) planar[n=543808] raw 4.30/41.94 LF 2.83/9.18 dz -0.0474 | curved[n=1106] raw 139.03/141.50 LF 139.13/140.09 dz -0.0907 | WORSTPLANE 48 LF med 2.32 p90 9.48

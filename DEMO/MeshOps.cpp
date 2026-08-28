@@ -2390,6 +2390,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		}
 		return false;
 	};
+	const bool siblingAbut = fds::FeatureFlags::greets_displace_sibling_abut();
 	auto abutPointMat = [&](const Vector &P, uint64_t kA, uint64_t kB,
 	                        const Vector *ownN) -> const char * {
 		if (abutTris.empty()) return nullptr;
@@ -2412,7 +2413,21 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// only the mutual corner vertex, and skipping it blinded the veto.
 			const bool hasA = (T2.ka==kA || T2.kb==kA || T2.kc==kA);
 			const bool hasB = (T2.ka==kB || T2.kb==kB || T2.kc==kB);
-			if (hasA && hasB) continue;
+			// --greets_displace_sibling_abut (2026-08-28, the TEARS near the
+			// walls): a FOREIGN-material face that shares BOTH endpoints is not
+			// "our own face" — it is the neighbour that owns the far side of the
+			// whole edge. The floor's face along a wall base shares the wall's
+			// authored base edge exactly, so this exclusion skipped it, the
+			// veto saw nothing on the far side, the base row was FREED and rode
+			// the field (measured: 288 base-row verts displaced, sinking to
+			// y=-0.078 / lifting off the floor edge, every wall base in the
+			// scene) while the floor bake pinned its side — the two bakes
+			// diverged along the shared line and the seam opened as z==0 holes.
+			// With the flag the same-endpoints skip applies to OWN-material
+			// faces only; the foreign face falls through to the side test
+			// (floor centroid in FRONT of the wall's rendered plane = concave
+			// = pin), so both bakes agree at the line.
+			if (hasA && hasB && (!siblingAbut || !T2.mat || !std::strcmp(T2.mat, matName))) continue;
 			if (pointTriDistSq(P, T2.a, T2.b, T2.c) >= kAbutEps*kAbutEps) continue;
 			if (!ownN) return T2.mat ? T2.mat : "(unnamed)";
 			// Orientation of the abutting face relative to the owning plane.

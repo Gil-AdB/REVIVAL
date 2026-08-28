@@ -1,0 +1,54 @@
+  170 px seam  planes 43         ctr (17.91 4.33 -57.91) ext (0.01 0.74 0.25) px-bbox (1217, 82, 1266, 255)
+      rooms::mirUV n=30 |dv| med 0.033 max 0.037 created 30 weld 24
+  125 px base  planes 48         ctr (14.49 0.08 -61.25) ext (0.88 0.14 0.43) px-bbox (103, 855, 176, 954)
+      rooms n=26 |dv| med 0.001 max 0.100 created 26 weld 0
+   98 px base  planes 48         ctr (14.91 0.10 -61.49) ext (0.43 0.20 0.06) px-bbox (81, 931, 87, 967)
+      rooms n=22 |dv| med 0.016 max 0.100 created 22 weld 0
+   46 px seam  planes 43,49      ctr (17.83 0.30 -57.96) ext (0.36 0.30 0.30) px-bbox (1178, 964, 1182, 984)
+      rooms::mirUV n=33 |dv| med 0.029 max 0.114 created 33 weld 17
+   42 px seam  planes 43         ctr (17.81 0.20 -57.83) ext (0.08 0.08 0.14) px-bbox (1184, 976, 1222, 990)
+      rooms::mirUV n=14 |dv| med 0.031 max 0.114 created 14 weld 1
+   32 px base  planes 48         ctr (14.87 -0.03 -61.49) ext (0.29 0.12 0.06) px-bbox (84, 963, 95, 974)
+      rooms n=16 |dv| med 0.001 max 0.064 created 16 weld 0
+   31 px base  planes 48         ctr (15.48 0.02 -61.73) ext (0.21 0.01 0.11) px-bbox (20, 1012, 46, 1039)
+      rooms n=11 |dv| med 0.013 max 0.015 created 11 weld 0
+   29 px base  planes 48         ctr (13.37 -0.00 -60.73) ext (0.45 0.24 0.11) px-bbox (212, 828, 223, 844)
+      rooms n=22 |dv| med 0.007 max 0.041 created 22 weld 0
+   26 px base  planes 49         ctr (14.70 0.11 -56.11) ext (0.30 0.11 0.18) px-bbox (1085, 736, 1090, 764)
+      rooms::mirUV n=14 |dv| med 0.010 max 0.064 created 14 weld 0
+   23 px base  planes 49         ctr (16.36 0.05 -57.07) ext (0.81 0.48 0.64) px-bbox (1126, 857, 1130, 878)
+      floor::mirUV n=1 |dv| med 0.000 max 0.000 created 1 weld 0
+      rooms::mirUV n=23 |dv| med 0.011 max 0.100 created 23 weld 0
+   18 px base  planes 45         ctr (9.33 0.05 -58.03) ext (0.19 0.18 0.09) px-bbox (488, 627, 494, 639)
+      rooms::mirUV n=15 |dv| med 0.059 max 0.082 created 15 weld 0
+   16 px seam  planes 43         ctr (17.87 3.20 -57.98) ext (0.01 0.05 0.01) px-bbox (1203, 410, 1205, 420)
+      rooms::mirUV n=30 |dv| med 0.017 max 0.049 created 30 weld 13
+   13 px seam  planes 43         ctr (17.83 4.99 -57.96) ext (0.01 0.05 0.01) px-bbox (1219, 0, 1219, 12)
+      rooms::mirUV n=4 |dv| med 0.000 max 0.000 created 3 weld 0
+   13 px base  planes 49         ctr (13.58 0.08 -55.44) ext (0.28 0.07 0.17) px-bbox (1067, 696, 1071, 703)
+      rooms::mirUV n=17 |dv| med 0.003 max 0.082 created 17 weld 0
+   13 px base  planes 49         ctr (15.42 0.11 -56.54) ext (0.53 0.10 0.31) px-bbox (1095, 782, 1107, 803)
+      floor::mirUV n=1 |dv| med 0.000 max 0.000 created 1 weld 0
+      rooms::mirUV n=14 |dv| med 0.001 max 0.015 created 14 weld 0
+   10 px base  planes 48         ctr (14.36 0.01 -61.18) ext (0.10 0.00 0.05) px-bbox (144, 905, 153, 914)
+      rooms n=9 |dv| med 0.001 max 0.010 created 9 weld 0
+    9 px panel planes 49         ctr (16.23 2.06 -57.05) ext (0.02 0.05 0.02) px-bbox (1125, 558, 1125, 566)
+      NO VERTS within 0.15u
+    8 px base  planes 45         ctr (8.39 0.06 -56.50) ext (0.07 0.07 0.03) px-bbox (630, 591, 630, 598)
+      rooms::mirUV n=11 |dv| med 0.018 max 0.064 created 11 weld 0
+    8 px base  planes 48         ctr (12.43 0.02 -60.22) ext (0.11 0.01 0.05) px-bbox (279, 771, 285, 776)
+      rooms n=9 |dv| med 0.011 max 0.012 created 9 weld 0
+    8 px base  planes 48         ctr (14.15 0.02 -61.07) ext (0.08 0.00 0.04) px-bbox (163, 887, 170, 894)
+      rooms n=8 |dv| med 0.001 max 0.003 created 8 weld 0
+    8 px base  planes 48         ctr (15.33 0.03 -61.66) ext (0.06 0.00 0.03) px-bbox (48, 1002, 55, 1009)
+      rooms n=8 |dv| med 0.014 max 0.015 created 8 weld 0
+    7 px base  planes 49         ctr (14.98 0.03 -56.27) ext (0.51 0.22 0.36) px-bbox (1092, 772, 1094, 779)
+      rooms::mirUV n=14 |dv| med 0.005 max 0.064 created 14 weld 0
+    7 px base  planes 48         ctr (12.68 0.02 -60.35) ext (0.10 0.00 0.05) px-bbox (265, 785, 271, 791)
+      rooms n=9 |dv| med 0.002 max 0.014 created 9 weld 0
+    7 px panel planes 49         ctr (16.90 0.65 -57.44) ext (0.03 0.04 0.02) px-bbox (1140, 822, 1140, 828)
+      NO VERTS within 0.15u
+    6 px base  planes 48         ctr (10.58 0.12 -59.30) ext (0.02 0.04 0.01) px-bbox (366, 676, 366, 681)
+      rooms n=7 |dv| med 0.015 max 0.031 created 7 weld 0
+    6 px seam  planes 49         ctr (17.83 0.43 -57.98) ext (0.00 0.03 0.00) px-bbox (1177, 951, 1177, 956)
+      rooms::mirUV n=16 |dv| med 0.032 max 0.114 created 16 weld 12

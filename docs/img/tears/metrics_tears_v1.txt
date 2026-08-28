@@ -1,0 +1,75 @@
+pfm_A: TEAR 32973 (hole 792, seethrough 32181) black 0 | base 1005 seam 1677 panel 30291 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 32108:wall:49 454:wall:48 323:wall:43 68:wall:45 19:wall:44
+pfm_B: TEAR 20930 (hole 486, seethrough 20444) black 0 | base 2957 seam 5147 panel 12826 | cam half=0.5 ys=-1 med|dz| 0.0530 | top planes 20615:wall:49 137:wall:45 92:wall:44 86:wall:48
+bare_A: TEAR 20 (hole 0, seethrough 20) black 1 | base 5 seam 14 panel 1 | cam half=0.5 ys=-1 med|dz| 0.0280 | top planes 19:wall:44 1:wall:49
+pfm_A: TEAR 2262 (hole 792, seethrough 1470) black 0 | base 524 seam 1098 panel 640 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1405:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
+pfm_B: TEAR 3275 (hole 486, seethrough 2789) black 0 | base 644 seam 1568 panel 1063 | cam half=0.5 ys=-1 med|dz| 0.0530 | top planes 2962:wall:49 137:wall:45 90:wall:44 86:wall:48
+def_A: TEAR 2262 (hole 792, seethrough 1470) black 0 | base 524 seam 1098 panel 640 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1405:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
+def_B: TEAR 3275 (hole 486, seethrough 2789) black 0 | base 644 seam 1568 panel 1063 | cam half=0.5 ys=-1 med|dz| 0.0530 | top planes 2962:wall:49 137:wall:45 90:wall:44 86:wall:48
+def_A: TEAR 2262 (hole 792, seethrough 1470) black 0 | base 524 seam 1098 panel 640 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1405:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
+def_B: TEAR 3275 (hole 486, seethrough 2789) black 0 | base 644 seam 1568 panel 1063 | cam half=0.5 ys=-1 med|dz| 0.0530 | top planes 2962:wall:49 137:wall:45 90:wall:44 86:wall:48
+def_G1: TEAR 5460 (hole 74, seethrough 5386) black 286 | base 1744 seam 2627 panel 1089 | cam half=0.0 ys=-1 med|dz| 0.0686 | top planes 4707:wall:44 640:wall:41 100:wall:38 9:wall:37 4:floor:18
+def_G2: TEAR 5725 (hole 71, seethrough 5654) black 582 | base 1872 seam 2778 panel 1075 | cam half=0.0 ys=-1 med|dz| 0.0621 | top planes 4821:wall:44 644:wall:41 97:wall:6 80:wall:38 79:wall:37
+def_G3: TEAR 4660 (hole 191, seethrough 4469) black 11727 | base 1611 seam 2224 panel 825 | cam half=0.5 ys=-1 med|dz| 0.0806 | top planes 4149:wall:44 435:wall:41 68:wall:38 8:wall:37
+def_G4: TEAR 3117 (hole 257, seethrough 2860) black 1723 | base 1302 seam 1457 panel 358 | cam half=0.5 ys=-1 med|dz| 0.1142 | top planes 2677:wall:44 369:wall:41 63:wall:38 8:wall:37
+def_P2845: TEAR 18 (hole 18, seethrough 0) black 0 | base 0 seam 0 panel 18 | cam half=0.5 ys=-1 med|dz| 0.0174 | top planes 18:wall:39
+def_P5534: TEAR 2225 (hole 78, seethrough 2147) black 0 | base 530 seam 1342 panel 353 | cam half=0.5 ys=-1 med|dz| 6.4026 | top planes 2147:wall:44 57:wall:45 21:wall:48
+def_P5743: TEAR 2036 (hole 820, seethrough 1216) black 1298 | base 880 seam 733 panel 423 | cam half=0.5 ys=-1 med|dz| 0.0798 | top planes 1208:wall:38 726:wall:41 48:wall:37 26:wall:1 13:wall:6
+def_P5773: TEAR 6975 (hole 377, seethrough 6598) black 485 | base 2334 seam 2091 panel 2550 | cam half=0.5 ys=-1 med|dz| 0.0730 | top planes 6136:wall:38 764:wall:41 26:wall:1 22:wall:37 13:wall:6
+def_P5813: TEAR 5904 (hole 177, seethrough 5727) black 111 | base 2526 seam 2123 panel 1255 | cam half=0.5 ys=-1 med|dz| 0.0765 | top planes 5251:wall:44 547:wall:41 77:wall:38 16:wall:6 12:wall:37
+def_P5814: TEAR 5770 (hole 167, seethrough 5603) black 226 | base 2455 seam 2118 panel 1197 | cam half=0.5 ys=-1 med|dz| 0.0776 | top planes 5128:wall:44 541:wall:41 78:wall:38 12:wall:6 11:wall:37
+def_P5843: TEAR 3343 (hole 159, seethrough 3184) black 122 | base 809 seam 2015 panel 519 | cam half=0.5 ys=-1 med|dz| 0.1008 | top planes 3180:wall:44 84:wall:38 78:wall:41 1:floor:18
+def_P5854: TEAR 3451 (hole 410, seethrough 3041) black 54 | base 674 seam 1913 panel 864 | cam half=0.5 ys=-1 med|dz| 0.0734 | top planes 3079:wall:44 212:wall:45 82:wall:38 77:wall:41 1:floor:18
+def_P5963: TEAR 5844 (hole 1075, seethrough 4769) black 1 | base 376 seam 2525 panel 2943 | cam half=0.5 ys=-1 med|dz| 0.0675 | top planes 4686:wall:49 912:wall:38 172:wall:45 61:wall:44 12:wall:37
+def_P5967: TEAR 5777 (hole 830, seethrough 4947) black 0 | base 413 seam 2464 panel 2900 | cam half=0.5 ys=-1 med|dz| 0.0704 | top planes 4626:wall:49 951:wall:44 170:wall:45 28:wall:37 1:wall:41
+def_P5987: TEAR 3181 (hole 419, seethrough 2762) black 0 | base 1263 seam 798 panel 1120 | cam half=0.5 ys=-1 med|dz| 0.0420 | top planes 2944:wall:43 145:wall:45 86:wall:48 6:wall:49
+def_P6097: TEAR 23658 (hole 522, seethrough 23136) black 2606 | base 233 seam 3659 panel 19766 | cam half=0.0 ys=-1 med|dz| 0.6062 | top planes 23166:wall:49 492:wall:48
+def_P6133: TEAR 1763 (hole 1201, seethrough 562) black 1 | base 194 seam 561 panel 1008 | cam half=0.5 ys=-1 med|dz| 0.0380 | top planes 1359:wall:43 357:wall:48 33:wall:45 14:wall:49
+def_P6293: TEAR 785 (hole 515, seethrough 270) black 0 | base 87 seam 265 panel 433 | cam half=0.5 ys=-1 med|dz| 0.0378 | top planes 664:wall:43 108:wall:48 8:wall:45 5:wall:49
+def_S5400: TEAR 1096 (hole 429, seethrough 667) black 1 | base 342 seam 543 panel 211 | cam half=0.0 ys=-1 med|dz| 0.0433 | top planes 893:wall:38 177:wall:41 19:wall:45 5:wall:44 1:wall:37
+def_S5430: TEAR 1554 (hole 699, seethrough 855) black 208 | base 600 seam 626 panel 328 | cam half=0.0 ys=-1 med|dz| 0.0648 | top planes 1296:wall:38 224:wall:41 22:wall:45 6:wall:48 5:wall:44
+def_S5460: TEAR 1625 (hole 564, seethrough 1061) black 335 | base 569 seam 764 panel 292 | cam half=0.0 ys=-1 med|dz| 0.0795 | top planes 1389:wall:38 209:wall:41 9:wall:48 9:wall:45 9:wall:44
+def_S5490: TEAR 2021 (hole 593, seethrough 1428) black 715 | base 676 seam 978 panel 367 | cam half=0.0 ys=-1 med|dz| 0.0792 | top planes 1717:wall:38 248:wall:41 33:wall:45 12:wall:44 11:wall:48
+def_S5520: TEAR 1880 (hole 82, seethrough 1798) black 0 | base 432 seam 1125 panel 323 | cam half=0.5 ys=-1 med|dz| 8.9552 | top planes 1798:wall:44 63:wall:45 19:wall:48
+def_S5550: TEAR 2906 (hole 127, seethrough 2779) black 0 | base 731 seam 1611 panel 564 | cam half=0.5 ys=-1 med|dz| 1.0256 | top planes 2785:wall:44 91:wall:45 30:wall:48
+def_S5580: TEAR 2832 (hole 206, seethrough 2626) black 0 | base 1410 seam 935 panel 487 | cam half=0.0 ys=-1 med|dz| 0.0645 | top planes 2626:wall:44 138:wall:45 68:wall:48
+def_S5610: TEAR 53 (hole 0, seethrough 53) black 55769 | base 0 seam 0 panel 53 | cam half=0.0 ys=+1 med|dz| 2.3042 | top planes 53:floor:18
+def_S5640: TEAR 2349 (hole 138, seethrough 2211) black 1 | base 902 seam 1193 panel 254 | cam half=0.5 ys=-1 med|dz| 0.3692 | top planes 2210:wall:37 106:wall:23 18:wall:19 7:wall:6 6:wall:1
+def_S5670: TEAR 2362 (hole 107, seethrough 2255) black 9603 | base 549 seam 1700 panel 113 | cam half=0.5 ys=-1 med|dz| 2.4530 | top planes 2193:wall:37 45:wall:23 39:wall:1 34:wall:32 24:wall:6
+def_S5700: TEAR 2498 (hole 485, seethrough 2013) black 4812 | base 790 seam 1509 panel 199 | cam half=0.0 ys=-1 med|dz| 0.1689 | top planes 1232:wall:37 1107:wall:38 90:wall:6 33:wall:10 12:wall:1
+def_S5730: TEAR 2097 (hole 865, seethrough 1232) black 1865 | base 943 seam 783 panel 371 | cam half=0.5 ys=-1 med|dz| 0.0891 | top planes 1184:wall:38 805:wall:41 43:wall:37 27:wall:1 14:wall:6
+def_S5760: TEAR 2638 (hole 919, seethrough 1719) black 738 | base 951 seam 708 panel 979 | cam half=0.5 ys=-1 med|dz| 0.0751 | top planes 1731:wall:38 829:wall:41 34:wall:1 27:wall:37 10:wall:19
+def_S5790: TEAR 6956 (hole 279, seethrough 6677) black 455 | base 2554 seam 2391 panel 2011 | cam half=0.5 ys=-1 med|dz| 0.0747 | top planes 6240:wall:38 637:wall:41 29:wall:1 19:wall:37 15:wall:6
+def_S5820: TEAR 5385 (hole 118, seethrough 5267) black 87 | base 2347 seam 1986 panel 1052 | cam half=0.5 ys=-1 med|dz| 0.0776 | top planes 4806:wall:44 489:wall:41 79:wall:38 11:wall:37
+def_S5850: TEAR 2775 (hole 191, seethrough 2584) black 3 | base 591 seam 1745 panel 439 | cam half=0.0 ys=-1 med|dz| 0.1644 | top planes 2602:wall:44 82:wall:41 79:wall:38 11:floor:18 1:wall:37
+def_S5880: TEAR 13087 (hole 259, seethrough 12828) black 41 | base 2084 seam 3728 panel 7275 | cam half=0.5 ys=-1 med|dz| 0.0781 | top planes 12830:wall:44 204:wall:45 52:wall:41 1:floor:18
+def_S5910: TEAR 7666 (hole 209, seethrough 7457) black 165 | base 1487 seam 3460 panel 2719 | cam half=0.5 ys=-1 med|dz| 0.0881 | top planes 7456:wall:44 203:wall:45 6:wall:41 1:wall:38
+def_S5940: TEAR 5109 (hole 262, seethrough 4847) black 2 | base 1256 seam 2728 panel 1125 | cam half=0.5 ys=-1 med|dz| 0.0743 | top planes 4850:wall:44 254:wall:45 5:wall:41
+def_S5970: TEAR 5046 (hole 309, seethrough 4737) black 1 | base 368 seam 2225 panel 2453 | cam half=0.5 ys=-1 med|dz| 0.0414 | top planes 3904:wall:49 915:wall:43 171:wall:45 55:wall:44 1:wall:41
+def_S6000: TEAR 2923 (hole 396, seethrough 2527) black 0 | base 1089 seam 804 panel 1030 | cam half=0.5 ys=-1 med|dz| 0.0419 | top planes 2661:wall:43 126:wall:45 106:wall:48 30:wall:49
+def_S6030: TEAR 2218 (hole 264, seethrough 1954) black 0 | base 522 seam 699 panel 997 | cam half=0.5 ys=-1 med|dz| 0.0401 | top planes 1930:wall:43 180:wall:48 83:wall:45 24:wall:49 1:floor:18
+def_S6060: TEAR 1738 (hole 517, seethrough 1221) black 0 | base 295 seam 553 panel 890 | cam half=0.5 ys=-1 med|dz| 0.0401 | top planes 1418:wall:43 252:wall:48 45:wall:45 23:wall:49
+def_S6090: TEAR 1446 (hole 618, seethrough 828) black 0 | base 303 seam 421 panel 722 | cam half=0.5 ys=-1 med|dz| 0.0388 | top planes 1001:wall:43 401:wall:48 32:wall:45 12:wall:49
+def_S6120: TEAR 1959 (hole 1362, seethrough 597) black 1 | base 190 seam 597 panel 1172 | cam half=0.5 ys=-1 med|dz| 0.0378 | top planes 1481:wall:43 435:wall:48 35:wall:45 7:wall:49 1:floor:18
+adapt0_A: TEAR 2262 (hole 792, seethrough 1470) black 0 | base 524 seam 1098 panel 640 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1405:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
+def_S6150: TEAR 1384 (hole 929, seethrough 455) black 1 | base 141 seam 456 panel 787 | cam half=0.5 ys=-1 med|dz| 0.0386 | top planes 1100:wall:43 254:wall:48 24:wall:45 6:wall:49
+adapt0_B: TEAR 3275 (hole 486, seethrough 2789) black 0 | base 644 seam 1568 panel 1063 | cam half=0.5 ys=-1 med|dz| 0.0530 | top planes 2962:wall:49 137:wall:45 90:wall:44 86:wall:48
+def_S6180: TEAR 1170 (hole 779, seethrough 391) black 0 | base 133 seam 381 panel 656 | cam half=0.5 ys=-1 med|dz| 0.0383 | top planes 959:wall:43 182:wall:48 21:wall:45 8:wall:49
+def_S6210: TEAR 989 (hole 660, seethrough 329) black 0 | base 101 seam 344 panel 544 | cam half=0.5 ys=-1 med|dz| 0.0379 | top planes 811:wall:43 165:wall:48 10:wall:45 3:wall:49
+free_edge_A: TEAR 2262 (hole 792, seethrough 1470) black 0 | base 524 seam 1098 panel 640 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1405:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
+def_S6240: TEAR 843 (hole 552, seethrough 291) black 0 | base 111 seam 279 panel 453 | cam half=0.5 ys=-1 med|dz| 0.0379 | top planes 687:wall:43 141:wall:48 12:wall:45 3:wall:49
+free_edge_B: TEAR 3275 (hole 486, seethrough 2789) black 0 | base 644 seam 1568 panel 1063 | cam half=0.5 ys=-1 med|dz| 0.0530 | top planes 2962:wall:49 137:wall:45 90:wall:44 86:wall:48
+def_S6270: TEAR 811 (hole 543, seethrough 268) black 0 | base 93 seam 290 panel 428 | cam half=0.5 ys=-1 med|dz| 0.0379 | top planes 673:wall:43 121:wall:48 10:wall:45 7:wall:49
+no_border_pin_A: TEAR 1686 (hole 481, seethrough 1205) black 0 | base 542 seam 984 panel 160 | cam half=0.5 ys=-1 med|dz| 0.0523 | top planes 1288:wall:49 234:wall:48 120:floor:18 25:wall:43 19:wall:44
+def_S6300: TEAR 744 (hole 470, seethrough 274) black 0 | base 99 seam 279 panel 366 | cam half=0.5 ys=-1 med|dz| 0.0377 | top planes 611:wall:43 115:wall:48 11:wall:45 6:wall:49 1:floor:18
+no_border_pin_B: TEAR 2943 (hole 428, seethrough 2515) black 0 | base 666 seam 1475 panel 802 | cam half=0.5 ys=-1 med|dz| 0.0532 | top planes 2736:wall:49 173:floor:18 34:wall:44
+no_corner_ride_A: TEAR 2343 (hole 792, seethrough 1551) black 0 | base 594 seam 1085 panel 664 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1486:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
+no_corner_ride_B: TEAR 3272 (hole 486, seethrough 2786) black 0 | base 694 seam 1490 panel 1088 | cam half=0.5 ys=-1 med|dz| 0.0529 | top planes 2959:wall:49 137:wall:45 90:wall:44 86:wall:48
+no_edge_A: TEAR 1528 (hole 558, seethrough 970) black 1 | base 316 seam 277 panel 935 | cam half=0.5 ys=-1 med|dz| 0.0231 | top planes 790:wall:49 457:wall:43 162:wall:45 104:wall:48 15:wall:41
+no_edge_B: TEAR 3680 (hole 549, seethrough 3131) black 0 | base 466 seam 715 panel 2499 | cam half=0.5 ys=-1 med|dz| 0.0361 | top planes 1892:wall:49 1348:wall:44 311:wall:45 126:wall:48 3:wall:41
+no_fold_relax_A: TEAR 3183 (hole 1671, seethrough 1512) black 0 | base 1190 seam 1249 panel 744 | cam half=0.5 ys=-1 med|dz| 0.0526 | top planes 1873:wall:49 1021:wall:48 168:wall:43 94:wall:45 19:wall:44
+no_fold_relax_B: TEAR 3869 (hole 855, seethrough 3014) black 5 | base 1042 seam 1617 panel 1210 | cam half=0.5 ys=-1 med|dz| 0.0530 | top planes 3314:wall:49 194:wall:45 190:wall:48 171:wall:44
+no_front_orient_A: TEAR 2341 (hole 950, seethrough 1391) black 0 | base 505 seam 1207 panel 629 | cam half=0.5 ys=-1 med|dz| 0.0519 | top planes 1744:wall:49 452:wall:48 68:wall:45 57:wall:43 19:wall:44
+no_front_orient_B: TEAR 2737 (hole 477, seethrough 2260) black 0 | base 622 seam 1243 panel 872 | cam half=0.5 ys=-1 med|dz| 0.0531 | top planes 2229:wall:49 285:wall:44 137:wall:45 86:wall:48
+no_groove_front_A: TEAR 2343 (hole 792, seethrough 1551) black 0 | base 594 seam 1085 panel 664 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1486:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
+no_groove_front_B: TEAR 3272 (hole 486, seethrough 2786) black 0 | base 694 seam 1490 panel 1088 | cam half=0.5 ys=-1 med|dz| 0.0529 | top planes 2959:wall:49 137:wall:45 90:wall:44 86:wall:48
+no_groove_shade_pl_A: TEAR 2343 (hole 792, seethrough 1551) black 0 | base 594 seam 1085 panel 664 | cam half=0.5 ys=-1 med|dz| 0.0515 | top planes 1486:wall:49 452:wall:48 317:wall:43 68:wall:45 19:wall:44
