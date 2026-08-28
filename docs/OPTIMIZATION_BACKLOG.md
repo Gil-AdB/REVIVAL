@@ -98,6 +98,316 @@ failed. Nothing here.
   now that C1/C2/C3/C4/C5 are resolved.
 * **C8** (depth-sliced tile-vs-cone cull) — overlaps almost entirely with C5,
   which has now taken half the available cull prize. Marginal value ≤ 2 %.
+## 2026-08-28 — **CITY'S OUTER-VEC WAVE-1 KERNEL, THE FIRST ROUND EVER RUN ON IT: `lighting-w1` −24.2 % instructions, `renderFrame` −5.7 %, and the biggest candidate on the list is KILLED BY ITS OWN CENSUS.** DONE (six levers, all byte-null, four dialable)
+
+**THE TARGET.** `Render_DeferredLighting_Tile_OuterVec`
+(`FDS/RENDER/DeferredSurfaceKernel.cpp`) — the kernel city, fountain and crash
+select through `Scene::PreferOuterVec`. It is vectorised over PIXELS (8 px × 1
+light), takes **no shadow tap of any kind**, has no GGX lobe (so `--pbr` is
+structurally inert in it), and had **no instrument at all**: `FDS_OMNI_ABLATE`,
+`FDS_PIX_ABLATE`, `FDS_W2_ABLATE` and `FDS_W1LDR_ABLATE` all live inside
+`TileT` / `TileFill`, which this kernel never enters. Read-only analysis:
+`docs/PERF_LIGHTINGW1_ANALYSIS.md` (branch `rev-w1analysis`); implementation:
+branch `rev-w1impl`.
+
+### The instrument, built first
+
+`-DFDS_OVEC_ABLATE=n` (11 per-group stages), `-DFDS_OVEC_OMNI_ABLATE=n` (5
+per-light stages), `-DFDS_OVEC_CENSUS=ON` (runtime `--omni_census`). All
+compile-time with `if constexpr` and a cumulative sink, for the reason 16l
+documented: a *runtime* predicate in this body cost **+4.3 % with the flag OFF**.
+The shipping build emits none of it. `--deferred_gloss_stats` also gained a map
+census (materials / normalMap / roughMap / metalMap / Reflection>0) rather than
+a new flag.
+
+### The ladder — city t=1961, 1512×848, `--env_live_water --deferred --city_env_pixel`
+
+Row = **0.955 Gi/f** on the C1+C8 build (the analysis said 0.957 — it reproduces).
+
+| stage adds | Gi/f | Δ | % of row |
+|---|--:|--:|--:|
+| z + alive/in-range masks | 0.016 | 0.016 | 1.7 |
+| + mat32 / matID / bounds | 0.016 | 0.000 | 0.0 |
+| **+ the per-lane material gather** | 0.108 | **0.092** | **9.6** |
+| + 8-wide octahedral normal decode | 0.122 | 0.014 | 1.5 |
+| + nmap / TBN lane loop + SH | 0.142 | 0.020 | 2.1 |
+| + view-space position reconstruct | 0.149 | 0.007 | 0.7 |
+| + texel/ambient loads, masks, anyVecLane | 0.174 | 0.025 | 2.6 |
+| **+ THE OMNI LOOP** | 0.650 | **0.476** | **49.8** |
+| + 250 saturate + tex·lit/256 | 0.673 | 0.023 | 2.4 |
+| + needsScalar + 11 scratch store-outs | 0.681 | 0.008 | 0.8 |
+| + 8-wide env front-end | 0.718 | 0.037 | 3.9 |
+| **+ the per-lane PACK loop (full)** | 0.955 | **0.237** | **24.8** |
+
+The analysis's static estimate of ~47 % for the omni loop was right. **Its ~5 %
+for the pack was not** — the pack is a QUARTER of the row, because 36 % of
+city's alive lanes carry an env store and take the scalar env compose
+(`EnvCubeFetchBil` ×1–2 + face pick + live-water tilt) inside it. That is the
+biggest un-attacked block left in this kernel and it belongs to the next round.
+
+### The census — three poses, and it settles the ranking
+
+`--omni_census` on a `-DFDS_OVEC_CENSUS=ON` build, city, his arm:
+
+| number | t=400 | t=1961 | t=2400 | decides |
+|---|--:|--:|--:|---|
+| material-**uniform** groups | 94.9 % | 95.0 % | 95.3 % | **C3** |
+| … uniform AND all 8 lanes alive | 91.0 % | 90.6 % | 87.8 % | C3's actual path |
+| `testz(omni_lane)` — light reaches NO lane | **39.6 %** | **37.4 %** | **28.5 %** | **C4** |
+| **f** = lanes wanting the scalar redo | **0.91 %** | **3.25 %** | **1.06 %** | **C6 — KILLED** |
+| … of those, lanes that DUPLICATE a vec diffuse | 0.06 % | 0.30 % | 0.01 % | C6 again |
+| all-plain groups (no scalar, no env lane) | 61.0 % | 57.7 % | 63.1 % | **C7** |
+| alive lanes carrying an env store | 35.3 % | 36.2 % | 33.0 % | the next round |
+| lights / tile · spots / tile | 15.2 · 4.0 | 23.8 · 6.6 | 11.8 · 1.2 | C5 |
+
+**C6 IS CLOSED BY CENSUS, and with it the C6a look call.** The analysis set its
+own kill line at *f* < 0.08 and predicted ~18 % of the row at *f* = 0.30;
+measured *f* is **0.0091 to 0.0325**, 2.5–9× under the line. Worse for the
+candidate: the redo only *duplicates* a vec diffuse in a group that also has a
+vec lane, and that is **0.01–0.30 % of alive lanes** — the kernel's own
+`anyVecLane` early-out (`needVec = ~needScalar & alive`, `omniLoopN = 0` when
+empty) already collects the all-spec case. **C6a — unifying the vec
+`_mm256_rsqrt_ps` with the scalar `fast_rsqrt`, which would move every city
+pixel — is therefore NOT WORTH PROPOSING as a perf item.** It remains a
+standalone correctness/look question for Gil-Ad and `SHADING_CONTRACT.md`: the
+two paths still disagree by up to ±0.3 % with LUT-cell stepping. Not built, not
+landed.
+
+Also settled: the `×2` on `PERF_STATE.md`'s `lighting-w1` row is **two
+main-view-sized dispatches per frame** (city's mirrored water pass, then the
+main view). The census prints one block per dispatch; the mirrored one carries
+**zero** env lanes and a much higher `testz` rate (56.2 % at t=1961).
+
+### What landed
+
+Six levers. **All six are byte-null**; C1 and C8 ship flagless (16h/16m/16o
+precedent: a dial costs more than the mechanism), the four in the hot loop carry
+dials so a future round can A/B them on ONE binary.
+
+| # | lever | flag | mechanism |
+|---|---|---|---|
+| C1 | publish `sEnvVecDiagOff` + hoist 4 per-group flag reads + `testz`-gate the env uniformity scan | *flagless* | 16m's defect verbatim: a function-local `static` with a dynamic initializer **inside the per-8-pixel-group loop** forces `bl __cxa_guard_acquire` into the function |
+| C8 | skip the per-lane nmap/TBN loop and its store/reload when the scene has no normal map | *flagless* | `ctx.anyNormalMap`, one table scan per frame beside `shadowSkipMask`. **City: 138 materials, ZERO normal maps** (also zero rough, zero metal, 78 Reflection>0, 14 Specular>0 all at gloss 64) |
+| C4 | `testz(omni_lane) → continue` | `--deferred_ovec_light_skip` | 28–40 % of (group×light) pairs reach no lane; the three rejects are spatially correlated across 8 adjacent pixels |
+| C3 | ONE `Material` walk per uniform group + vec texel unpack | `--deferred_ovec_mat_uniform` | 95 % of groups uniform; uniformity tested on `m >> 20` (matID **and** mip) |
+| C2 | template the dead mirror compare out of the light loop | `--deferred_ovec_nomirror` | both operands provably constant zero; predicate asserted BOTH ways, dispatched by generic-lambda tag so it is outside the loop |
+| C7 | one 256-bit store for an all-plain group | `--deferred_ovec_vec_pack` | 58–63 % of groups; clamp in FLOAT before `cvttps` |
+
+### Measured — predicted vs measured, min-of-5 interleaved, Ginstr floor ±0.14 %
+
+Per-lever, **ONE binary, flag flips**, city t=1961; ALL-OFF arm = 0.983 Gi/f:
+
+| lever | predicted (analysis) | **measured, % of row** | % of `renderFrame` |
+|---|--:|--:|--:|
+| C4 | 2.4–10 % | **−9.2 %** (0.983→0.893) | −1.9 % |
+| C3 | 4.8 % | **−8.0 %** (0.983→0.904) | −1.7 % |
+| C2 | 4.1 % | **−4.8 %** (0.983→0.936) | −1.2 % |
+| C7 | 1.9 % | **−2.7 %** (0.983→0.956) | −0.6 % |
+| all four | — | **−24.6 %** (0.983→0.741) | −5.8 % |
+
+Nearly perfectly additive (singles sum 0.243, combined 0.242). **Every one beat
+its prediction**, and C4/C3 beat theirs because the ladder shows the omni loop
+and the gather are both bigger than the static estimate assumed.
+
+End-to-end against the **fog-wt parent `e017d611`**, both binaries built in this
+one worktree, interleaved, min-of-5:
+
+| pose | `lighting-w1` Gi/f | | `Gcyc/f` | | IPC | `renderFrame` Gi/f | |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| city t=1961 | 0.978 → **0.741** | **−24.2 %** | 0.244 → 0.187 | −23.4 % | 4.01 → 3.96 | 4.183 → **3.945** | **−5.7 %** |
+| city t=2400 | 0.390 → **0.328** | **−15.9 %** | 0.104 → 0.080 | −23.1 % | 3.75 → 4.10 | 2.255 → **2.191** | **−2.8 %** |
+| city t=400 | 0.734 → **0.538** | **−26.7 %** | 0.185 → 0.141 | −23.8 % | 3.97 → 3.81 | 3.175 → **2.978** | **−6.2 %** |
+| fountain t=2500 | 0.105 → **0.088** | **−16.2 %** | 0.029 → 0.025 | −13.8 % | 3.62 → 3.52 | 1.060 → 1.043 | −1.6 % |
+| **greets t=5743 (CONTROL)** | 1.477 → **1.477** | **0.00 %** | 0.382 → 0.379 | −0.8 % | 3.87 → 3.90 | 3.643 → 3.642 | −0.03 % |
+
+**Cycles agree with instructions and IPC barely moves** — this is not the cube-
+prepass trap where instructions and cycles told different stories. greets is
+*exactly* flat, which is the control that proves the change is confined to the
+OuterVec kernel and does not touch the scalar wave-1 kernel greets and chase run.
+
+### Refuted / not landed, and why
+
+* **C6 (specular-only redo lane) + C6a (rsqrt unification)** — killed by census,
+  see above. *f* = 0.91–3.25 % against its own 8 % kill line.
+* **C1+C8 in isolation — MEASURED ON ITS OWN BINARY, and 16m's mechanism
+  reproduces.** A dedicated build of `187355b5` against the parent, interleaved,
+  min-of-5: city t=1961 `lighting-w1` **0.977 → 0.953 Gi/f (−2.5 %)** but
+  **0.243 → 0.231 Gcyc/f (−4.9 %)**; t=400 **0.733 → 0.709 (−3.3 %) Gi** and
+  **0.186 → 0.180 (−3.2 %) Gcyc**. Predicted 1.5–4 % combined; measured 2.5–4.9 %.
+  **The cycle win exceeding the instruction win at t=1961 is exactly 16m's
+  signature** (16m measured Gi −0.96 to 0.00 % against Gcyc −1.17 to −2.85 %) —
+  this is a register/frame effect, not an instruction-count one, and the
+  disassembly says so directly:
+
+  | binary | instrs in the symbol | `cxa_guard` refs | `bl` calls | callee-save `stp` pairs |
+  |---|--:|--:|--:|--:|
+  | parent `e017d611` | 3533 | **2** | **13** | **10** |
+  | C1+C8 `187355b5` | 3490 | **0** | **6** | **9** |
+  | full round | 3677 | 0 | 6 | 11 |
+
+  Publishing the lazy static removed both guard references, took the call count
+  from 13 to 6 and freed a callee-save pair — the same structural table 16m used.
+  An earlier draft of this entry called C1+C8 "a wash"; that reading came from
+  comparing the parent against the FULL child with its four dials forced OFF,
+  which carries their OFF-arm cost (see the next bullet) and is not the C1+C8 arm.
+* **The OFF-arm of the four dials reads 2.9 % above the C1+C8 build** (0.955 →
+  0.983), which is why the per-lever column above is quoted against the ALL-OFF
+  arm and the headline against the parent. **THIS ENTRY ORIGINALLY CALLED THAT
+  2.9 % RECOVERABLE BY GOING FLAGLESS. THAT WAS WRONG AND ROUND 2 MEASURED IT:
+  collapsing C3/C4/C7 to compile-time `true` is worth −0.19 to −0.27 % of the
+  row**, i.e. at the ±0.14 % Ginstr floor. Clang had already hoisted the
+  loop-invariant bools; the disassembly shows exactly two `adrp` disappearing
+  (the two flag-array address materialisations) and one callee-save pair freed,
+  and retired instructions barely move. The 2.9 % was the OFF arm *executing the
+  slow paths*, plus LTO layout — not the dial reads. The collapse is kept anyway
+  (byte-null, simpler hot body, campaign precedent) but it is a **refutation, not
+  a win**, and nobody should go looking for that 2.9 % again.
+* **C5 (hoist the spot cone's `_mm256_div_ps` to list-build time) — NOT BUILT.**
+  C4 already skips 28–40 % of pairs before the cone block ever runs, and the
+  census puts spots at 1.2–6.6 of 11.8–23.8 tile lights. The analysis predicted
+  ~0.3 % of the row on instructions and "larger on cycles"; with C4 in front of
+  it the instruction half is smaller still. Left on the backlog as the cheapest
+  remaining byte-null item.
+
+### The next round's target, named by this round's ladder
+
+**The pack loop, 24.8 % of the row, of which the env-lane scalar compose is the
+bulk: 33–36 % of city's alive lanes carry an env store** and each pays a face
+pick, a live-water weight, a tilt + re-projection, and one or two
+`EnvCubeFetchBil`. `EnvComposeCityVec8` already vectorises the *front end* of
+this (reflect dir, Fresnel, mip) and arms on 33–37 % of groups; the *fetch* is
+still eight scalar bilinear taps. That is the biggest single block left, and it
+is a different shape from anything the campaign has attacked.
+
+## 2026-08-28b — **ROUND 2 ON THE SAME KERNEL: the pack loop's env fetch goes 8-wide and city's `lighting-w1` reaches −27.5 % against the pre-campaign parent.** DONE (C9, C10; the flag collapse is a REFUTATION)
+
+Continuation of **2026-08-28**. Same target, same arm, same worktree
+(`rev-w1impl`), parent for all end-to-end numbers is still `fog-wt` `e017d611`.
+
+### 1. The flag collapse — REFUTED at −0.2 %
+
+Round 1 said "if a future round wants the last 2.9 %, collapse the four dials to
+flagless". Measured: **−0.19 to −0.27 % of the row**, which is the ±0.14 %
+Ginstr floor. Clang had already hoisted the loop-invariant bools out of both
+loops; the disassembly shows only **two `adrp` gone** (the flag-array address
+materialisations) and one callee-save pair freed, with static size actually
+*rising* 3677 → 4051 as the constant predicates let it specialise more. The
+2.9 % was the OFF arm running the slow paths plus LTO layout — never the dial.
+
+Kept anyway (byte-null, simpler body, 16h/16m/16o precedent), now as
+`-DFDS_OVEC_HATCH=ON` rebuild arms in the shape `--deferred_fill_oct_pair`
+already uses. Keep/drop, one line each:
+
+* `--deferred_ovec_light_skip` (C4) — **dropped**; its `&&` was evaluated per
+  (group × light), ~2.3 M times a frame.
+* `--deferred_ovec_mat_uniform` (C3) — **dropped**; per group, behind a movemask.
+* `--deferred_ovec_vec_pack` (C7) — **dropped**; per group, same shape.
+* `--deferred_ovec_nomirror` (C2) — **KEPT LIVE**; read once per TILE, and it is
+  the only way to force the `kMirror == true` instantiation on a scene that
+  allocates no mirror plane, i.e. the only way to byte-compare the two arms of
+  the templated loop from a shipping binary.
+
+### 2. The refreshed ladder — the pack loop GREW to 29.9 % of the row
+
+Round 1 shrank everything around it. City t=1961, 1512×848, row now 0.739 Gi/f:
+
+| block | Gi/f | % of row | was (round 1) |
+|---|--:|--:|--:|
+| **the omni loop** | 0.336 | **45.5** | 49.8 |
+| **the pack loop** | 0.221 | **29.9** | 24.8 |
+| everything through the material gather | 0.067 | 9.1 | 9.6 |
+| normal decode + view pos + texel/masks | 0.054 | 7.3 | — |
+| env front-end (`EnvComposeCityVec8`) | 0.042 | 5.7 | 3.9 |
+| saturate + compose + store-outs | 0.019 | 2.6 | 3.2 |
+
+A new **`-DFDS_OVEC_ENVDIAG=n`** ladder (byte-changing, cost instrument only,
+same status as `FDS_W1LDR_ABLATE`) splits the pack:
+
+| piece | Gi/f | % of row |
+|---|--:|--:|
+| 2× `EnvCubeFetchBil` — **the fetch** | 0.038 | **5.1** |
+| live-water weight + tilt + re-projection | 0.025 | 3.4 |
+| `EnvCube_DirToFaceUV` face pick | 0.014 | 1.9 |
+| everything else in the lane loop | 0.144 | 19.5 |
+
+### 3. The same-face census — measured BEFORE choosing the shape
+
+`--omni_census`, city, of the groups carrying a vec-env lane:
+
+| number | t=400 | t=1961 | t=2400 |
+|---|--:|--:|--:|
+| **all env lanes on ONE cube face** (after the live-water tilt) | **95.9 %** | **96.2 %** | **90.2 %** |
+| same face **and** same mip level | 95.9 % | 96.2 % | 90.2 % |
+| vec-env lanes per such group | 7.43 | 7.59 | 7.37 |
+| lanes needing BOTH mip levels | **100 %** | **100 %** | **100 %** |
+| live-water tilt fired | 42.4 % | 37.9 % | 26.1 % |
+| `EnvCubeFetchBil` calls / frame | 488 k | 498 k | 287 k |
+
+Same-face implies same-mip 100 % of the time — gloss is per-material and 95 % of
+groups are material-uniform. The shape was justified before a line was written.
+
+### 4. What landed
+
+**C9 — `EnvCubeFetchBil8`.** The whole bilinear for eight lanes sharing one face
+and one level. The face pick and live-water tilt move out of the lane loop into
+a pre-pass (same work, same order, hoisted only so the uniformity test can see
+all eight answers); a mixed-face group falls back to the scalar fetch reading the
+face/uv the pre-pass already computed, so it is never worse.
+
+**C10 — 8-wide pack for an ENV group.** C7 only ever fired for the 58–63 % of
+groups with NO env lane; C9 leaves the env texel in arrays, so the other third
+packs 8-wide too. It reproduces the scalar's **order of rounding**, which is not
+C7's: the scalar truncates each term with `int()` and clamps the INTEGER SUM, so
+this is two `cvttps` + int add + int `min`/`max`, deliberately different from
+C7's float-clamp-before-convert (right for a single term, wrong for two).
+
+**Byte-exactness held on the FIRST try, no tuning**, on three details worth
+keeping: `u*fr - 0.5f` is a *contracted* fmsub under `-ffp-contract=fast`;
+`if (px < 0) px = 0` must be `_mm256_max_ps(zero, px)` and **not**
+`max_ps(px, zero)`, because maxps returns its second operand when unordered and
+the scalar leaves a NaN alone; and the inter-level lerp keeps `lf` **per lane**,
+because `lvlF` can differ inside one integer level even when `lvl0` agrees.
+
+### 5. Predicted vs measured
+
+| lever | predicted (% of row) | measured (% of row) | % of `renderFrame` |
+|---|--:|--:|--:|
+| flag collapse | "up to 2.9" | **−0.19 to −0.27** | ~0 — **REFUTED** |
+| C9 8-wide fetch | 3.4 | **−2.1 to −3.2** | −0.32 to −0.60 |
+| C10 8-wide env pack | 1.5 | **−1.4 to −2.2** | −0.24 to −0.37 |
+| C9 + C10 | 4.9 | **−4.1 to −5.4** | **−0.64 to −0.97** |
+
+**End-to-end, round 1 + round 2 against `e017d611`**, both binaries in one
+worktree, interleaved, min-of-5, Ginstr floor ±0.14 %:
+
+| pose | `lighting-w1` Gi/f | | `Gcyc/f` | | `renderFrame` Gi/f | |
+|---|--:|--:|--:|--:|--:|--:|
+| city t=1961 | 0.978 → **0.709** | **−27.5 %** | 0.245 → 0.180 | −26.5 % | 4.184 → **3.915** | **−6.4 %** |
+| city t=400 | 0.733 → **0.508** | **−30.7 %** | 0.185 → 0.127 | −31.4 % | 3.174 → **2.949** | **−7.1 %** |
+| city t=2400 | 0.390 → **0.315** | **−19.2 %** | 0.103 → 0.083 | −19.4 % | 2.255 → **2.180** | **−3.3 %** |
+| fountain t=2500 | 0.105 → **0.090** | **−14.3 %** | 0.029 → 0.025 | −13.8 % | 1.061 → 1.045 | −1.5 % |
+| **greets t=5743 (control)** | 1.478 → **1.476** | **−0.14 %** | 0.379 → 0.383 | +1.1 % | 3.644 → 3.640 | −0.11 % |
+
+greets sits at the instruction floor, which is the control that keeps proving the
+work is confined to the OuterVec kernel.
+
+### 6. The next block, and it is now a different one
+
+The pack loop's **"everything else", 0.144 Gi/f / 19.5 % of the row**, is the
+largest piece this round did not price further, and C10 has just taken a bite out
+of it that the next ladder run should re-measure. After that the ranking is:
+
+1. **The omni loop, still 45.5 %.** C2 and C4 took ~29 % out of it; what remains
+   is ~64 NEON of genuinely per-(pixel × light) arithmetic on the 60–72 % of
+   pairs that survive C4. The only structural idea left is transposing it to
+   8 lights × 8 pixels, which is a different kernel, not a lever.
+2. **The live-water tilt, 3.4 %, and the face pick, 1.9 %** — both now sit in the
+   C9 pre-pass as per-lane scalar loops, both 8-wide-able. `EnvCube_DirToFaceUV`
+   is a max-abs select plus two divides; byte-exact vectorisation is plausible
+   but the face output feeds C9's own uniformity test, so it must stay per-lane
+   int. Worth ~1.5–3 % of the row if it works.
+3. **C5 (the spot-cone reciprocal) stays not-built**, for the round-1 reason:
+   C4 skips 28–40 % of pairs before the cone block runs at all.
 
 ## 2026-08-26 — **2026-08-25b IS FIXED: the mechanism is `Scene::PreferOuterVec`, not the tonemap — the outer-vec lighting kernel writes NO HDR radiance, so SSAO was multiplying a cleared buffer.** DONE (`--ssao_hdr_transport`, default 1)
 

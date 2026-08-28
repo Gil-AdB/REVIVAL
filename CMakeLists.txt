@@ -129,6 +129,31 @@ endif()
 
 # Wave-2 (checkerboard fill) census: where each odd cell goes — averaged,
 # full-shade fallback, or dropped. Shares the --omni_census runtime gate.
+# OuterVec wave-1 instruments (city / fountain / crash). Same compile-time shape
+# and the same reason: a runtime predicate in this pixel body costs about what a
+# micro-mechanism saves (2026-08-16h/16l).
+#   cmake -S . -B build-ovc -G Ninja -DFDS_OVEC_CENSUS=ON      (runtime --omni_census)
+#   cmake -S . -B build-abl -G Ninja -DFDS_OVEC_ABLATE=8       (per-group ladder)
+#   cmake -S . -B build-abl -G Ninja -DFDS_OVEC_OMNI_ABLATE=3  (per-light ladder)
+set(FDS_OVEC_ENVDIAG "0" CACHE STRING "OuterVec env-lane cost ladder stage (0 = shipping, BYTE-CHANGING otherwise)")
+add_compile_definitions(FDS_OVEC_ENVDIAG=${FDS_OVEC_ENVDIAG})
+option(FDS_OVEC_HATCH "Keep the OuterVec C3/C4/C7 levers as runtime flags (measurement only)" OFF)
+if(FDS_OVEC_HATCH)
+    add_compile_definitions(FDS_OVEC_HATCH=1)
+else()
+    add_compile_definitions(FDS_OVEC_HATCH=0)
+endif()
+option(FDS_OVEC_CENSUS "Compile the OuterVec wave-1 census hooks (--omni_census)" OFF)
+if(FDS_OVEC_CENSUS)
+    add_compile_definitions(FDS_OVEC_CENSUS=1)
+else()
+    add_compile_definitions(FDS_OVEC_CENSUS=0)
+endif()
+set(FDS_OVEC_ABLATE "0" CACHE STRING "OuterVec per-group ablation stage (0 = shipping)")
+add_compile_definitions(FDS_OVEC_ABLATE=${FDS_OVEC_ABLATE})
+set(FDS_OVEC_OMNI_ABLATE "0" CACHE STRING "OuterVec per-light ablation stage (0 = shipping)")
+add_compile_definitions(FDS_OVEC_OMNI_ABLATE=${FDS_OVEC_OMNI_ABLATE})
+
 option(FDS_W2_CENSUS "Compile the deferred wave-2 fill census hooks (--omni_census)" OFF)
 if(FDS_W2_CENSUS)
     add_compile_definitions(FDS_W2_CENSUS=1)

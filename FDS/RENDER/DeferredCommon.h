@@ -327,6 +327,15 @@ struct DeferredLightingCtx {
 	// Render_DeferredLighting; matID is 8-bit so 256 bits covers the table.
 	// Bit set == skips casting. Byte-identical: same predicate, same Material*.
 	uint64_t             shadowSkipMask[4];
+	// "Some material in matTable carries a NormalMap." Same once-per-frame
+	// table scan as shadowSkipMask above, and for the same reason: the OuterVec
+	// kernel ran an 8-iteration per-LANE loop that re-derives matID, re-resolves
+	// Material* and tests Mat->NormalMap on EVERY 8-pixel group, wrapped in a
+	// store/reload round-trip of the three normal registers. When this is false
+	// the loop provably writes nothing and the reload is the identity, so both
+	// are skipped (byte-null by construction). CITY: 138 materials, ZERO normal
+	// maps (--deferred_gloss_stats). greets does carry them and takes the loop.
+	bool                 anyNormalMap;
 	// True when the tile kernels run INLINE on the calling thread (an
 	// offscreen bake: DeferredOverride::inlineDispatch). Then the kernel must
 	// NOT release renderns::tileDone and the dispatch loop must not acquire

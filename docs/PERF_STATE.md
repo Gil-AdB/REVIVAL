@@ -27,6 +27,18 @@
 > row in the campaign. On the shipped defaults it is now ~25 %; with both look
 > flags it is ~7 %.**
 
+> **2026-08-28: §00l below is the CURRENT COST MAP for the three arms Gil-Ad
+> actually runs**, and it supersedes §00 for those arms. **§00k and §00l are the
+> same day and they overlap on ONE row**: §00k took city's `lighting-w1`
+> −24.2 % *after* §00l's battery ran, so §00l's city column is a parent number
+> and says so in its own banner. Everything else in §00l stands. §00 benched greets
+> *flat* (no `--ssao`) and chase through the snapshot harness; both of his SSAO
+> arms are new ground, `ssao` did not exist as a row in §00, and four defaults
+> have moved since (`ssao_downscale` 1→2, `ssao_radius_zfloor` 0→48, the
+> HDR/SSAO transport fix, `refl_correct` ON). §00's *method* and its per-row
+> mechanism notes still stand and §00k cites them constantly. Read §00k for
+> "what costs what today" and §00/§00a–j for "why".
+>
 > **2026-08-15: §00 rows 1 and 5 are amended in place by the omni-loop ladder**
 > (`docs/OPTIMIZATION_BACKLOG.md` 2026-08-15). Row 1's `Ginstr/f` is confirmed
 > to 0.16 %; row 5's *share* is corrected upward and its attack is refuted.
@@ -43,6 +55,1135 @@
 > self-checking phase split of five poses across three scenes. The rest of the
 > document remains the best description of the *mechanism* (kernel structure, cube
 > tap, sampling modes, flag inventory) — read it for "how", read §0 for "how much".
+
+---
+
+## 00l. `lighting-w1` IN CITY, ROUND 2 (2026-08-28b): the pack loop's env fetch goes 8-wide — **−27.5 % instructions and −6.4 % of `renderFrame` cumulative** against the pre-campaign parent
+
+Continuation of §00k; same kernel, same arm, same worktree. Full account:
+`docs/OPTIMIZATION_BACKLOG.md` **2026-08-28b**.
+
+**THE LADDER MOVED.** Round 1 shrank everything around the pack loop, so the pack
+GREW as a share of the row — 24.8 % → **29.9 %** (0.221 of 0.739 Gi/f), second
+only to the omni loop's 45.5 %. A new `-DFDS_OVEC_ENVDIAG=n` ladder splits it:
+the two per-lane `EnvCubeFetchBil` calls are **5.1 % of the row** on their own,
+the live-water tilt 3.4 %, the face pick 1.9 %, and 19.5 % is the rest of the
+lane loop.
+
+**THE CENSUS CHOSE THE SHAPE.** Of the groups carrying a vec-env lane,
+**90.2–96.2 %** have every such lane on ONE cube face *after* the live-water
+tilt, at 7.4–7.6 env lanes per group, and **100 % of lanes need both mip levels**
+(2.00 fetches/lane, ~498 k a frame). Same-face implies same-mip 100 % of the
+time, because gloss is per-material and 95 % of groups are material-uniform.
+
+**LANDED: C9** (`EnvCubeFetchBil8` — the whole bilinear, eight lanes, one face,
+one level; face pick and live-water tilt hoisted to a pre-pass so the uniformity
+test can see all eight; scalar fallback for a mixed-face group) and **C10** (the
+8-wide pack extended to env groups, which C7 never covered — it reproduces the
+scalar's rounding ORDER: truncate each term, clamp the integer sum).
+
+| pose | `lighting-w1` Gi/f | `Gcyc/f` | `renderFrame` Gi/f |
+|---|---|---|---|
+| city t=1961 | 0.978 → **0.709** (−27.5 %) | 0.245 → 0.180 (−26.5 %) | 4.184 → **3.915** (−6.4 %) |
+| city t=400 | 0.733 → **0.508** (−30.7 %) | 0.185 → 0.127 (−31.4 %) | 3.174 → **2.949** (−7.1 %) |
+| city t=2400 | 0.390 → **0.315** (−19.2 %) | 0.103 → 0.083 (−19.4 %) | 2.255 → **2.180** (−3.3 %) |
+| fountain t=2500 | 0.105 → **0.090** (−14.3 %) | 0.029 → 0.025 | 1.061 → 1.045 (−1.5 %) |
+| **greets (control)** | 1.478 → **1.476 (−0.14 %)** | 0.379 → 0.383 | 3.644 → 3.640 |
+
+**REFUTED IN THIS ROUND, and §00k is corrected in place:** collapsing the four
+round-1 dials to flagless is worth **−0.19 to −0.27 % of the row**, at the
+±0.14 % Ginstr floor — not the 2.9 % §00k predicted. Clang had already hoisted
+the loop-invariant bools; the disassembly loses exactly two `adrp`. The 2.9 % was
+the OFF arm executing slow paths plus LTO layout.
+
+**Gates:** 13/13 pinned poses + `render_gate` 4/4 after every step, byte-exact on
+the first try.
+
+---
+
+## 00k. `lighting-w1` IN CITY — the OUTER-VEC kernel, first round ever run on it (2026-08-28): **−24.2 % instructions, −5.7 % of `renderFrame`**, and the row's shape is now measured, not estimated
+
+Branch `rev-w1impl` off `fog-wt` `e017d611`. Arm
+`--env_live_water --deferred --city_env_pixel`, 1512×848, `--bench=scene`,
+`--deferred_prof=1 --hw_prof`. Full account, census and refutations:
+`docs/OPTIMIZATION_BACKLOG.md` **2026-08-28**.
+
+`Render_DeferredLighting_Tile_OuterVec` is a **different kernel** from the
+`lighting-w1` this document's greets rows describe. greets and chase run
+`Render_DeferredLighting_TileT` (1 px × 1 light, full shadow tap, GGX);
+city / fountain / crash run OuterVec (8 px × 1 light, **no shadow tap of any
+kind**, no GGX lobe — `--pbr` is structurally inert in it). Six of the eleven
+landed greets `lighting-w1` levers are shadow-tap work and do not transfer.
+
+**THE ROW'S SHAPE, measured by `-DFDS_OVEC_ABLATE` (this round's new ladder;
+there was none before it).** City t=1961, row = 0.955 Gi/f:
+
+| block | Gi/f | % of row |
+|---|--:|--:|
+| **the omni loop** | 0.476 | **49.8** |
+| **the per-lane pack loop** | 0.237 | **24.8** |
+| the per-lane material gather | 0.092 | 9.6 |
+| the 8-wide env front-end | 0.037 | 3.9 |
+| everything else (masks, decode, view pos, compose, store-outs) | 0.113 | 11.8 |
+
+The two big blocks are the round's finding. The omni loop at ~50 % matched the
+analysis's static estimate; **the pack loop at 24.8 % did not** (estimated ~5 %),
+because **33–36 % of city's alive lanes carry an env store** and pay a scalar
+env compose inside the pack. That block is untouched and is the next target.
+
+**WHAT LANDED** — six byte-null levers (`--deferred_ovec_light_skip`,
+`--deferred_ovec_mat_uniform`, `--deferred_ovec_nomirror`,
+`--deferred_ovec_vec_pack`, plus two flagless), against the parent `e017d611`,
+both binaries in one worktree, interleaved, min-of-5, Ginstr floor **±0.14 %**:
+
+| pose | `lighting-w1` Gi/f | `Gcyc/f` | IPC | `renderFrame` Gi/f |
+|---|---|---|---|---|
+| city t=1961 | 0.978 → **0.741** (−24.2 %) | 0.244 → 0.187 (−23.4 %) | 4.01 → 3.96 | 4.183 → **3.945** (−5.7 %) |
+| city t=2400 | 0.390 → **0.328** (−15.9 %) | 0.104 → 0.080 (−23.1 %) | 3.75 → 4.10 | 2.255 → **2.191** (−2.8 %) |
+| city t=400 | 0.734 → **0.538** (−26.7 %) | 0.185 → 0.141 (−23.8 %) | 3.97 → 3.81 | 3.175 → **2.978** (−6.2 %) |
+| fountain t=2500 | 0.105 → **0.088** (−16.2 %) | 0.029 → 0.025 | 3.62 → 3.52 | 1.060 → 1.043 (−1.6 %) |
+| **greets t=5743 (control)** | 1.477 → **1.477 (0.00 %)** | 0.382 → 0.379 | 3.87 → 3.90 | 3.643 → 3.642 |
+
+Cycles track instructions and IPC barely moves — not the cube-prepass pattern
+where the two columns disagreed. greets is exactly flat, which proves the change
+is confined to the OuterVec kernel.
+
+> **ROUND 2 CORRECTION (§00l):** this section's closing recommendation — that a
+> future round collapse the four dials to flagless for the last 2.9 % — is
+> REFUTED. Measured at −0.19 to −0.27 % of the row, i.e. the Ginstr floor.
+
+**C1 + C8 alone** (the two flagless levers, own binary, interleaved min-of-5):
+t=1961 0.977 → 0.953 Gi/f (−2.5 %) and 0.243 → **0.231 Gcyc/f (−4.9 %)**; t=400
+−3.3 % Gi / −3.2 % Gcyc. Cycles beating instructions is 16m's signature, and the
+disassembly agrees: the OuterVec symbol goes from 2 `__cxa_guard` references,
+13 `bl` calls and 10 callee-save `stp` pairs to **0, 6 and 9**.
+
+**Gates:** 13/13 pinned poses + `render_gate` 4/4, and byte-nullity proved
+DIFFERENTIALLY on one binary — each lever flipped off individually and all four
+together reproduce the same hash at city t=1961, fountain t=2500, crash
+t=400/1200, and greets t=5743 forced through `--deferred_outer_vec` (the only
+arm that exercises the mirror-compare instantiation and the real normal-map lane
+loop).
+
+## 00l. 2026-08-28 — RANKED COST MAP AFTER THE SSAO/HDR ROUND. **§00 (2026-08-14) is superseded for the three arms Gil-Ad actually runs**: `ssao` did not exist as a row then and is now 14–25 % of two of the three arms, and chase's whole volumetric/AO/tonemap stack turns out to run **TWICE a frame**
+
+> ### ⚠ THE CITY ROWS ARE ALREADY ONE ROUND STALE — read §00k above first
+>
+> Every number here was measured on **`e017d611`**, and §00k's OuterVec round
+> landed on `fog-wt` the same day, **after** this battery ran. It takes city's
+> `lighting-w1` **−24.2 % instructions** and city's `renderFrame` **−5.7 %** at
+> t=1961. So this section's **city `lighting-w1` 11.924 ms, `renderFrame`
+> 53.710 ms and tick 65.550 ms are PARENT numbers.** The city rows' RANKING is
+> unaffected (`cones` 14.99 was already ahead of `lighting-w1` 11.92, and it
+> widens), and greets / chase are untouched — §00k's own greets control is
+> **exactly flat, 1.477 → 1.477 Gi/f**. Re-take the city column before quoting
+> its absolute ms. §00k measured at 1512×848 and this section at 1920×1080, so
+> the two are not directly subtractable.
+>
+> **One prediction in §00l.5 is CORRECTED by §00k and the correction is in
+> place** — see item 2's city paragraph. OuterVec has **no shadow tap of any
+> kind**, so "port the cube-tap wins to it" was the wrong mechanism; the
+> measured next target is its **per-lane pack loop, 24.8 % of the row**.
+
+**Read this section, not §00, for "what costs what today."** §00's *method* and its
+per-row mechanism notes still stand; its numbers were taken before four defaults
+moved (`ssao_downscale` 1→2, `ssao_radius_zfloor` 0→48, the HDR/SSAO transport
+fix, `refl_correct` ON) and — more importantly — **§00 never measured Gil-Ad's
+arms.** It benched greets *flat* (no `--ssao`) and chase through the snapshot
+harness. Both of his SSAO arms are new ground.
+
+Measured on `e017d611` (**fog-wt tip when this round started**; fog-wt has since
+advanced to `0dc730d5`, see the banner) in a private worktree `/Users/gil-ad/work/rev-perfmap`,
+branch `rev-perfmap`. One binary for every number in this section
+(md5 `27efffb1cce906f1706b0b3286971797`), one asset tree, committed `rev.cfg`
+(**1920×1080**, HiDPI 0), `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`,
+`--profiler=0`, 12 pool workers. **AC power, battery 100 % charged, no thermal
+or performance warning recorded by `pmset -g therm` before or after.**
+
+> **RESOLUTION CAVEAT.** These are 1920×1080 numbers. Gil-Ad's working tree's
+> `rev.cfg` currently says **1384×768** = 0.505× the pixels. Every per-pixel row
+> below (`ssao`, `lighting-w1/w2`, `cones`, `fastfog`, `water-glints`,
+> `tonemap-post`, `gbuf-clear`) roughly halves at his window; the geometry rows
+> (`Tick-Xfrm`, `Tick-Radix`, `face-bin`, `shadow-bake`, `Tick-ReflXfrm`) do
+> not. The RANKING is stable across that scale; the absolute ms are not.
+
+### THE INSTRUMENTS THAT LANDED WITH THIS ROUND (both byte-null, both proved)
+
+> **WHERE THEY LIVE.** Both instruments and all four battery drivers are on the
+> side branch **`rev-perfmap`** (commit `b818bb2c`), NOT on `fog-wt` — only this
+> document merged. They are byte-null and gate-verified against seven pins (see
+> below), so merging them is a judgement call for the owner, not a risk; the
+> numbers in this section cannot be reproduced on `fog-wt` without them.
+
+1. **`--bench=scene@scene=chase,...` exists now** (`DEMO/Snapshot.cpp`,
+   `RunSceneBench`). chase had no bench arm, so every prior round drove it
+   through `--snapshot=chase@t=<t repeated N times>`, which interleaves a 6 MB
+   `write_ppm` between ticks — usable for `[DPROF]` (those scopes live *inside*
+   `tick()`) but useless as a **whole-tick clock**. chase now has the same
+   `mean ms/iter` instrument greets and city have.
+2. **city and chase tick work outside `renderFrame` is now attributed**
+   (`DEMO/CITY.CPP`, `DEMO/CHASE.CPP`): depth-3 `TailProf` scopes
+   `Tick-Clear` / `Tick-SkyCube` / `Tick-Anim` / `Tick-Light` / `Tick-ReflXfrm` /
+   `Tick-Xfrm` / `Tick-Radix` / `Tick-ShadowBake`, mirroring the ones greets has
+   had since 2026-08. **This cut the unaccounted residue from 10.9 % → 5.0 % of
+   the city tick and 9.0 % → 3.3 % of chase's.**
+
+**GATES on the instrumented binary** (it is the binary every number here was
+taken on, so this matters): greets acceptance pin t=5743
+**`440aa6bbb350ae95fbacf339dd2ad957`** reproduces; the five chase default pins
+**`f16bedd0` / `fcc9d561` / `397b878d` / `3539492d` / `0622d56e`** all reproduce;
+city `FDS_CITY_ENV_PIXEL=1` t=1961 **`bd4ffbf87d1492175a9b6c1111fb3f5f`**
+reproduces. **The instrumentation is byte-null.**
+
+> **METHOD SCAR, recorded so nobody loses an hour to it again:** the chase pin
+> recipe is `--snapshot=chase@t=100,400,800,1200,1600` **as one process**.
+> Running a SUBSET of those timestamps (I tried `t=100,800,1600`) gives
+> different hashes at every pose but the first — chase's driver accumulates
+> across ticks, so t=800 rendered after t=400 is not t=800 rendered after t=100.
+> The five-value list is part of the pin, not a convenience.
+
+### MEASUREMENT CONDITIONS AND NOISE FLOORS — read before quoting any number
+
+Every table says min-of-N with the arms **interleaved and order-rotated every
+round**, round 0 discarded. "floor" = `(2nd-min − min) / min`, the within-arm
+spread of the estimator itself.
+
+| battery | rounds | iters/run | 1-min load during | trust |
+|---|--:|--:|---|---|
+| **§00l.1–2 phase map** (5 arms) | 12, round 0 dropped | 24 | **3.9 → 9.5** | headline ms + splits |
+| §00l.2 hardware counters | 6, round 0 dropped | 24 | 7.8 → 8.6 | `Ginstr/f`, `IPC` (load-robust) |
+| §00l.4 flag ladders L1–L5 | 7, round 0 dropped | 24 | 8.7 → 13.7 | **deltas only** |
+| §00l.4 GTAO ladder L6–L7 | 7, round 0 dropped | 24 | **17.7 → 27.2** | **deltas only, and coarsely** |
+| between-binary floor | 7, round 0 dropped | 24 | 9.2 → 14.6 | the floor figure itself |
+
+**The box was NOT quiet.** Two other agents were building and benchmarking on it
+through most of this round; the load column is not decoration. What that buys
+and costs:
+
+* **The within-arm floors are still excellent** — 0.0–1.4 % on almost every
+  headline row (`greets t=5743 ssao` +0.28 %, `chase t=800 cones` +0.12 %,
+  `city cones` +0.05 %). The min-of-11 estimator is doing its job; a descheduled
+  worker inflates the mean, not the minimum, and the minimum is what is printed.
+* **Relative rankings and phase splits survive contention.** They are ratios
+  inside one process, and the `Ginstr/f` column (load-robust by construction)
+  agrees with them everywhere I checked.
+* **Absolute ms were the part to distrust, and they were re-verified.** The
+  whole 12-round battery was re-run at the end of the session under a
+  **box-quiet protocol** — poll `pgrep` for builds and benches until the box is
+  idle, then start; record load and battery before and after. It started at
+  1-min load **2.89** with zero build/bench processes (and finished at 19.03,
+  which is mostly the battery's own 12 workers). **The two batteries agree:**
+
+| arm | tick, loaded battery | tick, quiet-start | Δ | `renderFrame` loaded | quiet-start | Δ |
+|---|--:|--:|--:|--:|--:|--:|
+| greets t=5743 | 56.536 | 56.590 | **+0.10 %** | 46.639 | 47.328 | +1.48 % |
+| greets t=5965 | 48.090 | 48.553 | +0.96 % | 42.477 | 42.461 | −0.04 % |
+| city t=1961 | 65.550 | 65.886 | +0.51 % | 53.710 | 53.976 | +0.50 % |
+| chase t=1105 | 45.956 | 46.508 | +1.20 % | 42.291 | 42.757 | +1.10 % |
+| chase t=800 | 55.536 | 55.725 | +0.34 % | 42.912 | 42.846 | −0.15 % |
+
+  **Every whole-tick figure reproduces inside +1.2 %, and every headline phase
+  row inside ±3.6 %.** Only two rows move more than 1.5 % between the batteries,
+  and both are ones this section already calls out for their own reasons:
+  `gbuffer` (+3.58 % greets, +3.55 % chase t=1105 — the load-sensitive raster
+  phase) and greets' `RTT` (−2.66 %, a 1.7 ms dispatch row). `ssao` reproduces
+  to **+0.16 / +0.03 / −0.07 %**, `cones` to **+0.22 / +0.24 %**, `fastfog` to
+  **+0.27 %**, `lighting-w2` **exactly**. **The min-of-11 estimator was not
+  materially contaminated**, which is what the tight within-arm floors already
+  suggested. The tables in §00l.1–2 quote the LOADED battery (it has the same
+  arms and the same round count); use the column above as the error bar.
+* The ladder batteries (§00l.4) were **not** re-run quiet. They are same-binary
+  flag flips read as deltas inside one interleaved batch, and their base arms
+  agree across batches to 0.3 % (L1 base `ssao` 7.757 vs L6 base 7.737) — but
+  quote them as deltas, not as absolute ms.
+* Two rows carry a visibly worse floor and are flagged in place:
+  `greets gbuffer` (+5.3 %) and `chase t=1105 gbuffer` (+5.9 % in the L2
+  ladder) — the raster phase is the one that reacts to a busy box, which is
+  itself consistent with it being the parallelism-bound phase (below).
+
+**Between-binary floor.** The instrumented binary vs a control built from
+pristine sources in the same worktree, same flags, same arms, 7 rounds
+interleaved: greets tick **−0.45 %**, greets `renderFrame` **−0.43 %**, city tick
+**+0.16 %**, city `renderFrame` **+0.86 %**, and on a single phase (`gbuffer`)
+**±2.6 %**. So: **a cross-binary claim under ~1 % of frame is not a claim**, and
+under ~3 % on one phase is not a claim. Same-binary flag flips (everything in
+§00l.4) do not pay this floor and are quoted at their own floors.
+
+---
+
+### 00l.1 — THE THREE ARMS, WHOLE FRAME
+
+His arms, verbatim:
+
+```
+greets  --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace
+city    --env_live_water --deferred --city-env-pixel
+chase   --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao
+```
+
+`--bench=scene@scene=<s>,t=<t>,iters=24 <arm> --profiler=0 --deferred_prof=1 --strict_flags`
+
+| arm / pose | whole tick (ms/f) | floor | `renderFrame` | floor | `renderFrame` calls/f | outside `renderFrame`, attributed | UNACCOUNTED | unacc. % of tick |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| **greets t=5743** | **56.536** | +0.72 % | 46.639 | +1.39 % | 1 | 5.845 | 4.052 | 7.2 % |
+| **greets t=5965** | **48.090** | +0.35 % | 42.477 | +0.08 % | 1 | 3.089 | 2.524 | 5.2 % |
+| **city t=1961** | **65.550** | +0.58 % | 53.710 | +0.63 % | 2 (+1 off-view) | 8.566 | 3.274 | 5.0 % |
+| **chase t=1105** | **45.956** | +0.81 % | 42.291 | +0.45 % | 2 (+1 off-view) | 2.160 | 1.505 | 3.3 % |
+| **chase t=800** | **55.536** | +0.46 % | 42.912 | +0.42 % | 2 (+1 off-view) | 10.323 | 2.301 | 4.1 % |
+
+**`renderFrame` calls/f is the single most load-bearing column in this table and
+it is new.** city and chase each run **two main-view `renderFrame` calls a
+frame** (the water-reflection pass and the main pass) plus one off-main-view
+pass. `wall_min` for every row below is the **per-frame total over both calls** —
+it is not a per-pass number. What differs between the two scenes is what the
+reflection pass is allowed to skip, and that is §00l.5 item 1.
+
+The remaining UNACCOUNTED residue (1.5–4.1 ms) is, in order of size:
+the off-main-view `renderFrame` (`off wall` reads ≈0.74 ms chase, ≈0.82 ms city
+in the same runs), `Flip`/`clearFrame` tails, `Dynamic_Camera`,
+`Reflective_AnimateTexture`, `riskOfRain`, `driveBlasters`/`BlasterBolts_Draw`,
+and greets' `ShadowBake_DispatchGreets` overlap window. **None of it is a single
+big item**; I did not chase it below ~1 ms/row because nothing in it can be
+larger than the residue.
+
+---
+
+### 00l.2 — THE PHASE SPLIT, PER POSE, RANKED
+
+`wall_min` in ms per FRAME (both `renderFrame` calls where calls/f = 2).
+`core-ms` = `thrsum_avg`, the Σ of tile-task time; `effPar` = core-ms / wall =
+workers actually kept busy out of 12. `Ginstr/f` and `IPC` are from the
+separate hardware-counter battery (box calibration: **IPC ≈2.42 compute-bound,
+≈0.96 L1-latency, ≈0.14 L2-latency**).
+
+#### greets t=5743 — tick 56.536, `renderFrame` 46.639
+
+| row | depth | wall_min | floor | % of `renderFrame` | core-ms | effPar | Ginstr/f | IPC |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| `DeferredLighting-call` | 1 | **22.133** | +0.17 % | 47.5 % | – | – | 2.793 | 3.99 |
+| ⤷ `lighting-w1` | 2 | **17.899** | +0.04 % | 38.4 % | 207.7 | 11.2 | 2.385 | 3.89 |
+| ⤷ `lighting-w2` | 2 | 2.385 | +0.04 % | 5.1 % | 27.0 | 10.8 | 0.386 | 4.74 |
+| ⤷ `mirror-grid` | 2 | 0.689 | +2.32 % | 1.5 % | – | – | – | – |
+| ⤷ `depth-bounds` | 2 | 0.288 | +0.35 % | 0.6 % | – | – | – | – |
+| `gbuffer` | 1 | **10.721** | +5.33 % | 23.0 % | 119.1 | 9.6 | 1.373 | 3.87 |
+| **`ssao`** | 1 | **7.728** | +0.28 % | **16.6 %** | – | – | 0.962 | 3.73 |
+| `shadow-bake` | 3 | 1.801 | +1.61 % | – | 13.3 | 6.7 | 0.135 | 3.28 |
+| `bloom-chain` | 1 | 1.736 | +0.86 % | 3.7 % | – | – | 0.218 | 4.54 |
+| `RTT` | 3 | 1.693 | +0.77 % | – | – | – | 0.020 | 2.38 |
+| `cones-call` | 1 | 1.116 | +1.16 % | 2.4 % | 10.4 | 6.9 | 0.142 | 4.32 |
+| `Tick-Light` | 3 | 0.809 | +0.37 % | – | – | – | – | – |
+| `tonemap-post` | 1 | 0.668 | +0.30 % | 1.4 % | – | – | 0.060 | 2.67 |
+| `Tick-Xfrm` | 3 | 0.448 | +1.56 % | – | – | – | – | – |
+| `StampMasks` | 3 | 0.432 | +6.94 % | – | – | – | 0.003 | 1.95 |
+| `TBR-render` | 1 | 0.408 | +0.25 % | 0.9 % | – | – | – | – |
+| `gbuf-clear` | 1 | 0.333 | +2.40 % | 0.7 % | – | – | 0.005 | **0.58** |
+| `Tick-Radix` | 3 | 0.293 | +0.68 % | – | – | – | – | – |
+| `hdr-begin` | 1 | 0.259 | +0.00 % | 0.6 % | – | – | – | – |
+| `xpar-peel` | 1 | 0.245 | +1.63 % | 0.5 % | – | – | – | – |
+| `hdr-activate` | 1 | 0.187 | +1.60 % | 0.4 % | – | – | – | – |
+| `OTHER (unattributed)` | 1 | 0.142 | – | 0.3 % | – | – | – | – |
+| `shadow-uniformity` | 3 | 0.119 | +5.88 % | – | – | – | – | – |
+| `GreetsCodeStage` | 3 | 0.115 | +0.00 % | – | – | – | – | – |
+| `face-bin` | 1 | 0.110 | +2.73 % | 0.2 % | – | – | – | – |
+| `Tick-Logic` | 3 | 0.105 | +0.95 % | – | – | – | – | – |
+| `tile-cull` / `strip-lists` | 2 | 0.079 / 0.079 | – | 0.2 % ea | – | – | – | – |
+| `sprite-insert` | 1 | 0.061 | +1.64 % | 0.1 % | – | – | – | – |
+| `Tick-Anim` | 3 | 0.030 | +6.67 % | – | – | – | – | – |
+| `light-list` / `w1-enqueue` | 2 | 0.020 / 0.016 | – | 0.0 % | – | – | – | – |
+
+#### greets t=5965 — tick 48.090, `renderFrame` 42.477
+
+The same frame minus the cones and the RTT. `ssao` does **not** shrink.
+
+| row | wall_min | floor | % of `renderFrame` | Ginstr/f | IPC |
+|---|--:|--:|--:|--:|--:|
+| `DeferredLighting-call` | **20.374** | +0.32 % | 48.0 % | 2.523 | 3.94 |
+| ⤷ `lighting-w1` | **16.149** | +0.07 % | 38.0 % | 2.114 | 3.82 |
+| ⤷ `lighting-w2` | 2.384 | +0.13 % | 5.6 % | 0.388 | 4.79 |
+| `gbuffer` | **9.953** | +0.02 % | 23.4 % | 1.238 | 3.96 |
+| **`ssao`** | **7.702** | +0.05 % | **18.1 %** | 0.963 | 3.75 |
+| `shadow-bake` (d3) | 1.852 | +0.16 % | – | 0.146 | 3.31 |
+| `bloom-chain` | 1.762 | +0.91 % | 4.1 % | 0.218 | 4.47 |
+| `mirror-grid` | 0.686 | +0.15 % | 1.6 % | – | – |
+| `tonemap-post` | 0.667 | +0.15 % | 1.6 % | 0.060 | 2.67 |
+| `StampMasks` (d3) | 0.459 | +1.09 % | – | – | – |
+| `cones-call` | 0.375 | +0.00 % | 0.9 % | 0.037 | 4.16 |
+| `Tick-Xfrm` (d3) | 0.345 | +1.16 % | – | – | – |
+| `gbuf-clear` | 0.335 | +0.30 % | 0.8 % | – | **0.58** |
+| `depth-bounds` | 0.271 | +1.85 % | 0.6 % | – | – |
+| `RTT` (d3) | **0.001** | – | – | – | – |
+
+#### city t=1961 — tick 65.550, `renderFrame` 53.710 (2 main passes)
+
+| row | depth | wall_min | floor | % of `renderFrame` | core-ms | effPar | Ginstr/f | IPC |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| `cones-call` (1 call/f) | 1 | **15.022** | +0.11 % | 28.0 % | – | – | 2.082 | 3.99 |
+| ⤷ `cones` | 2 | **14.990** | +0.05 % | 27.9 % | 176.5 | 11.3 | 2.082 | 3.99 |
+| `DeferredLighting-call` | 1 | **13.023** | +0.34 % | 24.2 % | – | – | 1.586 | 3.99 |
+| ⤷ `lighting-w1` | 2 | **11.924** | +0.37 % | 22.2 % | 132.2 | 10.6 | 1.578 | 4.01 |
+| `fastfog` (1 call/f) | 1 | **8.977** | +0.55 % | 16.7 % | – | – | 1.070 | 3.60 |
+| ⤷ `fog-composite` | 2 | 4.571 | +0.61 % | 8.5 % | – | – | 0.578 | 3.93 |
+| ⤷ `fog-columns` | 2 | 3.635 | +0.14 % | 6.8 % | – | – | 0.400 | 3.17 |
+| ⤷ `fog-glow` | 2 | 0.701 | +0.86 % | 1.3 % | – | – | – | – |
+| `gbuffer` | 1 | **6.861** | +0.85 % | 12.8 % | 48.8 | **6.6** | 0.571 | 3.79 |
+| `TBR-render` | 1 | **6.510** | +0.52 % | 12.1 % | – | – | 0.844 | 3.84 |
+| `water-glints` | 3 | 2.554 | +0.31 % | – | 28.9 | 9.8 | 0.327 | 3.72 |
+| **`Tick-ReflXfrm`** | 3 | **1.888** | +0.32 % | – | – | – | 0.018 | **2.53** |
+| `water-ripple` | 3 | 1.776 | +0.23 % | – | 20.3 | 10.4 | 0.238 | 3.88 |
+| `fog-skypaint` | 1 | 1.160 | +0.26 % | 2.2 % | – | – | 0.108 | 3.01 |
+| `Tick-Light` | 3 | 0.919 | +0.00 % | – | – | – | 0.107 | 3.38 |
+| `Tick-SkyCube` | 3 | 0.757 | +0.13 % | – | – | – | 0.067 | 3.42 |
+| `gbuf-clear` | 1 | 0.681 | +0.15 % | 1.3 % | – | – | – | – |
+| `depth-bounds` | 2 | 0.544 | +0.18 % | 1.0 % | – | – | – | – |
+| `dispmap-resample` | 3 | 0.405 | +3.46 % | – | – | – | – | – |
+| `strip-lists` | 2 | 0.279 | +0.00 % | 0.5 % | – | – | – | – |
+| `xpar-peel` | 1 | 0.265 | +0.38 % | 0.5 % | – | – | – | – |
+| `face-bin` | 1 | 0.169 | +5.92 % | 0.3 % | – | – | – | – |
+| `Tick-Radix` | 3 | 0.165 | +0.00 % | – | – | – | – | – |
+| `tile-cull` | 2 | 0.156 | +0.00 % | 0.3 % | – | – | – | – |
+| `Tick-Clear` | 3 | 0.091 | +2.20 % | – | – | – | – | – |
+| `Tick-Anim` | 3 | 0.011 | +0.00 % | – | – | – | – | – |
+| **`ssao`** | 1 | **0.000** | – | – | – | – | – | – |
+
+> **`ssao` is ZERO in city, and that is not a bug — his city arm has no
+> `--ssao`.** The 2026-08-25 HDR/SSAO transport fix made city *able* to apply
+> AO; it did not turn it on. **city pays nothing for SSAO today**, and any
+> proposal to enable it there must be priced at roughly what greets pays
+> (~7.7 ms at 1920×1080) before it is offered as a look upgrade.
+
+#### chase t=1105 — tick 45.956, `renderFrame` 42.291 (2 main passes)
+
+| row | depth | wall_min | floor | % of `renderFrame` | core-ms | effPar | Ginstr/f | IPC |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| `DeferredLighting-call` | 1 | **14.328** | +0.43 % | 33.9 % | – | – | 2.500 | **5.48** |
+| ⤷ `lighting-w1` | 2 | **13.444** | +0.52 % | 31.8 % | 151.6 | 10.7 | 2.492 | **5.50** |
+| **`ssao`** (2 calls/f) | 1 | **11.134** | +0.51 % | **26.3 %** | – | – | 1.391 | 3.73 |
+| `gbuffer` | 1 | 5.204 | +0.04 % | 12.3 % | 48.0 | 7.3 | 0.587 | 4.00 |
+| `cones-call` (2 calls/f) | 1 | **4.809** | +0.19 % | 11.4 % | 51.9 | 10.0 | 0.663 | 4.24 |
+| `tonemap-post` (2/f) | 1 | 1.373 | +0.00 % | 3.2 % | – | – | 0.119 | 2.62 |
+| `fog-legacy` (2/f) | 1 | 0.928 | +1.94 % | 2.2 % | – | – | 0.063 | 2.02 |
+| `TBR-render` | 1 | 0.889 | +0.22 % | 2.1 % | – | – | 0.124 | 4.36 |
+| `Tick-SkyCube` | 3 | 0.735 | +0.68 % | – | – | – | 0.066 | 3.49 |
+| `gbuf-clear` (2/f) | 1 | 0.681 | +0.15 % | 1.6 % | – | – | 0.009 | **0.60** |
+| `hdr-activate` (2/f) | 1 | 0.676 | +0.44 % | 1.6 % | – | – | 0.101 | 5.17 |
+| `depth-bounds` | 2 | 0.536 | +3.92 % | 1.3 % | – | – | – | – |
+| `Tick-Xfrm` | 3 | 0.397 | +1.51 % | – | – | – | 0.011 | 2.77 |
+| `water-glints` | 3 | 0.397 | +0.50 % | – | 4.1 | 8.9 | – | – |
+| `Tick-Radix` | 3 | 0.258 | +0.39 % | – | – | – | – | – |
+| `hdr-begin` | 1 | 0.248 | +0.40 % | 0.6 % | – | – | – | – |
+| `xpar-peel` | 1 | 0.207 | +0.97 % | 0.5 % | – | – | – | – |
+| `Tick-ReflXfrm` | 3 | 0.192 | +0.52 % | – | – | – | – | – |
+| `strip-lists` | 2 | 0.179 | +0.00 % | 0.4 % | – | – | – | – |
+| `face-bin` | 1 | 0.152 | +2.63 % | 0.4 % | – | – | – | – |
+| `Tick-Light` | 3 | 0.086 | +4.65 % | – | – | – | – | – |
+| `Tick-Clear` | 3 | 0.083 | +0.00 % | – | – | – | – | – |
+
+#### chase t=800 — tick 55.536, `renderFrame` 42.912 (2 main passes)
+
+| row | depth | wall_min | floor | % of `renderFrame` | core-ms | effPar | Ginstr/f | IPC |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| `cones-call` (2 calls/f) | 1 | **13.623** | +0.10 % | 31.7 % | – | – | 1.979 | 4.31 |
+| ⤷ `cones` | 2 | **13.558** | +0.12 % | 31.6 % | 154.6 | 10.6 | 1.979 | 4.31 |
+| `gbuffer` | 1 | **8.585** | +1.60 % | 20.0 % | **30.0** | **3.1** | 0.400 | 4.07 |
+| `water-glints` | 3 | **7.974** | +1.40 % | – | 91.1 | 10.6 | 0.962 | 3.51 |
+| **`ssao`** (2 calls/f) | 1 | **7.485** | +0.00 % | 17.4 % | – | – | 0.895 | 3.66 |
+| `DeferredLighting-call` | 1 | 4.646 | +0.86 % | 10.8 % | – | – | 0.576 | 5.38 |
+| ⤷ `lighting-w1` | 2 | 3.651 | +0.14 % | 8.5 % | 33.9 | 8.5 | 0.569 | **5.50** |
+| `TBR-render` | 1 | 2.555 | +0.04 % | 6.0 % | – | – | 0.459 | 5.34 |
+| `tonemap-post` (2/f) | 1 | 1.352 | +0.96 % | 3.2 % | – | – | 0.119 | 2.63 |
+| `hdr-activate` (2/f) | 1 | 0.999 | +0.10 % | 2.3 % | – | – | 0.168 | 5.88 |
+| `fog-legacy` (2/f) | 1 | 0.915 | +1.64 % | 2.1 % | – | – | 0.063 | 1.97 |
+| `Tick-SkyCube` | 3 | 0.728 | +0.14 % | – | – | – | 0.066 | 3.50 |
+| `gbuf-clear` (2/f) | 1 | 0.676 | +2.07 % | 1.6 % | – | – | 0.009 | **0.59** |
+| `depth-bounds` | 2 | 0.646 | +0.46 % | 1.5 % | – | – | – | – |
+| `Tick-ReflXfrm` | 3 | 0.507 | +1.58 % | – | – | – | – | – |
+| `Tick-Radix` | 3 | 0.398 | +0.00 % | – | – | – | – | – |
+| `Tick-Xfrm` | 3 | 0.395 | +1.77 % | – | – | – | – | – |
+| `xpar-peel` | 1 | 0.272 | +1.47 % | 0.6 % | – | – | – | – |
+| `strip-lists` | 2 | 0.227 | +0.44 % | 0.5 % | – | – | – | – |
+| `Tick-Light` | 3 | 0.222 | +0.00 % | – | – | – | – | – |
+| `face-bin` | 1 | 0.180 | +2.78 % | 0.4 % | – | – | – | – |
+
+**Every hot row reads IPC 3.5–5.5 against a 2.42 compute anchor — the pipeline
+is compute-bound essentially everywhere.** The exceptions are exactly three and
+they are all small: `gbuf-clear` (IPC 0.58–0.60, the one bandwidth-bound phase,
+0.33–0.68 ms), `fog-legacy` (2.0), `tonemap-post` (2.6), and `Tick-ReflXfrm`
+(2.53) / `Tick-Xfrm` (2.77) — the two per-vertex transform rows, which is what
+"striding a 140-byte `Vertex`" looks like (§00g/§00h).
+
+**The one parallelism outlier is `chase t=800 gbuffer`: effPar 3.1 of 12** —
+30.0 core-ms spread over 8.585 ms of wall means **nine of twelve workers are
+idle through that phase.** It is the only structural inefficiency in the map
+that is not "the kernel does N things per pixel."
+
+---
+
+### 00l.3 — WHAT THE WHOLE-TICK CLOCK SEES THAT `[DPROF]` USED TO MISS
+
+The brief for this round named `refl_correct`'s per-vertex normal (§00j) as the
+known example. It is now a **row**, not a residue, in both scenes that pay it:
+
+| scene / pose | `Tick-ReflXfrm` | IPC | what it is |
+|---|--:|--:|---|
+| city t=1961 | **1.888 ms** | 2.53 | `cityMirrorGlassForward()` + `Reflected_Transform(CitySc)`, `DEMO/CITY.CPP:3838` |
+| chase t=800 | 0.507 ms | – | `Reflected_Transform(ChaseSc)`, `DEMO/CHASE.CPP:1484` |
+| chase t=1105 | 0.192 ms | – | same |
+
+§00j bracketed the whole `--refl_correct` effect at "≈2 ms/frame, quoted at one
+significant figure, against a 2–7 % floor". **The direct scope agrees and
+sharpens it**: city's entire mirrored-transform block is 1.888 ms with a
++0.32 % floor — so §00j's ~1.7 ms estimate for city was right, and it is now
+measured rather than differenced. Note this row is the *whole* block (the
+mirror transform exists with or without `--refl_correct`); the flag's marginal
+cost is the TN/TTangent part of it, which §00j priced.
+
+Full outside-`renderFrame` ledger, per arm:
+
+| row | greets t=5743 | greets t=5965 | city t=1961 | chase t=1105 | chase t=800 |
+|---|--:|--:|--:|--:|--:|
+| `shadow-bake` | 1.801 | 1.852 | – | – | – |
+| `RTT` | 1.693 | 0.001 | – | – | – |
+| `water-glints` | – | – | 2.554 | 0.397 | **7.974** |
+| `Tick-ReflXfrm` | – | – | **1.888** | 0.192 | 0.507 |
+| `water-ripple` | – | – | 1.776 | – | – |
+| `Tick-Light` (forward per-vertex `Lighting()`) | 0.809 | – | 0.919 | 0.086 | 0.222 |
+| `Tick-SkyCube` | – | – | 0.757 | 0.735 | 0.728 |
+| `Tick-Xfrm` (`Transform_Objects`) | 0.448 | 0.345 | – | 0.397 | 0.395 |
+| `StampMasks` | 0.432 | 0.459 | – | – | – |
+| `dispmap-resample` | – | – | 0.405 | – | – |
+| `Tick-Radix` | 0.293 | 0.180 | 0.165 | 0.258 | 0.398 |
+| `shadow-uniformity` | 0.119 | 0.124 | – | – | – |
+| `GreetsCodeStage` | 0.115 | 0.114 | – | – | – |
+| `Tick-Logic` / `Tick-Clear` | 0.105 | 0.009 | 0.091 | 0.083 | 0.087 |
+| `Tick-Anim` | 0.030 | 0.029 | 0.011 | 0.012 | 0.012 |
+| `Tick-ShadowBake` (city) | – | – | 0.000 | – | – |
+| **Σ attributed** | **5.845** | **3.089** | **8.566** | **2.160** | **10.323** |
+| **UNACCOUNTED** | 4.052 | 2.524 | 3.274 | 1.505 | 2.301 |
+
+Two things in that table are worth saying out loud:
+
+* **city's `Tick-Anim` is 0.011 ms and its `Tick-ShadowBake` is 0.000.** Neither
+  is a target. `Animate_Objects` being 11 µs on a scene this size is a good
+  result, not a measurement error — it was checked against chase (0.012) and
+  greets (0.030).
+* **`Tick-SkyCube` is 0.73–0.76 ms in city AND both chase poses**, and it is a
+  full `RenderSkyCube` into VPage that the deferred path then paints over
+  wherever geometry covers. Nobody has ever looked at it. 0.75 ms is 1.1–1.6 %
+  of those ticks.
+
+---
+
+### 00l.4 — FLAG-FLIP LADDERS (same binary, so no between-binary floor is paid)
+
+#### L1/L6 — greets t=5743: what the SSAO 7.7 ms actually is
+
+| arm | tick | `renderFrame` | `ssao` | Δ`ssao` vs base |
+|---|--:|--:|--:|--:|
+| **base** (his arm) | 57.015 | 47.606 | **7.757** | – |
+| `--no-ssao` | 48.810 | 39.574 | 0.000 | **−7.76** (frame −8.03) |
+| `--ssao_blur=0` | 56.417 | 46.941 | 7.431 | −0.33 |
+| `--ssao_samples=1` | 56.733 | 47.477 | 7.734 | **−0.02 (NOTHING)** |
+| `--ssao_downscale=4` | 52.649 | 43.018 | 3.383 | −4.37 |
+| `--ssao_downscale=3` * | 53.969 | 44.388 | 4.679 | −3.06 |
+| `--ssao_gtao_slices=1` (from 2) * | 55.924 | 45.237 | 5.327 | **−2.41 (−31 %)** |
+| `--ssao_gtao_steps=2` (from 4) * | 57.446 | 45.904 | 5.940 | **−1.80 (−23 %)** |
+| `--ssao_gtao_slices=1 --ssao_gtao_steps=2` * | 55.382 | 44.160 | **4.418** | **−3.32 (−43 %)** |
+
+\* the starred rows are the L6 ladder, run at load 17.7–27.2 — **deltas only,
+and coarsely.** Its own `base` read 7.737 against L1's 7.757, which is the
+reassurance that the arms are comparable inside each ladder. `--ssao_downscale=4`
+was already measured by the 2026-08-16y round at **2.19 ms** (1512×848) and
+**not taken — look cost max \|Δ\| 102–109**; my 3.383 at 1920×1080 is the same
+number scaled, so that door stays closed. The `downscale` arms here are a
+MEASURING INSTRUMENT for the interior split, not a proposal.
+
+**Three findings, and one of them kills a knob:**
+
+1. **`--ssao_samples` does nothing under `--ssao-gtao`.** 16 → 1 moved the pass
+   by 0.02 ms against a +0.03 % floor. The GTAO producer
+   (`FDS/RENDER/DeferredSSAO.cpp:352-354`) reads `ssao_gtao_slices` (default 2)
+   and `ssao_gtao_steps` (default 4); `ssao_samples` feeds only the
+   *hemisphere point-sampler* producer at line 627, which his arm does not run.
+   **Anybody tuning greets/chase AO cost with `--ssao_samples` is turning a
+   disconnected dial.**
+2. **The pass splits, by the `downscale` slope, into a low-res part and a
+   full-res part.** With `cost = A + B·lowN` and lowN ∝ 1/down²:
+   down=2 → 7.757, down=4 → 3.383 ⇒ **B·N/4 ≈ 5.83 ms (the GTAO march, low-res)
+   and A ≈ 1.93 ms (the full-res apply/upsample wave)**. The bilateral blur is
+   0.33 ms of the march side. This is arithmetic on two measured points, not a
+   scope — labelled INFERRED — but it is corroborated by the slices/steps rows,
+   which move only the march.
+3. **`--no-ssao` costs the frame 8.03 ms while the `ssao` row is 7.76** — the
+   extra ~0.27 ms is downstream (the AO multiply's effect on what bloom and the
+   tonemap then read). So the *realisable* prize on this row is the row plus
+   ~3 %.
+
+#### L2/L7 — chase t=1105: SSAO is a quarter of the frame
+
+| arm | tick | `renderFrame` | `ssao` (2 calls/f) |
+|---|--:|--:|--:|
+| **base** (his arm) | 47.558 | 43.332 | **11.290** |
+| `--no-ssao` | **35.637** | 31.340 | 0.000 |
+| `--ssao_blur=0` | 47.734 | 42.728 | 10.892 |
+| `--ssao_samples=1` | 47.890 | 43.355 | 11.445 |
+| `--ssao_gtao_slices=1` * | 43.911 | 39.831 | 7.685 (−33 %) |
+| `--ssao_gtao_steps=2` * | 44.068 | 40.244 | 8.937 (−22 %) |
+| `--ssao_downscale=3` * | 42.376 | 38.465 | 6.670 (−42 %) |
+| `--ssao_downscale=4` * | 40.522 | 35.625 | 4.799 (−58 %) |
+
+**`--no-ssao` takes 11.92 ms off a 47.56 ms tick — 25.1 %.** That is the single
+largest flag-attributable cost anywhere in his three arms.
+
+#### L3 — chase t=800: the raster tile grid
+
+| arm | tick | `renderFrame` | `gbuffer` | `cones` |
+|---|--:|--:|--:|--:|
+| **base** (6×5, the default) | 55.762 | 43.230 | **8.619** | 13.514 |
+| **`--frame_tile_x=6 --frame_tile_y=20`** | **52.588** | **39.960** | **5.507** | 13.698 |
+| `--frame_tile_x=12 --frame_tile_y=10` | 55.251 | 42.875 | 8.433 | 13.643 |
+| `--no-ssao` | 47.709 | 35.439 | 8.752 | 13.629 |
+
+**6×20 takes `gbuffer` −3.11 ms (−36 %), `renderFrame` −3.27 ms (−7.6 %) and the
+tick −3.17 ms (−5.7 %), against a base floor of +0.01 %.** That is a
+signal-to-floor ratio in the hundreds. **12×10 buys nothing (−0.19 ms)** — the
+same 120 tiles spent on columns instead of rows. §00d said the shape matters and
+this is the confirmation on chase.
+
+**And on chase it is nearly byte-free.** Same 120-tile grid through the chase pin
+recipe, all five poses:
+
+| pose | px moved of 2 073 600 | % | max \|Δ\| | mean \|Δ\| on moved |
+|---|--:|--:|--:|--:|
+| t=100 | 57 | 0.00 % | 71 | 4.60 |
+| t=800 | 327 | 0.02 % | 33 | 2.97 |
+| t=1600 | 59 | 0.00 % | 52 | 3.03 |
+
+(Hashes do move — `b67b47f0` / `5bc199d4` / `d1284b5a` / `9c0f7c2f` /
+`9cdf5603` at 6×20 — so it is a re-pin, not a no-op. But 327 pixels is a
+different order of magnitude from the 16 % §00d measured on greets.)
+
+#### L4/L5 — the same grid on city and greets, and city's forward `Lighting()`
+
+| city t=1961 arm | tick | `renderFrame` | `gbuffer` | `Tick-Light` |
+|---|--:|--:|--:|--:|
+| base | 65.639 | 53.910 | 6.863 | 0.919 |
+| `--frame_tile_x=6 --frame_tile_y=20` | 64.850 | **53.055** | **5.961** | 0.919 |
+| `--prof_no_vertex_light` | 64.745 | 53.829 | 6.786 | **0.000** |
+| `--prof_no_fog` | 65.639 | 53.956 | 6.885 | 0.915 |
+
+| greets t=5743 arm | tick | `renderFrame` | `gbuffer` |
+|---|--:|--:|--:|
+| base | 57.417 | **46.998** | **10.850** |
+| `--frame_tile_x=6 --frame_tile_y=20` | 56.287 | 47.481 (**+0.48**) | 11.623 (**+0.77**) |
+| `--frame_tile_x=12 --frame_tile_y=10` | 56.330 | 47.023 | 11.191 |
+
+* **city gains from 6×20 too** (−0.90 ms `gbuffer`, −0.86 ms `renderFrame`,
+  −0.79 ms tick), and it moves **4 534 px / 0.219 %, max \|Δ\| 160** at the pin
+  pose — a real but small judge call. **Note this DISAGREES with §00d, which
+  recorded city at 38 430 px = 1.85 %**; §00d measured a different arm and
+  resolution, and I did not reconcile the two. Whoever takes the city half must
+  re-measure the byte cost under the arm they intend to ship, not quote either
+  figure.
+* **greets LOSES from 6×20** (+0.48 ms `renderFrame`, +0.77 ms `gbuffer`) — so
+  this must be a **per-scene default**, never a global one. (greets' tick column
+  disagrees in sign with its own `renderFrame`/`gbuffer` columns; those two have
+  the tighter floors and are the ones I believe. The tick column here is the
+  loaded-box noise showing through.)
+* **`--prof_no_fog` is inert on city's `fastfog`** — it gates the *legacy* fog
+  pass, not `Render_DeferredFastFog`. Recorded so the next round does not use it
+  as a fastfog ablation.
+* **city's forward per-vertex `Lighting()` is 0.919 ms — 1.4 % of the tick.**
+  If a backlog note ever put it at "~10 % of the frame on city under
+  `--deferred`", **that is refuted at this pose**: `--prof_no_vertex_light`
+  takes 0.89 ms off the tick and 0.919 off its own scope. It is not a target.
+
+---
+
+### 00l.5 — THE RANKED ATTACK LIST
+
+Ranked by **absolute ms in the arm where the row is largest**; "total" is the row
+summed across all five measured poses, as a second opinion on *breadth*. Every ms
+is MEASURED; every "achievable" is labelled **MEASURED** or **INFERRED**. The
+prior-attack column is a full sweep of `OPTIMIZATION_BACKLOG.md`,
+`PERF_STATE.md`, `HW_PROFILING.md`, `SESSION_STATE.md`, `ARCHITECTURE_NEXT.md`,
+`SOA_VERTEX_REFACTOR.md` and `fast_fog_*.md` done for this round —
+**read (b) before writing any code, it is there so nothing gets re-refuted.**
+
+---
+
+#### 1. **chase's water-reflection pass runs the ENTIRE volumetric + AO + tonemap stack a second time.** **≈9.0 ms (t=1105) / ≈11.7 ms (t=800) upper bound — 19.6 % / 21.1 % of those ticks**
+
+**(a) What the code does.** `DEMO/CHASE.CPP:1496` calls a bare `Render();` —
+i.e. `renderFrame(RenderPath::Default, skipVolumetric = false)` — for the
+mirrored water-reflection pass. `DEMO/CITY.CPP:3881` calls
+`Render(RenderPath::Default, /*skipVolumetric=*/true)` for the *same* structural
+pass, with the comment *"the pass-1 output is consumed by the dispMap
+distortion, so volumetric work here is wasted CPU (≈60 ms/frame on the cube omni
+halo)"*. `skipVolumetric` gates, in `FDS/RENDER/RENDER.CPP`: `Render_SSAO`
+(`:730`), the SSAO debug write (`:741`), sky gradient (`:759`), the froxel
+populate carve-out (`:779`), **HDR activation** (`:796`), glass refraction
+(`:823`), and the whole cones / halos / rain / **tonemap** block at `:1380`.
+The only other `skipVolumetric=true` sites in the tree are `EnvBake.cpp:481`,
+`MirrorShatter.cpp:915` and `GREETS.CPP:4162`.
+
+**This is why chase's `[DPROF]` shows `calls/f = 2` on `ssao`, `cones-call`,
+`tonemap-post`, `hdr-activate` and `fog-legacy`, while city shows 1.**
+
+**(b) Prior rounds.** **Proposed exactly once and never priced.** A 2026-08-17
+handover in `OPTIMIZATION_BACKLOG.md:398` says, verbatim: *"chase never passes
+`skipVolumetric`, so its reflected pass re-runs SSAO, bloom, tonemap, rain, DoF
+and the froxel populate a second time. That is both a correctness hazard (fog
+temporal history) and, **on its face, the largest single perf item left in
+chase**."* **No A/B, no measurement, no refutation exists.** The same round
+flagged two live correctness hazards from it: chase's SSR capture keys on
+`skipVolumetric` (so it would misbehave if enabled) and chase defeats city's
+`skipVolumetric` carve-out for the froxel fog's temporal history. **The numbers
+below are the first pricing this item has ever had.**
+
+**(c) Prediction.** Rows that would halve, from the measured per-frame totals:
+
+| row (per-frame, both calls) | chase t=800 | chase t=1105 |
+|---|--:|--:|
+| `cones-call` | 13.623 | 4.809 |
+| `ssao` | 7.485 | 11.134 |
+| `tonemap-post` | 1.352 | 1.373 |
+| `hdr-activate` | 0.999 | 0.676 |
+| **half of the above** | **≈11.73** | **≈8.99** |
+| as % of that pose's tick | **21.1 %** | **19.6 %** |
+
+**Read that as an UPPER BOUND, not a promise.** Two measured reasons it is less:
+the reflection pass covers less non-sky area than the main pass (SSAO early-outs
+on `ze == 0`, `DeferredSSAO.cpp:384`); and **it is not byte-null and not even
+look-null** — turning off `hdr-activate` there changes the reflection from an HDR
+to an LDR underlay, and the 2026-08-17 round already noted chase's reflected pass
+currently paints *a real (if incorrect) second unmirrored light shaft* that
+Gil-Ad has not judged. **Offer it as a ladder, not a flip:** (i) skip only `ssao`
+in the reflection pass — cheapest and least visible, worth ≈3.7 ms at t=800 and
+≈5.6 ms at t=1105; (ii) + cones; (iii) full `skipVolumetric=true`.
+**Step zero is one line and no risk: give the two passes distinct `TailProf`
+names so the halving stops being an assumption.**
+
+---
+
+#### 2. `lighting-w1` — the deferred surface kernel's wave 1. **max 17.90 ms (greets t=5743) · total 63.1 ms** — the largest row in the map by total, and the most heavily refuted thing in the tree
+
+**(a) What the code does.** `FDS/RENDER/DeferredSurfaceKernel.cpp:8158-8191`
+(the `Stamp`/`drain` pair). greets/chase run `Render_DeferredLighting_Tile`;
+city/fountain/crash run the `_OuterVec` monolith (`Scene::PreferOuterVec`,
+`CITY.CPP:2586`). core-ms 207.7 at greets t=5743 over 12 workers, **effPar 11.2**
+— the pool is saturated, there is no barrier tail to reclaim.
+
+**(b) Prior rounds — ELEVEN of them, and the refusal list is long.** Wins taken:
+packed shadow planes (27.620 → 26.423 ms), `--deferred_tile_sphere_cull`
+(−3.3 % instr), the `computeMapShadowAtten` guard hoist (**−1.75 ms, −9.0 % of
+w1; chase −22.5 %**), the **8×8 PolyId pyramid — already SHIPPED 2026-08-15b,
+80.3 % of taps skip, −0.192 Gi/f (−6.5 %)**, `--deferred_cube_direct` (−7.9 %),
+`--deferred_shade_ldr_skip`, `--deferred_cube_prepass` (Gcyc −13.8 %),
+`ShadowSwzGetShape()`'s lazy static, `always_inline` on the spot tap.
+**REFUTED with numbers — do not retry any of these:** the dynamic-plane skip
+(**+12.4 % of w1's instructions**), passing world position in (+0.010 Gi), the
+`noinline` 2×2 PCF (+0.51…+1.54 %), a runtime bool hatch (+4.3 % *with the flag
+OFF*), the mirrorId group reject, the 4×4 pyramid (net −0.35 %, memory ×4), a
+finer light tile grid past 12×8 (whole prize ≈0.012 Gi/f), the GGX hoist (LICM
+already does it), the `Material` hot-record (≲0.1 ms). **The standing rule**
+(`OPTIMIZATION_BACKLOG.md:4783`): *"the cube tap is at its register-allocation
+limit and **any** new runtime predicate in its innermost body costs more than the
+work it removes. Treat 'add a cheap test to the tap' as refuted-by-default; the
+tap only gets cheaper by being CALLED LESS."*
+
+**(c) Prediction.** **Do not re-attack the greets/chase kernel interior.** IPC
+3.89 greets / **5.50 chase** — chase's is the highest of any hot row here.
+**City's half of this row was taken while this battery was
+running** — see §00k above. My draft predicted 0.8–1.5 ms on city *by porting
+`--deferred_cube_direct` + `--deferred_cube_prepass` to the outer-vec path*, and
+**that mechanism is wrong**: §00k establishes that `Tile_OuterVec` is a different
+kernel with **no shadow tap of any kind** and no GGX lobe, so six of the eleven
+landed greets levers are shadow-tap work that cannot transfer. What actually
+landed there is six byte-null levers for **−24.2 % of city's `lighting-w1`
+instructions / −5.7 % of `renderFrame`**, with greets exactly flat as the
+control. **The measured next target on city is that round's own finding: the
+per-lane pack loop at 24.8 % of the row** — five times the ~5 % its analysis
+estimated, because 33–36 % of city's alive lanes carry an env store and pay a
+scalar env compose inside the pack. Do not re-derive it here; §00k has the
+ablation ladder (`-DFDS_OVEC_ABLATE`). Two other items are open and named. (i) The **only untried shape for the cube
+tap itself** — make it **8-wide over PIXELS for a fixed light**, i.e. restructure
+the loop pixel-major → light-major; *"large, and the per-pixel early-outs fight
+it."* (ii) The `srcCube` mirror-reflection arithmetic on the spot tap (~40 float
+ops × 828 k–1.77 M/frame, computed twice when both arms are live) — *"a real
+lever and a different round"*. **Both must be quoted at t=3409 / t=3122, never at
+t=5743**: the spot-tap call count spans 0 to 1.77 M/frame across six greets
+poses, so a five-pose summary hides the sign.
+
+---
+
+#### 3. `ssao` — the whole SSAO stack. **max 11.13 ms (chase t=1105) · total 34.0 ms** · 26.3 % of chase's `renderFrame`, 16.6–18.1 % of greets'
+
+**(a) What the code does.** `Render_SSAO()`, `FDS/RENDER/DeferredSSAO.cpp:212`,
+called from `RENDER.CPP:730`. Under `--ssao-gtao` it runs **three fan-out/join
+waves** over a static 12×8 = 96-tile grid (`:332`): the GTAO horizon march at
+`:372` (low-res, W/2 × H/2 at `ssao_downscale=2`, `slices=2` × `steps=4` per
+side), a bilateral denoise at `:794`, and a **full-resolution** depth-aware
+upsample + apply at `:992`. The hemisphere point-sampler at `:627` and the
+temporal wave at `:916` are dead in his arms.
+
+**(b) Prior rounds — the pass HAS been attacked (2026-08-16, four rungs) but has
+never been DECOMPOSED.** The 2026-08-16 round took `ssao` **2.143 → 1.652 Ginstr/f,
+23.55 → 16.36 ms** at greets t=5743 via a slice-trig table + 8-wide denoise
+(byte-null), a vector tail (byte-null), sector units (judge call) and an
+`vld4_f16`/`vst4_f16` apply (byte-null) — image cost 343 px of 24 883 200.
+2026-08-16y then flipped `ssao_downscale` 1→2, countersigned by Gil-Ad verbatim
+(*"ssao downscale 2 is ok (no downscale looks much better, but too slow)"*),
+cashing **14.55 → 4.96 ms**. **That dial is SPENT — do not re-propose it**, and
+the same entry warns that the flip made the remaining SSAO items *"worth ~1/4 of
+what this round priced them at."* `ssao_radius_zfloor=48` is a **look pin, not a
+perf item** (|Δ| ≤ 0.08 ms over 14×14 interleaved runs; the old +0.17 ms figure
+is retracted as noise). **DO NOT RE-PROPOSE, all tried and reverted:** the `cos⁴`
+normal weight in denoise/upsample (bands); the geometric plane-distance weight
+(0 gain, ~2× denoise cost); the **normal-aware upsample (+1.8 ms — edge-gating
+deopts the apply loop's auto-vectorisation by ~1.2 ms)**; and **folding the apply
+into the lighting kernel (full-rate kernel +5.4 ms against ~1.6 ms of apply
+saved, net +3.8 ms — "keep the standalone apply")**. **Parked and explicitly not
+attempted:** the per-lane scalar slice setup in `gtaoRow8` (cross products +
+`fast_rsqrt` + `atan2_approx` per lane per slice, *"estimated ~20 % of the
+compute, not attempted"*, bit-exact only if `atan2_approx`'s branches become
+selects); and the two `_mm256_sqrt_ps` in `gtaoAcos_x8` (rsqrt-and-multiply is
+**not byte-safe** — flips ~0.3 % of samples). **Open CORRECTNESS item riding
+along:** 2026-08-17a found the 8-wide GTAO's two reciprocals disagree with its
+own scalar reference on **up to 24 % of pixels** — *reported, not fixed*, fix is
+one Newton–Raphson step, deferred because the file was contended.
+
+**(c) Prediction.**
+* **`--ssao_samples` is a dead dial under GTAO — MEASURED, 0.02 ms of 7.76.**
+  It feeds only the hemisphere sampler at `:627`. Anyone tuning greets/chase AO
+  cost with it is turning a disconnected knob; consider making it warn.
+* **The pass has ONE profiler row and no `effPar` at all** (it uses
+  `dispatchIndexed` without the `Stamp`/`drain` pairing, so `core-ms` and
+  `effPar` print `-` — see the tables above). **Splitting it into
+  march / blur / apply scopes is three lines and it is step one**, because the
+  only per-wave number that exists in the whole tree is a doc note saying *"the
+  apply's ~0.7 ms"* and my measurement disagrees with it.
+* Interior split, **INFERRED** from the `downscale` slope (`cost = A + B·lowN`,
+  `lowN ∝ 1/down²`; down=2 → 7.757, down=4 → 3.383): **GTAO march ≈ 5.8 ms,
+  full-res apply ≈ 1.9 ms, blur ≈ 0.33 ms** at greets t=5743, 1920×1080.
+  Corroborated by the slices/steps rows, which move only the march side. **This
+  is arithmetic on two points, not a scope — replace it with the scopes.**
+* The march is very nearly linear in `slices × steps` (`slices=1` −31 %,
+  `steps=2` −23 %), which means **there is no fat in the loop structure — inside
+  it, only fewer samples helps, and that is a quality call.** The one named,
+  never-attempted structural item is the per-lane slice setup above (~20 %).
+  **INFERRED 0.8–1.2 ms on greets if it lands, and it is a judge call on bytes.**
+
+---
+
+#### 4. `cones` — the volumetric cone pass. **max 14.99 ms (city t=1961) / 13.56 ms (chase t=800) · total 34.7 ms**
+
+**(a) What the code does.** `Render_VolumetricCones_Tile`,
+`FDS/RENDER/DeferredVolumetric.cpp:776`, dispatched at `:3113`/`:3129`, scoped at
+`:3123`. Nest is row → 8-px batch → spot. city runs it once per frame, chase
+twice (item 1). core-ms 176.5 / effPar 11.3 in city — saturated pool.
+
+**(b) Prior rounds — SEVEN, and the do-not-retry list is the longest in the
+tree.** Taken: R1 `--vol_cone_solve_vec` (city 30.764 → 21.406 ms, −30.4 %);
+R2 `--vol_cone_lane_vec` (→ 17.145, −19.8 %); R4 `FDS_CONE_NEONMINMAX`;
+R5 `FDS_CONE_NEONSTEP`; R6 un-gating the vector solve on the segmented path +
+`FDS_CONE_QUADEARLYOUT` (chase 18.304 → 14.930, **−18.4 %**); R7 the per-tile
+`ConeSpotPre` hoist (chase −9.1 % instr, city −8.1 %, **bit-exact**). **R6 is the
+"wrong scene" lesson**: rounds 1–5 measured city, where **0.0 %** of pairs are
+segmented, while chase is 90–100 % segmented — every city-derived cone
+conclusion is an all-wide-branch result. **Do not retry:** the range-sphere
+early-out (+2.0 %), raw rcp/rsqrt (+1.6 %), finer cone tiles, the `1/uV` hoist
+(*killed twice, LICM already does it*), per-lane noise loop, per-spot broadcasts,
+W4 rolled (+7.5 % cycles), the `zLo/zHi` select collapse, the 8-segment closed
+form (+0.1…+0.7 % instr), register-handover fusion (+2.0 %). Culling is capped at
+**~3 %**, unroll-and-jam at **~8 %**. §11's rule: *"stop counting instructions on
+this pass"* — `FDS_CONE_HOTONLY` deletes 8–10 % of instructions for **zero cycles
+and zero wall**. **And the standing warning:** *"do not price a cull on this pass
+without its fire rate first"* — 83.9 % / 18.8 % / 3.4 % across three poses, and
+**the verdict flips sign across that range.** Left unpriced: the per-spot
+shadow-map block behind `spotAlive`; greets' `shadowed=51` per-segment tap.
+
+**(c) Prediction.** On chase, **the biggest cone win available is item 1** — stop
+running the pass twice — not anything in the kernel. On city, §00's ceiling holds:
+**INFERRED 0.5–1.2 ms** from the two unpriced blocks. A separate agent is
+auditing the city cones path this session; take its findings before spending a
+round here.
+
+---
+
+#### 5. `gbuffer` — the raster / G-buffer fill. **max 10.72 ms (greets t=5743) · total 41.3 ms** · at chase t=800 it is the ONLY parallelism-bound row in the map, and **the fix is already written, measured, and un-taken**
+
+**(a) What the code does.** `RENDER.CPP:660-680`; the tile grid is
+`--frame_tile_x` × `--frame_tile_y`, default **6×5 = 30 tiles**, read at
+`RENDER.CPP:469-470` and rounded down to a multiple of 8. At chase t=800:
+30.0 core-ms over 8.585 ms wall = **effPar 3.1 of 12 — nine workers idle.**
+
+**(b) Prior rounds.** §00 row 9 (2026-08-14) refuted a finer grid at *"+41 %
+wall, +139 % instructions"* because each clipper tile re-walked the whole face
+list. **That refutation is DEAD**: 2026-08-16c removed the traversal
+(`c26c1c35` + `d9dfa527` `--face_tile_bin`) and the identical 12×10 probe then
+cost **+2.7 %** — §00d says in terms *"nobody should quote row 9 as a reason
+again."* §00d also established that **shape dominates count**: at a fixed 120
+tiles, `6×20` beats `12×10` by 35 % of the gbuffer wall and `24×5` by 33 %; at
+chase t=800 it took `gbuffer` **8.50 → 5.22 ms (−38.5 %)**, effPar **2.9 → 5.1**,
+`renderFrame` **−11.7 %** for +0.5 % instructions. The 16→20 row cliff is
+**recorded as an unexplained open question.** The flags landed at the historical
+6×5 default, byte-null, and **nothing was switched on.** **The per-scene default
+WAS proposed and never taken**, verbatim: *"If the chase pins are acceptable at
+that scale, `FF::setDefault(frame_tile_y, 20)` in `CHASE.CPP` is the whole
+change. **Per-scene, not global.**"* / *"**greets: no.** Flat wall, 16 % of
+pixels moved."* / *"**city: marginal.**"* I confirmed **no `setDefault(frame_tile_*)`
+exists anywhere in `DEMO/` today.**
+
+**(c) Prediction — MEASURED this round, and it is the cheapest real win in the
+map.**
+
+| scene | Δ`gbuffer` at 6×20 | Δ`renderFrame` | Δ tick | pixels moved (this round) |
+|---|--:|--:|--:|---|
+| **chase t=800** | **−3.11 ms (−36 %)** | **−3.27 ms (−7.6 %)** | **−3.17 ms (−5.7 %)** | **327 of 2 073 600 (0.02 %)**, max \|Δ\| 33 |
+| **city t=1961** | −0.90 ms | −0.86 ms | −0.79 ms | 4 534 (0.219 %), max \|Δ\| 160 |
+| **greets t=5743** | **+0.77 (worse)** | **+0.48 (worse)** | – | §00d: 339 472 px = 16.37 % |
+
+12×10 buys **−0.19 ms** — the same 120 tiles spent on columns instead of rows.
+**Mechanism (now certain):** chase's raster is row-bound — its geometry is a wide
+horizon band, so with 5 row-tiles a few workers own almost all the faces.
+My byte counts (57 / 327 / 59 px at t=100/800/1600) independently reproduce
+§00d's *"chase 58–1 738 px"*. **Land it as a per-scene default: chase 6×20
+certainly; city 6×20 only after Gil-Ad looks at 4 534 px; greets stays 6×5.**
+Cost: one `setDefault` line plus a five-hash re-pin
+(`b67b47f0`/`5bc199d4`/`d1284b5a`/`9c0f7c2f`/`9cdf5603`), and a memory note
+recorded by the `--face_tile_bin` round: its arena grows **403 KiB → 851 KiB at
+6×20** (1.22 MiB at 24×20). Not a blocker; state it in the commit.
+
+greets' 10.72 ms `gbuffer` is a **geometry** row (displaced stone), effPar 9.6,
+already priced by §00's displacement family table. No new lever found.
+
+---
+
+#### 6. `fastfog` — city's froxel fog. **8.98 ms, city only, 16.7 % of its `renderFrame`**
+
+**(a) What the code does.** `RENDER.CPP:780` → `Render_DeferredFastFog(dctx)`.
+The two sub-scopes that carry it: **`fog-composite` 4.571 ms**
+(`DeferredFastFog.cpp:3034`) and **`fog-columns` 3.635 ms** (`:3026`), plus
+`fog-glow` 0.701 and the separate `fog-skypaint` 1.160. `fog-columns` reads
+IPC 3.17 — the lowest of the hot rows.
+
+**(b) Prior rounds.** §00 row 8 per-symbol split: `FastFog_SampleGrid` 4.3 %,
+`Froxel_CompositePixel` 4.1 %, `vFogNoise` 3.9 %, the three tile lambdas 5.9 %,
+`SkyPaint` 1.8 %, `vBlobNoise` 0.7 % of city's whole CPU — *"the noise is the
+cost."* 2026-08-16b cached `Froxel_CompositePixel`'s per-pixel
+`1/log(far/near)` per frame (`fog-composite` −3.2…−3.8 %, bit-exact). 2026-08-16z
+was the only dedicated round: `--fog_composite_tile_align8` taken (−2.93 % of the
+sub-row) with the honest caveat that *"the frame does not resolve this"*.
+**DO NOT REOPEN** (`OPTIMIZATION_BACKLOG.md:648`): the glow `atanf` (deleting it
+*entirely* is `renderFrame` −0.79 %; a polynomial measured −0.24 %, under the bar),
+the live-water slope indirection (0.10 %), lane-level composite punting (**87.7 %
+of punted groups have all eight lanes reflective → ≤6 % recoverable**). Also
+arm64-negative and parked for x64: the SIMD 8-corner hash (−1 to −2 ms
+*regression*), corner caching, packed AoS froxel record, vectorised `fastExpNeg`.
+**Note for the next agent: `--prof_no_fog` does NOT gate this pass** (measured
+inert this round — it gates the *legacy* fog).
+
+**(c) Prediction.** Two named items survive. **The composite's remaining scalar
+half — 335 184 punted px/frame, ≈0.030 Gi/f — is the biggest remaining fastfog
+item**, and the specified shape is *"the water-reflection branch written 8-wide,
+scalar lanes first, vector store masked."* **INFERRED 0.3–0.6 ms.** Separately,
+**`FastFog_SampleGrid` (4.3 % of city's CPU) has NO prior attack at all** — it is
+named in the census and nowhere else. **INFERRED unknown; census it first.**
+`fog-columns` at 0.400 Gi/f is the noise and *"no new lever found"* — leave it.
+
+---
+
+#### 7. `water-glints` — chase's procedural sea. **7.97 ms at chase t=800 (18.6 % of its `renderFrame`), 2.55 ms city** · **and the win city already took has NEVER reached chase**
+
+**(a) What the code does.** chase takes `pwater::RenderGlintsVaried`
+(`DEMO/ProceduralWater.cpp:792`, banded at `:884`); city takes the plain
+`RenderGlints` (`:623`, banded at `:785`). Outside `renderFrame`. effPar 10.6,
+IPC 3.51, 0.962 Ginstr/f at chase t=800.
+
+**(b) Prior rounds — four, and the last one bypassed chase by construction.**
+2026-08-15d: `runRowBands` 8-row atomic chunks + an `ndhMin` skip ahead of `powf`
+— **chase 14.195 → 10.021 ms (−29.4 %)**, city 7.720 → 4.602, bit-exact.
+2026-08-15e: the caustic sum-plane — chase 11.190 → 9.297 (−16.9 %), a judge call
+at 7 px. 2026-08-16b: the `% WNRM` → 129-stride halo (161 → 132 instructions).
+**2026-08-16e: `--water_slope_vec8`, BYTE-NULL — city `water-glints` Gcyc/f
+0.082 → 0.054 (−34 %), wall 2.423 → 1.590 ms.** And then, verbatim
+(`PERF_STATE.md:1615`): *"**Chase and greets are untouched by construction as
+well as by pin — chase's water goes through `RenderGlintsVaried` /
+`waterWaveSlopeVaried`, a separate copy this round does not open.**"*
+**Do not retry:** constant texture dims / removing 5 of 9 `fdiv` (instructions
+went *up*), the occlusion-test hoist (1.4 %), the per-row horizon early-out
+(0.7 %). And the standing correction: *"THE FOUNTAIN-198M PATTERN IS NOT WHAT
+THIS IS"* — the reject path is ~10 instructions against ~1050 per live pixel.
+
+**(c) Prediction — this is the best-shaped un-taken win after items 1 and 5.**
+**Port `--water_slope_vec8` to `waterWaveSlopeVaried`.** It is byte-null on the
+city copy, the mechanism is identical, and city measured **−34 % of the row's
+cycles**. **INFERRED 1.5–2.5 ms at chase t=800** (a −34 % cycle result on a
+7.97 ms row, discounted because the `Varied` copy has extra terms). Then the
+second, already-priced item: *"five libm calls per live pixel"* — the four swell
+transcendentals ablate at **−20.1 % instructions / −11.7 % wall of the chase
+pass** and the lever is a 4-wide vector `cos`, a judge call on ~1 ulp
+(**INFERRED further 0.9 ms**). Note the residue is *"the `powf` lobe and the
+caustic tap, not the slope"* once the vec8 lands.
+
+---
+
+#### 8. `TBR-render` — the transparent/sprite lighting pass. **6.51 ms city, 2.56 ms chase t=800, 5.00 ms chase t=1600 (per §00)**
+
+**(a) What the code does.** `RENDER.CPP:1360` → `TBR_Render(CurScene, &dctx)`;
+the kernel is `Render_DeferredTransparentLighting_Tile<0>` (front-facing) / `<1>`
+(back-facing). IPC 3.84 city / 5.34 chase.
+
+**(b) Prior rounds — and the obvious idea is already dead.** The **fountain**
+instance was §00 row 3 and CLOSED 2026-08-14b at **−11.99 ms of a 27.46 ms frame
+(−43.7 %)**: the per-strip dispatch bounded Y and only Y, so 12 884 composite
+invocations a frame scanned the full 1920-px strip width (197.90 M px scanned for
+0.97 M live — 0.491 %) and peel passes 1–3 were 100 % empty. **That fix WAS
+measured on city and chase in the same table and it is NULL there**
+(`OPTIMIZATION_BACKLOG.md:4941-4947`): city t=1961 `TBR-render` **7.00 → 6.77**,
+chase t=1600 **4.61 → 4.62**, verdict *"the other three scenes are NULL, as
+expected — they do not run thousands of sprite-delimited clumps a frame. **This
+is a fountain fix.**"* Mechanism for why: city/chase run **one** peel pass, their
+`.xparPeel = 4` never engages, and forcing it is byte-identical (*"DO NOT RUSH TO
+WIRE IT"*). **But city's and chase's TBR rows have never been censused or
+attacked in their own right** — `--xpar_extent_census` has only ever been run on
+fountain t=1200, the §00b ranked table's attack cell for city's TBR is empty, and
+no "do not re-propose" warning exists for them.
+
+**(c) Prediction.** Do **not** re-run the fountain diagnosis; it is excluded.
+Do run `--xpar_extent_census` on city t=1961 once — it is one run and it is the
+only instrument that exists — to establish what city's 6.51 ms actually *is*
+before anyone designs for it. **INFERRED 0–2 ms, genuinely bimodal**, and the
+honest statement today is **"unopened", not "attackable"**.
+
+---
+
+#### 9. greets' three ~1.7 ms passengers: `shadow-bake` 1.80 + `RTT` 1.69 + `bloom-chain` 1.74 = **5.23 ms of a 56.5 ms tick (9.3 %)**
+
+**(a)** `shadow-bake` — `Render_DeferredShadowMaps`, outside `renderFrame`,
+**effPar 6.7 of 12** (the second-worst parallelism in the map). `RTT` — the
+mirror offscreen pass, **`Ginstr/f` 0.020 and IPC 2.38**: almost no work, 1.69 ms
+of wall, and **0.001 ms at greets t=5965** where no RTT job ran. `bloom-chain` —
+`RENDER.CPP:1411`, IPC 4.54.
+
+**(b) Prior rounds.** `shadow-bake`: 2026-08-16q's `--shadow_bbox_cull` (default
+ON) took clipper entries **231 735 → 41 787 (−82.0 %)** and `DynMeshes` raster
+−40.0 %, byte-exact over 79.7 M face-visits. §00 calls the row **"mature"**, and
+two doors are explicitly closed — shadow-map tiling (*"linear won all 15
+shape-measurements. Closed."*) and shadow-bake ∥ gbuffer overlap (*"IMPLEMENTED,
+GATED OFF, MEASURED NET-NEGATIVE — do not default on"*, p50 40.0 → 52.5 ms).
+**Two items are open and named:** (1) *"`FDS_SHADOW_TILE_GRID` is now the wrong
+shape and nobody has re-asked it… a per-light FACE→TILE BIN — i.e.
+`--face_tile_bin` for the shadow pass — would collapse the 237 609 pair-visits a
+frame to two list walks; `FaceTileBin.cpp` already exists and its
+order-preservation proof already covers this shape. **Not built.**"* (2)
+**`DynOmnis` is now the bigger bake (1.21 ms raster vs `DynMeshes`' 0.78) — 28
+maps of which 18 are single-tile 128², untouched, and the cost is per-map fixed
+overhead, not clipper population.** `bloom-chain` / `tonemap-post` /
+`hdr-activate`: **the entire 2026-08 campaign never touched them.** All prior work
+is 2026-07 — the f16 HDR buffer (frame min 50.7 → 43.6 ms) and half-res DoF
+(−3 ms) — and the one pricing note reads *"long tail — no hidden monster."*
+Do-not-re-propose: pointwise post-FX fusion (*"only pays with chromatic off
+(~0.3 ms); not built"*). `RTT`: §00 row 13 — *"expected, priced, not a defect."*
+
+**(c) Prediction.** **`RTT` is the odd one and the best-shaped of the three:
+0.020 Ginstr/f producing 1.69 ms of wall at IPC 2.38 is not a compute row** — it
+is dispatch, allocation or wait, and the same row is 0.001 ms one pose over.
+**INFERRED 0.5–1.0 ms** by making the per-frame RTT conditional on the mirror
+being visible-and-changed; the predicate machinery already exists
+(`fds::g_rttJobsLastFrame`, used at `GREETS.CPP:4078`). `shadow-bake`'s two named
+open items (the shadow-pass face-tile bin, and `DynOmnis`' 18 single-tile 128²
+maps): **INFERRED 0.4–0.7 ms**. `bloom-chain` at IPC 4.54, unattacked since 2026-07:
+**INFERRED 0.3–0.6 ms, no mechanism identified** — a scoping run first.
+
+---
+
+#### 10. `lighting-w2` — the checkerboard fill wave. **2.39 ms greets, both poses, dead flat**
+
+**(a)** `DeferredSurfaceKernel.cpp:8207-8214`. IPC **4.74–4.79** — the highest in
+greets. effPar 10.8.
+
+**(b) Prior rounds — two wins and a closing statement.** 2026-08-16h
+`--deferred_fill_ldr_skip` + a material hoist: **w2 −7.0…−7.4 % at every pose**;
+the same round's census **refuted its own hypothesis** — the full-shade edge
+fallback is **768 of 641 088 cells = 0.12 %**, so *"no attack on the edge
+classification is justified on cost grounds."* 2026-08-16o: 4-wide
+`oct_decode_u32_x4`, **0.272 → 0.239 Gi/f (−11.9…−13.4 %)**, bit-exact over
+57.3 M lanes. **Do not re-propose:** turning the checkerboard OFF (**53.1 →
+79.3 ms**); the scanline carry for the neighbour gather (**tried twice, both net
+zero**, +23 %/+20 %/+8.2 %); the skip-when-equal oct fast path (dissolved by the
+4-wide). The durable rule: *"in this kernel a flag-guarded predicate or eight
+extra live values in the pixel body cost about what any of these mechanisms
+save."* **And the closing line, verbatim:** the 3-channel scalar arithmetic is
+*"the only one big enough to matter"* at ~0.03 Gi/f but *"a 4-wide rewrite is NOT
+bit-exact by construction — the `fdiv` reassociation is where it will break"*,
+after which *"**nothing else in this row is worth a round.**"*
+
+**(c) Prediction. INFERRED 0.2–0.4 ms and a judge call on bytes.** This row is
+close to closed and the docs say so. **Take it last, if at all.**
+
+---
+
+#### Also on the board, below the top ten but measured and named
+
+| row | ms | note |
+|---|--:|---|
+| **`mirror-grid`** (greets) | **0.689** | **The cleanest un-refuted, parallelism-shaped row in the tree.** §00 row 14: *"still unattacked since the backlog flagged it"*; flagged three separate times since 2026-07-03 (*"still serial, parallelizable follow-up"*), achievable 0.3–0.5 ms. A full-res scalar scan of the mirrorMask plane every frame (`DeferredSurfaceKernel.cpp:7932`). The adjacent, already-identified item: `mirrorMask` (u8) and `mirrorMaskZ` (u16) are 3 bytes across **two allocations 2 MB apart**, read together twice per rasterizer row — the backlog's *"second-cleanest"* hot-struct merge candidate. **INFERRED 0.3–0.5 ms, low risk.** |
+| `Tick-ReflXfrm` (city) | **1.888** | IPC 2.53. §00j priced `--refl_correct`'s marginal half at ~1.7 ms against a *larger* between-binary floor; this scope measures the whole block directly at a +0.32 % floor. **Not an overhead target** — §00j: *"that work IS the feature."* The structural answer (SoA Phase 5) is **NO-GO / BLOCKED ON SCOPE**: 274 refs in DEMO scene code including three alternative transform pipelines, end state measured at 0.56 % of a greets frame, and *"there is no bit-exact subset of Phase 5 that pays."* |
+| `Tick-SkyCube` | **0.73–0.76 in ALL THREE arms** | A full `RenderSkyCube` into VPage that the deferred path then paints over wherever geometry covers. **Zero prior history found.** 1.1–1.6 % of three ticks for mostly-overdrawn pixels; `--deferred_skybox` (`RENDER.CPP:749`) already exists as the replacement and is default-off *"until visually validated"*. **INFERRED 0.4–0.7 ms × 3 scenes; needs Gil-Ad's eye, not a measurement.** |
+| `tonemap-post` | 1.35–1.37 chase, 0.67 greets | IPC 2.6, 2 calls/f in chase (item 1). Untouched since 2026-07. |
+| `water-ripple` (city) | 1.776 | effPar 10.4; cashed 2026-08-15d alongside the glints. |
+| `Tick-Light` (city forward `Lighting()`) | **0.919** | **This CONFIRMS a fix, it does not refute a claim.** The *"~10 % of the city frame"* figure (`PERF_STATE.md:1491`) is the **pre-fix** number — 2026-08-16b diagnosed it as a load-imbalance row (`effPar` ≈ 1.5, the fan's unit was a MESH and one mesh is the whole building), chunked it to 1 024-vertex ranges byte-null, and took `LGHT` p50 **5.904 → 0.974 ms** (frame min −4.96 ms). My 0.919 matches the post-fix 0.974 within noise. **Anyone quoting "10 % of the city frame" today is quoting a dead number.** Not a target. |
+| `gbuf-clear` | 0.33–0.68 | **IPC 0.58–0.60 — the only bandwidth-bound phase in the tree**, and deliberately unattacked: it is the instrument's own control, proving IPC discriminates rather than reading 3.9 everywhere. |
+| `face-bin` | 0.11–0.18 | Already attacked and landed (`--face_tile_bin`, 2026-08-16c, byte-null). Build cost 0.200 ms at city t=1961. The open follow-on is the *shadow*-pass bin (row 9). |
+| `depth-bounds`, `strip-lists` | 0.18–0.65 / 0.08–0.28 | **No prior history found for either.** Too small to lead a round; note `depth-bounds` reaches 0.646 ms at chase t=800. |
+| UNACCOUNTED residue | 1.5–4.1 | §00l.1. Nothing inside it can exceed the residue. |
+
+---
+
+### 00l.6 — EXECUTION ORDER, IF YOU ARE THE NEXT AGENT
+
+Ranked by (measured win) ÷ (risk × effort), not by ms:
+
+1. **Per-scene `frame_tile` default: `setDefault(frame_tile_y, 20)` in
+   `CHASE.CPP`.** **MEASURED −3.17 ms of chase's t=800 tick (−5.7 %)**, 327 px of
+   2 M move, five hashes to re-pin. §00d already wrote the recommendation and
+   nobody executed it. Then offer city 6×20 (−0.79 ms, 4 534 px) to Gil-Ad's eye.
+   **Never global — greets loses 0.48 ms and moves 16 % of its pixels.**
+2. **Give chase's two `renderFrame` passes distinct `[DPROF]` names, then price
+   the `skipVolumetric` ladder.** Upper bound **≈11.7 ms at t=800**. The item is
+   named in a 2026-08-17 handover as *"on its face, the largest single perf item
+   left in chase"* and has **never been measured**. Step one is instrumentation.
+3. **Port `--water_slope_vec8` to `waterWaveSlopeVaried`** — byte-null on the
+   city copy, **−34 % of that row's cycles there**, and chase was skipped *by
+   construction*. **INFERRED 1.5–2.5 ms** on a 7.97 ms row.
+4. **Split `Render_SSAO` into march / blur / apply scopes** (three lines). It is
+   the only top-3 row in the map with one profiler line, no `effPar`, and an
+   inferred interior.
+5. **`--xpar_extent_census` on city t=1961** — one run, decides whether the
+   6.51 ms `TBR-render` row is worth opening at all.
+6. **`mirror-grid`** — 0.689 ms, serial, flagged three times, never touched.
+7. Then the kernel rows (2, 4) — where eleven and seven rounds of refutations
+   are waiting for anyone who arrives without reading (b).
+
+### 00l.7 — REPRODUCTION
+
+Drivers are committed at `scratchpad/perfmap28.py` (interleaved, order-rotated,
+min-of-rounds, JSON out), `scratchpad/perfmap28_report.py` (the tables above),
+`scratchpad/ladder28.py` (the flag ladders) and `scratchpad/binfloor28.py` (the
+between-binary floor). All take `PM_ITERS` / `PM_ROUNDS` / `PM_ONLY` / `PM_BIN` /
+`PM_LADDERS` / `PM_OUT` from the environment. Single-row recipe:
+
+```sh
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./DEMO \
+  --bench=scene@scene=<greets|city|chase>,t=<t>,iters=24 <his arm> \
+  --profiler=0 --deferred_prof=1 --strict_flags [--hw_prof]
+```
+
+**Do not time SSAO from an `--ssao_dump` run** — the dump forces the scalar apply
+loop and inflates the pass ~3.5× (13.7–16.0 ms against ~4.1–4.4 at 1512×848).
+The warning is in the source at `DeferredSSAO.cpp:258` and it is repeated here
+because two rounds have now had to re-learn it.
 
 ---
 
