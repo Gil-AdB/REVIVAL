@@ -10,6 +10,95 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-28 — **THE CONE PASS, ROUND 8**: city's `cones-call` **15.32 → 13.38 ms BIT-EXACT** and **→ 3.09 ms (−79.8 %) with the two look flags on**. Two landings, one refutation, and two bound defects found in code nobody was auditing. DONE / his call
+
+Implementation round against `docs/PERF_CONES_ANALYSIS.md` (branch
+`rev-conesimpl`). Arm throughout: city t=1961, `--env_live_water --deferred
+--city_env_pixel`, 1920×1080, `--profiler=0 --deferred_prof=1`, interleaved
+min-of-11, **zero other DEMO processes on the box before and after every
+quoted battery**. `Ginstr/f` is quoted only as the deterministic column
+(within-arm spread 0.05–0.32 %); cycles and wall lead.
+
+| lever | status | `cones-call` Gcyc/f | wall ms | Ginstr/f | pixels |
+|---|---|--:|--:|--:|---|
+| round baseline | — | 0.525 | 15.32 | 2.081 | — |
+| **C4** `anyLane_x8` | **LANDED, bit-exact** | 0.475 (−6.1 %) | 14.26 | 1.971 (−5.3 %) | none |
+| **C5** `--cone_hull_rect` | **LANDED, default ON, bit-exact** | 0.424 (−8.2 % more) | 13.38 | 1.838 | none |
+| **C2** `--cone_half_y_wide` | built, **default OFF — his call** | 0.229 (−50.4 %) | 6.92 | 0.946 | 0.37 % of px, max 5/255 |
+| **C1** `--cone_range_cull=0.5` | built, **default OFF — his call** | 0.099 (−78.6 %) | 3.09 | 0.412 | 19.3 % of px, max 4/255 |
+| C3 headlight-pair merge | **REFUTED, not built** | — | — | — | — |
+| C7 drop the Newton step | not built (precision call, his stack) | — | — | — | — |
+
+`renderFrame` (×2) at 1920×1080: 53.29 → 52.24 ms bit-exact, → 42.02 ms
+(−21.1 %) with both look flags.
+
+### The two bound defects, which are worth more than the milliseconds
+
+* **`lightSphereScreenRect` (`DeferredCommon.h`) is NOT conservative**, and
+  its own comment claims the opposite ("slightly over-estimates near the FOV
+  edges"). The small-angle form `rx = r·fovX/vz` under-estimates an off-axis
+  sphere's silhouette. Measured: at city **t=2400 the exact tangent bound
+  admits 3 013 alive (lane × spot) pairs the shipping sphere rect was
+  dropping.** It is byte-null at the city pins only because those pairs
+  contribute sub-LSB. **This helper is also used by `buildTileLightLists` and
+  `buildStripLightLists`** — the same under-estimate is live in the tiled
+  LIGHTING cull, where the contributions are not sub-LSB. NOT audited this
+  round. **TODO, and it is a correctness item, not a perf item.**
+* **A cone whose apex is behind the near plane has no finite screen rect.**
+  Perspective projection maps a 3-D convex hull to the hull of the projections
+  only for sets strictly in front of the eye. The first `--cone_hull_rect`
+  build fell back to the base ball's rect there, and chase caught it: 4 of 5
+  pinned poses moved, 62 589 / 24 249 / 27 387 / 228 919 px, **and every
+  changed pixel got DARKER, 0 brighter anywhere** — the signature of a leaking
+  cull, and the reason the delta's SIGN is worth measuring, not just its size.
+
+### C3 — refuted by its own falsifier before a line was written
+
+`FDS_CONE_PAIRCENSUS=1` (env-gated, kept). The analysis assumed **f = 0.7** of
+the 23 L/R pairs merge at K = 1 px. Measured f at K = 1: **0.087 / 0.304 /
+0.000 / 0.087 / 0.000** at t = 1961 / 400 / 2400 / 1000 / 3000 — mean 0.096,
+**zero at two of five poses**. Worse, the pairs that DO merge are the distant
+vehicles, whose beams are cheap per spot; the near cars that dominate the cost
+have apexes tens of pixels apart. K = 4 px only reaches f = 0.165, by which
+point the apex is displaced 2 px and the "structurally invisible" argument has
+failed. Nothing here.
+
+### Corrections to `docs/PERF_CONES_ANALYSIS.md`, for whoever reads it next
+
+1. **C1's "sub-LSB is free" argument is wrong as stated.** `VolCompositeAdd`
+   truncates ONCE, on `accB/G/R[lane]` — the sum over every spot on the pixel,
+   not per spot. One removed sub-LSB term is enough to flip the floor. C1 is
+   therefore never byte-null below k = 1, which is exactly what the sweep
+   found (2.79 % of pixels move at k = 0.9).
+2. **C1's k² tile-entry falsifier is refuted; the lever survives anyway.**
+   Tile-entries fall as **k^0.79** (1187 → 981 → 830 → 687 → 558 at k = 1.0 →
+   0.4), because a spot's footprint cannot shrink below one 160×135 tile. The
+   win comes from lanes dying earlier INSIDE retained tiles: dead pairs 39.9 %
+   → 64.3 % and alive lane×spot −65.9 % at k = 0.5.
+3. **C5 was under-called at 2.4–3.2 %; it measured −7.7 % cycles.** The
+   analysis capped it at §3.1's 12 % "perfect geometric cull" bound; the hull
+   reaches half of that alone (dead pairs 1 279 130 → 628 432).
+4. **C4 was under-called at 1.5–4 %; it measured −6.1 % cycles.** Its "25
+   instructions per site" reading of the disassembly is CONFIRMED (opcode
+   diff: `ushl.4s` 2→0, `ext.16b` 4→0, `orr.8b` 2→0, `mov.s` 34→28, `orr`
+   25→15, `ldr` 943→918).
+
+### Carried forward, not done this round
+
+* **The simde `movemask` lowering defect outside the cone pass.** Round 7's
+  B12 audit never covered it. The pattern is live elsewhere in the tree —
+  `Render_DeferredFastFog`'s lambda carries 2 `ushl.4s`, the `meka` and
+  `barry` tile rasterizers carry 26 and 2–6 each, `computeMirrorPresenceGrid`
+  27, `bilinear_sample_x8` 4. Not all of those are `movemask` (some are real
+  shifts) and none were touched. **Worth one sweep: `anyLane_x8` is a
+  10-line, bit-exact, control-flow-only change and it paid 6 % on the first
+  loop it was tried in.**
+* **C6** (closed-form W²/D·W in the midpoint block) — 1–3 %, re-association,
+  moves bytes. Unbuilt; still the best remaining candidate on the ranked list
+  now that C1/C2/C3/C4/C5 are resolved.
+* **C8** (depth-sliced tile-vs-cone cull) — overlaps almost entirely with C5,
+  which has now taken half the available cull prize. Marginal value ≤ 2 %.
+
 ## 2026-08-26 — **2026-08-25b IS FIXED: the mechanism is `Scene::PreferOuterVec`, not the tonemap — the outer-vec lighting kernel writes NO HDR radiance, so SSAO was multiplying a cleared buffer.** DONE (`--ssao_hdr_transport`, default 1)
 
 **THE NAMED MECHANISM.** `Render_DeferredLighting_Tile_OuterVec` — the kernel city,
