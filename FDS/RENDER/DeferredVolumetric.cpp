@@ -275,6 +275,104 @@ static inline __m256 fmax_x8(const __m256 &a, const __m256 &b) { return _mm256_m
 static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) { return _mm256_min_ps(a, b); }
 #endif
 
+// ─── "any lane alive?" at 3 instructions instead of 25 ──────────────────────
+// `_mm256_movemask_ps(m) == 0` is the kernel's two hot early-outs. On x86 that
+// is one VMOVMSKPS; on arm64 there is NOTHING to lower it to, so simde builds
+// the 8-bit sign-bit word by hand and the shipping binary pays TWENTY-FIVE
+// instructions per site: ext.16b, two adrp + two constant-table ldr q, ushl.4s,
+// and.16b, ext.16b, orr.8b, then FIVE vector->GPR moves (fmov x/w, three
+// mov.s w, v[i]) and nine scalar lsr/orr to pack the bits, then cbz. The five
+// v->GPR moves are ~6-10 cycle latency EACH and they sit directly between the
+// solve's dependency chain and a branch, so this costs latency as well as
+// issue slots. Round 7's simde audit (B12) checked blendv, the unordered
+// predicates, mask chains, set1, cmp-vs-zero, andnot and faddp -- movemask was
+// never in that list.
+//
+// The predicate we actually want is "does any lane have its sign bit set",
+// which is `vminvq_s32(OR of the two halves) < 0`: the bitwise OR preserves
+// each lane position's sign bit, and a signed horizontal min is negative iff
+// some lane is negative. That is EXACTLY movemask != 0 for any input, not just
+// for the all-ones/all-zeros masks a cmp produces -- so it is bit-exact by
+// construction, control flow only, no value changes.
+//
+// COMPILE-TIME, deliberately NOT a FeatureFlag: HW_PROFILING.md:1370-1372
+// measured a flagged dual-arm at +5.9% instructions in this kernel ("one extra
+// live bool costs more than most of the wins the campaign has landed").
+// Precedent: FDS_CONE_NEONMINMAX above.
+// -DFDS_CONE_ANYLANE=0 rebuilds the exact pre-change arm (both sites back on
+// _mm256_movemask_ps) in the SAME worktree, which is the A/B this landed on.
+#ifndef FDS_CONE_ANYLANE
+#define FDS_CONE_ANYLANE 1
+#endif
+#if FDS_CONE_ANYLANE && (defined(__ARM_NEON) || defined(__aarch64__))
+static inline bool anyLane_x8(const __m256 &m) {
+    simde__m256_private p = simde__m256_to_private(m);
+    const int32x4_t o = vorrq_s32(p.m128_private[0].neon_i32,
+                                  p.m128_private[1].neon_i32);
+    return vminvq_s32(o) < 0;
+}
+#else
+static inline bool anyLane_x8(const __m256 &m) { return _mm256_movemask_ps(m) != 0; }
+#endif
+
+// EXACT screen AABB of a sphere, for --cone_hull_rect.
+//
+// `lightSphereScreenRect` (DeferredCommon.h) uses the small-angle form
+// `rx = r * fovX / vz`, and its comment claims it "slightly over-estimates
+// near the FOV edges". For the RANGE sphere, whose radius is large enough
+// that the slack swamps the error, that is true in practice. It is NOT true
+// in general: an off-axis sphere's silhouette subtends more than r/vz, so the
+// small-angle rect can UNDER-estimate -- measured, the first cone-hull build
+// lost 846 of city's 15 326 914 alive (lane x spot) pairs, which is exactly
+// the signature of a bound that is not conservative. A cull that is only
+// "byte-null at the pins we happen to own" is not a cull, so the hull's two
+// pieces get the exact bound instead.
+//
+// The exact one is the tangent construction: in the x-z plane the sphere
+// projects to a circle at (vx, vz) of radius r, and the silhouette's extreme
+// x is where a tangent plane contains the y axis -- i.e. the tangent lines
+// from the eye, at angles atan2(vx, vz) +/- asin(r / |(vx,vz)|). Same in y.
+// ~8 transcendentals per sphere, 2 spheres x 46 spots once per frame; the
+// orchestrator is not the hot loop.
+static inline bool coneHullSphereRect(float vx, float vy, float vz, float r,
+                                      float fovX, float fovY,
+                                      float cntrEX, float cntrEY,
+                                      int xres, int yres, LightScreenRect &out)
+{
+    if (vz + r < 0.0f) return false;          // wholly behind the eye
+    if (vz - r < 1.0f) { out.full = true; return true; }
+    out.full = false;
+    constexpr float kHalfPi = 1.5707963f - 1e-3f;
+    // axis: returns [lo, hi] in tangent units, or the full range when the
+    // sphere wraps past 90 degrees on this axis.
+    auto span = [&](float c, float &tlo, float &thi) {
+        const float d = std::sqrt(c * c + vz * vz);
+        if (!(d > r)) { tlo = -1e30f; thi = 1e30f; return; }   // eye inside
+        const float a = std::atan2(c, vz);
+        const float b = std::asin(r / d);
+        const float a0 = a - b, a1 = a + b;
+        tlo = (a0 <= -kHalfPi) ? -1e30f : std::tan(a0);
+        thi = (a1 >=  kHalfPi) ?  1e30f : std::tan(a1);
+    };
+    float tx0, tx1, ty0, ty1;
+    span(vx, tx0, tx1);
+    span(vy, ty0, ty1);
+    const float xlo = cntrEX + fovX * tx0, xhi = cntrEX + fovX * tx1;
+    // Screen y is inverted: cy = cntrEY - fovY * tan(angle), so the LARGER
+    // world angle is the SMALLER screen row.
+    const float ylo = cntrEY - fovY * ty1, yhi = cntrEY - fovY * ty0;
+    // One pixel of pad. tan() near +/-90 degrees amplifies float error
+    // without bound, and the tile grid is 160x135 px, so a pixel of slack is
+    // free and takes the boundary-rounding question off the table.
+    constexpr float kPad = 1.0f;
+    const float fx = float(xres - 1), fy = float(yres - 1);
+    out.x0 = int(std::floor(std::min(std::max(xlo - kPad, 0.0f), fx)));
+    out.x1 = int(std::ceil (std::min(std::max(xhi + kPad, 0.0f), fx)));
+    out.y0 = int(std::floor(std::min(std::max(ylo - kPad, 0.0f), fy)));
+    out.y1 = int(std::ceil (std::min(std::max(yhi + kPad, 0.0f), fy)));
+    return true;
+}
+
 // OR of the mirror-footprint presence bits (ctx.tileMirrorPresence,
 // LIGHTING-tile geometry: 8-rounded X over the 12x8 grid) across every
 // lighting tile overlapping the given pixel rect. Used by the cone and
@@ -902,7 +1000,27 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     const bool coneReduced = fds::FeatureFlags::vol_cone_half_y()
                           || fds::FeatureFlags::deferred_quarter()
                           || fds::FeatureFlags::deferred_checkerboard();
-    const int yStep = (vecPath && coneReduced) ? 2 : 1;
+
+    // --cone_range_cull=k: shrink the RANGE-SPHERE CLAMP (and, in the
+    // orchestrator, the screen rect + tile-vs-cone cull) to k x Range, and
+    // NOTHING else. `rr` (= 1/Range) is deliberately NOT scaled, so the
+    // beam's brightness profile -- softEdge = max(0, 1 - rr*d)^2, the
+    // cone-atten smoothstep, the fog and surface fades -- is bit-identical
+    // inside the retained volume; only the chord's far end moves in.
+    // WHY IT PAYS: the LDR composite truncates
+    // (`int((pix>>16)&0xFF) + int(aR)`), so in-scatter past ~half range is
+    // worth a fraction of one display level. It has no such justification
+    // under --hdr (float composite, no truncation), so k is forced to 1
+    // there. k == 1.0f is an exact IEEE identity, so the default arm is
+    // byte-null BY CONSTRUCTION, not by measurement.
+    // WHAT IT IS NOT: byte-null below 1.0. The truncation is applied once to
+    // the SUM over every spot on the pixel, not per spot, so dropping a
+    // sub-LSB term still flips the floor wherever the accumulated fraction
+    // crosses an integer. Measured, city t=1961: k=0.7 -> 12.33% of pixels
+    // move at max |d| 2/255; k=0.5 -> 19.30% at max |d| 4/255.
+    const float coneRangeK  = fds::g_hdrActive ? 1.0f
+                            : fds::FeatureFlags::cone_range_cull();
+    const float coneRangeK2 = coneRangeK * coneRangeK;
 
     // ─── the per-(tile × spot) precompute (see ConeSpotPre) ─────────────
     // Built once here, consumed by the SIMD spot loop below. Spots the old
@@ -952,8 +1070,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                        lights->mirD[li];
                 if (hsD == 0.0f) continue;  // camera on the glass
             }
-            const float r2   = lights->range2[li];
-            const float rr   = lights->rRange[li];
+            const float r2   = lights->range2[li] * coneRangeK2;
+            const float rr   = lights->rRange[li];   // NOT scaled -- see coneRangeK
             const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
             const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
             const float c2   = cosO * cosO;
@@ -980,6 +1098,26 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
             p.bounce = bounce;
         }
     }
+
+    // --cone_half_y_wide: half VERTICAL rate, but derived per TILE instead of
+    // taken from a global flag. --vol_cone_half_y's veto is explicitly
+    // narrow-beam-specific ("the 1-2px bright core line can fall between
+    // sampled rows"), and `segPath` -- already computed above, already the
+    // predicate the kernel uses to pick the analytic closed form -- is
+    // exactly that class: cos(4.5 deg) = 0.9969 > 0.985 for the disco beams,
+    // cos(30 deg) = 0.866 < 0.985 for city's headlights. So a tile halves
+    // only when EVERY spot binned to it is a wide, non-turbulent cone, and
+    // the beams the veto is about are never touched. Evaluated HERE, before
+    // the row loop, so it adds no live value to the inner loop
+    // (HW_PROFILING.md:1370-1372: one extra live bool in this kernel costs
+    // more than most of the wins the campaign has landed).
+    bool allWideTile = false;
+    if (vecPath && conePreCount > 0 && fds::FeatureFlags::cone_half_y_wide()) {
+        allWideTile = true;
+        for (int s = 0; s < conePreCount; ++s)
+            if (conePre[s].segPath) { allWideTile = false; break; }
+    }
+    const int yStep = (vecPath && (coneReduced || allWideTile)) ? 2 : 1;
 
     for (int py = y1; py < y2; py += yStep) {
         const float Y = (CntrEY - float(py)) * invFOVY;
@@ -1497,7 +1635,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         if (g_coneDiag && _mm256_movemask_ps(mAlive) == 0)
                             g_dQuadDead.fetch_add(1, std::memory_order_relaxed);
 #if FDS_CONE_QUADEARLYOUT
-                        if (_mm256_movemask_ps(mAlive) == 0) {
+                        // anyLane_x8, not movemask -- see its definition.
+                        if (!anyLane_x8(mAlive)) {
                             if (g_coneDiag)
                                 g_dDead.fetch_add(1, std::memory_order_relaxed);
                             continue;
@@ -1542,9 +1681,13 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         _mm256_store_ps(zLoArr,    _mm256_and_ps(zLo, mAlive));
                         _mm256_store_ps(zHiArr,    _mm256_and_ps(zHi, mAlive));
                         _mm256_store_ps(aliveLane, _mm256_and_ps(sOne, mAlive));
-                        const int aliveBits = _mm256_movemask_ps(mAlive);
-                        spotAlive = aliveBits != 0;
+                        // The shipping build only ever asked this mask
+                        // "is anything alive"; the BITS are needed solely by
+                        // the compiled-out census popcount, so the 25-op
+                        // sign-bit pack now lives there and nowhere else.
+                        spotAlive = anyLane_x8(mAlive);
                         if (g_coneDiag) {
+                            const int aliveBits = _mm256_movemask_ps(mAlive);
                             g_dLanes.fetch_add(FDS_POPCOUNT(unsigned(aliveBits)),
                                                std::memory_order_relaxed);
                             if (!spotAlive)
@@ -2480,8 +2623,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
                 const float cosO = lights->cosOuter[li];
                 const float cosI = lights->cosInner[li];
-                const float r2   = lights->range2[li];
-                const float rr   = lights->rRange[li];
+                const float r2   = lights->range2[li] * coneRangeK2;
+                const float rr   = lights->rRange[li];   // NOT scaled -- see coneRangeK
                 // Clone-beam footprint gate (vec path has the same;
                 // scalar fallback keeps correctness for A/B).
                 const uint32_t omid_s = lights->mirrorId[li];
@@ -2968,15 +3111,68 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             XRes, YRes);
     }
 
+    const float coneRangeK_orch = fds::g_hdrActive ? 1.0f
+                                : fds::FeatureFlags::cone_range_cull();
+    const bool coneHullRect = fds::FeatureFlags::cone_hull_rect();
+
     for (int s = 0; s < spotCount; ++s) {
         const int li = spotIdx[s];
         const float vx = lights->posX[li];
         const float vy = lights->posY[li];
         const float vz = lights->posZ[li];
-        const float r  = std::sqrt(lights->range2[li]);
+        // Screen rect + tile-vs-cone cull shrink with --cone_range_cull too;
+        // if they did not, the tile lists would still carry spots whose
+        // retained volume no longer reaches the tile. k == 1.0f is exact.
+        const float r  = std::sqrt(lights->range2[li]) * coneRangeK_orch;
+        // --cone_hull_rect: the range sphere is a 2r cube around the apex,
+        // but the lit volume is a 30-degree cone -- roughly 1.37r x r x r,
+        // a quarter to a third of the sphere's screen AABB. Bound the tile
+        // span by the CONE HULL instead: conv({apex} U B(P + r*cosO*D,
+        // r*sinO)). That hull provably CONTAINS the spot volume (a point at
+        // radius s <= r and angle phi <= O lies inside the apex-to-ball
+        // tangent cone, whose half-angle is exactly arcsin(r sinO / r) = O;
+        // and any point past the base plane satisfies |X-C|^2 <= r^2 sin^2 O
+        // outright, since u*c > cosO gives u^2 - 2*u*c*cosO + 2cos^2 O - 1 <
+        // u^2 - 1 <= 0). A perspective projection maps a convex hull to the
+        // hull of the projections, so the AABB of the two projected pieces
+        // contains the projected cone. Exactly conservative -> BIT-EXACT:
+        // every entry dropped is one whose pixels the per-pixel solve
+        // rejects anyway.
         LightScreenRect sr;
-        if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
-                                   XRes, YRes, sr)) continue;
+        if (coneHullRect) {
+            const float cosO_h = lights->cosOuter[li];
+            const float sinO_h = lights->sinOuter[li];
+            const float ar     = r * cosO_h;             // axial to base centre
+            LightScreenRect ra, rb;
+            const bool okA = coneHullSphereRect(vx, vy, vz, 0.0f,
+                                 FOVX, FOVY, CntrEX, CntrEY, XRes, YRes, ra);
+            const bool okB = coneHullSphereRect(
+                                 vx + lights->dirX[li] * ar,
+                                 vy + lights->dirY[li] * ar,
+                                 vz + lights->dirZ[li] * ar,
+                                 r * sinO_h,
+                                 FOVX, FOVY, CntrEX, CntrEY, XRes, YRes, rb);
+            // BOTH pieces must project from strictly in front of the eye,
+            // or the hull-of-projections identity does not hold and the rect
+            // is not a bound. A cone whose APEX is behind the near plane
+            // widens without limit as its cross-section approaches the eye,
+            // so its screen footprint is far larger than the base ball's --
+            // this is what the first build got wrong, and chase (32 narrow
+            // beams, apexes sweeping past the camera) paid for it in
+            // exactly one direction: 4 of its 5 pinned poses lost light,
+            // 0 pixels anywhere got brighter.
+            if (!okA || !okB || ra.full || rb.full) {
+                sr.full = true;
+            } else {
+                sr.full = false;
+                sr.x0 = XRes; sr.x1 = -1; sr.y0 = YRes; sr.y1 = -1;
+                if (okA) { sr.x0 = std::min(sr.x0, ra.x0); sr.x1 = std::max(sr.x1, ra.x1);
+                           sr.y0 = std::min(sr.y0, ra.y0); sr.y1 = std::max(sr.y1, ra.y1); }
+                if (okB) { sr.x0 = std::min(sr.x0, rb.x0); sr.x1 = std::max(sr.x1, rb.x1);
+                           sr.y0 = std::min(sr.y0, rb.y0); sr.y1 = std::max(sr.y1, rb.y1); }
+            }
+        } else if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX,
+                                          CntrEY, XRes, YRes, sr)) continue;
         if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
         const int ti_lo = sr.full ? 0 : sr.x0 / tileSizeX;
         const int ti_hi = sr.full ? numTilesX - 1
@@ -3054,6 +3250,59 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                 }
             }
         }
+    }
+
+    // FDS_CONE_PAIRCENSUS=1: prices candidate C3 (headlight-pair merge)
+    // BEFORE building it, which is the order docs/PERF_CONES_ANALYSIS.md asks
+    // for. Two spots are a merge candidate when they share cone angles,
+    // range, gain and axis (dot > 0.9999) and their APEXES project within K
+    // screen pixels of each other -- at which point one spot at the midpoint
+    // with 2x gain is, per the analysis, "structurally invisible". `f` is the
+    // fraction of the population that could merge. Diagnostic only, outside
+    // every loop that matters, and it never alters the spot list.
+    static const bool sPairCensus = [](){ const char *e = std::getenv("FDS_CONE_PAIRCENSUS"); return e && *e == '1'; }();
+    if (sPairCensus && !inlineDispatch) {
+        static const float kK[5] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+        int merged[5] = {0,0,0,0,0};
+        for (int ki = 0; ki < 5; ++ki) {
+            bool used[CONE_TILE_SPOT_CAP * 8] = {};
+            for (int a = 0; a < spotCount; ++a) {
+                if (a < int(sizeof(used)/sizeof(used[0])) && used[a]) continue;
+                const int la = spotIdx[a];
+                if (lights->posZ[la] <= 1.0f) continue;
+                const float ax = CntrEX + lights->posX[la] * FOVX / lights->posZ[la];
+                const float ay = CntrEY - lights->posY[la] * FOVY / lights->posZ[la];
+                for (int b = a + 1; b < spotCount; ++b) {
+                    if (b < int(sizeof(used)/sizeof(used[0])) && used[b]) continue;
+                    const int lb = spotIdx[b];
+                    if (lights->posZ[lb] <= 1.0f) continue;
+                    if (lights->cosOuter[la] != lights->cosOuter[lb]) continue;
+                    if (lights->cosInner[la] != lights->cosInner[lb]) continue;
+                    if (lights->range2[la]  != lights->range2[lb])  continue;
+                    if (lights->coneGain[la]!= lights->coneGain[lb])continue;
+                    const float dot = lights->dirX[la]*lights->dirX[lb]
+                                    + lights->dirY[la]*lights->dirY[lb]
+                                    + lights->dirZ[la]*lights->dirZ[lb];
+                    if (dot < 0.9999f) continue;
+                    const float bx = CntrEX + lights->posX[lb] * FOVX / lights->posZ[lb];
+                    const float by = CntrEY - lights->posY[lb] * FOVY / lights->posZ[lb];
+                    const float dx = ax - bx, dy = ay - by;
+                    if (dx*dx + dy*dy > kK[ki]*kK[ki]) continue;
+                    ++merged[ki];
+                    if (a < int(sizeof(used)/sizeof(used[0]))) used[a] = true;
+                    if (b < int(sizeof(used)/sizeof(used[0]))) used[b] = true;
+                    break;
+                }
+            }
+        }
+        fprintf(stderr, "[CONE-PAIR] spots=%d | merged pairs at K=0.25/0.5/1/2/4 px: "
+                "%d %d %d %d %d  -> f = %.3f %.3f %.3f %.3f %.3f\n",
+                spotCount, merged[0], merged[1], merged[2], merged[3], merged[4],
+                spotCount ? 2.0*merged[0]/spotCount : 0.0,
+                spotCount ? 2.0*merged[1]/spotCount : 0.0,
+                spotCount ? 2.0*merged[2]/spotCount : 0.0,
+                spotCount ? 2.0*merged[3]/spotCount : 0.0,
+                spotCount ? 2.0*merged[4]/spotCount : 0.0);
     }
 
     if (sConeAttr && !inlineDispatch) {
