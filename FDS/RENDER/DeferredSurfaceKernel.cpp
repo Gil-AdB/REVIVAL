@@ -2004,6 +2004,33 @@ static inline float ovecAblSum(__m256i v)
 // [15] tile calls  [16] sum of tl.count over tile calls
 // [17] sum of spot count over tile calls                               -> C5
 // [18] uniform-group alive lanes  [19] groups where the env vec front-end armed
+// ─── OuterVec lever hatch (2026-08-28 round 2) ──────────────────────────────
+// Round 1 shipped C3/C4/C7 behind runtime FeatureFlags so their A/B could be
+// done on ONE binary. That measurement is finished, and it MEASURED THE FLAGS'
+// OWN COST: the ALL-OFF arm of the four dials read 0.983 Gi/f against the
+// C1+C8 build's 0.955 — +2.9 %% of the row paid for predicates whose answer is a
+// compile-time constant in every shipping configuration. That is 16l's
+// +4.3 %%-with-the-flag-OFF result verbatim, and 16h/16m/16o all shipped this
+// class flagless for exactly this reason.
+//
+// So the three levers whose predicate sits in the PIXEL/LIGHT body are now
+// compile-time `true`, and their FeatureFlags are INERT measurement hatches in
+// the shape --deferred_fill_oct_pair already uses: build with
+// -DFDS_OVEC_HATCH=ON to get the runtime dials back for a future A/B.
+// C2's --deferred_ovec_nomirror is deliberately NOT hatched — see its use site.
+#ifndef FDS_OVEC_HATCH
+#define FDS_OVEC_HATCH 0
+#endif
+#if FDS_OVEC_HATCH
+#define OVEC_LIGHT_SKIP_ON   fds::FeatureFlags::deferred_ovec_light_skip()
+#define OVEC_MAT_UNIFORM_ON  fds::FeatureFlags::deferred_ovec_mat_uniform()
+#define OVEC_VEC_PACK_ON     fds::FeatureFlags::deferred_ovec_vec_pack()
+#else
+#define OVEC_LIGHT_SKIP_ON   true
+#define OVEC_MAT_UNIFORM_ON  true
+#define OVEC_VEC_PACK_ON     true
+#endif
+
 #ifndef FDS_OVEC_CENSUS
 #define FDS_OVEC_CENSUS 0
 #endif
@@ -5971,10 +5998,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	// round-trip when the scene carries no normal map at all. See
 	// DeferredLightingCtx::anyNormalMap.
 	const bool  nmapLoopOnG = ctx.anyNormalMap;
-	// C4 — see the testz in the omni loop. Read ONCE per tile, never in the
-	// loop: 16l measured a runtime hatch bool inside a hot inner body at
-	// +4.3 %% WITH THE FLAG OFF.
-	const bool  ovecGroupLightSkip = fds::FeatureFlags::deferred_ovec_light_skip();
+	// C4 — FLAGLESS since round 2: the dial itself was part of the +2.9 %% the
+	// ALL-OFF arm carried. -DFDS_OVEC_HATCH=ON restores it.
+	const bool  ovecGroupLightSkip = OVEC_LIGHT_SKIP_ON;
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked). See
 	// the lane_ambB rewrite after the normal decode below.
 	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
@@ -6014,10 +6040,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 		if (tl.mirrorId[n] != 0u) { _tlMirrorAllZero = false; break; }
 	const bool  ovecNoMirror = gb.mirrorId.empty() && _tlMirrorAllZero
 	    && fds::FeatureFlags::deferred_ovec_nomirror();
-	// C7 — see the 8-wide pack before the lane loop.
-	const bool  ovecVecPack = fds::FeatureFlags::deferred_ovec_vec_pack();
-	// C3 — see the uniform-group material resolve in the gather.
-	const bool  ovecMatUniform = fds::FeatureFlags::deferred_ovec_mat_uniform();
+	// C7 / C3 — flagless since round 2, same reason as C4 above.
+	const bool  ovecVecPack    = OVEC_VEC_PACK_ON;
+	const bool  ovecMatUniform = OVEC_MAT_UNIFORM_ON;
 #if FDS_OVEC_ABLATE || FDS_OVEC_OMNI_ABLATE
 	float ovecSink = 0.0f;
 #endif
