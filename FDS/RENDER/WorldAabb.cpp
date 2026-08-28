@@ -398,7 +398,7 @@ std::unordered_map<DispPosKey, Vector, DispPosHash> g_dispVec;
 // — steepest |n_y| (walls ~0, sliver strips large), distinct parent count, and
 // whether the vert is bake-created (i >= nOrig). Proves WHICH geometry class a
 // dump population belongs to without trusting code reading.
-struct DispTag { float parentNyMax; uint8_t nParents; uint8_t created; };
+struct DispTag { float parentNyMax; uint8_t nParents; uint8_t created; uint8_t weld; };
 std::unordered_map<DispPosKey, DispTag, DispPosHash> g_dispTag;
 // --displace_viz=2: per-displaced-triangle SIGNED height error (truth − carried,
 // world units), keyed by the triangle's final centroid position bits.
@@ -511,10 +511,11 @@ void DisplaceViz_RecordVec(const Material* M, const Vector& finalLocal, const Ve
 }
 
 void DisplaceViz_RecordTag(const Vector& finalLocal, float parentNyMax,
-                           unsigned nParents, bool created) {
+                           unsigned nParents, bool created, bool weld) {
     if (!FeatureFlags::displace_viz() && !FeatureFlags::viz_arm()) return;
     g_dispTag[posKey(finalLocal)] = DispTag{ parentNyMax,
-        uint8_t(nParents > 255 ? 255 : nParents), uint8_t(created ? 1 : 0) };
+        uint8_t(nParents > 255 ? 255 : nParents), uint8_t(created ? 1 : 0),
+        uint8_t(weld ? 1 : 0) };
 }
 
 // signedErrFrac is PRE-NORMALIZED by the bake to an absolute fraction where
@@ -544,6 +545,11 @@ void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, flo
 static void DisplaceViz_DumpRecords(Scene* sc) {
     struct Agg { Vector w, dv; float m; float devMax, devMin; int nf; const char* mat; };
     std::unordered_map<DispPosKey, Agg, DispPosHash> agg;
+    // Companion face-record file: the vert dump cannot answer "which FACE does
+    // a rendered pixel lie on" (the bridging-face question) — per face with
+    // bake records, the three WORLD corners + material, same one-shot pass.
+    FILE* ff = std::fopen("displace_faces.txt", "w");
+    if (ff) std::fprintf(ff, "# mat  ax ay az  bx by bz  cx cy cz\n");
     for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         TriMesh* T = (TriMesh*)Obj->Data;
@@ -570,6 +576,17 @@ static void DisplaceViz_DumpRecords(Scene* sc) {
             const float nbl = std::sqrt(nbx*nbx+nby*nby+nbz*nbz);
             if (nbl <= 1e-9f) continue;
             nbx/=nbl; nby/=nbl; nbz/=nbl;
+            if (ff) {
+                Vector fw[3];
+                for (int k = 0; k < 3; ++k) {
+                    MatrixXVector(T->RotMat, &corner[k]->Pos, &fw[k]);
+                    fw[k].x += T->IPos.x; fw[k].y += T->IPos.y; fw[k].z += T->IPos.z;
+                }
+                std::fprintf(ff, "%s  %.5f %.5f %.5f  %.5f %.5f %.5f  %.5f %.5f %.5f\n",
+                             (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "?",
+                             fw[0].x, fw[0].y, fw[0].z, fw[1].x, fw[1].y, fw[1].z,
+                             fw[2].x, fw[2].y, fw[2].z);
+            }
             for (int k = 0; k < 3; ++k) {
                 const float m = std::sqrt(dv[k].x*dv[k].x + dv[k].y*dv[k].y + dv[k].z*dv[k].z);
                 float dev = 0.0f;
@@ -591,20 +608,22 @@ static void DisplaceViz_DumpRecords(Scene* sc) {
     }
     FILE* f = std::fopen("displace_dump.txt", "w");
     if (!f) { std::fprintf(stderr, "[DISPLACE-DUMP] cannot open displace_dump.txt\n"); return; }
-    std::fprintf(f, "# wx wy wz  dvx dvy dvz  mag  devMax devMin  nfaces  mat  pNy nPar created\n");
+    std::fprintf(f, "# wx wy wz  dvx dvy dvz  mag  devMax devMin  nfaces  mat  pNy nPar created weld\n");
     for (auto& kv : agg) {
         const Agg& a = kv.second;
-        float pNy = -1.0f; int nPar = 0, created = -1;
+        float pNy = -1.0f; int nPar = 0, created = -1, weld = 0;
         auto tt = g_dispTag.find(kv.first);
         if (tt != g_dispTag.end()) { pNy = tt->second.parentNyMax;
                                      nPar = tt->second.nParents;
-                                     created = tt->second.created; }
-        std::fprintf(f, "%.5f %.5f %.5f  %.6f %.6f %.6f  %.6f  %.2f %.2f  %d  %s  %.3f %d %d\n",
+                                     created = tt->second.created;
+                                     weld = tt->second.weld; }
+        std::fprintf(f, "%.5f %.5f %.5f  %.6f %.6f %.6f  %.6f  %.2f %.2f  %d  %s  %.3f %d %d %d\n",
                      a.w.x, a.w.y, a.w.z, a.dv.x, a.dv.y, a.dv.z, a.m,
-                     a.devMax, a.devMin, a.nf, a.mat, pNy, nPar, created);
+                     a.devMax, a.devMin, a.nf, a.mat, pNy, nPar, created, weld);
     }
     std::fclose(f);
-    std::fprintf(stderr, "[DISPLACE-DUMP] wrote %zu verts to displace_dump.txt\n", agg.size());
+    if (ff) std::fclose(ff);
+    std::fprintf(stderr, "[DISPLACE-DUMP] wrote %zu verts to displace_dump.txt (+faces)\n", agg.size());
 }
 
 void DisplaceViz_DrawOverlay(Scene* sc) {

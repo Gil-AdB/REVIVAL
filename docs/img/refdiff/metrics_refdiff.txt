@@ -87,3 +87,24 @@ clamp_A: cam(half=0.5,ys=-1) planar[n=1164201] raw 4.32/45.08 LF 2.92/11.74 dz -
   plane 45 n=359439 LF med 3.06 p90 9.25
   plane 41 n=31644 LF med 3.80 p90 6.83
 clamp_B: cam(half=0.5,ys=-1) planar[n=541596] raw 4.31/41.85 LF 2.84/9.17 dz -0.0476 | curved[n=3133] raw 31.31/140.60 LF 28.49/139.47 dz -0.0795 | WORSTPLANE 48 LF med 2.29 p90 9.46
+snap_A MARK-rect: geo n=15756 dz med -0.0267 p90|dz| 0.6651 frac(dz>+0.08) 28.7% frac(|dz|>0.08) 64.6% ; LF med 7.35 (n=5590)
+snap_A MARK-ellipse: geo n=43043 dz med -0.0431 p90|dz| 0.5307 frac(dz>+0.08) 14.9% frac(|dz|>0.08) 52.6% ; LF med 8.05 (n=20235)
+  plane 43 n=650575 LF med 3.23 p90 14.59
+  plane 48 n=254847 LF med 2.32 p90 9.86
+  plane 41 n=36047 LF med 3.86 p90 7.66
+  plane 45 n=222631 LF med 2.81 p90 6.74
+snap_A: cam(half=0.5,ys=-1) planar[n=1164100] raw 4.30/45.52 LF 2.93/11.94 dz -0.0532 | curved[n=29759] raw 4.32/23.13 LF 3.96/16.19 dz -0.0269 | WORSTPLANE 43 LF med 3.23 p90 14.59
+snap_A MARK-rect: geo n=15756 dz med -0.0267 p90|dz| 0.6651 frac(dz>+0.08) 28.7% frac(|dz|>0.08) 64.6% ; LF med 7.35 (n=5590)
+snap_A MARK-ellipse: geo n=43043 dz med -0.0431 p90|dz| 0.5307 frac(dz>+0.08) 14.9% frac(|dz|>0.08) 52.6% ; LF med 8.05 (n=20235)
+  plane 43 n=650575 LF med 3.23 p90 14.59
+  plane 48 n=254847 LF med 2.32 p90 9.86
+  plane 41 n=36047 LF med 3.86 p90 7.66
+  plane 45 n=222631 LF med 2.81 p90 6.74
+snap_A: cam(half=0.5,ys=-1) planar[n=1164100] raw 4.30/45.52 LF 2.93/11.94 dz -0.0532 | curved[n=29759] raw 4.32/23.13 LF 3.96/16.19 dz -0.0269 | WORSTPLANE 43 LF med 3.23 p90 14.59
+snap_A MARK-rect: geo n=15756 dz med -0.0288 p90|dz| 0.6902 frac(dz>+0.08) 30.0% frac(|dz|>0.08) 66.5% ; LF med 8.17 (n=5336)
+snap_A MARK-ellipse: geo n=42992 dz med -0.0488 p90|dz| 0.5425 frac(dz>+0.08) 15.8% frac(|dz|>0.08) 53.6% ; LF med 8.34 (n=20850)
+  plane 43 n=652517 LF med 3.27 p90 14.56
+  plane 48 n=256321 LF med 2.26 p90 9.82
+  plane 41 n=36110 LF med 3.86 p90 7.67
+  plane 45 n=222996 LF med 2.85 p90 6.89
+snap_A: cam(half=0.5,ys=-1) planar[n=1167944] raw 4.21/45.99 LF 2.94/11.95 dz -0.0604 | curved[n=29363] raw 4.43/25.34 LF 4.10/17.52 dz -0.0153 | WORSTPLANE 43 LF med 3.27 p90 14.56

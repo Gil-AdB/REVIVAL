@@ -6348,6 +6348,54 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			}
 			return best;
 		};
+		// ── JOINT SNAP (--greets_displace_joint_snap, 2026-08-28 refdiff round).
+		// His marked lips, attributed by dump: created BORDER-STRIP verts at the
+		// pier junction carry PLATEAU-level displacement at bed-joint heights
+		// (20 proud vs 35 correctly-notched joint verts) — the strip's per-vert
+		// sample lands on the joint's shoulder at unlucky phase and the narrow
+		// groove is missed, so the course line juts a lip past the corner (the
+		// same phase-miss disease the v3 thread measured on its rings). The map
+		// itself knows where its bed joints are: V-row medians of the sampled
+		// mip carve well below mipMean exactly at the joint bands. Snap: a
+		// border-family vert (freeEdgeKA-keyed) whose mean V sits inside an
+		// (extended) groove band, and whose sampled h MISSED the groove, takes
+		// the band's own row-median height. Lower-only, never raises; verts the
+		// line machinery already snapped (hClass E/P) are left alone.
+		struct JointBand { float v0, v1, c0, c1, hBand; };
+		std::vector<JointBand> jointBands;
+		if (fds::FeatureFlags::greets_displace_joint_snap()) {
+			const int mh = useMipH > 0 ? useMipH : 1;
+			const int mw = useMipW > 0 ? useMipW : 1;
+			std::vector<float> rowMed(size_t(mh), mipMean);
+			std::vector<float> rowBuf(size_t(mw), 0.0f);
+			for (int r = 0; r < mh; ++r) {
+				const float v = (float(r) + 0.5f) / float(mh);
+				for (int c = 0; c < mw; ++c)
+					rowBuf[size_t(c)] = SampleHeight8Bilinear(hm, useMip,
+						(float(c) + 0.5f) / float(mw), v);
+				std::nth_element(rowBuf.begin(), rowBuf.begin() + mw/2, rowBuf.end());
+				rowMed[size_t(r)] = rowBuf[size_t(mw/2)];
+			}
+			constexpr float kJointDepth = 0.06f;   // rowMed below mipMean-this = joint
+			const float kExt = 2.0f / float(mh);   // shoulder-phase margin, 2 rows
+			for (int r = 0; r < mh; ) {
+				if (rowMed[size_t(r)] >= mipMean - kJointDepth) { ++r; continue; }
+				int r2 = r;
+				std::vector<float> bmed;
+				while (r2 < mh && rowMed[size_t(r2)] < mipMean - kJointDepth)
+					bmed.push_back(rowMed[size_t(r2++)]);
+				std::nth_element(bmed.begin(), bmed.begin() + bmed.size()/2, bmed.end());
+				jointBands.push_back({ float(r)/float(mh) - kExt,
+				                       float(r2)/float(mh) + kExt,
+				                       float(r)/float(mh), float(r2)/float(mh),
+				                       bmed[bmed.size()/2] });
+				r = r2;
+			}
+			if (!jointBands.empty())
+				std::fprintf(stderr, "[STONE-JSNAP] '%s' %zu joint bands from the "
+					"mip%d row profile\n", matName, jointBands.size(), useMip);
+		}
+		int nJointSnap = 0;
 		// ── PROVENANCE CENSUS ([STONE-PROV], census+box gated): every vert in
 		// the box WITH its classification, printed BEFORE the displacement loop
 		// so pinned verts show too — FINALV can only ever show displacing verts,
@@ -6384,6 +6432,35 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					if (lineRepV[i] < 1e29f) { h = lineRepV[i]; ++nLineSnap; hClass = 'E'; }
 				} else if (linePlatD[i] < 1e29f) {
 					h = linePlatV[i]; ++nPlatPin; hClass = 'P';
+				}
+			}
+			// JOINT SNAP (see the band construction above). Two populations:
+			//  * hClass 'P' — the STONE-LINE fallback's plateau-pin, the anti-
+			//    zigzag cure that deliberately holds groove-zone verts at
+			//    plateau level ("no carve"). Correct on the SHOULDER, but a
+			//    vert whose V sits inside the joint CORE is holding a plateau
+			//    lip across the bed joint — the marked juts and the scene-wide
+			//    "course lines in front" signature. Core verts take the
+			//    band's row-median: stable (no zigzag) AND recessed.
+			//  * hClass '-' border-family — phase-missed groove samples; the
+			//    extended band catches shoulder phase.
+			// Lower-only; 'E' (true line verts, castellated rep) always wins.
+			if (!jointBands.empty()) {
+				// 'E'/'P' (the line machinery's plateau-side reps) snap in the
+				// band CORE only — their "no carve" design stays correct on the
+				// shoulders. '-' (raw phase samples, mid-bevel chaos measured
+				// at the marked joint rows: +0.067/+0.038 corners on one joint)
+				// snaps across the extended band.
+				float vf = hCnt[i] ? vSum[i]/float(hCnt[i]) : 0.0f;
+				vf -= std::floor(vf);                    // toroidal map space
+				const bool core = (hClass == 'E' || hClass == 'P');
+				for (const JointBand &JB : jointBands) {
+					const float lo = core ? JB.c0 : JB.v0;
+					const float hi = core ? JB.c1 : JB.v1;
+					if (vf >= lo && vf <= hi && h > JB.hBand + 0.02f) {
+						h = JB.hBand; ++nJointSnap; hClass = 'J';
+						break;
+					}
 				}
 			}
 			float dsp=amp*(h-mipMean);
@@ -6799,6 +6876,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				"snapped to their groove line's rep (edge path); %d fallback-path "
 				"verts plateau-pinned inside groove zones\n",
 				matName, nLineSnap, nMoved, nPlatPin);
+		if (nJointSnap)
+			std::fprintf(stderr, "[STONE-JSNAP] '%s': %d border-family verts "
+				"snapped into their bed-joint band (phase-missed groove)\n",
+				matName, nJointSnap);
 
 		// ── FOLD RELAXATION (--greets_displace_fold_relax, default on) — the
 		// t=6097 SLIVER-GAP fix. A displaced target face whose geometric normal
@@ -6996,7 +7077,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				// modes 3/4: the FULL vector, so the overlay can reconstruct the
 				// base wall plane (base = final − vec) and judge direction+height.
 				fds::DisplaceViz_RecordVec(targetMat, verts[i].Pos, Vector{dx,dy,dz});
-				fds::DisplaceViz_RecordTag(verts[i].Pos, tagNy[i], tagNp[i], i>=nOrig); }
+				fds::DisplaceViz_RecordTag(verts[i].Pos, tagNy[i], tagNp[i], i>=nOrig,
+				                           i < mitreOf.size() && mitreOf[i] >= 0); }
 		}
 
 		// ── viz record (--displace_viz=2 HEIGHT-ERROR field): per emitted target

@@ -1,5 +1,38 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28h — THE MARKED JUTS ARE NAMED AT FACE LEVEL AND THE VERT-LEVEL
+> LEVER FAMILY IS REFUTED BY THE GATE: the protrusion is COURSE-SPANNING
+> SLIVER FANS WITH NO VERTS INSIDE THE BED-JOINT BANDS — the indicated fix is
+> the joint-band edge split, handed to the next round
+>
+> The bridging-face premise, tested directly (new instruments: the
+> displace_faces.txt face dump + tools/bridging_verify.py): 76–88%% of
+> protruding marked pixels lie on faces whose corners all classify to ONE
+> authored plane — NOT junction-spanning. The interrogation of the exact
+> faces under his marks (per-corner dump join) shows the true mechanism:
+> the corner strip's fans span joint-to-joint (corners at y=3.33 and y=4.68,
+> a whole course, nothing between), their joint-row corners sit at MIXED
+> levels (line-rep 'E' plateau +0.102, phase '-' mid-bevel +0.067/+0.038,
+> notched −0.01 — on ONE joint), and the face INTERIORS bridge across the
+> reference's groove band: corners individually legal (≤ +0.10), pixels
+> 0.25–0.93 ray-inflated. No level assignment can carve a face that has no
+> vert in the joint — measured three ways: joint-snap 23 border-key verts →
+> marks unmoved (28.7/14.9%%); +plateau-pin cores (313) → unmoved; wide
+> variant incl. 'E' cores (4451) → marks WORSE (30.0/15.8%%) and the scene
+> recession deepened (−0.053 → −0.060). greets_displace_joint_snap ships
+> default OFF with the refutation in its flag text; the default arm is
+> byte-identical to pre-round (eeb15725).
+>
+> Also measured en route: the pier junction has ZERO welded verts in the
+> default arm (the mitre line at bis(+0.49,0,−0.87) prints sign-check
+> "INVERTED?" and belongs to another corner; the sign validation only
+> prints — it corrects nothing); the pier column is built entirely of
+> created band/strip verts. NEXT (one round, scoped): the JOINT-BAND EDGE
+> SPLIT — split strip edges where they cross a bed-joint V-band and insert
+> the joint-row verts so the carve can exist; gate unchanged (his marks →
+> bare floor 0.0000).
+
+
 > ## 2026-08-28g — THE FIX ROUND UNDER THE NEW GATE: the DC-first order is
 > refuted by measurement, the vert clamp is refuted by its own gate, and the
 > juts are cornered as BRIDGING FACES

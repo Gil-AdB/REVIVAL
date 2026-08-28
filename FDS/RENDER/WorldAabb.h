@@ -126,7 +126,7 @@ void DisplaceViz_RecordVec(const Material* M, const Vector& finalLocal, const Ve
 // (steepest |n_y| of incident target faces' AUTHORED parent planes, distinct
 // parent count, bake-created flag). Recorded by the bake's viz block.
 void DisplaceViz_RecordTag(const Vector& finalLocal, float parentNyMax,
-                           unsigned nParents, bool created);
+                           unsigned nParents, bool created, bool weld = false);
 
 // --displace_viz=2 (HEIGHT-ERROR field): called by the bake once per emitted
 // displaced triangle with its FINAL centroid (model space, exact bits — same

@@ -73,3 +73,22 @@ worsens marks 28.7→35.8%).
   --normchain_dump. FDS_ENVCLAMP_DEBUG=1 prints plane-cluster areas.
 - Corpus + ledger: docs/BULGE_CORPUS.md (his verbatim labels — the ONLY
   ground truth), docs/SESSION_STATE.md top entries 2026-08-28f/g.
+
+
+## UPDATE 2026-08-28h (the fork after the handoff — verification round)
+The junction-split premise was tested directly and REFUTED: see SESSION_STATE
+2026-08-28h. The real producer of his marked juts: course-spanning sliver fan
+faces on the corner strip with NO verts inside the bed-joint V-bands — corners
+legal, interiors bridge the groove. Three vert-level snap variants refuted by
+the gate (numbers in the flag text of greets_displace_joint_snap, default OFF).
+NEXT ROUND BUILDS: the joint-band edge split — for strip/fan faces whose edges
+cross a bed-joint V-band (bands from the mip row-profile, machinery already in
+the joint_snap block at MeshOps.cpp ~6357), split the edge at the band border
+crossings and assign the inserted verts the band's row-median height (the
+carve). Reuse: the band construction, the per-vert vSum/hCnt V estimates, the
+banded pre-split's edge-splitting bookkeeping (~4234). Watch: fan apex
+degeneracy (kBandWidth slivers), UV interpolation must use per-FACE corner
+UVs, and the gate is his marks toward 0.0000 with quiet planes staying 0.00.
+Instruments added this round: displace_faces.txt (world corners per face, same
+--displace_dump pass), tools/bridging_verify.py (pixel→face→plane classifier),
+weld column in displace_dump.txt.
