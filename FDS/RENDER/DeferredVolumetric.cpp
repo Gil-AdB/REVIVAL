@@ -904,6 +904,27 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                           || fds::FeatureFlags::deferred_checkerboard();
     const int yStep = (vecPath && coneReduced) ? 2 : 1;
 
+    // --cone_range_cull=k: shrink the RANGE-SPHERE CLAMP (and, in the
+    // orchestrator, the screen rect + tile-vs-cone cull) to k x Range, and
+    // NOTHING else. `rr` (= 1/Range) is deliberately NOT scaled, so the
+    // beam's brightness profile -- softEdge = max(0, 1 - rr*d)^2, the
+    // cone-atten smoothstep, the fog and surface fades -- is bit-identical
+    // inside the retained volume; only the chord's far end moves in.
+    // WHY IT PAYS: the LDR composite truncates
+    // (`int((pix>>16)&0xFF) + int(aR)`), so in-scatter past ~half range is
+    // worth a fraction of one display level. It has no such justification
+    // under --hdr (float composite, no truncation), so k is forced to 1
+    // there. k == 1.0f is an exact IEEE identity, so the default arm is
+    // byte-null BY CONSTRUCTION, not by measurement.
+    // WHAT IT IS NOT: byte-null below 1.0. The truncation is applied once to
+    // the SUM over every spot on the pixel, not per spot, so dropping a
+    // sub-LSB term still flips the floor wherever the accumulated fraction
+    // crosses an integer. Measured, city t=1961: k=0.7 -> 12.33% of pixels
+    // move at max |d| 2/255; k=0.5 -> 19.30% at max |d| 4/255.
+    const float coneRangeK  = fds::g_hdrActive ? 1.0f
+                            : fds::FeatureFlags::cone_range_cull();
+    const float coneRangeK2 = coneRangeK * coneRangeK;
+
     // ─── the per-(tile × spot) precompute (see ConeSpotPre) ─────────────
     // Built once here, consumed by the SIMD spot loop below. Spots the old
     // prologue `continue`d out of are simply not appended, so the compacted
@@ -952,8 +973,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                        lights->mirD[li];
                 if (hsD == 0.0f) continue;  // camera on the glass
             }
-            const float r2   = lights->range2[li];
-            const float rr   = lights->rRange[li];
+            const float r2   = lights->range2[li] * coneRangeK2;
+            const float rr   = lights->rRange[li];   // NOT scaled -- see coneRangeK
             const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
             const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
             const float c2   = cosO * cosO;
@@ -2480,8 +2501,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
                 const float cosO = lights->cosOuter[li];
                 const float cosI = lights->cosInner[li];
-                const float r2   = lights->range2[li];
-                const float rr   = lights->rRange[li];
+                const float r2   = lights->range2[li] * coneRangeK2;
+                const float rr   = lights->rRange[li];   // NOT scaled -- see coneRangeK
                 // Clone-beam footprint gate (vec path has the same;
                 // scalar fallback keeps correctness for A/B).
                 const uint32_t omid_s = lights->mirrorId[li];
@@ -2968,12 +2989,18 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             XRes, YRes);
     }
 
+    const float coneRangeK_orch = fds::g_hdrActive ? 1.0f
+                                : fds::FeatureFlags::cone_range_cull();
+
     for (int s = 0; s < spotCount; ++s) {
         const int li = spotIdx[s];
         const float vx = lights->posX[li];
         const float vy = lights->posY[li];
         const float vz = lights->posZ[li];
-        const float r  = std::sqrt(lights->range2[li]);
+        // Screen rect + tile-vs-cone cull shrink with --cone_range_cull too;
+        // if they did not, the tile lists would still carry spots whose
+        // retained volume no longer reaches the tile. k == 1.0f is exact.
+        const float r  = std::sqrt(lights->range2[li]) * coneRangeK_orch;
         LightScreenRect sr;
         if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
                                    XRes, YRes, sr)) continue;
