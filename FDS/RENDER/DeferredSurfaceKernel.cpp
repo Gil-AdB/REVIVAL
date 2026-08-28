@@ -7054,6 +7054,41 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					envFetchDone = true;
 				}
 			}
+			// ─── C10 (2026-08-28 round 2): 8-WIDE PACK FOR AN ENV GROUP ──────
+			// C7 vectorised the pack only for an ALL-PLAIN group (no env lane).
+			// C9 has now left this group's env texel in envFB/FG/FR[] as arrays,
+			// so an env group's pack is vectorisable too — and env groups are
+			// 33-37 %% of all groups (census), running the full scalar lane loop
+			// for all eight lanes.
+			// The scalar per-lane form is `int(vf) + int(b0 * (envEk*specMul))`
+			// with the CLAMP ON THE INTEGER SUM, so this reproduces it exactly:
+			// two cvttps (truncate toward zero, same as int()), an int add, then
+			// int min/max — NOT the float clamp C7 uses, because there the sum is
+			// a single term. A lane with no env store gets its multiplier ANDed
+			// to +0.0f by lane_hasEnv, so its env term truncates to 0 and the add
+			// is the identity — matching the scalar, which simply omits it.
+			// Gated off --diffuse_energy (default 0; it would re-weight the
+			// diffuse per lane) and off FDS_ENVVEC_STATS (whose per-callsite
+			// counters this path would stop incrementing).
+			if (ovecVecPack && envFetchDone && !diffuseEnergyG && !g_envVecStats
+			    && _mm256_movemask_epi8(mask_alive_fresh) == -1
+			    && _mm256_testz_si256(needsScalar, needsScalar)) {
+				const __m256 ekv = _mm256_and_ps(
+				    _mm256_mul_ps(_mm256_load_ps(envEk), _mm256_load_ps(lane_specMul)),
+				    _mm256_castsi256_ps(_mm256_load_si256((const __m256i*)lane_hasEnv)));
+				const __m256i lo = _mm256_setzero_si256(), hi = _mm256_set1_epi32(255);
+				auto pk = [&](__m256 fd, const float* envC) {
+					__m256i v = _mm256_add_epi32(_mm256_cvttps_epi32(fd),
+					    _mm256_cvttps_epi32(_mm256_mul_ps(_mm256_load_ps(envC), ekv)));
+					return _mm256_max_epi32(lo, _mm256_min_epi32(hi, v));
+				};
+				const __m256i vb = pk(fdB, envFB), vg = pk(fdG, envFG), vr = pk(fdR, envFR);
+				_mm256_storeu_si256((__m256i*)(out + i), _mm256_or_si256(
+				    _mm256_or_si256(vb, _mm256_slli_epi32(vg, 8)),
+				    _mm256_or_si256(_mm256_slli_epi32(vr, 16),
+				                    _mm256_set1_epi32(int(0xFF000000u)))));
+				continue;
+			}
 #if FDS_OVEC_CENSUS
 			int  cenEnvVecN = 0, cenFace0 = -1, cenLvl0 = -1;
 			bool cenFaceUni = true, cenLvlUni = true;
