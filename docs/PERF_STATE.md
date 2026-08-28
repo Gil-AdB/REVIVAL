@@ -241,6 +241,17 @@ mirrored beams from the water AND removing a leak that arguably should not be
 there. **It is a look call and it is his, not mine.** Crops:
 `docs/img/chaserefl/r_cones_t000800_{before,after,diff16x,where}.png`.
 
+**WHAT THE TWO `where` MAPS ACTUALLY SHOW** (`docs/img/chaserefl/*_t000800_where.png`),
+because the ms columns do not say this. `r_ssao`'s moved pixels are *exactly* the
+reflected content and nothing else: the mirrored islands under the horizon, the
+mirrored ship in the foreground, the mirrored lighthouse on the right, zero
+pixels of sky. It is hermetic — and it is landing squarely on the content he
+commissioned, at max 119/255. `r_cones`'s map is the opposite shape: a broad
+low-amplitude wash over the beam in the sky and its reflection, max 4–6/255,
+which is why it can move 15 % of the frame and still be hard to see. **Cheaper
+in milliseconds does not mean cheaper to the eye here — the ms and the amplitude
+rank these two in OPPOSITE orders.**
+
 **NOTHING HERE IS PROVABLY INVISIBLE, so nothing merges as byte-null.** The one
 byte-null arm, `--refl_skip_rain`, is byte-null because it does nothing at all.
 
