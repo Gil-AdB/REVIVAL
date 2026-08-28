@@ -10,6 +10,83 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29 — **THE MOVEMASK SWEEP (only the cone kernel converts) and `lightSphereScreenRect` PROVEN TO DROP REAL LIGHT (max 5/255, 6 of 39 poses)**. Sweep DONE / bug REPORTED, not fixed
+
+### 1. `anyLane_x8` engine-wide — bit-exact, and a refutation of my own pick
+
+`simdAnyLane_ps8` / `simdAnyByte_epi8` / `simdAllBytes_epi8` now live in
+`DeferredCommon.h`. Eight further sites converted (`DeferredFastFog.cpp`
+:1424/:1473/:1502; `DeferredSurfaceKernel.cpp` :3512/:6333/:6335/:6946/:7074);
+`DeferredSurfaceKernel.cpp:2029` left alone (it needs the BITS, and is compiled
+out of shipping); `DeferredSSAO.cpp` left to its owner.
+`-DFDS_SIMD_ANYLANE=0` is the exact pre-sweep arm.
+
+**A second, previously unrecorded lowering.** `_mm256_movemask_epi8` is NOT the
+25-instruction `ushl.4s` sequence — it is `cmlt.16b` + `and.16b` against a
+bit-weight table + `tbl.16b` + `addv.8h` per half, ~12–13 instructions.
+Opcode diff of `Render_DeferredLighting_Tile_OuterVec`: `addv.8h` 8→0,
+`tbl.16b` 8→0, `cmlt.16b` 6→0, `bics` 4→0, `mov.16b` 90→74, vs `uminv.16b`
+0→4; total 4287→4237.
+
+**Measured, city t=1961, two independent interleaved min-of-11 batteries:**
+
+| row | Ginstr/f | Gcyc/f | wall |
+|---|--:|--:|--:|
+| `cones-call` | −4.42 % / −4.47 % | −5.95 % / −1.70 % | **−5.12 % / −5.21 %** |
+| `lighting-w1` | −1.93 % / −2.02 % | **+0.71 % / +1.43 %** | +0.14 % / −0.51 % |
+| `fastfog` | −0.28 % / −0.37 % | −0.34 % / +1.02 % | +0.11 % / −0.14 % |
+
+**Only the cone kernel converts.** `lighting-w1` reproducibly sheds ~2 % of its
+instructions for zero cycles — IPC 4.08 → 3.94. Those slots were not the
+constraint, and `uminv.16b` has much the same latency as the `tbl`/`addv` chain
+it replaces, so the critical path is unchanged. `HW_PROFILING.md:1011-1014`
+landing a second time. The fog sites are cold (per-column-block, not per-lane).
+Kept anyway — bit-exact, free, one spelling engine-wide — but the header
+comment carries this table so nobody sizes a plan on it.
+
+**NOT swept, on purpose:** `_mm256_testz_si256` / `_mm256_testz_ps` is the same
+family (simde → `vandq_s64` + two `vgetq_lane_s64` per half, ~10–12 instr, four
+vector→GPR moves, against three for `vmaxvq_u32(vandq(…)) == 0`). Ten live
+sites, all `DeferredSurfaceKernel.cpp` (:6691 :6739 :6758 :6796 :6886 :6948
+:6950 :6951 :7078), and :6758 is on the per-(group × light) hot path. Plus
+VCL's `horizontal_or`/`horizontal_and` in `TheOtherBarry.h`, `ShadowMap.cpp`,
+`Mekalele.h`, which compile to exactly this. **Left because the batteries above
+measured this kernel's response to removing this exact class of instruction and
+it was zero.** Also spotted: `:6948`'s `!testz(m,m) && simdAllBytes_epi8(m)` is
+redundant in its first term (all ⇒ nonzero) and could be deleted — also for no
+measurable time.
+
+### 2. `lightSphereScreenRect` — the bug is real, and it is 5/255
+
+`--light_rect_exact` (default OFF) + `FDS_LIGHTRECT_AUDIT=1`. The shipping
+small-angle rect drops (light × tile) pairs in **every scene**: city t=400
+189 pairs / 5.2 % over 25 lights, greets t=5743 264 / 2.9 % over 31, fountain
+21 / 2.6 %, chase 28 / 0.9 %, city t=1961 14 / 0.35 %.
+
+Worst light any pixel of a dropped tile can be missing — derived from the
+kernel's exact `falloff = 1 − dist/range` and each tile's nearest pixel to the
+light's projected centre — is **1.1 % to 12.7 % of that light's full
+brightness**. (The edge-of-rect form reads up to 23 % and is the wrong bound to
+quote: a dropped tile lies wholly beyond that edge.)
+
+**39 poses swept, 6 differ**, all strictly brighter under the exact bound:
+city t=700 (161 px, max 2), t=1000 (259, 2), t=200 plain `--deferred` (428, 3),
+t=500 (60, 2), fountain t=1500 (**359, max 5**), t=3500 (629, 3). All 13 pinned
+gate poses are byte-identical, which is why seven rounds never saw it.
+
+At fountain t=1500 the delta is **362 brighter pixels and 0 darker**, in a band
+`x[755..878] y[945..949]` — 124 px wide, **5 rows tall**. A tile-boundary
+sliver: the "missing light on the rect" shape, same family as `eb36c1fd`, at
+2–5/255. `docs/img/conesimpl/lightrect_fountain_t1500_*` (24× amplified; at 1×
+there is nothing to see).
+
+**Verdict: reported, not fixed.** Real defect, real light on the floor, but
+bounded at 5/255 on 0.03 % of pixels, and flipping it is still a look change on
+pinned scenes. The flag ships OFF; what actually got corrected is the SOURCE
+COMMENT, which asserted "slightly over-estimates … no correctness impact" and
+now says the opposite with the reproduction recipe.
+**Gil-Ad's call whether 5/255 of restored light is worth a re-pin.**
+
 ## 2026-08-28 — **THE CONE PASS, ROUND 8**: city's `cones-call` **15.32 → 13.38 ms BIT-EXACT** and **→ 3.09 ms (−79.8 %) with the two look flags on**. Two landings, one refutation, and two bound defects found in code nobody was auditing. DONE / his call
 
 Implementation round against `docs/PERF_CONES_ANALYSIS.md` (branch
