@@ -1421,7 +1421,9 @@ static inline __m256 vFogNoise(const FastFogParams& P, __m256 wx, __m256 wy, __m
                                float cell, float invCell) {
 	vFogWarp(P,wx,wy,wz);
 	__m256 d=vMetaball(wx,wy,wz,invCell,P.blobOverlap,P.worleyThresh,P.worleyInvT);
-	if (_mm256_movemask_ps(_mm256_cmp_ps(d,_mm256_setzero_ps(),_CMP_GT_OQ)) == 0)
+	// simdAnyLane_ps8, not movemask: identical predicate, 3 NEON ops instead of
+	// simde's 25-instruction hand-rolled sign-bit pack (DeferredCommon.h).
+	if (!simdAnyLane_ps8(_mm256_cmp_ps(d,_mm256_setzero_ps(),_CMP_GT_OQ)))
 		return d;   // all lanes <= 0 (exact zeros) — matches scalar early return
 	const float mc=cell*2.7f;
 	const __m256 mod=_mm256_add_ps(_mm256_set1_ps(0.35f),vBlobNoise(wx,wy,wz,mc,1.0f/mc));
@@ -1470,7 +1472,7 @@ static void Froxel_DensityBlock8(const FastFogParams& P, const float* zb, int iz
 	const __m256 inSlab=_mm256_and_ps(
 		_mm256_cmp_ps(wy,_mm256_set1_ps(P.slabY0),_CMP_GE_OQ),
 		_mm256_cmp_ps(wy,_mm256_set1_ps(P.slabY1),_CMP_LE_OQ));
-	if (_mm256_movemask_ps(inSlab) == 0) {
+	if (!simdAnyLane_ps8(inSlab)) {
 		_mm256_storeu_ps(dens+iz0,_mm256_setzero_ps());
 		return;
 	}
@@ -1499,7 +1501,7 @@ static void Froxel_DensityBlock8(const FastFogParams& P, const float* zb, int iz
 		lod=_mm256_max_ps(_mm256_min_ps(lod,_mm256_set1_ps(1.f)),_mm256_setzero_ps());
 		const __m256 lodM=_mm256_and_ps(inSlab,
 			_mm256_cmp_ps(lod,_mm256_setzero_ps(),_CMP_GT_OQ));
-		if (_mm256_movemask_ps(lodM) != 0) {
+		if (simdAnyLane_ps8(lodM)) {
 			const __m256 coarse=vFogNoise(P,wx,wy,wz,P.cell*4.0f,P.invCell*0.25f);
 			// KNOWN ±ulp RESIDUAL (self-test-verified): non-LOD slices are
 			// bit-exact, but `coarse` here can differ from the scalar by a

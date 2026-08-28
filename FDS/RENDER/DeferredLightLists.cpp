@@ -203,6 +203,118 @@ void computeMirrorPresenceGrid(const uint8_t *mask, int w, int h,
 	}
 }
 
+// ─── lightSphereScreenRect conservativeness audit (2026-08-29) ──────────────
+// The shipping small-angle rect under-estimates an off-axis sphere. In the
+// CONE pass that only ever cost sub-LSB in-scatter; here it decides which
+// tiles a light is SHADED in, where a dropped tile is missing light on real
+// pixels. `FDS_LIGHTRECT_AUDIT=1` prints how many (light x tile) pairs the
+// two bounds disagree on; `--light_rect_exact` renders with them restored.
+// `noinline` so the counters cannot move codegen in the caller.
+static const bool g_lightRectAudit = [](){
+	const char *e = std::getenv("FDS_LIGHTRECT_AUDIT"); return e && *e == '1'; }();
+static std::atomic<long long> g_lrPairsApprox{0}, g_lrPairsExact{0},
+                              g_lrDropped{0}, g_lrLightsAffected{0},
+                              g_lrWorstLight{-1}, g_lrWorstDrop{0};
+static std::atomic<int> g_lrWorstFalloffMilli{0};
+static float g_lrCx, g_lrCy, g_lrCntrX, g_lrCntrY, g_lrInvFovX, g_lrInvFovY;
+// Worst-case light a DROPPED tile can be missing, in units of full brightness.
+// The approximate bound puts its edge at tan(theta-alpha) = r/vz, so a ray
+// there passes the light centre at D_min = d*sin(theta-alpha) = d*r/hypot(r,vz)
+// with d = hypot(vx,vz). The kernel's falloff is EXACTLY 1 - dist/range
+// (DeferredSurfaceKernel.cpp:329/463/3453), and every point of that ray inside
+// the range sphere is at dist >= D_min, so the most light any pixel of a
+// dropped tile can be missing is  1 - D_min/r = 1 - hypot(vx,vz)/hypot(r,vz).
+// It is <= 0 (i.e. the shipping bound is conservative after all) whenever
+// |vx| >= r -- the defect only bites for lights nearly in front of the eye.
+static inline float lightRectWorstFalloff(float c, float vz, float r)
+{
+	if (!(vz > 0.0f) || !(r > 0.0f)) return 0.0f;
+	const float f = 1.0f - std::sqrt(c*c + vz*vz) / std::sqrt(r*r + vz*vz);
+	return f > 0.0f ? f : 0.0f;
+}
+static void __attribute__((noinline)) LightRect_Audit(
+    bool okA, const LightScreenRect &a, bool okX, const LightScreenRect &x,
+    int tsX, int tsY, int ntX, int ntY, int li,
+    float vx, float vy, float vz, float r)
+{
+	auto span = [&](bool ok, const LightScreenRect &r, int &i0, int &i1,
+	                int &j0, int &j1) {
+		if (!ok) { i0 = j0 = 0; i1 = j1 = -1; return; }
+		if (r.full) { i0 = j0 = 0; i1 = ntX - 1; j1 = ntY - 1; return; }
+		if (r.x0 > r.x1 || r.y0 > r.y1) { i0 = j0 = 0; i1 = j1 = -1; return; }
+		i0 = r.x0 / tsX; i1 = std::min(ntX - 1, r.x1 / tsX);
+		j0 = r.y0 / tsY; j1 = std::min(ntY - 1, r.y1 / tsY);
+	};
+	int ai0, ai1, aj0, aj1, xi0, xi1, xj0, xj1;
+	span(okA, a, ai0, ai1, aj0, aj1);
+	span(okX, x, xi0, xi1, xj0, xj1);
+	const long long na = (ai1 < ai0 || aj1 < aj0) ? 0
+	                   : (long long)(ai1 - ai0 + 1) * (aj1 - aj0 + 1);
+	const long long nx = (xi1 < xi0 || xj1 < xj0) ? 0
+	                   : (long long)(xi1 - xi0 + 1) * (xj1 - xj0 + 1);
+	g_lrPairsApprox.fetch_add(na, std::memory_order_relaxed);
+	g_lrPairsExact.fetch_add(nx, std::memory_order_relaxed);
+	// tiles the EXACT bound keeps that the approximate one drops
+	long long dropped = 0;
+	for (int j = xj0; j <= xj1; ++j)
+		for (int i = xi0; i <= xi1; ++i)
+			if (i < ai0 || i > ai1 || j < aj0 || j > aj1) ++dropped;
+	if (dropped > 0) {
+		g_lrDropped.fetch_add(dropped, std::memory_order_relaxed);
+		g_lrLightsAffected.fetch_add(1, std::memory_order_relaxed);
+		if (dropped > g_lrWorstDrop.load(std::memory_order_relaxed)) {
+			g_lrWorstDrop.store(dropped, std::memory_order_relaxed);
+			g_lrWorstLight.store(li, std::memory_order_relaxed);
+		}
+		// TIGHT per-tile bound. The edge formula above is loose: a DROPPED
+		// tile lies wholly beyond the approximate rect, so its nearest
+		// pixel is further out still. For each dropped tile take the point
+		// of that tile closest to the light's projected centre, build its
+		// view ray, and measure the ray's true distance from the light
+		// centre; falloff = max(0, 1 - D_min/r) is then the most light any
+		// pixel of that tile can be missing.
+		float worstF = 0.0f;
+		for (int j = xj0; j <= xj1; ++j)
+			for (int i = xi0; i <= xi1; ++i) {
+				if (i >= ai0 && i <= ai1 && j >= aj0 && j <= aj1) continue;
+				const float tx0 = float(i * tsX),  tx1 = float((i + 1) * tsX - 1);
+				const float ty0 = float(j * tsY),  ty1 = float((j + 1) * tsY - 1);
+				const float px = std::min(std::max(g_lrCx, tx0), tx1);
+				const float py = std::min(std::max(g_lrCy, ty0), ty1);
+				const float dx = (px - g_lrCntrX) * g_lrInvFovX;
+				const float dy = -(py - g_lrCntrY) * g_lrInvFovY;
+				const float dz = 1.0f;
+				const float dd = dx*dx + dy*dy + dz*dz;
+				const float t  = (vx*dx + vy*dy + vz*dz) / dd;   // proj param
+				const float qx = vx - t*dx, qy = vy - t*dy, qz = vz - t*dz;
+				const float dmin = std::sqrt(qx*qx + qy*qy + qz*qz);
+				const float f = (t > 0.0f && dmin < r) ? (1.0f - dmin / r) : 0.0f;
+				if (f > worstF) worstF = f;
+			}
+		const int worst = int(1000.0f * worstF);
+		int prev = g_lrWorstFalloffMilli.load(std::memory_order_relaxed);
+		while (worst > prev &&
+		       !g_lrWorstFalloffMilli.compare_exchange_weak(prev, worst)) {}
+	}
+}
+void __attribute__((noinline)) LightRect_AuditReport(const char *tag)
+{
+	if (!g_lightRectAudit) return;
+	fprintf(stderr, "[LIGHTRECT] %s | light x tile pairs approx=%lld exact=%lld"
+	        " | DROPPED BY SHIPPING BOUND=%lld (%.3f%%) over %lld lights"
+	        " | worst light idx=%lld drops %lld tiles"
+	        " | WORST RECOVERABLE FALLOFF %.1f%% of full brightness\n",
+	        tag, g_lrPairsApprox.load(), g_lrPairsExact.load(),
+	        g_lrDropped.load(),
+	        g_lrPairsExact.load() ? 100.0 * double(g_lrDropped.load())
+	                                / double(g_lrPairsExact.load()) : 0.0,
+	        g_lrLightsAffected.load(), g_lrWorstLight.load(),
+	        g_lrWorstDrop.load(), 0.1 * double(g_lrWorstFalloffMilli.load()));
+	g_lrPairsApprox = 0; g_lrPairsExact = 0; g_lrDropped = 0;
+	g_lrLightsAffected = 0; g_lrWorstLight = -1; g_lrWorstDrop = 0;
+	g_lrWorstFalloffMilli = 0;
+}
+
 void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                                  int tileSizeX, int tileSizeY, int xres, int yres,
                                  const ViewLightsSoA &lights, int numLights,
@@ -273,6 +385,7 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		}
 	}
 
+	const bool g_lightRectExact = fds::FeatureFlags::light_rect_exact();
 	for (int li = 0; li < numLights; ++li) {
 		const float vx = lights.posX[li];
 		const float vy = lights.posY[li];
@@ -282,9 +395,30 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const float vz_minus_r = vz - r;
 		const float vz_plus_r  = vz + r;
 
-		LightScreenRect sr;
-		if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
-		                           xres, yres, sr)) continue;
+		// --light_rect_exact / FDS_LIGHTRECT_AUDIT=1. The shipping
+		// small-angle rect is NOT conservative (see
+		// lightSphereScreenRect's amended comment): it can bin a light
+		// into FEWER tiles than it lights. The exact tangent bound can
+		// only ever ADD tiles, so the audit counts (light x tile) pairs
+		// the shipping bound drops, and the flag lets the frame be
+		// rendered with them put back.
+		LightScreenRect sr, srX;
+		const bool okA = lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY,
+		                                       CntrEX, CntrEY, xres, yres, sr);
+		bool okX = okA;
+		if (g_lightRectExact || g_lightRectAudit)
+			okX = lightSphereScreenRectExact(vx, vy, vz, r, FOVX, FOVY,
+			                                 CntrEX, CntrEY, xres, yres, srX);
+		if (g_lightRectAudit) {
+			g_lrCntrX = CntrEX; g_lrCntrY = CntrEY;
+			g_lrInvFovX = 1.0f / FOVX; g_lrInvFovY = 1.0f / FOVY;
+			g_lrCx = CntrEX + vx * FOVX / vz;
+			g_lrCy = CntrEY - vy * FOVY / vz;
+			LightRect_Audit(okA, sr, okX, srX, tileSizeX, tileSizeY,
+			                numTilesX, numTilesY, li, vx, vy, vz, r);
+		}
+		if (g_lightRectExact) { sr = srX; if (!okX) continue; }
+		else if (!okA) continue;
 		if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
 
 		const int tile_i_lo = sr.full ? 0 : sr.x0 / tileSizeX;
@@ -426,6 +560,7 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 	for (int t = 0; t < numTiles; ++t) {
 		zeroTileLightPadding(tileLights[t]);
 	}
+	LightRect_AuditReport("tile");
 }
 
 // Strip-flavored light list builder (1D, Y-only) for the unified TBR
@@ -456,12 +591,16 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
 		const float vy = lights.posY[li];
 		const float vz = lights.posZ[li];
 		const float r  = std::sqrt(lights.range2[li]);
+		const bool g_lightRectExact = fds::FeatureFlags::light_rect_exact();
 
 		// Y-only: strips ignore X, so an off-screen-in-X light must
 		// still reach its Y strips (see lightSphereScreenRect docs).
 		LightScreenRect sr;
-		if (!lightSphereScreenRect(vx, vy, vz, r, 0.0f, FOVY, 0.0f, CntrEY,
-		                           1, yres, sr)) continue;
+		if (g_lightRectExact) {
+			if (!lightSphereScreenRectExact(vx, vy, vz, r, 0.0f, FOVY, 0.0f,
+			                                CntrEY, 1, yres, sr)) continue;
+		} else if (!lightSphereScreenRect(vx, vy, vz, r, 0.0f, FOVY, 0.0f,
+		                                  CntrEY, 1, yres, sr)) continue;
 		if (!sr.full && sr.y0 > sr.y1) continue;
 
 		const int strip_lo = sr.full ? 0 : sr.y0 / stripHeight;
