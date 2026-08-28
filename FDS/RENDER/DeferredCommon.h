@@ -443,9 +443,18 @@ inline bool lightSphereScreenRect(float vx, float vy, float vz, float r,
 	if (vz - r < 1.0f) { out.full = true; return true; }
 	out.full = false;
 	// Pinhole projection of the bounding sphere — small-angle
-	// approximation. Slightly over-estimates near the FOV edges, which
-	// just bins tiles that the per-pixel cull rejects; no correctness
-	// impact.
+	// approximation.
+	// ⚠ THIS COMMENT USED TO SAY "slightly over-estimates near the FOV
+	// edges … no correctness impact". THAT IS FALSE and it was measured
+	// false on 2026-08-28: `rx = r·fovX/vz` UNDER-estimates an off-axis
+	// sphere's silhouette, because the silhouette subtends
+	// atan2(vx,vz) ± asin(r/|(vx,vz)|), not ±r/vz. In the cone pass the
+	// exact bound below admitted 3 013 alive (lane × spot) pairs at city
+	// t=2400 that this rect was dropping. Whether it drops anything
+	// VISIBLE through buildTileLightLists / buildStripLightLists is
+	// audited under --light_rect_exact; see docs/OPTIMIZATION_BACKLOG.md
+	// 2026-08-29. Kept as the default only because flipping it is a look
+	// change, not because it is correct.
 	const float invZ = 1.0f / vz;
 	const float cx   = cntrEX + vx * fovX * invZ;
 	const float cy   = cntrEY - vy * fovY * invZ;
@@ -457,6 +466,65 @@ inline bool lightSphereScreenRect(float vx, float vy, float vz, float r,
 	out.y1 = std::min(yres - 1, int(std::ceil (cy + ry)));
 	return true;
 }
+
+// EXACT screen AABB of a sphere. THE ONE ABOVE IS NOT ONE -- see below.
+//
+// `lightSphereScreenRect` (DeferredCommon.h) uses the small-angle form
+// `rx = r * fovX / vz`, and its comment claims it "slightly over-estimates
+// near the FOV edges". For the RANGE sphere, whose radius is large enough
+// that the slack swamps the error, that is true in practice. It is NOT true
+// in general: an off-axis sphere's silhouette subtends more than r/vz, so the
+// small-angle rect can UNDER-estimate -- measured, the first cone-hull build
+// lost 846 of city's 15 326 914 alive (lane x spot) pairs, which is exactly
+// the signature of a bound that is not conservative. A cull that is only
+// "byte-null at the pins we happen to own" is not a cull, so the hull's two
+// pieces get the exact bound instead.
+//
+// The exact one is the tangent construction: in the x-z plane the sphere
+// projects to a circle at (vx, vz) of radius r, and the silhouette's extreme
+// x is where a tangent plane contains the y axis -- i.e. the tangent lines
+// from the eye, at angles atan2(vx, vz) +/- asin(r / |(vx,vz)|). Same in y.
+// ~8 transcendentals per sphere, 2 spheres x 46 spots once per frame; the
+// orchestrator is not the hot loop.
+inline bool lightSphereScreenRectExact(float vx, float vy, float vz, float r,
+                                      float fovX, float fovY,
+                                      float cntrEX, float cntrEY,
+                                      int xres, int yres, LightScreenRect &out)
+{
+    if (vz + r < 0.0f) return false;          // wholly behind the eye
+    if (vz - r < 1.0f) { out.full = true; return true; }
+    out.full = false;
+    constexpr float kHalfPi = 1.5707963f - 1e-3f;
+    // axis: returns [lo, hi] in tangent units, or the full range when the
+    // sphere wraps past 90 degrees on this axis.
+    auto span = [&](float c, float &tlo, float &thi) {
+        const float d = std::sqrt(c * c + vz * vz);
+        if (!(d > r)) { tlo = -1e30f; thi = 1e30f; return; }   // eye inside
+        const float a = std::atan2(c, vz);
+        const float b = std::asin(r / d);
+        const float a0 = a - b, a1 = a + b;
+        tlo = (a0 <= -kHalfPi) ? -1e30f : std::tan(a0);
+        thi = (a1 >=  kHalfPi) ?  1e30f : std::tan(a1);
+    };
+    float tx0, tx1, ty0, ty1;
+    span(vx, tx0, tx1);
+    span(vy, ty0, ty1);
+    const float xlo = cntrEX + fovX * tx0, xhi = cntrEX + fovX * tx1;
+    // Screen y is inverted: cy = cntrEY - fovY * tan(angle), so the LARGER
+    // world angle is the SMALLER screen row.
+    const float ylo = cntrEY - fovY * ty1, yhi = cntrEY - fovY * ty0;
+    // One pixel of pad. tan() near +/-90 degrees amplifies float error
+    // without bound, and the tile grid is 160x135 px, so a pixel of slack is
+    // free and takes the boundary-rounding question off the table.
+    constexpr float kPad = 1.0f;
+    const float fx = float(xres - 1), fy = float(yres - 1);
+    out.x0 = int(std::floor(std::min(std::max(xlo - kPad, 0.0f), fx)));
+    out.x1 = int(std::ceil (std::min(std::max(xhi + kPad, 0.0f), fx)));
+    out.y0 = int(std::floor(std::min(std::max(ylo - kPad, 0.0f), fy)));
+    out.y1 = int(std::ceil (std::min(std::max(yhi + kPad, 0.0f), fy)));
+    return true;
+}
+
 
 // Light-list builders (DeferredLightLists.cpp). Called once per frame
 // by the Render_DeferredLighting orchestrator; buildStripLightLists
