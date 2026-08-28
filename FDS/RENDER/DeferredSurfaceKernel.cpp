@@ -981,6 +981,71 @@ static const bool g_envVecDiagOff =
 	!std::getenv("ENV_NOFETCH") && !std::getenv("FDS_ENV_SKIP_NEGY") &&
 	!EnvTraceGet();
 
+// 8-WIDE face-major bilinear fetch — the same sampling convention as the scalar
+// EnvCubeFetchBil below, term for term, for eight lanes that share ONE face and
+// ONE mip level. CENSUS (--omni_census, city): 90.2 / 95.9 / 96.2 %% of groups
+// carrying a vec-env lane have all their env lanes on one face at t=2400 /
+// t=400 / t=1961, at 7.4-7.6 env lanes per such group, and same-face implies
+// same-mip 100 %% of the time (gloss is per-material and 95 %% of groups are
+// material-uniform). Non-participating lanes MUST arrive with u = v = 0: the
+// clamp then puts them at texel (0,0), which is in bounds, and their result is
+// discarded.
+//
+// BYTE-EXACTNESS is the whole game here, so every operation mirrors the scalar
+// one in the order -ffp-contract=fast chose:
+//   * `u*fr - 0.5f` is a CONTRACTED fmsub in the scalar, so it is fmsub here.
+//   * `if (px < 0) px = 0` is _mm256_max_ps(zero, px) and NOT max_ps(px, zero):
+//     maxps returns its SECOND operand when unordered, and the scalar leaves a
+//     NaN alone, so the operand order is load-bearing.
+//   * `int(px)` is truncation toward zero == cvttps, and px >= 0 after the clamp.
+//   * the two lerps are `fmadd(a, hi - lo, lo)`, matching `lo + a*(hi - lo)`.
+static inline void EnvCubeFetchBil8(const fds::EnvPanoLinear* envP, int lvl,
+                                    int face, const float* u8, const float* v8,
+                                    float* B8, float* G8, float* R8)
+{
+	const int fr = envP->W >> lvl;
+	const __m256 zero = _mm256_setzero_ps();
+	const __m256 frF  = _mm256_set1_ps(float(fr));
+	__m256 px = _mm256_fmsub_ps(_mm256_load_ps(u8), frF, _mm256_set1_ps(0.5f));
+	__m256 py = _mm256_fmsub_ps(_mm256_load_ps(v8), frF, _mm256_set1_ps(0.5f));
+	px = _mm256_max_ps(zero, px);
+	py = _mm256_max_ps(zero, py);
+	const __m256i lim = _mm256_set1_epi32(fr - 2);
+	const __m256i x0i = _mm256_min_epi32(_mm256_cvttps_epi32(px), lim);
+	const __m256i y0i = _mm256_min_epi32(_mm256_cvttps_epi32(py), lim);
+	const __m256 ax = _mm256_sub_ps(px, _mm256_cvtepi32_ps(x0i));
+	const __m256 ay = _mm256_sub_ps(py, _mm256_cvtepi32_ps(y0i));
+	alignas(32) int32_t xs[8], ys[8];
+	_mm256_store_si256((__m256i*)xs, x0i);
+	_mm256_store_si256((__m256i*)ys, y0i);
+	alignas(32) uint32_t q00[8], q10[8], q01[8], q11[8];
+	const uint32_t* base = envP->mip[lvl] + size_t(face) * fr * fr;
+	for (int k = 0; k < 8; ++k) {
+		const uint32_t* q = base + size_t(ys[k]) * fr + xs[k];
+		q00[k] = q[0]; q10[k] = q[1]; q01[k] = q[fr]; q11[k] = q[fr + 1];
+	}
+	const __m256i p00 = _mm256_load_si256((const __m256i*)q00);
+	const __m256i p10 = _mm256_load_si256((const __m256i*)q10);
+	const __m256i p01 = _mm256_load_si256((const __m256i*)q01);
+	const __m256i p11 = _mm256_load_si256((const __m256i*)q11);
+	const __m256i mask8 = _mm256_set1_epi32(0xFF);
+	// sh must be a compile-time constant: on AArch64 the shift lowers to
+	// vshrq_n and simde requires an immediate. Hence the integral_constant tag.
+	auto chan = [&](auto shTag, float* out) {
+		constexpr int sh = decltype(shTag)::value;
+		const __m256 f00 = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(p00, sh), mask8));
+		const __m256 f10 = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(p10, sh), mask8));
+		const __m256 f01 = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(p01, sh), mask8));
+		const __m256 f11 = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(p11, sh), mask8));
+		const __m256 t0 = _mm256_fmadd_ps(ax, _mm256_sub_ps(f10, f00), f00);
+		const __m256 t1 = _mm256_fmadd_ps(ax, _mm256_sub_ps(f11, f01), f01);
+		_mm256_store_ps(out, _mm256_fmadd_ps(ay, _mm256_sub_ps(t1, t0), t0));
+	};
+	chan(std::integral_constant<int, 0>{},  B8);
+	chan(std::integral_constant<int, 8>{},  G8);
+	chan(std::integral_constant<int, 16>{}, R8);
+}
+
 // Face-major BILINEAR fetch from a padded-cube env store (in-face clamped —
 // the D2 overscan padding makes that seam-free). Shared by the scalar
 // compose and the OuterVec 8-wide env front-end so the two paths cannot
@@ -2004,10 +2069,50 @@ static inline float ovecAblSum(__m256i v)
 // [15] tile calls  [16] sum of tl.count over tile calls
 // [17] sum of spot count over tile calls                               -> C5
 // [18] uniform-group alive lanes  [19] groups where the env vec front-end armed
+// ─── OuterVec lever hatch (2026-08-28 round 2) ──────────────────────────────
+// Round 1 shipped C3/C4/C7 behind runtime FeatureFlags so their A/B could be
+// done on ONE binary. That measurement is finished, and it MEASURED THE FLAGS'
+// OWN COST: the ALL-OFF arm of the four dials read 0.983 Gi/f against the
+// C1+C8 build's 0.955 — +2.9 %% of the row paid for predicates whose answer is a
+// compile-time constant in every shipping configuration. That is 16l's
+// +4.3 %%-with-the-flag-OFF result verbatim, and 16h/16m/16o all shipped this
+// class flagless for exactly this reason.
+//
+// So the three levers whose predicate sits in the PIXEL/LIGHT body are now
+// compile-time `true`, and their FeatureFlags are INERT measurement hatches in
+// the shape --deferred_fill_oct_pair already uses: build with
+// -DFDS_OVEC_HATCH=ON to get the runtime dials back for a future A/B.
+// C2's --deferred_ovec_nomirror is deliberately NOT hatched — see its use site.
+// ─── Env-lane cost ladder (-DFDS_OVEC_ENVDIAG=n) ────────────────────────────
+// The round-1 ladder put the PACK LOOP at 24.8 %% of city's lighting-w1 and the
+// census says 33-36 %% of alive lanes carry an env store. This splits that block
+// into its three scalar pieces. BYTE-CHANGING — a cost instrument, never a ship
+// configuration, same status as FDS_W1LDR_ABLATE.
+//   1  skip both EnvCubeFetchBil  (keep the face pick and the live-water tilt)
+//   2  also skip the live-water weight / tilt / re-projection
+//   3  also skip the face pick — i.e. the whole vec-env lane
+//   0  full
+#ifndef FDS_OVEC_ENVDIAG
+#define FDS_OVEC_ENVDIAG 0
+#endif
+
+#ifndef FDS_OVEC_HATCH
+#define FDS_OVEC_HATCH 0
+#endif
+#if FDS_OVEC_HATCH
+#define OVEC_LIGHT_SKIP_ON   fds::FeatureFlags::deferred_ovec_light_skip()
+#define OVEC_MAT_UNIFORM_ON  fds::FeatureFlags::deferred_ovec_mat_uniform()
+#define OVEC_VEC_PACK_ON     fds::FeatureFlags::deferred_ovec_vec_pack()
+#else
+#define OVEC_LIGHT_SKIP_ON   true
+#define OVEC_MAT_UNIFORM_ON  true
+#define OVEC_VEC_PACK_ON     true
+#endif
+
 #ifndef FDS_OVEC_CENSUS
 #define FDS_OVEC_CENSUS 0
 #endif
-static constexpr int OVC_N = 24;
+static constexpr int OVC_N = 32;
 #if FDS_OVEC_CENSUS
 static std::atomic<uint64_t> g_ovCen[OVC_N];
 __attribute__((noinline)) static void OVecCensus_Report()
@@ -2039,6 +2144,27 @@ __attribute__((noinline)) static void OVecCensus_Report()
 	    double(c[12]), 100.0*double(c[12])/A, double(c[19]), 100.0*double(c[19])/G,
 	    double(c[15]), double(c[16])/T, double(c[17])/T,
 	    double(c[13]), double(c[14]), 100.0*double(c[14])/S);
+	// Round 2: the PACK LOOP's env lane — the block the round-1 ladder put at
+	// 24.8 %% of the row. [20] vec-front-end env lanes, [21] scalar-compose env
+	// lanes, [22] groups with >=1 vec env lane, [23] ... all sharing ONE cube
+	// FACE after the live-water tilt (this is the number that decides whether an
+	// 8-wide bilinear fetch is even the right shape), [24] ... one face AND one
+	// mip level, [25] lanes whose live-water tilt fired, [26] lanes needing TWO
+	// levels, [27] total EnvCubeFetchBil calls.
+	const double EV = double(c[20] ? c[20] : 1), EG = double(c[22] ? c[22] : 1);
+	std::fprintf(stderr,
+	    "[OVEC-CENSUS]   PACK env lanes: vec-frontend %.0f  scalar-compose %.0f  "
+	    "| groups with a vec env lane %.0f\n"
+	    "[OVEC-CENSUS]     SAME-FACE groups %.0f (%.2f%% of env groups)  "
+	    "same-face AND same-mip %.0f (%.2f%%)  vec env lanes/group %.2f\n"
+	    "[OVEC-CENSUS]     live-water tilt fired %.0f (%.2f%% of vec env lanes)  "
+	    "two-level lanes %.0f (%.2f%%)  EnvCubeFetchBil calls %.0f (%.2f/lane)\n",
+	    double(c[20]), double(c[21]), double(c[22]),
+	    double(c[23]), 100.0*double(c[23])/EG,
+	    double(c[24]), 100.0*double(c[24])/EG, double(c[20])/EG,
+	    double(c[25]), 100.0*double(c[25])/EV,
+	    double(c[26]), 100.0*double(c[26])/EV,
+	    double(c[27]), double(c[27])/EV);
 	for (int i = 0; i < OVC_N; ++i) g_ovCen[i].store(0, std::memory_order_relaxed);
 }
 #define OVC(idx)         do { ++ovcn[(idx)]; } while (0)
@@ -5971,10 +6097,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	// round-trip when the scene carries no normal map at all. See
 	// DeferredLightingCtx::anyNormalMap.
 	const bool  nmapLoopOnG = ctx.anyNormalMap;
-	// C4 — see the testz in the omni loop. Read ONCE per tile, never in the
-	// loop: 16l measured a runtime hatch bool inside a hot inner body at
-	// +4.3 %% WITH THE FLAG OFF.
-	const bool  ovecGroupLightSkip = fds::FeatureFlags::deferred_ovec_light_skip();
+	// C4 — FLAGLESS since round 2: the dial itself was part of the +2.9 %% the
+	// ALL-OFF arm carried. -DFDS_OVEC_HATCH=ON restores it.
+	const bool  ovecGroupLightSkip = OVEC_LIGHT_SKIP_ON;
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked). See
 	// the lane_ambB rewrite after the normal decode below.
 	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
@@ -6014,10 +6139,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 		if (tl.mirrorId[n] != 0u) { _tlMirrorAllZero = false; break; }
 	const bool  ovecNoMirror = gb.mirrorId.empty() && _tlMirrorAllZero
 	    && fds::FeatureFlags::deferred_ovec_nomirror();
-	// C7 — see the 8-wide pack before the lane loop.
-	const bool  ovecVecPack = fds::FeatureFlags::deferred_ovec_vec_pack();
-	// C3 — see the uniform-group material resolve in the gather.
-	const bool  ovecMatUniform = fds::FeatureFlags::deferred_ovec_mat_uniform();
+	// C7 / C3 — flagless since round 2, same reason as C4 above.
+	const bool  ovecVecPack    = OVEC_VEC_PACK_ON;
+	const bool  ovecMatUniform = OVEC_MAT_UNIFORM_ON;
 #if FDS_OVEC_ABLATE || FDS_OVEC_OMNI_ABLATE
 	float ovecSink = 0.0f;
 #endif
@@ -6835,6 +6959,140 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				_mm256_storeu_si256((__m256i*)(out + i), pk);
 				continue;
 			}
+			// ─── C9 (2026-08-28 round 2): 8-WIDE ENV BILINEAR FETCH ──────────
+			// The round-1 ladder put the PACK LOOP at 29.9 %% of this row and
+			// -DFDS_OVEC_ENVDIAG split it: the two per-lane EnvCubeFetchBil calls
+			// are 5.1 %% of the row on their own (0.038 Gi/f), the live-water
+			// tilt 3.4 %%, the face pick 1.9 %%. The census says the fetch is
+			// vectorisable: 90.2-96.2 %% of groups carrying a vec-env lane have
+			// every such lane on ONE cube face after the tilt, at 7.4-7.6 env
+			// lanes per group, and 100 %% of lanes need BOTH mip levels (so it is
+			// always two fetches, never one).
+			//
+			// The face pick and the live-water tilt move OUT of the lane loop
+			// into this pre-pass unconditionally — same work, same order, just
+			// hoisted so the uniformity test can see all eight answers. Only the
+			// FETCH is vectorised, and only when the faces agree; a mixed-face
+			// group falls back to the scalar fetch, reading the face/uv this
+			// pre-pass already computed, so it is never worse.
+			alignas(32) float envCu[8] = {0}, envCv[8] = {0};
+			alignas(32) float envFB[8], envFG[8], envFR[8];
+			int  envFace[8];
+			bool envFetchDone = false;
+			for (int k = 0; k < 8; ++k) envFace[k] = -1;
+			if (envVecReady) {
+				int uFace = -1, uLvl = -1, nPart = 0;
+				bool uni = true;
+				for (int k = 0; k < 8; ++k) {
+					if (!lane_alive_now[k] || !lane_envP[k] || lane_needs_scalar[k]) continue;
+					const fds::EnvPanoLinear* eP = lane_envP[k];
+					int face = 0; float cu = 0.0f, cvv = 0.0f;
+#if FDS_OVEC_ENVDIAG >= 3
+					cu = envRvx[k]; cvv = envRvy[k]; face = int(envRvz[k]);
+#else
+					fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k], envRvz[k],
+					                         face, cu, cvv);
+#endif
+#if FDS_OVEC_ENVDIAG < 2
+					{
+						// Live water: same lookup-dir perturbation as the scalar
+						// compose, same single-projection form — see
+						// EnvLiveWaterWeightAtFaceUV. Fires on 26-42 %% of lanes.
+						const float lwW = EnvLiveWaterWeightAtFaceUV(
+							eP->bakeY, envRvy[k], eP->waterMask, eP->waterMaskRes,
+							face, cu, cvv);
+						OVC_ADD(25, (lwW > 0.0f) ? 1 : 0);
+						if (lwW > 0.0f) {
+							fds::EnvLiveWater_TiltDir(eP->bakeX, eP->bakeY, eP->bakeZ,
+							                          envRvx[k], envRvy[k], envRvz[k], lwW);
+							fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k], envRvz[k],
+							                         face, cu, cvv);
+						}
+					}
+#endif
+					envFace[k] = face; envCu[k] = cu; envCv[k] = cvv;
+					const int l0 = int(envLvlF[k]);
+					if (nPart == 0) { uFace = face; uLvl = l0; }
+					else if (face != uFace || l0 != uLvl) uni = false;
+					++nPart;
+				}
+#if FDS_OVEC_CENSUS
+				if (ovCensus && nPart > 0) { OVC(22); if (uni) { OVC(23); OVC(24); } }
+#endif
+				// 8-wide fetch: one face, one level, both mips, then the
+				// inter-level lerp — all eight lanes at once.
+				if (nPart > 0 && uni) {
+					const fds::EnvPanoLinear* eP = nullptr;
+					for (int k = 0; k < 8; ++k) if (envFace[k] >= 0) { eP = lane_envP[k]; break; }
+					const int lvl1 = uLvl + 1 < eP->numMips ? uLvl + 1 : uLvl;
+#if FDS_OVEC_ENVDIAG >= 1
+					for (int k = 0; k < 8; ++k) {
+						envFB[k] = envCu[k]; envFG[k] = envCv[k];
+						envFR[k] = float(uFace) + float(uLvl);
+					}
+					(void)lvl1;
+#else
+					EnvCubeFetchBil8(eP, uLvl, uFace, envCu, envCv, envFB, envFG, envFR);
+					if (lvl1 != uLvl) {
+						alignas(32) float b1[8], g1[8], r1[8];
+						EnvCubeFetchBil8(eP, lvl1, uFace, envCu, envCv, b1, g1, r1);
+						// lf = lvlF - float(lvl0), per lane (lvlF can differ inside
+						// one integer level); the lerp is fmadd(lf, hi-lo, lo),
+						// matching the scalar `b0 += lf * (b1 - b0)`.
+						const __m256 lf = _mm256_sub_ps(_mm256_load_ps(envLvlF),
+						                                _mm256_set1_ps(float(uLvl)));
+						const __m256 vb = _mm256_load_ps(envFB), vg = _mm256_load_ps(envFG),
+						             vr = _mm256_load_ps(envFR);
+						_mm256_store_ps(envFB, _mm256_fmadd_ps(lf,
+						    _mm256_sub_ps(_mm256_load_ps(b1), vb), vb));
+						_mm256_store_ps(envFG, _mm256_fmadd_ps(lf,
+						    _mm256_sub_ps(_mm256_load_ps(g1), vg), vg));
+						_mm256_store_ps(envFR, _mm256_fmadd_ps(lf,
+						    _mm256_sub_ps(_mm256_load_ps(r1), vr), vr));
+					}
+#endif
+					envFetchDone = true;
+				}
+			}
+			// ─── C10 (2026-08-28 round 2): 8-WIDE PACK FOR AN ENV GROUP ──────
+			// C7 vectorised the pack only for an ALL-PLAIN group (no env lane).
+			// C9 has now left this group's env texel in envFB/FG/FR[] as arrays,
+			// so an env group's pack is vectorisable too — and env groups are
+			// 33-37 %% of all groups (census), running the full scalar lane loop
+			// for all eight lanes.
+			// The scalar per-lane form is `int(vf) + int(b0 * (envEk*specMul))`
+			// with the CLAMP ON THE INTEGER SUM, so this reproduces it exactly:
+			// two cvttps (truncate toward zero, same as int()), an int add, then
+			// int min/max — NOT the float clamp C7 uses, because there the sum is
+			// a single term. A lane with no env store gets its multiplier ANDed
+			// to +0.0f by lane_hasEnv, so its env term truncates to 0 and the add
+			// is the identity — matching the scalar, which simply omits it.
+			// Gated off --diffuse_energy (default 0; it would re-weight the
+			// diffuse per lane) and off FDS_ENVVEC_STATS (whose per-callsite
+			// counters this path would stop incrementing).
+			if (ovecVecPack && envFetchDone && !diffuseEnergyG && !g_envVecStats
+			    && _mm256_movemask_epi8(mask_alive_fresh) == -1
+			    && _mm256_testz_si256(needsScalar, needsScalar)) {
+				const __m256 ekv = _mm256_and_ps(
+				    _mm256_mul_ps(_mm256_load_ps(envEk), _mm256_load_ps(lane_specMul)),
+				    _mm256_castsi256_ps(_mm256_load_si256((const __m256i*)lane_hasEnv)));
+				const __m256i lo = _mm256_setzero_si256(), hi = _mm256_set1_epi32(255);
+				auto pk = [&](__m256 fd, const float* envC) {
+					__m256i v = _mm256_add_epi32(_mm256_cvttps_epi32(fd),
+					    _mm256_cvttps_epi32(_mm256_mul_ps(_mm256_load_ps(envC), ekv)));
+					return _mm256_max_epi32(lo, _mm256_min_epi32(hi, v));
+				};
+				const __m256i vb = pk(fdB, envFB), vg = pk(fdG, envFG), vr = pk(fdR, envFR);
+				_mm256_storeu_si256((__m256i*)(out + i), _mm256_or_si256(
+				    _mm256_or_si256(vb, _mm256_slli_epi32(vg, 8)),
+				    _mm256_or_si256(_mm256_slli_epi32(vr, 16),
+				                    _mm256_set1_epi32(int(0xFF000000u)))));
+				continue;
+			}
+#if FDS_OVEC_CENSUS
+			int  cenEnvVecN = 0, cenFace0 = -1, cenLvl0 = -1;
+			bool cenFaceUni = true, cenLvlUni = true;
+#endif
 			for (int k = 0; k < 8; ++k) {
 				if (!lane_alive_now[k]) continue;
 				int outB, outG, outR;
@@ -7012,40 +7270,50 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						// reflect dir, Fresnel weight and mip; finish with
 						// the shared scalar face pick + bilinear fetch.
 						const fds::EnvPanoLinear* envP_ = lane_envP[k];
-						// Live water: same lookup-dir perturbation as the
-						// scalar compose (parity between the two paths), with
-						// the same single-projection form — see
-						// EnvLiveWaterWeightAtFaceUV. This lane IS the city
-						// glass, so it is where the duplicate projection was
-						// actually being paid.
-						int face; float cu, cvv;
-						fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k],
-						                         envRvz[k], face, cu, cvv);
-						{
-							const float lwW = EnvLiveWaterWeightAtFaceUV(
-								envP_->bakeY, envRvy[k],
-								envP_->waterMask, envP_->waterMaskRes,
-								face, cu, cvv);
-							if (lwW > 0.0f) {
-								fds::EnvLiveWater_TiltDir(
-									envP_->bakeX, envP_->bakeY, envP_->bakeZ,
-									envRvx[k], envRvy[k], envRvz[k], lwW);
-								fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k],
-								                         envRvz[k], face, cu, cvv);
-							}
-						}
+						// C9: the face pick and the live-water tilt already ran
+						// in the pre-pass above (same work, same order, hoisted
+						// so the face-uniformity test can see all eight).
+						const int face = envFace[k];
+						const float cu = envCu[k], cvv = envCv[k];
 						const float lvlF = envLvlF[k];
 						const int lvl0 = int(lvlF);
+#if FDS_OVEC_CENSUS
+						if (ovCensus) {
+							++cenEnvVecN;
+							if (cenFace0 < 0) { cenFace0 = face; cenLvl0 = lvl0; }
+							else {
+								if (face != cenFace0) cenFaceUni = false;
+								if (lvl0 != cenLvl0)  cenLvlUni  = false;
+							}
+						}
+#endif
 						const int lvl1 = lvl0 + 1 < envP_->numMips ? lvl0 + 1 : lvl0;
 						const float lf = lvlF - float(lvl0);
 						float b0, g0, r0;
+						OVC_ADD(20, 1); OVC_ADD(27, 1);
+						OVC_ADD(26, (lvl1 != lvl0) ? 1 : 0);
+						OVC_ADD(27, (lvl1 != lvl0) ? 1 : 0);
+						if (envFetchDone) {
+							// C9 fast path: the 8-wide fetch and the inter-level
+							// lerp already produced this lane's texel.
+							b0 = envFB[k]; g0 = envFG[k]; r0 = envFR[k];
+						} else {
+#if FDS_OVEC_ENVDIAG >= 1
+						b0 = cu; g0 = cvv; r0 = float(face) + float(lvl0);
+#else
 						EnvCubeFetchBil(envP_, lvl0, face, cu, cvv, b0, g0, r0);
+#endif
 						if (lvl1 != lvl0) {
 							float b1, g1, r1;
+#if FDS_OVEC_ENVDIAG >= 1
+							b1 = cvv; g1 = cu; r1 = float(lvl1);
+#else
 							EnvCubeFetchBil(envP_, lvl1, face, cu, cvv, b1, g1, r1);
+#endif
 							b0 += lf * (b1 - b0);
 							g0 += lf * (g1 - g0);
 							r0 += lf * (r1 - r0);
+						}
 						}
 						// ×lane_specMul: the env-specular IS this lane's whole
 						// specular term (×1.0f = exact identity, byte-null).
@@ -7055,6 +7323,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						outR += int(r0 * ekS);
 						fresLane = envFres[k];
 					} else if (lane_envP[k]) {
+						OVC_ADD(21, 1);
 						if (g_envVecStats) g_envCntOvEnvScalar.fetch_add(1, std::memory_order_relaxed);
 						const uint32_t m_   = lane_mat32[k];
 						const uint32_t mid_ = (m_ >> 20) & 0xFF;
@@ -7103,6 +7372,12 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				if (outR > 255) outR = 255; if (outR < 0) outR = 0;
 				out[i + k] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
 			}
+#if FDS_OVEC_CENSUS
+			if (ovCensus && cenEnvVecN > 0) {
+				OVC(22);
+				if (cenFaceUni) { OVC(23); if (cenLvlUni) OVC(24); }
+			}
+#endif
 		}
 
 		// Tail: scalar for remaining 1-7 pixels
