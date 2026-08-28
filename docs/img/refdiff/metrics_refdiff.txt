@@ -143,3 +143,11 @@ p5950_off: cam(half=0.5,ys=-1) planar[n=647551] raw 4.05/41.49 LF 2.77/10.96 dz 
   plane 45 n=587211 LF med 2.59 p90 11.14
   plane 41 n=60340 LF med 4.23 p90 10.24
 p5950_on: cam(half=0.5,ys=-1) planar[n=647551] raw 4.05/41.49 LF 2.77/10.96 dz -0.0421 | curved[n=679502] raw 4.04/41.68 LF 2.69/28.57 dz -0.0708 | WORSTPLANE 45 LF med 2.59 p90 11.14
+--- shoulder_plateau candidate (round 3) ---
+shp_A MARK-rect: geo n=15756 dz med -0.0379 p90|dz| 0.2839 frac(dz>+0.08) 18.9% frac(|dz|>0.08) 63.3% ; LF med 5.45 (n=6332)
+shp_A MARK-ellipse: geo n=43279 dz med -0.0541 p90|dz| 0.3579 frac(dz>+0.08) 8.5% frac(|dz|>0.08) 54.8% ; LF med 5.31 (n=21614)
+  plane 43 n=642265 LF med 3.25 p90 14.26
+  plane 48 n=252420 LF med 2.84 p90 9.78
+  plane 41 n=35640 LF med 3.80 p90 7.35
+  plane 45 n=216780 LF med 2.76 p90 6.90
+shp_A: cam(half=0.5,ys=-1) planar[n=1147105] raw 4.58/42.52 LF 3.09/11.66 dz -0.0252 | curved[n=35410] raw 3.50/24.45 LF 2.23/11.75 dz -0.1019 | WORSTPLANE 43 LF med 3.25 p90 14.26

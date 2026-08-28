@@ -1,5 +1,40 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28k — ROUND 3, THE SCENE-WIDE RECESSION MEASURED IN NORMAL SPACE:
+> the plateaus sit 0.036 u behind the field on EVERY wall plane because the
+> lattice spans each block from the groove SHOULDER lines (rep 0.42, the
+> mip's down-slope) with no vert inside the block; grooves are within +0.01;
+> parallax is exonerated. Candidate `--greets_displace_shoulder_plateau`
+> halves the bias (−0.036 → −0.018) — ships default OFF for his eye
+>
+> The ray-space "groove over-carve −0.0515" of 2026-08-28g does not survive
+> a normal-space measurement (new tools/nspace_relief.py: per-pixel engine
+> and reference heights ALONG THE PLANE NORMAL, binned by the reference's
+> own relief class). pfm_A: plane 43 plateau e−r med −0.036, bevel −0.018,
+> groove +0.009; planes 45/48/49 the same to ±0.003. --no-parallax renders
+> the identical numbers (parallax is a UV nudge, no depth write). The
+> per-vert census (whole-scene FINALV, 40k rooms verts) shows the VERTS are
+> on the field (E-plain hEff−hRaw med +0.012 map = +0.004 u; raw '-' verts
+> exact) — the recession is between the verts: with cpb=1 the edge-aligned
+> lattice puts a block's corners ON the shoulder lines (A/D at lo−pad,
+> along-line median 0.42 vs plateau 0.59) and the block face is spanned
+> from them, ~0.05 u below its own plateau (the first bulge round's
+> "pyramid" cross-section, now with the number that matters).
+>
+> Candidate lever (flag, default OFF): carry the plateau ref pLo/pHi the
+> line machinery already computes on the shoulder lines A/D (h and v);
+> floors B/C unchanged. Measured cam A: plateau bias 43/45/49 −0.036/−0.036/
+> −0.035 → −0.019/−0.017/−0.017 (the inset ref at pad+1.25 texels still
+> samples the blur tail — kPlatIns is the remaining dial), bevel −0.018 →
+> 0.000, grooves +0.009 → +0.019; scene ray-space dz median −0.053 → −0.025;
+> his marks p90|dz| 0.395/0.503 → 0.284/0.358 and median −0.14/−0.17 →
+> −0.038/−0.054, LF 9.1/7.4 → 5.5/5.3 — but ray-space PROTRUSION frac rises
+> 13.5/6.7 → 18.9/8.5% (the crisper shoulder reads as protrusion against the
+> mip-2 reference at grazing). 32% of cam-A pixels change (every wall).
+> Look (shp_A_tex.png): flat block tops, crisp recessed joints, straight
+> pier arris. That is a scene-wide look trade against the blurred field —
+> HIS call, not the envelope's; default arm byte-identical (f7ecefe2).
+
 > ## 2026-08-28j — THE MARKED JUTS ARE A RIDE-SIGN INVERSION, NOT A REP LEVEL:
 > the plane-normal ride resolved its sign by dot with the polluted smoothed
 > normal, and on the pier front that flips within ~1.1u of the corner — the

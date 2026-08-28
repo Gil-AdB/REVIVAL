@@ -141,3 +141,14 @@ dsp -0.038) between correctly carved joints, ray-stretched; plus thin red
 rims at course edges (frac 13.5/6.7%). That is the groove/shoulder LEVEL
 family (round-2 in the queue), not a sign. Census box for the strip:
 FDS_STONE_CENSUS_BOX="16.3,17.95,-58.2,-56.9,1.6,4.75".
+
+## UPDATE 2026-08-28k (round 3 — the recession is the SHOULDER-LEVEL lattice)
+tools/nspace_relief.py measures engine-vs-reference height along the plane
+normal per relief class. Plateaus sit −0.036 u on every wall plane (grooves
++0.01, bevels −0.018; parallax exonerated). Cause: cpb=1 edge-aligned cells
+have corners on the shoulder lines (rep 0.42 = mip down-slope) and no vert in
+the block. Candidate greets_displace_shoulder_plateau (OFF): shoulders take
+the plateau ref → plateau bias −0.018, bevel 0.000, marks p90 0.28/0.36,
+protrusion frac 18.9/8.5% (crisp shoulders vs the blurred reference —
+his eye). Remaining dial: kPlatIns (the inset still samples the blur tail).
+Default arm byte-identical f7ecefe2 (part 5 on, shoulder OFF).

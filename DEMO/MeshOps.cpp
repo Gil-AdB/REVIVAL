@@ -2752,14 +2752,25 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					const float ctr = 0.5f * (r.lo + r.hi);
 					const float pLo = medH(r.lo - kPlatIns), pHi = medH(r.hi + kPlatIns);
 					const float pMid = 0.5f * (pLo + pHi);
-					hLineRep.push_back({A, medH(A), pLo});
+					// --greets_displace_shoulder_plateau (2026-08-28, round 3 of the
+					// ride-sign fork): the SHOULDER lines A/D sit kPadTex outside the
+					// groove, on the mip's blurred down-slope (measured rep 0.42 vs
+					// plateau 0.59), and the edge-aligned lattice has NO vert inside
+					// a block — so every block top is spanned from shoulder-level
+					// corners and the rendered plateau sits 0.036 u BEHIND the field
+					// on every wall plane (tools/nspace_relief.py: plateau e-r med
+					// -0.036 on planes 43/45/48/49, grooves +0.01). Carry the
+					// PLATEAU ref on the shoulder lines instead; the floor lines B/C
+					// still carve, the bevel spans the 2*pad band between them.
+					const bool shoulderPlat = fds::FeatureFlags::greets_displace_shoulder_plateau();
+					hLineRep.push_back({A, shoulderPlat ? pLo : medH(A), pLo});
 					if (C - B >= kMinFloorTex) {
 						hLineRep.push_back({B, medH(B), pMid});
 						hLineRep.push_back({C, medH(C), pMid});
 					} else {
 						hLineRep.push_back({ctr, medH(ctr), pMid});
 					}
-					hLineRep.push_back({D, medH(D), pHi});
+					hLineRep.push_back({D, shoulderPlat ? pHi : medH(D), pHi});
 				}
 				vLineRep.resize(grid.vPerBand.size());
 				for (size_t b = 0; b < grid.vPerBand.size(); ++b) {
@@ -2771,14 +2782,15 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						const float pLo = medV(r.lo - kPlatIns, y0, y1);
 						const float pHi = medV(r.hi + kPlatIns, y0, y1);
 						const float pMid = 0.5f * (pLo + pHi);
-						vLineRep[b].push_back({A, medV(A, y0, y1), pLo});
+						const bool shoulderPlatV = fds::FeatureFlags::greets_displace_shoulder_plateau();
+						vLineRep[b].push_back({A, shoulderPlatV ? pLo : medV(A, y0, y1), pLo});
 						if (C - B >= kMinFloorTex) {
 							vLineRep[b].push_back({B, medV(B, y0, y1), pMid});
 							vLineRep[b].push_back({C, medV(C, y0, y1), pMid});
 						} else {
 							vLineRep[b].push_back({ctr, medV(ctr, y0, y1), pMid});
 						}
-						vLineRep[b].push_back({D, medV(D, y0, y1), pHi});
+						vLineRep[b].push_back({D, shoulderPlatV ? pHi : medV(D, y0, y1), pHi});
 					}
 				}
 				size_t nvl = 0;
