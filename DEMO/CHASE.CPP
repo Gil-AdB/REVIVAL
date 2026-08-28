@@ -1038,6 +1038,14 @@ namespace {
 struct ChaseScene : SceneDriver {
 	int32_t partTime() const override { return CHPartTime; }
 	FrameProfiler prof{"chase"};
+	// --frame_tile_y, saved by createChaseScene() and put back in cleanup().
+	// setDefault() writes a PROCESS-wide global and does not mark the flag set,
+	// so without this restore chase's finer grid would leak forward into
+	// fountain / crash / greets for the rest of a full run — and greets is
+	// measured to LOSE from it (PERF_STATE §00l.4: +0.48 ms renderFrame,
+	// +0.77 ms gbuffer, and §00d's 16 % of its pixels). The tile grid is the
+	// one flag in this file that another scene demonstrably wants different.
+	int savedFrameTileY = 0;
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)
 	bool    pause_mode = false;
 	// M1.3 engine-glow throttle state (chase_engine_mod): the two ship meshes
@@ -1568,6 +1576,12 @@ struct ChaseScene : SceneDriver {
 	}
 
 	void cleanup() override {
+		// Hand the frame tile grid back exactly as we found it (see
+		// savedFrameTileY). Unconditional: when the user set --frame_tile_y
+		// explicitly, createChaseScene()'s setDefault was a no-op and this
+		// writes the same value back, so the restore is identity either way.
+		fds::FeatureFlags::g_intVals[
+			static_cast<int>(fds::FeatureFlags::IntId::frame_tile_y)] = savedFrameTileY;
 		if (g_profilerActive) prof.dump();
 		Timer -= CHPartTime;
 		waitBackspaceRelease();
@@ -1597,7 +1611,31 @@ std::unique_ptr<SceneDriver> createChaseScene()
 	// and it only matters under --chase_blasters (EmitLights is gated on it).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_range, 90.0f);
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_intensity, 260.0f);
-	return std::make_unique<ChaseScene>();
+	// PERF: chase rasters its G-buffer at effPar 3.1 of 12 workers on the
+	// default 6x5 grid (PERF_STATE §00l.2, chase t=800) — nine of twelve
+	// threads idle through the phase because chase's screen is a handful of
+	// enormous canyon-wall and water faces and a 6x5 tile is big enough that
+	// one tile owns most of them. 6x20 keeps the SAME tile count shape the
+	// clipper likes (interior boundaries stay 8-aligned) but slices the heavy
+	// band into rows: MEASURED gbuffer -3.11 ms (-36 %), renderFrame -3.27 ms
+	// (-7.6 %), tick -3.17 ms (-5.7 %) at t=800.
+	//
+	// PER SCENE, NEVER GLOBAL. greets LOSES from the same grid (+0.48 ms) and
+	// city gains only 0.79 ms for 4 534 moved pixels, so neither is opted in
+	// here; ChaseScene::cleanup() puts the flag back so this cannot leak into
+	// the scenes that follow chase in a full run.
+	//
+	// NOT BYTE-NULL, and the cost depends on the arm: bare --deferred moves
+	// 57-1 738 px of 2 073 600 at the five gate poses, but under
+	// --texture-filter=2 (his arm) the per-tile mip hysteresis sees a different
+	// tile partition and the wash grows to 23 866 px at t=800 / 87 121 px at
+	// t=1105 — 1.2 % / 4.2 % of the frame at mean |d| 0.7 / 1.6 of 255, with
+	// only 18 pixels anywhere above 32. Revert with --frame_tile_y=5.
+	const int prevFrameTileY = fds::FeatureFlags::frame_tile_y();
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::IntId::frame_tile_y, 20);
+	auto sc = std::make_unique<ChaseScene>();
+	sc->savedFrameTileY = prevFrameTileY;
+	return sc;
 }
 
 void Run_Chase()
