@@ -111,10 +111,35 @@ and costs:
 * **Relative rankings and phase splits survive contention.** They are ratios
   inside one process, and the `Ginstr/f` column (load-robust by construction)
   agrees with them everywhere I checked.
-* **Absolute ms are the part to distrust.** §00k.1's headline row per arm was
-  **re-verified on a quiet box** at the end of the round — see §00k.6. Where the
-  quiet re-run disagrees with the loaded battery, the quiet number is quoted and
-  both are shown.
+* **Absolute ms were the part to distrust, and they were re-verified.** The
+  whole 12-round battery was re-run at the end of the session under a
+  **box-quiet protocol** — poll `pgrep` for builds and benches until the box is
+  idle, then start; record load and battery before and after. It started at
+  1-min load **2.89** with zero build/bench processes (and finished at 19.03,
+  which is mostly the battery's own 12 workers). **The two batteries agree:**
+
+| arm | tick, loaded battery | tick, quiet-start | Δ | `renderFrame` loaded | quiet-start | Δ |
+|---|--:|--:|--:|--:|--:|--:|
+| greets t=5743 | 56.536 | 56.590 | **+0.10 %** | 46.639 | 47.328 | +1.48 % |
+| greets t=5965 | 48.090 | 48.553 | +0.96 % | 42.477 | 42.461 | −0.04 % |
+| city t=1961 | 65.550 | 65.886 | +0.51 % | 53.710 | 53.976 | +0.50 % |
+| chase t=1105 | 45.956 | 46.508 | +1.20 % | 42.291 | 42.757 | +1.10 % |
+| chase t=800 | 55.536 | 55.725 | +0.34 % | 42.912 | 42.846 | −0.15 % |
+
+  **Every whole-tick figure reproduces inside +1.2 %, and every headline phase
+  row inside ±3.6 %.** Only two rows move more than 1.5 % between the batteries,
+  and both are ones this section already calls out for their own reasons:
+  `gbuffer` (+3.58 % greets, +3.55 % chase t=1105 — the load-sensitive raster
+  phase) and greets' `RTT` (−2.66 %, a 1.7 ms dispatch row). `ssao` reproduces
+  to **+0.16 / +0.03 / −0.07 %**, `cones` to **+0.22 / +0.24 %**, `fastfog` to
+  **+0.27 %**, `lighting-w2` **exactly**. **The min-of-11 estimator was not
+  materially contaminated**, which is what the tight within-arm floors already
+  suggested. The tables in §00k.1–2 quote the LOADED battery (it has the same
+  arms and the same round count); use the column above as the error bar.
+* The ladder batteries (§00k.4) were **not** re-run quiet. They are same-binary
+  flag flips read as deltas inside one interleaved batch, and their base arms
+  agree across batches to 0.3 % (L1 base `ssao` 7.757 vs L6 base 7.737) — but
+  quote them as deltas, not as absolute ms.
 * Two rows carry a visibly worse floor and are flagged in place:
   `greets gbuffer` (+5.3 %) and `chase t=1105 gbuffer` (+5.9 % in the L2
   ladder) — the raster phase is the one that reacts to a busy box, which is
