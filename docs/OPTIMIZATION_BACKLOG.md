@@ -141,13 +141,27 @@ OuterVec kernel and does not touch the scalar wave-1 kernel greets and chase run
 
 * **C6 (specular-only redo lane) + C6a (rsqrt unification)** — killed by census,
   see above. *f* = 0.91–3.25 % against its own 8 % kill line.
-* **C1+C8 in isolation read as a wash on instructions.** Parent 0.978 →
-  C1+C8-only build 0.955 = **−2.4 % of the row**, against a predicted 1.5–4 %
-  — so the *instruction* half landed at the bottom of its range and the
-  register/frame half (16m's −1.17 to −2.85 % Gcyc) was not separable from LTO
-  layout at this size. It is kept because it is byte-null, ~40 lines, and
-  removes a `__cxa_guard_acquire` from the hot path on principle; it is **not**
-  the round's win and should not be quoted as one.
+* **C1+C8 in isolation — MEASURED ON ITS OWN BINARY, and 16m's mechanism
+  reproduces.** A dedicated build of `187355b5` against the parent, interleaved,
+  min-of-5: city t=1961 `lighting-w1` **0.977 → 0.953 Gi/f (−2.5 %)** but
+  **0.243 → 0.231 Gcyc/f (−4.9 %)**; t=400 **0.733 → 0.709 (−3.3 %) Gi** and
+  **0.186 → 0.180 (−3.2 %) Gcyc**. Predicted 1.5–4 % combined; measured 2.5–4.9 %.
+  **The cycle win exceeding the instruction win at t=1961 is exactly 16m's
+  signature** (16m measured Gi −0.96 to 0.00 % against Gcyc −1.17 to −2.85 %) —
+  this is a register/frame effect, not an instruction-count one, and the
+  disassembly says so directly:
+
+  | binary | instrs in the symbol | `cxa_guard` refs | `bl` calls | callee-save `stp` pairs |
+  |---|--:|--:|--:|--:|
+  | parent `e017d611` | 3533 | **2** | **13** | **10** |
+  | C1+C8 `187355b5` | 3490 | **0** | **6** | **9** |
+  | full round | 3677 | 0 | 6 | 11 |
+
+  Publishing the lazy static removed both guard references, took the call count
+  from 13 to 6 and freed a callee-save pair — the same structural table 16m used.
+  An earlier draft of this entry called C1+C8 "a wash"; that reading came from
+  comparing the parent against the FULL child with its four dials forced OFF,
+  which carries their OFF-arm cost (see the next bullet) and is not the C1+C8 arm.
 * **The OFF-arm of the four dials costs 2.9 % of the row** (C1+C8 build 0.955 →
   child ALL-OFF 0.983). That is 16l's "+4.3 % with the flag OFF" reappearing,
   and it is why the per-lever column above is quoted against the ALL-OFF arm and

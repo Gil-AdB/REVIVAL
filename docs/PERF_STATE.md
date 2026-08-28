@@ -66,6 +66,12 @@ Cycles track instructions and IPC barely moves — not the cube-prepass pattern
 where the two columns disagreed. greets is exactly flat, which proves the change
 is confined to the OuterVec kernel.
 
+**C1 + C8 alone** (the two flagless levers, own binary, interleaved min-of-5):
+t=1961 0.977 → 0.953 Gi/f (−2.5 %) and 0.243 → **0.231 Gcyc/f (−4.9 %)**; t=400
+−3.3 % Gi / −3.2 % Gcyc. Cycles beating instructions is 16m's signature, and the
+disassembly agrees: the OuterVec symbol goes from 2 `__cxa_guard` references,
+13 `bl` calls and 10 callee-save `stp` pairs to **0, 6 and 9**.
+
 **Gates:** 13/13 pinned poses + `render_gate` 4/4, and byte-nullity proved
 DIFFERENTIALLY on one binary — each lever flipped off individually and all four
 together reproduce the same hash at city t=1961, fountain t=2500, crash

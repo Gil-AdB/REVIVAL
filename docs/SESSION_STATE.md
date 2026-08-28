@@ -41,6 +41,15 @@
 > compare) **−4.8 %**, `--deferred_ovec_vec_pack` (one 256-bit store for an
 > all-plain group; 58–63 %) **−2.7 %**. Every one beat its prediction.
 >
+> **C1 + C8, the two flagless ones, priced on their OWN binary**: city t=1961
+> `lighting-w1` 0.977 → 0.953 Gi/f (−2.5 %) but **0.243 → 0.231 Gcyc/f (−4.9 %)**;
+> t=400 −3.3 % Gi / −3.2 % Gcyc. The cycle win exceeding the instruction win is
+> **16m's signature** (that round measured Gi −0.96 to 0.00 % against Gcyc −1.17
+> to −2.85 %), and the disassembly confirms the mechanism directly: publishing
+> the in-loop `static const bool` took the OuterVec symbol from **2
+> `__cxa_guard` references, 13 `bl` calls and 10 callee-save `stp` pairs to 0, 6
+> and 9**.
+>
 > **THE NEXT TARGET IS NAMED BY THE LADDER, and the analysis mis-sized it: the
 > per-lane PACK loop is 24.8 % of the row**, not ~5 %, because **33–36 % of
 > city's alive lanes carry an env store** and pay a scalar face pick, live-water
