@@ -45,3 +45,36 @@ greets_displace_crease_normals=0 (kept as instrument). Byte-exact restore proven
 --no-greets_displace_groove_shade_plane == pre-fix md5 5081d8b5. Residuals, named: pierside
 corner-fan strip ~80 (pre-existing STONE-CORNERF debt, unmasked by clean panels); curved-wall
 GBI ~8.6 vs bare 3.3 (relief-on-arc, partly pre-existing); pierfront GBI 2.82 (pyramid density).
+
+=== DO-W/E LOOP (2026-08-28, rounds 1-3 after the ship state) ===
+Round 1 LANDED (41ff72ed, greets_displace_groove_front_majority=1): the groove-blend's
+patch target carried an arbitrary winding sign resolved by dot-with-the-POLLUTED-ride;
+majority-front orientation (the dd798c31 mitre rule, per patch) kills every inversion.
+  pierside(seam) GBI 80.66 -> 49.55; stage-D vertN-vs-faceN max 176deg(anti-parallel) -> 85.8, inverted count -> 0
+  pierfront/curved: bit-identical (byte-null off-seam). --no- == md5 de408743 (pre-fix) exact.
+Round 2 REFUTED as a lever: cpb=2/cpb=3 under the ship arm change the FLOOR only --
+wall regions bit-identical to cpb=1 (diff census: 4206/514800 px in pierfront, all floor
+rows y>=494). The crease-round "cpb halves the pyramid residual" attribution does NOT
+hold under current defaults; pierfront 2.82 stays, attribution OPEN (may be legitimate
+relief: SGM med 4.41 vs floor 3.15 -- see below).
+Round 3 LANDED (greets_displace_corner_front_ride=1, threshold 25deg): corner verts
+(incident faces >1 plane) displaced along the polluted smoothed ride; now ride the
+normalized sum of their patches' majority fronts when it deviates >25deg (355 'rooms'
+verts fire = the tearhunt population). Changes land exactly on curve-bend seam columns
+(60073 px on the curved wall at cam A, pierfront 0 px); joint shading reads cleaner,
+no regression at grazing t=5958. --no- == md5 f819ec6c (r1) exact. Init cost: wall-clock
+identical (2.36 vs 2.37s whole run); faces unchanged; no per-frame mechanism.
+NEW INSTRUMENTS: normchain stage D (normchain_final.txt -- the FINAL shading field;
+stage C dumps BEFORE the weld and cannot see weld-made defects) and tools/sgm_detect.py
+(SGM = per-pixel angle between G-buffer shading normal and depth-reconstructed geometric
+normal, both view-space -- grazing-invariant, self-FOV-calibrated at IFOV~58deg,
+noise floor med~3.15 on the known-flat wall).
+PIERSIDE RELABELED: the region is the second wall at extreme grazing (FACEID census:
+regular plane-10 interior faces, NOT fan strips). GBI there double-counts legitimate
+relief (a 64px cell spans many world-units of bevels edge-on): A_nodisp reads 0.00 only
+because the bare wall has NO relief. SGM is the metric for grazing regions: med 4.46
+(floor 3.15), p90 53 (tail = smoothing halos + the 80deg weld's bevel/top merge).
+Remaining, named: (a) the 80deg weld's bevel/top chain-averaging (stage-D vf med 19 on
+the grazing slice; crease30 refuted as a global default, a bevel-aware gate is the open
+design); (b) curved-wall pre-bake residual (bare wall GBI 3.3/SWEEPv 4.0, predates
+displacement); (c) pierfront 2.82 attribution (defect vs legitimate relief) awaits his eye.

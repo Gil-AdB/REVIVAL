@@ -1,5 +1,36 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28e — THE DO-W/E LOOP: two sign/steering fixes LAND, cpb is
+> REFUTED as a wall lever, and the pierside metric is corrected
+>
+> Round 1 (`greets_displace_groove_front_majority`, ON): the groove-blend'''s
+> patch-plane target carried an arbitrary winding sign resolved by dot with
+> the POLLUTED ride — seam-column shading normals inverted up to 176° (stage
+> D instrument, new). Majority-front orientation per patch (the dd798c31
+> mitre rule) kills every inversion: seam GBI 80.7→49.6, pierfront/curved
+> bit-identical, `--no-` restores md5 de408743 exactly.
+>
+> Round 2: cpb=2/3 under the ship arm change the FLOOR only — wall regions
+> bit-identical (4206/514800 px, all floor rows). The crease-round'''s "cpb
+> halves the pyramid residual" does NOT hold at current defaults; refuted.
+>
+> Round 3 (`greets_displace_corner_front_ride`, ON, 25° gate): corner verts
+> displaced along the polluted smoothed ride (the tearhunt'''s 293-vert
+> population); they now ride their patches''' majority-front mean when it
+> deviates >25° (355 verts fire). Diffs land exactly on curve-bend seam
+> columns; grazing t=5958 crisp; `--no-` restores md5 f819ec6c exactly.
+> Locality sweep 6 poses: all >10/255 diffs on displaced materials (the
+> lone off-material cluster was floor::mirUV, i.e. in scope).
+>
+> Instruments added: normchain stage D (the FINAL shading field — stage C
+> dumps before the weld and is blind to weld defects) and tools/
+> sgm_detect.py (grazing-invariant shading-vs-geometry mismatch; floor
+> ~3.15). PIERSIDE RELABELED: it is the second wall at extreme grazing —
+> GBI double-counts legitimate relief there; SGM is the metric (med 4.46).
+> Remaining, named: the 80° weld'''s bevel/top chain-average (open design:
+> bevel-aware gate), curved-wall pre-bake residual (predates displacement),
+> pierfront 2.82 attribution (his eye decides defect vs relief).
+
 > ## 2026-08-28c — **THE PANEL BULGE CLOSES: groove-shade was blending every
 > grout band toward the POLLUTED smoothed ride field, and retargeting it to
 > the patch plane flattens the walls — the commissioned crease gate is

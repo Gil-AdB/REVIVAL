@@ -5195,6 +5195,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		                        && fds::FeatureFlags::greets_displace_groove_shade_plane();
 		std::vector<Vector> grooveTgtN;      // unit patch plane per vert (sign-ambiguous), empty when off
 		std::vector<char>   grooveTgtFront;  // 1 = grooveTgtN already majority-front oriented (part 3)
+		std::vector<Vector> cornerFrontN;    // part 4: per-CORNER-vert majority-front patch mean (unit), zero = none
 		const int   bmeanMode  = fds::FeatureFlags::greets_displace_border_mean();
 		const float bmeanScale = fds::FeatureFlags::greets_displace_border_mean_scale();
 		const bool  wantBMean  = bmeanMode != 0;
@@ -5322,6 +5323,62 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				std::fprintf(stderr, "[STONE-GROOVEFRONT] '%s' %d patch-plane targets "
 				             "majority-front oriented (%d flipped, %d ambiguous kept "
 				             "ride-signed)\n", matName?matName:"?", nOr, nFlip, nWeak);
+				// ── part 4: CORNER-vert RIDE direction from the majority fronts ──
+				// (--greets_displace_corner_front_ride). Corner verts (incident
+				// faces span >1 plane) are skipped by every retarget above and
+				// still DISPLACE along the polluted smoothed ride — the tearhunt
+				// round's 293-vert "own tilted plane" population and the seam
+				// column's GEOMBOW 0.40 wobble. Give each corner vert the
+				// normalized sum of its incident patches' majority fronts (the
+				// area bisector at a junction). Consumed at the ride site only
+				// when it deviates from the smoothed ride by more than the
+				// threshold — healthy columns (the 207° jamb: ride dots +0.93)
+				// stay byte-identical by construction.
+				if (fds::FeatureFlags::greets_displace_corner_front_ride()) {
+					cornerFrontN.assign(nV, Vector{0.0f,0.0f,0.0f});
+					// per-vert: set of incident per-face plane keys (small — dedupe inline)
+					std::vector<std::array<uint64_t,4>> vKeys(nV, {0,0,0,0});
+					auto addKey = [&](uint32_t v, uint64_t k){
+						auto &K = vKeys[v];
+						for (int s=0;s<4;++s) { if (K[s]==k) return; if (K[s]==0){K[s]=k;return;} }
+					};
+					for (size_t f=0; f<faces.size(); ++f) {
+						if (!isTargetNew(faces[f])) continue;
+						const uint32_t a=fIdx[f][0], b=fIdx[f][1], c=fIdx[f][2];
+						if (a>=nV||b>=nV||c>=nV) continue;
+						const Vector &A=basePos[a],&B=basePos[b],&C=basePos[c];
+						const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z;
+						const float e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+						float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+						const float gl=std::sqrt(gx*gx+gy*gy+gz*gz);
+						if (gl < 1e-12f) continue;
+						gx/=gl; gy/=gl; gz/=gl;
+						const uint64_t k = planeKeyOf(gx,gy,gz, gx*A.x+gy*A.y+gz*A.z);
+						for (uint32_t v : {a,b,c})
+							if (v<nV && have[v] && corner[v]) addKey(v, k);
+					}
+					int nCF=0;
+					for (uint32_t v=0; v<nV; ++v) {
+						if (!have[v] || !corner[v]) continue;
+						Vector s{0,0,0}; int used=0;
+						for (uint64_t k : vKeys[v]) {
+							if (!k) break;
+							auto it = patchFront.find(k);
+							if (it == patchFront.end()) continue;
+							const Vector &fa = it->second;
+							const float fl = std::sqrt(fa.x*fa.x+fa.y*fa.y+fa.z*fa.z);
+							if (fl < 1e-9f) continue;
+							s.x += fa.x/fl; s.y += fa.y/fl; s.z += fa.z/fl; ++used;
+						}
+						const float sl = std::sqrt(s.x*s.x+s.y*s.y+s.z*s.z);
+						if (used < 1 || sl < 0.35f) continue;   // opposing/no fronts: leave the ride
+						cornerFrontN[v] = Vector{ s.x/sl, s.y/sl, s.z/sl };
+						++nCF;
+					}
+					std::fprintf(stderr, "[STONE-CORNERFRONT] '%s' %d corner verts "
+					             "carry a majority-front ride candidate\n",
+					             matName?matName:"?", nCF);
+				}
 			}
 			if (!wantPlaneN) planeN.clear();          // mean-only: leave the ride alone
 			else {
@@ -5376,7 +5433,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				}
 			}
 		}
-		int nMoved=0, nLineSnap=0, nPlatPin=0; float dMin=1e30f,dMax=-1e30f;
+		int nMoved=0, nLineSnap=0, nPlatPin=0, nCornerFrontRide=0; float dMin=1e30f,dMax=-1e30f;
 		int nFreeVerts=0, nFreeClamped=0, nFreeDeslid=0; float freeDeepest=0.0f, freeSlideMax=0.0f;
 		// ── NO SLIDE ALONG A FREED BORDER ────────────────────────────────────
 		// The displacement rides the SMOOTHED vertex normal, and at a patch border
@@ -6267,6 +6324,23 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					dx = s*Q.x; dy = s*Q.y; dz = s*Q.z; ++nPlaneRide;
 				}
 			}
+			// part 4 (--greets_displace_corner_front_ride): a CORNER vert whose
+			// smoothed ride deviates from its patches' majority-front mean by
+			// more than the threshold is pollution-steered — ride the front
+			// mean instead. Fires only where the ride is measurably wrong, so
+			// healthy columns are byte-identical; the matched mitre below still
+			// has the last word on welded verts.
+			if (i < cornerFrontN.size()) {
+				const Vector &Q = cornerFrontN[i];
+				if (Q.x!=0.0f || Q.y!=0.0f || Q.z!=0.0f) {
+					static const float cosCF = std::cos(
+					    fds::FeatureFlags::greets_displace_corner_front_deg()
+					    * float(PI) / 180.0f);
+					if (Q.x*dx + Q.y*dy + Q.z*dz < cosCF) {
+						dx = Q.x; dy = Q.y; dz = Q.z; ++nCornerFrontRide;
+					}
+				}
+			}
 			// ── MATCHED MITRE (last word for welded corner verts): the shared
 			// profile h(s) along the corner line, ridden along the group
 			// bisector. Supersedes the de-slide, the recess clamp, the bmean
@@ -6593,6 +6667,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				"the smoothed ride or they tear apart)\n",
 				matName, nPlaneRide, nPlaneSkipCorner, nPlaneSkipTwin,
 				nPlaneSkipForeign);
+		if (nCornerFrontRide)
+			std::fprintf(stderr, "[STONE-CORNERFRONT] '%s': %d corner verts rode "
+				"the majority-front mean instead of the polluted smoothed ride "
+				"(deviation > %.0f deg; --no-greets_displace_corner_front_ride "
+				"restores)\n", matName, nCornerFrontRide,
+				(double)fds::FeatureFlags::greets_displace_corner_front_deg());
 		if (lineHeight)
 			std::fprintf(stderr, "[STONE-LINE] '%s': %d of %d displaced verts "
 				"snapped to their groove line's rep (edge path); %d fallback-path "
