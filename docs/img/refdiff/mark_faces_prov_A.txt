@@ -1,0 +1,99 @@
+camera pick half=0.5 ysign=-1 med|dz|=0.0510
+MARK-rect: 1506 protruding px sampled onto 63 faces
+  face#71345 (rooms::mirUV) px 340 meandz +0.297 planes [49, 49, 49]
+     c0 (16.9926, 3.3342, -57.5164) above-plane +0.0386
+     c1 (17.8584, 3.3365, -57.9769) above-plane -0.0118
+     c2 (17.8839, 4.6560, -58.0100) above-plane +0.0035
+  face#71313 (rooms::mirUV) px 150 meandz +0.429 planes [49, 49, 49]
+     c0 (16.9200, 3.3342, -57.5061) above-plane +0.0671
+     c1 (16.9926, 3.3342, -57.5164) above-plane +0.0386
+     c2 (17.0132, 4.6818, -57.4819) above-plane -0.0017
+  face#71298 (rooms::mirUV) px 123 meandz +0.594 planes [49, 43, 49]
+     c0 (17.8647, 3.2695, -57.9933) above-plane -0.0010
+     c1 (17.8890, 3.3342, -57.9984) above-plane -0.0091
+     c2 (16.9926, 3.3342, -57.5164) above-plane +0.0386
+  face#71295 (rooms::mirUV) px 110 meandz +0.922 planes [49, 49, 49]
+     c0 (17.6998, 3.2691, -58.0142) above-plane +0.1018
+     c1 (17.7969, 3.2691, -57.9835) above-plane +0.0254
+     c2 (16.9926, 3.3342, -57.5164) above-plane +0.0386
+  face#71294 (rooms::mirUV) px 102 meandz +1.191 planes [49, 49, 49]
+     c0 (16.9600, 3.2691, -57.5706) above-plane +0.1018
+     c1 (17.6998, 3.2691, -58.0142) above-plane +0.1018
+     c2 (16.9926, 3.3342, -57.5164) above-plane +0.0386
+  face#71307 (rooms::mirUV) px 88 meandz +0.215 planes [49, 49, 49]
+     c0 (15.5099, 3.3342, -56.5373) above-plane -0.0385
+     c1 (16.8189, 3.3342, -57.4122) above-plane +0.0385
+     c2 (15.4925, 4.6818, -56.5663) above-plane -0.0047
+  face#71316 (rooms::mirUV) px 66 meandz +0.574 planes [49, 43, 49]
+     c0 (16.9926, 3.3342, -57.5164) above-plane +0.0386
+     c1 (17.8990, 4.6818, -58.0162) above-plane +0.0010
+     c2 (17.0132, 4.6818, -57.4819) above-plane -0.0017
+  face#71266 (rooms::mirUV) px 53 meandz +0.473 planes [49, 49, 49]
+     c0 (17.8017, 3.2040, -57.9755) above-plane +0.0162
+     c1 (17.7969, 3.2691, -57.9835) above-plane +0.0254
+     c2 (17.6998, 3.2691, -58.0142) above-plane +0.1018
+  face#71311 (rooms::mirUV) px 52 meandz +0.616 planes [49, 49, 34]
+     c0 (16.8556, 3.3342, -57.4823) above-plane +0.0797
+     c1 (16.9200, 3.3342, -57.5061) above-plane +0.0671
+     c2 (16.9376, 4.6818, -57.3455) above-plane +0.0751
+  face#71296 (rooms::mirUV) px 48 meandz +0.769 planes [49, 49, 49]
+     c0 (17.7969, 3.2691, -57.9835) above-plane +0.0254
+     c1 (17.8647, 3.2695, -57.9933) above-plane -0.0010
+     c2 (16.9926, 3.3342, -57.5164) above-plane +0.0386
+  face#71240 (rooms::mirUV) px 36 meandz +0.320 planes [49, 49, 47]
+     c0 (13.4289, 3.2040, -55.3295) above-plane -0.0041
+     c1 (14.8015, 3.2040, -56.1499) above-plane -0.0065
+     c2 (14.8505, 3.2691, -56.0681) above-plane -0.0948
+  face#71308 (rooms::mirUV) px 26 meandz +0.174 planes [49, 49, 49]
+     c0 (16.8189, 3.3342, -57.4122) above-plane +0.0385
+     c1 (16.8460, 4.6818, -57.3670) above-plane -0.0141
+     c2 (15.4925, 4.6818, -56.5663) above-plane -0.0047
+MARK-ellipse: 2245 protruding px sampled onto 64 faces
+  face#73926 (rooms::mirUV) px 365 meandz +0.559 planes [49, 49, 49]
+     c0 (17.0293, 1.7454, -57.6149) above-plane +0.1041
+     c1 (17.7331, 1.8105, -57.9587) above-plane +0.0371
+     c2 (16.4930, 1.8105, -57.1286) above-plane -0.0371
+  face#73876 (rooms::mirUV) px 302 meandz +0.234 planes [49, 49, 49]
+     c0 (16.9946, 0.3110, -57.5529) above-plane +0.0688
+     c1 (17.0762, 1.6804, -57.5367) above-plane +0.0130
+     c2 (16.9946, 1.6804, -57.5529) above-plane +0.0688
+  face#71237 (rooms::mirUV) px 273 meandz +0.361 planes [49, 49, 49]
+     c0 (17.7934, 1.8105, -57.9894) above-plane +0.0324
+     c1 (17.8635, 1.8103, -57.9925) above-plane -0.0011
+     c2 (17.8644, 3.2046, -57.9935) above-plane -0.0006
+  face#73925 (rooms::mirUV) px 196 meandz +0.563 planes [49, 49, 49]
+     c0 (17.0293, 1.7454, -57.6149) above-plane +0.1041
+     c1 (17.6986, 1.7454, -58.0162) above-plane +0.1041
+     c2 (17.7331, 1.8105, -57.9587) above-plane +0.0371
+  face#73894 (rooms::mirUV) px 181 meandz +0.417 planes [49, 49, 49]
+     c0 (15.5986, 1.6804, -56.6005) above-plane -0.0300
+     c1 (16.9236, 1.7454, -57.5515) above-plane +0.1041
+     c2 (16.5275, 1.7453, -57.0711) above-plane -0.1041
+  face#71233 (rooms::mirUV) px 108 meandz +0.427 planes [49, 49, 49]
+     c0 (16.4930, 1.8105, -57.1286) above-plane -0.0371
+     c1 (17.7331, 1.8105, -57.9587) above-plane +0.0371
+     c2 (17.7465, 3.2040, -57.9363) above-plane +0.0109
+  face#73927 (rooms::mirUV) px 61 meandz +0.477 planes [49, 49, 49]
+     c0 (17.6986, 1.7454, -58.0162) above-plane +0.1041
+     c1 (17.7966, 1.7455, -57.9840) above-plane +0.0260
+     c2 (17.7331, 1.8105, -57.9587) above-plane +0.0371
+  face#73866 (rooms::mirUV) px 58 meandz +0.439 planes [49, 49, 49]
+     c0 (15.4966, 0.3110, -56.5310) above-plane -0.0371
+     c1 (15.4892, 1.6804, -56.5434) above-plane -0.0227
+     c2 (14.1151, 1.6804, -55.7256) above-plane -0.0174
+  face#73883 (rooms::mirUV) px 57 meandz +0.417 planes [49, 49, 49]
+     c0 (14.1151, 1.6804, -55.7256) above-plane -0.0174
+     c1 (15.4892, 1.6804, -56.5434) above-plane -0.0227
+     c2 (15.5311, 1.7454, -56.4735) above-plane -0.1041
+  face#73803 (rooms::mirUV) px 55 meandz +0.526 planes [49, 47, 49]
+     c0 (14.8707, -0.0078, -56.1941) above-plane -0.0042
+     c1 (14.8843, 0.2049, -56.1714) above-plane +0.0085
+     c2 (13.4903, 0.2049, -55.3355) above-plane -0.0306
+  face#71235 (rooms::mirUV) px 44 meandz +0.358 planes [49, 49, 49]
+     c0 (17.7331, 1.8105, -57.9587) above-plane +0.0371
+     c1 (17.7934, 1.8105, -57.9894) above-plane +0.0324
+     c2 (17.7465, 3.2040, -57.9363) above-plane +0.0109
+  face#73370 (rooms::mirUV) px 41 meandz +0.095 planes [43, 43, 43]
+     c0 (17.7939, 1.7449, -57.4069) above-plane -0.1041
+     c1 (17.8810, 1.8011, -57.9559) above-plane -0.0171
+     c2 (17.8863, 1.7399, -57.9574) above-plane -0.0118

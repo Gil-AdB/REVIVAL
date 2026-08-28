@@ -118,3 +118,26 @@ numbers in greets_displace_joint_split's flag text; all three shipped OFF,
   pitfall note's legit excess is 0.02-0.04, tol 0.05.
 - Round 2 (groove over-carve, scene-wide -0.0515) remains queued and untouched;
   it cannot be the marks' owner (sign is opposite).
+
+## UPDATE 2026-08-28j (the provenance round — the juts were a RIDE SIGN)
+The "+0.102 'E' rep over-raise" reading was WRONG: every marked joint-row vert
+carries the correct mortar-floor rep (hEff 0.200/0.208, the crossing minimum);
+|dsp| 0.104 was displaced along the ANTI-front on verts within ~1.1u of the
+corner because the plane-normal ride (MeshOps ride site, "PLANE-NORMAL RIDE")
+resolved planeN's sign by dot with the polluted smoothed normal. Part 5
+(`greets_displace_plane_front_majority`, default ON) orients planeN by the
+patch majority front; 38 verts flipped scene-wide, all on the pier-front
+strip. Marks 28.7→13.5% / 14.9→6.7% protruding; --no- byte-exact eeb15725.
+Instruments: [STONE-RIDEPROV] (census+box, at the ride site: smN, planeN,
+sRide, sUsed, cls, hEff, dsp, motion along the plane normal) and the
+[STONE-PLANEFRONT] flip census (count + bbox, always printed);
+tools/mark_faces.py joins his marked pixels to bake FACES (index, corners,
+above-plane height) — run it on raw/<arm>_A with a fresh displace_faces.txt
+(NOTE: --displace_dump only fires on an OVERLAY frame — snapshot runs do not
+write it; the 12:46 Runtime/displace_faces.txt is the last valid one).
+REMAINDER at the marks (measured, not chased): median dz now -0.14/-0.17 —
+the strip's course-spanning faces sit at the SHOULDER level (hEff 0.419,
+dsp -0.038) between correctly carved joints, ray-stretched; plus thin red
+rims at course edges (frac 13.5/6.7%). That is the groove/shoulder LEVEL
+family (round-2 in the queue), not a sign. Census box for the strip:
+FDS_STONE_CENSUS_BOX="16.3,17.95,-58.2,-56.9,1.6,4.75".

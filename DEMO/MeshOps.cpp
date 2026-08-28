@@ -5552,7 +5552,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// tears it off its twin (1408 background px at t=5967 against 46).
 		std::vector<Vector> planeN;
 		std::vector<uint64_t> planeKey;      // per-vert PATCH identity, for the mean
+		std::vector<char>   planeFront;      // part 5: 1 = planeN[v] is majority-front oriented (ride trusts it)
 		int nPlaneRide = 0, nPlaneSkipCorner = 0, nPlaneSkipTwin = 0, nPlaneSkipForeign = 0;
+		// part 5 census: verts whose EFFECTIVE ride sign changed (majority front
+		// disagrees with the old dot-with-the-smoothed-ride rule), with bbox.
+		int nFrontFlipRide = 0;
+		float ffMin[3] = {1e30f,1e30f,1e30f}, ffMax[3] = {-1e30f,-1e30f,-1e30f};
 		const bool wantPlaneN = fds::FeatureFlags::greets_displace_plane_normal();
 		// --greets_displace_groove_shade_plane: the carved-band shading restore
 		// targets the vert's PATCH-PLANE normal, not the polluted smoothed ride
@@ -5652,8 +5657,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			// by the area-weighted majority of its authored Face::N — the
 			// mitre's own validated rule (windings disagree ~17% per face; the
 			// patch-wide majority measured 220:46 / 414:83, unambiguous).
-			if (groovePlaneOn && fds::FeatureFlags::greets_displace_groove_front_majority()) {
-				std::unordered_map<uint64_t, Vector> patchFront;
+			// The majority map is shared by part 3 (groove target), part 4 (corner
+			// ride) and part 5 (the plane-normal RIDE sign, below) — built once
+			// when any consumer is on; byte-null otherwise (nothing reads it).
+			const bool planeFrontOn = wantPlaneN &&
+			    fds::FeatureFlags::greets_displace_plane_front_majority();
+			std::unordered_map<uint64_t, Vector> patchFront;
+			if ((groovePlaneOn && fds::FeatureFlags::greets_displace_groove_front_majority())
+			    || planeFrontOn) {
 				patchFront.reserve(256);
 				for (size_t f=0; f<faces.size(); ++f) {
 					if (!isTargetNew(faces[f])) continue;
@@ -5672,6 +5683,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						fa.x += fn.x*area2; fa.y += fn.y*area2; fa.z += fn.z*area2;
 					}
 				}
+			}
+			if (groovePlaneOn && fds::FeatureFlags::greets_displace_groove_front_majority()) {
 				grooveTgtFront.assign(nV, 0);
 				int nOr=0, nFlip=0, nWeak=0;
 				for (uint32_t v=0; v<nV; ++v) {
@@ -5797,6 +5810,43 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					if (twin[v] || (v < nOrig && coincidentOrig[v])) { ++nPlaneSkipTwin; continue; }
 					if (foreignTouch(basePos[v], acc[v])) { ++nPlaneSkipForeign; continue; }
 					planeN[v] = acc[v];
+				}
+				// ── part 5: the PLANE-NORMAL RIDE takes the majority-front SIGN ──
+				// (--greets_displace_plane_front_majority, 2026-08-28, his marked
+				// juts). planeN[v] is acc[v] = the FIRST incident face's winding
+				// normal — arbitrary sign — and the ride site resolved it by dot
+				// with the polluted smoothed ride. MEASURED on the pier front
+				// (plane n=(-0.514,0,-0.858), joint rows y=1.745 / 3.269, census
+				// box 16.3,17.95,-58.2,-56.9,1.6,4.75): verts >~1.5u from the
+				// corner ride (-0.514,0,-0.858) and carve their mortar-floor rep
+				// (hEff 0.200, dsp -0.104) INTO the wall; verts within ~1.1u of
+				// the corner ride (+0.514,0,+0.858) — the exact anti-front — and
+				// the SAME rep, same dsp, lands +0.104 IN FRONT of the plane.
+				// That sign flip IS the jut he circles (nine tessellation-side
+				// levers never touched it: the rep was right all along). Orient
+				// planeN once by the patch's area-weighted authored majority —
+				// the rule that already fixed the mitre bisector (dd798c31) and
+				// the groove target (41ff72ed) — and let the ride trust it.
+				if (planeFrontOn) {
+					planeFront.assign(nV, 0);
+					int nOr=0, nFlip=0, nWeak=0, nNoKey=0;
+					for (uint32_t v=0; v<nV; ++v) {
+						Vector &pn = planeN[v];
+						if (pn.x==0.0f && pn.y==0.0f && pn.z==0.0f) continue;
+						if (planeKey[v]==0) { ++nNoKey; continue; }
+						auto it = patchFront.find(planeKey[v]);
+						if (it == patchFront.end()) { ++nNoKey; continue; }
+						const Vector &fa = it->second;
+						const float fl = std::sqrt(fa.x*fa.x+fa.y*fa.y+fa.z*fa.z);
+						if (fl < 1e-9f) { ++nWeak; continue; }   // exact 50/50: leave ride-signed
+						const float d = pn.x*fa.x + pn.y*fa.y + pn.z*fa.z;
+						if (d < 0.0f) { pn.x=-pn.x; pn.y=-pn.y; pn.z=-pn.z; ++nFlip; }
+						planeFront[v] = 1; ++nOr;
+					}
+					std::fprintf(stderr, "[STONE-PLANEFRONT] '%s' %d plane-ride normals "
+					             "majority-front oriented (%d flipped vs first-face winding, "
+					             "%d ambiguous, %d keyless kept ride-signed)\n",
+					             matName?matName:"?", nOr, nFlip, nWeak, nNoKey);
 				}
 			}
 		}
@@ -6737,7 +6787,38 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (!planeN.empty()) {
 				const Vector &Q = planeN[i];
 				if (Q.x!=0.0f || Q.y!=0.0f || Q.z!=0.0f) {
-					const float s = (Q.x*dx + Q.y*dy + Q.z*dz) < 0.0f ? -1.0f : 1.0f;
+					// the old rule: sign from the polluted smoothed ride. Part 5
+					// (planeFront) supersedes it with the patch majority front.
+					const float sRide = (Q.x*dx + Q.y*dy + Q.z*dz) < 0.0f ? -1.0f : 1.0f;
+					const bool  front = i < planeFront.size() && planeFront[i];
+					const float s = front ? 1.0f : sRide;
+					// [STONE-RIDEPROV] (junction_census + box): the ride-sign
+					// provenance per vert — smoothed ride, raw plane normal, the
+					// sign each rule picks, the rep it carries, and the resulting
+					// signed motion along the majority front (+ = protrudes).
+					if (fds::FeatureFlags::greets_displace_junction_census()
+					    && stoneCensusBox().set) {
+						const StoneCensusBox &CBr = stoneCensusBox();
+						const Vector &Pr = basePos[i];
+						if (Pr.x > CBr.x0 && Pr.x < CBr.x1 && Pr.z > CBr.z0 && Pr.z < CBr.z1
+						    && Pr.y > CBr.y0 && Pr.y < CBr.y1)
+							std::fprintf(stderr, "[STONE-RIDEPROV] '%s' idx %u pos(%.3f,%.3f,%.3f) "
+								"smN(%+.3f,%+.3f,%+.3f) planeN(%+.3f,%+.3f,%+.3f) sRide %+.0f "
+								"front %d sUsed %+.0f cls %c hEff %.3f dsp %+.4f "
+								"motionAlongPlaneN %+.4f\n",
+								matName, i, double(Pr.x), double(Pr.y), double(Pr.z),
+								double(dx), double(dy), double(dz),
+								double(Q.x), double(Q.y), double(Q.z), double(sRide),
+								int(front), double(s), hClass, double(h), double(dsp),
+								double(dsp*s));
+					}
+					if (front && sRide < 0.0f) {
+						++nFrontFlipRide;
+						const Vector &Pf = basePos[i];
+						ffMin[0]=std::min(ffMin[0],Pf.x); ffMax[0]=std::max(ffMax[0],Pf.x);
+						ffMin[1]=std::min(ffMin[1],Pf.y); ffMax[1]=std::max(ffMax[1],Pf.y);
+						ffMin[2]=std::min(ffMin[2],Pf.z); ffMax[2]=std::max(ffMax[2],Pf.z);
+					}
 					dx = s*Q.x; dy = s*Q.y; dz = s*Q.z; ++nPlaneRide;
 				}
 			}
@@ -7084,6 +7165,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				"the smoothed ride or they tear apart)\n",
 				matName, nPlaneRide, nPlaneSkipCorner, nPlaneSkipTwin,
 				nPlaneSkipForeign);
+		if (nFrontFlipRide)
+			std::fprintf(stderr, "[STONE-PLANEFRONT] '%s': %d plane-ride verts had their "
+				"ride SIGN inverted by the old dot-with-the-smoothed-ride rule (the "
+				"majority front disagrees) — bbox x[%.2f,%.2f] y[%.2f,%.2f] z[%.2f,%.2f]; "
+				"--no-greets_displace_plane_front_majority restores the inversion\n",
+				matName, nFrontFlipRide, double(ffMin[0]), double(ffMax[0]),
+				double(ffMin[1]), double(ffMax[1]), double(ffMin[2]), double(ffMax[2]));
 		if (nCornerFrontRide)
 			std::fprintf(stderr, "[STONE-CORNERFRONT] '%s': %d corner verts rode "
 				"the majority-front mean instead of the polluted smoothed ride "

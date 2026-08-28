@@ -1,5 +1,60 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28j — THE MARKED JUTS ARE A RIDE-SIGN INVERSION, NOT A REP LEVEL:
+> the plane-normal ride resolved its sign by dot with the polluted smoothed
+> normal, and on the pier front that flips within ~1.1u of the corner — the
+> correct mortar-floor rep displaced the WRONG WAY. Part 5 (majority-front
+> plane ride) lands: 38 verts, one strip, his marks 28.7→13.5% / 14.9→6.7%
+>
+> Round 1 (provenance, as ordered) refuted the handoff's "+0.102 'E' rep
+> over-raise" reading before any lever: [STONE-FINALV] in the census box
+> 16.3,17.95,-58.2,-56.9,1.6,4.75 shows EVERY vert on the marked joint rows
+> (plane 49 n=(-0.514,0,-0.858), y=1.745 and y=3.269) carrying the correct
+> mortar-floor line rep — hEff 0.200/0.208, dsp -0.104/-0.102; the
+> crossing-minimum rule fires exactly as designed. What differs along one
+> row is the RIDE: verts at x 16.36-16.47 ride (-0.514,0,-0.858) and carve
+> in (above-plane -0.104, correct); verts at x 16.84-17.81 ride
+> (+0.514,0,+0.858) — the exact anti-front — and the SAME recess lands
+> +0.104 IN FRONT of the plane. "|dsp| = 0.104 with the wrong sign" is the
+> whole jut; nine tessellation-side levers could never touch a sign.
+>
+> Producer (new [STONE-RIDEPROV], per vert): planeN[v] = the first incident
+> face's winding normal (arbitrary sign) and the ride site chose its sign by
+> dot with the smoothed ride — the polluted 1998 field, third door after the
+> mitre bisector (dd798c31) and the groove target (41ff72ed). Measured:
+> smN (+0.90,+0.14,-0.41) at x=16.98 dots -0.115 with the plane → sRide -1;
+> smN (+0.82,+0.18,-0.55) at x=16.36 dots +0.052 → sRide +1. The zero
+> crossing sits between x 16.47 and 16.84 — exactly where the row flips.
+>
+> Fix, `--greets_displace_plane_front_majority` (default ON, branch): orient
+> planeN once per vert by the patch's area-weighted authored Face::N
+> majority (the same rule as parts 3/4) and let the ride trust it. Scene
+> census: 29315 rooms + 8792 floor plane normals oriented (all flipped vs
+> the first-face winding — the engine winding IS the anti-front), and only
+> **38 verts** had their effective ride sign changed, bbox x[16.35,17.82]
+> y[0.20,4.81] z[-57.97,-57.08] — the pier-front seam strip and nothing
+> else. `--no-` restores md5 eeb15725 byte-exactly on the final binary.
+>
+> GATE (tools/refdiff_detect.py, bare floor 0.0000): cam A MARK-rect
+> frac(dz>+0.08) 28.7% → **13.5%**, p90|dz| 0.665 → 0.395; MARK-ellipse
+> 14.9% → **6.7%**, p90 0.531 → 0.503. Median dz flips from -0.03 to
+> -0.14/-0.17: the strip's course-spanning faces now sit at the shoulder
+> level between correctly carved joints — that remainder is the shoulder/
+> groove level family (round-2 item), no longer a sign. Quiet planes
+> 43/48/41/45 numerically identical. Scene-camera t=5950 (plane 49 up close,
+> grazing): protrusion 26.4% → 5.1%, p90|dz| 0.326 → 0.165 — the giant red
+> lip across the course line is gone. Sweep t=5400-6280 step 55: 10/17
+> byte-identical, every diff on the pier column (t=6005 0.35%, t=6060
+> 0.05%, then ≤122 px); grazing t=5958 byte-identical. Cost: init-only
+> (one map lookup per vert), no per-frame mechanism.
+>
+> Evidence: docs/img/refdiff/refdiff_geo_pfm_A.png (after; before =
+> refdiff_geo_r3_A.png), pfm_A_tex.png / pfm_B_tex.png (after; r3_*_tex_ref
+> before), pfm_t5950_pair_off_on.png, pfm_changed_px_A/B.png, sweep masks
+> pfm_sweep_t*_diffmask.png, metrics_refdiff.txt (pfm round + t=5950 block),
+> census_box_A.log / census_box_pfm_A.log ([STONE-FINALV]/[STONE-RIDEPROV]
+> before/after), mark_faces_prov_A.txt (tools/mark_faces.py: marks → faces).
+
 > ## 2026-08-28i — THE EDGE-SPLIT FAMILY DIES BY THE GATE AND THE MARKS NAME
 > THEIR REAL OWNER: the LINE-REP LEVELS. Three split iterations (exemption /
 > full-traversal / single-border+snap) all leave his marked regions at
