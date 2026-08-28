@@ -4010,8 +4010,20 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
         // Run_Greets does — bench/snapshot harness must too).
         Greets_JoinBakeThread();
         driver = createGreetsScene();
+    } else if (cfg.scene == "chase") {
+        // 2026-08-28 (perf map round): chase had no --bench arm, so every prior
+        // round profiled it through --snapshot=chase@t=<t repeated N times>,
+        // which interleaves a 6 MB write_ppm between ticks and therefore has no
+        // usable WHOLE-TICK clock (the [DPROF] rows were fine — they live
+        // inside tick()). This branch is the same two lines as every other
+        // scene; it changes no render path and is reached only from --bench.
+        Initialize_Chase();
+        driver = createChaseScene();
+        // chase's tick() draws the interactive profiler overlay; same silence
+        // RunChaseSnapshot applies, for the same reason.
+        silenceProfilerOverlayForSnapshot();
     } else {
-        std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, fountain, greets)\n",
+        std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, chase, fountain, greets)\n",
                      cfg.scene.c_str());
         ThreadPool::instance().close();
         return 2;

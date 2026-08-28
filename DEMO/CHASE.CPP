@@ -6,6 +6,7 @@
 #include <Base/TriMesh.h>
 #include <Base/Scene.h>
 
+#include <RENDER/TailProf.h>   // 2026-08-28 perf map: whole-tick attribution
 #include "CHASE.H"
 #include "ProceduralWater.h"
 #include "SceneTick.h"
@@ -1386,7 +1387,7 @@ struct ChaseScene : SceneDriver {
 		// Shared transport: pause (P/U), fast-forward/rewind (F2/F1), and
 		// the race-free scene-time snapshot. See SceneDriver::tickSceneTimer.
 		tickSceneTimer(TTrd, pause_mode);
-		clearFrame();
+		{ TailProf::ScopeTimer _tp("Tick-Clear", 3); clearFrame(); }
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;
 
@@ -1404,9 +1405,9 @@ struct ChaseScene : SceneDriver {
 		// the sky, and the transparent water then blends the reflected sky where
 		// no mirrored geometry covers it — the sky reflects on the water for
 		// free. Uses the current-frame View (set by Dynamic_Camera above).
-		RenderSkyCube(ChaseSkySc, View, false);
+		{ TailProf::ScopeTimer _tp("Tick-SkyCube", 3); RenderSkyCube(ChaseSkySc, View, false); }
 
-		Animate_Objects(ChaseSc, View);
+		{ TailProf::ScopeTimer _tp("Tick-Anim", 3); Animate_Objects(ChaseSc, View); }
 
 		// M1.3 engine-glow throttle (default-off). Animate_Objects has just
 		// re-set each omni's ISize from its (constant) Size spline, so this
@@ -1475,15 +1476,15 @@ struct ChaseScene : SceneDriver {
 		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
 		prof.switchTo(PROF_LGHT);
-		Lighting(ChaseSc);
+		{ TailProf::ScopeTimer _tp("Tick-Light", 3); Lighting(ChaseSc); }
 
 		prof.switchTo(PROF_XFRM);
-		Reflected_Transform(ChaseSc);
+		{ TailProf::ScopeTimer _tp("Tick-ReflXfrm", 3); Reflected_Transform(ChaseSc); }
 		prof.leave(PROF_XFRM);
 
 		if (CAll) {
 			prof.enter(PROF_SORT);
-			Radix_Sort(FList, SList, CAll);
+			{ TailProf::ScopeTimer _tp("Tick-Radix", 3); Radix_Sort(FList, SList, CAll); }
 			prof.switchTo(PROF_RNDR);
 			// --refl_correct: this Render() IS a complete second renderFrame
 			// (RENDER.CPP:1868) with its own G-buffer and its own deferred
@@ -1510,11 +1511,11 @@ struct ChaseScene : SceneDriver {
 
 		prof.enter(PROF_XFRM);
 		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;
-		Transform_Objects(ChaseSc, fds::g_mainCamera, fds::g_mainFaces);
+		{ TailProf::ScopeTimer _tp("Tick-Xfrm", 3); Transform_Objects(ChaseSc, fds::g_mainCamera, fds::g_mainFaces); }
 		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
 		prof.enter(PROF_SORT);
-		Radix_Sort(FList, SList, CAll);
+		{ TailProf::ScopeTimer _tp("Tick-Radix", 3); Radix_Sort(FList, SList, CAll); }
 		prof.switchTo(PROF_RNDR);
 		Render();
 		prof.leave(PROF_RNDR);
