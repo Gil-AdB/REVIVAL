@@ -1,5 +1,21 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28i — THE EDGE-SPLIT FAMILY DIES BY THE GATE AND THE MARKS NAME
+> THEIR REAL OWNER: the LINE-REP LEVELS. Three split iterations (exemption /
+> full-traversal / single-border+snap) all leave his marked regions at
+> 27-29%/15-16% protruding — the third makes the ellipse WORSE and deepens the
+> recession — while the [STONE-JSQ] census and a per-pixel face resolve on the
+> split arm show the marked faces are SAME-plane, corners ON the joint rows at
+> the 'E' line-rep course level +0.102u where the pointwise field says +0.015:
+> ~0.09u of rep over-raise, ray-stretched at grazing into the 0.66u juts. Nine
+> levers across three families (snap, clamp, split) were all tessellation-side;
+> the levels are wrong. joint_split ships default OFF with the full refutation
+> in its flag text; --no- arm proven byte-exact eeb15725 on the final binary.
+> Next (his go): dump the E/P rep provenance at the strip's bed-joint rows —
+> the crossing rule says mortar MINIMUM dominates, so a +0.102 plateau rep on a
+> bed joint is a classification contradiction with a locatable producer.
+
+
 > ## 2026-08-28h — THE MARKED JUTS ARE NAMED AT FACE LEVEL AND THE VERT-LEVEL
 > LEVER FAMILY IS REFUTED BY THE GATE: the protrusion is COURSE-SPANNING
 > SLIVER FANS WITH NO VERTS INSIDE THE BED-JOINT BANDS — the indicated fix is

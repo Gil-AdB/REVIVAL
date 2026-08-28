@@ -92,3 +92,29 @@ UVs, and the gate is his marks toward 0.0000 with quiet planes staying 0.00.
 Instruments added this round: displace_faces.txt (world corners per face, same
 --displace_dump pass), tools/bridging_verify.py (pixel→face→plane classifier),
 weld column in displace_dump.txt.
+
+## UPDATE 2026-08-28i (the joint-band edge-split round — refuted, attribution sharpened)
+The edge-split lever family is REFUTED by the gate in three iterations (full
+numbers in greets_displace_joint_split's flag text; all three shipped OFF,
+--no- proven byte-exact eeb15725). What the round measured instead:
+- [STONE-JSQ] census (junction_census+box gated, MeshOps ~5290): the marked
+  faces (f1475 family, y 3.34-4.68) span PLATEAU-to-PLATEAU with their corners
+  ON adjacent joint rows — the joints sit at the edge ENDPOINTS, so there is
+  no in-face band to traverse, and any corner-in-band exemption skips exactly
+  the diseased faces.
+- Per-pixel face resolve on the SPLIT arm (bridging_verify vs jsplit raw):
+  marked pixels sit on SAME-plane faces with corner excess p90 +0.102u — the
+  LINE-REP course level ('E', +0.102 measured on a BED-JOINT row where the
+  crossing rule says the mortar minimum should dominate) vs the pointwise
+  reference's +0.015 plateau. ~0.09u normal error, ray-stretched at grazing =
+  the 0.66u p90 marked juts. This population survived snap x3, clamp x3, and
+  split x3 untouched — every lever was tessellation-side while the REP LEVELS
+  are wrong.
+- NEXT LEVER (not built, needs the coordinator's go): the line-height rep
+  assignment. First instrument: dump the E/P rep provenance at the strip's
+  joint rows — which LINE contributed the +0.102 rep to a bed-joint vert (a
+  vertical head-joint line's plateau ref bleeding onto the bed joint?), and
+  why the crossing MINIMUM rule did not fire. Then bound or reclassify; the
+  pitfall note's legit excess is 0.02-0.04, tol 0.05.
+- Round 2 (groove over-carve, scene-wide -0.0515) remains queued and untouched;
+  it cannot be the marks' owner (sign is opposite).

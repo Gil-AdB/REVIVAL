@@ -5166,6 +5166,252 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					matName, nLadderStrips, nLadderCells, nLadderVerts);
 			}
 		}
+		// ── JOINT BANDS (shared by --greets_displace_joint_snap and the edge split
+		// below; construction hoisted 2026-08-28 so the split can run BEFORE the
+		// per-vert analysis sizes its arrays): bed-joint V-ranges from the mip ROW
+		// profile — rows whose median carves > kJointDepth below mipMean are joint
+		// rows; c0/c1 is the core, v0/v1 adds a 2-row shoulder-phase margin; hBand
+		// is the band's own row-median (the carve level the map itself prescribes).
+		struct JointBand { float v0, v1, c0, c1, hBand; };
+		std::vector<JointBand> jointBands;
+		if (fds::FeatureFlags::greets_displace_joint_snap() ||
+		    fds::FeatureFlags::greets_displace_joint_split()) {
+			const int mh = useMipH > 0 ? useMipH : 1;
+			const int mw = useMipW > 0 ? useMipW : 1;
+			std::vector<float> rowMed(size_t(mh), mipMean);
+			std::vector<float> rowBuf(size_t(mw), 0.0f);
+			for (int r = 0; r < mh; ++r) {
+				const float v = (float(r) + 0.5f) / float(mh);
+				for (int c = 0; c < mw; ++c)
+					rowBuf[size_t(c)] = SampleHeight8Bilinear(hm, useMip,
+						(float(c) + 0.5f) / float(mw), v);
+				std::nth_element(rowBuf.begin(), rowBuf.begin() + mw/2, rowBuf.end());
+				rowMed[size_t(r)] = rowBuf[size_t(mw/2)];
+			}
+			constexpr float kJointDepth = 0.06f;   // rowMed below mipMean-this = joint
+			const float kExt = 2.0f / float(mh);   // shoulder-phase margin, 2 rows
+			for (int r = 0; r < mh; ) {
+				if (rowMed[size_t(r)] >= mipMean - kJointDepth) { ++r; continue; }
+				int r2 = r;
+				std::vector<float> bmed;
+				while (r2 < mh && rowMed[size_t(r2)] < mipMean - kJointDepth)
+					bmed.push_back(rowMed[size_t(r2++)]);
+				std::nth_element(bmed.begin(), bmed.begin() + bmed.size()/2, bmed.end());
+				jointBands.push_back({ float(r)/float(mh) - kExt,
+				                       float(r2)/float(mh) + kExt,
+				                       float(r)/float(mh), float(r2)/float(mh),
+				                       bmed[bmed.size()/2] });
+				r = r2;
+			}
+			if (!jointBands.empty())
+				std::fprintf(stderr, "[STONE-JSNAP] '%s' %zu joint bands from the "
+					"mip%d row profile\n", matName, jointBands.size(), useMip);
+		}
+		// ── JOINT-BAND EDGE SPLIT (--greets_displace_joint_split, 2026-08-28, the
+		// marked-juts round, FACE level). Measured disease: the corner strip's
+		// course-spanning sliver fans have corners on adjacent bed joints and NO
+		// vert inside the joint band — corners individually legal, the face
+		// INTERIOR bridges flat across the reference's groove, and no level
+		// assignment can carve a face that has no vert in the joint (joint_snap,
+		// three variants, refuted by the gate). Create the verts: a WALL face
+		// with NO corner inside a band's core whose edge CROSSES a core border is
+		// split at the crossing; the inserted vert carries the band's row-median
+		// (jointRowH) so the carve exists by construction. Shared edges split at
+		// the SAME vert on both sides (pend records, peek-not-pop — each key is
+		// created exactly once, and a face that split no longer carries the
+		// pair), so the surface stays watertight. Crossings within 2% of an
+		// endpoint are skipped (fan-apex guard). Scoped to the WALL material this
+		// round: the disease was measured on the corner strip, and the floor is
+		// masked out of the refdiff gate — ungated changes stay out.
+		std::vector<float> jointRowH;   // 1e30 = no override
+		int nJointSplitV = 0, nJointSplitF = 0;
+		if (fds::FeatureFlags::greets_displace_joint_split() &&
+		    !jointBands.empty() && !std::strcmp(matName, "rooms")) {
+			jointRowH.resize(verts.size(), 1e30f);
+			struct SplitRec { uint32_t mid; float t; uint32_t a; };
+			std::map<std::pair<uint32_t,uint32_t>, SplitRec> pendOf;
+			auto eKey = [](uint32_t a, uint32_t b) {
+				return std::make_pair(std::min(a,b), std::max(a,b)); };
+			auto isTgtJS = [&](const Face &F){ return F.Txtr && F.Txtr->Name &&
+				!std::strcmp(F.Txtr->Name, matName); };
+			auto wrap01 = [](float v) { v -= std::floor(v); return v; };
+			auto jsU = [&](const Face &F, int k) -> float { return k==0?F.U1:(k==1?F.U2:F.U3); };
+			auto jsV = [&](const Face &F, int k) -> float { return k==0?F.V1:(k==1?F.V2:F.V3); };
+			auto jsSetUV = [&](Face &F, int k, float u, float v) {
+				if (k==0) { F.U1=u; F.V1=v; F.EU1=u; F.EV1=v; }
+				else if (k==1) { F.U2=u; F.V2=v; F.EU2=u; F.EV2=v; }
+				else { F.U3=u; F.V3=v; F.EU3=u; F.EV3=v; }
+			};
+			auto splitFaceEdge = [&](size_t i, int k, uint32_t mid, float t) {
+				const float ua = jsU(faces[i],k),        va = jsV(faces[i],k);
+				const float ub = jsU(faces[i],(k+1)%3),  vb = jsV(faces[i],(k+1)%3);
+				const float um = ua + t*(ub-ua), vm = va + t*(vb-va);
+				Face f2 = faces[i];                        // becomes (m,b,c)
+				jsSetUV(f2, k, um, vm);
+				std::array<uint32_t,3> i2 = fIdx[i]; i2[k] = mid;
+				jsSetUV(faces[i], (k+1)%3, um, vm);        // face i -> (a,m,c)
+				fIdx[i][(k+1)%3] = mid;
+				faces.push_back(f2); fIdx.push_back(i2);
+				faceFromEdge.push_back(faceFromEdge[i]);
+				++nJointSplitF;
+			};
+			// COURSE-SPAN gate: the diseased population spans joint-to-joint
+			// ("corners on one bed joint and the next, nothing between") — its
+			// V-extent is a whole course. The healthy edge-aligned lattice's
+			// cells are far smaller. Without this gate the split fired on the
+			// ENTIRE wall (measured: 19,862 verts / 37,357 faces — scene-wide,
+			// ungated flattening of every groove); with it, only the sliver
+			// fans that actually bridge a course qualify.
+			float coursePitch = 0.25f;
+			if (jointBands.size() >= 2) {
+				std::vector<float> gaps;
+				for (size_t bi = 1; bi < jointBands.size(); ++bi)
+					gaps.push_back(0.5f*(jointBands[bi].c0 + jointBands[bi].c1)
+					             - 0.5f*(jointBands[bi-1].c0 + jointBands[bi-1].c1));
+				std::nth_element(gaps.begin(), gaps.begin() + gaps.size()/2, gaps.end());
+				coursePitch = gaps[gaps.size()/2];
+			}
+			const float kMinSpan = 0.5f * coursePitch;
+			// census (junction_census + box): the qualifying state of every boxed
+			// face BEFORE the passes — corner world-y vs face-V side by side, so a
+			// diseased face that fails to qualify names which gate blocked it.
+			if (fds::FeatureFlags::greets_displace_junction_census() && stoneCensusBox().set) {
+				const StoneCensusBox &CB = stoneCensusBox();
+				for (size_t i = 0; i < faces.size(); ++i) {
+					if (!isTgtJS(faces[i])) continue;
+					bool inBox = false;
+					for (int k = 0; k < 3 && !inBox; ++k) {
+						const Vector &P = verts[fIdx[i][k]].Pos;
+						inBox = P.x > CB.x0 && P.x < CB.x1 && P.z > CB.z0 && P.z < CB.z1
+						     && P.y > CB.y0 && P.y < CB.y1;
+					}
+					if (!inBox) continue;
+					const float q0 = jsV(faces[i],0), q1 = jsV(faces[i],1), q2 = jsV(faces[i],2);
+					const float qMin = std::min(q0, std::min(q1, q2));
+					const float qMax = std::max(q0, std::max(q1, q2));
+					std::fprintf(stderr, "[STONE-JSQ] f%zu y(%.2f,%.2f,%.2f) V(%.3f,%.3f,%.3f) "
+						"span %.3f (min %.3f) %s\n", i,
+						double(verts[fIdx[i][0]].Pos.y), double(verts[fIdx[i][1]].Pos.y),
+						double(verts[fIdx[i][2]].Pos.y), double(q0), double(q1), double(q2),
+						double(qMax - qMin), double(kMinSpan),
+						(qMax - qMin) >= kMinSpan ? "spanOK" : "SPAN-FAIL");
+				}
+			}
+			bool didJS = true;
+			for (int pass = 0; didJS && pass < 24; ++pass) {
+				didJS = false;
+				const size_t nf = faces.size();
+				for (size_t i = 0; i < nf; ++i) {
+					if (!isTgtJS(faces[i])) continue;
+					const float fv0 = jsV(faces[i],0), fv1 = jsV(faces[i],1), fv2 = jsV(faces[i],2);
+					const float fvMin = std::min(fv0, std::min(fv1, fv2));
+					const float fvMax = std::max(fv0, std::max(fv1, fv2));
+					const bool spanOK = (fvMax - fvMin) >= kMinSpan;
+					bool splitThis = false;
+					for (int k = 0; k < 3 && !splitThis; ++k) {
+						const uint32_t a = fIdx[i][k], b = fIdx[i][(k+1)%3];
+						if (a == b) continue;
+						// forced: another face already split this edge — use the
+						// SAME vert (watertight), param mirrored to this face's
+						// edge orientation. Runs regardless of the span gate.
+						auto itp = pendOf.find(eKey(a,b));
+						if (itp != pendOf.end()) {
+							const SplitRec R = itp->second;   // copy: map may rehash
+							splitFaceEdge(i, k, R.mid, (R.a == a) ? R.t : 1.0f - R.t);
+							splitThis = true; didJS = true; break;
+						}
+						if (!spanOK) continue;
+						const float v0 = jsV(faces[i],k), v1 = jsV(faces[i],(k+1)%3);
+						if (v0 == v1) continue;
+						// makeVert: insert the edge point at param t, classified by
+						// the branch's standing rules, carrying the band's carve.
+						auto makeVert = [&](float t, const JointBand &JB) -> uint32_t {
+							Vertex m = verts[a];
+							m.Pos.x = verts[a].Pos.x + t*(verts[b].Pos.x - verts[a].Pos.x);
+							m.Pos.y = verts[a].Pos.y + t*(verts[b].Pos.y - verts[a].Pos.y);
+							m.Pos.z = verts[a].Pos.z + t*(verts[b].Pos.z - verts[a].Pos.z);
+							float nx = (1.0f-t)*verts[a].N.x + t*verts[b].N.x;
+							float ny = (1.0f-t)*verts[a].N.y + t*verts[b].N.y;
+							float nz = (1.0f-t)*verts[a].N.z + t*verts[b].N.z;
+							const float nl = std::sqrt(nx*nx+ny*ny+nz*nz);
+							if (nl > 1e-6f) { m.N.x=nx/nl; m.N.y=ny/nl; m.N.z=nz/nl; }
+							const uint32_t mid = uint32_t(verts.size());
+							verts.push_back(m);
+							pinnedZero.resize(verts.size(), 0);
+							recessOnly.resize(verts.size(), 0);
+							freeEdgeDir.resize(verts.size(), Vector{0.0f,0.0f,0.0f});
+							freeEdgeKA.resize(verts.size(), 0);
+							freeEdgeKB.resize(verts.size(), 0);
+							bandInner.resize(verts.size(), 0);
+							jointRowH.resize(verts.size(), 1e30f);
+							const bool bothPinned = pinnedZero[a] && pinnedZero[b];
+							const bool sideIsBorder = !bothPinned &&
+								recessOnly[a] && recessOnly[b] &&
+								freeEdgeKA[a] && freeEdgeKA[a] == freeEdgeKA[b] &&
+								freeEdgeKB[a] == freeEdgeKB[b];
+							if (bothPinned) {
+								pinnedZero[mid] = 1;
+							} else if (foreignCoincident(m.Pos)) {
+								// addendum-4 creation guard: a vert created at
+								// another bake's junction pins, always.
+								pinnedZero[mid] = 1;
+							} else if (sideIsBorder) {
+								const Vector fn = faces[i].N;
+								if (abutPointMat(m.Pos, freeEdgeKA[a], freeEdgeKB[a], &fn)) {
+									pinnedZero[mid] = 1;
+								} else {
+									recessOnly[mid] = 1;
+									freeEdgeDir[mid] = freeEdgeDir[a];
+									freeEdgeKA[mid] = freeEdgeKA[a];
+									freeEdgeKB[mid] = freeEdgeKB[a];
+									jointRowH[mid] = JB.hBand;
+								}
+							} else {
+								jointRowH[mid] = JB.hBand;   // the carve
+							}
+							++nJointSplitV;
+							return mid;
+						};
+						for (size_t bi = 0; bi < jointBands.size() && !splitThis; ++bi) {
+							const JointBand &JB = jointBands[bi];
+							// Insert a border vert at EVERY core-border crossing of
+							// a course-spanning edge. Measured geometry (census
+							// [STONE-JSQ], f1475 family — the marked faces): the
+							// sliver fans span PLATEAU-to-PLATEAU with their
+							// corners ON adjacent joint rows, so the bands sit at
+							// the edge ENDS — a full-core traversal never exists
+							// (that variant split nothing at the marks) and a
+							// corner-in-band exemption skips exactly the diseased
+							// faces (the corners are in-band at phase-missed
+							// PLATEAU heights). One border vert per crossing, plus
+							// the snap rule leveling the in-band corners (enabled
+							// with this flag below), together make the carve:
+							// plateau -> border(hBand) -> joint row(hBand via
+							// snap) -> border(hBand) -> plateau.
+							const float lo = std::min(v0, v1), hi = std::max(v0, v1);
+							for (int border = 0; border < 2 && !splitThis; ++border) {
+								const float X = border ? JB.c1 : JB.c0;
+								for (int n = int(std::floor(lo - X)) - 1;
+								     n <= int(std::ceil(hi - X)) + 1 && !splitThis; ++n) {
+									const float vX = X + float(n);
+									if (vX <= lo || vX >= hi) continue;
+									const float t = (vX - v0) / (v1 - v0);
+									if (t < 0.02f || t > 0.98f) continue;   // fan-apex guard
+									const uint32_t mid = makeVert(t, JB);
+									pendOf[eKey(a,b)] = SplitRec{ mid, t, a };
+									splitFaceEdge(i, k, mid, t);
+									splitThis = true; didJS = true;
+								}
+							}
+						}
+					}
+				}
+			}
+			if (nJointSplitV)
+				std::fprintf(stderr, "[STONE-JSPLIT] '%s': %d joint-row verts inserted "
+					"(%d face splits) at bed-joint band borders — the carve now has "
+					"verts to exist on\n", matName, nJointSplitV, nJointSplitF);
+		}
 		// ── displacement (per-vertex height averaged over incident target faces,
 		// pushed along the vertex normal; authored-border verts pinned to zero) ──
 		const uint32_t nV = uint32_t(verts.size());
@@ -6349,53 +6595,12 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			return best;
 		};
 		// ── JOINT SNAP (--greets_displace_joint_snap, 2026-08-28 refdiff round).
-		// His marked lips, attributed by dump: created BORDER-STRIP verts at the
-		// pier junction carry PLATEAU-level displacement at bed-joint heights
-		// (20 proud vs 35 correctly-notched joint verts) — the strip's per-vert
-		// sample lands on the joint's shoulder at unlucky phase and the narrow
-		// groove is missed, so the course line juts a lip past the corner (the
-		// same phase-miss disease the v3 thread measured on its rings). The map
-		// itself knows where its bed joints are: V-row medians of the sampled
-		// mip carve well below mipMean exactly at the joint bands. Snap: a
-		// border-family vert (freeEdgeKA-keyed) whose mean V sits inside an
-		// (extended) groove band, and whose sampled h MISSED the groove, takes
-		// the band's own row-median height. Lower-only, never raises; verts the
-		// line machinery already snapped (hClass E/P) are left alone.
-		struct JointBand { float v0, v1, c0, c1, hBand; };
-		std::vector<JointBand> jointBands;
-		if (fds::FeatureFlags::greets_displace_joint_snap()) {
-			const int mh = useMipH > 0 ? useMipH : 1;
-			const int mw = useMipW > 0 ? useMipW : 1;
-			std::vector<float> rowMed(size_t(mh), mipMean);
-			std::vector<float> rowBuf(size_t(mw), 0.0f);
-			for (int r = 0; r < mh; ++r) {
-				const float v = (float(r) + 0.5f) / float(mh);
-				for (int c = 0; c < mw; ++c)
-					rowBuf[size_t(c)] = SampleHeight8Bilinear(hm, useMip,
-						(float(c) + 0.5f) / float(mw), v);
-				std::nth_element(rowBuf.begin(), rowBuf.begin() + mw/2, rowBuf.end());
-				rowMed[size_t(r)] = rowBuf[size_t(mw/2)];
-			}
-			constexpr float kJointDepth = 0.06f;   // rowMed below mipMean-this = joint
-			const float kExt = 2.0f / float(mh);   // shoulder-phase margin, 2 rows
-			for (int r = 0; r < mh; ) {
-				if (rowMed[size_t(r)] >= mipMean - kJointDepth) { ++r; continue; }
-				int r2 = r;
-				std::vector<float> bmed;
-				while (r2 < mh && rowMed[size_t(r2)] < mipMean - kJointDepth)
-					bmed.push_back(rowMed[size_t(r2++)]);
-				std::nth_element(bmed.begin(), bmed.begin() + bmed.size()/2, bmed.end());
-				jointBands.push_back({ float(r)/float(mh) - kExt,
-				                       float(r2)/float(mh) + kExt,
-				                       float(r)/float(mh), float(r2)/float(mh),
-				                       bmed[bmed.size()/2] });
-				r = r2;
-			}
-			if (!jointBands.empty())
-				std::fprintf(stderr, "[STONE-JSNAP] '%s' %zu joint bands from the "
-					"mip%d row profile\n", matName, jointBands.size(), useMip);
-		}
-		int nJointSnap = 0;
+		// The band CONSTRUCTION was hoisted above the joint-band edge split (see
+		// the JOINT BANDS block before the displacement section) so the split can
+		// insert verts before the per-vert analysis; the snap CONSUMER below is
+		// unchanged and now gated on its own flag explicitly, since the bands may
+		// exist for the split alone.
+		int nJointSnap = 0, nJointSplitApply = 0;
 		// ── PROVENANCE CENSUS ([STONE-PROV], census+box gated): every vert in
 		// the box WITH its classification, printed BEFORE the displacement loop
 		// so pinned verts show too — FINALV can only ever show displacing verts,
@@ -6445,7 +6650,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			//  * hClass '-' border-family — phase-missed groove samples; the
 			//    extended band catches shoulder phase.
 			// Lower-only; 'E' (true line verts, castellated rep) always wins.
-			if (!jointBands.empty()) {
+			// Fires for joint_snap (its own arm) AND for joint_split: the split's
+			// border verts only carve if the in-band phase-missed corners level
+			// too — snap-alone was refuted (no verts to carve with), split-alone
+			// leaves the joint-row spike between two carved borders; together
+			// they are the notch (see the [STONE-JSQ] census note at the split).
+			if ((fds::FeatureFlags::greets_displace_joint_snap() ||
+			     fds::FeatureFlags::greets_displace_joint_split()) && !jointBands.empty()) {
 				// 'E'/'P' (the line machinery's plateau-side reps) snap in the
 				// band CORE only — their "no carve" design stays correct on the
 				// shoulders. '-' (raw phase samples, mid-bevel chaos measured
@@ -6462,6 +6673,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 						break;
 					}
 				}
+			}
+			// JOINT-SPLIT carve override: a vert the edge split planted at a
+			// bed-joint band border carries the band's row-median by construction
+			// — deterministic and phase-proof; wins over the line machinery
+			// ('E'/'P') and the snap ('J') alike, because the vert EXISTS only to
+			// carry the carve.
+			if (i < jointRowH.size() && jointRowH[i] < 1e29f) {
+				h = jointRowH[i]; hClass = 'B'; ++nJointSplitApply;
 			}
 			float dsp=amp*(h-mipMean);
 			// Direction the vertex rides. Interior verts keep the smoothed vertex
@@ -6880,6 +7099,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			std::fprintf(stderr, "[STONE-JSNAP] '%s': %d border-family verts "
 				"snapped into their bed-joint band (phase-missed groove)\n",
 				matName, nJointSnap);
+		if (nJointSplitApply)
+			std::fprintf(stderr, "[STONE-JSPLIT] '%s': %d inserted joint-row verts "
+				"displaced at their band's row-median (the carve)\n",
+				matName, nJointSplitApply);
 
 		// ── FOLD RELAXATION (--greets_displace_fold_relax, default on) — the
 		// t=6097 SLIVER-GAP fix. A displaced target face whose geometric normal
