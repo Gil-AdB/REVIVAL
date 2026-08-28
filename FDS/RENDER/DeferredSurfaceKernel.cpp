@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <map>
 #include <limits>
+#include <type_traits>   // std::false_type/true_type — OuterVec omni-loop tag dispatch
 #include <chrono>
 #include <atomic>
 #if defined(__ARM_NEON) || defined(__aarch64__)
@@ -964,6 +965,22 @@ static std::atomic<uint64_t> g_envCntWave1{0}, g_envCntXpar{0},
 	g_envCntOvScalar{0}, g_envCntOvEnvScalar{0}, g_envCntOvEnvVec{0};
 static const bool g_envVecStats = std::getenv("FDS_ENVVEC_STATS") != nullptr;
 
+// OuterVec's 8-wide env front-end gate: "no env diagnostic is armed, so the vec
+// compose may run". PUBLISHED to file scope (2026-08-28, candidate C1) from a
+// function-local `static const bool` that sat INSIDE
+// Render_DeferredLighting_Tile_OuterVec's per-8-pixel-group loop. That form is
+// the exact defect round 16m removed from the cube tap: a function-local static
+// with a DYNAMIC initializer forces `bl __cxa_guard_acquire` into the enclosing
+// function, and 16m measured that one never-taken call pinning eight callee-save
+// pairs and a 144-byte frame across the hot path (greets lighting-w1 Gcyc/f
+// -1.17 to -2.85 %% at 5/5 poses for ~30 bit-exact lines). Byte-null by
+// construction: the environment does not change during a run, so a static-init
+// read and a first-use read return the same value.
+static const bool g_envVecDiagOff =
+	!std::getenv("ENVPROBE") && !std::getenv("ENVFLIP") &&
+	!std::getenv("ENV_NOFETCH") && !std::getenv("FDS_ENV_SKIP_NEGY") &&
+	!EnvTraceGet();
+
 // Face-major BILINEAR fetch from a padded-cube env store (in-face clamped —
 // the D2 overscan padding makes that seam-free). Shared by the scalar
 // compose and the OuterVec 8-wide env front-end so the two paths cannot
@@ -1891,6 +1908,144 @@ static void W2Verify_Report()
 	    100.0 * double(c[6]) / double((c[0] + c[2]) ? (c[0] + c[2]) : 1));
 	for (int i = 0; i < W2V_N; ++i) g_w2Ver[i].store(0, std::memory_order_relaxed);
 }
+#endif
+
+// ─── Ablation ladder + census for the OUTER-VEC wave-1 kernel (lighting-w1) ──
+// `Render_DeferredLighting_Tile_OuterVec` is what city / fountain / crash run
+// (Scene::PreferOuterVec). It is vectorised over PIXELS (8 px x 1 light), takes
+// NO shadow tap of any kind, and had no instrument at all: FDS_OMNI_ABLATE,
+// FDS_PIX_ABLATE, FDS_W2_ABLATE and FDS_W1LDR_ABLATE are all inside TileT /
+// TileFill, which this kernel never enters. Compile-time, `if constexpr`,
+// cumulative sink — exactly the four existing ladders' shape, and compile-time
+// for the reason 16l documented: a RUNTIME predicate in this body cost +4.3 %
+// with the flag OFF.
+//
+// -DFDS_OVEC_ABLATE=n cuts the per-8-PIXEL-GROUP loop, so stage n prices
+// everything ABOVE cut n (the light loop and the pack go away with it):
+//    1  z load + alive / in-range / checker masks
+//    2  + mat32 load, matID extract, bounds mask
+//    3  + the PER-LANE MATERIAL GATHER (8 scalar Material walks)
+//    4  + the 8-wide octahedral normal decode
+//    5  + the per-lane normal-map / TBN loop and --sh_ambient
+//    6  + view-space position reconstruct
+//    7  + texel/ambient vec loads, water + needScalar masks, anyVecLane
+//    8  + THE OMNI LOOP
+//    9  + the 250 saturate and tex*lit/256
+//   10  + the needsScalar mask and the 11 scratch store-outs
+//   11  + the 8-wide env front-end (EnvComposeCityVec8, uniformity scan)
+//    0  full (adds the per-lane pack loop: scalar redo / env add / plain pack)
+//
+// -DFDS_OVEC_OMNI_ABLATE=n cuts the per-LIGHT loop inside stage 8:
+//    1  loop skeleton only
+//    2  + w vector, N.L dot, len2
+//    3  + the three float cmps, the mirrorId cmpeq and the four ands
+//    4  + safe_len2 / rsqrt / dist / falloff / k
+//    5  + the spot cone block
+//    0  full (adds intensity + the three colour FMAs)
+#ifndef FDS_OVEC_ABLATE
+#define FDS_OVEC_ABLATE 0
+#endif
+#ifndef FDS_OVEC_OMNI_ABLATE
+#define FDS_OVEC_OMNI_ABLATE 0
+#endif
+#if FDS_OVEC_ABLATE || FDS_OVEC_OMNI_ABLATE
+static volatile float g_ovecAblSink = 0.0f;
+// Horizontal sum, used ONLY by the ladder: the cut has to consume every lane of
+// a retained __m256 or the compiler deletes exactly the work being priced.
+static inline float ovecAblSum(__m256 v)
+{
+	__m128 s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+	s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+	s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 0x55));
+	return _mm_cvtss_f32(s);
+}
+static inline float ovecAblSum(__m256i v)
+{
+	return float(_mm256_movemask_ps(_mm256_castsi256_ps(v)));
+}
+#endif
+#if FDS_OVEC_ABLATE
+// Cumulative sink: each boundary folds its own outputs into a running
+// per-group accumulator, so a late cut cannot let the compiler dead-strip an
+// early stage. One fadd per boundary crossed; the shipping build pays none.
+#define OVEC_ABL_CUT(stage, expr) \
+	ovecKeep += (expr); \
+	if constexpr ((FDS_OVEC_ABLATE) == (stage)) { ovecSink += ovecKeep; continue; }
+#else
+#define OVEC_ABL_CUT(stage, expr)  ((void)0)
+#endif
+#if FDS_OVEC_OMNI_ABLATE
+// NB: no do/while wrapper — the `continue` has to reach the per-light `for`.
+#define OVEC_OMNI_CUT(stage, expr) \
+	if constexpr ((FDS_OVEC_OMNI_ABLATE) == (stage)) { ovecSink += (expr); continue; }
+#define OVEC_OMNI_CUT_BARE(stage) \
+	if constexpr ((FDS_OVEC_OMNI_ABLATE) == (stage)) { continue; }
+#else
+#define OVEC_OMNI_CUT(stage, expr)  ((void)0)
+#define OVEC_OMNI_CUT_BARE(stage)   ((void)0)
+#endif
+
+// ─── OuterVec census — the four numbers that rank C2..C7 ────────────────────
+// Build with -DFDS_OVEC_CENSUS=ON; runtime gate --omni_census (shared).
+// Counter set, all per frame-equivalent:
+//  [0] groups entered (past any_alive)   [1] alive lanes
+//  [2] MATERIAL-UNIFORM groups (every alive lane shares one matID)   -> C3
+//  [3] groups with all 8 lanes alive AND uniform
+//  [4] (group x light) pairs entered in the vec omni loop
+//  [5] ... of which testz(omni_lane): the light reaches NO lane        -> C4
+//  [6] alive lanes with needs_scalar (wantSpec | isWater)              -> f, C6
+//  [7] groups with anyVecLane true (the vec loop ran)
+//  [8] groups where EVERY alive lane needs scalar (vec loop skipped)
+//  [9] needs_scalar lanes inside groups where the vec loop DID run     -> C6's
+//      byte-safe prize: only these lanes pay the vec diffuse AND the redo
+// [10] all-plain groups: no alive lane needs scalar and none has env   -> C7
+// [11] alive lanes with an env store   [12] alive water lanes
+// [13] (group x spot) pairs            [14] ... testz(maskInside)      -> C5
+// [15] tile calls  [16] sum of tl.count over tile calls
+// [17] sum of spot count over tile calls                               -> C5
+// [18] uniform-group alive lanes  [19] groups where the env vec front-end armed
+#ifndef FDS_OVEC_CENSUS
+#define FDS_OVEC_CENSUS 0
+#endif
+static constexpr int OVC_N = 24;
+#if FDS_OVEC_CENSUS
+static std::atomic<uint64_t> g_ovCen[OVC_N];
+__attribute__((noinline)) static void OVecCensus_Report()
+{
+	uint64_t c[OVC_N];
+	for (int i = 0; i < OVC_N; ++i) c[i] = g_ovCen[i].load(std::memory_order_relaxed);
+	if (c[0] == 0) { return; }
+	const double G = double(c[0]), A = double(c[1] ? c[1] : 1);
+	const double P = double(c[4] ? c[4] : 1), S = double(c[13] ? c[13] : 1);
+	const double T = double(c[15] ? c[15] : 1);
+	std::fprintf(stderr,
+	    "[OVEC-CENSUS] groups %.0f  aliveLanes %.0f (%.2f/group)\n"
+	    "[OVEC-CENSUS]   C3 uniform groups %.0f (%.2f%%)  all8+uniform %.0f (%.2f%%)  "
+	    "uniform alive lanes %.0f (%.2f%% of alive)\n"
+	    "[OVEC-CENSUS]   C4 (group x light) pairs %.0f  testz(omni_lane) %.0f (%.2f%%)\n"
+	    "[OVEC-CENSUS]   C6 f = needScalar lanes %.0f (%.2f%% of alive); vec-loop groups "
+	    "%.0f (%.2f%%); all-scalar groups %.0f (%.2f%%); DUPLICATED lanes %.0f (%.2f%% of alive)\n"
+	    "[OVEC-CENSUS]   C7 all-plain groups %.0f (%.2f%%)  env lanes %.0f (%.2f%%)  "
+	    "water lanes %.0f (%.2f%%)  envVec armed %.0f (%.2f%%)\n"
+	    "[OVEC-CENSUS]   C5 tiles %.0f  lights/tile %.2f  spots/tile %.2f  "
+	    "(group x spot) %.0f  testz(inside) %.0f (%.2f%%)\n",
+	    G, double(c[1]), double(c[1]) / G,
+	    double(c[2]), 100.0*double(c[2])/G, double(c[3]), 100.0*double(c[3])/G,
+	    double(c[18]), 100.0*double(c[18])/A,
+	    double(c[4]), double(c[5]), 100.0*double(c[5])/P,
+	    double(c[6]), 100.0*double(c[6])/A, double(c[7]), 100.0*double(c[7])/G,
+	    double(c[8]), 100.0*double(c[8])/G, double(c[9]), 100.0*double(c[9])/A,
+	    double(c[10]), 100.0*double(c[10])/G, double(c[11]), 100.0*double(c[11])/A,
+	    double(c[12]), 100.0*double(c[12])/A, double(c[19]), 100.0*double(c[19])/G,
+	    double(c[15]), double(c[16])/T, double(c[17])/T,
+	    double(c[13]), double(c[14]), 100.0*double(c[14])/S);
+	for (int i = 0; i < OVC_N; ++i) g_ovCen[i].store(0, std::memory_order_relaxed);
+}
+#define OVC(idx)         do { ++ovcn[(idx)]; } while (0)
+#define OVC_ADD(idx, v)  do { ovcn[(idx)] += uint64_t(v); } while (0)
+#else
+#define OVC(idx)         ((void)0)
+#define OVC_ADD(idx, v)  ((void)0)
 #endif
 
 // ─── Per-PIXEL live-light census — the companion instrument to the ladder ────
@@ -5799,6 +5954,27 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const float roughStrengthG = fds::FeatureFlags::roughness_strength();  // redo-lane rough attenuation (see wave-1)
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
+	// HOISTED per-group flag reads (2026-08-28, candidate C1). All four were
+	// re-read once per 8-PIXEL GROUP — 1 696 groups per tile x 96 tiles — for
+	// values that cannot change inside a frame. The sibling scalar kernel
+	// already carries the rule as a comment: "Hoist mode/global queries once
+	// per tile ... 2M function calls/frame adds up". Byte-null by construction.
+	//   envVecGateG : g_envVecDiagOff (published, see its file-scope decl) AND
+	//                 the three position-aware-lookup fakes, all of which run
+	//                 SCALAR-only and therefore disengage the 8-wide compose.
+	const bool  envVecGateG = g_envVecDiagOff
+	    && fds::FeatureFlags::env_sphere_parallax() <= 0.0f
+	    && fds::FeatureFlags::env_ssr() <= 0    // SSR march is scalar-only
+	    && !envBrdfAnalyticG;                   // analytic env-BRDF is scalar-only (no AVX2 exp2)
+	const bool  profNoLightsG = fds::FeatureFlags::prof_no_lights();
+	// C8: skip the per-lane normal-map / TBN lane loop and its store/reload
+	// round-trip when the scene carries no normal map at all. See
+	// DeferredLightingCtx::anyNormalMap.
+	const bool  nmapLoopOnG = ctx.anyNormalMap;
+	// C4 — see the testz in the omni loop. Read ONCE per tile, never in the
+	// loop: 16l measured a runtime hatch bool inside a hot inner body at
+	// +4.3 %% WITH THE FLAG OFF.
+	const bool  ovecGroupLightSkip = fds::FeatureFlags::deferred_ovec_light_skip();
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked). See
 	// the lane_ambB rewrite after the normal decode below.
 	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
@@ -5820,6 +5996,42 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	// source; it is not the same code.
 	const bool  hdrWrite = fds::FeatureFlags::hdr() && ctx.hdrBuf != nullptr;
 	const TileLights &tl = ctx.tileLights[tileIndex];
+	// C2 (2026-08-28) — THE MIRROR LANE IS PROVABLY DEAD IN CITY. The omni loop
+	// masks each light by `cmpeq(lane_mirrorId, tl.mirrorId[n])`, and BOTH sides
+	// are constant zero on every PreferOuterVec scene: gb.mirrorId is allocated
+	// in exactly one place in the tree (GreetsMirror.cpp), and ReflMirror.cpp
+	// says of --refl_correct's mirrored lights, verbatim, "mirrorId --
+	// deliberately left at 0 ... city does not allocate gb.mirrorId, so the
+	// per-pixel pmid is hard 0". The predicate below asserts BOTH halves rather
+	// than trusting the scene: no per-pixel plane AND no tile light carrying a
+	// non-zero id. Under it `cmpeq(0,0)` is all-ones at every lane of every
+	// group and `x & 0xFFFFFFFF == x`, so dropping the broadcast, the cmpeq and
+	// one `and` is byte-null BY CONSTRUCTION -- and so is dropping the eight
+	// stores of a constant zero that exist only to feed the compare. The
+	// tl.mirrorId scan is tl.count iterations per TILE, not per group.
+	bool _tlMirrorAllZero = true;
+	for (int n = 0; n < tl.count; ++n)
+		if (tl.mirrorId[n] != 0u) { _tlMirrorAllZero = false; break; }
+	const bool  ovecNoMirror = gb.mirrorId.empty() && _tlMirrorAllZero
+	    && fds::FeatureFlags::deferred_ovec_nomirror();
+	// C7 — see the 8-wide pack before the lane loop.
+	const bool  ovecVecPack = fds::FeatureFlags::deferred_ovec_vec_pack();
+	// C3 — see the uniform-group material resolve in the gather.
+	const bool  ovecMatUniform = fds::FeatureFlags::deferred_ovec_mat_uniform();
+#if FDS_OVEC_ABLATE || FDS_OVEC_OMNI_ABLATE
+	float ovecSink = 0.0f;
+#endif
+#if FDS_OVEC_CENSUS
+	uint64_t ovcn[OVC_N] = {0};
+	const bool ovCensus = fds::FeatureFlags::omni_census() && ctx.xres >= 640;
+	if (ovCensus) {
+		OVC(15);
+		OVC_ADD(16, tl.count);
+		int _nsp = 0;
+		for (int n = 0; n < tl.count; ++n) if (tl.isSpot[n]) ++_nsp;
+		OVC_ADD(17, _nsp);
+	}
+#endif
 	const float  ambB_sc = float(ctx.Sc->Ambient.B);
 	const float  ambG_sc = float(ctx.Sc->Ambient.G);
 	const float  ambR_sc = float(ctx.Sc->Ambient.R);
@@ -5884,12 +6096,17 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 		}
 
 		for (; px < x2; px += 8) {
+#if FDS_OVEC_ABLATE
+			float ovecKeep = 0.0f;
+#endif
 			const size_t i = size_t(py) * XRes + px;
 			// Per-lane mirror id snapshot for this 8-pixel block. Used
 			// by the omni loop below to mask off lights whose mirrorId
 			// disagrees with the lane's. Plane is byte-sized, widened
 			// to uint32 here so cmpeq lines up with tl.mirrorId.
-			if (gb.mirrorId.empty()) {
+			if (ovecNoMirror) {
+				// C2: nothing reads lane_mirrorId on this arm.
+			} else if (gb.mirrorId.empty()) {
 				for (int k = 0; k < 8; ++k) lane_mirrorId[k] = 0u;
 			} else {
 				for (int k = 0; k < 8; ++k)
@@ -5948,6 +6165,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				mask_alive = _mm256_and_si256(mask_alive, keep);
 			}
 
+			OVEC_ABL_CUT(1, ovecAblSum(mask_alive));
+
 			// Load mat32
 			__m256i mat32v = _mm256_loadu_si256((const __m256i*)(gb.txtr.data() + i));
 			__m256i matIDv = _mm256_and_si256(_mm256_srli_epi32(mat32v, 20),
@@ -5960,11 +6179,94 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// Stash for scalar lane work
 			_mm256_store_si256((__m256i*)lane_mat32, mat32v);
 			_mm256_store_si256((__m256i*)lane_alive, mask_alive);
+			OVEC_ABL_CUT(2, ovecAblSum(matIDv));
 
 			// Per-lane scalar gather: resolve Material*, gather texel,
 			// fill ambient + spec/diffuse scratch.
 			bool any_alive = false;
-			for (int k = 0; k < 8; ++k) {
+			// ─── C3 (2026-08-28): ONE material resolve for a UNIFORM group ───
+			// City's facades are large flat quads, so the eight (matID, mip)
+			// pairs of a horizontal 8-pixel run are almost always equal.
+			// CENSUS (--omni_census, city): 94.9 / 95.0 / 95.3 %% of groups are
+			// material-uniform at t=400 / t=1961 / t=2400, and 86-91 %% are
+			// uniform AND fully alive, which is what this path requires (a dead
+			// lane still needs its own zero-fill).
+			// The slow path walks Material -> Txtr -> Mipmap[mip] EIGHT TIMES
+			// for one record and writes 13 scratch arrays lane by lane; here the
+			// walk happens ONCE and the eleven per-material constants become
+			// broadcasts. Only the texel address is genuinely per lane, and even
+			// that is 8 scalar loads feeding ONE vec unpack instead of 8x(3 and/
+			// shift + 3 int->float + 3 mul + 3 store).
+			// BYTE-NULL: every arithmetic operation is the same IEEE op on the
+			// same operands -- `float(tx & 0xFF) * Mat->TintB` is one mul either
+			// way, and `Lumin*255.0f + Diff*ambB_sc` is written ONCE, in the same
+			// source form, so -ffp-contract picks the same fusion it picked in
+			// the lane body. The uniformity test only selects between two paths
+			// that compute the same values. Note the test is on `m >> 20`, i.e.
+			// matID AND MIP together: two lanes of one material at different mip
+			// levels resolve DIFFERENT texData and must take the slow path.
+			bool uniformDone = false;
+			if (ovecMatUniform && _mm256_movemask_epi8(mask_alive) == -1) {
+				const uint32_t midmip0 = lane_mat32[0] >> 20;
+				if (_mm256_movemask_epi8(_mm256_cmpeq_epi32(
+				        _mm256_srli_epi32(mat32v, 20),
+				        _mm256_set1_epi32(int(midmip0)))) == -1) {
+					const uint32_t matID = midmip0 & 0xFF;
+					const uint32_t mip   = (midmip0 >> 8) & 0xF;
+					Material *Mat = ctx.matTable.data[matID];
+					const dword *texData = (Mat && Mat->Txtr)
+					    ? (const dword*)Mat->Txtr->Mipmap[mip] : nullptr;
+					if (texData) {
+						// 8 texels -> one vec unpack. texFilterOn reads the
+						// raster-time filtered albedo plane instead (same
+						// choice as the lane body).
+						alignas(32) uint32_t txv[8];
+						if (texFilterOn) {
+							for (int k = 0; k < 8; ++k) txv[k] = gb.albedo[i + k];
+						} else {
+							for (int k = 0; k < 8; ++k)
+								txv[k] = texData[lane_mat32[k] & 0xFFFFF];
+						}
+						const __m256i tx8 = _mm256_load_si256((const __m256i*)txv);
+						const __m256i m8  = _mm256_set1_epi32(0xFF);
+						_mm256_store_ps(lane_texB, _mm256_mul_ps(
+						    _mm256_cvtepi32_ps(_mm256_and_si256(tx8, m8)),
+						    _mm256_set1_ps(Mat->TintB)));
+						_mm256_store_ps(lane_texG, _mm256_mul_ps(
+						    _mm256_cvtepi32_ps(_mm256_and_si256(
+						        _mm256_srli_epi32(tx8, 8), m8)),
+						    _mm256_set1_ps(Mat->TintG)));
+						_mm256_store_ps(lane_texR, _mm256_mul_ps(
+						    _mm256_cvtepi32_ps(_mm256_and_si256(
+						        _mm256_srli_epi32(tx8, 16), m8)),
+						    _mm256_set1_ps(Mat->TintR)));
+						const float Lumin = Mat->Luminosity;
+						const float Diff  = Mat->Diffuse;
+						_mm256_store_ps(lane_ambB, _mm256_set1_ps(Lumin * 255.0f + Diff * ambB_sc));
+						_mm256_store_ps(lane_ambG, _mm256_set1_ps(Lumin * 255.0f + Diff * ambG_sc));
+						_mm256_store_ps(lane_ambR, _mm256_set1_ps(Lumin * 255.0f + Diff * ambR_sc));
+						_mm256_store_ps(lane_diffuse,  _mm256_set1_ps(Diff));
+						_mm256_store_ps(lane_specular, _mm256_set1_ps(Mat->Specular));
+						_mm256_store_ps(lane_specMul,  _mm256_set1_ps(Mat->SpecMul));
+						_mm256_store_ps(lane_gloss,    _mm256_set1_ps(
+						    Mat->Glossiness > 0 ? float(Mat->Glossiness) : 32.0f));
+						const uint32_t ws = (Mat->Specular > 0.0f && specGlobalOn) ? 0xFFFFFFFFu : 0u;
+						const uint32_t iw = (int(matID) == ctx.waterMatID) ? 0xFFFFFFFFu : 0u;
+						_mm256_store_si256((__m256i*)lane_wantSpec, _mm256_set1_epi32(int(ws)));
+						_mm256_store_si256((__m256i*)lane_isWater,  _mm256_set1_epi32(int(iw)));
+						const fds::EnvPanoLinear* ep =
+						    (envTabG && (Mat->Reflection > 0.0f
+						                 || (metalMapOnG && Mat->MetallicMap)))
+						    ? envTabG[matID] : nullptr;
+						for (int k = 0; k < 8; ++k) lane_envP[k] = ep;
+						_mm256_store_si256((__m256i*)lane_hasEnv,
+						    _mm256_set1_epi32(ep ? -1 : 0));
+						any_alive = true;
+						uniformDone = true;
+					}
+				}
+			}
+			for (int k = 0; !uniformDone && k < 8; ++k) {
 				if (!lane_alive[k]) {
 					lane_texB[k] = lane_texG[k] = lane_texR[k] = 0;
 					lane_ambB[k] = lane_ambG[k] = lane_ambR[k] = 0;
@@ -6037,6 +6339,33 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// Refresh alive mask from scratch (some lanes may have been
 			// killed by mip-data null check above).
 			__m256i mask_alive_fresh = _mm256_load_si256((const __m256i*)lane_alive);
+#if FDS_OVEC_CENSUS
+			if (ovCensus) {
+				OVC(0);
+				int nAlive = 0, nScal = 0, nEnv = 0, nWat = 0;
+				uint32_t m0 = 0xFFFFFFFFu; bool uni = true;
+				for (int k = 0; k < 8; ++k) {
+					if (!lane_alive[k]) continue;
+					++nAlive;
+					const uint32_t mid = (lane_mat32[k] >> 20) & 0xFF;
+					if (m0 == 0xFFFFFFFFu) m0 = mid; else if (mid != m0) uni = false;
+					if (lane_wantSpec[k] || lane_isWater[k]) ++nScal;
+					if (lane_hasEnv[k]) ++nEnv;
+					if (lane_isWater[k]) ++nWat;
+				}
+				OVC_ADD(1, nAlive);
+				OVC_ADD(6, nScal);
+				OVC_ADD(11, nEnv);
+				OVC_ADD(12, nWat);
+				if (uni) { OVC(2); OVC_ADD(18, nAlive); if (nAlive == 8) OVC(3); }
+				if (nScal < nAlive) { OVC(7); OVC_ADD(9, nScal); }
+				else                  OVC(8);
+				if (nScal == 0 && nEnv == 0) OVC(10);
+			}
+#endif
+			OVEC_ABL_CUT(3, ovecAblSum(mask_alive_fresh)
+			              + lane_texB[0] + lane_ambG[3] + lane_gloss[7]
+			              + float(lane_wantSpec[1] | lane_hasEnv[5]));
 
 			// Decode 8 normals in parallel. oct_decode_u32 form (16.16):
 			//   qx = sign-extend(low 16), qy = sign-extend(high 16)
@@ -6082,6 +6411,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256 nx = _mm256_mul_ps(ox, invLenN);
 			__m256 ny = _mm256_mul_ps(oy, invLenN);
 			__m256 nz = _mm256_mul_ps(az, invLenN);
+			OVEC_ABL_CUT(4, ovecAblSum(_mm256_add_ps(_mm256_add_ps(nx, ny), nz)));
 
 			// Per-lane normal-map sampling. Stores the geometric N back
 			// to scratch, then re-runs the wave-1 kernel's Tier-B nmap +
@@ -6090,11 +6420,21 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// vec light loop and the scalar fallback both pick it up.
 			// Without this, OuterVec rendered nmap surfaces flat, which
 			// looked like horizontal banding on greets's hex floor.
+			// C8 (2026-08-28): the store/loop/reload triple below is DEAD when
+			// no material in the table carries a NormalMap — the loop's only
+			// writes are nx_lane[k] = ... inside `if (MatN->NormalMap)`, so the
+			// reload of an unmodified buffer is the identity. ctx.anyNormalMap
+			// is one table scan per FRAME (beside shadowSkipMask). The scratch
+			// is still needed when --sh_ambient is on, because that loop reads
+			// nx_lane[] directly. City: 138 materials, zero normal maps → the
+			// whole block collapses. Byte-null by construction.
 			alignas(32) float nx_lane[8], ny_lane[8], nz_lane[8];
-			_mm256_store_ps(nx_lane, nx);
-			_mm256_store_ps(ny_lane, ny);
-			_mm256_store_ps(nz_lane, nz);
-			for (int k = 0; k < 8; ++k) {
+			if (nmapLoopOnG || shCoefG) {
+				_mm256_store_ps(nx_lane, nx);
+				_mm256_store_ps(ny_lane, ny);
+				_mm256_store_ps(nz_lane, nz);
+			}
+			for (int k = 0; nmapLoopOnG && k < 8; ++k) {
 				if (!lane_alive[k]) continue;
 				const uint32_t m = lane_mat32[k];
 				const uint32_t mid  = (m >> 20) & 0xFF;
@@ -6145,9 +6485,11 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				ny_lane[k] = vny * invLen;
 				nz_lane[k] = vnz * invLen;
 			}
-			nx = _mm256_load_ps(nx_lane);
-			ny = _mm256_load_ps(ny_lane);
-			nz = _mm256_load_ps(nz_lane);
+			if (nmapLoopOnG) {
+				nx = _mm256_load_ps(nx_lane);
+				ny = _mm256_load_ps(ny_lane);
+				nz = _mm256_load_ps(nz_lane);
+			}
 
 			// --sh_ambient: rewrite the flat Diff*Sc->Ambient term baked into
 			// lane_ambB (Lumin*255 + Diff*ambB_sc) as Lumin*255 + Diff*E(n),
@@ -6171,6 +6513,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				}
 			}
 
+			OVEC_ABL_CUT(5, ovecAblSum(_mm256_add_ps(_mm256_add_ps(nx, ny), nz))
+			              + lane_ambB[2]);
+
 			// Reconstruct view-space pos for 8 lanes.
 			// z = (0xFF80 - zEnc) * invZScale
 			__m256 zEncF = _mm256_cvtepi32_ps(zEncI);
@@ -6187,6 +6532,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			                                                       _mm256_set1_ps(float(py))),
 			                                         zv),
 			                           _mm256_set1_ps(ctx.invFOVY));
+
+			OVEC_ABL_CUT(6, ovecAblSum(_mm256_add_ps(_mm256_add_ps(xv, yv), zv)));
 
 			// Texel + ambient as vec
 			__m256 texB = _mm256_load_ps(lane_texB);
@@ -6216,11 +6563,25 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256i needVec      = _mm256_andnot_si256(needScalar, mask_alive_fresh);
 			const bool anyVecLane = !_mm256_testz_si256(needVec, needVec);
 
+			OVEC_ABL_CUT(7, ovecAblSum(_mm256_add_ps(_mm256_add_ps(texB, texG),
+			                                          _mm256_add_ps(lB, vDiff)))
+			              + float(anyVecLane) + ovecAblSum(omniMask));
+
 			// Per-omni accumulate. Each omni broadcast, 8 pixels in vec.
-			const bool profNoLights = fds::FeatureFlags::prof_no_lights();
-			const int omniLoopN = (profNoLights || !anyVecLane) ? 0 : tl.count;
-			__m256i lane_mirror_v = _mm256_load_si256((const __m256i*)lane_mirrorId);
-			for (int n = 0; n < omniLoopN; ++n) {
+			const int omniLoopN = (profNoLightsG || !anyVecLane) ? 0 : tl.count;
+			__m256i lane_mirror_v = ovecNoMirror
+			    ? _mm256_setzero_si256()
+			    : _mm256_load_si256((const __m256i*)lane_mirrorId);
+			// C2: ONE source copy, TWO instantiations. The generic-lambda tag
+			// makes kMirror a compile-time constant inside the body, so the
+			// predicate is outside the loop entirely -- the only form 16h/16l/16m
+			// say pays in this kernel. Duplicating ~80 instructions of LOOP is
+			// not 16l's I-cache objection, which was to a second instantiation
+			// of the 4 800-instruction kernel.
+			auto ovecOmniLoop = [&](auto kMirrorTag) FDS_ALWAYS_INLINE {
+			  constexpr bool kMirror = decltype(kMirrorTag)::value;
+			  for (int n = 0; n < omniLoopN; ++n) {
+				OVEC_OMNI_CUT_BARE(1);
 				__m256 wx = _mm256_sub_ps(_mm256_set1_ps(tl.posX[n]), xv);
 				__m256 wy = _mm256_sub_ps(_mm256_set1_ps(tl.posY[n]), yv);
 				__m256 wz = _mm256_sub_ps(_mm256_set1_ps(tl.posZ[n]), zv);
@@ -6230,18 +6591,44 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				__m256 len2 = _mm256_fmadd_ps(wx, wx,
 				               _mm256_fmadd_ps(wy, wy,
 				                _mm256_mul_ps(wz, wz)));
+				OVEC_OMNI_CUT(2, ovecAblSum(_mm256_add_ps(dot, len2)));
 				__m256 mask_dot   = _mm256_cmp_ps(dot,  _mm256_setzero_ps(), _CMP_GE_OQ);
 				__m256 mask_range = _mm256_cmp_ps(len2, _mm256_set1_ps(tl.range2[n]), _CMP_LE_OQ);
 				__m256 mask_pos   = _mm256_cmp_ps(len2, _mm256_setzero_ps(), _CMP_GT_OQ);
 				// Per-lane mirror filter: light's mirrorId must equal
 				// the pixel's. tl.mirrorId[n] is the light's id; lane_
 				// mirror_v holds the 8 lanes' pixel ids.
-				__m256 mirrorMask = _mm256_castsi256_ps(
-					_mm256_cmpeq_epi32(lane_mirror_v,
-					                    _mm256_set1_epi32((int)tl.mirrorId[n])));
 				__m256 omni_lane  = _mm256_and_ps(_mm256_and_ps(mask_dot, mask_range),
-				                                   _mm256_and_ps(_mm256_and_ps(mask_pos, omniMaskF),
-				                                                  mirrorMask));
+				                                   _mm256_and_ps(mask_pos, omniMaskF));
+				if constexpr (kMirror) {
+					__m256 mirrorMask = _mm256_castsi256_ps(
+						_mm256_cmpeq_epi32(lane_mirror_v,
+						                    _mm256_set1_epi32((int)tl.mirrorId[n])));
+					omni_lane = _mm256_and_ps(omni_lane, mirrorMask);
+				}
+#if FDS_OVEC_CENSUS
+				if (ovCensus) {
+					OVC(4);
+					if (_mm256_testz_ps(omni_lane, omni_lane)) OVC(5);
+				}
+#endif
+				OVEC_OMNI_CUT(3, ovecAblSum(omni_lane));
+				// C4 (2026-08-28): this light reaches NO lane of the group —
+				// skip the blend, the rsqrt, dist, falloff, k, the WHOLE spot
+				// block, the intensity blend and the three colour FMAs.
+				// BYTE-NULL BY CONSTRUCTION: every downstream term is already
+				// multiplied by omni_lane through the _mm256_blendv_ps that
+				// builds `intensity`, so intensity is exactly +0.0f in every
+				// lane and fmadd(+0.0f, col, l) == l bit-for-bit for the finite
+				// non-negative accumulator (it starts at lane_ambB >= 0 and only
+				// accumulates non-negatives). CENSUS at city, --omni_census:
+				// 28.5 / 37.4 / 39.6 %% of (group x light) pairs at t=2400 /
+				// t=1961 / t=400 -- the three rejects (N.L, range, len2>0) are
+				// spatially correlated across 8 horizontally adjacent pixels,
+				// which usually share a surface and therefore a normal. The
+				// kernel already carries this shape one level up (`anyVecLane`).
+				if (ovecGroupLightSkip
+				    && _mm256_testz_ps(omni_lane, omni_lane)) continue;
 				// safe_len2: 1.0 when masked off
 				__m256 safe_len2 = _mm256_blendv_ps(_mm256_set1_ps(1.0f), len2, omni_lane);
 				__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
@@ -6250,6 +6637,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				                                _mm256_mul_ps(dist, _mm256_set1_ps(tl.rRange[n])));
 				__m256 k = _mm256_mul_ps(_mm256_mul_ps(dot, lenInv), falloff);
 
+				OVEC_OMNI_CUT(4, ovecAblSum(k));
 				// Spot cone attenuation (only fires when isSpot[n] is set).
 				// Matches the standard kernel exactly so omni pixels under
 				// greets's robot spotlight get the same cone falloff.
@@ -6275,7 +6663,14 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					                                _mm256_mul_ps(_mm256_set1_ps(2.0f), t)));
 					__m256 coneAtten = _mm256_blendv_ps(_mm256_setzero_ps(), smooth, maskInside);
 					k = _mm256_mul_ps(k, coneAtten);
+#if FDS_OVEC_CENSUS
+					if (ovCensus) {
+						OVC(13);
+						if (_mm256_testz_ps(maskInside, maskInside)) OVC(14);
+					}
+#endif
 				}
+				OVEC_OMNI_CUT(5, ovecAblSum(k));
 
 				__m256 intensity = _mm256_blendv_ps(_mm256_setzero_ps(),
 				                                     _mm256_mul_ps(k, vDiff),
@@ -6283,7 +6678,12 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				lB = _mm256_fmadd_ps(intensity, _mm256_set1_ps(tl.colB[n]), lB);
 				lG = _mm256_fmadd_ps(intensity, _mm256_set1_ps(tl.colG[n]), lG);
 				lR = _mm256_fmadd_ps(intensity, _mm256_set1_ps(tl.colR[n]), lR);
-			}
+			  }
+			};
+			if (ovecNoMirror) ovecOmniLoop(std::false_type{});
+			else              ovecOmniLoop(std::true_type{});
+
+			OVEC_ABL_CUT(8, ovecAblSum(_mm256_add_ps(_mm256_add_ps(lB, lG), lR)));
 
 			// Saturate to 250 — 8-bit rollover guard; upper cap lifted under
 			// HDR (see hdrWrite above), lower 0-clamp always.
@@ -6305,6 +6705,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256 fdB = _mm256_mul_ps(_mm256_mul_ps(texB, lB), inv256);
 			__m256 fdG = _mm256_mul_ps(_mm256_mul_ps(texG, lG), inv256);
 			__m256 fdR = _mm256_mul_ps(_mm256_mul_ps(texR, lR), inv256);
+
+			OVEC_ABL_CUT(9, ovecAblSum(_mm256_add_ps(_mm256_add_ps(fdB, fdG), fdR)));
 
 			// Spec / water blend / pow are not handled in vec — for any
 			// alive lane that needs spec or water-mat, fall back to
@@ -6335,26 +6737,28 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			_mm256_store_ps(any_l, ny);
 			_mm256_store_ps(anz, nz);
 
+			OVEC_ABL_CUT(10, vfB[0] + vfG[3] + vfR[7] + ax[1] + ay[4] + az_lane[6]
+			               + anx[2] + any_l[5] + anz[0]
+			               + float(lane_needs_scalar[3] | uint32_t(lane_alive_now[6])));
+
 			// 8-wide env front-end (city case): engage when every env lane
 			// in this group shares ONE cube store with the city shape
 			// (noParallax + cv-pull) and no per-pixel map/diagnostic
 			// forces the scalar compose. See EnvComposeCityVec8.
-			static const bool sEnvVecDiagOff =
-				!std::getenv("ENVPROBE") && !std::getenv("ENVFLIP") &&
-				!std::getenv("ENV_NOFETCH") && !std::getenv("FDS_ENV_SKIP_NEGY") &&
-				!EnvTraceGet();
-			// Position-aware lookup fakes run scalar-only for now (see
-			// EnvSpecComposeScalar; vectorizing them is the follow-up if
-			// the look is approved) — disengage the vec compose when on.
-			const bool envPosFakesOff =
-				fds::FeatureFlags::env_sphere_parallax() <= 0.0f &&
-				fds::FeatureFlags::env_ssr() <= 0 &&   // SSR march is scalar-only
-				!envBrdfAnalyticG;                     // analytic env-BRDF is scalar-only (no AVX2 exp2)
+			// envVecGateG (= g_envVecDiagOff && the three position-fake flag
+			// reads) is HOISTED to the kernel head — see its declaration there.
 			bool envVecReady = false;
 			alignas(32) float envRvx[8], envRvy[8], envRvz[8];
 			alignas(32) float envEk[8], envLvlF[8], envF0[8];
 			alignas(32) float envFres[8] = {0};   // (1-F) diffuse energy conservation
-			if (sEnvVecDiagOff && envPosFakesOff) {
+			// anyEnvLane gate: the uniformity scan below is an 8-iteration loop
+			// that ran on EVERY group, including the majority with no env lane at
+			// all — where `uni` stays null and `envVecReady` stays false. testz
+			// over lane_hasEnv[] (already built by the gather) answers it in ~4
+			// instructions. Byte-null: same `uni == nullptr` outcome.
+			if (envVecGateG && !_mm256_testz_si256(
+			        _mm256_load_si256((const __m256i*)lane_hasEnv),
+			        _mm256_load_si256((const __m256i*)lane_hasEnv))) {
 				const fds::EnvPanoLinear* uni = nullptr;
 				bool uniform = true;
 				for (int k = 0; k < 8; ++k) {
@@ -6394,6 +6798,43 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				}
 			}
 
+#if FDS_OVEC_CENSUS
+			if (ovCensus && envVecReady) OVC(19);
+#endif
+			OVEC_ABL_CUT(11, float(envVecReady) + envRvx[0] + envEk[2] + envLvlF[5]
+			               + envF0[7] + envFres[1]);
+
+			// ─── C7 (2026-08-28): 8-wide pack for an all-plain group ─────────
+			// The lane loop below converts, clamps and stores EIGHT separate
+			// dwords, never one 256-bit store, even when all eight lanes take
+			// the plain path. CENSUS (--omni_census, city): 57.7 / 61.0 / 63.1 %%
+			// of groups at t=1961 / t=400 / t=2400 have no lane needing the
+			// scalar redo and no lane carrying an env store.
+			// BYTE-NULL, with the clamp ordering as the guard: `int(f)` is
+			// truncation toward zero == _mm256_cvttps_epi32, and clamping to
+			// [0,255] in FLOAT before the convert gives the same integer as
+			// clamping after it for every finite f (min/max commute with trunc
+			// on a monotone range) while avoiding cvttps' INT_MIN result for
+			// |f| >= 2^31, which the after-clamp form would turn into 0 instead
+			// of 255. All 8 lanes must be alive: a dead lane must keep whatever
+			// out[] already held.
+			if (ovecVecPack && !_mm256_testz_si256(mask_alive_fresh, mask_alive_fresh)
+			    && _mm256_movemask_epi8(mask_alive_fresh) == -1
+			    && _mm256_testz_si256(needsScalar, needsScalar)
+			    && _mm256_testz_si256(
+			           _mm256_load_si256((const __m256i*)lane_hasEnv),
+			           _mm256_load_si256((const __m256i*)lane_hasEnv))) {
+				const __m256 lo = _mm256_setzero_ps(), hi = _mm256_set1_ps(255.0f);
+				__m256i b = _mm256_cvttps_epi32(_mm256_min_ps(_mm256_max_ps(fdB, lo), hi));
+				__m256i g = _mm256_cvttps_epi32(_mm256_min_ps(_mm256_max_ps(fdG, lo), hi));
+				__m256i r = _mm256_cvttps_epi32(_mm256_min_ps(_mm256_max_ps(fdR, lo), hi));
+				__m256i pk = _mm256_or_si256(
+				    _mm256_or_si256(b, _mm256_slli_epi32(g, 8)),
+				    _mm256_or_si256(_mm256_slli_epi32(r, 16),
+				                    _mm256_set1_epi32(int(0xFF000000u))));
+				_mm256_storeu_si256((__m256i*)(out + i), pk);
+				continue;
+			}
 			for (int k = 0; k < 8; ++k) {
 				if (!lane_alive_now[k]) continue;
 				int outB, outG, outR;
@@ -6675,6 +7116,14 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			break;
 		}
 	}
+
+#if FDS_OVEC_ABLATE || FDS_OVEC_OMNI_ABLATE
+	g_ovecAblSink = ovecSink;
+#endif
+#if FDS_OVEC_CENSUS
+	for (int _i = 0; _i < OVC_N; ++_i)
+		if (ovcn[_i]) g_ovCen[_i].fetch_add(ovcn[_i], std::memory_order_relaxed);
+#endif
 
 	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
 	// SKIPPED for an INLINE (offscreen-bake) dispatch: the calling thread would
@@ -7658,10 +8107,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		if (Sc != lastScene) {
 			lastScene = Sc;
 			std::map<unsigned short, int> glossHisto;
-			int specMats = 0;
+			int specMats = 0, nMats = 0, nmapMats = 0, roughMats = 0,
+			    metalMats = 0, reflMats = 0;
 			for (size_t i = 0; i < matTable.count; ++i) {
 				Material *M = matTable.data[i];
-				if (!M || M->Specular <= 0.0f) continue;
+				if (!M) continue;
+				++nMats;
+				if (M->NormalMap)    ++nmapMats;
+				if (M->RoughnessMap) ++roughMats;
+				if (M->MetallicMap)  ++metalMats;
+				if (M->Reflection > 0.0f) ++reflMats;
+				if (M->Specular <= 0.0f) continue;
 				++specMats;
 				++glossHisto[M->Glossiness];
 			}
@@ -7673,6 +8129,16 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 				first = false;
 			}
 			std::fprintf(stderr, "}\n");
+			// MAP CENSUS (2026-08-28): the OuterVec kernel runs an 8-iteration
+			// per-lane normal-map/TBN loop and a store/reload round-trip on
+			// EVERY group; when no material in the table carries a NormalMap the
+			// loop provably does nothing (candidate C8's premise). Printed here
+			// rather than behind a new flag — see the analysis's instrument
+			// hygiene note.
+			std::fprintf(stderr,
+				"[GLOSS-STATS] mats=%d normalMap=%d roughMap=%d metalMap=%d "
+				"reflection>0=%d\n",
+				nMats, nmapMats, roughMats, metalMats, reflMats);
 		}
 	}
 
@@ -8014,12 +8480,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// this loop cannot reach (or that are null) are never consulted — the
 	// mask reproduces the old call's answer for every pixel that asks.
 	std::memset(ctx.shadowSkipMask, 0, sizeof(ctx.shadowSkipMask));
+	ctx.anyNormalMap = false;
 	{
 		const dword nMat = matTable.count < 256u ? matTable.count : 256u;
 		for (dword mi = 0; mi < nMat; ++mi) {
 			Material *M = matTable.data[mi];
-			if (M && Shadow_MaterialSkipsCasting(M))
+			if (!M) continue;
+			if (Shadow_MaterialSkipsCasting(M))
 				ctx.shadowSkipMask[mi >> 6] |= (uint64_t(1) << (mi & 63));
+			// See DeferredLightingCtx::anyNormalMap — the OuterVec kernel's
+			// per-lane nmap loop is dead work on a scene with no normal maps.
+			if (M->NormalMap) ctx.anyNormalMap = true;
 		}
 	}
 	ctx.tileLights = tileLights;
@@ -8235,6 +8706,10 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// the per-tile gate is xres >= 640, same rule as the tap census).
 	if (fds::FeatureFlags::omni_census() && !inlineDispatch && ctx.xres >= 640)
 		OmniCensus_Report();
+#endif
+#if FDS_OVEC_CENSUS
+	if (fds::FeatureFlags::omni_census() && !inlineDispatch && ctx.xres >= 640)
+		OVecCensus_Report();
 #endif
 
 	// Dump cache-line transition stats accumulated by shadow sampling

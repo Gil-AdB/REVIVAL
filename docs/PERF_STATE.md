@@ -19,6 +19,62 @@
 
 ---
 
+## 00k. `lighting-w1` IN CITY — the OUTER-VEC kernel, first round ever run on it (2026-08-28): **−24.2 % instructions, −5.7 % of `renderFrame`**, and the row's shape is now measured, not estimated
+
+Branch `rev-w1impl` off `fog-wt` `e017d611`. Arm
+`--env_live_water --deferred --city_env_pixel`, 1512×848, `--bench=scene`,
+`--deferred_prof=1 --hw_prof`. Full account, census and refutations:
+`docs/OPTIMIZATION_BACKLOG.md` **2026-08-28**.
+
+`Render_DeferredLighting_Tile_OuterVec` is a **different kernel** from the
+`lighting-w1` this document's greets rows describe. greets and chase run
+`Render_DeferredLighting_TileT` (1 px × 1 light, full shadow tap, GGX);
+city / fountain / crash run OuterVec (8 px × 1 light, **no shadow tap of any
+kind**, no GGX lobe — `--pbr` is structurally inert in it). Six of the eleven
+landed greets `lighting-w1` levers are shadow-tap work and do not transfer.
+
+**THE ROW'S SHAPE, measured by `-DFDS_OVEC_ABLATE` (this round's new ladder;
+there was none before it).** City t=1961, row = 0.955 Gi/f:
+
+| block | Gi/f | % of row |
+|---|--:|--:|
+| **the omni loop** | 0.476 | **49.8** |
+| **the per-lane pack loop** | 0.237 | **24.8** |
+| the per-lane material gather | 0.092 | 9.6 |
+| the 8-wide env front-end | 0.037 | 3.9 |
+| everything else (masks, decode, view pos, compose, store-outs) | 0.113 | 11.8 |
+
+The two big blocks are the round's finding. The omni loop at ~50 % matched the
+analysis's static estimate; **the pack loop at 24.8 % did not** (estimated ~5 %),
+because **33–36 % of city's alive lanes carry an env store** and pay a scalar
+env compose inside the pack. That block is untouched and is the next target.
+
+**WHAT LANDED** — six byte-null levers (`--deferred_ovec_light_skip`,
+`--deferred_ovec_mat_uniform`, `--deferred_ovec_nomirror`,
+`--deferred_ovec_vec_pack`, plus two flagless), against the parent `e017d611`,
+both binaries in one worktree, interleaved, min-of-5, Ginstr floor **±0.14 %**:
+
+| pose | `lighting-w1` Gi/f | `Gcyc/f` | IPC | `renderFrame` Gi/f |
+|---|---|---|---|---|
+| city t=1961 | 0.978 → **0.741** (−24.2 %) | 0.244 → 0.187 (−23.4 %) | 4.01 → 3.96 | 4.183 → **3.945** (−5.7 %) |
+| city t=2400 | 0.390 → **0.328** (−15.9 %) | 0.104 → 0.080 (−23.1 %) | 3.75 → 4.10 | 2.255 → **2.191** (−2.8 %) |
+| city t=400 | 0.734 → **0.538** (−26.7 %) | 0.185 → 0.141 (−23.8 %) | 3.97 → 3.81 | 3.175 → **2.978** (−6.2 %) |
+| fountain t=2500 | 0.105 → **0.088** (−16.2 %) | 0.029 → 0.025 | 3.62 → 3.52 | 1.060 → 1.043 (−1.6 %) |
+| **greets t=5743 (control)** | 1.477 → **1.477 (0.00 %)** | 0.382 → 0.379 | 3.87 → 3.90 | 3.643 → 3.642 |
+
+Cycles track instructions and IPC barely moves — not the cube-prepass pattern
+where the two columns disagreed. greets is exactly flat, which proves the change
+is confined to the OuterVec kernel.
+
+**Gates:** 13/13 pinned poses + `render_gate` 4/4, and byte-nullity proved
+DIFFERENTIALLY on one binary — each lever flipped off individually and all four
+together reproduce the same hash at city t=1961, fountain t=2500, crash
+t=400/1200, and greets t=5743 forced through `--deferred_outer_vec` (the only
+arm that exercises the mirror-compare instantiation and the real normal-map lane
+loop).
+
+---
+
 ## 00j. THE PRICE OF `--refl_correct` — 2026-08-17: the mirrored-list build is **1 microsecond a frame**; the cost that exists is the per-vertex normal, and it lives OUTSIDE `renderFrame`
 
 The commissioned look change (`docs/OPTIMIZATION_BACKLOG.md` **2026-08-17**)
