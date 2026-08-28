@@ -1,5 +1,27 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28g — THE FIX ROUND UNDER THE NEW GATE: the DC-first order is
+> refuted by measurement, the vert clamp is refuted by its own gate, and the
+> juts are cornered as BRIDGING FACES
+>
+> Dependency first, as ordered: simulating the DC fix makes his marked
+> protrusions WORSE (rect 28.7->35.8%) - the plateau recession partially
+> MASKS the juts, so juts first. Vert audit of mechanism (2): plateaus sit
+> ON the reference (own-excess -0.003); GROOVES are over-carved (-0.0515)
+> and the faces sag between - the recession is the groove-carve arithmetic,
+> not plateau displacement. The envelope VERT clamp (footprint-bounded,
+> strict containment, junction-scoped, tol 0.05) catches a real population
+> - 576 verts, worst excess 1.16u, incl. the census's 70 zero-displacement
+> bake-CREATED lip verts - changes ~78k px, restores byte-exactly, and his
+> marked regions DO NOT MOVE (28.7->27.1% / 14.9->14.8% protruding). Ships
+> default OFF with the refutation in the flag text. What survives every
+> vert-level lever is face-level by elimination: BRIDGING FACES spanning
+> the junction with per-wall-legal corner verts - the indicated fix is the
+> face split at the junction line (the border-pipeline reorder), measured
+> next time against the same two marked regions. All numbers in
+> docs/BULGE_CORPUS.md fix-round ledger; clamp_A/B heatmaps + changed-px
+> mask in docs/img/refdiff/.
+
 > ## 2026-08-28f — THE DETECTION METHOD IS REBUILT AGAINST GROUND TRUTH AND
 > HIS VERDICTS, AND IT FINDS WHAT FIVE METRICS MISSED
 >

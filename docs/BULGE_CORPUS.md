@@ -82,3 +82,26 @@ course lips overshooting), and the seam column protrudes outright. Bare
 arm: 0.0000 exact everywhere. Whatever the mechanism, the displaced
 surface's relief is systematically offset from the height field's truth —
 a defect class every engine-self-referencing instrument was blind to.
+
+## Fix-round ledger (2026-08-28, post-validation)
+
+- **Dependency (measured first, as ordered):** simulating a DC fix (engine
+  +0.05 out) makes the marked protrusions WORSE (rect 28.7→35.8%, ellipse
+  14.9→21.2%): the recession partially masks the juts. Mechanisms are
+  independent-and-opposing → juts first.
+- **Vert-level audit of the profile offset:** plane-43 interior verts sit
+  ON the reference at plateaus (own-excess med −0.003) but grooves are
+  over-carved (med −0.0515); the rasterized faces sag between correct
+  plateau centres and too-deep widened grooves → the pixel-level −0.05
+  plateau recession. Mechanism (2) is the groove-carve arithmetic (the
+  notch/ramp chain), not the plateau displacement. No lever built yet.
+- **Envelope vert clamp — REFUTED as the juts fix** (flag
+  `greets_displace_env_clamp`, default OFF, kept as instrument): catches a
+  real off-envelope population (576 verts, worst 1.16 u; the census's 70
+  zero-displacement bake-CREATED lip verts included) and changes ~78k px,
+  but his marked regions' protrusion fractions are unmoved (28.7→27.1%,
+  14.9→14.8%). The juts therefore are not vert positions: supported
+  hypothesis = BRIDGING FACES spanning the junction whose corner verts are
+  each legal on their own wall. Indicated fix: face-level split at the
+  junction line (the border-pipeline reorder named twice before), so no
+  face crosses the envelope corner.

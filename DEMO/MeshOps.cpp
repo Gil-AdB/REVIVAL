@@ -2073,6 +2073,127 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		for (const std::string &s : *displacedSet) if (s == nm) return true;
 		return false;
 	};
+	// ── --greets_displace_env_clamp registry (built ONCE, from AUTHORED faces
+	// across ALL meshes, before any subdivision): the dominant target planes
+	// with visible-front orientation (authored-majority rule), a least-squares
+	// world->UV affine, and the panel's UV footprint. A per-mesh registry
+	// fragments the plane set (the first cut saw 8 of the scene's 24 dominant
+	// rooms planes) and misses cross-mesh junction partners entirely.
+	struct EnvPlane {
+		double n[3], d;
+		double p0[3], t1[3], t2[3];        // in-plane 2D frame (a full 3D
+		double AtA[3][3], AtU[3], AtV[3];  // affine on [x,y,z,1] is rank-3 on
+		double cu[3], cv[3];               // planar points — solve in-plane)
+		double uLo, uHi, vLo, vHi;
+		double area, signSum;
+		bool ok, haveFrame;
+	};
+	std::vector<EnvPlane*> envDoms;
+	std::map<std::array<int,4>, EnvPlane> envPlanes;
+	if (fds::FeatureFlags::greets_displace_env_clamp()) {
+		auto q = [](float v, float s){ return int(std::floor(v*s + 0.5f)); };
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+			for (int32_t fi = 0; fi < T->FIndex; ++fi) {
+				const Face &F = T->Faces[fi];
+				if (!isTarget(&F) || !F.A || !F.B || !F.C) continue;
+				float len = std::sqrt(F.N.x*F.N.x + F.N.y*F.N.y + F.N.z*F.N.z);
+				if (!(len > 1e-4f)) continue;
+				const float inv = 1.0f/len;
+				float nx = F.N.x*inv, ny = F.N.y*inv, nz = F.N.z*inv;
+				float d  = -F.NormProd*inv;
+				float sgn = 1.0f;
+				if (nx < 0 || (nx == 0 && (ny < 0 || (ny == 0 && nz < 0)))) {
+					nx = -nx; ny = -ny; nz = -nz; d = -d; sgn = -1.0f;
+				}
+				const std::array<int,4> key{ q(nx,16.0f), q(ny,16.0f), q(nz,16.0f), q(d,2.0f) };
+				EnvPlane &P = envPlanes[key];
+				if (P.area == 0.0) {
+					P.n[0]=nx; P.n[1]=ny; P.n[2]=nz; P.d=d; P.signSum=0;
+					P.ok=false; P.haveFrame=false;
+					P.uLo=P.vLo=1e30; P.uHi=P.vHi=-1e30;
+					std::memset(P.AtA,0,sizeof P.AtA);
+					std::memset(P.AtU,0,sizeof P.AtU);
+					std::memset(P.AtV,0,sizeof P.AtV);
+				}
+				const Vector *pp[3] = { &F.A->Pos, &F.B->Pos, &F.C->Pos };
+				const float ax=pp[1]->x-pp[0]->x, ay=pp[1]->y-pp[0]->y, az=pp[1]->z-pp[0]->z;
+				const float bx=pp[2]->x-pp[0]->x, by=pp[2]->y-pp[0]->y, bz=pp[2]->z-pp[0]->z;
+				const float cx=ay*bz-az*by, cy=az*bx-ax*bz, cz=ax*by-ay*bx;
+				const double a2 = 0.5*std::sqrt((double)cx*cx+(double)cy*cy+(double)cz*cz);
+				P.area += a2;
+				P.signSum += sgn * a2;
+				if (!P.haveFrame) {
+					const double el = std::sqrt((double)ax*ax+(double)ay*ay+(double)az*az);
+					if (el > 1e-6) {
+						P.p0[0]=pp[0]->x; P.p0[1]=pp[0]->y; P.p0[2]=pp[0]->z;
+						P.t1[0]=ax/el; P.t1[1]=ay/el; P.t1[2]=az/el;
+						P.t2[0]=P.n[1]*P.t1[2]-P.n[2]*P.t1[1];
+						P.t2[1]=P.n[2]*P.t1[0]-P.n[0]*P.t1[2];
+						P.t2[2]=P.n[0]*P.t1[1]-P.n[1]*P.t1[0];
+						P.haveFrame = true;
+					}
+				}
+				if (!P.haveFrame) continue;
+				const float uu[3] = { F.U1, F.U2, F.U3 };
+				const float vv[3] = { F.V1, F.V2, F.V3 };
+				for (int k = 0; k < 3; ++k) {
+					const double px = pp[k]->x-P.p0[0], py = pp[k]->y-P.p0[1], pz = pp[k]->z-P.p0[2];
+					const double r[3] = { px*P.t1[0]+py*P.t1[1]+pz*P.t1[2],
+					                      px*P.t2[0]+py*P.t2[1]+pz*P.t2[2], 1.0 };
+					for (int a = 0; a < 3; ++a) {
+						for (int b = 0; b < 3; ++b) P.AtA[a][b] += r[a]*r[b];
+						P.AtU[a] += r[a]*uu[k];
+						P.AtV[a] += r[a]*vv[k];
+					}
+					if (uu[k] < P.uLo) P.uLo = uu[k];
+					if (uu[k] > P.uHi) P.uHi = uu[k];
+					if (vv[k] < P.vLo) P.vLo = vv[k];
+					if (vv[k] > P.vHi) P.vHi = vv[k];
+				}
+			}
+		}
+		for (auto &kv : envPlanes) {
+			EnvPlane &P = kv.second;
+			if (P.area < 20.0 || !P.haveFrame) continue;
+			const double s = (P.signSum >= 0) ? 1.0 : -1.0;
+			P.n[0]*=s; P.n[1]*=s; P.n[2]*=s; P.d*=s;
+			double M[3][4];
+			P.ok = true;
+			for (int rhs = 0; rhs < 2 && P.ok; ++rhs) {
+				for (int a = 0; a < 3; ++a) {
+					for (int b = 0; b < 3; ++b) M[a][b] = P.AtA[a][b];
+					M[a][3] = rhs ? P.AtV[a] : P.AtU[a];
+				}
+				for (int c = 0; c < 3; ++c) {
+					int piv = c;
+					for (int r2 = c+1; r2 < 3; ++r2)
+						if (std::fabs(M[r2][c]) > std::fabs(M[piv][c])) piv = r2;
+					if (std::fabs(M[piv][c]) < 1e-9) { P.ok = false; break; }
+					if (piv != c) for (int b = c; b < 4; ++b) std::swap(M[c][b], M[piv][b]);
+					for (int r2 = 0; r2 < 3; ++r2) {
+						if (r2 == c) continue;
+						const double f = M[r2][c]/M[c][c];
+						for (int b = c; b < 4; ++b) M[r2][b] -= f*M[c][b];
+					}
+				}
+				if (P.ok) for (int a = 0; a < 3; ++a)
+					(rhs ? P.cv : P.cu)[a] = M[a][3]/M[a][a];
+			}
+			if (P.ok) envDoms.push_back(&P);
+		}
+		std::fprintf(stderr, "[STONE-ENVCLAMP] '%s': registry %zu dominant planes "
+		             "(authored, all meshes)\n", matName, envDoms.size());
+		if (std::getenv("FDS_ENVCLAMP_DEBUG")) {
+			std::vector<double> ar;
+			for (auto &kv : envPlanes) ar.push_back(kv.second.area);
+			std::sort(ar.rbegin(), ar.rend());
+			std::fprintf(stderr, "[STONE-ENVCLAMP] debug: %zu clusters; top areas:", ar.size());
+			for (size_t i = 0; i < ar.size() && i < 8; ++i)
+				std::fprintf(stderr, " %.1f", ar[i]);
+			std::fprintf(stderr, "\n");
+		}
+	}
 	// Hard ceiling on subdivision depth. Was 3 (8×8 cells/quad) — too coarse
 	// for walls whose quads span several UV tiles: at the finely-tiled wall
 	// (block pitch 0.25 UV, but quads covering 2-3 tiles) L3 leaves each cell
@@ -7301,6 +7422,85 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				std::fprintf(stderr, "[STONE] reveal combs: %d built, %d skipped (shape), %d skipped (span)\n",
 					nCombs, nSkipShape, nSkipSpan);
 		}
+		// ── --greets_displace_env_clamp: NO VERT PAST THE DISPLACED ENVELOPE ──
+		// (2026-08-28, his two marked regions on the r3 render.) The refdiff
+		// ground-truth census measured 70 bake-CREATED verts (100% created,
+		// parent |n_y|=0 walls, ZERO applied displacement — their positions are
+		// CONSTRUCTED, not displaced) standing up to 1.0u past the neighbour
+		// wall's displaced surface at the pier junction: the course lips /
+		// block wedges he circled. Constructive rule: near a junction (base
+		// position near >=2 dominant parent planes), a vert may not stand in
+		// front of ALL of those planes' displaced surfaces — that region is
+		// outside the outer-mitre envelope by definition. Violators are pulled
+		// back along the LEAST-violated plane's normal onto that surface (the
+		// envelope boundary), twice (footprint moves with the pull). Runs
+		// before the commit so facet N/NormProd re-derive from clamped
+		// positions. Per-plane world->UV is a least-squares affine over the
+		// plane's own faces' BASE corners + authored UVs.
+		if (fds::FeatureFlags::greets_displace_env_clamp() && hm && !faces.empty()) {
+			int nClamped = 0; double worstExcess = 0.0, movedSum = 0.0;
+			if (envDoms.size() >= 2) {
+				const float tol = 0.05f;
+				std::vector<char> vTgt(verts.size(), 0);
+				for (size_t i = 0; i < faces.size(); ++i)
+					if (isTargetNew(faces[i]))
+						for (int k = 0; k < 3; ++k) vTgt[fIdx[i][k]] = 1;
+				for (size_t v = 0; v < verts.size(); ++v) {
+					if (!vTgt[v] || v >= basePos.size()) continue;
+					for (int pass = 0; pass < 2; ++pass) {
+						const Vector &b = basePos[v];
+						Vector &p = verts[v].Pos;
+						// A wall's displaced surface ENDS at its footprint: a
+						// course lip hanging sideways past the arris sits over
+						// the NEIGHBOUR's domain only, so candidacy is strict
+						// containment (his marked juts are contained in exactly
+						// ONE plane — the ">=2 planes" first cut skipped them).
+						// The clamp stays junction-scoped: some OTHER dominant
+						// plane's base must pass within 0.8u, so wall interiors
+						// are never touched. tol=0.05 spares the legitimate
+						// course-LEVEL castellation (level vs pointwise sample
+						// differs by intra-course variance, ~0.02-0.04).
+						EnvPlane *best = nullptr; double bestEx = 1e30;
+						int nContained = 0; bool nearOther = false;
+						bool allViolate = true;
+						for (EnvPlane *P : envDoms) {
+							const double sb = P->n[0]*b.x + P->n[1]*b.y + P->n[2]*b.z - P->d;
+							if (sb >= -0.6 && sb <= 1.2) {
+								const double qx = p.x-P->p0[0], qy = p.y-P->p0[1], qz = p.z-P->p0[2];
+								const double ia = qx*P->t1[0]+qy*P->t1[1]+qz*P->t1[2];
+								const double ib = qx*P->t2[0]+qy*P->t2[1]+qz*P->t2[2];
+								const double u = P->cu[0]*ia + P->cu[1]*ib + P->cu[2];
+								const double w = P->cv[0]*ia + P->cv[1]*ib + P->cv[2];
+								if (u >= P->uLo + 0.02 && u <= P->uHi - 0.02 &&
+								    w >= P->vLo + 0.02 && w <= P->vHi - 0.02) {
+									++nContained;
+									const double s = P->n[0]*p.x + P->n[1]*p.y + P->n[2]*p.z - P->d;
+									const double dref = amp * (SampleHeight8Bilinear(hm, useMip, (float)u, (float)w) - mipMean);
+									const double ex = s - dref;
+									if (ex <= tol) allViolate = false;
+									else if (ex < bestEx) { bestEx = ex; best = P; }
+									continue;
+								}
+							}
+							if (std::fabs(sb) < 0.8) nearOther = true;
+						}
+						if (nContained < 1 || !(nContained >= 2 || nearOther) ||
+						    !allViolate || !best) break;
+						p.x -= float(best->n[0] * bestEx);
+						p.y -= float(best->n[1] * bestEx);
+						p.z -= float(best->n[2] * bestEx);
+						if (pass == 0) { ++nClamped; movedSum += bestEx;
+						                 if (bestEx > worstExcess) worstExcess = bestEx; }
+					}
+				}
+			}
+			if (nClamped)
+				std::fprintf(stderr, "[STONE-ENVCLAMP] '%s': %d verts pulled onto the "
+				             "displaced envelope (worst excess %.3f, mean %.3f; %zu "
+				             "dominant planes)\n", matName, nClamped,
+				             worstExcess, nClamped ? movedSum/nClamped : 0.0, envDoms.size());
+		}
+
 		// Commit new arrays.
 		Vertex *nv = new Vertex[verts.size()];
 		std::memcpy(nv, verts.data(), verts.size()*sizeof(Vertex));
