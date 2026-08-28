@@ -275,6 +275,46 @@ static inline __m256 fmax_x8(const __m256 &a, const __m256 &b) { return _mm256_m
 static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) { return _mm256_min_ps(a, b); }
 #endif
 
+// ─── "any lane alive?" at 3 instructions instead of 25 ──────────────────────
+// `_mm256_movemask_ps(m) == 0` is the kernel's two hot early-outs. On x86 that
+// is one VMOVMSKPS; on arm64 there is NOTHING to lower it to, so simde builds
+// the 8-bit sign-bit word by hand and the shipping binary pays TWENTY-FIVE
+// instructions per site: ext.16b, two adrp + two constant-table ldr q, ushl.4s,
+// and.16b, ext.16b, orr.8b, then FIVE vector->GPR moves (fmov x/w, three
+// mov.s w, v[i]) and nine scalar lsr/orr to pack the bits, then cbz. The five
+// v->GPR moves are ~6-10 cycle latency EACH and they sit directly between the
+// solve's dependency chain and a branch, so this costs latency as well as
+// issue slots. Round 7's simde audit (B12) checked blendv, the unordered
+// predicates, mask chains, set1, cmp-vs-zero, andnot and faddp -- movemask was
+// never in that list.
+//
+// The predicate we actually want is "does any lane have its sign bit set",
+// which is `vminvq_s32(OR of the two halves) < 0`: the bitwise OR preserves
+// each lane position's sign bit, and a signed horizontal min is negative iff
+// some lane is negative. That is EXACTLY movemask != 0 for any input, not just
+// for the all-ones/all-zeros masks a cmp produces -- so it is bit-exact by
+// construction, control flow only, no value changes.
+//
+// COMPILE-TIME, deliberately NOT a FeatureFlag: HW_PROFILING.md:1370-1372
+// measured a flagged dual-arm at +5.9% instructions in this kernel ("one extra
+// live bool costs more than most of the wins the campaign has landed").
+// Precedent: FDS_CONE_NEONMINMAX above.
+// -DFDS_CONE_ANYLANE=0 rebuilds the exact pre-change arm (both sites back on
+// _mm256_movemask_ps) in the SAME worktree, which is the A/B this landed on.
+#ifndef FDS_CONE_ANYLANE
+#define FDS_CONE_ANYLANE 1
+#endif
+#if FDS_CONE_ANYLANE && (defined(__ARM_NEON) || defined(__aarch64__))
+static inline bool anyLane_x8(const __m256 &m) {
+    simde__m256_private p = simde__m256_to_private(m);
+    const int32x4_t o = vorrq_s32(p.m128_private[0].neon_i32,
+                                  p.m128_private[1].neon_i32);
+    return vminvq_s32(o) < 0;
+}
+#else
+static inline bool anyLane_x8(const __m256 &m) { return _mm256_movemask_ps(m) != 0; }
+#endif
+
 // OR of the mirror-footprint presence bits (ctx.tileMirrorPresence,
 // LIGHTING-tile geometry: 8-rounded X over the 12x8 grid) across every
 // lighting tile overlapping the given pixel rect. Used by the cone and
@@ -1518,7 +1558,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         if (g_coneDiag && _mm256_movemask_ps(mAlive) == 0)
                             g_dQuadDead.fetch_add(1, std::memory_order_relaxed);
 #if FDS_CONE_QUADEARLYOUT
-                        if (_mm256_movemask_ps(mAlive) == 0) {
+                        // anyLane_x8, not movemask -- see its definition.
+                        if (!anyLane_x8(mAlive)) {
                             if (g_coneDiag)
                                 g_dDead.fetch_add(1, std::memory_order_relaxed);
                             continue;
@@ -1563,9 +1604,13 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         _mm256_store_ps(zLoArr,    _mm256_and_ps(zLo, mAlive));
                         _mm256_store_ps(zHiArr,    _mm256_and_ps(zHi, mAlive));
                         _mm256_store_ps(aliveLane, _mm256_and_ps(sOne, mAlive));
-                        const int aliveBits = _mm256_movemask_ps(mAlive);
-                        spotAlive = aliveBits != 0;
+                        // The shipping build only ever asked this mask
+                        // "is anything alive"; the BITS are needed solely by
+                        // the compiled-out census popcount, so the 25-op
+                        // sign-bit pack now lives there and nowhere else.
+                        spotAlive = anyLane_x8(mAlive);
                         if (g_coneDiag) {
+                            const int aliveBits = _mm256_movemask_ps(mAlive);
                             g_dLanes.fetch_add(FDS_POPCOUNT(unsigned(aliveBits)),
                                                std::memory_order_relaxed);
                             if (!spotAlive)
