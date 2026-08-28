@@ -449,8 +449,21 @@ bool WaterProceduralEffective() {
 // 8-bit fields FaceTileBin packs its per-face (i0,i1,j0,j1) range into.
 static constexpr int kFrameTileMax = 24;
 
+// See RenderPipeline.h. Set only by fds::ReflUnderlayScope, only on the tick
+// thread, only around a scene's mirrored water-reflection Render().
+bool fds::g_reflUnderlayPass = false;
+
 void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 {
+	// --refl_skip_post (see FeatureFlags.def): read ONCE, here, so the tonemap
+	// gate far below and the dctx.ldrDiscarded promise far above can never
+	// disagree — if the tonemap is going to be skipped in this pass then the
+	// kernel's 8-bit VPage write is the only thing that will produce an
+	// underlay at all, and it must stay alive. (A disagreement between those
+	// two is exactly the class of bug render_gate.sh's rttslot row exists to
+	// catch.) Default OFF ⇒ false ⇒ every expression below is unchanged.
+	const bool reflSkipPost = fds::g_reflUnderlayPass && fds::FeatureFlags::refl_skip_post();
+
 	// Tile counts chosen so tile sizes are multiples of 8 (Mekalele's
 	// SIMD tile). At 1920×1080: 6×5 → 320×216, both 8-aligned. Otherwise
 	// adjacent clipper tile workers race on the 16-byte aligned blendv
@@ -718,7 +731,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// return, and `deferred && hdr() && !g_hdrDeferTonemap`.
 		dctx.ldrDiscarded = !skipVolumetric && deferred
 		    && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap
-		    && !(fds::FeatureFlags::ssao() && fds::FeatureFlags::ssao_debug());
+		    && !(fds::FeatureFlags::ssao() && fds::FeatureFlags::ssao_debug())
+		    && !reflSkipPost;
 		{ TailProf::ScopeTimer _tp("DeferredLighting-call", 1); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
@@ -727,7 +741,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// water-reflection underlay passes (cost + the static AO scratch buffer
 		// isn't re-entrant). No-op unless --ssao.
 		fds::Hdr_DebugScan(skipVolumetric ? "ssao-pre(SKIP)" : "ssao-pre");
-		if (!skipVolumetric)
+		if (!skipVolumetric
+		    && !(fds::g_reflUnderlayPass && fds::FeatureFlags::refl_skip_ssao()))
 			{ TailProf::ScopeTimer _tp("ssao", 1); Render_SSAO(); }
 		fds::Hdr_DebugScan(skipVolumetric ? "ssao-post(SKIP)" : "ssao-post");
 
@@ -1382,8 +1397,10 @@ xpar_done: ;
 			TailProf::ScopeTimer _tp("unified-vol", 1);
 			Render_DeferredVolumetric(dctx);   // NB: not yet HDR-redirected (no scene uses it)
 		} else {
+			if (!(fds::g_reflUnderlayPass && fds::FeatureFlags::refl_skip_cones())) {
 			{ TailProf::ScopeTimer _tp("cones-call", 1); Render_VolumetricCones(dctx); }
 			{ TailProf::ScopeTimer _tp("halos", 1); Render_OmniHalos(dctx); } fds::Hdr_DebugScan("cones+halos");
+			}
 		}
 
 		// Screen-space rain LAST among the view-aligned scene passes (streaks
@@ -1392,7 +1409,8 @@ xpar_done: ;
 		// screen-space effect re-run from the mirror camera would rain
 		// upward in the water. Rain is scene radiance → in HDR it accumulates
 		// into g_hdrBuf (gated g_hdrActive) and is captured by the tonemap.
-		{ TailProf::ScopeTimer _tp("rain", 1); Render_ScreenSpaceRain(); }
+		if (!(fds::g_reflUnderlayPass && fds::FeatureFlags::refl_skip_rain()))
+			{ TailProf::ScopeTimer _tp("rain", 1); Render_ScreenSpaceRain(); }
 
 		// HDR (Phase 2.x): tonemap now that ALL scene-radiance overlays (cones,
 		// halos, rain) have accumulated into g_hdrBuf. SKIPPED when
@@ -1407,7 +1425,8 @@ xpar_done: ;
 		// freshly-painted skybox with last frame's image (grey wash + cityscape
 		// smear under camera motion). Snapshots hid it: on a one-frame render
 		// g_hdrActive starts false so the sky-cube pass's tonemap no-ops.
-		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) {
+		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap
+		    && !reflSkipPost) {
 		{ TailProf::ScopeTimer _tp("bloom-chain", 1);
 			fds::Hdr_DebugScan("pre-dof"); fds::Render_DoFPass(); fds::Hdr_DebugScan("post-dof");
 			fds::Render_HdrBrightPass();    // one shared bright-pass for anamorphic+bloom+lens-ghost (no-op unless one is on)
@@ -1428,7 +1447,7 @@ xpar_done: ;
 		// the FINAL displayed image, so they run AFTER the tonemap (LDR, like
 		// UI). The deferred fountain tonemaps in its tick, so it runs lens
 		// drops there instead; skip here when the tonemap is deferred.
-		if (!(fds::FeatureFlags::hdr() && fds::g_hdrDeferTonemap))
+		if (!(fds::FeatureFlags::hdr() && fds::g_hdrDeferTonemap) && !reflSkipPost)
 			{ TailProf::ScopeTimer _tp("lensdrops", 1); Render_LensDrops(); }
 	}
 	VolProf_Tick();

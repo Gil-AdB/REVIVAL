@@ -323,3 +323,8 @@ Runtime/SCENES/.backups/
 .claude/
 build-*/
 Runtime/*.ppm
+
+# Round-8/9 gate + battery OUTPUT (PPMs, logs). Scratchpad SCRIPTS stay tracked,
+# as they already were; their multi-hundred-MB output must not be.
+scratchpad/gate_*/
+scratchpad/*.log

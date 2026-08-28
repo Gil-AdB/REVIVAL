@@ -33,8 +33,8 @@ d="$OUT/fount"; mkdir -p "$d"
 chk fountain "8db68ccb59416e9a44037e9f387b7bd9 " "$(h $d)"
 d="$OUT/chase"; mkdir -p "$d"
 "$BIN" --snapshot=chase@t=100,400,800,1200,1600 --out="$d" --deferred >/dev/null 2>&1
-chk "chase default x5" "f16bedd0a76092dd711b528106b57f28 fcc9d5610778b6315fd2bc551a77dcd6 397b878dc36b722ec9d7ed4b7085b016 3539492d32571da5017b1d437a1365bd 0622d56e943a59ed899f1c7eda282c75 " "$(h $d)"
+chk "chase default x5" "b67b47f0de8b41365f96fff68e50d367 5bc199d4949a6212b4b7cb1004ab0e3a d1284b5a727bb6c5924b6ba3012f89ae 9c0f7c2fac7b8a1408f62110bb70d12f 9cdf5603f231392e64000ed2b850877a " "$(h $d)"
 d="$OUT/chcin"; mkdir -p "$d"
 "$BIN" --cinematic --deferred --snapshot=chase@t=800,1600 --out="$d" >/dev/null 2>&1
-chk "chase cinematic x2" "b61b33970977d31b0d8ff50788365d49 4d70fdbdfb2596f1ec4ba30e278eee82 " "$(h $d)"
+chk "chase cinematic x2" "d50a32d33f23a6de505257b663dbdc62 92ffa25d675a716c6809a7db133c3961 " "$(h $d)"
 printf "\n== %d PASS / %d FAIL ==\n" $PASS $FAIL

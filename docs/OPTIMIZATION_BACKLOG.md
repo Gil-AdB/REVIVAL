@@ -86,6 +86,48 @@ pinned scenes. The flag ships OFF; what actually got corrected is the SOURCE
 COMMENT, which asserted "slightly over-estimates … no correctness impact" and
 now says the opposite with the reproduction recipe.
 **Gil-Ad's call whether 5/255 of restored light is worth a re-pin.**
+## 2026-08-29 — chase round: the tile grid lands, the reflection pass is priced, and two things turn up that are not perf
+
+Full account: `docs/PERF_STATE.md` §00m. Branch `rev-chaseperf`, merged tip.
+
+**LANDED.** `frame_tile_y` 5→20 in chase only (`createChaseScene`, restored in
+`cleanup()`): `gbuffer` −3.11 ms (−36 %), tick −3.17 ms; the revert arm measures
++3.51 ms (+6.8 %) at t=800 on the merged tip. Moves pixels (23 866 px / 1.15 % at
+t=800 on his arm, 199 px above 16/255 in 2 M). **Revert is one flag,
+`--frame_tile_y=5`, and it is exact byte-for-byte.**
+
+**RETURNED AS A MENU, NOT MERGED** — five `--refl_skip_*` flags, all default 0,
+byte-null at their defaults. The reflection pass is **17.38 ms of a 49.96 ms
+tick** at t=800 (§00l's estimate of ≈11.7 ms was 56 % LOW). Best offer on the
+menu is `--refl_skip_cones`: −6.41 ms (12.8 % of tick) for a max change of
+**6/255**. His call, uncommissioned.
+
+### OPEN ITEMS THIS ROUND CREATED
+
+1. **`water-glints` is chase's next target — 7.999 ms, 16.0 % of the t=800 tick**,
+   `DEMO/ProceduralWater.cpp:785,884`, and it sits OUTSIDE `renderFrame` (it runs
+   in the scene's own tick, so no PassTag row covers it). It swings **20×** across
+   poses — 7.999 ms at t=800 vs 0.397 ms at t=1105 — which points at work scaling
+   with visible glint area. Never examined. After the reflection pass it is the
+   largest single row in the scene.
+
+2. **CORRECTNESS, small: the reflection pass's additive cone radiance leaks into
+   the main view.** At chase t=800, `--refl_skip_cones` moves 224 466 pixels in
+   the SKY (71.6 % of all its moved pixels), above the horizon where no water is
+   drawn, at max 4/255. The signed delta is **positive everywhere and negative
+   nowhere** over those pixels — removed additive light, not a reordered sum. The
+   control is `--refl_skip_ssao`, which moves **0 px** above the horizon, so
+   `ReflUnderlayScope` is sound and the leak is specific to the additive
+   cone/halo composite into the shared HDR buffer. Not fixed here (amplitude is
+   ≤4/255 and the cone files were being worked by another branch this round).
+
+3. **Latent, guarded, currently harmless: screen-space rain would run in the
+   reflection pass.** `RENDER.CPP:1406` documents that rain must never run there
+   ("would rain upward in the water") and implements the guard for
+   `skipVolumetric` — which chase does not pass. Chase therefore runs it. Measured
+   0.0000 ms and byte-identical at both poses because chase has no rain armed, so
+   it costs nothing today; it becomes a visible bug the moment rain is armed in a
+   two-pass scene. `--refl_skip_rain` is the guard.
 
 ## 2026-08-28 — **THE CONE PASS, ROUND 8**: city's `cones-call` **15.32 → 13.38 ms BIT-EXACT** and **→ 3.09 ms (−79.8 %) with the two look flags on**. Two landings, one refutation, and two bound defects found in code nobody was auditing. DONE / his call
 
@@ -355,6 +397,89 @@ pick, a live-water weight, a tilt + re-projection, and one or two
 this (reflect dir, Fresnel, mip) and arms on 33–37 % of groups; the *fetch* is
 still eight scalar bilinear taps. That is the biggest single block left, and it
 is a different shape from anything the campaign has attacked.
+
+## 2026-08-29 — **`Render_SSAO` DECOMPOSED, and the split's target taken: the march's per-lane slice setup goes 4-wide BIT-EXACT — `ssao` −9.3 % (greets) / −16.4 % (chase), march −16.5 % / −22.0 %.** DONE (S1; two candidates refuted by census before coding)
+
+`Render_SSAO` was **11.13 ms at chase t=1105 = 26.3 % of `renderFrame`** and
+16.6–18.1 % of greets'. `PERF_STATE.md` §00l called the decomposition "step one"
+and priced the interior by arithmetic on two `--ssao_downscale` points. Full
+account, tables and the reusable contraction rules: **`docs/PERF_STATE.md`
+§00n**. Branch `rev-ssao`.
+
+### Step zero — the scopes, and the inference CONFIRMED
+
+The pass dispatched with `dispatchIndexed(..., nullptr, ...)` and joined on a
+bare `tileDone.acquire()` loop, so it never used the `Stamp`/`drain` pairing and
+had no `effPar` at all. Five wave scopes now exist. **The stamp must be taken
+before the dispatch** — a first attempt with the drain inside the lambda printed
+`0.00 calls/f`.
+
+| scope | measured | inferred | effPar | Gi/f | IPC |
+|---|--:|--:|--:|--:|--:|
+| march | **5.712 ms** | ≈5.8 | 11.0 | 0.621 | **3.26** |
+| apply | **1.756 ms** | ≈1.9 | 10.6 | 0.310 | **5.30** |
+| blur | **0.272 ms** | ≈0.33 | 9.0 | 0.032 | 3.79 |
+
+**The `--ssao_downscale`-slope inference was right** (1.5 % / 7.6 % / 17.6 %),
+and the scopes cover 99.3 % of the row — no hidden block. The new information is
+`effPar` (9–11 of 12, no serial bottleneck) and **IPC: the apply is at 5.30, near
+the core ceiling; the march is at 3.26.** The march is 64.5 % of the instructions
+and 73.3 % of the time — it is the one that stalls, and the one to attack.
+
+### Refuted BEFORE coding — add both to the do-not-repropose list
+
+* **The cone round's arm64 `_mm256_movemask_ps` defect does NOT exist in SSAO.**
+  Zero movemask sites in `DeferredSSAO.cpp`, and the 32-sector bitmask's eight
+  scalar `__builtin_popcount` calls are **already vectorised by clang** into
+  2× `cnt.16b`. Checked in the disassembly before a line was written.
+* **Sky/background early-out is worth nothing in the arm that matters**
+  (`-DFDS_SSAO_CENSUS`): ALL-SKY 8-cell groups **0.00 % in greets**, 5.08 % in
+  chase; valid lanes 99.96 % / 94.40 %; scalar-tail cells **0**.
+
+### What landed — S1
+
+The per-lane slice setup, priced by the new `-DFDS_SSAO_DIAG` ladder at **22.5 %
+of the march** (atan2 alone 7.6 %) = **135 instructions per (lane × slice), 1.04 M
+a frame**, now runs 4 lanes at a time in **plain NEON** (not simde, so
+`fast_rsqrt`'s `vrsqrte`+1-Newton is exact). Predicted −0.09 to −0.105 Gi/f;
+**measured −0.092.** greets march −16.5 % ms / −14.8 % Gi, `ssao` −9.3 % / −9.6 %,
+`renderFrame` −1.65 % Gi. chase march −22.0 % / −18.6 %, `ssao` **−16.4 %**.
+`ssao-apply` and `ssao-blur` are unchanged to the digit — the control.
+
+### THE DURABLE HALF: three contraction rules, established by reading the assembly
+
+The first build failed one pin, so `-DFDS_SSAO_VERIFY` ran the scalar behind the
+vector counting mismatches **per term**. Each fault was then settled by compiling
+the scalar expression standalone and reading its assembly — not by guessing:
+
+1. **`a*b - c*d` contracts to ONE `fnmsub`**, not two muls and a sub.
+2. **For `A + B + C` all products, clang chains from the SECOND term:**
+   `fma(C, fma(A, mul(B)))`. Starting at A moved **26 % of lanes**.
+3. **A trailing `x * poly` that feeds an add/sub is never materialised alone** —
+   `halfPi - a*poly` is one `fmsub`, `a*poly + (±π)` is one `fmadd`. Rounding it
+   separately cost **32 196 lanes**.
+
+Final: **0 mismatches in 1 036 800 lanes at two poses, on every term.** Anyone
+vectorising a scalar float expression in this tree should start from these three
+rules and the verify harness, not from the intrinsics.
+
+### Not taken
+
+`atan_approx_x8` already exists and uses `_mm256_rcp_ps` where the scalar
+divides. It is faster and it **moves AO values** — a look call in the same family
+as the 8-wide GTAO rsqrt item already in Gil-Ad's stack (2026-08-17a), not a perf
+lever. Going the other way (removing precision) is equally his call.
+
+### Next
+
+The march is now 4.827 ms of a 7.280 ms greets row (66 %). What remains inside it
+is the sample loop: the scalar depth gather (8 loads + bounds + convert per
+sample batch, 1.04 M batches/frame), the reconstruct, two `_mm256_rsqrt_ps`, two
+`gtaoAcos_x8` and the bitmask build. The gather's address math and its
+`u16 → float` convert are vectorisable the same way this round's setup was; the
+two `sqrt`s inside `gtaoAcos_x8` are **not** byte-safe to replace (prior round:
+flips ~0.3 % of samples). The apply at IPC 5.30 is close to the ceiling and
+should be left alone.
 
 ## 2026-08-28b — **ROUND 2 ON THE SAME KERNEL: the pack loop's env fetch goes 8-wide and city's `lighting-w1` reaches −27.5 % against the pre-campaign parent.** DONE (C9, C10; the flag collapse is a REFUTATION)
 

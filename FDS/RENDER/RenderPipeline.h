@@ -55,6 +55,27 @@ private:
     int waterMatID_ = -1;
 };
 
+// ── "this renderFrame IS the mirrored water-reflection underlay" ───────────
+//
+// Independent of ReflMirror (which is gated on --refl_correct and is about the
+// mirror MATH). This says only WHICH ROLE the pass plays, so the reflection
+// pass can be given cheaper work than the main view without the wholesale
+// `skipVolumetric=true` city uses — see the --refl_skip_* flags in
+// FeatureFlags.def and PERF_STATE §00m.
+//
+// Read only by renderFrame, on the tick thread, outside every per-pixel loop.
+// Every --refl_skip_* flag defaults OFF, so with none of them passed this
+// global is READ and never acted on: the shipping frame is byte-identical.
+extern bool g_reflUnderlayPass;
+
+struct ReflUnderlayScope {
+    bool prev;
+    explicit ReflUnderlayScope(bool on) : prev(g_reflUnderlayPass) { g_reflUnderlayPass = on; }
+    ~ReflUnderlayScope() { g_reflUnderlayPass = prev; }
+    ReflUnderlayScope(const ReflUnderlayScope &)            = delete;
+    ReflUnderlayScope &operator=(const ReflUnderlayScope &) = delete;
+};
+
 } // namespace fds
 
 #endif

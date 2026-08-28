@@ -3681,7 +3681,7 @@ struct CityScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		clearFrame();
+		{ TailProf::ScopeTimer _tp("Tick-Clear", 3); clearFrame(); }
 
 		prof.switchTo(PROF_ANIM);
 
@@ -3751,7 +3751,7 @@ struct CityScene : SceneDriver {
 		// mirrored-sky pixels pass-1 leaves uncovered are black+skybox —
 		// never stale content.)
 		prof.switchTo(PROF_SKY);
-		RenderSkyCube(SkySc, View, false);
+		{ TailProf::ScopeTimer _tp("Tick-SkyCube", 3); RenderSkyCube(SkySc, View, false); }
 		prof.switchTo(PROF_ANIM);
 
 		// Water UV scroll advances by dTime, which stays NONZERO during
@@ -3819,14 +3819,17 @@ struct CityScene : SceneDriver {
 		}
 
 
-		Animate_Objects(CitySc, View);
-		Update_Vehicle_Headlights();
+		{
+			TailProf::ScopeTimer _tp("Tick-Anim", 3);
+			Animate_Objects(CitySc, View);
+			Update_Vehicle_Headlights();
+		}
 
 		((TriMesh*)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
 		prof.switchTo(PROF_LGHT);
 
-		Lighting(CitySc);
+		{ TailProf::ScopeTimer _tp("Tick-Light", 3); Lighting(CitySc); }
 
 		if (fds::FeatureFlags::city_rain()) {
 			// Bill rain to ANIM (it's particle animation, and ANIM is
@@ -3838,15 +3841,18 @@ struct CityScene : SceneDriver {
 		prof.switchTo(PROF_XFRM);
 
 		// render reflection of all objects except water
-		cityMirrorGlassForward();   // city_env_pixel: forward glass in the mirror pass
-		Reflected_Transform(CitySc);
+		{
+			TailProf::ScopeTimer _tp("Tick-ReflXfrm", 3);
+			cityMirrorGlassForward();   // city_env_pixel: forward glass in the mirror pass
+			Reflected_Transform(CitySc);
+		}
 
 		prof.leave(PROF_XFRM);
 
 		if (CAll) {
 			prof.enter(PROF_SORT);
 
-			Radix_Sort(FList, SList, CAll);
+			{ TailProf::ScopeTimer _tp("Tick-Radix", 3); Radix_Sort(FList, SList, CAll); }
 
 			prof.switchTo(PROF_BAKE);
 
@@ -3854,12 +3860,15 @@ struct CityScene : SceneDriver {
 			// lights (currently the test streetlights when
 			// FDS_CITY_TEST_SPOTS=1). No-op when no spot has the flag.
 			// Must run before Render() since it swaps view globals.
+			{
+			TailProf::ScopeTimer _tp("Tick-ShadowBake", 3);
 			Render_DeferredShadowMaps(CitySc, ShadowBakeMode::DynamicOmnisPerFrame);
 			// Re-bake just the moving meshes into the dynamic shadow
 			// buffer of each STATIC omni (no-op when --shadow-dynamic
 			// is off). Lighting kernel samples min(static, dynamic).
 			if (fds::FeatureFlags::shadow_dynamic()) {
 				Render_DeferredShadowMaps(CitySc, ShadowBakeMode::DynamicMeshesPerFrame);
+			}
 			}
 		prof.switchTo(PROF_RNDR);
 			// skipVolumetric=true — the pass-1 output is consumed by the
