@@ -61,6 +61,41 @@
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/Hdr.h"
 #include "Threads.h"
+#include "RENDER/TailProf.h"   // per-wave [DPROF] scopes — see the wave stamps below
+
+// ─── GTAO march census (-DFDS_SSAO_CENSUS=ON, runtime --omni_census) ────────
+// The march is 73-74 %% of the `ssao` row at BOTH of his SSAO arms (measured by
+// the wave scopes added 2026-08-28c; before them the split was only inferred).
+// [0] gtaoRow8 groups entered   [1] ... with ZERO valid lanes (all sky)
+// [2] valid lanes               [3] lanes total
+// [4] (group x slice x dir x step) sample batches   [5] ... with no live sample
+// [6] scalar gtaoCell tail calls
+#ifndef FDS_SSAO_CENSUS
+#define FDS_SSAO_CENSUS 0
+#endif
+static constexpr int SSC_N = 8;
+#if FDS_SSAO_CENSUS
+static std::atomic<unsigned long long> g_ssCen[SSC_N];
+__attribute__((noinline)) static void SsaoCensus_Report()
+{
+	unsigned long long c[SSC_N];
+	for (int i = 0; i < SSC_N; ++i) c[i] = g_ssCen[i].load(std::memory_order_relaxed);
+	if (c[0] == 0) return;
+	const double G = double(c[0]), Ln = double(c[3] ? c[3] : 1), B = double(c[4] ? c[4] : 1);
+	std::fprintf(stderr,
+	    "[SSAO-CENSUS] gtaoRow8 groups %.0f  ALL-SKY groups %.0f (%.2f%%)  "
+	    "valid lanes %.0f/%.0f (%.2f%%)\n"
+	    "[SSAO-CENSUS]   sample batches %.0f  no-live-sample %.0f (%.2f%%)  "
+	    "scalar tail cells %.0f\n",
+	    G, double(c[1]), 100.0*double(c[1])/G,
+	    double(c[2]), double(c[3]), 100.0*double(c[2])/Ln,
+	    double(c[4]), double(c[5]), 100.0*double(c[5])/B, double(c[6]));
+	for (int i = 0; i < SSC_N; ++i) g_ssCen[i].store(0, std::memory_order_relaxed);
+}
+#define SSC(idx, v) g_ssCen[(idx)].fetch_add((unsigned long long)(v), std::memory_order_relaxed)
+#else
+#define SSC(idx, v) ((void)0)
+#endif
 
 // Shared tile-drain semaphore (defined in DeferredFastFog.cpp). Reused here;
 // SSAO and fog never run concurrently, so sharing the counter is safe.
@@ -369,7 +404,18 @@ void Render_SSAO() {
 		const bool noSimd = std::getenv("FDS_SSAO_NOSIMD") != nullptr;   // A/B validation escape
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
+		// [DPROF] wave scope (2026-08-28c) — the GTAO horizon/bitmask march on the LOW-RES grid.
+		// Render_SSAO was ONE scope with no effPar at all: it dispatches with
+		// dispatchIndexed(..., nullptr, ...) and then joins with a BARE
+		// tileDone.acquire() loop, so it never used the Stamp/drain pairing and
+		// its interior split had only ever been INFERRED from the
+		// --ssao_downscale slope. The stamp MUST be taken before the dispatch
+		// (TailProf.h's drain contract) or the wave is measured from the join,
+		// which reads near zero. Byte-null: every TailProf entry point is inert
+		// unless --deferred_prof.
+		const TailProf::Stamp _scmarch("ssao-march");
 		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
 			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
@@ -489,6 +535,10 @@ void Render_SSAO() {
 							aRi[k]=ri;
 							valid[k]=true;
 						}
+#if FDS_SSAO_CENSUS
+						{ int nv=0; for (int k=0;k<8;++k) if (valid[k]) ++nv;
+						  SSC(0,1); SSC(2,nv); SSC(3,8); if (!nv) SSC(1,1); }
+#endif
 						const __m256 PxV=_mm256_load_ps(aPx),PyV=_mm256_load_ps(aPy),PzV=_mm256_load_ps(aPz);
 						const __m256 VxV=_mm256_load_ps(aVx),VyV=_mm256_load_ps(aVy),VzV=_mm256_load_ps(aVz);
 						const __m256 pxiV=_mm256_load_ps(aPxi), pyV=_mm256_set1_ps(float(py));
@@ -545,6 +595,7 @@ void Render_SSAO() {
 										if (!z2){ szA[k]=0.0f; continue; }
 										szA[k]=float(0xFF80-z2)*invZScale; any=true;
 									}
+									SSC(4,1); if (!any) SSC(5,1);
 									if (!any) continue;
 									const __m256 szV=_mm256_load_ps(szA);
 									// gather-valid = sz>0 (sky/offscreen lanes set sz=0); proper all-ones mask
@@ -613,18 +664,34 @@ void Render_SSAO() {
 							for (; lx + 8 <= lx2; lx += 8) gtaoRow8(lx, ly);
 							if (lx < lx2 && lx2 - lx1 >= 8) { gtaoRow8(lx2 - 8, ly); lx = lx2; }
 						}
-						for (; lx < lx2; ++lx) gtaoCell(lx, ly);
+						for (; lx < lx2; ++lx) { SSC(6,1); gtaoCell(lx, ly); }
 					}
 					renderns::tileDone.release();
 				}
+			TailProf::addBusy(_tp);
 		});
-		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+		TailProf::drain(renderns::tileDone, numTilesX * numTilesY,
+		                "ssao-march", 2, _scmarch);
+#if FDS_SSAO_CENSUS
+		if (fds::FeatureFlags::omni_census()) SsaoCensus_Report();
+#endif
 	} else
 	{
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
 		const float invN = 1.0f / float(nSamp);
+		// [DPROF] wave scope (2026-08-28c) — the hemisphere point-sampler (dead under --ssao-gtao).
+		// Render_SSAO was ONE scope with no effPar at all: it dispatches with
+		// dispatchIndexed(..., nullptr, ...) and then joins with a BARE
+		// tileDone.acquire() loop, so it never used the Stamp/drain pairing and
+		// its interior split had only ever been INFERRED from the
+		// --ssao_downscale slope. The stamp MUST be taken before the dispatch
+		// (TailProf.h's drain contract) or the wave is measured from the join,
+		// which reads near zero. Byte-null: every TailProf entry point is inert
+		// unless --deferred_prof.
+		const TailProf::Stamp _schemi("ssao-hemi");
 		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
 			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
@@ -771,8 +838,10 @@ void Render_SSAO() {
 					}
 					renderns::tileDone.release();
 				}
+			TailProf::addBusy(_tp);
 		});
-		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+		TailProf::drain(renderns::tileDone, numTilesX * numTilesY,
+		                "ssao-hemi", 2, _schemi);
 	}
 	const auto tP1 = std::chrono::steady_clock::now();
 
@@ -791,7 +860,18 @@ void Render_SSAO() {
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
 		const float depthSig = std::max(radius, 1.0f);
 		const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);  // divide-free depth falloff
+		// [DPROF] wave scope (2026-08-28c) — the bilateral denoise on the low-res grid.
+		// Render_SSAO was ONE scope with no effPar at all: it dispatches with
+		// dispatchIndexed(..., nullptr, ...) and then joins with a BARE
+		// tileDone.acquire() loop, so it never used the Stamp/drain pairing and
+		// its interior split had only ever been INFERRED from the
+		// --ssao_downscale slope. The stamp MUST be taken before the dispatch
+		// (TailProf.h's drain contract) or the wave is measured from the join,
+		// which reads near zero. Byte-null: every TailProf entry point is inert
+		// unless --deferred_prof.
+		const TailProf::Stamp _scblur("ssao-blur");
 		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
 			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
@@ -867,8 +947,10 @@ void Render_SSAO() {
 					}
 					renderns::tileDone.release();
 				}
+			TailProf::addBusy(_tp);
 		});
-		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+		TailProf::drain(renderns::tileDone, numTilesX * numTilesY,
+		                "ssao-blur", 2, _scblur);
 		aoSrc = aoBlur;
 	}
 	const auto tP2 = std::chrono::steady_clock::now();
@@ -913,7 +995,18 @@ void Render_SSAO() {
 		const float *aoIn = aoSrc;
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
+		// [DPROF] wave scope (2026-08-28c) — the temporal history blend (dead unless --ssao_temporal).
+		// Render_SSAO was ONE scope with no effPar at all: it dispatches with
+		// dispatchIndexed(..., nullptr, ...) and then joins with a BARE
+		// tileDone.acquire() loop, so it never used the Stamp/drain pairing and
+		// its interior split had only ever been INFERRED from the
+		// --ssao_downscale slope. The stamp MUST be taken before the dispatch
+		// (TailProf.h's drain contract) or the wave is measured from the join,
+		// which reads near zero. Byte-null: every TailProf entry point is inert
+		// unless --deferred_prof.
+		const TailProf::Stamp _sctemporal("ssao-temporal");
 		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
 			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
@@ -969,8 +1062,10 @@ void Render_SSAO() {
 					}
 					renderns::tileDone.release();
 				}
+			TailProf::addBusy(_tp);
 		});
-		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+		TailProf::drain(renderns::tileDone, numTilesX * numTilesY,
+		                "ssao-temporal", 2, _sctemporal);
 		g_histIdx = wrIdx;
 		g_histValid = true;
 		if (View) {
@@ -989,7 +1084,18 @@ void Render_SSAO() {
 		const float invDown  = 1.0f / float(down);
 		const float depthSig = std::max(radius, 1.0f);
 		const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);  // divide-free depth falloff
+		// [DPROF] wave scope (2026-08-28c) — the FULL-RES depth-aware upsample + apply.
+		// Render_SSAO was ONE scope with no effPar at all: it dispatches with
+		// dispatchIndexed(..., nullptr, ...) and then joins with a BARE
+		// tileDone.acquire() loop, so it never used the Stamp/drain pairing and
+		// its interior split had only ever been INFERRED from the
+		// --ssao_downscale slope. The stamp MUST be taken before the dispatch
+		// (TailProf.h's drain contract) or the wave is measured from the join,
+		// which reads near zero. Byte-null: every TailProf entry point is inert
+		// unless --deferred_prof.
+		const TailProf::Stamp _scapply("ssao-apply");
 		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const long long _tp = TailProf::enabled() ? TailProf::nowNs() : 0;
 			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int y1 = tsy * tj, y2 = std::min(y1 + tsy, H);
 			const int x1 = tsx * ti, x2 = std::min(x1 + tsx, W);
@@ -1099,8 +1205,10 @@ void Render_SSAO() {
 					}
 					renderns::tileDone.release();
 				}
+			TailProf::addBusy(_tp);
 		});
-		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+		TailProf::drain(renderns::tileDone, numTilesX * numTilesY,
+		                "ssao-apply", 2, _scapply);
 	}
 
 	if (dumpAo) WriteAoDump(g_aoDumpPlane.data(), g_aoDumpZ.data(),
