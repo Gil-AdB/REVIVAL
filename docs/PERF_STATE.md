@@ -150,11 +150,224 @@ the same family as the 8-wide GTAO rsqrt item already in Gil-Ad's stack
 
 ---
 
-## 00m. `lighting-w1` IN CITY, ROUND 2 (2026-08-28b): the pack loop's env fetch goes 8-wide — **−27.5 % instructions and −6.4 % of `renderFrame` cumulative** against the pre-campaign parent
+## 00m. CHASE'S TILE GRID LANDS, AND ITS REFLECTION PASS IS MEASURED INSTEAD OF ASSUMED — 2026-08-28/29: the reflection is **17.38 ms of a 49.96 ms tick** (18.26 of 51.54 pre-merge), not the ≈11.7 ms §00l bounded it at, and the cheapest exclusion on the menu costs **6 grey levels**
 
-Continuation of §00k; same kernel, same arm, same worktree. (Renumbered to
-§00m 2026-08-29 — it was written as §00l on the same day the ranked cost map
-landed with that letter, and two sections shared it for a day.) Full account:
+Branch `rev-chaseperf`. Two items from §00l: row 2 (the raster grid) LANDS, row 1
+(the double stack) is MEASURED and returned as a menu, unmerged.
+
+### ITEM A — `frame_tile_y` 5→20 in chase only. LANDED, gated, merged.
+
+§00d found the shape a fortnight ago and §00l re-measured it on the current tip;
+nobody had executed it. `FF::setDefault(frame_tile_y, 20)` in `createChaseScene`,
+restored in `cleanup()`. **The restore is not decoration**: `setDefault` writes a
+process-wide global and does NOT mark the flag set, so in a full run the grid
+would have leaked into every scene after chase — and greets is measured to LOSE
+from exactly this grid (+0.48 ms `renderFrame`, +0.77 ms `gbuffer`, 16 % of its
+pixels moved, §00d). Probed: chase enters at 5, leaves at 5; an explicit
+`--frame_tile_y=12` survives untouched.
+
+The win, min-of-11 on the tip §00l measured (`gbuffer` had effPar **3.1 of 12** —
+nine of twelve workers idle, the only structural parallelism failure in the
+ranked map): `gbuffer` **−3.11 ms (−36 %)**, `renderFrame` −3.27 ms (−7.6 %),
+tick −3.17 ms (−5.7 %), against a base floor of +0.01 %. Re-confirmed on the
+merged tip by the `tile5` revert arm: **+3.51 ms tick (+6.8 %)** at t=800.
+
+**NOT byte-null, and the honest number depends on the arm.** On the pin recipe
+(`--deferred` alone) the move is 57 / 563 / 327 / 1 738 / 59 px of 2 073 600 at
+t=100/400/800/1200/1600 — but **that recipe is not his arm and understates the
+change by two orders of magnitude**. Under `--hdr --hdr-linear --texture-filter=2
+--ssao --ssao-gtao` the same flip moves 23 866 px (1.15 %) at t=800 and 87 121 px
+(4.20 %) at t=1105, because the per-tile mip hysteresis sees a different tile
+partition. Amplitude stays tiny (mean |Δ| 0.7 / 1.6; **199 px above 16/255 in
+2 M**) and the amplifier is MEASURED to be `--texture-filter=2` alone — not
+`--ssao`, not `--hdr`. Images `docs/img/tilegrid/`.
+
+**THE REVERT IS ONE FLAG: `--frame_tile_y=5`**, and it is exact — the same child
+binary under it reproduces all seven previous chase hashes byte-identically, on
+the merged tip. Both chase rows re-pinned in `docs/SESSION_STATE.md`.
+
+### ITEM B — the reflection pass, priced per pass
+
+Branch `rev-chaseperf` off `fog-wt`, re-gated on the merged tip `8555dfda`
+(cone round 8 `b288f08d` + city lighting round 2 `9fa680be` both in). Arm is
+**his**: `--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao`,
+1920×1080, `--bench=scene ... iters=20`, `--profiler=0 --deferred_prof=1`,
+interleaved arms, order rotated per round, round 0 discarded, **min of 15**.
+Every arm is a SAME-BINARY FLAG FLIP, so no between-binary floor is paid.
+
+### The instrument (§00m step zero, byte-null)
+
+`TailProf::PassTag` appends a suffix to every phase name recorded while it is in
+scope, so the registry grows `ssao@refl` and `ssao@main` where it used to carry
+one summed `ssao` row at `calls/f = 2`. `thread_local`, like `passMainFlag`, so a
+pool worker's offscreen shard bake can never inherit the tick thread's tag. Chase
+wraps its reflection `Render()` in `fds::ReflUnderlayScope`. **This is why the
+item could finally be priced: §00l had to ASSUME the two-call rows halve, and
+said so. They do not halve — see the t=1105 column.**
+
+### THE LEDGER — what each pass actually costs (min-of-15, MERGED TIP `8555dfda`)
+
+| row | t=800 @refl | t=800 @main | refl % | t=1105 @refl | t=1105 @main | refl % |
+|---|--:|--:|--:|--:|--:|--:|
+| **renderFrame** | **17.379** | **20.040** | **46.4** | **14.534** | **26.790** | **35.2** |
+| cones-call | 5.874 | 5.756 | 50.5 | 3.714 | 0.624 | **85.6** |
+| ssao | 3.464 | 3.897 | 47.1 | 3.763 | 7.429 | 33.6 |
+| gbuffer | 2.776 | 2.627 | 51.4 | 1.525 | 3.364 | 31.2 |
+| DeferredLighting-call | 2.225 | 2.238 | 49.9 | 2.880 | 11.538 | 20.0 |
+| lighting-w1 | 1.729 | 1.720 | 50.1 | 2.429 | 11.077 | 18.0 |
+| tonemap-post | 0.668 | 0.685 | 49.4 | 0.666 | 0.682 | 49.4 |
+| hdr-activate | 0.486 | 0.501 | 49.2 | 0.445 | 0.163 | 73.2 |
+| fog-legacy | 0.454 | 0.452 | 50.1 | 0.442 | 0.480 | 47.9 |
+| TBR-render | 0.039 | 2.504 | 1.5 | 0.026 | 0.847 | 3.0 |
+| **rain** | **0.000** | **0.000** | — | **0.000** | **0.000** | — |
+| | tick **49.961** | | | tick **45.695** | | |
+
+Pre-merge (parent, before cone round 8 `b288f08d`) the same table read
+`renderFrame@refl` **18.259** / `@main` 21.136 on a **51.537 ms** tick at t=800.
+Cone round 8 took `cones-call` down **−13.8 % @refl and −13.6 % @main** — the
+same cut on both passes, which is what a bit-exact cone change should do — and
+`ssao` moved −0.3 % / +1.3 %, inside the floor. Both batteries agree; the
+merged-tip numbers are the ones quoted everywhere below.
+
+**The 50/50 assumption is right at t=800 and badly wrong at t=1105.** At t=800
+nearly every row splits within a point of half — the reflection genuinely costs
+what the main view costs. At t=1105 the split runs from 18.0 % (`lighting-w1`)
+to **85.6 % (`cones-call`: 3.714 ms in the reflection against 0.624 ms in the
+main view)**. The mirror camera sees the lighthouse beams almost side-on where
+the chase camera barely sees them, so the pose that looks cheap in the main view
+is the pose whose *reflection* is carrying the cone pass.
+
+**§00l's bound was LOW, not high.** It priced the item at ≈11.7 ms (t=800) /
+≈9.0 ms (t=1105) by halving the summed rows. Measured on the parent it was
+**18.26 / 14.81 ms** — +56 % and +65 % over the estimate. It is still the largest
+single perf item in the engine, and it is larger than the map said.
+
+### THE PIXEL COST OF EACH EXCLUSION (final, snapshots on the merged tip)
+
+`./DEMO --snapshot=chase@t=800,1105 --deferred --hdr --hdr-linear
+--texture-filter=2 --ssao --ssao-gtao --profiler=0`, base vs arm, 1920×1080
+(2 073 600 px). Crops `docs/img/chaserefl/<arm>_t000800_{before,after,diff16x,where}.png`.
+
+| arm | t=800 px moved | % | max \|Δ\| | mean \|Δ\| | t=1105 px moved | % | max \|Δ\| |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `--refl_skip_rain` | **0** | **0** | **BYTE-IDENTICAL** | — | **0** | **0** | **BYTE-IDENTICAL** |
+| `--refl_skip_cones` | 313 524 | 15.12 | **6** | 0.91 | 2 | 0.0001 | 2 |
+| `--refl_skip_ssao` | 178 582 | 8.61 | 119 | 3.13 | 64 | 0.0031 | 6 |
+| `--refl_skip_ssao --refl_skip_cones` | 471 556 | 22.74 | 119 | 1.73 | 64 | 0.0031 | 6 |
+| `--refl_skip_post` | 1 833 893 | **88.44** | 181 | 4.05 | 116 440 | 5.62 | 174 |
+| `--refl_skip_vol` | 1 833 894 | **88.44** | 146 | 3.88 | 116 440 | 5.62 | 174 |
+
+### TWO FINDINGS THE LADDER TURNED UP THAT ARE NOT PERF
+
+**1. `--refl_skip_rain` is a REFUTATION, and a clean one.** The call site in
+`RENDER.CPP:1406-1413` carries a comment saying rain must never run in the
+reflection pass because "a screen-space effect re-run from the mirror camera
+would rain upward in the water" — and it implements that guard for
+`skipVolumetric`, which chase does not pass. So chase *does* run it. Measured:
+`rain@refl` and `rain@main` are **0.0000 ms** at both poses and the flag is
+**byte-identical to base at both poses**. Chase has no rain armed. The latent
+bug is real and the flag is worth **zero milliseconds and zero pixels** in chase.
+Do not ship it as a perf change; keep it as the guard for whoever arms rain.
+
+**2. `--refl_skip_cones` is NOT confined to the reflection, and the flag text
+saying "the main view is untouched by construction" is REFUTED by measurement.**
+At t=800, **71.6 % of the moved pixels are in the SKY** (y < 400), above the
+horizon, where no water is drawn:
+
+| region | px moved | share | max \|Δ\| |
+|---|--:|--:|--:|
+| sky y<400 | 224 466 | 71.6 % | 4 |
+| horizon 400–520 | 17 467 | 5.6 % | 6 |
+| water y≥520 | 71 591 | 22.8 % | 4 |
+
+The discriminator is the SIGN. Over all 224 466 moved sky pixels the signed
+delta `base − skip` is **positive 478 242 channel-samples and negative ZERO** —
+base is brighter everywhere and darker nowhere. That is the signature of
+**removed additive light**, not of a different tile partition or a reordered
+sum. The reflection pass's cone radiance is accumulating into the shared HDR
+buffer and surviving into the main image wherever the main pass does not opaquely
+overwrite it, i.e. across the sky. **The control that makes this airtight is
+`--refl_skip_ssao`: it moves 0 px above y=400** — perfectly hermetic — so the
+`ReflUnderlayScope` mechanism itself is sound and the leak is specific to the
+additive cone/halo composite. Amplitude is small (≤4/255 in the sky) and it has
+presumably always been there; it is logged as a correctness item, not fixed here.
+
+### THE MENU — default OFF, on the branch, NOT merged. Read the two columns together.
+
+Min-of-15, merged tip, his arm. **The floor is measured, not assumed**: the
+`--refl_skip_rain` arm is byte-identical to base by census, so its apparent
+tick delta IS the between-arm floor — **−0.10 ms (−0.2 %) at t=800 and −0.17 ms
+(−0.4 %) at t=1105.** Anything below that is noise; everything below is far above it.
+
+| arm | t=800 saves | of tick | t=1105 saves | of tick | what it does to the picture |
+|---|--:|--:|--:|--:|---|
+| `--refl_skip_cones` | **−6.41 ms** | **−12.8 %** | **−4.26 ms** | **−9.3 %** | 15.1 % of px at t=800, **max 6/255**, mean 0.91; 2 px at t=1105. The mirrored lighthouse beams leave the water. |
+| `--refl_skip_ssao` | −3.67 ms | −7.3 % | −3.96 ms | −8.7 % | 8.6 % of px at t=800 but **max 119/255**, mean 3.13 — contact darkening leaves the reflected rocks. 64 px at t=1105. |
+| `--refl_skip_ssao --refl_skip_cones` | **−9.82 ms** | **−19.6 %** | −7.67 ms | −16.8 % | 22.7 % of px, max 119 — the union, and the SSAO half is what you see. |
+| `--refl_skip_vol` (wholesale) | −11.16 ms | −22.3 % | −9.41 ms | −20.6 % | **88.4 % of px, max 146.** The reflection stops being tonemapped. |
+| `--refl_skip_post` | −0.71 ms | −1.4 % | −0.94 ms | −2.1 % | **88.4 % of px, max 181, for under a millisecond.** |
+| `--refl_skip_rain` | −0.10 ms | (floor) | −0.17 ms | (floor) | **byte-identical.** |
+
+**`--refl_skip_post` IS REFUTED AS A PERF ITEM AND SHOULD NOT BE ON HIS LIST.**
+The brief expected the tonemap/bloom chain to be worth taking. It is not: the
+reflection pass's whole post chain is `tonemap-post` 0.662 + `hdr-activate` 0.485
++ `hdr-begin` 0.117 ≈ **1.26 ms**, of which the flag recovers 0.66–0.94 ms — and
+it costs **88 % of the frame at max 181/255**, because dropping the tonemap turns
+the underlay into the deferred kernel's raw 8-bit LDR write. Worst ratio on the
+menu by two orders of magnitude. The same reasoning condemns most of
+`--refl_skip_vol`'s margin over `--refl_skip_ssao --refl_skip_cones`: of its
+extra 1.34 ms, the post chain is ~0.7 ms and it is buying the same 88 % wreckage.
+
+**WHERE THE VALUE ACTUALLY IS: cones and SSAO, and they are separable.**
+`--refl_skip_ssao --refl_skip_cones` is **19.6 % of the whole tick at t=800**,
+9.82 ms, and it keeps the tonemap. Whether it is acceptable is entirely a
+question about the SSAO half — the cone half changes nothing above 6/255.
+
+**THE ONE I WOULD PUT IN FRONT OF HIS EYE: `--refl_skip_cones` alone.**
+−6.41 ms (12.8 % of the tick) at t=800 and −4.26 ms (9.3 %) at t=1105, and the
+largest change it makes to any pixel in a 2 073 600-pixel frame is **six grey
+levels**. But it is NOT free of caveat and the caveat is above: 71.6 % of those
+pixels are in the sky, because the reflection pass's additive cone radiance is
+leaking into the main view. So the flag is doing two things at once — removing
+mirrored beams from the water AND removing a leak that arguably should not be
+there. **It is a look call and it is his, not mine.** Crops:
+`docs/img/chaserefl/r_cones_t000800_{before,after,diff16x,where}.png`.
+
+**WHAT THE TWO `where` MAPS ACTUALLY SHOW** (`docs/img/chaserefl/*_t000800_where.png`),
+because the ms columns do not say this. `r_ssao`'s moved pixels are *exactly* the
+reflected content and nothing else: the mirrored islands under the horizon, the
+mirrored ship in the foreground, the mirrored lighthouse on the right, zero
+pixels of sky. It is hermetic — and it is landing squarely on the content he
+commissioned, at max 119/255. `r_cones`'s map is the opposite shape: a broad
+low-amplitude wash over the beam in the sky and its reflection, max 4–6/255,
+which is why it can move 15 % of the frame and still be hard to see. **Cheaper
+in milliseconds does not mean cheaper to the eye here — the ms and the amplitude
+rank these two in OPPOSITE orders.**
+
+**NOTHING HERE IS PROVABLY INVISIBLE, so nothing merges as byte-null.** The one
+byte-null arm, `--refl_skip_rain`, is byte-null because it does nothing at all.
+
+### NEXT CHASE TARGET (not this round)
+
+**`water-glints` — 7.999 ms, 16.0 % of chase's t=800 tick**, `DEMO/ProceduralWater.cpp:785,884`,
+and it is OUTSIDE `renderFrame` entirely (untagged by PassTag, it runs in the
+scene's own tick). It swings **20×** across the two poses — 7.999 ms at t=800
+against 0.397 ms at t=1105 — which is the signature of work that scales with
+visible glint area rather than with a fixed cost. After the reflection pass it is
+the largest single row in the scene, and it has never been looked at.
+
+---
+
+## 00k2. `lighting-w1` IN CITY, ROUND 2 (2026-08-28b): the pack loop's env fetch goes 8-wide — **−27.5 % instructions and −6.4 % of `renderFrame` cumulative** against the pre-campaign parent
+
+Continuation of §00k; same kernel, same arm, same worktree. Full account:
+
+> **SECTION LETTER, for anyone chasing a cross-reference:** this round was
+> written as §00l, renumbered to §00m, and settled at **§00k2** — three
+> agents landed sections in this file across the same two days. §00l is the
+> RANKED COST MAP (every "§00l item N" reference points there) and §00m is
+> chase's tile grid. This is the continuation of §00k, hence the name.
+
 `docs/OPTIMIZATION_BACKLOG.md` **2026-08-28b**.
 
 **THE LADDER MOVED.** Round 1 shrank everything around the pack loop, so the pack

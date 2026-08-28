@@ -6,6 +6,7 @@
 #include <Base/TriMesh.h>
 #include <Base/Scene.h>
 
+#include <RENDER/TailProf.h>   // 2026-08-28 perf map: whole-tick attribution
 #include "CHASE.H"
 #include "ProceduralWater.h"
 #include "SceneTick.h"
@@ -17,6 +18,7 @@
 #include <Base/FaceNeedle.h>   // Reflected_Transform --needle_cull pre-reject
 #include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
 #include <RENDER/ReflMirror.h>  // --refl_correct: mirrored-pass light state
+#include <RENDER/RenderPipeline.h>  // ReflUnderlayScope: --refl_skip_* ladder
 #if FDS_REFLTN_CENSUS
 #include <FILLERS/Mekalele.h>  // census build only: per-pass zero-TN reporter
 #endif
@@ -1037,6 +1039,14 @@ namespace {
 struct ChaseScene : SceneDriver {
 	int32_t partTime() const override { return CHPartTime; }
 	FrameProfiler prof{"chase"};
+	// --frame_tile_y, saved by createChaseScene() and put back in cleanup().
+	// setDefault() writes a PROCESS-wide global and does not mark the flag set,
+	// so without this restore chase's finer grid would leak forward into
+	// fountain / crash / greets for the rest of a full run — and greets is
+	// measured to LOSE from it (PERF_STATE §00l.4: +0.48 ms renderFrame,
+	// +0.77 ms gbuffer, and §00d's 16 % of its pixels). The tile grid is the
+	// one flag in this file that another scene demonstrably wants different.
+	int savedFrameTileY = 0;
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)
 	bool    pause_mode = false;
 	// M1.3 engine-glow throttle state (chase_engine_mod): the two ship meshes
@@ -1386,7 +1396,7 @@ struct ChaseScene : SceneDriver {
 		// Shared transport: pause (P/U), fast-forward/rewind (F2/F1), and
 		// the race-free scene-time snapshot. See SceneDriver::tickSceneTimer.
 		tickSceneTimer(TTrd, pause_mode);
-		clearFrame();
+		{ TailProf::ScopeTimer _tp("Tick-Clear", 3); clearFrame(); }
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;
 
@@ -1404,9 +1414,9 @@ struct ChaseScene : SceneDriver {
 		// the sky, and the transparent water then blends the reflected sky where
 		// no mirrored geometry covers it — the sky reflects on the water for
 		// free. Uses the current-frame View (set by Dynamic_Camera above).
-		RenderSkyCube(ChaseSkySc, View, false);
+		{ TailProf::ScopeTimer _tp("Tick-SkyCube", 3); RenderSkyCube(ChaseSkySc, View, false); }
 
-		Animate_Objects(ChaseSc, View);
+		{ TailProf::ScopeTimer _tp("Tick-Anim", 3); Animate_Objects(ChaseSc, View); }
 
 		// M1.3 engine-glow throttle (default-off). Animate_Objects has just
 		// re-set each omni's ISize from its (constant) Size spline, so this
@@ -1475,15 +1485,15 @@ struct ChaseScene : SceneDriver {
 		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
 		prof.switchTo(PROF_LGHT);
-		Lighting(ChaseSc);
+		{ TailProf::ScopeTimer _tp("Tick-Light", 3); Lighting(ChaseSc); }
 
 		prof.switchTo(PROF_XFRM);
-		Reflected_Transform(ChaseSc);
+		{ TailProf::ScopeTimer _tp("Tick-ReflXfrm", 3); Reflected_Transform(ChaseSc); }
 		prof.leave(PROF_XFRM);
 
 		if (CAll) {
 			prof.enter(PROF_SORT);
-			Radix_Sort(FList, SList, CAll);
+			{ TailProf::ScopeTimer _tp("Tick-Radix", 3); Radix_Sort(FList, SList, CAll); }
 			prof.switchTo(PROF_RNDR);
 			// --refl_correct: this Render() IS a complete second renderFrame
 			// (RENDER.CPP:1868) with its own G-buffer and its own deferred
@@ -1493,7 +1503,24 @@ struct ChaseScene : SceneDriver {
 			// ORIGIN, d = 0. Passing anything else would desynchronise the
 			// lights from the geometry they are lighting.
 			fds::ReflMirror_Begin(RflSurfNorm, 0.0f);
-			Render();
+			{
+				// TWO renderFrame calls a frame, and until 2026-08-28 the
+				// [DPROF] table summed them: `ssao`, `cones-call`,
+				// `tonemap-post`, `hdr-activate` and `fog-legacy` all read
+				// calls/f = 2 with no way to say which pass owned which
+				// millisecond. PassTag splits every row into `@refl` / `@main`
+				// (instrument only, byte-null). ReflUnderlayScope is what the
+				// --refl_skip_* ladder keys on; with every one of those flags
+				// at its default 0 it is a global write nothing reads.
+				TailProf::PassTag _tag("refl");
+				fds::ReflUnderlayScope _ru(true);
+				// --refl_skip_vol is the top of the ladder: chase takes the
+				// same skipVolumetric=true CITY.CPP passes for the structurally
+				// identical pass. Default 0 ⇒ the bare Render() below, exactly
+				// as it has always been.
+				Render(RenderPath::Default,
+				       /*skipVolumetric=*/fds::FeatureFlags::refl_skip_vol());
+			}
 			fds::ReflMirror_End();
 			prof.leave(PROF_RNDR);
 		}
@@ -1510,13 +1537,13 @@ struct ChaseScene : SceneDriver {
 
 		prof.enter(PROF_XFRM);
 		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;
-		Transform_Objects(ChaseSc, fds::g_mainCamera, fds::g_mainFaces);
+		{ TailProf::ScopeTimer _tp("Tick-Xfrm", 3); Transform_Objects(ChaseSc, fds::g_mainCamera, fds::g_mainFaces); }
 		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
 		prof.enter(PROF_SORT);
-		Radix_Sort(FList, SList, CAll);
+		{ TailProf::ScopeTimer _tp("Tick-Radix", 3); Radix_Sort(FList, SList, CAll); }
 		prof.switchTo(PROF_RNDR);
-		Render();
+		{ TailProf::PassTag _tag("main"); Render(); }
 		prof.leave(PROF_RNDR);
 #if FDS_REFLTN_CENSUS
 		meka::ReflTnCensus_Report("MAIN");
@@ -1567,6 +1594,12 @@ struct ChaseScene : SceneDriver {
 	}
 
 	void cleanup() override {
+		// Hand the frame tile grid back exactly as we found it (see
+		// savedFrameTileY). Unconditional: when the user set --frame_tile_y
+		// explicitly, createChaseScene()'s setDefault was a no-op and this
+		// writes the same value back, so the restore is identity either way.
+		fds::FeatureFlags::g_intVals[
+			static_cast<int>(fds::FeatureFlags::IntId::frame_tile_y)] = savedFrameTileY;
 		if (g_profilerActive) prof.dump();
 		Timer -= CHPartTime;
 		waitBackspaceRelease();
@@ -1596,7 +1629,31 @@ std::unique_ptr<SceneDriver> createChaseScene()
 	// and it only matters under --chase_blasters (EmitLights is gated on it).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_range, 90.0f);
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_intensity, 260.0f);
-	return std::make_unique<ChaseScene>();
+	// PERF: chase rasters its G-buffer at effPar 3.1 of 12 workers on the
+	// default 6x5 grid (PERF_STATE §00l.2, chase t=800) — nine of twelve
+	// threads idle through the phase because chase's screen is a handful of
+	// enormous canyon-wall and water faces and a 6x5 tile is big enough that
+	// one tile owns most of them. 6x20 keeps the SAME tile count shape the
+	// clipper likes (interior boundaries stay 8-aligned) but slices the heavy
+	// band into rows: MEASURED gbuffer -3.11 ms (-36 %), renderFrame -3.27 ms
+	// (-7.6 %), tick -3.17 ms (-5.7 %) at t=800.
+	//
+	// PER SCENE, NEVER GLOBAL. greets LOSES from the same grid (+0.48 ms) and
+	// city gains only 0.79 ms for 4 534 moved pixels, so neither is opted in
+	// here; ChaseScene::cleanup() puts the flag back so this cannot leak into
+	// the scenes that follow chase in a full run.
+	//
+	// NOT BYTE-NULL, and the cost depends on the arm: bare --deferred moves
+	// 57-1 738 px of 2 073 600 at the five gate poses, but under
+	// --texture-filter=2 (his arm) the per-tile mip hysteresis sees a different
+	// tile partition and the wash grows to 23 866 px at t=800 / 87 121 px at
+	// t=1105 — 1.2 % / 4.2 % of the frame at mean |d| 0.7 / 1.6 of 255, with
+	// only 18 pixels anywhere above 32. Revert with --frame_tile_y=5.
+	const int prevFrameTileY = fds::FeatureFlags::frame_tile_y();
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::IntId::frame_tile_y, 20);
+	auto sc = std::make_unique<ChaseScene>();
+	sc->savedFrameTileY = prevFrameTileY;
+	return sc;
 }
 
 void Run_Chase()
