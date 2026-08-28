@@ -10,6 +10,49 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29 — chase round: the tile grid lands, the reflection pass is priced, and two things turn up that are not perf
+
+Full account: `docs/PERF_STATE.md` §00m. Branch `rev-chaseperf`, merged tip.
+
+**LANDED.** `frame_tile_y` 5→20 in chase only (`createChaseScene`, restored in
+`cleanup()`): `gbuffer` −3.11 ms (−36 %), tick −3.17 ms; the revert arm measures
++3.51 ms (+6.8 %) at t=800 on the merged tip. Moves pixels (23 866 px / 1.15 % at
+t=800 on his arm, 199 px above 16/255 in 2 M). **Revert is one flag,
+`--frame_tile_y=5`, and it is exact byte-for-byte.**
+
+**RETURNED AS A MENU, NOT MERGED** — five `--refl_skip_*` flags, all default 0,
+byte-null at their defaults. The reflection pass is **17.38 ms of a 49.96 ms
+tick** at t=800 (§00l's estimate of ≈11.7 ms was 56 % LOW). Best offer on the
+menu is `--refl_skip_cones`: −6.41 ms (12.8 % of tick) for a max change of
+**6/255**. His call, uncommissioned.
+
+### OPEN ITEMS THIS ROUND CREATED
+
+1. **`water-glints` is chase's next target — 7.999 ms, 16.0 % of the t=800 tick**,
+   `DEMO/ProceduralWater.cpp:785,884`, and it sits OUTSIDE `renderFrame` (it runs
+   in the scene's own tick, so no PassTag row covers it). It swings **20×** across
+   poses — 7.999 ms at t=800 vs 0.397 ms at t=1105 — which points at work scaling
+   with visible glint area. Never examined. After the reflection pass it is the
+   largest single row in the scene.
+
+2. **CORRECTNESS, small: the reflection pass's additive cone radiance leaks into
+   the main view.** At chase t=800, `--refl_skip_cones` moves 224 466 pixels in
+   the SKY (71.6 % of all its moved pixels), above the horizon where no water is
+   drawn, at max 4/255. The signed delta is **positive everywhere and negative
+   nowhere** over those pixels — removed additive light, not a reordered sum. The
+   control is `--refl_skip_ssao`, which moves **0 px** above the horizon, so
+   `ReflUnderlayScope` is sound and the leak is specific to the additive
+   cone/halo composite into the shared HDR buffer. Not fixed here (amplitude is
+   ≤4/255 and the cone files were being worked by another branch this round).
+
+3. **Latent, guarded, currently harmless: screen-space rain would run in the
+   reflection pass.** `RENDER.CPP:1406` documents that rain must never run there
+   ("would rain upward in the water") and implements the guard for
+   `skipVolumetric` — which chase does not pass. Chase therefore runs it. Measured
+   0.0000 ms and byte-identical at both poses because chase has no rain armed, so
+   it costs nothing today; it becomes a visible bug the moment rain is armed in a
+   two-pass scene. `--refl_skip_rain` is the guard.
+
 ## 2026-08-28 — **THE CONE PASS, ROUND 8**: city's `cones-call` **15.32 → 13.38 ms BIT-EXACT** and **→ 3.09 ms (−79.8 %) with the two look flags on**. Two landings, one refutation, and two bound defects found in code nobody was auditing. DONE / his call
 
 Implementation round against `docs/PERF_CONES_ANALYSIS.md` (branch
