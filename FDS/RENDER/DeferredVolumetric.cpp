@@ -1000,7 +1000,6 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     const bool coneReduced = fds::FeatureFlags::vol_cone_half_y()
                           || fds::FeatureFlags::deferred_quarter()
                           || fds::FeatureFlags::deferred_checkerboard();
-    const int yStep = (vecPath && coneReduced) ? 2 : 1;
 
     // --cone_range_cull=k: shrink the RANGE-SPHERE CLAMP (and, in the
     // orchestrator, the screen rect + tile-vs-cone cull) to k x Range, and
@@ -1099,6 +1098,26 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
             p.bounce = bounce;
         }
     }
+
+    // --cone_half_y_wide: half VERTICAL rate, but derived per TILE instead of
+    // taken from a global flag. --vol_cone_half_y's veto is explicitly
+    // narrow-beam-specific ("the 1-2px bright core line can fall between
+    // sampled rows"), and `segPath` -- already computed above, already the
+    // predicate the kernel uses to pick the analytic closed form -- is
+    // exactly that class: cos(4.5 deg) = 0.9969 > 0.985 for the disco beams,
+    // cos(30 deg) = 0.866 < 0.985 for city's headlights. So a tile halves
+    // only when EVERY spot binned to it is a wide, non-turbulent cone, and
+    // the beams the veto is about are never touched. Evaluated HERE, before
+    // the row loop, so it adds no live value to the inner loop
+    // (HW_PROFILING.md:1370-1372: one extra live bool in this kernel costs
+    // more than most of the wins the campaign has landed).
+    bool allWideTile = false;
+    if (vecPath && conePreCount > 0 && fds::FeatureFlags::cone_half_y_wide()) {
+        allWideTile = true;
+        for (int s = 0; s < conePreCount; ++s)
+            if (conePre[s].segPath) { allWideTile = false; break; }
+    }
+    const int yStep = (vecPath && (coneReduced || allWideTile)) ? 2 : 1;
 
     for (int py = y1; py < y2; py += yStep) {
         const float Y = (CntrEY - float(py)) * invFOVY;
@@ -3231,6 +3250,59 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                 }
             }
         }
+    }
+
+    // FDS_CONE_PAIRCENSUS=1: prices candidate C3 (headlight-pair merge)
+    // BEFORE building it, which is the order docs/PERF_CONES_ANALYSIS.md asks
+    // for. Two spots are a merge candidate when they share cone angles,
+    // range, gain and axis (dot > 0.9999) and their APEXES project within K
+    // screen pixels of each other -- at which point one spot at the midpoint
+    // with 2x gain is, per the analysis, "structurally invisible". `f` is the
+    // fraction of the population that could merge. Diagnostic only, outside
+    // every loop that matters, and it never alters the spot list.
+    static const bool sPairCensus = [](){ const char *e = std::getenv("FDS_CONE_PAIRCENSUS"); return e && *e == '1'; }();
+    if (sPairCensus && !inlineDispatch) {
+        static const float kK[5] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+        int merged[5] = {0,0,0,0,0};
+        for (int ki = 0; ki < 5; ++ki) {
+            bool used[CONE_TILE_SPOT_CAP * 8] = {};
+            for (int a = 0; a < spotCount; ++a) {
+                if (a < int(sizeof(used)/sizeof(used[0])) && used[a]) continue;
+                const int la = spotIdx[a];
+                if (lights->posZ[la] <= 1.0f) continue;
+                const float ax = CntrEX + lights->posX[la] * FOVX / lights->posZ[la];
+                const float ay = CntrEY - lights->posY[la] * FOVY / lights->posZ[la];
+                for (int b = a + 1; b < spotCount; ++b) {
+                    if (b < int(sizeof(used)/sizeof(used[0])) && used[b]) continue;
+                    const int lb = spotIdx[b];
+                    if (lights->posZ[lb] <= 1.0f) continue;
+                    if (lights->cosOuter[la] != lights->cosOuter[lb]) continue;
+                    if (lights->cosInner[la] != lights->cosInner[lb]) continue;
+                    if (lights->range2[la]  != lights->range2[lb])  continue;
+                    if (lights->coneGain[la]!= lights->coneGain[lb])continue;
+                    const float dot = lights->dirX[la]*lights->dirX[lb]
+                                    + lights->dirY[la]*lights->dirY[lb]
+                                    + lights->dirZ[la]*lights->dirZ[lb];
+                    if (dot < 0.9999f) continue;
+                    const float bx = CntrEX + lights->posX[lb] * FOVX / lights->posZ[lb];
+                    const float by = CntrEY - lights->posY[lb] * FOVY / lights->posZ[lb];
+                    const float dx = ax - bx, dy = ay - by;
+                    if (dx*dx + dy*dy > kK[ki]*kK[ki]) continue;
+                    ++merged[ki];
+                    if (a < int(sizeof(used)/sizeof(used[0]))) used[a] = true;
+                    if (b < int(sizeof(used)/sizeof(used[0]))) used[b] = true;
+                    break;
+                }
+            }
+        }
+        fprintf(stderr, "[CONE-PAIR] spots=%d | merged pairs at K=0.25/0.5/1/2/4 px: "
+                "%d %d %d %d %d  -> f = %.3f %.3f %.3f %.3f %.3f\n",
+                spotCount, merged[0], merged[1], merged[2], merged[3], merged[4],
+                spotCount ? 2.0*merged[0]/spotCount : 0.0,
+                spotCount ? 2.0*merged[1]/spotCount : 0.0,
+                spotCount ? 2.0*merged[2]/spotCount : 0.0,
+                spotCount ? 2.0*merged[3]/spotCount : 0.0,
+                spotCount ? 2.0*merged[4]/spotCount : 0.0);
     }
 
     if (sConeAttr && !inlineDispatch) {
