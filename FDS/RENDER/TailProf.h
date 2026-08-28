@@ -243,6 +243,31 @@ inline std::thread::id& tickThread() { static std::thread::id id; return id; }
 // clears it for offscreen passes.
 inline bool& passMainFlag() { static thread_local bool m = true; return m; }
 
+// ── Per-PASS name tag ───────────────────────────────────────────────────────
+//
+// city and chase call renderFrame TWICE per main-view frame (the mirrored
+// water-reflection underlay, then the real view). Every row in the report is
+// therefore the SUM of the two passes, and no ladder that touches only one of
+// them can be read off it — PERF_STATE §00l had to price chase's reflection
+// pass by ASSUMING the rows halve, and said so. This tag appends a suffix to
+// every name recorded while it is in scope, so `ssao` becomes `ssao@refl` and
+// `ssao@main` and the split is measured instead of assumed.
+//
+// INSTRUMENT ONLY. It changes no pixel; it costs one thread_local pointer read
+// per phase boundary and one small string append, both only when
+// --deferred_prof is on, and literally nothing when it is off (record() is
+// unreachable then). thread_local, so a pool worker's offscreen render can
+// never inherit the tick thread's tag — the same discipline passMainFlag uses.
+inline const char*& passTag() { static thread_local const char* t = nullptr; return t; }
+
+struct PassTag {
+	const char* prev;
+	explicit PassTag(const char* t) : prev(passTag()) { if (enabled()) passTag() = t; }
+	~PassTag() { if (enabled()) passTag() = prev; }
+	PassTag(const PassTag&) = delete;
+	PassTag& operator=(const PassTag&) = delete;
+};
+
 // Frames excluded from the steady-state columns. --deferred_prof=N sets it; 1
 // (a bare --deferred_prof) drops just the lazy-init frame.
 inline int warmupFrames() {
@@ -321,13 +346,18 @@ inline void record(const char* name, long long wallNs, double busyMs,
 	const double wallMs = double(wallNs) / 1e6;
 	bool     print = false;
 	double   pw = 0, pb = 0; int pf = 0, pn = 0;
+	// Per-pass suffix (see PassTag). Only pays for itself when a tag is armed,
+	// which is only ever the tick thread inside a multi-pass scene's tick.
+	std::string tagged;
+	const bool tag = (passTag() != nullptr);
+	if (tag) { tagged.reserve(32); tagged = name; tagged += '@'; tagged += passTag(); }
 	{
 		std::lock_guard<std::mutex> lk(regMutex());
 		auto& m = registry();
-		auto  it = m.find(name);
+		auto  it = tag ? m.find(tagged) : m.find(name);
 		if (it == m.end()) {
-			it = m.emplace(std::string(name), Acc{}).first;
-			regOrder().push_back(name);
+			it = m.emplace(tag ? tagged : std::string(name), Acc{}).first;
+			regOrder().push_back(it->first);
 		}
 		Acc& a = it->second;
 		a.depth  = depth;

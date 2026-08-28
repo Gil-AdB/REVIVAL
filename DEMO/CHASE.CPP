@@ -18,6 +18,7 @@
 #include <Base/FaceNeedle.h>   // Reflected_Transform --needle_cull pre-reject
 #include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
 #include <RENDER/ReflMirror.h>  // --refl_correct: mirrored-pass light state
+#include <RENDER/RenderPipeline.h>  // ReflUnderlayScope: --refl_skip_* ladder
 #if FDS_REFLTN_CENSUS
 #include <FILLERS/Mekalele.h>  // census build only: per-pass zero-TN reporter
 #endif
@@ -1502,7 +1503,24 @@ struct ChaseScene : SceneDriver {
 			// ORIGIN, d = 0. Passing anything else would desynchronise the
 			// lights from the geometry they are lighting.
 			fds::ReflMirror_Begin(RflSurfNorm, 0.0f);
-			Render();
+			{
+				// TWO renderFrame calls a frame, and until 2026-08-28 the
+				// [DPROF] table summed them: `ssao`, `cones-call`,
+				// `tonemap-post`, `hdr-activate` and `fog-legacy` all read
+				// calls/f = 2 with no way to say which pass owned which
+				// millisecond. PassTag splits every row into `@refl` / `@main`
+				// (instrument only, byte-null). ReflUnderlayScope is what the
+				// --refl_skip_* ladder keys on; with every one of those flags
+				// at its default 0 it is a global write nothing reads.
+				TailProf::PassTag _tag("refl");
+				fds::ReflUnderlayScope _ru(true);
+				// --refl_skip_vol is the top of the ladder: chase takes the
+				// same skipVolumetric=true CITY.CPP passes for the structurally
+				// identical pass. Default 0 ⇒ the bare Render() below, exactly
+				// as it has always been.
+				Render(RenderPath::Default,
+				       /*skipVolumetric=*/fds::FeatureFlags::refl_skip_vol());
+			}
 			fds::ReflMirror_End();
 			prof.leave(PROF_RNDR);
 		}
@@ -1525,7 +1543,7 @@ struct ChaseScene : SceneDriver {
 		prof.enter(PROF_SORT);
 		{ TailProf::ScopeTimer _tp("Tick-Radix", 3); Radix_Sort(FList, SList, CAll); }
 		prof.switchTo(PROF_RNDR);
-		Render();
+		{ TailProf::PassTag _tag("main"); Render(); }
 		prof.leave(PROF_RNDR);
 #if FDS_REFLTN_CENSUS
 		meka::ReflTnCensus_Report("MAIN");
