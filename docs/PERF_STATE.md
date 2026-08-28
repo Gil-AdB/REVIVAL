@@ -19,6 +19,49 @@
 
 ---
 
+## 00l. `lighting-w1` IN CITY, ROUND 2 (2026-08-28b): the pack loop's env fetch goes 8-wide — **−27.5 % instructions and −6.4 % of `renderFrame` cumulative** against the pre-campaign parent
+
+Continuation of §00k; same kernel, same arm, same worktree. Full account:
+`docs/OPTIMIZATION_BACKLOG.md` **2026-08-28b**.
+
+**THE LADDER MOVED.** Round 1 shrank everything around the pack loop, so the pack
+GREW as a share of the row — 24.8 % → **29.9 %** (0.221 of 0.739 Gi/f), second
+only to the omni loop's 45.5 %. A new `-DFDS_OVEC_ENVDIAG=n` ladder splits it:
+the two per-lane `EnvCubeFetchBil` calls are **5.1 % of the row** on their own,
+the live-water tilt 3.4 %, the face pick 1.9 %, and 19.5 % is the rest of the
+lane loop.
+
+**THE CENSUS CHOSE THE SHAPE.** Of the groups carrying a vec-env lane,
+**90.2–96.2 %** have every such lane on ONE cube face *after* the live-water
+tilt, at 7.4–7.6 env lanes per group, and **100 % of lanes need both mip levels**
+(2.00 fetches/lane, ~498 k a frame). Same-face implies same-mip 100 % of the
+time, because gloss is per-material and 95 % of groups are material-uniform.
+
+**LANDED: C9** (`EnvCubeFetchBil8` — the whole bilinear, eight lanes, one face,
+one level; face pick and live-water tilt hoisted to a pre-pass so the uniformity
+test can see all eight; scalar fallback for a mixed-face group) and **C10** (the
+8-wide pack extended to env groups, which C7 never covered — it reproduces the
+scalar's rounding ORDER: truncate each term, clamp the integer sum).
+
+| pose | `lighting-w1` Gi/f | `Gcyc/f` | `renderFrame` Gi/f |
+|---|---|---|---|
+| city t=1961 | 0.978 → **0.709** (−27.5 %) | 0.245 → 0.180 (−26.5 %) | 4.184 → **3.915** (−6.4 %) |
+| city t=400 | 0.733 → **0.508** (−30.7 %) | 0.185 → 0.127 (−31.4 %) | 3.174 → **2.949** (−7.1 %) |
+| city t=2400 | 0.390 → **0.315** (−19.2 %) | 0.103 → 0.083 (−19.4 %) | 2.255 → **2.180** (−3.3 %) |
+| fountain t=2500 | 0.105 → **0.090** (−14.3 %) | 0.029 → 0.025 | 1.061 → 1.045 (−1.5 %) |
+| **greets (control)** | 1.478 → **1.476 (−0.14 %)** | 0.379 → 0.383 | 3.644 → 3.640 |
+
+**REFUTED IN THIS ROUND, and §00k is corrected in place:** collapsing the four
+round-1 dials to flagless is worth **−0.19 to −0.27 % of the row**, at the
+±0.14 % Ginstr floor — not the 2.9 % §00k predicted. Clang had already hoisted
+the loop-invariant bools; the disassembly loses exactly two `adrp`. The 2.9 % was
+the OFF arm executing slow paths plus LTO layout.
+
+**Gates:** 13/13 pinned poses + `render_gate` 4/4 after every step, byte-exact on
+the first try.
+
+---
+
 ## 00k. `lighting-w1` IN CITY — the OUTER-VEC kernel, first round ever run on it (2026-08-28): **−24.2 % instructions, −5.7 % of `renderFrame`**, and the row's shape is now measured, not estimated
 
 Branch `rev-w1impl` off `fog-wt` `e017d611`. Arm
@@ -65,6 +108,10 @@ both binaries in one worktree, interleaved, min-of-5, Ginstr floor **±0.14 %**:
 Cycles track instructions and IPC barely moves — not the cube-prepass pattern
 where the two columns disagreed. greets is exactly flat, which proves the change
 is confined to the OuterVec kernel.
+
+> **ROUND 2 CORRECTION (§00l):** this section's closing recommendation — that a
+> future round collapse the four dials to flagless for the last 2.9 % — is
+> REFUTED. Measured at −0.19 to −0.27 % of the row, i.e. the Ginstr floor.
 
 **C1 + C8 alone** (the two flagless levers, own binary, interleaved min-of-5):
 t=1961 0.977 → 0.953 Gi/f (−2.5 %) and 0.243 → **0.231 Gcyc/f (−4.9 %)**; t=400

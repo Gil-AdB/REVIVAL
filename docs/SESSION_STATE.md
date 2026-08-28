@@ -1,5 +1,70 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28b — **ROUND 2 ON THE SAME KERNEL: the env bilinear fetch goes
+> 8-wide and city's `lighting-w1` reaches −27.5 % / `renderFrame` −6.4 %
+> cumulative — and round 1's own "2.9 % left on the table" is REFUTED**
+>
+> **THE FLAG COLLAPSE IS A REFUTATION, NOT A WIN.** Round 1 predicted that
+> collapsing the four dials to flagless would return the 2.9 % its ALL-OFF arm
+> carried. Measured: **−0.19 to −0.27 % of the row**, i.e. the ±0.14 % Ginstr
+> floor. Clang had already hoisted the loop-invariant bools out of both loops —
+> the disassembly loses exactly **two `adrp`** (the flag-array address
+> materialisations) and one callee-save pair, while static size *rises* 3677 →
+> 4051 because constant predicates let it specialise more. The 2.9 % was the OFF
+> arm executing the slow paths plus LTO layout. Kept anyway (byte-null, simpler
+> body), now as `-DFDS_OVEC_HATCH=ON` rebuild arms. `--deferred_ovec_nomirror`
+> is the ONE dial kept live: it is read once per TILE and it is the only way to
+> force the `kMirror == true` instantiation from a shipping binary.
+>
+> **THE LADDER RE-RANKED ITSELF, which is why round 2 went where it did.** Round
+> 1 shrank everything around the pack loop, so the pack GREW as a share: 24.8 %
+> → **29.9 %** of the row (0.221 of 0.739 Gi/f), second only to the omni loop's
+> 45.5 %. A new `-DFDS_OVEC_ENVDIAG=n` ladder split it — the two per-lane
+> `EnvCubeFetchBil` calls are **5.1 % of the row**, the live-water tilt 3.4 %,
+> the face pick 1.9 %, the rest of the lane loop 19.5 %.
+>
+> **THE CENSUS CHOSE THE SHAPE BEFORE A LINE WAS WRITTEN.** Of the groups
+> carrying a vec-env lane, **90.2 / 95.9 / 96.2 %** have every such lane on ONE
+> cube face AFTER the live-water tilt (t=2400 / t=400 / t=1961), at 7.4–7.6 env
+> lanes per group, and **100 % of lanes need BOTH mip levels** — always two
+> fetches, ~498 k a frame. Same-face implies same-mip 100 % of the time.
+>
+> **LANDED: C9** (`EnvCubeFetchBil8` — one bilinear for eight lanes sharing a
+> face and a level; the face pick and live-water tilt hoisted into a pre-pass so
+> the uniformity test can see all eight answers; mixed-face groups fall back to
+> the scalar fetch reading the pre-pass's own face/uv, so never worse) and
+> **C10** (the 8-wide pack extended to env groups — C7 only ever fired for the
+> 58–63 % with NO env lane). Predicted −3.4 % and −1.5 % of the row; measured
+> **−2.1 to −3.2 %** and **−1.4 to −2.2 %**.
+>
+> **BYTE-EXACT ON THE FIRST TRY, no tuning**, on three details worth keeping:
+> `u*fr - 0.5f` is a CONTRACTED fmsub under `-ffp-contract=fast`;
+> `if (px < 0) px = 0` must be `_mm256_max_ps(zero, px)` and NOT
+> `max_ps(px, zero)`, because maxps returns its SECOND operand when unordered and
+> the scalar leaves a NaN alone; and the inter-level lerp keeps `lf` PER LANE,
+> because `lvlF` can differ inside one integer level even when `lvl0` agrees.
+> C10 additionally reproduces the scalar's ORDER OF ROUNDING — truncate each
+> term, clamp the INTEGER sum — which is deliberately different from C7's
+> float-clamp-before-convert.
+>
+> **CUMULATIVE, rounds 1+2 against `e017d611`**, both binaries in one worktree,
+> interleaved min-of-5, Ginstr floor ±0.14 %: city t=1961 `lighting-w1`
+> **0.978 → 0.709 (−27.5 %)** and `renderFrame` **4.184 → 3.915 (−6.4 %)**;
+> t=400 **−30.7 % / −7.1 %**; t=2400 −19.2 % / −3.3 %; fountain −14.3 %;
+> **greets −0.14 %, at the floor** — the control that keeps proving the work is
+> confined to the OuterVec kernel.
+>
+> **GATES: no pin moved, at any step.** 13/13 pinned poses + `render_gate` 4/4
+> after the flag collapse, after C9 and after C10.
+>
+> **NEXT:** the pack loop's remaining "everything else" (19.5 %, and C10 has just
+> taken a bite the next ladder run should re-measure), then the live-water tilt
+> (3.4 %) and face pick (1.9 %), both now sitting in C9's pre-pass as per-lane
+> scalar loops and both 8-wide-able. The omni loop is still 45.5 % but C2/C4 took
+> ~29 % out of it and what is left is genuine per-(pixel × light) arithmetic;
+> the only structural idea remaining there is transposing to 8 lights × 8 pixels,
+> which is a different kernel, not a lever.
+
 > ## 2026-08-28 — **CITY'S OUTER-VEC LIGHTING KERNEL, THE FIRST ROUND EVER RUN
 > ON IT: `lighting-w1` −24.2 % instructions, `renderFrame` −5.7 %, six byte-null
 > levers, 13/13 pins and `render_gate` 4/4 — and the single biggest candidate is
