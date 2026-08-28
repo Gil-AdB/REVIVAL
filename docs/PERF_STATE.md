@@ -1,5 +1,32 @@
 # PERF_STATE.md — current state of the deferred pipeline (greets, 2026-05)
 
+> **2026-08-28 — CONE ROUND 8 lands two BIT-EXACT wins on `cones-call` and
+> builds two look flags that halve it again.** city t=1961, his arm
+> `--env_live_water --deferred --city_env_pixel`, 1920×1080, interleaved
+> min-of-11, box verified empty of other `DEMO` processes before and after
+> every battery. `cones-call` **0.525 → 0.424 Gcyc/f and 15.32 → 13.38 ms
+> with NO pixel moving anywhere** (`--cone_hull_rect` default ON +
+> `anyLane_x8`, compile-time); **→ 0.099 Gcyc/f / 3.09 ms (−79.8 %) with
+> `--cone_half_y_wide --cone_range_cull=0.5`**, both default OFF pending his
+> eye. `renderFrame` 53.29 → 52.24 ms bit-exact, → 42.02 ms (−21.1 %) with
+> both. 13/13 pins and `render_gate.sh` 4/4 on the shipped defaults. Full
+> account, the two BOUND DEFECTS it found, the C3 refutation and four
+> corrections to `docs/PERF_CONES_ANALYSIS.md`:
+> `docs/OPTIMIZATION_BACKLOG.md` **2026-08-28**. Look deltas for his call:
+> `docs/img/conesimpl/`.
+>
+> | arm | `cones-call` Gcyc/f | wall ms | Ginstr/f | `renderFrame` wall ms |
+> |---|--:|--:|--:|--:|
+> | round baseline | 0.525 | 15.32 | 2.081 | 54.81 |
+> | + `anyLane_x8` (bit-exact) | 0.475 | 14.26 | 1.971 | — |
+> | + `--cone_hull_rect` (bit-exact, **shipped**) | 0.424 | 13.38 | 1.838 | 52.24 |
+> | + `--cone_half_y_wide` (OFF) | 0.229 | 6.92 | 0.946 | 45.74 |
+> | + `--cone_range_cull=0.5` (OFF) | 0.099 | 3.09 | 0.412 | 42.02 |
+>
+> **`cones-call` was 30.9 % of `renderFrame` and the largest never-attacked
+> row in the campaign. On the shipped defaults it is now ~25 %; with both look
+> flags it is ~7 %.**
+
 > **2026-08-28: §00l below is the CURRENT COST MAP for the three arms Gil-Ad
 > actually runs**, and it supersedes §00 for those arms. **§00k and §00l are the
 > same day and they overlap on ONE row**: §00k took city's `lighting-w1`
