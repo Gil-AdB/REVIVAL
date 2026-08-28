@@ -1,7 +1,10 @@
 # PERF_STATE.md — current state of the deferred pipeline (greets, 2026-05)
 
-> **2026-08-28: §00k below is the CURRENT COST MAP for the three arms Gil-Ad
-> actually runs**, and it supersedes §00 for those arms. §00 benched greets
+> **2026-08-28: §00l below is the CURRENT COST MAP for the three arms Gil-Ad
+> actually runs**, and it supersedes §00 for those arms. **§00k and §00l are the
+> same day and they overlap on ONE row**: §00k took city's `lighting-w1`
+> −24.2 % *after* §00l's battery ran, so §00l's city column is a parent number
+> and says so in its own banner. Everything else in §00l stands. §00 benched greets
 > *flat* (no `--ssao`) and chase through the snapshot harness; both of his SSAO
 > arms are new ground, `ssao` did not exist as a row in §00, and four defaults
 > have moved since (`ssao_downscale` 1→2, `ssao_radius_zfloor` 0→48, the
@@ -28,7 +31,85 @@
 
 ---
 
-## 00k. 2026-08-28 — RANKED COST MAP AFTER THE SSAO/HDR ROUND. **§00 (2026-08-14) is superseded for the three arms Gil-Ad actually runs**: `ssao` did not exist as a row then and is now 14–25 % of two of the three arms, and chase's whole volumetric/AO/tonemap stack turns out to run **TWICE a frame**
+## 00k. `lighting-w1` IN CITY — the OUTER-VEC kernel, first round ever run on it (2026-08-28): **−24.2 % instructions, −5.7 % of `renderFrame`**, and the row's shape is now measured, not estimated
+
+Branch `rev-w1impl` off `fog-wt` `e017d611`. Arm
+`--env_live_water --deferred --city_env_pixel`, 1512×848, `--bench=scene`,
+`--deferred_prof=1 --hw_prof`. Full account, census and refutations:
+`docs/OPTIMIZATION_BACKLOG.md` **2026-08-28**.
+
+`Render_DeferredLighting_Tile_OuterVec` is a **different kernel** from the
+`lighting-w1` this document's greets rows describe. greets and chase run
+`Render_DeferredLighting_TileT` (1 px × 1 light, full shadow tap, GGX);
+city / fountain / crash run OuterVec (8 px × 1 light, **no shadow tap of any
+kind**, no GGX lobe — `--pbr` is structurally inert in it). Six of the eleven
+landed greets `lighting-w1` levers are shadow-tap work and do not transfer.
+
+**THE ROW'S SHAPE, measured by `-DFDS_OVEC_ABLATE` (this round's new ladder;
+there was none before it).** City t=1961, row = 0.955 Gi/f:
+
+| block | Gi/f | % of row |
+|---|--:|--:|
+| **the omni loop** | 0.476 | **49.8** |
+| **the per-lane pack loop** | 0.237 | **24.8** |
+| the per-lane material gather | 0.092 | 9.6 |
+| the 8-wide env front-end | 0.037 | 3.9 |
+| everything else (masks, decode, view pos, compose, store-outs) | 0.113 | 11.8 |
+
+The two big blocks are the round's finding. The omni loop at ~50 % matched the
+analysis's static estimate; **the pack loop at 24.8 % did not** (estimated ~5 %),
+because **33–36 % of city's alive lanes carry an env store** and pay a scalar
+env compose inside the pack. That block is untouched and is the next target.
+
+**WHAT LANDED** — six byte-null levers (`--deferred_ovec_light_skip`,
+`--deferred_ovec_mat_uniform`, `--deferred_ovec_nomirror`,
+`--deferred_ovec_vec_pack`, plus two flagless), against the parent `e017d611`,
+both binaries in one worktree, interleaved, min-of-5, Ginstr floor **±0.14 %**:
+
+| pose | `lighting-w1` Gi/f | `Gcyc/f` | IPC | `renderFrame` Gi/f |
+|---|---|---|---|---|
+| city t=1961 | 0.978 → **0.741** (−24.2 %) | 0.244 → 0.187 (−23.4 %) | 4.01 → 3.96 | 4.183 → **3.945** (−5.7 %) |
+| city t=2400 | 0.390 → **0.328** (−15.9 %) | 0.104 → 0.080 (−23.1 %) | 3.75 → 4.10 | 2.255 → **2.191** (−2.8 %) |
+| city t=400 | 0.734 → **0.538** (−26.7 %) | 0.185 → 0.141 (−23.8 %) | 3.97 → 3.81 | 3.175 → **2.978** (−6.2 %) |
+| fountain t=2500 | 0.105 → **0.088** (−16.2 %) | 0.029 → 0.025 | 3.62 → 3.52 | 1.060 → 1.043 (−1.6 %) |
+| **greets t=5743 (control)** | 1.477 → **1.477 (0.00 %)** | 0.382 → 0.379 | 3.87 → 3.90 | 3.643 → 3.642 |
+
+Cycles track instructions and IPC barely moves — not the cube-prepass pattern
+where the two columns disagreed. greets is exactly flat, which proves the change
+is confined to the OuterVec kernel.
+
+**C1 + C8 alone** (the two flagless levers, own binary, interleaved min-of-5):
+t=1961 0.977 → 0.953 Gi/f (−2.5 %) and 0.243 → **0.231 Gcyc/f (−4.9 %)**; t=400
+−3.3 % Gi / −3.2 % Gcyc. Cycles beating instructions is 16m's signature, and the
+disassembly agrees: the OuterVec symbol goes from 2 `__cxa_guard` references,
+13 `bl` calls and 10 callee-save `stp` pairs to **0, 6 and 9**.
+
+**Gates:** 13/13 pinned poses + `render_gate` 4/4, and byte-nullity proved
+DIFFERENTIALLY on one binary — each lever flipped off individually and all four
+together reproduce the same hash at city t=1961, fountain t=2500, crash
+t=400/1200, and greets t=5743 forced through `--deferred_outer_vec` (the only
+arm that exercises the mirror-compare instantiation and the real normal-map lane
+loop).
+
+## 00l. 2026-08-28 — RANKED COST MAP AFTER THE SSAO/HDR ROUND. **§00 (2026-08-14) is superseded for the three arms Gil-Ad actually runs**: `ssao` did not exist as a row then and is now 14–25 % of two of the three arms, and chase's whole volumetric/AO/tonemap stack turns out to run **TWICE a frame**
+
+> ### ⚠ THE CITY ROWS ARE ALREADY ONE ROUND STALE — read §00k above first
+>
+> Every number here was measured on **`e017d611`**, and §00k's OuterVec round
+> landed on `fog-wt` the same day, **after** this battery ran. It takes city's
+> `lighting-w1` **−24.2 % instructions** and city's `renderFrame` **−5.7 %** at
+> t=1961. So this section's **city `lighting-w1` 11.924 ms, `renderFrame`
+> 53.710 ms and tick 65.550 ms are PARENT numbers.** The city rows' RANKING is
+> unaffected (`cones` 14.99 was already ahead of `lighting-w1` 11.92, and it
+> widens), and greets / chase are untouched — §00k's own greets control is
+> **exactly flat, 1.477 → 1.477 Gi/f**. Re-take the city column before quoting
+> its absolute ms. §00k measured at 1512×848 and this section at 1920×1080, so
+> the two are not directly subtractable.
+>
+> **One prediction in §00l.5 is CORRECTED by §00k and the correction is in
+> place** — see item 2's city paragraph. OuterVec has **no shadow tap of any
+> kind**, so "port the cube-tap wins to it" was the wrong mechanism; the
+> measured next target is its **per-lane pack loop, 24.8 % of the row**.
 
 **Read this section, not §00, for "what costs what today."** §00's *method* and its
 per-row mechanism notes still stand; its numbers were taken before four defaults
@@ -37,7 +118,8 @@ fix, `refl_correct` ON) and — more importantly — **§00 never measured Gil-A
 arms.** It benched greets *flat* (no `--ssao`) and chase through the snapshot
 harness. Both of his SSAO arms are new ground.
 
-Measured on `e017d611` (fog-wt tip) in a private worktree `/Users/gil-ad/work/rev-perfmap`,
+Measured on `e017d611` (**fog-wt tip when this round started**; fog-wt has since
+advanced to `0dc730d5`, see the banner) in a private worktree `/Users/gil-ad/work/rev-perfmap`,
 branch `rev-perfmap`. One binary for every number in this section
 (md5 `27efffb1cce906f1706b0b3286971797`), one asset tree, committed `rev.cfg`
 (**1920×1080**, HiDPI 0), `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`,
@@ -94,10 +176,10 @@ spread of the estimator itself.
 
 | battery | rounds | iters/run | 1-min load during | trust |
 |---|--:|--:|---|---|
-| **§00k.1–2 phase map** (5 arms) | 12, round 0 dropped | 24 | **3.9 → 9.5** | headline ms + splits |
-| §00k.2 hardware counters | 6, round 0 dropped | 24 | 7.8 → 8.6 | `Ginstr/f`, `IPC` (load-robust) |
-| §00k.4 flag ladders L1–L5 | 7, round 0 dropped | 24 | 8.7 → 13.7 | **deltas only** |
-| §00k.4 GTAO ladder L6–L7 | 7, round 0 dropped | 24 | **17.7 → 27.2** | **deltas only, and coarsely** |
+| **§00l.1–2 phase map** (5 arms) | 12, round 0 dropped | 24 | **3.9 → 9.5** | headline ms + splits |
+| §00l.2 hardware counters | 6, round 0 dropped | 24 | 7.8 → 8.6 | `Ginstr/f`, `IPC` (load-robust) |
+| §00l.4 flag ladders L1–L5 | 7, round 0 dropped | 24 | 8.7 → 13.7 | **deltas only** |
+| §00l.4 GTAO ladder L6–L7 | 7, round 0 dropped | 24 | **17.7 → 27.2** | **deltas only, and coarsely** |
 | between-binary floor | 7, round 0 dropped | 24 | 9.2 → 14.6 | the floor figure itself |
 
 **The box was NOT quiet.** Two other agents were building and benchmarking on it
@@ -134,9 +216,9 @@ and costs:
   to **+0.16 / +0.03 / −0.07 %**, `cones` to **+0.22 / +0.24 %**, `fastfog` to
   **+0.27 %**, `lighting-w2` **exactly**. **The min-of-11 estimator was not
   materially contaminated**, which is what the tight within-arm floors already
-  suggested. The tables in §00k.1–2 quote the LOADED battery (it has the same
+  suggested. The tables in §00l.1–2 quote the LOADED battery (it has the same
   arms and the same round count); use the column above as the error bar.
-* The ladder batteries (§00k.4) were **not** re-run quiet. They are same-binary
+* The ladder batteries (§00l.4) were **not** re-run quiet. They are same-binary
   flag flips read as deltas inside one interleaved batch, and their base arms
   agree across batches to 0.3 % (L1 base `ssao` 7.757 vs L6 base 7.737) — but
   quote them as deltas, not as absolute ms.
@@ -151,11 +233,11 @@ interleaved: greets tick **−0.45 %**, greets `renderFrame` **−0.43 %**, city
 **+0.16 %**, city `renderFrame` **+0.86 %**, and on a single phase (`gbuffer`)
 **±2.6 %**. So: **a cross-binary claim under ~1 % of frame is not a claim**, and
 under ~3 % on one phase is not a claim. Same-binary flag flips (everything in
-§00k.4) do not pay this floor and are quoted at their own floors.
+§00l.4) do not pay this floor and are quoted at their own floors.
 
 ---
 
-### 00k.1 — THE THREE ARMS, WHOLE FRAME
+### 00l.1 — THE THREE ARMS, WHOLE FRAME
 
 His arms, verbatim:
 
@@ -180,7 +262,7 @@ it is new.** city and chase each run **two main-view `renderFrame` calls a
 frame** (the water-reflection pass and the main pass) plus one off-main-view
 pass. `wall_min` for every row below is the **per-frame total over both calls** —
 it is not a per-pass number. What differs between the two scenes is what the
-reflection pass is allowed to skip, and that is §00k.5 item 1.
+reflection pass is allowed to skip, and that is §00l.5 item 1.
 
 The remaining UNACCOUNTED residue (1.5–4.1 ms) is, in order of size:
 the off-main-view `renderFrame` (`off wall` reads ≈0.74 ms chase, ≈0.82 ms city
@@ -192,7 +274,7 @@ larger than the residue.
 
 ---
 
-### 00k.2 — THE PHASE SPLIT, PER POSE, RANKED
+### 00l.2 — THE PHASE SPLIT, PER POSE, RANKED
 
 `wall_min` in ms per FRAME (both `renderFrame` calls where calls/f = 2).
 `core-ms` = `thrsum_avg`, the Σ of tile-task time; `effPar` = core-ms / wall =
@@ -362,7 +444,7 @@ that is not "the kernel does N things per pixel."
 
 ---
 
-### 00k.3 — WHAT THE WHOLE-TICK CLOCK SEES THAT `[DPROF]` USED TO MISS
+### 00l.3 — WHAT THE WHOLE-TICK CLOCK SEES THAT `[DPROF]` USED TO MISS
 
 The brief for this round named `refl_correct`'s per-vertex normal (§00j) as the
 known example. It is now a **row**, not a residue, in both scenes that pay it:
@@ -417,7 +499,7 @@ Two things in that table are worth saying out loud:
 
 ---
 
-### 00k.4 — FLAG-FLIP LADDERS (same binary, so no between-binary floor is paid)
+### 00l.4 — FLAG-FLIP LADDERS (same binary, so no between-binary floor is paid)
 
 #### L1/L6 — greets t=5743: what the SSAO 7.7 ms actually is
 
@@ -543,7 +625,7 @@ different order of magnitude from the 16 % §00d measured on greets.)
 
 ---
 
-### 00k.5 — THE RANKED ATTACK LIST
+### 00l.5 — THE RANKED ATTACK LIST
 
 Ranked by **absolute ms in the arm where the row is largest**; "total" is the row
 summed across all five measured poses, as a second opinion on *breadth*. Every ms
@@ -637,12 +719,19 @@ tap only gets cheaper by being CALLED LESS."*
 
 **(c) Prediction.** **Do not re-attack the greets/chase kernel interior.** IPC
 3.89 greets / **5.50 chase** — chase's is the highest of any hot row here.
-The one genuinely open sub-row with a number on it is **city's
-`Render_DeferredLighting_Tile_OuterVec`: 0.956 Gi/f, 22.9 % of city's w1, and it
-never received the 2026-08-16g/16l treatment the scalar tile kernel got.** That
-is the largest unattacked slice in this row. **INFERRED 0.8–1.5 ms on city** by
-porting `--deferred_cube_direct` + `--deferred_cube_prepass` to the outer-vec
-path. Two other items are open and named. (i) The **only untried shape for the cube
+**City's half of this row was taken while this battery was
+running** — see §00k above. My draft predicted 0.8–1.5 ms on city *by porting
+`--deferred_cube_direct` + `--deferred_cube_prepass` to the outer-vec path*, and
+**that mechanism is wrong**: §00k establishes that `Tile_OuterVec` is a different
+kernel with **no shadow tap of any kind** and no GGX lobe, so six of the eleven
+landed greets levers are shadow-tap work that cannot transfer. What actually
+landed there is six byte-null levers for **−24.2 % of city's `lighting-w1`
+instructions / −5.7 % of `renderFrame`**, with greets exactly flat as the
+control. **The measured next target on city is that round's own finding: the
+per-lane pack loop at 24.8 % of the row** — five times the ~5 % its analysis
+estimated, because 33–36 % of city's alive lanes carry an env store and pay a
+scalar env compose inside the pack. Do not re-derive it here; §00k has the
+ablation ladder (`-DFDS_OVEC_ABLATE`). Two other items are open and named. (i) The **only untried shape for the cube
 tap itself** — make it **8-wide over PIXELS for a fixed light**, i.e. restructure
 the loop pixel-major → light-major; *"large, and the per-pixel early-outs fight
 it."* (ii) The `srcCube` mirror-reflection arithmetic on the spot tap (~40 float
@@ -974,11 +1063,11 @@ close to closed and the docs say so. **Take it last, if at all.**
 | `gbuf-clear` | 0.33–0.68 | **IPC 0.58–0.60 — the only bandwidth-bound phase in the tree**, and deliberately unattacked: it is the instrument's own control, proving IPC discriminates rather than reading 3.9 everywhere. |
 | `face-bin` | 0.11–0.18 | Already attacked and landed (`--face_tile_bin`, 2026-08-16c, byte-null). Build cost 0.200 ms at city t=1961. The open follow-on is the *shadow*-pass bin (row 9). |
 | `depth-bounds`, `strip-lists` | 0.18–0.65 / 0.08–0.28 | **No prior history found for either.** Too small to lead a round; note `depth-bounds` reaches 0.646 ms at chase t=800. |
-| UNACCOUNTED residue | 1.5–4.1 | §00k.1. Nothing inside it can exceed the residue. |
+| UNACCOUNTED residue | 1.5–4.1 | §00l.1. Nothing inside it can exceed the residue. |
 
 ---
 
-### 00k.6 — EXECUTION ORDER, IF YOU ARE THE NEXT AGENT
+### 00l.6 — EXECUTION ORDER, IF YOU ARE THE NEXT AGENT
 
 Ranked by (measured win) ÷ (risk × effort), not by ms:
 
@@ -1003,7 +1092,7 @@ Ranked by (measured win) ÷ (risk × effort), not by ms:
 7. Then the kernel rows (2, 4) — where eleven and seven rounds of refutations
    are waiting for anyone who arrives without reading (b).
 
-### 00k.7 — REPRODUCTION
+### 00l.7 — REPRODUCTION
 
 Drivers are committed at `scratchpad/perfmap28.py` (interleaved, order-rotated,
 min-of-rounds, JSON out), `scratchpad/perfmap28_report.py` (the tables above),

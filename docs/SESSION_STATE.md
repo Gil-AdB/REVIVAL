@@ -1,5 +1,71 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28 — **CITY'S OUTER-VEC LIGHTING KERNEL, THE FIRST ROUND EVER RUN
+> ON IT: `lighting-w1` −24.2 % instructions, `renderFrame` −5.7 %, six byte-null
+> levers, 13/13 pins and `render_gate` 4/4 — and the single biggest candidate is
+> killed by its own census**
+>
+> `Render_DeferredLighting_Tile_OuterVec` — the kernel city, fountain and crash
+> select through `Scene::PreferOuterVec` — was 22.9 % of city's `renderFrame`
+> and had **no instrument of any kind**: all four existing ablation ladders live
+> inside `TileT` / `TileFill`, which it never enters. This round built
+> `-DFDS_OVEC_ABLATE` / `-DFDS_OVEC_OMNI_ABLATE` / `-DFDS_OVEC_CENSUS`
+> (compile-time, `if constexpr`, cumulative sink — a *runtime* predicate in this
+> body cost 16l +4.3 % with the flag OFF), then measured before choosing.
+>
+> **THE CENSUS KILLED THE BIGGEST CANDIDATE.** The analysis's C6 (give the
+> `wantSpec` redo lane a specular-only loop) predicted **~18 % of the row** at an
+> assumed *f* = 0.30 and set its own kill line at *f* < 0.08. Measured *f* — the
+> fraction of alive lanes wanting the scalar redo — is **0.91 / 3.25 / 1.06 %**
+> at city t=400 / t=1961 / t=2400. Worse for it: the redo only *duplicates* a vec
+> diffuse in a group that also has a vec lane, and that is **0.01–0.30 % of
+> lanes**, because the kernel's own `anyVecLane` early-out already zeroes
+> `omniLoopN` for an all-spec group. **C6 is closed, and with it C6a** — the
+> rsqrt unification that would have moved every city pixel. C6a survives ONLY as
+> a standalone look/correctness question for Gil-Ad and `SHADING_CONTRACT.md`
+> (the vec loop's `_mm256_rsqrt_ps` is a bare estimate, ±0.3 % and piecewise-
+> constant; the scalar redo's `fast_rsqrt` is refined to ±6e-5), never as a perf
+> item. It was not built.
+>
+> **WHAT LANDED, all six byte-null, measured min-of-5 interleaved against the
+> parent `e017d611` with both binaries built in one worktree** (Ginstr floor
+> ±0.14 %): city t=1961 `lighting-w1` **0.978 → 0.741 Gi/f (−24.2 %)**,
+> `renderFrame` **4.183 → 3.945 (−5.7 %)**; t=400 −26.7 % / −6.2 %; t=2400
+> −15.9 % / −2.8 %; fountain t=2500 −16.2 %; **greets t=5743 exactly 0.00 %**,
+> the control that proves nothing outside OuterVec moved. Cycles track
+> instructions (IPC 4.01 → 3.96), so this is not the cube-prepass trap.
+> Per-lever on ONE binary from the ALL-OFF arm: `--deferred_ovec_light_skip`
+> (skip a light that reaches no lane of the group; 28–40 % of pairs) **−9.2 %**,
+> `--deferred_ovec_mat_uniform` (one `Material` walk per group; 95 % of groups
+> are uniform) **−8.0 %**, `--deferred_ovec_nomirror` (the provably-dead mirror
+> compare) **−4.8 %**, `--deferred_ovec_vec_pack` (one 256-bit store for an
+> all-plain group; 58–63 %) **−2.7 %**. Every one beat its prediction.
+>
+> **C1 + C8, the two flagless ones, priced on their OWN binary**: city t=1961
+> `lighting-w1` 0.977 → 0.953 Gi/f (−2.5 %) but **0.243 → 0.231 Gcyc/f (−4.9 %)**;
+> t=400 −3.3 % Gi / −3.2 % Gcyc. The cycle win exceeding the instruction win is
+> **16m's signature** (that round measured Gi −0.96 to 0.00 % against Gcyc −1.17
+> to −2.85 %), and the disassembly confirms the mechanism directly: publishing
+> the in-loop `static const bool` took the OuterVec symbol from **2
+> `__cxa_guard` references, 13 `bl` calls and 10 callee-save `stp` pairs to 0, 6
+> and 9**.
+>
+> **THE NEXT TARGET IS NAMED BY THE LADDER, and the analysis mis-sized it: the
+> per-lane PACK loop is 24.8 % of the row**, not ~5 %, because **33–36 % of
+> city's alive lanes carry an env store** and pay a scalar face pick, live-water
+> weight, tilt + re-projection and one or two `EnvCubeFetchBil` inside it.
+> `EnvComposeCityVec8` already vectorises the front end and arms on 33–37 % of
+> groups; the fetch is still eight scalar bilinear taps.
+>
+> **GATES: no pin moved.** 13/13 pinned poses reproduce and `render_gate` is
+> 4/4 from this worktree's stock `rev.cfg`. Byte-nullity is also proved
+> DIFFERENTIALLY on one binary: every lever flipped off individually and all four
+> together give the same hash at city t=1961 (`4cb8d2ca…`), fountain t=2500
+> (`8db68ccb…`), crash t=400/1200 (`e33b57d5…` ×2) and greets t=5743 forced
+> through `--deferred_outer_vec` (`5a9190d2…`) — the last being the only arm that
+> exercises the mirror-compare instantiation and the real normal-map lane loop.
+> greets acceptance t=5743 / t=2845 are byte-identical to their pins.
+
 > ## 2026-08-26 — **CITY AND FOUNTAIN HAVE AMBIENT OCCLUSION FOR THE FIRST
 > TIME**: the discard is `Scene::PreferOuterVec`, not the tonemap — the
 > outer-vec lighting kernel writes NO HDR radiance, so SSAO was multiplying a
