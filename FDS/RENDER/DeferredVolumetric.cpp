@@ -315,6 +315,64 @@ static inline bool anyLane_x8(const __m256 &m) {
 static inline bool anyLane_x8(const __m256 &m) { return _mm256_movemask_ps(m) != 0; }
 #endif
 
+// EXACT screen AABB of a sphere, for --cone_hull_rect.
+//
+// `lightSphereScreenRect` (DeferredCommon.h) uses the small-angle form
+// `rx = r * fovX / vz`, and its comment claims it "slightly over-estimates
+// near the FOV edges". For the RANGE sphere, whose radius is large enough
+// that the slack swamps the error, that is true in practice. It is NOT true
+// in general: an off-axis sphere's silhouette subtends more than r/vz, so the
+// small-angle rect can UNDER-estimate -- measured, the first cone-hull build
+// lost 846 of city's 15 326 914 alive (lane x spot) pairs, which is exactly
+// the signature of a bound that is not conservative. A cull that is only
+// "byte-null at the pins we happen to own" is not a cull, so the hull's two
+// pieces get the exact bound instead.
+//
+// The exact one is the tangent construction: in the x-z plane the sphere
+// projects to a circle at (vx, vz) of radius r, and the silhouette's extreme
+// x is where a tangent plane contains the y axis -- i.e. the tangent lines
+// from the eye, at angles atan2(vx, vz) +/- asin(r / |(vx,vz)|). Same in y.
+// ~8 transcendentals per sphere, 2 spheres x 46 spots once per frame; the
+// orchestrator is not the hot loop.
+static inline bool coneHullSphereRect(float vx, float vy, float vz, float r,
+                                      float fovX, float fovY,
+                                      float cntrEX, float cntrEY,
+                                      int xres, int yres, LightScreenRect &out)
+{
+    if (vz + r < 0.0f) return false;          // wholly behind the eye
+    if (vz - r < 1.0f) { out.full = true; return true; }
+    out.full = false;
+    constexpr float kHalfPi = 1.5707963f - 1e-3f;
+    // axis: returns [lo, hi] in tangent units, or the full range when the
+    // sphere wraps past 90 degrees on this axis.
+    auto span = [&](float c, float &tlo, float &thi) {
+        const float d = std::sqrt(c * c + vz * vz);
+        if (!(d > r)) { tlo = -1e30f; thi = 1e30f; return; }   // eye inside
+        const float a = std::atan2(c, vz);
+        const float b = std::asin(r / d);
+        const float a0 = a - b, a1 = a + b;
+        tlo = (a0 <= -kHalfPi) ? -1e30f : std::tan(a0);
+        thi = (a1 >=  kHalfPi) ?  1e30f : std::tan(a1);
+    };
+    float tx0, tx1, ty0, ty1;
+    span(vx, tx0, tx1);
+    span(vy, ty0, ty1);
+    const float xlo = cntrEX + fovX * tx0, xhi = cntrEX + fovX * tx1;
+    // Screen y is inverted: cy = cntrEY - fovY * tan(angle), so the LARGER
+    // world angle is the SMALLER screen row.
+    const float ylo = cntrEY - fovY * ty1, yhi = cntrEY - fovY * ty0;
+    // One pixel of pad. tan() near +/-90 degrees amplifies float error
+    // without bound, and the tile grid is 160x135 px, so a pixel of slack is
+    // free and takes the boundary-rounding question off the table.
+    constexpr float kPad = 1.0f;
+    const float fx = float(xres - 1), fy = float(yres - 1);
+    out.x0 = int(std::floor(std::min(std::max(xlo - kPad, 0.0f), fx)));
+    out.x1 = int(std::ceil (std::min(std::max(xhi + kPad, 0.0f), fx)));
+    out.y0 = int(std::floor(std::min(std::max(ylo - kPad, 0.0f), fy)));
+    out.y1 = int(std::ceil (std::min(std::max(yhi + kPad, 0.0f), fy)));
+    return true;
+}
+
 // OR of the mirror-footprint presence bits (ctx.tileMirrorPresence,
 // LIGHTING-tile geometry: 8-rounded X over the 12x8 grid) across every
 // lighting tile overlapping the given pixel rect. Used by the cone and
@@ -3036,6 +3094,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
 
     const float coneRangeK_orch = fds::g_hdrActive ? 1.0f
                                 : fds::FeatureFlags::cone_range_cull();
+    const bool coneHullRect = fds::FeatureFlags::cone_hull_rect();
 
     for (int s = 0; s < spotCount; ++s) {
         const int li = spotIdx[s];
@@ -3046,9 +3105,55 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         // if they did not, the tile lists would still carry spots whose
         // retained volume no longer reaches the tile. k == 1.0f is exact.
         const float r  = std::sqrt(lights->range2[li]) * coneRangeK_orch;
+        // --cone_hull_rect: the range sphere is a 2r cube around the apex,
+        // but the lit volume is a 30-degree cone -- roughly 1.37r x r x r,
+        // a quarter to a third of the sphere's screen AABB. Bound the tile
+        // span by the CONE HULL instead: conv({apex} U B(P + r*cosO*D,
+        // r*sinO)). That hull provably CONTAINS the spot volume (a point at
+        // radius s <= r and angle phi <= O lies inside the apex-to-ball
+        // tangent cone, whose half-angle is exactly arcsin(r sinO / r) = O;
+        // and any point past the base plane satisfies |X-C|^2 <= r^2 sin^2 O
+        // outright, since u*c > cosO gives u^2 - 2*u*c*cosO + 2cos^2 O - 1 <
+        // u^2 - 1 <= 0). A perspective projection maps a convex hull to the
+        // hull of the projections, so the AABB of the two projected pieces
+        // contains the projected cone. Exactly conservative -> BIT-EXACT:
+        // every entry dropped is one whose pixels the per-pixel solve
+        // rejects anyway.
         LightScreenRect sr;
-        if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
-                                   XRes, YRes, sr)) continue;
+        if (coneHullRect) {
+            const float cosO_h = lights->cosOuter[li];
+            const float sinO_h = lights->sinOuter[li];
+            const float ar     = r * cosO_h;             // axial to base centre
+            LightScreenRect ra, rb;
+            const bool okA = coneHullSphereRect(vx, vy, vz, 0.0f,
+                                 FOVX, FOVY, CntrEX, CntrEY, XRes, YRes, ra);
+            const bool okB = coneHullSphereRect(
+                                 vx + lights->dirX[li] * ar,
+                                 vy + lights->dirY[li] * ar,
+                                 vz + lights->dirZ[li] * ar,
+                                 r * sinO_h,
+                                 FOVX, FOVY, CntrEX, CntrEY, XRes, YRes, rb);
+            // BOTH pieces must project from strictly in front of the eye,
+            // or the hull-of-projections identity does not hold and the rect
+            // is not a bound. A cone whose APEX is behind the near plane
+            // widens without limit as its cross-section approaches the eye,
+            // so its screen footprint is far larger than the base ball's --
+            // this is what the first build got wrong, and chase (32 narrow
+            // beams, apexes sweeping past the camera) paid for it in
+            // exactly one direction: 4 of its 5 pinned poses lost light,
+            // 0 pixels anywhere got brighter.
+            if (!okA || !okB || ra.full || rb.full) {
+                sr.full = true;
+            } else {
+                sr.full = false;
+                sr.x0 = XRes; sr.x1 = -1; sr.y0 = YRes; sr.y1 = -1;
+                if (okA) { sr.x0 = std::min(sr.x0, ra.x0); sr.x1 = std::max(sr.x1, ra.x1);
+                           sr.y0 = std::min(sr.y0, ra.y0); sr.y1 = std::max(sr.y1, ra.y1); }
+                if (okB) { sr.x0 = std::min(sr.x0, rb.x0); sr.x1 = std::max(sr.x1, rb.x1);
+                           sr.y0 = std::min(sr.y0, rb.y0); sr.y1 = std::max(sr.y1, rb.y1); }
+            }
+        } else if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX,
+                                          CntrEY, XRes, YRes, sr)) continue;
         if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
         const int ti_lo = sr.full ? 0 : sr.x0 / tileSizeX;
         const int ti_hi = sr.full ? numTilesX - 1
