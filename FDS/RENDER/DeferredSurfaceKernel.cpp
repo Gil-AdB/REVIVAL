@@ -964,6 +964,22 @@ static std::atomic<uint64_t> g_envCntWave1{0}, g_envCntXpar{0},
 	g_envCntOvScalar{0}, g_envCntOvEnvScalar{0}, g_envCntOvEnvVec{0};
 static const bool g_envVecStats = std::getenv("FDS_ENVVEC_STATS") != nullptr;
 
+// OuterVec's 8-wide env front-end gate: "no env diagnostic is armed, so the vec
+// compose may run". PUBLISHED to file scope (2026-08-28, candidate C1) from a
+// function-local `static const bool` that sat INSIDE
+// Render_DeferredLighting_Tile_OuterVec's per-8-pixel-group loop. That form is
+// the exact defect round 16m removed from the cube tap: a function-local static
+// with a DYNAMIC initializer forces `bl __cxa_guard_acquire` into the enclosing
+// function, and 16m measured that one never-taken call pinning eight callee-save
+// pairs and a 144-byte frame across the hot path (greets lighting-w1 Gcyc/f
+// -1.17 to -2.85 %% at 5/5 poses for ~30 bit-exact lines). Byte-null by
+// construction: the environment does not change during a run, so a static-init
+// read and a first-use read return the same value.
+static const bool g_envVecDiagOff =
+	!std::getenv("ENVPROBE") && !std::getenv("ENVFLIP") &&
+	!std::getenv("ENV_NOFETCH") && !std::getenv("FDS_ENV_SKIP_NEGY") &&
+	!EnvTraceGet();
+
 // Face-major BILINEAR fetch from a padded-cube env store (in-face clamped —
 // the D2 overscan padding makes that seam-free). Shared by the scalar
 // compose and the OuterVec 8-wide env front-end so the two paths cannot
@@ -5799,6 +5815,23 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const float roughStrengthG = fds::FeatureFlags::roughness_strength();  // redo-lane rough attenuation (see wave-1)
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
+	// HOISTED per-group flag reads (2026-08-28, candidate C1). All four were
+	// re-read once per 8-PIXEL GROUP — 1 696 groups per tile x 96 tiles — for
+	// values that cannot change inside a frame. The sibling scalar kernel
+	// already carries the rule as a comment: "Hoist mode/global queries once
+	// per tile ... 2M function calls/frame adds up". Byte-null by construction.
+	//   envVecGateG : g_envVecDiagOff (published, see its file-scope decl) AND
+	//                 the three position-aware-lookup fakes, all of which run
+	//                 SCALAR-only and therefore disengage the 8-wide compose.
+	const bool  envVecGateG = g_envVecDiagOff
+	    && fds::FeatureFlags::env_sphere_parallax() <= 0.0f
+	    && fds::FeatureFlags::env_ssr() <= 0    // SSR march is scalar-only
+	    && !envBrdfAnalyticG;                   // analytic env-BRDF is scalar-only (no AVX2 exp2)
+	const bool  profNoLightsG = fds::FeatureFlags::prof_no_lights();
+	// C8: skip the per-lane normal-map / TBN lane loop and its store/reload
+	// round-trip when the scene carries no normal map at all. See
+	// DeferredLightingCtx::anyNormalMap.
+	const bool  nmapLoopOnG = ctx.anyNormalMap;
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked). See
 	// the lane_ambB rewrite after the normal decode below.
 	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
@@ -6090,11 +6123,21 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// vec light loop and the scalar fallback both pick it up.
 			// Without this, OuterVec rendered nmap surfaces flat, which
 			// looked like horizontal banding on greets's hex floor.
+			// C8 (2026-08-28): the store/loop/reload triple below is DEAD when
+			// no material in the table carries a NormalMap — the loop's only
+			// writes are nx_lane[k] = ... inside `if (MatN->NormalMap)`, so the
+			// reload of an unmodified buffer is the identity. ctx.anyNormalMap
+			// is one table scan per FRAME (beside shadowSkipMask). The scratch
+			// is still needed when --sh_ambient is on, because that loop reads
+			// nx_lane[] directly. City: 138 materials, zero normal maps → the
+			// whole block collapses. Byte-null by construction.
 			alignas(32) float nx_lane[8], ny_lane[8], nz_lane[8];
-			_mm256_store_ps(nx_lane, nx);
-			_mm256_store_ps(ny_lane, ny);
-			_mm256_store_ps(nz_lane, nz);
-			for (int k = 0; k < 8; ++k) {
+			if (nmapLoopOnG || shCoefG) {
+				_mm256_store_ps(nx_lane, nx);
+				_mm256_store_ps(ny_lane, ny);
+				_mm256_store_ps(nz_lane, nz);
+			}
+			for (int k = 0; nmapLoopOnG && k < 8; ++k) {
 				if (!lane_alive[k]) continue;
 				const uint32_t m = lane_mat32[k];
 				const uint32_t mid  = (m >> 20) & 0xFF;
@@ -6145,9 +6188,11 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				ny_lane[k] = vny * invLen;
 				nz_lane[k] = vnz * invLen;
 			}
-			nx = _mm256_load_ps(nx_lane);
-			ny = _mm256_load_ps(ny_lane);
-			nz = _mm256_load_ps(nz_lane);
+			if (nmapLoopOnG) {
+				nx = _mm256_load_ps(nx_lane);
+				ny = _mm256_load_ps(ny_lane);
+				nz = _mm256_load_ps(nz_lane);
+			}
 
 			// --sh_ambient: rewrite the flat Diff*Sc->Ambient term baked into
 			// lane_ambB (Lumin*255 + Diff*ambB_sc) as Lumin*255 + Diff*E(n),
@@ -6217,8 +6262,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			const bool anyVecLane = !_mm256_testz_si256(needVec, needVec);
 
 			// Per-omni accumulate. Each omni broadcast, 8 pixels in vec.
-			const bool profNoLights = fds::FeatureFlags::prof_no_lights();
-			const int omniLoopN = (profNoLights || !anyVecLane) ? 0 : tl.count;
+			const int omniLoopN = (profNoLightsG || !anyVecLane) ? 0 : tl.count;
 			__m256i lane_mirror_v = _mm256_load_si256((const __m256i*)lane_mirrorId);
 			for (int n = 0; n < omniLoopN; ++n) {
 				__m256 wx = _mm256_sub_ps(_mm256_set1_ps(tl.posX[n]), xv);
@@ -6339,22 +6383,20 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// in this group shares ONE cube store with the city shape
 			// (noParallax + cv-pull) and no per-pixel map/diagnostic
 			// forces the scalar compose. See EnvComposeCityVec8.
-			static const bool sEnvVecDiagOff =
-				!std::getenv("ENVPROBE") && !std::getenv("ENVFLIP") &&
-				!std::getenv("ENV_NOFETCH") && !std::getenv("FDS_ENV_SKIP_NEGY") &&
-				!EnvTraceGet();
-			// Position-aware lookup fakes run scalar-only for now (see
-			// EnvSpecComposeScalar; vectorizing them is the follow-up if
-			// the look is approved) — disengage the vec compose when on.
-			const bool envPosFakesOff =
-				fds::FeatureFlags::env_sphere_parallax() <= 0.0f &&
-				fds::FeatureFlags::env_ssr() <= 0 &&   // SSR march is scalar-only
-				!envBrdfAnalyticG;                     // analytic env-BRDF is scalar-only (no AVX2 exp2)
+			// envVecGateG (= g_envVecDiagOff && the three position-fake flag
+			// reads) is HOISTED to the kernel head — see its declaration there.
 			bool envVecReady = false;
 			alignas(32) float envRvx[8], envRvy[8], envRvz[8];
 			alignas(32) float envEk[8], envLvlF[8], envF0[8];
 			alignas(32) float envFres[8] = {0};   // (1-F) diffuse energy conservation
-			if (sEnvVecDiagOff && envPosFakesOff) {
+			// anyEnvLane gate: the uniformity scan below is an 8-iteration loop
+			// that ran on EVERY group, including the majority with no env lane at
+			// all — where `uni` stays null and `envVecReady` stays false. testz
+			// over lane_hasEnv[] (already built by the gather) answers it in ~4
+			// instructions. Byte-null: same `uni == nullptr` outcome.
+			if (envVecGateG && !_mm256_testz_si256(
+			        _mm256_load_si256((const __m256i*)lane_hasEnv),
+			        _mm256_load_si256((const __m256i*)lane_hasEnv))) {
 				const fds::EnvPanoLinear* uni = nullptr;
 				bool uniform = true;
 				for (int k = 0; k < 8; ++k) {
@@ -7658,10 +7700,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		if (Sc != lastScene) {
 			lastScene = Sc;
 			std::map<unsigned short, int> glossHisto;
-			int specMats = 0;
+			int specMats = 0, nMats = 0, nmapMats = 0, roughMats = 0,
+			    metalMats = 0, reflMats = 0;
 			for (size_t i = 0; i < matTable.count; ++i) {
 				Material *M = matTable.data[i];
-				if (!M || M->Specular <= 0.0f) continue;
+				if (!M) continue;
+				++nMats;
+				if (M->NormalMap)    ++nmapMats;
+				if (M->RoughnessMap) ++roughMats;
+				if (M->MetallicMap)  ++metalMats;
+				if (M->Reflection > 0.0f) ++reflMats;
+				if (M->Specular <= 0.0f) continue;
 				++specMats;
 				++glossHisto[M->Glossiness];
 			}
@@ -7673,6 +7722,16 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 				first = false;
 			}
 			std::fprintf(stderr, "}\n");
+			// MAP CENSUS (2026-08-28): the OuterVec kernel runs an 8-iteration
+			// per-lane normal-map/TBN loop and a store/reload round-trip on
+			// EVERY group; when no material in the table carries a NormalMap the
+			// loop provably does nothing (candidate C8's premise). Printed here
+			// rather than behind a new flag — see the analysis's instrument
+			// hygiene note.
+			std::fprintf(stderr,
+				"[GLOSS-STATS] mats=%d normalMap=%d roughMap=%d metalMap=%d "
+				"reflection>0=%d\n",
+				nMats, nmapMats, roughMats, metalMats, reflMats);
 		}
 	}
 
@@ -8014,12 +8073,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// this loop cannot reach (or that are null) are never consulted — the
 	// mask reproduces the old call's answer for every pixel that asks.
 	std::memset(ctx.shadowSkipMask, 0, sizeof(ctx.shadowSkipMask));
+	ctx.anyNormalMap = false;
 	{
 		const dword nMat = matTable.count < 256u ? matTable.count : 256u;
 		for (dword mi = 0; mi < nMat; ++mi) {
 			Material *M = matTable.data[mi];
-			if (M && Shadow_MaterialSkipsCasting(M))
+			if (!M) continue;
+			if (Shadow_MaterialSkipsCasting(M))
 				ctx.shadowSkipMask[mi >> 6] |= (uint64_t(1) << (mi & 63));
+			// See DeferredLightingCtx::anyNormalMap — the OuterVec kernel's
+			// per-lane nmap loop is dead work on a scene with no normal maps.
+			if (M->NormalMap) ctx.anyNormalMap = true;
 		}
 	}
 	ctx.tileLights = tileLights;
