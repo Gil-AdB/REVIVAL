@@ -1,0 +1,56 @@
+--- run ---
+bare_A MARK-rect: geo n=15756 dz med -0.0000 p90|dz| 0.0011 frac(dz>+0.08) 0.0% frac(|dz|>0.08) 0.0% ; LF med 0.07 (n=10164)
+bare_A MARK-ellipse: geo n=43333 dz med +0.0000 p90|dz| 0.0011 frac(dz>+0.08) 0.0% frac(|dz|>0.08) 0.0% ; LF med 0.03 (n=28891)
+  plane 45 n=225949 LF med 7.61 p90 15.07
+  plane 41 n=35364 LF med 9.30 p90 9.92
+  plane 48 n=280304 LF med 0.01 p90 0.01
+  plane 43 n=668542 LF med 0.00 p90 0.00
+bare_A: cam(half=0.5,ys=-1) planar[n=1210159] raw 0.00/9.18 LF 0.00/9.03 dz 0.0000 | curved[n=58067] raw 0.01/0.01 LF 0.04/0.63 dz -0.0000 | WORSTPLANE 45 LF med 7.61 p90 15.07
+r3_A MARK-rect: geo n=15756 dz med -0.0267 p90|dz| 0.6651 frac(dz>+0.08) 28.7% frac(|dz|>0.08) 64.6% ; LF med 7.35 (n=5590)
+r3_A MARK-ellipse: geo n=43043 dz med -0.0431 p90|dz| 0.5307 frac(dz>+0.08) 14.9% frac(|dz|>0.08) 52.6% ; LF med 8.05 (n=20235)
+  plane 43 n=650575 LF med 3.23 p90 14.59
+  plane 48 n=254847 LF med 2.32 p90 9.86
+  plane 41 n=36047 LF med 3.86 p90 7.66
+  plane 45 n=222631 LF med 2.81 p90 6.74
+r3_A: cam(half=0.5,ys=-1) planar[n=1164100] raw 4.30/45.52 LF 2.93/11.94 dz -0.0532 | curved[n=29759] raw 4.32/23.13 LF 3.96/16.19 dz -0.0269 | WORSTPLANE 43 LF med 3.23 p90 14.59
+ship_A MARK-rect: geo n=15756 dz med -0.0267 p90|dz| 0.6651 frac(dz>+0.08) 28.7% frac(|dz|>0.08) 64.6% ; LF med 8.14 (n=5590)
+ship_A MARK-ellipse: geo n=42932 dz med -0.0430 p90|dz| 0.5363 frac(dz>+0.08) 14.9% frac(|dz|>0.08) 52.4% ; LF med 10.45 (n=20237)
+  plane 43 n=650575 LF med 3.23 p90 14.63
+  plane 48 n=254675 LF med 2.31 p90 9.79
+  plane 41 n=36074 LF med 3.89 p90 7.70
+  plane 45 n=222694 LF med 2.81 p90 6.67
+ship_A: cam(half=0.5,ys=-1) planar[n=1164018] raw 4.30/45.54 LF 2.93/11.96 dz -0.0531 | curved[n=29748] raw 5.39/38.80 LF 6.26/24.06 dz -0.0269 | WORSTPLANE 43 LF med 3.23 p90 14.63
+fixcam_A MARK-rect: geo n=15756 dz med -0.0267 p90|dz| 0.6651 frac(dz>+0.08) 28.7% frac(|dz|>0.08) 64.6% ; LF med 16.38 (n=5590)
+fixcam_A MARK-ellipse: geo n=42932 dz med -0.0430 p90|dz| 0.5363 frac(dz>+0.08) 14.9% frac(|dz|>0.08) 52.4% ; LF med 9.93 (n=20237)
+  plane 43 n=650575 LF med 9.30 p90 19.55
+  plane 48 n=254675 LF med 10.10 p90 16.85
+  plane 41 n=36074 LF med 9.37 p90 14.91
+  plane 45 n=222694 LF med 7.45 p90 13.66
+fixcam_A: cam(half=0.5,ys=-1) planar[n=1164018] raw 9.78/43.50 LF 9.13/17.62 dz -0.0531 | curved[n=29748] raw 13.81/40.52 LF 14.33/28.86 dz -0.0269 | WORSTPLANE 43 LF med 9.30 p90 19.55
+prefo_A MARK-rect: geo n=15756 dz med -0.0079 p90|dz| 0.6687 frac(dz>+0.08) 30.2% frac(|dz|>0.08) 62.6% ; LF med 13.76 (n=5959)
+prefo_A MARK-ellipse: geo n=42820 dz med -0.0552 p90|dz| 0.5390 frac(dz>+0.08) 17.3% frac(|dz|>0.08) 54.3% ; LF med 11.48 (n=20793)
+  plane 43 n=653433 LF med 9.37 p90 19.71
+  plane 48 n=254675 LF med 10.10 p90 16.85
+  plane 41 n=36074 LF med 9.37 p90 14.91
+  plane 45 n=222694 LF med 7.45 p90 13.66
+prefo_A: cam(half=0.5,ys=-1) planar[n=1166876] raw 9.80/43.66 LF 9.16/17.75 dz -0.0537 | curved[n=28191] raw 15.29/57.24 LF 13.57/35.86 dz -0.0017 | WORSTPLANE 43 LF med 9.37 p90 19.71
+  plane 45 n=361566 LF med 7.75 p90 15.22
+  plane 41 n=32249 LF med 9.76 p90 10.07
+  plane 48 n=157483 LF med 0.01 p90 0.01
+bare_B: cam(half=0.5,ys=-1) planar[n=551298] raw 5.02/14.39 LF 4.83/14.06 dz 0.0000 | curved[n=0] raw nan/nan LF nan/nan dz nan | WORSTPLANE 45 LF med 7.75 p90 15.22
+  plane 48 n=150814 LF med 2.30 p90 9.55
+  plane 45 n=359466 LF med 3.04 p90 9.25
+  plane 41 n=31633 LF med 3.86 p90 7.07
+r3_B: cam(half=0.5,ys=-1) planar[n=541913] raw 4.29/41.97 LF 2.86/9.20 dz -0.0476 | curved[n=3240] raw 18.52/140.43 LF 19.65/139.17 dz -0.0779 | WORSTPLANE 48 LF med 2.30 p90 9.55
+  plane 48 n=150801 LF med 2.28 p90 9.55
+  plane 45 n=359377 LF med 3.03 p90 9.30
+  plane 41 n=31644 LF med 3.93 p90 7.34
+ship_B: cam(half=0.5,ys=-1) planar[n=541822] raw 4.27/42.10 LF 2.85/9.23 dz -0.0475 | curved[n=3240] raw 18.75/140.43 LF 19.86/139.16 dz -0.0779 | WORSTPLANE 48 LF med 2.28 p90 9.55
+  plane 45 n=359377 LF med 7.40 p90 15.93
+  plane 48 n=150801 LF med 9.13 p90 14.92
+  plane 41 n=31644 LF med 7.70 p90 13.69
+fixcam_B: cam(half=0.5,ys=-1) planar[n=541822] raw 8.88/42.08 LF 7.95/15.34 dz -0.0475 | curved[n=3240] raw 18.85/140.43 LF 20.92/139.16 dz -0.0779 | WORSTPLANE 45 LF med 7.40 p90 15.93
+  plane 45 n=359377 LF med 7.40 p90 15.93
+  plane 48 n=150801 LF med 9.13 p90 14.92
+  plane 41 n=31599 LF med 7.72 p90 13.70
+prefo_B: cam(half=0.5,ys=-1) planar[n=541777] raw 8.88/42.08 LF 7.95/15.34 dz -0.0475 | curved[n=3535] raw 64.12/88.10 LF 57.99/84.34 dz -0.0530 | WORSTPLANE 45 LF med 7.40 p90 15.93

@@ -875,6 +875,132 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             }
         }
 
+        // --refplane_dump (DIAGNOSTIC, default OFF): ground-truth feed for the
+        // offline reference detector (tools/refdiff_detect.py). Writes the
+        // camera ACTUALLY used plus every rooms*/floor* face (world pos + UVs +
+        // face N) and the height-map mip the bake samples (deswizzled). Faces
+        // are the authored coarse quads only in a --no-greets-displace run —
+        // the flag description carries the protocol. Write-only: no pixel.
+        if (fds::FeatureFlags::refplane_dump()) {
+            char rp[1024];
+            std::snprintf(rp, sizeof(rp), "%s/greets_t%06d_refplane.txt",
+                          cfg.outDir.c_str(), ts);
+            FILE* rf = std::fopen(rp, "w");
+            if (rf) {
+                if (View) {
+                    std::fprintf(rf, "CAM src %.9g %.9g %.9g persp %.9g %.9g "
+                                 "cntr %d %d res %d %d fov %.9g\n",
+                                 View->ISource.x, View->ISource.y, View->ISource.z,
+                                 View->PerspX, View->PerspY, (int)CntrX, (int)CntrY,
+                                 (int)XRes, (int)YRes, View->IFOV);
+                    for (int r = 0; r < 3; ++r)
+                        std::fprintf(rf, "CAMMAT%d %.9g %.9g %.9g\n", r,
+                                     View->Mat[r][0], View->Mat[r][1], View->Mat[r][2]);
+                }
+                auto wantMat = [](const char *n) {
+                    return n && (!std::strncmp(n, "rooms", 5) ||
+                                 !std::strncmp(n, "floor", 5));
+                };
+                // Per-material height info + deswizzled mip, once per name.
+                // Same clamp + mean walk as DisplaceMaterialVertices.
+                std::set<std::string> hmDone;
+                for (Object *Obj = CurScene ? CurScene->ObjectHead : nullptr;
+                     Obj; Obj = Obj->Next) {
+                    if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+                    TriMesh *T = (TriMesh*)Obj->Data;
+                    for (int32_t fi = 0; fi < T->FIndex; ++fi) {
+                        Face *F = &T->Faces[fi];
+                        if (!F->Txtr || !F->Txtr->Name || !wantMat(F->Txtr->Name))
+                            continue;
+                        const std::string mn = F->Txtr->Name;
+                        if (hmDone.count(mn)) continue;
+                        hmDone.insert(mn);
+                        const Texture *hm = F->Txtr->HeightMap;
+                        if (!hm || hm->BPP != 8 || !hm->Mipmap[0]) {
+                            std::fprintf(rf, "MATINFO %s no-heightmap\n", mn.c_str());
+                            continue;
+                        }
+                        int useMip = fds::FeatureFlags::greets_displace_mip();
+                        if (useMip >= int(hm->numMipmaps)) useMip = int(hm->numMipmaps) - 1;
+                        if (useMip < 0) useMip = 0;
+                        while (useMip > 0 &&
+                               ((std::max(1, int(hm->SizeX) >> useMip) < (1 << hm->blockSizeX)) ||
+                                (std::max(1, int(hm->SizeY) >> useMip) < (1 << hm->blockSizeY))))
+                            --useMip;
+                        const int mw = std::max(1, int(hm->SizeX) >> useMip);
+                        const int mh = std::max(1, int(hm->SizeY) >> useMip);
+                        const byte *md = hm->Mipmap[useMip];
+                        // local copy of MeshOps.cpp:SwizzledOffset (block-tiled layout)
+                        auto swz = [&](int x, int y) -> size_t {
+                            const int BX = 1 << hm->blockSizeX;
+                            const int BY = 1 << hm->blockSizeY;
+                            const int blockRowsPerCol = mh >> hm->blockSizeY;
+                            const int bx = x >> hm->blockSizeX;
+                            const int by = y >> hm->blockSizeY;
+                            const int k  = x & (BX - 1);
+                            const int j  = y & (BY - 1);
+                            return (size_t(bx) * blockRowsPerCol + by) * size_t(BX * BY)
+                                   + size_t(j) * BX + k;
+                        };
+                        double sum = 0.0;
+                        for (int y = 0; y < mh; ++y)
+                            for (int x = 0; x < mw; ++x)
+                                sum += md[swz(x, y)];
+                        const double mipMean = sum / (double(mw) * mh * 255.0);
+                        std::fprintf(rf, "MATINFO %s hm %s size %d %d block %d %d "
+                                     "useMip %d amp %.9g mipflag %d mipMean %.9g\n",
+                                     mn.c_str(), "hm8",
+                                     (int)hm->SizeX, (int)hm->SizeY,
+                                     (int)hm->blockSizeX, (int)hm->blockSizeY,
+                                     useMip, fds::FeatureFlags::greets_displace_amp(),
+                                     fds::FeatureFlags::greets_displace_mip(), mipMean);
+                        // sanitize material name for the filename (:: -> _)
+                        std::string safe = mn;
+                        for (char &c : safe) if (c == ':' || c == '/') c = '_';
+                        char hp[1024];
+                        std::snprintf(hp, sizeof(hp), "%s/greets_hm_%s_mip%d.u8",
+                                      cfg.outDir.c_str(), safe.c_str(), useMip);
+                        if (FILE* hf = std::fopen(hp, "wb")) {
+                            std::vector<byte> row;
+                            row.resize(size_t(mw));
+                            for (int y = 0; y < mh; ++y) {
+                                for (int x = 0; x < mw; ++x) row[size_t(x)] = md[swz(x, y)];
+                                std::fwrite(row.data(), 1, size_t(mw), hf);
+                            }
+                            std::fclose(hf);
+                        }
+                    }
+                }
+                // Every face of the wanted materials: authored planes + UVs.
+                long nFaces = 0;
+                for (Object *Obj = CurScene ? CurScene->ObjectHead : nullptr;
+                     Obj; Obj = Obj->Next) {
+                    if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+                    TriMesh *T = (TriMesh*)Obj->Data;
+                    for (int32_t fi = 0; fi < T->FIndex; ++fi) {
+                        Face *F = &T->Faces[fi];
+                        if (!F->Txtr || !F->Txtr->Name || !wantMat(F->Txtr->Name))
+                            continue;
+                        if (!F->A || !F->B || !F->C) continue;
+                        std::fprintf(rf, "FACE %s %s "
+                                     "%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g "
+                                     "%.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n",
+                                     Obj->Name ? Obj->Name : "(unnamed)",
+                                     F->Txtr->Name,
+                                     F->A->Pos.x, F->A->Pos.y, F->A->Pos.z,
+                                     F->B->Pos.x, F->B->Pos.y, F->B->Pos.z,
+                                     F->C->Pos.x, F->C->Pos.y, F->C->Pos.z,
+                                     F->U1, F->V1, F->U2, F->V2, F->U3, F->V3,
+                                     F->N.x, F->N.y, F->N.z);
+                        ++nFaces;
+                    }
+                }
+                std::fclose(rf);
+                std::fprintf(stderr, "[GREETSSNAP] refplane (%ld faces) -> %s\n",
+                             nFaces, rp);
+            }
+        }
+
         // FDS_DUMP_TXTR: dump the finalized per-pixel parallax UV (uf,vf) that the
         // march recorded during this tick (see g_pomDbgUV set before the tick).
         // Diffing two runs' UV bins isolates the MARCH output (spatial texel

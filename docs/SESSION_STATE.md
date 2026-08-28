@@ -1,5 +1,36 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-28f — THE DETECTION METHOD IS REBUILT AGAINST GROUND TRUTH AND
+> HIS VERDICTS, AND IT FINDS WHAT FIVE METRICS MISSED
+>
+> His directive: "It's time to fix the detection method first." Built
+> `--refplane_dump` (camera actually used + authored faces + the bake's
+> height mip/amp/mipMean, byte-null proven: full-dump-stack color md5 ==
+> clean run) + `tools/refdiff_detect.py`: an offline per-pixel reference —
+> ray-cast the AUTHORED planes, iterate onto the ideal displaced surface
+> S = P + N̂·amp·(h−mean), analytic bilinear-gradient normals — sharing NO
+> machinery with the bake. Two channels: LF normal angle (σ16) and signed
+> depth vs the displaced ENVELOPE. Validation is against his verdict corpus
+> (docs/BULGE_CORPUS.md, new: every state he labeled, verbatim).
+>
+> **Validation PASSED where five metrics failed**: bare arm reads EXACT 0.00
+> (planes 43/48, dz 0.0000 — camera+reference proven); every broken-labeled
+> era fires; the ordering matches his verdicts (prefo≈fixcam 9.2-9.4 >
+> ship≈r3 2.9-3.2 LF med, his "bit better" step); and inside his two marked
+> regions on the r3 render the GEOMETRY channel fires hugely (28.7%/14.9% of
+> pixels protrude >0.08u past the outer mitre envelope, p90 |dz| 0.665u) —
+> in EVERY displaced era ≈identically: the seam-column juts were never
+> touched by any normal-side fix. FINDINGS (measured, mechanisms open): (1)
+> pre-existing bare-arm shading pollution lives on planes 45/41 (7.6/9.3° LF
+> — his "first version" datum, localized); (2) displacement CORRUPTS the
+> clean planes 43/48 (0.00→2.3-3.2 med, 10-15 p90) concentrated at grout
+> bands/bevels (refdiff_r3_A.png: every block rimmed red); (3) block faces
+> render ~0.05u RECESSED vs the ideal surface while course lines rim in
+> front — the relief is systematically offset from the height field's truth.
+> Evidence: docs/img/refdiff/ (heatmaps + metrics_refdiff.txt); raw dumps
+> untracked in docs/img/refdiff/raw/. No fix built — detection only, per the
+> directive.
+
 > ## 2026-08-28e — THE DO-W/E LOOP: two sign/steering fixes LAND, cpb is
 > REFUTED as a wall lever, and the pierside metric is corrected
 >
