@@ -87,3 +87,31 @@ Supported via `if (EMSCRIPTEN) add_compile_options(-msimd128 -sUSE_SDL=2)` at th
 - `REV.CPP` contains a large historical dev log as a leading comment — preserve it when editing.
 - Many code paths are commented-out alternative implementations (e.g. FMOD vs Modplayer, pre-SIMD asm vs `.cpp` ports). Treat these as historical reference.
 - The `Original/` directory holds pristine 1998 sources — read-only reference.
+
+## Conclusion ledger (`groundwork`)
+
+What is *currently known* about this tree — measurements, verdicts, refutations,
+laws, traps, decisions — lives in `.groundwork/facts.jsonl` (append-only JSONL,
+`merge=union`), with the project's scope dimensions and named contracts in
+`.groundwork/config.json` and domain rules in `.groundwork/rules.lp`. Prose docs
+(`docs/SESSION_STATE.md`, `PERF_STATE.md`, `PERF_LAWS.md`, …) remain the narrative;
+the ledger is what you **query before proposing** and **write to when you measure**.
+
+- CLI: `/Users/gil-ad/work/groundwork/.venv/bin/groundwork` (alias `gw` in the same
+  venv). Run from anywhere inside this tree. Design: `/Users/gil-ad/work/groundwork/DESIGN.md`.
+- Protocol for agents: `/Users/gil-ad/work/groundwork/skills/groundwork/SKILL.md`.
+- Set `GROUNDWORK_WRITER` before writing: `coordinator` for the human-facing session,
+  `subagent:<name>` for a subagent. Only a listed human (`gilad`) or the coordinator
+  quoting him verbatim (`--quote … --quote-date …`) can write a `verdict` or `decision`;
+  a subagent's attempt is rejected by the lint.
+- Start of a session: `groundwork status` (stale / open / void / unverified-at-tip
+  counts), then `groundwork query <subject>` for whatever you are about to touch and
+  `groundwork check --json '<proposal>'` before building a lever — a refutation whose
+  scope covers yours exits 3.
+- After a correction: `groundwork supersede <old-id> --json …` then `groundwork stale`
+  and report what went stale. An *agreeing* re-measurement is added **without**
+  `supersedes` (supersede means the belief changed).
+- Human-readable state: `groundwork digest` → `.groundwork/digest.md` (committed);
+  `datasette .groundwork/cache.sqlite` to browse.
+- The global store `~/.groundwork/` holds traps that transfer between projects
+  (`groundwork add --global`); queries union it with `origin=global`.

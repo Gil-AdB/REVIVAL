@@ -1,0 +1,177 @@
+{
+  "name": "revival-fog",
+  "dimensions": {
+    "scene": {},
+    "pose": {},
+    "arm": {},
+    "defect": {},
+    "granularity": {},
+    "metric": {},
+    "state": {},
+    "detector": {},
+    "flag": {},
+    "row": {},
+    "recipe": {},
+    "tool": {},
+    "head": {
+      "kind": "git"
+    }
+  },
+  "contracts": {
+    "snapshot_md5": {
+      "kind": "exact",
+      "strict": true,
+      "unit": "md5 of the snapshot colour dump",
+      "ladder": {
+        "md5_24_runs": 5,
+        "md5_pin": 4,
+        "md5_single": 2,
+        "commit": 1,
+        "narrative": 1
+      }
+    },
+    "state": {
+      "kind": "exact",
+      "unit": "symbolic state (holds/refuted/trap/valid...)",
+      "ladder": {
+        "battery": 5,
+        "md5_pin": 4,
+        "single_run": 3,
+        "commit": 1,
+        "narrative": 1,
+        "doc": 1
+      }
+    },
+    "frame_ms": {
+      "kind": "tolerance",
+      "eps": 0.05,
+      "unit": "ms",
+      "ladder": {
+        "min_of_11_interleaved": 5,
+        "battery": 5,
+        "min_of_8": 4,
+        "min_of_5": 4,
+        "single_run": 3,
+        "image_read": 1,
+        "commit": 1,
+        "narrative": 1,
+        "doc": 1
+      }
+    },
+    "pct_delta": {
+      "kind": "tolerance",
+      "eps": 0.1,
+      "unit": "% delta vs parent",
+      "ladder": {
+        "min_of_11_interleaved": 5,
+        "battery": 5,
+        "min_of_8": 4,
+        "min_of_5": 4,
+        "single_run": 3,
+        "commit": 1,
+        "narrative": 1,
+        "doc": 1
+      }
+    },
+    "share_pct": {
+      "kind": "range",
+      "eps": 0.5,
+      "unit": "%",
+      "ladder": {
+        "min_of_11_interleaved": 5,
+        "battery": 5,
+        "snapshot_diff": 5,
+        "min_of_5": 4,
+        "single_run": 3,
+        "commit": 1,
+        "narrative": 1,
+        "doc": 1
+      }
+    },
+    "world_units": {
+      "kind": "tolerance",
+      "eps": 0.005,
+      "unit": "u",
+      "ladder": {
+        "battery": 5,
+        "single_run": 3,
+        "commit": 1,
+        "narrative": 1,
+        "doc": 1
+      }
+    },
+    "world_units_range": {
+      "kind": "range",
+      "eps": 0.005,
+      "unit": "u",
+      "ladder": {
+        "battery": 5,
+        "single_run": 3,
+        "commit": 1,
+        "narrative": 1,
+        "doc": 1
+      }
+    },
+    "pixel_delta": {
+      "kind": "tolerance",
+      "eps": 0,
+      "unit": "8-bit levels (max |delta|)",
+      "ladder": {
+        "snapshot_diff": 5,
+        "battery": 4,
+        "image_read": 2,
+        "commit": 1,
+        "narrative": 1
+      }
+    },
+    "hole_px": {
+      "kind": "tolerance",
+      "eps": 0,
+      "unit": "z==0 hole pixels",
+      "ladder": {
+        "battery": 5,
+        "single_run": 3,
+        "commit": 1,
+        "narrative": 1
+      }
+    },
+    "look": {
+      "kind": "judged",
+      "unit": "his eye",
+      "ladder": {
+        "transcript": 5,
+        "image_read": 2,
+        "battery": 1,
+        "md5_pin": 1,
+        "commit": 1,
+        "narrative": 1,
+        "doc": 1
+      }
+    }
+  },
+  "humans": [
+    "gilad"
+  ],
+  "tip_ref": "fog-wt",
+  "rules": "rules.lp",
+  "comments": {
+    "dimensions": {
+      "scene": "city/chase/fountain/greets/crash - every measurement is per scene",
+      "pose": "the t= of a snapshot or the cam name (camA/camB/H6017): pins and his marks are pose-specific (T5: chase pins are pose-SEQUENCE dependent)",
+      "arm": "the flag set a render was judged/measured under (judging, default, shoulder_plateau, prefo, fixcam, ship, r3...): the same wall under two arms is two claims",
+      "defect": "wall/floor/tears/bulge - a lever refuted 'as a wall lever' must keep that word (F3: cpb)",
+      "granularity": "kernel_row/whole_frame/binary - the placement floor applies per kernel row, not per frame (F7)",
+      "metric": "renderFrame/tick/delta_pct/plateau_bias/... - which number a measurement is",
+      "state": "a BULGE_CORPUS state number, so a detector reading and his label join on it (fixture 5)",
+      "detector": "gbi/sweep/sgm/blackpx/geomxsec/refdiff - which instrument a validity claim or reading is about",
+      "flag": "a FeatureFlags.def name - refutations and look decisions are about a flag",
+      "row": "a TailProf row name (lighting-w1, Tick-ReflXfrm, cones-call) - per-row costs and floors",
+      "recipe": "a pin recipe (city_deferred, chase_default, chase_cinematic, greets_t1588, greets_acceptance, render_gate) - one md5 per (recipe, pose)",
+      "tool": "the instrument or program a trap is about (pgrep, warm_gate.sh, tear_battery.sh, zsh, git, DisplaceStoneSubdiv)",
+      "head": "auto-captured git commit; tip_ref is fog-wt (the integration branch), so worktree records are neither older nor at tip until merged"
+    },
+    "contracts": "snapshot_md5 is strict: shared engine machinery changes only by a new md5 proof. look is judged: his eye; an md5 pin is weight 1 there (2026-08-13: byte gates are instruments, not vetoes). Numeric contracts carry the campaign's ladder: min-of-11 interleaved with a duplicate arm is the top; a single run is 3.",
+    "humans": "gilad writes his own records without a quote; the coordinator records his words verbatim with a date.",
+    "seeded": "2026-08-29 by the coordinator's seeding fork from PERF_LAWS.md, PERF_STATE.md 00v/00w/00q, SESSION_STATE.md gates, FeatureFlags.def refutations, BULGE_CORPUS.md (copied from rev-dispfix), and rev-dispfix SESSION_STATE 2026-08-29a (read-only). Script: .groundwork/seed/seed_2026-08-29.py"
+  }
+}

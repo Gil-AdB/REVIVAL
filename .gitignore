@@ -328,3 +328,4 @@ Runtime/*.ppm
 # as they already were; their multi-hundred-MB output must not be.
 scratchpad/gate_*/
 scratchpad/*.log
+.groundwork/cache.sqlite
