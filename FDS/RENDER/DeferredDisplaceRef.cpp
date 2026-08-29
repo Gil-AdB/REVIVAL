@@ -69,6 +69,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
 #include <map>
 #include <semaphore>
 #include <string>
@@ -244,6 +245,7 @@ struct RefFace {
 	int    domOwner[3] = {-1,-1,-1};         // dominant height owner (stone only)
 	V3     ext[3];               // extended-triangle corners (world)
 	int    matIdx = 0;
+	const TriMesh *mesh = nullptr;   // for the per-frame hide track
 	uint16_t shadowMatID = 0;
 	uint8_t  lastMip = 0;
 	double worldPerTexel = 0.01;
@@ -302,8 +304,22 @@ static inline V3 WorldPos(const TriMesh *T, const Vertex *vx) {
 	return V3(r.x + T->IPos.x, r.y + T->IPos.y, r.z + T->IPos.z);
 }
 
+// The stone materials, INCLUDING the greets mirror system's per-material UV
+// clones.  GreetsMirror clones 'rooms' -> 'rooms::mirUV' (and 'floor' likewise),
+// sharing the same HeightMap, and it is the CLONES the main view rasterises:
+// measured at cam A, matID 40 ('rooms::mirUV') and 41 ('floor::mirUV') cover
+// 1.6M of the 2.07M pixels while the un-suffixed 8/10 cover 0.45M.  Matching
+// only the bare names left the reference blind to the walls it exists to render
+// and counted every wall pixel as newly grown.
 static bool IsStoneName(const char *nm) {
-	return nm && (!std::strcmp(nm, "rooms") || !std::strcmp(nm, "floor"));
+	if (!nm) return false;
+	for (const char *base : { "rooms", "floor" }) {
+		const size_t n = std::strlen(base);
+		if (std::strncmp(nm, base, n) != 0) continue;
+		if (nm[n] == '\0') return true;
+		if (nm[n] == ':' && nm[n+1] == ':') return true;
+	}
+	return false;
 }
 
 // Uniform spatial grid over the soup, for the free-edge probe.
@@ -391,6 +407,13 @@ FDS_NOINLINE static bool BuildModel(Scene *Sc)
 
 	// ── materials ──────────────────────────────────────────────────────────
 	MatTable mt = Scene_GetMatTable(Sc);
+	if (verbose >= 2) {
+		std::fprintf(stderr, "[REFRENDER-TABLE] Scene_GetMatTable count=%u\n", mt.count);
+		for (dword i = 0; i < mt.count; ++i)
+			if (mt.data[i] && mt.data[i]->Name)
+				std::fprintf(stderr, "[REFRENDER-TABLE]  slot %3u  ID=%-3u  '%s'  hm=%p\n",
+				             i, mt.data[i]->ID, mt.data[i]->Name, (void*)mt.data[i]->HeightMap);
+	}
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != Sc || !IsStoneName(M->Name) || !M->HeightMap) continue;
 		const Texture *hm = M->HeightMap;
@@ -486,6 +509,7 @@ FDS_NOINLINE static bool BuildModel(Scene *Sc)
 		rf.u[1] = F.U2; rf.v[1] = F.V2;
 		rf.u[2] = F.U3; rf.v[2] = F.V3;
 		rf.matIdx = matIndexOf(F.Txtr);
+		rf.mesh   = T;
 
 		rf.shadowMatID = F.ShadowMatID ? F.ShadowMatID
 		               : (F.Txtr->ShadowMatID ? F.Txtr->ShadowMatID : uint16_t(F.Txtr->ID + 1));
@@ -727,6 +751,25 @@ FDS_NOINLINE static bool BuildModel(Scene *Sc)
 		(void)to2;
 	}
 
+	if (verbose >= 2) {
+		std::map<std::string, std::array<double,7>> census;   // n, bbox
+		for (const RefFace &rf : g_m.faces) {
+			const char *nm = g_m.mats[size_t(rf.matIdx)].mat->Name;
+			auto &e = census[nm];
+			if (e[0] == 0) { e[1]=e[3]=e[5]=1e30; e[2]=e[4]=e[6]=-1e30; }
+			e[0] += 1;
+			for (int k=0;k<3;++k) {
+				e[1]=std::min(e[1],rf.p[k].x); e[2]=std::max(e[2],rf.p[k].x);
+				e[3]=std::min(e[3],rf.p[k].y); e[4]=std::max(e[4],rf.p[k].y);
+				e[5]=std::min(e[5],rf.p[k].z); e[6]=std::max(e[6],rf.p[k].z);
+			}
+		}
+		for (auto &kv : census)
+			std::fprintf(stderr, "[REFRENDER-FACES] '%s' n=%.0f  bbox x[%.1f..%.1f] "
+			             "y[%.1f..%.1f] z[%.1f..%.1f]\n", kv.first.c_str(), kv.second[0],
+			             kv.second[1], kv.second[2], kv.second[3], kv.second[4],
+			             kv.second[5], kv.second[6]);
+	}
 	g_m.built = true;
 	if (verbose) {
 		for (const RefMat &rm : g_m.mats)
@@ -781,20 +824,48 @@ static void PrepareFrame(const fds::CameraContext &cam)
 
 		// screen bbox of the prism (extended triangle × [−back, dMax]).
 		const RefMat &rm = g_m.mats[size_t(rf.matIdx)];
+		// Screen bbox of the prism, NEAR-PLANE CLIPPED.  The earlier fallback
+		// ("any vertex behind the near plane → bin into every tile") put
+		// hundreds of faces in every bin, and the per-ray candidate cap then
+		// dropped whichever ones it reached last — silently, and not
+		// necessarily the far ones.  Measured at cam A: the pier's own front
+		// face was dropped from its own pixels and an edge-on face 1.1 u BEHIND
+		// it won a 90 px band.  A prism is convex with 6 vertices and 9 edges,
+		// so clipping it against z = nearZ is exact and cheap.
 		double x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
-		bool behind = false, any = false;
-		for (int k = 0; k < 3; ++k) for (int s = 0; s < 2; ++s) {
-			const V3 q = fvv.ext[k] + fvv.n * (s ? rm.dMax : -g_m.back);
-			if (q.z <= nearZ) { behind = true; continue; }
+		bool any = false;
+		V3 pv[6];
+		for (int k = 0; k < 3; ++k) {
+			pv[k]     = fvv.ext[k] + fvv.n * rm.dMax;
+			pv[k + 3] = fvv.ext[k] - fvv.n * g_m.back;
+		}
+		static const int kEdges[9][2] = { {0,1},{1,2},{2,0}, {3,4},{4,5},{5,3}, {0,3},{1,4},{2,5} };
+		auto emit = [&](const V3 &q) {
+			if (q.z <= nearZ) return;
 			const double sx = cam.cntrEX + (q.x / q.z) * cam.fovX;
 			const double sy = cam.cntrEY - (q.y / q.z) * cam.fovY;
 			x0 = std::min(x0, sx); x1 = std::max(x1, sx);
 			y0 = std::min(y0, sy); y1 = std::max(y1, sy);
 			any = true;
+		};
+		for (int k = 0; k < 6; ++k) emit(pv[k]);
+		for (int e = 0; e < 9; ++e) {
+			const V3 &a = pv[kEdges[e][0]], &b = pv[kEdges[e][1]];
+			if ((a.z > nearZ) == (b.z > nearZ)) continue;
+			const double t = (nearZ - a.z) / (b.z - a.z);
+			emit(a + (b - a) * t + V3(0, 0, 1e-6));
 		}
-		if (behind || !any) { x0 = 0; y0 = 0; x1 = double(XRes); y1 = double(YRes); any = true; }
 		fvv.sxMin = x0; fvv.sxMax = x1; fvv.syMin = y0; fvv.syMax = y1;
-		fvv.onScreen = any && x1 >= 0 && y1 >= 0 && x0 <= XRes && y0 <= YRes;
+		// HIDE TRACK.  The scene hides meshes over time and Transform_Objects
+		// drops them with exactly this test (`if (!(T->Flags & HTrack_Visible))
+		// { Tri_Invisible; continue; }`).  The model is built once and cached,
+		// so visibility has to be re-asked EVERY frame: at cam A t=5965 a hidden
+		// stone wall stands 10 u in front of the camera, and a reference that
+		// ignores the track renders that wall over the entire view (measured:
+		// one face took 1.2M of 2.07M pixels at z 4-9 where the rasterizer's
+		// nearest surface is at 15).
+		const bool visible = rf.mesh && (rf.mesh->Flags & HTrack_Visible);
+		fvv.onScreen = visible && any && x1 >= 0 && y1 >= 0 && x0 <= XRes && y0 <= YRes;
 	}
 
 	g_m.tilePx = 32;
@@ -810,6 +881,19 @@ static void PrepareFrame(const fds::CameraContext &cam)
 		const int ty1 = std::min(g_m.tilesY - 1, int(std::floor(fvv.syMax)) / g_m.tilePx);
 		for (int ty = ty0; ty <= ty1; ++ty) for (int tx = tx0; tx <= tx1; ++tx)
 			g_m.bins[size_t(ty) * g_m.tilesX + tx].push_back(int32_t(i));
+	}
+	// Order every bin NEAREST FIRST, so if the per-ray candidate cap ever binds
+	// it can only drop faces that were going to lose the depth test anyway.
+	{
+		std::vector<double> key(g_m.fv.size(), 1e30);
+		for (size_t i = 0; i < g_m.fv.size(); ++i) {
+			const RefFaceV &f = g_m.fv[i];
+			double z = 1e30;
+			for (int k = 0; k < 3; ++k) z = std::min(z, f.ext[k].z);
+			key[i] = z;
+		}
+		for (auto &b : g_m.bins)
+			std::sort(b.begin(), b.end(), [&](int32_t a, int32_t c) { return key[size_t(a)] < key[size_t(c)]; });
 	}
 	// closure: a candidate's neighbours must be present, because the mitre
 	// trim and the bisector both read them.
@@ -828,7 +912,7 @@ static void PrepareFrame(const fds::CameraContext &cam)
 // ═══════════════════════════════════════════════════════════════════════════
 // 6.  The per-ray solver.
 // ═══════════════════════════════════════════════════════════════════════════
-static constexpr int kMaxCand   = 96;
+static constexpr int kMaxCand   = 192;
 static constexpr int kMaxEvents = 512;
 
 struct RayCand {
@@ -944,11 +1028,35 @@ struct Hit {
 	bool   skirt = false;
 };
 
-// Is the ray point at t inside the solid?  Returns the governing face too.
+// Is the ray point at t inside the solid?  Returns the owning face too.
+//
+// TWO READINGS OF THE SAME SENTENCE, and they are not the same solid.
+// "The displaced SOLID is the union of the slabs, with each face governing the
+// region where its base plane is the nearest."
+//
+//   partition = 0 (UNION MEMBERSHIP, the default).  A point is in the solid if
+//     ANY candidate slab contains it; the nearest base plane among the slabs
+//     that DO contain it owns the shading.  This is the reading the literature
+//     supports: min-as-union, exact because the march starts outside (survey §G).
+//
+//   partition = 1 (PARTITIONED MEMBERSHIP, the literal candidate definition).
+//     The nearest base plane governs FIRST, and the point is in the solid only
+//     if THAT face's slab contains it.  This is what produces the castellation
+//     step — and it also DELETES MATERIAL.  Wherever the governing face's own
+//     height says air while a neighbour's slab says solid, the point is air.
+//     At a grazing corner that is not a sliver: measured at cam A t=5965, the
+//     pier's own front surface is deleted over a 90 px band because the
+//     adjacent face is seen exactly edge-on, so its plane is the nearest one
+//     along the entire ray, and its height there happens to be a groove — the
+//     reference reported the solid starting 1.1 u BEHIND the true surface.
+//     A plane bisector is a non-local partition: an edge-on plane is "nearest"
+//     to an enormous region, and nothing about the model bounds that.
+//     Kept, default OFF, because seeing it is the point of a reference.
 static bool InsideAt(const RayCtx &rc, double t, int &govSlot)
 {
 	govSlot = -1;
-	if (g_m.partition == 0) {                        // plain union of the slabs
+	if (g_m.partition != 1) {
+		int best = -1; double bestAbs = 1e300;
 		for (int i = 0; i < rc.n; ++i) {
 			const RayCand &c = rc.c[i];
 			if (t < c.tLo || t > c.tHi) continue;
@@ -956,11 +1064,13 @@ static bool InsideAt(const RayCtx &rc, double t, int &govSlot)
 			if (sd < -g_m.back) continue;
 			if (sd > DOfFace(rc, i, t)) continue;
 			if (!MitreTrimOk(rc, i, t)) continue;
-			govSlot = i; return true;
+			const double a = std::fabs(sd);
+			if (a < bestAbs) { bestAbs = a; best = i; }
 		}
-		return false;
+		govSlot = best;
+		return best >= 0;
 	}
-	// bisector partition: the nearest BASE PLANE governs
+	// the literal rule: nearest BASE PLANE governs, then its slab decides
 	int best = -1; double bestAbs = 1e300, bestSd = 0;
 	for (int i = 0; i < rc.n; ++i) {
 		const RayCand &c = rc.c[i];
@@ -1087,15 +1197,28 @@ static void MarchCandidate(const RayCtx &rc, int slot, double ta, double tb,
 
 // Solve one ray.  D is the view-space direction with D.z == 1, so the ray
 // parameter t IS the view-space Z, which is what the depth encoding wants.
+// FDS_REFRENDER_DEBUG_PX="x,y" traces one pixel's whole solve.
+static int g_dbgX = -1, g_dbgY = -1;
+static thread_local bool g_dbgThis = false;
+
 static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
                     double tNear, double tFar, int &cellsOut, bool &budgetOut)
 {
 	Hit out;
 	RayCtx rc; rc.D = D;
+	std::vector<int32_t> allFaces;
+	const std::vector<int32_t> *use = &bin;
+	if (g_dbgThis) {
+		std::fprintf(stderr, "[REFDBG] bin size=%zu (tracing BRUTE FORCE over all %zu faces)\n",
+		             bin.size(), g_m.faces.size());
+		allFaces.resize(g_m.faces.size());
+		for (size_t i = 0; i < allFaces.size(); ++i) allFaces[i] = int32_t(i);
+		use = &allFaces;
+	}
 
 	// build candidates
-	for (int32_t fi : bin) {
-		if (rc.n >= kMaxCand) break;
+	for (int32_t fi : *use) {
+		if (rc.n >= kMaxCand) break;   // bins are ordered nearest-first (PrepareFrame)
 		const RefFaceV &fvv = g_m.fv[size_t(fi)];
 		const RefFace  &rf  = g_m.faces[size_t(fi)];
 		const RefMat   &rm  = g_m.mats[size_t(rf.matIdx)];
@@ -1110,7 +1233,10 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 		// this rule: one far-side wall face minted 203k of the 296k pixels the
 		// reference grew, every one of them a non-slab event.  A face cannot
 		// show the eye relief it is facing away from.
-		if (c.sn >= 0.0) continue;
+		if (c.sn >= 0.0) {
+			
+			continue;
+		}
 		c.s0 = -fvv.d;
 		double lo = tNear, hi = tFar;
 		for (int i = 0; i < 3; ++i) {
@@ -1119,14 +1245,29 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 			// ed_i(t) <= margin_i
 			ClipHalf(c.en[i], c.e0[i] - rf.margin[i], lo, hi);
 		}
-		if (hi <= lo) continue;
+		if (hi <= lo) {
+			
+			continue;
+		}
 		// band: −back <= sd(t) <= dMax
 		ClipHalf( c.sn,  c.s0 - rm.dMax, lo, hi);
 		ClipHalf(-c.sn, -c.s0 - g_m.back, lo, hi);
-		if (hi <= lo) continue;
+		if (hi <= lo) {
+			
+			continue;
+		}
 		c.un = dot(fvv.gu, D); c.u0c = fvv.u0 - dot(fvv.gu, fvv.p0);
 		c.vn = dot(fvv.gv, D); c.v0c = fvv.v0 - dot(fvv.gv, fvv.p0);
 		c.tLo = lo; c.tHi = hi;
+		if (g_dbgThis) {
+			bool inBin = false;
+			for (int32_t b : bin) if (b == fi) { inBin = true; break; }
+			if (!inBin) std::fprintf(stderr, "[REFDBG]  *** f=%d t=[%.3f..%.3f] IS A CANDIDATE "
+			                         "BUT NOT IN THE BIN (onScreen=%d bbox x[%.0f..%.0f] y[%.0f..%.0f])\n",
+			                         fi, lo, hi, g_m.fv[size_t(fi)].onScreen ? 1 : 0,
+			                         g_m.fv[size_t(fi)].sxMin, g_m.fv[size_t(fi)].sxMax,
+			                         g_m.fv[size_t(fi)].syMin, g_m.fv[size_t(fi)].syMax);
+		}
 		rc.c[rc.n++] = c;
 	}
 	if (rc.n == 0) return out;
@@ -1157,7 +1298,7 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 		}
 	}
 	// bisector crossings (the castellation STEP lives on exactly these)
-	if (g_m.partition == 1) {
+	{
 		for (int i = 0; i < rc.n && nev + 2 < kMaxEvents; ++i)
 			for (int j = i + 1; j < rc.n && nev + 2 < kMaxEvents; ++j) {
 				const double an = rc.c[i].sn - rc.c[j].sn, ab = rc.c[i].s0 - rc.c[j].s0;
@@ -1180,6 +1321,20 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 
 	if (nev < 2) return out;
 	std::sort(ev, ev + nev);
+	if (g_dbgThis) {
+		std::fprintf(stderr, "[REFDBG] ray D=(%.4f,%.4f,1) cands=%d events=%d\n", D.x, D.y, rc.n, nev);
+		for (int i = 0; i < rc.n; ++i) {
+			const RayCand &c = rc.c[i];
+			const RefFace &rf = g_m.faces[size_t(c.fi)];
+			const RefMat &rm = g_m.mats[size_t(rf.matIdx)];
+			std::fprintf(stderr, "[REFDBG]  cand f=%d '%s' n=(%.3f,%.3f,%.3f) sn=%.4f "
+			             "t=[%.3f..%.3f] sd@lo=%.4f sd@hi=%.4f d@lo=%.4f d@hi=%.4f\n",
+			             c.fi, rm.mat->Name, g_m.fv[size_t(c.fi)].n.x, g_m.fv[size_t(c.fi)].n.y,
+			             g_m.fv[size_t(c.fi)].n.z, c.sn, c.tLo, c.tHi,
+			             c.sn*c.tLo + c.s0, c.sn*c.tHi + c.s0,
+			             DOfFace(rc, i, c.tLo), DOfFace(rc, i, c.tHi));
+		}
+	}
 
 	// ── walk the intervals; the first one whose interior is inside the solid
 	//     starts at the surface.  The march starts OUTSIDE, which is what makes
@@ -1191,28 +1346,52 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 		if (a >= gHi) break;
 		const double mid = 0.5 * (a + b);
 		if (mid <= tNear) continue;
-		if (InsideAt(rc, mid, gov)) {
-			out.hit = true;
-			out.t   = std::max(a, tNear);
-			out.fi  = rc.c[gov].fi;
-			out.u   = rc.c[gov].un * out.t + rc.c[gov].u0c;
-			out.v   = rc.c[gov].vn * out.t + rc.c[gov].v0c;
-			// classify the surface we landed on: if at the hit the governing
-			// face's own slab boundary is NOT what we crossed, it is a
-			// bisector step or a skirt.
-			const double sd = rc.c[gov].sn * out.t + rc.c[gov].s0;
-			const double dd = DOfFace(rc, gov, out.t);
-			if (std::fabs(sd - dd) > 1e-5) {
-				const RefFace &rf = g_m.faces[size_t(out.fi)];
-				bool nearFree = false;
-				for (int k = 0; k < 3; ++k) {
-					if (rf.kind[k] != EDGE_FREE) continue;
-					if (std::fabs(rc.c[gov].en[k] * out.t + rc.c[gov].e0[k]) < 1e-4) nearFree = true;
-				}
-				if (nearFree) out.skirt = true; else out.stepFace = true;
-			}
-			return out;
+		if (!InsideAt(rc, mid, gov)) continue;
+		const double t = std::max(a, tNear);
+
+		// WHAT KIND OF SURFACE IS THIS?  Only three things are real faces of the
+		// displaced solid: the slab top (sd = d(u,v)), the lateral face at a FREE
+		// edge (the skirt), and — under the partitioned reading — the bisector
+		// step.  The EXTENDED-POLYGON boundary is none of them: it is where the
+		// model stops asking this face, not where the material ends, and a ray
+		// that crosses INTO a slab through that boundary has not hit anything.
+		// Reporting it stands a phantom lateral face up at the margin distance,
+		// which at cam A t=5965 is a 90 px band of stretched wall across the
+		// pier's corner.  The literature's rule for a march leaving its patch is
+		// DISCARD (Policarpo & Oliveira 2006, survey §G); the same applies to one
+		// arriving.  So: accept a slab crossing or a free-edge skirt always, a
+		// bisector step only under partition = 1, and otherwise keep walking.
+		const RayCand &oc = rc.c[gov];
+		const double sd = oc.sn * t + oc.s0;
+		const double dd = DOfFace(rc, gov, t);
+		const RefFace &orf = g_m.faces[size_t(oc.fi)];
+		const double surfTol = 1e-4;
+		bool isSlab = std::fabs(sd - dd) <= surfTol;
+		bool isBack = std::fabs(sd + g_m.back) <= surfTol;
+		bool isSkirt = false, isMargin = false;
+		for (int k = 0; k < 3; ++k) {
+			const double ed = oc.en[k] * t + oc.e0[k];
+			if (std::fabs(ed - orf.margin[k]) > surfTol) continue;
+			if (orf.kind[k] == EDGE_FREE) isSkirt = true; else isMargin = true;
 		}
+		bool isStep = false;
+		if (g_m.partition == 1 && !isSlab && !isSkirt && !isBack) {
+			for (int j = 0; j < rc.n; ++j) {
+				if (j == gov) continue;
+				const double sj = rc.c[j].sn * t + rc.c[j].s0;
+				if (std::fabs(std::fabs(sj) - std::fabs(sd)) <= 1e-4) { isStep = true; break; }
+			}
+		}
+		if (!(isSlab || isSkirt || isBack || isStep)) { (void)isMargin; continue; }
+
+		out.hit = true;
+		out.t   = t;
+		out.fi  = oc.fi;
+		out.u   = oc.un * t + oc.u0c;
+		out.v   = oc.vn * t + oc.v0c;
+		out.stepFace = isStep;
+		out.skirt    = isSkirt;
+		return out;
 	}
 	return out;
 }
@@ -1318,7 +1497,20 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 
 	// stone matIDs, for "was this pixel already stone?"
 	bool isStoneMat[256] = { false };
-	for (const RefMat &rm : g_m.mats) if (rm.matID < 256) isStoneMat[rm.matID] = true;
+	double dMaxGlobal = 0.0;
+	for (const RefMat &rm : g_m.mats) {
+		if (rm.matID < 256) isStoneMat[rm.matID] = true;
+		dMaxGlobal = std::max(dMaxGlobal, rm.dMax);
+	}
+	// COINCIDENT FOREIGN SURFACES.  Decorative panels are authored lying ON the
+	// stone plane, so the reference's own relief (up to dMax in front of that
+	// plane) is "nearer" than the panel by a hair and would steal the pixel on a
+	// rounding tie — measured at cam A: face 91's slab took 13k pixels off
+	// matID 40 at literally the same depth.  A decal on a wall is meant to sit
+	// on the wall, so the reference only takes a foreign pixel when it beats it
+	// by more than the whole outward amplitude.  Genuine silhouette growth
+	// (where the relief stands proud of something further away) is unaffected.
+	const double zSteal = dMaxGlobal + 0.02;
 
 	const bool wantAlbedo = !g_gbuffer->albedo.empty();
 	const bool wantTangent = !g_gbuffer->tangent.empty();
@@ -1338,6 +1530,9 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 		df.assign(size_t(XRes) * YRes, -1);
 		dfl.assign(size_t(XRes) * YRes, 0u);
 	}
+
+	{	const char *dbg = std::getenv("FDS_REFRENDER_DEBUG_PX");
+		if (dbg) std::sscanf(dbg, "%d,%d", &g_dbgX, &g_dbgY); }
 
 	RefStats st;
 
@@ -1360,6 +1555,7 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 				const uint32_t matOld = (txOld >> 20) & 0xFF;
 				const bool wasStone = (zOld != 0) && isStoneMat[matOld];
 
+				g_dbgThis = (px == g_dbgX && py == g_dbgY);
 				const V3 D((double(px) + 0.5 - double(cam.cntrEX)) * invFovX,
 				           (double(cam.cntrEY) - (double(py) + 0.5)) * invFovY, 1.0);
 				double tMax = tFar;
@@ -1374,7 +1570,7 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 					if (wasStone) { ++lFall; if (!dfl.empty()) dfl[idx] |= 2u; }
 					continue;
 				}
-				if (!wasStone && h.t >= tMax) continue;      // hidden behind real geometry
+				if (!wasStone && h.t >= tMax - zSteal) continue;   // behind / coincident with real geometry
 				if (!wasStone) ++lGrow;
 				++lHit;
 				if (h.stepFace) ++lStep;
@@ -1430,7 +1626,26 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 				const Material *M = rm.mat;
 				const Texture  *TX = M->Txtr;
 				if (TX && TX->numMipmaps) {
-					int mip = wasStone ? int((txOld >> 28) & 0xF) : int(rf.lastMip);
+					// TEXTURE LOD.  Reusing the mip the rasterizer picked for the
+					// FLAT surface aliases badly wherever the reference surface is
+					// not the flat one — most visibly at a convex corner, where a
+					// face turning away from the eye shows its whole relief profile
+					// edge-on as a band tens of pixels wide, compressed 40:1, and a
+					// mip chosen for a face-on wall turns that band into coloured
+					// stripes.  Derive the LOD from THIS hit instead: world units
+					// per pixel at the hit distance, times albedo texels per world
+					// unit, times the grazing stretch 1/|cos i|.  (The HEIGHT field
+					// stays pinned at the bake mip — that is the model's definition,
+					// not a filtering choice.)
+					const double wpp   = h.t / double(cam.fovX);
+					const double texU  = double(1 << TX->LSizeX) / std::max(1e-6, lu);
+					const double texV  = double(1 << TX->LSizeY) / std::max(1e-6, lv);
+					const V3     dHat  = nrm(D);
+					const double cosI  = std::fabs(dot(dHat, fvv.n));
+					const double tpp   = wpp * std::max(texU, texV) / std::max(0.08, cosI);
+					int mip = int(std::floor(std::log2(std::max(1.0, tpp)) + 0.5));
+					const int rastMip = wasStone ? int((txOld >> 28) & 0xF) : int(rf.lastMip);
+					mip = std::max(mip, std::min(rastMip, int(TX->numMipmaps) - 1));
 					if (mip >= int(TX->numMipmaps)) mip = int(TX->numMipmaps) - 1;
 					if (mip < 0) mip = 0;
 					const int LogW = TX->LSizeX - mip, LogH = TX->LSizeY - mip;
@@ -1498,9 +1713,10 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 	const double ms = std::chrono::duration<double, std::milli>(
 		std::chrono::steady_clock::now() - t0).count();
 	std::fprintf(stderr,
+		"[REFRENDER] zScale=%.3f (viewZ = (0xFF80 - z16)/zScale)\n"
 		"[REFRENDER] %.0f ms  cast %lld  hit %lld (grow %lld, step %lld, skirt %lld)  "
 		"fallback %lld  budget-hit %lld  cells %lld (%.1f/px)\n",
-		ms, (long long)st.pxCast, (long long)st.pxHit, (long long)st.pxGrow,
+		zScale, ms, (long long)st.pxCast, (long long)st.pxHit, (long long)st.pxGrow,
 		(long long)st.pxStep, (long long)st.pxSkirt, (long long)st.pxFallback,
 		(long long)st.pxBudget, (long long)st.cells,
 		st.pxCast ? double(st.cells) / double(st.pxCast) : 0.0);
