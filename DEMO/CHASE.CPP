@@ -1555,8 +1555,11 @@ struct ChaseScene : SceneDriver {
 			// drama-5: chase opts into the varied (less-regular) sea. Call-site
 			// dispatch keeps the default RenderGlints byte-identical for city.
 			if (fds::FeatureFlags::water_variation())
-				pwater::RenderGlintsVaried(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
-				                           g_chaseWaterMinZ, g_chaseWaterMaxZ);
+				(fds::FeatureFlags::water_glints_batch()
+				     ? pwater::RenderGlintsVariedBatched
+				     : pwater::RenderGlintsVaried)
+				    (g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
+				     g_chaseWaterMinZ, g_chaseWaterMaxZ);
 			else
 				pwater::RenderGlints(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
 				                     g_chaseWaterMinZ, g_chaseWaterMaxZ);

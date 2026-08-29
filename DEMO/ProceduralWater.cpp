@@ -341,6 +341,20 @@ static inline void waveSlopeBatch(const float* wxs, const float* wzs, int n,
 		waterWaveSlope(wxs[k], wzs[k], t, scale, /*nOct=*/0, bnxs[k], bnzs[k]);
 }
 
+// ───────── -DFDS_WGLINT_ABLATE=N : chase glint-cost decomposition ─────────
+// Compile-time ONLY (no runtime flag surface), same shape as the cone round's
+// -DFDS_OVEC_ABLATE. Every value but 0 MOVES PIXELS and exists solely to price
+// one block of the varied glint loop; nothing here is ever shipped.
+//   0 normal   1 no swell/macro trig (the 3 cos + 1 sin)   2 no 3rd octave
+//   3 no caustics   4 no specular tail   5 slope only   6 nothing per live px
+//   7 SCAN FLOOR (ray-cast kept alive by a volatile sink, shades nothing)
+//     6 is INVALID and kept only as the record of why: with the body empty the
+//     loop is side-effect-free and clang deletes it whole, so 6 measures 0.027
+//     ms of nothing. 7 is the probe that actually holds the scan up.
+#ifndef FDS_WGLINT_ABLATE
+#define FDS_WGLINT_ABLATE 0
+#endif
+
 // VARIED wave slope (water_variation ON — chase only). A SEPARATE function from
 // the byte-identical waterWaveSlope() above (touching that reshapes its fmadd
 // chain under -ffp-contract=fast+LTO → city moves). Adds a low-frequency world
@@ -356,6 +370,7 @@ static inline void waterWaveSlopeVaried(float wx, float wz, float t, float scale
 	float n2x, n2z; sampleWaterNrm(rx*base*1.7f - t*10.0f, rz*base*1.7f + t*14.0f, n2x, n2z);
 	bnx = (n1x + n2x*0.6f) * 1.6f;
 	bnz = (n1z + n2z*0.6f) * 1.6f;
+#if FDS_WGLINT_ABLATE != 1
 	// (1) Large-scale swell (wavelengths of thousands of units, slow drift).
 	const float td = t * 0.5f;
 	bnx += 0.85f * std::cos(wx*0.00034f + wz*0.00019f + td*1.6f);
@@ -363,12 +378,134 @@ static inline void waterWaveSlopeVaried(float wx, float wz, float t, float scale
 	// a slower, longer macro roll (~6-9k unit wavelength).
 	bnx += 0.55f * std::cos(wx*0.00015f - wz*0.00011f + td*0.7f);
 	bnz += 0.55f * std::sin(wz*0.00013f + wx*0.00009f - td*0.85f);
+#endif
+#if FDS_WGLINT_ABLATE != 2
 	// (2) a 3rd ripple octave at a different scale + rotation (off the tile period).
 	const float e = base * 2.55f;
 	const float qx = wx*0.62f - wz*0.78f, qz = wx*0.78f + wz*0.62f;   // ~51 deg
 	float n3x, n3z; sampleWaterNrm(qx*e + t*23.0f, qz*e - t*17.0f, n3x, n3z);
 	bnx += n3x * 0.5f;
 	bnz += n3z * 0.5f;
+#endif
+}
+
+// ───────── 8-wide waterWaveSlopeVaried (--water_slope_vec8, chase) ─────────
+// The port §00l item 7 named: --water_slope_vec8 was built for city's
+// waterWaveSlope and never reached chase's SEPARATE waterWaveSlopeVaried copy.
+// Only the THREE sampleWaterNrm taps go 8-wide. The four libm calls (3 cos +
+// 1 sin) stay SCALAR PER LANE on purpose: a vector sin/cos is a different
+// polynomial from the platform libm's and would not be byte-null, and the
+// swell is measured at 24.4 % of the row -- i.e. this port CANNOT address the
+// biggest block. See PERF_STATE 00n for the arithmetic.
+//
+// Per-lane operation ORDER is the scalar's, exactly: base mix -> swell ->
+// macro roll -> 3rd octave. The 3rd octave is applied AFTER the trig because
+// that is where the scalar applies it.
+#ifdef PWATER_VEC8
+static inline void waterWaveSlopeVaried8(const float* wxs, const float* wzs,
+                                         float t, float scale,
+                                         float* bnxs, float* bnzs) {
+	const float base = 0.02f * scale;
+	const pwf8 kBase = base;
+	const pwf8 wx = pwLd8(wxs);
+	const pwf8 wz = pwLd8(wzs);
+	pwf8 u1, v1, u2, v2, u3, v3;
+	{
+		FP_CONTRACT_OFF
+		// rx/rz: scalar is `wx*ca - wz*sa` / `wx*sa + wz*ca`, both fused with
+		// only the second product rounded -- the waterWaveSlope8 spelling.
+		const pwf8 kCa = 0.87f, kSa = 0.5f;
+		const pwf8 rx = pwFma(wx, kCa, -(wz * kSa));
+		const pwf8 rz = pwFma(wx, kSa,   wz * kCa);
+		u1 = wx * kBase + pwf8(t * 16.0f);
+		v1 = wz * kBase - pwf8(t * 12.0f);
+		u2 = pwf8(1.7f) * (rx * kBase) - pwf8(t * 10.0f);
+		v2 = pwf8(1.7f) * (rz * kBase) + pwf8(t * 14.0f);
+		// 3rd octave: e = base*2.55, q = rotate ~51 deg. The scalar SOURCE is
+		// unfused but -ffp-contract=fast FUSES it, exactly as it does rx/rz
+		// above -- second product rounded, first absorbed. Spelling it unfused
+		// here was worth 403 px at 1 LSB (PERF_STATE 00n).
+		const pwf8 e  = pwf8(base * 2.55f);
+		const pwf8 qx = pwFma(wx, pwf8(0.62f), -(wz * pwf8(0.78f)));
+		const pwf8 qz = pwFma(wx, pwf8(0.78f),   wz * pwf8(0.62f));
+		u3 = qx * e + pwf8(t * 23.0f);
+		v3 = qz * e - pwf8(t * 17.0f);
+	}
+	pwf8 n1x, n1z, n2x, n2z, n3x, n3z;
+	sampleWaterNrm8(u1, v1, n1x, n1z);
+	sampleWaterNrm8(u2, v2, n2x, n2z);
+	sampleWaterNrm8(u3, v3, n3x, n3z);
+	float b1x[8], b1z[8], b3x[8], b3z[8];
+	{
+		FP_CONTRACT_OFF
+		const pwf8 k06 = 0.6f;
+		pwSt8(b1x, pwFma(k06, n2x, n1x) * 1.6f);   // scalar mix IS fused (fmla)
+		pwSt8(b1z, pwFma(k06, n2z, n1z) * 1.6f);
+	}
+	pwSt8(b3x, n3x); pwSt8(b3z, n3z);
+	// The trig tail, per lane, in the scalar's order and spelling.
+	const float td = t * 0.5f;
+	for (int k = 0; k < 8; ++k) {
+		const float wxk = wxs[k], wzk = wzs[k];
+		float bx = b1x[k], bz = b1z[k];
+		bx += 0.85f * std::cos(wxk*0.00034f + wzk*0.00019f + td*1.6f);
+		bz += 0.85f * std::cos(wzk*0.00050f - wxk*0.00024f - td*1.3f);
+		bx += 0.55f * std::cos(wxk*0.00015f - wzk*0.00011f + td*0.7f);
+		bz += 0.55f * std::sin(wzk*0.00013f + wxk*0.00009f - td*0.85f);
+		bnxs[k] = bx + b3x[k] * 0.5f;
+		bnzs[k] = bz + b3z[k] * 0.5f;
+	}
+}
+#endif  // PWATER_VEC8
+
+// The batch dispatcher's OWN scalar fallback. A verbatim copy of
+// waterWaveSlopeVaried, and it exists for one reason: giving the batched path a
+// reference to the original left waterWaveSlopeVaried with TWO callers, clang
+// stopped inlining it into the default loop, its fmadd chain reshaped, and the
+// DEFAULT arm's five chase pins all moved. Exactly the trap this file's other
+// comments describe. One caller each keeps both paths compiling as they did.
+static inline void waterWaveSlopeVariedB(float wx, float wz, float t, float scale,
+                                         float& bnx, float& bnz) {
+	if (g_waterNrm.empty()) { bnx = bnz = 0.0f; return; }
+	const float base = 0.02f * scale;
+	float n1x, n1z; sampleWaterNrm(wx*base + t*16.0f, wz*base - t*12.0f, n1x, n1z);
+	const float ca = 0.87f, sa = 0.5f;
+	const float rx = wx*ca - wz*sa, rz = wx*sa + wz*ca;
+	float n2x, n2z; sampleWaterNrm(rx*base*1.7f - t*10.0f, rz*base*1.7f + t*14.0f, n2x, n2z);
+	bnx = (n1x + n2x*0.6f) * 1.6f;
+	bnz = (n1z + n2z*0.6f) * 1.6f;
+	const float td = t * 0.5f;
+	bnx += 0.85f * std::cos(wx*0.00034f + wz*0.00019f + td*1.6f);
+	bnz += 0.85f * std::cos(wz*0.00050f - wx*0.00024f - td*1.3f);
+	bnx += 0.55f * std::cos(wx*0.00015f - wz*0.00011f + td*0.7f);
+	bnz += 0.55f * std::sin(wz*0.00013f + wx*0.00009f - td*0.85f);
+	const float e = base * 2.55f;
+	const float qx = wx*0.62f - wz*0.78f, qz = wx*0.78f + wz*0.62f;
+	float n3x, n3z; sampleWaterNrm(qx*e + t*23.0f, qz*e - t*17.0f, n3x, n3z);
+	bnx += n3x * 0.5f;
+	bnz += n3z * 0.5f;
+}
+
+// Dispatcher for the VARIED slope. Same padding rule as waveSlopeBatch: lanes
+// >= n are filled with lane 0 so a stale float cannot index the field OOB.
+static inline void waveSlopeVariedBatch(const float* wxs, const float* wzs, int n,
+                                        float t, float scale,
+                                        float* bnxs, float* bnzs) {
+	if (g_waterNrm.empty()) {
+		for (int k = 0; k < n; ++k) { bnxs[k] = 0.0f; bnzs[k] = 0.0f; }
+		return;
+	}
+#ifdef PWATER_VEC8
+	if (fds::FeatureFlags::water_slope_vec8()) {
+		float px[8], pz[8], qx[8], qz[8];
+		for (int k = 0; k < 8; ++k) { const int s = k < n ? k : 0; px[k] = wxs[s]; pz[k] = wzs[s]; }
+		waterWaveSlopeVaried8(px, pz, t, scale, qx, qz);
+		for (int k = 0; k < n; ++k) { bnxs[k] = qx[k]; bnzs[k] = qz[k]; }
+		return;
+	}
+#endif
+	for (int k = 0; k < n; ++k)
+		waterWaveSlopeVariedB(wxs[k], wzs[k], t, scale, bnxs[k], bnzs[k]);
 }
 
 // Procedural water-detail texture (row-major), sampled by the screen-space water
@@ -493,6 +630,26 @@ static inline float causticCellVaried(float wx, float wz, float bnx, float bnz,
 	                                 rz*texScale*2.3f + bnz*texWarp*0.7f - flowV*1.2f) * (1.0f/765.0f);
 	const float c3 = sampleWaterCell(wx*texScale*0.45f + bnx*texWarp*1.6f - flowU*0.5f,
 	                                 wz*texScale*0.45f + bnz*texWarp*1.6f + flowV*0.5f) * (1.0f/765.0f);
+	return cell*0.5f + c2*0.28f + c3*0.22f;
+}
+
+// RenderGlintsVaried's OWN varied cell tap, with the interpolation's fma
+// grouping PINNED -- the exact twin of sampleWaterCellGlints, and it exists for
+// the exact reason that one does: batching the varied slope moves this tap into
+// an outlined flush and clang then contracts the final lerp the other way
+// round. The shared causticCellVaried above stays untouched so the env-bake
+// CausticModulation keeps compiling as it did.
+static inline float causticCellVariedGlints(float wx, float wz, float bnx, float bnz,
+                                            float texScale, float texWarp,
+                                            float flowU, float flowV) {
+	const float cell = sampleWaterCellGlints(wx*texScale + bnx*texWarp + flowU,
+	                                         wz*texScale + bnz*texWarp + flowV) * (1.0f/765.0f);
+	const float ca = 0.80f, sa = 0.60f;
+	const float rx = wx*ca - wz*sa, rz = wx*sa + wz*ca;
+	const float c2 = sampleWaterCellGlints(rx*texScale*2.3f + bnx*texWarp*0.7f + flowU*1.6f,
+	                                       rz*texScale*2.3f + bnz*texWarp*0.7f - flowV*1.2f) * (1.0f/765.0f);
+	const float c3 = sampleWaterCellGlints(wx*texScale*0.45f + bnx*texWarp*1.6f - flowU*0.5f,
+	                                       wz*texScale*0.45f + bnz*texWarp*1.6f + flowV*0.5f) * (1.0f/765.0f);
 	return cell*0.5f + c2*0.28f + c3*0.22f;
 }
 
@@ -879,6 +1036,146 @@ void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float 
 				if (B>255)B=255; if (G>255)G=255; if (R>255)R=255;
 				row[x] = dword(B) | (dword(G)<<8) | (dword(R)<<16) | 0xFF000000u;
 			}
+		}
+	};
+	runRowBands("water-glints", band);
+}
+
+// BATCHED variant of RenderGlintsVaried (--water_glints_batch, DEFAULT OFF).
+// Collects a row's LIVE pixels and flushes in eights through the 8-wide varied
+// slope, the shape RenderGlints has had since the city round. Measured -2.412 ms
+// on chase's `water-glints` row at t=800 (-29.9 % of the row, -5.4 % of the
+// whole tick) -- but NOT byte-null: 241 px of 2 073 600 move at max |d| 1
+// (0.012 %), a 1-LSB contraction-grouping residue that could not be pinned out
+// because waterWaveSlopeVaried's own fmadd chain differs from waterWaveSlope's.
+// So it ships DEFAULT OFF behind its own flag, and the function above stays the
+// untouched default path. Full account: PERF_STATE 00n.
+void RenderGlintsVariedBatched(float waterY, float minX, float maxX, float minZ, float /*maxZ*/) {
+	const float strength = fds::FeatureFlags::water_bump_strength();
+	if (strength <= 0.0f || !View) return;
+	if (maxX <= minX) return;
+	Census("glintsVaried", waterY, /*useOcclusion=*/true, /*useFarCut=*/true);
+	const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
+	const float scale = fds::FeatureFlags::water_bump_scale();
+	const float texMix   = WaterProceduralEffective() ? fds::FeatureFlags::water_albedo_mix() : 0.0f;
+	const float texScale = fds::FeatureFlags::water_tex_scale();
+	const float texWarp  = fds::FeatureFlags::water_tex_warp();
+	const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();
+	const float wnBase = 0.02f * scale;
+	const float flowK  = (wnBase > 0.0f) ? (texScale / wnBase) * fds::FeatureFlags::water_tex_flow() : 0.0f;
+	const float flowU  =  t * 16.0f * flowK;
+	const float flowV  = -t * 12.0f * flowK;
+	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+	const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+	const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+	const float cex = CntrEX, cey = CntrEY;
+	const float m00=View->Mat[0][0], m10=View->Mat[1][0], m20=View->Mat[2][0];
+	const float m01=View->Mat[0][1], m11=View->Mat[1][1], m21=View->Mat[2][1];
+	const float m02=View->Mat[0][2], m12=View->Mat[1][2], m22=View->Mat[2][2];
+	const float ex=View->ISource.x, ey=View->ISource.y, ez=View->ISource.z;
+	float Lx=0.35f, Ly=0.82f, Lz=0.42f; { const float l=std::sqrt(Lx*Lx+Ly*Ly+Lz*Lz); Lx/=l;Ly/=l;Lz/=l; }
+	const float bumpAmp = 1.7f;
+	const float wYplane = waterY;
+	// The specular lobe cannot brighten a pixel below a KNOWN half-vector
+	// threshold, and powf is the single most expensive operation in this loop —
+	// a libm CALL, taken on every pixel that reaches it. The tail is exact, not
+	// approximate: the write is `add = int(g*255 + 0.5)` with
+	// g = pow(ndh,shin)*strength*distFade and distFade <= 1, so add == 0 — i.e.
+	// `continue` — for every ndh with pow(ndh,shin)*strength < 0.5/255.
+	// Inverting that once per pass turns it into a plain compare that provably
+	// skips only pixels whose output was already zero. BIT-EXACT.
+	const float ndhMin = std::pow(0.5f / (255.0f * strength), 1.0f / shin) * 0.99999f;
+	const float fzp = (CurScene && CurScene->FZP > 0.0f) ? CurScene->FZP : 1e30f;
+	const float fadeStart = fzp * 0.55f;
+	const float invFadeRange = 1.0f / std::max(1.0f, fzp - fadeStart);
+	dword* const vp = (dword*)VPage;
+	const uint16_t* const oz = ZPage16;
+	const int xr = XRes;
+	auto band = [=](int y0, int y1) {
+		// Batched exactly like RenderGlints: collect a row's LIVE pixels, flush
+		// in eights through the 8-wide varied slope, then shade each. The
+		// rejects never reach the field. Rows are independent; a batch is never
+		// carried across one.
+		float bWx[8], bWz[8], bFade[8], bNx[8], bNz[8];
+		int   bIdx[8]; int nB = 0;
+		for (int y = y0; y < y1; ++y) {
+			dword* row = vp + size_t(y) * size_t(xr);
+			const uint16_t* orow = oz + size_t(y) * size_t(xr);
+			auto shade = [&](int x, float wx, float wz, float distFade, float bnx, float bnz) {
+				if (texMix > 0.0f && g_waterTexW > 0 && FDS_WGLINT_ABLATE != 3) {
+					// multi-scale caustics → breaks the tiling repeat.
+					const float cell = causticCellVariedGlints(wx, wz, bnx, bnz, texScale, texWarp, flowU, flowV);
+					const float cellHi = cell - 0.40f;
+					const float mod = 1.0f + cellHi * 2.0f * texMix * 0.6f;
+					const float blueLine = (cellHi > 0.0f ? cellHi : 0.0f) * texMix * 220.0f;
+					const dword p = row[x];
+					int nb = int(float(p & 0xFFu)     * mod + blueLine);
+					int ng = int(float((p>>8)&0xFFu)  * mod + blueLine * 0.40f);
+					int nr = int(float((p>>16)&0xFFu) * mod + blueLine * 0.08f);
+					if (nb<0)nb=0; if (ng<0)ng=0; if (nr<0)nr=0;
+					if (nb>255)nb=255; if (ng>255)ng=255; if (nr>255)nr=255;
+					row[x] = dword(nb) | (dword(ng)<<8) | (dword(nr)<<16) | 0xFF000000u;
+				}
+#if FDS_WGLINT_ABLATE == 4
+				return;        // stop after slope+caustics: prices the specular tail
+#endif
+				float Nx = bnx * bumpAmp, Ny = 1.0f, Nz = bnz * bumpAmp;
+				const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
+				Nx*=nInv; Ny*=nInv; Nz*=nInv;
+				float Vx = ex-wx, Vy = ey-wYplane, Vz = ez-wz;   // view dir
+				// PINNED CONTRACTION — the identical trap RenderGlints documents.
+				// Vy is loop-INVARIANT (ey and the water plane are both pass
+				// constants). Unbatched, clang compiled `Vx*Vx + Vy*Vy + Vz*Vz`
+				// as fmul(Vx,Vx) + fmadd(Vy) + fmadd(Vz) — only the FIRST product
+				// rounded. Once the slope moves to a batch flush, LICM hoists the
+				// invariant Vy*Vy OUT, which ROUNDS it and leaves Vx*Vx fused
+				// instead: same algebra, swapped rounding, and it lands on
+				// int(g*255 + 0.5). Spelling it out with contraction off restores
+				// the pre-batch grouping, which is what makes this port byte-null.
+				float vLen2;
+				{ FP_CONTRACT_OFF vLen2 = FDS_FMAF(Vz, Vz, FDS_FMAF(Vy, Vy, Vx*Vx)); }
+				const float vInv = 1.0f / std::sqrt(vLen2);
+				Vx*=vInv; Vy*=vInv; Vz*=vInv;
+				float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
+				const float hInv = 1.0f / std::sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
+				const float ndh = (Nx*Hx + Ny*Hy + Nz*Hz) * hInv;
+				if (ndh < ndhMin) return;      // provably add == 0 (see ndhMin)
+				const float g = std::pow(ndh, shin) * strength * distFade;
+				int add = int(g * 255.0f + 0.5f); if (add <= 0) return; if (add > 255) add = 255;
+				const dword p = row[x];
+				int B = int(p & 0xFFu) + add, G = int((p>>8)&0xFFu) + add, R = int((p>>16)&0xFFu) + add;
+				if (B>255)B=255; if (G>255)G=255; if (R>255)R=255;
+				row[x] = dword(B) | (dword(G)<<8) | (dword(R)<<16) | 0xFF000000u;
+			};
+			auto flush = [&]() {
+				waveSlopeVariedBatch(bWx, bWz, nB, t, scale, bNx, bNz);
+#if FDS_WGLINT_ABLATE == 5
+				{ volatile float sink = bNx[0] + bNz[0]; (void)sink; nB = 0; return; }
+#endif
+				for (int k = 0; k < nB; ++k)
+					shade(bIdx[k], bWx[k], bWz[k], bFade[k], bNx[k], bNz[k]);
+				nB = 0;
+			};
+			for (int x = 0; x < xr; ++x) {
+				const float xn = (float(x) - cex) * invFX;
+				const float yn = (cey - float(y)) * invFY;
+				const float D = m01*xn + m11*yn + m21;
+				if (D == 0.0f) continue;
+				const float sd = (wYplane - ey) / D;
+				if (sd <= 1.0f || sd >= fzp) continue;
+				const uint16_t oe = orow[x];
+				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;
+#if FDS_WGLINT_ABLATE == 7
+				// VALID scan floor: the volatile sink keeps the ray-cast alive.
+				{ volatile float sink = sd; (void)sink; continue; }
+#endif
+				bFade[nB] = sd <= fadeStart ? 1.0f : (fzp - sd) * invFadeRange;
+				bWx[nB]   = ex + sd * (m00*xn + m10*yn + m20);
+				bWz[nB]   = ez + sd * (m02*xn + m12*yn + m22);
+				bIdx[nB]  = x;
+				if (++nB == 8) flush();
+			}
+			if (nB) flush();   // rows are independent; never carry a batch over
 		}
 	};
 	runRowBands("water-glints", band);

@@ -10,6 +10,59 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29b — chase round 2: water-glints decomposed and ported, and chase's sky turns out to be painted by the reflection pass
+
+Full account: `docs/PERF_STATE.md` §00n.
+
+**LANDED, byte-null (all 14 pins + render_gate 4/4).** `--water_glints_batch`,
+**DEFAULT 0**. Batches chase's varied glint pass the way `RenderGlints` has been
+batched since the city round. Same-binary flag flip, min-of-9, quiet box:
+`water-glints` **−30 % at every watered pose** (t=400 −2.397, t=800 −2.401,
+t=1600 −4.186 ms), tick **−4.2 % / −5.6 % / −11.1 %**. t=1105 is +0.022 ms — 691
+live water pixels, nothing to batch. **OFF by default because it is not
+byte-null: 450/304/241/76/2934 px move at the five pins, every one by max |Δ| 1.**
+
+### OPEN ITEMS
+
+1. **`water-glints` at chase t=1600 is 14.296 ms — 33.6 % of that pose's whole
+   tick**, nearly double t=800's 8.089. §00m sampled t=800/t=1105 only and
+   under-described the row by 2×. Any future chase map must include t=1600.
+
+2. **The batched port's last LSB.** 241 px at t=800, bisected to the slope
+   kernel (not the caustic tap, not the specular tail). Five pinning attempts
+   logged in §00n with their pixel counts. It cannot be closed by copying
+   `waterWaveSlope8`'s spelling because `waterWaveSlopeVaried` gets a different
+   fmadd chain from clang. **Next attempt starts with that function's
+   disassembly, not another guess.** Closing it flips the flag's default.
+
+3. **The scan pre-reject.** The pass ray-casts all 2 073 600 pixels every frame:
+   **0.461 ms at t=800 (5.7 % of the row) and 0.400 ms at t=1105, where it is
+   102 % of the row** — the pass spends its entire time finding 691 pixels.
+   A conservative per-tile bound (§00f's shadow-reject shape) is byte-null by
+   construction and worth ~0.4 ms at water-poor poses.
+
+4. **What is left in the row is a LOOK call, not a perf item.** After the port,
+   t=800's shading is caustics **30.2 %** + four libm `cos`/`sin` **24.4 %** =
+   54.6 % of the row, and neither can be reduced without changing how the water
+   looks. Parallel efficiency is already 10.0 of 12; this is not a threading row.
+
+5. **CORRECTION to §00m, and it matters: chase's SKY is painted by the
+   reflection pass.** §00m blamed the sky movement under `--refl_skip_cones` on
+   additive HDR accumulation. That is refuted — `Hdr_BeginFramePass` zeroes
+   `g_hdrBuf` every pass and the tonemap writes every pixel ungated. The truth is
+   structural: both `Render()` calls target the same VPage, and the engine
+   classifies `zEnc == 0` as "sky OR the water's reflection underlay"
+   (`DeferredFastFog.cpp:2220`) — **one pixel class** — which reach `g_hdrBuf`
+   only via the VPage lift. So the main pass lifts the reflection's sky and ships
+   it. `--refl_skip_post`, a reflection-only flag, moves **713 917 of 768 000 sky
+   pixels (93.0 %)**, and the red stops exactly at the terrain silhouette:
+   `docs/img/chaserefl/skyleak_post_t000800_where.png`. **Not a lifetime bug — a
+   classifier defect**; the correct predicate (ray-cast to the water plane)
+   already exists in `ProceduralWater.cpp`. Visible harm today is small (mirrored
+   beams wash the sky at ≤4/255, zero pixels reach 8/255); the hazard is that any
+   change to the reflection pass silently repaints the sky. Not fixed: a fix
+   changes where the sky comes from, so it cannot be byte-null.
+
 ## 2026-08-29 — chase round: the tile grid lands, the reflection pass is priced, and two things turn up that are not perf
 
 Full account: `docs/PERF_STATE.md` §00m. Branch `rev-chaseperf`, merged tip.
