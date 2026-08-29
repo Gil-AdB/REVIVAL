@@ -58,6 +58,15 @@
 
 ---
 
+> **→ `docs/PERF_LAWS.md` is the durable companion to this file.** The §00
+> sections below are per-round findings; PERF_LAWS is the consolidated set of
+> LAWS (fan-out thresholds, vectorising short scalar loops, register pressure
+> vs op count, when instructions stop predicting) and TRAPS (the tick-1 gate
+> blindness, process-wide `hwRead`, `ChdirToAssetRoot`, chase pose-sequence,
+> stale shares, and the rest) that this campaign established, each with its
+> evidence and the round that produced it. **Read it before proposing an
+> optimisation.**
+
 ## 00v. THE WINDOW LEDGER — 2026-08-28 19:00 → 2026-08-29 07:30, `e017d611` → `78c0a752`: what Gil-Ad actually gets, measured end to end
 
 **Read this section first.** Every other §00 section reports one round against

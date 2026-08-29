@@ -7112,6 +7112,11 @@ Range covered here: `1ca269d..7282f7a` (~60 commits, 2026-07-08..11).
 
 ## Verification protocol (THE gates — run before/after everything)
 
+> **→ `docs/PERF_LAWS.md` collects every measurement trap below, plus the
+> campaign's optimisation laws, in one place with its evidence.** The traps
+> in this section are the gate-specific ones; PERF_LAWS has those and the
+> instrument/attribution ones together.
+
 All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 
 > **THREE WAYS TO GET A FALSE RED ON THIS TABLE — all three were hit and
