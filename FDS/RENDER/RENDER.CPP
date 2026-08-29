@@ -54,6 +54,10 @@ bool IsFrontFacingInViewSpace(const Face* F);
 void Render_DeferredFogPass(const DeferredLightingCtx &ctx);
 // Full-res SSAO post-pass (DeferredSSAO.cpp). Gated on --ssao; no-op otherwise.
 void Render_SSAO();
+// --greets_displace_ref: the reference relief renderer (FDS/RENDER/DeferredDisplaceRef.cpp).
+// Runs AFTER the G-buffer fill and BEFORE the lighting kernel, so the reference surface is
+// shaded by the same lights / SSAO / fog / tonemap as the engine's own render. Default OFF.
+namespace fds { void Render_GreetsDisplaceRef(struct Scene *Sc); }
 void Render_EdgeAA(const DeferredLightingCtx &ctx);
 // Render_VolumetricCones declared in DeferredCommon.h (with its inlineDispatch arg).
 void Render_OmniHalos(const DeferredLightingCtx& ctx);
@@ -733,6 +737,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		    && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap
 		    && !(fds::FeatureFlags::ssao() && fds::FeatureFlags::ssao_debug())
 		    && !reflSkipPost;
+		if (!skipVolumetric && fds::FeatureFlags::greets_displace_ref())
+			fds::Render_GreetsDisplaceRef(CurScene);
 		{ TailProf::ScopeTimer _tp("DeferredLighting-call", 1); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
