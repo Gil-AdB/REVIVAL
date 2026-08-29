@@ -103,6 +103,9 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float maxZ);
 // RenderGlints) so the default path stays byte-identical. Dispatched at the call
 // site on FeatureFlags::water_variation().
 void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float maxZ);
+// --water_glints_batch: the batched/8-wide variant of the above. Same pixels to
+// within 241 px at 1 LSB, -29.9 % of the `water-glints` row. DEFAULT OFF.
+void RenderGlintsVariedBatched(float waterY, float minX, float maxX, float minZ, float maxZ);
 
 // Caustic-cell modulation factors at world XZ — the EXACT formula of
 // RenderGlints' texMix block (keep in lockstep; not shared with that hot loop
