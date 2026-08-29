@@ -940,7 +940,9 @@ Byte evidence: city pin `37e62845` exact, fountain pin `51fff7cd` exact, greets 
 recipe off==on, chase 5-pose + cinematic 2-pose lists off==on (and t100/400/800/1200 match the
 committed pins), greets displaced t=5780 off==on over 6 runs, and `--soa-verify` (which
 compares the inline stores against the AoS the sweep would have copied, bit-for-bit) reports
-0 mismatches on greets/city/fountain/chase. `--no-xfrm_soa_inline` restores the sweep.
+0 mismatches on greets/city/fountain/chase. `--no-xfrm_soa_inline` restored the sweep;
+**that flag was deleted 2026-08-29** and the inline store is unconditional (the sweep
+survives only as the fallback for a mesh whose `VertexFrame` cannot be resolved).
 
 ### Rejected after measuring: a cheaper reciprocal (`--xfrm_rcp`, default 0)
 

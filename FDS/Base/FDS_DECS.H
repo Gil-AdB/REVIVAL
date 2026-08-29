@@ -560,7 +560,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 
 // Declare every strip's xpar layer slice dirty over its full width. Both TBR
 // schedulers call this before dispatch: the per-strip column tracker that
-// bounds the clump clears (--xpar_strip_extent) only knows what IT dirtied,
+// bounds the clump clears only knows what IT dirtied,
 // so anything left by the previous frame, by the legacy peel, or by a
 // resolution change has to be conservatively re-declared.
 void XparStripSlices_MarkAllDirty();

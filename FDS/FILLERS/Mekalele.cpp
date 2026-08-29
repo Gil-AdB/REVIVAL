@@ -189,7 +189,7 @@ void XparPeel_ResetAll()
         std::fill_n(g_gbufferTransparentBack->txtr.begin(), n, 0xFFFFFFFFu);
     if (g_xparZ)     std::fill_n(g_xparZ,     n, uint16_t(0));
     if (g_xparZBack) std::fill_n(g_xparZBack, n, uint16_t(0));
-    // Per-strip dirty-column bookkeeping (the --xpar_strip_extent records).
+    // Per-strip dirty-column bookkeeping (the XparSliceDirty records).
     XparStripSlices_MarkAllDirty();
     // thread_local, so this only disarms the CALLING thread — which is the
     // one that runs the inline offscreen bakes (the mirror RTT). Every

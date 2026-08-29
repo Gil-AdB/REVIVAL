@@ -5568,7 +5568,7 @@ void XparExtentCensus_Report()
 // One xpar G-buffer layer is dirtied per clump (back layer for back-
 // facing tris, front layer for front-facing tris). We clear only the
 // strip's slice (61 KB per layer at 1920 wide, or just the dirty columns
-// under --xpar_strip_extent), raster the clump's faces with clipper
+// the per-strip tracker recorded), raster the clump's faces with clipper
 // extents = strip rect, then composite the strip rows via
 // Render_DeferredTransparentLighting_Tile<Layer>.
 void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
@@ -5584,8 +5584,10 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	// ── Column bound (see XparSliceDirty above). OFF → every range below is
 	//    the full strip width and the memsets stay the single contiguous ones. ──
 	const int stripIdx0 = strip_y >> 3;   // TILELOG=3
-	const bool extentOn = fds::FeatureFlags::xpar_strip_extent() &&
-	                      stripIdx0 >= 0 && stripIdx0 < DEFERRED_MAX_STRIPS;
+	// (The A/B dial was --xpar_strip_extent, deleted 2026-08-29: BYTE-NULL by
+	// construction — the clear happens over exactly the columns the previous
+	// raster dirtied. What is left is the in-range bounds test.)
+	const bool extentOn = stripIdx0 >= 0 && stripIdx0 < DEFERRED_MAX_STRIPS;
 	const bool censusOn = fds::FeatureFlags::xpar_extent_census();
 	XparSliceDirty *const dSide  = extentOn ? &g_xparDirtySide[front ? 1 : 0][stripIdx0] : nullptr;
 	XparSliceDirty *const dFloor = extentOn ? &g_xparDirtyFloor[stripIdx0] : nullptr;
@@ -5630,7 +5632,6 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 			std::memset(g_xparPeelFloor + size_t(strip_y + r) * size_t(XRes) + size_t(x0),
 			            0, w * sizeof(uint16_t));
 	};
-	const bool peelEarlyOut = fds::FeatureFlags::xpar_peel_early_out();
 	// "Did the last pass commit anything in this clump's columns?" — a committed
 	// fragment's stored Z is always < 0xFFFF (pass 0's own accept mask requires
 	// z_candidate < z_existing with z_existing pre-cleared to 0xFFFF), so an
@@ -5837,11 +5838,11 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 			if (dFloor) *dFloor = { 0, 0 };
 		} else {
 			int f0, f1; clamped(dSide, f0, f1);
-			// --xpar_peel_early_out: the previous pass left its whole extent at
+			// PEEL EARLY-OUT: the previous pass left its whole extent at
 			// the 0xFFFF clear value, so this pass's ceiling is 0xFFFF there and
 			// its accept mask `(z < 0xFFFF) & (z > 0xFFFF)` is empty — as is
 			// every later pass's, each inheriting an untouched layer in turn.
-			if (peelEarlyOut && sideZUntouched(f0, f1)) break;
+			if (sideZUntouched(f0, f1)) break;
 			copyFloor(f0, f1);
 			if (dFloor) *dFloor = { f0, f1 };
 		}

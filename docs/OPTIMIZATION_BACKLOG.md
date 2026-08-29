@@ -555,7 +555,9 @@ byte-null: 450/304/241/76/2934 px move at the five pins, every one by max |Δ| 1
    already exists in `ProceduralWater.cpp`. Visible harm today is small (mirrored
    beams wash the sky at ≤4/255, zero pixels reach 8/255); the hazard is that any
    change to the reflection pass silently repaints the sky. Not fixed: a fix
-   changes where the sky comes from, so it cannot be byte-null.
+   changes where the sky comes from, so it cannot be byte-null. (The `--refl_skip_post`
+   flag itself was **deleted 2026-08-29** — it was refuted as a perf item, ledger
+   `7db03051cf38`; the 93.0 % census above stands as the measurement it produced.)
 
 
 ## 2026-08-29 — **THE MOVEMASK SWEEP (only the cone kernel converts) and `lightSphereScreenRect` PROVEN TO DROP REAL LIGHT (max 5/255, 6 of 39 poses)**. Sweep DONE / bug REPORTED, not fixed
@@ -712,7 +714,12 @@ menu is `--refl_skip_cones`: −6.41 ms (12.8 % of tick) for a max change of
    `skipVolumetric` — which chase does not pass. Chase therefore runs it. Measured
    0.0000 ms and byte-identical at both poses because chase has no rain armed, so
    it costs nothing today; it becomes a visible bug the moment rain is armed in a
-   two-pass scene. `--refl_skip_rain` is the guard.
+   two-pass scene. The `--refl_skip_rain` flag that used to stand as the guard was
+   **deleted 2026-08-29** (refuted as a perf item, ledger `da3b5399de80`: it saved
+   zero ms and moved zero pixels at every pose it was built for). **If rain is ever
+   armed in a two-pass scene, the guard has to be written as an unconditional
+   `!g_reflUnderlayPass` test at `RENDER.CPP`'s rain call — there is no dial for it
+   any more.**
 
 ## 2026-08-28 — **THE CONE PASS, ROUND 8**: city's `cones-call` **15.32 → 13.38 ms BIT-EXACT** and **→ 3.09 ms (−79.8 %) with the two look flags on**. Two landings, one refutation, and two bound defects found in code nobody was auditing. DONE / his call
 
@@ -1083,8 +1090,11 @@ interleaved rounds: **serial 0.478–0.481 ms, pooled 0.617–0.639 ms.**
 
 These clears are **DRAM-bandwidth-bound**, so more workers cannot beat the memory
 system and the join is pure cost; `gbuf-clear` profits only because its buffers
-are several times larger and amortise it. Kept as `--mirror_mask_pool_clear`,
-**default OFF**, numbers in the flag text.
+are several times larger and amortise it. Was kept as
+`--mirror_mask_pool_clear`, default OFF; the **flag was deleted 2026-08-29** and
+the pooled arm with it — the numbers now live in the ledger
+(`5e72dd2e4e6c` / `2dab7c032afc`) and in the comment at
+`GreetsMirror.cpp`'s `MSET`.
 
 **FOURTH SIGHTING OF ONE LAW, and the clearest statement yet: a fan-out pays only
 above a work-per-dispatch threshold.** The RTT cone pass (+139 % at 64 µs), the
@@ -6298,7 +6308,7 @@ per-SCENE constant, but a clump is a sprite-delimited run of faces, and those
 almost never stack in depth. Exactly ONE clump in the frame has a real second
 depth layer.
 
-### Lever 1 — `--xpar_strip_extent` (default ON, byte-null by construction)
+### Lever 1 — `--xpar_strip_extent` (default ON, byte-null by construction; **flag deleted 2026-08-29**, the bound is unconditional)
 
 The rasterizer records the tile-column extent it touched (`meka::g_rasterXExtent`,
 updated inside the `g_rasterStripClamp.tileYMax < INT32_MAX` branch that only
@@ -6316,7 +6326,7 @@ legacy peel and resolution changes are all covered.
 **Scanned px 197.90 M -> 6.66 M (3.36 %). Live fragment count IDENTICAL (0.97 M)
 in both arms — the bound loses nothing.**
 
-### Lever 2 — `--xpar_peel_early_out` (default ON, byte-null by construction)
+### Lever 2 — `--xpar_peel_early_out` (default ON, byte-null by construction; **flag deleted 2026-08-29**, the early-out is unconditional)
 
 Reverse-peel accept mask (`Mekalele.h:1455`):
 `zmask = (z_candidate < z_existing) & (z_candidate > peelFloor)`, with
@@ -6443,7 +6453,7 @@ The two poses are complementary and neither alone would have told the truth:
 t=5743 is tap-heavy and light-list-clean; **his pose is the opposite — half of
 every tile's light list cannot light one pixel of that tile.**
 
-### DONE, shipped default ON, byte-null: `--deferred_tile_sphere_cull`
+### DONE, shipped default ON, byte-null: `--deferred_tile_sphere_cull` (**flag deleted 2026-08-29**, the cull is unconditional)
 
 The tile light list culled a light against the tile's screen rect **and**, 
 separately, against its z-extent. A conjunction of two separable projections of

@@ -31,7 +31,9 @@ threaded passes).
 
 ## What shipped from this
 
-**P1 — parallel vertex Lighting (`--vertex_light_parallel`, default ON).**
+**P1 — parallel vertex Lighting (`--vertex_light_parallel`, default ON;
+the flag was **deleted 2026-08-29** and the fan is unconditional — the arms were
+byte-identical by construction).**
 Lighting() extracted to a per-mesh body + fanned across the pool. TWO lessons:
 - Per-mesh tasks REGRESSED (1.27 ms vs 0.83 serial): greets is many small
   wall-chunk meshes; enqueue/semaphore overhead drowned the work.

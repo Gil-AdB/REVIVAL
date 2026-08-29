@@ -155,7 +155,7 @@ that face count is < 2 ms and net-positive.
 ### 2e. The face-front-end is already reclaimed (the ceiling that matters)
 
 `--tile_bbox_cull` A/B (the existing B5 reject, the closest proxy for "cull faces
-cheaply"):
+cheaply") — *(That flag was **deleted 2026-08-29** — default ON with byte-equal arms; see `docs/FLAG_CULL_CANDIDATES.md` §Removed. The measurement stands; the A/B arm no longer exists.)*
 
 | pose | bbox cull OFF | ON | **face-front-end reclaimed** |
 |---|--:|--:|--:|
@@ -197,7 +197,9 @@ culls). **Visibility culling is not where the frame is.**
 skip*, or *geometry-front-end-bound past what B5 reclaims* (e.g. a displaced-LOD
 regime pushing well past 100 k on-screen occluded faces), re-open §4. The
 `--vis_stats` diagnostic (Slice 0) is exactly how to detect that: watch `overdraw`,
-`faces fully occluded`, and the `no-tile_bbox_cull` delta.
+`faces fully occluded`, and the overdraw the B5 bbox reject removes. (The
+`--no-tile_bbox_cull` arm that delta was read from was **deleted 2026-08-29**;
+re-creating it locally is the way to re-run this.)
 
 ---
 

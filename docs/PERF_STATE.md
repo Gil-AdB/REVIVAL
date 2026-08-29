@@ -434,8 +434,9 @@ the water-glints port and analytic scan clip (flagless); chase `frame_tile_y`
 **Default OFF — none of their time is in any number above, and he cannot get it
 without flipping them:** `--water_glints_batch`, `--cone_half_y_wide`,
 `--cone_range_cull` (1.0 = inert), `--refl_skip_cones`, `--refl_skip_ssao`,
-`--light_rect_exact`, and `--mirror_mask_pool_clear` (**REFUTED at +33 %**, kept
-only as its own proof).
+`--light_rect_exact`. (`--mirror_mask_pool_clear`, **REFUTED at +33 %**, used to
+sit in this list as its own proof; the flag was **deleted 2026-08-29** and the
+refutation now lives in the ledger, `5e72dd2e4e6c` / `2dab7c032afc`.)
 
 ### 00v.4 — THE REGRESSION THIS ROUND CAUGHT AND FIXED
 
@@ -796,7 +797,8 @@ was recomputed once per FACE, 208× per mesh): **`Tick-ReflGlass` 0.931 → 0.16
 0.161. Byte-null over **24 consecutive runs of the city acceptance pose, one
 hash**, plus a same-binary flag flip at three poses.
 
-**REFUTED — `--mirror_mask_pool_clear`, default OFF.** `StampMasks` (0.478 ms,
+**REFUTED — `--mirror_mask_pool_clear`, default OFF** (flag **deleted
+2026-08-29**; the measurement below stands, the dial does not). `StampMasks` (0.478 ms,
 ~1.3 cores) is ~8–10 MB of serial `std::memset` a frame, and `parallel_memset` is
 **+33 % slower** (serial 0.478–0.481, pooled 0.617–0.639, four interleaved
 rounds). Bandwidth-bound work cannot be sped up by adding workers; `gbuf-clear`
@@ -1207,7 +1209,10 @@ rules. It is filed as a bug with the reproduction recipe below.
        --texture-filter=2 --ssao --ssao-gtao --profiler=0 --refl_skip_post
 ```
 Every pixel above the terrain silhouette differs. Add `--water_census` for the
-above-horizon denominator.
+above-horizon denominator. **`--refl_skip_post` was DELETED on 2026-08-29** (it
+was refuted as a perf item, ledger `7db03051cf38`); to re-run this recipe today
+the arm has to be re-created locally, or use `--refl_skip_vol`, which the ladder
+below shows moves the same 88.44 % of pixels.
 
 
 ### NEXT CHASE TARGET
@@ -1414,11 +1419,11 @@ single perf item in the engine, and it is larger than the map said.
 
 | arm | t=800 px moved | % | max \|Δ\| | mean \|Δ\| | t=1105 px moved | % | max \|Δ\| |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| `--refl_skip_rain` | **0** | **0** | **BYTE-IDENTICAL** | — | **0** | **0** | **BYTE-IDENTICAL** |
+| `--refl_skip_rain` *(flag deleted 2026-08-29)* | **0** | **0** | **BYTE-IDENTICAL** | — | **0** | **0** | **BYTE-IDENTICAL** |
 | `--refl_skip_cones` | 313 524 | 15.12 | **6** | 0.91 | 2 | 0.0001 | 2 |
 | `--refl_skip_ssao` | 178 582 | 8.61 | 119 | 3.13 | 64 | 0.0031 | 6 |
 | `--refl_skip_ssao --refl_skip_cones` | 471 556 | 22.74 | 119 | 1.73 | 64 | 0.0031 | 6 |
-| `--refl_skip_post` | 1 833 893 | **88.44** | 181 | 4.05 | 116 440 | 5.62 | 174 |
+| `--refl_skip_post` *(flag deleted 2026-08-29)* | 1 833 893 | **88.44** | 181 | 4.05 | 116 440 | 5.62 | 174 |
 | `--refl_skip_vol` | 1 833 894 | **88.44** | 146 | 3.88 | 116 440 | 5.62 | 174 |
 
 ### TWO FINDINGS THE LADDER TURNED UP THAT ARE NOT PERF
@@ -1469,10 +1474,14 @@ tick delta IS the between-arm floor — **−0.10 ms (−0.2 %) at t=800 and −
 | `--refl_skip_ssao` | −3.67 ms | −7.3 % | −3.96 ms | −8.7 % | 8.6 % of px at t=800 but **max 119/255**, mean 3.13 — contact darkening leaves the reflected rocks. 64 px at t=1105. |
 | `--refl_skip_ssao --refl_skip_cones` | **−9.82 ms** | **−19.6 %** | −7.67 ms | −16.8 % | 22.7 % of px, max 119 — the union, and the SSAO half is what you see. |
 | `--refl_skip_vol` (wholesale) | −11.16 ms | −22.3 % | −9.41 ms | −20.6 % | **88.4 % of px, max 146.** The reflection stops being tonemapped. |
-| `--refl_skip_post` | −0.71 ms | −1.4 % | −0.94 ms | −2.1 % | **88.4 % of px, max 181, for under a millisecond.** |
-| `--refl_skip_rain` | −0.10 ms | (floor) | −0.17 ms | (floor) | **byte-identical.** |
+| `--refl_skip_post` *(deleted)* | −0.71 ms | −1.4 % | −0.94 ms | −2.1 % | **88.4 % of px, max 181, for under a millisecond.** |
+| `--refl_skip_rain` *(deleted)* | −0.10 ms | (floor) | −0.17 ms | (floor) | **byte-identical.** |
 
 **`--refl_skip_post` IS REFUTED AS A PERF ITEM AND SHOULD NOT BE ON HIS LIST.**
+*(Acted on 2026-08-29: the flag and its ON arm were deleted from the tree, with
+`--refl_skip_rain`. The measurements in this section stand; the two dials do not
+exist any more. The live ladder is `--refl_skip_ssao`, `--refl_skip_cones`,
+`--refl_skip_vol`.)*
 The brief expected the tonemap/bloom chain to be worth taking. It is not: the
 reflection pass's whole post chain is `tonemap-post` 0.662 + `hdr-activate` 0.485
 + `hdr-begin` 0.117 ≈ **1.26 ms**, of which the flag recovers 0.66–0.94 ms — and
@@ -1509,7 +1518,8 @@ in milliseconds does not mean cheaper to the eye here — the ms and the amplitu
 rank these two in OPPOSITE orders.**
 
 **NOTHING HERE IS PROVABLY INVISIBLE, so nothing merges as byte-null.** The one
-byte-null arm, `--refl_skip_rain`, is byte-null because it does nothing at all.
+byte-null arm, `--refl_skip_rain`, is byte-null because it does nothing at all —
+which is why that flag was deleted on 2026-08-29.
 
 ### NEXT CHASE TARGET (not this round)
 
@@ -3873,7 +3883,7 @@ composite. It cannot reach:
 | SSAO | `DeferredSSAO.cpp:228` etc. (5 sites) | 12×8 | none, own constant |
 | fast fog | `DeferredFastFog.cpp:2742` etc. (6 sites) | 12×8 | none, own constant |
 | shadow maps | `Shadows.cpp:726` | 4×4 | none, own constant |
-| volumetric cones | `--cone_fine_tiles` | 12×8 / 6×4 | none |
+| volumetric cones | (unconditional since `--cone_fine_tiles` was deleted 2026-08-29) | 12×8 | none |
 
 The ONE coupling is the **legacy `--no-xpar_tile_lights` fallback**
 (`DeferredSurfaceKernel.cpp:3735`), which subscripts the 96-entry light array
@@ -4052,7 +4062,9 @@ The S2 contract is why: the box is a conservative superset of the un-clipped
 triangle and the clipper only shrinks coverage, so a box that misses a tile
 means zero output there. The escape hatches agree too — city t=1961 under his
 arm gives `925ecd43…` on all four of default / `--no-face_tile_bin` /
-`--no-tile_bbox_cull` / both off.
+`--no-tile_bbox_cull` / both off. *(`--tile_bbox_cull` was **deleted 2026-08-29**
+— the reject is unconditional now, so only the `--no-face_tile_bin` arm of that
+four-way still exists.)*
 
 > **2026-08-16f — the `925ecd43…` here is HUD-BEARING and has been superseded.**
 > It was taken without `--profiler=0`, and `RunCitySnapshot` did not silence the
@@ -5757,7 +5769,6 @@ These are the user's A/B handles; delta vs default = the gated stage's cost.
 | `volumetric_unified` | 0 | Beer-Lambert unified pass |
 | `vol_n_samples` | 4 | Ray-march samples |
 | `vol_vec` | 1 | 8-wide SIMD per-sample inner loop |
-| `vol_rect_cull` | 1 | Screen-rect cull per batch |
 | `vol_halo_analytic` | 1 | Closed-form arctan integral |
 | `vol_cone_analytic` | 1 | Cone analytic integral |
 | `vol_prof` | 0 | Per-frame volumetric timing |

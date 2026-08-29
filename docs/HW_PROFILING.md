@@ -573,6 +573,9 @@ hoists it out of the per-spot loop (it depends only on `pxHashArr`, which is
 per-batch). *Do not "fix" the noise loop; it is already fixed.*
 
 ### The lever taken — `--vol_cone_lane_vec`, both leftover loops 8 wide
+*(flag deleted 2026-08-29: it had been default ON and bit-exact since `03ef0ff0`;
+both loops are unconditional now. `--no-vol_cone_lane_vec` arms quoted below no
+longer exist.)*
 
 Same defect at both ends of the body, and it is **memory traffic, not
 arithmetic**: the solve writes `zLoArr`/`zHiArr` as vectors, a scalar loop reads
@@ -853,8 +856,10 @@ verified, not assumed: the shipping binary's cone kernel disassembles to the
 `str` q, 479/389 scalar, 210 `fmul.4s`, 114 `fmla.4s`, 39 `dup.4s`) and measures
 2.388–2.390 Ginstr/f against the parent's 2.387–2.390.
 
-* **`-DFDS_CONE_FORCE=1`** — folds `vol_cone_solve_vec` / `vol_cone_lane_vec` to
-  compile-time `true` so the scalar fallbacks dead-code away. A runtime-flagged
+* **`-DFDS_CONE_FORCE=1`** — folds `vol_cone_solve_vec` to compile-time `true`
+  so its scalar fallback dead-codes away. (It used to fold `vol_cone_lane_vec`
+  too; that flag was **deleted 2026-08-29** and its two loops are now
+  unconditionally 8-wide, so the define no longer has anything to do there.) A runtime-flagged
   function carries every arm in **one register allocation**, so its disassembly
   and its pressure are the union of paths no single frame takes. Round 2 needed
   this, built it ad hoc, and could only describe it in prose.

@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-122 records, 119 current, 3 superseded; HEAD 501603ad2842.
+123 records, 120 current, 3 superseded; HEAD fdd1ad04b599.
 
 ## Attention
 ### Stale — depends on a superseded claim (3)
@@ -55,6 +55,7 @@
 - `7453a529070e` law **displace.law.tjunctions_before_displacement** = "holds" (state) {} w=1/5 — T-junctions and duplicate border vertices must be eliminated BEFORE displacement: a shared-border vertex is evaluated once and indexed from both sides (R1), the border owns its sample count (R2), border parameters are exact i/n (R3). Displacing a T-vertex by its own sampled height turns a sub-pixel raster crack into a full-amplitude hole.
 
 ### flag
+- `f329b70c05f7` measurement **flag.cull_round_2026_08_29** = "holds" (state) {state=flags_deleted tool=tools/flag_audit.py} w=4/5 — 13 FeatureFlags rows deleted (2 unwired: vol_rect_cull, water_ripple_scale; 3 refuted: refl_skip_rain, refl_skip_post, mirror_mask_pool_clear, with the ON arms they gated; 8 byte-equal landed-AB hatches: cone_fine_tiles, vertex_light_parallel, tile_bbox_cull, xfrm_soa_inline, vol_cone_lane_vec, xpar_strip_extent, xpar_peel_early_out, deferred_tile_sphere_cull, ON branches inlined across 15 call sites) plus 9 stale status sentences rewritten: FeatureFlags.def 780 rows/543128 B -> 765 rows/528423 B, 15752 B of rows removed. DEFAULT ARM UNMOVED: 14/14 pin poses byte-identical to the unmodified fog-wt build in the same worktree and each at its recorded value, render_gate 4/4, warm_gate --full 7/7, after every one of the four buckets.
 - `864d9658ae3a` refutation **flag.greets_displace_crease_normals** = "refuted" (state) {defect=wall flag=greets_displace_crease_normals scene=greets} w=5/5 — Crease-gated post-bake shading normals are REFUTED AS A DEFAULT: crease30 is worse than the 80-deg weld on every region (pier front GBI 3.50 vs 2.82, curved 13.74 vs 8.56, seam 84.3 vs 80.7); the panel-scale bulge was the groove-shade TARGET, not the smoothing angle. [seeded 2026-08-29 by the coordinator from FeatureFlags.def / commit message]
 - `0c2cd2a858e6` refutation **flag.greets_displace_edge_vert_merge** = "refuted" (state) {defect=tears flag=greets_displace_edge_vert_merge scene=greets} w=5/5 — The tolerant shared-edge vertex merge is REFUTED as a tear lever: 264 merges fire and S6120 + cam A stay byte-identical, holes unchanged 1101 / 116 - the hairline twins are minted by different creation passes. [seeded 2026-08-29 by the coordinator from FeatureFlags.def / commit message]
 - `baf27927b0e5` refutation **flag.greets_displace_env_clamp** = "refuted" (state) {defect=wall flag=greets_displace_env_clamp scene=greets} w=5/5 — The envelope vert clamp is REFUTED AS A FIX for his marked juts: it pulls 576 real off-envelope verts and changes ~78k px, but the marks are unmoved (28.7 -> 27.1 % / 14.9 -> 14.8 %); the juts are not vert positions off the envelope. [seeded 2026-08-29 by the coordinator from FeatureFlags.def / commit message]

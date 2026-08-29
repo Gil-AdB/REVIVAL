@@ -291,7 +291,6 @@ static void Reflected_Transform(Scene *Sc)
 
 	// S2 tile pre-reject: read the flag + this pass's near plane once.
 	// See the twin block in CITY.CPP's Reflected_Transform.
-	const bool  tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
 	const float bboxNearZ    = Sc->NZP;
 	// --needle_cull: degenerate-face pre-reject, same near plane, same read-once
 	// shape as the bbox flag above. See FDS/Base/FaceNeedle.h.
@@ -675,9 +674,8 @@ static void Reflected_Transform(Scene *Sc)
 				e->sortKey = F->SortZ.DW;
 				e->face    = F;
 				// S2 tile pre-reject bbox — see CITY.CPP's twin. Without it
-				// the mirror pass ran with --tile_bbox_cull inert.
-				if (tileBboxCull) fds::FaceBBox_Stamp(e, F, bboxNearZ);
-				else { e->bbMinX = e->bbMinY = -32768; e->bbMaxX = e->bbMaxY = 32767; }
+				// the mirror pass ran with the tile pre-reject inert.
+				fds::FaceBBox_Stamp(e, F, bboxNearZ);
 			}
 		}
 	}

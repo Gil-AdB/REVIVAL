@@ -56,7 +56,8 @@ write; a flag with none is correctly placed by construction.
 | `hdr` / `hdr_linear` | none | correctly-placed |
 | `deferred_checkerboard` | none (`RENDER.CPP:368` `deferredEnabled()` is per-frame; greets' init-time `DeferredPathEnabled()` at `GREETS.CPP:2477` is already true via `shard_deferred`, set in the **Init** block) | correctly-placed |
 | `bloom` / `bloom_intensity` / `hdr_refl_gain` / `hdr_exposure` | none (`Hdr.cpp` 172/206/212/78/822, all per-frame) | correctly-placed |
-| `cone_strength` / `cone_fine_tiles` / `disco_bloom` | none | correctly-placed |
+| `cone_strength` / `disco_bloom` | none | correctly-placed |
+| ~~`cone_fine_tiles`~~ | — | **flag deleted 2026-08-29**; the `GREETS.CPP` `setDefault` went with it |
 | `greets_shard_fall_speed` | none (`MirrorShatter.cpp:369`, `update`, per-frame) | correctly-placed |
 | `greets_shard_randomness` | **`MirrorShatter.cpp:225`** (`MirrorShatter::build` ← `BuildGreetsShatter` ← `Initialize_Greets`) | **INERT** — parked, §0.5 |
 | `anamorphic`/`chromatic`/`vignette`/`grade`/`grain` (`--cinematic`) | none | correctly-placed |
@@ -341,7 +342,7 @@ This is the block the brief called "suspect in its entirety". It is 27 rows;
 | `bloom_intensity` | 2.0 | `Hdr.cpp:201` | frame | HONOURED |
 | `hdr_refl_gain` | 4.0 | `Hdr.cpp:77` | frame | HONOURED |
 | `cone_strength` | 2.0 | `DeferredVolumetric.cpp:1797`, `DeferredFastFog.cpp:4075` | frame | **HONOURED — MEASURED**, §4.0 |
-| `cone_fine_tiles` | 1 | `DeferredVolumetric.cpp:1890` | frame | HONOURED |
+| ~~`cone_fine_tiles`~~ | ~~1~~ | — | — | **FLAG DELETED 2026-08-29** (the fine 12×8 grid is unconditional; the `setDefault` was already redundant) |
 | `disco_bloom` | 0.0 | `GreetsDisco.cpp:763` (`DiscoBloomPost`, called `GREETS.CPP:3952`) | frame | HONOURED |
 | `mirror_rtt` | 1 | **`GreetsMirror.cpp:2651`** (`PrepareSecondOrderMirrorRtt` ← `GREETS.CPP:2917`), **`GreetsMirror.cpp:1401`** (`BuildMirrorsByTextureName` ← `GREETS.CPP:2905`), `GREETS.CPP:3779` | **init** + frame | **DROPPED** — §4.1 |
 | `mirror_rtt_density` | 1024 | **`GreetsMirror.cpp:1591`, `:2754`** — both init, no frame consumer | **init only** | **DROPPED** — §4.3 |
