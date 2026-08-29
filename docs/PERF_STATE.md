@@ -58,6 +58,140 @@
 
 ---
 
+## 00v. THE WINDOW LEDGER — 2026-08-28 19:00 → 2026-08-29 07:30, `e017d611` → `78c0a752`: what Gil-Ad actually gets, measured end to end
+
+**Read this section first.** Every other §00 section reports one round against
+its own baseline. This is the only end-to-end measurement of the whole night,
+and it is **default-vs-default**: both binaries run his arms with no extra
+flags, so every number here is one he gets by launching the demo. Wins behind
+default-OFF flags are listed separately and are **NOT** in these totals.
+
+**Method.** Both binaries built in ONE clean worktree (`rev-ledger`) from one
+CMake cache: `e017d611` (the tip when the window opened) and **`78c0a752`**.
+Interleaved A/B/**A2**, min-of-N, dummy drivers, `--profiler=0`, warm env cache.
+**A2 is a DUPLICATE OF A** — the same binary a third time each round, so its
+drift against A is the contamination detector; rows where it exceeds ±3 % are
+marked `*` and are not findings. The between-binary floor on `renderFrame` is
+**±0.9 %** (§00l), so anything under ~1 % on a whole-frame row is not a claim.
+
+> **Two caveats, stated rather than buried.** (1) The AFTER binary is
+> `78c0a752`, which still carried the `bsWorld` cache later removed as a
+> regression (§00v.4); removing it made city ~0.02 ms **faster**, so these
+> numbers are conservative by that much and nothing else moved. (2) chase has no
+> `--bench` arm on `e017d611`, so its rows come from the `--snapshot` harness and
+> the AFTER binary's `@refl`+`@main` split is summed to match BEFORE's single
+> row; chase whole-TICK is therefore not comparable and is omitted.
+
+### 00v.1 — THE HEADLINE
+
+**Whole tick**, mean ms/iter, min-of-5 interleaved:
+
+| arm / pose | BEFORE | AFTER | Δ | | dup-arm |
+|---|--:|--:|--:|--:|--:|
+| greets t=5743 | 56.878 | 55.594 | −1.284 | **−2.3 %** | +0.52 % |
+| greets t=5965 | 49.158 | 47.242 | −1.916 | **−3.9 %** | −1.37 % |
+| **city t=1961** | **65.641** | **59.552** | **−6.089** | **−9.3 %** | +2.68 % |
+
+**`renderFrame`**, min-of-8 (greets/city) and min-of-5 (chase):
+
+| arm / pose | BEFORE | AFTER | Δ | |
+|---|--:|--:|--:|--:|
+| greets t=5743 | 47.893 | 46.925 | −0.968 | −2.0 % |
+| greets t=5965 | 42.735 | 41.516 | −1.219 | −2.9 % |
+| **city t=1961** | **54.264** | **47.952** | **−6.312** | **−11.6 %** |
+| **chase t=800** | **43.939** | **36.167** | **−7.772** | **−17.7 %** |
+| chase t=1105 | 41.944 | 39.179 | −2.765 | −6.6 % |
+| **chase t=1600** | **26.282** | **22.841** | **−3.441** | **−13.1 %** |
+
+### 00v.2 — THE ROWS THAT MOVED
+
+**city t=1961** — the arm the window changed most:
+
+| row | BEFORE | AFTER | Δ | | dup |
+|---|--:|--:|--:|--:|--:|
+| `lighting-w1` | 11.984 | 8.807 | −3.177 | **−26.5 %** | +0.08 % |
+| `cones-call` | 15.071 | 13.445 | −1.626 | −10.8 % | +0.70 % |
+| `fastfog` | 8.989 | 8.031 | −0.958 | −10.7 % | +2.22 % |
+| `gbuffer` | 7.144 | 6.895 | −0.249 | −3.5 % | −1.44 % |
+| `TBR-render` | 6.569 | 6.548 | −0.021 | −0.3 % | +1.28 % |
+| `water-glints` | 2.563 | 2.590 | +0.027 | +1.1 % | +1.44 % |
+
+**chase** — `gbuffer` −36.9 % / −3.5 % / −20.9 % at t=800/1105/1600 (the 6×20
+raster grid, §00m), `ssao` −26.7 % / −16.4 % / −32.8 %, `cones-call` −15.0 % /
+−10.9 % / −5.5 %, `water-glints` −24.8 % at t=1105. chase t=1105 `gbuffer` shows
+a dup drift of **+23.9 %** and is not a finding.
+
+**greets t=5743** — `RTT` 1.694 → 1.221 (**−27.9 %**), `cones-call` 1.197 → 0.938
+(−21.6 %), `ssao` 7.739 → 6.837 (**−11.7 %**), `bloom-chain` −3.6 %.
+**greets t=5965** — `ssao` 7.749 → 6.804 (**−12.2 %**), `cones-call` −18.7 %.
+
+> **TWO HONEST REGRESSIONS ON GREETS.** `lighting-w1` **+1.8 %** and
+> `lighting-w2` **+2.9 %** at t=5743, with dup-arm drift ±0.1 % — real, not
+> noise. greets runs the SCALAR wave-1 kernel, which no round touched (the
+> OuterVec work is city/fountain/crash only and its own control measured greets
+> exactly flat). Most likely code layout: the window added a great deal to
+> `DeferredSurfaceKernel.cpp`. `gbuffer` **+5.7 %** is inside its own documented
+> ±5.3 % floor and is not a change.
+
+### 00v.3 — WHAT LANDED BY DEFAULT vs WHAT WAITS ON HIS EYE
+
+**By default** (in the numbers above): OuterVec `lighting-w1` −27.5 % cumulative
+(§00k/§00k2, flagless + compile-time); SSAO GTAO slice setup 4-wide (§00n,
+flagless); `--mirror_rtt_pool`=1 (§00r); `--city_glass_pool`=1 (§00r, cache
+removed §00v.4); the cone movemask hand-roll and cone-hull tile rect (flagless);
+the water-glints port and analytic scan clip (flagless); chase `frame_tile_y`
+5→20 (scene default).
+
+**Default OFF — none of their time is in any number above, and he cannot get it
+without flipping them:** `--water_glints_batch`, `--cone_half_y_wide`,
+`--cone_range_cull` (1.0 = inert), `--refl_skip_cones`, `--refl_skip_ssao`,
+`--light_rect_exact`, and `--mirror_mask_pool_clear` (**REFUTED at +33 %**, kept
+only as its own proof).
+
+### 00v.4 — THE REGRESSION THIS ROUND CAUGHT AND FIXED
+
+Round 5's city glass change shipped **two** things under one flag. The fan-out
+was clean; a per-mesh `bsWorld` cache riding with it **failed
+`tools/warm_gate.sh` at tick 4, deterministically**, and the flag did not even
+gate it (the cache ran on the serial path too). It had passed 13/13 one-tick
+pins and 24 consecutive runs of the city acceptance pose — **24 repetitions of a
+blind test is still a blind test**, because all 24 were one-tick snapshots and
+the defect begins at tick 4. Isolated inside ONE suite invocation, so the
+cross-row contamination a peer is chasing today cannot explain it:
+
+| CITY.CPP | `city-warm` |
+|---|---|
+| tip (fan-out + cache) | **FAIL** (two runs, byte-identical wrong hashes) |
+| tip, `FDS_CITY_GLASS_POOL=0` (cache only) | **FAIL**, same hashes |
+| fan-out kept, cache removed | **PASS** |
+| pre-round-5 | **PASS** |
+
+Cache removed; **`Tick-ReflGlass` 0.925 → 0.144 ms (−84.4 %)**, *faster* than the
+0.161 it reached with the cache — the cache was pure risk for no time. The
+mechanism is **not explained**, which is why it is deleted rather than repaired,
+and the site says so. `--mirror_rtt_pool` was checked for the same exposure and
+is **clean**: greets-warm passes with the flag ON and OFF and all five warm-tick
+hashes are byte-identical between the arms. The distinction is that it moved only
+*dispatch* of a pass whose tiles write disjoint regions; it added no cache.
+
+### 00v.5 — THE TOP THREE REMAINING, SIZED
+
+1. **`Tick-ReflXfrmOnly` — 1.02 ms at 1.22 cores** (city; chase has a twin). The
+   route is `Transform.cpp`'s own *"execution order free, output order pinned"*
+   shard reservation; the blocker is the in-order `FList` append feeding
+   `Radix_Sort`. **~0.8 ms**, multi-hour `goto`-state-machine rewrite in two demo
+   files, draw-order byte risk.
+2. **greets `lighting-w1` — 18.2 ms, the single largest row in any arm.** It is
+   the SCALAR kernel; every OuterVec win this window was structurally
+   inaccessible to it, and it has never been decomposed the way city's was.
+3. **chase's reflection pass** — the whole volumetric/AO/tonemap stack runs twice
+   a frame; §00m priced it and returned a menu whose every item is a look call.
+
+**Gates on `78c0a752` + the §00v.4 fix:** 13/13 pins, `render_gate` 4/4,
+`warm_gate --full` **7/7**.
+
+---
+
 ## 00u. `TBR-render`'s INTERIOR, ATTRIBUTED — 2026-08-29f: the three declared children read 0.000 because they instrument the **LEGACY** path; the unified path's 6.9–8.1 ms is **72.5 % transparent deferred lighting + 24.7 % raster**, and the attribution closes to **99.8 %**
 
 §00t closed `TBR-render` to the extent lever and handed on the real question: the
