@@ -58,7 +58,8 @@ extern float fastPow2(float x);
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/DeferredShadowSampling.h"
 #include "RENDER/LightmapBake.h"
-#include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
+#include "RENDER/Hdr.h"
+#include "RENDER/TbrSplit.h"   // 00u: TBR interior attribution (instrument only)  // HDR overlay reorg — xpar peel composites into g_hdrBuf
 #include "RENDER/EnvBake.h"  // --env_refl: per-scene panorama for env-specular
 #include "RENDER/EnvCube.h"  // --env_cube: trig-free padded cube-face lookup
 #include "RENDER/CubeTapPrepass.h"  // --deferred_cube_prepass: the tap's
@@ -5600,6 +5601,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	// what the parent did.
 	auto fillSide = [&](int x0, int x1, int zByte) {
 		if (x0 >= x1) return;
+		tbrsplit::AccNs _t(tbrsplit::clearNs());          // 00u instrument only
 		if (x0 == 0 && x1 == XRes) {
 			if (sideGB) std::memset(sideGB->txtr.data() + rowStart, 0xFF, rowCount * sizeof(uint32_t));
 			if (sideZ)  std::memset(sideZ + rowStart, zByte, rowCount * sizeof(uint16_t));
@@ -5614,6 +5616,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	};
 	auto fillFloor = [&](int x0, int x1) {          // zero the peel floor
 		if (!g_xparPeelFloor || x0 >= x1) return;
+		tbrsplit::AccNs _t(tbrsplit::clearNs());          // 00u instrument only
 		// Same invariant break as the legacy peel loop's memset — see
 		// XparPeel_ResetAll. The strip path zeroes/copies only columns, but
 		// "not all 0xFFFF" is all the next single-pass reader cares about.
@@ -5634,6 +5637,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	// all-0xFFFF window is an exact "nothing here". An empty window counts as
 	// untouched: a clump whose raster reached no tile at all commits nothing.
 	auto sideZUntouched = [&](int x0, int x1) -> bool {
+		tbrsplit::AccNs _t(tbrsplit::clearNs());          // 00u instrument only
 		if (!sideZ) return true;
 		if (x0 >= x1) return true;
 		for (int r = 0; r < strip_h; ++r) {
@@ -5644,6 +5648,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	};
 	auto copyFloor = [&](int x0, int x1) {          // peel floor <- this side's Z
 		if (!g_xparPeelFloor || !sideZ || x0 >= x1) return;
+		tbrsplit::AccNs _t(tbrsplit::clearNs());          // 00u instrument only
 		g_xparPeelFloorDirty.store(true, std::memory_order_relaxed);
 		if (x0 == 0 && x1 == XRes) {
 			std::memcpy(g_xparPeelFloor + rowStart, sideZ + rowStart, rowCount * sizeof(uint16_t));
@@ -5691,11 +5696,15 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 		const meka::RasterStripClamp savedClamp = meka::g_rasterStripClamp;
 		meka::g_rasterStripClamp = { stripTileRow, stripTileRow };
 		meka::g_rasterXExtent = { INT32_MAX, -1 };   // arm the column recorder
-		for (int i = 0; i < count; ++i) {
-			Face* F = faces[i];
-			if (!F) continue;
-			if (front) clipper.Render(F, MekaleleTransparent,     false, rt, cam);
-			else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
+		{
+			tbrsplit::AccNs _t(tbrsplit::rasterNs());     // 00u instrument only
+			for (int i = 0; i < count; ++i) {
+				Face* F = faces[i];
+				if (!F) continue;
+				tbrsplit::rasterFaces().fetch_add(1, std::memory_order_relaxed);
+				if (front) clipper.Render(F, MekaleleTransparent,     false, rt, cam);
+				else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
+			}
 		}
 		const meka::RasterXExtent xext = meka::g_rasterXExtent;
 		meka::g_rasterStripClamp = savedClamp;
@@ -5785,6 +5794,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 			stripCtx.ltSizeX = XRes > 0 ? XRes : 1;
 			stripCtx.ltSizeY = 1 << 3;   // TILESIZE
 		}
+		tbrsplit::AccNs _t(tbrsplit::compNs());           // 00u instrument only
 		if (front) {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
 				stripCtx, stripIdx, cx0, strip_y, cx1, strip_y + strip_h);

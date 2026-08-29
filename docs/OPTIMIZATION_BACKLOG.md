@@ -10,6 +10,59 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29f — `TBR-render`'s interior is attributed: 72.5 % transparent deferred lighting, 24.7 % raster, and the three "dead" children were instrumenting the LEGACY path
+
+Full account: `docs/PERF_STATE.md` §00u. **Instrument only, byte-null.**
+14/14 pins + `render_gate` 4/4 + `warm_gate.sh --full` 7/7.
+
+**Why the three declared children read 0.000:** `s_xparClearMs/RasterMs/CompMs`
+are incremented only inside `RENDER.CPP`'s `unifiedTbr=false` LEGACY block
+(`:1207/1218/1252`). city runs the UNIFIED path, so they are never written there
+and `addMs` books three honest zeroes. The names were right, the wiring pointed
+at the other implementation, and the unified interior (`FILLERS.CPP:2346`) had no
+scopes at all.
+
+**The split** (city t=1961; core-ms, thread-summed; `tbr-core` 85.683 against a
+9.315 ms wall → **effPar 9.20 of 12**):
+
+| scope | core-ms | % |
+|---|--:|--:|
+| `tbr-xparflush` | 83.762 | **97.76** |
+| — `xflush-composite` | **62.142** | **72.53** |
+| — `xflush-raster` | 21.146 | 24.68 |
+| — `xflush-clear` | 0.334 | 0.39 |
+| `tbr-collect` / `tbr-sprite` / `tbr-walk` | 1.921 | 2.24 |
+
+**Confirmed independently by ablation** (one-line `return` before the composite,
+`--hw_prof`): composite is **5.632 ms wall (73.4 %), 0.626 Ginstr (75.8 %),
+0.181 Gcyc (76.1 %), IPC 3.459**. Two methods sharing no machinery, agreeing to
+three points. Attribution closes to **99.8 %**.
+
+**`hwRead()` is `proc_pid_rusage(getpid())` — PROCESS-WIDE**, so nested
+per-worker counters are meaningless inside a strip wave; per-block Ginstr/Gcyc
+must come from ablation differencing. Recorded because it constrains every future
+sub-scope split in a threaded pass.
+
+### OPEN
+
+1. **The largest block is NOT obviously leverable, and I did not force one.**
+   `Render_DeferredTransparentLighting_Tile` runs at **IPC 3.459** (vs
+   `renderFrame`'s 3.625) — issue-bound on real work, not stalled. Its pixel
+   count is already near-minimal (§00t: the extent bound is 91.58 % live), and
+   city runs ONE peel pass, so there is no depth lever. What is left is the
+   kernel's own arithmetic, which lives in the greets round's file:
+   **measured and handed over, not edited.** The number to hand over:
+   **62.1 core-ms / 0.626 Ginstr per frame for 1.578 M live transparent px
+   ≈ 36 ns and ~400 instructions per pixel.**
+2. **`xflush-raster` (24.7 %) is the second block and it IS mine** (clipper +
+   `MekaleleTransparent*`). 21.1 core-ms at **effPar 2.27 — the lowest in the
+   split.** Whether that is real serialisation or a short block thinly spread
+   across the wave is NOT established; that is the honest next question.
+3. **The dead legacy children should be guarded or renamed.** They will keep
+   printing 0.000 on the unified path and reading as "measured, empty" when they
+   mean "not wired here". Cheap fix; not taken tonight because a table change is
+   itself a thing to gate.
+
 ## 2026-08-29e — city's `TBR-render` is CLOSED: the census says the bound is already 91.58 % live, so the lever the map named is worth ~0.13 ms
 
 Full account: `docs/PERF_STATE.md` §00t. **No code written; the row is closed

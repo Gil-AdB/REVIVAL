@@ -16,6 +16,8 @@
 #include "SimdHelpers.h"
 #include "Mekalele.h"  // g_gbuffer — flare filler's mirror-footprint gate
 #include "RENDER/Hdr.h"  // HDR overlay reorg — sprites accumulate into g_hdrBuf
+#include "RENDER/TailProf.h"  // TBR interior split (00u): thread-summed sub-scopes
+#include "RENDER/TbrSplit.h"   // 00u: the flush interior (clear/raster/composite)
 #include "RENDER/GreetsMirror.h"  // MirrorMaskScreenBBox — --mirror_flare_bbox
 #include "Base/FeatureFlags.h"
 #include <Threads.h>
@@ -2324,6 +2326,37 @@ static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 static const bool g_tbrStats = std::getenv("FDS_TBR_STATS") != nullptr;
 static std::atomic<uint64_t> g_tbrBusyNs{0}, g_tbrMaxStripNs{0};
 static std::atomic<uint64_t> g_tbrEntries{0}, g_tbrFlushes{0};
+
+// ── TBR interior split (PERF_STATE 00u) ─────────────────────────────────────
+// TBR-render measured 6.930 ms on city t=1961 while its three DECLARED children
+// (xpar-clear / xpar-raster / xpar-composite) all read 0.000: those accumulators
+// are written only inside RENDER.CPP's `unifiedTbr=false` LEGACY block, and city
+// runs the unified path, so they are structurally dead here. The row's whole
+// interior lives in the strip lambda below and had no scopes at all.
+//
+// hwRead() is proc_pid_rusage(getpid()) -- PROCESS-WIDE -- so nested per-worker
+// instruction/cycle counters are impossible; per-block Ginstr/Gcyc has to come
+// from ablation differencing at row level. What CAN be had per block, cheaply
+// and byte-null, is thread-summed nanoseconds. These are CORE-ms (summed over
+// every worker), not wall: they are compared against g_tbrCoreNs, not against
+// the parent's wall row.
+static std::atomic<uint64_t> g_tbrCoreNs{0};      // Σ whole-strip time
+static std::atomic<uint64_t> g_tbrCollectNs{0};   // linked-list gather + stable_sort
+static std::atomic<uint64_t> g_tbrSpriteNs{0};    // the sprite branch (SpriterRT)
+static std::atomic<uint64_t> g_tbrFlushNs{0};     // RenderXparClumpInStrip
+static std::atomic<uint64_t> g_tbrSprites{0};     // population, for ns/sprite
+
+// Adds its lifetime to an atomic on destruction, so a branch that `continue`s
+// out of several places still books exactly once.
+struct TbrAccNs {
+	std::atomic<uint64_t>* acc; long long t0; bool on;
+	TbrAccNs(std::atomic<uint64_t>* a, bool en)
+		: acc(a), t0(en ? TailProf::nowNs() : 0), on(en) {}
+	~TbrAccNs() {
+		if (on) acc->fetch_add(uint64_t(TailProf::nowNs() - t0),
+		                       std::memory_order_relaxed);
+	}
+};
 // Per-material entry census (pointer-keyed open table; names printed).
 static std::atomic<const char*> g_tbrMatName[16];
 static std::atomic<uint64_t>    g_tbrMatCount[16];
@@ -2362,6 +2395,15 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 	std::counting_semaphore<INT_MAX> stripsDone{0};
 
 	const auto tbrWall0 = std::chrono::steady_clock::now();
+	const bool tbrProf = TailProf::enabled();          // interior split, 00u
+	if (tbrProf) {
+		tbrsplit::resetAll();
+		g_tbrCoreNs.store(0, std::memory_order_relaxed);
+		g_tbrCollectNs.store(0, std::memory_order_relaxed);
+		g_tbrSpriteNs.store(0, std::memory_order_relaxed);
+		g_tbrFlushNs.store(0, std::memory_order_relaxed);
+		g_tbrSprites.store(0, std::memory_order_relaxed);
+	}
 	if (g_tbrStats) {
 		g_tbrBusyNs.store(0, std::memory_order_relaxed);
 		g_tbrMaxStripNs.store(0, std::memory_order_relaxed);
@@ -2369,7 +2411,8 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 		g_tbrFlushes.store(0, std::memory_order_relaxed);
 	}
 
-	dispatchIndexed(numTiles, &stripsDone, [Sc, dctx](int ii) {
+	dispatchIndexed(numTiles, &stripsDone, [Sc, dctx, tbrProf](int ii) {
+			const long long tCore0 = tbrProf ? TailProf::nowNs() : 0;
 			const auto tStrip0 = g_tbrStats
 				? std::chrono::steady_clock::now()
 				: std::chrono::steady_clock::time_point{};
@@ -2382,6 +2425,7 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			// array so we can sort them. Each entry holds Face* + renderZ
 			// + next pointer (set by InsertSpanToTBR at insertion time).
 			thread_local std::vector<TBREntry> scratch;
+			const long long tCol0 = tbrProf ? TailProf::nowNs() : 0;
 			scratch.clear();
 			sdword n = Sc->SBufferHead[i];
 			while (n != -1) {
@@ -2391,6 +2435,8 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			// Descending: largest renderZ (farthest) first, then the
 			// deterministic camera-independent tie-break (see tbrXparOrderLess).
 			std::stable_sort(scratch.begin(), scratch.end(), tbrXparOrderLess);
+			if (tbrProf) g_tbrCollectNs.fetch_add(
+				uint64_t(TailProf::nowNs() - tCol0), std::memory_order_relaxed);
 
 			// Walk the sorted strip items in back-to-front order. Two
 			// item types share the list:
@@ -2417,6 +2463,7 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 				// fountain fallback) — no transparent faces were routed
 				// into the strips there, so the clump is always empty.
 				if (dctx) {
+					TbrAccNs _f(&g_tbrFlushNs, tbrProf);
 					RenderXparClumpInStrip(*dctx, xparClump.data(),
 					                       int(xparClump.size()),
 					                       clumpFront, strip_y_i, strip_h);
@@ -2436,6 +2483,8 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 					// composites BEFORE this (closer) sprite.
 					flushXparClump();
 
+					TbrAccNs _s(&g_tbrSpriteNs, tbrProf);
+					if (tbrProf) g_tbrSprites.fetch_add(1, std::memory_order_relaxed);
 					Vertex* V = F->A;
 					float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
 					// Far-plane clamp matches The_MMX_Scalar's immediate path
@@ -2508,6 +2557,8 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			// Trailing flush.
 			flushXparClump();
 			Sc->SBufferHead[i] = -1;
+			if (tbrProf) g_tbrCoreNs.fetch_add(
+				uint64_t(TailProf::nowNs() - tCore0), std::memory_order_relaxed);
 			if (g_tbrStats) {
 				const uint64_t ns = uint64_t(
 					std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2521,6 +2572,24 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 	});
 
 	for (int k = 0; k < numTiles; ++k) stripsDone.acquire();
+
+	// Interior split (00u). CORE-ms, thread-summed -- these sum to tbr-core, NOT
+	// to the parent TBR-render WALL row. tbr-walk is the residue: the sorted
+	// per-entry walk, the clump bucketing and the push_backs.
+	if (tbrProf) {
+		const double core = double(g_tbrCoreNs.load(std::memory_order_relaxed))    / 1e6;
+		const double coll = double(g_tbrCollectNs.load(std::memory_order_relaxed)) / 1e6;
+		const double spr  = double(g_tbrSpriteNs.load(std::memory_order_relaxed))  / 1e6;
+		const double flsh = double(g_tbrFlushNs.load(std::memory_order_relaxed))   / 1e6;
+		double walk = core - coll - spr - flsh;
+		if (walk < 0.0) walk = 0.0;
+		TailProf::addMs("tbr-core",      core, 2);
+		TailProf::addMs("tbr-xparflush", flsh, 3);
+		TailProf::addMs("tbr-collect",   coll, 3);
+		TailProf::addMs("tbr-sprite",    spr,  3);
+		TailProf::addMs("tbr-walk",      walk, 3);
+		tbrsplit::book();                 // xflush-{composite,raster,clear}
+	}
 
 	if (g_tbrStats) {
 		static int sCall = 0;
