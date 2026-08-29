@@ -1616,6 +1616,23 @@ names so the halving stops being an assumption.**
 
 #### 2. `lighting-w1` — the deferred surface kernel's wave 1. **max 17.90 ms (greets t=5743) · total 63.1 ms** — the largest row in the map by total, and the most heavily refuted thing in the tree
 
+> **⚠ 2026-08-29d AMENDS THIS SECTION. The "cube tap (36.6 % of the row)"
+> figure below is STALE and roughly double the truth.** Re-measured with
+> `--no-shadows` (interleaved min-of-9, quiet box, instruction spread
+> 0.04–0.21 %): **ALL** shadow work — cube tap, spot tap, plane setup, the
+> light-list shadow fields together — is **16.1 / 18.3 / 26.6 % of wall** at
+> greets t=5743 / 1588 / 3409 (cycles 17.2 / 17.1 / 27.9 %). The eleven
+> rounds of levers listed below did their job and the share was never
+> re-taken after them. **72–84 % of this row is not shadow work at all**, so
+> a plan sized off 36.6 % aims at roughly twice the prize that exists.
+> Two further corrections: `--shadow_polyid_no_pcf` is **−0.33 % cycles**
+> (the 8×8 pyramid already skips 54.8–80.5 % of texel reads, so the read is
+> free and the CALL is the cost), and `--no-env_refl` is **−0.33 % cycles**
+> (env is not a lever here). The call-count census, the 8×8-block
+> redundancy (71–91 % of taps), the 2.3–5.3 ms ceiling and why it needs a
+> structural change rather than micro-optimisation:
+> `docs/OPTIMIZATION_BACKLOG.md` **2026-08-29d**.
+
 **(a) What the code does.** `FDS/RENDER/DeferredSurfaceKernel.cpp:8158-8191`
 (the `Stamp`/`drain` pair). greets/chase run `Render_DeferredLighting_Tile`;
 city/fountain/crash run the `_OuterVec` monolith (`Scene::PreferOuterVec`,

@@ -96,6 +96,119 @@ on stderr under an existing diagnostic flag would make it self-diagnosing. Not
 taken tonight: a gate-visible print is itself a thing to gate.
 
 
+## 2026-08-29d — **greets `lighting-w1` ROUND 12, CENSUS ONLY**: the row's shadow half is **16–28 %, not the 36.6 % on record** — the stale figure has been costing this campaign its aim. 71–91 % of cube-tap CALLS are redundant at 8×8 screen granularity, worth **2.3–5.3 ms**, and reaching it needs a structural change. NO CODE LANDED, by choice
+
+Twelfth round on the largest row in the engine (greets t=5743 **18.06 ms**
+measured this round). No lever built: the census either killed or re-sized every
+candidate before code, which is what the previous eleven rounds established as
+the way to work here.
+
+### CORRECTION 1 — the shadow share is HALF what the map says
+
+`docs/PERF_STATE.md` §2 records *"the cube tap (36.6 % of the row)"*. Measured
+this round with `--no-shadows` as the ablation, interleaved min-of-9, quiet box,
+instruction column spread 0.04–0.21 %:
+
+| pose | `lighting-w1` wall | ALL shadow work: wall | cycles | instructions |
+|---|--:|--:|--:|--:|
+| t=5743 | 18.06 ms | −16.1 % | −17.2 % | −20.6 % |
+| t=1588 | 32.34 ms | −18.3 % | −17.1 % | −23.4 % |
+| t=3409 | 20.92 ms | −26.6 % | −27.9 % | −27.5 % |
+
+**All shadow work — cube tap, spot tap, plane setup, the light-list shadow
+fields — is 16–28 % of the row.** Eleven rounds of landed levers (the 8×8
+PolyId pyramid −6.5 %, `--deferred_cube_direct` −7.9 %, `--deferred_cube_prepass`,
+the `computeMapShadowAtten` guard hoist −9.0 %) did their job; the map was never
+re-taken after them. **72–84 % of this row is not shadow work at all.**
+
+### CORRECTION 2 — the texel read is already free; the CALL is the cost
+
+`--shadow_polyid_no_pcf` (one nearest tap instead of 2×2): **−4.35 %
+instructions, −0.33 % cycles.** The 8×8 pyramid already resolves 54.8–80.5 % of
+taps with no texel read at all, so removing the remaining reads buys nothing.
+This is the standing rule confirmed with a number: the tap only gets cheaper by
+being CALLED less.
+
+### THE CALL-COUNT CENSUS (`-DFDS_SHADOW_TAP_CENSUS=ON`, `-DFDS_OMNI_CENSUS=ON`)
+
+Both instruments needed `--bench`, not `--snapshot`: the report prints every
+`DEFERRED_NUM_TILES * 8` = 768 tiles = 8 main-view frames, and a one-pose
+snapshot renders one. (Another instance of 2026-08-29c's trap, in the
+instrument this time.)
+
+| pose | shaded px | (px×light) entered | lights/px | cube taps/f | cube REJECT rate | ACCUM | 8×8-block-uniform taps |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| t=5743 | 1.044 M | 8.763 M | 8.40 | 4.760 M | **29.99 %** | 24.5 % (2.06 l/px) | **75.6 %** |
+| t=3122 | 1.036 M | — | — | 2.880 M | **1.18 %** | 33.5 % (3.04 l/px) | **90.0 %** |
+| t=3409 | 1.056 M | — | — | 2.580 M | **1.07 %** | 38.5 % (2.93 l/px) | **90.9 %** |
+| t=1588 | 1.314 M | — | — | 7.519 M | **21.71 %** | 30.6 % (3.40 l/px) | **70.8 %** |
+
+Reject chain at t=5743 (share of the 8.763 M pairs killed at each link):
+`mirrorId 4.75 % · N·L<0 20.72 % · range 8.75 % · portal 0.00 % · cone 11.18 % ·
+mapshadow 0.12 % · **cube 29.99 %** · horizon 0.00 % → ACCUMULATED 24.48 %`.
+The chain is already ordered cheapest-first and the cube tap is the single
+biggest rejector — at that pose it is doing real work.
+
+**But the pose spread is the finding.** At t=3409 and t=3122 the cube tap is
+called 2.58 M / 2.88 M times a frame and **rejects 1.07 % / 1.18 % of pairs** —
+it is establishing "lit" 99 % of the time. And at exactly those poses **90.9 % /
+90.0 % of its taps sit in an 8×8 SCREEN block where every tap agrees.**
+Uniformity is strongly scale-dependent (t=5743): 8×8 **75.6 %**, 16×16 50.5 %,
+32×32 35.5 %, whole 160×135 tile 15.6 % — so the redundancy is real but only
+visible at fine screen granularity.
+
+### THE CEILING, AND WHY NO CODE LANDED
+
+A PERFECT per-(8×8 block × light) oracle that skipped every uniform block:
+`0.71–0.91 × (16–28 % of the row)` = **12–25 % of `lighting-w1`, i.e. 2.3 ms at
+t=5743 and up to 5.3 ms at t=3409.** Real, large, and NOT reachable by
+micro-optimisation:
+
+* the predicate cannot live inside the tap — `OPTIMIZATION_BACKLOG:4783` and a
+  measured +12.4 % say so;
+* deciding it per block needs **per-8×8-block depth bounds**, and only per-TILE
+  bounds exist (`computeTileDepthBounds`). Tile bounds over an 8×8 block give a
+  frustum slab so elongated that its cube footprint is never provably uniform —
+  that is what kills the cheap version;
+* so it needs a hi-Z-style min/max pyramid over `ZPage16` **plus** a hierarchical
+  cube-footprint query against the existing PolyId pyramid, **plus** the
+  pixel-major → block/light-major loop restructure that §2 already names as
+  *"the only untried shape … large, and the per-pixel early-outs fight it."*
+
+That is a structural change, and it is the honest answer to the round's
+question: **this row is not irreducible, but the next greets millisecond is not
+available to micro-optimisation.** Attempting the restructure in the last three
+hours of the window, in the most-refuted kernel in the tree, would have produced
+something half-done and ungated. Deliberately not started.
+
+### CLOSED BELOW BAR THIS ROUND, with numbers
+
+* **Dead (tile × light) entries** — 3.6 % / 5.6 % / 11.4 % / 15.5 % of entries at
+  t=1588 / 5743 / 3122 / 3409, costing 0.49–1.24 M "dead prologue px" per frame.
+  A prologue px is an in-range test, ~10 instructions → **≲0.75 % of the row.**
+  Not worth a tighter tile cull.
+* **`computeMapShadowAtten`'s 99.5 %-free calls** — the census line reads
+  "4.784 M calls, NONE-OF-THREE 99.50 %", which looks like 4.76 M wasted calls.
+  It is not: the guard `(smIdx & srcSm & srcCube) >= 0` — one 3-way AND
+  exploiting all-negative sign bits — **already landed**, and the counter counts
+  pairs reaching the guard, not calls made. Re-proposing this was the trap and
+  the census walked into it; recorded so the next round does not.
+* **`--no-env_refl`**: −2.05 % instructions, **−0.33 % cycles**. Env reflection
+  is not a lever in this row. `--no-ssao`: +0.04 % — SSAO is not in this row at
+  all.
+
+### WHERE THE OTHER 72–84 % IS
+
+At 2.392 Gi/f over 4.76 M in-range (px × light) pairs, the row is **~500
+instructions per surviving pair** — the core diffuse/specular arithmetic, with
+no attachable sub-feature above the noise. **The only lever left with real
+headroom is FEWER PAIRS**, which is the same verdict the cone campaign reached:
+8.40 lights/px are entered and 2.06–3.40 accumulate. A contribution-threshold
+cull (drop a light whose peak contribution at this pixel is below one display
+level) is the cone round's `--cone_range_cull` mechanism applied here — it
+worked there (−52.6 % of that pass for max |Δ| 4/255) and it is a LOOK dial, so
+it belongs in front of Gil-Ad, not in a perf round.
+
 ## 2026-08-29c — **THE GATE SUITE HAS A STRUCTURAL HOLE, AND IT IS NOW CLOSED**: every pinned row is a ONE-TICK snapshot, so any path that switches on at tick 2 is untested. A binary that deletes city's water fog entirely passes **12/12 pins** and fails **5/7 warm rows**. `tools/warm_gate.sh` DONE
 
 ### THE TRAP, STATED ONCE
