@@ -5757,7 +5757,6 @@ These are the user's A/B handles; delta vs default = the gated stage's cost.
 | `volumetric_unified` | 0 | Beer-Lambert unified pass |
 | `vol_n_samples` | 4 | Ray-march samples |
 | `vol_vec` | 1 | 8-wide SIMD per-sample inner loop |
-| `vol_rect_cull` | 1 | Screen-rect cull per batch |
 | `vol_halo_analytic` | 1 | Closed-form arctan integral |
 | `vol_cone_analytic` | 1 | Cone analytic integral |
 | `vol_prof` | 0 | Per-frame volumetric timing |
