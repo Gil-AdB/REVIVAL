@@ -136,6 +136,55 @@ regression, not because the millisecond is impressive.
    `ps -Ao comm=`, which matches the executable NAME and cannot false-match a
    shell. Same class as the documented `pgrep -fl DEMO` self-match, one level up.
 
+## 2026-08-29g — **THE WINDOW LEDGER, and a MERGED REGRESSION found and fixed inside it.** `e017d611` → `78c0a752`: city `renderFrame` −11.6 %, chase −17.7 / −6.6 / −13.1 %, greets −2.0 / −2.9 %
+
+Full tables, method, dup-arm contamination detector and the default-ON vs
+flag-gated split: **`docs/PERF_STATE.md` §00v**. Two things belong here.
+
+### The regression — a fan-out was fine, the cache riding with it was not
+
+Round 5's `--city_glass_pool` shipped **two** changes under one flag: a chunked
+fan-out of `cityMirrorGlassForward` and a per-mesh `bsWorld` cache. The peer's
+`tools/warm_gate.sh`, written hours earlier for exactly this hole, failed
+`city-warm` at **tick 4**. Bisected inside ONE suite invocation (so the cross-row
+contamination a peer is chasing cannot explain it): tip **FAIL**, cache-only
+(flag off) **FAIL**, fan-out-without-cache **PASS**, pre-round-5 **PASS**.
+Deterministic — two runs, byte-identical wrong hashes.
+
+**Two lessons, both mine:**
+
+1. **24 repetitions of a blind test is still a blind test.** Round 5 certified
+   this "byte-null over 24 consecutive runs, one hash". True, and worthless: all
+   24 were ONE-TICK `--snapshot` runs and the defect starts at tick 4. The pins
+   have the same blindness by construction, which is why warm_gate exists.
+2. **A flag that does not gate the whole change is not a revert arm.** The flag
+   controlled the fan-out while the cache ran on *both* paths, so my first
+   "flags off still fails" reading pointed away from my own code and nearly
+   exonerated it. When shipping two mechanisms, gate them separately or ship one.
+
+The cache is **removed, not repaired** — its failure mechanism is still
+unexplained, and the argument for it ("`bsWorld` is a pure function of the mesh")
+is one I still cannot fault on paper, which is precisely why it must not come
+back without warm_gate green. The site and the flag text both say so.
+**The win is fully retained and slightly better: `Tick-ReflGlass` 0.925 → 0.144 ms
+(−84.4 %) without the cache, against 0.161 with it.**
+
+`--mirror_rtt_pool` was checked for the same exposure and is **clean** —
+greets-warm passes with it ON and OFF, all five warm-tick hashes byte-identical.
+It moved only *dispatch* of a pass whose tiles write disjoint regions and added
+no cross-item state. **That is the line: re-dispatching disjoint work is safe;
+caching across items is what needs the warm gate.**
+
+### The ledger, in one line each
+
+city `renderFrame` **54.264 → 47.952 (−11.6 %)**, tick −9.3 %; chase
+`renderFrame` **−17.7 / −6.6 / −13.1 %** at t=800/1105/1600; greets −2.0 / −2.9 %,
+tick −2.3 / −3.9 %. Biggest movers: city `lighting-w1` −26.5 %, chase `gbuffer`
+−36.9 % (t=800) and `ssao` −26.7 to −32.8 %, greets `RTT` −27.9 % and `ssao`
+−11.7 %. **Reported honestly against it:** greets `lighting-w1` **+1.8 %** and
+`lighting-w2` **+2.9 %** — real (dup-arm ±0.1 %), unexplained, most likely code
+layout, and on the SCALAR kernel no round touched.
+
 ## 2026-08-29c — the cross-tree divergence was never a divergence: byte-identical binaries, a self-locating asset root, and pose-sequence-dependent chase pins
 
 Full account: `docs/PERF_STATE.md` §00q. **Zero regressions found; three false
