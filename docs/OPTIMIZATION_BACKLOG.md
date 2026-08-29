@@ -489,6 +489,83 @@ this (reflect dir, Fresnel, mip) and arms on 33–37 % of groups; the *fetch* is
 still eight scalar bilinear taps. That is the biggest single block left, and it
 is a different shape from anything the campaign has attacked.
 
+## 2026-08-29c — **greets' PASSENGER ROWS: `RTT` was running 96 lighting tiles INLINE on the tick thread — pooling them takes the row 1.77 → 1.28 ms byte-null.** The other two rows are healthy, and `Tick-ReflXfrm`'s attribution is corrected by 30×
+
+Branch `rev-ssao`. The map (§00l item 9) named four unexamined rows. Three are
+now measured and one is fixed.
+
+### The diagnosis that mattered: cores, not instructions
+
+| row | wall | Gi/f | Gcyc/f | **cores** | IPC |
+|---|--:|--:|--:|--:|--:|
+| `shadow-bake` | 1.918 | 0.143 | 0.044 | **7.2** | 3.25 |
+| `bloom-chain` | 1.904 | 0.218 | 0.050 | **8.2** | 4.36 |
+| **`RTT`** | 1.742 | 0.020 | **0.009** | **1.6** | 2.22 |
+| `Tick-SkyCube` (city) | 0.793 | 0.068 | 0.020 | **7.9** | 3.41 |
+
+`cores = Gcyc / clock / wall` is the whole diagnostic. `shadow-bake`,
+`bloom-chain` and `Tick-SkyCube` are already parallel and high-IPC — **no
+structural headroom, closed**. `RTT` at 1.6 cores was the outlier.
+
+### RTT — the map's premise was wrong, and so was mine at first
+
+§00l called it "0.020 Ginstr/f producing 1.69 ms at IPC 2.38 — not a compute
+row", implying a stall or a mislabelled scope. It is neither. Decomposed:
+`rtt-pick` 0.002, `rtt-prep` 0.003, **`rtt-bakejob` 1.765 (2 calls/f)** — two
+genuine 512×512 offscreen scene renders, of which `rttj-xform` 0.321,
+`rttj-raster` 0.305, **`rttj-light` 0.837**. And greets turns the feature on
+itself (`FF::setDefault(BoolId::mirror_rtt, true)` in GREETS.CPP), which is why
+the `.def` default of 0 is not what runs — worth knowing before reading any
+mirror flag's default as its value.
+
+**The defect: `ov.inlineDispatch = true` in `bakeJob`** — all 96 lighting tiles
+serially on the tick thread. Inline was correct where it was introduced (the
+mirror-SHARD bake: 96 tiles × 238 shards = 22 848 semaphore round trips a
+shatter frame at 3.4–4.0 µs of core time each); the RTT amortises one round trip
+over 262 144 pixels. The pool is idle here by construction (after Animate,
+before the main Transform; `--bake_tick_overlap` dispatches later).
+
+**`--deferred_ovec`… no — `--mirror_rtt_pool`, default ON.** Predicted 0.2–0.35 ms
+for the pooled lighting; measured **0.339**. `rttj-light` 0.837 → 0.339
+(−59.5 %); **RTT 1.684 → 1.279 ms (−24.1 %)**, interleaved min-of-7. Byte-null,
+proved differentially on ONE binary at greets t=5743 / t=2845 / t=6097.
+
+**The same change on the RTT's CONE pass is a regression and is not taken:**
+0.064 → 0.153 ms (+139 %). That pass is ~64 µs, so the round trip costs more
+than the fan-out saves. The flag covers the lighting only and the cone call keeps
+inline dispatch with the number written beside it. *The fan-out pays when the
+work per dispatch is large enough; 64 µs is not — the shard bake's lesson, one
+level down.*
+
+**Not taken:** `rttj-raster` (0.305 ms) is `MekaleleFillRegionInline` and the
+tree has no parallel region-fill; writing one is new code whose z-buffer
+tie-breaks are order-dependent — a byte risk for 0.3 ms.
+
+### `Tick-ReflXfrm` — a 30× attribution error, corrected
+
+City's largest tick row outside `renderFrame` (1.883 ms) was two calls under one
+scope. Split: **`Tick-ReflGlass` 0.899 ms** (IPC 1.94, ~1.04 cores) and
+**`Tick-ReflXfrmOnly` 0.981 ms** (IPC 3.46, ~1.27 cores).
+
+The row has been carried since 2026-08-17 as the `--refl_correct` commission's
+per-vertex normal work "priced at ~2 ms/frame". **Measured by flag flip on one
+binary: 1.952 ms with, 1.888 ms without — the commission costs 0.064 ms, 3.3 % of
+the row.** The rest predates it. Anyone budgeting against that look feature has
+been reading a number ~30× too large.
+
+### Handoff — the route is already in the tree
+
+Both halves run at ~1 core. `Reflected_Transform` is a demo-side serial copy of a
+pass FDS parallelises; the blocker is its in-order append to the shared `FList`,
+which feeds `Radix_Sort`, so naive fan-out can reorder equal-key faces and move
+pixels. **`Transform.cpp` has already solved exactly this**: a planning pass
+reserves each shard's output offset, then execution order floats —
+*"execution order free, output order pinned"*. Porting that is the lever, worth
+~0.8 ms; it was not attempted this round because it is a multi-hour restructure
+across two demo files and a truncated one is worse than none.
+`cityMirrorGlassForward` carries two visible redundancies for whoever takes it:
+`bsWorld` recomputed PER FACE from per-MESH inputs, and a `powf` per face.
+
 ## 2026-08-29b — **THE SSAO ROW IS CLOSED AT THE BIT-EXACT LEVEL.** The depth gather is REFUTED (−9.8 % instructions, +2.5 % cycles) and the `gtaoAcos` sqrt look call is priced at NOTHING — it comes off the decision stack
 
 Continuation of **2026-08-29**. Same branch, same arms. Nothing landed this
