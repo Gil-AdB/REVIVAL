@@ -2362,6 +2362,74 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 // inner body. Used as the fallback for the SIMD path's edge/tail groups and
 // the rare water-reflection lanes. (Recomputes the per-row invariants; only
 // ever runs on a minority of pixels, so the redundant log() is irrelevant.)
+// ─── the water-reflection leg of the composite, shared by BOTH paths ────────
+// Lifted VERBATIM out of Froxel_CompositePixel so the 8-wide tile path can run
+// the identical source per reflective lane instead of punting the whole group
+// (which cost 27.6 % of city's groups -- see FDS_FOG_PUNT_CENSUS). Sharing the
+// source is the bit-exactness argument: there is no second spelling to keep in
+// agreement, and none of it is re-associated. `fastExpNeg` (an 8-bit LUT) and
+// `fogAntiderivG` (a 3-way branch on m*z) are why this leg stays scalar per
+// lane; the expensive part of the composite -- the four bilinear froxel
+// gathers and the Beer-Lambert tail -- is what goes 8-wide around it.
+// The leg's frame-invariant terms. `hb` in particular was calling fastExpNeg
+// -- an 8-bit LUT plus two clamps -- once per reflective PIXEL for a value
+// that depends only on P.kHeight and gFrReflWaterY. `k` folds sigma*meanD,
+// which is the FIRST product of tau's left-associative chain, so pulling it
+// out re-associates NOTHING: tau stays ((k * sqrt(uV)) * hb) * G.
+struct FroxelReflConst {
+	float hb;           // fastExpNeg(kHeight * waterY), or 1
+	float k;            // P.sigma * meanD
+	float wMinusCam;    // gFrReflWaterY - P.camY
+	float slabMinusW;   // P.slabY1 - gFrReflWaterY
+};
+static inline FroxelReflConst Froxel_ReflConst(const FastFogParams& P) {
+	FroxelReflConst c;
+	c.hb = (P.kHeight != 0.0f) ? fastExpNeg(P.kHeight * gFrReflWaterY) : 1.0f;
+	c.k  = P.sigma * (P.blobs ? 0.22f : 1.0f);
+	c.wMinusCam  = gFrReflWaterY - P.camY;
+	c.slabMinusW = P.slabY1 - gFrReflWaterY;
+	return c;
+}
+static inline void Froxel_ReflBranch(int px, int py, size_t i,
+                                     const FastFogParams& P,
+                                     const FroxelReflConst &C,
+                                     float &z, float &reflAmt2)
+{
+	const uint16_t zr = gFrReflZ[i];
+	if (!zr) return;
+	const float zm = float(0xFF80 - int(zr)) * P.invZScale;
+	if (zm > 0.0f && zm < gFrFar) {
+		const float Xc = (float(px) - CntrEX) * P.invFOVX;
+		const float Yc = (CntrEY - float(py)) * P.invFOVY;
+		const float gY = P.w10*Xc + P.w11*Yc + P.w12;
+		float zw = zm;
+		if (gY < -1e-6f) {
+			const float t = C.wMinusCam / gY;
+			if (t > 0.0f && t < zm) zw = t;
+		}
+		z = zw < gFrNear ? gFrNear : zw;
+		const float L = zm - zw;
+		if (L > 0.0f) {
+			const float gYu = -gY;
+			float sB = L;
+			if (gYu > 1e-6f) {
+				const float sExit = C.slabMinusW / gYu;
+				if (sExit < sB) sB = sExit;
+			}
+			if (sB > 0.0f) {
+				const float uV = Xc*Xc + Yc*Yc + 1.0f;
+				const float m  = P.kHeight*gYu + P.invRf;
+				const float tau = C.k
+				    * std::sqrt(uV) * C.hb
+				    * fogAntiderivG(sB, m);
+				reflAmt2 = 1.0f - fastExpNeg(tau);
+				if (reflAmt2 > 1.0f) reflAmt2 = 1.0f;
+				if (reflAmt2 < 0.0f) reflAmt2 = 0.0f;
+			}
+		}
+	}
+}
+
 static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P) {
 	const uint16_t* zEnc = ZPage16;
 	dword* out = reinterpret_cast<dword*>(VPage);
@@ -2388,47 +2456,7 @@ static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P)
 	float reflAmt2 = 0.0f;
 	if (ze == 0) {
 		z = gFrFar;
-		if (gFrReflZ) {
-			const uint16_t zr = gFrReflZ[i];
-			if (zr) {
-				const float zm = float(0xFF80 - int(zr)) * P.invZScale;
-				if (zm > 0.0f && zm < gFrFar) {
-					const float Xc = (float(px) - CntrEX) * P.invFOVX;
-					const float Yc = (CntrEY - float(py)) * P.invFOVY;
-					const float gY = P.w10*Xc + P.w11*Yc + P.w12;
-					float zw = zm;
-					if (gY < -1e-6f) {
-						const float t = (gFrReflWaterY - P.camY) / gY;
-						if (t > 0.0f && t < zm) zw = t;
-					}
-					z = zw < gFrNear ? gFrNear : zw;
-					const float L = zm - zw;
-					if (L > 0.0f) {
-						const float gYu = -gY;
-						float sB = L;
-						if (gYu > 1e-6f) {
-							const float sExit =
-							    (P.slabY1 - gFrReflWaterY) / gYu;
-							if (sExit < sB) sB = sExit;
-						}
-						if (sB > 0.0f) {
-							const float uV = Xc*Xc + Yc*Yc + 1.0f;
-							const float m  = P.kHeight*gYu + P.invRf;
-							const float hb = (P.kHeight != 0.0f)
-							    ? fastExpNeg(P.kHeight * gFrReflWaterY)
-							    : 1.0f;
-							const float meanD = P.blobs ? 0.22f : 1.0f;
-							const float tau = P.sigma * meanD
-							    * std::sqrt(uV) * hb
-							    * fogAntiderivG(sB, m);
-							reflAmt2 = 1.0f - fastExpNeg(tau);
-							if (reflAmt2 > 1.0f) reflAmt2 = 1.0f;
-							if (reflAmt2 < 0.0f) reflAmt2 = 0.0f;
-						}
-					}
-				}
-			}
-		}
+		if (gFrReflZ) Froxel_ReflBranch(px, py, i, P, Froxel_ReflConst(P), z, reflAmt2);
 	} else {
 		const float zSurf = float(0xFF80 - int(ze)) * P.invZScale;
 		z = zSurf > gFrFar ? gFrFar : zSurf;
@@ -2501,6 +2529,15 @@ static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P)
 // gate --omni_census. Never shipped.
 #ifndef FDS_FOG_PUNT_CENSUS
 #define FDS_FOG_PUNT_CENSUS 0
+#endif
+// COST PROBE, not a shipping arm: -DFDS_FOG_PUNT_PROBE=1 skips the punt and
+// runs the vec8 path on reflection groups too. The pixels are WRONG (the
+// reflection term is simply not computed), but the timing is an upper bound on
+// what vectorising the reflection branch could ever recover -- i.e. it prices
+// the item before it is built. Never ship it; it exists so the ceiling is a
+// measurement rather than an estimate.
+#ifndef FDS_FOG_PUNT_PROBE
+#define FDS_FOG_PUNT_PROBE 0
 #endif
 #if FDS_FOG_PUNT_CENSUS
 // [0] full groups seen, [1] punted groups, [2] tail pixels (partial groups),
@@ -2578,6 +2615,8 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 	const __m256i iAlpha=_mm256_set1_epi32((int)0xFF000000u);
 	const __m256i lane = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
 	const float da = P.ditherAmp;
+	const bool reflVec = fds::FeatureFlags::fog_refl_vec();
+	const FroxelReflConst reflC = Froxel_ReflConst(P);   // frame-invariant
 	FOGPUNT_DECL();
 
 	for (int py = y1; py < y2; ++py) {
@@ -2595,21 +2634,42 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			const size_t i0 = row + size_t(px);
 			FOGPUNT_CEN(0);
 			// Punt any group holding a water-reflection lane to the scalar path.
-			if (gFrReflZ) {
-				bool punt = false;
-				for (int L=0;L<8;++L) if (zEnc[i0+L]==0 && gFrReflZ[i0+L]!=0){punt=true;break;}
-				if (punt) {
+			// --fog_refl_vec: a group holding a water-reflection lane used to
+			// go WHOLLY scalar. Instead, run the reflection leg per reflective
+			// LANE through the shared Froxel_ReflBranch and let the group keep
+			// the 8-wide composite -- the leg is ~60 instructions, the pixel
+			// path it was dragging in is ~640.
+			alignas(32) float reflA[8]  = {0,0,0,0,0,0,0,0};
+			alignas(32) float reflZA[8];
+			bool anyRefl = false;
+			if (gFrReflZ && !FDS_FOG_PUNT_PROBE) {
+				for (int L=0;L<8;++L) if (zEnc[i0+L]==0 && gFrReflZ[i0+L]!=0){anyRefl=true;break;}
+				if (anyRefl) {
 #if FDS_FOG_PUNT_CENSUS
 					int _k=0; for(int L=0;L<8;++L) if (zEnc[i0+L]==0 && gFrReflZ[i0+L]!=0) ++_k;
 					FOGPUNT_CEN(1); FOGPUNT_CEN(2+_k);
 #endif
-					for(int L=0;L<8;++L) Froxel_CompositePixel(px+L,py,P); continue; }
+					if (!reflVec) {
+						for(int L=0;L<8;++L) Froxel_CompositePixel(px+L,py,P);
+						continue;
+					}
+					for (int L=0;L<8;++L) {
+						float zL = gFrFar, rA = 0.0f;
+						if (zEnc[i0+L]==0) Froxel_ReflBranch(px+L, py, i0+size_t(L), P, reflC, zL, rA);
+						reflZA[L] = zL; reflA[L] = rA;
+					}
+				}
 			}
 			// ze, sky mask, z (= max(min(zSurf,far)|far, near))
 			__m256i ze = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)&zEnc[i0]));
 			__m256 skyM = _mm256_castsi256_ps(_mm256_cmpeq_epi32(ze, iZero));
 			__m256 zSurf = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(iFF80, ze)), vInvZ);
 			__m256 z = _mm256_blendv_ps(_mm256_min_ps(zSurf, vFar), vFar, skyM);
+			// The reflection leg replaces z on SKY lanes only (the scalar sets
+			// z = gFrFar there and the leg may lower it to the mirrored path
+			// length); non-sky lanes are untouched, and the shared
+			// max(z, near) below is the scalar's own trailing clamp.
+			if (anyRefl) z = _mm256_blendv_ps(z, _mm256_load_ps(reflZA), skyM);
 			z = _mm256_max_ps(z, vNear);
 			// bilinear X: ix0, wx (clamp order matches scalar; nx>1 guaranteed)
 			__m256 pxf = _mm256_add_ps(_mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_set1_epi32(px), lane)), vHalf);
@@ -2626,7 +2686,23 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			// iz (uint8 LUT) + zb slice boundaries — scalar per lane.
 			alignas(32) int zeA[8]; _mm256_store_si256((__m256i*)zeA, ze);
 			alignas(32) int izA[8]; alignas(32) float zb0A[8], dSlA[8];
+			if (!anyRefl) {
 			for (int L=0;L<8;++L){ int iz=izLUT[zeA[L]]; izA[L]=iz; float b0=zb[iz]; zb0A[L]=b0; dSlA[L]=zb[iz+1]-b0; }
+			} else {
+			// A sky lane whose z the reflection leg pulled in front of the far
+			// plane takes the scalar's LOG slice index, not the ze LUT --
+			// `if (ze != 0 || z == gFrFar) LUT else log(...)`, transcribed
+			// exactly, including the clamp order.
+			alignas(32) float zA[8]; _mm256_store_ps(zA, z);
+			for (int L=0;L<8;++L){
+				int iz;
+				if (zeA[L] != 0 || zA[L] == gFrFar) iz = izLUT[zeA[L]];
+				else {
+					iz = int(std::log(zA[L] * gFrInvNear) * gFrInvLogFN * float(nz));
+					if (iz < 0) iz = 0; if (iz >= nz) iz = nz-1;
+				}
+				izA[L]=iz; float b0=zb[iz]; zb0A[L]=b0; dSlA[L]=zb[iz+1]-b0; }
+			}
 			__m256i izv = _mm256_load_si256((const __m256i*)izA);
 			__m256 zb0v = _mm256_load_ps(zb0A);
 			__m256 dSlv = _mm256_load_ps(dSlA);
@@ -2721,6 +2797,25 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			aG=_mm256_blendv_ps(prevG,aG,extPos);
 			aB=_mm256_blendv_ps(prevB,aB,extPos);
 			Tpix=_mm256_blendv_ps(prevT,Tpix,extPos);
+			// The scalar's `if (reflAmt2 > 0) { aR += Tpix*fogR*reflAmt2; ...
+			// Tpix *= 1-reflAmt2; }`, transcribed per lane in the spilled
+			// domain so the expression -- and whatever -ffp-contract makes of
+			// it -- is literally the same one. Only reflective groups pay the
+			// round trip; every other group skips this block entirely and is
+			// byte-identical to before at identical cost.
+			if (anyRefl) {
+				alignas(32) float rfR[8],rfG[8],rfB[8],rfT[8];
+				_mm256_store_ps(rfR,aR); _mm256_store_ps(rfG,aG);
+				_mm256_store_ps(rfB,aB); _mm256_store_ps(rfT,Tpix);
+				for (int L=0;L<8;++L) if (reflA[L] > 0.0f) {
+					rfR[L] += rfT[L] * P.fogR * reflA[L];
+					rfG[L] += rfT[L] * P.fogG * reflA[L];
+					rfB[L] += rfT[L] * P.fogB * reflA[L];
+					rfT[L] *= 1.0f - reflA[L];
+				}
+				aR=_mm256_load_ps(rfR); aG=_mm256_load_ps(rfG);
+				aB=_mm256_load_ps(rfB); Tpix=_mm256_load_ps(rfT);
+			}
 			// Legacy distance dim (frDistDim mirror): sky lanes dim at the
 			// horizon distance; uses the UNCLAMPED zSurf like the scalar.
 			__m256 dimV = vOne;
