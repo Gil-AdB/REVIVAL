@@ -67,6 +67,166 @@
 > evidence and the round that produced it. **Read it before proposing an
 > optimisation.**
 
+## 00w. §00v's OPEN LOOSE END, CLOSED — 2026-08-29g: greets' `lighting-w1` **+1.8 %** and `lighting-w2` **+2.9 %** are **CODE PLACEMENT, NOT A CODE CHANGE.** The proof is an arm whose kernel is **mnemonic-identical to the parent's** and still carries **70 % of the regression**
+
+§00v reported, honestly rather than burying it, that greets' two lighting rows
+came out of the window SLOWER than its parent while everything else improved.
+The rows are on the **scalar** wave-1/wave-2 kernels, and §00v noted no round
+edited them. This section settles it. **Verdict: placement. Do not hunt it, and
+do not revert anything to chase it.**
+
+Measured in a private worktree `/Users/gil-ad/work/rev-window`, **two binaries
+from ONE CMake cache**, parent **`e017d611`** vs **`ad4d7fd5`** (fog-wt tip when
+this round started; fog-wt has since advanced to `e4b04d14`). Committed
+`rev.cfg` **1920×1080**, `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`,
+`--profiler=0 --deferred_prof=1`, 20 iters/run, **min-of-11** with the arms
+interleaved and order-rotated every round, round 0 discarded, and a
+**duplicate same-binary arm** in every battery. The parent carries **only** the
+tip's `DEMO/Snapshot.cpp` (13 lines: the chase `--bench=scene` arm, which
+`e017d611` does not have), so both binaries share one instrument.
+
+> **The box was NOT quiet** — peers were building and benching throughout
+> (1-min load 8.8–17.6). Absolute ms are inflated against §00l's quiet
+> battery; every claim below is a RATIO inside one battery, and the
+> duplicate-arm column is printed beside each so the reader can see the floor.
+
+### 1. IT REPRODUCES — three independent batteries, and it is outside every floor
+
+greets t=5743 `lighting-w1`, parent → tip:
+
+| battery | before | after | Δ | duplicate-arm floor |
+|---|--:|--:|--:|--:|
+| A (6-pose ledger, 12 rounds) | 17.812 | 18.090 | **+1.56 %** | +0.08 % |
+| B (4-arm, 12 rounds) | 17.708 | 18.058 | **+1.98 %** | +0.13 % |
+| C (5-arm, 12 rounds) | 17.780 | 18.107 | **+1.84 %** | −0.37 % |
+
+§00v's +1.8 % is **confirmed**. It is 5–25× the duplicate-arm floor.
+
+### 2. WHAT ACTUALLY CHANGED IN THE KERNEL — one site, and it is nameable
+
+`Render_DeferredLighting_TileT` (`FDS/RENDER/DeferredSurfaceKernel.cpp:2430`)
+is greets' and chase's scalar wave-1 body. Its TU changed by **889 lines** in
+the window and `DeferredCommon.h` by **163** — the "nothing touched it" premise
+is true of the *function* and false of the *translation unit*.
+
+Disassembling `Render_DeferredLighting_TileTI<true>` out of both binaries and
+comparing mnemonic streams: **5 359 → 5 351 instructions, 8 fewer.** By class:
+
+| | Δ | reading |
+|---|--:|---|
+| `addv.8h`, `tbl.16b` | **−2, −2** | the simde `_mm256_movemask_epi8` lowering, gone |
+| `umaxv.16b` | **+1** | `simdAnyByte_epi8`'s `vmaxvq_u8`, arrived |
+| `ldr` / `mov` / `mov.16b` | **+14 / −15 / −5** | **register moves became reloads — spill traffic** |
+| everything arithmetic (`fmul`, `fmadd`, `fadd`, …) | **0** | the maths is untouched |
+
+That is the **engine-wide movemask sweep** (`dac4bf9e`) landing on this kernel's
+**one** converted site — `simdAnyByte_epi8(anyShadow)` at line **3514**, the
+per-(light × 8-pixel-group) shadow quick-reject. Every other `simdAny*`/
+`simdAll*` in the file (6344+) is in the **OuterVec** kernel, which is city's
+path, not greets'. `dac4bf9e`'s own commit message already said the honest
+thing: *"lighting-w1 loses 2 % of its instructions and pays the same cycles,
+because that row was never issue-bound."*
+
+**Confirmed by the documented hatch.** `-DFDS_SIMD_ANYLANE=0` rebuilds the
+pre-sweep arm. Its `TileTI<true>` is **5 359 instructions, mnemonic-identical
+to the parent's, byte-for-byte the same 21 428-byte size**, and `TileTI<false>`
+is re-inlined into the wrapper exactly as the parent had it. So the sweep is
+**the whole** codegen delta in this kernel; nothing else in 1 052 lines of
+diff reached it.
+
+### 3. AND IT IS STILL NOT THE ANSWER — the control that decides it
+
+If the sweep's instructions were the cost, the pre-sweep arm would land on the
+parent. **It does not.** greets t=5743 `lighting-w1`:
+
+| arm | kernel instruction stream | ms | vs parent |
+|---|---|--:|--:|
+| parent `e017d611` | 5 359 | 17.780 | — |
+| tip `ad4d7fd5` | 5 351 | 18.107 | **+1.84 %** |
+| tip `-DFDS_SIMD_ANYLANE=0` | **5 359 — IDENTICAL to the parent** | 17.972 | **+1.08 %** |
+| tip + inert `PAD` (below) | 5 351 — identical to the tip | 18.067 | +1.61 % |
+
+**An arm whose kernel is byte-for-byte the parent's instruction sequence is
+still +1.08 %.** Reverting the sweep recovers −0.22 to −0.55 % of a +1.84 to
++1.98 % regression — under a quarter. **The cost is not in this function's
+instruction stream.**
+
+### 4. THE POSITIVE PROOF — 24 bytes of address, and the rows move
+
+`PAD` is an inert `extern "C" __attribute__((used, noinline))` integer function
+inserted immediately **before** the template. It changes no kernel instruction
+— the disassembly is identical to the tip's 5 351 — and moves the kernel's
+address `0x…202b30 → 0x…202b48`, **24 bytes**. That alone moves:
+`__tick` **+1.21 %**, `lighting-w2` +0.37 %, `gbuffer` −0.46 %,
+`lighting-w1` −0.22 %. **Zero semantic change, ±1.2 % of measured time.**
+
+The build itself is **byte-reproducible** (a full rebuild from a different
+source state reproduced md5 `ef9f0d75…` exactly), so this is deterministic
+placement, not build nondeterminism.
+
+### 5. THREE INDEPENDENT WITNESSES THAT SAY THE SAME THING
+
+1. **`lighting-w2` moved MORE than `lighting-w1` and NOTHING touched it.**
+   +3.03 % at t=5743. The wave-2 fill kernel has **no** `simdAny*` site at all,
+   and `-DFDS_SIMD_ANYLANE=0` recovers **−0.16 %** of it. A row no change in
+   the window edited moved three percent.
+2. **It is pose-dependent in the same scene, same binary, same kernel.**
+   t=5743 **+1.84 %** vs t=5965 **+0.42 %**; `lighting-w2` **+3.03 %** vs
+   **+0.08 %**. An instruction-level regression does not quadruple between two
+   poses of one scene running one kernel; an I-cache/placement effect that
+   depends on which paths are hot does exactly that.
+3. **chase runs the SAME scalar kernel and does not regress**: t=800
+   **−1.17 %**, t=1105 **+0.11 %**, t=1600 **+0.39 %** — at or inside floor.
+
+### 6. THE METHOD CORRECTION THIS BUYS — and it is the durable part
+
+**The duplicate same-binary arm cannot see placement effects, by construction.**
+It runs the *same* image, so it measures scheduler and thermal noise only
+(±0.1–0.4 % here) and is blind to the one thing that separates two binaries.
+Reading a cross-binary row delta against it **overstates significance**.
+
+For **code-placement-sensitive rows** (the big scalar kernels: `lighting-w1`,
+`lighting-w2`, `gbuffer`), the honest cross-binary floor measured here is
+**±1.5–2 %**, not ±0.1 %. §00l's between-binary floor of ±0.9 % was established
+on **`renderFrame`** — a sum over many phases, where placement effects partly
+cancel — and it does not transfer to an individual row. **A single row moving
+1–2 % between two binaries is not evidence of anything.** greets `lighting-w1`
+at +1.8 % sits inside that band; that is why it survived three batteries and
+still is not a regression.
+
+### 7. WHAT THIS DOES NOT SAY
+
+It does not say the time is imaginary — the tip really does spend ~0.3 ms more
+in that row at that pose. It says **no change caused it and no revert removes
+it**: the pre-sweep arm, carrying the parent's exact instructions, keeps most
+of it. Chasing it means chasing the linker's layout, which the next unrelated
+commit will reshuffle anyway.
+
+**greets is NET FASTER across the window regardless**: tick **−2.7 to −4.0 %**,
+`renderFrame` **−1.9 to −2.6 %**, `ssao` **−11.9 to −12.3 %**.
+
+### 8. STATUS OF THE `WCELL` HOIST (`DEMO/ProceduralWater.cpp`) — VERIFIED, NOT MERGED
+
+The uncommitted `constexpr WCELL = 256` hoist (worktree
+`/Users/gil-ad/work/rev-chaseperf`) applies cleanly to the tip and is
+**byte-null there**, re-verified as a direct A/B between two tip binaries in one
+asset tree:
+
+* chase 5-pose (`t=100,400,800,1200,1600`, his SSAO arm), **5 repeats per
+  binary** — all 5 poses byte-identical, base vs hoist, every repeat.
+* The 8-pose default/glass suite (greets t=1588 + fountain t=2500 + city t=1961
+  + chase ×5), **2 runs per binary** — byte-identical base vs hoist, and
+  run-to-run stable within each binary. Those hashes reproduce the committed
+  pins (`b67b47f0…`, city `bd4ffbf87d1492175a9b6c1111fb3f5f`).
+
+**The intermittent gate failure its predecessor flagged did NOT reproduce in 14
+suite-runs** across both binaries, i.e. it is not attributable to this change.
+**Left UNMERGED**: it is verified byte-null but was never given its perf
+measurement, and the full merge gate (13/13 pins + `render_gate.sh` 4/4 +
+`tools/warm_gate.sh --full`) was not run against the current tip inside this
+window. It is a clean pickup for whoever has the gate time.
+
+
 ## 00v. THE WINDOW LEDGER — 2026-08-28 19:00 → 2026-08-29 07:30, `e017d611` → `78c0a752`: what Gil-Ad actually gets, measured end to end
 
 **Read this section first.** Every other §00 section reports one round against
