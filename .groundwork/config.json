@@ -150,7 +150,7 @@
     }
   },
   "humans": [
-    "gilad"
+    "gil-ad"
   ],
   "tip_ref": "fog-wt",
   "rules": "rules.lp",
@@ -171,7 +171,7 @@
       "head": "auto-captured git commit; tip_ref is fog-wt (the integration branch), so worktree records are neither older nor at tip until merged"
     },
     "contracts": "snapshot_md5 is strict: shared engine machinery changes only by a new md5 proof. look is judged: his eye; an md5 pin is weight 1 there (2026-08-13: byte gates are instruments, not vetoes). Numeric contracts carry the campaign's ladder: min-of-11 interleaved with a duplicate arm is the top; a single run is 3.",
-    "humans": "gilad writes his own records without a quote; the coordinator records his words verbatim with a date.",
+    "humans": "gil-ad is the OS username (home /Users/gil-ad, git author Gil-Ad Ben Or): a person typing at the keyboard leaves GROUNDWORK_WRITER unset and is identified by that name; the coordinator records his words verbatim with a date; the earlier 'gilad' was an invention and is gone.",
     "seeded": "2026-08-29 by the coordinator's seeding fork from PERF_LAWS.md, PERF_STATE.md 00v/00w/00q, SESSION_STATE.md gates, FeatureFlags.def refutations, BULGE_CORPUS.md (copied from rev-dispfix), and rev-dispfix SESSION_STATE 2026-08-29a (read-only). Script: .groundwork/seed/seed_2026-08-29.py",
     "code_paths": "a record is older-than-tip only if fog-wt changed one of these since the record's commit; docs/, tools/, .groundwork/ and images do not re-open a measurement (the rev-kb seeding merge is docs-only and must not unverify the 00v baselines)"
   },

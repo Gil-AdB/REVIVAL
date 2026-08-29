@@ -100,10 +100,13 @@ the ledger is what you **query before proposing** and **write to when you measur
 - CLI: `/Users/gil-ad/work/groundwork/.venv/bin/groundwork` (alias `gw` in the same
   venv). Run from anywhere inside this tree. Design: `/Users/gil-ad/work/groundwork/DESIGN.md`.
 - Protocol for agents: `/Users/gil-ad/work/groundwork/skills/groundwork/SKILL.md`.
-- Set `GROUNDWORK_WRITER` before writing: `coordinator` for the human-facing session,
-  `subagent:<name>` for a subagent. Only a listed human (`gilad`) or the coordinator
-  quoting him verbatim (`--quote … --quote-date …`) can write a `verdict` or `decision`;
+- `GROUNDWORK_WRITER` is for **agents only**: `coordinator` for the human-facing session,
+  `subagent:<name>` for a subagent. Gil-Ad types with it unset and is identified by his OS
+  username `gil-ad` (listed under `humans` in the config). Only he, or the coordinator
+  quoting him verbatim (`--quote … --quote-date …`), can write a `verdict` or `decision`;
   a subagent's attempt is rejected by the lint.
+- Reading: `groundwork ui --open` renders the ledger as one self-contained page
+  (`.groundwork/ui.html`, committed alongside the digest).
 - Start of a session: `groundwork status` (stale / open / void / unverified-at-tip
   counts), then `groundwork query <subject>` for whatever you are about to touch and
   `groundwork check --json '<proposal>'` before building a lever — a refutation whose
