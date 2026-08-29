@@ -10,6 +10,79 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29e — city's `TBR-render` is CLOSED: the census says the bound is already 91.58 % live, so the lever the map named is worth ~0.13 ms
+
+Full account: `docs/PERF_STATE.md` §00t. **No code written; the row is closed
+with numbers, which is the outcome the census was there to produce.**
+
+§00l item 8 carried `TBR-render` (6.51 ms) as the last unopened row, noting that
+one `--xpar_extent_census` run would decide it. It did:
+
+```
+px full=2.43M  bound=1.72M (71.01%)  live=1.58M (91.58% OF THE BOUND)
+```
+
+`xpar_strip_extent` **already** cut the scan to 71 % of full width, and what it
+scans is **91.58 % live**. The dead scan — the entire addressable prize — is
+0.145 M px, **8.42 % of the bound**. Against a measured row of 6.930 ms
+(city t=1961, 68.85 ms tick), the ceiling on any tightening is 0.583 ms if a dead
+pixel cost the same as a live one (absurd), and **≈0.06–0.19 ms on realistic
+assumptions — under 0.3 % of the tick.** The 37 empty flushes (23.4 % of 158) are
+already inside that dead total and are worth tens of microseconds.
+
+**STRIKE §00l item 8.** The row is irreducible by its own lever *because the
+lever already worked*, and that also explains why the fountain fix measured NULL
+here: there was nothing to find.
+
+### FOR WHOEVER OPENS THE ROW ANYWAY
+
+`TBR-render` reads 6.930 ms while its three declared children — `xpar-clear`,
+`xpar-raster`, `xpar-composite` — all read **0.000**. The interior instrument
+does not cover the deferred/unified-TBR path, so the 1.578 M live pixels (the
+only real mass) are unattributed. A sub-scope split is step one for anyone who
+wants that mass; the extent bound is not the way in.
+
+## 2026-08-29d — the water scan's analytic reject is clipped away: byte-null, and 26 % off the row at the pose where the pass was 102 % scan
+
+Full account: `docs/PERF_STATE.md` §00s (renumbered from §00r at the merge — the greets round took that letter the same day). **LANDED, byte-null** (14/14 pins +
+`render_gate` 4/4 from a stock worktree).
+
+`rowXClip()` in `DEMO/ProceduralWater.cpp`. `D` is affine in x and the keep-test
+`sd = K/D in (1,fzp)` collapses to one interval on `D`, so the surviving x-range
+is solvable per row in O(1). Applied to both varied glint loops (default and
+`--water_glints_batch`). **Byte-null by construction**: bounds widened 2 px, all
+per-pixel tests retained, degenerate `fzp<=0` fails OPEN.
+
+Validated two ways: the pins (both arms byte-exact) and a renderer-independent
+falsifier — 4 000 random camera configurations, **4 801 816 px, ZERO live pixels
+wrongly skipped**, 51 % skipped on average.
+
+Measured, min-of-9, same-binary control at −0.10/+1.00/−0.69 %: t=800 −0.072 ms
+(−0.9 %), **t=1105 −0.104 ms (−26.1 %)**, t=1600 −0.195 ms (−1.4 %); batched arm
+−0.141 / −0.121 ms. **Predicted ~0.15 ms, measured 0.07–0.20 ms.** A peer's
+battery contaminated `__tick` (BOX-AFTER busy=7, load 20.9) so tick is NOT quoted
+from this run; the row survived, per the control.
+
+Honest size: 0.2–0.4 % of tick. It lands because it is byte-null and never a
+regression, not because the millisecond is impressive.
+
+### OPEN
+
+1. **The same clip fits `RenderGlints` (city/fountain) and was NOT applied** —
+   that function is byte-gated by their pins and this file's inlining trap makes
+   any edit there a gate risk for a sub-ms return. Mechanism is written; someone
+   with a quiet box can take it.
+2. **The occlusion reject is the remaining half and needs the Z-buffer** — at
+   t=1105 it is 1 132 109 px of the 2 073 600. A per-tile Z-max (hierarchical Z)
+   is the only cheap way at it; the water pass has no such structure today.
+3. **TOOLING, shared: `pgrep -f` self-matches peer wait-loops.**
+   `scratchpad/quietrun.sh`'s box check matched a PEER AGENT'S OWN quiet-wait
+   loop (its command line contains the literals `cmake|ninja`), so two waiters
+   waited on each other and **neither ever started** — a battery stalled
+   silently, looking exactly like a slow run. Both wrappers now use
+   `ps -Ao comm=`, which matches the executable NAME and cannot false-match a
+   shell. Same class as the documented `pgrep -fl DEMO` self-match, one level up.
+
 ## 2026-08-29c — the cross-tree divergence was never a divergence: byte-identical binaries, a self-locating asset root, and pose-sequence-dependent chase pins
 
 Full account: `docs/PERF_STATE.md` §00q. **Zero regressions found; three false
@@ -54,6 +127,98 @@ render regression and cost this campaign an investigation. One line of provenanc
 on stderr under an existing diagnostic flag would make it self-diagnosing. Not
 taken tonight: a gate-visible print is itself a thing to gate.
 
+
+## 2026-08-29c — **THE GATE SUITE HAS A STRUCTURAL HOLE, AND IT IS NOW CLOSED**: every pinned row is a ONE-TICK snapshot, so any path that switches on at tick 2 is untested. A binary that deletes city's water fog entirely passes **12/12 pins** and fails **5/7 warm rows**. `tools/warm_gate.sh` DONE
+
+### THE TRAP, STATED ONCE
+
+**A green 13/13 does not mean a path was exercised. Check whether the path is
+even reachable at tick 1 before claiming byte-nullity from those rows.**
+
+### DEMONSTRATED, NOT ASSERTED
+
+`-DFDS_FOG_PUNT_PROBE=1` builds a binary that simply does not compute city's
+water-reflection fog — the exact shape a botched vectorisation of that leg would
+take. Against the canonical suite it is **invisible**:
+
+| suite | result on the deliberately-broken binary |
+|---|---|
+| the 13 pinned poses | **12/12 PASS** |
+| `tools/render_gate.sh` | (unaffected — no water) |
+| `tools/warm_gate.sh --full` | **5 of 7 FAIL** |
+
+And the failure signature is the mechanism itself: in *every* failing row the
+**first frame's hash matches** and only ticks 2+ diverge.
+
+### THE CENSUS — what tick 1 does not execute
+
+Two distinct classes. **(A) genuinely unreachable** (needs a previous frame's
+output), and **(B) deliberately neutered by the snapshot harness**.
+
+| # | path | why it is cold at tick 1 | class | status |
+|---|---|---|---|---|
+| 1 | city water-reflection leg — `gFrReflZ`, `Froxel_ReflBranch`, `--fog_refl_vec` | `FastFog_SetReflectionZ` is consume-once and only fires from city's reflection pass; city's water carries no mirrored content on tick 1 | A | **MEASURED** — `PUNTED 0` at tick 1, 27.6 % of groups from tick 2 on |
+| 2 | froxel temporal EMA **blend arm** — `temporal = gFrTemporal && gFrHistValid` | `gFrHistValid = false` initially (also reset on scene change, grid change, near/far change) | A | **MEASURED, PARTIAL** — the *flag* IS visible at tick 1 because it also enables jitter, so a flag flip would be caught; a change confined to the **blend expression** would not |
+| 3 | chunk occlusion cull — `--chunk_occlusion` | doubly cold: `REV.CPP:1629` forces `g_occlSnapshotInert = true` under `--snapshot`, AND its own "first frame of a scene: no capture yet → cull inert" | A+B | **MEASURED that snapshots force it inert.** Pixel effect unconfirmed and *not confirmable by image*: a correct cull is byte-null by design. Needs `--chunk_occl_verify`. Default OFF today → no live exposure |
+| 4 | mip hysteresis — `Face::LastMip` | `if (mipHyst > 0 && F->LastMip != 0xFF)`; `LastMip` is unset on frame 1 | A | candidate. `mip_hysteresis` defaults **0.0f** → no live exposure today, but it is a trap the moment anyone dials it |
+| 5 | greets code-screen smear — `OldBuf` feedback | iterative smear; a function of how many times `Render()` has run, not of `t` | A | **known** (already a SESSION_STATE trap); now covered by `greets-warm` |
+| 6 | xpar peel / strip slices | "whatever the previous frame / the legacy peel left in the xpar layer slices is unknown to the per-strip column tracker" | A | candidate, **low risk** — `XparStripSlices_MarkAllDirty()` runs every frame, so it is self-healing by construction |
+| 7 | city env probe cube | disk cache keyed on the FLD, **not** on FeatureFlags; a cold worktree re-bakes | B-ish | **known/documented** in the gates table already |
+| 8 | MirrorShatter surface + clone arrays | "kept warm across frames" | A | candidate, **low risk** — allocation lifetime, not content |
+| 9 | cross-SCENE state (the fountain→greets peel-floor leak) | a single-scene snapshot never crosses a scene boundary | A | **known** from the prior campaign; still uncovered — no warm row crosses scenes |
+
+Items 1–3 are the ones that have actually cost something. Item 9 is the one
+still open: **no gate in this repo runs two scenes in one process.**
+
+### THE KNOWLEDGE EXISTED; THE GATE COVERAGE DID NOT
+
+`./DEMO --help` has said this all along, and it is worth quoting because it
+means nobody needs convincing of the mechanism — only of the gap:
+
+> **REPRO** (headless INTERACTIVE harness — use when `--snapshot` CANNOT
+> reproduce a defect the user sees in his live run) … Runs the REAL scene
+> driver through the REAL per-frame path, scrubbing to t the way F1/F2 does,
+> so defects that need **accumulated per-frame state** appear. **`--snapshot`
+> renders ONE cold tick with the fine scene clock and the chunk-occlusion cull
+> pinned, and is blind to those by construction.**
+
+So `--repro` (and `docs/INTERACTIVE_REPRO.md`) is the sanctioned instrument for
+exactly this class, and it names the chunk-occlusion pinning explicitly. **What
+was missing was not the tool or the knowledge — it was that not one row of the
+gate suite used either.** `tools/warm_gate.sh` closes that with multi-pose
+`--snapshot`, which accumulates state across poses within one process (proven:
+the punt census reads 0 on pose 1 and 27.6 % from pose 2). A `--repro`-based
+row would exercise the real per-frame driver rather than the snapshot driver
+and is the natural next extension; I could not get `--repro=city@t=…` to emit
+PPMs in the time available, so it is left as a NOTED gap rather than a
+half-verified gate row.
+
+### THE COVERAGE THAT NOW EXISTS
+
+`tools/warm_gate.sh` — fast pair (`city-warm`, `greets-warm`) for every gate
+check; `--full` is 7 rows in **18 seconds**, so there is no excuse not to run it
+before touching the composite, the froxel volume or reflections.
+`WARM_GATE_BIN=/path/to/DEMO` retargets it. Baselines recorded at `bc36387b`,
+1920×1080, stock `rev.cfg` — same resolution trap as `render_gate.sh`.
+Documented as a row in `docs/SESSION_STATE.md`'s gates table with the reason.
+
+### THE SECOND-ORDER COST OF THE HOLE
+
+The same blind spot mis-priced the work. This item was recorded at **0.030 Gi/f
+/ 0.72 % of `renderFrame`** from a census taken **cold, at 1512×848**. Warm at
+1920×1080 a punted pixel costs ~640 instructions and the item is **5.15 %** —
+**7× low**. A cold census does not just fail to catch regressions; it sizes the
+backlog wrong.
+
+### NEXT LEVER ON THAT ROW (noted, NOT built)
+
+Vectorising the reflection leg's own arithmetic — everything except
+`fastExpNeg` (8-bit LUT) and `fogAntiderivG` (3-way branch). Ceiling
+**~0.12 Gi/f**, the residue after 2026-08-29b took 57 % of the punt's cost.
+**This one does need the §00k2 contraction rules**, unlike 2026-08-29b which
+avoided them by sharing source: `gY = w10*Xc + w11*Yc + w12` and
+`uV = Xc*Xc + Yc*Yc + 1` are both exactly rule 2's "A+B+C of products" shape,
+which chains from the SECOND term.
 
 ## 2026-08-29b — **THE FROXEL COMPOSITE'S SCALAR HALF IS GONE**: `--fog_refl_vec`, 572 648 punted px/frame go 8-wide, `fog-composite` **−27.2 %** and `renderFrame` **−1.40 ms**, BIT-EXACT. And the item was **invisible to all 13 pins**. DONE, merged
 

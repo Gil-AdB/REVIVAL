@@ -58,6 +58,163 @@
 
 ---
 
+## 00t. city's `TBR-render` — 2026-08-29e: **CLOSED, IRREDUCIBLE BY ITS OWN LEVER.** One `--xpar_extent_census` run decides it: the strip bound is already **91.58 % live**, so a PERFECT bound is worth ≤0.583 ms and realistically ~0.13
+
+§00l item 8 left `TBR-render` (6.51 ms) as the last unopened row on the map, with
+the note that the fountain fix measured NULL here and that **one
+`--xpar_extent_census` run decides it**. This is that run. It says close the row.
+
+### THE CENSUS
+
+`city@t=1961`, `--deferred --hdr --hdr-linear --env_live_water --city_env_pixel`:
+
+```
+[XPAR-CENSUS] flushes=158 passes=158
+              px full=2.43M  bound=1.72M (71.01%)  live=1.58M (65.03% of full, 91.58% of bound)
+[XPAR-CENSUS]   front peel0  calls=158  empty=37 (23.4%)  bound=1.723M  live=1.578M
+```
+
+| quantity | px | reading |
+|---|--:|---|
+| a full-width strip scan | 2.430 M | what the bound is measured against |
+| **what `xpar_strip_extent` actually scans** | **1.723 M** | the bound **already saves 29.1 %** |
+| **live — pixels carrying a real xpar fragment** | **1.578 M** | **91.58 % OF THE BOUND** |
+| dead scan the bound still pays for | **0.145 M** | **8.42 % of the bound** — the entire prize |
+
+### THE ARITHMETIC THAT CLOSES IT
+
+The row measures **6.930 ms** here (`--deferred_prof`, city t=1961, 68.85 ms tick).
+Only the 0.145 M dead pixels are addressable — the 1.578 M live ones do the
+actual compositing and no bound can remove them. So:
+
+| assumption about a dead pixel's cost | ceiling on the whole lever |
+|---|--:|
+| same as a live pixel (**absurd** upper bound) | 0.583 ms — 8.4 % of the row, 0.85 % of tick |
+| half a live pixel | 0.304 ms — 0.44 % of tick |
+| a fifth of a live pixel (a test + reject) | **0.125 ms — 0.18 % of tick** |
+| a tenth | 0.063 ms — 0.09 % of tick |
+
+A dead pixel is a bounds test and a reject; a live one is a fetch, blend and
+store. The realistic figure is the bottom half of that table: **≈0.06–0.19 ms,
+under 0.3 % of city's tick, for rewriting the extent machinery.** Even the
+physically impossible perfect bound does not reach 1 % of the tick.
+
+**The 37 empty flushes (23.4 % of 158) are not a second prize either** — they are
+already inside the 0.145 M dead total, and at any plausible per-flush overhead
+they are tens of microseconds.
+
+### VERDICT
+
+**CLOSED. The row is irreducible by the lever the map named, and the reason is
+that the lever ALREADY WORKED**: `xpar_strip_extent` cut the scan to 71 % of full
+width and left it 91.58 % live. There is no population here to attack. §00l item
+8 should be struck rather than carried, and the fountain fix's NULL result at
+this row is now explained — it was null because there was nothing to find.
+
+### ONE OBSERVATION FOR WHOEVER DOES OPEN THE ROW
+
+`TBR-render` reads **6.930 ms** while its three declared children —
+`xpar-clear`, `xpar-raster`, `xpar-composite` — all read **0.000**. The row's
+interior is not where the existing instrument points on the deferred/unified-TBR
+path. Anyone attacking the 1.578 M live pixels (the only real mass here) needs a
+sub-scope split first; the current one attributes none of it.
+
+---
+
+## 00s. THE WATER SCAN'S ANALYTIC REJECT, CLIPPED — 2026-08-29d: byte-null, validated at **4 801 816 pixels** independently of the pins, and it takes **26 % off the row at the pose where the pass was 102 % scan**
+
+*(Numbered §00s, not §00r: the greets passenger-row round took that letter on `fog-wt` the same day — see the section below. Third letter collision of this campaign; letters are allocated per branch and reconciled at the merge.)*
+
+### THE SCAN'S ROW CLIP — byte-null, and the analytic half of the reject goes away
+
+§00o left the water pass's whole-framebuffer ray-cast as the honest next item:
+**0.461 ms at chase t=800 (5.7 % of the row) and 0.400 ms at t=1105, where it is
+102 % of the row** — the pass spends its entire time discovering it has nothing
+to do.
+
+**Priced before building, as instructed.** The census splits the rejects into an
+ANALYTIC class and a per-pixel class:
+
+| pose | above horizon (`sd<=1`) | past far plane | **analytic total** | occluded (needs Z) | live |
+|---|--:|--:|--:|--:|--:|
+| t=800 | 837 120 | 15 360 | **852 480 (41.1 %)** | 103 221 | 1 117 899 |
+| t=1105 | 906 240 | 34 560 | **940 800 (45.4 %)** | 1 132 109 | 691 |
+
+Only the analytic class can be skipped without touching memory. Early-exit
+pixels cost roughly 80 % of a full iteration, so the predicted saving was
+**≈0.15 ms at both poses, ~0.3 % of tick** — small, and said so up front.
+
+**The mechanism.** `D = m01·xn + (m11·yn + m21)` is AFFINE in x, and the keep
+test `sd = K/D ∈ (1, fzp)` with `K = waterY − ey` collapses — both sign cases —
+to `D` lying strictly between `K` and `K/fzp`. So the surviving x-range is ONE
+interval per row, solved in O(1) by `rowXClip()`.
+
+**Byte-null by construction, belt-and-braces:** the bounds are widened by 2 px
+and **every original per-pixel test is left in place**, so the clip can only skip
+pixels whose own `continue` would have fired; a rounding error in the bound costs
+work, never a pixel.
+
+**Proved two ways.** (1) The pins: the default arm reproduces all five chase
+hashes and the `--water_glints_batch` arm reproduces its own five, byte-exactly.
+(2) A brute-force falsifier independent of the renderer — 4 000 random camera
+configurations, **4 801 816 pixels checked, 0 live pixels wrongly skipped**, mean
+51 % of the row skipped.
+
+**Not applied to `RenderGlints` (city/fountain), deliberately.** The same clip
+would fit, but that function is byte-gated by the city and fountain pins and this
+file's inlining trap (§00o) makes any edit there a gate risk for a sub-millisecond
+return. Left as a follow-up with the mechanism already written.
+
+### A TOOLING TRAP THAT SILENTLY STALLED A BATTERY
+
+`scratchpad/quietrun.sh`'s box-quiet check was
+`pgrep -f 'ninja|cargo build|cmake --build'`. **`pgrep -f` matches COMMAND
+LINES**, so it also matched a *peer agent's own quiet-wait loop*, whose command
+string contains those literals. Two waiters then wait on each other and **neither
+ever starts** — the battery sat in its wait loop reporting nothing, looking
+exactly like a slow run. This is the same class as the documented
+`pgrep -fl DEMO` self-match, one level up.
+
+Fixed in both wrappers: `ps -Ao comm=` matches the executable NAME only and
+cannot false-match a shell. The reliable check, which the brief already
+prescribes for DEMO, is now what the scripts use for compilers too:
+
+```sh
+ps -Ao comm= | grep -cE '(^|/)DEMO$'
+ps -Ao comm= | grep -cE '(^|/)(ninja|cc1plus|clang\+\+|cargo)$'
+```
+
+### MEASURED vs PREDICTED
+
+Min-of-9, interleaved, order-rotated, two binaries (clip / no-clip) plus a
+DUPLICATE same-binary arm as the contamination detector. A peer agent started
+benching city mid-battery (`BOX-AFTER busy=7, load 20.9`), so the detector earns
+its keep: the same-binary control spreads are **−0.10 % / +1.00 % / −0.69 %**,
+i.e. the min-of-9 estimator survived on the ROW. **The `__tick` column did NOT
+and is not quoted from this run** (it reads +1.5 % / +1.2 % / +0.1 %, which is
+the peer's load, not the clip).
+
+| pose | `water-glints` no-clip → clip | Δ | scan was |
+|---|--:|--:|--:|
+| t=800 | 8.081 → 8.009 | −0.072 (−0.9 %) | 5.7 % of row |
+| **t=1105** | 0.399 → 0.295 | **−0.104 (−26.1 %)** | **102 % of row** |
+| t=1600 | 14.420 → 14.225 | −0.195 (−1.4 %) | — |
+| t=800, batched arm | 5.700 → 5.559 | −0.141 (−2.5 %) | — |
+| t=1105, batched arm | 0.435 → 0.314 | **−0.121 (−27.8 %)** | — |
+
+**Predicted ~0.15 ms; measured 0.07–0.20 ms.** The prediction was right this
+time, and the shape is what the arithmetic said it would be: a fixed saving of
+about a tenth of a millisecond, which is **noise at t=800 and t=1600 (0.9–1.4 %
+of a row dominated by shading) and a quarter of the row at t=1105**, the pose
+where the pass was doing nothing else. The item was aimed at exactly that pose
+and hit it.
+
+**Honest size:** ~0.1–0.2 ms of a ~45 ms tick, 0.2–0.4 %. Below the bar as a
+perf win on its own. It lands because it is **byte-null, never a regression at
+any pose, and it removes the one place where the engine spent 100 % of a pass
+deciding it had nothing to do** — not because the millisecond is impressive.
+
+
 ## 00r. greets' PASSENGER ROWS — 2026-08-29c: `RTT` ran its 96 lighting tiles **inline on the tick thread**; pooling them is **−24.1 %** byte-null. The other three rows are healthy, and `Tick-ReflXfrm`'s attribution is corrected **30×**
 
 > **SECTION LETTER:** §00q is the cross-tree-divergence round's; this is §00r.
