@@ -82,6 +82,11 @@
 //   1  replace the atan2_approx call with a constant (prices the atan alone)
 //   2  replace the WHOLE per-lane slice setup with constants
 //   4  replace the WHOLE per-sample depth gather (loads included) with a constant
+//      NOTE stages 1-4 are CUMULATIVE (each includes the ones below it); stage 5
+//      is EXCLUSIVE, so it prices the sqrts ALONE. Getting this wrong once cost
+//      me a 99 %%-of-pixels "look delta" that was really stages 2+4+5 together.
+//   5  swap gtaoAcos_x8's two full-precision sqrts for rsqrt-and-multiply
+//      (BYTE-CHANGING look call, priced only so its worth is known)
 //   0  full
 #ifndef FDS_SSAO_DIAG
 #define FDS_SSAO_DIAG 0
@@ -339,9 +344,21 @@ inline __m256 gtaoAcos_x8(__m256 x) {
 	const __m256 sgn = _mm256_set1_ps(-0.0f);
 	const __m256 one = _mm256_set1_ps(1.0f);
 	__m256 ax = _mm256_min_ps(_mm256_andnot_ps(sgn, x), one);           // |x| clamped
+	// -DFDS_SSAO_DIAG=5 prices the two full-precision _mm256_sqrt_ps in this
+	// function by swapping each for rsqrt-and-multiply. BYTE-CHANGING — a prior
+	// round measured that substitution flipping ~0.3 %% of samples, which is why
+	// it is a look call for Gil-Ad and not a lever. This arm exists only to say
+	// what that call is WORTH in ms. Never a ship configuration.
+#if FDS_SSAO_DIAG == 5
+	const __m256 s_ = _mm256_sub_ps(one, ax);
+	__m256 r  = _mm256_mul_ps(
+		_mm256_fmadd_ps(_mm256_set1_ps(-0.156583f), ax, _mm256_set1_ps(1.57079633f)),
+		_mm256_mul_ps(s_, _mm256_rsqrt_ps(_mm256_max_ps(s_, _mm256_set1_ps(1e-20f)))));
+#else
 	__m256 r  = _mm256_mul_ps(
 		_mm256_fmadd_ps(_mm256_set1_ps(-0.156583f), ax, _mm256_set1_ps(1.57079633f)),
 		_mm256_sqrt_ps(_mm256_sub_ps(one, ax)));
+#endif
 	__m256 neg = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_LT_OQ);
 	return _mm256_blendv_ps(r, _mm256_sub_ps(_mm256_set1_ps(3.14159265f), r), neg);
 }
@@ -801,7 +818,7 @@ void Render_SSAO() {
 									// for the -DFDS_SSAO_DIAG=4 cost arm.
 									__m256 szVv = _mm256_setzero_ps();
 									bool any=false;
-#if FDS_SSAO_DIAG >= 4
+#if FDS_SSAO_DIAG == 4
 									alignas(32) float szA[8];
 									// Ceiling for the WHOLE depth gather, LOADS INCLUDED —
 									// so the delta against stage 0 bounds what any
@@ -927,7 +944,7 @@ void Render_SSAO() {
 #endif
 									SSC(4,1); if (!any) SSC(5,1);
 									if (!any) continue;
-#if FDS_SSAO_DIAG >= 4
+#if FDS_SSAO_DIAG == 4
 									const __m256 szV=_mm256_load_ps(szA);
 #else
 									const __m256 szV=szVv;
