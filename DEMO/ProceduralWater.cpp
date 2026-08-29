@@ -521,13 +521,14 @@ static std::vector<dword> g_waterTex;
 // sums are exact (three bytes, <= 765, exactly representable), so only the lerp
 // itself reassociates. The dword plane is kept for the FDS_WATERTEX_DUMP debug.
 static std::vector<float> g_waterCell;
+static constexpr int WCELL = 256;
 static int g_waterTexW = 0, g_waterTexH = 0;
 
 static void buildWaterDetail() {
 	// Procedural, high-res, row-major → no swizzle dependence (no V1/V2 trap) and
 	// no blockiness (the original albedo was low-res). A soft tiling Worley cell
 	// field tinted blue-cyan; the water pass samples it field-warped for coherence.
-	const int N = 256;
+	const int N = WCELL;
 	g_waterTex.assign(size_t(N) * size_t(N), 0u);
 	g_waterCell.assign(size_t(N) * size_t(N), 0.0f);
 	g_waterTexW = g_waterTexH = N;
@@ -575,7 +576,7 @@ static void buildWaterDetail() {
 // Bilinear tap on the pre-summed cell plane. Returns cb+cg+cr directly — see
 // g_waterCell for why the three channels never had to be interpolated apart.
 static inline float sampleWaterCell(float u, float v) {
-	const int W = g_waterTexW, H = g_waterTexH;
+	constexpr int W = WCELL, H = WCELL;
 	float fu = u - std::floor(u / W) * W;                       // wrap
 	float fv = v - std::floor(v / H) * H;
 	int i0 = int(fu), j0 = int(fv); if (i0 >= W) i0 = 0; if (j0 >= H) j0 = 0;
@@ -598,7 +599,7 @@ static inline float sampleWaterCell(float u, float v) {
 // algebra, opposite choice of which product keeps its extra bits, and it lands
 // on `int(colour*mod + blueLine)` where a 1-LSB shift is a changed pixel.
 static inline float sampleWaterCellGlints(float u, float v) {
-	const int W = g_waterTexW, H = g_waterTexH;
+	constexpr int W = WCELL, H = WCELL;
 	float fu = u - std::floor(u / W) * W;                       // wrap
 	float fv = v - std::floor(v / H) * H;
 	int i0 = int(fu), j0 = int(fv); if (i0 >= W) i0 = 0; if (j0 >= H) j0 = 0;

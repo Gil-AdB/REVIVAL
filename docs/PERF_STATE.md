@@ -67,6 +67,126 @@
 > evidence and the round that produced it. **Read it before proposing an
 > optimisation.**
 
+## 00x. THE `WCELL` CONSTEXPR HOIST — 2026-08-29h: **byte-null and MERGED, but the win is BELOW THE FLOOR and the brief's premise was wrong.** The modulos it was costed on were never divisions: the whole change is **4 `fdiv` + 1 `ucvtf`, binary-wide**
+
+Branch `rev-chaseperf` → `fog-wt`. The last open item from the water round: both
+water cell samplers in `DEMO/ProceduralWater.cpp` read the detail-plane size from
+the runtime globals `g_waterTexW`/`g_waterTexH`, though `buildWaterDetail` is the
+only writer and always builds 256². The change is `static constexpr int WCELL =
+256;` and `constexpr int W = WCELL, H = WCELL;` in `sampleWaterCell` and
+`sampleWaterCellGlints`.
+
+### THE PREMISE WAS WRONG, AND THE DISASSEMBLY IS HOW WE KNOW
+
+The item was costed as *"6 float divisions + 6 integer modulos + 3 index
+multiplies per live water pixel"*, with a stated −0.3 to −0.5 ms prediction that
+was flagged as **too LOW** because it counted only the divisions. Both halves of
+that are wrong. `objdump -d` on the two binaries, differenced per function:
+
+| function | instr base → wcell | key opcode delta |
+|---|--:|---|
+| `RenderGlintsVaried::$_` | 828 → 811 | `fdiv` 9→7, `ucvtf` 2→1 |
+| `RenderGlints::$_0::cl` | 468 → 459 | `fdiv` 4→3 |
+| `RenderGlintsVariedBatched` | 1880 → 1872 | `fdiv` 4→3 |
+
+Whole-binary opcode census, base → wcell: **`fdiv` 2301 → 2296 (−5)**, `ucvtf`
+1687 → 1686 (−1), and **`sdiv` 254 → 254, `msub` 501 → 501, `mul` 2866 → 2866,
+`lsl` 3610 → 3610 — all ZERO change.**
+
+**The integer modulos were already free.** `(i0 + 1) % W` sits behind
+`if (i0 >= W) i0 = 0;`, which bounds the numerator to `[1, W]`, so clang had
+already lowered it to a compare-and-select — never an `sdiv`/`msub` pair, in
+either arm. Same for the index multiplies: unchanged. The entire realised change
+is **4 `fdiv` → `fmul` plus one dropped int→float convert**, and the corrected
+analytic prediction is ~2–3 % of the shading term (≈2 `fdiv` × ~3.5 cycles out of
+§00o's ~260 cycles per live pixel per thread) — i.e. **−0.2 ms at t=800 /
+−0.35 ms at t=1600**. So the prediction was **HIGH, not low.**
+
+### MEASURED — chase, his SSAO arm, 1920×1080, interleaved min-of-11
+
+`--deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao
+--profiler=0 --deferred_prof=1 --hw_prof`, `--bench=scene@scene=chase,t=T,iters=20`,
+three arms round-robin (`base`, `wcell`, `base2` = the SAME base binary again as a
+contamination detector), warm-up round discarded. Both binaries built in ONE
+worktree from ONE CMake cache at tip `3cff1085`.
+
+`water-glints`, the row under test:
+
+| pose | metric | base | wcell | base2 | **EFFECT** | CONTROL (base2−base) |
+|---|---|--:|--:|--:|--:|--:|
+| t=400 | wall_min ms | 7.850 | 7.659 | 7.715 | **−0.191 (−2.43 %)** | −0.135 (−1.72 %) |
+| t=800 | wall_min ms | 8.032 | 7.940 | 8.015 | **−0.092 (−1.15 %)** | −0.017 (−0.21 %) |
+| t=1600 | wall_min ms | 14.335 | 14.215 | 14.354 | **−0.120 (−0.84 %)** | +0.019 (+0.13 %) |
+| **t=1105 (control pose)** | wall_min ms | 0.291 | 0.302 | 0.304 | +0.011 (+3.78 %) | +0.013 (+4.47 %) |
+| t=400 | thrsum ms | 96.177 | 93.712 | 94.887 | **−2.465 (−2.56 %)** | −1.290 (−1.34 %) |
+| t=800 | thrsum ms | 98.382 | 96.220 | 97.816 | **−2.162 (−2.20 %)** | −0.566 (−0.58 %) |
+| t=1600 | thrsum ms | 177.178 | 173.820 | 178.303 | **−3.358 (−1.90 %)** | +1.125 (+0.63 %) |
+| **t=1105 (control pose)** | thrsum ms | 3.142 | 3.206 | 3.129 | +0.064 (+2.04 %) | −0.013 (−0.41 %) |
+
+### THE HONEST READING: THE WALL WIN IS NOT ESTABLISHED
+
+**§00w's floor governs this measurement.** For a single big kernel row the
+cross-binary placement floor is **±1.5–2 %**, not `renderFrame`'s ±0.9 %. Against
+that floor:
+
+* t=1600: floor is ±0.215–0.287 ms; the effect is **−0.120 ms — BELOW it.**
+* t=800: floor is ±0.120–0.161 ms; the effect is **−0.092 ms — BELOW it.**
+* t=400: the effect (−0.191 ms) clears 1.5 % — but its *same-binary control is
+  −0.135 ms*, i.e. the detector is itself at the floor at that pose, so the row
+  buys nothing.
+
+**No pose resolves the wall win above the placement floor.** The `thrsum` column
+(CPU thread-time, ~11 workers, so ~11× the signal) is the more sensitive
+instrument and is **consistently −1.9 % to −2.6 % at all three watered poses
+while its control is smaller and sign-inconsistent** — and, the discriminator
+that matters, **the water-free control pose t=1105 shows NO win** (+2.0 %),
+which is the signature a real per-water-pixel effect must have. So the direction
+is coherent and matches the corrected ~2–3 % prediction; the magnitude is simply
+too small for this harness to certify. Note the same-binary control arm is
+**blind to placement by construction** — it cannot bound the very floor that
+governs here.
+
+**Instruction counts do NOT see it**, as expected once the opcode census is
+known: `water-glints` `Ginstr/f` moves −0.11 % / −0.53 % / +0.47 % at
+t=400/800/1600 while the same-binary control moves +0.53 % / −0.53 % / +1.00 %.
+Five instructions out of 1.7 G is not a measurable fraction.
+
+### WHY IT WAS MERGED ANYWAY
+
+The merge criterion for this item was byte-identity plus the gates, not a perf
+threshold, and **the change is a strict simplification with zero measured risk**:
+it stops reading mutable runtime globals for a value that is a compile-time
+invariant, which is also a latent-hazard removal (any future writer of a
+different plane size would silently mis-sample). **It is NOT credited with a
+win** — no ms may be attributed to this change on the strength of the numbers
+above.
+
+**GATES — byte-null at tip `3cff1085`, on both binaries, all three suites:**
+
+* **14/14 pin poses across the 7 pin recipes** identical base-vs-`wcell` **and**
+  every one at its current recorded value, first try: city t=1961
+  `bd4ffbf8…`; greets t=1588 `570a7b44…`; greets acceptance t=5743
+  `440aa6bb…` / t=2845 `00d17bc5…` / t=6097 `29c1e7fb…` / t=6133 `bc1b0a8a…`;
+  fountain t=2500 `8db68ccb…`; chase default t100/400/800/1200/1600
+  `b67b47f0…` `5bc199d4…` `d1284b5a…` `9c0f7c2f…` `9cdf5603…`; chase cinematic
+  t800 `d50a32d3…` / t1600 `92ffa25d…`. Recipe traps honoured (`FDS_GREETS_CAM`
+  set for t=1588 and NOT set for the acceptance ×4; no `--profiler=0` on the
+  chase rows; `FDS_CITY_ENV_PIXEL=1` on city). City env cubes byte-unchanged
+  across the run (`…c0c60c19` `adbac29c…`, `…c0c60ff9` `a896a47c…`).
+* **`render_gate.sh` 4/4** on both binaries — mirrortest `4ac809e5…`, rttslot
+  `826c09e6…`, conetest `b41894f9…`, halotest `166fa25a…`.
+* **`tools/warm_gate.sh --full` 7/7** on both, with the **per-tick hash
+  sequences identical verbatim** between the arms (stronger than PASS: no row
+  emitted zero frames, so the fixed "no-frames reads as a pixel FAIL"
+  mis-report did not arise).
+
+**BOX STATE, stated because it bounds the numbers:** not quiet.
+`mediaanalysisd` held 90–137 % of one core for the whole window and could not be
+cleared; the battery was interleaved and min-of-11 specifically to survive it,
+and the `base2` control is the residual-contamination detector. A quiet-box
+re-run would tighten the wall column but cannot move it far enough to clear the
+placement floor, because the corrected prediction is itself ≈ the floor.
+
 ## 00w. §00v's OPEN LOOSE END, CLOSED — 2026-08-29g: greets' `lighting-w1` **+1.8 %** and `lighting-w2` **+2.9 %** are **CODE PLACEMENT, NOT A CODE CHANGE.** The proof is an arm whose kernel is **mnemonic-identical to the parent's** and still carries **70 % of the regression**
 
 §00v reported, honestly rather than burying it, that greets' two lighting rows
