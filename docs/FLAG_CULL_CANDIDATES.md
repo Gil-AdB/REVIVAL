@@ -18,6 +18,70 @@ python3 tools/flag_audit.py --json build/flag_audit.json --md build/flag_audit.m
 
 ---
 
+## Removed 2026-08-29 — 13 flags, 15 752 B of `.def`, on branch `rev-flagcull`
+
+His decision, verbatim: **"for the flags — remove the dead weight."** Three
+buckets were taken; **DECIDE-LOOK, the 15 LANDED-AB-B look fixes and the 25
+UNSURE were NOT touched.** The `.def` goes **780 rows / 543 128 B → 765 rows /
+528 423 B** (the byte figure nets the 13 deleted rows against ~1 KB of text
+added by the stale-status rewrite in §4B).
+
+**Gate, run on the unmodified `fog-wt` build in this same worktree FIRST and
+then after every bucket:** 14/14 pin poses across the 7 pin recipes, each one
+byte-identical to the baseline run AND at its recorded value; `render_gate.sh`
+4/4; `warm_gate.sh --full` 7/7. Nothing moved at any step, which is what a
+default-preserving deletion has to look like.
+
+| bucket | commit | flags | `.def` bytes |
+|---|---|---|--:|
+| DELETE-UNWIRED | `3ccb66a1` | `vol_rect_cull`, `water_ripple_scale` | 564 |
+| DELETE-REFUTED | `9338aaeb` | `refl_skip_rain`, `refl_skip_post`, `mirror_mask_pool_clear` | 5 756 |
+| DELETE-LANDED-AB-A | `fcca3e2c` | `cone_fine_tiles`, `vertex_light_parallel`, `tile_bbox_cull`, `xfrm_soa_inline`, `vol_cone_lane_vec`, `xpar_strip_extent`, `xpar_peel_early_out`, `deferred_tile_sphere_cull` | 9 432 |
+| stale-text fix (§4B, 9 rows, no behaviour change) | see below | `mip_fix`, `env_bake_linear`, `sh_bake_linear`, `metal_spec_f0`, `env_metal_tint_linear`, `shadow_noncaster_depth`, `env_bake_sh_first`, `env_bake_include_animated`, `deferred_checker_env_full` | +1 047 |
+
+**§2 (unwired)** — neither flag had a reader in any of the four spellings; both
+deletions are byte-null by construction. `docs/PERF_STATE.md`'s volumetric flag
+table lost its dangling `vol_rect_cull` row.
+
+**§3 (refuted)** — all three defaulted OFF, so the surviving arm is today's
+shipping path. The refutation text is preserved in each commit message and in
+the ledger; `GreetsMirror.cpp`'s `MSET` comment now carries the
+`mirror_mask_pool_clear` numbers directly. **One thing that was NOT lost:**
+`refl_skip_rain`'s deletion removes the flag that was standing in for a real
+latent hazard (screen-space rain would run in the reflection pass if a two-pass
+scene ever armed rain). `docs/OPTIMIZATION_BACKLOG.md` now records that the
+guard has to be written as a plain `!g_reflUnderlayPass` test at the rain call,
+because there is no dial for it any more.
+
+**§4A (byte-equal arms)** — 15 call sites; each ON branch inlined, each OFF
+branch deleted, plus `GREETS.CPP`'s redundant
+`setDefault(cone_fine_tiles, true)`. Comments and help text that named a deleted
+flag as a live gate, or as a condition another flag still requires
+(`face_tile_bin` required `tile_bbox_cull`; `shadow_bbox_cull` claimed to be
+inert without it; `-DFDS_CONE_FORCE=1` folded `vol_cone_lane_vec`), were
+corrected. Historical measurement records that merely quote a `--no-` arm were
+left as written.
+
+**§4B stale text** — the nine rows that still said *"default OFF … left OFF
+pending the user's own review"* while defaulting `1`. Each now states the flip
+with the commit that made it, and the per-flag commit rather than one blanket
+SHA, because they were not all the same landing: `bd6e8060` (2026-08-09, *"the
+user overrode my recommendations … and asked for all of them defaulted"*) for
+`env_bake_linear` / `sh_bake_linear` / `metal_spec_f0` / `env_bake_sh_first`;
+`17823518` (2026-08-09, landed as measured correctness fixes) for
+`env_metal_tint_linear` / `shadow_noncaster_depth` /
+`deferred_checker_env_full` / `env_bake_include_animated`; `b8319e10`
+(2026-08-08) for `mip_fix`.
+
+**Found while doing it, NOT fixed because it is out of scope:**
+`--hdr_metal_kill` (INT, default 2 since 2026-08-08) carries the SAME stale
+sentence — *"so it is left OFF pending the user's own review"* — contradicting
+its own corrected header two hundred characters earlier. The audit's rule missed
+it because the rule keyed on BOOL default flips. It is a one-sentence text fix
+whenever someone wants it.
+
+---
+
 ## 0. Summary
 
 | bucket | flags | help-text bytes | in-loop reads | flags with an in-loop read |
