@@ -55,6 +55,75 @@ on stderr under an existing diagnostic flag would make it self-diagnosing. Not
 taken tonight: a gate-visible print is itself a thing to gate.
 
 
+## 2026-08-29c — **THE GATE SUITE HAS A STRUCTURAL HOLE, AND IT IS NOW CLOSED**: every pinned row is a ONE-TICK snapshot, so any path that switches on at tick 2 is untested. A binary that deletes city's water fog entirely passes **12/12 pins** and fails **5/7 warm rows**. `tools/warm_gate.sh` DONE
+
+### THE TRAP, STATED ONCE
+
+**A green 13/13 does not mean a path was exercised. Check whether the path is
+even reachable at tick 1 before claiming byte-nullity from those rows.**
+
+### DEMONSTRATED, NOT ASSERTED
+
+`-DFDS_FOG_PUNT_PROBE=1` builds a binary that simply does not compute city's
+water-reflection fog — the exact shape a botched vectorisation of that leg would
+take. Against the canonical suite it is **invisible**:
+
+| suite | result on the deliberately-broken binary |
+|---|---|
+| the 13 pinned poses | **12/12 PASS** |
+| `tools/render_gate.sh` | (unaffected — no water) |
+| `tools/warm_gate.sh --full` | **5 of 7 FAIL** |
+
+And the failure signature is the mechanism itself: in *every* failing row the
+**first frame's hash matches** and only ticks 2+ diverge.
+
+### THE CENSUS — what tick 1 does not execute
+
+Two distinct classes. **(A) genuinely unreachable** (needs a previous frame's
+output), and **(B) deliberately neutered by the snapshot harness**.
+
+| # | path | why it is cold at tick 1 | class | status |
+|---|---|---|---|---|
+| 1 | city water-reflection leg — `gFrReflZ`, `Froxel_ReflBranch`, `--fog_refl_vec` | `FastFog_SetReflectionZ` is consume-once and only fires from city's reflection pass; city's water carries no mirrored content on tick 1 | A | **MEASURED** — `PUNTED 0` at tick 1, 27.6 % of groups from tick 2 on |
+| 2 | froxel temporal EMA **blend arm** — `temporal = gFrTemporal && gFrHistValid` | `gFrHistValid = false` initially (also reset on scene change, grid change, near/far change) | A | **MEASURED, PARTIAL** — the *flag* IS visible at tick 1 because it also enables jitter, so a flag flip would be caught; a change confined to the **blend expression** would not |
+| 3 | chunk occlusion cull — `--chunk_occlusion` | doubly cold: `REV.CPP:1629` forces `g_occlSnapshotInert = true` under `--snapshot`, AND its own "first frame of a scene: no capture yet → cull inert" | A+B | **MEASURED that snapshots force it inert.** Pixel effect unconfirmed and *not confirmable by image*: a correct cull is byte-null by design. Needs `--chunk_occl_verify`. Default OFF today → no live exposure |
+| 4 | mip hysteresis — `Face::LastMip` | `if (mipHyst > 0 && F->LastMip != 0xFF)`; `LastMip` is unset on frame 1 | A | candidate. `mip_hysteresis` defaults **0.0f** → no live exposure today, but it is a trap the moment anyone dials it |
+| 5 | greets code-screen smear — `OldBuf` feedback | iterative smear; a function of how many times `Render()` has run, not of `t` | A | **known** (already a SESSION_STATE trap); now covered by `greets-warm` |
+| 6 | xpar peel / strip slices | "whatever the previous frame / the legacy peel left in the xpar layer slices is unknown to the per-strip column tracker" | A | candidate, **low risk** — `XparStripSlices_MarkAllDirty()` runs every frame, so it is self-healing by construction |
+| 7 | city env probe cube | disk cache keyed on the FLD, **not** on FeatureFlags; a cold worktree re-bakes | B-ish | **known/documented** in the gates table already |
+| 8 | MirrorShatter surface + clone arrays | "kept warm across frames" | A | candidate, **low risk** — allocation lifetime, not content |
+| 9 | cross-SCENE state (the fountain→greets peel-floor leak) | a single-scene snapshot never crosses a scene boundary | A | **known** from the prior campaign; still uncovered — no warm row crosses scenes |
+
+Items 1–3 are the ones that have actually cost something. Item 9 is the one
+still open: **no gate in this repo runs two scenes in one process.**
+
+### THE COVERAGE THAT NOW EXISTS
+
+`tools/warm_gate.sh` — fast pair (`city-warm`, `greets-warm`) for every gate
+check; `--full` is 7 rows in **18 seconds**, so there is no excuse not to run it
+before touching the composite, the froxel volume or reflections.
+`WARM_GATE_BIN=/path/to/DEMO` retargets it. Baselines recorded at `bc36387b`,
+1920×1080, stock `rev.cfg` — same resolution trap as `render_gate.sh`.
+Documented as a row in `docs/SESSION_STATE.md`'s gates table with the reason.
+
+### THE SECOND-ORDER COST OF THE HOLE
+
+The same blind spot mis-priced the work. This item was recorded at **0.030 Gi/f
+/ 0.72 % of `renderFrame`** from a census taken **cold, at 1512×848**. Warm at
+1920×1080 a punted pixel costs ~640 instructions and the item is **5.15 %** —
+**7× low**. A cold census does not just fail to catch regressions; it sizes the
+backlog wrong.
+
+### NEXT LEVER ON THAT ROW (noted, NOT built)
+
+Vectorising the reflection leg's own arithmetic — everything except
+`fastExpNeg` (8-bit LUT) and `fogAntiderivG` (3-way branch). Ceiling
+**~0.12 Gi/f**, the residue after 2026-08-29b took 57 % of the punt's cost.
+**This one does need the §00k2 contraction rules**, unlike 2026-08-29b which
+avoided them by sharing source: `gY = w10*Xc + w11*Yc + w12` and
+`uV = Xc*Xc + Yc*Yc + 1` are both exactly rule 2's "A+B+C of products" shape,
+which chains from the SECOND term.
+
 ## 2026-08-29b — **THE FROXEL COMPOSITE'S SCALAR HALF IS GONE**: `--fog_refl_vec`, 572 648 punted px/frame go 8-wide, `fog-composite` **−27.2 %** and `renderFrame` **−1.40 ms**, BIT-EXACT. And the item was **invisible to all 13 pins**. DONE, merged
 
 `Froxel_CompositeTileVec8` punted a WHOLE 8-lane group to scalar for any
