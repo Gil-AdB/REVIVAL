@@ -216,9 +216,9 @@ frame. Use `--bench` or a multi-pose snapshot, and read the *second* report.
 
 ---
 
-## PART 3 — WINDOW STATE AT PUBLICATION (2026-08-29 08:0x)
+## PART 3 — WINDOW STATE AT PUBLICATION (2026-08-29, `fog-wt` = `9b885002`)
 
-**`fog-wt` tip: `b2c9bf8c`** (this document's commit is its child).
+**`fog-wt` tip: `9b885002`** (`b2c9bf8c` + this document).
 **Gates on that tip, this worktree, stock `rev.cfg`, 1920×1080:**
 13/13 pinned poses · `tools/render_gate.sh` **4/4** ·
 `tools/warm_gate.sh --full` **7/7**.
