@@ -1149,12 +1149,7 @@ static void cityMirrorGlassForward()
 	// (censused), so there is no ordering hazard and no shared destination —
 	// unlike the sibling Reflected_Transform, whose in-order FList append feeds
 	// Radix_Sort. See --city_glass_pool.
-	// `lastT`/`lastBs` hoists the per-MESH bounding-sphere world position out of
-	// the per-FACE loop; entries are grouped by mesh, so a one-entry cache
-	// collapses ~208 recomputes per mesh. Each worker owns its own cache, and
-	// the value is a pure function of the mesh, so every lane computes the same
-	// bits the serial loop did.
-	auto glassFace = [&](size_t idx, const TriMesh*& lastT, Vector& lastBs) {
+	auto glassFace = [&](size_t idx) {
 		TriMesh* T = g_mirrorGlassFaces[idx].T;
 		Face*    F = g_mirrorGlassFaces[idx].F;
 		if (!T->EnvHemiSheets[0]) return;     // no sheets — leave deferred-only
@@ -1170,12 +1165,18 @@ static void cityMirrorGlassForward()
 		auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
 		Vector_Norm(&n);
 		Vector bsWorld;
-		if (T != lastT) {
-			MatrixXVector(T->RotMat, &T->BSphereCtr, &lastBs);
-			lastBs += T->IPos;
-			lastT = T;
-		}
-		bsWorld = lastBs;
+		// ⚠ THE PER-MESH bsWorld CACHE IS REMOVED AND MUST NOT COME BACK
+		// WITHOUT `tools/warm_gate.sh` GREEN. It hoisted this MatrixXVector out
+		// of the per-FACE loop on the argument that it is a pure function of the
+		// MESH (208 faces per mesh on average). It passed 13/13 one-tick pins AND
+		// 24 consecutive runs of the city acceptance pose — and it FAILS the WARM
+		// multi-tick gate at tick 4, deterministically. Bisected within one suite
+		// run: fan-out+cache FAIL, cache alone (fan-out off) FAIL, fan-out alone
+		// (this form) PASS, pre-round-5 PASS. The parallel fan-out below is
+		// clean; the CACHE is the defect, and its mechanism is NOT yet explained
+		// — do not re-land it on the theory that "entries are grouped by mesh".
+		MatrixXVector(T->RotMat, &T->BSphereCtr, &bsWorld);
+		bsWorld += T->IPos;
 		Vector cv = View->ISource;
 		const float planeD = fabsf((cv - wsPos[0]) * n);
 		const float optD   = fabsf((bsWorld - wsPos[0]) * n);
@@ -1208,8 +1209,7 @@ static void cityMirrorGlassForward()
 
 	const size_t nGlass = g_mirrorGlassFaces.size();
 	if (!fds::FeatureFlags::city_glass_pool() || nGlass < 512) {
-		const TriMesh* lastT = nullptr; Vector lastBs;
-		for (size_t i = 0; i < nGlass; ++i) glassFace(i, lastT, lastBs);
+		for (size_t i = 0; i < nGlass; ++i) glassFace(i);
 		return;
 	}
 	// Chunked fan-out: chunk COUNT is fixed by the face count, not by which
@@ -1220,8 +1220,7 @@ static void cityMirrorGlassForward()
 	dispatchIndexed(nChunks, nullptr, [&](int c) {
 		const size_t lo = size_t(c) * kChunk;
 		const size_t hi = std::min(lo + kChunk, nGlass);
-		const TriMesh* lastT = nullptr; Vector lastBs;
-		for (size_t i = lo; i < hi; ++i) glassFace(i, lastT, lastBs);
+		for (size_t i = lo; i < hi; ++i) glassFace(i);
 		renderns::tileDone.release();
 	});
 	for (int i = 0; i < nChunks; ++i) renderns::tileDone.acquire();
