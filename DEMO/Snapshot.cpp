@@ -780,6 +780,26 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             }
         }
 
+        // FDS_SNAPSHOT_NRMDUMP: raw deferred G-buffer SHADING NORMAL plane
+        // (uint32[xres*yres], octahedral 16.16 — decode with
+        // meka::oct_decode_u32). The z16 dump answers "where is the surface";
+        // this answers "which way does it face", which is the other half of any
+        // surface-vs-surface comparison — e.g. the reference relief renderer
+        // (--greets_displace_ref) against the tessellated bake, where a normal
+        // that is 20 deg off matters as much as a depth that is 0.02 u off.
+        // Env-gated → inert (no gate touches it), same pattern as the two
+        // dumps around it.
+        if (std::getenv("FDS_SNAPSHOT_NRMDUMP") && g_gbuffer
+            && g_gbuffer->normal.size() >= size_t(xres) * yres) {
+            char np[1024];
+            std::snprintf(np, sizeof(np), "%s/greets_t%06d_nrm.u32", cfg.outDir.c_str(), ts);
+            if (FILE* nf = std::fopen(np, "wb")) {
+                std::fwrite(g_gbuffer->normal.data(), sizeof(uint32_t), size_t(xres) * yres, nf);
+                std::fclose(nf);
+                std::fprintf(stderr, "[GREETSSNAP] gbuf-nrm -> %s\n", np);
+            }
+        }
+
         // FDS_SNAPSHOT_GBUFDUMP: raw deferred G-buffer material plane
         // (uint32[xres*yres], packed mip:4|matID:8|swizzledUV:20; the forward
         // sentinels 0xFFFFFFFF/0xFFFFFFFE pass through) plus the matID -> name

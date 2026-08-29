@@ -2792,6 +2792,16 @@ AfterXForm:
 	// single-sided walls/sheets) — easier to just skip it.
 	extern thread_local bool g_inShadowPass;
 	const bool shadowNoBackface = g_inShadowPass && !fds::FeatureFlags::shadow_backface_cull();
+	// --cull_front: keep the BACK faces and drop the front ones (Lindstrom &
+	// Turk's inspection trick). Any surface that should be interior becomes
+	// visible, so a leak, a flipped facet or a slab poking out of a wall shows
+	// up as itself instead of hiding behind the surface in front of it.
+	// Measurement-only; default OFF. Written as `(test) != cullFront` and NOT
+	// as a ternary over two copies of the test: under -ffp-contract=fast the
+	// duplicated dot product contracts differently and flips faces sitting
+	// exactly on the plane -- that form moved BOTH greets pins with the flag
+	// off. This form leaves the float expression textually identical.
+	const bool cullFront = !g_inShadowPass && fds::FeatureFlags::cull_front();
 	// Env-reflection bake: the baked surface's own faces stay out of its
 	// probe (face-level; see the note at the mesh loop). Hoisted bool —
 	// false on every non-bake pass, so the per-face cost is one branch.
@@ -2867,7 +2877,7 @@ AfterXForm:
 			&&(forceTS
 			|| shadowNoBackface
 			||(F->Txtr->Flags&Mat_TwoSided)
-			||(AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z<F->NormProd) // Backface culling
+			||((AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z<F->NormProd) != cullFront) // Backface culling (--cull_front inverts)
 			//||(1) // no backface culling
 			))
 		{
