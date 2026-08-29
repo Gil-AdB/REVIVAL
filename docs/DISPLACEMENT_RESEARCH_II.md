@@ -1358,3 +1358,200 @@ across all 10 runs):
 
 Scripts and dumps: session scratchpad `rq/` (`st.sh`, `census.out`, `weld.out`,
 `h_matsign/`, `h_facesign/`).
+
+---
+
+# §REF — The reference relief renderer (`--greets_displace_ref`)
+
+*Added 2026-08-30. Built because there was no reference: a month of tessellated-
+displacement fixes was measured against an invented one. His words, 2026-08-29:
+"another issue is that we don't have an actual reference to use. I would assume
+the displacement around corners should be continuous with regards to the face
+location" and "I'll need to see results to judge."*
+
+`FDS/RENDER/DeferredDisplaceRef.cpp` renders the **definition** of the displaced
+stone surface, per pixel, with **no tessellation**. It is an independent second
+implementation: it does not call, read or resemble `DisplaceStoneSubdiv`, and it
+runs on the **authored** faces — i.e. with `--greets_displace` OFF. It writes the
+G-buffer exactly as the rasterizer would (depth, octahedral normal, `txtr`
+mip|matID|swizzled-UV, filtered albedo, tangent, shadowMatID), inserted right
+before `Render_DeferredLighting`, so the deferred lighting shades the reference
+with the same lights, SSAO, fog and tone map as the engine's own render.
+Non-stone geometry renders as usual.
+
+Everything below is behind flags, default OFF; the default arm is byte-identical
+(proof at the end).
+
+## The model it renders
+
+* **Height field.** `d(u,v) = amp·(h(u,v) − mipMean)`, `h` bilinear at texel
+  centres with toroidal wrap, at the bake mip. The sampler and the mip-mean are
+  re-implemented from the bake's own convention, not shared: measured mipMean
+  **0.5471** (rooms) / **0.3405** (floor) at mip 2, against the bake's own
+  banner's 0.547 / 0.340. amp 0.300, `|d|max` 0.164 (rooms) / 0.050 (floor).
+* **Direction.** The face's **authored plane normal**, nothing else. OpenSubdiv:
+  displacing along a normal that is discontinuous at a crease *"will likely tear
+  apart the surface along the crease"* — the smoothed vertex normal has no
+  correct version here (`docs/DISPLACEMENT_LITERATURE.md` §B, §F/1).
+* **Slab.** Signed distance from the face's plane in `[−back, d(u,v)]`, over the
+  face's polygon extended past each **shared** edge by the mitre margin and
+  **trimmed at the mitre** by the neighbour's own slab. A **free** edge — used by
+  exactly one face with no face of *any* material sharing it or lying
+  position-coincident across it within `--greets_displace_ref_free_tol` — gets no
+  extension, so its exposed lateral face **is** the skirt.
+* **Partition.** `--greets_displace_ref_partition` (see the finding below).
+* **Shading normal.** `n ∝ N − ∇ₛh` in the plane's own frame — **exact** on a
+  plane (Mikkelsen's surface-gradient form, survey §C), with `N` the face normal
+  at a crease and the crease-aware interpolated authored normal below the
+  threshold. Never an area-weighted average across a crease: the question is
+  malformed there (Max 1999).
+* **March.** Per-texel **DDA** with an **exact quadratic root** inside each
+  bilinear cell, plus a conservative per-cell max-height skip. Linear search plus
+  binary refinement (Policarpo 2005 / POM) is **not** conservative — it steps over
+  thin features — and is used nowhere. Every boundary of the "inside the solid"
+  predicate is enumerated as an exact event (slab crossings from the DDA,
+  bisector crossings, extended-polygon boundaries, band boundaries) and the first
+  interval whose interior is inside the solid starts at the hit, so a castellation
+  step is an exact planar hit rather than something a step size might miss. The
+  march always starts **outside**, which is what makes min-over-slabs exact
+  (survey §G).
+
+## THE FINDING: the literal candidate definition deletes material
+
+"Each face governing the region where its base plane is the nearest" has two
+readings, and they are not the same solid.
+
+* `--greets_displace_ref_partition=0` — **union membership** (the default). A
+  point is in the solid if **any** slab contains it; the nearest base plane among
+  the slabs that *do* contain it owns the shading.
+* `--greets_displace_ref_partition=1` — **partitioned membership**, the literal
+  rule. The nearest base plane governs *first*, and only **that** face's slab
+  decides. This is what produces the castellation step, and it also **deletes
+  material**: wherever the governing face's own height says air while a
+  neighbour's slab says solid, the point is air.
+
+At a grazing corner that is not a sliver. Traced at cam A t=5965, px(1240,300):
+the edge-on face 881 (view normal (−1.000, −0.004, −0.018)) governs from t=5.58
+while the pier's own front faces 170/836 only begin at t=5.90, so the pier's front
+surface is deleted over a ~90 px band and the reference reports the solid 1.1 u
+behind the true surface. **A plane bisector is a non-local partition** — a face
+seen edge-on has its plane nearest along an entire ray — and nothing in the model
+bounds that. The survey (§G) records that **no source defines** the
+bisector-partitioned union; this is what that absence looks like.
+
+**Both arms are rendered at every pose.** The default was changed from his brief's
+rule to union membership because shipping an obviously broken default is worse
+than flagging the change — it is his to overrule with `=1`.
+
+The companion arm is `--greets_displace_ref_shared_edge`: along a shared crease
+both faces read **one dominant height**, the owner chosen by a canonical
+order-independent key, blended back over `--greets_displace_ref_edge_band` texels.
+This is Dudash's "dominant data" (GDC 2012) and micro-meshes' duplicated shared-edge
+displacement values. With it, the two heights agree at the edge, the mitre becomes
+well defined, and the castellation step **vanishes on its own** — which is the
+literature's answer and the thing the step should be judged against.
+
+## Ambiguities in the definition, and what was chosen
+
+| # | Ambiguity | Choice | Flag |
+|---|---|---|---|
+| 1 | "Union of slabs" vs "each face governs" — two different solids | union membership; the literal rule is kept and rendered | `--greets_displace_ref_partition` |
+| 2 | Margin M "default = the displacement amplitude" | Derived per edge instead. A **crease** is a corner: it needs `max(cot, tan)(φ/2)·hAbsMax` — `cot` is the bisector's requirement (survey §G's correction), `tan` the mitre's, and cot dominates up to 90°, tan past it. A **smooth** seam (φ below the crease threshold) is not a corner at all: sizing it by `cot(φ/2)` replaced the curved wall with its tangent planes extended a whole unit (cot 5° = 11.4). Constant M is still available. | `--greets_displace_ref_margin` (0 = derive), `--greets_displace_ref_max_ext` |
+| 3 | Nothing in the brief trims the extension | Added. Survey §B: at a convex corner the offset faces must be extended **to** the mitre point (spike risk); past it the margin itself mints surface, and every convex corner grows a raised lip of the leftover amplitude. Applied at concave edges too — survey §B trims those *back* to the same point. | `--greets_displace_ref_mitre_trim` |
+| 4 | Skirt "from the displaced edge down to the base plane" | A zero-depth slab has no skirt at all for a groove, so the slab's back is the amplitude. Only observable at a free edge — and this scene has **4** of them. | `--greets_displace_ref_back` |
+| 5 | Bevel geometry past the mitre limit | The margin is capped at `sqrt(L²−1)·hAbsMax` rather than a bevel *face* being emitted; with the trim, the neighbour's slab is what closes the corner. Fires on 1 edge at the default limit 4. | `--greets_displace_ref_mitre` |
+| 6 | What happens where the reference finds no hit on a stone pixel | The rasterized flat surface is kept (the correct amp→0 limit) and the pixel is flagged `fallback` in the dump. 6–7.5k px/pose. | — |
+| 7 | Coincident foreign surfaces | A decal authored **on** the stone plane is "behind" the relief by a hair and would be stolen on a rounding tie (measured: 13k px off matID 40 at literally the same depth). The reference only takes a foreign pixel when it beats it by more than the whole outward amplitude. | — |
+| 8 | Texture LOD | Derived from the hit's own UV density and grazing angle, not reused from the rasterizer's flat-surface pick — at a corner a face turning away shows its whole relief profile compressed ~40:1, and a face-on mip turns that into coloured stripes. The **height** field stays pinned at the bake mip: that is the model's definition, not a filtering choice. | — |
+| 9 | Back faces | A slab is a closed solid, so its back plane is a surface; a face whose outward normal points away from the eye presents nothing else. The rasterizer back-face culls per triangle, so the model does too. | — |
+| 10 | The extended-polygon boundary | **Not a surface.** It is where the model stops asking a face, not where material ends. A ray crossing *into* a slab through it has not hit anything; the literature's rule for a march leaving its patch is discard (Policarpo & Oliveira 2006). | — |
+
+## Five things the model had to be told that the brief did not mention
+
+Each was found from the picture or the raw dump, not from a metric, and each
+looked like a rendering bug until it was traced:
+
+1. **The hide track.** `Transform_Objects` drops a mesh with
+   `!(T->Flags & HTrack_Visible)`. The model is cached, so visibility must be
+   re-asked every frame: at cam A a hidden stone wall stands 10 u in front of the
+   camera and one of its faces took 1.2M of 2.07M pixels.
+2. **The mirror UV clones.** `GreetsMirror` clones `rooms` → `rooms::mirUV`
+   (and `floor` likewise), sharing the height map, and it is the **clones** the
+   main view rasterises — matID 40/41 cover 1.6M pixels while the un-suffixed
+   8/10 cover 0.45M, and `floor` has **no** un-suffixed faces at all.
+3. **Near-plane clipping of the prism bbox**, or a straddling face is binned into
+   every tile and the per-ray candidate cap drops faces arbitrarily.
+4. **Engine-oriented soup normals.** A winding-dependent neighbour normal
+   silently inverts the trim's "which side is material" test.
+5. **World-position ordering of shared-edge endpoints** before anything is derived
+   from an edge (DiagSplit's precision rule), so the dominant owner and the blend
+   parameter cannot depend on which face the walk saw first.
+
+## Running it
+
+```sh
+cd Runtime
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+FDS_GREETS_CAM="22.5084476,3.87992334,-61.8882256,-0.829246342,-0.20816116,0.518670499" \
+FDS_REFRENDER_DUMP=/tmp/ref.bin FDS_SNAPSHOT_ZDUMP=1 FDS_SNAPSHOT_GBUFDUMP=1 FDS_SNAPSHOT_NRMDUMP=1 \
+  ./DEMO --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao \
+         --greets_displace_ref --greets_displace_ref_stats=1 \
+         --snapshot=greets@t=5965 --out=/tmp/ref
+```
+
+`tools/refrender_battery.sh <dir>` renders the whole pose set × arms (2 min).
+`tools/refrender_diff.py --tess DIR --ref DIR --bare DIR --out-prefix P` prints
+the per-pixel numbers and writes the dz / normal / crack / Laplacian-weighted
+maps. `FDS_REFRENDER_DEBUG_PX="x,y"` traces one pixel's entire solve — every
+candidate, its t-range, `sd` and `d` at each end, every interval and its
+inside/governing verdict. `FDS_REFRENDER_DUMP=path` writes
+`REFRND01 | w,h | float z | float3 n | int32 faceId | uint32 flags` per pixel
+(flags: 1 hit, 2 fallback, 4 step, 8 skirt, 16 march budget, 32 silhouette growth).
+
+**Cost:** 190–400 ms for the pass at 1920×1080 (22–68 height-map cells walked per
+pixel), inside a ~3 s whole-snapshot run.
+
+**Byte-identity of the default arm**, against a fresh build of the parent commit
+`bc9737a3`, 3 poses × 2 arms on the judging flags — all six identical:
+
+| pose | bare | `--greets-displace` |
+|---|---|---|
+| cam A t=5965 | `440deac28b1e9d1a38d3e5e61ab8d918` | `dbe2d4c2716e2d762b366d5a45c151a6` |
+| H6194 t=6194 | `80f21d8517fa4909b8ce4d40a9815fcf` | `e2385cafaf64f068290bcadb7e2c4444` |
+| t=5743 | `43b459c14c4a968392386bb711b57f16` | `2568147a159488b603f147c7c7991d56` |
+
+One trap on the way: `--cull_front` written as a ternary over two copies of the
+backface dot product moved **both** pins **with the flag off** — under
+`-ffp-contract=fast` the duplicated expression contracts differently and flips
+faces sitting exactly on the plane. It is now `(test) != cullFront`, leaving the
+float expression textually unchanged.
+
+## The numbers (bake vs reference, stone pixels only)
+
+`|dz|` in world units along the view ray; the share of stone pixels past 0.02 and
+0.08 u; the shading-normal angle; and the **bare** (undisplaced) arm's `|dz|` for
+scale.
+
+| pose | dz p50 | dz p90 | >0.02 | >0.08 | nrm p50 | nrm p90 | bare p50 | bare p90 |
+|---|---|---|---|---|---|---|---|---|
+| cam A t=5965 | 0.045 | 0.181 | 77 % | 24 % | 10.2° | 47.6° | 0.027 | 0.165 |
+| cam B t=5965 | 0.040 | 0.102 | 75 % | 15 % | 9.4° | 49.5° | 0.024 | 0.146 |
+| H6017 t=6017 | 0.026 | 0.071 | 67 % | 7 % | 6.9° | 48.2° | 0.016 | 0.084 |
+| H6194 t=6194 | 0.038 | 0.073 | 80 % | 9 % | 7.1° | 45.8° | 0.016 | 0.070 |
+| doorway t=5963 | 0.052 | 1.224 | 83 % | 41 % | 21.4° | 113.7° | 0.059 | 1.088 |
+| corner t=6097 | 0.032 | 0.063 | 66 % | 4 % | 19.8° | 54.0° | 0.024 | 0.099 |
+| curved t=2845 | 0.010 | 0.058 | 37 % | 6 % | 4.7° | 45.8° | 0.022 | 0.062 |
+| corridor t=5534 | 0.071 | 0.142 | 82 % | 42 % | 10.3° | 40.2° | 0.035 | 0.085 |
+
+The p50 column reads the same way at **seven of eight** poses: the bake is
+**further from the definition than the flat wall is**. Only the grazing close-up
+t=2845 has the bake closer (0.010 vs 0.022).
+
+**Read that carefully.** It measures distance from *this* definition, which the
+bake was never built to match, and the reference carries full relief at borders
+where the bake pins to zero by design. It is a yardstick, not a verdict — and the
+yardstick itself has a judged parameter (the partition) that he has not ruled on.
+
+Renders: `docs/img/refrender/` — `<pose>_triptych.png` (bare | tessellated |
+reference), `camA_variants.png` / `H6194_variants.png` (partition, dominant-edge,
+mitre 2/4/8, crease 15/30/60), `<pose>_diffmaps.png`, `camA_cullfront.png`.
