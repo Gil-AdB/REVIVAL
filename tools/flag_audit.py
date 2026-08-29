@@ -448,11 +448,13 @@ MANUAL_OVERRIDES = {
 #   B = a LANDED FIX: ON is the shipped behaviour, OFF is the LEGACY path kept
 #       as a revert. Deleting B removes a revert hatch, so B is a separate call.
 LANDED_SUBCLASS = {
-    # A -- arms byte-equal
-    'cone_fine_tiles': 'A', 'deferred_tile_sphere_cull': 'A',
-    'vertex_light_parallel': 'A', 'tile_bbox_cull': 'A',
-    'xpar_strip_extent': 'A', 'xpar_peel_early_out': 'A',
-    'xfrm_soa_inline': 'A', 'vol_cone_lane_vec': 'A',
+    # A -- arms byte-equal.  ALL EIGHT WERE DELETED ON 2026-08-29 (their ON
+    # branches were inlined and the OFF branches removed), so this class is now
+    # empty and a fresh run of this script will not surface it:
+    #   cone_fine_tiles, deferred_tile_sphere_cull, vertex_light_parallel,
+    #   tile_bbox_cull, xpar_strip_extent, xpar_peel_early_out,
+    #   xfrm_soa_inline, vol_cone_lane_vec.
+    # See docs/FLAG_CULL_CANDIDATES.md, "Removed 2026-08-29".
     # B -- landed fix, OFF is the legacy look
     'env_cube': 'B', 'mip_fix': 'B', 'env_bake_linear': 'B',
     'sh_bake_linear': 'B', 'metal_spec_f0': 'B',

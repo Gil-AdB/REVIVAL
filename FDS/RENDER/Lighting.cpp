@@ -435,8 +435,9 @@ void Lighting(Scene *Sc)
 
 	// Fan the per-mesh work across the pool (the pool is parked during the
 	// scene tick, so this is free parallelism — measured ~1 ms serial on
-	// greets). --no-vertex_light_parallel restores the serial walk.
-	if (fds::FeatureFlags::vertex_light_parallel())
+	// greets). The --no-vertex_light_parallel serial walk was deleted
+	// 2026-08-29: the writes are per-mesh Verts and therefore disjoint, the
+	// math is untouched, so the two arms were byte-identical by construction.
 	{
 		// Work-stealing fan via dispatchIndexed: W enqueues total (a task PER
 		// MESH drowned in enqueue/semaphore overhead — measured 1.27 ms vs
@@ -479,12 +480,5 @@ void Lighting(Scene *Sc)
 		{
 			for (const VLJob &j : sJobs) LightMeshVerts(Sc, j.T, j.v0, j.v1);
 		}
-		return;
-	}
-
-	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next)
-	{
-		if (T->Flags & (Tri_Invisible | Tri_Noshading)) continue;
-		LightMeshVerts(Sc, T, 0, (int)T->VIndex);
 	}
 }

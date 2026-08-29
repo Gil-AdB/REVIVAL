@@ -14,7 +14,7 @@ struct FListEntry;
 //
 // WHAT IT REPLACES. Every raster tile used to re-walk the WHOLE face list and
 // 4-compare-reject the faces whose screen bbox misses its rect
-// (--tile_bbox_cull). At city t=1961 that is 30 tiles x 2 renderFrame passes x
+// (the S2/B5 reject, formerly --tile_bbox_cull). At city t=1961 that is 30 tiles x 2 renderFrame passes x
 // ~20 500 entries = 1.23 M FListEntry reads per frame to find the ~30 000
 // (face, tile) pairs that actually exist. Binning walks the list TWICE (count,
 // then fill) instead of thirty times, and hands each tile a dense, sequential
@@ -28,9 +28,11 @@ struct FListEntry;
 // chunk-major — so tile t's run is the subsequence of FList order that passes
 // t's bbox test, byte-for-byte the same sequence the walk yields.
 //
-// The bin is a PURE restatement of the --tile_bbox_cull test, so it is only
-// built when that flag is on (flag off = the walk rejects nothing, and every
-// tile legitimately sees every face).
+// The bin is a PURE restatement of the per-face bbox test. It used to also
+// require --tile_bbox_cull to be on (with the reject off, the walk rejected
+// nothing and every tile legitimately saw every face); that flag was deleted
+// 2026-08-29 and the reject is unconditional, so only --face_tile_bin gates
+// this now.
 //
 // MEMORY: two vectors reused across frames, grown monotonically — no per-frame
 // allocation once the scene's face count has been seen. `arena` holds

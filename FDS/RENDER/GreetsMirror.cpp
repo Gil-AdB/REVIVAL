@@ -31,7 +31,6 @@
 
 #include <Base/FrameState.h>  // fds::g_mainCamera / g_mainFaces (RTT pass)
 #include "RENDER/TailProf.h"   // RTT decomposition scopes (rtt-pick/prep/bakejob, rttj-*)
-#include "Threads.h"           // parallel_memset for the mask-plane clears
 
 // Provided by MISC/PREPROC.CPP — stamps F->A_idx/B_idx/C_idx for SoA.
 extern void Compute_FaceVertexIndices(TriMesh *T);
@@ -4227,16 +4226,17 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     auto &zplane = g_gbuffer->mirrorMaskZ;
     if (zplane.size() < plane.size()) return;  // sized together
     // Clear last frame's coverage. NOT a cheap memset: 2 MB + 4 MB at 1080p,
-    // and with the two ownership planes below this function was moving ~8-10 MB
-    // a frame through a SINGLE thread — 0.478 ms at ~1.3 cores, which is what
-    // the cores = Gcyc/clock/wall reading exposed. parallel_memset is the same
-    // bytes written by the pool (it falls back to serial under 256 KB), and
-    // `gbuf-clear` next door has been using it all along at ~7 cores.
-    // Byte-null: a memset is a memset.
-    const bool _pmset = fds::FeatureFlags::mirror_mask_pool_clear();
-    auto MSET = [&](void* d, size_t n) {
-        if (_pmset) parallel_memset(d, 0, n); else std::memset(d, 0, n);
-    };
+    // and with the two ownership planes below this function moves ~8-10 MB a
+    // frame through a SINGLE thread — 0.478 ms at ~1.3 cores, which is what the
+    // cores = Gcyc/clock/wall reading exposed. THE POOL DOES NOT FIX IT, and
+    // that is measured, not assumed: `--mirror_mask_pool_clear` ran the same
+    // bytes through parallel_memset and came out +33 % SLOWER (serial
+    // 0.478-0.481 ms, pooled 0.617-0.639 ms, four interleaved rounds). This
+    // clear is DRAM-bandwidth-bound, so extra workers add synchronisation and
+    // no bandwidth — one sighting of perf.law.L1_fanout_threshold. The flag was
+    // deleted 2026-08-29; the refutation lives in the ledger
+    // (5e72dd2e4e6c / 2dab7c032afc). Serial it stays.
+    auto MSET = [](void* d, size_t n) { std::memset(d, 0, n); };
     MSET(plane.data(), plane.size());
     MSET(zplane.data(), zplane.size() * sizeof(uint16_t));
     // Also clear the ownership plane each frame so foreground commits

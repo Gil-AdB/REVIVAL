@@ -484,7 +484,6 @@ static void Reflected_Transform(Scene *Sc)
 	// Sc->NZP is the mirror pass's near plane (Render() runs with the same
 	// scene near/far as the main pass — the camera is reflected, not the
 	// frustum), i.e. the same value Transform_Objects passes as cam.nearZ.
-	const bool  tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
 	const float bboxNearZ    = Sc->NZP;
 	// --needle_cull: degenerate-face pre-reject, same near plane, same read-once
 	// shape as the bbox flag above. See FDS/Base/FaceNeedle.h.
@@ -857,12 +856,12 @@ OUT:
 				e->face    = F;
 				// S2 tile pre-reject bbox — the mirror pass needs it too.
 				// Without this the aggregate push left the cover-all default
-				// on every entry, so --tile_bbox_cull was INERT here and each
-				// of the 30 tiles handed all ~20 700 faces to the clipper
+				// on every entry, so the tile pre-reject was INERT here and
+				// each of the 30 tiles handed all ~20 700 faces to the clipper
 				// (621 180 pairs vs the main pass's 29 671 at city t=1961).
 				// Pure reject, byte-identical — see FDS/Base/FaceBBox.h.
-				if (tileBboxCull) fds::FaceBBox_Stamp(e, F, bboxNearZ);
-				else { e->bbMinX = e->bbMinY = -32768; e->bbMaxX = e->bbMaxY = 32767; }
+				// (The A/B dial was --tile_bbox_cull, deleted 2026-08-29.)
+				fds::FaceBBox_Stamp(e, F, bboxNearZ);
 			}
 		}
 	}

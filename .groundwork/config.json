@@ -27,7 +27,8 @@
         "md5_pin": 4,
         "md5_single": 2,
         "commit": 1,
-        "narrative": 1
+        "narrative": 1,
+        "image": 2
       }
     },
     "state": {
@@ -39,7 +40,8 @@
         "single_run": 3,
         "commit": 1,
         "narrative": 1,
-        "doc": 1
+        "doc": 1,
+        "image": 2
       }
     },
     "frame_ms": {
@@ -55,7 +57,8 @@
         "image_read": 1,
         "commit": 1,
         "narrative": 1,
-        "doc": 1
+        "doc": 1,
+        "image": 2
       }
     },
     "pct_delta": {
@@ -70,7 +73,8 @@
         "single_run": 3,
         "commit": 1,
         "narrative": 1,
-        "doc": 1
+        "doc": 1,
+        "image": 2
       }
     },
     "share_pct": {
@@ -85,7 +89,8 @@
         "single_run": 3,
         "commit": 1,
         "narrative": 1,
-        "doc": 1
+        "doc": 1,
+        "image": 2
       }
     },
     "world_units": {
@@ -97,7 +102,8 @@
         "single_run": 3,
         "commit": 1,
         "narrative": 1,
-        "doc": 1
+        "doc": 1,
+        "image": 2
       }
     },
     "world_units_range": {
@@ -109,7 +115,8 @@
         "single_run": 3,
         "commit": 1,
         "narrative": 1,
-        "doc": 1
+        "doc": 1,
+        "image": 2
       }
     },
     "pixel_delta": {
@@ -121,7 +128,8 @@
         "battery": 4,
         "image_read": 2,
         "commit": 1,
-        "narrative": 1
+        "narrative": 1,
+        "image": 2
       }
     },
     "hole_px": {
@@ -132,7 +140,8 @@
         "battery": 5,
         "single_run": 3,
         "commit": 1,
-        "narrative": 1
+        "narrative": 1,
+        "image": 2
       }
     },
     "look": {
@@ -145,7 +154,8 @@
         "md5_pin": 1,
         "commit": 1,
         "narrative": 1,
-        "doc": 1
+        "doc": 1,
+        "image": 2
       }
     }
   },

@@ -1544,7 +1544,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	const bool _mcensus  = (_mcensusN > 0) && (xresOverride < 0);
 #endif  // FDS_VIS_CENSUS
 
-	// SoA Phase 2a — INLINE SoA STORE (--xfrm_soa_inline).
+	// SoA Phase 2a — INLINE SoA STORE.
 	// Phase 1 shipped the AoS->SoA dual write as a SEPARATE post-pass sweep
 	// (VertexFrame_DumpFromAoS at AfterXForm): a second walk over the mesh's
 	// whole Vertex array, re-reading 16 of the 136 bytes per vertex that the
@@ -1555,8 +1555,10 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// ~130 MB of cache lines. With this on, each per-vertex loop stores the
 	// same four values into the SoA arrays as it goes and the sweep is
 	// skipped. BIT-EXACT BY CONSTRUCTION: same values, same source, just
-	// stored one loop earlier — VertexFrame contents are identical.
-	const bool soaInline = fds::FeatureFlags::xfrm_soa_inline();
+	// stored one loop earlier — VertexFrame contents are identical, which is
+	// why the --xfrm_soa_inline A/B dial was deleted 2026-08-29 (it had been
+	// default ON and byte-identical at every pin since a1f89d43). The sweep
+	// still runs as the fallback when the frame cannot be resolved for a mesh.
 	const int  rcpMode   = fds::FeatureFlags::xfrm_rcp();
 
 #if not(DEBUG_PARTICLES)
@@ -1875,10 +1877,10 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 
 		// SoA Phase 2a: resolve the VertexFrame here (after the culls, before
 		// the per-vertex loops) so the loops can store straight into it. Same
-		// resolution the AfterXForm sweep does; when soaInline is off these
-		// stay null and the sweep runs exactly as before.
+		// resolution the AfterXForm sweep does; if it cannot be resolved these
+		// stay null and the sweep below runs instead.
 		float *soaX = nullptr, *soaY = nullptr, *soaZ = nullptr, *soaPY = nullptr;
-		if (soaInline) {
+		{
 			VertexFrame *FI_ = nullptr;
 			if (scratch) {
 				FI_ = &scratch->cloneOf(T).frame;   // cloneOf already ensureSized it
@@ -2714,11 +2716,11 @@ AfterXForm:
 		// reading from is cache-friendly (sequential reads at pack(1)
 		// stride). Eventually Transform's per-vert loops will write
 		// SoA directly and this sweep goes away.
-		// SoA Phase 2a: with --xfrm_soa_inline the per-vertex loops above have
-		// already stored TPos_x/y/z + PY, so this whole re-read sweep is dead
-		// work. `soaX == nullptr` means the frame couldn't be resolved/sized
-		// for this mesh — fall back to the sweep so the SoA never goes stale.
-		if (!(soaInline && soaX)) {
+		// SoA Phase 2a: the per-vertex loops above have already stored
+		// TPos_x/y/z + PY, so this whole re-read sweep is dead work.
+		// `soaX == nullptr` means the frame couldn't be resolved/sized for this
+		// mesh — fall back to the sweep so the SoA never goes stale.
+		if (!soaX) {
 			VertexFrame *F_ = nullptr;
 			if (scratch) {
 				// cloneOf already ensureSized'd clone.frame.
@@ -2751,10 +2753,10 @@ AfterXForm:
 				}
 			}
 		}
-		// Same bit-for-bit audit for the INLINE path (--xfrm_soa_inline +
-		// --soa-verify): the stores happened one loop earlier, so this
-		// re-checks them against the AoS the sweep would have copied from.
-		if (soaInline && soaX && fds::FeatureFlags::soa_verify()) {
+		// Same bit-for-bit audit for the INLINE path (--soa-verify): the stores
+		// happened one loop earlier, so this re-checks them against the AoS the
+		// sweep would have copied from.
+		if (soaX && fds::FeatureFlags::soa_verify()) {
 			const uint32_t nv = T->VIndex;
 			for (uint32_t i = 0; i < nv; ++i) {
 				if (soaX[i]  != tVerts[i].TPos_AOS.x ||
@@ -2811,8 +2813,9 @@ AfterXForm:
 	// rasterizer walk can 4-compare-reject it before the Face deref. Filled
 	// only when the flag is on (flag-off leaves the FListEntry's cover-all
 	// default -> the walk never rejects -> today's exact path, byte-identical).
-	// Read the flag + nearZ once per mesh.
-	const bool tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
+	// (The A/B dial was --tile_bbox_cull, default ON and a PURE reject — the
+	// clipper already clips to the tile, so its two arms were byte-identical.
+	// Deleted 2026-08-29; the stamp is unconditional now.)
 	// --needle_cull: the degenerate-face pre-reject (FDS/Base/FaceNeedle.h holds
 	// the threshold, the contract and the census). Read once per mesh, like the
 	// bbox flag beside it; the near plane it needs is bboxNearZ, already hoisted.
@@ -3241,7 +3244,7 @@ AfterXForm:
 			// 1px margin, int16-saturated); the clipper only SHRINKS coverage,
 			// so a box that misses the tile means zero output there → the
 			// reject is byte-identical to clipping.
-			if (tileBboxCull && !(xab && (_xablate & XAB_NO_BBOX))) {
+			if (!(xab && (_xablate & XAB_NO_BBOX))) {
 				const Vertex* va = F->A; const Vertex* vb = F->B; const Vertex* vc = F->C;
 				const float za = va->TPos_AOS.z, zb = vb->TPos_AOS.z, zc = vc->TPos_AOS.z;
 				if (za > bboxNearZ && zb > bboxNearZ && zc > bboxNearZ) {
