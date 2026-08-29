@@ -79,6 +79,59 @@ Vectorising the leg's own arithmetic (everything but `fastExpNeg` /
 the §00k2 contraction rules** — `gY = w10*Xc + w11*Yc + w12` and
 `uV = Xc*Xc + Yc*Yc + 1` are both "A+B+C of products", the exact shape rule 2
 covers. Ceiling on it is ~0.12 Gi/f.
+## 2026-08-29b — chase round 2: water-glints decomposed and ported, and chase's sky turns out to be painted by the reflection pass
+
+Full account: `docs/PERF_STATE.md` §00o (renumbered from §00n at the merge -- the SSAO round took that letter the same day).
+
+**LANDED, byte-null (all 14 pins + render_gate 4/4).** `--water_glints_batch`,
+**DEFAULT 0**. Batches chase's varied glint pass the way `RenderGlints` has been
+batched since the city round. Same-binary flag flip, min-of-9, quiet box:
+`water-glints` **−30 % at every watered pose** (t=400 −2.397, t=800 −2.401,
+t=1600 −4.186 ms), tick **−4.2 % / −5.6 % / −11.1 %**. t=1105 is +0.022 ms — 691
+live water pixels, nothing to batch. **OFF by default because it is not
+byte-null: 450/304/241/76/2934 px move at the five pins, every one by max |Δ| 1.**
+
+### OPEN ITEMS
+
+1. **`water-glints` at chase t=1600 is 14.296 ms — 33.6 % of that pose's whole
+   tick**, nearly double t=800's 8.089. §00m sampled t=800/t=1105 only and
+   under-described the row by 2×. Any future chase map must include t=1600.
+
+2. **The batched port's last LSB.** 241 px at t=800, bisected to the slope
+   kernel (not the caustic tap, not the specular tail). Five pinning attempts
+   logged in §00o with their pixel counts. It cannot be closed by copying
+   `waterWaveSlope8`'s spelling because `waterWaveSlopeVaried` gets a different
+   fmadd chain from clang. **Next attempt starts with that function's
+   disassembly, not another guess.** Closing it flips the flag's default.
+
+3. **The scan pre-reject.** The pass ray-casts all 2 073 600 pixels every frame:
+   **0.461 ms at t=800 (5.7 % of the row) and 0.400 ms at t=1105, where it is
+   102 % of the row** — the pass spends its entire time finding 691 pixels.
+   A conservative per-tile bound (§00f's shadow-reject shape) is byte-null by
+   construction and worth ~0.4 ms at water-poor poses.
+
+4. **What is left in the row is a LOOK call, not a perf item.** After the port,
+   t=800's shading is caustics **30.2 %** + four libm `cos`/`sin` **24.4 %** =
+   54.6 % of the row, and neither can be reduced without changing how the water
+   looks. Parallel efficiency is already 10.0 of 12; this is not a threading row.
+
+5. **CORRECTION to §00m, and it matters: chase's SKY is painted by the
+   reflection pass.** §00m blamed the sky movement under `--refl_skip_cones` on
+   additive HDR accumulation. That is refuted — `Hdr_BeginFramePass` zeroes
+   `g_hdrBuf` every pass and the tonemap writes every pixel ungated. The truth is
+   structural: both `Render()` calls target the same VPage, and the engine
+   classifies `zEnc == 0` as "sky OR the water's reflection underlay"
+   (`DeferredFastFog.cpp:2220`) — **one pixel class** — which reach `g_hdrBuf`
+   only via the VPage lift. So the main pass lifts the reflection's sky and ships
+   it. `--refl_skip_post`, a reflection-only flag, moves **713 917 of 768 000 sky
+   pixels (93.0 %)**, and the red stops exactly at the terrain silhouette:
+   `docs/img/chaserefl/skyleak_post_t000800_where.png`. **Not a lifetime bug — a
+   classifier defect**; the correct predicate (ray-cast to the water plane)
+   already exists in `ProceduralWater.cpp`. Visible harm today is small (mirrored
+   beams wash the sky at ≤4/255, zero pixels reach 8/255); the hazard is that any
+   change to the reflection pass silently repaints the sky. Not fixed: a fix
+   changes where the sky comes from, so it cannot be byte-null.
+
 
 ## 2026-08-29 — **THE MOVEMASK SWEEP (only the cone kernel converts) and `lightSphereScreenRect` PROVEN TO DROP REAL LIGHT (max 5/255, 6 of 39 poses)**. Sweep DONE / bug REPORTED, not fixed
 
@@ -504,6 +557,93 @@ pick, a live-water weight, a tilt + re-projection, and one or two
 this (reflect dir, Fresnel, mip) and arms on 33–37 % of groups; the *fetch* is
 still eight scalar bilinear taps. That is the biggest single block left, and it
 is a different shape from anything the campaign has attacked.
+
+## 2026-08-29b — **THE SSAO ROW IS CLOSED AT THE BIT-EXACT LEVEL.** The depth gather is REFUTED (−9.8 % instructions, +2.5 % cycles) and the `gtaoAcos` sqrt look call is priced at NOTHING — it comes off the decision stack
+
+Continuation of **2026-08-29**. Same branch, same arms. Nothing landed this
+round that changes a pixel or a cycle; what landed is three instruments and two
+refutations, and the conclusion that the row has no bit-exact work left in it.
+
+### The row as it stands (five scopes, greets t=5743 / chase t=1105)
+
+| scope | greets ms | % | IPC | effPar | chase@main | chase@refl |
+|---|--:|--:|--:|--:|--:|--:|
+| `ssao-march` | 4.751 | **69.6** | 3.27 | 11.2 | 4.561 | 2.058 |
+| `ssao-apply` | 1.762 | 25.8 | **5.29** | 11.0 | 1.687 | 0.504 |
+| `ssao-blur` | 0.272 | 4.0 | 3.66 | 9.7 | 0.269 | 0.265 |
+| `ssao` | 6.827 | | 3.80 | | 6.552 | 2.877 |
+
+(chase now splits `@refl` / `@main` — the cone round's `TailProf::PassTag`
+composing with these scopes.)
+
+### REFUTED — vectorising the march's depth gather
+
+Priced first: `-DFDS_SSAO_DIAG=4` removes the whole gather, **loads included**, and
+it is **0.105 Gi/f = 19.8 % of the march**, with cycles moving proportionally
+(IPC 2.777 → 2.757) — i.e. **instruction-bound, not stalled on the scattered u16
+loads**, which are only ~8 % of its instructions. That reading is what justified
+building it. Built bit-exact; three interleaved rounds:
+
+| arm | Gi/f | Gcyc/f | IPC |
+|---|--:|--:|--:|
+| scalar (shipping) | 0.529 | 0.159–0.164 | **3.29** |
+| vector, narrow stores | 0.479 | 0.168–0.170 | 2.83 |
+| vector, lane inserts | 0.477 | 0.163–0.166 | 2.90 |
+
+**−9.8 % instructions for +2.5 % cycles.** Within-arm spreads are 0.001–0.003
+Gcyc, so the direction is not noise. The scalar loop's eight iterations are
+INDEPENDENT and the out-of-order engine was already overlapping their loads with
+the surrounding vector arithmetic; the vector form replaces that with one
+dependency chain (index → spill → eight dependent loads → widen → mask →
+convert). The first variant additionally put a narrow-store-to-wide-load
+forwarding stall on that chain; `vld1q_lane_u16` inserts remove that half, and
+the chain half does not go away. Reverted; kept as **`-DFDS_SSAO_VECGATHER=ON`**
+because on a target with a real hardware gather the balance could invert.
+
+**THIRD OCCURRENCE OF ONE LAW, now stated as one:** cone round C6 ("register
+pressure beats op count"), the engine-wide movemask sweep (bit-exact,
+instruction-cheaper, cycle-NEUTRAL in the lighting kernel, IPC 4.08 → 3.94), and
+this. **An 8-iteration independent scalar loop in these kernels is not
+automatically improved by vectorising it — price it in CYCLES before believing
+the instruction count.**
+
+### REFUTED — and this one closes an item in Gil-Ad's stack
+
+`gtaoAcos_x8`'s two `_mm256_sqrt_ps` were declined by a prior round as "not
+byte-safe, flips ~0.3 % of samples" — declined on look grounds, never priced.
+Priced now (`-DFDS_SSAO_DIAG=5`), three interleaved rounds: the rsqrt
+substitution is **+1.9 % instructions, +3.1 % cycles, no better on wall**.
+`fsqrt.4s` on this core beats rsqrt + multiply + the max-guard the substitution
+needs to stay finite. **There is no look call to make: the faster-looking option
+is not faster.** Closed, not deferred.
+
+### Two instrument defects of mine, both found by disbelieving a good number
+
+1. Ladder stages 1–4 are CUMULATIVE (`>= n`) and stage 5 read as `>= 4`, so the
+   first DIAG=5 run also deleted the gather and reported the substitution as
+   worth −19.5 % of the row and moving **99.13 % of pixels**. Both were the
+   gather. Stage 5 is now `== 5`; the header states which stages are cumulative.
+2. S1 (2026-08-29) rewrote the slice setup and deleted DIAG stages 1–3 with it,
+   so a DIAG=2 run now measures NOTHING — and my reading of "0.530 vs 0.529, the
+   slice setup is free post-S1" was a dead instrument. **WITHDRAWN.** What is
+   established about S1 is its own A/B: −0.092 Gi/f of the 0.140 priced.
+
+### Why the row is closed at the bit-exact level
+
+* the per-lane slice setup — **taken** (2026-08-29, −16.5 %/−22.0 % of the march)
+* the depth gather, 19.8 % — **refuted above**
+* `gtaoAcos_x8`'s sqrts — **refuted above**, and the look call with them
+* the vec loop's bare `_mm256_rsqrt_ps` — still a genuine look/precision item in
+  his stack (2026-08-17a), untouched, and not a perf lever either way
+* the reconstruct, the bitmask build and the popcount — **already vector**, the
+  popcount by clang itself (2× `cnt.16b`)
+* `ssao-apply` at **IPC 5.29** is at the core ceiling; `ssao-blur` is 4 % of the row
+
+The next ms in this pass has to come from doing less work — fewer slices, fewer
+steps, a coarser grid — and every one of those is a quality dial, i.e. his call,
+not a lever. `--ssao_gtao_slices=1` and `--ssao_gtao_steps=2` are already
+measured (−31 % / −23 % of the row, `PERF_STATE` §00l.4) and remain the honest
+menu if he wants the time back.
 
 ## 2026-08-29 — **`Render_SSAO` DECOMPOSED, and the split's target taken: the march's per-lane slice setup goes 4-wide BIT-EXACT — `ssao` −9.3 % (greets) / −16.4 % (chase), march −16.5 % / −22.0 %.** DONE (S1; two candidates refuted by census before coding)
 

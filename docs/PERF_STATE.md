@@ -58,6 +58,308 @@
 
 ---
 
+## 00p. THE SSAO ROW IS CLOSED AT THE BIT-EXACT LEVEL — 2026-08-29b: the depth gather is refuted (−9.8 % instructions, **+2.5 % cycles**) and `gtaoAcos`'s sqrt look call prices at **nothing**
+
+> **SECTION LETTER:** §00o is the chase agent's (they renumbered from §00n when my SSAO round took that letter the same day); this round is §00p.
+
+Continuation of §00n. Nothing landed that moves a pixel or a cycle; what landed
+is instruments and two refutations. Full account: `docs/OPTIMIZATION_BACKLOG.md`
+**2026-08-29b**.
+
+| scope | greets ms | % of row | IPC | effPar | chase@main | chase@refl |
+|---|--:|--:|--:|--:|--:|--:|
+| `ssao-march` | 4.751 | **69.6** | 3.27 | 11.2 | 4.561 | 2.058 |
+| `ssao-apply` | 1.762 | 25.8 | **5.29** | 11.0 | 1.687 | 0.504 |
+| `ssao-blur` | 0.272 | 4.0 | 3.66 | 9.7 | 0.269 | 0.265 |
+
+**The depth gather (19.8 % of the march, priced with `-DFDS_SSAO_DIAG=4`, loads
+included) vectorises BIT-EXACTLY and loses.** −9.8 % instructions, **+2.5 %
+cycles**, IPC 3.29 → 2.90, three interleaved rounds, within-arm Gcyc spreads of
+0.001–0.003. The scalar loop's eight iterations are independent and were already
+being overlapped with the surrounding vector work; the vector form serialises
+them behind one dependency chain. Kept as `-DFDS_SSAO_VECGATHER=ON`.
+**Third occurrence of the same law** (cone C6; the movemask sweep's
+cycle-neutrality in the lighting kernel; this) — *an 8-iteration independent
+scalar loop here is not automatically improved by vectorising it; price it in
+cycles.*
+
+**`gtaoAcos_x8`'s two `_mm256_sqrt_ps` price at nothing.** The rsqrt substitution
+a prior round declined on look grounds (~0.3 % of samples flip) is **+1.9 %
+instructions and +3.1 % cycles** — `fsqrt.4s` beats rsqrt + multiply + the
+finiteness guard on this core. **The look call is moot and comes off the stack.**
+
+**Bounds safety, proved not assumed** (`-DFDS_SSAO_VERIFY`, scalar behind vector
+per term, plus a count of how often the guard FIRES): 0 sz and 0 any-flag
+mismatches over 8 294 400 lanes at each of greets t=5743, t=2845 and chase
+t=1105, while the guard caught **12.18 % / 12.22 % / 5.04 %** of lanes. A guard
+that never trips proves nothing; this one trips on one lane in eight.
+
+**Why closed:** slice setup taken (§00n); gather refuted; acos sqrts refuted;
+reconstruct/bitmask/popcount already vector (the popcount by clang, 2× `cnt.16b`);
+apply at IPC 5.29 is at the ceiling; blur is 4 %. The remaining `_mm256_rsqrt_ps`
+refinement is a genuine look item in his stack and not a lever either way. **The
+next ms here has to come from fewer slices/steps or a coarser grid — quality
+dials, already measured at −31 % / −23 % in §00l.4, and his call.**
+
+---
+
+---
+
+## 00o. `water-glints` DECOMPOSED AND PORTED — 2026-08-29: the 20× pose swing is **a fixed 0.43 ms scan plus 6.8 ns per live water pixel**, at t=1105 the pass spends **102 % of its time deciding it has nothing to do**, and the port lands **−30 % of the row at every watered pose** — but for the opposite reason to the one the map gave
+
+*(Numbered §00o, not §00n: the SSAO round landed its own §00n on `fog-wt` the same day — see the section below. Same collision §00l/§00m hit last round; the letters are allocated per branch and reconciled at the merge.)*
+
+Branch `rev-chaseperf`. §00m handed on `water-glints` — 7.999 ms, 16.0 % of
+chase's t=800 tick, `DEMO/ProceduralWater.cpp`, OUTSIDE `renderFrame`, swinging
+20× across poses (7.999 → 0.397 ms) and never examined. This is the examination.
+
+### THE SWING'S CAUSE — measured, and it is not what "20×" suggests
+
+`--water_census` counts what the pass's whole-framebuffer ray-cast actually finds:
+
+| pose | scanned/f | rej above-horizon | rej far | rej occluded | **LIVE** | live % |
+|---|--:|--:|--:|--:|--:|--:|
+| t=800 | 2 073 600 | 837 120 | 15 360 | 103 221 | **1 117 899** | 53.91 % |
+| t=1105 | 2 073 600 | 906 240 | 34 560 | 1 132 109 | **691** | 0.03 % |
+
+**Live water swings 1618×. The row swings 20×.** Those two numbers cannot both
+describe the same cost, and the gap is the finding: if the row were pure
+per-pixel shading, t=1105 would cost `7.999 × 691/1 117 899` = **0.005 ms**. It
+costs 0.397 — **80× more than its live pixels justify.**
+
+A two-term fit (`ms = scan + k·live`) gives **k = 6.80 ns per live pixel** and a
+**fixed scan of 0.392 ms**, and it was then CONFIRMED by an independent probe
+rather than left as a fit — `-DFDS_WGLINT_ABLATE=7`, which keeps the ray-cast
+alive behind a `volatile` sink and shades nothing:
+
+| pose | row | **scan floor (arm 7)** | shading |
+|---|--:|--:|--:|
+| t=800 | 8.026 ms | **0.461 ms (5.7 %)** | 7.565 ms |
+| t=1105 | 0.392 ms | **0.400 ms (102.0 %)** | **−0.008 ms** |
+
+**At t=1105 the entire row is the scan.** The pass classifies 2 073 600 pixels
+to find 691, and the 691 cost nothing measurable. The swing is 20× and not
+1618× precisely because ~0.43 ms of the row does not vary with the water at all.
+
+**A REFUTED PROBE, recorded because it nearly became the answer.** The first
+scan probe (`ABLATE=6`) `continue`d with no sink and read **0.027 ms**, which
+would have said the scan was free. It is invalid: with the body empty the loop
+is side-effect-free and clang deletes it whole. Arm 6 is kept in the source as
+the record; arm 7 is the probe that holds the loop up. A 15× wrong answer.
+
+### WHERE THE 7.6 ms OF SHADING GOES (t=800, min-of-9, same-binary floor ±1.0 %)
+
+`-DFDS_WGLINT_ABLATE=N`, one binary per arm, interleaved, round 0 discarded.
+Arm 0 is measured twice from the same binary (`0`/`0b`) to expose the floor:
+**8.110 vs 8.028 ms = 1.0 %**, so nothing below ~1 % is real. Parallel
+efficiency is **10.0 of 12** — this row is NOT a parallelism failure; the lever
+is cycles per pixel (98.6 ms of core time over 1 117 899 px ≈ **262 cycles each**).
+
+| block removed | ms | Δ | **% of row** |
+|---|--:|--:|--:|
+| the caustics (3 cell taps + colour math) | 5.661 | −2.449 | **−30.2 %** |
+| the swell + macro roll (**3 `cos` + 1 `sin`, libm**) | 6.135 | −1.975 | **−24.4 %** |
+| the specular tail (`pow` + 3 normalizes) | 7.175 | −0.935 | −11.5 % |
+| the 3rd ripple octave (1 normal tap) | 7.359 | −0.751 | −9.3 % |
+| slope only (caustics AND specular off) | 3.833 | −4.277 | −52.7 % |
+
+At t=1105 the same ladder moves nothing outside the ±1 % floor (arms 1–5 span
+−3.2 % to +6.9 %), which is the ledger agreeing with itself: with 691 live
+pixels there is no shading to ablate.
+
+### THE PORT — predicted BEFORE measuring, and the map's inference is REFUTED
+
+§00l item 7 held that `--water_slope_vec8` (−34 % cycles, byte-null on city) had
+never reached chase's separate `waterWaveSlopeVaried`, and inferred **1.5–2.5 ms**
+sitting there. Chase's copy is indeed unported — and worse than unported, it is
+**structurally unbatched**: `RenderGlintsVaried` evaluates the slope scalar per
+pixel, where `RenderGlints` has collected live pixels and flushed in eights since
+the city round. So the port applies.
+
+**The ablation says the 8-wide gather ALONE cannot pay for that.** The 8-wide
+form can only address the *normal-map taps*. Chase's varied slope is 3 taps
+**plus 4 libm transcendentals**, and a vector `sin`/`cos` is a different
+polynomial from the platform libm's — it cannot be byte-null, so the trig must
+stay scalar per lane. The trig is **24.4 % of the row (1.975 ms) and is
+unreachable by this port by construction.** Addressable: the 3 taps, ≈ 2.2 ms of
+the row (the 3rd octave alone measures 0.751 ms). At city's −34 % that is a
+**predicted −0.75 ms, ≈ 9 % of the row and ≈ 1.5 % of the tick** — a third of
+the low end of the map's range.
+
+**That prediction is recorded because it was WRONG, and the way it was wrong is
+the finding.** The port measured **−2.4 ms**, squarely inside the map's 1.5–2.5 ms.
+So §00l's NUMBER was right and its MECHANISM was not: the money is not in the
+8-wide gather it named, it is in the BATCHING that the gather merely requires.
+See the port section below.
+
+### THE PORT, BUILT — **−29.9 % of the row, and the prediction was wrong by 3× in the GOOD direction**
+
+`--water_glints_batch`, **DEFAULT 0**, routes chase to `RenderGlintsVariedBatched`:
+a row's live pixels collected and flushed in eights through a new
+`waterWaveSlopeVaried8` (the three `sampleWaterNrm` taps 8-wide; the four libm
+`cos`/`sin` **scalar per lane**, because a vector transcendental is a different
+polynomial and could never be byte-null), plus a pinned varied caustic tap.
+
+Same-binary flag flip, min-of-9, quiet box (`demo=0 build=0` both ends), his
+arm, four poses. Within-arm floors from the duplicated OFF arm: +0.06 / +0.12 /
+−1.01 / −0.34 %.
+
+| pose | `water-glints` off → on | Δ row | tick off | Δ tick |
+|---|--:|--:|--:|--:|
+| t=400 | 7.785 → 5.388 | **−2.397 (−30.8 %)** | 51.299 | −2.139 (−4.2 %) |
+| t=800 | 8.089 → 5.688 | **−2.401 (−29.7 %)** | 50.490 | −2.817 (−5.6 %) |
+| **t=1600** | **14.296 → 10.110** | **−4.186 (−29.3 %)** | 42.581 | **−4.716 (−11.1 %)** |
+| t=1105 | 0.398 → 0.420 | +0.022 (+5.5 %) | 45.376 | +0.499 (+1.1 %) |
+
+**Predicted −0.75 ms (−9 % of the row). Measured −30 % of the row at every pose
+that has water**, and −4.2 to −11.1 % of the whole tick.
+
+**And t=1600 was not on anyone's map**: its `water-glints` row is **14.296 ms —
+33.6 % of that pose's entire tick**, nearly double t=800's. §00m sampled t=800
+and t=1105 and therefore under-described this row by a factor of two.
+
+**Why the prediction was 3× low, and it is the lesson of the round:** it counted
+only the tap vectorisation. **Most of the win is the BATCHING, not the 8-wide
+gather.** Collecting live pixels and shading them in a tight flush of eight is
+worth more than making the taps wide, because it is the loop shape that changes —
+the rejects stop interleaving with the shading. `--water_slope_vec8` was the
+headline of §00l item 7 and it is the smaller half of its own port.
+
+Not universal: at t=1105 it is **+0.028 ms (+7.1 % of a 0.39 ms row)** — batching
+overhead on a pose with 691 live pixels and nothing to batch. This is a
+t=800-shaped win.
+
+### WHY IT IS DEFAULT OFF — 241 px at ONE LSB, and three pinning attempts that failed
+
+**It is not byte-null.** At the five chase pins the flag moves
+**450 / 304 / 241 / 76 / 2934 px** of 2 073 600 (0.004 – 0.142 %), and **every
+one of them by max |Δ| = 1**. Never 2. It is a pure last-bit contraction residue.
+
+The pinning ladder, recorded so the next attempt does not repeat it:
+
+| attempt | change | px at t=800 |
+|---|---|--:|
+| 1 | qx/qz rotation spelled UNFUSED, caustic tap unpinned | 403 |
+| 2 | qx/qz **FUSED** (as `-ffp-contract=fast` compiles the scalar) + a pinned `causticCellVariedGlints` twin | **241** |
+| 3 | scroll coords u1/v1/u2/v2/u3/v3 fused too | 62 → **worse** (they really are unfused) |
+| 4 | `vLen2` pinning removed | 53 (ABLATE=3 arm) — **no change either way** |
+| 5 | 3rd octave made scalar per lane | 287 — **worse** |
+
+The bisect that localised it: with the caustics ablated the residue is 53 px, so
+it is in the **slope kernel**, not the caustic tap or the specular tail. The
+reason it cannot be closed by copying `waterWaveSlope8`'s spelling is that
+**`waterWaveSlopeVaried` is a different function from `waterWaveSlope`** — the
+trig and the third tap change its register pressure and clang gives it a
+different fmadd chain. An 8-wide form that is byte-null against one scalar is
+not byte-null against the other. Closing it needs the varied function's own
+disassembly, which is the next attempt's first step, not a guess.
+
+### A TRAP THAT COST THE DEFAULT ARM ITS PINS, AND IS WORTH THE NEXT ROUND KNOWING
+
+Splitting the pass into `RenderGlintsVaried` (untouched) + `RenderGlintsVariedBatched`
+**broke the default arm** — all five chase pins moved — even though the default
+function's source was restored from `HEAD` **verbatim, character for character**.
+Cause: the batched dispatcher's scalar fallback also called
+`waterWaveSlopeVaried`, giving it **TWO callers**; clang stopped inlining it into
+the default loop and its fmadd chain reshaped. The fix is a private verbatim twin
+(`waterWaveSlopeVariedB`) so each path keeps exactly one caller — after which all
+five pins return byte-identical. **In this file, adding a second CALLER is as
+much of an edit as changing the arithmetic.**
+
+### ITEM 2 — THE "CONE LEAK" IS NOT A LEAK AND NOT A LIFETIME BUG. **Chase's entire sky is painted by the reflection pass**, and the classifier that does it cannot tell sky from water.
+
+§00m found that `--refl_skip_cones` moves 224 466 SKY pixels and called the
+mechanism "the reflection's cone radiance accumulating into the shared HDR
+buffer". **That mechanism is REFUTED, twice, by reading the code it names:**
+
+* `Hdr_BeginFramePass` (`FDS/RENDER/Hdr.cpp:31`) does
+  `std::fill(g_hdrBuf.begin(), g_hdrBuf.end(), 0.0f)` **every pass**, and
+  `hdr-begin` is measured in BOTH passes (0.117 @refl / 0.128 @main). Nothing
+  additive survives in `g_hdrBuf` across the pass boundary.
+* `Render_TonemapToVPage` (`Hdr.cpp:897`) writes `row[x] = …` for **every pixel
+  with no coverage gate**. The main pass's tonemap cannot leave reflection bytes
+  standing in VPage either.
+
+**WHAT IS ACTUALLY HAPPENING.** Chase's two `Render()` calls (`CHASE.CPP:1521`
+and `:1545`) both target the **same main VPage at the same resolution** — there
+is no offscreen reflection target. The reflection paints the whole screen first;
+the main pass then renders over it and the transparent water composites against
+what is underneath. That is the intended underlay. The defect is the predicate
+that selects it. `DeferredFastFog.cpp:2220` states it outright:
+
+> `// zEnc==0 pixels are sky OR the water's reflection underlay`
+
+Sky and underlay are **the same pixel class** — neither writes Z — and
+`DeferredCommon.h:372` records that such pixels "reach `g_hdrBuf` only via the
+VPage lift". So the main pass lifts whatever the reflection pass left in VPage
+into its own HDR buffer, tonemaps it, and ships it as chase's sky.
+
+**THE PROOF IS ONE IMAGE.** `docs/img/chaserefl/skyleak_post_t000800_where.png`
+flags every ABOVE-HORIZON pixel that moves when `--refl_skip_post` — a
+reflection-pass-only flag — is flipped. **713 917 of 768 000 sky pixels (93.0 %)
+move, and the red stops exactly at the terrain silhouette and the lighthouse**,
+i.e. exactly where `zEnc != 0`. A flag that by construction touches only the
+reflection pass cannot repaint the sky unless the sky IS the reflection pass's
+output. The census agrees on the denominator: 837 120 of 2 073 600 pixels are
+above-horizon at this pose (`--water_census`, `rej_near`).
+
+**ANSWER TO (a): neither intended nor a buffer-lifetime bug.** It is not the
+fountain→greets peel-floor class (stale state crossing a scene boundary); every
+buffer here is correctly cleared. It is a **classifier defect**: the underlay is
+deliberate and correct for water, and `zEnc == 0` is simply not a water test.
+
+**ANSWER TO (b): the correct scoping already exists in the frame.** The water
+pass computes the exact predicate — ray-cast to the water plane, in front of the
+eye, inside the far plane, not occluded (`ProceduralWater.cpp`, and `Census()`
+counts it: 1 117 899 live water px at t=800 against 837 120 above-horizon). The
+underlay should be admitted on that test, not on `zEnc == 0`.
+
+**HOW BAD IS IT TODAY? SMALL, AND I WILL NOT OVERSELL IT.** The reflection's sky
+and the main sky are largely the same skycube, mirrored, so the visible residue
+is a wash, not an artefact:
+
+| arm | sky px moved | % of sky | mean \|Δ\| | ≥8/255 | max |
+|---|--:|--:|--:|--:|--:|
+| `--refl_skip_cones` (mirrored beams) | 224 466 | 29.2 % | 1.02 | **0** | 4 |
+| `--refl_skip_post` (whole refl post chain) | 713 917 | 93.0 % | 2.80 | 34 463 | 30 |
+
+The base sky is nearly black (mean luminance 9.86/255), so 1–2/255 is a real
+*relative* wash on it — but **zero pixels of the mirrored-beam residue reach even
+8/255**. Nobody is going to see upside-down beams in chase's sky today.
+
+**THE REASON TO CARE IS THE HAZARD, NOT THE PIXELS.** Chase's sky is a
+downstream product of the reflection pass, so *any* future change to that pass
+silently repaints it — and `--refl_skip_post` is the demonstration, moving 93 %
+of the sky at up to 30/255. That is also why §00m's menu is entangled: part of
+what `--refl_skip_cones` buys is sky, not reflection.
+
+**NOT FIXED HERE, deliberately.** A fix changes where chase's sky comes from, so
+it is not byte-null in the intended path and cannot merge under this round's
+rules. It is filed as a bug with the reproduction recipe below.
+
+**REPRODUCTION:** build the tip, then from `Runtime/` with dummy drivers
+```
+./DEMO --snapshot=chase@t=800 --out=A --deferred --hdr --hdr-linear \
+       --texture-filter=2 --ssao --ssao-gtao --profiler=0
+./DEMO --snapshot=chase@t=800 --out=B --deferred --hdr --hdr-linear \
+       --texture-filter=2 --ssao --ssao-gtao --profiler=0 --refl_skip_post
+```
+Every pixel above the terrain silhouette differs. Add `--water_census` for the
+above-horizon denominator.
+
+
+### NEXT CHASE TARGET
+
+Not the vec8 port's remainder. `water-glints` at t=800 is **7.6 ms of shading**
+whose two biggest blocks — **caustics 30.2 % and the four libm trig 24.4 %,
+54.6 % together** — can only be reduced by changing how the water LOOKS, and
+that is his call, not a perf decision. The byte-null levers left in this row are
+small: closing the batched port's last LSB (worth turning a flag ON, not new ms)
+and a conservative pre-reject for the scan, which is **102 % of the row at
+t=1105** and ~0.43 ms everywhere. The scan pre-reject is the honest next item —
+same shape as §00f's per-tile shadow reject — and it is worth ~0.4 ms at
+water-poor poses and ~0.2 ms at water-rich ones.
+
 ## 00n. `Render_SSAO` DECOMPOSED — 2026-08-29: the row had ONE scope and an INFERRED interior; it now has five, the inference is CONFIRMED, and the march's per-lane slice setup goes 4-wide **bit-exact** for `ssao` −9.3 % (greets) / **−16.4 % (chase)**
 
 §00l item 3 named the decomposition as "step one" and priced the interior by
