@@ -97,6 +97,29 @@ output), and **(B) deliberately neutered by the snapshot harness**.
 Items 1–3 are the ones that have actually cost something. Item 9 is the one
 still open: **no gate in this repo runs two scenes in one process.**
 
+### THE KNOWLEDGE EXISTED; THE GATE COVERAGE DID NOT
+
+`./DEMO --help` has said this all along, and it is worth quoting because it
+means nobody needs convincing of the mechanism — only of the gap:
+
+> **REPRO** (headless INTERACTIVE harness — use when `--snapshot` CANNOT
+> reproduce a defect the user sees in his live run) … Runs the REAL scene
+> driver through the REAL per-frame path, scrubbing to t the way F1/F2 does,
+> so defects that need **accumulated per-frame state** appear. **`--snapshot`
+> renders ONE cold tick with the fine scene clock and the chunk-occlusion cull
+> pinned, and is blind to those by construction.**
+
+So `--repro` (and `docs/INTERACTIVE_REPRO.md`) is the sanctioned instrument for
+exactly this class, and it names the chunk-occlusion pinning explicitly. **What
+was missing was not the tool or the knowledge — it was that not one row of the
+gate suite used either.** `tools/warm_gate.sh` closes that with multi-pose
+`--snapshot`, which accumulates state across poses within one process (proven:
+the punt census reads 0 on pose 1 and 27.6 % from pose 2). A `--repro`-based
+row would exercise the real per-frame driver rather than the snapshot driver
+and is the natural next extension; I could not get `--repro=city@t=…` to emit
+PPMs in the time available, so it is left as a NOTED gap rather than a
+half-verified gate row.
+
 ### THE COVERAGE THAT NOW EXISTS
 
 `tools/warm_gate.sh` — fast pair (`city-warm`, `greets-warm`) for every gate
