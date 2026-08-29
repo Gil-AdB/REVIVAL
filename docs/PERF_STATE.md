@@ -58,6 +58,48 @@
 
 ---
 
+## 00r. greets' PASSENGER ROWS — 2026-08-29c: `RTT` ran its 96 lighting tiles **inline on the tick thread**; pooling them is **−24.1 %** byte-null. The other three rows are healthy, and `Tick-ReflXfrm`'s attribution is corrected **30×**
+
+> **SECTION LETTER:** §00q is the cross-tree-divergence round's; this is §00r.
+
+Full account: `docs/OPTIMIZATION_BACKLOG.md` **2026-08-29c**.
+
+**The diagnostic that decided the round is `cores = Gcyc / clock / wall`, not the
+instruction count** — the map reached for RTT because 0.020 Gi looked too small
+for 1.69 ms, which implied a stall; the cycles say something different and more
+useful:
+
+| row | wall | Gi/f | Gcyc/f | **cores** | IPC | verdict |
+|---|--:|--:|--:|--:|--:|---|
+| `shadow-bake` | 1.918 | 0.143 | 0.044 | 7.2 | 3.25 | healthy, **closed** |
+| `bloom-chain` | 1.904 | 0.218 | 0.050 | 8.2 | 4.36 | healthy, **closed** |
+| `Tick-SkyCube` (city) | 0.793 | 0.068 | 0.020 | 7.9 | 3.41 | healthy + view-dependent, **closed** |
+| **`RTT`** | 1.742 | 0.020 | 0.009 | **1.6** | 2.22 | **fixed** |
+
+**RTT is two genuine 512×512 offscreen renders a frame** (`rtt-bakejob` 1.765 ms
+at 2 calls/f; `rttj-xform` 0.321, `rttj-raster` 0.305, `rttj-light` 0.837) — not
+a stall, not a mislabelled scope. greets enables the feature itself via
+`FF::setDefault(BoolId::mirror_rtt, true)`, so the `.def` default of 0 is not
+what runs. The defect was `ov.inlineDispatch = true`: 96 lighting tiles serially
+on the tick thread while the pool sat idle.
+
+**`--mirror_rtt_pool` (default ON):** `rttj-light` 0.837 → **0.339 ms** (−59.5 %),
+**RTT 1.684 → 1.279 ms (−24.1 %)**, interleaved min-of-7. Predicted 0.2–0.35 ms
+before measuring. Byte-null, proved differentially on one binary at three greets
+poses. **The same flip on the RTT's cone pass regresses (+139 %, 0.064 → 0.153 ms)
+and is deliberately not taken** — that pass is ~64 µs, too small to amortise a
+semaphore round trip.
+
+**`Tick-ReflXfrm`, corrected:** the row (city's largest outside `renderFrame`,
+1.883 ms) splits into `Tick-ReflGlass` 0.899 (IPC 1.94, ~1.04 cores) and
+`Tick-ReflXfrmOnly` 0.981 (IPC 3.46, ~1.27 cores). It has been carried since
+2026-08-17 as the `--refl_correct` commission's cost "≈2 ms/frame". **Flag flip
+on one binary: 1.952 with, 1.888 without — the commission costs 0.064 ms, 3.3 %
+of the row.** ~30× overstated. Both halves are ~1 core; the route is
+`Transform.cpp`'s own *"execution order free, output order pinned"* shard
+reservation, sized at ~0.8 ms and handed off rather than half-built.
+---
+
 ## 00q. THE CROSS-TREE DIVERGENCE, RESOLVED — 2026-08-29c: **the build is perfectly reproducible (byte-identical binaries) and there was never a divergence.** The binary chooses its own asset tree, and chase's pins are pose-SEQUENCE dependent — three false reds, one investigation, zero regressions
 
 The 2026-08-29 water round closed by flagging an unexplained divergence:

@@ -30,6 +30,7 @@
 #include <unordered_map>
 
 #include <Base/FrameState.h>  // fds::g_mainCamera / g_mainFaces (RTT pass)
+#include "RENDER/TailProf.h"   // RTT decomposition scopes (rtt-pick/prep/bakejob, rttj-*)
 
 // Provided by MISC/PREPROC.CPP — stamps F->A_idx/B_idx/C_idx for SoA.
 extern void Compute_FaceVertexIndices(TriMesh *T);
@@ -2999,6 +3000,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
 {
     ScopedMirrorMs _t(&g_mirrorProf.rttMs);
     g_rttJobsLastFrame = 0;
+    const long long _rttT0 = TailProf::enabled() ? TailProf::nowNs() : 0;
     if (!sc || slots.empty()) return;
     const Camera *mainCam = ::View ? ::View : sc->CameraHead;
     if (!mainCam) return;
@@ -3141,6 +3143,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     if (recurseDepth <= 0 && int(jobs.size()) > kRttPerFrame)
         jobs.resize(kRttPerFrame);
     g_rttJobsLastFrame = int(jobs.size());
+    TailProf::mark("rtt-pick", _rttT0, 3);
+    const long long _rttT1 = TailProf::enabled() ? TailProf::nowNs() : 0;
     g_mirrorProf.rttJobsSum += int(jobs.size());
 
     // ── Offscreen surface (allocated once; CITY cube-bake pattern).
@@ -3257,9 +3261,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     // slice-2 recursive tree bakes at max dims so the sibling texture
     // stash/restore below is a constant-size byte copy. Shared verbatim by
     // the legacy scheduled path, the flat N-pass recursion, and the tree.
+    TailProf::mark("rtt-prep", _rttT1, 3);
     auto bakeJob = [&](MirrorRttSlot &s, const Vector &camPos, const float D,
                        const bool backSide, const float swPx, const float shPx,
                        const bool adaptive) {
+        TailProf::ScopeTimer _tpj("rtt-bakejob", 3);
         // --mirror_rtt_trace stage digests; every one stays 0 when the flag is
         // off and the branches below are the only cost the default path pays.
         uint64_t tCam = 0, tFloor = 0, tXfrm = 0, tGB = 0, tLit = 0, tCone = 0;
@@ -3476,10 +3482,14 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 tMat = h;
             }
         }
+        const long long _jt0 = TailProf::enabled() ? TailProf::nowNs() : 0;
         std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
         std::memset(s_rttSurf.Z16, 0, sizeof(word) * size_t(s.texW) * size_t(s.texH));
         fds::g_offAxisFrustumCull = true;
+        TailProf::mark("rttj-clear", _jt0, 3);
+        const long long _jt1 = TailProf::enabled() ? TailProf::nowNs() : 0;
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        TailProf::mark("rttj-xform", _jt1, 3);
         fds::g_offAxisFrustumCull = false;
         // Every rendering RTT slot is an order-2 reflection that shows the
         // room (the disco + its volumetric cones live there), so they ALL
@@ -3551,7 +3561,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 rctx.target.xres             = s.texW;
                 rctx.target.yres             = s.texH;
                 rctx.target.gbuffer          = &s_rttGB;
-                MekaleleFillRegionInline(rctx, 0, 0, float(s.texW), float(s.texH));
+                { TailProf::ScopeTimer _tr("rttj-raster", 3);
+                MekaleleFillRegionInline(rctx, 0, 0, float(s.texW), float(s.texH)); }
                 if (rttTrace) {
                     // RASTER — every G-buffer plane the kernel writes, plus the
                     // depth it resolved. NOTE the planes that this bake does NOT
@@ -3598,7 +3609,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 ov.zpage16    = (word*)s_rttSurf.Z16;
                 ov.xres       = s.texW;
                 ov.yres       = s.texH;
-                ov.inlineDispatch = true;
+                // See --mirror_rtt_pool: inline runs all 96 lighting tiles on
+                // the tick thread, which is why this row reads ~1.1 cores.
+                ov.inlineDispatch = !fds::FeatureFlags::mirror_rtt_pool();
                 // HDR-correct reflection: size g_hdrBuf to THIS RTT slot so the
                 // deferred kernel + cones accumulate linear radiance. For order-1
                 // panels the composite below captures that float radiance into the
@@ -3607,7 +3620,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 // froxel composite to set it — so cones add into g_hdrBuf and the
                 // tonemap runs. The main pass's Hdr_BeginFrame restores g_hdrBuf.
                 if (rttHdr) fds::Hdr_BeginFramePass(s.texW, s.texH);
-                Render_DeferredLighting(dctx, &ov);
+                { TailProf::ScopeTimer _tl("rttj-light", 3);
+                Render_DeferredLighting(dctx, &ov); }
                 if (rttTrace) {
                     // LIGHTING — 8-bit surface AND, when HDR is on, the float
                     // radiance the panel composite actually samples. Hashing
@@ -3651,6 +3665,12 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 // can no longer produce the checkerboard garble described. The
                 // call is still required — for the pixel set named above.
                 if (rttHdr) fds::Hdr_ActivateNoFog();
+                // STAYS INLINE, and that is measured, not inherited: pooling
+                // this call took it 0.064 -> 0.153 ms (+139 %). The RTT cone
+                // pass is ~64 us of work, so the semaphore round trip costs
+                // more than the fan-out saves — the same reason inline was
+                // chosen for the shard bake. Only the LIGHTING is big enough
+                // to pay for the pool here (0.837 -> 0.339 ms).
                 Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
                 if (rttHdr) {
                     fds::Render_TonemapToVPage();
