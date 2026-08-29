@@ -7,7 +7,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy
 cd "$RT" || exit 1
 PASS=0; FAIL=0
-chk() { # label expected got
+chk() {
   if [ "$3" = "$2" ]; then printf "PASS  %-24s %s\n" "$1" "$3"; PASS=$((PASS+1))
   else printf "FAIL  %-24s got %s want %s\n" "$1" "$3" "$2"; FAIL=$((FAIL+1)); fi
 }

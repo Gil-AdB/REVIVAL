@@ -88,6 +88,44 @@ static std::atomic<int> g_coneRaymarchHits{0};
 #ifndef FDS_CONE_SEG_CLOSEDFORM
 #define FDS_CONE_SEG_CLOSEDFORM 0
 #endif
+// Round 9 / candidate C6 -- BUILT, MEASURED AND REJECTED (compiled out in
+// place as the record of the test, like the three probes above).
+//
+// The SAME W2 / D.W closed form as FDS_CONE_SEG_CLOSEDFORM, applied at the
+// MIDPOINT block instead of the 8-segment loop. The premise was that B11's
+// refutation could not transfer: the segment loop runs on 8.1 % of chase's
+// pairs (~0.9 % of the pass gross) while the midpoint block runs on every
+// ALIVE pair -- 75.4 % of city's, once --cone_hull_rect has removed the dead
+// ones. The premise was right and the conclusion was still wrong.
+//
+// MEASURED, two binaries in one worktree, city t=1961 `--env_live_water
+// --deferred --city_env_pixel`, 1920x1080, interleaved min-of-11, quiet box,
+// within-arm spread 0.05-1.8 % (the cleanest battery of the round):
+//     cones-call  Ginstr/f  1.838 -> 1.864  (+1.41 %)
+//                 Gcyc/f    0.461 -> 0.486  (+5.42 %)
+//                 wall      13.336 -> 13.999 ms (+4.97 %)
+// It is a LOSS on every column, not a wash.
+//
+// AND THE DISASSEMBLY SAYS EXACTLY WHY -- the arithmetic saving is real and
+// it is bought with spills. In Render_VolumetricCones_Tile:
+//     fmla.4s 114->110, fmul.4s 198->196, fsub.4s 64->62, fneg.4s 7->5
+//        = -10 vector-ALU ops, as predicted
+//     ldr 925->940, str 606->620  = +29 stack accesses
+//     total 4665 -> 4682 (+17)
+// Holding vUv_v / vVP_v / vPP_v / vDVc_v / vN2VP_v / vNDP_v live across the
+// whole atan + integral block down to the midpoint costs more registers than
+// the block saves ops, and on arm64 one __m256 is TWO of the 32 v-registers.
+// This is B8's lesson again ("the arrays are not a buffer, they are a phi
+// node", +2.0 % instructions, ldr q 248->263): in this kernel, REGISTER
+// PRESSURE beats op count. Fewer ops is not fewer cycles here.
+//
+// It is also a RE-ASSOCIATION, so it was never free: 18 px at city t=1961 and
+// 45 px at t=400, max |d| 2/255 (chase and greets are byte-null -- their cones
+// are segmented, so the midpoint coneAtten is bypassed). Not worth a judge
+// call for a change that loses 5 % of the pass.
+#ifndef FDS_CONE_MID_CLOSEDFORM
+#define FDS_CONE_MID_CLOSEDFORM 0
+#endif
 // Ablation ladder for the SECOND round of the cone-cost campaign (the first
 // round's ladder was ad-hoc and not committed; this one is, because the split
 // has to be re-derived every time the pass changes shape). COMPILE-TIME only:
@@ -304,74 +342,14 @@ static inline __m256 fmin_x8(const __m256 &a, const __m256 &b) { return _mm256_m
 #ifndef FDS_CONE_ANYLANE
 #define FDS_CONE_ANYLANE 1
 #endif
-#if FDS_CONE_ANYLANE && (defined(__ARM_NEON) || defined(__aarch64__))
-static inline bool anyLane_x8(const __m256 &m) {
-    simde__m256_private p = simde__m256_to_private(m);
-    const int32x4_t o = vorrq_s32(p.m128_private[0].neon_i32,
-                                  p.m128_private[1].neon_i32);
-    return vminvq_s32(o) < 0;
-}
+// Promoted to DeferredCommon.h as `simdAnyLane_ps8` once the same defect was
+// found in the fog and lighting kernels; this stays only to keep
+// -DFDS_CONE_ANYLANE=0, the exact pre-landing A/B arm, buildable.
+#if FDS_CONE_ANYLANE
+static inline bool anyLane_x8(const __m256 &m) { return simdAnyLane_ps8(m); }
 #else
 static inline bool anyLane_x8(const __m256 &m) { return _mm256_movemask_ps(m) != 0; }
 #endif
-
-// EXACT screen AABB of a sphere, for --cone_hull_rect.
-//
-// `lightSphereScreenRect` (DeferredCommon.h) uses the small-angle form
-// `rx = r * fovX / vz`, and its comment claims it "slightly over-estimates
-// near the FOV edges". For the RANGE sphere, whose radius is large enough
-// that the slack swamps the error, that is true in practice. It is NOT true
-// in general: an off-axis sphere's silhouette subtends more than r/vz, so the
-// small-angle rect can UNDER-estimate -- measured, the first cone-hull build
-// lost 846 of city's 15 326 914 alive (lane x spot) pairs, which is exactly
-// the signature of a bound that is not conservative. A cull that is only
-// "byte-null at the pins we happen to own" is not a cull, so the hull's two
-// pieces get the exact bound instead.
-//
-// The exact one is the tangent construction: in the x-z plane the sphere
-// projects to a circle at (vx, vz) of radius r, and the silhouette's extreme
-// x is where a tangent plane contains the y axis -- i.e. the tangent lines
-// from the eye, at angles atan2(vx, vz) +/- asin(r / |(vx,vz)|). Same in y.
-// ~8 transcendentals per sphere, 2 spheres x 46 spots once per frame; the
-// orchestrator is not the hot loop.
-static inline bool coneHullSphereRect(float vx, float vy, float vz, float r,
-                                      float fovX, float fovY,
-                                      float cntrEX, float cntrEY,
-                                      int xres, int yres, LightScreenRect &out)
-{
-    if (vz + r < 0.0f) return false;          // wholly behind the eye
-    if (vz - r < 1.0f) { out.full = true; return true; }
-    out.full = false;
-    constexpr float kHalfPi = 1.5707963f - 1e-3f;
-    // axis: returns [lo, hi] in tangent units, or the full range when the
-    // sphere wraps past 90 degrees on this axis.
-    auto span = [&](float c, float &tlo, float &thi) {
-        const float d = std::sqrt(c * c + vz * vz);
-        if (!(d > r)) { tlo = -1e30f; thi = 1e30f; return; }   // eye inside
-        const float a = std::atan2(c, vz);
-        const float b = std::asin(r / d);
-        const float a0 = a - b, a1 = a + b;
-        tlo = (a0 <= -kHalfPi) ? -1e30f : std::tan(a0);
-        thi = (a1 >=  kHalfPi) ?  1e30f : std::tan(a1);
-    };
-    float tx0, tx1, ty0, ty1;
-    span(vx, tx0, tx1);
-    span(vy, ty0, ty1);
-    const float xlo = cntrEX + fovX * tx0, xhi = cntrEX + fovX * tx1;
-    // Screen y is inverted: cy = cntrEY - fovY * tan(angle), so the LARGER
-    // world angle is the SMALLER screen row.
-    const float ylo = cntrEY - fovY * ty1, yhi = cntrEY - fovY * ty0;
-    // One pixel of pad. tan() near +/-90 degrees amplifies float error
-    // without bound, and the tile grid is 160x135 px, so a pixel of slack is
-    // free and takes the boundary-rounding question off the table.
-    constexpr float kPad = 1.0f;
-    const float fx = float(xres - 1), fy = float(yres - 1);
-    out.x0 = int(std::floor(std::min(std::max(xlo - kPad, 0.0f), fx)));
-    out.x1 = int(std::ceil (std::min(std::max(xhi + kPad, 0.0f), fx)));
-    out.y0 = int(std::floor(std::min(std::max(ylo - kPad, 0.0f), fy)));
-    out.y1 = int(std::ceil (std::min(std::max(yhi + kPad, 0.0f), fy)));
-    return true;
-}
 
 // OR of the mirror-footprint presence bits (ctx.tileMirrorPresence,
 // LIGHTING-tile geometry: 8-rounded X over the 12x8 grid) across every
@@ -2032,7 +2010,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             return _mm256_add_ps(at,
                                    _mm256_and_ps(mWrap, _mm256_set1_ps(3.14159265f)));
                         };
-#if FDS_CONE_SEG_CLOSEDFORM
+#if FDS_CONE_SEG_CLOSEDFORM || FDS_CONE_MID_CLOSEDFORM
                         // ROUND 7'S SECOND PROBE — MEASURED AND NOT KEPT
                         // (compiled out in place as the record of the test).
                         // W = z·V − P with V = (X, Y, 1), so both dot products
@@ -2222,6 +2200,18 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 vZMid    = _mm256_mul_ps(
                                                 _mm256_add_ps(vZLo_v, vZHi_v),
                                                 _mm256_set1_ps(0.5f));
+#if FDS_CONE_MID_CLOSEDFORM
+                        // C6: W2 = z(z*uV - 2*VP) + PP and D.W = z*DV - DP,
+                        // from quantities the solve already produced, instead
+                        // of rebuilding W = z*V - P. 11 __m256 ops -> 3, plus
+                        // the 3 shared helpers above (which city otherwise
+                        // does not pay, since it never enters the segment
+                        // loop). RE-ASSOCIATION -- it moves bytes.
+                        const __m256 W2_m = _mm256_fmadd_ps(vZMid,
+                                            _mm256_fmadd_ps(vZMid, vUv_v, vN2VP_v),
+                                            vPP_v);
+                        const __m256 DW_m = _mm256_fmadd_ps(vZMid, vDVc_v, vNDP_v);
+#else
                         const __m256 Wx_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vX_v), vPx_v);
                         const __m256 Wy_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vY_v), vPy_v);
                         const __m256 Wz_m = _mm256_sub_ps(vZMid, vPz_v);
@@ -2231,6 +2221,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 DW_m = _mm256_fmadd_ps(vDx_v, Wx_m,
                                             _mm256_fmadd_ps(vDy_v, Wy_m,
                                              _mm256_mul_ps(vDz_dir_v, Wz_m)));
+#endif
                         const __m256 safeW2_m = _mm256_blendv_ps(vOne_v, W2_m, mAlive);
                         const __m256 invLen_m = rsqrt_nr_x8(safeW2_m);
                         const __m256 cosT_m   = _mm256_mul_ps(DW_m, invLen_m);
@@ -3144,9 +3135,9 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             const float sinO_h = lights->sinOuter[li];
             const float ar     = r * cosO_h;             // axial to base centre
             LightScreenRect ra, rb;
-            const bool okA = coneHullSphereRect(vx, vy, vz, 0.0f,
+            const bool okA = lightSphereScreenRectExact(vx, vy, vz, 0.0f,
                                  FOVX, FOVY, CntrEX, CntrEY, XRes, YRes, ra);
-            const bool okB = coneHullSphereRect(
+            const bool okB = lightSphereScreenRectExact(
                                  vx + lights->dirX[li] * ar,
                                  vy + lights->dirY[li] * ar,
                                  vz + lights->dirZ[li] * ar,

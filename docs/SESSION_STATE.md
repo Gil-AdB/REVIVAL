@@ -1,5 +1,53 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-29 — **`Render_SSAO` HAS AN INTERIOR AT LAST**: five wave scopes
+> replace one, the inferred split is CONFIRMED, and the march's per-lane slice
+> setup goes 4-wide BIT-EXACT — `ssao` **−16.4 % at chase**, −9.3 % at greets
+>
+> The row was 26.3 % of chase's `renderFrame` and had **one profiler scope with
+> no `effPar` at all** — it dispatched with `dispatchIndexed(..., nullptr, ...)`
+> and joined on a bare `tileDone.acquire()` loop, so its march/apply/blur split
+> had only ever been INFERRED from the `--ssao_downscale` slope. Five scopes now
+> exist. **The stamp must be taken BEFORE the dispatch** (TailProf.h's own drain
+> contract); putting the drain inside the lambda prints `0.00 calls/f`.
+>
+> **THE INFERENCE WAS RIGHT** — march 5.712 ms measured vs ≈5.8 inferred, apply
+> 1.756 vs ≈1.9, blur 0.272 vs ≈0.33, and the scopes cover 99.3 % of the row, so
+> there is no hidden fourth block. What the inference could not give is what
+> chose the target: **`effPar` 9–11 of 12 (no serial bottleneck) and IPC — the
+> apply runs at 5.30, near the core ceiling, the march at 3.26.** The march is
+> 64.5 % of the instructions and 73.3 % of the time; it is the one that stalls.
+>
+> **TWO CANDIDATES REFUTED BEFORE ANY CODE.** The cone round's arm64
+> `_mm256_movemask_ps` defect is **not present** — zero movemask sites in
+> `DeferredSSAO.cpp`, and the 32-sector bitmask's eight scalar popcounts are
+> **already vectorised by clang** into 2× `cnt.16b`. And sky waste is nil:
+> ALL-SKY groups **0.00 % in greets**, 5.08 % in chase, scalar-tail cells **0**.
+>
+> **LANDED (S1):** the per-lane slice setup — the one item §00l called never
+> attempted — priced by a new `-DFDS_SSAO_DIAG` ladder at **22.5 % of the march**
+> (135 instructions per lane×slice, 1.04 M a frame), now 4-wide in **plain NEON**
+> so `fast_rsqrt`'s vrsqrte+1-Newton is exact. Predicted −0.09 to −0.105 Gi/f;
+> **measured −0.092.** greets march 5.781 → **4.827 ms**, `ssao` 8.028 →
+> **7.280**; chase march 8.394 → **6.547 ms**, `ssao` 11.279 → **9.432**.
+> `ssao-apply` and `ssao-blur` unchanged to the digit.
+>
+> **THE DURABLE HALF — three FMA-contraction rules, and a verify harness.** The
+> first build failed ONE pin, so `-DFDS_SSAO_VERIFY` ran the scalar behind the
+> vector counting mismatches PER TERM, and each fault was settled by compiling
+> the scalar expression standalone and reading its assembly: (1) `a*b - c*d` is
+> ONE `fnmsub`; (2) for `A+B+C` all products clang chains from the **SECOND**
+> term, `fma(C, fma(A, mul(B)))` — starting at A moved 26 % of lanes; (3) a
+> trailing `x*poly` feeding an add/sub is **never materialised alone**
+> (`halfPi - a*poly` is one `fmsub`) — rounding it separately cost 32 196 lanes.
+> Final: **0 mismatches in 1 036 800 lanes at two poses, every term.**
+>
+> **NOT TAKEN:** `atan_approx_x8` exists and uses `_mm256_rcp_ps` where the
+> scalar divides — faster, and it moves AO values. That is a look call in the
+> same family as the 8-wide GTAO rsqrt item already in his stack (2026-08-17a).
+>
+> **GATES: 13/13 pins + `render_gate` 4/4 at every step.**
+
 > ## 2026-08-28b — **ROUND 2 ON THE SAME KERNEL: the env bilinear fetch goes
 > 8-wide and city's `lighting-w1` reaches −27.5 % / `renderFrame` −6.4 %
 > cumulative — and round 1's own "2.9 % left on the table" is REFUTED**

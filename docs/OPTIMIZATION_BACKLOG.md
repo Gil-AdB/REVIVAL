@@ -12,7 +12,7 @@ Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked
 
 ## 2026-08-29b — chase round 2: water-glints decomposed and ported, and chase's sky turns out to be painted by the reflection pass
 
-Full account: `docs/PERF_STATE.md` §00n.
+Full account: `docs/PERF_STATE.md` §00o (renumbered from §00n at the merge -- the SSAO round took that letter the same day).
 
 **LANDED, byte-null (all 14 pins + render_gate 4/4).** `--water_glints_batch`,
 **DEFAULT 0**. Batches chase's varied glint pass the way `RenderGlints` has been
@@ -30,7 +30,7 @@ byte-null: 450/304/241/76/2934 px move at the five pins, every one by max |Δ| 1
 
 2. **The batched port's last LSB.** 241 px at t=800, bisected to the slope
    kernel (not the caustic tap, not the specular tail). Five pinning attempts
-   logged in §00n with their pixel counts. It cannot be closed by copying
+   logged in §00o with their pixel counts. It cannot be closed by copying
    `waterWaveSlope8`'s spelling because `waterWaveSlopeVaried` gets a different
    fmadd chain from clang. **Next attempt starts with that function's
    disassembly, not another guess.** Closing it flips the flag's default.
@@ -63,6 +63,120 @@ byte-null: 450/304/241/76/2934 px move at the five pins, every one by max |Δ| 1
    change to the reflection pass silently repaints the sky. Not fixed: a fix
    changes where the sky comes from, so it cannot be byte-null.
 
+
+## 2026-08-29 — **THE MOVEMASK SWEEP (only the cone kernel converts) and `lightSphereScreenRect` PROVEN TO DROP REAL LIGHT (max 5/255, 6 of 39 poses)**. Sweep DONE / bug REPORTED, not fixed
+
+### 1. `anyLane_x8` engine-wide — bit-exact, and a refutation of my own pick
+
+`simdAnyLane_ps8` / `simdAnyByte_epi8` / `simdAllBytes_epi8` now live in
+`DeferredCommon.h`. Eight further sites converted (`DeferredFastFog.cpp`
+:1424/:1473/:1502; `DeferredSurfaceKernel.cpp` :3512/:6333/:6335/:6946/:7074);
+`DeferredSurfaceKernel.cpp:2029` left alone (it needs the BITS, and is compiled
+out of shipping); `DeferredSSAO.cpp` left to its owner.
+`-DFDS_SIMD_ANYLANE=0` is the exact pre-sweep arm.
+
+**A second, previously unrecorded lowering.** `_mm256_movemask_epi8` is NOT the
+25-instruction `ushl.4s` sequence — it is `cmlt.16b` + `and.16b` against a
+bit-weight table + `tbl.16b` + `addv.8h` per half, ~12–13 instructions.
+Opcode diff of `Render_DeferredLighting_Tile_OuterVec`: `addv.8h` 8→0,
+`tbl.16b` 8→0, `cmlt.16b` 6→0, `bics` 4→0, `mov.16b` 90→74, vs `uminv.16b`
+0→4; total 4287→4237.
+
+**Measured, city t=1961, two independent interleaved min-of-11 batteries:**
+
+| row | Ginstr/f | Gcyc/f | wall |
+|---|--:|--:|--:|
+| `cones-call` | −4.42 % / −4.47 % | −5.95 % / −1.70 % | **−5.12 % / −5.21 %** |
+| `lighting-w1` | −1.93 % / −2.02 % | **+0.71 % / +1.43 %** | +0.14 % / −0.51 % |
+| `fastfog` | −0.28 % / −0.37 % | −0.34 % / +1.02 % | +0.11 % / −0.14 % |
+
+**Only the cone kernel converts.** `lighting-w1` reproducibly sheds ~2 % of its
+instructions for zero cycles — IPC 4.08 → 3.94. Those slots were not the
+constraint, and `uminv.16b` has much the same latency as the `tbl`/`addv` chain
+it replaces, so the critical path is unchanged. `HW_PROFILING.md:1011-1014`
+landing a second time. The fog sites are cold (per-column-block, not per-lane).
+Kept anyway — bit-exact, free, one spelling engine-wide — but the header
+comment carries this table so nobody sizes a plan on it.
+
+**NOT swept, on purpose:** `_mm256_testz_si256` / `_mm256_testz_ps` is the same
+family (simde → `vandq_s64` + two `vgetq_lane_s64` per half, ~10–12 instr, four
+vector→GPR moves, against three for `vmaxvq_u32(vandq(…)) == 0`). Ten live
+sites, all `DeferredSurfaceKernel.cpp` (:6691 :6739 :6758 :6796 :6886 :6948
+:6950 :6951 :7078), and :6758 is on the per-(group × light) hot path. Plus
+VCL's `horizontal_or`/`horizontal_and` in `TheOtherBarry.h`, `ShadowMap.cpp`,
+`Mekalele.h`, which compile to exactly this. **Left because the batteries above
+measured this kernel's response to removing this exact class of instruction and
+it was zero.** Also spotted: `:6948`'s `!testz(m,m) && simdAllBytes_epi8(m)` is
+redundant in its first term (all ⇒ nonzero) and could be deleted — also for no
+measurable time.
+
+### 3. C6 (midpoint closed-form W²/D·W) — BUILT, MEASURED, REJECTED
+
+`FDS_CONE_MID_CLOSEDFORM`, compiled out in place as the record. The premise
+was sound and the conclusion still wrong. B11 refuted this form at the
+8-segment site because that loop runs on 8.1 % of chase's pairs; the midpoint
+block runs on every ALIVE pair (75.4 % of city's, post-`--cone_hull_rect`), so
+the fire-rate objection genuinely does not transfer.
+
+**It is a LOSS on every column** — city t=1961, two binaries in one worktree,
+interleaved min-of-11, quiet box, within-arm spread 0.05–1.8 % (cleanest
+battery of the round):
+
+| row | explicit W | closed form | delta |
+|---|--:|--:|--:|
+| `cones-call` Ginstr/f | 1.838 | 1.864 | **+1.41 %** |
+| `cones-call` Gcyc/f | 0.461 | 0.486 | **+5.42 %** |
+| `cones-call` wall ms | 13.336 | 13.999 | **+4.97 %** |
+
+**The disassembly gives the mechanism, and the arithmetic saving is real —
+it is just bought with spills.** In `Render_VolumetricCones_Tile`:
+`fmla.4s` 114→110, `fmul.4s` 198→196, `fsub.4s` 64→62, `fneg.4s` 7→5 = **−10
+vector-ALU ops, exactly as predicted**; against `ldr` 925→940 and `str`
+606→620 = **+29 stack accesses**, total 4665→4682. Holding `vUv_v` / `vVP_v` /
+`vPP_v` plus the three helpers live across the whole atan+integral block down
+to the midpoint costs more registers than the block saves ops, and on arm64 an
+`__m256` is TWO of the 32 v-registers. **B8's lesson again: in this kernel
+register pressure beats op count.** It is also a re-association (18 px at city
+t=1961, 45 at t=400, max |Δ| 2/255; chase and greets byte-null) — but the
+pixels never became the question.
+
+**Consequence for the ranked list:** with C1/C2/C3/C4/C5/C6 all resolved, the
+only unbuilt candidate left from `PERF_CONES_ANALYSIS.md` is C8 (depth-sliced
+tile-vs-cone cull), whose prize overlaps almost entirely with C5 — and C5 has
+now taken roughly half of §3.1's 12 % perfect-cull ceiling on its own. **The
+cone pass should be considered closed at the bit-exact level.** What remains
+is the two look flags, which are Gil-Ad's call, not an engineering question.
+
+### 2. `lightSphereScreenRect` — the bug is real, and it is 5/255
+
+`--light_rect_exact` (default OFF) + `FDS_LIGHTRECT_AUDIT=1`. The shipping
+small-angle rect drops (light × tile) pairs in **every scene**: city t=400
+189 pairs / 5.2 % over 25 lights, greets t=5743 264 / 2.9 % over 31, fountain
+21 / 2.6 %, chase 28 / 0.9 %, city t=1961 14 / 0.35 %.
+
+Worst light any pixel of a dropped tile can be missing — derived from the
+kernel's exact `falloff = 1 − dist/range` and each tile's nearest pixel to the
+light's projected centre — is **1.1 % to 12.7 % of that light's full
+brightness**. (The edge-of-rect form reads up to 23 % and is the wrong bound to
+quote: a dropped tile lies wholly beyond that edge.)
+
+**39 poses swept, 6 differ**, all strictly brighter under the exact bound:
+city t=700 (161 px, max 2), t=1000 (259, 2), t=200 plain `--deferred` (428, 3),
+t=500 (60, 2), fountain t=1500 (**359, max 5**), t=3500 (629, 3). All 13 pinned
+gate poses are byte-identical, which is why seven rounds never saw it.
+
+At fountain t=1500 the delta is **362 brighter pixels and 0 darker**, in a band
+`x[755..878] y[945..949]` — 124 px wide, **5 rows tall**. A tile-boundary
+sliver: the "missing light on the rect" shape, same family as `eb36c1fd`, at
+2–5/255. `docs/img/conesimpl/lightrect_fountain_t1500_*` (24× amplified; at 1×
+there is nothing to see).
+
+**Verdict: reported, not fixed.** Real defect, real light on the floor, but
+bounded at 5/255 on 0.03 % of pixels, and flipping it is still a look change on
+pinned scenes. The flag ships OFF; what actually got corrected is the SOURCE
+COMMENT, which asserted "slightly over-estimates … no correctness impact" and
+now says the opposite with the reproduction recipe.
+**Gil-Ad's call whether 5/255 of restored light is worth a re-pin.**
 ## 2026-08-29 — chase round: the tile grid lands, the reflection pass is priced, and two things turn up that are not perf
 
 Full account: `docs/PERF_STATE.md` §00m. Branch `rev-chaseperf`, merged tip.
@@ -374,6 +488,89 @@ pick, a live-water weight, a tilt + re-projection, and one or two
 this (reflect dir, Fresnel, mip) and arms on 33–37 % of groups; the *fetch* is
 still eight scalar bilinear taps. That is the biggest single block left, and it
 is a different shape from anything the campaign has attacked.
+
+## 2026-08-29 — **`Render_SSAO` DECOMPOSED, and the split's target taken: the march's per-lane slice setup goes 4-wide BIT-EXACT — `ssao` −9.3 % (greets) / −16.4 % (chase), march −16.5 % / −22.0 %.** DONE (S1; two candidates refuted by census before coding)
+
+`Render_SSAO` was **11.13 ms at chase t=1105 = 26.3 % of `renderFrame`** and
+16.6–18.1 % of greets'. `PERF_STATE.md` §00l called the decomposition "step one"
+and priced the interior by arithmetic on two `--ssao_downscale` points. Full
+account, tables and the reusable contraction rules: **`docs/PERF_STATE.md`
+§00n**. Branch `rev-ssao`.
+
+### Step zero — the scopes, and the inference CONFIRMED
+
+The pass dispatched with `dispatchIndexed(..., nullptr, ...)` and joined on a
+bare `tileDone.acquire()` loop, so it never used the `Stamp`/`drain` pairing and
+had no `effPar` at all. Five wave scopes now exist. **The stamp must be taken
+before the dispatch** — a first attempt with the drain inside the lambda printed
+`0.00 calls/f`.
+
+| scope | measured | inferred | effPar | Gi/f | IPC |
+|---|--:|--:|--:|--:|--:|
+| march | **5.712 ms** | ≈5.8 | 11.0 | 0.621 | **3.26** |
+| apply | **1.756 ms** | ≈1.9 | 10.6 | 0.310 | **5.30** |
+| blur | **0.272 ms** | ≈0.33 | 9.0 | 0.032 | 3.79 |
+
+**The `--ssao_downscale`-slope inference was right** (1.5 % / 7.6 % / 17.6 %),
+and the scopes cover 99.3 % of the row — no hidden block. The new information is
+`effPar` (9–11 of 12, no serial bottleneck) and **IPC: the apply is at 5.30, near
+the core ceiling; the march is at 3.26.** The march is 64.5 % of the instructions
+and 73.3 % of the time — it is the one that stalls, and the one to attack.
+
+### Refuted BEFORE coding — add both to the do-not-repropose list
+
+* **The cone round's arm64 `_mm256_movemask_ps` defect does NOT exist in SSAO.**
+  Zero movemask sites in `DeferredSSAO.cpp`, and the 32-sector bitmask's eight
+  scalar `__builtin_popcount` calls are **already vectorised by clang** into
+  2× `cnt.16b`. Checked in the disassembly before a line was written.
+* **Sky/background early-out is worth nothing in the arm that matters**
+  (`-DFDS_SSAO_CENSUS`): ALL-SKY 8-cell groups **0.00 % in greets**, 5.08 % in
+  chase; valid lanes 99.96 % / 94.40 %; scalar-tail cells **0**.
+
+### What landed — S1
+
+The per-lane slice setup, priced by the new `-DFDS_SSAO_DIAG` ladder at **22.5 %
+of the march** (atan2 alone 7.6 %) = **135 instructions per (lane × slice), 1.04 M
+a frame**, now runs 4 lanes at a time in **plain NEON** (not simde, so
+`fast_rsqrt`'s `vrsqrte`+1-Newton is exact). Predicted −0.09 to −0.105 Gi/f;
+**measured −0.092.** greets march −16.5 % ms / −14.8 % Gi, `ssao` −9.3 % / −9.6 %,
+`renderFrame` −1.65 % Gi. chase march −22.0 % / −18.6 %, `ssao` **−16.4 %**.
+`ssao-apply` and `ssao-blur` are unchanged to the digit — the control.
+
+### THE DURABLE HALF: three contraction rules, established by reading the assembly
+
+The first build failed one pin, so `-DFDS_SSAO_VERIFY` ran the scalar behind the
+vector counting mismatches **per term**. Each fault was then settled by compiling
+the scalar expression standalone and reading its assembly — not by guessing:
+
+1. **`a*b - c*d` contracts to ONE `fnmsub`**, not two muls and a sub.
+2. **For `A + B + C` all products, clang chains from the SECOND term:**
+   `fma(C, fma(A, mul(B)))`. Starting at A moved **26 % of lanes**.
+3. **A trailing `x * poly` that feeds an add/sub is never materialised alone** —
+   `halfPi - a*poly` is one `fmsub`, `a*poly + (±π)` is one `fmadd`. Rounding it
+   separately cost **32 196 lanes**.
+
+Final: **0 mismatches in 1 036 800 lanes at two poses, on every term.** Anyone
+vectorising a scalar float expression in this tree should start from these three
+rules and the verify harness, not from the intrinsics.
+
+### Not taken
+
+`atan_approx_x8` already exists and uses `_mm256_rcp_ps` where the scalar
+divides. It is faster and it **moves AO values** — a look call in the same family
+as the 8-wide GTAO rsqrt item already in Gil-Ad's stack (2026-08-17a), not a perf
+lever. Going the other way (removing precision) is equally his call.
+
+### Next
+
+The march is now 4.827 ms of a 7.280 ms greets row (66 %). What remains inside it
+is the sample loop: the scalar depth gather (8 loads + bounds + convert per
+sample batch, 1.04 M batches/frame), the reconstruct, two `_mm256_rsqrt_ps`, two
+`gtaoAcos_x8` and the bitmask build. The gather's address math and its
+`u16 → float` convert are vectorisable the same way this round's setup was; the
+two `sqrt`s inside `gtaoAcos_x8` are **not** byte-safe to replace (prior round:
+flips ~0.3 % of samples). The apply at IPC 5.30 is close to the ceiling and
+should be left alone.
 
 ## 2026-08-28b — **ROUND 2 ON THE SAME KERNEL: the pack loop's env fetch goes 8-wide and city's `lighting-w1` reaches −27.5 % against the pre-campaign parent.** DONE (C9, C10; the flag collapse is a REFUTATION)
 

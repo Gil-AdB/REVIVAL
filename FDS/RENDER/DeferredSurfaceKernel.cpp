@@ -3509,7 +3509,8 @@ static void Render_DeferredLighting_TileT(const DeferredLightingCtx &ctx,
 							                _mm256_cmpgt_epi32(smIdxV,   negOne)),
 							_mm256_or_si256(_mm256_cmpgt_epi32(srcSmV,   negOne),
 							                _mm256_cmpgt_epi32(srcCubeV, negOne)));
-						if (_mm256_movemask_epi8(anyShadow) != 0) {
+						// simdAnyByte_epi8: same predicate, 3 NEON ops (DeferredCommon.h).
+						if (simdAnyByte_epi8(anyShadow)) {
 							alignas(32) int32_t cubeArr[8];
 							_mm256_store_si256((__m256i*)cubeArr, cubeIdxV);
 							alignas(32) float kArr[8];
@@ -6330,11 +6331,13 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// matID AND MIP together: two lanes of one material at different mip
 			// levels resolve DIFFERENT texData and must take the slow path.
 			bool uniformDone = false;
-			if (ovecMatUniform && _mm256_movemask_epi8(mask_alive) == -1) {
+			// simdAllBytes_epi8: `movemask_epi8(v) == -1` at 3 NEON ops
+			// (DeferredCommon.h). Same predicate, same values, control flow only.
+			if (ovecMatUniform && simdAllBytes_epi8(mask_alive)) {
 				const uint32_t midmip0 = lane_mat32[0] >> 20;
-				if (_mm256_movemask_epi8(_mm256_cmpeq_epi32(
+				if (simdAllBytes_epi8(_mm256_cmpeq_epi32(
 				        _mm256_srli_epi32(mat32v, 20),
-				        _mm256_set1_epi32(int(midmip0)))) == -1) {
+				        _mm256_set1_epi32(int(midmip0))))) {
 					const uint32_t matID = midmip0 & 0xFF;
 					const uint32_t mip   = (midmip0 >> 8) & 0xF;
 					Material *Mat = ctx.matTable.data[matID];
@@ -6943,7 +6946,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// of 255. All 8 lanes must be alive: a dead lane must keep whatever
 			// out[] already held.
 			if (ovecVecPack && !_mm256_testz_si256(mask_alive_fresh, mask_alive_fresh)
-			    && _mm256_movemask_epi8(mask_alive_fresh) == -1
+			    && simdAllBytes_epi8(mask_alive_fresh)
 			    && _mm256_testz_si256(needsScalar, needsScalar)
 			    && _mm256_testz_si256(
 			           _mm256_load_si256((const __m256i*)lane_hasEnv),
@@ -7071,7 +7074,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// diffuse per lane) and off FDS_ENVVEC_STATS (whose per-callsite
 			// counters this path would stop incrementing).
 			if (ovecVecPack && envFetchDone && !diffuseEnergyG && !g_envVecStats
-			    && _mm256_movemask_epi8(mask_alive_fresh) == -1
+			    && simdAllBytes_epi8(mask_alive_fresh)
 			    && _mm256_testz_si256(needsScalar, needsScalar)) {
 				const __m256 ekv = _mm256_and_ps(
 				    _mm256_mul_ps(_mm256_load_ps(envEk), _mm256_load_ps(lane_specMul)),

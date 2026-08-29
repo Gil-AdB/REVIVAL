@@ -396,7 +396,7 @@ static inline void waterWaveSlopeVaried(float wx, float wz, float t, float scale
 // 1 sin) stay SCALAR PER LANE on purpose: a vector sin/cos is a different
 // polynomial from the platform libm's and would not be byte-null, and the
 // swell is measured at 24.4 % of the row -- i.e. this port CANNOT address the
-// biggest block. See PERF_STATE 00n for the arithmetic.
+// biggest block. See PERF_STATE 00o for the arithmetic.
 //
 // Per-lane operation ORDER is the scalar's, exactly: base mix -> swell ->
 // macro roll -> 3rd octave. The 3rd octave is applied AFTER the trig because
@@ -424,7 +424,7 @@ static inline void waterWaveSlopeVaried8(const float* wxs, const float* wzs,
 		// 3rd octave: e = base*2.55, q = rotate ~51 deg. The scalar SOURCE is
 		// unfused but -ffp-contract=fast FUSES it, exactly as it does rx/rz
 		// above -- second product rounded, first absorbed. Spelling it unfused
-		// here was worth 403 px at 1 LSB (PERF_STATE 00n).
+		// here was worth 403 px at 1 LSB (PERF_STATE 00o).
 		const pwf8 e  = pwf8(base * 2.55f);
 		const pwf8 qx = pwFma(wx, pwf8(0.62f), -(wz * pwf8(0.78f)));
 		const pwf8 qz = pwFma(wx, pwf8(0.78f),   wz * pwf8(0.62f));
@@ -1049,7 +1049,7 @@ void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float 
 // (0.012 %), a 1-LSB contraction-grouping residue that could not be pinned out
 // because waterWaveSlopeVaried's own fmadd chain differs from waterWaveSlope's.
 // So it ships DEFAULT OFF behind its own flag, and the function above stays the
-// untouched default path. Full account: PERF_STATE 00n.
+// untouched default path. Full account: PERF_STATE 00o.
 void RenderGlintsVariedBatched(float waterY, float minX, float maxX, float minZ, float /*maxZ*/) {
 	const float strength = fds::FeatureFlags::water_bump_strength();
 	if (strength <= 0.0f || !View) return;

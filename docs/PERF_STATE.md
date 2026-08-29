@@ -58,7 +58,9 @@
 
 ---
 
-## 00n. `water-glints` DECOMPOSED AND PORTED — 2026-08-29: the 20× pose swing is **a fixed 0.43 ms scan plus 6.8 ns per live water pixel**, at t=1105 the pass spends **102 % of its time deciding it has nothing to do**, and the port lands **−30 % of the row at every watered pose** — but for the opposite reason to the one the map gave
+## 00o. `water-glints` DECOMPOSED AND PORTED — 2026-08-29: the 20× pose swing is **a fixed 0.43 ms scan plus 6.8 ns per live water pixel**, at t=1105 the pass spends **102 % of its time deciding it has nothing to do**, and the port lands **−30 % of the row at every watered pose** — but for the opposite reason to the one the map gave
+
+*(Numbered §00o, not §00n: the SSAO round landed its own §00n on `fog-wt` the same day — see the section below. Same collision §00l/§00m hit last round; the letters are allocated per branch and reconciled at the merge.)*
 
 Branch `rev-chaseperf`. §00m handed on `water-glints` — 7.999 ms, 16.0 % of
 chase's t=800 tick, `DEMO/ProceduralWater.cpp`, OUTSIDE `renderFrame`, swinging
@@ -311,6 +313,96 @@ t=1105** and ~0.43 ms everywhere. The scan pre-reject is the honest next item �
 same shape as §00f's per-tile shadow reject — and it is worth ~0.4 ms at
 water-poor poses and ~0.2 ms at water-rich ones.
 
+## 00n. `Render_SSAO` DECOMPOSED — 2026-08-29: the row had ONE scope and an INFERRED interior; it now has five, the inference is CONFIRMED, and the march's per-lane slice setup goes 4-wide **bit-exact** for `ssao` −9.3 % (greets) / **−16.4 % (chase)**
+
+§00l item 3 named the decomposition as "step one" and priced the interior by
+arithmetic on two `--ssao_downscale` points. This section replaces that
+arithmetic with scopes, and then attacks what they name. Branch `rev-ssao`;
+gates 13/13 + `render_gate` 4/4 at every step.
+
+### The instrument
+
+`Render_SSAO` dispatched with `dispatchIndexed(..., nullptr, ...)` and joined
+with a bare `tileDone.acquire()` loop, so it never used the `Stamp`/`drain`
+pairing and printed no `effPar`. Five wave scopes now exist — `ssao-march`,
+`ssao-hemi`, `ssao-blur`, `ssao-temporal`, `ssao-apply`. **The stamp must be
+taken BEFORE the dispatch** (TailProf.h's own drain contract); a first attempt
+that put the drain inside the lambda printed `0.00 calls/f`.
+
+### MEASURED vs INFERRED — the inference was right
+
+greets t=5743, 1920×1080, his arm:
+
+| scope | **measured** | inferred (§00l) | effPar | `Ginstr/f` | **IPC** |
+|---|--:|--:|--:|--:|--:|
+| `ssao-march` | **5.712 ms** (73.3 %) | ≈5.8 | 11.0 | 0.621 | **3.26** |
+| `ssao-apply` | **1.756 ms** (22.5 %) | ≈1.9 | 10.6 | 0.310 | **5.30** |
+| `ssao-blur` | **0.272 ms** (3.5 %) | ≈0.33 | 9.0 | 0.032 | 3.79 |
+| sum | 7.740 (99.3 % of the row) | | | 0.963 | |
+
+Within 1.5 % on the march, 7.6 % on the apply, 17.6 % on the tiny blur, and the
+scopes account for 99.3 % of the row — **there is no hidden fourth block.**
+chase t=1105 has the same shape (march 73.8 %, apply 20.1 %, blur 5.2 %).
+
+**What the inference could not give, and what chose the target:** `effPar`
+9.0–11.0 of 12 workers — no serial bottleneck anywhere — and **IPC**. The apply
+runs at **5.30**, near this core's ceiling, and is 32 % of the instructions but
+only 22.5 % of the time. The march runs at **3.26**, is 64.5 % of the
+instructions and 73.3 % of the time. The march is the one that stalls.
+
+### Two candidates refuted before any code was written
+
+* **The arm64 mask-lowering defect the cone round found does not exist here.**
+  `DeferredSSAO.cpp` has **zero** `_mm256_movemask_*` sites, and the 32-sector
+  visibility bitmask's eight scalar `__builtin_popcount` calls are **already
+  vectorised by clang** into 2× `cnt.16b`.
+* **Sky/background waste is not there either** (`-DFDS_SSAO_CENSUS`): ALL-SKY
+  8-cell groups are **0.00 % in greets**, 5.08 % in chase; valid lanes 99.96 % /
+  94.40 %; scalar-tail cells **0**. The march is dense, useful work.
+
+### What landed — the slice setup, 4-wide and bit-exact
+
+The per-lane slice setup (two cross products, a `fast_rsqrt`, a normal
+projection, a third cross product, two dots and an `atan2_approx`, once per lane
+per slice) is what §00l calls the one never-attempted structural item at
+"~20 % of the compute". The new `-DFDS_SSAO_DIAG` ladder prices it at **22.5 %
+of the march** (0.621 → 0.481 Gi/f), the atan2 alone at 7.6 % — **135
+instructions per (lane × slice), 1.04 M a frame.**
+
+| pose | `ssao-march` | | `ssao` | | `renderFrame` Gi |
+|---|--:|--:|--:|--:|--:|
+| greets t=5743 | 5.781 → **4.827 ms** (−16.5 %) | 0.620 → 0.528 Gi (−14.8 %) | 8.028 → **7.280 ms** (−9.3 %) | 0.962 → 0.870 (−9.6 %) | 5.588 → 5.496 (−1.65 %) |
+| chase t=1105 | 8.394 → **6.547 ms** (−22.0 %) | 0.973 → 0.792 Gi (−18.6 %) | 11.279 → **9.432 ms** (−16.4 %) | 1.391 → 1.210 (−13.0 %) | – |
+
+Predicted −0.09 to −0.105 Gi/f before measuring; **measured −0.092.**
+`ssao-apply` (0.310 → 0.310 Gi) and `ssao-blur` (0.032 → 0.032) are byte-for-byte
+unchanged — the control that proves the change is confined to the march.
+
+### The bit-exactness, and how it was won
+
+Written in **plain NEON, not simde**, so `fast_rsqrt`'s `vrsqrte` + one Newton
+step is reproduced exactly rather than through an intrinsic simde may refine.
+The first build failed ONE pin (greets t=2845), so `-DFDS_SSAO_VERIFY` runs the
+scalar behind the vector and counts mismatches **per term**. It localised the
+fault three times, and each time the answer came from compiling the scalar
+expression standalone and reading the assembly — never from guessing:
+
+1. `a*b - c*d` contracts to **one `fnmsub`**, not two muls and a sub.
+2. For `A + B + C` all products, clang chains from the **second** term:
+   `fma(C, fma(A, mul(B)))`. Starting at A moved **26 % of lanes**.
+3. `atan2`'s final `a * poly` is **never materialised alone**: clang fuses it
+   into `signedHalfPi - a*poly` (one `fmsub`) and `a*poly + (±π)` (one `fmadd`).
+   Rounding it separately cost **32 196 lanes**.
+
+Final: **0 mismatches in 1 036 800 lanes at t=2845 and t=5743**, on every term.
+**This is a reusable rule set for vectorising any scalar float expression in this
+tree, and it is the durable half of this round.**
+
+**NOT TAKEN:** the existing `atan_approx_x8` uses `_mm256_rcp_ps` where the
+scalar divides. It would be faster and it would move AO values — a look call in
+the same family as the 8-wide GTAO rsqrt item already in Gil-Ad's stack
+(backlog 2026-08-17a), not a perf lever.
+
 ---
 
 ## 00m. CHASE'S TILE GRID LANDS, AND ITS REFLECTION PASS IS MEASURED INSTEAD OF ASSUMED — 2026-08-28/29: the reflection is **17.38 ms of a 49.96 ms tick** (18.26 of 51.54 pre-merge), not the ≈11.7 ms §00l bounded it at, and the cheapest exclusion on the menu costs **6 grey levels**
@@ -521,9 +613,16 @@ the largest single row in the scene, and it has never been looked at.
 
 ---
 
-## 00l. `lighting-w1` IN CITY, ROUND 2 (2026-08-28b): the pack loop's env fetch goes 8-wide — **−27.5 % instructions and −6.4 % of `renderFrame` cumulative** against the pre-campaign parent
+## 00k2. `lighting-w1` IN CITY, ROUND 2 (2026-08-28b): the pack loop's env fetch goes 8-wide — **−27.5 % instructions and −6.4 % of `renderFrame` cumulative** against the pre-campaign parent
 
 Continuation of §00k; same kernel, same arm, same worktree. Full account:
+
+> **SECTION LETTER, for anyone chasing a cross-reference:** this round was
+> written as §00l, renumbered to §00m, and settled at **§00k2** — three
+> agents landed sections in this file across the same two days. §00l is the
+> RANKED COST MAP (every "§00l item N" reference points there) and §00m is
+> chase's tile grid. This is the continuation of §00k, hence the name.
+
 `docs/OPTIMIZATION_BACKLOG.md` **2026-08-28b**.
 
 **THE LADDER MOVED.** Round 1 shrank everything around the pack loop, so the pack
