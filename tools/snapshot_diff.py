@@ -7,9 +7,18 @@ Usage:
 The diff image highlights where pixels differ. A red overlay marks pixels
 that disagree at all; brightness scales with the channel-summed absolute
 difference. White pixels mean ~equal.
+
+The diff PNG carries a `groundwork-provenance` chunk naming BOTH inputs and
+their own provenance, so "which two arms is this a diff of?" is answerable
+from the file rather than from whoever ran the command. Written only when at
+least one input carried provenance — see tools/provenance.py carry_through.
 """
+import os
 import sys
 from PIL import Image, ImageChops, ImageFilter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provenance import carry_through
 
 def main():
     if len(sys.argv) < 3:
@@ -58,7 +67,9 @@ def main():
         red = Image.new("RGB", (w, h), (255, 0, 0))
         out = Image.composite(red, base, mask)
         out.save(out_path)
-        print(f"  wrote diff:     {out_path}")
+        carried = carry_through(out_path, "tools/snapshot_diff.py", [a_path, b_path])
+        print(f"  wrote diff:     {out_path}"
+              f"{'  (+provenance)' if carried else '  (no input provenance)'}")
 
 if __name__ == "__main__":
     main()

@@ -31,6 +31,9 @@ usage:
 import argparse, glob, json, os, sys
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provenance import carry_through
+
 
 # ── the engine's octahedral 16.16 codec (meka::oct_decode_u32) ──────────────
 def oct_decode_u32(packed):
@@ -100,12 +103,26 @@ def colormap(v, lo, hi, cmap="magma"):
     return (rgb * 255.0 + 0.5).astype(np.uint8)
 
 
+# Every map this tool writes is derived from the ARM DIRECTORIES, whose
+# provenance lives on the colour PPM the same snapshot run dumped there. Pass
+# those PPMs as the inputs so a _dz.png names the two arms it compares.
+_PROV_INPUTS = []
+
+
+def arm_provenance_source(d):
+    """The provenance-bearing file in a snapshot arm dir (its colour PPM)."""
+    g = sorted(glob.glob(os.path.join(d, "greets_t*_color.ppm")))
+    return g[0] if g else None
+
+
 def save_png(path, rgb):
     try:
         from PIL import Image
     except ImportError:
         sys.exit("Pillow needed for the map images")
     Image.fromarray(rgb, "RGB").save(path)
+    if _PROV_INPUTS:
+        carry_through(path, "tools/refrender_diff.py", _PROV_INPUTS)
 
 
 def pct(a, q):
@@ -207,6 +224,12 @@ def main():
         res["bare_dz_p90"] = pct(np.abs((bz - rz)[mb]), 90)
 
     if a.out_prefix:
+        for _d in (a.tess, a.ref, a.bare):
+            if not _d:
+                continue
+            _p = arm_provenance_source(_d)
+            if _p:
+                _PROV_INPUTS.append(_p)
         # signed dz, diverging, +-0.15 u
         img = np.zeros((h, w, 3), np.uint8)
         img[both] = colormap(dz, -0.15, 0.15, "diverging")[both]
