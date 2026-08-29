@@ -58,6 +58,110 @@
 
 ---
 
+## 00q. THE CROSS-TREE DIVERGENCE, RESOLVED — 2026-08-29c: **the build is perfectly reproducible (byte-identical binaries) and there was never a divergence.** The binary chooses its own asset tree, and chase's pins are pose-SEQUENCE dependent — three false reds, one investigation, zero regressions
+
+The 2026-08-29 water round closed by flagging an unexplained divergence:
+binaries built in Gil-Ad's main tree and in a worktree, from the same commit
+with identical CMake caches, rendered chase differently (`e1dae312…` against the
+pinned `b67b47f0…`), and it recommended treating the installed binary as
+UNGATED. **That recommendation is withdrawn. The installed binary was always
+correct.** Here is what was actually happening, measured in the order the
+coordinator set: characterise, localise, state the consequence.
+
+### STEP 2 FIRST, BECAUSE IT IS ONE COMMAND: THE BINARIES ARE IDENTICAL
+
+```
+main md5 fdb6894a303e767c28d04e612bc8be2d   size 4333528
+wt   md5 fdb6894a303e767c28d04e612bc8be2d   size 4333528
+cmp -l  ->  0 differing bytes
+```
+
+**The build is byte-reproducible across trees.** No `__FILE__` leakage, no
+absolute paths in codegen, no `-frandom-seed` effect, no stale object, no ccache,
+no submodule skew, no differing `libmodplayer.a`. Every hypothesis in that branch
+of the search is dead in one command. Which — per the coordinator's own decision
+tree — means the cause is **runtime input**.
+
+### THE CAUSE: `ChdirToAssetRoot` MAKES THE EXECUTABLE'S LOCATION SELECT THE ASSETS
+
+`DEMO/REV.CPP:1392` calls `ChdirToAssetRoot(argv[0])`, defined at `:554`. It
+resolves its **own** path (`_NSGetExecutablePath` + `realpath`), then probes
+`<exedir>/rev.cfg`, `<exedir>/../Runtime/rev.cfg`, `<exedir>/../../Runtime/rev.cfg`
+and **chdirs to the first that exists** — discarding the working directory the
+caller chose, without a word on stdout.
+
+So the experiment that produced the "divergence" was invalid: I ran a
+main-tree-built binary with `cwd = worktree/Runtime` believing that selected the
+worktree's stock 1920×1080 assets. It did not. The binary walked back to
+`/Users/gil-ad/work/revival-fog/Runtime` and rendered **his 1384×768 `rev.cfg`
+and his untracked asset drift**. Two binaries with identical bytes read different
+inputs because of where their files happened to sit.
+
+**PROVED BOTH WAYS.** With `FDS_CHDIR_ASSETS=0` (the documented override, along
+with `--no-chdir_assets`) so that `cd` is authoritative, the **main tree's**
+binary reproduces the pins EXACTLY:
+
+| pin | main-tree binary + `FDS_CHDIR_ASSETS=0` | pinned |
+|---|---|---|
+| chase ×5 | `b67b47f0 5bc199d4 d1284b5a 9c0f7c2f 9cdf5603` | identical |
+| greets t=5743 | `440aa6bbb350ae95fbacf339dd2ad957` | identical |
+| city t=1961 | `bd4ffbf87d1492175a9b6c1111fb3f5f` | identical |
+
+Not chase-specific, not flag-specific, not intermittent: it is deterministic
+(6/6 identical runs) and it is simply which `Runtime/` the process ends up in.
+
+### AND A SECOND, INDEPENDENT TRAP THE HUNT EXPOSED: THE CHASE PINS ARE POSE-SEQUENCE DEPENDENT
+
+The chase rows are pinned from `--snapshot=chase@t=100,400,800,1200,1600` —
+**five poses in one process** — and scene state carries across them:
+
+| comparison | result |
+|---|---|
+| t=100 **alone** vs t=100 as **first of five** | **BYTE-IDENTICAL** |
+| t=800 **alone** vs t=800 as **third of five** | **434 591 px (20.96 %), max \|Δ\| 5, mean 0.62** |
+
+Only the first pose in a process is sequence-free. This is the exact mirror of
+the greets pins' documented "ONE POSE PER PROCESS" rule and it had never been
+written down for chase.
+
+**IT ACCOUNTS FOR TWO MORE FALSE ALARMS I RAISED THE SAME NIGHT, AND BOTH ARE
+NOW WITHDRAWN.** "A cosmetic string literal in `FeatureFlags.def` moved the
+pins" and "the incremental `build/` is poisoned by LTO+incremental linking" were
+the same mistake: a `--snapshot=chase@t=800` spot-check compared against a pin
+defined by the five-pose recipe. **The supposedly poisoned incremental binary
+reproduces all five pins under the canonical recipe**, and the clean rebuild that
+appeared to "fix" it only appeared to because I happened to run the full recipe
+with it. There was no LTO nondeterminism and no build poisoning.
+
+### STEP 3 — THE CONSEQUENCE FOR THIS WINDOW'S GATES: ALL OF THEM STAND
+
+Every byte-identity claim in the 2026-08-28/29 rounds (the `frame_tile_y` chase
+grid, the five `--refl_skip_*` flags' byte-null defaults, `--water_glints_batch`'s
+byte-null default, the SSAO and cone rounds' bit-exactness) was taken **in a
+stock worktree, from that worktree's own build, with the recipes verbatim** —
+i.e. under none of the three failure modes. Nothing needs re-verification.
+Re-run at the merged tip after taking `ac34f170` (SSAO round 4): **14/14 pins
+byte-identical, `render_gate` 4/4.**
+
+**Where the pins are canonical:** a worktree with a **stock committed `rev.cfg`
+(1920×1080, HiDPI 0)** and **no untracked `Runtime/` drift**, gated with that
+worktree's own build. Gil-Ad's main tree satisfies neither condition — by his
+choice, both are his working state — so **a red gate there is expected and is
+not a break.** Recorded in the `SESSION_STATE.md` gates-table preamble.
+
+### FIX OR DOCUMENT
+
+**Documented, not "fixed", and deliberately so.** `ChdirToAssetRoot` is a
+feature — it is what lets `./DEMO` run from anywhere — and it already ships two
+overrides. Changing it would break the ergonomics it exists for. The defect is
+that it is **silent**: nothing in the output says which asset root won. The
+cheap, byte-null improvement is one line of provenance on stderr under an
+existing verbose/diagnostic path, so a gate mismatch is self-diagnosing. Left as
+a backlog item rather than taken tonight, because a gate-visible print is itself
+a thing to gate and the window is short.
+
+---
+
 ## 00p. THE SSAO ROW IS CLOSED AT THE BIT-EXACT LEVEL — 2026-08-29b: the depth gather is refuted (−9.8 % instructions, **+2.5 % cycles**) and `gtaoAcos`'s sqrt look call prices at **nothing**
 
 > **SECTION LETTER:** §00o is the chase agent's (they renumbered from §00n when my SSAO round took that letter the same day); this round is §00p.
