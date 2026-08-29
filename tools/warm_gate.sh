@@ -35,6 +35,12 @@
 # mode hashes. They CANNOT pass in the main tree while Runtime/rev.cfg carries
 # the user's window size. Run from a stock-rev.cfg worktree.
 #
+# BASELINES: recorded at bc36387b. city-warm and city-warm-noal8 RE-BASELINED
+# 2026-08-29 at ad4d7fd5 -- a parent built at 63f0b8f1 reproduces the previous
+# values exactly, the post-merge child diverges DETERMINISTICALLY (3/3) at ONE
+# PIXEL, max |d| 1 at t=1961 and 2 at t=1962, on warm ticks 4-5 only. Struck
+# values, for the record: city-warm ...cb4db07e 540ae440 ; noal8 ...8f249cb0.
+#
 # Usage:  tools/warm_gate.sh [--full] [--update]
 #         WARM_GATE_BIN=/path/to/DEMO tools/warm_gate.sh --full
 #           (the binary still resolves its OWN asset root, so point it at a
@@ -67,7 +73,7 @@ recipes=(
   "--snapshot=greets@t=5739,5740,5741,5742,5743 $GREETS_ARM"
 )
 expect=(
-  "aa45e9a6ad3eb41c7ec7d9e2976b2a33 2c56ce520da2123b0a8b0635dcaa447f de6db0e3e2bcefe5b6b7583f5da20e37 cb4db07edad634ec4f224134c0040a0a 540ae440ddadc2b815349f8e66503f51"
+  "aa45e9a6ad3eb41c7ec7d9e2976b2a33 2c56ce520da2123b0a8b0635dcaa447f de6db0e3e2bcefe5b6b7583f5da20e37 8e6b1e963c3ecce86334dfaba41f011d 48f32707227d8a5093050b01577fa204"
   "2d652283d04a9e286f3954726322c13f d3279eb566580442e6d41dba402c0bf8 b065d0fa9fc931b6c051c86636848086 fd82a58d895a468ee064dd26bad0663e c0266682a6b8a63839d1db4fdcf2d8a4"
 )
 if [ "$FULL" = 1 ]; then
@@ -84,7 +90,7 @@ if [ "$FULL" = 1 ]; then
     "136a758c7c4436ddc4694140a2b5d60a 9a1d34e02100b8f645ab02074ddf2fb1 c89ea48f084ca87ece699c6c163e5625 9b88d6c5aecb2cb7303aca5b1d24ca46 e263aa8e0c1bb4a3200ce251cff8db3d"
     "5961ad8bfe016215129efdac7279421d 083c44a11ea38d033fe1ccf9e9a84ade 720ee4990865dca20f60b07752ce7603"
     "d2b75240759f8f99ec54f7f84957a05f 0119be58c585e8f0a383dd95876b618d 1681829b4d3608a1083e809f9663fb32"
-    "b5de2a662a584d890e564de004091070 37ec05849727bc124e64459172a95390 8f249cb05d8a291c5820f4f87cab92c7"
+    "b5de2a662a584d890e564de004091070 37ec05849727bc124e64459172a95390 2dddf60c395c3c4c624c0822324250ed"
   )
 fi
 
@@ -93,11 +99,23 @@ echo "warm gate ($([ "$FULL" = 1 ] && echo full || echo fast)):"
 for k in "${!names[@]}"; do
   n="${names[$k]}"; d="$OUT/$n"; mkdir -p "$d"
   # shellcheck disable=SC2086
-  "$BIN" ${recipes[$k]} --out="$d" >/dev/null 2>&1
+  "$BIN" ${recipes[$k]} --out="$d" >"$d/.stdout" 2>"$d/.stderr"
+  rc=$?
   got="$(md5 -q "$d"/*_color.ppm 2>/dev/null | tr '\n' ' ')"
   got="${got% }"
+  nppm="$(ls "$d"/*_color.ppm 2>/dev/null | wc -l | tr -d ' ')"
+  want_n="$(printf '%s' "${expect[$k]}" | wc -w | tr -d ' ')"
   if [ "$UPDATE" = 1 ]; then printf "  %-18s %s\n" "$n" "$got"; continue; fi
-  if [ "$got" = "${expect[$k]}" ]; then
+  # A row that produced no/too-few frames is an ERROR, not a hash mismatch, and
+  # must say so: an empty `got` printed as a FAIL reads like a pixel regression
+  # and sends the next reader hunting one. (Cost this suite an hour on
+  # 2026-08-29.)
+  if [ "$rc" != 0 ] || [ "$nppm" != "$want_n" ]; then
+    printf "  ERROR %-18s ran but produced %s/%s frames (exit %s) -- NOT a pixel mismatch\n" \
+      "$n" "$nppm" "$want_n" "$rc"
+    printf "        stderr tail: %s\n" "$(tail -2 "$d/.stderr" 2>/dev/null | tr '\n' ' ' | cut -c1-160)"
+    FAIL=$((FAIL+1))
+  elif [ "$got" = "${expect[$k]}" ]; then
     printf "  PASS  %-18s %s\n" "$n" "$got"; PASS=$((PASS+1))
   else
     printf "  FAIL  %-18s\n        got  %s\n        want %s\n" "$n" "$got" "${expect[$k]}"; FAIL=$((FAIL+1))
