@@ -3843,8 +3843,10 @@ struct CityScene : SceneDriver {
 		// render reflection of all objects except water
 		{
 			TailProf::ScopeTimer _tp("Tick-ReflXfrm", 3);
-			cityMirrorGlassForward();   // city_env_pixel: forward glass in the mirror pass
-			Reflected_Transform(CitySc);
+			{ TailProf::ScopeTimer _tg("Tick-ReflGlass", 3);
+			  cityMirrorGlassForward(); }   // city_env_pixel: forward glass in the mirror pass
+			{ TailProf::ScopeTimer _tx("Tick-ReflXfrmOnly", 3);
+			  Reflected_Transform(CitySc); }
 		}
 
 		prof.leave(PROF_XFRM);
