@@ -10,6 +10,50 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29c — the cross-tree divergence was never a divergence: byte-identical binaries, a self-locating asset root, and pose-sequence-dependent chase pins
+
+Full account: `docs/PERF_STATE.md` §00q. **Zero regressions found; three false
+reds explained; the previous round's "treat the installed binary as UNGATED"
+recommendation is WITHDRAWN.**
+
+**The build is byte-reproducible across trees** — same commit, same cache, `md5`
+equal and `cmp` reports **0 differing bytes**. That one command killed the whole
+build-side hypothesis list (`__FILE__`, baked absolute paths, stale objects,
+ccache, `-frandom-seed`, submodule skew, `libmodplayer.a`).
+
+**Cause 1 — `ChdirToAssetRoot` (`DEMO/REV.CPP:554`, called at `:1392`).** The
+binary resolves its OWN executable path and chdirs to the first `rev.cfg` it
+finds in `<exedir>{,/../Runtime,/../../Runtime}`, **silently discarding the
+caller's working directory**. So a binary's *file location* selects the assets
+and the `rev.cfg`. Gil-Ad's main tree is 1384×768 plus untracked `Runtime/`
+drift, so any binary living there mismatches the pins by construction. Proved
+both ways: under `FDS_CHDIR_ASSETS=0` the main tree's binary reproduces the
+chase, greets and city pins exactly.
+
+**Cause 2 — chase's pins are POSE-SEQUENCE dependent** and it was never written
+down. They are pinned from five poses in ONE process; state carries across them.
+t=100 alone is byte-identical to t=100 first-of-five, but **t=800 alone differs
+from t=800 third-of-five by 434 591 px (20.96 %), max |Δ| 5**. Only the first
+pose of a process is sequence-free. This retro-explains and **withdraws two more
+alarms I raised the same night** — "a cosmetic string moved the pins" and "the
+incremental build is LTO-poisoned" — both were single-pose spot-checks against a
+five-pose pin. The supposedly poisoned binary reproduces all five pins under the
+canonical recipe.
+
+**Consequence: every byte-identity claim of the 2026-08-28/29 window stands.**
+All were taken in a stock worktree from its own build with verbatim recipes.
+Re-gated at the merged tip (after `ac34f170`): 14/14 pins + `render_gate` 4/4.
+Both causes are now in the `SESSION_STATE.md` gates-table preamble.
+
+### OPEN ITEM
+
+**`ChdirToAssetRoot` should say which root it chose.** It is a feature, not a
+bug, and it already has two overrides (`--no-chdir_assets`, `FDS_CHDIR_ASSETS=0`)
+— the defect is that it is SILENT, so a gate mismatch caused by it looks like a
+render regression and cost this campaign an investigation. One line of provenance
+on stderr under an existing diagnostic flag would make it self-diagnosing. Not
+taken tonight: a gate-visible print is itself a thing to gate.
+
 ## 2026-08-29b — chase round 2: water-glints decomposed and ported, and chase's sky turns out to be painted by the reflection pass
 
 Full account: `docs/PERF_STATE.md` §00o (renumbered from §00n at the merge -- the SSAO round took that letter the same day).

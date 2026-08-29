@@ -7114,6 +7114,47 @@ Range covered here: `1ca269d..7282f7a` (~60 commits, 2026-07-08..11).
 
 All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 
+> **THREE WAYS TO GET A FALSE RED ON THIS TABLE — all three were hit and
+> resolved on 2026-08-29, and none of them was ever a regression. Read this
+> before reporting a broken gate.** (Full account: `docs/PERF_STATE.md` §00q.)
+>
+> **1. THE BINARY CHOOSES THE ASSET TREE, NOT YOUR `cd`.** `main()` calls
+> `ChdirToAssetRoot(argv[0])` (`DEMO/REV.CPP:554,1392`): it resolves its own
+> executable path with `_NSGetExecutablePath`, then looks for `rev.cfg` in
+> `<exedir>`, `<exedir>/../Runtime`, `<exedir>/../../Runtime` and **chdirs to the
+> first hit**, silently discarding the working directory you started it in. So
+> `cd worktree/Runtime && /other/tree/build/DEMO/DEMO …` renders **the other
+> tree's assets and the other tree's `rev.cfg`**, not the ones you cd'd to.
+> Gil-Ad's main tree runs `rev.cfg` at **1384×768** and carries untracked asset
+> drift, so any binary living under `/Users/gil-ad/work/revival-fog/` mismatches
+> this table by construction. **Gate from a stock worktree's own build, or pass
+> `FDS_CHDIR_ASSETS=0` / `--no-chdir_assets` to make `cd` authoritative.**
+> PROVED both ways 2026-08-29: the two trees' binaries are **byte-identical**
+> (`md5` equal, `cmp` reports 0 differing bytes) and the main tree's binary under
+> `FDS_CHDIR_ASSETS=0` reproduces the chase, greets and city pins EXACTLY.
+> There is no cross-tree build divergence; the build is reproducible.
+>
+> **2. THE CHASE PINS ARE POSE-SEQUENCE DEPENDENT. `--snapshot=chase@t=800`
+> ALONE IS NOT THE PINNED t=800.** The chase rows are pinned from
+> `--snapshot=chase@t=100,400,800,1200,1600` — five poses in ONE process — and
+> scene state carries across them. Measured: t=100 alone is **byte-identical** to
+> t=100 as the first of five, but **t=800 alone differs from t=800 as the third
+> of five by 434 591 px (20.96 %), max |Δ| 5, mean 0.62**. Only the FIRST pose of
+> a process is sequence-free. **Always run the whole five-pose recipe verbatim.**
+> (greets is the mirror-image trap and already documented: ONE POSE PER PROCESS.)
+>
+> **3. Resolution.** `tools/render_gate.sh` has no override and renders at
+> whatever `rev.cfg` says — see the `gate suite` row.
+>
+> Corollary for merge decisions: every byte-identity claim in this table's
+> 2026-08-28/29 rounds was taken from a stock worktree running its own build with
+> the verbatim recipes, so they stand. Two alarms raised during that window — "a
+> cosmetic string literal moved the pins" and "the incremental `build/` is
+> poisoned by LTO" — were **both** cause 2 (a single-pose run compared against a
+> five-pose pin) and are **withdrawn**: the same incremental binary reproduces all
+> five pins under the canonical recipe.
+
+
 > **2026-08-26 — the `ssao_hdr_transport` fix (SSAO reaches city/fountain under
 > `--hdr` for the first time) moves NOTHING in this table.** All 13 pose hashes
 > below reproduce on the fixed binary, plus the city acceptance arm
