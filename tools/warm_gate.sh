@@ -35,11 +35,22 @@
 # mode hashes. They CANNOT pass in the main tree while Runtime/rev.cfg carries
 # the user's window size. Run from a stock-rev.cfg worktree.
 #
-# BASELINES: recorded at bc36387b. city-warm and city-warm-noal8 RE-BASELINED
-# 2026-08-29 at ad4d7fd5 -- a parent built at 63f0b8f1 reproduces the previous
-# values exactly, the post-merge child diverges DETERMINISTICALLY (3/3) at ONE
-# PIXEL, max |d| 1 at t=1961 and 2 at t=1962, on warm ticks 4-5 only. Struck
-# values, for the record: city-warm ...cb4db07e 540ae440 ; noal8 ...8f249cb0.
+# BASELINES: recorded at bc36387b and UNCHANGED SINCE. They have survived one
+# real regression, and the way that went is the standing lesson:
+#
+#   On 2026-08-29 city-warm and city-warm-noal8 went red at ticks 4-5 (ticks
+#   1-3 and all 13 one-tick pins byte-identical). The divergence was ONE PIXEL
+#   at max |d| 1-2 and deterministic 3/3, so it looked exactly like the
+#   accepted-class LSB drift this tree re-pins for all the time -- and it was
+#   RE-BASELINED here for about ten minutes. It was not drift. It was a broken
+#   per-mesh bsWorld cache in another agent's city glass fan-out, which its
+#   owner then found and removed; the fix restored these exact values.
+#
+# **A WARM-GATE RED FROM SOMEONE ELSE'S CHANGE IS NOT YOURS TO RE-BASELINE.**
+# Report it to the owner and leave the baseline alone. "One pixel, 1 LSB,
+# deterministic" is not evidence of harmlessness -- a stale cached bounding
+# sphere presents exactly that way, and re-baselining would have blessed it
+# permanently.
 #
 # Usage:  tools/warm_gate.sh [--full] [--update]
 #         WARM_GATE_BIN=/path/to/DEMO tools/warm_gate.sh --full
@@ -73,7 +84,7 @@ recipes=(
   "--snapshot=greets@t=5739,5740,5741,5742,5743 $GREETS_ARM"
 )
 expect=(
-  "aa45e9a6ad3eb41c7ec7d9e2976b2a33 2c56ce520da2123b0a8b0635dcaa447f de6db0e3e2bcefe5b6b7583f5da20e37 8e6b1e963c3ecce86334dfaba41f011d 48f32707227d8a5093050b01577fa204"
+  "aa45e9a6ad3eb41c7ec7d9e2976b2a33 2c56ce520da2123b0a8b0635dcaa447f de6db0e3e2bcefe5b6b7583f5da20e37 cb4db07edad634ec4f224134c0040a0a 540ae440ddadc2b815349f8e66503f51"
   "2d652283d04a9e286f3954726322c13f d3279eb566580442e6d41dba402c0bf8 b065d0fa9fc931b6c051c86636848086 fd82a58d895a468ee064dd26bad0663e c0266682a6b8a63839d1db4fdcf2d8a4"
 )
 if [ "$FULL" = 1 ]; then
@@ -90,7 +101,7 @@ if [ "$FULL" = 1 ]; then
     "136a758c7c4436ddc4694140a2b5d60a 9a1d34e02100b8f645ab02074ddf2fb1 c89ea48f084ca87ece699c6c163e5625 9b88d6c5aecb2cb7303aca5b1d24ca46 e263aa8e0c1bb4a3200ce251cff8db3d"
     "5961ad8bfe016215129efdac7279421d 083c44a11ea38d033fe1ccf9e9a84ade 720ee4990865dca20f60b07752ce7603"
     "d2b75240759f8f99ec54f7f84957a05f 0119be58c585e8f0a383dd95876b618d 1681829b4d3608a1083e809f9663fb32"
-    "b5de2a662a584d890e564de004091070 37ec05849727bc124e64459172a95390 2dddf60c395c3c4c624c0822324250ed"
+    "b5de2a662a584d890e564de004091070 37ec05849727bc124e64459172a95390 8f249cb05d8a291c5820f4f87cab92c7"
   )
 fi
 
