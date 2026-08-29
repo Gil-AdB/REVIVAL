@@ -10,6 +10,76 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29b — **THE FROXEL COMPOSITE'S SCALAR HALF IS GONE**: `--fog_refl_vec`, 572 648 punted px/frame go 8-wide, `fog-composite` **−27.2 %** and `renderFrame` **−1.40 ms**, BIT-EXACT. And the item was **invisible to all 13 pins**. DONE, merged
+
+`Froxel_CompositeTileVec8` punted a WHOLE 8-lane group to scalar for any
+water-reflection lane. Warm at 1920×1080: **71 581 of 259 200 groups (27.6 %) =
+572 648 px/frame**, 95.1 % of those lanes genuinely reflective, 64 337 groups
+with all eight. Lane-level punting stays refuted (2026-08-16z); the fix was to
+stop punting.
+
+### THE TRAP THAT HID IT FOR SEVEN ROUNDS
+
+**The punt never fires on tick 1 of a process.** `--snapshot=city@t=1961`
+reports `PUNTED 0`; the census switches on from the second tick, because city's
+water has no mirrored content until then. **All 13 pinned poses are one-tick
+snapshots, so none of them executes a single line of this code.** They pass
+before and after and prove nothing about it. Gate this path on
+`--snapshot=city@t=1958,…,1962` and compare the later frames — same family as
+the gates table's own "judge city's reflection from a warm multi-tick run".
+
+### PRICED BEFORE BUILT, AND THE BACKLOG'S OWN ESTIMATE WAS 7× LOW
+
+`-DFDS_FOG_PUNT_PROBE=1` (committed, never shipped) skips the punt and runs the
+vec path anyway — wrong pixels, but it measures the ceiling: `fog-composite`
+0.577 → 0.291 Gi/f, `renderFrame` −2.39 ms. This item was recorded at
+0.030 Gi/f / **0.72 %** of renderFrame (1512×848, "92 instr/px"). Warm at
+1920×1080 a punted pixel costs **~640 instructions** and the item is
+**5.15 %** of renderFrame.
+
+### RESULT — same binary, flag flipped, min-of-11, quiet box, three agreeing batteries
+
+| row | punt | reflvec | delta |
+|---|--:|--:|--:|
+| `fog-composite` Ginstr/f | 0.5990 | 0.4360 | **−27.21 %** |
+| `fog-composite` Gcyc/f | 0.1570 | 0.1160 | **−26.11 %** |
+| `fog-composite` wall | 4.874 | 3.482 ms | **−1.39 ms** |
+| `fastfog` wall | 9.258 | 7.857 ms | **−1.40 ms (−15.1 %)** |
+| `renderFrame` Ginstr/f | 5.5910 | 5.4280 | −2.92 % |
+| `renderFrame` wall | 49.357 | 47.956 ms | **−1.40 ms (−2.84 %)** |
+| `cones-call` / `fog-columns` | — | — | **0.00 % (controls)** |
+
+**57 % of the probe's ceiling.** The residue is the scalar leg, ~215 instr per
+reflective pixel.
+
+### HOW BIT-EXACTNESS WAS WON — by sharing source, not by transcribing
+
+The leg is lifted verbatim into `Froxel_ReflBranch` and called by BOTH paths, so
+there is no second spelling and nothing is re-associated — no contraction
+archaeology was needed. Three things stay scalar-per-lane, each with precedent
+in this same function: the leg (`fastExpNeg` is an 8-bit LUT, `fogAntiderivG` a
+3-way branch), the LOG slice index, and the `reflAmt2` fold (done in the spilled
+domain so the expression is literally the same one). What went 8-wide is what
+always cost: the four bilinear froxel gathers and the Beer-Lambert tail.
+
+**One hoist worth its own line:** `hb` was calling `fastExpNeg` once per
+reflective PIXEL for a per-frame value. `FroxelReflConst` lifts it plus
+`sigma*meanD` (tau's FIRST product, so nothing re-associates) — 1.7 points of
+`fog-composite` by itself.
+
+**28 warm frames byte-identical** against a HEAD-built parent across six arms
+(his arm ×2, plain `--deferred`, `--hdr --hdr-linear`, `--fast_fog_dist_dim`,
+and `--no-fog_composite_tile_align8` for the scalar-tile path), plus 13/13 pins
+and `render_gate.sh` 4/4.
+
+### NEXT ON THIS ROW
+
+Vectorising the leg's own arithmetic (everything but `fastExpNeg` /
+`fogAntiderivG`) would attack the remaining ~215 instr/px. **That one DOES need
+the §00k2 contraction rules** — `gY = w10*Xc + w11*Yc + w12` and
+`uV = Xc*Xc + Yc*Yc + 1` are both "A+B+C of products", the exact shape rule 2
+covers. Ceiling on it is ~0.12 Gi/f.
+
 ## 2026-08-29 — **THE MOVEMASK SWEEP (only the cone kernel converts) and `lightSphereScreenRect` PROVEN TO DROP REAL LIGHT (max 5/255, 6 of 39 poses)**. Sweep DONE / bug REPORTED, not fixed
 
 ### 1. `anyLane_x8` engine-wide — bit-exact, and a refutation of my own pick
