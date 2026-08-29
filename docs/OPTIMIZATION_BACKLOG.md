@@ -489,6 +489,93 @@ this (reflect dir, Fresnel, mip) and arms on 33–37 % of groups; the *fetch* is
 still eight scalar bilinear taps. That is the biggest single block left, and it
 is a different shape from anything the campaign has attacked.
 
+## 2026-08-29b — **THE SSAO ROW IS CLOSED AT THE BIT-EXACT LEVEL.** The depth gather is REFUTED (−9.8 % instructions, +2.5 % cycles) and the `gtaoAcos` sqrt look call is priced at NOTHING — it comes off the decision stack
+
+Continuation of **2026-08-29**. Same branch, same arms. Nothing landed this
+round that changes a pixel or a cycle; what landed is three instruments and two
+refutations, and the conclusion that the row has no bit-exact work left in it.
+
+### The row as it stands (five scopes, greets t=5743 / chase t=1105)
+
+| scope | greets ms | % | IPC | effPar | chase@main | chase@refl |
+|---|--:|--:|--:|--:|--:|--:|
+| `ssao-march` | 4.751 | **69.6** | 3.27 | 11.2 | 4.561 | 2.058 |
+| `ssao-apply` | 1.762 | 25.8 | **5.29** | 11.0 | 1.687 | 0.504 |
+| `ssao-blur` | 0.272 | 4.0 | 3.66 | 9.7 | 0.269 | 0.265 |
+| `ssao` | 6.827 | | 3.80 | | 6.552 | 2.877 |
+
+(chase now splits `@refl` / `@main` — the cone round's `TailProf::PassTag`
+composing with these scopes.)
+
+### REFUTED — vectorising the march's depth gather
+
+Priced first: `-DFDS_SSAO_DIAG=4` removes the whole gather, **loads included**, and
+it is **0.105 Gi/f = 19.8 % of the march**, with cycles moving proportionally
+(IPC 2.777 → 2.757) — i.e. **instruction-bound, not stalled on the scattered u16
+loads**, which are only ~8 % of its instructions. That reading is what justified
+building it. Built bit-exact; three interleaved rounds:
+
+| arm | Gi/f | Gcyc/f | IPC |
+|---|--:|--:|--:|
+| scalar (shipping) | 0.529 | 0.159–0.164 | **3.29** |
+| vector, narrow stores | 0.479 | 0.168–0.170 | 2.83 |
+| vector, lane inserts | 0.477 | 0.163–0.166 | 2.90 |
+
+**−9.8 % instructions for +2.5 % cycles.** Within-arm spreads are 0.001–0.003
+Gcyc, so the direction is not noise. The scalar loop's eight iterations are
+INDEPENDENT and the out-of-order engine was already overlapping their loads with
+the surrounding vector arithmetic; the vector form replaces that with one
+dependency chain (index → spill → eight dependent loads → widen → mask →
+convert). The first variant additionally put a narrow-store-to-wide-load
+forwarding stall on that chain; `vld1q_lane_u16` inserts remove that half, and
+the chain half does not go away. Reverted; kept as **`-DFDS_SSAO_VECGATHER=ON`**
+because on a target with a real hardware gather the balance could invert.
+
+**THIRD OCCURRENCE OF ONE LAW, now stated as one:** cone round C6 ("register
+pressure beats op count"), the engine-wide movemask sweep (bit-exact,
+instruction-cheaper, cycle-NEUTRAL in the lighting kernel, IPC 4.08 → 3.94), and
+this. **An 8-iteration independent scalar loop in these kernels is not
+automatically improved by vectorising it — price it in CYCLES before believing
+the instruction count.**
+
+### REFUTED — and this one closes an item in Gil-Ad's stack
+
+`gtaoAcos_x8`'s two `_mm256_sqrt_ps` were declined by a prior round as "not
+byte-safe, flips ~0.3 % of samples" — declined on look grounds, never priced.
+Priced now (`-DFDS_SSAO_DIAG=5`), three interleaved rounds: the rsqrt
+substitution is **+1.9 % instructions, +3.1 % cycles, no better on wall**.
+`fsqrt.4s` on this core beats rsqrt + multiply + the max-guard the substitution
+needs to stay finite. **There is no look call to make: the faster-looking option
+is not faster.** Closed, not deferred.
+
+### Two instrument defects of mine, both found by disbelieving a good number
+
+1. Ladder stages 1–4 are CUMULATIVE (`>= n`) and stage 5 read as `>= 4`, so the
+   first DIAG=5 run also deleted the gather and reported the substitution as
+   worth −19.5 % of the row and moving **99.13 % of pixels**. Both were the
+   gather. Stage 5 is now `== 5`; the header states which stages are cumulative.
+2. S1 (2026-08-29) rewrote the slice setup and deleted DIAG stages 1–3 with it,
+   so a DIAG=2 run now measures NOTHING — and my reading of "0.530 vs 0.529, the
+   slice setup is free post-S1" was a dead instrument. **WITHDRAWN.** What is
+   established about S1 is its own A/B: −0.092 Gi/f of the 0.140 priced.
+
+### Why the row is closed at the bit-exact level
+
+* the per-lane slice setup — **taken** (2026-08-29, −16.5 %/−22.0 % of the march)
+* the depth gather, 19.8 % — **refuted above**
+* `gtaoAcos_x8`'s sqrts — **refuted above**, and the look call with them
+* the vec loop's bare `_mm256_rsqrt_ps` — still a genuine look/precision item in
+  his stack (2026-08-17a), untouched, and not a perf lever either way
+* the reconstruct, the bitmask build and the popcount — **already vector**, the
+  popcount by clang itself (2× `cnt.16b`)
+* `ssao-apply` at **IPC 5.29** is at the core ceiling; `ssao-blur` is 4 % of the row
+
+The next ms in this pass has to come from doing less work — fewer slices, fewer
+steps, a coarser grid — and every one of those is a quality dial, i.e. his call,
+not a lever. `--ssao_gtao_slices=1` and `--ssao_gtao_steps=2` are already
+measured (−31 % / −23 % of the row, `PERF_STATE` §00l.4) and remain the honest
+menu if he wants the time back.
+
 ## 2026-08-29 — **`Render_SSAO` DECOMPOSED, and the split's target taken: the march's per-lane slice setup goes 4-wide BIT-EXACT — `ssao` −9.3 % (greets) / −16.4 % (chase), march −16.5 % / −22.0 %.** DONE (S1; two candidates refuted by census before coding)
 
 `Render_SSAO` was **11.13 ms at chase t=1105 = 26.3 % of `renderFrame`** and

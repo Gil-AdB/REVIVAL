@@ -58,6 +58,53 @@
 
 ---
 
+## 00p. THE SSAO ROW IS CLOSED AT THE BIT-EXACT LEVEL — 2026-08-29b: the depth gather is refuted (−9.8 % instructions, **+2.5 % cycles**) and `gtaoAcos`'s sqrt look call prices at **nothing**
+
+> **SECTION LETTER:** §00o is the chase agent's (they renumbered from §00n when my SSAO round took that letter the same day); this round is §00p.
+
+Continuation of §00n. Nothing landed that moves a pixel or a cycle; what landed
+is instruments and two refutations. Full account: `docs/OPTIMIZATION_BACKLOG.md`
+**2026-08-29b**.
+
+| scope | greets ms | % of row | IPC | effPar | chase@main | chase@refl |
+|---|--:|--:|--:|--:|--:|--:|
+| `ssao-march` | 4.751 | **69.6** | 3.27 | 11.2 | 4.561 | 2.058 |
+| `ssao-apply` | 1.762 | 25.8 | **5.29** | 11.0 | 1.687 | 0.504 |
+| `ssao-blur` | 0.272 | 4.0 | 3.66 | 9.7 | 0.269 | 0.265 |
+
+**The depth gather (19.8 % of the march, priced with `-DFDS_SSAO_DIAG=4`, loads
+included) vectorises BIT-EXACTLY and loses.** −9.8 % instructions, **+2.5 %
+cycles**, IPC 3.29 → 2.90, three interleaved rounds, within-arm Gcyc spreads of
+0.001–0.003. The scalar loop's eight iterations are independent and were already
+being overlapped with the surrounding vector work; the vector form serialises
+them behind one dependency chain. Kept as `-DFDS_SSAO_VECGATHER=ON`.
+**Third occurrence of the same law** (cone C6; the movemask sweep's
+cycle-neutrality in the lighting kernel; this) — *an 8-iteration independent
+scalar loop here is not automatically improved by vectorising it; price it in
+cycles.*
+
+**`gtaoAcos_x8`'s two `_mm256_sqrt_ps` price at nothing.** The rsqrt substitution
+a prior round declined on look grounds (~0.3 % of samples flip) is **+1.9 %
+instructions and +3.1 % cycles** — `fsqrt.4s` beats rsqrt + multiply + the
+finiteness guard on this core. **The look call is moot and comes off the stack.**
+
+**Bounds safety, proved not assumed** (`-DFDS_SSAO_VERIFY`, scalar behind vector
+per term, plus a count of how often the guard FIRES): 0 sz and 0 any-flag
+mismatches over 8 294 400 lanes at each of greets t=5743, t=2845 and chase
+t=1105, while the guard caught **12.18 % / 12.22 % / 5.04 %** of lanes. A guard
+that never trips proves nothing; this one trips on one lane in eight.
+
+**Why closed:** slice setup taken (§00n); gather refuted; acos sqrts refuted;
+reconstruct/bitmask/popcount already vector (the popcount by clang, 2× `cnt.16b`);
+apply at IPC 5.29 is at the ceiling; blur is 4 %. The remaining `_mm256_rsqrt_ps`
+refinement is a genuine look item in his stack and not a lever either way. **The
+next ms here has to come from fewer slices/steps or a coarser grid — quality
+dials, already measured at −31 % / −23 % in §00l.4, and his call.**
+
+---
+
+---
+
 ## 00o. `water-glints` DECOMPOSED AND PORTED — 2026-08-29: the 20× pose swing is **a fixed 0.43 ms scan plus 6.8 ns per live water pixel**, at t=1105 the pass spends **102 % of its time deciding it has nothing to do**, and the port lands **−30 % of the row at every watered pose** — but for the opposite reason to the one the map gave
 
 *(Numbered §00o, not §00n: the SSAO round landed its own §00n on `fog-wt` the same day — see the section below. Same collision §00l/§00m hit last round; the letters are allocated per branch and reconciled at the merge.)*
