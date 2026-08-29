@@ -10,6 +10,47 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29d — the water scan's analytic reject is clipped away: byte-null, and 26 % off the row at the pose where the pass was 102 % scan
+
+Full account: `docs/PERF_STATE.md` §00s (renumbered from §00r at the merge — the greets round took that letter the same day). **LANDED, byte-null** (14/14 pins +
+`render_gate` 4/4 from a stock worktree).
+
+`rowXClip()` in `DEMO/ProceduralWater.cpp`. `D` is affine in x and the keep-test
+`sd = K/D in (1,fzp)` collapses to one interval on `D`, so the surviving x-range
+is solvable per row in O(1). Applied to both varied glint loops (default and
+`--water_glints_batch`). **Byte-null by construction**: bounds widened 2 px, all
+per-pixel tests retained, degenerate `fzp<=0` fails OPEN.
+
+Validated two ways: the pins (both arms byte-exact) and a renderer-independent
+falsifier — 4 000 random camera configurations, **4 801 816 px, ZERO live pixels
+wrongly skipped**, 51 % skipped on average.
+
+Measured, min-of-9, same-binary control at −0.10/+1.00/−0.69 %: t=800 −0.072 ms
+(−0.9 %), **t=1105 −0.104 ms (−26.1 %)**, t=1600 −0.195 ms (−1.4 %); batched arm
+−0.141 / −0.121 ms. **Predicted ~0.15 ms, measured 0.07–0.20 ms.** A peer's
+battery contaminated `__tick` (BOX-AFTER busy=7, load 20.9) so tick is NOT quoted
+from this run; the row survived, per the control.
+
+Honest size: 0.2–0.4 % of tick. It lands because it is byte-null and never a
+regression, not because the millisecond is impressive.
+
+### OPEN
+
+1. **The same clip fits `RenderGlints` (city/fountain) and was NOT applied** —
+   that function is byte-gated by their pins and this file's inlining trap makes
+   any edit there a gate risk for a sub-ms return. Mechanism is written; someone
+   with a quiet box can take it.
+2. **The occlusion reject is the remaining half and needs the Z-buffer** — at
+   t=1105 it is 1 132 109 px of the 2 073 600. A per-tile Z-max (hierarchical Z)
+   is the only cheap way at it; the water pass has no such structure today.
+3. **TOOLING, shared: `pgrep -f` self-matches peer wait-loops.**
+   `scratchpad/quietrun.sh`'s box check matched a PEER AGENT'S OWN quiet-wait
+   loop (its command line contains the literals `cmake|ninja`), so two waiters
+   waited on each other and **neither ever started** — a battery stalled
+   silently, looking exactly like a slow run. Both wrappers now use
+   `ps -Ao comm=`, which matches the executable NAME and cannot false-match a
+   shell. Same class as the documented `pgrep -fl DEMO` self-match, one level up.
+
 ## 2026-08-29c — the cross-tree divergence was never a divergence: byte-identical binaries, a self-locating asset root, and pose-sequence-dependent chase pins
 
 Full account: `docs/PERF_STATE.md` §00q. **Zero regressions found; three false
