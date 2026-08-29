@@ -87,6 +87,36 @@
 #define FDS_SSAO_DIAG 0
 #endif
 
+// ─── S2, REFUTED AND KEPT AS A REBUILD ARM (-DFDS_SSAO_VECGATHER=ON) ────────
+// Vectorising the march's per-sample depth gather — bounds mask, index,
+// validity, the u16->float convert and the `any` reduction all in vector, only
+// the eight scattered u16 loads left scalar — is BIT-EXACT (verified below) and
+// removes 9.8 %% of `ssao-march`'s instructions. **It costs 2.5 %% MORE CYCLES.**
+//   arm            Gi/f    Gcyc/f   IPC
+//   scalar         0.529   0.161    3.29
+//   vector (S2b)   0.477   0.164    2.90
+// Three interleaved rounds, spreads of 0.001-0.003 Gcyc inside each arm, so the
+// direction is not noise. The IPC collapse is the whole story: the scalar loop's
+// eight iterations are INDEPENDENT, and the out-of-order engine was already
+// overlapping their loads with the surrounding vector arithmetic; the vector
+// form replaces that with one dependency chain (index -> store -> eight loads ->
+// widen -> mask -> convert) and a store-to-load round trip in the middle of it.
+// An earlier variant that spilled the eight loads as eight NARROW stores feeding
+// one 32-byte load was worse still (+4.0 %% cycles) — the lane-insert form below
+// fixes that half and the chain half remains.
+//
+// This is the THIRD time this campaign has met the same law (cone round C6:
+// "register pressure beats op count"; the engine-wide movemask sweep: bit-exact,
+// instruction-cheaper, cycle-NEUTRAL in the lighting kernel). Stated plainly:
+// **an 8-iteration independent scalar loop in these kernels is not automatically
+// improved by vectorising it — it is already extracting ILP the vector form
+// serialises, and instruction count will lie to you about it.**
+// Kept compilable because on a target with a real hardware gather (x86 AVX2
+// vpgatherdd) the balance could invert; inert and zero-cost at the default.
+#ifndef FDS_SSAO_VECGATHER
+#define FDS_SSAO_VECGATHER 0
+#endif
+
 // [INSTRUMENT] -DFDS_SSAO_VERIFY=ON: run the SCALAR slice setup behind the
 // 4-wide one and count bit-pattern disagreements per TERM, so a divergence can
 // be localised instead of guessed at. Compile-time, like the wave-2 oct-pair
@@ -779,7 +809,7 @@ void Render_SSAO() {
 									// Gcyc column says how much of it is the memory.
 									for (int k=0;k<8;++k) szA[k]=1.0f;
 									any=true;
-#else
+#elif FDS_SSAO_VECGATHER
 									// ─── S2 (2026-08-29): VECTORISED DEPTH GATHER ────────
 									// Priced by -DFDS_SSAO_DIAG=4 (the whole block, loads
 									// included) at 0.105 Gi/f = 19.8 %% of `ssao-march`, with
@@ -817,7 +847,23 @@ void Render_SSAO() {
 											ok);
 										alignas(32) int idxA[8]; alignas(32) int z2A[8];
 										_mm256_store_si256((__m256i*)idxA, idx);
-										for (int k=0;k<8;++k) z2A[k] = int(zEnc[size_t(unsigned(idxA[k]))]);
+										// S2b: eight LANE-INSERTS straight into one u16x8
+										// register, then widen in-register and spill as TWO
+										// 16-byte stores. The obvious form (8 scalar int
+										// stores feeding one 32-byte load) puts a
+										// narrow-store-to-wide-load forwarding stall on the
+										// critical path of every sample batch.
+										uint16x8_t zr = vdupq_n_u16(0);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[0]), zr, 0);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[1]), zr, 1);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[2]), zr, 2);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[3]), zr, 3);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[4]), zr, 4);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[5]), zr, 5);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[6]), zr, 6);
+										zr = vld1q_lane_u16(zEnc + unsigned(idxA[7]), zr, 7);
+										vst1q_u32((uint32_t*)z2A,     vmovl_u16(vget_low_u16(zr)));
+										vst1q_u32((uint32_t*)z2A + 4, vmovl_u16(vget_high_u16(zr)));
 										const __m256i z2v = _mm256_load_si256((const __m256i*)z2A);
 										// valid = in range AND z != 0 (z2 is u16, so a signed
 										// compare against 0 is exact)
@@ -863,6 +909,20 @@ void Render_SSAO() {
 											if (anyS != any) g_ssVer[11].fetch_add(1,std::memory_order_relaxed);
 										}
 #endif
+									}
+#else
+									{
+										alignas(32) int sxA[8], syA[8]; alignas(32) float szA2[8];
+										_mm256_store_si256((__m256i*)sxA,sxi);
+										_mm256_store_si256((__m256i*)syA,syi);
+										for (int k=0;k<8;++k){
+											const int sx=sxA[k], sy=syA[k];
+											if ((unsigned)sx>=(unsigned)W||(unsigned)sy>=(unsigned)H){ szA2[k]=0.0f; continue; }
+											const word z2=zEnc[size_t(sy)*size_t(W)+size_t(sx)];
+											if (!z2){ szA2[k]=0.0f; continue; }
+											szA2[k]=float(0xFF80-z2)*invZScale; any=true;
+										}
+										szVv=_mm256_load_ps(szA2);
 									}
 #endif
 									SSC(4,1); if (!any) SSC(5,1);
