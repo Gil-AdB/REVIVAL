@@ -346,17 +346,17 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const char *e = std::getenv("FDS_CONTRIB_CULL_THR");
 		return (e && *e) ? float(std::atof(e)) : 0.0f;
 	}();
-	// --deferred_tile_sphere_cull: BYTE-NULL 3-D tightening of the cull above.
-	// The screen-rect test and the z-extent test are each a projection of the
-	// light's range sphere onto one axis set, and a conjunction of two
-	// separable tests is strictly weaker than the 3-D test: a light diagonally
-	// off the corner of a tile's frustum chunk passes both and reaches not one
-	// of its pixels. Measured with --shadow_tap_census (greets t=5743): 9.6 %
-	// of admitted (tile x light) entries have ZERO in-range pixels, and 93 % of
-	// those carry a cube shadow. Removing them cannot move a byte — every pixel
-	// they reach fails the same `len2 > range2` test the per-pixel loop already
-	// applies — so this is the byte-null half of the parked per-tile early-out.
-	const bool sphereCull = fds::FeatureFlags::deferred_tile_sphere_cull();
+	// TILE SPHERE CULL — a BYTE-NULL 3-D tightening of the cull above (was
+	// --deferred_tile_sphere_cull, flag deleted 2026-08-29; it had been default
+	// ON and byte-identical since 43ac3456). The screen-rect test and the
+	// z-extent test are each a projection of the light's range sphere onto one
+	// axis set, and a conjunction of two separable tests is strictly weaker
+	// than the 3-D test: a light diagonally off the corner of a tile's frustum
+	// chunk passes both and reaches not one of its pixels. Measured with
+	// --shadow_tap_census (greets t=5743): 9.6 % of admitted (tile x light)
+	// entries have ZERO in-range pixels, and 93 % of those carry a cube shadow.
+	// Removing them cannot move a byte — every pixel they reach fails the same
+	// `len2 > range2` test the per-pixel loop already applies.
 	// PER-CALL, NOT `static`. This scratch is written for every tile of THIS
 	// call's grid and then read back across the light loop below, so a `static`
 	// makes it shared mutable state between every concurrent caller. That is a
@@ -369,19 +369,17 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 	// (tile x light) set — and therefore the shaded reflection — depended on
 	// thread interleaving. Measured: greets t=6293/6294 under the acceptance arm
 	// with FDS_GREETS_SHATTER=1 flipped 15 times in 49 launches with the static,
-	// 0 in 48 with it per-call. 96 x 20 B = 1.9 KB of stack, written before read
-	// in the guarded branch and never read outside it; the main frame is one
-	// caller on one thread, so its values are unchanged (byte-null there).
+	// 0 in 48 with it per-call. 96 x 20 B = 1.9 KB of stack, written before it
+	// is read; the main frame is one caller on one thread, so its values are
+	// unchanged (byte-null there).
 	TileChunkSphere chunk[DEFERRED_NUM_TILES];
-	if (coneCull || sphereCull || sContribThr > 0.0f) {
-		for (int j = 0; j < numTilesY; ++j) {
-			for (int i = 0; i < numTilesX; ++i) {
-				const int idx = j * numTilesX + i;
-				chunk[idx] = tileChunkSphere(
-					float(i * tileSizeX), float(std::min((i+1) * tileSizeX, xres)),
-					float(j * tileSizeY), float(std::min((j+1) * tileSizeY, yres)),
-					tileLights[idx].zMin, tileLights[idx].zMax);
-			}
+	for (int j = 0; j < numTilesY; ++j) {
+		for (int i = 0; i < numTilesX; ++i) {
+			const int idx = j * numTilesX + i;
+			chunk[idx] = tileChunkSphere(
+				float(i * tileSizeX), float(std::min((i+1) * tileSizeX, xres)),
+				float(j * tileSizeY), float(std::min((j+1) * tileSizeY, yres)),
+				tileLights[idx].zMin, tileLights[idx].zMax);
 		}
 	}
 
@@ -475,7 +473,7 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 				// so a --deferred_max_range clamp stays consistent between
 				// the two. Rejection is exact: dist(L, chunkCentre) - chunkR
 				// is a lower bound on |L - P| for every P the tile can shade.
-				if (sphereCull && chunk[idx].valid) {
+				if (chunk[idx].valid) {
 					const TileChunkSphere &cc = chunk[idx];
 					const float ddx = Lpx - cc.cx;
 					const float ddy = Lpy - cc.cy;

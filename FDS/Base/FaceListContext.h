@@ -41,7 +41,8 @@ namespace fds {
 // filled: near-plane-straddling faces (PX/PY invalid) and every non-main
 // pass that doesn't fill it stay conservatively un-rejected — byte-safe.
 // This is a PURE reject (the clipper already clips to the tile rect, so
-// output is byte-identical); --tile_bbox_cull gates it for A/B.
+// output is byte-identical). It used to be gated by --tile_bbox_cull for A/B;
+// that flag was deleted 2026-08-29 and the reject is unconditional.
 struct FListEntry {
     uint32_t sortKey;
     Face*    face;

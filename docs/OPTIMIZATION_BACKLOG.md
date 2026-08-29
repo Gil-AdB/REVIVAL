@@ -6308,7 +6308,7 @@ per-SCENE constant, but a clump is a sprite-delimited run of faces, and those
 almost never stack in depth. Exactly ONE clump in the frame has a real second
 depth layer.
 
-### Lever 1 — `--xpar_strip_extent` (default ON, byte-null by construction)
+### Lever 1 — `--xpar_strip_extent` (default ON, byte-null by construction; **flag deleted 2026-08-29**, the bound is unconditional)
 
 The rasterizer records the tile-column extent it touched (`meka::g_rasterXExtent`,
 updated inside the `g_rasterStripClamp.tileYMax < INT32_MAX` branch that only
@@ -6326,7 +6326,7 @@ legacy peel and resolution changes are all covered.
 **Scanned px 197.90 M -> 6.66 M (3.36 %). Live fragment count IDENTICAL (0.97 M)
 in both arms — the bound loses nothing.**
 
-### Lever 2 — `--xpar_peel_early_out` (default ON, byte-null by construction)
+### Lever 2 — `--xpar_peel_early_out` (default ON, byte-null by construction; **flag deleted 2026-08-29**, the early-out is unconditional)
 
 Reverse-peel accept mask (`Mekalele.h:1455`):
 `zmask = (z_candidate < z_existing) & (z_candidate > peelFloor)`, with
@@ -6453,7 +6453,7 @@ The two poses are complementary and neither alone would have told the truth:
 t=5743 is tap-heavy and light-list-clean; **his pose is the opposite — half of
 every tile's light list cannot light one pixel of that tile.**
 
-### DONE, shipped default ON, byte-null: `--deferred_tile_sphere_cull`
+### DONE, shipped default ON, byte-null: `--deferred_tile_sphere_cull` (**flag deleted 2026-08-29**, the cull is unconditional)
 
 The tile light list culled a light against the tile's screen rect **and**, 
 separately, against its z-extent. A conjunction of two separable projections of

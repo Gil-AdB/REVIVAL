@@ -14,7 +14,7 @@ namespace fds {
 // inline) because the scene-local mirror transforms (CITY.CPP / CHASE.CPP
 // `Reflected_Transform`, which build FList by hand for the water-reflection
 // underlay pass) pushed `{sortKey, face}` aggregates and left the bbox at its
-// cover-all default. That made `--tile_bbox_cull` completely INERT on those
+// cover-all default. That made the tile pre-reject completely INERT on those
 // passes: every face was handed to every tile's clipper. Measured on city
 // t=1961 (1512x848, 6x5 tiles): the main pass stamps 98.8 % of its entries and
 // averages 1.45 tiles touched per face -> 29 671 (face, tile) pairs, while the

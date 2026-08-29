@@ -643,16 +643,18 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	const fds::RenderContext fctx = fds::primaryRenderContext();
 
 	// --face_tile_bin: bin the face list to tiles ONCE, instead of letting all
-	// 30 tiles re-walk it. Pure restatement of the --tile_bbox_cull reject,
-	// order-preserving (FDS/RENDER/FaceTileBin.h), so it is byte-identical and
-	// requires that flag to be on. Built here, between the sort and the tile
+	// 30 tiles re-walk it. Pure restatement of the per-face tile bbox reject,
+	// order-preserving (FDS/RENDER/FaceTileBin.h), so it is byte-identical.
+	// (That reject used to be gated by --tile_bbox_cull, which this condition
+	// therefore also required; the flag was deleted 2026-08-29 and the reject
+	// is unconditional.) Built here, between the sort and the tile
 	// dispatch, and consumed before this function returns — no nested
 	// renderFrame runs in that window (the env / SH bakes are in the prologue,
 	// above), so one file-scope arena is safe and nothing allocates per frame
 	// once the scene's face count has been seen.
 	fds::FaceTileBins& bins = fds::FaceTileBins_Instance();
 	bool useBins = false;
-	if (fds::FeatureFlags::face_tile_bin() && fds::FeatureFlags::tile_bbox_cull()) {
+	if (fds::FeatureFlags::face_tile_bin()) {
 		TailProf::ScopeTimer _tpBin("face-bin", 1);
 		useBins = fds::FaceTileBins_Build(bins, FList, CAll,
 		                                  numTilesX, numTilesY,

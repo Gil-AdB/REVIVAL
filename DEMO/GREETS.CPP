@@ -1344,7 +1344,6 @@ static void GreetsApplyRunDefaults()
 	FF::setDefault(FF::FloatId::bloom_intensity,        2.0f);
 	FF::setDefault(FF::FloatId::hdr_refl_gain,          4.0f);
 	FF::setDefault(FF::FloatId::cone_strength,          2.0f);
-	FF::setDefault(FF::BoolId::cone_fine_tiles,         true);
 	FF::setDefault(FF::FloatId::disco_bloom,            0.0f);
 	// Shatter feel. mirror_rtt / mirror_rtt_density USED to be set here and
 	// were inert: GreetsMirror.cpp's `wantRtt` decision runs during

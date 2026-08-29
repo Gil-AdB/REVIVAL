@@ -3883,7 +3883,7 @@ composite. It cannot reach:
 | SSAO | `DeferredSSAO.cpp:228` etc. (5 sites) | 12×8 | none, own constant |
 | fast fog | `DeferredFastFog.cpp:2742` etc. (6 sites) | 12×8 | none, own constant |
 | shadow maps | `Shadows.cpp:726` | 4×4 | none, own constant |
-| volumetric cones | `--cone_fine_tiles` | 12×8 / 6×4 | none |
+| volumetric cones | (unconditional since `--cone_fine_tiles` was deleted 2026-08-29) | 12×8 | none |
 
 The ONE coupling is the **legacy `--no-xpar_tile_lights` fallback**
 (`DeferredSurfaceKernel.cpp:3735`), which subscripts the 96-entry light array
@@ -4062,7 +4062,9 @@ The S2 contract is why: the box is a conservative superset of the un-clipped
 triangle and the clipper only shrinks coverage, so a box that misses a tile
 means zero output there. The escape hatches agree too — city t=1961 under his
 arm gives `925ecd43…` on all four of default / `--no-face_tile_bin` /
-`--no-tile_bbox_cull` / both off.
+`--no-tile_bbox_cull` / both off. *(`--tile_bbox_cull` was **deleted 2026-08-29**
+— the reject is unconditional now, so only the `--no-face_tile_bin` arm of that
+four-way still exists.)*
 
 > **2026-08-16f — the `925ecd43…` here is HUD-BEARING and has been superseded.**
 > It was taken without `--profiler=0`, and `RunCitySnapshot` did not silence the

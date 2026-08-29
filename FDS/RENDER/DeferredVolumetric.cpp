@@ -172,8 +172,9 @@ static volatile float g_ablSink = 0.0f;
 // register allocator spend its slots", which a two-arm histogram cannot answer.
 //
 //   0  runtime flags (shipping — folds to the plain flag reads, byte-null)
-//   1  vol_cone_solve_vec and vol_cone_lane_vec folded to compile-time TRUE,
-//      so the scalar fallbacks dead-code away entirely
+//   1  vol_cone_solve_vec folded to compile-time TRUE, so its scalar fallback
+//      dead-codes away entirely. (It also folded vol_cone_lane_vec until that
+//      flag was deleted 2026-08-29; those two loops are now unconditional.)
 #ifndef FDS_CONE_FORCE
 #define FDS_CONE_FORCE 0
 #endif
@@ -891,10 +892,10 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     // Read once per tile call — the branch never enters the per-spot loop.
     const bool coneSolveVec = (FDS_CONE_FORCE != 0)
                             || fds::FeatureFlags::vol_cone_solve_vec();
-    // The two leftover SCALAR per-lane loops (dz/fade window, colour
-    // accumulate) 8 lanes wide. Read once per tile, same as above.
-    const bool laneVec = (FDS_CONE_FORCE != 0)
-                       || fds::FeatureFlags::vol_cone_lane_vec();
+    // (The two leftover SCALAR per-lane loops — dz/fade window and colour
+    // accumulate — went 8 lanes wide under --vol_cone_lane_vec, default ON and
+    // BIT-EXACT since 03ef0ff0. The dial was deleted 2026-08-29; both loops
+    // below are unconditionally 8-wide.)
     // The same solve at the machine's NATIVE 128-bit width, run twice over the
     // 8-pixel batch (see FDS_CONE_W4). Compile-time only: at the default 0 the
     // arm below emits literally nothing and the shipping kernel disassembles to
@@ -1142,7 +1143,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 alignas(32) float accB[8] = {}, accG[8] = {}, accR[8] = {};
                 // 8-wide colour accumulators — see the accumulate note at
                 // the bottom of the per-spot loop. Live in REGISTERS across
-                // the whole spot loop under --vol_cone_lane_vec; drained to
+                // the whole spot loop; drained to
                 // accB/accG/accR once per batch, so the composite loop
                 // below is untouched.
                 __m256 vAccB = _mm256_setzero_ps();
@@ -1859,7 +1860,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // negates to the UNORDERED _CMP_NEQ_UQ. 12.0f*invZScale
                     // is loop-invariant, so hoisting it is the identical
                     // product, not a re-association.
-                    if (laneVec) {
+                    // Surface-fade window: at least ~12 z-buffer quanta wide,
+                    // so the z16 staircase (large in world units at grazing
+                    // incidence) jitters INSIDE the ramp instead of cutting the
+                    // beam at a per-column-noisy depth.
+                    {
                         const __m256 vZeroL  = _mm256_setzero_ps();
                         const __m256 mLive   = _mm256_cmp_ps(
                                                _mm256_load_ps(aliveLane),
@@ -1875,20 +1880,6 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         _mm256_store_ps(dzArr,        _mm256_blendv_ps(vZeroL, vD,     mLive));
                         _mm256_store_ps(invDzArr,     _mm256_blendv_ps(vZeroL, vInvFw, mLive));
                         _mm256_store_ps(fadeStartArr, _mm256_blendv_ps(vZeroL, vFadeS, mLive));
-                    } else {
-                    for (int lane = 0; lane < 8; ++lane) {
-                        if (aliveLane[lane] == 0.0f) continue;
-                        const float d = (zHiArr[lane] - zLoArr[lane]) * inv_nSamp;
-                        dzArr[lane]        = d;
-                        // Surface-fade window: at least ~12 z-buffer
-                        // quanta wide, so the z16 staircase (large in
-                        // world units at grazing incidence) jitters
-                        // INSIDE the ramp instead of cutting the beam
-                        // at a per-column-noisy depth.
-                        const float fadeW = std::max(d, 12.0f * invZScale);
-                        invDzArr[lane]     = 1.0f / fadeW;
-                        fadeStartArr[lane] = zMaxArr[lane] - fadeW;
-                    }
                     }
 
                     // ablation: keep the scalar per-lane dz/fade loop.
@@ -2496,8 +2487,6 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // cut before the per-lane colour accumulate.
                     CONE_ABL_CUT(5, accV);
 
-                    alignas(32) float accArr[8];
-                    if (!laneVec) _mm256_store_ps(accArr, accV);
                     const float colB = lights->colB[li];
                     const float colG = lights->colG[li];
                     const float colR = lights->colR[li];
@@ -2541,7 +2530,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // because that is what the compiler contracted it to
                     // under the tree-wide -ffp-contract=fast (verified
                     // against the city pin, which does not move).
-                    if (laneVec) {
+                    {
                         const __m256 mPos = _mm256_cmp_ps(accV, _mm256_setzero_ps(),
                                                           _CMP_NLE_UQ);
                         __m256 w = _mm256_mul_ps(accV, vDensity_v);
@@ -2551,21 +2540,11 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         vAccB = _mm256_fmadd_ps(w, _mm256_set1_ps(colB), vAccB);
                         vAccG = _mm256_fmadd_ps(w, _mm256_set1_ps(colG), vAccG);
                         vAccR = _mm256_fmadd_ps(w, _mm256_set1_ps(colR), vAccR);
-                    } else {
-                    for (int lane = 0; lane < 8; ++lane) {
-                        if (accArr[lane] <= 0.0f) continue;
-                        const float w = accArr[lane] * density * nNorm * coneGain;
-                        accB[lane] += w * colB;
-                        accG[lane] += w * colG;
-                        accR[lane] += w * colR;
-                    }
                     }
                 }
-                if (laneVec) {
-                    _mm256_store_ps(accB, vAccB);
-                    _mm256_store_ps(accG, vAccG);
-                    _mm256_store_ps(accR, vAccR);
-                }
+                _mm256_store_ps(accB, vAccB);
+                _mm256_store_ps(accG, vAccG);
+                _mm256_store_ps(accR, vAccR);
 
                 for (int lane = 0; lane < laneCount; ++lane) {
                     if (accB[lane] <= 0.0f && accG[lane] <= 0.0f && accR[lane] <= 0.0f) continue;
@@ -3049,28 +3028,22 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         spotIdx[spotCount++] = i;
     }
     if (spotCount == 0) return;
-    // --cone-fine-tiles: 12x8 (== the lighting grid) instead of the coarse
-    // 6x4. Finer tiles spread the cone-heavy region across 4x more tasks for
-    // better load balance at the pass barrier; each cone tile then maps 1:1
-    // onto a lighting tile (scaleX/Y = 1) for the zMax lookup. Coarse 6x4
-    // keeps the legacy 2x2 (scaleX/Y = 2) mapping.
-    const bool coneFine = fds::FeatureFlags::cone_fine_tiles();
-    const int numTilesX = coneFine ? DEFERRED_NUM_TILES_X : 6;
-    const int numTilesY = coneFine ? DEFERRED_NUM_TILES_Y : 4;
+    // The cone grid IS the 12x8 lighting grid. Fine tiles spread the
+    // cone-heavy region across 4x more tasks for better load balance at the
+    // pass barrier, and each cone tile then maps 1:1 onto a lighting tile
+    // (scaleX/Y = 1) for the zMax lookup. (The legacy coarse 6x4 grid with its
+    // 2x2 mapping was the --cone_fine_tiles OFF arm: same per-pixel work,
+    // byte-identical output verified on conetest. Flag deleted 2026-08-29.)
+    const int numTilesX = DEFERRED_NUM_TILES_X;
+    const int numTilesY = DEFERRED_NUM_TILES_Y;
     const int numTiles  = numTilesX * numTilesY;
     const int scaleX = DEFERRED_NUM_TILES_X / numTilesX;   // lighting tiles per cone tile
     const int scaleY = DEFERRED_NUM_TILES_Y / numTilesY;
-    int tileSizeX, tileSizeY;
-    if (coneFine) {
-        // Match the lighting tile geometry exactly so cone tile K == lighting
-        // tile K (Render_DeferredLighting:3164-3166: 8-rounded X).
-        const int rawTileX = (XRes + (numTilesX - 1)) / numTilesX;
-        tileSizeX = (rawTileX + 7) & ~7;
-        tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
-    } else {
-        tileSizeX = (XRes + numTilesX - 1) / numTilesX;
-        tileSizeY = (YRes + numTilesY - 1) / numTilesY;
-    }
+    // Match the lighting tile geometry exactly so cone tile K == lighting
+    // tile K (Render_DeferredLighting:3164-3166: 8-rounded X).
+    const int rawTileX  = (XRes + (numTilesX - 1)) / numTilesX;
+    const int tileSizeX = (rawTileX + 7) & ~7;
+    const int tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 
     // Per-tile spot filtering. Mirror buildTileLightLists's screen-space
     // sphere projection but WITHOUT the z-cull (which caused the

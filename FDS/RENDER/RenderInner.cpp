@@ -101,7 +101,7 @@ void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, fl
 	// When the caller handed us a face->tile bin (--face_tile_bin) the reject
 	// has already been done once for the whole frame and this tile's run is
 	// dense: read Face* straight out of it, in the same order the walk gave.
-	const bool bboxCull = !binFaces && fds::FeatureFlags::tile_bbox_cull();
+	const bool bboxCull = !binFaces;
 	const int tx1 = int(x1), ty1 = int(y1), tx2 = int(x2), ty2 = int(y2);
 
 	while (I--) {
@@ -257,7 +257,9 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2,
 	// renderFrame bins the list once per pass and hands each tile a dense
 	// Face* run, in the SAME order this walk produces (FaceTileBin.h). When
 	// binFaces is non-null the bbox test below is already accounted for.
-	const bool bboxCull = !binFaces && fds::FeatureFlags::tile_bbox_cull();
+	// (The A/B dial was --tile_bbox_cull, deleted 2026-08-29 — byte-identical
+	// arms: this is a PURE reject and flag-off faces carried a cover-all box.)
+	const bool bboxCull = !binFaces;
 	const int tx1 = int(x1), ty1 = int(y1), tx2 = int(x2), ty2 = int(y2);
 
 	while (I--) {

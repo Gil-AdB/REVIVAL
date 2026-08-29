@@ -915,8 +915,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 						// coverage. A box that misses this tile means zero texels
 						// written here, so the reject is identical to clipping —
 						// checked, not just argued, with --shadow_plane_hash.
-						const bool bboxCull = fds::FeatureFlags::shadow_bbox_cull()
-						                   && fds::FeatureFlags::tile_bbox_cull();
+						const bool bboxCull = fds::FeatureFlags::shadow_bbox_cull();
 						const int tx1 = int(x1f), ty1 = int(y1f);
 						const int tx2 = int(x2f), ty2 = int(y2f);
 						const bool clipCensus = fds::FeatureFlags::clip_stats();
