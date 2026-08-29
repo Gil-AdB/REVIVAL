@@ -81,6 +81,7 @@
 // BYTE-CHANGING — a cost instrument only, same status as FDS_W1LDR_ABLATE.
 //   1  replace the atan2_approx call with a constant (prices the atan alone)
 //   2  replace the WHOLE per-lane slice setup with constants
+//   4  replace the WHOLE per-sample depth gather (loads included) with a constant
 //   0  full
 #ifndef FDS_SSAO_DIAG
 #define FDS_SSAO_DIAG 0
@@ -95,15 +96,19 @@
 #endif
 #if FDS_SSAO_VERIFY
 // [0] lanes checked, [1] snl, [2] nd, [3] dt, [4] dv, [5] atan2, [6] aNang
-static std::atomic<unsigned long long> g_ssVer[8];
+static std::atomic<unsigned long long> g_ssVer[16];
 __attribute__((noinline)) static void SsaoVerify_Report() {
-	unsigned long long c[8];
-	for (int i=0;i<8;++i) c[i]=g_ssVer[i].load(std::memory_order_relaxed);
-	if (!c[0]) return;
+	unsigned long long c[16];
+	for (int i=0;i<16;++i) c[i]=g_ssVer[i].load(std::memory_order_relaxed);
+	if (!c[0] && !c[8]) return;
 	std::fprintf(stderr,
 	  "[SSAO-VERIFY] lanes %llu | LEN %llu  RSQRT-only %llu  snl %llu  nd %llu  dt %llu  dv %llu  aNang %llu\n",
 	  c[0],c[5],c[7],c[1],c[2],c[3],c[4],c[6]);
-	for (int i=0;i<8;++i) g_ssVer[i].store(0,std::memory_order_relaxed);
+	std::fprintf(stderr,
+	  "[SSAO-VERIFY] GATHER lanes %llu | sz mismatches %llu | any-flag mismatches %llu"
+	  " | OUT-OF-BOUNDS lanes the guard caught %llu (%.3f%%)\n",
+	  c[8], c[9], c[11], c[10], c[8] ? 100.0*double(c[10])/double(c[8]) : 0.0);
+	for (int i=0;i<16;++i) g_ssVer[i].store(0,std::memory_order_relaxed);
 }
 static inline bool bitne(float a, float b) {
 	uint32_t x,y; std::memcpy(&x,&a,4); std::memcpy(&y,&b,4); return x!=y;
@@ -761,20 +766,112 @@ void Render_SSAO() {
 									              _mm256_cvttps_epi32(_mm256_add_ps(offx,vHalf)));
 									__m256i syi=_mm256_add_epi32(_mm256_set1_epi32(py),
 									              _mm256_cvttps_epi32(_mm256_add_ps(offy,vHalf)));
-									alignas(32) int sxA[8], syA[8]; alignas(32) float szA[8];
-									_mm256_store_si256((__m256i*)sxA,sxi);
-									_mm256_store_si256((__m256i*)syA,syi);
+									// sxA/syA are gone with the scalar gather: the sample
+									// position never leaves a register now. szA survives only
+									// for the -DFDS_SSAO_DIAG=4 cost arm.
+									__m256 szVv = _mm256_setzero_ps();
 									bool any=false;
-									for (int k=0;k<8;++k){
-										const int sx=sxA[k], sy=syA[k];
-										if ((unsigned)sx>=(unsigned)W||(unsigned)sy>=(unsigned)H){ szA[k]=0.0f; continue; }
-										const word z2=zEnc[size_t(sy)*size_t(W)+size_t(sx)];
-										if (!z2){ szA[k]=0.0f; continue; }
-										szA[k]=float(0xFF80-z2)*invZScale; any=true;
+#if FDS_SSAO_DIAG >= 4
+									alignas(32) float szA[8];
+									// Ceiling for the WHOLE depth gather, LOADS INCLUDED —
+									// so the delta against stage 0 bounds what any
+									// rework of this block could ever recover, and the
+									// Gcyc column says how much of it is the memory.
+									for (int k=0;k<8;++k) szA[k]=1.0f;
+									any=true;
+#else
+									// ─── S2 (2026-08-29): VECTORISED DEPTH GATHER ────────
+									// Priced by -DFDS_SSAO_DIAG=4 (the whole block, loads
+									// included) at 0.105 Gi/f = 19.8 %% of `ssao-march`, with
+									// Gcyc moving proportionally (18.9 %%, IPC 2.777 -> 2.757)
+									// — so this block is INSTRUCTION-bound, not stalled on
+									// the scattered u16 loads, which are only ~8 %% of its
+									// instructions. Everything except the eight loads goes
+									// vector.
+									//
+									// BOUNDS SAFETY IS PRESERVED AND STRENGTHENED, not
+									// assumed away. The scalar guard is
+									// `(unsigned)sx >= (unsigned)W || (unsigned)sy >= (unsigned)H`,
+									// i.e. one unsigned compare catching BOTH negative and
+									// past-the-end. Signed AVX2 compares reproduce it exactly
+									// as `sx > -1 && W > sx` (W,H <= INT_MAX here), and the
+									// index of an out-of-range lane is then ANDed to ZERO, so
+									// EVERY lane loads from a provably in-range address —
+									// either its own, proven in range by the mask, or
+									// element 0 — and its value is discarded by the same
+									// mask. There is no path on which a sample offset that
+									// runs off a tile edge reads out of the buffer.
+									{
+										const __m256i vZeroI = _mm256_setzero_si256();
+										const __m256i okX = _mm256_and_si256(
+											_mm256_cmpgt_epi32(sxi, _mm256_set1_epi32(-1)),
+											_mm256_cmpgt_epi32(_mm256_set1_epi32(W), sxi));
+										const __m256i okY = _mm256_and_si256(
+											_mm256_cmpgt_epi32(syi, _mm256_set1_epi32(-1)),
+											_mm256_cmpgt_epi32(_mm256_set1_epi32(H), syi));
+										const __m256i ok  = _mm256_and_si256(okX, okY);
+										// idx = sy*W + sx, forced to 0 where out of range.
+										const __m256i idx = _mm256_and_si256(
+											_mm256_add_epi32(
+												_mm256_mullo_epi32(syi, _mm256_set1_epi32(W)), sxi),
+											ok);
+										alignas(32) int idxA[8]; alignas(32) int z2A[8];
+										_mm256_store_si256((__m256i*)idxA, idx);
+										for (int k=0;k<8;++k) z2A[k] = int(zEnc[size_t(unsigned(idxA[k]))]);
+										const __m256i z2v = _mm256_load_si256((const __m256i*)z2A);
+										// valid = in range AND z != 0 (z2 is u16, so a signed
+										// compare against 0 is exact)
+										const __m256i valid = _mm256_and_si256(ok,
+											_mm256_cmpgt_epi32(z2v, vZeroI));
+										// float(0xFF80 - z2) * invZScale, zeroed where invalid —
+										// the same int subtract, the same int->float convert and
+										// the same multiply the scalar does, and +0.0f (all bits
+										// zero) is exactly what the scalar stores.
+										szVv = _mm256_and_ps(
+											_mm256_mul_ps(_mm256_cvtepi32_ps(
+												_mm256_sub_epi32(_mm256_set1_epi32(0xFF80), z2v)),
+												_mm256_set1_ps(invZScale)),
+											_mm256_castsi256_ps(valid));
+										any = simdAnyByte_epi8(valid);
+#if FDS_SSAO_VERIFY
+										{
+											// Scalar behind vector for the GATHER, per term,
+											// plus a count of how often the bounds guard
+											// actually FIRES — a guard that never trips
+											// proves nothing, so [10] is the load-bearing
+											// column of this harness.
+											alignas(32) float vsz[8];
+											_mm256_store_ps(vsz, szVv);
+											alignas(32) int sxS[8], syS[8];
+											_mm256_store_si256((__m256i*)sxS, sxi);
+											_mm256_store_si256((__m256i*)syS, syi);
+											bool anyS=false;
+											for (int k=0;k<8;++k){
+												float ref;
+												const int sx=sxS[k], sy=syS[k];
+												if ((unsigned)sx>=(unsigned)W||(unsigned)sy>=(unsigned)H){
+													ref=0.0f;
+													g_ssVer[10].fetch_add(1,std::memory_order_relaxed);
+												} else {
+													const word z2=zEnc[size_t(sy)*size_t(W)+size_t(sx)];
+													if (!z2) ref=0.0f;
+													else { ref=float(0xFF80-z2)*invZScale; anyS=true; }
+												}
+												g_ssVer[8].fetch_add(1,std::memory_order_relaxed);
+												if (bitne(vsz[k],ref)) g_ssVer[9].fetch_add(1,std::memory_order_relaxed);
+											}
+											if (anyS != any) g_ssVer[11].fetch_add(1,std::memory_order_relaxed);
+										}
+#endif
 									}
+#endif
 									SSC(4,1); if (!any) SSC(5,1);
 									if (!any) continue;
+#if FDS_SSAO_DIAG >= 4
 									const __m256 szV=_mm256_load_ps(szA);
+#else
+									const __m256 szV=szVv;
+#endif
 									// gather-valid = sz>0 (sky/offscreen lanes set sz=0); proper all-ones mask
 									__m256 gmask=_mm256_cmp_ps(szV,vZero,_CMP_GT_OQ);
 									const __m256 sxf=_mm256_cvtepi32_ps(sxi), syf=_mm256_cvtepi32_ps(syi);
