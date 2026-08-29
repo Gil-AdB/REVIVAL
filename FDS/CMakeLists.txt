@@ -30,6 +30,8 @@ set(Base
     Base/FaceListContext.h
     Base/FeatureFlags.cpp
     Base/ParamScript.cpp
+    Base/Provenance.cpp
+    Base/Provenance.h
         Base/TuneServer.cpp
     Base/FeatureFlags.def
     Base/FeatureFlags.h
@@ -248,6 +250,10 @@ set(ALL_FILES
 add_library(${PROJECT_NAME} STATIC ${ALL_FILES})
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# cmake/BuildInfo.cmake writes generated/Base/BuildInfo.h here; Base/Provenance.cpp
+# includes it as "Base/BuildInfo.h". PUBLIC so DEMO sees it too.
+target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_BINARY_DIR}/generated)
 
 # Optional PGO flags (no-op when -DPGO_PHASE=OFF). Defined at top-level
 # CMakeLists.txt; we explicitly link Modplayer's Rust archive elsewhere

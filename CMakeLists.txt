@@ -477,6 +477,14 @@ if(NOT EMSCRIPTEN)
     enable_testing()
 endif()
 
+# ── Snapshot provenance: bake the source SHA into the binary ─────────
+# Generates ${CMAKE_BINARY_DIR}/generated/Base/BuildInfo.h, which
+# FDS/Base/Provenance.cpp includes to stamp every PPM sidecar with the git
+# HEAD (+dirty) the binary was built from. Re-stamped automatically when HEAD
+# moves (CMAKE_CONFIGURE_DEPENDS registered inside the function).
+include(${CMAKE_SOURCE_DIR}/cmake/BuildInfo.cmake)
+fds_generate_build_info(${CMAKE_BINARY_DIR}/generated/Base/BuildInfo.h)
+
 add_subdirectory(Modplayer)
 add_subdirectory(FDS)
 add_subdirectory(DEMO)

@@ -8,6 +8,7 @@
 #include <Base/FDS_DECS.H>
 #include <Base/FDS_DEFS.H>
 #include <Base/FeatureFlags.h>
+#include <Base/Provenance.h>
 #include <Base/Camera.h>
 #include <FILLERS/Mekalele.h>
 #include <Threads.h>
@@ -81,6 +82,10 @@ void write_ppm(const char* path, const byte* bgra, int xres, int yres, int bpsl)
         std::fwrite(row.data(), 1, row.size(), f);
     }
     std::fclose(f);
+    // Provenance sidecar beside the PPM (PPM bytes untouched). --repro renders
+    // are the ones that reach docs/img/ most often, because they are the ones
+    // that reproduce what the user actually saw.
+    fds::Provenance::WriteSidecar(path, xres, yres, "ppm");
     std::fprintf(stderr, "[REPRO] wrote %s\n", path);
 }
 
@@ -218,6 +223,12 @@ bool ParseReproArgs(int argc, const char* argv[], ReproConfig& cfg) {
 
 int RunRepro(const ReproConfig& cfg, int xres, int yres) {
     using FF = fds::FeatureFlags;
+
+    // Label every sidecar this run writes. The scene TIME is not recorded here:
+    // WriteSidecar reads the live Timer, which is the LANDED t, not the
+    // requested one — the same distinction the [REPRO] line above prints.
+    fds::Provenance::SetScene(cfg.scene.c_str());
+    fds::Provenance::SetTag("harness", "repro");
 
     if (cfg.scene != "greets") {
         std::fprintf(stderr,
