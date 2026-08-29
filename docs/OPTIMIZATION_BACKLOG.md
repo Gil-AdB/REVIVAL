@@ -56,6 +56,43 @@ it was zero.** Also spotted: `:6948`'s `!testz(m,m) && simdAllBytes_epi8(m)` is
 redundant in its first term (all ⇒ nonzero) and could be deleted — also for no
 measurable time.
 
+### 3. C6 (midpoint closed-form W²/D·W) — BUILT, MEASURED, REJECTED
+
+`FDS_CONE_MID_CLOSEDFORM`, compiled out in place as the record. The premise
+was sound and the conclusion still wrong. B11 refuted this form at the
+8-segment site because that loop runs on 8.1 % of chase's pairs; the midpoint
+block runs on every ALIVE pair (75.4 % of city's, post-`--cone_hull_rect`), so
+the fire-rate objection genuinely does not transfer.
+
+**It is a LOSS on every column** — city t=1961, two binaries in one worktree,
+interleaved min-of-11, quiet box, within-arm spread 0.05–1.8 % (cleanest
+battery of the round):
+
+| row | explicit W | closed form | delta |
+|---|--:|--:|--:|
+| `cones-call` Ginstr/f | 1.838 | 1.864 | **+1.41 %** |
+| `cones-call` Gcyc/f | 0.461 | 0.486 | **+5.42 %** |
+| `cones-call` wall ms | 13.336 | 13.999 | **+4.97 %** |
+
+**The disassembly gives the mechanism, and the arithmetic saving is real —
+it is just bought with spills.** In `Render_VolumetricCones_Tile`:
+`fmla.4s` 114→110, `fmul.4s` 198→196, `fsub.4s` 64→62, `fneg.4s` 7→5 = **−10
+vector-ALU ops, exactly as predicted**; against `ldr` 925→940 and `str`
+606→620 = **+29 stack accesses**, total 4665→4682. Holding `vUv_v` / `vVP_v` /
+`vPP_v` plus the three helpers live across the whole atan+integral block down
+to the midpoint costs more registers than the block saves ops, and on arm64 an
+`__m256` is TWO of the 32 v-registers. **B8's lesson again: in this kernel
+register pressure beats op count.** It is also a re-association (18 px at city
+t=1961, 45 at t=400, max |Δ| 2/255; chase and greets byte-null) — but the
+pixels never became the question.
+
+**Consequence for the ranked list:** with C1/C2/C3/C4/C5/C6 all resolved, the
+only unbuilt candidate left from `PERF_CONES_ANALYSIS.md` is C8 (depth-sliced
+tile-vs-cone cull), whose prize overlaps almost entirely with C5 — and C5 has
+now taken roughly half of §3.1's 12 % perfect-cull ceiling on its own. **The
+cone pass should be considered closed at the bit-exact level.** What remains
+is the two look flags, which are Gil-Ad's call, not an engineering question.
+
 ### 2. `lightSphereScreenRect` — the bug is real, and it is 5/255
 
 `--light_rect_exact` (default OFF) + `FDS_LIGHTRECT_AUDIT=1`. The shipping

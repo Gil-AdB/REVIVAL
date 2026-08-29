@@ -88,6 +88,44 @@ static std::atomic<int> g_coneRaymarchHits{0};
 #ifndef FDS_CONE_SEG_CLOSEDFORM
 #define FDS_CONE_SEG_CLOSEDFORM 0
 #endif
+// Round 9 / candidate C6 -- BUILT, MEASURED AND REJECTED (compiled out in
+// place as the record of the test, like the three probes above).
+//
+// The SAME W2 / D.W closed form as FDS_CONE_SEG_CLOSEDFORM, applied at the
+// MIDPOINT block instead of the 8-segment loop. The premise was that B11's
+// refutation could not transfer: the segment loop runs on 8.1 % of chase's
+// pairs (~0.9 % of the pass gross) while the midpoint block runs on every
+// ALIVE pair -- 75.4 % of city's, once --cone_hull_rect has removed the dead
+// ones. The premise was right and the conclusion was still wrong.
+//
+// MEASURED, two binaries in one worktree, city t=1961 `--env_live_water
+// --deferred --city_env_pixel`, 1920x1080, interleaved min-of-11, quiet box,
+// within-arm spread 0.05-1.8 % (the cleanest battery of the round):
+//     cones-call  Ginstr/f  1.838 -> 1.864  (+1.41 %)
+//                 Gcyc/f    0.461 -> 0.486  (+5.42 %)
+//                 wall      13.336 -> 13.999 ms (+4.97 %)
+// It is a LOSS on every column, not a wash.
+//
+// AND THE DISASSEMBLY SAYS EXACTLY WHY -- the arithmetic saving is real and
+// it is bought with spills. In Render_VolumetricCones_Tile:
+//     fmla.4s 114->110, fmul.4s 198->196, fsub.4s 64->62, fneg.4s 7->5
+//        = -10 vector-ALU ops, as predicted
+//     ldr 925->940, str 606->620  = +29 stack accesses
+//     total 4665 -> 4682 (+17)
+// Holding vUv_v / vVP_v / vPP_v / vDVc_v / vN2VP_v / vNDP_v live across the
+// whole atan + integral block down to the midpoint costs more registers than
+// the block saves ops, and on arm64 one __m256 is TWO of the 32 v-registers.
+// This is B8's lesson again ("the arrays are not a buffer, they are a phi
+// node", +2.0 % instructions, ldr q 248->263): in this kernel, REGISTER
+// PRESSURE beats op count. Fewer ops is not fewer cycles here.
+//
+// It is also a RE-ASSOCIATION, so it was never free: 18 px at city t=1961 and
+// 45 px at t=400, max |d| 2/255 (chase and greets are byte-null -- their cones
+// are segmented, so the midpoint coneAtten is bypassed). Not worth a judge
+// call for a change that loses 5 % of the pass.
+#ifndef FDS_CONE_MID_CLOSEDFORM
+#define FDS_CONE_MID_CLOSEDFORM 0
+#endif
 // Ablation ladder for the SECOND round of the cone-cost campaign (the first
 // round's ladder was ad-hoc and not committed; this one is, because the split
 // has to be re-derived every time the pass changes shape). COMPILE-TIME only:
@@ -1972,7 +2010,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             return _mm256_add_ps(at,
                                    _mm256_and_ps(mWrap, _mm256_set1_ps(3.14159265f)));
                         };
-#if FDS_CONE_SEG_CLOSEDFORM
+#if FDS_CONE_SEG_CLOSEDFORM || FDS_CONE_MID_CLOSEDFORM
                         // ROUND 7'S SECOND PROBE — MEASURED AND NOT KEPT
                         // (compiled out in place as the record of the test).
                         // W = z·V − P with V = (X, Y, 1), so both dot products
@@ -2162,6 +2200,18 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 vZMid    = _mm256_mul_ps(
                                                 _mm256_add_ps(vZLo_v, vZHi_v),
                                                 _mm256_set1_ps(0.5f));
+#if FDS_CONE_MID_CLOSEDFORM
+                        // C6: W2 = z(z*uV - 2*VP) + PP and D.W = z*DV - DP,
+                        // from quantities the solve already produced, instead
+                        // of rebuilding W = z*V - P. 11 __m256 ops -> 3, plus
+                        // the 3 shared helpers above (which city otherwise
+                        // does not pay, since it never enters the segment
+                        // loop). RE-ASSOCIATION -- it moves bytes.
+                        const __m256 W2_m = _mm256_fmadd_ps(vZMid,
+                                            _mm256_fmadd_ps(vZMid, vUv_v, vN2VP_v),
+                                            vPP_v);
+                        const __m256 DW_m = _mm256_fmadd_ps(vZMid, vDVc_v, vNDP_v);
+#else
                         const __m256 Wx_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vX_v), vPx_v);
                         const __m256 Wy_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vY_v), vPy_v);
                         const __m256 Wz_m = _mm256_sub_ps(vZMid, vPz_v);
@@ -2171,6 +2221,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const __m256 DW_m = _mm256_fmadd_ps(vDx_v, Wx_m,
                                             _mm256_fmadd_ps(vDy_v, Wy_m,
                                              _mm256_mul_ps(vDz_dir_v, Wz_m)));
+#endif
                         const __m256 safeW2_m = _mm256_blendv_ps(vOne_v, W2_m, mAlive);
                         const __m256 invLen_m = rsqrt_nr_x8(safeW2_m);
                         const __m256 cosT_m   = _mm256_mul_ps(DW_m, invLen_m);
