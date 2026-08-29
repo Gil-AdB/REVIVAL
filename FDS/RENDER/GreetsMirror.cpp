@@ -31,6 +31,7 @@
 
 #include <Base/FrameState.h>  // fds::g_mainCamera / g_mainFaces (RTT pass)
 #include "RENDER/TailProf.h"   // RTT decomposition scopes (rtt-pick/prep/bakejob, rttj-*)
+#include "Threads.h"           // parallel_memset for the mask-plane clears
 
 // Provided by MISC/PREPROC.CPP — stamps F->A_idx/B_idx/C_idx for SoA.
 extern void Compute_FaceVertexIndices(TriMesh *T);
@@ -4225,22 +4226,32 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     if (plane.empty()) return;  // no mirror has activated the plane
     auto &zplane = g_gbuffer->mirrorMaskZ;
     if (zplane.size() < plane.size()) return;  // sized together
-    // Clear last frame's coverage. Cheap memset — 2+4 MB at 1080p.
-    std::memset(plane.data(), 0, plane.size());
-    std::memset(zplane.data(), 0, zplane.size() * sizeof(uint16_t));
+    // Clear last frame's coverage. NOT a cheap memset: 2 MB + 4 MB at 1080p,
+    // and with the two ownership planes below this function was moving ~8-10 MB
+    // a frame through a SINGLE thread — 0.478 ms at ~1.3 cores, which is what
+    // the cores = Gcyc/clock/wall reading exposed. parallel_memset is the same
+    // bytes written by the pool (it falls back to serial under 256 KB), and
+    // `gbuf-clear` next door has been using it all along at ~7 cores.
+    // Byte-null: a memset is a memset.
+    const bool _pmset = fds::FeatureFlags::mirror_mask_pool_clear();
+    auto MSET = [&](void* d, size_t n) {
+        if (_pmset) parallel_memset(d, 0, n); else std::memset(d, 0, n);
+    };
+    MSET(plane.data(), plane.size());
+    MSET(zplane.data(), zplane.size() * sizeof(uint16_t));
     // Also clear the ownership plane each frame so foreground commits
     // (which write ownerMirrorId = 0) start from a known baseline; the
     // deferred lighting reads it as pmid per pixel.
     if (!g_gbuffer->mirrorId.empty()) {
-        std::memset(g_gbuffer->mirrorId.data(), 0, g_gbuffer->mirrorId.size());
+        MSET(g_gbuffer->mirrorId.data(), g_gbuffer->mirrorId.size());
     }
     if (g_gbufferTransparent && !g_gbufferTransparent->mirrorId.empty()) {
-        std::memset(g_gbufferTransparent->mirrorId.data(), 0,
-                    g_gbufferTransparent->mirrorId.size());
+        MSET(g_gbufferTransparent->mirrorId.data(),
+             g_gbufferTransparent->mirrorId.size());
     }
     if (g_gbufferTransparentBack && !g_gbufferTransparentBack->mirrorId.empty()) {
-        std::memset(g_gbufferTransparentBack->mirrorId.data(), 0,
-                    g_gbufferTransparentBack->mirrorId.size());
+        MSET(g_gbufferTransparentBack->mirrorId.data(),
+             g_gbufferTransparentBack->mirrorId.size());
     }
     // Use the engine surface size that matches the gbuffer plane.
     const int w = int(::XRes);
