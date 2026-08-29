@@ -10,6 +10,38 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29e — city's `TBR-render` is CLOSED: the census says the bound is already 91.58 % live, so the lever the map named is worth ~0.13 ms
+
+Full account: `docs/PERF_STATE.md` §00t. **No code written; the row is closed
+with numbers, which is the outcome the census was there to produce.**
+
+§00l item 8 carried `TBR-render` (6.51 ms) as the last unopened row, noting that
+one `--xpar_extent_census` run would decide it. It did:
+
+```
+px full=2.43M  bound=1.72M (71.01%)  live=1.58M (91.58% OF THE BOUND)
+```
+
+`xpar_strip_extent` **already** cut the scan to 71 % of full width, and what it
+scans is **91.58 % live**. The dead scan — the entire addressable prize — is
+0.145 M px, **8.42 % of the bound**. Against a measured row of 6.930 ms
+(city t=1961, 68.85 ms tick), the ceiling on any tightening is 0.583 ms if a dead
+pixel cost the same as a live one (absurd), and **≈0.06–0.19 ms on realistic
+assumptions — under 0.3 % of the tick.** The 37 empty flushes (23.4 % of 158) are
+already inside that dead total and are worth tens of microseconds.
+
+**STRIKE §00l item 8.** The row is irreducible by its own lever *because the
+lever already worked*, and that also explains why the fountain fix measured NULL
+here: there was nothing to find.
+
+### FOR WHOEVER OPENS THE ROW ANYWAY
+
+`TBR-render` reads 6.930 ms while its three declared children — `xpar-clear`,
+`xpar-raster`, `xpar-composite` — all read **0.000**. The interior instrument
+does not cover the deferred/unified-TBR path, so the 1.578 M live pixels (the
+only real mass) are unattributed. A sub-scope split is step one for anyone who
+wants that mass; the extent bound is not the way in.
+
 ## 2026-08-29d — the water scan's analytic reject is clipped away: byte-null, and 26 % off the row at the pose where the pass was 102 % scan
 
 Full account: `docs/PERF_STATE.md` §00s (renumbered from §00r at the merge — the greets round took that letter the same day). **LANDED, byte-null** (14/14 pins +

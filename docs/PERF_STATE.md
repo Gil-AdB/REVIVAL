@@ -58,6 +58,69 @@
 
 ---
 
+## 00t. city's `TBR-render` — 2026-08-29e: **CLOSED, IRREDUCIBLE BY ITS OWN LEVER.** One `--xpar_extent_census` run decides it: the strip bound is already **91.58 % live**, so a PERFECT bound is worth ≤0.583 ms and realistically ~0.13
+
+§00l item 8 left `TBR-render` (6.51 ms) as the last unopened row on the map, with
+the note that the fountain fix measured NULL here and that **one
+`--xpar_extent_census` run decides it**. This is that run. It says close the row.
+
+### THE CENSUS
+
+`city@t=1961`, `--deferred --hdr --hdr-linear --env_live_water --city_env_pixel`:
+
+```
+[XPAR-CENSUS] flushes=158 passes=158
+              px full=2.43M  bound=1.72M (71.01%)  live=1.58M (65.03% of full, 91.58% of bound)
+[XPAR-CENSUS]   front peel0  calls=158  empty=37 (23.4%)  bound=1.723M  live=1.578M
+```
+
+| quantity | px | reading |
+|---|--:|---|
+| a full-width strip scan | 2.430 M | what the bound is measured against |
+| **what `xpar_strip_extent` actually scans** | **1.723 M** | the bound **already saves 29.1 %** |
+| **live — pixels carrying a real xpar fragment** | **1.578 M** | **91.58 % OF THE BOUND** |
+| dead scan the bound still pays for | **0.145 M** | **8.42 % of the bound** — the entire prize |
+
+### THE ARITHMETIC THAT CLOSES IT
+
+The row measures **6.930 ms** here (`--deferred_prof`, city t=1961, 68.85 ms tick).
+Only the 0.145 M dead pixels are addressable — the 1.578 M live ones do the
+actual compositing and no bound can remove them. So:
+
+| assumption about a dead pixel's cost | ceiling on the whole lever |
+|---|--:|
+| same as a live pixel (**absurd** upper bound) | 0.583 ms — 8.4 % of the row, 0.85 % of tick |
+| half a live pixel | 0.304 ms — 0.44 % of tick |
+| a fifth of a live pixel (a test + reject) | **0.125 ms — 0.18 % of tick** |
+| a tenth | 0.063 ms — 0.09 % of tick |
+
+A dead pixel is a bounds test and a reject; a live one is a fetch, blend and
+store. The realistic figure is the bottom half of that table: **≈0.06–0.19 ms,
+under 0.3 % of city's tick, for rewriting the extent machinery.** Even the
+physically impossible perfect bound does not reach 1 % of the tick.
+
+**The 37 empty flushes (23.4 % of 158) are not a second prize either** — they are
+already inside the 0.145 M dead total, and at any plausible per-flush overhead
+they are tens of microseconds.
+
+### VERDICT
+
+**CLOSED. The row is irreducible by the lever the map named, and the reason is
+that the lever ALREADY WORKED**: `xpar_strip_extent` cut the scan to 71 % of full
+width and left it 91.58 % live. There is no population here to attack. §00l item
+8 should be struck rather than carried, and the fountain fix's NULL result at
+this row is now explained — it was null because there was nothing to find.
+
+### ONE OBSERVATION FOR WHOEVER DOES OPEN THE ROW
+
+`TBR-render` reads **6.930 ms** while its three declared children —
+`xpar-clear`, `xpar-raster`, `xpar-composite` — all read **0.000**. The row's
+interior is not where the existing instrument points on the deferred/unified-TBR
+path. Anyone attacking the 1.578 M live pixels (the only real mass here) needs a
+sub-scope split first; the current one attributes none of it.
+
+---
+
 ## 00s. THE WATER SCAN'S ANALYTIC REJECT, CLIPPED — 2026-08-29d: byte-null, validated at **4 801 816 pixels** independently of the pins, and it takes **26 % off the row at the pose where the pass was 102 % scan**
 
 *(Numbered §00s, not §00r: the greets passenger-row round took that letter on `fog-wt` the same day — see the section below. Third letter collision of this campaign; letters are allocated per branch and reconciled at the merge.)*
