@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-117 records, 114 current, 3 superseded; HEAD 063a97824d9f.
+118 records, 115 current, 3 superseded; HEAD e94f1f2d91ec.
 
 ## Attention
 ### Stale — depends on a superseded claim (3)
@@ -62,6 +62,7 @@
 - `da3b5399de80` refutation **flag.refl_skip_rain** = "refuted" (state) {flag=refl_skip_rain scene=chase} w=5/5 — REFUTED AS A PERF ITEM: rain@refl and rain@main are 0.0000 ms at chase t=800 and t=1105 and the flag is byte-identical to base - chase has no rain armed; its apparent -0.10/-0.17 ms is the between-arm floor. [seeded 2026-08-29 by the coordinator from FeatureFlags.def / commit message]
 
 ### greets
+- `f2696d3c8aa7` decision **greets.displace.bake.strategy** = "rewrite" (state) {defect=wall scene=greets} w=1/5 — The stone displacement bake (DisplaceStoneSubdiv) is to be REWRITTEN from scratch from the literature, designed against the recorded failure modes and validated by the ground-truth detectors and his fly-through; the old bake stays the shipped default until the corpus says otherwise. Supersedes the month of patch-on-patch levers.
 - `a6d63f8a66ca` measurement **greets.lighting_w1.shadow_share** = [16, 28] (share_pct) {pose=5743 row=lighting-w1 scene=greets} w=5/5  [unverified_at_tip] — ALL shadow work is 16-28 % of greets lighting-w1, pose-dependent; the 36.6 % was one pose on an older binary and every plan sized off it aimed at twice the prize (round 12 census, no code landed).  (+1 superseded)
 - `5d381b833cd3` measurement **greets.lighting_w1.tick_delta** = 1.8 (pct_delta) {granularity=kernel_row metric=delta_pct pose=5743 row=lighting-w1 scene=greets} w=4/5  [unverified_at_tip void] — greets t=5743 lighting-w1 +1.8 % vs the window's parent (dup-arm drift +-0.1 %) - later shown to be code placement (00w), not a code change.
 - `13323d13b643` measurement **greets.renderFrame.ms** = 46.925 (frame_ms) {arm=default metric=renderFrame pose=5743 scene=greets} w=4/5  [unverified_at_tip] — greets t=5743 renderFrame = 46.925 ms on the window's AFTER binary (default-vs-default, interleaved, dummy drivers, --profiler=0, 1920x1080); PERF_STATE 00v.1.
