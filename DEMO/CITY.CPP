@@ -23,6 +23,9 @@
 #include <algorithm>
 #include <memory>
 #include <vector>
+#include <set>
+#include <semaphore>
+#include <climits>
 #include "FRUSTRUM.H"
 #include <RENDER/OffscreenView.h>  // g_offscreenViewDepth (cube-map bake marks itself offscreen)
 #include <RENDER/EnvCube.h>        // env_cube: padded 6-face bake + convention
@@ -1131,13 +1134,30 @@ void City_Lighting()
 // TEXTURETEXTURE> and Mekalele stamps the mat32 sentinel, so the mirror
 // pass's kernel never sees them. cityMirrorGlassRestore() clears the flag
 // again so pass-2 rasterizes the glass into the G-buffer as before.
+// Shared tile-drain semaphore (defined in DeferredFastFog.cpp). Reused for the
+// glass fan-out below: that runs on the tick thread OUTSIDE renderFrame, so no
+// render wave can be using it concurrently — the same reuse DeferredSSAO makes.
+namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
 struct MirrorGlassFace { TriMesh* T; Face* F; };
 static std::vector<MirrorGlassFace> g_mirrorGlassFaces;
 
 static void cityMirrorGlassForward()
 {
-	for (auto& [T, F] : g_mirrorGlassFaces) {
-		if (!T->EnvHemiSheets[0]) continue;   // no sheets — leave deferred-only
+	// One face = one independent unit of work: it writes only its own
+	// F->ReflectionTexture / F->EU*/EV* / F->Flags and reads per-mesh + camera
+	// state. 14 784 faces over 71 meshes with ZERO duplicate Face pointers
+	// (censused), so there is no ordering hazard and no shared destination —
+	// unlike the sibling Reflected_Transform, whose in-order FList append feeds
+	// Radix_Sort. See --city_glass_pool.
+	// `lastT`/`lastBs` hoists the per-MESH bounding-sphere world position out of
+	// the per-FACE loop; entries are grouped by mesh, so a one-entry cache
+	// collapses ~208 recomputes per mesh. Each worker owns its own cache, and
+	// the value is a pure function of the mesh, so every lane computes the same
+	// bits the serial loop did.
+	auto glassFace = [&](size_t idx, const TriMesh*& lastT, Vector& lastBs) {
+		TriMesh* T = g_mirrorGlassFaces[idx].T;
+		Face*    F = g_mirrorGlassFaces[idx].F;
+		if (!T->EnvHemiSheets[0]) return;     // no sheets — leave deferred-only
 		Vector wsPos[3];
 		size_t i = 0;
 		for (Vertex* v : { F->A, F->B, F->C }) {
@@ -1150,8 +1170,12 @@ static void cityMirrorGlassForward()
 		auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
 		Vector_Norm(&n);
 		Vector bsWorld;
-		MatrixXVector(T->RotMat, &T->BSphereCtr, &bsWorld);
-		bsWorld += T->IPos;
+		if (T != lastT) {
+			MatrixXVector(T->RotMat, &T->BSphereCtr, &lastBs);
+			lastBs += T->IPos;
+			lastT = T;
+		}
+		bsWorld = lastBs;
 		Vector cv = View->ISource;
 		const float planeD = fabsf((cv - wsPos[0]) * n);
 		const float optD   = fabsf((bsWorld - wsPos[0]) * n);
@@ -1180,7 +1204,27 @@ static void cityMirrorGlassForward()
 		F->EU2 = eu[1]; F->EV2 = ev[1];
 		F->EU3 = eu[2]; F->EV3 = ev[2];
 		F->Flags |= Face_Reflective;
+	};
+
+	const size_t nGlass = g_mirrorGlassFaces.size();
+	if (!fds::FeatureFlags::city_glass_pool() || nGlass < 512) {
+		const TriMesh* lastT = nullptr; Vector lastBs;
+		for (size_t i = 0; i < nGlass; ++i) glassFace(i, lastT, lastBs);
+		return;
 	}
+	// Chunked fan-out: chunk COUNT is fixed by the face count, not by which
+	// worker gets which chunk, so the partition (and therefore each face's
+	// cache lineage) is identical every frame regardless of scheduling.
+	constexpr size_t kChunk = 512;
+	const int nChunks = int((nGlass + kChunk - 1) / kChunk);
+	dispatchIndexed(nChunks, nullptr, [&](int c) {
+		const size_t lo = size_t(c) * kChunk;
+		const size_t hi = std::min(lo + kChunk, nGlass);
+		const TriMesh* lastT = nullptr; Vector lastBs;
+		for (size_t i = lo; i < hi; ++i) glassFace(i, lastT, lastBs);
+		renderns::tileDone.release();
+	});
+	for (int i = 0; i < nChunks; ++i) renderns::tileDone.acquire();
 }
 
 static void cityMirrorGlassRestore()

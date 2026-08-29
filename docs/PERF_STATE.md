@@ -247,6 +247,25 @@ poses. **The same flip on the RTT's cone pass regresses (+139 %, 0.064 → 0.153
 and is deliberately not taken** — that pass is ~64 µs, too small to amortise a
 semaphore round trip.
 
+**city's glass forward stamp — LANDED.** `cityMirrorGlassForward`, the other half
+of `Tick-ReflXfrm`, ran serially at ~1.04 cores. Census first: **14 784 entries,
+14 784 distinct `Face*`, ZERO duplicates, 71 meshes** — no shared destination, no
+ordering hazard. Chunked fan-out plus hoisting `bsWorld` (a per-MESH value that
+was recomputed once per FACE, 208× per mesh): **`Tick-ReflGlass` 0.931 → 0.161 ms
+(−82.7 %)**, `Tick-ReflXfrm` 1.951 → 1.282 (−34.3 %). Predicted ~0.20, measured
+0.161. Byte-null over **24 consecutive runs of the city acceptance pose, one
+hash**, plus a same-binary flag flip at three poses.
+
+**REFUTED — `--mirror_mask_pool_clear`, default OFF.** `StampMasks` (0.478 ms,
+~1.3 cores) is ~8–10 MB of serial `std::memset` a frame, and `parallel_memset` is
+**+33 % slower** (serial 0.478–0.481, pooled 0.617–0.639, four interleaved
+rounds). Bandwidth-bound work cannot be sped up by adding workers; `gbuf-clear`
+profits only because its buffers amortise the join. **Fourth sighting of one law:
+a fan-out pays only above a work-per-dispatch threshold** — the RTT cone pass
+(+139 % at 64 µs), the SSAO gather (+2.5 % cycles), the OuterVec dial predicates,
+and this, against the RTT lighting's −24 % at 262 144 px per dispatch. *`cores`
+tells you where to look; it does not tell you the fan-out will pay.*
+
 **`Tick-ReflXfrm`, corrected:** the row (city's largest outside `renderFrame`,
 1.883 ms) splits into `Tick-ReflGlass` 0.899 (IPC 1.94, ~1.04 cores) and
 `Tick-ReflXfrmOnly` 0.981 (IPC 3.46, ~1.27 cores). It has been carried since
