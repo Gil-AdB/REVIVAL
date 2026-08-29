@@ -732,6 +732,46 @@ void Census(const char* tag, float waterY, bool useOcclusion, bool useFarCut) {
 	}
 }
 
+// ── Per-row x-clip for the water passes' whole-framebuffer ray-cast ──────
+// Both glint passes ray-cast EVERY pixel of the framebuffer to the water plane
+// and throw most of them away: at chase t=800, 852 480 of 2 073 600 fail
+// `sd<=1 || sd>=fzp` (above the horizon / past the far plane), and at t=1105 it
+// is 940 800 -- where the whole pass is 102 % scan (PERF_STATE 00o).
+//
+// Those two rejects are ANALYTIC, so they do not need a per-pixel visit.
+// D = m01*xn + (m11*yn + m21) is AFFINE in x, and the keep-test sd = K/D with
+// K = waterY - ey and sd in (1, fzp) reduces to D lying strictly between K and
+// K/fzp (both sign cases collapse to that, with min/max picking the order).
+// So the surviving x-range is one interval per row, solvable in O(1).
+//
+// BYTE-NULL BY CONSTRUCTION, and deliberately belt-and-braces: the bounds are
+// widened by 2 px and every original per-pixel test is left in place, so the
+// clip can only ever skip pixels whose own `continue` would have fired. A
+// rounding error in the bound costs work, never a pixel.
+struct RowXClip { int x0, x1; };            // [x0, x1)
+static inline RowXClip rowXClip(float yn, float m01, float m11, float m21,
+                                float K, float fzp, float cex, float invFX, int xr) {
+	// fzp <= 0 is unreachable from both callers today (they pass FZP or 1e30f),
+	// but the collapsed interval would skip EVERY row rather than none, so fail
+	// open: a degenerate far plane returns the whole row and the per-pixel tests
+	// decide, exactly as they did before this clip existed.
+	if (!(fzp > 0.0f)) return RowXClip{0, xr};
+	const float dA = K, dB = K / fzp;
+	const float dLo = dA < dB ? dA : dB, dHi = dA < dB ? dB : dA;
+	const float a = m01 * invFX;
+	const float b = (m11 * yn + m21) - m01 * invFX * cex;   // D = a*x + b
+	if (!(a > 0.0f) && !(a < 0.0f)) {                        // D constant across the row
+		return (b > dLo && b < dHi) ? RowXClip{0, xr} : RowXClip{0, 0};
+	}
+	float t0 = (dLo - b) / a, t1 = (dHi - b) / a;
+	if (t0 > t1) { const float tmp = t0; t0 = t1; t1 = tmp; }
+	int x0 = int(std::floor(t0)) - 2, x1 = int(std::ceil(t1)) + 2;
+	if (x0 < 0) x0 = 0;
+	if (x1 > xr) x1 = xr;
+	if (x1 < x0) x1 = x0;
+	return RowXClip{x0, x1};
+}
+
 // ───────── Public API ─────────
 
 void BuildField() {
@@ -991,7 +1031,9 @@ void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float 
 		for (int y = y0; y < y1; ++y) {
 			dword* row = vp + size_t(y) * size_t(xr);
 			const uint16_t* orow = oz + size_t(y) * size_t(xr);
-			for (int x = 0; x < xr; ++x) {
+			const RowXClip rc = rowXClip((cey - float(y)) * invFY, m01, m11, m21,
+			                             wYplane - ey, fzp, cex, invFX, xr);
+			for (int x = rc.x0; x < rc.x1; ++x) {
 				const float xn = (float(x) - cex) * invFX;
 				const float yn = (cey - float(y)) * invFY;
 				const float D = m01*xn + m11*yn + m21;
@@ -1156,7 +1198,9 @@ void RenderGlintsVariedBatched(float waterY, float minX, float maxX, float minZ,
 					shade(bIdx[k], bWx[k], bWz[k], bFade[k], bNx[k], bNz[k]);
 				nB = 0;
 			};
-			for (int x = 0; x < xr; ++x) {
+			const RowXClip rc = rowXClip((cey - float(y)) * invFY, m01, m11, m21,
+			                             wYplane - ey, fzp, cex, invFX, xr);
+			for (int x = rc.x0; x < rc.x1; ++x) {
 				const float xn = (float(x) - cex) * invFX;
 				const float yn = (cey - float(y)) * invFY;
 				const float D = m01*xn + m11*yn + m21;
