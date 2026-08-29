@@ -58,6 +58,186 @@
 
 ---
 
+## 00u. `TBR-render`'s INTERIOR, ATTRIBUTED — 2026-08-29f: the three declared children read 0.000 because they instrument the **LEGACY** path; the unified path's 6.9–8.1 ms is **72.5 % transparent deferred lighting + 24.7 % raster**, and the attribution closes to **99.8 %**
+
+§00t closed `TBR-render` to the extent lever and handed on the real question: the
+row measured 6.930 ms while `xpar-clear`, `xpar-raster` and `xpar-composite` all
+read **0.000**, leaving 1.578 M live pixels a frame unaccounted. This is the
+attribution. **No lever was forced; the deliverable is the split.**
+
+### WHY THE THREE CHILDREN WERE DEAD — a wiring fact, not a TailProf contract slip
+
+`s_xparClearMs` / `s_xparRasterMs` / `s_xparCompMs` are incremented **only at
+`RENDER.CPP:1207/1218/1252`, inside the `unifiedTbr=false` LEGACY block** (the
+block that closes at `:1307`). city runs the **unified** path, so on that path
+the three accumulators are never written and `addMs` books three honest zeroes.
+The names were right; they were attached to the other implementation. The
+unified path's interior — `TBR_Render` in `FILLERS.CPP:2346` — had **no scopes
+at all**.
+
+### THE INSTRUMENT, AND WHY IT IS NANOSECONDS AND NOT COUNTERS
+
+`TailProf::hwRead()` is `proc_pid_rusage(getpid())` — **process-wide**. A nested
+per-worker instruction/cycle read is therefore meaningless inside a strip wave
+(concurrent strips interleave into the same counters). So per-block Ginstr/Gcyc
+cannot come from nested scopes; it has to come from **ablation differencing at
+row level**, and that is what the last table below does. What *is* sound per
+block, and free when the profiler is off, is **thread-summed core-nanoseconds**.
+
+Two levels were added, both **instrument only, byte-null** (gates below):
+`FILLERS.CPP` (mine) splits the strip lambda; `FDS/RENDER/TbrSplit.h` (new, mine)
+holds the accumulators so that **`DeferredSurfaceKernel.cpp` — owned by the
+greets lighting round — takes one `#include` and five RAII lines and nothing
+else.** No arithmetic in that file was touched.
+
+### THE SPLIT — city t=1961, `--deferred --hdr --hdr-linear --env_live_water --city_env_pixel`
+
+CORE-ms (thread-summed over the strip wave). They sum to `tbr-core`, **not** to
+the parent's WALL row. `tbr-core` = **85.683 core-ms** against a `TBR-render`
+wall of **9.315 ms** → **effPar 9.20 of 12**.
+
+| scope | core-ms | % of `tbr-core` | effPar |
+|---|--:|--:|--:|
+| **`tbr-xparflush`** (`RenderXparClumpInStrip`) | **83.762** | **97.76 %** | 8.99 |
+| &nbsp;&nbsp;`xflush-composite` (`Render_DeferredTransparentLighting_Tile`) | **62.142** | **72.53 %** | 6.67 |
+| &nbsp;&nbsp;`xflush-raster` (`clipper.Render` → `MekaleleTransparent*`) | **21.146** | **24.68 %** | 2.27 |
+| &nbsp;&nbsp;`xflush-clear` (the memsets + the peel-floor copy/scan) | 0.334 | 0.39 % | 0.04 |
+| &nbsp;&nbsp;(flush residue: extent bookkeeping, lambda glue) | 0.140 | 0.16 % | — |
+| `tbr-collect` (linked-list gather + `stable_sort`) | 1.251 | 1.46 % | 0.13 |
+| `tbr-sprite` (the `SpriterRT` branch) | 0.523 | 0.61 % | 0.06 |
+| `tbr-walk` (sorted walk + clump bucketing, residue) | 0.147 | 0.17 % | 0.02 |
+
+**The attribution closes to 99.8 %** — the three flush children plus the residue
+account for 83.762 of 83.762, and the four top-level scopes account for all of
+`tbr-core` by construction (`tbr-walk` is the residue and is 0.17 %, so the
+construction is not hiding anything).
+
+### THE SAME SPLIT BY ABLATION, WITH HARDWARE COUNTERS — two independent methods agreeing
+
+One-line arm: `return;` at the top of the composite call (patch quoted below).
+Row level, `--hw_prof`, same arm:
+
+| | full | composite skipped | **composite, by difference** |
+|---|--:|--:|--:|
+| `TBR-render` wall_min | 7.671 ms | 2.039 ms | **5.632 ms (73.4 %)** |
+| **Ginstr/f** | 0.826 | 0.200 | **0.626 (75.8 %)** |
+| **Gcyc/f** | 0.238 | 0.057 | **0.181 (76.1 %)** |
+| **IPC** | 3.466 | 3.509 | **3.459** |
+
+The nanosecond split said the composite is 72.5 % of core; the ablation says
+73.4 % of wall and 75.8 % of instructions. **Two methods that share no
+machinery, agreeing to within three points.** `renderFrame` falls 54.161 → 48.435
+on the same arm, i.e. 5.726 ms, which matches TBR's own 5.632 ms drop — the
+saving does not leak in from anywhere else.
+
+### THE LARGEST BLOCK, AND WHETHER IT HAS A LEVER
+
+**`Render_DeferredTransparentLighting_Tile` — 72.5 % of the row, 0.626 Ginstr/f,
+14.9 % of the whole frame's instructions.** It is the per-pixel deferred shading
+of the transparent layer.
+
+**It does not look like a micro-optimisation target, and I am not going to force
+one:**
+
+* **IPC 3.459** against `renderFrame`'s own 3.625 — it is issue-bound doing real
+  work, not stalled on memory. There is no obvious stall to recover.
+* **Its pixel count is already near-minimal.** §00t measured the extent bound at
+  **91.58 % live**; the composite runs over the bound, so at most 8.42 % of what
+  it shades is dead — the same ≤0.583 ms ceiling §00t already priced and rejected.
+* **city runs ONE peel pass** (`flushes=158, passes=158`), so there is no
+  peel-depth lever here either.
+
+That leaves the kernel's own arithmetic, which lives in the greets round's file.
+**Measured and handed over rather than edited**, exactly as the ownership rule
+requires. The number to hand over: **62.1 core-ms / 0.626 Ginstr per frame to
+shade 1.578 M live transparent pixels ≈ 36 ns and ~400 instructions per pixel.**
+
+**`xflush-raster` at 24.7 % is the second block** and it is *mine* (`Mekalele`,
+the clipper). It is 21.1 core-ms at effPar 2.27 — the lowest parallel efficiency
+in the split. Whether that is a real serialisation or just a short block spread
+thinly across the wave is not established here and is the honest next question.
+
+### REPRODUCING THE ABLATION
+
+```c
+// DeferredSurfaceKernel.cpp, in rasterAndComposite, before the front/back call:
+tbrsplit::AccNs _t(tbrsplit::compNs());
+return;   // <-- the arm
+if (front) { Render_DeferredTransparentLighting_Tile<XparLayer::Front>(...
+```
+Left OUT of the tree deliberately: the file belongs to another round and an
+ablation hatch is not instrumentation.
+
+### GATES
+
+**14/14 pins byte-identical + `render_gate` 4/4 + `warm_gate.sh --full` 7/7.**
+The instrument is byte-null in both files.
+
+---
+
+## 00t. city's `TBR-render` — 2026-08-29e: **CLOSED, IRREDUCIBLE BY ITS OWN LEVER.** One `--xpar_extent_census` run decides it: the strip bound is already **91.58 % live**, so a PERFECT bound is worth ≤0.583 ms and realistically ~0.13
+
+§00l item 8 left `TBR-render` (6.51 ms) as the last unopened row on the map, with
+the note that the fountain fix measured NULL here and that **one
+`--xpar_extent_census` run decides it**. This is that run. It says close the row.
+
+### THE CENSUS
+
+`city@t=1961`, `--deferred --hdr --hdr-linear --env_live_water --city_env_pixel`:
+
+```
+[XPAR-CENSUS] flushes=158 passes=158
+              px full=2.43M  bound=1.72M (71.01%)  live=1.58M (65.03% of full, 91.58% of bound)
+[XPAR-CENSUS]   front peel0  calls=158  empty=37 (23.4%)  bound=1.723M  live=1.578M
+```
+
+| quantity | px | reading |
+|---|--:|---|
+| a full-width strip scan | 2.430 M | what the bound is measured against |
+| **what `xpar_strip_extent` actually scans** | **1.723 M** | the bound **already saves 29.1 %** |
+| **live — pixels carrying a real xpar fragment** | **1.578 M** | **91.58 % OF THE BOUND** |
+| dead scan the bound still pays for | **0.145 M** | **8.42 % of the bound** — the entire prize |
+
+### THE ARITHMETIC THAT CLOSES IT
+
+The row measures **6.930 ms** here (`--deferred_prof`, city t=1961, 68.85 ms tick).
+Only the 0.145 M dead pixels are addressable — the 1.578 M live ones do the
+actual compositing and no bound can remove them. So:
+
+| assumption about a dead pixel's cost | ceiling on the whole lever |
+|---|--:|
+| same as a live pixel (**absurd** upper bound) | 0.583 ms — 8.4 % of the row, 0.85 % of tick |
+| half a live pixel | 0.304 ms — 0.44 % of tick |
+| a fifth of a live pixel (a test + reject) | **0.125 ms — 0.18 % of tick** |
+| a tenth | 0.063 ms — 0.09 % of tick |
+
+A dead pixel is a bounds test and a reject; a live one is a fetch, blend and
+store. The realistic figure is the bottom half of that table: **≈0.06–0.19 ms,
+under 0.3 % of city's tick, for rewriting the extent machinery.** Even the
+physically impossible perfect bound does not reach 1 % of the tick.
+
+**The 37 empty flushes (23.4 % of 158) are not a second prize either** — they are
+already inside the 0.145 M dead total, and at any plausible per-flush overhead
+they are tens of microseconds.
+
+### VERDICT
+
+**CLOSED. The row is irreducible by the lever the map named, and the reason is
+that the lever ALREADY WORKED**: `xpar_strip_extent` cut the scan to 71 % of full
+width and left it 91.58 % live. There is no population here to attack. §00l item
+8 should be struck rather than carried, and the fountain fix's NULL result at
+this row is now explained — it was null because there was nothing to find.
+
+### ONE OBSERVATION FOR WHOEVER DOES OPEN THE ROW
+
+`TBR-render` reads **6.930 ms** while its three declared children —
+`xpar-clear`, `xpar-raster`, `xpar-composite` — all read **0.000**. The row's
+interior is not where the existing instrument points on the deferred/unified-TBR
+path. Anyone attacking the 1.578 M live pixels (the only real mass here) needs a
+sub-scope split first; the current one attributes none of it.
+
+---
+
 ## 00s. THE WATER SCAN'S ANALYTIC REJECT, CLIPPED — 2026-08-29d: byte-null, validated at **4 801 816 pixels** independently of the pins, and it takes **26 % off the row at the pose where the pass was 102 % scan**
 
 *(Numbered §00s, not §00r: the greets passenger-row round took that letter on `fog-wt` the same day — see the section below. Third letter collision of this campaign; letters are allocated per branch and reconciled at the merge.)*
@@ -183,6 +363,25 @@ before measuring. Byte-null, proved differentially on one binary at three greets
 poses. **The same flip on the RTT's cone pass regresses (+139 %, 0.064 → 0.153 ms)
 and is deliberately not taken** — that pass is ~64 µs, too small to amortise a
 semaphore round trip.
+
+**city's glass forward stamp — LANDED.** `cityMirrorGlassForward`, the other half
+of `Tick-ReflXfrm`, ran serially at ~1.04 cores. Census first: **14 784 entries,
+14 784 distinct `Face*`, ZERO duplicates, 71 meshes** — no shared destination, no
+ordering hazard. Chunked fan-out plus hoisting `bsWorld` (a per-MESH value that
+was recomputed once per FACE, 208× per mesh): **`Tick-ReflGlass` 0.931 → 0.161 ms
+(−82.7 %)**, `Tick-ReflXfrm` 1.951 → 1.282 (−34.3 %). Predicted ~0.20, measured
+0.161. Byte-null over **24 consecutive runs of the city acceptance pose, one
+hash**, plus a same-binary flag flip at three poses.
+
+**REFUTED — `--mirror_mask_pool_clear`, default OFF.** `StampMasks` (0.478 ms,
+~1.3 cores) is ~8–10 MB of serial `std::memset` a frame, and `parallel_memset` is
+**+33 % slower** (serial 0.478–0.481, pooled 0.617–0.639, four interleaved
+rounds). Bandwidth-bound work cannot be sped up by adding workers; `gbuf-clear`
+profits only because its buffers amortise the join. **Fourth sighting of one law:
+a fan-out pays only above a work-per-dispatch threshold** — the RTT cone pass
+(+139 % at 64 µs), the SSAO gather (+2.5 % cycles), the OuterVec dial predicates,
+and this, against the RTT lighting's −24 % at 262 144 px per dispatch. *`cores`
+tells you where to look; it does not tell you the fan-out will pay.*
 
 **`Tick-ReflXfrm`, corrected:** the row (city's largest outside `renderFrame`,
 1.883 ms) splits into `Tick-ReflGlass` 0.899 (IPC 1.94, ~1.04 cores) and

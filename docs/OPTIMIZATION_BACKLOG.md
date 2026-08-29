@@ -10,6 +10,91 @@ behind a default-off flag until measured + look-approved.
 
 Status keys: TODO · IN-PROGRESS · DONE · PARKED (measured not-worth / blocked).
 
+## 2026-08-29f — `TBR-render`'s interior is attributed: 72.5 % transparent deferred lighting, 24.7 % raster, and the three "dead" children were instrumenting the LEGACY path
+
+Full account: `docs/PERF_STATE.md` §00u. **Instrument only, byte-null.**
+14/14 pins + `render_gate` 4/4 + `warm_gate.sh --full` 7/7.
+
+**Why the three declared children read 0.000:** `s_xparClearMs/RasterMs/CompMs`
+are incremented only inside `RENDER.CPP`'s `unifiedTbr=false` LEGACY block
+(`:1207/1218/1252`). city runs the UNIFIED path, so they are never written there
+and `addMs` books three honest zeroes. The names were right, the wiring pointed
+at the other implementation, and the unified interior (`FILLERS.CPP:2346`) had no
+scopes at all.
+
+**The split** (city t=1961; core-ms, thread-summed; `tbr-core` 85.683 against a
+9.315 ms wall → **effPar 9.20 of 12**):
+
+| scope | core-ms | % |
+|---|--:|--:|
+| `tbr-xparflush` | 83.762 | **97.76** |
+| — `xflush-composite` | **62.142** | **72.53** |
+| — `xflush-raster` | 21.146 | 24.68 |
+| — `xflush-clear` | 0.334 | 0.39 |
+| `tbr-collect` / `tbr-sprite` / `tbr-walk` | 1.921 | 2.24 |
+
+**Confirmed independently by ablation** (one-line `return` before the composite,
+`--hw_prof`): composite is **5.632 ms wall (73.4 %), 0.626 Ginstr (75.8 %),
+0.181 Gcyc (76.1 %), IPC 3.459**. Two methods sharing no machinery, agreeing to
+three points. Attribution closes to **99.8 %**.
+
+**`hwRead()` is `proc_pid_rusage(getpid())` — PROCESS-WIDE**, so nested
+per-worker counters are meaningless inside a strip wave; per-block Ginstr/Gcyc
+must come from ablation differencing. Recorded because it constrains every future
+sub-scope split in a threaded pass.
+
+### OPEN
+
+1. **The largest block is NOT obviously leverable, and I did not force one.**
+   `Render_DeferredTransparentLighting_Tile` runs at **IPC 3.459** (vs
+   `renderFrame`'s 3.625) — issue-bound on real work, not stalled. Its pixel
+   count is already near-minimal (§00t: the extent bound is 91.58 % live), and
+   city runs ONE peel pass, so there is no depth lever. What is left is the
+   kernel's own arithmetic, which lives in the greets round's file:
+   **measured and handed over, not edited.** The number to hand over:
+   **62.1 core-ms / 0.626 Ginstr per frame for 1.578 M live transparent px
+   ≈ 36 ns and ~400 instructions per pixel.**
+2. **`xflush-raster` (24.7 %) is the second block and it IS mine** (clipper +
+   `MekaleleTransparent*`). 21.1 core-ms at **effPar 2.27 — the lowest in the
+   split.** Whether that is real serialisation or a short block thinly spread
+   across the wave is NOT established; that is the honest next question.
+3. **The dead legacy children should be guarded or renamed.** They will keep
+   printing 0.000 on the unified path and reading as "measured, empty" when they
+   mean "not wired here". Cheap fix; not taken tonight because a table change is
+   itself a thing to gate.
+
+## 2026-08-29e — city's `TBR-render` is CLOSED: the census says the bound is already 91.58 % live, so the lever the map named is worth ~0.13 ms
+
+Full account: `docs/PERF_STATE.md` §00t. **No code written; the row is closed
+with numbers, which is the outcome the census was there to produce.**
+
+§00l item 8 carried `TBR-render` (6.51 ms) as the last unopened row, noting that
+one `--xpar_extent_census` run would decide it. It did:
+
+```
+px full=2.43M  bound=1.72M (71.01%)  live=1.58M (91.58% OF THE BOUND)
+```
+
+`xpar_strip_extent` **already** cut the scan to 71 % of full width, and what it
+scans is **91.58 % live**. The dead scan — the entire addressable prize — is
+0.145 M px, **8.42 % of the bound**. Against a measured row of 6.930 ms
+(city t=1961, 68.85 ms tick), the ceiling on any tightening is 0.583 ms if a dead
+pixel cost the same as a live one (absurd), and **≈0.06–0.19 ms on realistic
+assumptions — under 0.3 % of the tick.** The 37 empty flushes (23.4 % of 158) are
+already inside that dead total and are worth tens of microseconds.
+
+**STRIKE §00l item 8.** The row is irreducible by its own lever *because the
+lever already worked*, and that also explains why the fountain fix measured NULL
+here: there was nothing to find.
+
+### FOR WHOEVER OPENS THE ROW ANYWAY
+
+`TBR-render` reads 6.930 ms while its three declared children — `xpar-clear`,
+`xpar-raster`, `xpar-composite` — all read **0.000**. The interior instrument
+does not cover the deferred/unified-TBR path, so the 1.578 M live pixels (the
+only real mass) are unattributed. A sub-scope split is step one for anyone who
+wants that mass; the extent bound is not the way in.
+
 ## 2026-08-29d — the water scan's analytic reject is clipped away: byte-null, and 26 % off the row at the pose where the pass was 102 % scan
 
 Full account: `docs/PERF_STATE.md` §00s (renumbered from §00r at the merge — the greets round took that letter the same day). **LANDED, byte-null** (14/14 pins +
@@ -913,7 +998,67 @@ binary: 1.952 ms with, 1.888 ms without — the commission costs 0.064 ms, 3.3 %
 the row.** The rest predates it. Anyone budgeting against that look feature has
 been reading a number ~30× too large.
 
+### city's glass forward stamp — LANDED, `--city_glass_pool`, −82.7 %
+
+`cityMirrorGlassForward` is the other half of `Tick-ReflXfrm` and ran serially:
+0.899 ms at ~1.04 cores of 12, IPC 1.94. **Census first: 14 784 entries, 14 784
+DISTINCT Face pointers, ZERO duplicates, 71 meshes.** Zero duplicates is the
+load-bearing number — every iteration writes only its own `F->ReflectionTexture`
+/ `F->EU*/EV*` / `F->Flags` and reads only per-mesh and camera state, so there is
+no shared destination and no ordering hazard. That is exactly what separates it
+from its sibling `Reflected_Transform`.
+
+Two changes: a chunked fan-out (512 faces/chunk; the chunk COUNT is fixed by the
+face count so the partition is identical every frame regardless of scheduling),
+and `bsWorld` hoisted out of the per-face loop — `MatrixXVector(T->RotMat,
+&T->BSphereCtr, …)` depends only on the MESH and was recomputed once per FACE,
+**208× per mesh on average**.
+
+| | before | after | |
+|---|--:|--:|--:|
+| `Tick-ReflGlass` | 0.931 | **0.161 ms** | **−82.7 %** |
+| `Tick-ReflXfrm` | 1.951 | **1.282 ms** | −34.3 % |
+
+Predicted ~0.20 ms; measured 0.161. **Byte-null, and for a threading change one
+gate run is not evidence: 24 consecutive runs of the city acceptance pose give
+ONE hash** (`4cb8d2ca…`, the pin), plus the flag flips to identical hashes at
+t=1961 / t=2400 / t=400 on one binary.
+
+### REFUTED — parallelising the mirror-mask clears is +33 % SLOWER
+
+The cores sweep flagged `StampMasks` at 0.478 ms / ~1.3 cores, and it is
+dominated by serial `std::memset` of ~8–10 MB a frame (mask 2 MB, mask-Z 4 MB,
+up to three ownership planes). `parallel_memset` exists, `gbuf-clear` next door
+uses it at ~7 cores, and the change is byte-null by construction. Measured, four
+interleaved rounds: **serial 0.478–0.481 ms, pooled 0.617–0.639 ms.**
+
+These clears are **DRAM-bandwidth-bound**, so more workers cannot beat the memory
+system and the join is pure cost; `gbuf-clear` profits only because its buffers
+are several times larger and amortise it. Kept as `--mirror_mask_pool_clear`,
+**default OFF**, numbers in the flag text.
+
+**FOURTH SIGHTING OF ONE LAW, and the clearest statement yet: a fan-out pays only
+above a work-per-dispatch threshold.** The RTT cone pass (+139 % at 64 µs), the
+SSAO depth gather (+2.5 % cycles), the OuterVec dial predicates, and now a
+bandwidth-bound clear — against the RTT lighting's −24 % at 262 144 px per
+dispatch. **`cores` tells you where to look; it does not tell you the fan-out
+will pay.**
+
+### The cores sweep, and what is left
+
+`cores = Gcyc / clock / wall` applied to every row ≥0.20 ms in greets and city.
+Everything large is healthy — `gbuffer` 6.7, `shadow-bake` 7.2, `cones` 8.2,
+`Tick-SkyCube` 7.9. What remains serial, after this round's two landings:
+
+| cores | arm | row | wall | verdict |
+|--:|---|---|--:|---|
+| 1.02 | greets | `rttj-raster` | 0.307 | no parallel region-fill exists; z-order byte risk |
+| 1.17 | greets | `hdr-begin` | 0.266 | small, IPC 1.14 |
+| 1.22 | city | `Tick-ReflXfrmOnly` | 1.024 | **the handoff below** |
+| 1.12 | chase | `Tick-Radix` | 0.279 | small |
+
 ### Handoff — the route is already in the tree
+
 
 Both halves run at ~1 core. `Reflected_Transform` is a demo-side serial copy of a
 pass FDS parallelises; the blocker is its in-order append to the shared `FList`,
@@ -921,8 +1066,13 @@ which feeds `Radix_Sort`, so naive fan-out can reorder equal-key faces and move
 pixels. **`Transform.cpp` has already solved exactly this**: a planning pass
 reserves each shard's output offset, then execution order floats —
 *"execution order free, output order pinned"*. Porting that is the lever, worth
-~0.8 ms; it was not attempted this round because it is a multi-hour restructure
-across two demo files and a truncated one is worse than none.
+~0.8 ms; it was NOT attempted this round, deliberately, and here is the sizing so
+the next round does not have to re-derive it: the vertex loop is a `goto`-based
+legacy state machine (`Regular:` / `Ahead:` / `OUT:`) duplicated in CITY.CPP and
+CHASE.CPP, the face counts are not known before culling so the reservation has to
+over-allocate and compact (which is what `XfrmShard::out` is for), and any error
+is a DRAW-ORDER change that moves pixels only where faces share a depth key. A
+truncated attempt is worse than none.
 `cityMirrorGlassForward` carries two visible redundancies for whoever takes it:
 `bsWorld` recomputed PER FACE from per-MESH inputs, and a `powf` per face.
 
