@@ -68,8 +68,10 @@ def load_arm(d, w, h):
 
 
 def load_refbin(path, w, h):
+    """REFRND01 = z | n | faceId | flags;  REFRND02 adds the crease-dh plane."""
     with open(path, "rb") as f:
-        assert f.read(8) == b"REFRND01", "not a REFRND01 dump: " + path
+        magic = f.read(8)
+        assert magic in (b"REFRND01", b"REFRND02"), "not a REFRND0x dump: " + path
         rw, rh = np.frombuffer(f.read(8), dtype=np.int32)
         assert (int(rw), int(rh)) == (w, h), "resolution mismatch"
         n = w * h

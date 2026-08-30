@@ -64,6 +64,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <limits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -271,7 +272,7 @@ struct RefModel {
 	std::vector<RefFaceV> fv;
 	// tunables resolved at build
 	double back = 0.3, creaseDeg = 30.0, mitreLimit = 4.0, maxExt = 2.0;
-	double marginOverride = 0.0, freeTol = 0.05, edgeBandTex = 2.0;
+	double marginOverride = 0.0, freeTol = 0.05, edgeBandTex = 2.0, creaseVizTex = 0.0;
 	int    partition = 1, maxCells = 6000;
 	bool   sharedEdge = false;
 	int    mitreTrim = 2;
@@ -617,6 +618,7 @@ FDS_NOINLINE static bool BuildModel(Scene *Sc)
 	g_m.marginOverride = double(FF::greets_displace_ref_margin());
 	g_m.freeTol     = double(FF::greets_displace_ref_free_tol());
 	g_m.edgeBandTex = double(FF::greets_displace_ref_edge_band());
+	g_m.creaseVizTex = double(FF::greets_displace_ref_crease_viz());
 	g_m.partition   = FF::greets_displace_ref_partition();
 	g_m.maxCells    = std::max(16, FF::greets_displace_ref_steps());
 	g_m.sharedEdge  = FF::greets_displace_ref_shared_edge();
@@ -1221,14 +1223,22 @@ static inline double SdOfIdx(const RayCtx &rc, int fi, double t) {
 	const RefFaceV &f = g_m.fv[size_t(fi)];
 	return dot(f.n, rc.D) * t - f.d;
 }
-static inline void UvOfIdx(const RayCtx &rc, int fi, double t, double &u, double &v) {
+// The same two evaluators without a RayCtx, so the G-buffer write can ask a
+// face about a hit after the solver's context is gone (the crease-dh map).
+static inline void UvOfFaceD(int fi, const V3 &D, double t, double &u, double &v) {
 	const RefFaceV &f = g_m.fv[size_t(fi)];
-	u = f.u0 + dot(f.gu, rc.D) * t - dot(f.gu, f.p0);
-	v = f.v0 + dot(f.gv, rc.D) * t - dot(f.gv, f.p0);
+	u = f.u0 + dot(f.gu, D) * t - dot(f.gu, f.p0);
+	v = f.v0 + dot(f.gv, D) * t - dot(f.gv, f.p0);
+}
+static inline double EdOfFaceD(int fi, int e, const V3 &D, double t) {
+	const RefFaceV &f = g_m.fv[size_t(fi)];
+	return dot(f.em[e], D) * t - f.ec[e];      // em is unit, so this is world units
+}
+static inline void UvOfIdx(const RayCtx &rc, int fi, double t, double &u, double &v) {
+	UvOfFaceD(fi, rc.D, t, u, v);
 }
 static inline double EdOfIdx(const RayCtx &rc, int fi, int e, double t) {
-	const RefFaceV &f = g_m.fv[size_t(fi)];
-	return dot(f.em[e], rc.D) * t - f.ec[e];
+	return EdOfFaceD(fi, e, rc.D, t);
 }
 
 // d(u,v) for a face at ray parameter t, including the dominant-edge blend.
@@ -1926,11 +1936,13 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 	std::vector<float>    dn;
 	std::vector<int32_t>  df;
 	std::vector<uint32_t> dfl;
+	std::vector<float>    dch;     // crease-dh plane (REFRND02), NaN off-crease
 	if (dumpPath && *dumpPath) {
 		dz.assign(size_t(XRes) * YRes, 0.0f);
 		dn.assign(size_t(XRes) * YRes * 3, 0.0f);
 		df.assign(size_t(XRes) * YRes, -1);
 		dfl.assign(size_t(XRes) * YRes, 0u);
+		dch.assign(size_t(XRes) * YRes, std::numeric_limits<float>::quiet_NaN());
 	}
 
 	{	const char *dbg = std::getenv("FDS_REFRENDER_DEBUG_PX");
@@ -2144,6 +2156,29 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 				if (wantShadowId) g_gbuffer->shadowMatID[idx] = rf.shadowMatID;
 				if (!g_gbuffer->mirrorId.empty() && !wasStone) g_gbuffer->mirrorId[idx] = 0;
 
+				if (!dch.empty() && g_m.creaseVizTex > 0.0) {
+					// THE CREASE-dh MAP.  At a pixel within creaseVizTex texels of a
+					// shared stone crease, what the TWO SIDES say the surface height
+					// is at this exact world point.  The census says which junctions
+					// disagree; this says where on screen the eye meets one.
+					int bestE = -1; double bestAbs = 1e300;
+					for (int k = 0; k < 3; ++k) {
+						// CREASES ONLY.  Every quad is two triangles, so half a face's
+						// neighbours are co-planar and agree exactly; drawn, they bury
+						// the junctions under a lattice of zero.  A smooth seam is not
+						// a junction either — the two strips are one surface.
+						if (rf.nbrFace[k] < 0 || rf.smoothEdge[k]) continue;
+						const double e = std::fabs(EdOfFaceD(h.fi, k, D, h.t));
+						if (e < bestAbs) { bestAbs = e; bestE = k; }
+					}
+					if (bestE >= 0 && bestAbs <= g_m.creaseVizTex * rf.worldPerTexel) {
+						const int nb = rf.nbrFace[bestE];
+						const RefMat &om = g_m.mats[size_t(g_m.faces[size_t(nb)].matIdx)];
+						double ou, ov; UvOfFaceD(nb, D, h.t, ou, ov);
+						dch[idx] = float(rm.dOfH(rm.sampleH(h.u, h.v))
+						                 - om.dOfH(om.sampleH(ou, ov)));
+					}
+				}
 				if (!dz.empty()) {
 					dz[idx] = float(h.t);
 					dn[idx*3+0] = float(nShade.x); dn[idx*3+1] = float(nShade.y); dn[idx*3+2] = float(nShade.z);
@@ -2182,7 +2217,7 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 
 	if (!dz.empty()) {
 		if (FILE *f = std::fopen(dumpPath, "wb")) {
-			const char magic[8] = { 'R','E','F','R','N','D','0','1' };
+			const char magic[8] = { 'R','E','F','R','N','D','0','2' };
 			int32_t wh[2] = { int32_t(XRes), int32_t(YRes) };
 			std::fwrite(magic, 1, 8, f);
 			std::fwrite(wh, sizeof(int32_t), 2, f);
@@ -2190,8 +2225,9 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 			std::fwrite(dn.data(),  sizeof(float),    dn.size(),  f);
 			std::fwrite(df.data(),  sizeof(int32_t),  df.size(),  f);
 			std::fwrite(dfl.data(), sizeof(uint32_t), dfl.size(), f);
+			std::fwrite(dch.data(), sizeof(float),    dch.size(), f);
 			std::fclose(f);
-			std::fprintf(stderr, "[REFRENDER] dump -> %s (%dx%d, z/n/faceid/flags)\n",
+			std::fprintf(stderr, "[REFRENDER] dump -> %s (%dx%d, z/n/faceid/flags/crease-dh)\n",
 			             dumpPath, int(XRes), int(YRes));
 		} else {
 			std::fprintf(stderr, "[REFRENDER] could not open FDS_REFRENDER_DUMP='%s'\n", dumpPath);

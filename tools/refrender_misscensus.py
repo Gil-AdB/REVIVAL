@@ -34,15 +34,19 @@ CAUSE_RGB = [(255,255,0), (255,0,255), (0,255,255), (255,60,60),
 
 
 def load(path):
+    """REFRND01 = z | n | faceId | flags;  REFRND02 adds the crease-dh plane."""
     with open(path, "rb") as f:
-        assert f.read(8) == b"REFRND01", "not a REFRND01 dump: " + path
+        magic = f.read(8)
+        assert magic in (b"REFRND01", b"REFRND02"), "not a REFRND0x dump: " + path
         w, h = (int(x) for x in np.frombuffer(f.read(8), dtype=np.int32))
         n = w * h
         z = np.frombuffer(f.read(n * 4), dtype=np.float32).reshape(h, w)
         f.read(n * 12)                                   # normals, unused here
         fid = np.frombuffer(f.read(n * 4), dtype=np.int32).reshape(h, w)
         fl = np.frombuffer(f.read(n * 4), dtype=np.uint32).reshape(h, w)
-    return w, h, z, fid, fl
+        ch = (np.frombuffer(f.read(n * 4), dtype=np.float32).reshape(h, w)
+              if magic == b"REFRND02" else np.full((h, w), np.nan, np.float32))
+    return w, h, z, fid, fl, ch
 
 
 def main():
@@ -52,7 +56,7 @@ def main():
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
-    w, h, z, fid, fl = load(a.refbin)
+    w, h, z, fid, fl, ch = load(a.refbin)
     hit = (fl & 1) != 0
     miss = (fl & 2) != 0
     cause = ((fl >> 12) & 7)
