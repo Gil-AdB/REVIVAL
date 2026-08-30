@@ -109,10 +109,15 @@ for p in glob.glob(os.path.join(sys.argv[1], "*.ppm")):
 PY
 }
 
-# delete the raw planes of one arm dir (keeps PNGs, log.txt, *.json)
+# delete the raw planes of one arm dir (keeps PNGs, log.txt, *.json).
+# null_glob is load-bearing: without it zsh's nomatch aborts the whole `rm`
+# on the first pattern that matches nothing, so NOTHING is deleted and the
+# lean run silently keeps every plane.
 strip_raw() {
+  setopt local_options null_glob
   local d=$1
-  rm -f "$d"/ref.bin "$d"/*.z16 "$d"/*.u32 "$d"/*.ppm 2>/dev/null || true
+  rm -f "$d"/ref.bin "$d"/*.z16 "$d"/*.u32 "$d"/*.ppm 2>/dev/null
+  return 0
 }
 
 score() {   # score <posedir>  -- tess vs ref, and tess vs refse if present

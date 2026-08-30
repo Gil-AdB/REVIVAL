@@ -297,6 +297,177 @@ static RefModel g_m;
 struct SoupFace { V3 p[3]; V3 n; const Material *mat = nullptr; };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 3b. THE CREASE CENSUS  (--greets_displace_ref_crease_scan=N)
+//
+//     His verdict on the first pictures was that at the problematic junctions
+//     "the two sides height-disagree".  This measures that sentence.  For every
+//     shared stone edge it walks the crease at N samples per height-map texel,
+//     evaluates BOTH faces' height fields at the SAME world points, and pools
+//     the result per PLANE-PAIR junction.
+//
+//     |Δd| says how big the disagreement is in world units — the size of the
+//     step a viewer sees.  The two correlations say what KIND it is, and they
+//     are the half that decides what can be done about it:
+//
+//       * high correlation at a NON-ZERO lag  = one chart shifted against the
+//         other.  The two sides carry the same relief out of phase, so a
+//         dominant-owner rule (or a UV nudge) genuinely reconciles them.
+//       * low correlation at EVERY lag        = two unrelated charts meeting.
+//         Nothing blends that; a dominant owner only picks a winner, and the
+//         step is a property of the authoring, not of the renderer.
+// ═══════════════════════════════════════════════════════════════════════════
+struct CreaseEdgeStat { double r0, rBest, lagTex; long long n; };
+struct CreaseAcc {
+	long long n = 0;
+	int    edges = 0;
+	double len = 0.0;
+	double texL = 0.0, texR = 0.0;      // texels per world unit along the crease
+	double phiSum = 0.0;
+	int    matL = -1, matR = -1;
+	int    nConvex = 0, nConcave = 0, nSmooth = 0;
+	std::vector<double> dAbs;           // |dL − dR| per sample, world units
+	std::vector<CreaseEdgeStat> per;
+};
+
+static inline int64_t PlaneKeyQ(const V3 &n, double d) {
+	// quantised plane identity: normal to 1e-3, offset to 1e-3
+	const int64_t a = int64_t(std::llround(n.x * 1000.0));
+	const int64_t b = int64_t(std::llround(n.y * 1000.0));
+	const int64_t c = int64_t(std::llround(n.z * 1000.0));
+	const int64_t e = int64_t(std::llround(d   * 1000.0));
+	return ((a * 4001 + b) * 4001 + c) * 100003 + e;
+}
+static double PctOf(std::vector<double> &v, double q) {
+	if (v.empty()) return 0.0;
+	std::sort(v.begin(), v.end());
+	const double x = q * 0.01 * double(v.size() - 1);
+	const size_t i = size_t(x);
+	const double f = x - double(i);
+	return (i + 1 < v.size()) ? v[i] * (1.0 - f) + v[i+1] * f : v.back();
+}
+// Pearson r of a against b shifted by `lag` samples.
+static double CorrLag(const std::vector<double> &a, const std::vector<double> &b, int lag) {
+	const int n = int(a.size());
+	const int i0 = std::max(0, -lag), i1 = std::min(n, n - lag);
+	if (i1 - i0 < 8) return 0.0;
+	double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0; int m = 0;
+	for (int i = i0; i < i1; ++i) {
+		const double x = a[size_t(i)], y = b[size_t(i + lag)];
+		sa += x; sb += y; saa += x*x; sbb += y*y; sab += x*y; ++m;
+	}
+	const double den = std::sqrt(std::max(0.0, (saa - sa*sa/m)) * std::max(0.0, (sbb - sb*sb/m)));
+	if (den < 1e-12) return 0.0;
+	return (sab - sa*sb/m) / den;
+}
+
+static void CreaseScan(int perTexel)
+{
+	if (perTexel <= 0) return;
+	std::map<std::pair<int64_t,int64_t>, CreaseAcc> junc;
+
+	for (size_t f = 0; f < g_m.faces.size(); ++f) {
+		const RefFace &L = g_m.faces[f];
+		for (int i = 0; i < 3; ++i) {
+			const int nb = L.nbrFace[i];
+			if (nb < 0 || size_t(nb) <= f) continue;       // each shared edge once
+			const RefFace &R = g_m.faces[size_t(nb)];
+			const RefMat  &mL = g_m.mats[size_t(L.matIdx)];
+			const RefMat  &mR = g_m.mats[size_t(R.matIdx)];
+
+			const V3 a = L.p[i], b = L.p[(i+1)%3];
+			const V3 e = b - a;
+			const double elen = len(e);
+			if (elen < 1e-9) continue;
+			const V3 eh = e * (1.0 / elen);
+
+			// texels per world unit ALONG the crease, each side's own chart
+			const double tL = std::sqrt(std::pow(dot(L.gu, eh) * mL.mw, 2.0)
+			                          + std::pow(dot(L.gv, eh) * mL.mh, 2.0));
+			const double tR = std::sqrt(std::pow(dot(R.gu, eh) * mR.mw, 2.0)
+			                          + std::pow(dot(R.gv, eh) * mR.mh, 2.0));
+			const double rate = std::max(1e-6, std::max(tL, tR));
+			const long long ns = std::max(8LL, std::min(4096LL,
+				(long long)std::llround(elen * rate * double(perTexel)) + 1));
+
+			std::vector<double> hL, hR;
+			hL.reserve(size_t(ns)); hR.reserve(size_t(ns));
+			std::vector<double> dd; dd.reserve(size_t(ns));
+			for (long long k = 0; k < ns; ++k) {
+				const double s = (ns > 1) ? double(k) / double(ns - 1) : 0.5;
+				const V3 q = a + e * s;
+				const double uL = L.u[0] + dot(L.gu, q - L.p[0]);
+				const double vL = L.v[0] + dot(L.gv, q - L.p[0]);
+				const double uR = R.u[0] + dot(R.gu, q - R.p[0]);
+				const double vR = R.v[0] + dot(R.gv, q - R.p[0]);
+				const double a1 = mL.sampleH(uL, vL), b1 = mR.sampleH(uR, vR);
+				hL.push_back(a1); hR.push_back(b1);
+				dd.push_back(std::fabs(mL.dOfH(a1) - mR.dOfH(b1)));
+			}
+
+			const int lagMax = std::min(48, int(ns) / 4);
+			double rBest = CorrLag(hL, hR, 0); int lagBest = 0;
+			for (int lg = -lagMax; lg <= lagMax; ++lg) {
+				const double r = CorrLag(hL, hR, lg);
+				if (r > rBest) { rBest = r; lagBest = lg; }
+			}
+			const double samplesPerTexel = double(ns) / std::max(1e-9, elen * rate);
+
+			const std::pair<int64_t,int64_t> key = std::minmax(PlaneKeyQ(L.n, L.d),
+			                                                   PlaneKeyQ(R.n, R.d));
+			CreaseAcc &A = junc[key];
+			if (A.edges == 0) { A.matL = L.matIdx; A.matR = R.matIdx; }
+			++A.edges; A.n += ns; A.len += elen;
+			A.texL += tL * elen; A.texR += tR * elen;
+			double c1 = dot(L.n, R.n); c1 = std::max(-1.0, std::min(1.0, c1));
+			A.phiSum += std::acos(c1) * elen;
+			if (L.kind[i] == EDGE_CONVEX) ++A.nConvex; else ++A.nConcave;
+			if (L.smoothEdge[i]) ++A.nSmooth;
+			A.dAbs.insert(A.dAbs.end(), dd.begin(), dd.end());
+			A.per.push_back({CorrLag(hL, hR, 0), rBest,
+			                 double(lagBest) / std::max(1e-9, samplesPerTexel), ns});
+		}
+	}
+
+	// sort junctions by |Δd| p90, worst first
+	struct Row { double p90; const CreaseAcc *A; };
+	std::vector<Row> rows;
+	for (auto &kv : junc) {
+		CreaseAcc &A = kv.second;
+		rows.push_back({PctOf(A.dAbs, 90.0), &A});
+	}
+	std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b){ return a.p90 > b.p90; });
+
+	std::fprintf(stderr, "[REFRENDER-CREASE] %zu plane-pair junctions, %d samples/texel; "
+	             "columns: edges n len phi texel-rate(L/R per world u) |dd|p50/p90/max r0 rbest lag(tex)\n",
+	             rows.size(), perTexel);
+	int shown = 0;
+	for (Row &r : rows) {
+		const CreaseAcc &A = *r.A;
+		double wr0 = 0, wrb = 0, wlag = 0, wn = 0, lagAbs = 0;
+		for (const CreaseEdgeStat &s : A.per) {
+			wr0 += s.r0 * double(s.n); wrb += s.rBest * double(s.n);
+			wlag += s.lagTex * double(s.n); lagAbs += std::fabs(s.lagTex) * double(s.n);
+			wn += double(s.n);
+		}
+		if (wn < 1) continue;
+		std::vector<double> dd = A.dAbs;
+		std::fprintf(stderr,
+			"[REFRENDER-CREASE] '%s'|'%s' %s edges=%d n=%lld len=%.2fu phi=%.1fdeg "
+			"tex=%.1f/%.1f  |dd| p50=%.4f p90=%.4f max=%.4f  r0=%+.3f rbest=%+.3f "
+			"lag=%+.2f (|lag|=%.2f) tex%s\n",
+			g_m.mats[size_t(A.matL)].mat->Name, g_m.mats[size_t(A.matR)].mat->Name,
+			A.nConvex > A.nConcave ? "CONVEX " : "concave",
+			A.edges, A.n, A.len, A.phiSum / std::max(1e-9, A.len) * 180.0 / M_PI,
+			A.texL / std::max(1e-9, A.len), A.texR / std::max(1e-9, A.len),
+			PctOf(dd, 50.0), PctOf(dd, 90.0), PctOf(dd, 100.0),
+			wr0 / wn, wrb / wn, wlag / wn, lagAbs / wn,
+			A.nSmooth ? "  [smooth seam]" : "");
+		if (++shown >= 60) { std::fprintf(stderr, "[REFRENDER-CREASE] ... %zu more\n",
+		                                  rows.size() - size_t(shown)); break; }
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 4.  Build.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -772,6 +943,7 @@ FDS_NOINLINE static bool BuildModel(Scene *Sc)
 			             kv.second[5], kv.second[6]);
 	}
 	g_m.built = true;
+	CreaseScan(FF::greets_displace_ref_crease_scan());
 	if (verbose) {
 		for (const RefMat &rm : g_m.mats)
 			std::fprintf(stderr,
@@ -1177,9 +1349,49 @@ static void MarchCandidate(const RayCtx &rc, int slot, double ta, double tb,
 	const RayCand &c  = rc.c[slot];
 	const RefFace &rf = g_m.faces[size_t(c.fi)];
 	const RefMat  &rm = g_m.mats[size_t(rf.matIdx)];
-	// blend mode makes d() a blend of two bilinears — no longer a quadratic —
-	// so that arm falls back to a conservative bound + bisection.
-	const bool exactQuad = !(g_m.sharedEdge && rf.anyShared);
+
+	// ── WHERE THE EXACT ROOT STILL HOLDS UNDER THE DOMINANT-EDGE BLEND ──────
+	// The blend makes d() a convex combination of TWO bilinears, which is no
+	// longer a quadratic along the ray, so the exact root does not apply there.
+	// But it only applies THERE: DOfIdx blends solely while the ray is inside
+	// the band of a shared crease, −band < ed_i(t) <= 0 for some edge i with a
+	// dominant owner, and that is a T-INTERVAL per edge, computable in closed
+	// form.  Outside the union of those three intervals d() is the plain
+	// bilinear and the quadratic is exact — bit for bit the same arithmetic the
+	// no-blend arm runs.  So the sampled fallback is confined to the cells that
+	// actually touch a band, instead of the whole face, which is what made the
+	// shared-edge arm cost 3316 ms against 330.
+	const double band = std::max(1e-6, g_m.edgeBandTex * rf.worldPerTexel);
+	const bool blendArm = g_m.sharedEdge && rf.anyShared;
+	double bLo[3], bHi[3]; int nBand = 0;
+	double blendDMax = rm.dMax;
+	if (blendArm) {
+		for (int i = 0; i < 3; ++i) {
+			if (rf.domOwner[i] < 0 || rf.domOwner[i] == c.fi) continue;
+			// the owner's relief can stand taller than this face's, and the
+			// per-cell skip must stay conservative over BOTH.
+			blendDMax = std::max(blendDMax,
+				g_m.mats[size_t(g_m.faces[size_t(rf.domOwner[i])].matIdx)].dMax);
+			// −band < en·t + e0 <= 0
+			const double en = c.en[i], e0 = c.e0[i];
+			double lo, hi;
+			if (std::fabs(en) < 1e-15) {
+				if (!(e0 <= 0.0 && e0 > -band)) continue;   // constant, never in the band
+				lo = ta; hi = tb;
+			} else if (en > 0.0) {
+				lo = (-band - e0) / en; hi = -e0 / en;
+			} else {
+				lo = -e0 / en; hi = (-band - e0) / en;
+			}
+			if (hi <= lo) continue;
+			bLo[nBand] = lo; bHi[nBand] = hi; ++nBand;
+		}
+	}
+	// a cell is exact unless its own t-span meets one of those intervals
+	auto cellIsExact = [&](double t0, double t1) {
+		for (int i = 0; i < nBand; ++i) if (t1 > bLo[i] && t0 < bHi[i]) return false;
+		return true;
+	};
 
 	// texel-space line
 	const double ax = c.un * rm.mw, bx = c.u0c * rm.mw - 0.5;
@@ -1204,13 +1416,15 @@ static void MarchCandidate(const RayCtx &rc, int slot, double ta, double tb,
 		double tEnd = std::min(tb, std::min(tNextX, tNextY));
 		if (!(tEnd > t)) tEnd = std::min(tb, t + 1e-9);
 
+		const bool exactQuad = !blendArm || cellIsExact(t, tEnd);
+
 		// conservative skip: the bilinear is bounded by its corner max.
 		double dCellMax;
 		if (exactQuad) {
 			dCellMax = rm.dOfH(rm.cellMaxAt(cx, cy));
 		} else {
-			// blend arm: the owner's cell may be taller; be generous.
-			dCellMax = rm.dMax;
+			// blended cell: the owner's cell may be taller; be generous over both.
+			dCellMax = blendDMax;
 		}
 		const double sdA = c.sn * t + c.s0, sdB = c.sn * tEnd + c.s0;
 		if (std::min(sdA, sdB) > dCellMax) {           // entirely above: no root
