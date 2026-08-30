@@ -499,6 +499,12 @@ enum class ShadowMode {
 	PolyId,   // material-ID equality (per-material shadow grouping)
 };
 extern std::atomic<ShadowMode> g_shadowMode;
+// Re-seed g_shadowMode from --shadow_polyid AFTER argv has been parsed.
+// REV.CPP calls this once, right after FeatureFlags::parseArgs. The reason it
+// has to exist at all is at the definition in FDS/RENDER/Shadows.cpp: the
+// namespace-scope initialiser runs before main(), so the CLI form of the flag
+// could not move the mode.
+void Shadow_SeedModeFromFlags();
 #endif
 
 #ifndef FrustrumIncluded

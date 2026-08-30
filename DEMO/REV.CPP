@@ -1600,6 +1600,14 @@ int main(int argc, const char *argv[])
 	if (fds::FeatureFlags::force_xres() > 0) g_demoXRes = fds::FeatureFlags::force_xres();
 	if (fds::FeatureFlags::force_yres() > 0) g_demoYRes = fds::FeatureFlags::force_yres();
 
+	// Derived state that must be re-evaluated now that argv HAS been parsed.
+	// g_shadowMode is initialised at namespace scope in FDS/RENDER/Shadows.cpp,
+	// i.e. before main(), so --shadow_polyid / --no-shadow_polyid on the COMMAND
+	// LINE moved nothing (only FDS_SHADOW_POLYID=0 or F3 did). One investigation
+	// already concluded "--no-shadow_polyid changes nothing, so PolyId is not the
+	// cause" from that. Re-seeding here is byte-null when the flag is absent.
+	Shadow_SeedModeFromFlags();
+
 	// Flag implication: city_env_pixel routes the city glass through the
 	// deferred env-specular compose, which only has data when env_refl's
 	// FramePrep bakes ran — without it the glass is flat (loses even the

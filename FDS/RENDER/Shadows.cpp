@@ -11,7 +11,11 @@
 //   --shadows / FDS_SHADOWS              master enable
 //   --shadow_polyid / FDS_SHADOW_POLYID  initial g_shadowMode (PolyId vs
 //                                        Depth comparison; F3 in greets
-//                                        toggles at runtime)
+//                                        toggles at runtime). The flag is read
+//                                        in exactly one place,
+//                                        Shadow_SeedModeFromFlags(), which
+//                                        REV.CPP calls once argv is parsed —
+//                                        see the long note at the definition.
 //   g_inShadowPass  per-thread flag set during the depth pre-pass so
 //                   the rasterizer / culler can take a depth-only path.
 
@@ -152,15 +156,45 @@ thread_local bool g_inShadowPass = false;
 
 // PolyId is the production default. F3 still toggles at runtime.
 //
-// TRAP, MEASURED 2026-08-08: this is a NAMESPACE-SCOPE dynamic initialiser, so
-// it reads shadow_polyid() BEFORE main() parses argv. `--no-shadow_polyid` on
-// the command line therefore does NOTHING to g_shadowMode (only the F3 toggle
-// or the ENV form FDS_SHADOW_POLYID=0, which the flag table's eager env scan
-// does see, can move it). An investigation concluded "--no-shadow_polyid
-// changes nothing, so PolyId is not the cause" from exactly this; with the env
-// form the same experiment recovers 100 % of the projector's direct term.
+// THE TRAP THIS USED TO BE, MEASURED 2026-08-08, FLAGGED AS THE TREE'S ONE
+// SEMGREP ERROR (.semgrep/revival.yml revival-featureflags-at-namespace-scope),
+// FIXED 2026-08-30. The initialiser below USED TO READ shadow_polyid() — a
+// NAMESPACE-SCOPE DYNAMIC INITIALISER, i.e. it ran before main() parsed argv.
+// `--no-shadow_polyid` ON THE COMMAND LINE therefore did NOTHING to
+// g_shadowMode; only the F3 toggle or the ENV form FDS_SHADOW_POLYID=0 (which
+// the flag table's eager env scan does see) could move it. An investigation
+// concluded "--no-shadow_polyid changes nothing, so PolyId is not the cause"
+// from exactly that; with the env form the same experiment recovered 100 % of
+// the projector's direct term. Measured here on the gate's own conetest recipe:
+// before the fix `--no-shadow_polyid` gave b41894f9…, bit-for-bit the default;
+// after it gives be71c7ab…, which is what FDS_SHADOW_POLYID=0 always gave.
+//
+// THE FIX is NOT to make the read lazy at the point of use: g_shadowMode is
+// loaded relaxed inside the deferred kernel's per-pixel shadow tap
+// (DeferredSurfaceKernel.cpp) and in LightmapBake, so a std::call_once or an
+// accessor call there is paid per tap. It is the .semgrep rule's other
+// sanctioned form — "an explicit init called after flag parsing":
+//
+//   * the definition below no longer reads the flag table at all. It is now a
+//     CONSTANT initialiser off the same compile-time macro the flag's own
+//     default is spelled with (FDS_SHADOW_POLYID_DEFAULT_ON, FeatureFlags.h),
+//     so there is no default to keep in sync and no dynamic init to order;
+//   * Shadow_SeedModeFromFlags() is the ONE place the flag is consulted, and
+//     REV.CPP calls it immediately after FeatureFlags::parseArgs — after the
+//     eager env scan, after FDS_BAKED_ARGS, after --flags-file and --vanilla,
+//     and long before any scene, snapshot or bake reads the mode. Both the CLI
+//     and the env form now land, by the same path.
+//
+// Byte-null on the default arm: with neither form of the flag set, the seed
+// stores exactly what the constant initialiser already holds.
 std::atomic<ShadowMode> g_shadowMode{
-	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
+	FDS_SHADOW_POLYID_DEFAULT_ON ? ShadowMode::PolyId : ShadowMode::Depth};
+
+void Shadow_SeedModeFromFlags() {
+	g_shadowMode.store(fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId
+	                                                      : ShadowMode::Depth,
+	                   std::memory_order_relaxed);
+}
 
 // ── the shadow CASTER predicate — one definition ────────────────────────────
 // Which materials are excluded from the shadow bake. The long rationale (why
