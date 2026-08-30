@@ -1,4 +1,19 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-08-31b — knife-edge landed (both hypotheses refuted); the queue is live
+
+- **M5** (rev-knifedge merged, 1d975e61, NO engine source): class 1 is ONE near-plane-clipped
+  triangle (Piramid.lwo:c0 face 0) with 2^22-ULP margins — no knife edge to guard; the ±1-quantum
+  speckle is explained (iNearZ=100 near-clip blowup, ~100 ULP view-z reconstruction). Class 2 is
+  THREE MISSING OMNI LIGHTS (114/115/116, cyan mech) on a bit-identical G-buffer. Decisive next
+  step is HIS run on the M5: `bash tools/m5_diag4.sh` (queue 951fa2dce8de); prime suspect
+  `--light_rect_exact`.
+- **The queue**: pending questions/decisions are ledger records now — `groundwork queue` in the
+  terminal, test-command copy buttons + per-option ANSWER buttons in `groundwork ui --open`
+  (`groundwork answer <id> --value <option>` files his decision, no quote ceremony). Six items
+  wait on him: 3 v4 rulings (d746f3373da0 / 9e7cde227316 / e325bd082cbc), dispfix merge
+  (12a396dd0f85), GpuBench M5 build (362f18df7f23), the m5_diag4 table (951fa2dce8de).
+- v4 P2 agent still running on rev-v4.
+
 
 
 > ## 2026-08-31 — SESSION HANDOFF (pre-compaction): three agents in flight, the M5 hunt
