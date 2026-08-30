@@ -1,5 +1,98 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> ## 2026-08-30 — **THE GTAO DEFAULT FLIP, ON HIS RULING: the guarded geometric
+> arm is the default for ALL SCENES.** Four pins re-baselined, ten verified
+> unmoved, and the pre-2026-08-30 render is still reachable byte-exactly from
+> ONE flag
+>
+> He flew the guarded geometric arm with `--ssao_gtao_bias=0.2` and ruled,
+> verbatim, **"all scenes"** (ledger decision `f2f179f017df`). What flipped:
+> `--ssao_gtao_step_dist` 0 → **1** (geometric ladder), `--ssao_gtao_srad_max`
+> 256 → **1024** (the cap stops binding at greets' review poses, so the AO scale
+> is the authored world radius again instead of a depth-proportional artefact of
+> the pixel grid), the AUTO self-occlusion bias 0.05 → **0.2**;
+> `--ssao_gtao_round_fix` was already ON. Both near-step guards stay AUTO
+> (`-1`) — on exactly when the ladder is front-loaded.
+>
+> **THE BIAS DEFAULT IS STILL SPELLED `-1` IN `FeatureFlags.def`, AND THAT IS THE
+> POINT.** A literal `0.2` would apply the guard to the UNIFORM ladder too, and
+> that is **not** byte-null there — measured: greets acceptance t=5743 goes
+> `a7fa9214…` → `aa08f5b1f5594250407ddbb3f14cbd20` under `--ssao_gtao_bias=0.2`
+> with `--ssao_gtao_step_dist=0`. Keeping AUTO and moving the AUTO *value* is
+> what buys the exact revert arm. AUTO now resolves to **0.2** with a
+> front-loaded ladder and **0** with the uniform one.
+>
+> **THE REVERT ARM IS EXACT, PROVED ON THE WHOLE 14-PIN BATTERY.** The shipped
+> binary under `--ssao_gtao_step_dist=0 --ssao_gtao_srad_max=256
+> --no-ssao_gtao_round_fix` reproduces the countersigned 2026-08-16y greets
+> acceptance values (`440aa6bb… / 00d17bc5… / 29c1e7fb… / bc1b0a8a…`) and every
+> other pin byte-identically; greets **cam A t=5965** under that arm gives
+> `dbe2d4c2716e2d762b366d5a45c151a6`, the value already on file at
+> `docs/DISPLACEMENT_RESEARCH_II.md:1519` from months earlier; and chase's five
+> pinned poses under **his SSAO arm** are byte-identical to the pre-round
+> binary. Drop only the `--no-ssao_gtao_round_fix` term and you get the
+> intermediate set the tip actually rendered between the round-fix commit and
+> this one (`a7fa9214… / 8593c712… / 4ea379d0… / 03160c82…`), which was
+> deliberately never pinned.
+>
+> **MOVED (4 of 14) — re-baselined:** greets acceptance t=5743
+> `08f0741fb8c5d324a2303fb03ed23437`, t=2845 `84e18552fa079409a3da12c4b922bf77`,
+> t=6097 `0cc05784dd3e9e448e3ad06df77180bc`, t=6133
+> `456eac7dc6d6b2135f0e975e11b3a4fe` — **24/24 identical each, 0 flips**. Plus
+> the warm suite's `greets-warm` row.
+> **UNMOVED (10 of 14) — VERIFIED 3/3, not assumed:** city t=1961, greets
+> t=1588, fountain t=2500, chase default ×5, chase cinematic ×2. Also unmoved:
+> the three city acceptance arms, `render_gate.sh` 4/4 (`groundwork recheck
+> --subject pin.render_gate`: 12 reverified, 0 disagree), and six of the seven
+> warm rows. The mechanism is structural: greets-acceptance and greets-warm are
+> the **only** recipes in the entire suite that pass `--ssao --ssao-gtao`, so
+> nothing else can enter the changed code.
+>
+> **COST — min-of-11 interleaved, both arms on ONE binary, `iters=40`,
+> 1920×1080, `--deferred_prof=5`, `wall_min`:**
+>
+> | scene / pose | renderFrame | `ssao` | `ssao-march` |
+> |---|--:|--:|--:|
+> | greets t=5743 | 46.240 → 46.367 ms **+0.27 %** | +3.69 % | +5.15 % |
+> | chase t=800 `@main` | 19.630 → 19.634 ms **+0.02 %** | −0.99 % | −1.77 % |
+> | chase t=800 `@refl` | 16.601 → 16.649 ms **+0.29 %** | −1.72 % | −2.67 % |
+> | city t=1961 | 56.159 → 56.228 ms **+0.12 %** | +2.18 % | +2.91 % |
+>
+> **Every renderFrame figure is an order of magnitude inside the ±1.5–2 %
+> placement floor**, and the greets one is not even sign-stable: a second
+> 11-round battery on the same binary minutes earlier gave **−0.64 %**. That is
+> what "inside the floor" means, and it is why the `+1.40 %` on file for the
+> 0.05-bias arm (`f555f3979175`) is superseded — its *row* numbers reproduce to
+> a tenth of a point, its frame headline does not. **chase's SSAO rows get
+> CHEAPER**, which is not a contradiction: at cap 1024 the march is ~4× longer
+> in screen space, far more samples land off-frame, and an off-frame sample
+> skips the gather, both `gtaoAcos` calls and the bitmask build. In greets'
+> tight interior the guards outweigh that saving; in chase's open corridor they
+> do not.
+>
+> **WHAT HIS NEXT FLY WILL SEE — chase and city have only ever been flown under
+> the OLD arm.** Old-vs-new on one binary, his SSAO arms, 1920×1080:
+>
+> | pose | px moved | mean \|Δ\| on moved | max |
+> |---|--:|--:|--:|
+> | chase t=100 | 218 499 (10.54 %) | 2.56 | 117 |
+> | chase t=400 | 209 190 (10.09 %) | 4.03 | 107 |
+> | chase t=800 | 338 442 (16.32 %) | 4.48 | 119 |
+> | chase t=1200 | 1 023 767 (49.37 %) | 2.59 | 118 |
+> | chase t=1600 | 35 600 (1.72 %) | 1.69 | 255 |
+> | chase t=1105 | 1 789 422 (**86.30 %**) | 2.69 | **17** |
+> | city t=1961 | 926 178 (44.67 %) | 3.94 | 145 |
+>
+> chase t=1105 is the most-moved pose in the campaign and its max is 17/255 — a
+> broad low-amplitude lift, the signature of the AO *scale* changing rather than
+> a defect appearing. The city diff shows the change reaching every opaque
+> surface and **not** the water, which is the expected shape. Images:
+> `docs/img/gtaoedge/allscenes/` (`chase_t800_{before_olddefaults,after_newdefaults,diff}.png`,
+> `chase_t1105_*` at 960×540, `city_t1961_*`).
+> **NOTE the city PIN is blind to this change** — its recipe carries no
+> `--ssao`. Judge city's AO from the acceptance arm plus his SSAO flags, never
+> from the pin.
+>
 > ## 2026-08-29 — **`Render_SSAO` HAS AN INTERIOR AT LAST**: five wave scopes
 > replace one, the inferred split is CONFIRMED, and the march's per-lane slice
 > setup goes 4-wide BIT-EXACT — `ssao` **−16.4 % at chase**, −9.3 % at greets
