@@ -42,11 +42,18 @@ add_custom_target(GpuBenchShaders ALL
     DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/.shaders.stamp")
 add_dependencies(GpuBenchShaders ${PROJECT_NAME})
 
-# Compile the .mm as Objective-C++ without enabling the OBJCXX language
-# project-wide (which would perturb the default configure).
+# The .mm files are Objective-C++ and must be compiled as such. The old form
+# here (LANGUAGE CXX + a manual -ObjC++ flag) broke on newer CMake: since
+# CMP0119 (CMake >= 3.20, default NEW in 4.x with a fresh cache), LANGUAGE CXX
+# emits an explicit `-x c++`, which overrides the .mm extension, makes clang
+# warn "argument unused during compilation: '-ObjC++'" and then reject every
+# @class in the Foundation headers (first seen on the M5's CLT setup,
+# 2026-08-31). The supported way: enable the OBJCXX language HERE, in this
+# subdirectory only — GpuBench is gated behind -DFDS_GPU_BENCH=ON, so the
+# default configure is still unperturbed, which is what the old hack was for.
+enable_language(OBJCXX)
 set_source_files_properties(GpuBenchMain.mm Deferred.mm PROPERTIES
-    LANGUAGE CXX
-    COMPILE_OPTIONS "-ObjC++;-fobjc-arc")
+    COMPILE_OPTIONS "-fobjc-arc")
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE SIMDE_ENABLE_NATIVE_ALIASES)
 
