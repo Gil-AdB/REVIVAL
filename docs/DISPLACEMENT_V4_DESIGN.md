@@ -258,3 +258,46 @@ that cannot be checked in isolation is not a stage. Every instrument is a
   T-junctions, sliver census (min-angle p10 > 2°, none < 1°), face count ≤ the
   old bake's, `[V4-OUT]` prints all four and `tools/v4_out_census.py` reads
   `displace_faces.txt`.
+
+## 3. The seven failure modes → the stage that prevents each
+
+| # | failure (old bake) | v4 stage that makes it impossible | ledger | regression detector |
+|---|---|---|---|---|
+| 1 | displacement direction = polluted smoothed normal (three doors: mitre bisector dd798c31, groove target 41ff72ed/16aac2ee, ride sign a0c46c40) | (e): direction is the chart plane normal; no smoothed field exists in v4 | law `420fcd4626b8`; corpus states 2–5 (`71676e39b432`…`f982d744206c`) | `[STONE-RIDEPROV]`-style provenance is unnecessary; the detector is `refrender_diff` normal-angle > 90° count (must be 0) |
+| 2 | reflex mitre with a wrong-sign partner | (e): offset-plane solve, sign-free by construction; mitre limit 4 | law `f713599ea11d`; refuted lever reflex weld (state 7, `4c091eb140bc`) | ring-vertex residual to both offset planes (1e-5 u) |
+| 3 | T-junctions and near-coincident twins (edgeVert float-bit key, profile twins, tsplit after displacement) | (c): R1/R2/R3, exact `i/n` borders, one vertex per border sample; watertight **before** displacement | law `7453a529070e`; `0c2cd2a858e6`, `c165bff2f03a`, `20be1fac463e` | undisplaced-arm tear battery = 0; use-count census; T-vertex census |
+| 4 | edges misclassified free (floor face excluded as "own face"; wall-end columns) | (a)+(f): material is an attribute; free = use-count 1 only; skirts after classification | `10994f6ef014`; bc79e39d (sibling_abut) | free-edge count == 4 + listed silhouettes; base-row tear class = 0 |
+| 5 | grooves over-carved / plateaus recessed (lattice nodes on the blur's shoulders) | (c)+(d): nodes ≥ 4 texels inside blocks, max/min pyramids | `d8e1d26bfc3e` (−0.036), `40ac61208dfa` | `nspace_relief.py` plateau bias within ±0.005 |
+| 6 | per-block pillow shading (blend toward the smoothed normal at every grout band) | (g): exact gradient normal per chart, no blend | `864d9658ae3a` (crease gate refuted on the wrong field); state 4 (`39daeb3a13c8`) | normal-angle p50/p90 vs reference; `bulge_detect.py` GBI on the pier front (must read the bare floor) |
+| 7 | curved strips vs true creases under one rule | (b): chart membership (normal budget) and crease threshold are two predicates | `60e3e63bed65` (cot-sized smooth seam replaced the curved wall) | curved-wall pose t=2845 dz p90 < 0.06 (today 0.058 — the one pose the old bake gets right must not regress) |
+
+Not a failure mode but a debt v4 retires with the same stage: the corner-column
+fan (73 vs 11 faces/u², 154 sub-1° slivers) — stage (c)'s ≤1-level rule; detector
+= the sliver census in (h).
+
+## 4. Validation plan
+
+1. **The reference renderer is the yardstick at every round.** `tools/refrender_battery.sh`
+   (lean mode, self-cleaning, aborts under 5 GiB free) at the corpus poses and
+   the review list: per-pixel signed dz, normal angle, the Laplacian-weighted
+   crack map, front-face-cull views (Lindstrom & Turk) — `docs/img/refrender/`
+   conventions, numbers into `refrender_numbers.json` and the ledger as
+   `greets.displace.v4.dz` measurements per pose, contract `world_units_range`,
+   scope `{arm: v4, pose}`.
+2. **Tear battery** (54 poses + H6194): 0 holes is the bar, per pose, not on
+   average; `tools/tear_detect.py` HOLE class only.
+3. **Polygon census** of `displace_faces.txt`: total faces, per-chart density,
+   min-angle distribution, corner-column density ratio — `tools/v4_out_census.py`.
+4. **Gates**: 14 pins + render_gate 4/4 + warm_gate --full 7/7, byte-identical
+   with `--greets_displace_v4` OFF (the flag is the only entry point); the
+   undisplaced v4 arm byte-identical to the bare wall.
+5. **Perf**: bake wall-clock from the `[V4-*]` banners (≤ 500 ms); greets tick at
+   t=5743/5965, min-of-11 interleaved, both arms on the same binary, judged
+   against the ±1.5–2 % placement floor (`perf.floor`); face count vs the old
+   bake.
+6. **His eye**: the fly-through command line with the flag, and the
+   before/after pairs at the corpus poses with full paths — the only acceptance
+   for look. Every render carries its provenance sidecar (b12f6b59).
+7. **Locality while both bakes coexist**: `--greets_displace_v4` changes stone
+   pixels only; a diff mask against the old default must be empty off the
+   stone materials.
