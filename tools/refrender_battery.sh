@@ -123,11 +123,11 @@ strip_raw() {
 score() {   # score <posedir>  -- tess vs ref, and tess vs refse if present
   local p=$1
   [[ -f "$p/ref/ref.bin" && -f "$p/tess/log.txt" ]] || return 0
-  python3 "$DIFF" --tess "$p/tess" --ref "$p/ref" ${BAREOPT} \
+  python3 "$DIFF" --tess "$p/tess" --ref "$p/ref" ${=BAREOPT} \
       --out-prefix "$p/ref_vs_tess" --json > "$p/score_ref.json" 2>"$p/score_ref.err" || \
       { echo "  [score] ref arm failed, see $p/score_ref.err" >&2; }
   if [[ -f "$p/refse/ref.bin" ]]; then
-    python3 "$DIFF" --tess "$p/tess" --ref "$p/refse" ${BAREOPT} \
+    python3 "$DIFF" --tess "$p/tess" --ref "$p/refse" ${=BAREOPT} \
         --out-prefix "$p/refse_vs_tess" --json > "$p/score_refse.json" 2>"$p/score_refse.err" || \
         { echo "  [score] refse arm failed, see $p/score_refse.err" >&2; }
   fi
