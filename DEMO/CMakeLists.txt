@@ -71,7 +71,9 @@ set(DEMO_SOURCES
     SDL2.cpp
     SDL2.h
     Snapshot.cpp
-    Snapshot.h)
+    Snapshot.h
+    V4Bake.cpp
+    V4Bake.h)
 
 source_group("" FILES ${DEMO_SOURCES})
 
