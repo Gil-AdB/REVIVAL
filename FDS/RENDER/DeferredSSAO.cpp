@@ -473,6 +473,40 @@ void Render_SSAO() {
 	float* aoDumpZ = dumpAo ? g_aoDumpZ.data() : nullptr;
 	float* aoDumpN = dumpAo ? g_aoDumpN.data() : nullptr;
 
+	// ── DIAGNOSTIC: synthetic border (--ssao_edge_inset) ──────────────────
+	// Screen-space AO has NO information outside the frame; the shipped march
+	// simply SKIPS a sample that lands off-screen, which is "not an occluder",
+	// i.e. the frame border reads as an open horizon. The resulting error band
+	// is as wide as the screen-space march radius and cannot be measured at the
+	// real border (there is no un-truncated reference there). This flag moves
+	// the border N px inward so the same frame can be differenced against
+	// N = 0 and the artifact profiled on identical content.
+	//   BYTE-NULL AT N = 0: the guard below is
+	//   (unsigned)(sx - exLo) >= (unsigned)(exHiX - exLo), which at exLo = 0,
+	//   exHiX = W is character-for-character the shipped
+	//   (unsigned)sx >= (unsigned)W.
+	int inset = fds::FeatureFlags::ssao_edge_inset();
+	if (inset < 0) inset = 0;
+	if (inset > 8192) inset = 8192;
+	const int insSide = fds::FeatureFlags::ssao_edge_inset_side();
+	const int insL = (insSide == 0 || insSide == 1) ? inset : 0;
+	const int insR = (insSide == 0 || insSide == 2) ? inset : 0;
+	const int insT = (insSide == 0 || insSide == 3) ? inset : 0;
+	const int insB = (insSide == 0 || insSide == 4) ? inset : 0;
+	const int exLoX = insL;  int exWx = W - insL - insR; if (exWx < 1) exWx = 1;
+	const int exLoY = insT;  int exWy = H - insT - insB; if (exWy < 1) exWy = 1;
+
+	// --ssao_gtao_round_fix (DEFAULT ON): round the march offset to the nearest
+	// pixel. See the flag text — truncation toward zero makes every UP-going and
+	// every LEFT-going sample land one pixel short, at every rotation, because
+	// buildSliceTrig's phi never leaves [0,PI).
+	const bool roundFix = fds::FeatureFlags::ssao_gtao_round_fix();
+
+	// ── DIAGNOSTIC: one-pixel march trace (--ssao_trace_x/--ssao_trace_y) ──
+	const int traceX = fds::FeatureFlags::ssao_trace_x();
+	const int traceY = fds::FeatureFlags::ssao_trace_y();
+	const bool doTrace = (traceX >= 0 && traceX < W && traceY >= 0 && traceY < H);
+
 	buildKernel(nSamp);
 	buildRot();
 
@@ -546,6 +580,12 @@ void Render_SSAO() {
 		int steps  = fds::FeatureFlags::ssao_gtao_steps();  steps  = std::max(1, std::min(16, steps));
 		if (temporal) steps = std::max(1, steps >> 1);
 		const float thickness = fds::FeatureFlags::ssao_gtao_thickness();
+		// The screen-space march radius CAP. Shipped as a bare 256.0f literal;
+		// exposed because in greets it is what actually sets the AO scale (it
+		// binds on 92-100 %% of covered pixels at the review poses), not
+		// --ssao_radius. Default 256 = byte-null.
+		float sradMax = fds::FeatureFlags::ssao_gtao_srad_max();
+		if (sradMax < 2.0f) sradMax = 2.0f;
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
 		// SECTOR SCALE — the horizon angles are consumed ONLY as h*32 (32-sector
@@ -559,6 +599,16 @@ void Render_SSAO() {
 		// the chain besides the two sqrts inside gtaoAcos.
 		const float kSec = 32.0f / kPI;
 		buildSliceTrig(slices);          // main thread, before the dispatch
+		const int trLx = doTrace ? (traceX / down) : -1;
+		const int trLy = doTrace ? (traceY / down) : -1;
+		if (doTrace)
+			fprintf(stderr,
+			  "[ssao-trace] px=(%d,%d) -> cell=(%d,%d) | W=%d H=%d down=%d low=%dx%d\n"
+			  "[ssao-trace] FOVX=%.4f FOVY=%.4f CntrEX=%.2f CntrEY=%.2f g_zscale=%.6f "
+			  "radius=%.4f strength=%.3f slices=%d steps=%d thickness=%.3f inset=%d\n",
+			  traceX, traceY, trLx, trLy, W, H, down, lowW, lowH,
+			  (double)fovX, (double)fovY, (double)cx, (double)cy, (double)g_zscale,
+			  (double)radius, (double)strength, slices, steps, (double)thickness, inset);
 		const bool noSimd = std::getenv("FDS_SSAO_NOSIMD") != nullptr;   // A/B validation escape
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
@@ -579,7 +629,7 @@ void Render_SSAO() {
 			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
 			{
 					// Scalar per-cell GTAO (reference + 8-wide remainder tail).
-					auto gtaoCell = [&](int lx, int ly) {
+					auto gtaoCell = [&](int lx, int ly, bool trc = false) {
 						const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
 						const int px = std::min(lx * down + half, W - 1);
 						const int py = std::min(ly * down + half, H - 1);
@@ -596,9 +646,15 @@ void Render_SSAO() {
 						const float vinv = fast_rsqrt(Px*Px + Py*Py + Pz*Pz + 1e-12f);
 						const float Vx = -Px*vinv, Vy = -Py*vinv, Vz = -Pz*vinv;
 						float srad = radius * fovX / z;
-						if (srad < 2.0f) srad = 2.0f; else if (srad > 256.0f) srad = 256.0f;
+						if (srad < 2.0f) srad = 2.0f; else if (srad > sradMax) srad = sradMax;
 						const int ri = ((ly & 3) * 4 + (lx & 3) + g_ssaoRotPhase) & 15;
 						const float jit = g_rotCos[ri] * 0.5f + 0.5f;
+						if (trc) fprintf(stderr,
+							"[ssao-trace] cell(%d,%d) px=(%d,%d) z=%.4f P=(%.4f,%.4f,%.4f) "
+							"N=(%.4f,%.4f,%.4f) V=(%.4f,%.4f,%.4f) srad=%.2f ri=%d jit=%.4f\n",
+							lx, ly, px, py, (double)z, (double)Px, (double)Py, (double)Pz,
+							(double)Nx, (double)Ny, (double)Nz, (double)Vx, (double)Vy, (double)Vz,
+							(double)srad, ri, (double)jit);
 						float vis = 0.0f;
 						for (int s = 0; s < slices; ++s) {
 							const float dcx = g_sliceCos[s][ri], dsy = g_sliceSin[s][ri];
@@ -620,17 +676,42 @@ void Render_SSAO() {
 								const float cSgn = float(sgn) * kSec;
 								for (int j = 0; j < steps; ++j) {
 									const float t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
-									const int sx = px + int(float(sgn)*dcx*t + 0.5f);
-									const int sy = py + int(float(sgn)*dsy*t + 0.5f);
-									if ((unsigned)sx >= (unsigned)W || (unsigned)sy >= (unsigned)H) continue;
+									const float ofx = float(sgn)*dcx*t, ofy = float(sgn)*dsy*t;
+									const int sx = px + (roundFix ? (int)lrintf(ofx) : int(ofx + 0.5f));
+									const int sy = py + (roundFix ? (int)lrintf(ofy) : int(ofy + 0.5f));
+									if ((unsigned)(sx - exLoX) >= (unsigned)exWx
+									 || (unsigned)(sy - exLoY) >= (unsigned)exWy) {
+										if (trc) fprintf(stderr,
+										  "[ssao-trace]  s=%d sgn=%+d j=%d d=(%+.4f,%+.4f) t=%7.2f "
+										  "off=(%+8.3f,%+8.3f) -> px=(%5d,%5d)  OFFSCREEN\n",
+										  s, sgn, j, (double)dcx, (double)dsy, (double)t,
+										  (double)ofx, (double)ofy, sx, sy);
+										continue;
+									}
 									const word ze2 = zEnc[size_t(sy)*size_t(W)+size_t(sx)];
-									if (ze2 == 0) continue;
+									if (ze2 == 0) {
+										if (trc) fprintf(stderr,
+										  "[ssao-trace]  s=%d sgn=%+d j=%d d=(%+.4f,%+.4f) t=%7.2f "
+										  "off=(%+8.3f,%+8.3f) -> px=(%5d,%5d)  SKY\n",
+										  s, sgn, j, (double)dcx, (double)dsy, (double)t,
+										  (double)ofx, (double)ofy, sx, sy);
+										continue;
+									}
 									const float sz = float(0xFF80 - ze2) * invZScale;
 									const float dx = (float(sx)-cx)*sz*invFOVX - Px;
 									const float dy = (cy-float(sy))*sz*invFOVY - Py;
 									const float dz = sz - Pz;
 									const float dl2 = dx*dx + dy*dy + dz*dz;
-									if (dl2 > r2max || dl2 < 1e-8f) continue;
+									if (dl2 > r2max || dl2 < 1e-8f) {
+										if (trc) fprintf(stderr,
+										  "[ssao-trace]  s=%d sgn=%+d j=%d d=(%+.4f,%+.4f) t=%7.2f "
+										  "off=(%+8.3f,%+8.3f) -> px=(%5d,%5d) sz=%.4f "
+										  "dl=%.4f  OUT-OF-RANGE\n",
+										  s, sgn, j, (double)dcx, (double)dsy, (double)t,
+										  (double)ofx, (double)ofy, sx, sy, (double)sz,
+										  (double)sqrtf(dl2));
+										continue;
+									}
 									const float dinv = fast_rsqrt(dl2);
 									const float bx = dx - Vx*thickness, by = dy - Vy*thickness, bz = dz - Vz*thickness;
 									const float binv = fast_rsqrt(bx*bx + by*by + bz*bz + 1e-12f);
@@ -647,15 +728,30 @@ void Render_SSAO() {
 										const uint32_t bf = (angBits >= 32) ? 0xFFFFFFFFu : (0xFFFFFFFFu >> (32 - angBits));
 										mask |= bf << startBit;
 									}
+									if (trc) fprintf(stderr,
+									  "[ssao-trace]  s=%d sgn=%+d j=%d d=(%+.4f,%+.4f) t=%7.2f "
+									  "off=(%+8.3f,%+8.3f) -> px=(%5d,%5d) sz=%.4f dl=%.4f "
+									  "h=[%.3f,%.3f] bits=%d@%u mask=%08x\n",
+									  s, sgn, j, (double)dcx, (double)dsy, (double)t,
+									  (double)ofx, (double)ofy, sx, sy, (double)sz,
+									  (double)sqrtf(dl2), (double)mn, (double)mx,
+									  angBits, startBit, mask);
 								}
 							}
 							vis += 1.0f - float(FDS_POPCOUNT(mask)) / 32.0f;
+							if (trc) fprintf(stderr,
+							  "[ssao-trace]  slice %d: mask=%08x popcount=%d visSlice=%.4f\n",
+							  s, mask, (int)FDS_POPCOUNT(mask),
+							  1.0f - float(FDS_POPCOUNT(mask)) / 32.0f);
 						}
 						vis /= float(slices);
 						float ao = 1.0f - (1.0f - vis) * strength;
 						if (ao < 0.0f) ao = 0.0f; else if (ao > 1.0f) ao = 1.0f;
 						if (power != 1.0f) ao = powf(ao, power);
 						aoRaw[lo] = ao;
+						if (trc) fprintf(stderr,
+						  "[ssao-trace] cell(%d,%d) vis=%.4f -> AO(raw)=%.4f\n", lx, ly,
+						  (double)vis, (double)ao);
 					};
 
 					// 8-wide GTAO over 8 cells of a row: the per-sample arithmetic
@@ -686,7 +782,7 @@ void Render_SSAO() {
 							float Nx,Ny,Nz; meka::oct_decode_u32(nrm[i],Nx,Ny,Nz);
 							if (Nx*Px+Ny*Py+Nz*Pz>0.0f){Nx=-Nx;Ny=-Ny;Nz=-Nz;}
 							const float vinv=fast_rsqrt(Px*Px+Py*Py+Pz*Pz+1e-12f);
-							float sr=radius*fovX/z; if(sr<2.0f)sr=2.0f; else if(sr>256.0f)sr=256.0f;
+							float sr=radius*fovX/z; if(sr<2.0f)sr=2.0f; else if(sr>sradMax)sr=sradMax;
 							const int ri=((ly&3)*4+(cx_&3)+g_ssaoRotPhase)&15;
 							aPx[k]=Px;aPy[k]=Py;aPz[k]=Pz; aVx[k]=-Px*vinv;aVy[k]=-Py*vinv;aVz[k]=-Pz*vinv;
 							aNx[k]=Nx;aNy[k]=Ny;aNz[k]=Nz; aSr[k]=sr; aJit[k]=g_rotCos[ri]*0.5f+0.5f;
@@ -809,10 +905,16 @@ void Render_SSAO() {
 									// sample int pos: px + int(sgn*dcx*t + 0.5)
 									__m256 offx=_mm256_mul_ps(_mm256_mul_ps(sgnV,dcxV),tV);
 									__m256 offy=_mm256_mul_ps(_mm256_mul_ps(sgnV,dsyV),tV);
+									// --ssao_gtao_round_fix: cvtps (round-to-nearest-even, and the
+									// same value lrintf gives the scalar reference) instead of
+									// cvtt(off + 0.5), which truncates toward zero and so lands a
+									// pixel short on every negative offset. One instruction fewer.
 									__m256i sxi=_mm256_add_epi32(_mm256_load_si256((const __m256i*)aPxInt),
-									              _mm256_cvttps_epi32(_mm256_add_ps(offx,vHalf)));
+									              roundFix ? _mm256_cvtps_epi32(offx)
+									                       : _mm256_cvttps_epi32(_mm256_add_ps(offx,vHalf)));
 									__m256i syi=_mm256_add_epi32(_mm256_set1_epi32(py),
-									              _mm256_cvttps_epi32(_mm256_add_ps(offy,vHalf)));
+									              roundFix ? _mm256_cvtps_epi32(offy)
+									                       : _mm256_cvttps_epi32(_mm256_add_ps(offy,vHalf)));
 									// sxA/syA are gone with the scalar gather: the sample
 									// position never leaves a register now. szA survives only
 									// for the -DFDS_SSAO_DIAG=4 cost arm.
@@ -851,11 +953,11 @@ void Render_SSAO() {
 									{
 										const __m256i vZeroI = _mm256_setzero_si256();
 										const __m256i okX = _mm256_and_si256(
-											_mm256_cmpgt_epi32(sxi, _mm256_set1_epi32(-1)),
-											_mm256_cmpgt_epi32(_mm256_set1_epi32(W), sxi));
+											_mm256_cmpgt_epi32(sxi, _mm256_set1_epi32(exLoX-1)),
+											_mm256_cmpgt_epi32(_mm256_set1_epi32(exLoX+exWx), sxi));
 										const __m256i okY = _mm256_and_si256(
-											_mm256_cmpgt_epi32(syi, _mm256_set1_epi32(-1)),
-											_mm256_cmpgt_epi32(_mm256_set1_epi32(H), syi));
+											_mm256_cmpgt_epi32(syi, _mm256_set1_epi32(exLoY-1)),
+											_mm256_cmpgt_epi32(_mm256_set1_epi32(exLoY+exWy), syi));
 										const __m256i ok  = _mm256_and_si256(okX, okY);
 										// idx = sy*W + sx, forced to 0 where out of range.
 										const __m256i idx = _mm256_and_si256(
@@ -934,7 +1036,8 @@ void Render_SSAO() {
 										_mm256_store_si256((__m256i*)syA,syi);
 										for (int k=0;k<8;++k){
 											const int sx=sxA[k], sy=syA[k];
-											if ((unsigned)sx>=(unsigned)W||(unsigned)sy>=(unsigned)H){ szA2[k]=0.0f; continue; }
+											if ((unsigned)(sx-exLoX)>=(unsigned)exWx
+											 || (unsigned)(sy-exLoY)>=(unsigned)exWy){ szA2[k]=0.0f; continue; }
 											const word z2=zEnc[size_t(sy)*size_t(W)+size_t(sx)];
 											if (!z2){ szA2[k]=0.0f; continue; }
 											szA2[k]=float(0xFF80-z2)*invZScale; any=true;
@@ -1017,6 +1120,12 @@ void Render_SSAO() {
 						}
 						for (; lx < lx2; ++lx) { SSC(6,1); gtaoCell(lx, ly); }
 					}
+					// --ssao_trace_x/y: re-run ONE cell down the scalar reference
+					// with the per-step prints on. Diagnostic only; it leaves that
+					// single cell holding the scalar value rather than the 8-wide
+					// one (an rsqrt/cvt rounding difference on one cell).
+					if (trLx >= lx1 && trLx < lx2 && trLy >= ly1 && trLy < ly2)
+						gtaoCell(trLx, trLy, true);
 					renderns::tileDone.release();
 				}
 			TailProf::addBusy(_tp);
