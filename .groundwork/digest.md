@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-198 records, 187 current, 11 superseded; HEAD be1e116fca56.
+199 records, 188 current, 11 superseded; HEAD 889441eba41e.
 
 ## Attention
 ### Stale — depends on a superseded claim (3)
@@ -141,8 +141,9 @@
 - **greets.renderFrame.ms** — 2 current records, by pose; no single current value
     - `13323d13b643` pose=5743: 46.925 (frame_ms) [unverified_at_tip] — greets t=5743 renderFrame = 46.925 ms on the window's AFTER binary (default-vs-default, interleaved, dummy drivers, --profiler=0, 1920x1080); PERF_STATE 00v.1.
     - `a74b30bbf987` pose=5965: 41.516 (frame_ms) [unverified_at_tip] — greets t=5965 renderFrame = 41.516 ms on the window's AFTER binary (default-vs-default, interleaved, dummy drivers, --profiler=0, 1920x1080); PERF_STATE 00v.1.
-- **greets.shading.view_dependent** — 3 current records, by arm/flag; no single current value
+- **greets.shading.view_dependent** — 4 current records, by arm/flag; no single current value
     - `8f33d7b9edee` arm=gtao_geometric_1024 flag=ssao_gtao_step_dist: "much_better_with_pose_artifacts" (look) — His fly-through of the geometric-step + srad_max=1024 GTAO arm (rev-gtaoedge 8a4c0a76 build, judging arm, 1512x848): looks much better than the shipped GTAO, with artifacts at two poses he dumped in the AO debug view: t=5726 (a black saw-tooth column on the far doorway jamb at x~1090-1140, streaky ceiling bands) and t=5836 (a black/white stipple column at the wall corner x~1075 and wavy vertical banding on the near right wall x~1350-1500).
+    - `0cbc63a6dcf7` arm=gtao_geometric_1024_guards flag=ssao_gtao_bias: "bias_0_2_kind_of_solves" (look) — His fly of the guarded geometric arm with --ssao_gtao_bias=0.2 (4x the AUTO value, 5x the metric-closest 0.04): kind of solves the remaining grazing-wall artifacts at his poses. Tepid approval - the bias value is his, chosen by eye against the agent measurement that read 0.10 as over-biased; his eyes outrank the metric.
     - `42cebd0d0e79` arm=judging flag=∅:  — His observation on the rev-dispfix build under the judging arm: the shading is view-dependent in a way that reads wrong - suspected interaction of SSAO (+its flags) with the AO maps. No pose recorded yet; discriminator ladder issued (one flag off at a time: --no-ssao, --no-ssao_gtao, --no-ssao_temporal, --no-ssao_hdr_transport, --no-ao_map, --no-ao_direct).
     - `d72feb6ec052` arm=judging flag=ssao_gtao: "ssao_gtao_edge_artifact" (look) — Discriminator ladder result (his eye, main-tree build ebeac8ea, judging arm): --no-ssao removes the view-dependent shading entirely; --no-ssao_gtao (the pre-GTAO sampler) looks pretty ok; with GTAO on, --no-ssao_temporal / --no-ssao_hdr_transport / --no-ao_map / --no-ao_direct each leave it, and the most jarring part is near the TOP and LEFT edges of the screen. Localises the defect to the GTAO path at the screen origin - asymmetric, so a negative-offset clamp/truncation or the half-res buffer origin mapping is the suspect class.
 - `79943f39e3a2` measurement **greets.shoulder_plateau.max_abs_delta** = 130 (pixel_delta) {arm=shoulder_plateau flag=greets_displace_shoulder_plateau metric=max_abs_delta scene=greets} w=5/5 — max |delta| 110-130 / 255 (p99 31-37) between the default and shoulder_plateau arms at cam A / cam B / t=6194 (coordinator's snapshot diff, 2026-08-29).
