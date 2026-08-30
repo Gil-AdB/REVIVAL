@@ -1,0 +1,3 @@
+d92cb6f5eb19da4301588ae83af6a56e  greets_t005965_color.ppm
+5570684aeca23cc1a17d8803a851fa3f  greets_t005965_depth.z16
+8efb25e6881c2dc22200b3631b9e3814  greets_t005965_mat.u32

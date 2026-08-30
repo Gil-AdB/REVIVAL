@@ -1,0 +1,16 @@
+FPCR=0000000000000000 FPSR(masked FZ bits)=0000000000000000
+denorm scalar: t*0.5=0x1.65p-141 t+t2=0x1.64ep-138 t/3=0x1.dcp-142
+denorm neon:   t*0.5=0x1.65p-141 t+t=0x1.65p-139
+FRECPE table hash (512 entries, exp 0): 22687230dee71b83
+FRSQRTE table hash (512 entries): 1a1b1d2426501b83
+tanf     sweep hash: 1273d08204227389
+sinf     sweep hash: df1d65cecaf031c3
+cosf     sweep hash: ea687b53ac2d9265
+expf     sweep hash: 5ae72e448a4d68d7
+logf     sweep hash: 14881eda07ada369
+acosf    sweep hash: 7a1fc4f0c0989840
+atan2f   sweep hash: 505f41dc4bc8bd62
+powf     sweep hash: 5ef5e1cc0f16010c
+fmodf    sweep hash: 26f38041c69d0383
+tanhf    sweep hash: ff2a8acdf9c713b0
+double combo sweep hash: 5f073112b5470edb
