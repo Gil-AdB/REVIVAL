@@ -364,6 +364,17 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 struct StoneParentPlane { float nx, ny, nz, d; };   // unit normal + n·p distance
 const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t ordinal);
 
+// The registry's WRITE side, exposed so the v4 bake (DEMO/V4Bake.cpp) stamps
+// the same transient ShadowMatID ordinals the greets shadow clustering
+// (GREETS.CPP ~2461) resolves.  Reset clears one material's registry (the old
+// bake does this per call); Register dedups a plane on the clustering's own
+// quantization grid (normal 1/16, distance 1/2) and returns its 1-based
+// ordinal, 0 for a degenerate normal.  `NormProd` is the Face convention,
+// -(N.p0), and N need not be unit.
+void     MeshOps_StoneParentPlaneReset(const char *matName);
+uint16_t MeshOps_StoneParentPlaneRegister(const char *matName, float Nx, float Ny, float Nz,
+                                          float NormProd);
+
 // Companion post-pass, called AFTER MakeFacesIndependentByAngle: re-SMOOTH the
 // displaced stone surface's vertex normals. That pass facets the displaced
 // relief (adjacent cell faces exceed its 30° crease threshold → split → flat

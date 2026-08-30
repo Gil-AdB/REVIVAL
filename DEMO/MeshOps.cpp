@@ -2036,6 +2036,32 @@ std::unordered_map<GrooveShadeKey, GrooveShadeRec, GrooveShadeKeyH> g_grooveShad
 // same finding (docs/DISPLACEMENT_V4_DESIGN.md §2c).
 }  // namespace
 
+void MeshOps_StoneParentPlaneReset(const char *matName) {
+	if (!matName) return;
+	g_stoneParentPlanes[matName].clear();
+	g_stoneParentPlaneKeys[matName].clear();
+}
+
+uint16_t MeshOps_StoneParentPlaneRegister(const char *matName, float Nx, float Ny, float Nz,
+                                          float NormProd) {
+	if (!matName) return 0;
+	auto &reg    = g_stoneParentPlanes[matName];
+	auto &keyIdx = g_stoneParentPlaneKeys[matName];
+	auto q = [](float v, float s){ return int(std::floor(v*s + 0.5f)); };
+	const float len = std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
+	if (!(len > 1e-4f)) return 0;
+	const float inv = 1.0f/len;
+	const float nx = Nx*inv, ny = Ny*inv, nz = Nz*inv;
+	const float d  = -NormProd*inv;                  // NormProd = -(N.A) -> n.A
+	const std::array<int,4> key{ q(nx,16.0f), q(ny,16.0f), q(nz,16.0f), q(d,2.0f) };
+	auto it = keyIdx.find(key);
+	if (it == keyIdx.end()) {
+		reg.push_back({nx, ny, nz, d});
+		it = keyIdx.emplace(key, uint16_t(reg.size())).first;   // 1-based
+	}
+	return it->second;
+}
+
 const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t ordinal) {
 	if (!matName || ordinal == 0) return nullptr;
 	auto it = g_stoneParentPlanes.find(matName);
@@ -2185,8 +2211,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
                          const std::vector<std::string> *displacedSet) {
 	if (!Sc || !matName) return;
 	if (cellsPerBlock < 0.25f) cellsPerBlock = 0.25f;
-	g_stoneParentPlanes[matName].clear();       // fresh registry per bake call
-	g_stoneParentPlaneKeys[matName].clear();
+	MeshOps_StoneParentPlaneReset(matName);     // fresh registry per bake call
 	auto isTarget = [&](const Face *F) {
 		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
 	};
@@ -6423,24 +6448,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// 1-based ordinal — a transient tag the clustering resolves and
 		// replaces. Registry is per material, shared across meshes.
 		{
-			auto &reg    = g_stoneParentPlanes[matName];
-			auto &keyIdx = g_stoneParentPlaneKeys[matName];
-			auto q = [](float v, float s){ return int(std::floor(v*s + 0.5f)); };
 			for (size_t i = 0; i < faces.size(); ++i) {
 				Face &F = faces[i];
 				if (!isTargetNew(F)) continue;
-				const float len = std::sqrt(F.N.x*F.N.x + F.N.y*F.N.y + F.N.z*F.N.z);
-				if (!(len > 1e-4f)) { F.ShadowMatID = 0; continue; }
-				const float inv = 1.0f/len;
-				const float nx = F.N.x*inv, ny = F.N.y*inv, nz = F.N.z*inv;
-				const float d  = -F.NormProd*inv;    // NormProd = -(N·A) → n̂·A
-				const std::array<int,4> key{ q(nx,16.0f), q(ny,16.0f), q(nz,16.0f), q(d,2.0f) };
-				auto it = keyIdx.find(key);
-				if (it == keyIdx.end()) {
-					reg.push_back({nx, ny, nz, d});
-					it = keyIdx.emplace(key, uint16_t(reg.size())).first;   // 1-based
-				}
-				F.ShadowMatID = it->second;
+				F.ShadowMatID = MeshOps_StoneParentPlaneRegister(matName, F.N.x, F.N.y, F.N.z,
+				                                                 F.NormProd);
 			}
 		}
 

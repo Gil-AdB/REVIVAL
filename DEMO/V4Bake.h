@@ -36,5 +36,38 @@ namespace v4 {
 // of `mats[0..nMats)` and prints the two census blocks.  Read-only on `Sc`.
 void RunP1Census(const Scene *Sc, const char *const *mats, int nMats);
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 2 (docs/DISPLACEMENT_V4_DESIGN.md §2c, §6 P2) — the UNDISPLACED
+// lattice.  Builds the per-chart UV-aligned lattice with the amplitude forced
+// to 0 and SWAPS it in for the authored stone faces; the old bake does not run
+// on those faces in this arm (GREETS.CPP chooses one or the other).
+//
+//   * breaklines on the mortar centrelines and block-edge pairs, from the
+//     height map's row/column profiles — MeshOps_FindStoneGrooveGrid, the
+//     finding extracted out of DisplaceStoneSubdiv so both bakes run the same
+//     code (the per-line REP heights are the half v4 drops);
+//   * plateau nodes at least 4 level-0 texels inside the block (the shoulder
+//     pad is 1.25 mip-2 texels = 5 level-0, so a node on or past a pad line
+//     already clears it);
+//   * interior density from --v4_cpb, groove bands --v4_groove_refine levels
+//     finer, adjacent cells never differing by more than one level;
+//   * R1/R2/R3 on every shared border: the border owns its sample count
+//     (derived from its two endpoints alone), the parameters are exact i/n in
+//     integer arithmetic (BorderSample below, -ffp-contract=off), each border
+//     vertex is created ONCE and indexed from both sides, and an edge's
+//     endpoints are ordered by world position before anything is derived.
+//
+// Prints [V4-LATTICE] and [V4-OUT] under --v4_census; tools/v4_census.py reads
+// them.  --v4_flat emits the authored triangles through the identical path
+// with no lattice at all: that is the CONTROL arm the phase's byte-identity
+// gate compares against (same downstream pipeline, only the tessellation
+// differs).
+void RunP2Bake(Scene *Sc, const char *const *mats, int nMats, int mip);
+
+// One shared-border sample position.  Defined in DEMO/V4Border.cpp, which is
+// compiled with -ffp-contract=off; see the banner there.  `A`/`B` are the
+// edge's endpoints in canonical world-position order, `i` in [0,n].
+void BorderSample(const double A[3], const double B[3], int i, int n, double out[3]);
+
 }  // namespace v4
 }  // namespace fds

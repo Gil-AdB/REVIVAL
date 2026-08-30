@@ -2025,12 +2025,23 @@ void Initialize_Greets()
 			// clone split (~line 2870) that copies the baked result.  It is
 			// read-only on the scene and prints two stderr blocks; the old bake
 			// then runs completely unchanged, so no pixel moves in either arm.
-			if (fds::FeatureFlags::greets_displace_v4() && fds::FeatureFlags::v4_census()) {
-				static const char *kV4Mats[2] = { "rooms", "floor" };
+			static const char *kV4Mats[2] = { "rooms", "floor" };
+			if (fds::FeatureFlags::greets_displace_v4() && fds::FeatureFlags::v4_census())
 				fds::v4::RunP1Census(GreetSc, kV4Mats, 2);
+			// ── v4 PHASE 2 (§2c, §6 P2) ── the flag now SELECTS THE BAKE.
+			// With --greets_displace_v4 the v4 lattice replaces the authored
+			// stone faces and the old bake does NOT run on them; with the flag
+			// off nothing here changes and the old bake is the shipped default,
+			// byte-identical to before (design §5's migration rule).  P2's
+			// lattice is UNDISPLACED (amplitude forced to 0), so this arm is a
+			// retessellation of the same planes, nothing more; --v4_flat is its
+			// control (the same pipeline emitting the authored triangles).
+			if (fds::FeatureFlags::greets_displace_v4()) {
+				fds::v4::RunP2Bake(GreetSc, kV4Mats, 2, mip);
+			} else {
+				DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb, &kDisplacedMats);
+				DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb, &kDisplacedMats);
 			}
-			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb, &kDisplacedMats);
-			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb, &kDisplacedMats);
 			// B4 residual: geometry now carries the low band of the relief, so
 			// POM must march the RESIDUAL (full − upsampled low band) or the
 			// blocks get counted twice (geometry bump + parallax shift of the
