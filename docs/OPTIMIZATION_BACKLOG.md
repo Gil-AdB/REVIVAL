@@ -414,7 +414,10 @@ half-verified gate row.
 check; `--full` is 7 rows in **18 seconds**, so there is no excuse not to run it
 before touching the composite, the froxel volume or reflections.
 `WARM_GATE_BIN=/path/to/DEMO` retargets it. Baselines recorded at `bc36387b`,
-1920×1080, stock `rev.cfg` — same resolution trap as `render_gate.sh`.
+1920×1080. As of 2026-08-30 it PASSES that resolution itself
+(`--force_xres=1920 --force_yres=1080` on every row), exactly like
+`render_gate.sh`, so neither gate reads the tree's `rev.cfg` and both run in
+any worktree — the main tree included.
 Documented as a row in `docs/SESSION_STATE.md`'s gates table with the reason.
 
 ### THE SECOND-ORDER COST OF THE HOLE
