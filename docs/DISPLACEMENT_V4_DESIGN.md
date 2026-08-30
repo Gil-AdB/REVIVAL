@@ -301,3 +301,60 @@ fan (73 vs 11 faces/u², 154 sub-1° slivers) — stage (c)'s ≤1-level rule; d
 7. **Locality while both bakes coexist**: `--greets_displace_v4` changes stone
    pixels only; a diff mask against the old default must be empty off the
    stone materials.
+
+## 5. Migration
+
+- `--greets_displace_v4` (BOOL, default OFF) selects the bake; the old
+  `DisplaceStoneSubdiv` and its flag family (45 `greets_displace_*` flags on
+  fog-wt, ~10 more on rev-dispfix: tsplit, border_weld, mitre_notch_taper,
+  sign_gate, shoulder_plateau…) stay untouched and shipped until v4 is the
+  default **by his fly-through** (a `decision` record with his quote, like
+  `45fa253bbed3`). Then the old bake and its flags are removed in one commit with
+  the byte-identity of the v4 default proven before and after the removal.
+- rev-dispfix (mitre notch taper, 5 072 → 478 at H6194) merges on its own merit
+  as the interim shipped path; nothing in v4 depends on it.
+- Instruments that survive (they measure against ground truth, not against the
+  old bake's internals): `tools/tear_detect.py` + battery, `tools/refrender_diff.py`
+  + battery + `refrender_creasemap.py`, `tools/tear_cover.py`, `tools/nspace_relief.py`,
+  `tools/refdiff_detect.py` (the plane+heightfield reference — now second to
+  the renderer, kept for its marks-region gate), `tools/bulge_detect.py` (GBI,
+  shading only), `tools/mark_faces.py`. Retired with the old bake: every
+  `[STONE-*]` census that names its internal classes (FREEV, EDGEVERT, RIDEPROV,
+  JSQ, PLANEFRONT, BWELD, EVM), `tools/tear_verts.py` (joins to old-bake verts),
+  `tools/bridging_verify.py`, `tools/tear_pairs.py`.
+- `docs/BULGE_CORPUS.md` gains v4's states as they are judged; the `look`
+  verdicts on the old arms stay as history.
+
+## 6. Implementation phases (each a gated round with its own measurement)
+
+| phase | builds | ends when (instrument) | risk |
+|---|---|---|---|
+| P1 registry + stitch | (a)+(b): half-edge over the authored soup, chart registry, junction table with census class | `[V4-STITCH]`/`[V4-CHARTS]`: 0 non-manifold edges, free edges listed (4 + silhouettes), ~24 planes + curved chart, every junction classified; no pixels change (nothing rendered yet) | low; the `::mirUV` ordering and the hidden-track meshes (§REF "five things" 1–2) are the traps |
+| P2 lattice, undisplaced | (c) with amp forced 0 | tear battery **0** on the undisplaced arm; pins byte-identical to bare; T-vertex census 0; sliver census; face count | medium: CDT with breaklines inside a restricted quadtree is the most code; R3 exactness on borders |
+| P3 plateau displacement | (d)+(e) interiors only, rings pinned at 0 | `nspace_relief` plateau bias within ±0.005 at all planes; `refrender_diff` dz p50 at block interiors ≤ 2× bare | low |
+| P4 corners | (e) rings by the offset-plane solve, junction rule per census class | crease-dh map matches the census per junction; H6194/cam A/corner6097 dz p90 < 0.08; tear battery 0 at the wall-end poses (S6120, P6133, S6150, H6194) | **high** — this is the month's defect; the reference has both arms rendered for his eye |
+| P5 free edges | (f) skirts | doorway t=5963/5928 dz p90 < 0.08; skirt count == free count | low |
+| P6 normals | (g) | normal-angle p50 < 5°, p90 < 15°; zero inversions; GBI at the bare floor | low |
+| P7 density + perf | tune `cpb`, groove refinement level, chart budget | init ≤ 500 ms, faces ≤ old bake, tick within the floor, sliver census clean | medium: perf vs relief trade is his call per §4.5 |
+
+Each phase files its measurements as records under `greets.displace.v4.*` and
+ends with the coordinator's `check` before the next phase's proposal is built.
+P4 cannot start before his rulings in §7 unless the assumptions stand.
+
+## 7. Open for Gil-Ad
+
+1. **Membership** (`greets.displace.v4.ruling.membership`): union (assumed) vs the
+   literal partition. Evidence: `e43c035dbedf`; both arms in
+   `docs/img/refrender/camA_variants.png` panels 1–2.
+2. **Corner rule** (`greets.displace.v4.ruling.corner_rule`): the census rule
+   (dominant on the 73 % phase-shifted, steps on the 21 % unrelated — assumed) vs
+   uniform steps (his 2026-08-29 ruling) vs uniform dominant. Evidence:
+   `83aa7c0b6c4c`, `docs/img/refrender/junction_<pose>.png`.
+3. **The 21 %** (`greets.displace.v4.ruling.unrelated_charts`): accept the
+   castellation there, or re-author the UVs at the named junctions so the two
+   sides agree in fact. Assumed: accept for v4's first landing; the census's
+   junction list is the work order if he wants them fixed.
+4. Not his but undecided: the crease threshold (30°, artist convention, no
+   measurement); `cpb` and the groove refinement level (P7, perf vs relief);
+   whether the lid faces (pier tops) take the junction rule or are always
+   dominant-to-the-wall.
