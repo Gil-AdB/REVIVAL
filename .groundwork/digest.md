@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-201 records, 189 current, 12 superseded; HEAD dc8cdbbda344.
+202 records, 189 current, 13 superseded; HEAD 4f8f5855a868.
 
 ## Attention
 ### Stale — depends on a superseded claim (5)
@@ -278,7 +278,7 @@
 - `f5b40d640422` proposal **plan.greets.shadow_tiling** {row=lighting-w1 scene=greets}   [stale] — shadow-map memory layout / tiling plan, parked for a shadow-bottleneck campaign, sized on the shadow share (docs/SHADOWMAP_TILING_PLAN.md).
 
 ### platform
-- `cb995428c637` open **platform.m5.missing_polys** {tool=m5}  — On his M5 machine, latest fog-wt shows very weird artifacts - missing polys etc. Unknown: same binary copied vs rebuilt on the M5, which scenes, which compiler. Suspect classes, cheapest discriminator first: threading race exposed by the new core topology (FDS_THREADS=1), codegen/UB exposure from a newer clang (Debug build), fp-contract differences (trap 607c7cd2c810), or genuinely missing SIMD paths. History says: 2-run md5 proves nothing for races, printf hides them, 24+-run gates needed.
+- `45421cacb74b` open **platform.m5.missing_polys** {tool=m5}  — M5, latest ORIGIN fog-wt (63 commits behind the dev box at the time), missing polys etc. NEW FACTS from him: the M5 compiler is clang 17 (the dev box builds with Apple clang 21.0.0 / clang-2100.1.1.101 - a large compiler delta, and a bare clang 17 string suggests Homebrew LLVM rather than Apple clang); FDS_THREADS=1 does NOT fix it, demoting the race hypothesis - the artifact is deterministic per-thread-count, pointing at codegen/UB/fp-contract differences in the simde/vectorclass paths (trap 607c7cd2c810 is the known fp-contract instance). Next: tools/m5_diag.sh on the M5 (gate + 24-run determinism + compiler census), then a rebuild with Apple clang (CC=/usr/bin/clang CXX=/usr/bin/clang++) as the compiler-swap discriminator.  (+1 superseded)
 
 ### shell
 
