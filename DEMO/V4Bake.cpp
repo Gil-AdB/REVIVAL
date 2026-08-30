@@ -1219,7 +1219,91 @@ struct MatGrid {
 	// colTpl throws it away.  Same construction, same expressions.
 	std::vector<std::vector<std::pair<double,int>>> colLine;
 	double y0Base = 0.0;                     // rowTpl[0].y0; the template's phase
+
+	// ── the height FIELD (design §1.1, §2d) ────────────────────────────────
+	// `fieldOk` is independent of `ok`: a material with no mortar grid has no
+	// breaklines but still has a height field, and P3 must not silently bake it
+	// flat.  All three fields are ROW-MAJOR at the bake mip — the block swizzle
+	// is undone once, here, so one sampler serves all three and the bilinear
+	// reconstruction cannot disagree between them.
+	//   fBase  the field itself: what a BEVEL node reads, and what every
+	//          [V4-RELIEF] r-value is measured against;
+	//   fMax   the MAX-pyramid over a `pyrRad`-texel window, what a PLATEAU
+	//          node reads (Garland & Heckbert §3.2; Tevs 2008);
+	//   fMin   the MIN-pyramid, what a GROOVE node reads.
+	bool   fieldOk = false;
+	std::vector<uint8_t> fBase, fMax, fMin;
+	double mipMean = 0.5;                    // the plain mean of the mip's bytes
+	double h0 = 0.0, h1 = 1.0;               // min / max of the mip, 0..1
+	double dAbsMax = 0.0;                    // max |amp*(h-mipMean)|
+	int    pyrRad = 0;                       // the window radius actually used
 };
+
+// The block-tiled texel address of DEMO/MeshOps.cpp:428 — the one
+// SampleHeight8Bilinear reads through.  COPIED rather than shared, exactly as
+// FDS/RENDER/DeferredDisplaceRef.cpp:131 copies it: the v4 bake reading the
+// same bytes through its own address arithmetic is a second implementation, and
+// the [V4-RELIEF] census's r-value is only ground truth if it is one.
+static inline size_t V4SwizzledOffset(int x, int y, int bsx, int bsy, int SizeY) {
+	const int BX = 1 << bsx, BY = 1 << bsy;
+	const int blockRowsPerCol = SizeY >> bsy;
+	return (size_t(x >> bsx) * blockRowsPerCol + size_t(y >> bsy)) * size_t(BX * BY)
+	       + size_t(y & (BY - 1)) * BX + size_t(x & (BX - 1));
+}
+
+static inline int WrapI(int a, int m) { const int r = a % m; return r < 0 ? r + m : r; }
+
+// h in 0..1 at a normalized UV: texel-CENTRE convention + toroidal wrap, the
+// convention of both SampleHeight8Bilinear and the reference renderer's
+// RefMat::sampleH.  Any deviation here would make dz measure a sampling
+// difference instead of the mesh (design §1.1).
+static double SampleField(const std::vector<uint8_t> &f, int mw, int mh,
+                          double u, double v)
+{
+	if (f.empty()) return 0.0;
+	const double x = u * double(mw) - 0.5, y = v * double(mh) - 0.5;
+	const double fxf = std::floor(x), fyf = std::floor(y);
+	const double fx = x - fxf, fy = y - fyf;
+	const int x0 = WrapI(int(fxf), mw), x1 = WrapI(int(fxf) + 1, mw);
+	const int y0 = WrapI(int(fyf), mh), y1 = WrapI(int(fyf) + 1, mh);
+	const double h00 = double(f[size_t(y0)*size_t(mw) + size_t(x0)]);
+	const double h10 = double(f[size_t(y0)*size_t(mw) + size_t(x1)]);
+	const double h01 = double(f[size_t(y1)*size_t(mw) + size_t(x0)]);
+	const double h11 = double(f[size_t(y1)*size_t(mw) + size_t(x1)]);
+	const double top = h00 + (h10 - h00) * fx;
+	const double bot = h01 + (h11 - h01) * fx;
+	return (top + (bot - top) * fy) * (1.0 / 255.0);
+}
+
+// Separable max (WANT_MAX) / min dilation over a (2R+1)² texel window with
+// toroidal wrap.  A max over a window IS the max-pyramid evaluated at the level
+// that covers that window, without the power-of-two quantisation a literal
+// pyramid would impose on a shoulder that is 1.25 texels wide.
+static void PyramidFilter(const std::vector<uint8_t> &src, int mw, int mh, int R,
+                          bool wantMax, std::vector<uint8_t> &dst)
+{
+	dst = src;
+	if (R <= 0) return;
+	std::vector<uint8_t> tmp(src.size());
+	for (int y = 0; y < mh; ++y)
+		for (int x = 0; x < mw; ++x) {
+			int acc = wantMax ? 0 : 255;
+			for (int dx = -R; dx <= R; ++dx) {
+				const int v = src[size_t(y)*size_t(mw) + size_t(WrapI(x+dx, mw))];
+				acc = wantMax ? std::max(acc, v) : std::min(acc, v);
+			}
+			tmp[size_t(y)*size_t(mw) + size_t(x)] = uint8_t(acc);
+		}
+	for (int y = 0; y < mh; ++y)
+		for (int x = 0; x < mw; ++x) {
+			int acc = wantMax ? 0 : 255;
+			for (int dy = -R; dy <= R; ++dy) {
+				const int v = tmp[size_t(WrapI(y+dy, mh))*size_t(mw) + size_t(x)];
+				acc = wantMax ? std::max(acc, v) : std::min(acc, v);
+			}
+			dst[size_t(y)*size_t(mw) + size_t(x)] = uint8_t(acc);
+		}
+}
 
 static void BuildMatGrid(const Material *mat, int mipReq, MatGrid &G)
 {
@@ -1238,6 +1322,37 @@ static void BuildMatGrid(const Material *mat, int mipReq, MatGrid &G)
 	G.hm = hm; G.useMip = useMip;
 	G.mipW = std::max(1, int(hm->SizeX) >> useMip);
 	G.mipH = std::max(1, int(hm->SizeY) >> useMip);
+
+	// ── the height field, unswizzled once, plus its two pyramids ───────────
+	// mipMean is the plain mean of the mip's bytes — the same number the old
+	// bake computes (MeshOps.cpp) and the same one the reference renderer
+	// computes (DeferredDisplaceRef.cpp), because the swizzle is a permutation
+	// and the mean does not see it.  The guard is the old bake's: a
+	// (near-)constant map carries no relief and is left alone.
+	{
+		const byte *d = hm->Mipmap[useMip];
+		const size_t n = size_t(G.mipW) * size_t(G.mipH);
+		byte lo = 255, hi = 0; uint64_t sum = 0;
+		for (size_t i = 0; i < n; ++i) { const byte b = d[i];
+			if (b < lo) lo = b; if (b > hi) hi = b; sum += b; }
+		if (hi - lo >= 2) {
+			G.mipMean = double(sum) / double(n) * (1.0/255.0);
+			G.h0 = double(lo) * (1.0/255.0);
+			G.h1 = double(hi) * (1.0/255.0);
+			G.fBase.assign(n, 0);
+			for (int y = 0; y < G.mipH; ++y)
+				for (int x = 0; x < G.mipW; ++x)
+					G.fBase[size_t(y)*size_t(G.mipW) + size_t(x)] =
+						d[V4SwizzledOffset(x, y, hm->blockSizeX, hm->blockSizeY, G.mipH)];
+			const double rad = double(FeatureFlags::v4_pyr_radius_tex());
+			G.pyrRad = (FeatureFlags::v4_pyramid() && rad > 0.0)
+			         ? int(std::ceil(rad - 1e-9)) : 0;
+			PyramidFilter(G.fBase, G.mipW, G.mipH, G.pyrRad, true,  G.fMax);
+			PyramidFilter(G.fBase, G.mipW, G.mipH, G.pyrRad, false, G.fMin);
+			G.fieldOk = true;
+		}
+	}
+
 	G.havePitch = EstimateBlockPitch(hm, useMip, G.pitchX, G.pitchY);
 	// Target cell texel footprint = block pitch / cpb, the old bake's formula
 	// with the old bake's fallback (a sixth of a tile) when there is no grid.
@@ -1301,6 +1416,100 @@ static bool InGrooveBand(const MatGrid &G, double u, double v)
 		if (wrap(x - lo, double(G.mipW)) <= w) return true;
 	}
 	return false;
+}
+
+// ── the RELIEF CLASS of a map coordinate (design §2d) ──────────────────────
+// The three classes are the mortar grid's own, not a threshold on the field:
+//   GROOVE   inside a mortar RUN — the flat floor of the joint;
+//   BEVEL    inside the run's shoulder PAD — the ramp the bake mip's blur makes
+//            out of what the level-0 map draws as a step;
+//   PLATEAU  everything else — the flat face of a block.
+// This is exactly the partition InGrooveBand() answers as one bit, split in
+// two, and it runs over the identical wrap arithmetic so the two can never
+// disagree about where a band is.
+enum { kRelGroove = 0, kRelBevel = 1, kRelPlateau = 2 };
+
+static int ReliefClassAt(const MatGrid &G, double u, double v)
+{
+	if (!G.ok) return kRelPlateau;
+	const double pad = double(kStonePadTex);
+	auto wrap = [](double x, double p) { double r = std::fmod(x, p); if (r < 0) r += p; return r; };
+	// One run's class at a wrapped coordinate.  The half-open convention at the
+	// two OUTER pad lines is load-bearing and was measured, not assumed: at
+	// cpb=1 the block interior gets no interior line at all (target cell = the
+	// block PITCH, so ceil(pitch/target) = 1 split), which means EVERY lattice
+	// node in this scene sits exactly on a breakline — the outer pad lines
+	// lo−pad / hi+pad and the inner pad lines lo+pad / hi−pad.  Calling the
+	// OUTER lines bevel left the census with plateau=0 nodes and the block face
+	// spanned shoulder-to-shoulder at the blur's down-slope value: the −0.036 u
+	// recession of d8e1d26bfc3e, reproduced exactly.  The outer pad line IS the
+	// top of the shoulder, so it is a PLATEAU node and reads the max-pyramid;
+	// the inner pad line is the bottom, so it is a GROOVE node and reads the
+	// min; the ramp between them is the bevel.  ε is in TEXELS and 6 orders
+	// below the 1.25-texel pad, so it only absorbs the fmod's last bit.
+	const double eps = 1e-6;
+	auto runClass = [&](double c, double lo, double hi, double period) -> int {
+		const double a = wrap(lo - pad, period);
+		const double w = (hi - lo) + 2.0*pad;
+		const double t = wrap(c - a, period);
+		if (t < eps || t > w - eps) return kRelPlateau;
+		return (t >= pad - eps && t <= w - pad + eps) ? kRelGroove : kRelBevel;
+	};
+	int cls = kRelPlateau;
+	const double y = wrap(v * double(G.mipH), double(G.mipH));
+	for (const StoneGRun &r : G.grid.h)
+		cls = std::min(cls, runClass(y, double(r.lo), double(r.hi), double(G.mipH)));
+	int band = 0;
+	for (size_t b = 0; b < G.grid.bandY.size(); ++b) {
+		const double a0 = wrap(double(G.grid.bandY[b].first), double(G.mipH));
+		const double w  = double(G.grid.bandY[b].second - G.grid.bandY[b].first);
+		if (wrap(y - a0, double(G.mipH)) <= w) { band = int(b); break; }
+	}
+	if (size_t(band) < G.grid.vPerBand.size()) {
+		const double x = wrap(u * double(G.mipW), double(G.mipW));
+		for (const StoneGRun &r : G.grid.vPerBand[size_t(band)])
+			cls = std::min(cls, runClass(x, double(r.lo), double(r.hi), double(G.mipW)));
+	}
+	return cls;
+}
+
+// The FIELD's own height at a map coordinate — the bilinear reconstruction the
+// reference renderer marches.  Every r-value of the [V4-RELIEF] census is this.
+static inline double FieldH(const MatGrid &G, double u, double v)
+{
+	return G.fieldOk ? SampleField(G.fBase, G.mipW, G.mipH, u, v) : G.mipMean;
+}
+
+// The height a NODE of relief class `cls` takes (design §2d): plateau from the
+// max-pyramid, groove from the min-pyramid, bevel from the field itself.  With
+// --no-v4_pyramid the two pyramids are copies of the field and this collapses
+// to the bilinear rule for every class, which is the isolating arm.
+static inline double NodeH(const MatGrid &G, double u, double v, int cls)
+{
+	if (!G.fieldOk) return G.mipMean;
+	if (cls == kRelPlateau) return SampleField(G.fMax, G.mipW, G.mipH, u, v);
+	if (cls == kRelGroove)  return SampleField(G.fMin, G.mipW, G.mipH, u, v);
+	return SampleField(G.fBase, G.mipW, G.mipH, u, v);
+}
+
+// The target cell footprint in WORLD units for one face — the same expression
+// FaceLattice sizes its interior density with, factored out so the [V4-RELIEF]
+// census can state its CORE band ("more than one cell from an authored edge")
+// in the lattice's own unit.  Returns 0 when the face has no usable UV map.
+static double FaceCellW(const P2Face &F, const MatGrid &G)
+{
+	if (!G.ok) return 0.0;
+	const double u0 = F.uv[0][0], v0 = F.uv[0][1];
+	const double du1 = F.uv[1][0]-u0, dv1 = F.uv[1][1]-v0;
+	const double du2 = F.uv[2][0]-u0, dv2 = F.uv[2][1]-v0;
+	const double det = du1*dv2 - du2*dv1;
+	const double uvScale = std::fabs(du1)+std::fabs(dv1)+std::fabs(du2)+std::fabs(dv2);
+	if (!(uvScale > 1e-12) || !(std::fabs(det) > 1e-9 * uvScale * uvScale)) return 0.0;
+	const V3 e1 = F.p[1] - F.p[0], e2 = F.p[2] - F.p[0];
+	const V3 Tu = (e1 * dv2 - e2 * dv1) * (1.0/det);
+	const V3 Bv = (e2 * du1 - e1 * du2) * (1.0/det);
+	return std::min(G.targetTexX * len(Tu) / double(G.mipW),
+	                G.targetTexY * len(Bv) / double(G.mipH));
 }
 
 // ── Delaunay (Bowyer-Watson with adjacency + a straight walk) ──────────────
@@ -1421,6 +1630,7 @@ struct P2Stats {
 	double  borderMaxDev = 0.0;              // max |sample - exact line| in world units
 	int64_t degenerateUV = 0, delaunayFail = 0, fanFallback = 0;
 	int64_t rowCapFaces = 0, nyCap = 0, nxCap = 0;
+	double  msRelief = 0;   // AccumRelief, which runs inside the lattice loop
 	double  minNodeSpacing = 1e30, maxNodeSpacing = 0;
 	int64_t triEmitted = 0;
 	double  plateauMinLevel0 = 1e30;         // min level-0 texels from a node to a block edge
@@ -1429,11 +1639,125 @@ struct P2Stats {
 };
 
 // One face's lattice.  Returns the triangles as index triples into `pt`.
-struct LatPt { double x2 = 0, y2 = 0, u = 0, v = 0; V3 p; int32_t gid = -1; };
+struct LatPt { double x2 = 0, y2 = 0, u = 0, v = 0; V3 p; int32_t gid = -1;
+               double d = 0.0; };   // d = the P3 displacement along the chart normal
 
 // Breaklines closer than this many texels at the bake mip are merged (see the
 // note at the merge site).  One texel is the field's own resolution.
 static constexpr double kLineMergeTex = 1.0;
+
+// ═══ [V4-RELIEF] — design §2d's invariant, measured on the mesh ════════════
+// The instrument the design names for this is tools/nspace_relief.py, which
+// reads a --refplane_dump raw dump: that flag lives on rev-dispfix and is not
+// on this branch, and porting a render-path dump to take a bake number would be
+// the wrong trade (trap 2: instrumentation out of the shipping paths).  What
+// nspace_relief measures is e−r ALONG THE PLANE NORMAL per relief class, and on
+// a v4 face that quantity is available exactly, with no camera and no grazing
+// stretch, because the whole face displaces along ONE direction:
+//
+//   e(x)  the SURFACE's own height — the linear interpolation of the three
+//         vertices' displacements over the triangle, which IS the signed
+//         distance from the authored plane since all three moved along the same
+//         normal.  The recession the −0.036 u finding named lives BETWEEN the
+//         nodes (its own per-vertex census read 0), so a per-vertex number
+//         would not see it and this one samples the surface.
+//   r(x)  the FIELD's own d(u,v) = amp*(h − mipMean) at the same UV, read
+//         through this file's own copy of the swizzle and its own bilinear.
+//
+// Classes and thresholds are nspace_relief's (groove r < −0.03, bevel −0.03..0,
+// plateau r ≥ 0) so the numbers are comparable to the ones it produced.
+struct ReliefBin {
+	std::vector<float> emr;        // e − r over every sample
+	std::vector<float> r;          // the field's own d, for the "ref med" column
+	std::vector<float> emrCore;    // e − r, samples > one target cell from an
+	                               // authored edge: the band P3's height rule
+	                               // owns, with P4's pinned rings excluded
+};
+struct ReliefCensus {
+	std::map<uint32_t, std::array<ReliefBin,3>> byPlane;   // (matIdx<<16)|planeOrd
+	int64_t samples = 0, coreSamples = 0;
+	// r-class (rows) x GEOMETRIC class (cols): where the disagreement lives.
+	std::vector<float> cross[3][3];
+	struct Worst { float emr, e, r, u, v; int32_t face; uint8_t rc, gc;
+	                float tu[3], tv[3], td[3], th[3]; uint8_t tc[3]; };
+	std::vector<Worst> worst;
+};
+
+// The m² equal-area barycentric sample points of one triangle (the centroids of
+// a uniform order-m subdivision: m(m+1)/2 upward plus m(m−1)/2 downward
+// sub-triangles, all of area A/m²), so an unweighted percentile over the sample
+// set IS the area-weighted percentile over the surface.
+static const int kReliefOrder = 3;
+
+static void AccumRelief(const P2Face &F, const MatGrid &G, double amp,
+                        const std::vector<LatPt> &pt,
+                        const std::vector<std::array<int32_t,3>> &tri,
+                        double cellW, ReliefCensus &RC)
+{
+	if (!G.fieldOk) return;
+	const double u0 = F.uv[0][0], v0 = F.uv[0][1];
+	const double du1 = F.uv[1][0]-u0, dv1 = F.uv[1][1]-v0;
+	const double du2 = F.uv[2][0]-u0, dv2 = F.uv[2][1]-v0;
+	const double det = du1*dv2 - du2*dv1;
+	if (!(std::fabs(det) > 1e-18)) return;
+	const double L12 = len(F.p[2] - F.p[1]);
+	const double L20 = len(F.p[0] - F.p[2]);
+	const double L01 = len(F.p[1] - F.p[0]);
+	const double twoA = 2.0 * F.area;
+	const uint32_t key = (uint32_t(F.matIdx) << 16) | uint32_t(F.planeOrd);
+	auto &bins = RC.byPlane[key];
+
+	const int m = kReliefOrder;
+	const double im = 1.0 / (3.0 * double(m));
+	double W[16][2];
+	int nW = 0;
+	for (int i = 0; i < m; ++i) for (int j = 0; j + i < m; ++j)
+		{ W[nW][0] = double(3*i+1)*im; W[nW][1] = double(3*j+1)*im; ++nW; }
+	for (int i = 0; i < m-1; ++i) for (int j = 0; j + i < m-1; ++j)
+		{ W[nW][0] = double(3*i+2)*im; W[nW][1] = double(3*j+2)*im; ++nW; }
+
+	for (const auto &tr : tri) {
+		const LatPt &A = pt[size_t(tr[0])], &B = pt[size_t(tr[1])], &C = pt[size_t(tr[2])];
+		for (int q = 0; q < nW; ++q) {
+			const double w1 = W[q][0], w2 = W[q][1], w0 = 1.0 - w1 - w2;
+			const double e = w0*A.d + w1*B.d + w2*C.d;
+			const double u = w0*A.u + w1*B.u + w2*C.u;
+			const double v = w0*A.v + w1*B.v + w2*C.v;
+			const double r = amp * (FieldH(G, u, v) - G.mipMean);
+			// the sample's barycentric in the AUTHORED face -> its distance to
+			// the nearest authored edge, in world units
+			const double dU = u - u0, dV = v - v0;
+			const double fb1 = ( dU*dv2 - dV*du2) / det;
+			const double fb2 = ( du1*dV - dv1*dU) / det;
+			const double fb0 = 1.0 - fb1 - fb2;
+			const double dEdge = std::min(std::min(twoA*fb0/std::max(1e-12,L12),
+			                                       twoA*fb1/std::max(1e-12,L20)),
+			                              twoA*fb2/std::max(1e-12,L01));
+			const int cls = (r < -0.03) ? kRelGroove : (r < 0.0 ? kRelBevel : kRelPlateau);
+			const int gcl = ReliefClassAt(G, u, v);
+			RC.cross[size_t(cls)][size_t(gcl)].push_back(float(e - r));
+			if (std::fabs(e - r) > 0.05)
+				RC.worst.push_back({ float(e-r), float(e), float(r), float(u), float(v),
+				                     F.faceIdx, uint8_t(cls), uint8_t(gcl),
+				                     { float(A.u), float(B.u), float(C.u) },
+				                     { float(A.v), float(B.v), float(C.v) },
+				                     { float(A.d), float(B.d), float(C.d) },
+				                     { float(FieldH(G,A.u,A.v)), float(FieldH(G,B.u,B.v)),
+				                       float(FieldH(G,C.u,C.v)) },
+				                     { uint8_t(ReliefClassAt(G,A.u,A.v)),
+				                       uint8_t(ReliefClassAt(G,B.u,B.v)),
+				                       uint8_t(ReliefClassAt(G,C.u,C.v)) } });
+			ReliefBin &bn = bins[size_t(cls)];
+			bn.emr.push_back(float(e - r));
+			bn.r.push_back(float(r));
+			++RC.samples;
+			if (cellW > 0.0 && dEdge > cellW) {
+				bn.emrCore.push_back(float(e - r));
+				++RC.coreSamples;
+			}
+		}
+	}
+}
 
 static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
                         const std::vector<LatPt> &boundary,
@@ -1525,18 +1849,35 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 		const long j1 = long(std::ceil ((xmax + perW) / perW));
 		struct ColSet { std::vector<double> lines, runEdge; };
 		std::map<std::pair<int,int>, ColSet> colCache;
+		const bool allBands = FeatureFlags::v4_band_union();
 		auto colsFor = [&](int bA, int bB) -> const ColSet & {
-			auto key = std::make_pair(std::min(bA,bB), std::max(bA,bB));
+			// Under --v4_band_union the LINE set is the same for every row, so
+			// the cache key collapses to one entry per face; the runEdge set
+			// still belongs to the row's own bands, and it is rebuilt per key.
+			auto key = allBands ? std::make_pair(std::min(bA,bB), std::min(bA,bB))
+			                    : std::make_pair(std::min(bA,bB), std::max(bA,bB));
 			auto it = colCache.find(key);
 			if (it != colCache.end()) return it->second;
 			std::vector<std::pair<double,int64_t>> raw;
 			ColSet cs;
 			int bands[2] = { key.first, key.second };
 			const int nb = (key.first == key.second) ? 1 : 2;
-			for (int q = 0; q < nb; ++q) {
-				const int bb = bands[q];
+			// The LINE set: this row's own two bands, or — under --v4_band_union
+			// — every band's.  Measured reason for the option (§P3 log): the
+			// mortar of a RUNNING BOND sits at the middle of the band above it,
+			// so at cpb=1, where a block interior carries no line of its own,
+			// the union ROW at a band change injects the neighbouring band's
+			// mortar nodes and the row below has nothing under them.  Delaunay
+			// then spans the whole block with a triangle whose three corners are
+			// all mortar-deep, and the block face bakes 0.08 u recessed.
+			// Unioning the bands gives every block a mid-block line that is
+			// classified PLATEAU there and reads the max-pyramid, which is the
+			// node the block interior was missing.
+			const size_t nbLine = allBands ? G.colLine.size() : size_t(nb);
+			for (size_t q = 0; q < nbLine; ++q) {
+				const int bb = allBands ? int(q) : bands[q];
 				if (bb < 0 || size_t(bb) >= G.colLine.size()) continue;
-				for (long j = j0; j <= j1; ++j) {
+				for (long j = j0; j <= j1; ++j)
 					for (const auto &cl : G.colLine[size_t(bb)]) {
 						const double x = cl.first + double(j) * perW;
 						if (x < xmin - perW || x > xmax + perW) continue;
@@ -1544,11 +1885,18 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 						                 | int64_t(j + (1 << 23));
 						raw.push_back({ x, rk });
 					}
+			}
+			// runEdge stays the ROW's OWN bands: it feeds the plateau-node
+			// distance census, which asks how far a node is from the mortar it
+			// is actually next to.
+			for (int q = 0; q < nb; ++q) {
+				const int bb = bands[q];
+				if (bb < 0 || size_t(bb) >= G.grid.vPerBand.size()) continue;
+				for (long j = j0; j <= j1; ++j)
 					for (const StoneGRun &r : G.grid.vPerBand[size_t(bb)]) {
 						cs.runEdge.push_back(double(r.lo) + double(j)*perW);
 						cs.runEdge.push_back(double(r.hi) + double(j)*perW);
 					}
-				}
 			}
 			std::sort(raw.begin(), raw.end());
 			std::sort(cs.runEdge.begin(), cs.runEdge.end());
@@ -1695,12 +2043,19 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 }  // namespace
 
 // ───────────────────────────────────────────────────────────────────────────
-void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
+void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, float ampIn)
 {
 	using clock = std::chrono::steady_clock;
 	const auto t0 = clock::now();
 	const bool census = FeatureFlags::v4_census();
 	const bool flat   = FeatureFlags::v4_flat();
+	// P3 amplitude: --v4_amp when it is set (>= 0), else the caller's
+	// --greets_displace_amp, so v4 and the reference renderer carve the same
+	// relief by default.  --v4_flat emits the authored triangles and has no
+	// interior node to move, so it is amp-blind by construction.
+	const double amp = flat ? 0.0
+	                 : (FeatureFlags::v4_amp() >= 0.0f ? double(FeatureFlags::v4_amp())
+	                                                   : double(ampIn));
 	const int  gref   = flat ? 0 : std::max(0, std::min(4, FeatureFlags::v4_groove_refine()));
 	const int  capSeg = std::max(1, FeatureFlags::v4_max_border_seg());
 	if (!Sc || !matNames || nMats <= 0) return;
@@ -1729,6 +2084,22 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 	}
 	const auto tGrid = clock::now();
 	S.msGrid = std::chrono::duration<double, std::milli>(tGrid - tTopo).count();
+
+	// ── the CHART PLANE NORMALS (design §2e: the displacement direction, and
+	// nothing else, anywhere — law 420fcd4626b8).  The chart's proxy is the
+	// AREA-WEIGHTED face normal, which is the optimal L^{2,1} proxy (survey
+	// §B), and the max angle any member face makes with it is reported: on this
+	// scene P1 measured every chart exactly coplanar (0.0000°), so the choice is
+	// free here, but the number is what would refute it on another scene. ──
+	std::vector<V3> chartN(size_t(T.nCharts));
+	double chartMaxDevDeg = 0.0;
+	{
+		for (const P2Face &F : T.faces)
+			chartN[size_t(F.chart)] = chartN[size_t(F.chart)] + F.n * F.area;
+		for (size_t c = 0; c < chartN.size(); ++c) chartN[c] = nrm(chartN[c]);
+		for (const P2Face &F : T.faces)
+			chartMaxDevDeg = std::max(chartMaxDevDeg, angDeg(chartN[size_t(F.chart)], F.n));
+	}
 
 	// ── R2: every vertex's target world spacing, then every border's own
 	// sample count.  The spacing is a property of the VERTEX (the finest cell
@@ -1804,8 +2175,10 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 		vClass.push_back(3);
 		return uint32_t(outV.size()) - 1;
 	};
+	int64_t nPinnedCorners = 0;
 	auto cornerVert = [&](int32_t sv) -> uint32_t {
 		if (T.vGlobal[size_t(sv)] >= 0) return uint32_t(T.vGlobal[size_t(sv)]);
+		++nPinnedCorners;
 		const Vertex *proto = T.vsrc[size_t(sv)];
 		Vertex m = *proto;                       // authored record, position included
 		outV.push_back(m);
@@ -1829,6 +2202,10 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 	std::vector<std::array<int32_t,3>> tri;
 	std::vector<int64_t> chartTris(size_t(T.nCharts), 0), chartFaces(size_t(T.nCharts), 0);
 	int64_t stoneFaces = 0;
+	int64_t nodeCls[3] = {0,0,0};                    // groove / bevel / plateau nodes moved
+	double  dMinSeen = 1e300, dMaxSeen = -1e300;
+	ReliefCensus RC;                                 // [V4-RELIEF]; empty unless asked
+	const bool reliefCensus = census && FeatureFlags::v4_relief_census() && amp != 0.0;
 	for (int32_t fi = 0; fi < M->FIndex; ++fi) {
 		const int32_t si = faceOfMesh[size_t(fi)];
 		if (si < 0) {                                    // non-stone: verbatim
@@ -1901,10 +2278,17 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 
 		FaceLattice(T, F, G, boundary, ex, ey, gref, flat, S, pt, tri);
 
-		// interior points get their vertices now (face-private by construction)
+		// ── PHASE 3 (§2d + §2e): interior points get their vertices now, and
+		// their HEIGHT.  `gid >= 0` is a point that already has a vertex — a
+		// corner or a shared/abutment border sample — and those are PINNED at
+		// 0 for the whole phase: §2e places them by the offset-plane solve and
+		// that is P4.  So displacement here can never move a vertex two faces
+		// share, which is why no silhouette and no border moves in this phase
+		// and the watertightness P2 proved is carried forward untouched. ──
 		const Vertex *pv[3] = { F.src->A, F.src->B, F.src->C };
+		const V3 dispDir = chartN[size_t(F.chart)];
 		for (size_t i = 0; i < pt.size(); ++i) {
-			if (pt[i].gid >= 0) continue;
+			if (pt[i].gid >= 0) { pt[i].d = 0.0; continue; }   // ring/border: PINNED
 			double b0, b1, b2;
 			{
 				const double u0 = F.uv[0][0], v0 = F.uv[0][1];
@@ -1918,8 +2302,22 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 					b0 = 1.0 - b1 - b2;
 				} else { b0 = b1 = b2 = 1.0/3.0; }
 			}
+			if (amp != 0.0 && G.fieldOk) {
+				const int cls = ReliefClassAt(G, pt[i].u, pt[i].v);
+				pt[i].d = amp * (NodeH(G, pt[i].u, pt[i].v, cls) - G.mipMean);
+				pt[i].p = pt[i].p + dispDir * pt[i].d;
+				++nodeCls[size_t(cls)];
+				dMinSeen = std::min(dMinSeen, pt[i].d);
+				dMaxSeen = std::max(dMaxSeen, pt[i].d);
+			}
 			const V3 nn = V3(pv[0]->N)*b0 + V3(pv[1]->N)*b1 + V3(pv[2]->N)*b2;
 			pt[i].gid = int32_t(mkVert(pv[0], pt[i].p, nn, pt[i].u, pt[i].v));
+		}
+
+		if (reliefCensus) {
+			const auto tR = clock::now();
+			AccumRelief(F, G, amp, pt, tri, FaceCellW(F, G), RC);
+			S.msRelief += std::chrono::duration<double, std::milli>(clock::now() - tR).count();
 		}
 
 		chartTris[size_t(F.chart)] += int64_t(tri.size());
@@ -2012,12 +2410,32 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 	std::fprintf(stderr,
 	    "[V4-LATTICE] triangulation degenerate_uv=%lld delaunay_fallback=%lld tris=%lld "
 	    "row_cap_faces=%lld ny_cap=%lld nx_cap=%lld cell_world_min=%.5f cell_world_max=%.5f "
-	    "ms_topo=%.2f ms_grid=%.2f ms_lattice=%.2f ms_commit=%.2f\n",
+	    "ms_topo=%.2f ms_grid=%.2f ms_lattice=%.2f ms_commit=%.2f ms_relief_census=%.2f\n",
 	    (long long)S.degenerateUV, (long long)S.delaunayFail, (long long)S.triEmitted,
 	    (long long)S.rowCapFaces, (long long)S.nyCap, (long long)S.nxCap,
 	    S.minNodeSpacing > 1e29 ? -1.0 : S.minNodeSpacing, S.maxNodeSpacing,
-	    S.msTopo, S.msGrid, S.msLattice, S.msCommit);
+	    S.msTopo, S.msGrid, S.msLattice - S.msRelief, S.msCommit, S.msRelief);
 
+	std::fprintf(stderr,
+	    "[V4-DISPLACE] arm amp=%.6f pyramid=%d pyr_radius_tex=%.3f pyr_rad_used=%d "
+	    "chart_maxdev_deg=%.6f\n",
+	    amp, int(FeatureFlags::v4_pyramid()), double(FeatureFlags::v4_pyr_radius_tex()),
+	    grids[0].pyrRad, chartMaxDevDeg);
+	std::fprintf(stderr,
+	    "[V4-DISPLACE] nodes moved=%lld groove=%lld bevel=%lld plateau=%lld pinned=%lld "
+	    "d_min=%+.6f d_max=%+.6f\n",
+	    (long long)(nodeCls[0]+nodeCls[1]+nodeCls[2]), (long long)nodeCls[0],
+	    (long long)nodeCls[1], (long long)nodeCls[2],
+	    (long long)(nPinnedCorners + int64_t(borderVert.size())),
+	    dMinSeen > 1e299 ? 0.0 : dMinSeen, dMaxSeen < -1e299 ? 0.0 : dMaxSeen);
+	for (int m = 0; m < nMats; ++m)
+		std::fprintf(stderr,
+		    "[V4-DISPLACE] FIELD name=%s field_ok=%d mip_mean=%.6f h=[%.4f..%.4f] "
+		    "d=[%+.6f..%+.6f]\n",
+		    matNames[m], int(grids[size_t(m)].fieldOk), grids[size_t(m)].mipMean,
+		    grids[size_t(m)].h0, grids[size_t(m)].h1,
+		    amp * (grids[size_t(m)].h0 - grids[size_t(m)].mipMean),
+		    amp * (grids[size_t(m)].h1 - grids[size_t(m)].mipMean));
 	if (!census) {
 		std::fprintf(stderr,
 		    "[V4-OUT] mesh verts=%d faces=%d stone_faces=%lld (add --v4_census for the "
@@ -2025,6 +2443,106 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 		    int(M->VIndex), int(M->FIndex), (long long)stoneFaces);
 		std::fflush(stderr);
 		return;
+	}
+
+	// ═══ [V4-RELIEF] — design §2d, e−r along the plane normal per class ═════
+	if (reliefCensus) {
+		static const char *kClsName[3] = { "groove", "bevel", "plateau" };
+		auto qOf = [](std::vector<float> &v, double q) -> double {
+			if (v.empty()) return 0.0;
+			std::sort(v.begin(), v.end());
+			return double(v[size_t(q * double(v.size() - 1))]);
+		};
+		// scene totals, merged out of the per-plane bins
+		std::array<ReliefBin,3> tot;
+		for (auto &kv : RC.byPlane)
+			for (int c = 0; c < 3; ++c) {
+				tot[size_t(c)].emr.insert(tot[size_t(c)].emr.end(),
+				    kv.second[size_t(c)].emr.begin(), kv.second[size_t(c)].emr.end());
+				tot[size_t(c)].r.insert(tot[size_t(c)].r.end(),
+				    kv.second[size_t(c)].r.begin(), kv.second[size_t(c)].r.end());
+				tot[size_t(c)].emrCore.insert(tot[size_t(c)].emrCore.end(),
+				    kv.second[size_t(c)].emrCore.begin(), kv.second[size_t(c)].emrCore.end());
+			}
+		std::fprintf(stderr,
+		    "[V4-RELIEF] arm amp=%.6f order=%d samples=%lld core_samples=%lld planes=%zu "
+		    "tol=0.005 min_n=200\n",
+		    amp, kReliefOrder, (long long)RC.samples, (long long)RC.coreSamples,
+		    RC.byPlane.size());
+		for (int c = 0; c < 3; ++c) {
+			ReliefBin &b = tot[size_t(c)];
+			std::fprintf(stderr,
+			    "[V4-RELIEF] class name=%s n=%zu emr_p50=%+.5f emr_p10=%+.5f emr_p90=%+.5f "
+			    "r_p50=%+.5f core_n=%zu core_emr_p50=%+.5f core_emr_p10=%+.5f "
+			    "core_emr_p90=%+.5f\n",
+			    kClsName[c], b.emr.size(), qOf(b.emr, 0.50), qOf(b.emr, 0.10),
+			    qOf(b.emr, 0.90), qOf(b.r, 0.50), b.emrCore.size(),
+			    qOf(b.emrCore, 0.50), qOf(b.emrCore, 0.10), qOf(b.emrCore, 0.90));
+		}
+		{
+			static const char *kG[3] = { "groove", "bevel", "plateau" };
+			for (int rc = 0; rc < 3; ++rc) for (int gc = 0; gc < 3; ++gc) {
+				std::vector<float> &v = RC.cross[size_t(rc)][size_t(gc)];
+				if (v.empty()) continue;
+				std::fprintf(stderr, "[V4-RELIEF] cross rclass=%s gclass=%s n=%zu "
+				             "emr_p50=%+.5f emr_p10=%+.5f emr_p90=%+.5f\n",
+				             kClsName[rc], kG[gc], v.size(), qOf(v,0.50), qOf(v,0.10), qOf(v,0.90));
+			}
+			std::sort(RC.worst.begin(), RC.worst.end(),
+			          [](const ReliefCensus::Worst &a, const ReliefCensus::Worst &b)
+			          { return std::fabs(a.emr) > std::fabs(b.emr); });
+			for (size_t i = 0; i < RC.worst.size() && i < 10; ++i)
+				std::fprintf(stderr, "[V4-RELIEF] WORST i=%zu emr=%+.5f e=%+.5f r=%+.5f "
+				             "u=%.5f v=%.5f face=%d rclass=%s gclass=%s "
+				             "T0=%.5f,%.5f,%+.5f,h%.4f,c%d T1=%.5f,%.5f,%+.5f,h%.4f,c%d "
+				             "T2=%.5f,%.5f,%+.5f,h%.4f,c%d\n", i,
+				             RC.worst[i].emr, RC.worst[i].e, RC.worst[i].r,
+				             RC.worst[i].u, RC.worst[i].v, RC.worst[i].face,
+				             kClsName[RC.worst[i].rc], kG[RC.worst[i].gc],
+				             RC.worst[i].tu[0], RC.worst[i].tv[0], RC.worst[i].td[0],
+				             RC.worst[i].th[0], int(RC.worst[i].tc[0]),
+				             RC.worst[i].tu[1], RC.worst[i].tv[1], RC.worst[i].td[1],
+				             RC.worst[i].th[1], int(RC.worst[i].tc[1]),
+				             RC.worst[i].tu[2], RC.worst[i].tv[2], RC.worst[i].td[2],
+				             RC.worst[i].th[2], int(RC.worst[i].tc[2]));
+		}
+
+		// per PLANE: the design's invariant is "within ±0.005 u on EVERY plane",
+		// so the row that matters is the count of planes that miss it, and the
+		// worst one is named so the next round can go and look at it.
+		int overAll[3] = {0,0,0}, overCore[3] = {0,0,0}, nPlanes[3] = {0,0,0};
+		double worstAll[3] = {0,0,0}, worstCore[3] = {0,0,0};
+		uint32_t worstKey[3] = {0,0,0};
+		for (auto &kv : RC.byPlane) {
+			std::fprintf(stderr, "[V4-RELIEF] PLANE mat=%s ord=%u",
+			             matNames[size_t(kv.first >> 16)], unsigned(kv.first & 0xFFFF));
+			for (int c = 0; c < 3; ++c) {
+				ReliefBin &b = kv.second[size_t(c)];
+				const double pa = qOf(b.emr, 0.50), pc = qOf(b.emrCore, 0.50);
+				std::fprintf(stderr, " %s_n=%zu %s_emr_p50=%+.5f %s_core_n=%zu "
+				             "%s_core_emr_p50=%+.5f",
+				             kClsName[c], b.emr.size(), kClsName[c], pa,
+				             kClsName[c], b.emrCore.size(), kClsName[c], pc);
+				if (b.emr.size() >= 200) {
+					++nPlanes[c];
+					if (std::fabs(pa) > 0.005) ++overAll[c];
+					if (std::fabs(pa) > std::fabs(worstAll[c]))
+						{ worstAll[c] = pa; worstKey[c] = kv.first; }
+				}
+				if (b.emrCore.size() >= 200) {
+					if (std::fabs(pc) > 0.005) ++overCore[c];
+					if (std::fabs(pc) > std::fabs(worstCore[c])) worstCore[c] = pc;
+				}
+			}
+			std::fprintf(stderr, "\n");
+		}
+		for (int c = 0; c < 3; ++c)
+			std::fprintf(stderr,
+			    "[V4-RELIEF] planegate name=%s planes=%d over_tol=%d worst_emr_p50=%+.5f "
+			    "worst_mat=%s worst_ord=%u core_over_tol=%d core_worst_emr_p50=%+.5f\n",
+			    kClsName[c], nPlanes[c], overAll[c], worstAll[c],
+			    nPlanes[c] ? matNames[size_t(worstKey[c] >> 16)] : "-",
+			    unsigned(worstKey[c] & 0xFFFF), overCore[c], worstCore[c]);
 	}
 
 	// ═══ [V4-OUT] — the design's §2h invariants, measured on what shipped ═══

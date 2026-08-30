@@ -2033,11 +2033,12 @@ void Initialize_Greets()
 			// stone faces and the old bake does NOT run on them; with the flag
 			// off nothing here changes and the old bake is the shipped default,
 			// byte-identical to before (design §5's migration rule).  P2's
-			// lattice is UNDISPLACED (amplitude forced to 0), so this arm is a
-			// retessellation of the same planes, nothing more; --v4_flat is its
-			// control (the same pipeline emitting the authored triangles).
+			// lattice is DISPLACED as of P3 (§2d/§2e): interior nodes ride the
+			// chart plane normal by amp*(h−mipMean), every vertex on an authored
+			// edge stays pinned at 0 until P4 solves the junction rings.
+			// --v4_amp=0 is the undisplaced control, --v4_flat the authored one.
 			if (fds::FeatureFlags::greets_displace_v4()) {
-				fds::v4::RunP2Bake(GreetSc, kV4Mats, 2, mip);
+				fds::v4::RunP2Bake(GreetSc, kV4Mats, 2, mip, amp);
 			} else {
 				DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb, &kDisplacedMats);
 				DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb, &kDisplacedMats);
