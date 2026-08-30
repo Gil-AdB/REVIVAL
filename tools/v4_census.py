@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Reader for the v4 phase-1 bake census blocks ([V4-STITCH] / [V4-CHARTS]).
+"""Reader for the v4 bake census blocks.
+
+Phase 1: [V4-STITCH] / [V4-CHARTS].  Phase 2: [V4-LATTICE] / [V4-OUT].
 
 The census is printed on stderr by DEMO/V4Bake.cpp when BOTH
 --greets_displace_v4 and --v4_census are on.  This turns the block into
@@ -18,7 +20,9 @@ Usage
 
   python3 tools/v4_census.py /tmp/v4/log.txt            # human table
   python3 tools/v4_census.py --json /tmp/v4/log.txt     # one JSON object
-  python3 tools/v4_census.py --gate /tmp/v4/log.txt     # PASS/FAIL, exit 0/1
+  python3 tools/v4_census.py --gate /tmp/v4/log.txt     # P1 PASS/FAIL, exit 0/1
+  python3 tools/v4_census.py --p2 /tmp/v4/log.txt       # the phase-2 table
+  python3 tools/v4_census.py --p2gate /tmp/v4/log.txt   # P2 PASS/FAIL, exit 0/1
 
 Gate (design §6 P1)
 -------------------
@@ -62,14 +66,17 @@ def parse(lines):
         "sec": {},
         "mesh": [], "use1": [], "nonmanifold": [], "chart_rows": [],
         "junc": [], "soupmat": [], "abutmat": [], "ulpmerge": [], "epsmerge": [],
+        "mat": [], "worst": [],
         "sweep": {},
     }
     row_tags = {
         "MESH": "mesh", "USE1": "use1", "NONMANIFOLD": "nonmanifold",
         "CHART": "chart_rows", "JUNC": "junc", "SOUPMAT": "soupmat",
         "ABUTMAT": "abutmat", "ULPMERGE": "ulpmerge", "EPSMERGE": "epsmerge",
+        "MAT": "mat", "WORST": "worst",
     }
-    blocks = {"[V4-STITCH]": "stitch", "[V4-CHARTS]": "charts", "[V4-CENSUS]": "census"}
+    blocks = {"[V4-STITCH]": "stitch", "[V4-CHARTS]": "charts", "[V4-CENSUS]": "census",
+              "[V4-LATTICE]": "lattice", "[V4-OUT]": "out"}
     for ln in lines:
         tag = next((t for t in blocks if t in ln), None)
         if tag is None:
@@ -157,6 +164,149 @@ def summarise(d):
     }
 
 
+def summarise_p2(d):
+    """The phase-2 numbers (design section 2c / 2h)."""
+    return {
+        "arm": g(d, "lattice.arm", "name"),
+        "cpb": g(d, "lattice.arm", "cpb"),
+        "groove_refine": g(d, "lattice.arm", "groove_refine"),
+        # the second, independent topology build -- cross-checks P1's census
+        "topo_faces": g(d, "lattice.topo", "faces"),
+        "topo_verts": g(d, "lattice.topo", "verts"),
+        "topo_corners": g(d, "lattice.topo", "corners"),
+        "topo_edges": g(d, "lattice.topo", "edges"),
+        "topo_use1": g(d, "lattice.topo", "use1"),
+        "topo_use2": g(d, "lattice.topo", "use2"),
+        "topo_use3plus": g(d, "lattice.topo", "use3plus"),
+        "topo_charts": g(d, "lattice.topo", "charts"),
+        "meshes_with_stone": g(d, "lattice.topo", "meshes_with_stone"),
+        # borders (R1/R2/R3)
+        "border_seg_min": g(d, "lattice.borders", "seg_min"),
+        "border_seg_max": g(d, "lattice.borders", "seg_max"),
+        "border_samples": g(d, "lattice.borders", "interior_samples"),
+        "border_capped": g(d, "lattice.borders", "capped"),
+        "border_max_dev": g(d, "lattice.borders", "max_dev_from_line"),
+        # nodes
+        "nodes_generated": g(d, "lattice.nodes", "generated"),
+        "nodes_kept": g(d, "lattice.nodes", "kept"),
+        "nodes_outside": g(d, "lattice.nodes", "outside"),
+        "nodes_margin": g(d, "lattice.nodes", "margin"),
+        "nodes_capped": g(d, "lattice.nodes", "capped"),
+        "plateau_min_level0_texels": g(d, "lattice.nodes", "plateau_min_level0_texels"),
+        "level_jump_violations": g(d, "lattice.nodes", "level_jump_violations"),
+        # triangulation
+        "degenerate_uv": g(d, "lattice.triangulation", "degenerate_uv"),
+        "delaunay_fallback": g(d, "lattice.triangulation", "delaunay_fallback"),
+        "row_cap_faces": g(d, "lattice.triangulation", "row_cap_faces"),
+        "cell_world_min": g(d, "lattice.triangulation", "cell_world_min"),
+        "cell_world_max": g(d, "lattice.triangulation", "cell_world_max"),
+        "ms_lattice": g(d, "lattice.triangulation", "ms_lattice"),
+        "ms_topo": g(d, "lattice.triangulation", "ms_topo"),
+        "ms_grid": g(d, "lattice.triangulation", "ms_grid"),
+        "ms_commit": g(d, "lattice.triangulation", "ms_commit"),
+        # output (section 2h)
+        "mesh_verts": g(d, "out.mesh", "verts"),
+        "mesh_faces": g(d, "out.mesh", "faces"),
+        "stone_faces": g(d, "out.mesh", "stone_faces"),
+        "stone_area": g(d, "out.mesh", "stone_area"),
+        "faces_per_u2": g(d, "out.mesh", "faces_per_u2"),
+        "out_edges": g(d, "out.usecount", "edges"),
+        "out_use1": g(d, "out.usecount", "use1"),
+        "out_use2": g(d, "out.usecount", "use2"),
+        "out_use3plus": g(d, "out.usecount", "use3plus"),
+        "out_expected_use1": g(d, "out.usecount", "expected_use1"),
+        "authored_abutments": g(d, "out.usecount", "authored_abutments"),
+        "tvertices": g(d, "out.tv", "count"),
+        "tv_corner": g(d, "out.tv", "corner"),
+        "tv_abut_sample": g(d, "out.tv", "abut_sample"),
+        "tv_border_sample": g(d, "out.tv", "border_sample"),
+        "tv_interior": g(d, "out.tv", "interior"),
+        "sliver_n": g(d, "out.slivers", "n"),
+        "minang_min": g(d, "out.slivers", "minang_min"),
+        "minang_p10": g(d, "out.slivers", "p10"),
+        "minang_p50": g(d, "out.slivers", "p50"),
+        "under1deg": g(d, "out.slivers", "under1deg"),
+        "under2deg": g(d, "out.slivers", "under2deg"),
+        "sliver_under1_band": g(d, "out.sliverclass", "u1band"),
+        "sliver_under1_abut": g(d, "out.sliverclass", "u1abut"),
+        "sliver_under1_other": g(d, "out.sliverclass", "u1other"),
+        "sliver_under2_band": g(d, "out.sliverclass", "u2band"),
+        "density_min": g(d, "out.density", "faces_per_u2_min"),
+        "density_max": g(d, "out.density", "faces_per_u2_max"),
+        "density_ratio": g(d, "out.density", "ratio"),
+    }
+
+
+def gate_p2(d, p1=None):
+    """Design section 2c / 2h invariants for the phase-2 lattice.
+
+    `p1`, when the same log also carries the phase-1 census, cross-checks the
+    two independent topology builds against each other.
+    """
+    su = summarise_p2(d)
+    rows = []
+
+    def chk(name, ok, detail):
+        rows.append((name, bool(ok), detail))
+
+    if p1 and p1.get("stone_faces") is not None:
+        chk("the two topology builds agree",
+            (su["topo_faces"] == p1["stone_faces"] and su["topo_verts"] == p1["vertices"]
+             and su["topo_edges"] == p1["edges"] and su["topo_use1"] == p1["use1"]
+             and su["topo_use3plus"] == p1["use3plus"] and su["topo_charts"] == p1["charts"]),
+            "P2 %s/%s/%s/%s/%s vs P1 %s/%s/%s/%s/%s (faces/verts/edges/use1/charts)" %
+            (su["topo_faces"], su["topo_verts"], su["topo_edges"], su["topo_use1"],
+             su["topo_charts"], p1["stone_faces"], p1["vertices"], p1["edges"],
+             p1["use1"], p1["charts"]))
+
+    chk("watertight: no output edge used more than twice", su["out_use3plus"] == 0,
+        "use3plus=%s of %s output edges" % (su["out_use3plus"], su["out_edges"]))
+
+    chk("boundary is exactly the authored abutments",
+        su["out_use1"] == su["out_expected_use1"],
+        "use1=%s, expected %s (the %s authored abutments cut into their own segments)" %
+        (su["out_use1"], su["out_expected_use1"], su["authored_abutments"]))
+
+    chk("the lattice creates no T-vertex",
+        (su["tv_border_sample"] == 0 and su["tv_interior"] == 0),
+        "T-vertices=%s: corner=%s abut_sample=%s border_sample=%s interior=%s "
+        "(corner+abut_sample are the AUTHORED T-junction abutments, design 2e / P4)" %
+        (su["tvertices"], su["tv_corner"], su["tv_abut_sample"],
+         su["tv_border_sample"], su["tv_interior"]))
+
+    chk("border samples lie on the authored line",
+        su["border_max_dev"] is not None and su["border_max_dev"] < 1e-9,
+        "max deviation %s u over %s interior samples" %
+        (su["border_max_dev"], su["border_samples"]))
+
+    chk("plateau nodes >= 4 level-0 texels inside the block",
+        su["plateau_min_level0_texels"] is not None
+        and su["plateau_min_level0_texels"] >= 4.0,
+        "min %s level-0 texels" % su["plateau_min_level0_texels"])
+
+    chk("adjacent cells differ by at most one level",
+        su["level_jump_violations"] == 0,
+        "violations=%s" % su["level_jump_violations"])
+
+    chk("no triangulation fallback",
+        su["delaunay_fallback"] == 0 and su["degenerate_uv"] == 0
+        and su["row_cap_faces"] == 0 and su["nodes_capped"] == 0,
+        "delaunay_fallback=%s degenerate_uv=%s row_cap=%s node_cap=%s" %
+        (su["delaunay_fallback"], su["degenerate_uv"], su["row_cap_faces"],
+         su["nodes_capped"]))
+
+    chk("sliver census: min-angle p10 > 2 deg",
+        su["minang_p10"] is not None and su["minang_p10"] > 2.0,
+        "p10=%s p50=%s min=%s" % (su["minang_p10"], su["minang_p50"], su["minang_min"]))
+
+    chk("sliver census: no face under 1 deg", su["under1deg"] == 0,
+        "under1=%s of %s (%s of them inside a mortar band, where a thin triangle "
+        "runs ALONG the line and is the legitimate kind)" %
+        (su["under1deg"], su["sliver_n"], su["sliver_under1_band"]))
+
+    return all(r[1] for r in rows), rows
+
+
 def gate(d):
     """Return (ok, [(name, ok, detail), ...]) for design section 6, phase P1."""
     su = summarise(d)
@@ -207,6 +357,8 @@ def main():
     ap.add_argument("logs", nargs="*", help="log file(s); stdin when omitted")
     ap.add_argument("--json", action="store_true", help="one JSON object on stdout")
     ap.add_argument("--gate", action="store_true", help="print the P1 gate, exit 1 on FAIL")
+    ap.add_argument("--p2", action="store_true", help="print the phase-2 table")
+    ap.add_argument("--p2gate", action="store_true", help="print the P2 gate, exit 1 on FAIL")
     ap.add_argument("--free", action="store_true", help="list the free edges only")
     ap.add_argument("--junctions", type=int, default=0, metavar="N",
                     help="also print the N longest chart-pair junctions")
@@ -221,6 +373,24 @@ def main():
         lines = sys.stdin.readlines()
 
     d = parse(lines)
+    if (a.p2 or a.p2gate) and any(k.startswith("lattice.") for k in d["sec"]):
+        su2 = summarise_p2(d)
+        p1 = summarise(d) if any(k.startswith("stitch.") for k in d["sec"]) else None
+        if a.p2:
+            print("== v4 phase-2 lattice")
+            for k in sorted(su2):
+                if su2[k] is not None:
+                    print("  %-28s %s" % (k, su2[k]))
+            for r in d["mat"]:
+                print("  MAT %s" % r)
+        if a.p2gate:
+            ok2, rows2 = gate_p2(d, p1)
+            print("== P2 gate")
+            for n, o, t in rows2:
+                print("  [%s] %-44s %s" % ("PASS" if o else "FAIL", n, t))
+            print("== %s" % ("PASS" if ok2 else "FAIL"))
+            return 0 if ok2 else 1
+        return 0
     if not d["sec"]:
         print("no [V4-STITCH] block in the input — was --greets_displace_v4 --v4_census on?",
               file=sys.stderr)

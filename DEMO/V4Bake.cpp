@@ -1979,7 +1979,7 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 	S.msCommit = std::chrono::duration<double, std::milli>(tCommit - tLat).count();
 
 	std::fprintf(stderr,
-	    "[V4-LATTICE] arm=%s cpb=%.3f groove_refine=%d chart_budget=%.1f mip=%d\n",
+	    "[V4-LATTICE] arm name=%s cpb=%.3f groove_refine=%d chart_budget=%.1f mip=%d\n",
 	    flat ? "flat" : "lattice", double(FeatureFlags::v4_cpb()), gref,
 	    double(FeatureFlags::v4_chart_budget_deg()), mipReq);
 	std::fprintf(stderr,
@@ -2191,7 +2191,7 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 	    outEdge.size(), (long long)oUse1, (long long)oUse2, (long long)oUse3,
 	    (long long)expectedBoundary, (long long)T.use1);
 	std::fprintf(stderr,
-	    "[V4-OUT] tvertices=%lld tol=1.0e-4 by_class corner=%lld abut_sample=%lld "
+	    "[V4-OUT] tv count=%lld tol=1.0e-4 corner=%lld abut_sample=%lld "
 	    "border_sample=%lld interior=%lld authored=%lld\n",
 	    (long long)tVerts, (long long)tByClass[0], (long long)tByClass[1],
 	    (long long)tByClass[2], (long long)tByClass[3], (long long)tByClass[4]);
@@ -2205,8 +2205,8 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq)
 	    minAng.size(), minAng.empty()?-1.0:minAng.front(), pct(0.10), pct(0.50),
 	    (long long)under1, (long long)under2, (long long)degenerate);
 	std::fprintf(stderr,
-	    "[V4-OUT] sliverclass under2 band=%lld abut=%lld other=%lld | under1 band=%lld "
-	    "abut=%lld other=%lld | other_n=%zu other_min=%.4f other_p10=%.4f other_p50=%.4f\n",
+	    "[V4-OUT] sliverclass u2band=%lld u2abut=%lld u2other=%lld u1band=%lld "
+	    "u1abut=%lld u1other=%lld other_n=%zu other_min=%.4f other_p10=%.4f other_p50=%.4f\n",
 	    (long long)u2band, (long long)u2abut, (long long)u2other,
 	    (long long)u1band, (long long)u1abut, (long long)u1other,
 	    minAngOther.size(), minAngOther.empty()?-1.0:minAngOther.front(),
