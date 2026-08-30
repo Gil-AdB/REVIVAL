@@ -58,6 +58,51 @@ Texture *MakeHeight8(Texture *src);
 // measures (docs/ENVDYN_DISPLACEMENT_PLAN.md); no runtime consumer changes.
 bool EstimateBlockPitch(const Texture *hm, int mip, float &pitchXtex, float &pitchYtex);
 
+// ── the mortar-groove FINDING, shared by the old bake and the v4 lattice ────
+// The stone height map's mortar grid, detected in MAP space at the bake mip.
+// A groove RUN is a below-threshold interval of a mean-height profile (mortar
+// is recessed, so the bimodal plateau/mortar field splits at the profile's
+// min/max midpoint). Horizontal runs are GLOBAL (one per-row profile);
+// vertical runs are PER BAND — the block row between two horizontal grooves —
+// so running bond, where the vertical mortar phase alternates per block row,
+// lands naturally as per-band positions.
+//
+// This is the code the v4 bake (DEMO/V4Bake.cpp, docs/DISPLACEMENT_V4_DESIGN.md
+// §2c) reuses for its BREAKLINES: the design keeps the *finding* and drops the
+// per-line rep-height machinery (StoneLineRep, which stays private to
+// DisplaceStoneSubdiv).  Extracted verbatim from the bake's own body so both
+// callers run the identical float expressions — the flag-OFF byte-identity gate
+// is what proves the extraction moved nothing.
+struct StoneGRun { float lo, hi; };                  // texels at the bake mip, lo<hi
+struct StoneGrooveGrid {
+	bool valid = false;
+	std::vector<StoneGRun> h;                        // horizontal grooves (y runs)
+	std::vector<std::pair<float,float>> bandY;       // band k y-range; second may exceed extent (wrap)
+	std::vector<std::vector<StoneGRun>> vPerBand;    // per band: vertical grooves (x runs)
+};
+// One v-period of the edge-aligned ROW layout (built from the h-grooves +
+// shoulder pads): type 0 = plateau (flat block row), 1 = step (transition band
+// carrying the wall), 2 = floor (flat mortar floor). bandA/bandB are the
+// adjacent block-row bands whose vertical grooves the row's columns follow.
+struct StoneRowT { float y0, y1; int type, bandA, bandB; };
+
+// The shoulder pad and the minimum flat-floor width, in texels at the bake mip.
+// A pad of 1.25 mip-2 texels is 5 level-0 texels, which is why a lattice node
+// placed at or beyond a pad line already satisfies the design's "plateau nodes
+// >= 4 level-0 texels inside the block" (§2c, d8e1d26bfc3e).
+inline constexpr float kStonePadTex      = 1.25f;
+inline constexpr float kStoneMinFloorTex = 1.5f;
+
+// Runs the detection over `hm` at `useMip` given the block pitch, and builds
+// the row template (one v-period, ascending, contiguous) and the per-band
+// column LINE x-positions. `grid.valid` false means the content is
+// structure-free or pathological and the caller must fall back.
+void MeshOps_FindStoneGrooveGrid(const Texture *hm, int useMip,
+                                 float pitchXtex, float pitchYtex,
+                                 StoneGrooveGrid &grid,
+                                 std::vector<StoneRowT> &rowTpl,
+                                 std::vector<std::vector<float>> &colTpl);
+
 // Tier-2 cone-step POM (--parallax_pom): bake a conservative cone-step map from
 // an 8-bit height texture (MakeHeight8 output). The result is an 8-bit texture
 // with the IDENTICAL tiled+mip layout, so the rasterizer's swizzled height
@@ -318,6 +363,17 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 // (bake didn't run) or ordinal is 0/out of range.
 struct StoneParentPlane { float nx, ny, nz, d; };   // unit normal + n·p distance
 const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t ordinal);
+
+// The registry's WRITE side, exposed so the v4 bake (DEMO/V4Bake.cpp) stamps
+// the same transient ShadowMatID ordinals the greets shadow clustering
+// (GREETS.CPP ~2461) resolves.  Reset clears one material's registry (the old
+// bake does this per call); Register dedups a plane on the clustering's own
+// quantization grid (normal 1/16, distance 1/2) and returns its 1-based
+// ordinal, 0 for a degenerate normal.  `NormProd` is the Face convention,
+// -(N.p0), and N need not be unit.
+void     MeshOps_StoneParentPlaneReset(const char *matName);
+uint16_t MeshOps_StoneParentPlaneRegister(const char *matName, float Nx, float Ny, float Nz,
+                                          float NormProd);
 
 // Companion post-pass, called AFTER MakeFacesIndependentByAngle: re-SMOOTH the
 // displaced stone surface's vertex normals. That pass facets the displaced

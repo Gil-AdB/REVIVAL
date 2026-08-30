@@ -71,7 +71,10 @@ set(DEMO_SOURCES
     SDL2.cpp
     SDL2.h
     Snapshot.cpp
-    Snapshot.h)
+    Snapshot.h
+    V4Bake.cpp
+    V4Border.cpp
+    V4Bake.h)
 
 source_group("" FILES ${DEMO_SOURCES})
 
@@ -79,6 +82,15 @@ add_executable(${PROJECT_NAME} ${DEMO_SOURCES})
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     SIMDE_ENABLE_NATIVE_ALIASES)
+
+# V4Border.cpp: -ffp-contract=off, LOAD-BEARING (trap 607c7cd2c810).
+# It holds the ONE function that produces a shared border's sample positions.
+# Clang's default is -ffp-contract=on, which contracts a*s + b*t within a
+# statement; when the same expression is later duplicated at another call site
+# and contracted differently, the two sides of a shared border stop agreeing to
+# the bit and the mesh cracks. Applied to the source file so BOTH the DEMO and
+# DEMO_snapshot targets below inherit it.
+set_source_files_properties(V4Border.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # -ffp-contract=fast: NOT applied to any DEMO file.
 #

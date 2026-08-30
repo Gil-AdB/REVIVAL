@@ -34,6 +34,7 @@
 // FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp).
 void Xtrace_WriteFile(const char*);
 #include "MeshOps.h"
+#include "V4Bake.h"           // v4 phase-1 census (docs/DISPLACEMENT_V4_DESIGN.md)
 #include "DisplaceRebuild.h"   // live shell rebuild (editor displacement panel)
 #include "MaterialImport.h"
 #include "MISC/PREPROC.H"
@@ -2016,8 +2017,31 @@ void Initialize_Greets()
 			// neighbour (siling/lintel — pin against it) from the sibling
 			// displaced junction (rooms<->floor — leave relieved).
 			static const std::vector<std::string> kDisplacedMats = { "rooms", "floor" };
-			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb, &kDisplacedMats);
-			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb, &kDisplacedMats);
+			// ── v4 PHASE 1 (docs/DISPLACEMENT_V4_DESIGN.md §2a/§2b/§6 P1) ──
+			// CENSUS ONLY.  With BOTH --greets_displace_v4 and --v4_census on,
+			// the new stage (a) stitch + half-edge and stage (b) chart registry
+			// run here — at the SAME point, over the SAME authored face set the
+			// two DisplaceStoneSubdiv calls below target, and BEFORE the ::mirUV
+			// clone split (~line 2870) that copies the baked result.  It is
+			// read-only on the scene and prints two stderr blocks; the old bake
+			// then runs completely unchanged, so no pixel moves in either arm.
+			static const char *kV4Mats[2] = { "rooms", "floor" };
+			if (fds::FeatureFlags::greets_displace_v4() && fds::FeatureFlags::v4_census())
+				fds::v4::RunP1Census(GreetSc, kV4Mats, 2);
+			// ── v4 PHASE 2 (§2c, §6 P2) ── the flag now SELECTS THE BAKE.
+			// With --greets_displace_v4 the v4 lattice replaces the authored
+			// stone faces and the old bake does NOT run on them; with the flag
+			// off nothing here changes and the old bake is the shipped default,
+			// byte-identical to before (design §5's migration rule).  P2's
+			// lattice is UNDISPLACED (amplitude forced to 0), so this arm is a
+			// retessellation of the same planes, nothing more; --v4_flat is its
+			// control (the same pipeline emitting the authored triangles).
+			if (fds::FeatureFlags::greets_displace_v4()) {
+				fds::v4::RunP2Bake(GreetSc, kV4Mats, 2, mip);
+			} else {
+				DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb, &kDisplacedMats);
+				DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb, &kDisplacedMats);
+			}
 			// B4 residual: geometry now carries the low band of the relief, so
 			// POM must march the RESIDUAL (full − upsampled low band) or the
 			// blocks get counted twice (geometry bump + parallax shift of the
