@@ -111,6 +111,12 @@ the ledger is what you **query before proposing** and **write to when you measur
   counts), then `groundwork query <subject>` for whatever you are about to touch and
   `groundwork check --json '<proposal>'` before building a lever — a refutation whose
   scope covers yours exits 3.
+- Pending work lives in the ledger too: `groundwork queue` — `open` questions grouped
+  by `waiting_on` (a human, `coordinator`, or `subagent:<name>`) plus pending proposals,
+  blocked ones first. A plan gated on a ruling lists the question in `depends_on` and
+  shows `blocked` until the answering decision supersedes the question (staleness-neutral).
+  Before a handoff/compaction: file every waiting-on item as an `open` record with
+  `waiting_on` — a queue entry survives the session, prose does not.
 - After a correction: `groundwork supersede <old-id> --json …` then `groundwork stale`
   and report what went stale. An *agreeing* re-measurement is added **without**
   `supersedes` (supersede means the belief changed).
