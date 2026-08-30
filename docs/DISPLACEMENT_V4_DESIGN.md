@@ -358,3 +358,187 @@ P4 cannot start before his rulings in §7 unless the assumptions stand.
    measurement); `cpb` and the groove refinement level (P7, perf vs relief);
    whether the lid faces (pier tops) take the junction rule or are always
    dominant-to-the-wall.
+
+---
+
+# §P1 — the round that built (a)+(b), and what it measured
+
+Built on `rev-v4` off `fog-wt` **99bf16b5** (the design was written against
+fcca1ed7; fog-wt has since advanced). Code: `DEMO/V4Bake.{h,cpp}`, flags
+`--greets_displace_v4` / `--v4_census` / `--v4_chart_budget_deg`, readers
+`tools/v4_census.py` and `tools/v4_p1_gate.sh`. Commits 84f5a585, de59ba3a,
+02d967be. Census only: the pass holds every scene pointer `const`, prints two
+stderr blocks and returns; the old bake then runs unchanged.
+
+Reproduce the whole round in one command:
+
+```sh
+/Users/gil-ad/work/rev-v4/tools/v4_p1_gate.sh              # table + the eight P1 checks
+/Users/gil-ad/work/rev-v4/tools/v4_p1_gate.sh --json       # what the ledger rechecks parse
+/Users/gil-ad/work/rev-v4/tools/v4_p1_gate.sh --log        # the raw [V4-*] block
+```
+
+## The gate — 8/8 PASS
+
+| check | result |
+|---|---|
+| 0 non-manifold edges | `use3plus=0` |
+| free edges, classified against the whole soup | `free=0`, `shared_soup=130`, `coincident=0` of `use1=130` |
+| 0 ε-fallback welds | `eps_merges=0` at ε = 4.937e-4 u = 1e-3 × the shortest authored edge (0.49374 u) |
+| no null twin | `null_twin=0`, 130 boundary half-edges carrying a null FACE |
+| every stone face in exactly one chart | 226 of 226, `unassigned=0` |
+| chart fits its budget | `over_budget_charts=0`, max in-chart deviation **0.0000°** |
+| winding consistent on every shared edge | `orient_flip=0`, `convex_disagree=0` |
+| census wall-clock ≤ 50 ms | 9.5–10.1 ms internal, **+12.8 ms** on the displace block (min-of-5), 0 with the flags off |
+
+Byte identity, greets cam A t=5965 on the judging flags at 1920×1080 —
+**`d92cb6f5eb19da4301588ae83af6a56e`** three ways: the pre-change binary built
+at 99bf16b5, the post-change binary with the flags OFF, and the post-change
+binary with them ON.
+
+## The scene, as measured rather than as assumed
+
+The bake set is far smaller than the design's prose implies, and everything
+below follows from that one number.
+
+| | |
+|---|---|
+| meshes carrying `rooms`/`floor` at the bake point | **1** (`Piramid.lwo`, 5532 faces total) |
+| authored stone triangles | **226** (196 `rooms`, 30 `floor`); 0 degenerate, 0 skipped by the old bake's height-map guard |
+| face corners → vertices | 678 → **155**, by BITWISE key alone (523 exact merges, 0 ULP, 0 ε) |
+| edges | 404 = 130 use-1 + 274 use-2 + **0** non-manifold |
+| edge attributes | 157 coplanar, 105 crease (≥30°, 629.4 u), 169 smooth, 33 material seams (333.5 u), 21 convex / 84 concave creases |
+| whole-scene soup at the bake point | 8880 faces over 7 meshes, 26 materials |
+| charts at 10° | **73**, max in-chart normal deviation 0.0000° |
+| distinct planes (the reference's own 0.5°/5 mm clustering) | **52** |
+| chart-pair junctions | **104**, 676.5 u (21 convex, 84 concave, 12 smooth edges) |
+| plane-pair junctions | **142**, 1904.18 u |
+
+### 1. The scene has **0** free edges at the bake set, not 4 — and the "4" is real, just elsewhere
+
+§1.7 and §2a expect "the scene's 4 free edges plus doorway/lid silhouettes".
+Measured: 130 edges are used by exactly one *stone* face, and **all 130 have a
+foreign soup face at distance 0** under the reference renderer's own rule (a
+soup face sharing the edge by position, else any soup face within 0.05 u of
+three interior points). By abutting material: `rooms` 60, `siling` 50,
+`floor` 14, `teleporter` 6. Zero are free; zero are the tolerance-only
+"coincident" class.
+
+That the count is *not* zero for `rooms`/`floor` is itself the finding: 74 of
+the 130 abut another **stone** face that the exact stitch cannot see, because
+the two sides are not co-segmented — T-junction abutments, of which the
+wall-base-on-floor concave junction is the archetype (§2e already predicts that
+"the floor's ring and the wall's ring are the same vertices" is a property v4
+must *create*; in the authored mesh they are not).
+
+The design's 4 is a property of the **render-time** scene: the reference reports
+`free 4` over 892 stone faces with mirrors on, and `free 0` over 226 with
+`--no-greets_mirror` — the same set and the same answer as this census.
+Consequence for §2f/P5: **skirt count == 0 at the bake set**, and the doorway
+relief P5 owes his 2026-08-11 ask has to come from the 130 classified
+abutments, not from a free-edge rule. Ledger `418c3bf6c9d7`.
+
+### 2. The crease census's 453 junctions reconcile exactly — they are the mirror clones
+
+§1.8 and §2b hang the corner rule on "453 junctions, 7375 u" (`83aa7c0b6c4c`).
+Measured on one binary, both ways:
+
+| arm | authored stone faces | plane-pair junctions | crease length |
+|---|---|---|---|
+| default (mirrors on) | 892 | **453** | 7375.2 u |
+| `--no-greets_mirror` | 226 | **142** | 1904.2 u |
+| v4 bake-time census (226 faces, same clustering) | 226 | **142** | 1904.1782 u |
+
+The bake-time census and the reference agree on the count exactly and on the
+length to 1e-4 u — two independent implementations, one at init on model-space
+authored faces, one at render time on transformed ones. `83aa7c0b6c4c` is
+**not** wrong: re-run at its own recipe (`--greets_displace_ref_crease_scan=4`)
+it reproduces 453 / 7375.2 u / 1085232 samples / 21.2 % unrelated bit for bit.
+It simply counts a population 4× the bake's, because `GreetsMirror` clones the
+room geometry for the teleporter and the three `P_TEXT` mirrors **after** the
+bake — the same ordering as the `::mirUV` split, and the same reason v4 must
+bake the 226 and let the clone build copy the result. The ratio is not exactly
+4 (453 vs 4×142) because the clones are mirror-bbox-clipped partial copies and
+the plane identity is a greedy first-match cluster. **The junction population
+v4's corner rule serves is 142, not 453.** Ledger `9a42678e68cf`.
+
+### 3. There is no curved-wall chart to merge — the scene is strictly piecewise-planar
+
+§2b expects "~24 dominant planes plus the curved-wall chart", the curved wall's
+narrow strips merging under the normal budget. Measured: **every** chart has a
+max in-chart normal deviation of **0.0000°** — every merge this scene admits is
+between exactly coplanar faces. The budget sweep says why:
+
+```
+budget°:charts   1:73  5:73  10:73  15:73  20:71  25:69  29:62  30:61  45:47
+```
+
+The count does not move at all from 1° to 15°: **the shallowest stone dihedral
+in the bake set is 17.6°**, and only 12 shared edges sit below the 30° crease
+threshold at all (17.6°, 20.5°, 25.5°, 26.0°, 27.3°, 27.7°, 29.1°, each a
+single edge, at (±3.67, ·, 0.45), (±3.07, ·, 4.24), (9.87, 2.47, −49.37),
+(5.52, 2.47, −51.69)). Whatever the curved wall of trap `60e3e63bed65` is, it is
+not in the `rooms`/`floor` faces the bake targets.
+
+"~24 dominant planes" reconciles as an **area** claim, and on that reading it is
+close: of 6455.4 u² of stone, 5 charts carry 50 %, **27 carry 90 %**, 54 carry
+99 %. The registry has 73 charts over 52 planes (8 planes host more than one
+chart, one hosts 6) because a chart is *connected* and a plane is not.
+
+Two consequences for later phases: with no sub-crease strips, the chart budget
+is **not** a live dial in this scene (anything in 1–15° gives the same registry),
+and the §2e warning about "three near-coplanar strips" conditioning the 3-plane
+corner solve does not arise here.
+
+### 4. The stitch needs no tolerance whatsoever
+
+Survey §E's "authored coordinates are bitwise equal at shared corners" holds
+exactly: 678 corners → 155 vertices on the bitwise key alone, with the
+single-ULP pass and the ε fallback each merging **0**. The ε fallback is built
+and instrumented (it prints every merge, ε relative to the shortest authored
+edge) but never fires. Ledger `bcd934f525da`.
+
+Also measured, and worth having on file: all 274 shared edges are wound
+consistently (0 flips) and their convex/concave sense agrees computed from
+either side (0 disagreements), so §REF "five things" #4's winding hazard is
+absent from this mesh — the census still orients every normal by the engine's
+`F.N` rather than trusting that.
+
+## Deviations from the design, stated
+
+1. **Chart growth is a dihedral union-find, not a Lloyd-iterated VSA.** A face
+   joins the chart when the dihedral across the shared edge is ≤ the budget.
+   Two reasons: it is what merges a curved wall (each strip differs from its
+   *neighbour* by a few degrees while the chart as a whole may span far more
+   than the budget), and it is order-independent by construction — the charts
+   are exactly the connected components of the sub-budget edge graph, so the
+   registry is reproducible without a seed order. The L^{2,1} proxy the survey
+   names is still computed and **reported** per chart (area-weighted normal plus
+   the max deviation from it), so the number that would refute the choice is on
+   the census. On this scene the two agree trivially: max deviation 0.0000°.
+2. **The design's `envDoms` block at `MeshOps.cpp` ~2082 does not exist** on
+   fog-wt 99bf16b5 (that line is inside `DisplaceStoneSubdiv`'s seam grid), so
+   the "reused read-only" precedent for the plane registry was written fresh.
+3. **The bake set is model space, not world space.** `Animate_Objects` has not
+   run at the bake point, so `TriMesh::RotMat` is `{0}` and `IPos` `{0,0,0}` —
+   the reference's `WorldPos()` cannot be reused here. The census reads the
+   splines' keys directly (no `Spline_Calc_*` call, which would mutate
+   `CurKey`) and reports the placement: `Piramid.lwo` carries 2-key Pos/Scale/
+   Rotate splines whose first key is identity, so it is flagged `animated=1
+   identity=0` and a warning is printed. With exactly **one** stone mesh this is
+   moot for topology — every length, dihedral and adjacency in the census is
+   invariant under the mesh's rigid placement — but the world coordinates in the
+   `USE1` / `JUNC` / `CHART` rows are model-space, and **P2 must carry the
+   placement explicitly** before it emits anything positional.
+
+## What P2 inherits
+
+* A stitched, edge-manifold, consistently wound half-edge over 226 faces /
+  155 vertices / 404 edges, with 0 tolerance anywhere in it.
+* 73 charts, 52 planes, 104 chart-pair and 142 plane-pair junctions, every
+  junction carrying φ, class and length.
+* 130 use-count-1 edges already classified against the whole soup, with the
+  abutting material named per edge — the input P5's skirt rule needs, and the
+  input §2e's concave wall/floor ring needs.
+* Two open corrections to this document's premises: **0 free edges** at the bake
+  set (§1.7, §2a, §2f, P5) and **142 junctions**, not 453 (§1.8, §2b, P4).
