@@ -273,7 +273,8 @@ struct RefModel {
 	double back = 0.3, creaseDeg = 30.0, mitreLimit = 4.0, maxExt = 2.0;
 	double marginOverride = 0.0, freeTol = 0.05, edgeBandTex = 2.0;
 	int    partition = 1, maxCells = 6000;
-	bool   sharedEdge = false, mitreTrim = true;
+	bool   sharedEdge = false;
+	int    mitreTrim = 2;
 	// build census
 	int nFree = 0, nConvex = 0, nConcave = 0, nExtCapped = 0, nBevel = 0;
 	int nNonStoneNbr = 0, nSoup = 0, nSmooth = 0;
@@ -790,7 +791,9 @@ FDS_NOINLINE static bool BuildModel(Scene *Sc)
 		g_m.phiHist[5], g_m.phiHist[6], g_m.phiHist[7], g_m.phiHist[8],
 		g_m.partition ? "bisector(steps)" : "union",
 		g_m.sharedEdge ? " +dominant-edge" : "",
-		g_m.mitreTrim ? " +mitre-trim" : " NO-mitre-trim");
+		g_m.mitreTrim >= 3 ? " +mitre-trim(convex, displaced-nbr only)" :
+		g_m.mitreTrim == 2 ? " +mitre-trim(convex)" :
+		g_m.mitreTrim == 1 ? " +mitre-trim(EVERY edge)" : " NO-mitre-trim");
 	return true;
 }
 
@@ -923,6 +926,52 @@ struct RayCand {
 	double tLo, tHi;        // extended-polygon interval
 };
 
+// ── H1 instrumentation: what the fixed event array threw away ──────────────
+// The event array is a fixed double[kMaxEvents] and its emitters run in a FIXED
+// ORDER: candidate intervals, polygon boundaries, band boundaries, the O(n²)
+// BISECTOR PAIRS, and only then the per-texel march that finds the actual slab
+// crossings.  So if the array fills, what is lost is whatever is emitted LAST —
+// the surface itself — and the ray then reports no hit on a pixel that has
+// stone in it.  These counters are PURE OBSERVERS: every emission guard is left
+// exactly as it was (each is monotone in nev, so moving one from a loop
+// condition to a per-emission test emits the identical set), and no branch here
+// can change a pixel.
+struct RayDiag {
+	int  cands = 0;
+	bool candCap = false;              // kMaxCand candidates reached, bin truncated
+	int  ev = 0;                       // events actually stored
+	int  drop[5] = {0,0,0,0,0};        // 0 interval 1 polygon 2 band 3 bisector 4 SLAB
+	int  dropTotal = 0;
+	inline void lost(int cls, int k = 1) { drop[cls] += k; dropTotal += k; }
+
+	// ── why a ray reported nothing.  A miss is not one thing: the ray may have
+	//    had no candidate at all, had every candidate BACK-FACE CULLED, been
+	//    outside every extended polygon or slab band, never been inside the
+	//    solid at any interval midpoint, or — the one the code comments
+	//    predict — been inside and had every such interval DISCARDED because
+	//    its entry boundary was the extended-polygon margin rather than a real
+	//    face of the solid.  Recorded per ray so the miss set can be split into
+	//    causes without an offline join.
+	int culledBack = 0;    // bin faces rejected by the backface rule (sn >= 0)
+	int culledPoly = 0;    // rejected by the extended-polygon clip
+	int culledBand = 0;    // rejected by the slab band clip
+	int inside = 0;        // intervals whose midpoint was inside the solid
+	int rejMargin = 0;     // ... of those, discarded: entry was a margin boundary
+	int rejNone = 0;       // ... of those, discarded: no boundary kind matched
+	int beforeNear = 0;    // intervals skipped for mid <= tNear
+	int intervals = 0;     // intervals walked
+	// ── why the inside() predicate said no, per (candidate, interval midpoint)
+	int niRange = 0, niBack = 0, niAbove = 0, niMitre = 0;
+	// closest approach of the ray to a slab TOP over all those probes, world
+	// units above it.  Near zero = a tangency the events did not bracket;
+	// large = the ray genuinely passes over the relief.
+	double niMinAbove = 1e300;
+	// which KIND of shared edge vetoed a point through the mitre trim.  The
+	// survey's rule is a CONVEX-corner rule; the code applies it at every shared
+	// edge, so this is the column that says whether that matters.
+	int trimConvex = 0, trimConcave = 0, trimSoup = 0, trimSmooth = 0;
+};
+
 struct RayCtx {
 	V3 D;
 	RayCand c[kMaxCand];
@@ -930,6 +979,7 @@ struct RayCtx {
 	int slot[kMaxCand];     // face index → slot lookup is linear over n
 	int cellsWalked = 0;
 	bool budgetHit = false;
+	mutable RayDiag dg;      // mutable: the const per-ray evaluators record into it
 };
 
 static inline int SlotOf(const RayCtx &rc, int fi) {
@@ -997,13 +1047,26 @@ static inline double DOfFace(const RayCtx &rc, int slot, double t) {
 
 // signed distance of the ray point at t from the neighbour plane of edge i,
 // against that neighbour's own displaced height (0 for a non-stone neighbour).
+// WHERE THE TRIM APPLIES.  Survey §B's sentence is a CONVEX-corner rule: "at a
+// convex material corner the offset faces must be extended to reach the miter
+// point (spike risk)".  Applying it at EVERY shared edge turns the model's
+// UNION into an INTERSECTION: a point that is inside face A's own slab, in A's
+// extension past a CONCAVE edge, is vetoed because face B — which the eye may
+// not even see, and which the ray may never enter — says air there.  Measured
+// at cam A t=5965 the trim vetoed 4007 of 4009 miss pixels and NOT ONE of those
+// vetoes came from a convex edge; at corridor t=5534, 8820 of 8946 with 92
+// convex.  A SOUP neighbour is worse still: it has no height field here, so dN
+// is 0 and the trim demands the point lie behind the neighbour's BARE AUTHORED
+// PLANE, ignoring its relief entirely — 2290 and 4464 of those same vetoes.
 static bool MitreTrimOk(const RayCtx &rc, int slot, double t)
 {
-	if (!g_m.mitreTrim) return true;
+	if (g_m.mitreTrim <= 0) return true;
 	const RayCand &c  = rc.c[slot];
 	const RefFace &rf = g_m.faces[size_t(c.fi)];
 	for (int i = 0; i < 3; ++i) {
 		if (!rf.hasNbr[i]) continue;                   // a free edge never trims
+		if (g_m.mitreTrim >= 2 && rf.kind[i] != EDGE_CONVEX) continue;
+		if (g_m.mitreTrim >= 3 && rf.nbrFace[i] < 0)   continue;   // no height field there
 		if (c.en[i] * t + c.e0[i] <= 0.0) continue;    // not in the extension
 		double sdN, dN;
 		if (rf.nbrFace[i] >= 0) {                      // displaced neighbour
@@ -1014,7 +1077,13 @@ static bool MitreTrimOk(const RayCtx &rc, int slot, double t)
 			sdN = dot(rf.nbrN[i], p) - rf.nbrD[i];     // nbrN is outward (build time)
 			dN  = 0.0;
 		}
-		if (sdN > dN) return false;                    // past the mitre point
+		if (sdN > dN) {                                // past the mitre point
+			if (rf.nbrFace[i] < 0)                 ++rc.dg.trimSoup;
+			else if (rf.kind[i] == EDGE_CONVEX)    ++rc.dg.trimConvex;
+			else                                   ++rc.dg.trimConcave;
+			if (rf.smoothEdge[i])                  ++rc.dg.trimSmooth;
+			return false;
+		}
 	}
 	return true;
 }
@@ -1052,18 +1121,22 @@ struct Hit {
 //     A plane bisector is a non-local partition: an edge-on plane is "nearest"
 //     to an enormous region, and nothing about the model bounds that.
 //     Kept, default OFF, because seeing it is the point of a reference.
-static bool InsideAt(const RayCtx &rc, double t, int &govSlot)
+static bool InsideAt(const RayCtx &rc, double t, int &govSlot, RayDiag *dg = nullptr)
 {
 	govSlot = -1;
 	if (g_m.partition != 1) {
 		int best = -1; double bestAbs = 1e300;
 		for (int i = 0; i < rc.n; ++i) {
 			const RayCand &c = rc.c[i];
-			if (t < c.tLo || t > c.tHi) continue;
+			if (t < c.tLo || t > c.tHi) { if (dg) ++dg->niRange; continue; }
 			const double sd = c.sn * t + c.s0;
-			if (sd < -g_m.back) continue;
-			if (sd > DOfFace(rc, i, t)) continue;
-			if (!MitreTrimOk(rc, i, t)) continue;
+			if (sd < -g_m.back) { if (dg) ++dg->niBack; continue; }
+			const double dv = DOfFace(rc, i, t);
+			if (sd > dv) {
+				if (dg) { ++dg->niAbove; dg->niMinAbove = std::min(dg->niMinAbove, sd - dv); }
+				continue;
+			}
+			if (!MitreTrimOk(rc, i, t)) { if (dg) ++dg->niMitre; continue; }
 			const double a = std::fabs(sd);
 			if (a < bestAbs) { bestAbs = a; best = i; }
 		}
@@ -1097,7 +1170,8 @@ static inline void ClipHalf(double a, double b, double &lo, double &hi) {
 // Per-texel DDA with an EXACT quadratic root inside each bilinear cell.
 // Emits every crossing of  sd(t) = d(u(t),v(t))  in [ta,tb] as an event.
 static void MarchCandidate(const RayCtx &rc, int slot, double ta, double tb,
-                           double *ev, int &nev, int maxEv, int &cells, bool &budget)
+                           double *ev, int &nev, int maxEv, int &cells, bool &budget,
+                           RayDiag &dg)
 {
 	if (tb <= ta) return;
 	const RayCand &c  = rc.c[slot];
@@ -1167,8 +1241,10 @@ static void MarchCandidate(const RayCtx &rc, int slot, double ta, double tb,
 					if (std::fabs(q) > 1e-300) roots[nr++] = qc / q;
 				}
 			}
-			for (int i = 0; i < nr; ++i)
-				if (roots[i] > t && roots[i] <= tEnd && nev < maxEv) ev[nev++] = roots[i];
+			for (int i = 0; i < nr; ++i) {
+				if (!(roots[i] > t && roots[i] <= tEnd)) continue;
+				if (nev < maxEv) ev[nev++] = roots[i]; else dg.lost(4);
+			}
 		} else {
 			// blend arm: 16 samples + bisection on each sign change.
 			const int NS = 16;
@@ -1183,7 +1259,7 @@ static void MarchCandidate(const RayCtx &rc, int slot, double ta, double tb,
 						const double gm = (c.sn*m + c.s0) - DOfFace(rc, slot, m);
 						if ((pg > 0) == (gm > 0)) a = m; else b = m;
 					}
-					if (nev < maxEv) ev[nev++] = 0.5 * (a + b);
+					if (nev < maxEv) ev[nev++] = 0.5 * (a + b); else dg.lost(4);
 				}
 				pt = q; pg = gq;
 			}
@@ -1202,7 +1278,8 @@ static int g_dbgX = -1, g_dbgY = -1;
 static thread_local bool g_dbgThis = false;
 
 static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
-                    double tNear, double tFar, int &cellsOut, bool &budgetOut)
+                    double tNear, double tFar, int &cellsOut, bool &budgetOut,
+                    RayDiag *diagOut = nullptr)
 {
 	Hit out;
 	RayCtx rc; rc.D = D;
@@ -1218,7 +1295,7 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 
 	// build candidates
 	for (int32_t fi : *use) {
-		if (rc.n >= kMaxCand) break;   // bins are ordered nearest-first (PrepareFrame)
+		if (rc.n >= kMaxCand) { rc.dg.candCap = true; break; }   // bins are ordered nearest-first (PrepareFrame)
 		const RefFaceV &fvv = g_m.fv[size_t(fi)];
 		const RefFace  &rf  = g_m.faces[size_t(fi)];
 		const RefMat   &rm  = g_m.mats[size_t(rf.matIdx)];
@@ -1234,7 +1311,7 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 		// reference grew, every one of them a non-slab event.  A face cannot
 		// show the eye relief it is facing away from.
 		if (c.sn >= 0.0) {
-			
+			++rc.dg.culledBack;
 			continue;
 		}
 		c.s0 = -fvv.d;
@@ -1246,14 +1323,14 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 			ClipHalf(c.en[i], c.e0[i] - rf.margin[i], lo, hi);
 		}
 		if (hi <= lo) {
-			
+			++rc.dg.culledPoly;
 			continue;
 		}
 		// band: −back <= sd(t) <= dMax
 		ClipHalf( c.sn,  c.s0 - rm.dMax, lo, hi);
 		ClipHalf(-c.sn, -c.s0 - g_m.back, lo, hi);
 		if (hi <= lo) {
-			
+			++rc.dg.culledBand;
 			continue;
 		}
 		c.un = dot(fvv.gu, D); c.u0c = fvv.u0 - dot(fvv.gu, fvv.p0);
@@ -1270,37 +1347,40 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 		}
 		rc.c[rc.n++] = c;
 	}
-	if (rc.n == 0) return out;
+	if (rc.n == 0) { rc.dg.cands = 0; if (diagOut) *diagOut = rc.dg; return out; }
 
 	// ── events: every boundary of the inside() predicate, exactly ──────────
 	double ev[kMaxEvents]; int nev = 0;
 	double gLo = 1e300, gHi = -1e300;
 	for (int i = 0; i < rc.n; ++i) { gLo = std::min(gLo, rc.c[i].tLo); gHi = std::max(gHi, rc.c[i].tHi); }
-	if (gHi <= gLo) return out;
+	if (gHi <= gLo) { rc.dg.cands = rc.n; if (diagOut) *diagOut = rc.dg; return out; }
 
 	for (int i = 0; i < rc.n; ++i) {
 		if (nev + 2 < kMaxEvents) { ev[nev++] = rc.c[i].tLo; ev[nev++] = rc.c[i].tHi; }
+		else rc.dg.lost(0, 2);
 		// polygon boundary crossings inside the global range (a face entering
 		// or leaving candidacy changes the partition)
 		const RefFace &rf = g_m.faces[size_t(rc.c[i].fi)];
 		for (int k = 0; k < 3; ++k) {
 			if (std::fabs(rc.c[i].en[k]) < 1e-15) continue;
 			const double t = (rf.margin[k] - rc.c[i].e0[k]) / rc.c[i].en[k];
-			if (t > gLo && t < gHi && nev < kMaxEvents) ev[nev++] = t;
+			if (!(t > gLo && t < gHi)) continue;
+			if (nev < kMaxEvents) ev[nev++] = t; else rc.dg.lost(1);
 		}
 		// band boundaries
 		const RefMat &rm = g_m.mats[size_t(rf.matIdx)];
 		if (std::fabs(rc.c[i].sn) > 1e-15) {
 			const double t1 = (rm.dMax  - rc.c[i].s0) / rc.c[i].sn;
 			const double t2 = (-g_m.back - rc.c[i].s0) / rc.c[i].sn;
-			if (t1 > gLo && t1 < gHi && nev < kMaxEvents) ev[nev++] = t1;
-			if (t2 > gLo && t2 < gHi && nev < kMaxEvents) ev[nev++] = t2;
+			if (t1 > gLo && t1 < gHi) { if (nev < kMaxEvents) ev[nev++] = t1; else rc.dg.lost(2); }
+			if (t2 > gLo && t2 < gHi) { if (nev < kMaxEvents) ev[nev++] = t2; else rc.dg.lost(2); }
 		}
 	}
 	// bisector crossings (the castellation STEP lives on exactly these)
 	{
-		for (int i = 0; i < rc.n && nev + 2 < kMaxEvents; ++i)
-			for (int j = i + 1; j < rc.n && nev + 2 < kMaxEvents; ++j) {
+		for (int i = 0; i < rc.n; ++i)
+			for (int j = i + 1; j < rc.n; ++j) {
+				if (!(nev + 2 < kMaxEvents)) { rc.dg.lost(3, 2); continue; }
 				const double an = rc.c[i].sn - rc.c[j].sn, ab = rc.c[i].s0 - rc.c[j].s0;
 				if (std::fabs(an) > 1e-15) {
 					const double t = -ab / an;
@@ -1316,10 +1396,12 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 	// slab crossings, per candidate, by conservative per-texel DDA
 	int cells = 0; bool budget = false;
 	for (int i = 0; i < rc.n; ++i)
-		MarchCandidate(rc, i, rc.c[i].tLo, rc.c[i].tHi, ev, nev, kMaxEvents, cells, budget);
+		MarchCandidate(rc, i, rc.c[i].tLo, rc.c[i].tHi, ev, nev, kMaxEvents, cells, budget, rc.dg);
 	cellsOut += cells; budgetOut = budgetOut || budget;
+	rc.dg.cands = rc.n;
+	rc.dg.ev    = nev;
 
-	if (nev < 2) return out;
+	if (nev < 2) { if (diagOut) *diagOut = rc.dg; return out; }
 	std::sort(ev, ev + nev);
 	if (g_dbgThis) {
 		std::fprintf(stderr, "[REFDBG] ray D=(%.4f,%.4f,1) cands=%d events=%d\n", D.x, D.y, rc.n, nev);
@@ -1344,9 +1426,31 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 		const double a = ev[i], b = ev[i+1];
 		if (b <= a || b <= gLo) continue;
 		if (a >= gHi) break;
+		++rc.dg.intervals;
 		const double mid = 0.5 * (a + b);
-		if (mid <= tNear) continue;
-		if (!InsideAt(rc, mid, gov)) continue;
+		if (mid <= tNear) { ++rc.dg.beforeNear; continue; }
+		const bool insideHere = InsideAt(rc, mid, gov, &rc.dg);
+		if (g_dbgThis) {
+			// CROSS-SECTION OF THE PREDICATE, one interval per line: this is the
+			// only place that says WHICH clause said no, and a miss is normally
+			// one clause saying no on every interval.
+			std::fprintf(stderr, "[REFDBG] iv %2d t=[%.5f..%.5f] mid=%.5f inside=%d\n",
+			             i, a, b, mid, insideHere ? 1 : 0);
+			for (int q = 0; q < rc.n; ++q) {
+				const RayCand &cq = rc.c[q];
+				const double sdq = cq.sn * mid + cq.s0;
+				const double dq  = DOfFace(rc, q, mid);
+				const bool inR = (mid >= cq.tLo && mid <= cq.tHi);
+				const bool inB = (sdq >= -g_m.back);
+				const bool und = (sdq <= dq);
+				const bool mit = MitreTrimOk(rc, q, mid);
+				std::fprintf(stderr, "[REFDBG]    f=%d sd=%+.5f d=%+.5f  range=%d back=%d under=%d mitre=%d%s\n",
+				             cq.fi, sdq, dq, inR?1:0, inB?1:0, und?1:0, mit?1:0,
+				             (inR&&inB&&und&&mit) ? "  <= IN" : "");
+			}
+		}
+		if (!insideHere) continue;
+		++rc.dg.inside;
 		const double t = std::max(a, tNear);
 
 		// WHAT KIND OF SURFACE IS THIS?  Only three things are real faces of the
@@ -1382,7 +1486,10 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 				if (std::fabs(std::fabs(sj) - std::fabs(sd)) <= 1e-4) { isStep = true; break; }
 			}
 		}
-		if (!(isSlab || isSkirt || isBack || isStep)) { (void)isMargin; continue; }
+		if (!(isSlab || isSkirt || isBack || isStep)) {
+			if (isMargin) ++rc.dg.rejMargin; else ++rc.dg.rejNone;
+			continue;
+		}
 
 		out.hit = true;
 		out.t   = t;
@@ -1391,8 +1498,10 @@ static Hit SolveRay(const std::vector<int32_t> &bin, const V3 &D,
 		out.v   = oc.vn * t + oc.v0c;
 		out.stepFace = isStep;
 		out.skirt    = isSkirt;
+		if (diagOut) *diagOut = rc.dg;
 		return out;
 	}
+	if (diagOut) *diagOut = rc.dg;
 	return out;
 }
 
@@ -1470,7 +1579,35 @@ static inline uint32_t BilinearBGRA(const uint32_t *tex, double fu, double fv,
 struct RefStats {
 	std::atomic<long long> pxCast{0}, pxHit{0}, pxFallback{0}, pxGrow{0};
 	std::atomic<long long> pxStep{0}, pxSkirt{0}, pxBudget{0}, cells{0};
+	// ── H1: the event array, and the MISS CLASSIFICATION it feeds ──────────
+	// A "miss" is a pixel the rasteriser painted stone where the reference ray
+	// found no surface at all (pxFallback).  Every counter below is the JOIN of
+	// that pixel set with one mechanical cause, computed per pixel in the same
+	// pass, so the correlation needs no offline join and cannot drift.
+	std::atomic<long long> pxDropAny{0}, pxDropSlab{0}, pxCandCap{0};
+	std::atomic<long long> missDropAny{0}, missDropSlab{0}, missCandCap{0};
+	std::atomic<long long> missBudget{0}, missNoCand{0}, missUnexplained{0};
+	// exclusive miss causes, in priority order (they sum to pxFallback)
+	std::atomic<long long> mcNoCand{0}, mcAllBack{0}, mcAllClipped{0}, mcNeverInside{0};
+	std::atomic<long long> mcRejMargin{0}, mcRejNone{0}, mcBeforeNear{0}, mcOther{0};
+	std::atomic<long long> missCulledBack{0};   // overlapping column: any backface cull on the ray
+	// never-inside misses, split by closest approach to a slab top (world u)
+	std::atomic<long long> niHist[7] = {};      // none/<1e-4/<1e-3/<1e-2/<0.05/<0.2/>=0.2
+	std::atomic<long long> niMitreOnly{0}, niBackOnly{0}, niRangeOnly{0};
+	// mitre-trim vetoes on MISS pixels, by the kind of edge that vetoed
+	std::atomic<long long> tvConvex{0}, tvConcave{0}, tvSoup{0}, tvSmooth{0}, tvAny{0};
+	std::atomic<long long> evDropSlab{0}, evDropBis{0}, evDropOther{0};
+	std::atomic<long long> candSum{0}, evSum{0};
+	std::atomic<int>       candMax{0};
+	std::atomic<long long> candHist[8] = {};   // 0-7 8-15 16-23 24-31 32-47 48-95 96-191 192
 };
+
+// candidate-count histogram bucket (the bisector pair count is n(n-1), so the
+// bucket a pixel lands in is what decides whether 512 events can hold it).
+static inline int CandBucket(int n) {
+	if (n < 8) return 0; if (n < 16) return 1; if (n < 24) return 2; if (n < 32) return 3;
+	if (n < 48) return 4; if (n < 96) return 5; if (n < 192) return 6; return 7;
+}
 
 void Render_GreetsDisplaceRef(Scene *Sc)
 {
@@ -1543,6 +1680,16 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 		const int y1 = tsy * tj, y2 = std::min(y1 + tsy, int(YRes));
 		const int x1 = tsx * ti, x2 = std::min(x1 + tsx, int(XRes));
 		long long lCast = 0, lHit = 0, lFall = 0, lGrow = 0, lStep = 0, lSkirt = 0, lBudget = 0, lCells = 0;
+		long long lDropAny = 0, lDropSlab = 0, lCandCap = 0;
+		long long lMissDropAny = 0, lMissDropSlab = 0, lMissCandCap = 0;
+		long long lMissBudget = 0, lMissNoCand = 0, lMissUnexp = 0;
+		long long lMc[8] = {0,0,0,0,0,0,0,0}, lMissCulledBack = 0;
+		long long lNi[7] = {0,0,0,0,0,0,0};
+		long long lNiMitre = 0, lNiBack = 0, lNiRange = 0;
+		long long lTvConvex = 0, lTvConcave = 0, lTvSoup = 0, lTvSmooth = 0, lTvAny = 0;
+		long long lEvDropSlab = 0, lEvDropBis = 0, lEvDropOther = 0;
+		long long lCandSum = 0, lEvSum = 0; int lCandMax = 0;
+		long long lCandHist[8] = {0,0,0,0,0,0,0,0};
 		for (int py = y1; py < y2; ++py) {
 			const int by = py / g_m.tilePx;
 			for (int px = x1; px < x2; ++px) {
@@ -1563,11 +1710,70 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 
 				++lCast;
 				int cells = 0; bool budget = false;
-				Hit h = SolveRay(bin, D, tNear, tFar, cells, budget);
+				RayDiag dg;
+				Hit h = SolveRay(bin, D, tNear, tFar, cells, budget, &dg);
 				lCells += cells; if (budget) ++lBudget;
 
+				const bool dropAny  = dg.dropTotal > 0;
+				const bool dropSlab = dg.drop[4] > 0;
+				if (dropAny)  ++lDropAny;
+				if (dropSlab) ++lDropSlab;
+				if (dg.candCap) ++lCandCap;
+				lEvDropSlab  += dg.drop[4];
+				lEvDropBis   += dg.drop[3];
+				lEvDropOther += dg.drop[0] + dg.drop[1] + dg.drop[2];
+				lCandSum += dg.cands; lEvSum += dg.ev;
+				if (dg.cands > lCandMax) lCandMax = dg.cands;
+				++lCandHist[CandBucket(dg.cands)];
+				const uint32_t diagBits = (dropAny ? 64u : 0u) | (dropSlab ? 128u : 0u)
+				                        | (dg.candCap ? 256u : 0u)
+				                        | (uint32_t(dg.dropTotal > 65535 ? 65535 : dg.dropTotal) << 16);
+
 				if (!h.hit) {
-					if (wasStone) { ++lFall; if (!dfl.empty()) dfl[idx] |= 2u; }
+					if (wasStone) {
+						++lFall;
+						if (dropAny)  ++lMissDropAny;
+						if (dropSlab) ++lMissDropSlab;
+						if (dg.candCap) ++lMissCandCap;
+						if (budget)   ++lMissBudget;
+						if (dg.cands == 0) ++lMissNoCand;
+						if (!dropAny && !dg.candCap && !budget && dg.cands > 0) ++lMissUnexp;
+						if (dg.culledBack > 0) ++lMissCulledBack;
+						if (dg.trimConvex)  ++lTvConvex;
+						if (dg.trimConcave) ++lTvConcave;
+						if (dg.trimSoup)    ++lTvSoup;
+						if (dg.trimSmooth)  ++lTvSmooth;
+						if (dg.trimConvex + dg.trimConcave + dg.trimSoup) ++lTvAny;
+						// EXCLUSIVE cause, first match wins, so the eight rows
+						// partition the miss set exactly.
+						int mc;
+						if (dg.cands == 0 && dg.culledBack == 0 && dg.culledPoly == 0
+						                  && dg.culledBand == 0)          mc = 0;  // nothing in the bin
+						else if (dg.cands == 0 && dg.culledBack > 0)      mc = 1;  // every face backfacing
+						else if (dg.cands == 0)                          mc = 2;  // every face clipped away
+						else if (dg.inside == 0 && dg.beforeNear == 0)   mc = 3;  // never inside the solid
+						else if (dg.rejMargin > 0)                       mc = 4;  // margin-arrival discard
+						else if (dg.rejNone > 0)                         mc = 5;  // unrecognised boundary
+						else if (dg.beforeNear > 0 && dg.inside == 0)    mc = 6;  // only before the near plane
+						else                                             mc = 7;
+						++lMc[mc];
+						if (mc == 3) {   // never inside: how close did the ray come?
+							int b;
+							if (dg.niAbove == 0)          b = 0;
+							else if (dg.niMinAbove < 1e-4)  b = 1;
+							else if (dg.niMinAbove < 1e-3)  b = 2;
+							else if (dg.niMinAbove < 1e-2)  b = 3;
+							else if (dg.niMinAbove < 0.05)  b = 4;
+							else if (dg.niMinAbove < 0.20)  b = 5;
+							else                            b = 6;
+							++lNi[b];
+							if (dg.niAbove == 0 && dg.niMitre > 0) ++lNiMitre;
+							if (dg.niAbove == 0 && dg.niBack  > 0) ++lNiBack;
+							if (dg.niAbove == 0 && dg.niRange > 0) ++lNiRange;
+						}
+						if (!dfl.empty())
+							dfl[idx] |= 2u | diagBits | (uint32_t(mc) << 12);   // bits 12..14; 256 is candCap
+					}
 					continue;
 				}
 				if (!wasStone && h.t >= tMax - zSteal) continue;   // behind / coincident with real geometry
@@ -1682,12 +1888,29 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 					if (h.skirt)    fl |= 8u;
 					if (budget)     fl |= 16u;
 					if (!wasStone)  fl |= 32u;
-					dfl[idx] = fl;
+					dfl[idx] = fl | diagBits;
 				}
 			}
 		}
 		st.pxCast += lCast; st.pxHit += lHit; st.pxFallback += lFall; st.pxGrow += lGrow;
 		st.pxStep += lStep; st.pxSkirt += lSkirt; st.pxBudget += lBudget; st.cells += lCells;
+		st.pxDropAny += lDropAny; st.pxDropSlab += lDropSlab; st.pxCandCap += lCandCap;
+		st.missDropAny += lMissDropAny; st.missDropSlab += lMissDropSlab;
+		st.missCandCap += lMissCandCap; st.missBudget += lMissBudget;
+		st.missNoCand += lMissNoCand; st.missUnexplained += lMissUnexp;
+		st.mcNoCand += lMc[0]; st.mcAllBack += lMc[1]; st.mcAllClipped += lMc[2];
+		st.mcNeverInside += lMc[3]; st.mcRejMargin += lMc[4]; st.mcRejNone += lMc[5];
+		st.mcBeforeNear += lMc[6]; st.mcOther += lMc[7];
+		st.missCulledBack += lMissCulledBack;
+		for (int b = 0; b < 7; ++b) st.niHist[b] += lNi[b];
+		st.niMitreOnly += lNiMitre; st.niBackOnly += lNiBack; st.niRangeOnly += lNiRange;
+		st.tvConvex += lTvConvex; st.tvConcave += lTvConcave; st.tvSoup += lTvSoup;
+		st.tvSmooth += lTvSmooth; st.tvAny += lTvAny;
+		st.evDropSlab += lEvDropSlab; st.evDropBis += lEvDropBis; st.evDropOther += lEvDropOther;
+		st.candSum += lCandSum; st.evSum += lEvSum;
+		for (int b = 0; b < 8; ++b) st.candHist[b] += lCandHist[b];
+		{	int cur = st.candMax.load(std::memory_order_relaxed);
+			while (lCandMax > cur && !st.candMax.compare_exchange_weak(cur, lCandMax)) {} }
 		renderns::tileDone.release();
 	});
 	for (int k = 0; k < NT * NT; ++k) renderns::tileDone.acquire();
@@ -1720,6 +1943,70 @@ void Render_GreetsDisplaceRef(Scene *Sc)
 		(long long)st.pxStep, (long long)st.pxSkirt, (long long)st.pxFallback,
 		(long long)st.pxBudget, (long long)st.cells,
 		st.pxCast ? double(st.cells) / double(st.pxCast) : 0.0);
+
+	// ── H1 census.  "miss" = a pixel the rasteriser painted stone and the
+	//    reference found nothing on (pxFallback).  The rows are the JOIN of
+	//    that set with each mechanical cause, so they are a classification of
+	//    the SAME pixels and not four unrelated totals.  Causes overlap by
+	//    construction (a starved ray is often also a deep-bin ray); the
+	//    'unexplained' row is the residue with none of them.
+	const double missPc = st.pxFallback ? 100.0 / double(st.pxFallback) : 0.0;
+	std::fprintf(stderr,
+		"[REFRENDER-H1] events: cap %d, mean %.1f/px, dropped %lld (slab %lld, bisector %lld, other %lld)\n"
+		"[REFRENDER-H1] pixels: any-drop %lld (%.2f%% of cast), slab-drop %lld, cand-cap %lld; "
+		"cands mean %.1f max %d, hist(<8/<16/<24/<32/<48/<96/<192/192) %lld/%lld/%lld/%lld/%lld/%lld/%lld/%lld\n"
+		"[REFRENDER-H1] MISS %lld  =  slab-events-dropped %lld (%.1f%%) | any-events-dropped %lld (%.1f%%) | "
+		"cand-cap %lld (%.1f%%) | march-budget %lld (%.1f%%) | no-candidate %lld (%.1f%%) | unexplained %lld (%.1f%%)\n",
+		kMaxEvents, st.pxCast ? double(st.evSum) / double(st.pxCast) : 0.0,
+		(long long)(st.evDropSlab + st.evDropBis + st.evDropOther),
+		(long long)st.evDropSlab, (long long)st.evDropBis, (long long)st.evDropOther,
+		(long long)st.pxDropAny, st.pxCast ? 100.0 * double(st.pxDropAny) / double(st.pxCast) : 0.0,
+		(long long)st.pxDropSlab, (long long)st.pxCandCap,
+		st.pxCast ? double(st.candSum) / double(st.pxCast) : 0.0, st.candMax.load(),
+		(long long)st.candHist[0], (long long)st.candHist[1], (long long)st.candHist[2],
+		(long long)st.candHist[3], (long long)st.candHist[4], (long long)st.candHist[5],
+		(long long)st.candHist[6], (long long)st.candHist[7],
+		(long long)st.pxFallback,
+		(long long)st.missDropSlab, missPc * double(st.missDropSlab),
+		(long long)st.missDropAny,  missPc * double(st.missDropAny),
+		(long long)st.missCandCap,  missPc * double(st.missCandCap),
+		(long long)st.missBudget,   missPc * double(st.missBudget),
+		(long long)st.missNoCand,   missPc * double(st.missNoCand),
+		(long long)st.missUnexplained, missPc * double(st.missUnexplained));
+
+	// ── the miss set PARTITIONED by cause (these eight sum to MISS exactly) ──
+	std::fprintf(stderr,
+		"[REFRENDER-MISS] %lld = empty-bin %lld (%.1f%%) | all-backfacing %lld (%.1f%%) | "
+		"all-clipped %lld (%.1f%%) | never-inside %lld (%.1f%%) | margin-arrival-discard %lld (%.1f%%) | "
+		"no-boundary-kind %lld (%.1f%%) | before-near %lld (%.1f%%) | other %lld (%.1f%%)"
+		"   [any-backface-cull on the ray: %lld]\n",
+		(long long)st.pxFallback,
+		(long long)st.mcNoCand,      missPc * double(st.mcNoCand),
+		(long long)st.mcAllBack,     missPc * double(st.mcAllBack),
+		(long long)st.mcAllClipped,  missPc * double(st.mcAllClipped),
+		(long long)st.mcNeverInside, missPc * double(st.mcNeverInside),
+		(long long)st.mcRejMargin,   missPc * double(st.mcRejMargin),
+		(long long)st.mcRejNone,     missPc * double(st.mcRejNone),
+		(long long)st.mcBeforeNear,  missPc * double(st.mcBeforeNear),
+		(long long)st.mcOther,       missPc * double(st.mcOther),
+		(long long)st.missCulledBack);
+
+	std::fprintf(stderr,
+		"[REFRENDER-MISS] never-inside %lld by CLOSEST APPROACH to a slab top (world u): "
+		"never-probed %lld | <1e-4 %lld | <1e-3 %lld | <1e-2 %lld | <0.05 %lld | <0.2 %lld | >=0.2 %lld"
+		"   (never-probed and rejected only by: mitre %lld, back-plane %lld, t-range %lld)\n",
+		(long long)st.mcNeverInside,
+		(long long)st.niHist[0], (long long)st.niHist[1], (long long)st.niHist[2],
+		(long long)st.niHist[3], (long long)st.niHist[4], (long long)st.niHist[5],
+		(long long)st.niHist[6],
+		(long long)st.niMitreOnly, (long long)st.niBackOnly, (long long)st.niRangeOnly);
+
+	std::fprintf(stderr,
+		"[REFRENDER-MISS] MITRE-TRIM vetoes on miss pixels: any %lld (%.1f%% of MISS) — "
+		"by edge kind: convex %lld, CONCAVE %lld, soup-neighbour %lld (smooth-seam %lld)\n",
+		(long long)st.tvAny, missPc * double(st.tvAny),
+		(long long)st.tvConvex, (long long)st.tvConcave, (long long)st.tvSoup,
+		(long long)st.tvSmooth);
 	(void)verbose;
 }
 
