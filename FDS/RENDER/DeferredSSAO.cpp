@@ -621,6 +621,15 @@ void Render_SSAO() {
 		float stepMin = fds::FeatureFlags::ssao_gtao_step_min();
 		if (stepMin < 0.25f) stepMin = 0.25f;
 		const float invSteps = 1.0f / float(steps);
+		// NEAR-STEP GUARDS. Both exist because the geometric ladder puts the
+		// first sample a few pixels out, where the uniform ladder put it 48-192
+		// px out; neither was ever needed before. AUTO (-1) therefore means
+		// "on with a front-loaded ladder, off with the uniform one", which is
+		// also exactly what keeps the shipped default byte-null.
+		const int tcFlag = fds::FeatureFlags::ssao_gtao_thick_clamp();
+		const bool thickClamp = (tcFlag < 0) ? (stepDist != 0) : (tcFlag != 0);
+		const float bFlag = fds::FeatureFlags::ssao_gtao_bias();
+		const float biasW = (bFlag < 0.0f) ? ((stepDist != 0) ? 0.05f : 0.0f) : bFlag;
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
 		// SECTOR SCALE — the horizon angles are consumed ONLY as h*32 (32-sector
@@ -768,7 +777,29 @@ void Render_SSAO() {
 										continue;
 									}
 									const float dinv = fast_rsqrt(dl2);
-									const float bx = dx - Vx*thickness, by = dy - Vy*thickness, bz = dz - Vz*thickness;
+									// --ssao_gtao_bias: skip a sample whose signed distance ABOVE our
+									// own tangent plane is below the bias -- it is our own surface.
+									// AN ANGLE FORM (dot(d,N)/|d|, the classic HBAO angle bias) WAS
+									// BUILT AND MEASURED AND IS WORSE: it looked right from one traced
+									// pixel, whose two self-samples both sat at dot(d,N)/|d| = 0.070,
+									// but on the grazing near wall of t=5836 it does not fix the
+									// banding at all (std 0.166 at 0.05 and 0.163 at 0.10, against
+									// 0.146 broken and 0.073 for this distance form). The wall's error
+									// is the ZPage16 depth quantum, which is a fixed SIZE, not a fixed
+									// angle. Do not re-derive the angle form from the trace alone.
+									if (biasW > 0.0f && (dx*Nx + dy*Ny + dz*Nz) < biasW) {
+										if (trc) fprintf(stderr,
+										  "[ssao-trace]  s=%d sgn=%+d j=%d t=%7.2f -> px=(%5d,%5d) "
+										  "dl=%.4f planeDist=%.4f  SELF (below the tangent plane)\n",
+										  s, sgn, j, (double)t, sx, sy, (double)sqrtf(dl2),
+										  (double)(dx*Nx + dy*Ny + dz*Nz));
+										continue;
+									}
+									// --ssao_gtao_thick_clamp: the back face may not be pushed
+									// further than the occluder's own distance from us.
+									float th = thickness;
+									if (thickClamp) { const float dlen = dl2 * dinv; if (th > dlen) th = dlen; }
+									const float bx = dx - Vx*th, by = dy - Vy*th, bz = dz - Vz*th;
 									const float binv = fast_rsqrt(bx*bx + by*by + bz*bz + 1e-12f);
 									const float fa = gtaoAcos((dx*Vx + dy*Vy + dz*Vz) * dinv);
 									const float ba = gtaoAcos((bx*Vx + by*Vy + bz*Vz) * binv);
@@ -859,6 +890,8 @@ void Render_SSAO() {
 #endif
 						const __m256 PxV=_mm256_load_ps(aPx),PyV=_mm256_load_ps(aPy),PzV=_mm256_load_ps(aPz);
 						const __m256 VxV=_mm256_load_ps(aVx),VyV=_mm256_load_ps(aVy),VzV=_mm256_load_ps(aVz);
+						const __m256 NxV=_mm256_load_ps(aNx),NyV=_mm256_load_ps(aNy),NzV=_mm256_load_ps(aNz);
+						const __m256 vBias=_mm256_set1_ps(biasW);
 						const __m256 pxiV=_mm256_load_ps(aPxi), pyV=_mm256_set1_ps(float(py));
 						const __m256 sradV=_mm256_load_ps(aSr);
 						alignas(32) float visAcc[8] = {0,0,0,0,0,0,0,0};
@@ -1144,7 +1177,15 @@ void Render_SSAO() {
 									__m256 rok=_mm256_and_ps(_mm256_cmp_ps(dl2,vR2,_CMP_LE_OQ),_mm256_cmp_ps(dl2,vEps,_CMP_GE_OQ));
 									gmask=_mm256_and_ps(gmask,rok);
 									const __m256 dinv=_mm256_rsqrt_ps(dl2);
-									const __m256 bx=_mm256_fnmadd_ps(VxV,vThick,dx), by=_mm256_fnmadd_ps(VyV,vThick,dy), bz=_mm256_fnmadd_ps(VzV,vThick,dz);
+									// --ssao_gtao_bias: drop samples at or below our tangent plane.
+									if (biasW > 0.0f)
+										gmask=_mm256_and_ps(gmask,
+										  _mm256_cmp_ps(_mm256_fmadd_ps(dx,NxV,_mm256_fmadd_ps(dy,NyV,_mm256_mul_ps(dz,NzV))),
+										                vBias,_CMP_GE_OQ));
+									// --ssao_gtao_thick_clamp: back face bounded by |d|.
+									const __m256 thV = thickClamp
+										? _mm256_min_ps(vThick, _mm256_mul_ps(dl2,dinv)) : vThick;
+									const __m256 bx=_mm256_fnmadd_ps(VxV,thV,dx), by=_mm256_fnmadd_ps(VyV,thV,dy), bz=_mm256_fnmadd_ps(VzV,thV,dz);
 									const __m256 binv=_mm256_rsqrt_ps(_mm256_fmadd_ps(bx,bx,_mm256_fmadd_ps(by,by,_mm256_fmadd_ps(bz,bz,_mm256_set1_ps(1e-12f)))));
 									const __m256 fdot=_mm256_mul_ps(_mm256_fmadd_ps(dx,VxV,_mm256_fmadd_ps(dy,VyV,_mm256_mul_ps(dz,VzV))),dinv);
 									const __m256 bdot=_mm256_mul_ps(_mm256_fmadd_ps(bx,VxV,_mm256_fmadd_ps(by,VyV,_mm256_mul_ps(bz,VzV))),binv);
