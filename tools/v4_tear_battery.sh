@@ -26,6 +26,5 @@ grep -v '^#' "$ROOT/docs/tears_poses.txt" | while read -r id t cam; do
   python3 "$ROOT/tools/v4_tear_cover.py" "$OUT/a" "$OUT/b" --label "$id"
   rm -rf "$OUT/a" "$OUT/b"
 done | tee "$OUT/battery.txt"
-echo "--- v4_tear_battery: $(grep -c 'holes=' "$OUT/battery.txt") poses, "\
-"$(awk -F'holes=| ' '/holes=/{s+=$2} END{print s+0}' "$OUT/battery.txt") total holes, "\
-"$(grep -c 'holes=[1-9]' "$OUT/battery.txt") poses with holes ---"
+awk '/holes=/{n=$0; sub(/.*holes=/,"",n); sub(/ .*/,"",n); s+=n; c++; if (n+0>0) p++}
+     END{printf "v4_tear_battery: poses=%d poses_with_holes=%d TOTAL_HOLES=%d\n", c, p+0, s+0}' "$OUT/battery.txt"
