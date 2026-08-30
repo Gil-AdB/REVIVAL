@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-196 records, 185 current, 11 superseded; HEAD e39d138b9545.
+197 records, 186 current, 11 superseded; HEAD ebeac8ea4297.
 
 ## Attention
 ### Stale — depends on a superseded claim (3)
@@ -141,7 +141,9 @@
 - **greets.renderFrame.ms** — 2 current records, by pose; no single current value
     - `13323d13b643` pose=5743: 46.925 (frame_ms) [unverified_at_tip] — greets t=5743 renderFrame = 46.925 ms on the window's AFTER binary (default-vs-default, interleaved, dummy drivers, --profiler=0, 1920x1080); PERF_STATE 00v.1.
     - `a74b30bbf987` pose=5965: 41.516 (frame_ms) [unverified_at_tip] — greets t=5965 renderFrame = 41.516 ms on the window's AFTER binary (default-vs-default, interleaved, dummy drivers, --profiler=0, 1920x1080); PERF_STATE 00v.1.
-- `42cebd0d0e79` open **greets.shading.view_dependent** {arm=judging defect=shading scene=greets}  — His observation on the rev-dispfix build under the judging arm: the shading is view-dependent in a way that reads wrong - suspected interaction of SSAO (+its flags) with the AO maps. No pose recorded yet; discriminator ladder issued (one flag off at a time: --no-ssao, --no-ssao_gtao, --no-ssao_temporal, --no-ssao_hdr_transport, --no-ao_map, --no-ao_direct).
+- **greets.shading.view_dependent** — 2 current records, by flag; no single current value
+    - `42cebd0d0e79` flag=∅:  — His observation on the rev-dispfix build under the judging arm: the shading is view-dependent in a way that reads wrong - suspected interaction of SSAO (+its flags) with the AO maps. No pose recorded yet; discriminator ladder issued (one flag off at a time: --no-ssao, --no-ssao_gtao, --no-ssao_temporal, --no-ssao_hdr_transport, --no-ao_map, --no-ao_direct).
+    - `d72feb6ec052` flag=ssao_gtao: "ssao_gtao_edge_artifact" (look) — Discriminator ladder result (his eye, main-tree build ebeac8ea, judging arm): --no-ssao removes the view-dependent shading entirely; --no-ssao_gtao (the pre-GTAO sampler) looks pretty ok; with GTAO on, --no-ssao_temporal / --no-ssao_hdr_transport / --no-ao_map / --no-ao_direct each leave it, and the most jarring part is near the TOP and LEFT edges of the screen. Localises the defect to the GTAO path at the screen origin - asymmetric, so a negative-offset clamp/truncation or the half-res buffer origin mapping is the suspect class.
 - `79943f39e3a2` measurement **greets.shoulder_plateau.max_abs_delta** = 130 (pixel_delta) {arm=shoulder_plateau flag=greets_displace_shoulder_plateau metric=max_abs_delta scene=greets} w=5/5 — max |delta| 110-130 / 255 (p99 31-37) between the default and shoulder_plateau arms at cam A / cam B / t=6194 (coordinator's snapshot diff, 2026-08-29).
 - `b2f458b0ad3c` measurement **greets.shoulder_plateau.px_changed_share** = [73, 93] (share_pct) {arm=shoulder_plateau flag=greets_displace_shoulder_plateau metric=px_changed_share scene=greets} w=5/5 — with --greets_displace_shoulder_plateau 73-93 % of wall pixels differ from the default arm at cam A / cam B / t=6194, mean |delta| 6/255 (the coordinator's own snapshot diff, 2026-08-29).
 - **greets.tick.ms** — 2 current records, by pose; no single current value
