@@ -329,6 +329,32 @@ void buildSliceTrig(int slices) {
 		}
 }
 
+// ─── Geometric march spacing (--ssao_gtao_step_dist=1) ──────────────────
+// The ladder t_j = lo*(srad/lo)^((j+0.5+jit/2)/steps) is a GEOMETRIC PROGRESSION
+// in j, so the whole per-step cost is ONE MULTIPLY: only the first term and the
+// ratio need a power, and both are per-CELL, not per-step and not per-slice.
+// They use these two quadratic minimax pieces rather than libm: 518k cells x 3
+// libm calls a frame would be milliseconds, and the accuracy needed here is
+// trivial - the sample position is rounded to an integer pixel immediately
+// afterwards, so 0.60 % on log2 and 0.31 % on exp2 (measured maxima over their
+// whole reduced ranges) is ~1 px on a 256 px step at the very outside.
+// UNREACHABLE from the default uniform path.
+static inline float ssaoLog2(float x) {
+	union { float f; uint32_t i; } u; u.f = x;
+	const float e = float(int((u.i >> 23) & 0xFFu) - 127);
+	u.i = (u.i & 0x007FFFFFu) | 0x3F800000u;          // mantissa into [1,2)
+	const float m = u.f;
+	return e + (-1.6797f + (2.01955f - 0.33985f * m) * m);
+}
+static inline float ssaoExp2(float x) {
+	if (x <= 0.0f) return 1.0f;                        // ladder exponents are >= 0
+	if (x >= 60.0f) return 1.0e18f;
+	const float fx = floorf(x), f = x - fx;
+	union { float f; uint32_t i; } u;
+	u.i = uint32_t(int(fx) + 127) << 23;
+	return u.f * (1.0f + (0.6568544f + 0.3431456f * f) * f);
+}
+
 // Fast acos (GTAO, Eberly fit), ~0.18° max error — cheap vs std::acos in the
 // per-sample horizon loop. Input clamped to [-1,1] by the caller's dot/rsqrt.
 inline float gtaoAcos(float x) {
@@ -590,6 +616,11 @@ void Render_SSAO() {
 		// --ssao_radius. Default 256 = byte-null.
 		float sradMax = fds::FeatureFlags::ssao_gtao_srad_max();
 		if (sradMax < 2.0f) sradMax = 2.0f;
+		// --ssao_gtao_step_dist: 0 uniform (byte-null), 1 geometric, 2 squared.
+		const int stepDist = fds::FeatureFlags::ssao_gtao_step_dist();
+		float stepMin = fds::FeatureFlags::ssao_gtao_step_min();
+		if (stepMin < 0.25f) stepMin = 0.25f;
+		const float invSteps = 1.0f / float(steps);
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
 		// SECTOR SCALE — the horizon angles are consumed ONLY as h*32 (32-sector
@@ -653,6 +684,16 @@ void Render_SSAO() {
 						if (srad < 2.0f) srad = 2.0f; else if (srad > sradMax) srad = sradMax;
 						const int ri = ((ly & 3) * 4 + (lx & 3) + g_ssaoRotPhase) & 15;
 						const float jit = g_rotCos[ri] * 0.5f + 0.5f;
+						// Per-CELL ladder constants (ssaoLog2/ssaoExp2 above). tBase is
+						// the first sample's distance, tRatio the geometric step.
+						float tBase = 0.0f, tRatio = 1.0f;
+						if (stepDist == 1) {
+							float lo = stepMin; const float half_ = srad * 0.5f;
+							if (lo > half_) lo = half_;
+							const float e = ssaoLog2(srad / lo) * invSteps;
+							tRatio = ssaoExp2(e);
+							tBase  = lo * ssaoExp2(e * (0.5f + jit * 0.5f));
+						}
 						if (trc) fprintf(stderr,
 							"[ssao-trace] cell(%d,%d) px=(%d,%d) z=%.4f P=(%.4f,%.4f,%.4f) "
 							"N=(%.4f,%.4f,%.4f) V=(%.4f,%.4f,%.4f) srad=%.2f ri=%d jit=%.4f\n",
@@ -678,8 +719,14 @@ void Render_SSAO() {
 							uint32_t mask = 0u;
 							for (int sgn = -1; sgn <= 1; sgn += 2) {
 								const float cSgn = float(sgn) * kSec;
+								float tRun = tBase;
 								for (int j = 0; j < steps; ++j) {
-									const float t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
+									float t;
+									if (stepDist == 1) { t = tRun; tRun *= tRatio; }
+									else if (stepDist == 2) {
+										const float f = (float(j) + 0.5f + jit*0.5f) * invSteps;
+										t = f * f * srad;
+									} else t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
 									const float ofx = float(sgn)*dcx*t, ofy = float(sgn)*dsy*t;
 									int sx = px + (roundFix ? (int)lrintf(ofx) : int(ofx + 0.5f));
 									int sy = py + (roundFix ? (int)lrintf(ofy) : int(ofy + 0.5f));
@@ -771,6 +818,7 @@ void Render_SSAO() {
 						const int py = std::min(ly * down + half, H - 1);
 						alignas(32) float aPx[8], aPy[8], aPz[8], aVx[8], aVy[8], aVz[8];
 						alignas(32) float aNx[8], aNy[8], aNz[8], aSr[8], aJit[8], aPxi[8];
+						alignas(32) float aTb[8], aTr[8];   // geometric ladder: first step, ratio
 						alignas(32) int   aPxInt[8];
 						int   aRi[8];
 						bool valid[8];
@@ -783,7 +831,8 @@ void Render_SSAO() {
 							aPxInt[k] = px; aPxi[k] = float(px);
 							if (ze == 0) { valid[k]=false; aoRaw[lo]=1.0f; aoZ[lo]=-1.0f;
 							               aPx[k]=aPy[k]=aPz[k]=0; aVx[k]=aVy[k]=0; aVz[k]=1;
-							               aNx[k]=aNy[k]=0; aNz[k]=1; aSr[k]=2; aJit[k]=0; aRi[k]=0; continue; }
+							               aNx[k]=aNy[k]=0; aNz[k]=1; aSr[k]=2; aJit[k]=0; aRi[k]=0;
+							               aTb[k]=0; aTr[k]=1; continue; }
 							const float z = float(0xFF80 - ze) * invZScale;
 							aoZ[lo] = z;
 							const float Px=(float(px)-cx)*z*invFOVX, Py=(cy-float(py))*z*invFOVY, Pz=z;
@@ -795,6 +844,13 @@ void Render_SSAO() {
 							aPx[k]=Px;aPy[k]=Py;aPz[k]=Pz; aVx[k]=-Px*vinv;aVy[k]=-Py*vinv;aVz[k]=-Pz*vinv;
 							aNx[k]=Nx;aNy[k]=Ny;aNz[k]=Nz; aSr[k]=sr; aJit[k]=g_rotCos[ri]*0.5f+0.5f;
 							aRi[k]=ri;
+							if (stepDist == 1) {
+								float lo_ = stepMin; const float h_ = sr * 0.5f;
+								if (lo_ > h_) lo_ = h_;
+								const float e_ = ssaoLog2(sr / lo_) * invSteps;
+								aTr[k] = ssaoExp2(e_);
+								aTb[k] = lo_ * ssaoExp2(e_ * (0.5f + aJit[k] * 0.5f));
+							} else { aTb[k]=0.0f; aTr[k]=1.0f; }
 							valid[k]=true;
 						}
 #if FDS_SSAO_CENSUS
@@ -903,12 +959,23 @@ void Render_SSAO() {
 							const __m256 jitV=_mm256_load_ps(aJit);
 							const __m256 srStep=_mm256_mul_ps(sradV,_mm256_set1_ps(1.0f/float(steps)));
 							__m256i maskV=_mm256_setzero_si256();
+							const __m256 tBaseV=_mm256_load_ps(aTb), tRatioV=_mm256_load_ps(aTr);
+							const __m256 invStepsV=_mm256_set1_ps(invSteps);
 							for (int sgn=-1; sgn<=1; sgn+=2) {
 								const __m256 sgnV=_mm256_set1_ps(float(sgn));
 								const __m256 cSgnV=_mm256_set1_ps(float(sgn)*kSec);
+								__m256 tRun=tBaseV;      // --ssao_gtao_step_dist=1 running term
 								for (int j=0;j<steps;++j) {
-									// t = ((j+0.5)+jit*0.5) * srad/steps
-									__m256 tV=_mm256_mul_ps(_mm256_add_ps(_mm256_set1_ps(float(j)+0.5f),
+									// t = ((j+0.5)+jit*0.5) * srad/steps  (uniform, the default)
+									__m256 tV;
+									if (stepDist == 1) {
+										tV = tRun; tRun = _mm256_mul_ps(tRun, tRatioV);
+									} else if (stepDist == 2) {
+										const __m256 f=_mm256_mul_ps(_mm256_add_ps(_mm256_set1_ps(float(j)+0.5f),
+										                _mm256_mul_ps(jitV,vHalf)), invStepsV);
+										tV = _mm256_mul_ps(_mm256_mul_ps(f,f), sradV);
+									} else
+									tV=_mm256_mul_ps(_mm256_add_ps(_mm256_set1_ps(float(j)+0.5f),
 									           _mm256_mul_ps(jitV,vHalf)), srStep);
 									// sample int pos: px + int(sgn*dcx*t + 0.5)
 									__m256 offx=_mm256_mul_ps(_mm256_mul_ps(sgnV,dcxV),tV);
