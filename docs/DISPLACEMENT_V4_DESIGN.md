@@ -123,3 +123,138 @@ classes, the reflex weld, the joint snap/split family (all refuted:
 `408a38faafa7`, `09cecbe6d510`, `baf27927b0e5`, `0c2cd2a858e6`, `c165bff2f03a`,
 `20be1fac463e`), `cpb` as a wall lever (`558b45ea139b`), and every flag that
 chose a sign by dot with a smoothed normal.
+
+## 2. The pipeline, stage by stage
+
+Each stage states its **invariant** and the **instrument** that checks it. A stage
+that cannot be checked in isolation is not a stage. Every instrument is a
+`--v4_census` print plus a `tools/` reader, so a round can gate on it.
+
+### (a) Stitch and half-edge over the authored soup
+- Input: the authored stone faces of every mesh (`rooms`, `floor`, and their
+  `::mirUV` clones — the clones are what the main view rasterises, §REF "five
+  things"; v4 must bake the same set the old bake baked, which is decided by the
+  `::mirUV` split at `GREETS.CPP` ~2868 running AFTER the bake at :2019–2020;
+  v4 runs at the same point and bakes the same meshes, then the clone split
+  copies the baked result — that ordering is kept, not re-derived).
+- **Exact-equality stitch** (bitwise / single-ULP hash) — authored coordinates are
+  bitwise equal at shared corners (survey §E). ε-welding only as an instrumented
+  fallback that prints what it merged, ε relative to the shortest authored edge,
+  never in world units (the old bake's 0.006/0.02 world-unit welds and their
+  chaining: `0c2cd2a858e6`, `20be1fac463e`).
+- **Half-edge** with boundaries as null *face* (never null twin). Material and
+  coplanarity are **attributes** of the two faces at an edge, never topology: an
+  edge with two faces of different materials is a material seam, not a boundary
+  (the base-junction bug, bc79e39d: `abutPointMat` excluded the floor face as
+  "the edge's own face"; the trap `greets.wall.bake_face_array_is_whole_trimesh`
+  is the same class).
+- Edge endpoints ordered by **world position** before anything is derived from an
+  edge (DiagSplit's precision rule; §REF "five things" #5).
+- Invariant: every edge has use-count 1 (genuine boundary — expect the scene's
+  4 free edges plus doorway/lid silhouettes, each listed) or 2; zero non-manifold
+  edges; zero near-coincident vertex pairs closer than ε that are not the same
+  vertex. Instrument: `[V4-STITCH]` census (counts by class, the list of
+  use-count-1 edges with their world segments) and `tools/v4_stitch_census.py`.
+
+### (b) Plane registry (charts)
+- VSA-style region growing over faces with a **normal budget** (the survey's
+  L^{2,1} proxy; the optimal proxy normal is the area-weighted face normal): the
+  curved wall's narrow strips merge into one chart; hard corners split. Registry
+  is **material-blind** (a wall and the floor are two planes of one solid) and
+  built across ALL meshes — the old `envDoms` block (`MeshOps.cpp` ~2082) is the
+  precedent and is reused read-only.
+- **Two thresholds, two questions** (survey §F/7): chart membership (normal
+  budget, ~10°) decides *parameterisation*; the crease threshold (30°) decides
+  *shading*. They are not the same predicate.
+- Invariant: every stone face belongs to exactly one chart; the chart's plane
+  fits all its faces within the budget; junction list = every pair of charts
+  sharing an edge, each with φ, convex/concave/smooth class, and the crease
+  census numbers (item 1.8) attached. Instrument: `[V4-CHARTS]` (chart count,
+  faces per chart, max deviation, junction table) — expect ~24 dominant planes
+  plus the curved-wall chart.
+
+### (c) Per-chart UV-aligned lattice
+- Domain: the chart's UV space (all its faces share a chart because they share a
+  chart of the height map).
+- **Breaklines** on the mortar centrelines and the block-edge pairs: the
+  centrelines come from the height map's row/column profiles (the old bake's
+  line machinery found them; v4 keeps the *finding*, drops the rep levels).
+  Constrained Delaunay within each block cell; slivers *along* a mortar line are
+  legitimate (Dyn–Levin–Rippa), slivers *across* one are not.
+- **Plateau nodes ≥ 4 level-0 texels inside the block** (the shoulder mechanism:
+  mip-2 bilinear smears a block edge over ~8 level-0 texels; a node on the
+  boundary reads the plateau/groove midpoint — measured as the −0.036 u plateau
+  bias, `d8e1d26bfc3e`; `shoulder_plateau` was a hand approximation of this rule,
+  `40ac61208dfa`).
+- **Density: restricted quadtree** — adjacent cells differ by ≤ 1 level (Von
+  Herzen & Barr); block interior cells at the `cpb` density, groove bands one
+  level finer, never a 0.08 u profile pitch against a 2.5 u interior (the
+  73-vs-11 faces/u² fan at the corner column).
+- **R1/R2/R3 on every shared border**: the border owns its sample count (derived
+  from the border alone, never from either chart's interior); parameters are
+  exact `i/n` integers; each border vertex is created **once** and indexed from
+  both charts (the old bake's `edgeVert` keyed on float bits and minted twins —
+  `0c2cd2a858e6`). FMA contraction: border positions are computed in one function
+  from one canonical operand order with `-ffp-contract=off` on that translation
+  unit (trap `607c7cd2c810`: `-ffp-contract=fast` contracted a duplicated
+  expression differently and moved two pins).
+- Invariant: watertight **before displacement** (law `7453a529070e`): use-count
+  2 on every interior edge, zero T-vertices (no vertex lies on an edge it is not
+  incident to), and the undisplaced v4 mesh renders **byte-identical** to the
+  bare wall at every pin (amp = 0 ⇒ the same planes). Instrument: `[V4-LATTICE]`
+  + the tear battery on the undisplaced arm (must read 0) + the pins.
+
+### (d) Heights
+- **Placement from the mip-2 field, values from the pyramids**: plateau nodes
+  read the **max**-pyramid, groove nodes the **min**-pyramid, bevel nodes the
+  bilinear value (Garland & Heckbert §3.2; Tevs 2008). The reference samples the
+  mip-2 field pointwise, so v4's dz at plateau interiors measures this rule
+  directly: target plateau bias 0 ± the reference's noise.
+- Invariant: per relief class, e−r along the plane normal p50 within ±0.005 u
+  (`tools/nspace_relief.py`, the instrument that found the −0.036).
+
+### (e) Displacement and junction rings
+- Every interior node moves along the **chart plane normal** by `d(u,v)`.
+- **Junction ring vertices** (shared by two charts at a crease) are placed by the
+  offset-plane solve `u = d·(n₁+n₂)/(1+n₁·n₂)` for equal offsets, the 3×3 system
+  (rows n₁, n₂, e; rhs d₁, d₂, 0) for unequal, and the 3-plane corner solve at
+  chart-corner vertices (conditioning ∝ 1/|det|: the dangerous vertex is three
+  near-coplanar strips, i.e. the curved wall — which the registry merges, so it
+  never reaches the solve). Never a normalised bisector (law `f713599ea11d`).
+  Mitre limit 4 → bevel quad (two vertices) past it.
+- The heights d₁, d₂ at the ring come from the **junction rule** (item 1.8):
+  dominant owner → one value both sides; steps → each side's own, joined by the
+  planar step face on the bisector (a real face in the mesh, watertight by
+  construction).
+- Concave junctions (wall–floor): the same solve; under union nothing else — no
+  pin, no free row (the base-junction bug, bc79e39d, cannot exist: the floor's
+  ring and the wall's ring are the same vertices).
+- Invariant: every ring vertex lies on both offset planes to 1e-5 u;
+  `refrender_diff` at the junction band (crease map, `creasemap_<pose>.png`)
+  reads the same |Δd| the census predicts for that junction. Instrument:
+  `[V4-RINGS]` + the crease-dh map.
+
+### (f) Free edges
+- Classified in (a); the skirt is a quad strip from the displaced edge down to
+  the slab back (amplitude), emitted only for use-count-1 edges that are not
+  silhouettes of a lid. Invariant: skirt count == free-edge count (4 + the listed
+  silhouettes); the doorway pose t=5963/5928 shows relief to the jamb
+  (his 2026-08-11 ask, the old `free_edge` flag's job) — `refrender_diff` at the
+  doorway p90 < 0.08 u (today 1.22).
+
+### (g) Shading normals
+- `n = normalize(N − (h_u/s_u)·T − (h_v/s_v)·B)` per chart, exact; gradient taken
+  at the same mip as the height (or geometry and shading disagree, survey §C);
+  split normals at creases (> 30°); the smooth base normal only within a merged
+  chart. `Compute_Vertex_Normals` is **not** called on the baked mesh.
+- Invariant: normal-angle vs the reference p50 < 5° on stone pixels (today
+  4.7–21°); zero pixels where the v4 normal is > 90° from the face normal
+  (the inversions of 41ff72ed).
+
+### (h) Output
+- One TriMesh per baked mesh; UVs per face corner; materials unchanged; the
+  `::mirUV` clone split runs after, as today.
+- Invariant: watertight (use-count 2 except the listed boundaries), zero
+  T-junctions, sliver census (min-angle p10 > 2°, none < 1°), face count ≤ the
+  old bake's, `[V4-OUT]` prints all four and `tools/v4_out_census.py` reads
+  `displace_faces.txt`.
