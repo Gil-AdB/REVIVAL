@@ -2031,18 +2031,9 @@ std::unordered_map<GrooveShadeKey, GrooveShadeRec, GrooveShadeKeyH> g_grooveShad
 // vertical mortar phase alternates per block row, lands naturally as per-band
 // positions. Runs are straight lines through the band: a few texels of organic
 // wander is absorbed by the transition-band shoulder pads, not modeled.
-struct StoneGRun { float lo, hi; };                  // texels at the bake mip, lo<hi
-struct StoneGrooveGrid {
-	bool valid = false;
-	std::vector<StoneGRun> h;                        // horizontal grooves (y runs)
-	std::vector<std::pair<float,float>> bandY;       // band k y-range; second may exceed extent (wrap)
-	std::vector<std::vector<StoneGRun>> vPerBand;    // per band: vertical grooves (x runs)
-};
-// One v-period of the edge-aligned ROW layout (built from the h-grooves +
-// shoulder pads): type 0 = plateau (flat block row), 1 = step (transition band
-// carrying the wall), 2 = floor (flat mortar floor). bandA/bandB are the
-// adjacent block-row bands whose vertical grooves the row's columns follow.
-struct StoneRowT { float y0, y1; int type; int bandA, bandB; };
+// StoneGRun / StoneGrooveGrid / StoneRowT and the detection itself now live in
+// MeshOps.h + MeshOps_FindStoneGrooveGrid below, so the v4 lattice reuses the
+// same finding (docs/DISPLACEMENT_V4_DESIGN.md §2c).
 }  // namespace
 
 const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t ordinal) {
@@ -2051,6 +2042,142 @@ const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t o
 	if (it == g_stoneParentPlanes.end()) return nullptr;
 	if (size_t(ordinal) > it->second.size()) return nullptr;
 	return &it->second[ordinal - 1];
+}
+
+// The mortar-groove FINDING (MeshOps.h) — extracted VERBATIM from
+// DisplaceStoneSubdiv so the v4 lattice reuses the identical float
+// expressions.  See MeshOps.h for what it finds and why v4 wants it.
+void MeshOps_FindStoneGrooveGrid(const Texture *hm, int useMip,
+                                 float pitchXtex, float pitchYtex,
+                                 StoneGrooveGrid &grid,
+                                 std::vector<StoneRowT> &rowTpl,
+                                 std::vector<std::vector<float>> &colTpl) {
+	const int useMipW = std::max(1, int(hm->SizeX) >> useMip);
+	const int useMipH = std::max(1, int(hm->SizeY) >> useMip);
+	const float kPadTex = kStonePadTex;
+	const float kMinFloorTex = kStoneMinFloorTex;
+	grid = StoneGrooveGrid(); rowTpl.clear(); colTpl.clear();
+	const byte *gdat = hm->Mipmap[useMip];
+	const int gbx = hm->blockSizeX, gby = hm->blockSizeY;
+	auto GTX = [&](int x, int y) -> float {
+		return float(gdat[SwizzledOffset(x, y, gbx, gby, useMipH)]) * (1.0f/255.0f); };
+	// below-threshold runs of a mean-height profile, wrap-aware
+	auto profileRuns = [&](const std::vector<float> &prof, float pitchTex,
+	                       std::vector<StoneGRun> &runs) -> bool {
+		const int n = int(prof.size());
+		runs.clear();
+		if (pitchTex < 4.0f || n < 8) return false;
+		float lo = 1e30f, hi = -1e30f;
+		for (float v : prof) { lo = std::min(lo, v); hi = std::max(hi, v); }
+		if (hi - lo < 0.06f) return false;              // no groove contrast
+		const float thr = lo + 0.5f * (hi - lo);
+		std::vector<char> low(size_t(n), 0);
+		int nLow = 0;
+		for (int i = 0; i < n; ++i) { low[i] = prof[i] < thr; nLow += low[i]; }
+		if (nLow == 0 || nLow > n / 2) return false;    // mortar must be the minority
+		int s0 = 0;
+		for (int i = 0; i < n; ++i) if (!low[i]) { s0 = i; break; }
+		int i = 0;
+		while (i < n) {
+			if (!low[(s0 + i) % n]) { ++i; continue; }
+			int j = i;
+			while (j < n && low[(s0 + j) % n]) ++j;
+			float rlo = float(s0 + i), rhi = float(s0 + j);
+			if (rhi - rlo >= 1.0f) {
+				if (rhi - rlo > 0.6f * pitchTex) return false;   // too wide: not mortar
+				while (rlo >= float(n)) { rlo -= float(n); rhi -= float(n); }
+				runs.push_back({rlo, rhi});
+			}
+			i = j;
+		}
+		if (runs.empty()) return false;
+		if (float(runs.size()) > float(n) / pitchTex * 2.0f + 2.0f) return false;
+		std::sort(runs.begin(), runs.end(),
+		          [](const StoneGRun &a, const StoneGRun &b){ return a.lo < b.lo; });
+		return true;
+	};
+	std::vector<float> rowProf(size_t(useMipH), 0.0f);
+	for (int y = 0; y < useMipH; ++y) {
+		float s = 0.0f;
+		for (int x = 0; x < useMipW; ++x) s += GTX(x, y);
+		rowProf[y] = s / float(useMipW);
+	}
+	const bool hOK = profileRuns(rowProf, pitchYtex, grid.h);
+	if (!hOK) grid.h.clear();
+	// bands between consecutive horizontal grooves (wrapping); with no
+	// horizontal grooves (vertical planks) one band spans the extent.
+	if (grid.h.empty()) grid.bandY.push_back({0.0f, float(useMipH)});
+	else for (size_t g = 0; g < grid.h.size(); ++g) {
+		const float y0 = grid.h[g].hi;
+		float y1 = grid.h[(g + 1) % grid.h.size()].lo;
+		if (y1 <= y0) y1 += float(useMipH);
+		grid.bandY.push_back({y0, y1});
+	}
+	grid.vPerBand.resize(grid.bandY.size());
+	bool anyV = false;
+	for (size_t b = 0; b < grid.bandY.size(); ++b) {
+		std::vector<float> colProf(size_t(useMipW), 0.0f);
+		const int yy0 = int(std::ceil(grid.bandY[b].first));
+		const int rows = std::max(1, int(std::floor(grid.bandY[b].second)) - yy0);
+		for (int x = 0; x < useMipW; ++x) {
+			float s = 0.0f;
+			for (int y = yy0; y < yy0 + rows; ++y) s += GTX(x, ((y % useMipH) + useMipH) % useMipH);
+			colProf[x] = s / float(rows);
+		}
+		if (profileRuns(colProf, pitchXtex, grid.vPerBand[b])) anyV = true;
+		else grid.vPerBand[b].clear();
+	}
+	grid.valid = hOK || anyV;
+	// row template (one v-period): step/floor/step per wide groove (a
+	// flat mortar floor between the pads), step/step around the centre
+	// for narrow grooves, plateau rows shoulder-to-shoulder between.
+	if (grid.valid && !grid.h.empty()) {
+		const int nh = int(grid.h.size());
+		for (int g = 0; g < nh; ++g) {
+			const int bAbove = (g + nh - 1) % nh;
+			const int bBelow = g;
+			const float lo = grid.h[g].lo, hi = grid.h[g].hi;
+			const float A = lo - kPadTex, B = lo + kPadTex;
+			const float C = hi - kPadTex, D = hi + kPadTex;
+			if (C - B >= kMinFloorTex) {
+				rowTpl.push_back({A, B, 1, bAbove, bAbove});
+				rowTpl.push_back({B, C, 2, bAbove, bBelow});
+				rowTpl.push_back({C, D, 1, bBelow, bBelow});
+			} else {
+				const float M = 0.5f * (lo + hi);
+				rowTpl.push_back({A, M, 1, bAbove, bAbove});
+				rowTpl.push_back({M, D, 1, bBelow, bBelow});
+			}
+			float nA = grid.h[(g + 1) % nh].lo - kPadTex;
+			if (g + 1 == nh) nA += float(useMipH);
+			rowTpl.push_back({D, nA, 0, bBelow, bBelow});
+		}
+	} else if (grid.valid) {
+		rowTpl.push_back({0.0f, float(useMipH), 0, 0, 0});
+	}
+	// column line template per band (same construction along x)
+	colTpl.resize(grid.vPerBand.size());
+	for (size_t b = 0; b < grid.vPerBand.size() && grid.valid; ++b) {
+		for (const StoneGRun &r : grid.vPerBand[b]) {
+			const float A = r.lo - kPadTex, B = r.lo + kPadTex;
+			const float C = r.hi - kPadTex, D = r.hi + kPadTex;
+			colTpl[b].push_back(A);
+			if (C - B >= kMinFloorTex) { colTpl[b].push_back(B); colTpl[b].push_back(C); }
+			else                         colTpl[b].push_back(0.5f * (r.lo + r.hi));
+			colTpl[b].push_back(D);
+		}
+		std::sort(colTpl[b].begin(), colTpl[b].end());
+		for (size_t i = 1; i < colTpl[b].size(); ++i)
+			if (colTpl[b][i] - colTpl[b][i-1] < 0.25f) { grid.valid = false; break; }
+	}
+	// sanity: rows strictly ascending + contiguous (overlapping shoulder
+	// pads from grooves closer than 2*pad would fold the layout) —
+	// pathological content falls back to the adaptive fan path.
+	for (size_t i = 0; i < rowTpl.size() && grid.valid; ++i) {
+		if (rowTpl[i].y1 - rowTpl[i].y0 < 0.05f) { grid.valid = false; break; }
+		if (i + 1 < rowTpl.size() &&
+		    std::fabs(rowTpl[i+1].y0 - rowTpl[i].y1) > 0.01f) { grid.valid = false; break; }
+	}
 }
 
 void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
@@ -2457,127 +2584,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		std::vector<std::vector<StoneLineRep>> vLineRep;    // per band: vertical lines (x)
 		const bool lineHeightOn = fds::FeatureFlags::greets_displace_line_height();
 		if (edgeMode && havePitch) {
-			const byte *gdat = hm->Mipmap[useMip];
-			const int gbx = hm->blockSizeX, gby = hm->blockSizeY;
-			auto GTX = [&](int x, int y) -> float {
-				return float(gdat[SwizzledOffset(x, y, gbx, gby, useMipH)]) * (1.0f/255.0f); };
-			// below-threshold runs of a mean-height profile, wrap-aware
-			auto profileRuns = [&](const std::vector<float> &prof, float pitchTex,
-			                       std::vector<StoneGRun> &runs) -> bool {
-				const int n = int(prof.size());
-				runs.clear();
-				if (pitchTex < 4.0f || n < 8) return false;
-				float lo = 1e30f, hi = -1e30f;
-				for (float v : prof) { lo = std::min(lo, v); hi = std::max(hi, v); }
-				if (hi - lo < 0.06f) return false;              // no groove contrast
-				const float thr = lo + 0.5f * (hi - lo);
-				std::vector<char> low(size_t(n), 0);
-				int nLow = 0;
-				for (int i = 0; i < n; ++i) { low[i] = prof[i] < thr; nLow += low[i]; }
-				if (nLow == 0 || nLow > n / 2) return false;    // mortar must be the minority
-				int s0 = 0;
-				for (int i = 0; i < n; ++i) if (!low[i]) { s0 = i; break; }
-				int i = 0;
-				while (i < n) {
-					if (!low[(s0 + i) % n]) { ++i; continue; }
-					int j = i;
-					while (j < n && low[(s0 + j) % n]) ++j;
-					float rlo = float(s0 + i), rhi = float(s0 + j);
-					if (rhi - rlo >= 1.0f) {
-						if (rhi - rlo > 0.6f * pitchTex) return false;   // too wide: not mortar
-						while (rlo >= float(n)) { rlo -= float(n); rhi -= float(n); }
-						runs.push_back({rlo, rhi});
-					}
-					i = j;
-				}
-				if (runs.empty()) return false;
-				if (float(runs.size()) > float(n) / pitchTex * 2.0f + 2.0f) return false;
-				std::sort(runs.begin(), runs.end(),
-				          [](const StoneGRun &a, const StoneGRun &b){ return a.lo < b.lo; });
-				return true;
-			};
-			std::vector<float> rowProf(size_t(useMipH), 0.0f);
-			for (int y = 0; y < useMipH; ++y) {
-				float s = 0.0f;
-				for (int x = 0; x < useMipW; ++x) s += GTX(x, y);
-				rowProf[y] = s / float(useMipW);
-			}
-			const bool hOK = profileRuns(rowProf, pitchYtex, grid.h);
-			if (!hOK) grid.h.clear();
-			// bands between consecutive horizontal grooves (wrapping); with no
-			// horizontal grooves (vertical planks) one band spans the extent.
-			if (grid.h.empty()) grid.bandY.push_back({0.0f, float(useMipH)});
-			else for (size_t g = 0; g < grid.h.size(); ++g) {
-				const float y0 = grid.h[g].hi;
-				float y1 = grid.h[(g + 1) % grid.h.size()].lo;
-				if (y1 <= y0) y1 += float(useMipH);
-				grid.bandY.push_back({y0, y1});
-			}
-			grid.vPerBand.resize(grid.bandY.size());
-			bool anyV = false;
-			for (size_t b = 0; b < grid.bandY.size(); ++b) {
-				std::vector<float> colProf(size_t(useMipW), 0.0f);
-				const int yy0 = int(std::ceil(grid.bandY[b].first));
-				const int rows = std::max(1, int(std::floor(grid.bandY[b].second)) - yy0);
-				for (int x = 0; x < useMipW; ++x) {
-					float s = 0.0f;
-					for (int y = yy0; y < yy0 + rows; ++y) s += GTX(x, ((y % useMipH) + useMipH) % useMipH);
-					colProf[x] = s / float(rows);
-				}
-				if (profileRuns(colProf, pitchXtex, grid.vPerBand[b])) anyV = true;
-				else grid.vPerBand[b].clear();
-			}
-			grid.valid = hOK || anyV;
-			// row template (one v-period): step/floor/step per wide groove (a
-			// flat mortar floor between the pads), step/step around the centre
-			// for narrow grooves, plateau rows shoulder-to-shoulder between.
-			if (grid.valid && !grid.h.empty()) {
-				const int nh = int(grid.h.size());
-				for (int g = 0; g < nh; ++g) {
-					const int bAbove = (g + nh - 1) % nh;
-					const int bBelow = g;
-					const float lo = grid.h[g].lo, hi = grid.h[g].hi;
-					const float A = lo - kPadTex, B = lo + kPadTex;
-					const float C = hi - kPadTex, D = hi + kPadTex;
-					if (C - B >= kMinFloorTex) {
-						rowTpl.push_back({A, B, 1, bAbove, bAbove});
-						rowTpl.push_back({B, C, 2, bAbove, bBelow});
-						rowTpl.push_back({C, D, 1, bBelow, bBelow});
-					} else {
-						const float M = 0.5f * (lo + hi);
-						rowTpl.push_back({A, M, 1, bAbove, bAbove});
-						rowTpl.push_back({M, D, 1, bBelow, bBelow});
-					}
-					float nA = grid.h[(g + 1) % nh].lo - kPadTex;
-					if (g + 1 == nh) nA += float(useMipH);
-					rowTpl.push_back({D, nA, 0, bBelow, bBelow});
-				}
-			} else if (grid.valid) {
-				rowTpl.push_back({0.0f, float(useMipH), 0, 0, 0});
-			}
-			// column line template per band (same construction along x)
-			colTpl.resize(grid.vPerBand.size());
-			for (size_t b = 0; b < grid.vPerBand.size() && grid.valid; ++b) {
-				for (const StoneGRun &r : grid.vPerBand[b]) {
-					const float A = r.lo - kPadTex, B = r.lo + kPadTex;
-					const float C = r.hi - kPadTex, D = r.hi + kPadTex;
-					colTpl[b].push_back(A);
-					if (C - B >= kMinFloorTex) { colTpl[b].push_back(B); colTpl[b].push_back(C); }
-					else                         colTpl[b].push_back(0.5f * (r.lo + r.hi));
-					colTpl[b].push_back(D);
-				}
-				std::sort(colTpl[b].begin(), colTpl[b].end());
-				for (size_t i = 1; i < colTpl[b].size(); ++i)
-					if (colTpl[b][i] - colTpl[b][i-1] < 0.25f) { grid.valid = false; break; }
-			}
-			// sanity: rows strictly ascending + contiguous (overlapping shoulder
-			// pads from grooves closer than 2*pad would fold the layout) —
-			// pathological content falls back to the adaptive fan path.
-			for (size_t i = 0; i < rowTpl.size() && grid.valid; ++i) {
-				if (rowTpl[i].y1 - rowTpl[i].y0 < 0.05f) { grid.valid = false; break; }
-				if (i + 1 < rowTpl.size() &&
-				    std::fabs(rowTpl[i+1].y0 - rowTpl[i].y1) > 0.01f) { grid.valid = false; break; }
-			}
+			// The FINDING itself now lives in MeshOps_FindStoneGrooveGrid (MeshOps.h)
+			// so the v4 lattice can reuse the identical code; the per-LINE rep
+			// heights below stay private to this bake.
+			MeshOps_FindStoneGrooveGrid(hm, useMip, pitchXtex, pitchYtex, grid, rowTpl, colTpl);
 			std::fprintf(stderr,
 				"[STONE] '%s' groove grid %s: %zu h-grooves, %zu bands, v-grooves/band",
 				matName, grid.valid ? "DETECTED" : "rejected", grid.h.size(), grid.bandY.size());
