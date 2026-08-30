@@ -338,7 +338,8 @@ void buildSliceTrig(int slices) {
 // trivial - the sample position is rounded to an integer pixel immediately
 // afterwards, so 0.60 % on log2 and 0.31 % on exp2 (measured maxima over their
 // whole reduced ranges) is ~1 px on a 256 px step at the very outside.
-// UNREACHABLE from the default uniform path.
+// THIS IS THE DEFAULT LADDER SINCE 2026-08-30 (--ssao_gtao_step_dist=1);
+// --ssao_gtao_step_dist=0 restores the uniform one and this code goes cold.
 static inline float ssaoLog2(float x) {
 	union { float f; uint32_t i; } u; u.f = x;
 	const float e = float(int((u.i >> 23) & 0xFFu) - 127);
@@ -610,26 +611,37 @@ void Render_SSAO() {
 		int steps  = fds::FeatureFlags::ssao_gtao_steps();  steps  = std::max(1, std::min(16, steps));
 		if (temporal) steps = std::max(1, steps >> 1);
 		const float thickness = fds::FeatureFlags::ssao_gtao_thickness();
-		// The screen-space march radius CAP. Shipped as a bare 256.0f literal;
-		// exposed because in greets it is what actually sets the AO scale (it
-		// binds on 92-100 %% of covered pixels at the review poses), not
-		// --ssao_radius. Default 256 = byte-null.
+		// The screen-space march radius CAP. Shipped as a bare 256.0f literal
+		// until 2026-08-30; exposed because in greets it is what actually set the
+		// AO scale (it bound on 92-100 %% of covered pixels at the review poses),
+		// not --ssao_radius. DEFAULT 1024 SINCE 2026-08-30 (Gil-Ad's ruling
+		// "all scenes", ledger decision f2f179f017df): at 1024 the cap stops
+		// binding at greets' review poses, so the AO scale is the authored world
+		// radius again. --ssao_gtao_srad_max=256 restores the old literal.
 		float sradMax = fds::FeatureFlags::ssao_gtao_srad_max();
 		if (sradMax < 2.0f) sradMax = 2.0f;
-		// --ssao_gtao_step_dist: 0 uniform (byte-null), 1 geometric, 2 squared.
+		// --ssao_gtao_step_dist: 0 uniform (the pre-2026-08-30 shipped ladder),
+		// 1 geometric (DEFAULT since 2026-08-30), 2 squared.
 		const int stepDist = fds::FeatureFlags::ssao_gtao_step_dist();
 		float stepMin = fds::FeatureFlags::ssao_gtao_step_min();
 		if (stepMin < 0.25f) stepMin = 0.25f;
 		const float invSteps = 1.0f / float(steps);
 		// NEAR-STEP GUARDS. Both exist because the geometric ladder puts the
 		// first sample a few pixels out, where the uniform ladder put it 48-192
-		// px out; neither was ever needed before. AUTO (-1) therefore means
-		// "on with a front-loaded ladder, off with the uniform one", which is
-		// also exactly what keeps the shipped default byte-null.
+		// px out; neither was ever needed before. AUTO (-1, the default for both)
+		// means "on with a front-loaded ladder, off with the uniform one" -- and
+		// since --ssao_gtao_step_dist now DEFAULTS to 1 that is ON by default,
+		// while --ssao_gtao_step_dist=0 still switches both off, which is what
+		// keeps the pre-2026-08-30 uniform arm reachable BYTE-EXACTLY.
+		// THE AUTO BIAS VALUE IS 0.2 BY GIL-AD'S RULING of 2026-08-30 (ledger
+		// decision f2f179f017df; his words: "I tried increasing values until I
+		// got something that makes the shade there go away - so it's kind of a
+		// look judge, no hard data"). It was 0.05 while the guards were still a
+		// candidate. An explicit --ssao_gtao_bias=<v> overrides it either way.
 		const int tcFlag = fds::FeatureFlags::ssao_gtao_thick_clamp();
 		const bool thickClamp = (tcFlag < 0) ? (stepDist != 0) : (tcFlag != 0);
 		const float bFlag = fds::FeatureFlags::ssao_gtao_bias();
-		const float biasW = (bFlag < 0.0f) ? ((stepDist != 0) ? 0.05f : 0.0f) : bFlag;
+		const float biasW = (bFlag < 0.0f) ? ((stepDist != 0) ? 0.2f : 0.0f) : bFlag;
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
 		// SECTOR SCALE — the horizon angles are consumed ONLY as h*32 (32-sector
