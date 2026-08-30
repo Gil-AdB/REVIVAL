@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# tools/hooks/pre-commit — NOT INSTALLED. Install instructions at the bottom.
+#
+# Runs tools/lint.sh over the STAGED files only:
+#   - tools/flag_readers.py   every FDS_FLAG_* in FeatureFlags.def has a reader
+#   - .semgrep/revival.yml    the three pattern rules
+#
+# WHY STAGED-ONLY. The tree carries pre-existing findings — one ERROR
+# (FDS/RENDER/Shadows.cpp:163, the g_shadowMode namespace-scope read) and ~100
+# raw-getenv WARNINGs. A hook that scanned the whole tree would refuse every
+# commit from the moment it was installed, and the second thing anyone would do
+# is delete it. Scanning what you are about to commit means the hook only ever
+# objects to a file you actually touched.
+#
+# WHAT BLOCKS A COMMIT: an ERROR-severity finding, or a flag with no reader.
+# The raw-getenv census is WARNING and never blocks; it is a report.
+#
+# ESCAPE HATCH: `git commit --no-verify` skips this entirely. That is the right
+# move when you are committing a WIP or someone else's code — the hook is a
+# reminder, not an authority, and it has no way to know your intent.
+
+set -uo pipefail
+ROOT="$(git rev-parse --show-toplevel)" || exit 0
+LINT="$ROOT/tools/lint.sh"
+
+[ -x "$LINT" ] || exit 0          # lint.sh gone / not executable: never block a commit
+
+if ! "$LINT" --staged; then
+	cat >&2 <<'MSG'
+
+pre-commit: the checks above objected to a file in this commit.
+  - to see the whole picture:      tools/lint.sh
+  - to commit anyway:              git commit --no-verify
+MSG
+	exit 1
+fi
+exit 0
+
+# ── INSTALL ────────────────────────────────────────────────────────────────
+#
+# Deliberately NOT installed. `.git/hooks/` is not tracked, and in this repo it
+# is SHARED: ~30 worktrees hang off one .git directory (git worktree list), so
+# installing a hook installs it for every branch and every agent working in
+# them at once. That is a decision for the repo owner, not a side effect of a
+# groundwork commit.
+#
+# To install it for real (from the main checkout):
+#
+#     ln -s ../../tools/hooks/pre-commit "$(git rev-parse --git-common-dir)/hooks/pre-commit"
+#
+# A SYMLINK, not a copy, so edits to this file take effect without reinstalling.
+# Note --git-common-dir (not --git-dir): inside a worktree, --git-dir points at
+# .git/worktrees/<name>, whose hooks/ is not the one git runs.
+#
+# To try it once without installing anything:
+#
+#     tools/hooks/pre-commit
+#
+# To remove it:
+#
+#     rm "$(git rev-parse --git-common-dir)/hooks/pre-commit"

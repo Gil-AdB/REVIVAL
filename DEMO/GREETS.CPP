@@ -3,6 +3,7 @@
 #include <Threads.h>
 #include <Base/RenderStats.h>
 #include <Base/FeatureFlags.h>
+#include <Base/Provenance.h>
 #include "FrameProfiler.h"
 
 // ---- Greets centering diagnostics --------------------------------------
@@ -4212,6 +4213,17 @@ struct GreetsScene : SceneDriver {
 						std::fwrite(row.data(), 1, row.size(), f);
 					}
 					std::fclose(f);
+					// Provenance sidecar: /tmp/greets_dump_N_tT.json beside the
+					// PPM. THIS is the dump that used to be unreadable a day
+					// later — an interactive grab has no --snapshot recipe to
+					// look back at, so without the sidecar the flags and the
+					// pose exist only in the terminal scrollback. The PPM bytes
+					// above are untouched.
+					fds::Provenance::SetScene("greets");
+					fds::Provenance::SetTag("harness", "interactive-grab");
+					fds::Provenance::SetTimeOverride(dumpT);
+					fds::Provenance::WriteSidecar(path, xr, yr, "ppm");
+					fds::Provenance::SetTimeOverride(-1);
 					std::fprintf(stderr, "[GREETS] dumped %s (t=%d)\n", path, dumpT);
 				}
 				// FDS_XPAR_TRACE: write the dumped frame's transparent composite

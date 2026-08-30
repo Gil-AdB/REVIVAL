@@ -329,3 +329,7 @@ Runtime/*.ppm
 scratchpad/gate_*/
 scratchpad/*.log
 .groundwork/cache.sqlite
+
+# Lint toolchain venv (tools/lint.sh creates it on demand; semgrep + deps are
+# ~150 MB of wheels that have no business in the history)
+tools/.venv-semgrep/

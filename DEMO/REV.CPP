@@ -469,6 +469,7 @@ material global ID or ptr
 #include <float.h>
 #include <Base/TriMesh.h>
 #include <Base/FeatureFlags.h>
+#include <Base/Provenance.h>
 #include <RENDER/EnvCube.h>
 #include <RENDER/ChunkOcclusion.h>  // g_occlSnapshotInert: pin dumps keep the cull inert
 #include <RENDER/VizCycle.h>        // VizCycle_Step: the X / Shift+X debug-viz cycle
@@ -1388,6 +1389,11 @@ int main(int argc, const char *argv[])
 	// properly, did you include SDL_main.h in the file containing main()?".
 	SDL_SetMainReady();
 #endif
+	// Snapshot provenance: record the invocation BEFORE the asset-root chdir,
+	// which would otherwise leave a relative argv[0] naming nothing. Every PPM
+	// this process writes gets a sidecar quoting this argv (FDS/Base/Provenance.cpp).
+	fds::Provenance::SetArgv(argc, argv);
+
 	if (WantChdirToAssetRoot(argc, argv)) {
 		ChdirToAssetRoot(argc > 0 ? argv[0] : "");
 	} else {

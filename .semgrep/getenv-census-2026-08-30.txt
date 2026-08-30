@@ -1,0 +1,152 @@
+RAW-getenv CENSUS — baseline taken 2026-08-30 at commit f0d023c9
+Rule: .semgrep/revival.yml r1 (revival-raw-getenv), run via tools/lint.sh
+
+semgrep findings              : 102  across 27 files
+grep getenv call sites (all)  : 199  across 35 files
+  of which in FeatureFlags.cpp: 6  (the sanctioned implementation, excluded by the rule)
+  of which in UNPARSED files  : 52  (semgrep's C++ parser rejected these outright; NO rule ran)
+  remainder = allowlisted names (documented instruments, HOME, the dev-rig gates)
+
+THE UNPARSED FILES — a clean report here is not a clean file:
+    5 getenv  DEMO/CITY.CPP
+    8 getenv  DEMO/MaterialEditor.cpp
+    0 getenv  FDS/IMGCODE/stb_image.h
+   18 getenv  FDS/RENDER/DeferredSurfaceKernel.cpp
+    7 getenv  FDS/RENDER/DeferredVolumetric.cpp
+   14 getenv  FDS/RENDER/EnvBake.cpp
+
+FINDINGS BY FILE (semgrep, descending):
+   23  DEMO/Snapshot.cpp
+   10  FDS/RENDER/MirrorShatter.cpp
+    9  DEMO/GREETS.CPP
+    8  FDS/RENDER/GreetsMirror.cpp
+    7  DEMO/MeshOps.cpp
+    7  FDS/RENDER/Shadows.cpp
+    3  DEMO/CloakTest.cpp
+    3  DEMO/GreetsDisco.cpp
+    3  DEMO/REV.CPP
+    3  FDS/RENDER/DeferredEdgeAA.cpp
+    3  FDS/RENDER/DeferredFastFog.cpp
+    3  FDS/RENDER/RENDER.CPP
+    2  DEMO/MirrorTestDriver.cpp
+    2  FDS/FILLERS/Mekalele.h
+    2  FDS/RENDER/DeferredDisplaceRef.cpp
+    2  FDS/RENDER/DeferredLightLists.cpp
+    2  FDS/RENDER/DeferredSSAO.cpp
+    1  DEMO/FOUNTAIN.CPP
+    1  DEMO/ProceduralWater.cpp
+    1  DEMO/ReproHarness.cpp
+    1  FDS/Base/WinCompat.h
+    1  FDS/FILLERS/FILLERS.CPP
+    1  FDS/FILLERS/ShadowMap.h
+    1  FDS/FLD/FLD_READ.CPP
+    1  FDS/RENDER/Hdr.cpp
+    1  FDS/RENDER/TailProf.h
+    1  FDS/Threads.h
+
+EVERY FINDING, file:line and the env name:
+  DEMO/CloakTest.cpp:324  "FDS_CLOAK_PARALLEL"
+  DEMO/CloakTest.cpp:331  "FDS_CLOAK_NOMIRROR"
+  DEMO/CloakTest.cpp:365  "FDS_CLOAK_DUMP"
+  DEMO/FOUNTAIN.CPP:3075  "FNT_DUMP_DIR"
+  DEMO/GREETS.CPP:135  "FDS_TINT_RED"
+  DEMO/GREETS.CPP:875  "FDS_GREETS_SHATTER_BOXDUMP"
+  DEMO/GREETS.CPP:953  "FDS_GREETS_SHATTER_SCAN"
+  DEMO/GREETS.CPP:1046  "FDS_GREETS_SHATTER_SCAN"
+  DEMO/GREETS.CPP:1966  "FDS_MOMY_SUBDIV"
+  DEMO/GREETS.CPP:3764  "FDS_GREETS_SHATTER"
+  DEMO/GREETS.CPP:4155  "FDS_RNDR_BENCH"
+  DEMO/GREETS.CPP:4313  "FDS_GREETS_FACEFIND"
+  DEMO/GREETS.CPP:4343  "FDS_GREETS_FACEFIND"
+  DEMO/GreetsDisco.cpp:162  "FDS_DISCO_POS"
+  DEMO/GreetsDisco.cpp:604  "FDS_DISCO_DUMP"
+  DEMO/GreetsDisco.cpp:620  "FDS_DISCO_SYNTH"
+  DEMO/MeshOps.cpp:589  "FDS_CONE_HIST"
+  DEMO/MeshOps.cpp:668  "FDS_STONE_CENSUS_BOX"
+  DEMO/MeshOps.cpp:804  "FDS_CONE_HIST"
+  DEMO/MeshOps.cpp:1446  "FDS_SUBDIV_DIAG"
+  DEMO/MeshOps.cpp:1663  "FDS_SUBDIV_DIAG"
+  DEMO/MeshOps.cpp:6197  "FDS_STONE_FOLD_HIST"
+  DEMO/MeshOps.cpp:6787  "FDS_SUBDIV_DIAG"
+  DEMO/MirrorTestDriver.cpp:458  "FDS_SHATTER_OUT"
+  DEMO/MirrorTestDriver.cpp:522  "FDS_SHATTER_DUMP"
+  DEMO/ProceduralWater.cpp:562  "FDS_WATERTEX_DUMP"
+  DEMO/REV.CPP:542  "FDS_CHDIR_ASSETS"
+  DEMO/REV.CPP:1319  "FDS_SKIP_INTRO"
+  DEMO/REV.CPP:1600  "FDS_ENV_CUBE_SELFTEST"
+  DEMO/ReproHarness.cpp:174  "FDS_GREETS_FOV"
+  DEMO/Snapshot.cpp:329  "FNTSNAP_POS"
+  DEMO/Snapshot.cpp:332  "FNTSNAP_FWD"
+  DEMO/Snapshot.cpp:335  "FNTSNAP_FOV"
+  DEMO/Snapshot.cpp:356  "DUMP_SURFACES"
+  DEMO/Snapshot.cpp:421  "DUMP_SURFACES"
+  DEMO/Snapshot.cpp:432  "DUMP_MESHES"
+  DEMO/Snapshot.cpp:653  "FDS_GREETS_FOV"
+  DEMO/Snapshot.cpp:700  "FDS_DUMP_TXTR"
+  DEMO/Snapshot.cpp:786  "FDS_SNAPSHOT_ZDUMP"
+  DEMO/Snapshot.cpp:808  "FDS_SNAPSHOT_NRMDUMP"
+  DEMO/Snapshot.cpp:827  "FDS_SNAPSHOT_GBUFDUMP"
+  DEMO/Snapshot.cpp:972  "GBUF_PROBE"
+  DEMO/Snapshot.cpp:1082  "GBUF_PROBE"
+  DEMO/Snapshot.cpp:1100  "GBUF_NPROBE"
+  DEMO/Snapshot.cpp:1194  "FDS_CHASE_BEATMAP"
+  DEMO/Snapshot.cpp:1195  "FDS_CHASE_EVENTS"
+  DEMO/Snapshot.cpp:1197  "FDS_CHASE_MUSIC_START_TICK"
+  DEMO/Snapshot.cpp:1283  "CITYSNAP_VIEW"
+  DEMO/Snapshot.cpp:1370  "CITYSNAP_RIPPLE"
+  DEMO/Snapshot.cpp:1381  "CITYSNAP_NOSRAND"
+  DEMO/Snapshot.cpp:1382  "CITYSNAP_PAUSEMODE"
+  DEMO/Snapshot.cpp:1478  "CITYSNAP_POS"
+  DEMO/Snapshot.cpp:1481  "CITYSNAP_FWD"
+  FDS/Base/WinCompat.h:87  name
+  FDS/FILLERS/FILLERS.CPP:2326  "FDS_TBR_STATS"
+  FDS/FILLERS/Mekalele.h:135  "FDS_MIRROR_CLAMP_STATS"
+  FDS/FILLERS/Mekalele.h:137  "FDS_NO_MIRROR_WALLZ_CLAMP"
+  FDS/FILLERS/ShadowMap.h:407  "FDS_SHADOW_SWZ_SHAPE"
+  FDS/FLD/FLD_READ.CPP:26  "FDS_FLD_VERBOSE"
+  FDS/RENDER/DeferredDisplaceRef.cpp:1522  "FDS_REFRENDER_DUMP"
+  FDS/RENDER/DeferredDisplaceRef.cpp:1534  "FDS_REFRENDER_DEBUG_PX"
+  FDS/RENDER/DeferredEdgeAA.cpp:166  "FDS_AA_VIZ_SPLIT"
+  FDS/RENDER/DeferredEdgeAA.cpp:231  "FDS_AA_SCALAR"
+  FDS/RENDER/DeferredEdgeAA.cpp:312  "FDS_AA_PROF"
+  FDS/RENDER/DeferredFastFog.cpp:1436  "FDS_FOG_COLUMNS_VEC"
+  FDS/RENDER/DeferredFastFog.cpp:1817  "FDS_FOG_COLVEC_SELFTEST"
+  FDS/RENDER/DeferredFastFog.cpp:3134  "FDS_FOG_COMPOSITE_VEC"
+  FDS/RENDER/DeferredLightLists.cpp:214  "FDS_LIGHTRECT_AUDIT"
+  FDS/RENDER/DeferredLightLists.cpp:346  "FDS_CONTRIB_CULL_THR"
+  FDS/RENDER/DeferredSSAO.cpp:382  "FDS_SSAO_DUMP_PATH"
+  FDS/RENDER/DeferredSSAO.cpp:1575  "FDS_SSAO_EVERY"
+  FDS/RENDER/GreetsMirror.cpp:2323  "FDS_BOUNCE_PROBE"
+  FDS/RENDER/GreetsMirror.cpp:2413  "FDS_BOUNCE_PROBE"
+  FDS/RENDER/GreetsMirror.cpp:2504  "FDS_MIRROR_PROF_EVERY"
+  FDS/RENDER/GreetsMirror.cpp:3343  "FDS_MIRROR_RTT_UV05"
+  FDS/RENDER/GreetsMirror.cpp:3693  "FDS_MIRROR_RTT_DUMP"
+  FDS/RENDER/GreetsMirror.cpp:3710  "FDS_MIRROR_RTT_MARK"
+  FDS/RENDER/GreetsMirror.cpp:3725  "FDS_MIRROR_RTT_DUMP"
+  FDS/RENDER/GreetsMirror.cpp:3890  "FDS_MIRROR_RECURSE_FLAT"
+  FDS/RENDER/Hdr.cpp:169  "FDS_SHARED_BP"
+  FDS/RENDER/MirrorShatter.cpp:182  "FDS_TINT_RED"
+  FDS/RENDER/MirrorShatter.cpp:766  "FDS_SHARD_REFL_PROF"
+  FDS/RENDER/MirrorShatter.cpp:777  "FDS_SHARD_REFL_LOOP"
+  FDS/RENDER/MirrorShatter.cpp:778  "FDS_SHARD_REFL_LOOP"
+  FDS/RENDER/MirrorShatter.cpp:1080  "FDS_SHARD_REFL_SERIAL"
+  FDS/RENDER/MirrorShatter.cpp:1085  "FDS_SHARD_REFL_PROF"
+  FDS/RENDER/MirrorShatter.cpp:1178  "FDS_SHARD_ATLAS_DUMP"
+  FDS/RENDER/MirrorShatter.cpp:1181  "FDS_SHARD_ATLAS_FRAME"
+  FDS/RENDER/MirrorShatter.cpp:1182  "FDS_SHARD_ATLAS_FRAME"
+  FDS/RENDER/MirrorShatter.cpp:1304  "FDS_SHARD_REFL_PROF"
+  FDS/RENDER/RENDER.CPP:1182  "FDS_XPAR_BATCHLOG"
+  FDS/RENDER/RENDER.CPP:1233  "FDS_XPAR_TILEVIZ"
+  FDS/RENDER/RENDER.CPP:1487  "FDS_XPAR_MIRRORVIZ"
+  FDS/RENDER/Shadows.cpp:761  "FDS_SHADOW_TILE_GRID"
+  FDS/RENDER/Shadows.cpp:1177  "FDS_SHADOW_TILE_PROBE"
+  FDS/RENDER/Shadows.cpp:1225  "FDS_SHADOW_DUMP_LIGHT"
+  FDS/RENDER/Shadows.cpp:1290  "FDS_SHADOW_PROF_INTERVAL"
+  FDS/RENDER/Shadows.cpp:1345  "FDS_SHADOW_PROF_INTERVAL"
+  FDS/RENDER/Shadows.cpp:1373  "FDS_SHADOW_PROF_INTERVAL"
+  FDS/RENDER/Shadows.cpp:1396  "FDS_SHADOW_PROF_INTERVAL"
+  FDS/RENDER/TailProf.h:173  "FDS_THREADS"
+  FDS/Threads.h:47  "FDS_THREADS"
+
+TWO NAMES ARE READ BOTH WAYS — registered in FeatureFlags.def AND read by
+a second, raw getenv:  FDS_CHDIR_ASSETS, FDS_DUMP_MATS

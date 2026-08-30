@@ -1,0 +1,180 @@
+# .semgrep/revival.yml — the standing pattern checks for this tree.
+#
+# Run them with `tools/lint.sh` (which also runs tools/flag_readers.py) rather
+# than invoking semgrep by hand: lint.sh knows the two things about this repo
+# that a bare `semgrep --config .semgrep` gets WRONG.
+#
+#   TRAP 1 — UPPERCASE SOURCE EXTENSIONS ARE INVISIBLE TO SEMGREP.
+#   This tree is half `REV.CPP` / `GREETS.CPP` / `FDS_DECS.H` and half
+#   `Config.cpp` / `SkyCube.h`. Semgrep maps extensions to languages
+#   CASE-SENSITIVELY, so `.CPP` and `.H` are "unknown" and are dropped at
+#   target selection. MEASURED 2026-08-30: `semgrep --config … DEMO FDS`
+#   scanned 667 files — 589 `.h`, 77 `.cpp`, 1 `.inl`, and ZERO `.CPP`. Every
+#   scene file in DEMO/ was silently unscanned. `--scan-unknown-extensions`
+#   alone does NOT fix it (still 667); the files must ALSO be named as explicit
+#   targets. lint.sh enumerates them. A rule that "finds nothing" here has
+#   usually just not been shown the file.
+#
+#   TRAP 2 — the rules below are deliberately NARROW. Each one encodes a defect
+#   this repo has actually shipped, with the evidence in its message. A rule
+#   nobody trusts gets `--disable`d and then the whole file is decoration.
+
+rules:
+
+# ─── r1 ─────────────────────────────────────────────────────────────────────
+- id: revival-raw-getenv
+  languages: [cpp]
+  severity: WARNING
+  message: >-
+    Raw getenv(). Runtime tunables belong in FDS/Base/FeatureFlags.def, which
+    gives the knob a --cli-name, an FDS_ENV name, a default, a category, help
+    text, --help listing, --dump-flags, the tune console, ParamScript, and
+    tools/flag_audit.py + tools/flag_readers.py coverage. A raw getenv has NONE
+    of that: it is invisible to every audit, cannot be set from the command
+    line, and does not appear in a snapshot's provenance sidecar -- so a render
+    it changed is a render nobody can reproduce. Two names here are read BOTH
+    ways (FDS_CHDIR_ASSETS, FDS_DUMP_MATS are registered flag env names AND
+    read by a second, raw getenv), which is the concrete form of the hazard.
+    Allowlisted below: the names docs/GRAPHICS_PIPELINE.md documents as
+    measurement instruments, HOME, and the gates whose only readers are the
+    three dev rigs (Snapshot.cpp, MaterialEditor.cpp, DisplaceTest.cpp).
+  metadata:
+    category: correctness
+    confidence: HIGH
+    evidence: >-
+      docs/GRAPHICS_PIPELINE.md §7 ("Read it anywhere as
+      fds::FeatureFlags::name()"); docs/S1_PIXEL_DISPLACEMENT_PLAN.md:87
+      ("Runtime tunables via FDS/Base/FeatureFlags.def, never raw getenv").
+  paths:
+    exclude:
+      # The FeatureFlags implementation IS the sanctioned getenv site: this is
+      # the one file whose job is to turn FDS_* env names into flag values.
+      - /FDS/Base/FeatureFlags.cpp
+  patterns:
+    - pattern-either:
+        - pattern: getenv($NAME)
+        - pattern: std::getenv($NAME)
+        - pattern: ::getenv($NAME)
+    - metavariable-regex:
+        metavariable: $NAME
+        # Negative lookahead: everything EXCEPT the allowlist is a finding.
+        # Group 1, documented in docs/GRAPHICS_PIPELINE.md as instruments
+        # (FDS_GREETS_CAM:286, FDS_TAIL_PROF:287, FDS_SSAO_STATS:156/330/360,
+        # FDS_SSAO_NOSIMD:349, FDS_HDR_SCAN:125). The brief said "four
+        # documented names"; the doc actually names five, and this is the five.
+        # Group 2, HOME: POSIX, not a project knob (path expansion in
+        # MaterialImport.cpp:57).
+        # Group 3, the dev-rig gates: every one of these is read ONLY inside
+        # DEMO/Snapshot.cpp, DEMO/MaterialEditor.cpp or DEMO/DisplaceTest.cpp
+        # -- harnesses, not engine or scene code. Enumerated rather than
+        # globbed on /_TEST$/ so that adding one is a visible edit here.
+        regex: >-
+          ^(?!"(FDS_GREETS_CAM|FDS_TAIL_PROF|FDS_SSAO_STATS|FDS_SSAO_NOSIMD|FDS_HDR_SCAN|HOME|CLEARMAP_TEST|EDIT_TEST|FOCUS_TEST|IMPORT_TEST|IMPORT_TEST_AFTER|LIGHT_TEST|LIGHTGROUP_TEST|MAPVIZ_TEST|OBJSCALE_TEST|PICK_TEST|SPLIT_TEST|SPOTEDIT_TEST|SURF_TEST|SURF_TEST_AFTER|UV_TEST|XPARTEST_TRI_COUNT|FDS_PBRTEST_CAM|FDS_CONETEST_CAM|FDS_DISPLACETEST_[A-Z_]+)"$).*$
+
+# ─── r2 ─────────────────────────────────────────────────────────────────────
+- id: revival-shell-bulk-git-mutation
+  languages: [generic]
+  severity: ERROR
+  message: >-
+    A tool/battery script must never stage or discard the WHOLE working tree.
+    `git add -A` / `git add .` sweep up whatever else is in flight -- and this
+    repo's working tree is routinely full of multi-hundred-MB PPM batteries,
+    untracked TEXTURES/ bakes and .backups/ dirs that .gitignore does not cover
+    -- while `git reset --hard` and `git stash` DESTROY uncommitted work with
+    no prompt, in a tree where several agents share worktrees off one .git.
+    A script that needs to commit must name its paths: `git add tools/x.py`.
+    (Currently 0 hits across 88 scripts: this rule is a guard on a property the
+    tree HAS, not a report on one it lost. Control run 2026-08-30 on a throwaway
+    script: fires on all four dangerous forms, silent on `git stash list`,
+    `git add tools/x.py` and an identifier spelled legit_git_add_all.)
+  metadata:
+    category: safety
+    confidence: HIGH
+  paths:
+    include:
+      - "/tools/*.sh"
+      - "/scratchpad/*.sh"
+  pattern-regex: >-
+    (?<![-\w])git\s+(add\s+(-A\b|--all\b|\.(?=\s|$))|reset\s+--hard\b|stash(?!\s+list)\b)
+
+# ─── r3 ─────────────────────────────────────────────────────────────────────
+- id: revival-featureflags-at-namespace-scope
+  languages: [cpp]
+  severity: ERROR
+  message: >-
+    A FeatureFlags read in a NAMESPACE-SCOPE initialiser runs before main()
+    parses argv, so the --cli form of that flag can never move this value. THE
+    MEASURED CASE (2026-08-08, FDS/RENDER/Shadows.cpp:163): `std::atomic<...>
+    g_shadowMode{ FeatureFlags::shadow_polyid() ? ... }` -- an investigation
+    ran `--no-shadow_polyid`, saw no change, and concluded "PolyId is not the
+    cause". It was measuring a flag that never took effect: with the ENV form
+    FDS_SHADOW_POLYID=0 (which the flag table's eager env scan DOES see) the
+    same experiment recovered 100% of the projector's direct term. This does
+    not merely produce a dead dial -- it produces a WRONG VERDICT that then
+    gets written down. Fix by reading the flag lazily inside the function that
+    needs it, or in an explicit init called after flag parsing.
+  metadata:
+    category: correctness
+    confidence: HIGH
+    evidence: >-
+      docs/SHADING_CONTRACT.md:1046-1050; docs/GPU_BENCHMARK_PLAN.md:2937;
+      FDS/RENDER/Shadows.cpp:155-163 (the trap is commented in place).
+  patterns:
+    - pattern-either:
+        - pattern: fds::FeatureFlags::$F(...)
+        - pattern: FF::$F(...)
+    # "Not inside any function body" == namespace/file scope. Verified against
+    # the known case: 1 finding tree-wide, and it is Shadows.cpp:163.
+    - pattern-not-inside: |
+        $RET $FN(...) { ... }
+
+# ─── CANDIDATES CONSIDERED FOR THE THIRD SLOT AND *NOT* WRITTEN ─────────────
+#
+# Recorded so the next person does not re-derive them, and so "only three
+# rules" reads as a decision rather than as the limit of the effort. Each was
+# tried against the tree before being dropped.
+#
+# c1. "getenv inside a loop body" (the per-pixel-getenv trap of
+#     GRAPHICS_PIPELINE.md §6 — "it tanked greets to seconds/frame once").
+#     EXPRESSIBLE: `pattern-inside: for(...){...}` is a real semgrep pattern.
+#     NOT WRITTEN because it fires on the wrong thing: this tree's universal
+#     idiom is `static const bool s = std::getenv("X") != nullptr;` — a
+#     FUNCTION-LOCAL STATIC, initialised exactly once, whose position relative
+#     to a loop is irrelevant. The defect is the MISSING `static`, and the
+#     `static` qualifier is exactly the token a semgrep C++ declaration pattern
+#     is least reliable about. A rule that flags the safe idiom and stays quiet
+#     about the unsafe one is worse than no rule. The honest check here is a
+#     profile, not a pattern.
+#
+# c2. "FeatureFlags::setDefault outside a *ApplyRunDefaults hook"
+#     (GRAPHICS_PIPELINE.md §7: "Global render flags must go in the scene's
+#     run-defaults hook, NOT in Initialize_*, or they leak across the demo
+#     sequence"). EXPRESSIBLE via pattern-not-inside plus a metavariable-regex
+#     on the function name. NOT WRITTEN because docs/SETDEFAULT_AUDIT.md is a
+#     whole document of case-by-case verdicts on these calls, several of which
+#     are deliberate exceptions. Encoding the rule without also encoding that
+#     audit's exception list produces confident findings that contradict a
+#     document someone already thought hard about. It belongs in the audit,
+#     which can carry a per-call reason; a linter cannot.
+#
+# c3. "one tile grid subscripted with another grid's ordinal" — the
+#     6×5 frame-raster vs 12×8 deferred-lighting vs 12×8 post-pass confusion
+#     that this project HAS shipped (`--xpar_tile_lights`, GRAPHICS_PIPELINE.md
+#     §6). NOT WRITTEN: all three ordinals are plain `int`. Semgrep OSS has no
+#     type information to separate them, so nothing distinguishes the right
+#     subscript from the wrong one at the pattern level. The fix is a type
+#     (distinct index structs), not a lint.
+#
+# c4. "getenv result dereferenced without a null check". NOT WRITTEN: it is a
+#     generic C hazard rather than a defect this repo has shipped, and the
+#     ~200 call sites would bury the three rules above in noise. Rules earn
+#     their place by naming a failure that actually happened HERE.
+#
+# c5. A parser-free (brace-walking) reimplementation of r3, to reach the files
+#     semgrep's C++ parser rejects outright (see lint.sh's UNPARSED report).
+#     BUILT AND RUN as a cross-check on 2026-08-30: it agrees with r3 exactly —
+#     Shadows.cpp:163 is the only namespace-scope brace-initialiser read in the
+#     tree — but it also emits ~44 hits that are ordinary in-function reads
+#     misclassified because preprocessor conditionals unbalance its brace
+#     count. Kept as corroboration for r3's answer, not shipped as a rule: 1
+#     true finding in 45 is not a check, it is a haystack.

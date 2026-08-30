@@ -1,0 +1,383 @@
+{
+ "schema": "revival/snapshot-provenance",
+ "schema_version": 1,
+ "written_utc": "2026-08-30T01:38:35Z",
+ "image": {
+  "path": "greets_t005965_color.ppm",
+  "format": "ppm",
+  "width": 1920,
+  "height": 1080
+ },
+ "scene": "greets",
+ "t": 5965,
+ "frame_time": 5965,
+ "camera": {
+  "pos": [
+   18.6564236,
+   3.21016479,
+   -58.8260384
+  ],
+  "fwd": [
+   -0.889560938,
+   -0.0746251494,
+   0.450679779
+  ],
+  "fov": 58.1092072,
+  "greets_cam": "18.6564236,3.21016479,-58.8260384,-0.889560938,-0.0746251494,0.450679779"
+ },
+ "argv": [
+  "./DEMO",
+  "--deferred",
+  "--hdr",
+  "--hdr-linear",
+  "--texture-filter=2",
+  "--ssao",
+  "--ssao-gtao",
+  "--greets_displace",
+  "--snapshot=greets@t=5965"
+ ],
+ "cwd": "/Users/gil-ad/work/rev-provenance/Runtime",
+ "build": {
+  "git_sha": "f0d023c975d5e459ccb6d5f48b9e95b97de8e043",
+  "git_dirty": false,
+  "git_describe": "f0d023c975d5e459ccb6d5f48b9e95b97de8e043",
+  "git_branch": "rev-provenance",
+  "configured_utc": "2026-08-30T01:36:44Z",
+  "source_dir": "/Users/gil-ad/work/rev-provenance",
+  "binary_dir": "/Users/gil-ad/work/rev-provenance/build",
+  "build_type": "Release"
+ },
+ "binary": {
+  "path": "/Users/gil-ad/work/rev-provenance/Runtime/DEMO",
+  "mtime_utc": "2026-08-30T01:37:08Z",
+  "size": 4428920
+ },
+ "flags": [
+  {
+   "name": "deferred",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": true
+  },
+  {
+   "name": "deferred_checkerboard",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "pbr",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "env_brdf_analytic",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "sh_ambient",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "diffuse_energy",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "pbr_multiscatter",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "shadows",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "shadow_cone_cull",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "shadow_skip_animated",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "shadow_dynamic",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "shadow_lightmap",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "shadow_lightmap_planar",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "env_refl",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "env_bake_fix",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "hdr",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": true
+  },
+  {
+   "name": "hdr_linear",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": true
+  },
+  {
+   "name": "bloom",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_mirror",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "no_greets_spots",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_omni_shadows",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_displace",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": true
+  },
+  {
+   "name": "greets_shadow_proxy",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_displace_flat_mirror",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "mirror_rtt",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "shard_deferred",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "ssao",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": true
+  },
+  {
+   "name": "ssao_gtao",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": true
+  },
+  {
+   "name": "greets_displace_seam_weld",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_displace_free_edge",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_displace_plane_normal",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_displace_block_level",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "greets_displace_geom_bisector",
+   "type": "bool",
+   "value": true,
+   "default": false,
+   "explicit": false
+  },
+  {
+   "name": "cone_strength",
+   "type": "float",
+   "value": 2,
+   "default": 0.0500000007,
+   "explicit": false
+  },
+  {
+   "name": "bloom_intensity",
+   "type": "float",
+   "value": 2,
+   "default": 0.600000024,
+   "explicit": false
+  },
+  {
+   "name": "hdr_refl_gain",
+   "type": "float",
+   "value": 4,
+   "default": 2.5,
+   "explicit": false
+  },
+  {
+   "name": "mirror_rtt_density",
+   "type": "float",
+   "value": 1024,
+   "default": 256,
+   "explicit": false
+  },
+  {
+   "name": "greets_shard_randomness",
+   "type": "float",
+   "value": 0.800000012,
+   "default": 1,
+   "explicit": false
+  },
+  {
+   "name": "greets_shard_fall_speed",
+   "type": "float",
+   "value": 0.800000012,
+   "default": 1.5,
+   "explicit": false
+  },
+  {
+   "name": "disco_bloom",
+   "type": "float",
+   "value": 0,
+   "default": 1.5,
+   "explicit": false
+  },
+  {
+   "name": "shadow_lightmap_texel_density",
+   "type": "float",
+   "value": 14.1999998,
+   "default": 0,
+   "explicit": false
+  },
+  {
+   "name": "shadow_lightmap_res",
+   "type": "int",
+   "value": 128,
+   "default": 16,
+   "explicit": false
+  },
+  {
+   "name": "texture_filter",
+   "type": "int",
+   "value": 2,
+   "default": 0,
+   "explicit": true
+  },
+  {
+   "name": "greets_omni_shadow_res",
+   "type": "int",
+   "value": 512,
+   "default": 256,
+   "explicit": false
+  },
+  {
+   "name": "greets_moving_omni_shadow_res",
+   "type": "int",
+   "value": 128,
+   "default": 0,
+   "explicit": false
+  },
+  {
+   "name": "greets_displace_border_mean",
+   "type": "int",
+   "value": 2,
+   "default": 0,
+   "explicit": false
+  }
+ ],
+ "env": {},
+ "tags": {
+  "harness": "snapshot"
+ }
+}

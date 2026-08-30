@@ -698,6 +698,50 @@ void FeatureFlags::dumpParamsJson(std::string &out) {
     (void)buf;
 }
 
+void FeatureFlags::dumpProvenanceFlagsJson(std::string &out) {
+    out += "[";
+    bool first = true;
+    auto emit = [&](const char *name, const char *type, const char *val,
+                    const char *def, bool set) {
+        if (!first) out += ",";
+        first = false;
+        out += "{\"name\":\"";     out += name;
+        out += "\",\"type\":\"";   out += type;
+        out += "\",\"value\":";    out += val;
+        out += ",\"default\":";    out += def;
+        out += ",\"explicit\":";   out += set ? "true" : "false";
+        out += "}";
+    };
+    for (int i = 0; i < kNumBool; ++i) {
+        const bool differs = (g_boolVals[i] != kBoolDefs[i].defaultValue);
+        if (!differs && !g_boolSet[i]) continue;
+        emit(kBoolDefs[i].name, "bool",
+             g_boolVals[i] ? "true" : "false",
+             kBoolDefs[i].defaultValue ? "true" : "false", g_boolSet[i]);
+    }
+    for (int i = 0; i < kNumFloat; ++i) {
+        // Bitwise compare: a float knob nudged to a value that PRINTS the same
+        // as the default is still a different render, and provenance that hides
+        // that is worse than none.
+        const bool differs = std::memcmp(&g_floatVals[i], &kFloatDefs[i].defaultValue,
+                                         sizeof(float)) != 0;
+        if (!differs && !g_floatSet[i]) continue;
+        char v[48], d[48];
+        std::snprintf(v, sizeof v, "%.9g", (double)g_floatVals[i]);
+        std::snprintf(d, sizeof d, "%.9g", (double)kFloatDefs[i].defaultValue);
+        emit(kFloatDefs[i].name, "float", v, d, g_floatSet[i]);
+    }
+    for (int i = 0; i < kNumInt; ++i) {
+        const bool differs = (g_intVals[i] != kIntDefs[i].defaultValue);
+        if (!differs && !g_intSet[i]) continue;
+        char v[32], d[32];
+        std::snprintf(v, sizeof v, "%d", g_intVals[i]);
+        std::snprintf(d, sizeof d, "%d", kIntDefs[i].defaultValue);
+        emit(kIntDefs[i].name, "int", v, d, g_intSet[i]);
+    }
+    out += "]";
+}
+
 bool FeatureFlags::setParamFromText(const char *name, const char *value) {
     const ParamRef r = findParam(name);
     // --vanilla is a startup-only ACTION (see applyVanilla). Applying it live

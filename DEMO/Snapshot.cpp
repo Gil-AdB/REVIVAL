@@ -14,6 +14,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
+#include <Base/Provenance.h>
 #include <FILLERS/Mekalele.h>
 #include <FILLERS/ShadowMap.h>
 #include <RENDER/LightmapBake.h>
@@ -96,6 +97,14 @@ void write_ppm(const char* path, const byte* bgra, int xres, int yres, int bpsl)
         std::fwrite(row.data(), 1, row.size(), f);
     }
     std::fclose(f);
+    // Provenance sidecar: <stem>.json beside the PPM. Separate file — the PPM
+    // bytes above are untouched, which is the gate this whole feature is held
+    // to. write_ppm is the single choke point for every colour dump in this
+    // harness (city / greets / fountain / chase / crash / pbrtest / filler /
+    // refltest / cuberefl / seaside / xpartest / spectest / halotest /
+    // conetest / lightmaptest / mirrortest / distsweep), so one call here
+    // provenances all of them.
+    fds::Provenance::WriteSidecar(path, xres, yres, "ppm");
     std::fprintf(stderr, "[SNAPSHOT] wrote %s\n", path);
 }
 
@@ -265,6 +274,13 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
         } else if (starts_with(a, "--out=")) {
             cfg.outDir = std::string(a.substr(strlen("--out=")));
         }
+    }
+    // Label every sidecar this run writes with the scene the harness was asked
+    // for. One call here covers all ~20 Run*Snapshot drivers, and the scene
+    // TIME needs no per-driver bookkeeping — WriteSidecar reads the live Timer.
+    if (found) {
+        fds::Provenance::SetScene(cfg.scene.c_str());
+        fds::Provenance::SetTag("harness", "snapshot");
     }
     // If no timestamps were passed, RunCitySnapshot picks an even sweep
     // across the scene's playable range once it knows CTPartTime.
@@ -1394,6 +1410,7 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                 std::fprintf(ff, "P6\n%d %d\n255\n", xres, yres);
                 std::fwrite(f.data(), 1, f.size(), ff);
                 std::fclose(ff);
+                fds::Provenance::WriteSidecar(p, xres, yres, "ppm");
                 std::fprintf(stderr, "[SNAPSHOT] wrote %s\n", p);
             };
             grab(prevF);
@@ -1448,6 +1465,7 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                     std::fwrite(row.data(), 1, row.size(), rf);
                 }
                 std::fclose(rf);
+                fds::Provenance::WriteSidecar(rPath, xres, yres, "ppm");
                 std::fprintf(stderr, "[SNAPSHOT] wrote %s\n", rPath);
             }
         }
@@ -3835,6 +3853,7 @@ int RunCitySeasideTest(const SnapshotConfig& cfg, int xres, int yres) {
             std::fwrite(row.data(), 1, row.size(), f);
         }
         std::fclose(f);
+        fds::Provenance::WriteSidecar(path, W, H, "ppm");
         std::fprintf(stderr, "[SEASIDE] dumped panorama -> %s\n", path);
     };
 

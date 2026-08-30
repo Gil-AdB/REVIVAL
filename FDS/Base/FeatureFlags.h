@@ -156,6 +156,16 @@ public:
     // unsetParam clears the mark and restores the compile-time default,
     // handing control back to scripts/defaults.
     static void dumpParamsJson(std::string &out);
+    // Snapshot-provenance view of the registry: a JSON array of ONLY the
+    // flags whose RESOLVED value differs from the compile-time default, or
+    // that were explicitly set (CLI / env / tune console). Everything else is
+    // the default and is recoverable from the .def at the recorded git SHA, so
+    // recording it would bloat every sidecar by ~700 entries for no
+    // information. Note the two conditions are not the same: a scene driver's
+    // setDefault() moves a value WITHOUT marking it set, and a CLI token can
+    // set a flag TO its default — a render's provenance needs both cases.
+    // Each entry: {"name","type","value","default","explicit"}.
+    static void dumpProvenanceFlagsJson(std::string &out);
     // Every explicitly-set param as (name, value-text). Used by the
     // console's bake-to-script.
     static void dumpSetParams(std::vector<std::pair<std::string, std::string>> &out);
