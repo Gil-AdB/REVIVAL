@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-266 records, 236 current, 30 superseded; HEAD fd2b272fb086.
+266 records, 236 current, 30 superseded; HEAD 23e1cd904aea.
 
 ## Attention
 ### Stale — depends on a superseded claim (3)
