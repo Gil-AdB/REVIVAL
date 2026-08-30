@@ -501,6 +501,10 @@ void Render_SSAO() {
 	// every LEFT-going sample land one pixel short, at every rotation, because
 	// buildSliceTrig's phi never leaves [0,PI).
 	const bool roundFix = fds::FeatureFlags::ssao_gtao_round_fix();
+	const bool edgeClamp = fds::FeatureFlags::ssao_gtao_edge_clamp();
+	float fadePx = fds::FeatureFlags::ssao_gtao_edge_fade();
+	if (fadePx < 0.0f) fadePx = 0.0f;
+	const float invFade = fadePx > 0.0f ? 1.0f / fadePx : 0.0f;
 
 	// ── DIAGNOSTIC: one-pixel march trace (--ssao_trace_x/--ssao_trace_y) ──
 	const int traceX = fds::FeatureFlags::ssao_trace_x();
@@ -677,8 +681,12 @@ void Render_SSAO() {
 								for (int j = 0; j < steps; ++j) {
 									const float t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
 									const float ofx = float(sgn)*dcx*t, ofy = float(sgn)*dsy*t;
-									const int sx = px + (roundFix ? (int)lrintf(ofx) : int(ofx + 0.5f));
-									const int sy = py + (roundFix ? (int)lrintf(ofy) : int(ofy + 0.5f));
+									int sx = px + (roundFix ? (int)lrintf(ofx) : int(ofx + 0.5f));
+									int sy = py + (roundFix ? (int)lrintf(ofy) : int(ofy + 0.5f));
+									if (edgeClamp) {   // --ssao_gtao_edge_clamp
+										if (sx < exLoX) sx = exLoX; else if (sx >= exLoX+exWx) sx = exLoX+exWx-1;
+										if (sy < exLoY) sy = exLoY; else if (sy >= exLoY+exWy) sy = exLoY+exWy-1;
+									}
 									if ((unsigned)(sx - exLoX) >= (unsigned)exWx
 									 || (unsigned)(sy - exLoY) >= (unsigned)exWy) {
 										if (trc) fprintf(stderr,
@@ -915,6 +923,12 @@ void Render_SSAO() {
 									__m256i syi=_mm256_add_epi32(_mm256_set1_epi32(py),
 									              roundFix ? _mm256_cvtps_epi32(offy)
 									                       : _mm256_cvttps_epi32(_mm256_add_ps(offy,vHalf)));
+									if (edgeClamp) {   // --ssao_gtao_edge_clamp
+										sxi=_mm256_min_epi32(_mm256_max_epi32(sxi,_mm256_set1_epi32(exLoX)),
+										                     _mm256_set1_epi32(exLoX+exWx-1));
+										syi=_mm256_min_epi32(_mm256_max_epi32(syi,_mm256_set1_epi32(exLoY)),
+										                     _mm256_set1_epi32(exLoY+exWy-1));
+									}
 									// sxA/syA are gone with the scalar gather: the sample
 									// position never leaves a register now. szA survives only
 									// for the -DFDS_SSAO_DIAG=4 cost arm.
@@ -1579,7 +1593,7 @@ void Render_SSAO() {
 					// two are bit-identical by construction (see the commit that
 					// introduced this path), so the dumped field is the field the
 					// un-instrumented frame applies.
-					if (down == 1 && useHdr && !dbg && !dumpAo) {
+					if (down == 1 && useHdr && !dbg && !dumpAo && fadePx <= 0.0f) {
 						for (int py = y1; py < y2; ++py) {
 							const size_t row = size_t(py) * size_t(W);
 							int px = x1;
@@ -1638,6 +1652,12 @@ void Render_SSAO() {
 								SSAO_TAP(o01, bw01) SSAO_TAP(o11, bw11)
 								#undef SSAO_TAP
 								ao = wsum > 1e-6f ? sum / wsum : 1.0f;
+							}
+							if (fadePx > 0.0f) {          // --ssao_gtao_edge_fade
+								const int ex = px < (W-1-px) ? px : (W-1-px);
+								const int ey = py < (H-1-py) ? py : (H-1-py);
+								const float e = float(ex < ey ? ex : ey) * invFade;
+								if (e < 1.0f) ao = 1.0f + (ao - 1.0f) * e;
 							}
 
 							if (aoDump) {
