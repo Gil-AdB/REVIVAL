@@ -1581,6 +1581,25 @@ int main(int argc, const char *argv[])
 	// anything they don't recognise.
 	fds::FeatureFlags::parseArgs(argc, argv);
 
+	// --force_xres / --force_yres: framebuffer resolution override that WINS
+	// over rev.cfg. It has to land HERE and not next to the cfg read above:
+	// parseArgs is what makes the CLI form visible, and it runs after it.
+	//
+	// BYTE-NULL WHEN UNSET BY CONSTRUCTION: both default to 0 and nothing is
+	// assigned at 0, so an ordinary run keeps exactly the numbers rev.cfg gave
+	// g_demoXRes/g_demoYRes a few lines above.
+	//
+	// WHY: rev.cfg is per-tree, uncommitted, shared state. The owner's tree
+	// carries his window size (1384x768) while every committed byte-pin was
+	// recorded at the stock 1920x1080, so tools/render_gate.sh reported 4/4
+	// FAIL there — with four unrelated md5s — on a binary that passes 4/4
+	// under a stock cfg. Both gate scripts now pass the pinned resolution
+	// explicitly and never read the tree's. Placed before EVERY run-mode
+	// dispatch on purpose: two of the gate's four rows are --scene-mirrortest,
+	// i.e. the interactive window path, not --snapshot.
+	if (fds::FeatureFlags::force_xres() > 0) g_demoXRes = fds::FeatureFlags::force_xres();
+	if (fds::FeatureFlags::force_yres() > 0) g_demoYRes = fds::FeatureFlags::force_yres();
+
 	// Flag implication: city_env_pixel routes the city glass through the
 	// deferred env-specular compose, which only has data when env_refl's
 	// FramePrep bakes ran — without it the glass is flat (loses even the

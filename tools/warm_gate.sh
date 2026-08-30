@@ -31,9 +31,16 @@
 # runs all seven. Run the fast set on every gate check; run --full before
 # merging anything that touches the composite, the froxel volume, or reflections.
 #
-# SAME RESOLUTION TRAP AS render_gate.sh: these baselines are 1920x1080 dummy-
-# mode hashes. They CANNOT pass in the main tree while Runtime/rev.cfg carries
-# the user's window size. Run from a stock-rev.cfg worktree.
+# RESOLUTION: PASSED EXPLICITLY, NEVER READ FROM THE TREE (2026-08-30).
+# These baselines are 1920x1080 dummy-mode hashes. They USED TO be unable to
+# pass in a tree whose Runtime/rev.cfg carried the owner's window size
+# (1384x768) — the same false red that fired on render_gate.sh three times in
+# two days. Every row now carries --force_xres/--force_yres (FeatureFlags.def;
+# applied in REV.CPP right after parseArgs, byte-null at their 0 default),
+# which win over rev.cfg, so this gate is cfg-independent and runs anywhere.
+# CAVEAT for WARM_GATE_BIN: a binary built before 2026-08-30 does not know
+# those flags and --strict_flags will abort it (exit 2) — the row then reports
+# ERROR ... 0/N frames, not a hash mismatch.
 #
 # BASELINES: recorded at bc36387b and UNCHANGED SINCE. They have survived one
 # real regression, and the way that went is the standing lesson:
@@ -71,6 +78,7 @@ for a in "$@"; do
 done
 
 export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy
+RES_ARGS="--force_xres=1920 --force_yres=1080"   # see the resolution note above
 rm -rf "$OUT"; mkdir -p "$OUT"
 cd "$RUN" || exit 1
 BIN="${WARM_GATE_BIN:-./DEMO}"
@@ -110,7 +118,7 @@ echo "warm gate ($([ "$FULL" = 1 ] && echo full || echo fast)):"
 for k in "${!names[@]}"; do
   n="${names[$k]}"; d="$OUT/$n"; mkdir -p "$d"
   # shellcheck disable=SC2086
-  "$BIN" ${recipes[$k]} --out="$d" >"$d/.stdout" 2>"$d/.stderr"
+  "$BIN" ${recipes[$k]} $RES_ARGS --out="$d" >"$d/.stdout" 2>"$d/.stderr"
   rc=$?
   got="$(md5 -q "$d"/*_color.ppm 2>/dev/null | tr '\n' ' ')"
   got="${got% }"
