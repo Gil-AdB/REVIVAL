@@ -1555,3 +1555,281 @@ yardstick itself has a judged parameter (the partition) that he has not ruled on
 Renders: `docs/img/refrender/` — `<pose>_triptych.png` (bare | tessellated |
 reference), `camA_variants.png` / `H6194_variants.png` (partition, dominant-edge,
 mitre 2/4/8, crease 15/30/60), `<pose>_diffmaps.png`, `camA_cullfront.png`.
+
+# §REF-2 — where the reference's own holes came from
+
+His verdict on §REF's pictures was two defects: *"in some poses it misses some
+across the corridor walls"* (called minor) and *"at our problematic wall
+connections the height doesn't always agree from both sides, which leads to
+artifact"* (called disqualifying). This round measured both. The first turned
+out not to be minor and not to be about the corridor: it was one rule applied in
+one place it does not belong, and fixing it removes **97.5 %** of the reference's
+missing surface at nine poses, five of them to exactly zero. The second is real,
+is now measured per junction, and puts a **bound on what any corner rule in this
+renderer can do** — 21 % of the crease length is two unrelated charts meeting.
+
+## H1, the event array, is refuted at zero
+
+The obvious suspect was the solver's fixed `double ev[512]`. Its emitters run in
+a fixed order — candidate intervals, polygon boundaries, band boundaries, the
+**O(n²) bisector pairs**, and only then the per-texel march that finds the actual
+slab crossings — so if the array ever filled, what it would lose is the surface
+itself, and the ray would report nothing on a pixel that has stone in it. That is
+exactly the shape of the defect.
+
+Every emission guard is now counted. They are pure observers: each guard is
+monotone in `nev`, so moving one from a loop condition to a per-emission test
+emits the identical set, and no branch can change a pixel.
+
+| pose | events dropped | mean events/px | candidates mean / max | cand-cap | march-budget |
+|---|---|---|---|---|---|
+| cam A t=5965 | **0** | 17.3 / 512 | 2.6 / 11 | 0 | 0 |
+| corridor t=5534 | **0** | 7.4 / 512 | 1.5 / 7 | 0 | 0 |
+
+Zero. At `n ≤ 11` the pair count `n(n−1)` cannot approach 512, and the fix the
+hypothesis implied — emit surface crossings before the bisector pairs — would
+have been wasted work. `code:FDS/RENDER/DeferredDisplaceRef.cpp#SolveRay`
+
+## What the misses actually are
+
+**Not silhouette rim.** `tools/refrender_misscensus.py` reads `ref.bin` alone and
+partitions the miss pixels by shape. At cam A: 83 components, biggest 899 px,
+62 % of miss pixels in components larger than 256 px, **83 % of them fully
+surrounded by reference surface**. At corridor: 84 components, biggest 1208 px.
+These are holes, not a one-pixel disagreement about where a triangle ends.
+
+**Where.** `docs/img/refrender/missoverlay_camA.png`,
+`docs/img/refrender/missoverlay_corridor5534.png` — thin slits running along
+every wall/floor and wall/ceiling junction and around the pier corners. His
+sentence named that place.
+
+**Which clause said no.** `FDS_REFRENDER_DEBUG_PX` now cross-sections the inside
+predicate clause by clause. One 1204-px hole at corridor (516,24):
+
+```
+iv 1 t=[8.409..9.441] mid=8.925 inside=0
+   f=809 sd=-0.10254 d=+0.02056  range=1 back=1 under=1 mitre=0
+```
+
+Inside its own slab on every clause, and vetoed by `MitreTrimOk`.
+`code:FDS/RENDER/DeferredDisplaceRef.cpp#MitreTrimOk`
+
+## The trim was a convex-corner rule applied at every edge
+
+`docs/DISPLACEMENT_LITERATURE.md` §B says: *"at a convex material corner the
+offset faces must be extended to reach the miter point (spike risk)"*. The code
+applied it at **every** shared edge. That turns the model's **union** into an
+**intersection**: a point inside face A's own slab, in A's extension past a
+*concave* edge, is vetoed because face B says air there — and B is often a face
+the ray never enters and the eye never sees.
+
+Counting the vetoes by the kind of edge that cast them:
+
+| pose | miss px | vetoed by the trim | convex | **concave** | **soup neighbour** |
+|---|---|---|---|---|---|
+| cam A t=5965 | 4009 | 4007 (100.0 %) | **0** | 1717 | 2290 |
+| corridor t=5534 | 8946 | 8820 (98.6 %) | 92 (1.0 %) | 4265 | 4464 |
+
+A **soup neighbour** is one found by the geometric face-soup probe rather than by
+a shared vertex. It has no height field in this model, so `dN` is 0 and the trim
+demands the point lie behind the neighbour's **bare authored plane**, ignoring
+its relief entirely. That is the largest single class at both poses.
+
+`--greets_displace_ref_mitre_trim` is now a mode: `0` off, `1` every shared edge
+(the refuted rule), **`2` convex edges only (the new default)**, `3` convex only
+and never against a soup neighbour.
+
+| mode | cam A miss | cam A grow | corridor miss | corridor grow |
+|---|---|---|---|---|
+| 0 off | 36 | 21 634 | 126 | 540 |
+| 1 every edge | 4009 | 4075 | 8946 | 140 |
+| **2 convex only** | **36** | **4368** | **217** | **203** |
+| 3 + no soup | 36 | 21 529 | 217 | 203 |
+
+Mode 3 is refuted: excluding soup neighbours gives cam A's convex-corner spike
+back (21 529 grown pixels), so the bare-plane stand-in is doing real spike
+control there and is conservative in the safe direction — the neighbour's true
+surface never stands more than `dMax` (0.035 u) in front of the plane it stands
+in for.
+
+### Nine poses, before and after
+
+| pose | miss, trim=1 | miss, trim=2 | grow, trim=1 → 2 | + shared edge |
+|---|---|---|---|---|
+| cam A t=5965 | 4009 | **36** | 4075 → 4368 | 46 |
+| cam B t=5965 | 1059 | **0** | 4581 → 5214 | 43 |
+| H6017 t=6017 | 362 | **0** | 1649 → 1649 | 6 |
+| H6194 t=6194 | 139 | **0** | 0 → 0 | 5 |
+| doorway t=5963 | 7515 | **260** | 9150 → 10 480 | 206 |
+| doorway t=5928 | 7515 | **260** | 22 570 → 24 327 | 206 |
+| corner t=6097 | 1203 | **0** | 0 → 0 | 4 |
+| curved t=2845 | 559 | **0** | 0 → 0 | 0 |
+| corridor t=5534 | 8946 | **217** | 140 → 203 | 367 |
+| **total** | **31 307** | **773** | 42 165 → 46 241 (+9.7 %) | 883 |
+
+Renders: `docs/img/refrender/trimfix_camA.png`,
+`docs/img/refrender/trimfix_corridor5534.png` (render | miss overlay, trim=1 on
+top, trim=2 below).
+
+**The dominant-edge arm does not earn the default on this number.** With the trim
+corrected it makes the holes *worse* at five of nine poses (cam A 36 → 46,
+cam B 0 → 43, corridor 217 → 367), better at one, and equal at three.
+
+## The dominant-edge arm keeps the exact march, and costs 6.5× less
+
+The blend makes `d()` a convex combination of two bilinears, which is not a
+quadratic along the ray, so the arm fell back to 16 samples plus bisection over
+the **whole face**. But `DOfIdx` only blends where it blends: inside the band of
+a shared crease, `−band < ed_i(t) ≤ 0` for some edge with a dominant owner, and
+that is a closed-form **t-interval per edge**. Outside the union of those three
+intervals `d()` is the plain bilinear and the exact root applies — the same
+arithmetic the no-blend arm runs. The DDA now tests each cell's own t-span
+against those intervals. The per-cell skip bound in a blended cell is also
+widened to cover the **owner's** material, which the old code did not do.
+
+A/B against the whole-face implementation, same tree either side:
+
+| pose | whole-face | band-confined | hit mask / flags / faceId | depth | normal |
+|---|---|---|---|---|---|
+| cam A | 3308 ms | **505 ms** | bit-identical | 2 px of 1 880 650 | p99.9 = 0.022°, 1 px > 1° |
+| corridor | 2514 ms | **349 ms** | bit-identical | 2 px of 1 712 885 | max 0.025° |
+
+Where the two disagree it is the **old** arm's bisection approximating a root the
+new arm solves in closed form. The no-blend arm is untouched (327 vs 338 ms).
+
+What the blend itself does at cam A, ON against OFF: 29 632 of 1 880 643 stone
+pixels differ (1.58 %), 80 % of them by under 0.02 u and 97 % by under 0.2 u,
+with a tail to 29.9 u where a grazing ray's `d` changing by a hair flips which
+face it reaches at all. The blend is confined in the **domain** by construction;
+it is not confined in the image, and that tail is why.
+`code:FDS/RENDER/DeferredDisplaceRef.cpp#MarchCandidate`
+
+## The crease census — what "the two sides height-disagree" measures
+
+`--greets_displace_ref_crease_scan=N` walks every shared stone edge at N samples
+per height-map texel, evaluates **both** faces' height fields at the **same world
+points**, and pools per plane-pair junction (planes identified by clustering
+within 0.5° and 5 mm — a quantised key split single junctions across four buckets
+and printed the same numbers four times).
+
+`|Δd|` says how big the step is. The two correlations say what **kind** it is,
+and that is the half that decides what can be done:
+
+* high correlation at a **non-zero lag** = one chart shifted against the other.
+  Both sides carry the same relief out of phase; a dominant-owner rule (or a UV
+  nudge) genuinely reconciles them.
+* low correlation at **every** lag = two unrelated charts meeting. No blend
+  reconciles that; a dominant owner only picks a winner.
+
+Scene-wide, 453 junctions, 7375 u of crease, 1 085 232 samples:
+
+| | |
+|---|---|
+| length-weighted `\|Δd\|` p50 / p90 / max | **0.0057 / 0.0149 / 0.1731 u** (against `\|d\|max` 0.1641) |
+| `r` at lag 0 / at best lag / mean `\|lag\|` | +0.767 / +0.791 / 1.39 texels |
+| crease length, phase-shifted (`r_best ≥ 0.8`) | 5406.5 u — **73.3 %** |
+| crease length, partly related (0.4 – 0.8) | 408.2 u — 5.5 % |
+| crease length, **unrelated charts** (`r_best < 0.4`) | **1560.5 u — 21.2 %** |
+
+The two readings line up: the worst junctions by `|Δd|` p90 (0.088 – 0.097 u,
+more than half the whole relief depth) are exactly the low-correlation ones —
+`r₀` of −0.246, −0.124, −0.049, +0.096 — and their `r_best` never rises more than
+0.04 above `r₀`, so **no shift rescues them**. The visible castellation lives on
+the 21 % that is unrelated charts, and that is an authoring fact, not a rendering
+one. `code:FDS/RENDER/DeferredDisplaceRef.cpp#CreaseScan`
+
+Each line carries the junction's world centroid, which is what shows repeated
+rows to be the same room module tiled: (4.9, 2.5, −37.0), (92.7, 2.5, −37.0),
+(4.9, 2.5, 46.9), (4.9, 2.5, −75.0) carry identical statistics because they are
+identical geometry at four places.
+
+## The crease-dh map — the census projected onto the picture
+
+`--greets_displace_ref_crease_viz=N` (texels, 0 = off) writes, for every hit
+pixel within N texels of a shared stone **crease**, the signed
+`d_self − d_neighbour` in world units at that exact world point. The dump becomes
+`REFRND02` with that plane appended; both readers accept either magic.
+`tools/refrender_creasemap.py` draws it diverging over a dimmed render.
+
+Creases only, and that filter is load-bearing: every quad is two triangles, so
+half of a face's neighbours are **co-planar** and agree to the bit. Drawn, they
+bury the junctions under a green lattice of zero — 204 131 band pixels at cam A
+with a p50 of 0.00003 u, a picture of the tessellation rather than of the model.
+Excluding co-planar and smooth seams leaves 90 335 px (4.8 % of the stone) with
+p50 0.0116, p90 0.0453, p99 0.1004, max 0.1787 u and 915 px past 0.10 u.
+
+Per pose, with the corrected trim (`--greets_displace_ref_crease_viz=6`):
+
+| pose | band px (% of stone) | `\|Δh\|` p50 | p90 | p99 | max | px > 0.05 u |
+|---|---|---|---|---|---|---|
+| cam A t=5965 | 90 335 (4.8 %) | 0.0116 | 0.0453 | 0.1004 | 0.1787 | 6743 |
+| cam B t=5965 | 99 581 (4.9 %) | 0.0100 | 0.0485 | 0.1071 | 0.1792 | 9430 |
+| H6017 t=6017 | 28 199 (1.4 %) | 0.0093 | 0.0390 | 0.0883 | 0.1064 | 1939 |
+| H6194 t=6194 | 20 465 (1.0 %) | 0.0119 | 0.0425 | 0.0849 | 0.1394 | 1304 |
+| corner t=6097 | 30 388 (1.5 %) | 0.0107 | 0.0448 | 0.0602 | 0.0701 | 1590 |
+| corridor t=5534 | 91 561 (5.3 %) | 0.0165 | 0.0454 | 0.0855 | 0.1784 | 5350 |
+
+Junction pair renders (render | crease-dh map, half scale) —
+`docs/img/refrender/junction_camA.png`, `junction_camB.png`, `junction_H6017.png`,
+`junction_H6194.png`, `junction_corner6097.png`, `junction_corridor5534.png`;
+the maps alone at `docs/img/refrender/creasemap_<pose>.png`.
+
+## The bake-vs-reference yardstick, re-measured against the corrected reference
+
+The trim fix does not move the yardstick — which is worth stating, because it
+means §REF's table was not an artefact of the holes. Nine poses, stone pixels
+only, `|dz|` in world units along the view ray:
+
+| pose | dz p50 | dz p90 | >0.02 | >0.08 | nrm p50 | nrm p90 | bare p50 | bare p90 | ref-only px |
+|---|---|---|---|---|---|---|---|---|---|
+| cam A t=5965 | 0.045 | 0.179 | 76 % | 24 % | 10.2° | 47.7° | 0.027 | 0.164 | 5433 |
+| cam B t=5965 | 0.040 | 0.103 | 75 % | 15 % | 9.4° | 49.8° | 0.024 | 0.147 | 5793 |
+| H6017 t=6017 | 0.026 | 0.071 | 67 % | 7 % | 6.9° | 48.7° | 0.016 | 0.086 | 1744 |
+| H6194 t=6194 | 0.038 | 0.073 | 80 % | 9 % | 7.1° | 45.9° | 0.016 | 0.070 | 5273 |
+| doorway t=5963 | 0.052 | 1.225 | 83 % | 41 % | 21.5° | 113.6° | 0.059 | 1.089 | 14 460 |
+| doorway t=5928 | 0.052 | 1.292 | 83 % | 41 % | 21.8° | 113.4° | 0.060 | 1.164 | 28 850 |
+| corner t=6097 | 0.032 | 0.063 | 66 % | 4 % | 19.8° | 54.0° | 0.023 | 0.099 | 532 |
+| curved t=2845 | 0.010 | 0.058 | 37 % | 6 % | 4.7° | 45.8° | 0.022 | 0.062 | 18 |
+| corridor t=5534 | 0.071 | 0.141 | 82 % | 42 % | 10.3° | 40.3° | 0.035 | 0.085 | 1200 |
+
+Against §REF's table every p50 is identical and every p90 moves by at most
+0.002 u (cam A 0.181 → 0.179, corridor 0.142 → 0.141). This is an **agreeing
+re-measurement**, not a correction: "the bake is further from the definition than
+the flat wall is at seven of eight poses" survives the trim fix unchanged.
+
+## Disk discipline
+
+The battery is now **lean by default**: each pose is rendered, scored, its PPMs
+converted to PNG and its raw planes deleted before the next pose starts. `df -h /`
+prints before the first pose and after every pose; the run aborts below
+`--min-free` GiB (5) or above `--max-out` MiB (2048). `--keep-raw` restores the
+old behaviour for the pose or two that need planes. Two traps found doing it:
+`strip_raw`'s `rm` aborted on zsh's `nomatch` before deleting anything (so the
+lean run kept every plane), and `${BAREOPT}` without `${=…}` passed `--bare /path`
+as one argv word and every score failed.
+
+## Byte identity
+
+3 poses × 2 arms on the judging flags, **6/6 identical**:
+
+| pose | bare | `--greets-displace` |
+|---|---|---|
+| cam A t=5965 | `440deac28b1e9d1a38d3e5e61ab8d918` | `dbe2d4c2716e2d762b366d5a45c151a6` |
+| H6194 t=6194 | `80f21d8517fa4909b8ce4d40a9815fcf` | `e2385cafaf64f068290bcadb7e2c4444` |
+| t=5743 | `43b459c14c4a968392386bb711b57f16` | `2568147a159488b603f147c7c7991d56` |
+
+The t=5743 pin needs its `docs/greets_review_poses.txt` camera
+(`9.07557869,3.19592357,-52.9277191,-0.20672597,-0.140846997,0.968207836`);
+without it the pin is unreproducible, which was confirmed against the unmodified
+tree rather than assumed.
+
+## Open for his ruling
+
+1. **The partition** (`--greets_displace_ref_partition`) — unchanged, still his.
+2. **The dominant-edge arm as default.** It no longer buys hole closure (it costs
+   a little), it now costs only 1.5× the pass, and the census says it can only
+   help the 73 % of crease length that is phase-shifted. Recommendation: leave it
+   off by default and judge it by eye at the junctions, not by the hole count.
+3. **The 21 % of crease length that is unrelated charts.** No renderer rule
+   reaches it. If those junctions must stop castellating, the fix is in the
+   authoring — the UV charts of the two walls.
