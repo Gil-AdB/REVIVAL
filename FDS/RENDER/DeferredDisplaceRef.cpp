@@ -323,19 +323,25 @@ struct CreaseAcc {
 	double len = 0.0;
 	double texL = 0.0, texR = 0.0;      // texels per world unit along the crease
 	double phiSum = 0.0;
+	V3     ctr;                         // length-weighted crease centroid
 	int    matL = -1, matR = -1;
 	int    nConvex = 0, nConcave = 0, nSmooth = 0;
 	std::vector<double> dAbs;           // |dL − dR| per sample, world units
 	std::vector<CreaseEdgeStat> per;
 };
 
-static inline int64_t PlaneKeyQ(const V3 &n, double d) {
-	// quantised plane identity: normal to 1e-3, offset to 1e-3
-	const int64_t a = int64_t(std::llround(n.x * 1000.0));
-	const int64_t b = int64_t(std::llround(n.y * 1000.0));
-	const int64_t c = int64_t(std::llround(n.z * 1000.0));
-	const int64_t e = int64_t(std::llround(d   * 1000.0));
-	return ((a * 4001 + b) * 4001 + c) * 100003 + e;
+// Plane identity by CLUSTERING, not by quantising.  A quantised key splits one
+// junction across four buckets whenever two faces of the same wall round their
+// offset to different thousandths, which is exactly what happened the first
+// time this ran: 453 "junctions" of one edge each, the same numbers four times.
+// Tolerance: normals within 0.5 deg and offsets within 5 mm.
+static std::vector<std::pair<V3,double>> g_planes;
+static int PlaneIdOf(const V3 &n, double d) {
+	for (size_t i = 0; i < g_planes.size(); ++i)
+		if (dot(g_planes[i].first, n) > 0.99996 && std::fabs(g_planes[i].second - d) < 0.005)
+			return int(i);
+	g_planes.push_back({n, d});
+	return int(g_planes.size()) - 1;
 }
 static double PctOf(std::vector<double> &v, double q) {
 	if (v.empty()) return 0.0;
@@ -363,7 +369,8 @@ static double CorrLag(const std::vector<double> &a, const std::vector<double> &b
 static void CreaseScan(int perTexel)
 {
 	if (perTexel <= 0) return;
-	std::map<std::pair<int64_t,int64_t>, CreaseAcc> junc;
+	std::map<std::pair<int,int>, CreaseAcc> junc;
+	g_planes.clear();
 
 	for (size_t f = 0; f < g_m.faces.size(); ++f) {
 		const RefFace &L = g_m.faces[f];
@@ -412,11 +419,12 @@ static void CreaseScan(int perTexel)
 			}
 			const double samplesPerTexel = double(ns) / std::max(1e-9, elen * rate);
 
-			const std::pair<int64_t,int64_t> key = std::minmax(PlaneKeyQ(L.n, L.d),
-			                                                   PlaneKeyQ(R.n, R.d));
+			const std::pair<int,int> key = std::minmax(PlaneIdOf(L.n, L.d),
+			                                           PlaneIdOf(R.n, R.d));
 			CreaseAcc &A = junc[key];
 			if (A.edges == 0) { A.matL = L.matIdx; A.matR = R.matIdx; }
 			++A.edges; A.n += ns; A.len += elen;
+			A.ctr = A.ctr + (a + b) * (0.5 * elen);
 			A.texL += tL * elen; A.texR += tR * elen;
 			double c1 = dot(L.n, R.n); c1 = std::max(-1.0, std::min(1.0, c1));
 			A.phiSum += std::acos(c1) * elen;
@@ -454,17 +462,60 @@ static void CreaseScan(int perTexel)
 		std::fprintf(stderr,
 			"[REFRENDER-CREASE] '%s'|'%s' %s edges=%d n=%lld len=%.2fu phi=%.1fdeg "
 			"tex=%.1f/%.1f  |dd| p50=%.4f p90=%.4f max=%.4f  r0=%+.3f rbest=%+.3f "
-			"lag=%+.2f (|lag|=%.2f) tex%s\n",
+			"lag=%+.2f (|lag|=%.2f) tex  at (%.1f,%.1f,%.1f)%s\n",
 			g_m.mats[size_t(A.matL)].mat->Name, g_m.mats[size_t(A.matR)].mat->Name,
 			A.nConvex > A.nConcave ? "CONVEX " : "concave",
 			A.edges, A.n, A.len, A.phiSum / std::max(1e-9, A.len) * 180.0 / M_PI,
 			A.texL / std::max(1e-9, A.len), A.texR / std::max(1e-9, A.len),
 			PctOf(dd, 50.0), PctOf(dd, 90.0), PctOf(dd, 100.0),
 			wr0 / wn, wrb / wn, wlag / wn, lagAbs / wn,
+			A.ctr.x / std::max(1e-9, A.len), A.ctr.y / std::max(1e-9, A.len),
+			A.ctr.z / std::max(1e-9, A.len),
 			A.nSmooth ? "  [smooth seam]" : "");
-		if (++shown >= 60) { std::fprintf(stderr, "[REFRENDER-CREASE] ... %zu more\n",
+		if (++shown >= 40) { std::fprintf(stderr, "[REFRENDER-CREASE] ... %zu more junctions "
+		                                  "(the summary below covers all of them)\n",
 		                                  rows.size() - size_t(shown)); break; }
 	}
+
+	// ── THE READING.  Length-weighted over every junction, and the one question
+	//    that decides what can be done: is a junction's disagreement a PHASE
+	//    OFFSET (both sides carry the same relief, shifted — a dominant owner or
+	//    a UV nudge reconciles it) or TWO UNRELATED CHARTS (no shift correlates
+	//    them, and no blend can do better than pick a winner)?
+	double Ltot = 0, wdd50 = 0, wdd90 = 0, wr0 = 0, wrb = 0, wlag = 0;
+	double lenPhase = 0, lenUnrel = 0, lenMid = 0, ddMax = 0;
+	long long nSamp = 0;
+	for (Row &r : rows) {
+		const CreaseAcc &A = *r.A;
+		std::vector<double> dd = A.dAbs;
+		const double p50 = PctOf(dd, 50.0), p90 = PctOf(dd, 90.0), mx = PctOf(dd, 100.0);
+		double a0 = 0, ab = 0, al = 0, wn = 0;
+		for (const CreaseEdgeStat &st : A.per) {
+			a0 += st.r0 * double(st.n); ab += st.rBest * double(st.n);
+			al += std::fabs(st.lagTex) * double(st.n); wn += double(st.n);
+		}
+		if (wn < 1) continue;
+		a0 /= wn; ab /= wn; al /= wn;
+		Ltot += A.len; nSamp += A.n;
+		wdd50 += p50 * A.len; wdd90 += p90 * A.len;
+		wr0 += a0 * A.len; wrb += ab * A.len; wlag += al * A.len;
+		ddMax = std::max(ddMax, mx);
+		if (ab >= 0.8)      lenPhase += A.len;
+		else if (ab < 0.4)  lenUnrel += A.len;
+		else                lenMid   += A.len;
+	}
+	if (Ltot > 1e-9)
+		std::fprintf(stderr,
+			"[REFRENDER-CREASE] SUMMARY %zu junctions, %.1f u of crease, %lld samples. "
+			"Length-weighted |dd| p50=%.4f p90=%.4f (max %.4f) against |d|max %.4f. "
+			"r0=%+.3f rbest=%+.3f mean|lag|=%.2f tex. "
+			"Crease length by KIND: phase-shifted (rbest>=0.8) %.1f u (%.1f%%), "
+			"partly related (0.4..0.8) %.1f u (%.1f%%), UNRELATED CHARTS (rbest<0.4) %.1f u (%.1f%%)\n",
+			rows.size(), Ltot, nSamp, wdd50/Ltot, wdd90/Ltot, ddMax,
+			[]{ double m = 0; for (const RefMat &rm : g_m.mats) m = std::max(m, rm.dAbs); return m; }(),
+			wr0/Ltot, wrb/Ltot, wlag/Ltot,
+			lenPhase, 100.0*lenPhase/Ltot, lenMid, 100.0*lenMid/Ltot,
+			lenUnrel, 100.0*lenUnrel/Ltot);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
