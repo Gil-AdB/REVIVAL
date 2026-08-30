@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-203 records, 189 current, 14 superseded; HEAD 03ef825e92e0.
+204 records, 189 current, 15 superseded; HEAD 2e02d06af3af.
 
 ## Attention
 ### Stale — depends on a superseded claim (5)
@@ -278,7 +278,7 @@
 - `f5b40d640422` proposal **plan.greets.shadow_tiling** {row=lighting-w1 scene=greets}   [stale] — shadow-map memory layout / tiling plan, parked for a shadow-bottleneck campaign, sized on the shadow share (docs/SHADOWMAP_TILING_PLAN.md).
 
 ### platform
-- `01d6d9bab537` open **platform.m5.missing_polys** {tool=m5}  — M5, origin fog-wt, APPLE clang 17 (his correction - not Homebrew; the dev box builds with Apple clang 21.0.0), built via the normal cmake build, artifacts visible with BARE ./DEMO (no flags - so the DEFAULT arm, not the deferred/SSAO stack; scene(s) unknown, the bare demo runs the whole sequence). FDS_THREADS=1 does not fix (deterministic). Suspects: Apple clang 17 codegen of the simde/vectorclass paths (miscompile or UB our newer compiler forgives), fp-contract behaviour differences (trap 607c7cd2c810). Next: he updates the M5 toolchain to current Apple clang and re-tests; tools/m5_diag.sh before/after pins whether the fix is the compiler.  (+2 superseded)
+- `9925a36280e7` open **platform.m5.missing_polys** {tool=m5}  — M5 Max, macOS 26.6.2 (same Darwin 25.6.0 as the dev box), repo /Users/gil-ad/REVIVAL at the pushed tip 03ef825e. m5_diag: render gate FAILS 4/4 with STABLE wrong hashes (mirrortest 4043aaaa, rttslot 88dd4632, conetest ffa28566, halotest 1a98cdf6) and the 24-run loop returns ONE hash x24 (cddd8887) - fully DETERMINISTIC, race excluded. Two axes differ from the dev box: (1) BUILD TYPE - the M5 cache says RelWithDebInfo (-O2), the dev box gates Release (-O3); being tested on the dev box now by building RWDI and comparing to the M5 hashes; (2) COMPILER - after his CLT reinstall the M5 tops out at Apple clang 17.0.0 (clang-1700.6.4.2); the dev box has Apple clang 21.0.0 via a newer Xcode; CLT alone does not go higher, full Xcode required. NOTE (his correction): bare ./DEMO still runs greets under DEFERRED, so the deferred stack is NOT excluded. Still unknown: which scene(s) show the missing polys; a stable-wrong gate hash can be benign LSB divergence, so the visible defect needs his dump - /tmp/m5diag_camA.ppm from the M5, or a G-key dump at a broken view, dropped into /Users/gil-ad/work/revival-fog/incoming_m5/.  (+3 superseded)
 
 ### shell
 
