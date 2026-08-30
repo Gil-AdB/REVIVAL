@@ -91,9 +91,20 @@ recipes=(
   "--snapshot=city@t=1958,1959,1960,1961,1962 $CITY_ARM"
   "--snapshot=greets@t=5739,5740,5741,5742,5743 $GREETS_ARM"
 )
+# greets-warm RE-BASELINED 2026-08-30 (GTAO defaults: --ssao_gtao_step_dist
+# 0->1, --ssao_gtao_srad_max 256->1024, AUTO bias 0.05->0.2; Gil-Ad's ruling
+# "all scenes", ledger decision f2f179f017df). It is the ONLY row in this
+# suite carrying --ssao --ssao-gtao, and it is the only one that moved: the
+# other six are byte-identical on the flipped binary. New values 3/3 stable;
+# the previous baseline
+#   2d652283d04a9e286f3954726322c13f d3279eb566580442e6d41dba402c0bf8
+#   b065d0fa9fc931b6c051c86636848086 fd82a58d895a468ee064dd26bad0663e
+#   c0266682a6b8a63839d1db4fdcf2d8a4
+# reproduces EXACTLY on this binary with
+#   --ssao_gtao_step_dist=0 --ssao_gtao_srad_max=256 --no-ssao_gtao_round_fix
 expect=(
   "aa45e9a6ad3eb41c7ec7d9e2976b2a33 2c56ce520da2123b0a8b0635dcaa447f de6db0e3e2bcefe5b6b7583f5da20e37 cb4db07edad634ec4f224134c0040a0a 540ae440ddadc2b815349f8e66503f51"
-  "2d652283d04a9e286f3954726322c13f d3279eb566580442e6d41dba402c0bf8 b065d0fa9fc931b6c051c86636848086 fd82a58d895a468ee064dd26bad0663e c0266682a6b8a63839d1db4fdcf2d8a4"
+  "1035af886a234c7b0864ef2b6fc44fce b3d01586aa5e9bbbf543bf9cea773db8 93d7aca0d892234007d42f3b267b8c86 01c0322a1d7f3b014d6a1aa30df91ca2 8c1c456d222dee6655716373ee34ff94"
 )
 if [ "$FULL" = 1 ]; then
   names+=(chase-warm city-warm-plain city-warm-hdr city-warm-dim city-warm-noal8)
