@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-199 records, 188 current, 11 superseded; HEAD 889441eba41e.
+200 records, 189 current, 11 superseded; HEAD a5f339c3f068.
 
 ## Attention
 ### Stale — depends on a superseded claim (3)
@@ -267,6 +267,9 @@
 - `e1438b4ac939` proposal **plan.city.refl_correct_cost_cut** {row=Tick-ReflXfrm scene=city}   [stale] — cut the --refl_correct commission's per-frame cost (carried since 2026-08-17 as the row's owner).
 - `6d612ecf4f07` proposal **plan.greets.cube_tap_cull** {row=lighting-w1 scene=greets}   [stale] — per-(8x8 block x light) cube-tap cull, sized at 2.3-5.3 ms off the shadow share; needs a hi-Z pyramid over ZPage16 and a block-major restructure (OPTIMIZATION_BACKLOG 2026-08-29d).
 - `f5b40d640422` proposal **plan.greets.shadow_tiling** {row=lighting-w1 scene=greets}   [stale] — shadow-map memory layout / tiling plan, parked for a shadow-bottleneck campaign, sized on the shadow share (docs/SHADOWMAP_TILING_PLAN.md).
+
+### platform
+- `cb995428c637` open **platform.m5.missing_polys** {tool=m5}  — On his M5 machine, latest fog-wt shows very weird artifacts - missing polys etc. Unknown: same binary copied vs rebuilt on the M5, which scenes, which compiler. Suspect classes, cheapest discriminator first: threading race exposed by the new core topology (FDS_THREADS=1), codegen/UB exposure from a newer clang (Debug build), fp-contract differences (trap 607c7cd2c810), or genuinely missing SIMD paths. History says: 2-run md5 proves nothing for races, printf hides them, 24+-run gates needed.
 
 ### shell
 
