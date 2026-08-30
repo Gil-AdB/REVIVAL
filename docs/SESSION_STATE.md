@@ -1,5 +1,59 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+
+> ## 2026-08-31 — SESSION HANDOFF (pre-compaction): three agents in flight, the M5 hunt
+> localized to two knife-edge amplifiers, v4 at P2, GpuBench OBJCXX fix landing
+>
+> **Resume protocol:** `groundwork status` from this tree, then this entry. The ledger
+> (267 records) carries every measurement/elimination chain — `groundwork query
+> platform.m5.missing_polys --all` is the M5 dossier; `greets.displace.v4` the rewrite.
+>
+> **RUNNING (background agents; results arrive as task notifications):**
+> 1. KNIFE-EDGE (worktree rev-knifedge): the two M5 amplifiers — (a) whole-floor-chunk
+>    cull flip (115,416 px, bare arm, bbox x[1040,1919] y[818,1079], the floor before the
+>    pier base; find the acceptance test within ~1 ULP via 24x 1-ULP camera jitter, guard
+>    band, flag default ON) and (b) co-planar ownership tie-break (22,860 mat flips on the
+>    displaced arm = the ceiling water-vs-base z-fight; deterministic tie-break). On report:
+>    verify, per-pin deltas are NOT re-baselined without his word; if the fix changes
+>    current-machine pixels STOP for him.
+> 2. V4 P2 (worktree rev-v4, branch tip 7c621be8 = P1 done, gate 8/8): the undisplaced
+>    per-chart lattice under R1/R2/R3. Two-tier gate: byte-identical-to-bare is the target;
+>    if only <=1-quantum + zero raster/ownership flips, STOP for coordinator sign-off before
+>    P3. P1 corrected the design: bake set = 226 tris / 1 mesh, 0 free edges (130 abutments,
+>    74 T-junction class), 142 junctions (453 was with mirror clones), charts exactly planar.
+> 3. GPUBENCH build-verify chain (background shell): the OBJCXX fix (LANGUAGE CXX + -ObjC++
+>    dies under CMP0119 on fresh CMake caches — the M5 build failure). If the link fails,
+>    fix before the commit/push that chain performs.
+>
+> **WAITING ON GIL-AD:** (a) M5: pull + the GpuBench rebuild command he was given; (b) fly
+> chase/city under his all-scenes GTAO ruling (pairs in docs/img/gtaoedge/allscenes/);
+> (c) the three v4 rulings — membership (assumed union), corner rule (assumed census:
+> dominant on the 73% phase-shifted, steps on the 21% unrelated), the 21% (assumed accept)
+> — needed before P4 only; (d) whether rev-dispfix (old-bake taper, "still a lot of tears",
+> corpus state 13) merges as the interim shipped path — less broken, not fixed.
+>
+> **THE M5 THREAD (all in the ledger chain):** same binary + same OS + identical FP env
+> (FPCR, denorms, full FRECPE/FRSQRTE tables, mass libm sweeps) + assets/caches eliminated
+> (pristine tree bit-identical) + worker count eliminated (z16 identical at 1/5/12) — yet
+> deterministic divergence: ±1-quantum z16 speckle (~10k texels) plus the two amplified
+> defects above. The ±1-ULP ORIGIN is unexplained and PARKED; the amplifiers are the fix.
+> M5 ground truth planes: incoming_m5/m5planes/ (bare/disp z16, mat, color). Reference
+> outputs for cross-machine probes: docs/data/{libm,fpenv,neon_est}_*_m2max.txt,
+> planes_*_m2max.txt; probes tools/{libm,fpenv,neon_est}_probe.c, m5_diag*.sh.
+>
+> **DECIDED THIS SESSION (ledger):** GTAO guarded-geometric default ALL scenes, bias 0.2
+> (decision f2f179f017df; pins re-baselined 24/24; his "much better"); the bake REWRITE
+> (f2696d3c8aa7) with design docs/DISPLACEMENT_V4_DESIGN.md and survey
+> docs/DISPLACEMENT_LITERATURE.md; the conclusion-ledger tool GROUNDWORK
+> (github.com/Gil-AdB/groundwork, 45 fixtures, hooks installed locally, edit-guard
+> block-once ON) with CLAUDE.md section as the protocol.
+>
+> **TREES:** fog-wt = everything merged (flag cull -13, provenance sidecars, semgrep,
+> force_xres/yres, shadow_polyid fix, reference renderer both rounds, GTAO all-scenes,
+> ledger 267). Unmerged: rev-dispfix (old-bake fixes, his call), rev-v4 (P1+P2 in flight),
+> rev-knifedge (in flight). rev-m5pin = pinned 03ef825e reference env, KEEP. rev-gtaoedge
+> merged (prunable). His rev.cfg (1384x768) stays uncommitted-dirty by design.
+
 > ## 2026-08-30 — **THE GTAO DEFAULT FLIP, ON HIS RULING: the guarded geometric
 > arm is the default for ALL SCENES.** Four pins re-baselined, ten verified
 > unmoved, and the pre-2026-08-30 render is still reachable byte-exactly from
