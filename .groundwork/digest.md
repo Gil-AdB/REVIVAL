@@ -1,6 +1,6 @@
 # revival-fog — what is currently true
 
-202 records, 189 current, 13 superseded; HEAD 4f8f5855a868.
+203 records, 189 current, 14 superseded; HEAD 03ef825e92e0.
 
 ## Attention
 ### Stale — depends on a superseded claim (5)
@@ -278,7 +278,7 @@
 - `f5b40d640422` proposal **plan.greets.shadow_tiling** {row=lighting-w1 scene=greets}   [stale] — shadow-map memory layout / tiling plan, parked for a shadow-bottleneck campaign, sized on the shadow share (docs/SHADOWMAP_TILING_PLAN.md).
 
 ### platform
-- `45421cacb74b` open **platform.m5.missing_polys** {tool=m5}  — M5, latest ORIGIN fog-wt (63 commits behind the dev box at the time), missing polys etc. NEW FACTS from him: the M5 compiler is clang 17 (the dev box builds with Apple clang 21.0.0 / clang-2100.1.1.101 - a large compiler delta, and a bare clang 17 string suggests Homebrew LLVM rather than Apple clang); FDS_THREADS=1 does NOT fix it, demoting the race hypothesis - the artifact is deterministic per-thread-count, pointing at codegen/UB/fp-contract differences in the simde/vectorclass paths (trap 607c7cd2c810 is the known fp-contract instance). Next: tools/m5_diag.sh on the M5 (gate + 24-run determinism + compiler census), then a rebuild with Apple clang (CC=/usr/bin/clang CXX=/usr/bin/clang++) as the compiler-swap discriminator.  (+1 superseded)
+- `01d6d9bab537` open **platform.m5.missing_polys** {tool=m5}  — M5, origin fog-wt, APPLE clang 17 (his correction - not Homebrew; the dev box builds with Apple clang 21.0.0), built via the normal cmake build, artifacts visible with BARE ./DEMO (no flags - so the DEFAULT arm, not the deferred/SSAO stack; scene(s) unknown, the bare demo runs the whole sequence). FDS_THREADS=1 does not fix (deterministic). Suspects: Apple clang 17 codegen of the simde/vectorclass paths (miscompile or UB our newer compiler forgives), fp-contract behaviour differences (trap 607c7cd2c810). Next: he updates the M5 toolchain to current Apple clang and re-tests; tools/m5_diag.sh before/after pins whether the fix is the compiler.  (+2 superseded)
 
 ### shell
 
