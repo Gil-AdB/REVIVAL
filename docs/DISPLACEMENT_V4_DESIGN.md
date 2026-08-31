@@ -889,3 +889,145 @@ neighbours rasterised in the arm, and holes there are 0.
   relief at a junction; on this arm the plateau it would reconcile is 0.1 u out
   of place, so a junction measurement taken now would be measuring the block
   interior's error, not the corner's.
+
+---
+
+# §P3b — the round that localized the band-union crack, and found the premise under it false
+
+Built on `rev-v4` at P3's tip **c3866bd6**. Code: `DEMO/V4Bake.cpp`
+(`FaceLattice`'s column rule and the new `[V4-GRID]` census), flag
+`--v4_block_mid` in `FDS/Base/FeatureFlags.def`, instruments
+`tools/v4_tear_arm.sh` and `tools/v4_grid_align.py`. Commits 57539737,
+13a73d10, bda61081.
+
+**Both defaults are still OFF.** `greets.displace.v4.ruling.p3_density` is
+Gil-Ad's and open; this round adds a rung to it and removes two of the reasons
+the flag was reverted, it does not decide anything.
+
+## 1. The pinholes: what they are, measured before anything was changed
+
+P3 reverted `--v4_band_union` (f53dc4d6) because the 54-pose battery went 14 →
+18 hole px and the 5 new pixels were **interior** gaps. Localized with the
+per-pixel face-ownership plane (`--face_id_dump`) at G2 t=5958:
+
+* The frame has **exactly 3 pixels of `z16 == 0` in 2 073 600**. `z16 =
+  0xFF80 − 395.6364·z` in that frame and the farthest rasterised surface
+  encodes 43 368 = 55.7 u, so `z16 == 0` means *nothing was drawn*, not a far
+  surface.
+* Every hole's 3×3 neighbourhood is face `fi=314` above and `fi=315` below, and
+  the `[FACEID]` table gives them the **same two world vertices**: they are the
+  two halves of ONE lattice cell, `u ∈ [−2.636, −2.524] × v ∈ [1.498, 1.509]`
+  (28.7 × 2.8 texels — a horizontal mortar-band ramp cell), split by its
+  diagonal, **sharing that diagonal exactly**.
+* The mesh agrees it is closed: with the union on, 630 use-1 edges = the 130
+  authored abutments, 0 use-3+, `tv_border_sample` 0 and `tv_interior` 0.
+* The surface is **1.9 u from the camera** and the leak is ~3 px in the 160–530
+  px the edge crosses — a gap of order 0.006–0.02 px.
+* **Camera jitter kills it**: +0.000 u → 3 holes, +0.002 u → **0**, +0.005 u →
+  **0**. `--no-mips` does not move it (3 holes), and a projected straight edge
+  stays straight, so neither the mip poly-split nor a T-junction on a split
+  edge can open a gap here.
+
+So these are not a defect in the lattice's topology; they are **the
+rasterizer's sub-pixel hairline at an exactly-shared edge**, and the count is a
+function of how many near-camera shared lattice edges are in view. Ledger:
+`d80e907170e6`.
+
+## 2. The local fix, and its locality proof
+
+`--v4_band_union` injected each foreign band's **whole `colLine` profile**
+(`lo−pad`, `mid`, `hi+pad` — three lines and two 2.5-texel cells) into every
+block interior, where the union needs **one** node. 57539737 restricts a
+foreign band to its **run centre**. Everything else is untouched, and the new
+branch is inside `allBands && !own`, so the shipped arm is byte-null by
+construction *and* by measurement: 60 606 stone faces, min-angle p10 2.4066,
+plateau e−r p50 −0.05561 / core −0.10653, 28 946 moved + 1 649 pinned — digit
+for digit §P3's numbers — cam A with the flag off still
+`d92cb6f5eb19da4301588ae83af6a56e`, `render_gate.sh` 4/4.
+
+| | profile form (P3) | centre form (P3b) |
+|---|---|---|
+| tear battery, 54 poses | **18** (5 new interior) | **14** — the shipped arm's own set, pixel for pixel |
+| stone faces | 124 716 (breaches §2h's 90 625) | **84 742** |
+| min-angle p10 / < 1° | 2.65 / 3 | 4.81 / 6 |
+| plateau e−r p50 all / core | −0.0084 / −0.0075 | −0.0115 / −0.0090 |
+| dz vs the bare floor | 0.74–0.78× | **0.77–1.18×**, PASS 4/4 |
+| bake, min-of-5 | — | **74.5 ms** (shipped 56.0, budget 500) |
+
+G2 3 → 0 holes, P5813 3 → 1, and that 1 is the pre-existing P2-lattice hole at
+(79, 36) present with the flag off at the same amplitude.
+
+## 3. Then Gil-Ad flew it, and the premise turned out to be false
+
+His verdict (`41112ea861bd`): *"p3 solves the cracks, but it creates artifacts
+on the fixed seams (and in other places). the polygons are not aligned to the
+receses…"*
+
+`--v4_band_union` was justified by §2c's sentence "in a running bond band k+1's
+mortar sits at the middle of band k's blocks". **That is not this wall.** The
+new census-only `[V4-GRID]` block prints the grid the lattice was actually
+built from instead of describing it; `tools/v4_grid_align.py` scores it. For
+`rooms`, mip 2, map 256×256, **pitch 64 texels**, the four bands' vertical-run
+centres are
+
+| band | run centres (texels) | phase mod 64 |
+|---|---|---|
+| 0 | 22.0 86.5 150.0 214.5 | **22.0** |
+| 1 | 63.5 125.5 190.0 255.0 | **62.5** |
+| 2 | 27.0 91.0 155.0 219.5 | **27.0** |
+| 3 | 1.5 64.5 128.0 192.0 | **0.5** |
+
+— not the 0/32 alternation a running bond would give. So a foreign band's run
+centre is **not** this row's block centre, and of the 12 lines the union
+injects into each host band:
+
+| host band | within 4 texels of a HOST breakline | inside the host's own recess |
+|---|---|---|
+| 0 | 4 of 12 (nearest **0.75**) | 0 |
+| 1 | 3 of 12 | **2** (0.25 and 1.25 texels) |
+| 2 | 4 of 12 (nearest **1.75**) | 0 |
+| 3 | 3 of 12 | **2** (1.00 and 0.75 texels) |
+
+and the ones that *do* land in a block sit 17–19 texels from a shoulder rather
+than at the ~29-texel centre. **A third of the injected breaklines are
+unsnapped polygon edges hugging or crossing a recess** — hair-thin cells
+parallel to a groove, and breaklines crossing a recess at an arbitrary phase.
+That is the mechanism behind the verdict. Ledger: refutation `935f59476311`.
+
+## 4. `--v4_block_mid` — the same node, taken from the host's own grid
+
+A span between two **different** runs is a block interior, and at cpb = 1 it
+takes no line of its own (the target cell *is* the block pitch). `--v4_block_mid`
+splits that span in two: the new line is the midpoint of the host band's own two
+bounding shoulders, **equidistant from the two recesses it lies between by
+construction**, one line per block instead of three, with no other band
+involved and no bond assumption. Spans inside a run are untouched (those are
+`--v4_groove_refine`'s), spans under 5 texels are left alone.
+
+| arm | stone faces | plateau e−r p50 all / core | planes over ±0.005 | min-ang p10 | < 1° | tear px |
+|---|---|---|---|---|---|---|
+| shipped `--v4_cpb=1` | 60 606 | −0.0556 / −0.1065 | 10 of 33 | 2.41 | 3 | **14** |
+| `--v4_band_union` (centre) | 84 742 | −0.0115 / −0.0090 | 10 of 36 | 4.81 | 6 | **14** |
+| **`--v4_block_mid`** | **75 856** | −0.0164 / −0.0167 | 9 | **6.22** | **1** | **14** |
+| old bake | 90 625 | — | — | — | — | 25 |
+
+All three are watertight: 630 use-1 edges = the 130 authored abutments, 0
+use-3+, 0 border-sample and 0 interior T-vertices.
+
+## 5. What P3b did NOT settle
+
+* **The ±0.005 u plateau invariant is still FAIL on every arm** — approached
+  (−0.0556 → −0.0115) but not reached. §6 P3's other end condition, dz ≤ 2× the
+  bare floor, now PASSES on the union arm at 4 of 4 corpus poses.
+* **The look is Gil-Ad's call.** `--v4_block_mid` is the arm built to answer
+  his verdict and it has not been flown. Nothing here is evidence about the
+  look; the alignment table is evidence about the *lines*, not about what they
+  look like.
+* **No recesses at wall boundaries** (`98b9eba830ec`) is border-pinning /P5
+  territory and was left alone. Nothing in this round moved a border sample:
+  `tv_border_sample` is 0 and `border_max_dev` 1.4e-14 u on every arm measured.
+* `tools/flip_rate.sh`'s greets recipe does **not** pass `--greets-displace`,
+  so it cannot measure a v4 arm — a run of it with `--greets_displace_v4
+  --v4_band_union` reproduces the OFF-arm pin `570a7b44…` exactly, because the
+  arm is inert in that recipe. Determinism for a v4 arm has to go through
+  `tools/v4_md5.sh` on the judging flags, which is what §P3 did.
