@@ -794,6 +794,12 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 						return 1.0f;   // occ would never leave its 0.0f initialiser
 					} else {
 						FDS_PYR_CENSUS(spotFastOcc);
+						// --shadow_coplanar_guard: this arm settles "fully
+						// shadowed" without reading a depth, so it must fall
+						// through to the real tap when the guard is on.
+						// Byte-null off. See FDS/FILLERS/ShadowMap.h.
+						if (fds::FeatureFlags::shadow_coplanar_guard())
+							uniC = kShadowUniMixed;
 					}
 				}
 				const float fx = smX - float(iX);
@@ -870,10 +876,42 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 					const uint16_t i10 = ShadowTexId(psB[o10]);
 					const uint16_t i01 = ShadowTexId(psB[o01]);
 					const uint16_t i11 = ShadowTexId(psB[o11]);
-					if (i00 != surfaceId && i00 != 0) occ += w00;
-					if (i10 != surfaceId && i10 != 0) occ += w10;
-					if (i01 != surfaceId && i01 != 0) occ += w01;
-					if (i11 != surfaceId && i11 != 0) occ += w11;
+					// ─── CO-PLANAR GUARD (--shadow_coplanar_guard, OFF) ──
+					// Same rule as the cube tap (FDS/FILLERS/ShadowMap.h).
+					// The id half read here is the STATIC plane's, so the
+					// depth compared against must be the static plane's too
+					// — NOT z00..z11, which are max(static, dynamic).
+					// Byte-null off: cpGuard false leaves each predicate as
+					// `i != surfaceId && i != 0`.
+					const bool cpGuard = fds::FeatureFlags::shadow_coplanar_guard();
+					int cpZ = 0, cpN = 0;
+					bool cpOne = false;   // --shadow_coplanar_guard_onesided
+					if (cpGuard) {
+						cpZ = 0xFF80 - int(lz * sm.zScale);
+						if (cpZ < 0) cpZ = 0;
+						if (cpZ > 0xFFFF) cpZ = 0xFFFF;
+						cpN = fds::FeatureFlags::shadow_coplanar_guard_quanta();
+						if (cpN < 0) {
+							// Depth-mode band: the same constant + slope term
+							// the depth branch below builds, recomputed here
+							// because that branch is not taken in PolyId mode.
+							const float dotGeoG = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+							const float nDotLG  = dotGeoG * lenInv;
+							const float invNdotLG = 1.0f / (nDotLG > 0.2f ? nDotLG : 0.2f);
+							cpN = kShadowBiasG + int(float(kSlopeBiasG) * (invNdotLG - 1.0f));
+						}
+						cpOne = fds::FeatureFlags::shadow_coplanar_guard_onesided();
+					}
+					auto occl = [&](uint16_t i, size_t o) -> bool {
+						if (i == surfaceId || i == 0) return false;
+						if (!cpGuard) return true;
+						const int dz = int(ShadowTexZ(psB[o])) - cpZ;
+						return (dz > cpN) || (!cpOne && dz < -cpN);
+					};
+					if (occl(i00, o00)) occ += w00;
+					if (occl(i10, o10)) occ += w10;
+					if (occl(i01, o01)) occ += w01;
+					if (occl(i11, o11)) occ += w11;
 				} else {
 					int pixZenc = 0xFF80 - int(lz * sm.zScale);
 					if (pixZenc < 0) pixZenc = 0;
@@ -2642,6 +2680,8 @@ static void Render_DeferredLighting_TileT(const DeferredLightingCtx &ctx,
 	    && !lmKernelEnabled
 	    && !caFlags.profNoCubeTap
 	    && caFlags.shadowMode == ShadowMode::PolyId;
+	// --shadow_coplanar_guard: one flag read per tile, not per tap.
+	const bool cpGuardTile = fds::FeatureFlags::shadow_coplanar_guard();
 
 	// --deferred_cube_prepass: armed for this tile by CubeProTileArmed(),
 	// which owns the whole predicate — see it for the terms and why.
@@ -3809,6 +3849,22 @@ static void Render_DeferredLighting_TileT(const DeferredLightingCtx &ctx,
 						//  - Otherwise → per-pixel cube tap.
 						const int32_t cubeIdx = tl.cubeShadowIdx[n];
 						if (cubeIdx >= 0) {
+							// --shadow_coplanar_guard band for the
+							// --deferred_cube_direct call below. The identity
+							// test ignores bias, so the shipping call passes
+							// 0/0; the guard's default band IS the depth-mode
+							// bias for this pixel, so it is computed when (and
+							// only when) the guard is on. Byte-null off: both
+							// are the same literal zeroes the call had, and the
+							// slope math is not entered.
+							int cpGuardCB = 0, cpGuardSB = 0;
+							if (cpGuardTile) {
+								const float dotGeoG = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+								const float nDotLG = dotGeoG * lenInv;
+								const float invNdotLG = 1.0f / (nDotLG > 0.2f ? nDotLG : 0.2f);
+								cpGuardCB = kShadowBiasG;
+								cpGuardSB = int(float(kSlopeBiasG) * (invNdotLG - 1.0f));
+							}
 							// --deferred_cube_direct: this IS resolveCubeAtten's
 							// PolyId arm, called with the arguments it forwards,
 							// without the 20-argument frame around it.
@@ -3829,7 +3885,7 @@ static void Render_DeferredLighting_TileT(const DeferredLightingCtx &ctx,
 							    : cubeDirect
 							    ? CubeShadow_Sample(cubeIdx,
 								sampleWorldX, sampleWorldY, sampleWorldZ,
-								x, y, z, /*constBias=*/0, /*slopeBias=*/0,
+								x, y, z, cpGuardCB, cpGuardSB,
 								surfaceShadowId)
 							    : resolveCubeAtten(
 								pixelLM, cubeIdx, lmKernelEnabled, caFlags,
@@ -6037,6 +6093,14 @@ static bool CubeProTileArmed(const DeferredLightingCtx &ctx, int tileIndex,
 		{ /* lmKernelEnabled == false: this is the arm we want */ }
 	else return false;
 	if (fds::FeatureFlags::prof_no_cube_tap())       return false;
+	// --shadow_coplanar_guard needs the receiver's LIGHT-SPACE DEPTH, and the
+	// cached tail is called with lz = 0 on purpose (CubeTapPrepass.h: the
+	// Depth-mode arm is unreachable under PolyId, so the prologue never stores
+	// lz and the slot has no room for it). Feeding the guard lz = 0 makes the
+	// receiver read as if it were AT the light, which silently turns the guard
+	// into "nothing ever occludes". Take the scalar path instead — the guard is
+	// an off-by-default correctness experiment, not a hot path.
+	if (fds::FeatureFlags::shadow_coplanar_guard())  return false;
 	if (g_shadowMode.load(std::memory_order_relaxed) != ShadowMode::PolyId) return false;
 	const bool quarter = deferredLightingQuarterEnabled();
 	const bool checker = deferredLightingCheckerboardEnabled() && !quarter;
