@@ -1851,11 +1851,11 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 		std::map<std::pair<int,int>, ColSet> colCache;
 		const bool allBands = FeatureFlags::v4_band_union();
 		auto colsFor = [&](int bA, int bB) -> const ColSet & {
-			// Under --v4_band_union the LINE set is the same for every row, so
-			// the cache key collapses to one entry per face; the runEdge set
-			// still belongs to the row's own bands, and it is rebuilt per key.
-			auto key = allBands ? std::make_pair(std::min(bA,bB), std::min(bA,bB))
-			                    : std::make_pair(std::min(bA,bB), std::max(bA,bB));
+			// The cache key is the row's OWN band pair in both arms: under
+			// --v4_band_union a foreign band no longer contributes the same
+			// thing as an own one (see the CENTRE rule below), so the key may
+			// not collapse to one entry per face the way P3's first cut did.
+			auto key = std::make_pair(std::min(bA,bB), std::max(bA,bB));
 			auto it = colCache.find(key);
 			if (it != colCache.end()) return it->second;
 			std::vector<std::pair<double,int64_t>> raw;
@@ -1873,10 +1873,42 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 			// Unioning the bands gives every block a mid-block line that is
 			// classified PLATEAU there and reads the max-pyramid, which is the
 			// node the block interior was missing.
+			//
+			// A FOREIGN band contributes ONE line per run — the run's CENTRE —
+			// and never its shoulder profile.  In a running bond that centre IS
+			// the centre of this row's block, so it is exactly the plateau node
+			// the interior was missing; lo±pad / hi±pad describe a groove that
+			// does not exist in this row, and injecting them put THREE lines and
+			// two 2.5-texel cells into every block interior instead of one node.
+			// Measured cost of the profile form (P3b): 124 716 stone faces and,
+			// in the razor-thin mortar strips, twice the near-camera shared
+			// edges — where the rasterizer's sub-pixel hairline at an
+			// exactly-shared edge leaks single background pixels (the 5 INTERIOR
+			// pinholes that reverted the flag in f53dc4d6; a 0.002 u camera
+			// jitter moves them, so they are alignment-sensitive leaks at the
+			// edge, not a gap in the mesh — the mesh is use-2 everywhere with
+			// 0 interior T-vertices in both forms).
 			const size_t nbLine = allBands ? G.colLine.size() : size_t(nb);
 			for (size_t q = 0; q < nbLine; ++q) {
 				const int bb = allBands ? int(q) : bands[q];
 				if (bb < 0 || size_t(bb) >= G.colLine.size()) continue;
+				const bool own = (bb == bands[0]) || (nb == 2 && bb == bands[1]);
+				if (allBands && !own) {
+					if (size_t(bb) >= G.grid.vPerBand.size()) continue;
+					int runId = 0;
+					for (const StoneGRun &r : G.grid.vPerBand[size_t(bb)]) {
+						for (long j = j0; j <= j1; ++j) {
+							const double x = 0.5*(double(r.lo) + double(r.hi))
+							               + double(j) * perW;
+							if (x < xmin - perW || x > xmax + perW) continue;
+							raw.push_back({ x, (int64_t(bb) << 44)
+							                 | (int64_t(runId) << 24)
+							                 | int64_t(j + (1 << 23)) });
+						}
+						++runId;
+					}
+					continue;
+				}
 				for (long j = j0; j <= j1; ++j)
 					for (const auto &cl : G.colLine[size_t(bb)]) {
 						const double x = cl.first + double(j) * perW;
