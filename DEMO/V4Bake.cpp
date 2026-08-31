@@ -1850,12 +1850,13 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 		struct ColSet { std::vector<double> lines, runEdge; };
 		std::map<std::pair<int,int>, ColSet> colCache;
 		const bool allBands = FeatureFlags::v4_band_union();
+		const bool blockMid = FeatureFlags::v4_block_mid();
 		auto colsFor = [&](int bA, int bB) -> const ColSet & {
-			// Under --v4_band_union the LINE set is the same for every row, so
-			// the cache key collapses to one entry per face; the runEdge set
-			// still belongs to the row's own bands, and it is rebuilt per key.
-			auto key = allBands ? std::make_pair(std::min(bA,bB), std::min(bA,bB))
-			                    : std::make_pair(std::min(bA,bB), std::max(bA,bB));
+			// The cache key is the row's OWN band pair in both arms: under
+			// --v4_band_union a foreign band no longer contributes the same
+			// thing as an own one (see the CENTRE rule below), so the key may
+			// not collapse to one entry per face the way P3's first cut did.
+			auto key = std::make_pair(std::min(bA,bB), std::max(bA,bB));
 			auto it = colCache.find(key);
 			if (it != colCache.end()) return it->second;
 			std::vector<std::pair<double,int64_t>> raw;
@@ -1873,10 +1874,42 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 			// Unioning the bands gives every block a mid-block line that is
 			// classified PLATEAU there and reads the max-pyramid, which is the
 			// node the block interior was missing.
+			//
+			// A FOREIGN band contributes ONE line per run — the run's CENTRE —
+			// and never its shoulder profile.  In a running bond that centre IS
+			// the centre of this row's block, so it is exactly the plateau node
+			// the interior was missing; lo±pad / hi±pad describe a groove that
+			// does not exist in this row, and injecting them put THREE lines and
+			// two 2.5-texel cells into every block interior instead of one node.
+			// Measured cost of the profile form (P3b): 124 716 stone faces and,
+			// in the razor-thin mortar strips, twice the near-camera shared
+			// edges — where the rasterizer's sub-pixel hairline at an
+			// exactly-shared edge leaks single background pixels (the 5 INTERIOR
+			// pinholes that reverted the flag in f53dc4d6; a 0.002 u camera
+			// jitter moves them, so they are alignment-sensitive leaks at the
+			// edge, not a gap in the mesh — the mesh is use-2 everywhere with
+			// 0 interior T-vertices in both forms).
 			const size_t nbLine = allBands ? G.colLine.size() : size_t(nb);
 			for (size_t q = 0; q < nbLine; ++q) {
 				const int bb = allBands ? int(q) : bands[q];
 				if (bb < 0 || size_t(bb) >= G.colLine.size()) continue;
+				const bool own = (bb == bands[0]) || (nb == 2 && bb == bands[1]);
+				if (allBands && !own) {
+					if (size_t(bb) >= G.grid.vPerBand.size()) continue;
+					int runId = 0;
+					for (const StoneGRun &r : G.grid.vPerBand[size_t(bb)]) {
+						for (long j = j0; j <= j1; ++j) {
+							const double x = 0.5*(double(r.lo) + double(r.hi))
+							               + double(j) * perW;
+							if (x < xmin - perW || x > xmax + perW) continue;
+							raw.push_back({ x, (int64_t(bb) << 44)
+							                 | (int64_t(runId) << 24)
+							                 | int64_t(j + (1 << 23)) });
+						}
+						++runId;
+					}
+					continue;
+				}
 				for (long j = j0; j <= j1; ++j)
 					for (const auto &cl : G.colLine[size_t(bb)]) {
 						const double x = cl.first + double(j) * perW;
@@ -1912,8 +1945,16 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 				if (i) {
 					const double a = base[i-1].first, b = base[i].first;
 					const bool sameRun = (base[i-1].second == base[i].second);
+					// --v4_block_mid: a span between two DIFFERENT runs is a block
+					// interior, and at cpb=1 it takes no line of its own (the target
+					// cell IS the block pitch).  Splitting it in two puts the node
+					// there, at the midpoint of the host band's own two bounding
+					// shoulders — equidistant from the two recesses by construction,
+					// which is the property --v4_band_union's borrowed lines do not
+					// have on this map (see the flag's doc and the [V4-GRID] census).
+					const int minCells = (blockMid && !sameRun && (b - a) > 5.0) ? 2 : 1;
 					int nx = sameRun ? (1 << grooveRefine)
-					                 : std::max(1, int(std::ceil((b - a) / G.targetTexX)));
+					                 : std::max(minCells, int(std::ceil((b - a) / G.targetTexX)));
 					if (nx > 64) { nx = 64; ++S.nxCap; }
 					for (int q2 = 1; q2 < nx; ++q2)
 						cs.lines.push_back(a + (b-a)*double(q2)/double(nx));
@@ -2386,6 +2427,42 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 	    T.faces.size(), T.vpos.size(), T.corners, T.exactClasses, T.edges.size(),
 	    (long long)T.use1, (long long)T.use2, (long long)T.use3plus, T.nCharts,
 	    T.meshesWithStone);
+	// ── the GRID itself, in the map's own texel coordinates ────────────────
+	// The breaklines are only "aligned to the recesses" if the runs they come
+	// from are.  P3b's look defect (verdict 41112ea861bd) is about exactly
+	// that, so the grid the lattice was built from is dumped rather than
+	// described: every horizontal run, every band's y-range, and every band's
+	// vertical runs, so a reader can check the running-bond offset between two
+	// bands instead of assuming it.  Census-only; nothing reads it at runtime.
+	if (census) for (int m = 0; m < nMats; ++m) {
+		const MatGrid &G = grids[size_t(m)];
+		if (!G.ok) continue;
+		std::string hs;
+		for (const StoneGRun &r : G.grid.h) {
+			char b[64]; std::snprintf(b, sizeof(b), "%.3f-%.3f ", double(r.lo), double(r.hi));
+			hs += b;
+		}
+		std::fprintf(stderr, "[V4-GRID] mat=%s mip=%d map=%dx%d pitch=%.3fx%.3f hruns=%s\n",
+		             matNames[m], G.useMip, G.mipW, G.mipH,
+		             double(G.pitchX), double(G.pitchY), hs.c_str());
+		for (size_t b = 0; b < G.grid.vPerBand.size(); ++b) {
+			std::string vs;
+			for (const StoneGRun &r : G.grid.vPerBand[b]) {
+				char t[80];
+				std::snprintf(t, sizeof(t), "%.3f-%.3f(c%.3f) ",
+				              double(r.lo), double(r.hi), 0.5*(double(r.lo)+double(r.hi)));
+				vs += t;
+			}
+			const double y0 = b < G.grid.bandY.size() ? double(G.grid.bandY[b].first)  : -1.0;
+			const double y1 = b < G.grid.bandY.size() ? double(G.grid.bandY[b].second) : -1.0;
+			std::fprintf(stderr, "[V4-GRID] mat=%s band=%zu y=%.3f..%.3f vruns=%s\n",
+			             matNames[m], b, y0, y1, vs.c_str());
+		}
+		for (size_t r = 0; r < G.rowTpl.size(); ++r)
+			std::fprintf(stderr, "[V4-GRID] mat=%s row=%zu y=%.3f..%.3f type=%d bandA=%d bandB=%d\n",
+			             matNames[m], r, double(G.rowTpl[r].y0), double(G.rowTpl[r].y1),
+			             G.rowTpl[r].type, G.rowTpl[r].bandA, G.rowTpl[r].bandB);
+	}
 	for (int m = 0; m < nMats; ++m) {
 		const MatGrid &G = grids[size_t(m)];
 		std::fprintf(stderr,
