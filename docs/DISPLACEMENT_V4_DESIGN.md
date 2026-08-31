@@ -693,3 +693,199 @@ value P1 recorded three ways; greets t=1588 pin `570a7b443f768393dc6647044a9e67b
   shared rings. Until they are, 278 points on them are T-vertices — harmless at
   amp = 0, and exactly what "P3+ cannot open the base junction" depends on P3
   pinning displacement along them.
+
+---
+
+# §P3 — the round that built (d)+(e) for interiors, and the gate it did not reach
+
+Built on `rev-v4` at P2's tip **b8b51422**. Code: `DEMO/V4Bake.cpp` (the height
+field, the pyramids, `ReliefClassAt`, the displacement in `RunP2Bake`,
+`AccumRelief`), flags `--v4_amp` / `--v4_pyramid` / `--v4_pyr_radius_tex` /
+`--v4_relief_census` / `--v4_band_union`, readers `tools/v4_census.py --p3
+--p3gate`, `tools/v4_p3_num.sh`, `tools/v4_p3_ref.sh` and the `--flat-deg`
+block-interior mask on `tools/refrender_diff.py`. Commits 7f21c96d, b518d7a2,
+f53dc4d6, 58b0c02e.
+
+**The headline: P3 built exactly what §6 P3 proposed and reached neither end
+condition, and the reason is not the height rule.** The same height rule, with
+one node added inside each block, passes the geometric condition at every corpus
+pose and beats the flat wall — which nothing in this campaign had done before.
+What blocks it is the lattice, which is §2c's stage and §6 P7's dial.
+
+Reproduce:
+
+```sh
+/Users/gil-ad/work/rev-v4/tools/v4_p3_num.sh plateau_emr_p50          # the census number
+/Users/gil-ad/work/rev-v4/tools/v4_p2_pose.sh /tmp/v4p3 5965 \
+  "22.5084476,3.87992334,-61.8882256,-0.829246342,-0.20816116,0.518670499" \
+  --greets_displace_v4 --v4_census
+python3 /Users/gil-ad/work/rev-v4/tools/v4_census.py --p3gate /tmp/v4p3/log.txt
+/Users/gil-ad/work/rev-v4/tools/v4_p3_ref.sh /tmp/v4p3ref                # dz, 4 poses
+/Users/gil-ad/work/rev-v4/tools/v4_tear_battery.sh /tmp/v4tear           # 54 poses
+```
+
+## What P3 does
+
+Every **interior** lattice node moves along its **chart plane normal** by
+`d(u,v) = amp·(h(u,v) − mipMean)`. Every vertex on an authored edge — corner,
+shared-border sample, abutment sample — stays **pinned at 0**: §2e's
+offset-plane solve is P4, so nothing two faces share moves, and P2's
+watertightness and every silhouette carry forward untouched (measured: 1 649
+pinned vertices, 28 946 moved, `border_sample` and `interior` T-vertices still 0).
+
+| | |
+|---|---|
+| direction | the chart's area-weighted proxy normal; max angle to any member face **1e-06°**, so §2b's "material-blind chart" and the face normal are the same thing on this scene, as P1 measured |
+| height field | the mip is unswizzled once per material into a row-major copy with this file's **own** copy of the block-tiled address and its own bilinear (texel centres, toroidal wrap) — a second implementation of the convention `MeshOps.cpp` and `DeferredDisplaceRef.cpp` each carry, which is what makes the census's `r` ground truth rather than self-agreement. `rooms` mipMean 0.547138, h ∈ [0, 0.6627], d ∈ [−0.1641, +0.0347]; `floor` 0.340478, [0.1725, 0.4588], [−0.0504, +0.0355] |
+| pyramids | separable max/min dilation over a `--v4_pyr_radius_tex` (default 1.25 = `kStonePadTex`) window with toroidal wrap. A max over a window **is** the max-pyramid at the level that covers it, without quantising a 1.25-texel shoulder to a power of two |
+| classes | from the mortar grid, never a threshold on the field: inside a run = groove (min-pyramid), inside its shoulder pad = bevel (bilinear), outside = plateau (max-pyramid) |
+| bake cost | displace block **55.8 ms** min-of-5 (`--v4_amp=0` 52.2, `--v4_flat` 23.3) against a 500 ms budget; the [V4-RELIEF] census is timed separately and runs only under `--v4_census` |
+
+### The convention at the outer pad lines, which had to be measured
+
+The first implementation called both pad lines of a mortar run "bevel". It
+produced **plateau = 0 nodes in the whole scene** and reproduced the −0.036 u
+recession of `d8e1d26bfc3e` exactly. At `--v4_cpb=1` the target cell **is** the
+block pitch, so `ceil(pitch/target) = 1` and *every* lattice node in this scene
+sits on a breakline — there is no node in a block interior for a "plateau node"
+rule to apply to. The outer pad line (`lo−pad`, `hi+pad`) is the **top of the
+shoulder** and is therefore a plateau node reading the max-pyramid; the inner
+pad line is the bottom and is a groove node reading the min; the ramp between
+them is the bevel. That fixed the classification (8 638 plateau / 20 308 groove
+nodes) and moved the scene bias −0.0720 → −0.0556, which is where the rule ran
+out of nodes to work with.
+
+## The gate — 6 PASS, 2 FAIL
+
+| row | target | measured | |
+|---|---|---|---|
+| OFF arm byte-identical | every pin | cam A `d92cb6f5eb19da4301588ae83af6a56e`, greets t=1588 `570a7b443f768393dc6647044a9e67b3`, fountain t=2500 `8db68ccb59416e9a44037e9f387b7bd9`, `render_gate.sh` **4/4** | **PASS** |
+| v4 arm deterministic | same md5 24/24 | `7c259253ca3b540de5c51e60417765f3`, 24 of 24, 0 flips | **PASS** |
+| tear battery | ≤ 15 hole px | **14** over 8 of 54 poses (P2: 15 over 9) | **PASS** |
+| sliver census | no regression past P2 | min-angle p10 **2.4066°** (P2 2.2551), p50 20.84, the same **8** faces under 1° of 60 606, 2 913 under 2° (P2 3 854) | **PASS** |
+| face count | ≤ the old bake's | **60 606** stone / 65 912 mesh, unchanged — P3 moves nodes and adds none; the old bake is 90 625 / 95 931 | **PASS** |
+| bake wall-clock | ≤ 500 ms | **55.8 ms** min-of-5 | **PASS** |
+| plateau bias | ±0.005 u on every plane | e−r p50 **−0.0556** u scene-wide, **−0.1065** in the core band, **33 of 33** planes outside, worst −0.1189 | **FAIL** |
+| dz at block interiors | ≤ 2× the bare floor | **2.91–4.84×** at 4 of 4 corpus poses | **FAIL** |
+
+Watertightness is carried forward intact: 91 224 output edges, use-2 90 594,
+use-1 630 = exactly the 130 authored abutments cut into their own segments,
+use-3+ **0**; 278 T-vertices, `border_sample` 0 and `interior` 0, i.e. every one
+of them still on an authored abutment line, which is §2e's and P4's.
+
+## Why it fails, localized
+
+Not the height rule and not the pinned rings — the **core** band (samples more
+than one target cell from an authored edge, i.e. with P4's rings excluded) reads
+**worse** than the all-sample number, −0.1065 against −0.0556. The recession
+lives inside the blocks.
+
+The wall is a **running bond**: band k+1's vertical mortar sits at the middle of
+band k's blocks. With no column line inside a block, the only nodes in a band-k
+block interior come from the union **row** at a band change, where band k+1's
+mortar columns are injected — and the row below has nothing under them. The
+Delaunay then covers the block with triangles whose three corners are all
+mortar-deep. Measured at cam A: a triangle at (153.25, 127.5) (150.75, 127.5)
+(126.75, 189.75) texels, corner heights h = 0.048 / 0.027 / 0.233, spanning a
+57.5-texel block whose field reads h = 0.59. Cross-tabulated, the
+plateau-by-field ∩ plateau-by-grid cell holds 149 571 samples at e−r p50
+**−0.0799 u**.
+
+**This also corrects §2c.** Its restricted-quadtree rule — "adjacent cells
+differ by ≤ 1 level" — is **not satisfied** by the P2 lattice: a 2.5-texel mortar
+cell abuts a 57.5-texel block cell, 4.5 levels apart. P2's
+`level_jump_violations = 0` measured the row **split count**, not the cell sizes,
+so the invariant was reported green on the wrong quantity.
+
+## The ladder, and what each rung costs
+
+All rungs are the identical height rule; only the lattice varies. cam A.
+
+| arm | stone faces | plateau e−r p50 all / core | planes over ±0.005 (core) | min-ang p10 | < 1° | dz vs bare floor | tear px |
+|---|---|---|---|---|---|---|---|
+| **`--v4_cpb=1` (shipped)** | **60 606** | −0.0556 / −0.1065 | 10 of 33 | 2.41 | 8 | **2.91–4.84×** FAIL | **14** PASS |
+| `--v4_cpb=2` | 110 249 | −0.0205 / −0.0234 | — | — | — | — | — |
+| `--v4_cpb=4` | 227 348 | −0.0015 / +0.0001 | **0 of 50** | 15.04 | 0 | — | — |
+| `--v4_band_union` | 124 716 | −0.0084 / −0.0075 | 10 of 36 | 2.65 | 3 | **0.74–0.78×** PASS | **18** FAIL |
+| `--v4_band_union --v4_cpb=1.5` | 183 645 | worst plane −0.0189 / core worst −0.0032 | **0 of 46** | 4.40 | 0 | — | — |
+| `--v4_band_union --v4_cpb=2` | 200 379 | −0.0030 / −0.0016 | **0 of 48** | 4.79 | 0 | — | — |
+
+`--v4_band_union` gives every row the column lines of **every** block-row band,
+which puts a line through every block interior; at that line the point is outside
+its *own* band's runs, so it is a plateau node reading the max-pyramid — the node
+the interior was missing.
+
+**It shipped ON for one commit (b518d7a2) and was reverted by the tear battery
+(f53dc4d6).** It takes the 54-pose battery from 14 to 18 hole px against a 15 px
+cap, and the 5 new pixels are not the silhouette recession a displaced arm is
+allowed to move: every one is an **interior gap** — all 8 neighbours rasterised
+in both arms, all 8 stone in the control — and they are **collinear**, the
+signature of a crack along one line (G2 (1457,49) (1378,70) (1299,91), spacing
+(−79,+21); P5813 (1280,488) (1293,668) on `floor::mirUV`). Decomposed:
+
+| pose | P2 lattice, amp 0 | band-union, amp 0 | band-union, amp 0.3 | no union, amp 0.3 |
+|---|---|---|---|---|
+| G2 | 0 | 0 | **3** | 0 |
+| P5813 | 2 | 2 | **3** | 1 |
+| P5854 | 0 | 0 | 1 | 1 |
+
+so the G2/P5813 pinholes are the band-union **×** displacement interaction —
+neither the lattice change alone nor the displacement alone makes one — and only
+P5854's single pixel is displacement's own. The mechanism is consistent with the
+union putting two column lines from *different* bands within a texel of each
+other on one row, where the relief class flips between them and the surface takes
+a 0.16 u step across ~1 texel; `kLineMergeTex` is 1.0 texel and does not see the
+class. That is a defect in the change, not in the phase, and it is not local
+enough to patch at the P3 gate.
+
+## Two instrument notes
+
+1. **`tools/nspace_relief.py` cannot run on this branch.** It imports
+   `tools/refdiff_detect.py` and reads `*_refplane.txt` dumps from
+   `--refplane_dump`; all three live only on `rev-dispfix` (d3f7a1ef). P3
+   measures the same quantity as a **bake-time** census (`[V4-RELIEF]`): 9
+   equal-area barycentric samples per emitted triangle, the surface's own height
+   along the plane normal (the linear interpolation of its three vertices'
+   displacements, exact because the whole face rides one normal) against the
+   field's `d(u,v)` at the same UV, in nspace_relief's own classes (groove
+   r < −0.03, bevel −0.03..0, plateau r ≥ 0) so the numbers are comparable to the
+   −0.036 u it found. Stronger where it matters — no camera, no grazing 1/cos
+   stretch, every plane, the whole surface rather than the visible pixels — and
+   weaker in one way: its `r` comes from the bake's own sampler. The independent
+   check on that is the dz row, which uses `DeferredDisplaceRef.cpp`'s separate
+   implementation, and the two agree on the direction and the size.
+2. **The block-interior mask needs no camera and no second reference arm.** A
+   reference pixel is block interior when its shading normal is within 2° of its
+   own face's plane normal, and the plane normal is recovered from the reference
+   alone as the per-`faceId` **median** normal (the flat parts are the majority of
+   every face's area). It calibrates itself: the bare wall reads **0.0142–0.0257 u**
+   p50 through that mask across the corpus four, which is §0's independently
+   stated reference noise floor of 0.016–0.035 u per pose.
+
+Also on file, because it looks alarming in the battery output and is not a
+defect: 31 of the 54 tear poses report `new_coverage=42049`. Those poses carry
+`cam -`, which the battery replaces with the fixed `0,0,0,0,0,1` camera, so all
+31 render **one** frame. At that framing the viewer looks *along* the floor
+plane: the flat control draws the floor edge-on at zero height and the displaced
+arm gives it relief, so its silhouette becomes a 39-px band at the horizon — all
+42 049 px are `floor::mirUV` in y ∈ [540, 578], 40 037 of them with all 8
+neighbours rasterised in the arm, and holes there are 0.
+
+## What P4 inherits — and why it should not start yet
+
+* The height rule of §2d, complete and cheap (6 ms), with its own census and its
+  own gate reader, and a direction field that is the chart plane normal and
+  nothing else (max deviation 1e-06°).
+* Every ring still pinned at 0 and every P2 invariant intact, so §2e's
+  offset-plane solve has exactly the mesh it was designed against.
+* **An open ruling, `greets.displace.v4.ruling.p3_density`** (`waiting_on:
+  gil-ad`): P3 cannot meet its own gate without a denser lattice, and each
+  candidate breaches a different invariant — (a) ship the recessed default, (b)
+  `--v4_band_union` and accept 5 interior pinholes plus 1.4× the faces, (c)
+  `--v4_band_union --v4_cpb=1.5`, the cheapest arm whose every plane passes, at
+  2.0× the old bake's faces, (d) `--v4_cpb=4` at 2.5×, or (e) find the
+  band-union pinhole's local fix first.
+* **P4 should not start on the shipped arm.** The corner rule reconciles the
+  relief at a junction; on this arm the plateau it would reconcile is 0.1 u out
+  of place, so a junction measurement taken now would be measuring the block
+  interior's error, not the corner's.
