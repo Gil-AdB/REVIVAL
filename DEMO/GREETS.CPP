@@ -1991,6 +1991,27 @@ void Initialize_Greets()
 	{
 		const int  L        = fds::FeatureFlags::greets_stone_subdiv();
 		const bool displace = fds::FeatureFlags::greets_displace();
+		// ── §WorldUV (--v4_world_uv, default OFF) — his ruling e54d2bd9b654.
+		// The per-plane world-space re-UV of the stone, BEFORE anything in
+		// this block reads or caches a UV.  It has to be here and not inside
+		// the v4 bake: CaptureStoneProxySnapshot below copies whole Face and
+		// Vertex structs (UVs included) and BuildStoneProxyMesh renders that
+		// copy in the offscreen mirror-RTT and env-probe passes, so a rewrite
+		// after it would leave the reflected wall in the dead coordinate
+		// system.  Every OTHER UV-derived table in greets init is rebuilt
+		// downstream of this line (tangents via MakeFacesIndependentByAngle
+		// and DisplaceStoneSmoothNormals, PomShellDomains, the ::mirUV
+		// handedness split, PomShell_BuildPrism); the static shadow lightmap
+		// never reads this channel (barycentric / world-planar atlas) and
+		// Face::EU1..EV3 is rebuilt per frame from the reflection vector.
+		// Gated on the v4 arm because the v4 lattice is what makes a
+		// continuous UV buy anything: its breaklines live in the height map's
+		// texel space, so one projection per plane turns 52 per-face lattices
+		// into one global one.
+		static const char *kWorldUVMats[2] = { "rooms", "floor" };
+		if (displace && fds::FeatureFlags::greets_displace_v4() &&
+		    fds::FeatureFlags::v4_world_uv())
+			fds::v4::WorldUV_Apply(GreetSc, kWorldUVMats, 2);
 		if (displace && fds::FeatureFlags::greets_shadow_proxy())
 			CaptureStoneProxySnapshot(GreetSc, g_stoneProxySnap);
 		if (!displace && L > 0) {
