@@ -144,6 +144,15 @@ def main():
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--stone-mat", help="comma-separated stone matIDs; default: read "
                                         "them from the reference arm's log.txt banner")
+    ap.add_argument("--flat-deg", type=float, default=2.0,
+                    help="BLOCK-INTERIOR mask: a reference pixel counts as block "
+                         "interior when its shading normal is within this many "
+                         "degrees of its own authored face's plane normal, which "
+                         "is estimated per faceId as the median of the reference "
+                         "normals on that face. The flat block tops and the flat "
+                         "mortar floors pass; the groove walls and shoulders, "
+                         "where the relief's own gradient tilts the normal, do "
+                         "not. Needs no camera and no second reference arm.")
     a = ap.parse_args()
     w, h = a.width, a.height
 
@@ -218,12 +227,59 @@ def main():
     else:
         ang = None
 
+    # ── BLOCK INTERIORS ────────────────────────────────────────────────────
+    # design §6 P3's end condition is "dz p50 at block INTERIORS", i.e. on the
+    # flat face of a block rather than on the shoulder the bake mip smears over
+    # ~8 level-0 texels.  The reference renders n ∝ N − ∇ₛh, so a pixel is on a
+    # flat part of the relief exactly when its normal equals its face's plane
+    # normal — and the plane normal is recoverable from the reference alone as
+    # the per-faceId MEDIAN normal, because the flat parts are the majority of
+    # every face's area.  No camera, no amp=0 arm, no assumption about which
+    # texels are mortar.
+    flat = np.zeros((h, w), bool)
+    if refhit.any():
+        fids = rfid[refhit]
+        order = np.argsort(fids, kind="stable")
+        fs = fids[order]
+        ns = rn[refhit][order]
+        bounds = np.flatnonzero(np.diff(fs)) + 1
+        planeN = {}
+        for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, fs.size]):
+            if hi - lo < 200:
+                continue
+            m = np.median(ns[lo:hi], axis=0)
+            n = np.linalg.norm(m)
+            if n > 1e-9:
+                planeN[int(fs[lo])] = m / n
+        if planeN:
+            ids = np.array(sorted(planeN))
+            tbl = np.stack([planeN[i] for i in ids])
+            idx = np.searchsorted(ids, rfid)
+            idx = np.clip(idx, 0, ids.size - 1)
+            known = refhit & (ids[idx] == rfid)
+            pn = tbl[idx]
+            cosang = np.clip((rn * pn).sum(-1), -1.0, 1.0)
+            flat = known & (np.degrees(np.arccos(cosang)) < a.flat_deg)
+    bothflat = both & flat
+    res["flat_deg"] = a.flat_deg
+    res["flat_px"] = int(flat.sum())
+    res["flat_share_of_stone"] = float(flat.sum()) / max(1, stone_n)
+    res["dz_p50_flat"] = pct(np.abs(dz[bothflat]), 50)
+    res["dz_p90_flat"] = pct(np.abs(dz[bothflat]), 90)
+
     if a.bare:
         bz16, bmat, bnrm = load_arm(a.bare, w, h)
         bz = np.where(bz16 > 0, (65408.0 - bz16.astype(np.float64)) / zscale, 0.0)
         mb = refhit & (bz16 > 0) & np.isin((bmat >> 20) & 0xFF, list(stone_ids))
         res["bare_dz_p50"] = pct(np.abs((bz - rz)[mb]), 50)
         res["bare_dz_p90"] = pct(np.abs((bz - rz)[mb]), 90)
+        res["bare_dz_p50_flat"] = pct(np.abs((bz - rz)[mb & flat]), 50)
+        res["bare_dz_p90_flat"] = pct(np.abs((bz - rz)[mb & flat]), 90)
+        # the phase's own gate: the arm's block-interior p50 against twice the
+        # bare wall's, both measured on the same mask through the same reference
+        if res["bare_dz_p50_flat"] == res["bare_dz_p50_flat"]:
+            res["p3_gate_ratio"] = res["dz_p50_flat"] / max(1e-9, res["bare_dz_p50_flat"])
+            res["p3_gate_pass"] = bool(res["p3_gate_ratio"] <= 2.0)
 
     if a.out_prefix:
         for _d in (a.tess, a.ref, a.bare):

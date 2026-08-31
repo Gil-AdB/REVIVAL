@@ -62,7 +62,17 @@ void RunP1Census(const Scene *Sc, const char *const *mats, int nMats);
 // with no lattice at all: that is the CONTROL arm the phase's byte-identity
 // gate compares against (same downstream pipeline, only the tessellation
 // differs).
-void RunP2Bake(Scene *Sc, const char *const *mats, int nMats, int mip);
+// PHASE 3 (§2d, §2e, §6 P3) rides in the same entry point: with `amp` non-zero
+// every INTERIOR lattice node is displaced along its CHART PLANE NORMAL by
+// d(u,v) = amp*(h(u,v) − mipMean), the plateau nodes reading the max-pyramid,
+// the groove nodes the min-pyramid and the bevel nodes the bilinear field
+// (§2d).  Every vertex that lies on an AUTHORED EDGE — corner, shared-border
+// sample, abutment sample — stays PINNED at 0: the junction rings are §2e's
+// offset-plane solve and that is phase P4, so P3 must not move a vertex two
+// faces share.  `amp` comes from the caller (--greets_displace_amp) unless
+// --v4_amp overrides it; --v4_amp=0 reproduces the P2 lattice exactly and is
+// the control arm of every P3 measurement.
+void RunP2Bake(Scene *Sc, const char *const *mats, int nMats, int mip, float amp);
 
 // One shared-border sample position.  Defined in DEMO/V4Border.cpp, which is
 // compiled with -ffp-contract=off; see the banner there.  `A`/`B` are the

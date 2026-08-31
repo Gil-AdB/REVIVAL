@@ -76,7 +76,8 @@ def parse(lines):
         "MAT": "mat", "WORST": "worst",
     }
     blocks = {"[V4-STITCH]": "stitch", "[V4-CHARTS]": "charts", "[V4-CENSUS]": "census",
-              "[V4-LATTICE]": "lattice", "[V4-OUT]": "out"}
+              "[V4-LATTICE]": "lattice", "[V4-OUT]": "out",
+              "[V4-DISPLACE]": "displace", "[V4-RELIEF]": "relief"}
     for ln in lines:
         tag = next((t for t in blocks if t in ln), None)
         if tag is None:
@@ -94,9 +95,14 @@ def parse(lines):
                     a, b = tok.split(":", 1)
                     out["sweep"][a] = num(b)
             continue
-        key = "%s.%s" % (blocks[tag], head)
-        out["sec"].setdefault(key, {}).update(
-            {k: num(v) for k, v in TOKEN.findall(body)})
+        toks = {k: num(v) for k, v in TOKEN.findall(body)}
+        # [V4-RELIEF] class/planegate/cross rows repeat under one section word and
+        # are distinguished by their `name=`, so key them by it.
+        if head in ("class", "planegate") and "name" in toks:
+            key = "%s.%s.%s" % (blocks[tag], head, toks["name"])
+        else:
+            key = "%s.%s" % (blocks[tag], head)
+        out["sec"].setdefault(key, {}).update(toks)
     return out
 
 
@@ -237,6 +243,81 @@ def summarise_p2(d):
     }
 
 
+def summarise_p3(d):
+    """Phase-3 numbers: the displacement banner and the relief census."""
+    out = {
+        "amp": g(d, "displace.arm", "amp"),
+        "pyramid": g(d, "displace.arm", "pyramid"),
+        "pyr_radius_tex": g(d, "displace.arm", "pyr_radius_tex"),
+        "pyr_rad_used": g(d, "displace.arm", "pyr_rad_used"),
+        "chart_maxdev_deg": g(d, "displace.arm", "chart_maxdev_deg"),
+        "nodes_moved": g(d, "displace.nodes", "moved"),
+        "nodes_groove": g(d, "displace.nodes", "groove"),
+        "nodes_bevel": g(d, "displace.nodes", "bevel"),
+        "nodes_plateau": g(d, "displace.nodes", "plateau"),
+        "nodes_pinned": g(d, "displace.nodes", "pinned"),
+        "d_min": g(d, "displace.nodes", "d_min"),
+        "d_max": g(d, "displace.nodes", "d_max"),
+        "relief_samples": g(d, "relief.arm", "samples"),
+        "relief_core_samples": g(d, "relief.arm", "core_samples"),
+        "relief_planes": g(d, "relief.arm", "planes"),
+        "relief_tol": g(d, "relief.arm", "tol"),
+    }
+    for c in ("groove", "bevel", "plateau"):
+        out["%s_emr_p50" % c] = g(d, "relief.class.%s" % c, "emr_p50")
+        out["%s_emr_p10" % c] = g(d, "relief.class.%s" % c, "emr_p10")
+        out["%s_emr_p90" % c] = g(d, "relief.class.%s" % c, "emr_p90")
+        out["%s_core_emr_p50" % c] = g(d, "relief.class.%s" % c, "core_emr_p50")
+        out["%s_planes" % c] = g(d, "relief.planegate.%s" % c, "planes")
+        out["%s_over_tol" % c] = g(d, "relief.planegate.%s" % c, "over_tol")
+        out["%s_worst_emr_p50" % c] = g(d, "relief.planegate.%s" % c, "worst_emr_p50")
+        out["%s_core_over_tol" % c] = g(d, "relief.planegate.%s" % c, "core_over_tol")
+        out["%s_core_worst_emr_p50" % c] = g(d, "relief.planegate.%s" % c,
+                                             "core_worst_emr_p50")
+    return out
+
+
+def gate_p3(d):
+    """Design section 2d's invariant: e-r p50 within +-0.005 u on EVERY plane.
+
+    Reported twice, because phase 3 pins every ring at 0 by its own spec and the
+    samples next to a pinned authored edge are P4's debt, not the height rule's:
+    ALL = every sample, CORE = only samples more than one target cell from an
+    authored edge.
+    """
+    su = summarise_p3(d)
+    rows = []
+
+    def chk(name, ok, detail):
+        rows.append((name, bool(ok), detail))
+
+    for c in ("plateau", "groove", "bevel"):
+        chk("%s: every plane within +-0.005 u (ALL samples)" % c,
+            su["%s_over_tol" % c] == 0,
+            "%s of %s planes outside, worst %s, scene p50 %s" %
+            (su["%s_over_tol" % c], su["%s_planes" % c],
+             su["%s_worst_emr_p50" % c], su["%s_emr_p50" % c]))
+        chk("%s: every plane within +-0.005 u (CORE band)" % c,
+            su["%s_core_over_tol" % c] == 0,
+            "%s of %s planes outside, worst %s, scene p50 %s" %
+            (su["%s_core_over_tol" % c], su["%s_planes" % c],
+             su["%s_core_worst_emr_p50" % c], su["%s_core_emr_p50" % c]))
+
+    chk("the displacement direction is the chart plane normal",
+        su["chart_maxdev_deg"] is not None and su["chart_maxdev_deg"] < 0.001,
+        "max angle between a chart's proxy normal and a member face's: %s deg" %
+        su["chart_maxdev_deg"])
+
+    chk("no ring or border vertex moved",
+        su["nodes_pinned"] is not None and su["nodes_pinned"] > 0,
+        "%s authored-edge vertices pinned at 0, %s interior nodes moved "
+        "(groove %s / bevel %s / plateau %s)" %
+        (su["nodes_pinned"], su["nodes_moved"], su["nodes_groove"],
+         su["nodes_bevel"], su["nodes_plateau"]))
+
+    return all(r[1] for r in rows), rows
+
+
 def gate_p2(d, p1=None):
     """Design section 2c / 2h invariants for the phase-2 lattice.
 
@@ -359,6 +440,8 @@ def main():
     ap.add_argument("--gate", action="store_true", help="print the P1 gate, exit 1 on FAIL")
     ap.add_argument("--p2", action="store_true", help="print the phase-2 table")
     ap.add_argument("--p2gate", action="store_true", help="print the P2 gate, exit 1 on FAIL")
+    ap.add_argument("--p3", action="store_true", help="print the phase-3 table")
+    ap.add_argument("--p3gate", action="store_true", help="print the P3 gate, exit 1 on FAIL")
     ap.add_argument("--free", action="store_true", help="list the free edges only")
     ap.add_argument("--junctions", type=int, default=0, metavar="N",
                     help="also print the N longest chart-pair junctions")
@@ -373,6 +456,21 @@ def main():
         lines = sys.stdin.readlines()
 
     d = parse(lines)
+    if (a.p3 or a.p3gate) and any(k.startswith("relief.") for k in d["sec"]):
+        if a.p3:
+            su3 = summarise_p3(d)
+            print("== v4 phase-3 displacement")
+            for k in sorted(su3):
+                if su3[k] is not None:
+                    print("  %-28s %s" % (k, su3[k]))
+        if a.p3gate:
+            ok3, rows3 = gate_p3(d)
+            print("== P3 gate")
+            for n, o, t in rows3:
+                print("  [%s] %-52s %s" % ("PASS" if o else "FAIL", n, t))
+            print("== %s" % ("PASS" if ok3 else "FAIL"))
+            return 0 if ok3 else 1
+        return 0
     if (a.p2 or a.p2gate) and any(k.startswith("lattice.") for k in d["sec"]):
         su2 = summarise_p2(d)
         p1 = summarise(d) if any(k.startswith("stitch.") for k in d["sec"]) else None
