@@ -1191,6 +1191,17 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 			const auto &buf = writeDynamicBuf ? sm.packDyn : sm.packSD;
 			mix(buf.data(), buf.size() * sizeof(uint32_t));
 			texels += buf.size();
+			// [SPH-MAP]: one line per map, so a cross-machine [SPH] mismatch can be
+			// narrowed to WHICH map without new instruments (added 2026-08-31 for the
+			// M5 hunt - the static bake's 48-map aggregate differed and pointed at
+			// nothing). Independent accumulator over the same packed bytes, so the
+			// [SPH] h/cum stream above stays byte-comparable with streams taken
+			// before this line existed.
+			uint64_t hm = 0xcbf29ce484222325ull;
+			const uint8_t *mb = (const uint8_t*)buf.data();
+			for (size_t i = 0; i < buf.size() * sizeof(uint32_t); ++i) { hm ^= mb[i]; hm *= 0x100000001b3ull; }
+			std::fprintf(stderr, "[SPH-MAP] map=%u res=%ux%u h=%016llx\n",
+			             li32, res[0], res[1], (unsigned long long)hm);
 		}
 		uint64_t c = sCum.load(std::memory_order_relaxed);
 		const uint8_t *hb = (const uint8_t*)&h;
