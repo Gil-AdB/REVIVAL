@@ -626,13 +626,43 @@ struct ShadowBarry {
 	float drzdx, drzdy;
 	uint16_t idByte;  // legacy name; now a 16-bit ShadowMatID
 	bool g_useFullStore;  // cached once per ShadowBarry, read per row inside apply_exact.
+	// --shadow_coplanar_flip=K (DIAGNOSTIC, default 0, byte-null off). The depth
+	// test below is `enc > z_existing`: the deeper-by-even-one-quantum writer
+	// loses, and on an EXACT tie the FIRST writer keeps the texel and its
+	// ShadowMatID. With K>0 it becomes `enc + K > z_existing`, so the LAST
+	// writer wins every contest decided by fewer than K quanta. K=1 flips exact
+	// ties only; K=2 also flips competitors one quantum apart — which is the
+	// class the M5's ±1-ULP raster noise can flip (ledger 0a9d99d9ead8), here
+	// forced deterministically and in one direction instead of at random.
+	// Cached once per triangle so the row loop reads an int, not a flag getter.
+	int flipK;
+	Vec8i vFlipK;
+	// --shadow_coplanar_idshift=N (DIAGNOSTIC, default 0, byte-null off).
+	// Stamp `idByte + N` instead of `idByte`, leaving the depth half alone, so
+	// every receiver's own texels carry an id that is not its own and the
+	// PolyId identity rescue fails frame-wide with ZERO depth separation — the
+	// state the M5's ceiling texels are in. Resolved once per triangle; the
+	// row loop reads the already-shifted `idStamp`.
+	uint16_t idStamp;
 
 	ShadowBarry(ShadowMap *smIn, uint16_t idIn, bool useDynamic)
 		: sm(smIn),
 		  pArr(useDynamic ? smIn->packDyn.data() : smIn->packSD.data()),
 		  pStaticArr(useDynamic ? smIn->packSD.data() : nullptr),
 		  drzdx(0), drzdy(0), idByte(idIn),
-		  g_useFullStore(fds::FeatureFlags::rast_full_store()) {}
+		  g_useFullStore(fds::FeatureFlags::rast_full_store()),
+		  flipK(fds::FeatureFlags::shadow_coplanar_flip()),
+		  vFlipK(fds::FeatureFlags::shadow_coplanar_flip()),
+		  idStamp(idIn)
+	{
+		const int sh = fds::FeatureFlags::shadow_coplanar_idshift();
+		// idByte == 0 means "no material identity"; that face preserves the
+		// existing id half rather than stamping one, so leave it at 0.
+		if (sh && idIn) {
+			const uint16_t v = uint16_t(unsigned(idIn) + unsigned(sh));
+			idStamp = v ? v : uint16_t(1);   // 0 is the unwritten sentinel
+		}
+	}
 
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
@@ -682,7 +712,10 @@ struct ShadowBarry {
 				Vec8ui p_existing;
 				p_existing.load(pRow);
 				const Vec8i z_existing = Vec8i(p_existing & Vec8ui(0xFFFFu));
-				p_mask &= Vec8ib(enc > z_existing);
+				// The `else` arm is the shipping expression verbatim; the
+				// predicate is loop-invariant and clang unswitches it.
+				if (flipK) p_mask &= Vec8ib(enc + vFlipK > z_existing);
+				else       p_mask &= Vec8ib(enc >  z_existing);
 
 				// Static-z cull: when writing the dynamic plane, mask
 				// off lanes where the STATIC plane already has a closer
@@ -704,7 +737,7 @@ struct ShadowBarry {
 					// the historic behaviour when they were two arrays and
 					// the polyId store was gated on `if (idByte)`.
 					const Vec8ui p_new = idByte
-						? (Vec8ui(enc) | Vec8ui(uint32_t(idByte) << 16))
+						? (Vec8ui(enc) | Vec8ui(uint32_t(idStamp) << 16))
 						: (Vec8ui(enc) | (p_existing & Vec8ui(0xFFFF0000u)));
 					// FULL row: when all 8 lanes survived edge+Z+static-Z,
 					// the masked select is wasted (it overwrites every lane

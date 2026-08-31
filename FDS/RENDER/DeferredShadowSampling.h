@@ -204,9 +204,17 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 		if (caFlags.shadowDynamicOn) {
 			float dynAtten;
 			if (caFlags.shadowMode == ShadowMode::PolyId) {
+				int cbG = 0, sbG = 0;
+				if (fds::FeatureFlags::shadow_coplanar_guard()) {
+					const float dotGeoG = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+					const float nDotLG = dotGeoG * lenInv;
+					const float invNdotLG = 1.0f / (nDotLG > 0.2f ? nDotLG : 0.2f);
+					cbG = kShadowBiasG;
+					sbG = int(float(kSlopeBiasG) * (invNdotLG - 1.0f));
+				}
 				dynAtten = CubeShadow_Sample(cubeIdx,
 				                              sampleWorldX, sampleWorldY, sampleWorldZ,
-				                              vx, vy, vz, /*constBias=*/0, /*slopeBias=*/0,
+				                              vx, vy, vz, cbG, sbG,
 				                              surfaceMatId, /*dynamicOnly=*/true);
 			} else {
 				const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
@@ -226,6 +234,21 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 	// depth comparison) — hoist the mode check above the slope-bias
 	// math so PolyId mode pays nothing for slope it never uses.
 	if (caFlags.shadowMode == ShadowMode::PolyId && surfaceMatId >= 0) {
+		// The identity test ignores bias, so PolyId normally pays nothing for
+		// slope it never uses. --shadow_coplanar_guard DOES use it: its default
+		// band is the depth-mode bias for this pixel, so compute and pass it
+		// when (and only when) the guard is on. Byte-null off — the else arm is
+		// the shipping call with its 0/0 verbatim.
+		if (fds::FeatureFlags::shadow_coplanar_guard()) {
+			const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+			const float nDotL = dotGeo * lenInv;
+			const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+			const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
+			return CubeShadow_Sample(cubeIdx,
+			                          sampleWorldX, sampleWorldY, sampleWorldZ,
+			                          vx, vy, vz, kShadowBiasG, slopeBias,
+			                          surfaceMatId);
+		}
 		return CubeShadow_Sample(cubeIdx,
 		                          sampleWorldX, sampleWorldY, sampleWorldZ,
 		                          vx, vy, vz, /*constBias=*/0, /*slopeBias=*/0,

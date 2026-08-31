@@ -667,10 +667,17 @@ FDS_ALWAYS_INLINE inline float CubeShadow_Tail(const ShadowMap& sm, float smX, f
                 return 1.0f;   // occ would never leave its 0.0f initialiser
             }
             FDS_PYR_CENSUS(fastOcc);
+            // --shadow_coplanar_guard: this arm returns "fully shadowed"
+            // WITHOUT ever reading a depth, so it cannot be guarded — force
+            // the real tap, which reads both halves. Byte-null off (the
+            // predicate is false and the line below is the shipping one).
+            // The uniform-LIT arm above is kept: the guard only ever turns
+            // occluded into lit, so a block that is already lit is settled.
+            if (fds::FeatureFlags::shadow_coplanar_guard()) uniC = kShadowUniMixed;
             // --shadow_polyid_no_pcf takes the single (00) texel and sets
             // occ = 1.0f outright; mirror that rather than summing weights
             // that can land a few ULP short of 1.0f and return ~6e-8.
-            if (fds::FeatureFlags::shadow_polyid_no_pcf()) return 0.0f;
+            else if (fds::FeatureFlags::shadow_polyid_no_pcf()) return 0.0f;
         }
     }
     CUBE_ABL_CUT(10, smX + smY + float(uniC));
@@ -741,7 +748,12 @@ FDS_ALWAYS_INLINE inline float CubeShadow_Tail(const ShadowMap& sm, float smX, f
         // dynamicOnly: treat the static word as 0 so closestPacked always
         // returns the dynamic id (or 0 if dynamic is also empty) — and
         // never touches the static plane's cache lines at all.
-        auto closestPacked = [&](size_t o) -> uint16_t {
+        //
+        // Returns the whole PACKED WORD, not just the id: --shadow_coplanar_guard
+        // needs the winner's DEPTH half too, and it must be the depth of the
+        // very texel whose id won. Pure integer selection either way, so the
+        // guard-off arm is bit-identical to the old `-> uint16_t` form.
+        auto closestPacked = [&](size_t o) -> uint32_t {
             const uint32_t d = pdB[o];
             const uint32_t s = dynamicOnly ? 0u : psB[o];
             const uint16_t dId = ShadowTexId(d);
@@ -749,22 +761,63 @@ FDS_ALWAYS_INLINE inline float CubeShadow_Tail(const ShadowMap& sm, float smX, f
             // Empty plane (id == 0) loses regardless of depth, because
             // unwritten texels have zEnc = 0 anyway. Otherwise pick the
             // one whose occluder is closer to the light.
-            if (sId == 0) return dId;
-            if (dId == 0) return sId;
-            return (ShadowTexZ(d) > ShadowTexZ(s)) ? dId : sId;
+            if (sId == 0) return d;
+            if (dId == 0) return s;
+            return (ShadowTexZ(d) > ShadowTexZ(s)) ? d : s;
+        };
+        // ─── CO-PLANAR GUARD (--shadow_coplanar_guard, default OFF) ─────────
+        // The identity test above has NO depth term: a texel occludes purely
+        // because someone else's id is in it. When that someone else is at the
+        // receiver's OWN depth, it is the receiver's plane under a different
+        // owner (a co-planar neighbour that won the texel by a quantum, or the
+        // same plane split into two shadow clusters) and it is not an occluder
+        // at all. Depth mode never has this problem because its constBias +
+        // slopeBias is ownership-blind. See docs/SHADOW_GUARD.md.
+        //
+        // Symmetric band on purpose: it cannot un-shadow a genuine occluder
+        // standing off the surface, and it cannot un-shadow a surface BEHIND
+        // the receiver (that would be the full depth test).
+        const bool cpGuard = fds::FeatureFlags::shadow_coplanar_guard();
+        int cpZ = 0, cpN = 0;
+        bool cpOne = false;   // --shadow_coplanar_guard_onesided
+        if (cpGuard) {
+            // Same encoding the depth arm below uses.
+            cpZ = 0xFF80 - int(lz * sm.zScale);
+            if (cpZ < 0) cpZ = 0;
+            if (cpZ > 0xFFFF) cpZ = 0xFFFF;
+            cpN = fds::FeatureFlags::shadow_coplanar_guard_quanta();
+            // < 0 (the default) = use the DEPTH MODE bias for this very pixel
+            // — constBias + the caller's slope-scaled term. That is the band
+            // whose width is already tuned to "how far a co-planar surface's
+            // stored depth can legitimately sit from the receiver's", which on
+            // a slanted surface is (texel footprint x depth slope) and reaches
+            // thousands of quanta, not one or two. Measured on the greets
+            // ceiling: a constant 512 rescues nothing, 4096 rescues most of it.
+            // PolyId callers pass 0/0 unless the guard is on (see
+            // DeferredShadowSampling.h), so this is 0 with the guard off and
+            // the whole block is dead there anyway.
+            if (cpN < 0) cpN = constBias + slopeBiasInt;
+            if (fds::FeatureFlags::shadow_coplanar_guard_onesided()) cpOne = true;
+        }
+        // `w` is the packed word closestPacked returned; `c` its id half.
+        auto occludes = [&](uint32_t w, uint16_t c) -> bool {
+            if (c == 0 || c == receiverId) return false;
+            if (!cpGuard) return true;
+            const int dz = int(ShadowTexZ(w)) - cpZ;
+            return (dz > cpN) || (!cpOne && dz < -cpN);
         };
         if (fds::FeatureFlags::shadow_polyid_no_pcf()) {
-            const uint16_t c = closestPacked(o00);
-            if (c != 0 && c != receiverId) occ = 1.0f;
+            const uint32_t p = closestPacked(o00);
+            if (occludes(p, ShadowTexId(p))) occ = 1.0f;
         } else {
-            const uint16_t c00 = closestPacked(o00);
-            const uint16_t c10 = closestPacked(o10);
-            const uint16_t c01 = closestPacked(o01);
-            const uint16_t c11 = closestPacked(o11);
-            if (c00 != 0 && c00 != receiverId) occ += w00;
-            if (c10 != 0 && c10 != receiverId) occ += w10;
-            if (c01 != 0 && c01 != receiverId) occ += w01;
-            if (c11 != 0 && c11 != receiverId) occ += w11;
+            const uint32_t p00 = closestPacked(o00);
+            const uint32_t p10 = closestPacked(o10);
+            const uint32_t p01 = closestPacked(o01);
+            const uint32_t p11 = closestPacked(o11);
+            if (occludes(p00, ShadowTexId(p00))) occ += w00;
+            if (occludes(p10, ShadowTexId(p10))) occ += w10;
+            if (occludes(p01, ShadowTexId(p01))) occ += w01;
+            if (occludes(p11, ShadowTexId(p11))) occ += w11;
         }
     } else {
         // Depth mode: legacy biased depth comparison. Dynamic plane is

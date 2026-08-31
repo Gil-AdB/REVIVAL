@@ -106,9 +106,34 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
         // 16-bit ShadowMatID direct compare (no +1 offset added here;
         // bake-time caller resolves Material::ShadowMatID upstream).
         const uint16_t receiverId = uint16_t(surfaceMatId);
+        // ─── CO-PLANAR GUARD (--shadow_coplanar_guard, default OFF) ────────
+        // The atlas the greets STATIC omnis read is baked here, through this
+        // copy of the identity test — so the guard has to exist here too or it
+        // would only cover the moving omnis. Same rule, same units as the
+        // runtime cube tap (FDS/FILLERS/ShadowMap.h): a different-owner texel
+        // stops occluding when its stored depth is within N quanta of the
+        // receiver's own depth. Byte-null off: cpGuard false leaves the
+        // predicate exactly `v != 0 && v != receiverId`.
+        const bool cpGuard = fds::FeatureFlags::shadow_coplanar_guard();
+        int cpZ = 0, cpN = 0;
+        bool cpOne = false;   // --shadow_coplanar_guard_onesided
+        if (cpGuard) {
+            cpZ = 0xFF80 - int(lz * sm.zScale);
+            if (cpZ < 0) cpZ = 0;
+            if (cpZ > 0xFFFF) cpZ = 0xFFFF;
+            cpN = fds::FeatureFlags::shadow_coplanar_guard_quanta();
+            // < 0 (default) = the depth-mode bias for this texel. The bake
+            // already computes and passes constBias + a per-face slope term
+            // even in PolyId mode, so it is here for free.
+            if (cpN < 0) cpN = constBias + slopeBiasInt;
+            if (fds::FeatureFlags::shadow_coplanar_guard_onesided()) cpOne = true;
+        }
         auto isOccluded = [&](uint32_t t) -> bool {
             const uint16_t v = ShadowTexId(t);
-            return v != 0 && v != receiverId;
+            if (v == 0 || v == receiverId) return false;
+            if (!cpGuard) return true;
+            const int dz = int(ShadowTexZ(t)) - cpZ;
+            return (dz > cpN) || (!cpOne && dz < -cpN);
         };
         if (isOccluded(p0[iX  ])) occ += w00;
         if (isOccluded(p0[iX+1])) occ += w10;
