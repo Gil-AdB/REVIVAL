@@ -1031,3 +1031,168 @@ use-3+, 0 border-sample and 0 interior T-vertices.
   --v4_band_union` reproduces the OFF-arm pin `570a7b44…` exactly, because the
   arm is inert in that recipe. Determinism for a v4 arm has to go through
   `tools/v4_md5.sh` on the judging flags, which is what §P3 did.
+
+---
+
+# §WorldUV — the round that built the tri-planar arm, and refuted its own premise
+
+His ruling **e54d2bd9b654**, verbatim: *"I think we should try the tri-planar
+idea?"* — re-project the stone UVs per wall plane in world space at bake time,
+albedo and height together, one projection per plane, dihedral corners still P4.
+
+Built on `rev-worlduv` at `a4d0ca9a`. Code: `DEMO/V4Bake.cpp`
+(`WorldUV_Apply`, `WUVCore`, `WUVSeamCensus`), the call site in
+`DEMO/GREETS.CPP`, flag `--v4_world_uv` (`FDS/Base/FeatureFlags.def`).
+Commits `81814eee`, `d80c45e4`.
+
+Runtime triplanar blending was never on the table — three texture fetches per
+pixel in a software rasterizer's hot loop. This is a **bake-time UV rewrite**:
+zero per-frame cost.
+
+## What was verified before a line of the projection was written
+
+**The UV-consumer sweep did NOT refute the approach.** The stone's base UV
+channel is not shared with anything that would break:
+
+| consumer | verdict | why |
+|---|---|---|
+| fillers / clipper (albedo, normal, height) | **safe** | `FRUSTRUM.CPP:1268` re-stamps the clipped verts' `U/V/UZ/VZ` from `Face::U1..V3` every frame; mesh `Vertex::U/V` is dead for rasterization (confirmed empirically — removing the `uvToVertices()` call changes no byte) |
+| static shadow **lightmap** | **safe, no shared channel** | per-face atlas indexed by barycentric (s,t), or by a world-planar basis picked from the face's own dominant cardinal axis — `StaticShadowLightmap.h:15`, *"no UV channel needed, no FLD changes"*. Grep for any UV read across `LightmapBake.cpp` / `StaticShadowLightmap.h` / `DeferredShadowSampling.h` returns zero hits |
+| `Face::EU1..EV3` (env / reflection) | **safe** | rebuilt per frame from the reflection vector, `Transform.cpp:2914-3124` |
+| cone map, horizon map, residual height | **safe** | texture-space; their cache keys hash the height mip, never a UV |
+| tangent bases | **safe by re-run** | `Compute_Vertex_Tangents` runs before the rewrite but `MakeFacesIndependentByAngle` (GREETS.CPP:2077) and, unconditionally for rooms/floor, `DisplaceStoneSmoothNormals` (2091) re-derive them after |
+| `PomShellDomains`, `PomShell_BuildPrism`, the `::mirUV` handedness split, shadow clustering | **safe** | all run after the rewrite point and are pure functions of the then-current UVs (or of geometry only) |
+| **`CaptureStoneProxySnapshot`** | **would BREAK** | it copies whole `Face`/`Vertex` structs (GREETS.CPP:1621/1625) and `BuildStoneProxyMesh` renders that copy in the offscreen mirror-RTT and env-probe passes. A rewrite after it leaves the *reflected* wall in the dead coordinate system |
+
+That last row is why the rewrite runs in `Initialize_Greets` at the top of the
+displace block, **before the proxy snapshot**, and not inside `RunP2Bake`.
+
+**Albedo and height cannot come apart under it**, which was the round's
+non-negotiable: the emitted face's `U1..V3` and the interior lattice node's
+`NodeH(G, pt.u, pt.v)` are literally the same two numbers.
+
+## The rule
+
+```
+axis = argmax(|n.x|, |n.y|, |n.z|), ties to the LOWER index (x > y > z)
+axis 0 (±X wall)  → (u, v) ← (world Z, world Y)
+axis 1 (±Y floor) → (u, v) ← (world X, world Z)
+axis 2 (±Z wall)  → (u, v) ← (world X, world Y)
+u = S·sgn[j₁]·w[j₁] + O[j₁]        v = S·sgn[j₂]·w[j₂] + O[j₂]
+```
+
+World Y drives V on **both** wall axes on purpose: it phase-locks the
+horizontal courses through the dihedral corners the projection cannot fix.
+`S`, `sgn[]` and `O[]` are one set **per material**, *fitted* from the authored
+UVs — `S` = median of the per-plane authored |du/dworld|, `sgn` = the
+area-majority sign, `O` = the area-weighted **circular** mean of the authored
+phases (period one tile; a linear mean of 0.02 and 0.98 lands half a tile from
+both). Nothing is hardcoded to this scene.
+
+Planes are clustered with the reference crease census's own identity (0.5° /
+5 mm), so the 52 planes here are the same 52 objects `e3e93ecd9546` counted.
+Near-45° planes are the rule's one arbitrary case; the census reports them
+rather than hiding them: **6 planes, 16.0995 u² of 6455.4299 = 0.2494 % of
+stone area**, max tilt 48.19°.
+
+## The measurement that refuted the premise — `[V4-WORLDUV] seams`
+
+The arm's own census walks every use-2 stone edge and asks the only question
+that makes a "same-plane seam" a seam: **do the two faces assign different UVs
+to the shared endpoints?**
+
+| arm | coplanar edges | coplanar len | UV-broken edges | UV-broken len | max &#124;ΔUV&#124; |
+|---|---|---|---|---|---|
+| **BEFORE** (authored) | 157 | 1227.7179 u | **0** | **0.0000 u** | **0.000000** |
+| AFTER (world UV) | 157 | 1227.7179 u | 0 | 0.0000 u | 0.000000 |
+| BEFORE, dihedral | 117 | 676.4603 u | 87 | 575.0310 u | 11.98 |
+| AFTER, dihedral | 117 | 676.4603 u | 87 | 575.0310 u | 19.98 |
+
+The 1227.7179 u / 157 edges reproduce `[V4-CHARTS] planepair` digit for digit,
+so the two censuses are measuring the same objects.
+
+**The 64.5 % of junction length the projection was supposed to dissolve was
+already continuous.** And the reason is on the per-plane fit:
+
+```
+[V4-WORLDUV] mat='rooms' planes=51 fitted=51 scale_uv_per_u=0.166667
+             authored_scale_min=0.166667 authored_scale_max=0.166667
+             sgn=+1,-1,+1 phase=-0.483012,0.042937,0.414506
+[V4-WORLDUV] planes=52 faces_rewritten=226 axis_x=28 axis_y=7 axis_z=17
+             near45_planes=6 max_tilt_deg=48.1897 max_fit_resid_uv=0.004779
+             convention_wins=52 swap_wins=0
+```
+
+Every one of the 51 `rooms` planes fits `u = +z/6 + o`, `v = −y/6 + o` with RMS
+residual **exactly 0.000000**, at one identical scale and one identical phase
+(to 8.7e-5 tile). **The greets stone was authored as a world-space tri-planar
+projection in the first place.** The convention (world Y → V) wins on 52 of 52
+planes against its swap — measured, not assumed.
+
+So the arm reproduces the authored mapping:
+
+| cost | measured |
+|---|---|
+| scale delta per plane | p50 **0.0000 %**, p90 0.0000 %, max **1.1059 %** (the floor alone: its authored u and v densities differ, 0.067528 vs 0.066067) |
+| visible (mod-1) UV shift, u | p50 0.000087, p90 0.003868, **max 0.033384** tiles |
+| visible (mod-1) UV shift, v | p50 0.000000, p90 0.020824, **max 0.451624** tiles — the six near-45 trim planes, 0.25 % of area |
+| block courses | a row-profile correlation of the wall crop before/after reads a best vertical shift of **−1 px at corr 0.9967**: they do not move |
+
+`docs/img/worlduv/H6194_sidebyside.png` is the picture of that: before over
+after at the close pose, same blocks, same diagonal artifact.
+
+## A trap the round had to prove before it could read its own diffs
+
+A whole-tile UV offset is arithmetically free for the texel fetch —
+`UScaleFactor = 1<<LogWidth` and the swizzled address masks with
+`(1<<LogWidth)-1`, so the fetch is periodic in one tile by construction. **It is
+not free for the rendered frame.** Measured (`c2d4e18d5a44`), after first
+validating the harness (a rewrite that writes the authored UVs back reproduces
+the control md5 byte for byte):
+
+| arm | control | pure +1.0 tile |
+|---|---|---|
+| `--texture-filter=2` | `2f61d079…` | `f8928756…` |
+| `--texture-filter=0` | `55e38cae…` | `bb5ccbd7…` |
+| `--no-mips` | `eddf4c9d…` | `afe4e93a…` |
+| forward (no `--deferred`) | `90d80190…` | `47b8fc1e…` |
+
+Ruled out: `uvToVertices` (byte-identical without it), mip selection (survives
+`--no-mips`), the bilinear negative-UV path (survives `tf=0`), the address mask.
+Standing suspect, **untested**: the per-face tangent basis, recomputed from
+float differences of the shifted UVs and feeding normal-mapped shading
+everywhere. **The mechanism is not localized and this document does not claim
+one.** The operational consequence is the trap `d5126706ca04`: an arm that only
+unifies UV *phase* still moves 77–99 % of pixels at mean Δ 15–44 of 765, and
+that number must not be read as "the pattern moved" without a row-profile
+correlation.
+
+## The gate
+
+| row | cap / target | measured | |
+|---|---|---|---|
+| OFF-arm cam A pin | `d92cb6f5eb19da4301588ae83af6a56e` | `d92cb6f5eb19da4301588ae83af6a56e` | **PASS** |
+| `render_gate.sh` | 4/4 | 4/4 (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`) | **PASS** |
+| ON-arm determinism | 24 runs, 1 md5 | 24/24 `7344f74e798653a166eba7ef2e8b5854` | **PASS** |
+| tear battery, 54 poses | ≤ 14 hole px | **12** (7 poses) | **PASS** |
+| bake time | ≤ 500 ms | **0.299 ms** min-of-5 | **PASS** |
+| stone face count | ≤ ~85–90k | 61 170 (vs 60 606 without the arm, **+0.93 %**) | **PASS** |
+| drawn block size | unchanged | scale delta p50/p90 **0.0000 %**, max 1.1059 % (floor) | **PASS** |
+| same-plane seam-step reduction | > 0 | **0** — there was no UV discontinuity to remove | **REFUTED** |
+
+## What this leaves
+
+* The arm exists, is default OFF, and is byte-null off. Nothing was merged and
+  no default was flipped.
+* `e3e93ecd9546`'s **number** stands (re-measured and agreeing, `29dee88bab08`);
+  its **inference** — that a per-plane world re-UV dissolves those seams by
+  construction — is disputed (`0aa815ad6963`) and refuted (`d622f5080836`).
+* **Same-plane castellation is not a UV defect**, so P4 owns it after all. The
+  standing suspect, on file rather than measured here: P3 pins every
+  authored-edge vertex at displacement 0 (`7cec6b7a171d`, 1649 pinned vs 28946
+  moved), and the per-face lattice cuts each shared border into equal
+  arc-length segments (`V4Border.cpp`, exact `i/n`), so no vertex is placed
+  where a groove crosses a shared edge. Both sides' interiors displace and the
+  seam between them stays flat.
+* Open for him, `f35aa1ca69d9`: keep the arm default-OFF, drop it, re-project
+  only the six near-45 trim planes, or go straight at the P4 pinning instead.

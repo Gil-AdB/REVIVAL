@@ -2822,5 +2822,511 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 	std::fflush(stderr);
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §WorldUV (--v4_world_uv) — the bake-time per-plane WORLD-SPACE re-UV
+//
+//  His ruling e54d2bd9b654 ("I think we should try the tri-planar idea?"), in
+//  the only form a software rasterizer can afford: runtime triplanar blending
+//  is 3× texture fetches in the filler's hot loop and is priced off the table,
+//  while a bake-time re-UV costs nothing per frame.  Each stone face's
+//  authored UV is replaced by the planar projection of its plane's DOMINANT
+//  WORLD AXIS, and everything downstream then moves together BY CONSTRUCTION:
+//
+//    * the ALBEDO the fillers sample is Face::U1..V3 (FRUSTRUM.CPP:1268 stamps
+//      it onto the clipped verts every frame — the mesh's Vertex::U/V is dead
+//      for rasterization), which RunP2Bake writes from the lattice point's
+//      (u, v);
+//    * the HEIGHT that displaces the lattice is NodeH(G, pt.u, pt.v) — the
+//      SAME (u, v), read out of the same map.  There is one UV and both read
+//      it, so the grooves cannot carve anywhere but where the mortar is drawn;
+//    * the BREAKLINES the lattice is cut on are the height map's own texel
+//      grid, i.e. they live in that same UV space (design §P2: "the lattice is
+//      defined per FACE, not per chart … the grid lines live in the height
+//      map's own texel space").
+//
+//  which is exactly why the arm bears on 41112ea861bd, his "the polygons are
+//  not aligned to the recesses": today every authored face carries its own
+//  affine UV map, so one map texel lands at a DIFFERENT world point on each
+//  face and the lattice cannot continue across a face boundary.  Under one
+//  projection per world axis the lattice is a single GLOBAL grid in world
+//  space, and the 1227.7 u of SAME-PLANE junction — 64.5 % of all stone
+//  junction length (e3e93ecd9546) — is dissolved.  The other 35.5 % is true
+//  dihedral corners; no projection fixes those and this one does not try.
+//
+//  THE RULE, stated so it can be refuted:
+//
+//    axis   = argmax(|n.x|, |n.y|, |n.z|), ties to the LOWER index (x > y > z)
+//    pair   = axis 0 (±X wall)  → (u, v) ← (world Z, world Y)
+//             axis 1 (±Y floor) → (u, v) ← (world X, world Z)
+//             axis 2 (±Z wall)  → (u, v) ← (world X, world Y)
+//    u = S·sgn[j₁]·w[j₁] + O[j₁]        v = S·sgn[j₂]·w[j₂] + O[j₂]
+//
+//  World Y (up) drives V on BOTH wall axes on purpose: it phase-locks the
+//  horizontal mortar courses THROUGH the dihedral corners the projection
+//  cannot otherwise fix, so the courses at least run continuously in height
+//  around a corner even where the vertical joints must break.
+//
+//  A near-45° plane is the rule's one genuinely arbitrary case: it takes the
+//  lower-index axis and the texture stretches by 1/cos(tilt) along the tilted
+//  direction.  That is not hidden — [V4-WORLDUV] prints max_tilt_deg and how
+//  many planes sit past 40°, so "this scene has none" is a measurement.
+//
+//  S, sgn[] and O[] are ONE SET PER MATERIAL, FITTED from the authored UVs so
+//  the drawn block size and phase stay where the author put them:
+//    S      = median over the material's planes of the authored |du/dworld|
+//    sgn[j] = the area-majority sign the authored UVs use on world axis j
+//    O[j]   = the area-weighted CIRCULAR MEAN (period = one UV tile) of the
+//             authored phases on world axis j
+//  Nothing is hardcoded to this scene: another map at another tiling re-fits
+//  to its own numbers, and the census prints every input and the cost
+//  (scale_delta_pct, uv_shift) the fit could not absorb.
+//
+//  WHERE IT RUNS, and why there: DEMO/GREETS.CPP, at the top of the displace
+//  block, BEFORE CaptureStoneProxySnapshot.  The UV-consumer sweep found
+//  exactly one consumer that caches UVs across the bake — that snapshot
+//  (GREETS.CPP:1621/1625 copy whole Vertex/Face structs), consumed by
+//  BuildStoneProxyMesh to render the stone in the offscreen mirror-RTT and
+//  env-probe passes.  Rewriting after it would leave the proxy albedo in the
+//  dead coordinate system and the mirrors would show the OLD wall.  Every
+//  other UV-derived table in greets init is rebuilt after this point:
+//  Compute_Vertex_Tangents (via MakeFacesIndependentByAngle, and
+//  unconditionally for rooms/floor via DisplaceStoneSmoothNormals),
+//  PomShellDomains, the ::mirUV handedness split, PomShell_BuildPrism.  The
+//  static shadow lightmap never reads this channel at all (barycentric /
+//  world-planar atlas, StaticShadowLightmap.h:15) and Face::EU1..EV3 is
+//  rebuilt per frame from the reflection vector (Transform.cpp:2914).
+// ═══════════════════════════════════════════════════════════════════════════
+namespace {
+
+struct WUVFace {
+	Face   *src = nullptr;
+	V3      p[3];
+	V3      n;
+	double  area = 0;
+	int     matIdx = 0;
+};
+
+struct WUVPlane {
+	V3      n;
+	double  d = 0;
+	int     axis = 0;        // dominant world axis: 0=X 1=Y 2=Z
+	int     matIdx = 0;
+	double  area = 0;
+	int64_t nFaces = 0;
+	double  su = 0, ou = 0, ru = 0;   // authored u ≈ su·w[j₁] + ou, RMS resid ru
+	double  sv = 0, ov = 0, rv = 0;
+	double  ruSwap = 0, rvSwap = 0;   // the same fit against the SWAPPED pair
+	double  ctr[3] = {0,0,0};
+	double  tiltDeg = 0;
+	double  phU = 0, phV = 0;      // the authored phase under the global S/sgn
+	double  dPhU = 0, dPhV = 0;    // and how far the global phase moves it, mod 1
+	bool    ok = false;
+};
+
+// a UV offset is only defined modulo one tile: fold a difference into
+// [-0.5, +0.5) tiles, which is the ONLY part of a shift that is visible.
+static inline double WUVWrap1(double x)
+{
+	x -= std::floor(x);
+	return (x >= 0.5) ? (x - 1.0) : x;
+}
+
+// (u, v) ← (w[j₁], w[j₂]) for each dominant axis.
+static inline void WUVAxisPair(int axis, int &j1, int &j2)
+{
+	if      (axis == 0) { j1 = 2; j2 = 1; }   // ±X wall : u←Z, v←Y
+	else if (axis == 1) { j1 = 0; j2 = 2; }   // ±Y floor: u←X, v←Z
+	else                { j1 = 0; j2 = 1; }   // ±Z wall : u←X, v←Y
+}
+
+static inline double WUVWorld(const V3 &p, int j)
+{
+	return j == 0 ? p.x : (j == 1 ? p.y : p.z);
+}
+
+// least squares y = s·x + o; returns the RMS residual
+static double WUVFit1(const std::vector<double> &x, const std::vector<double> &y,
+                      double &s, double &o)
+{
+	const size_t n = x.size();
+	if (n < 2) { s = 0; o = n ? y[0] : 0; return 0; }
+	double sx = 0, sy = 0;
+	for (size_t i = 0; i < n; ++i) { sx += x[i]; sy += y[i]; }
+	const double mx = sx / double(n), my = sy / double(n);
+	double sxx = 0, sxy = 0;
+	for (size_t i = 0; i < n; ++i) {
+		const double dx = x[i] - mx;
+		sxx += dx * dx; sxy += dx * (y[i] - my);
+	}
+	s = (sxx > 1e-12) ? (sxy / sxx) : 0.0;
+	o = my - s * mx;
+	double r = 0;
+	for (size_t i = 0; i < n; ++i) { const double e = y[i] - (s * x[i] + o); r += e * e; }
+	return std::sqrt(r / double(n));
+}
+
+static double WUVMedian(std::vector<double> v)
+{
+	if (v.empty()) return 0.0;
+	std::sort(v.begin(), v.end());
+	const size_t m = v.size() / 2;
+	return (v.size() & 1) ? v[m] : 0.5 * (v[m-1] + v[m]);
+}
+
+// ── the arm's PREMISE, measured directly on the data ──────────────────────
+// A "same-plane seam your projection dissolves by construction" is only a
+// seam if the two faces sharing that edge assign DIFFERENT UVs to the shared
+// endpoints.  This walks every use-2 stone edge and reports exactly that, in
+// world-units of junction length, split coplanar vs dihedral — run once
+// BEFORE the rewrite and once AFTER, so the arm's own census says whether it
+// had anything to dissolve.  Cross-checks e3e93ecd9546's planepair totals
+// (1227.7 u coplanar of 1904.2 u) on the same face set.
+static void WUVSeamCensus(const std::vector<WUVFace> &faces,
+                          const std::vector<int32_t> &planeOf, const char *label)
+{
+	const size_t nF = faces.size();
+	std::unordered_map<PKey, int32_t, PKeyH> vid;
+	std::vector<int32_t> corner(nF * 3, 0);
+	for (size_t f = 0; f < nF; ++f)
+		for (int k = 0; k < 3; ++k) {
+			const V3 &q = faces[f].p[k];
+			const PKey key { bitsOf(float(q.x)), bitsOf(float(q.y)), bitsOf(float(q.z)) };
+			auto it = vid.find(key);
+			if (it == vid.end()) it = vid.emplace(key, int32_t(vid.size())).first;
+			corner[f*3 + size_t(k)] = it->second;
+		}
+	std::map<std::pair<int32_t,int32_t>, std::vector<std::pair<int32_t,int>>> byEdge;
+	for (size_t f = 0; f < nF; ++f)
+		for (int k = 0; k < 3; ++k) {
+			const int32_t a = corner[f*3+size_t(k)], b = corner[f*3+size_t((k+1)%3)];
+			byEdge[{std::min(a,b), std::max(a,b)}].push_back({int32_t(f), k});
+		}
+	double lenCo = 0, lenDi = 0, brokenCo = 0, brokenDi = 0;
+	double maxCo = 0, maxDi = 0;
+	int64_t nCo = 0, nDi = 0, nBrokenCo = 0, nBrokenDi = 0;
+	const double kTol = 1.0e-4;          // 1/40 of a 256-texel map texel
+	for (const auto &kv : byEdge) {
+		if (kv.second.size() != 2) continue;
+		const int32_t f0 = kv.second[0].first, f1 = kv.second[1].first;
+		const int     k0 = kv.second[0].second;
+		const WUVFace &A = faces[size_t(f0)], &B = faces[size_t(f1)];
+		const double L = len(A.p[size_t((k0+1)%3)] - A.p[size_t(k0)]);
+		const bool co = (planeOf[size_t(f0)] == planeOf[size_t(f1)]);
+		// the largest UV disagreement at either shared endpoint
+		const float au[3] = { A.src->U1, A.src->U2, A.src->U3 };
+		const float av[3] = { A.src->V1, A.src->V2, A.src->V3 };
+		const float bu[3] = { B.src->U1, B.src->U2, B.src->U3 };
+		const float bv[3] = { B.src->V1, B.src->V2, B.src->V3 };
+		double dmax = 0;
+		for (int ka = 0; ka < 3; ++ka) {
+			const int32_t va = corner[size_t(f0)*3 + size_t(ka)];
+			if (va != kv.first.first && va != kv.first.second) continue;
+			for (int kb = 0; kb < 3; ++kb) {
+				if (corner[size_t(f1)*3 + size_t(kb)] != va) continue;
+				dmax = std::max(dmax, std::fabs(double(au[ka]) - double(bu[kb])));
+				dmax = std::max(dmax, std::fabs(double(av[ka]) - double(bv[kb])));
+			}
+		}
+		if (co) { ++nCo; lenCo += L; maxCo = std::max(maxCo, dmax);
+		          if (dmax > kTol) { ++nBrokenCo; brokenCo += L; } }
+		else    { ++nDi; lenDi += L; maxDi = std::max(maxDi, dmax);
+		          if (dmax > kTol) { ++nBrokenDi; brokenDi += L; } }
+	}
+	std::fprintf(stderr,
+	    "[V4-WORLDUV] seams %s coplanar_edges=%lld coplanar_len=%.4f "
+	    "uv_broken_edges=%lld uv_broken_len=%.4f max_duv=%.6f | "
+	    "dihedral_edges=%lld dihedral_len=%.4f uv_broken_edges=%lld "
+	    "uv_broken_len=%.4f max_duv=%.6f (tol=%.1e)\n",
+	    label, (long long)nCo, lenCo, (long long)nBrokenCo, brokenCo, maxCo,
+	    (long long)nDi, lenDi, (long long)nBrokenDi, brokenDi, maxDi, kTol);
+}
+
+static void WUVCore(std::vector<WUVFace> &faces, const char *const *matNames,
+                    int nMats, bool census, int64_t &rewritten)
+{
+	rewritten = 0;
+	const size_t nF = faces.size();
+	if (!nF) return;
+
+	// ── planes: the reference crease census's OWN identity (0.5° / 5 mm), the
+	// one e3e93ecd9546's 52-plane count was measured with, so the census here
+	// and the junction census there speak about the same objects ───────────
+	std::vector<WUVPlane> planes;
+	std::vector<int32_t>  planeOf(nF, -1);
+	for (size_t f = 0; f < nF; ++f) {
+		const WUVFace &F = faces[f];
+		const double d = dot(F.n, F.p[0]);
+		int32_t pid = -1;
+		for (size_t i = 0; i < planes.size(); ++i)
+			if (planes[i].matIdx == F.matIdx &&
+			    dot(planes[i].n, F.n) > 0.99996 && std::fabs(planes[i].d - d) < 0.005) {
+				pid = int32_t(i); break;
+			}
+		if (pid < 0) {
+			WUVPlane P; P.n = F.n; P.d = d; P.matIdx = F.matIdx;
+			const double ax = std::fabs(F.n.x), ay = std::fabs(F.n.y), az = std::fabs(F.n.z);
+			double amax = ax; P.axis = 0;
+			if (ay > amax) { amax = ay; P.axis = 1; }
+			if (az > amax) { amax = az; P.axis = 2; }
+			P.tiltDeg = std::acos(std::min(1.0, amax)) * 180.0 / 3.14159265358979323846;
+			planes.push_back(P);
+			pid = int32_t(planes.size()) - 1;
+		}
+		planeOf[f] = pid;
+		planes[size_t(pid)].area   += F.area;
+		planes[size_t(pid)].nFaces += 1;
+	}
+
+	// ── the per-plane authored fit, and the same fit with u/v swapped, so the
+	// CONVENTION above is checked against the author rather than assumed ────
+	std::vector<std::vector<double>> w1(planes.size()), w2(planes.size()),
+	                                 uu(planes.size()), vv(planes.size());
+	std::vector<double> cacc(planes.size() * 3, 0.0);
+	for (size_t f = 0; f < nF; ++f) {
+		const WUVFace &F = faces[f];
+		const size_t p = size_t(planeOf[f]);
+		int j1, j2; WUVAxisPair(planes[p].axis, j1, j2);
+		const float u3[3] = { F.src->U1, F.src->U2, F.src->U3 };
+		const float v3[3] = { F.src->V1, F.src->V2, F.src->V3 };
+		for (int k = 0; k < 3; ++k) {
+			w1[p].push_back(WUVWorld(F.p[k], j1));
+			w2[p].push_back(WUVWorld(F.p[k], j2));
+			uu[p].push_back(double(u3[k]));
+			vv[p].push_back(double(v3[k]));
+			cacc[p*3+0] += F.p[k].x; cacc[p*3+1] += F.p[k].y; cacc[p*3+2] += F.p[k].z;
+		}
+	}
+	for (size_t p = 0; p < planes.size(); ++p) {
+		WUVPlane &P = planes[p];
+		P.ru = WUVFit1(w1[p], uu[p], P.su, P.ou);
+		P.rv = WUVFit1(w2[p], vv[p], P.sv, P.ov);
+		double s, o;
+		P.ruSwap = WUVFit1(w2[p], uu[p], s, o);
+		P.rvSwap = WUVFit1(w1[p], vv[p], s, o);
+		const double inv = 1.0 / (3.0 * double(P.nFaces));
+		P.ctr[0] = cacc[p*3+0] * inv;
+		P.ctr[1] = cacc[p*3+1] * inv;
+		P.ctr[2] = cacc[p*3+2] * inv;
+		// a plane whose authored UV is a genuine in-plane ROTATION cannot be
+		// fitted by an axis-aligned map at all; the residual is how the census
+		// says so, and a zero scale is how this loop refuses to average it in
+		P.ok = (std::fabs(P.su) > 1e-9 && std::fabs(P.sv) > 1e-9);
+	}
+
+	// ── per-material globals ───────────────────────────────────────────────
+	struct MatFit {
+		double  S = 0;
+		double  sgn[3] = {1,1,1};
+		double  O[3]   = {0,0,0};
+		int64_t votes  = 0;
+		double  scaleMin = 0, scaleMax = 0;
+	};
+	std::vector<MatFit> mf;
+	mf.resize(size_t(nMats));
+	const double TWO_PI = 6.283185307179586476925286766559;
+	for (int m = 0; m < nMats; ++m) {
+		std::vector<double> sc;
+		double sgnAcc[3] = {0,0,0};
+		for (const WUVPlane &P : planes) {
+			if (P.matIdx != m || !P.ok) continue;
+			sc.push_back(std::fabs(P.su));
+			sc.push_back(std::fabs(P.sv));
+			int j1, j2; WUVAxisPair(P.axis, j1, j2);
+			sgnAcc[j1] += (P.su >= 0 ? 1.0 : -1.0) * P.area;
+			sgnAcc[j2] += (P.sv >= 0 ? 1.0 : -1.0) * P.area;
+		}
+		if (sc.empty()) continue;
+		MatFit &M = mf[size_t(m)];
+		M.S = WUVMedian(sc);
+		M.scaleMin = *std::min_element(sc.begin(), sc.end());
+		M.scaleMax = *std::max_element(sc.begin(), sc.end());
+		for (int j = 0; j < 3; ++j) M.sgn[j] = (sgnAcc[j] >= 0 ? 1.0 : -1.0);
+		// the phase: an area-weighted CIRCULAR mean, because a UV offset is
+		// only defined modulo one tile and a linear mean of 0.02 and 0.98 is
+		// half a tile away from both
+		double cs[3] = {0,0,0}, sn[3] = {0,0,0};
+		for (WUVPlane &P : planes) {
+			if (P.matIdx != m || !P.ok) continue;
+			int j1, j2; WUVAxisPair(P.axis, j1, j2);
+			// the offset this plane WOULD need, under the global scale and
+			// sign, for its drawn phase at its own centroid to be unchanged
+			const double phU = (P.su * P.ctr[j1] + P.ou) - M.S * M.sgn[j1] * P.ctr[j1];
+			const double phV = (P.sv * P.ctr[j2] + P.ov) - M.S * M.sgn[j2] * P.ctr[j2];
+			P.phU = phU; P.phV = phV;
+			cs[j1] += P.area * std::cos(TWO_PI * phU);
+			sn[j1] += P.area * std::sin(TWO_PI * phU);
+			cs[j2] += P.area * std::cos(TWO_PI * phV);
+			sn[j2] += P.area * std::sin(TWO_PI * phV);
+			++M.votes;
+		}
+		for (int j = 0; j < 3; ++j)
+			M.O[j] = (cs[j] != 0.0 || sn[j] != 0.0)
+			       ? std::atan2(sn[j], cs[j]) / TWO_PI : 0.0;
+	}
+
+	// ── rewrite, and measure what the rewrite COST the authored look ───────
+	if (census) WUVSeamCensus(faces, planeOf, "BEFORE");
+	std::vector<double> dScalePct, dShiftU, dShiftV, dWrapU, dWrapV;
+	for (size_t f = 0; f < nF; ++f) {
+		WUVFace &F = faces[f];
+		const WUVPlane &P = planes[size_t(planeOf[f])];
+		const MatFit   &M = mf[size_t(F.matIdx)];
+		if (M.S <= 0) continue;
+		int j1, j2; WUVAxisPair(P.axis, j1, j2);
+		float *pu[3] = { &F.src->U1, &F.src->U2, &F.src->U3 };
+		float *pv[3] = { &F.src->V1, &F.src->V2, &F.src->V3 };
+		for (int k = 0; k < 3; ++k) {
+			const double nu = M.S * M.sgn[j1] * WUVWorld(F.p[k], j1) + M.O[j1];
+			const double nv = M.S * M.sgn[j2] * WUVWorld(F.p[k], j2) + M.O[j2];
+			dShiftU.push_back(std::fabs(nu - double(*pu[k])));
+			dShiftV.push_back(std::fabs(nv - double(*pv[k])));
+			dWrapU.push_back(std::fabs(WUVWrap1(nu - double(*pu[k]))));
+			dWrapV.push_back(std::fabs(WUVWrap1(nv - double(*pv[k]))));
+			*pu[k] = float(nu); *pv[k] = float(nv);
+		}
+		// keep Vertex::U/V in the SAME coordinate system.  It is dead for
+		// rasterization (FRUSTRUM.CPP:1268 re-stamps from U1..V3 every frame),
+		// but Compute_Vertex_Tangents and DisplaceStoneSmoothNormals both fall
+		// back to it when a face's UV triangle is degenerate, and a fallback
+		// into the dead authored space would build a tangent frame for a
+		// texture that is no longer there.  A corner shared by two planes takes
+		// one of the two — exactly as an authored UV seam does today.
+		F.src->uvToVertices();
+		++rewritten;
+	}
+	for (WUVPlane &P : planes) {
+		if (!P.ok || mf[size_t(P.matIdx)].S <= 0) continue;
+		const MatFit &M = mf[size_t(P.matIdx)];
+		dScalePct.push_back(100.0 * (M.S / std::fabs(P.su) - 1.0));
+		dScalePct.push_back(100.0 * (M.S / std::fabs(P.sv) - 1.0));
+		int j1, j2; WUVAxisPair(P.axis, j1, j2);
+		P.dPhU = WUVWrap1(M.O[j1] - P.phU);
+		P.dPhV = WUVWrap1(M.O[j2] - P.phV);
+	}
+
+	if (!census) return;
+	WUVSeamCensus(faces, planeOf, "AFTER ");
+
+	for (int m = 0; m < nMats; ++m) {
+		const MatFit &M = mf[size_t(m)];
+		int64_t np = 0;
+		for (const WUVPlane &P : planes) if (P.matIdx == m) ++np;
+		std::fprintf(stderr,
+		    "[V4-WORLDUV] mat='%s' planes=%lld fitted=%lld scale_uv_per_u=%.6f "
+		    "authored_scale_min=%.6f authored_scale_max=%.6f "
+		    "sgn=%+.0f,%+.0f,%+.0f phase=%.6f,%.6f,%.6f\n",
+		    matNames[m], (long long)np, (long long)M.votes, M.S,
+		    M.scaleMin, M.scaleMax, M.sgn[0], M.sgn[1], M.sgn[2],
+		    M.O[0], M.O[1], M.O[2]);
+	}
+	int axisN[3] = {0,0,0}, near45 = 0, convWins = 0, swapWins = 0;
+	double maxTilt = 0, maxResid = 0;
+	for (const WUVPlane &P : planes) {
+		axisN[P.axis]++;
+		if (P.tiltDeg > 40.0) ++near45;
+		maxTilt  = std::max(maxTilt,  P.tiltDeg);
+		maxResid = std::max(maxResid, std::max(P.ru, P.rv));
+		if (P.ru + P.rv <= P.ruSwap + P.rvSwap) ++convWins; else ++swapWins;
+	}
+	std::sort(dScalePct.begin(), dScalePct.end());
+	std::sort(dShiftU.begin(),   dShiftU.end());
+	std::sort(dShiftV.begin(),   dShiftV.end());
+	auto pct = [](const std::vector<double> &v, double q) -> double {
+		if (v.empty()) return 0.0;
+		return v[size_t(q * double(v.size() - 1) + 0.5)];
+	};
+	std::fprintf(stderr,
+	    "[V4-WORLDUV] planes=%zu faces_rewritten=%lld axis_x=%d axis_y=%d axis_z=%d "
+	    "near45_planes=%d max_tilt_deg=%.4f max_fit_resid_uv=%.6f "
+	    "convention_wins=%d swap_wins=%d\n",
+	    planes.size(), (long long)rewritten, axisN[0], axisN[1], axisN[2],
+	    near45, maxTilt, maxResid, convWins, swapWins);
+	std::sort(dWrapU.begin(), dWrapU.end());
+	std::sort(dWrapV.begin(), dWrapV.end());
+	std::fprintf(stderr,
+	    "[V4-WORLDUV] cost scale_delta_pct_p50=%.4f p90=%.4f max=%.4f "
+	    "uv_shift_u_p50=%.6f max=%.6f uv_shift_v_p50=%.6f max=%.6f\n",
+	    pct(dScalePct, 0.5), pct(dScalePct, 0.9),
+	    dScalePct.empty() ? 0.0 : dScalePct.back(),
+	    pct(dShiftU, 0.5), dShiftU.empty() ? 0.0 : dShiftU.back(),
+	    pct(dShiftV, 0.5), dShiftV.empty() ? 0.0 : dShiftV.back());
+	// The VISIBLE part of a shift.  A whole-tile shift redraws the identical
+	// texture, so the number that says whether the drawn pattern moved is the
+	// shift MODULO one tile — reported in tiles; the 'rooms' mortar pitch is
+	// 64 texels of a 256-texel mip-2 map, i.e. one block = 0.25 tile.
+	std::fprintf(stderr,
+	    "[V4-WORLDUV] visible_shift_tiles u_p50=%.6f p90=%.6f max=%.6f "
+	    "v_p50=%.6f p90=%.6f max=%.6f\n",
+	    pct(dWrapU, 0.5), pct(dWrapU, 0.9), dWrapU.empty() ? 0.0 : dWrapU.back(),
+	    pct(dWrapV, 0.5), pct(dWrapV, 0.9), dWrapV.empty() ? 0.0 : dWrapV.back());
+	{   // how much of the stone AREA the near-45° tie-break rule governs
+		double a45 = 0, aAll = 0;
+		for (const WUVPlane &P : planes) { aAll += P.area; if (P.tiltDeg > 40.0) a45 += P.area; }
+		std::fprintf(stderr,
+		    "[V4-WORLDUV] near45 planes=%d area=%.4f of %.4f (%.4f%%)\n",
+		    near45, a45, aAll, aAll > 0 ? 100.0 * a45 / aAll : 0.0);
+	}
+	for (size_t p = 0; p < planes.size(); ++p) {
+		const WUVPlane &P = planes[p];
+		std::fprintf(stderr,
+		    "[V4-WORLDUV] PLANE id=%zu mat='%s' faces=%lld area=%.4f "
+		    "n=%.6f,%.6f,%.6f d=%.4f axis=%d tilt=%.4f "
+		    "su=%.6f sv=%.6f resid=%.6f,%.6f resid_swap=%.6f,%.6f "
+		    "phase=%.6f,%.6f dphase=%.6f,%.6f ctr=%.3f,%.3f,%.3f\n",
+		    p, matNames[P.matIdx], (long long)P.nFaces, P.area,
+		    P.n.x, P.n.y, P.n.z, P.d, P.axis, P.tiltDeg,
+		    P.su, P.sv, P.ru, P.rv, P.ruSwap, P.rvSwap,
+		    P.phU, P.phV, P.dPhU, P.dPhV,
+		    P.ctr[0], P.ctr[1], P.ctr[2]);
+	}
+	std::fflush(stderr);
+}
+
+}  // namespace
+
+// ───────────────────────────────────────────────────────────────────────────
+long long WorldUV_Apply(Scene *Sc, const char *const *matNames, int nMats)
+{
+	using clock = std::chrono::steady_clock;
+	const auto t0 = clock::now();
+	if (!Sc || !matNames || nMats <= 0) return 0;
+	const bool census = FeatureFlags::v4_census();
+
+	// The SAME face set the bake targets: material name match plus the old
+	// bake's own guard, so a face the bake would skip keeps its authored UV
+	// and the two sets cannot drift apart.
+	std::vector<WUVFace> faces;
+	for (TriMesh *M = Sc->TriMeshHead; M; M = M->Next) {
+		if (M->FIndex == 0 || !M->Faces || !M->Verts) continue;
+		for (dword i = 0; i < M->FIndex; ++i) {
+			Face &F = M->Faces[i];
+			if (!F.A || !F.B || !F.C || !F.Txtr || !F.Txtr->Name) continue;
+			int mi = -1;
+			for (int m = 0; m < nMats; ++m)
+				if (!std::strcmp(F.Txtr->Name, matNames[m])) { mi = m; break; }
+			if (mi < 0 || !OldBakeWouldBake(F.Txtr)) continue;
+			WUVFace W;
+			W.src = &F; W.matIdx = mi;
+			W.p[0] = V3(F.A->Pos); W.p[1] = V3(F.B->Pos); W.p[2] = V3(F.C->Pos);
+			const V3 gn = cross(W.p[1] - W.p[0], W.p[2] - W.p[0]);
+			const double gl = len(gn);
+			if (gl < 1e-12) continue;
+			W.area = 0.5 * gl;
+			W.n = gn * (1.0 / gl);
+			const V3 eN = V3(F.N);
+			if (len(eN) > 1e-9 && dot(W.n, nrm(eN)) < 0.0) W.n = W.n * -1.0;
+			faces.push_back(W);
+		}
+	}
+	int64_t rewritten = 0;
+	WUVCore(faces, matNames, nMats, census, rewritten);
+	const double ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+	std::fprintf(stderr, "[V4-WORLDUV] arm=ON faces_rewritten=%lld of %zu ms=%.3f\n",
+	             (long long)rewritten, faces.size(), ms);
+	std::fflush(stderr);
+	return rewritten;
+}
+
 }  // namespace v4
 }  // namespace fds

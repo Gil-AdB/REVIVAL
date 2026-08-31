@@ -74,6 +74,22 @@ void RunP1Census(const Scene *Sc, const char *const *mats, int nMats);
 // the control arm of every P3 measurement.
 void RunP2Bake(Scene *Sc, const char *const *mats, int nMats, int mip, float amp);
 
+// §WorldUV (--v4_world_uv, default OFF, byte-null off) — his ruling
+// e54d2bd9b654.  Replaces the authored UV of every face whose material is one
+// of `mats[0..nMats)` (and which the old bake would bake) with the WORLD-SPACE
+// PLANAR PROJECTION of its plane's dominant axis, so albedo, height and the
+// v4 lattice's breaklines all read ONE coordinate system that is continuous
+// across every same-plane face boundary.  Scale, sign and phase are fitted
+// per material from the authored UVs; the full rule and the reason it runs
+// where it runs are in the banner over the definition in V4Bake.cpp.
+//
+// CALL IT BEFORE CaptureStoneProxySnapshot in greets init: that snapshot
+// copies whole Face/Vertex structs and is the one consumer that caches UVs
+// across the bake (the offscreen mirror-RTT / env-probe proxy).  Returns the
+// number of faces rewritten; prints [V4-WORLDUV] (the per-plane fit and the
+// cost the fit could not absorb) under --v4_census.
+long long WorldUV_Apply(Scene *Sc, const char *const *mats, int nMats);
+
 // One shared-border sample position.  Defined in DEMO/V4Border.cpp, which is
 // compiled with -ffp-contract=off; see the banner there.  `A`/`B` are the
 // edge's endpoints in canonical world-position order, `i` in [0,n].
