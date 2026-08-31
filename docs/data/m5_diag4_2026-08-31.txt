@@ -1,0 +1,13 @@
+m5_diag4 2026-08-31T19:55:32Z @ c099e14a  (M5 Max, his run, pasted verbatim)
+arm                              ceiling band mean R G B
+baseline                           85.3   65.8   47.8
+--light_rect_exact                 85.3   65.8   47.8
+--no-deferred_zcull                85.3   65.8   47.8
+--light_rect_exact --no-deferred_zcull   85.3   65.8   47.8
+--no-shadows                       86.5  134.8  140.0
+--no-shadow_polyid                 85.4  134.4  140.0
+--prof_no_lights                   81.0   61.9   47.0
+--no-greets_mirror                 85.3   65.8   47.8
+dev-box reference: baseline 85.2 133.5 139.0 ; skip lights 114/115/116 -> 85.2 65.0 46.9
+READING: --no-shadows and --no-shadow_polyid RESTORE; light rect and z-cull exonerated.
+The three cyan mech omnis are fully SHADOWED on the ceiling on the M5; polyId rescue implicated.

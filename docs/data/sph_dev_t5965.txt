@@ -1,0 +1,3 @@
+[SPH] seq=0 mode=StaticOnce maps=48 texels=12582912 h=42d712493203badf cum=ee6290284934ef2f
+[SPH] seq=1 mode=DynOmnis maps=28 texels=950272 h=d519570048473f8e cum=7acde8a94b35bd34
+[SPH] seq=2 mode=DynMeshes maps=15 texels=3932160 h=274bb437f5279bd3 cum=6a4b82a625bac317
