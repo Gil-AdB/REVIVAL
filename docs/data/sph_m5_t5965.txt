@@ -1,0 +1,6 @@
+M5 Max, his run 2026-08-31, greets t=5965 acceptance recipe + --shadow_plane_hash (@ c099e14a tip binary)
+[SPH] seq=0 mode=StaticOnce maps=48 texels=12582912 h=d3f36784c7c0112c cum=d4064d2f0406a4d8
+[SPH] seq=1 mode=DynOmnis maps=28 texels=950272 h=5d365085786ffc57 cum=536b694e31fe90a0
+[SPH] seq=2 mode=DynMeshes maps=15 texels=3932160 h=06a34fd6cd80831b cum=a84a357d40f48137
+dev box (docs/data/sph_dev_t5965.txt): 42d712493203badf/ee6290284934ef2f d519570048473f8e/7acde8a94b35bd34 274bb437f5279bd3/6a4b82a625bac317
+READING: ALL THREE invocations differ, including the deterministic static init bake.
