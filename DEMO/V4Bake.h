@@ -95,5 +95,12 @@ long long WorldUV_Apply(Scene *Sc, const char *const *mats, int nMats);
 // edge's endpoints in canonical world-position order, `i` in [0,n].
 void BorderSample(const double A[3], const double B[3], int i, int n, double out[3]);
 
+// P4 (--v4_ring_grooves) — the same, at a free parameter `t` in [0,1] taken in
+// the edge's canonical a→b direction.  A mortar run boundary crosses an edge
+// wherever the height map's grid puts it, which is not a rational i/n; the seal
+// comes from the parameter being formed once per edge and the vertex being
+// created once and indexed from both faces, not from the parameter's form.
+void BorderSampleT(const double A[3], const double B[3], double t, double out[3]);
+
 }  // namespace v4
 }  // namespace fds
