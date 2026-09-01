@@ -2183,6 +2183,11 @@ struct RingStats {
 	// least-squares residual and its own count.
 	double  maxResidual = 0.0, maxResidualOver = 0.0;
 	double  dMin = 1e300, dMax = -1e300, maxMove = 0.0;
+	// The DISTRIBUTION of |x|, not only its max.  A max_move of 0.2 u says one
+	// ring vertex moved a fifth of a unit; it does not say whether the phase
+	// moved the junction as a whole, and the dz-vs-reference reading cannot be
+	// interpreted without that.  Every solved ring vertex appends one sample.
+	std::vector<float> moves;
 	int64_t soupTris = 0;
 	double  msRings = 0.0;
 };
@@ -2284,6 +2289,7 @@ static V3 RingSolve(const V3 &P, const V3 *nIn, int nInCount, double d,
 	if (m > 3) RS.maxResidualOver = std::max(RS.maxResidualOver, res);
 	else       RS.maxResidual     = std::max(RS.maxResidual, res);
 	RS.maxMove     = std::max(RS.maxMove, len(x));
+	RS.moves.push_back(float(len(x)));
 	RS.dMin = std::min(RS.dMin, d);
 	RS.dMax = std::max(RS.dMax, d);
 	return P + x;
@@ -3060,6 +3066,23 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 	    (long long)RS.planes4, (long long)RS.mitreClamped, (long long)RS.singular,
 	    (long long)RS.illCond, RS.maxResidual, RS.maxResidualOver, RS.maxMove,
 	    RS.dMin > 1e299 ? 0.0 : RS.dMin, RS.dMax < -1e299 ? 0.0 : RS.dMax);
+	{
+		// How far the phase actually moved the junction, as a distribution.
+		// The dz-vs-reference gate reads a few hundredths of a unit at the
+		// crease; whether that is P4 failing or P4 having little to move is
+		// this line's question, not a narrative's.
+		std::vector<float> mv = RS.moves;
+		std::sort(mv.begin(), mv.end());
+		auto mq = [&](double q) -> double {
+			return mv.empty() ? 0.0 : double(mv[size_t(q * double(mv.size() - 1))]);
+		};
+		int64_t tiny = 0;
+		for (float v : mv) if (v < 0.005f) ++tiny;
+		std::fprintf(stderr,
+		    "[V4-RINGS] move n=%zu p50=%.6f p90=%.6f p99=%.6f max=%.6f under0.005=%lld (%.1f%%)\n",
+		    mv.size(), mq(0.50), mq(0.90), mq(0.99), mq(1.0), (long long)tiny,
+		    mv.empty() ? 0.0 : 100.0 * double(tiny) / double(mv.size()));
+	}
 	for (size_t q = 0; q < holdMats.size(); ++q)
 		std::fprintf(stderr, "[V4-RINGS] heldby mat=%s verts=%lld\n",
 		             holdMats[q].first.c_str(), (long long)holdMats[q].second);
