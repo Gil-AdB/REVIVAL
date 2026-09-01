@@ -2402,6 +2402,7 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 	const bool  rings       = !flat && FeatureFlags::v4_rings();
 	const bool  ringGrooves = rings && FeatureFlags::v4_ring_grooves();
 	const bool  ringAbut    = FeatureFlags::v4_ring_abut();
+	const bool  crossBoth   = FeatureFlags::v4_ring_cross_both();
 	const double mitreLimit = std::max(1.0, double(FeatureFlags::v4_mitre_limit()));
 	const double minSepFrac = std::max(0.0, std::min(0.9, double(FeatureFlags::v4_ring_min_sep())));
 	RingStats RS;
@@ -2559,8 +2560,8 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 				int32_t fDom = f0;
 				if (f0 >= 0 && f1 >= 0 &&
 				    chartLess(T.faces[size_t(f1)].chart, T.faces[size_t(f0)].chart)) fDom = f1;
-				for (int s = 0; s < 1; ++s) {
-					const int32_t fi = fDom;
+				for (int s = 0; s < (crossBoth ? 2 : 1); ++s) {
+					const int32_t fi = crossBoth ? eFace[ei][s] : fDom;
 					if (fi < 0) continue;
 					const P2Face &F = T.faces[size_t(fi)];
 					const MatGrid &G = grids[size_t(F.matIdx)];
@@ -3036,9 +3037,9 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 	// both offset planes to 1e-5 u.  `held` is the population P4 does NOT move
 	// and why, which is the honest form of "the wall boundaries now recess".
 	std::fprintf(stderr,
-	    "[V4-RINGS] arm rings=%d grooves=%d abut=%d mitre_limit=%.2f min_sep=%.3f "
+	    "[V4-RINGS] arm rings=%d grooves=%d cross_both=%d abut=%d mitre_limit=%.2f min_sep=%.3f "
 	    "soup_tris=%lld ms=%.3f\n",
-	    int(rings), int(ringGrooves), int(ringAbut), mitreLimit, minSepFrac,
+	    int(rings), int(ringGrooves), int(crossBoth), int(ringAbut), mitreLimit, minSepFrac,
 	    (long long)RS.soupTris, RS.msRings);
 	std::fprintf(stderr,
 	    "[V4-RINGS] corners solved=%lld held_abut=%lld held_soup=%lld no_field=%lld "
