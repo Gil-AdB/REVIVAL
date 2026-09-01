@@ -2542,8 +2542,25 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 			if (flat) continue;
 			cross.clear();
 			if (ringGrooves && eFree(ei)) {
-				for (int s = 0; s < 2; ++s) {
-					const int32_t fi = eFace[ei][s];
+				// The crossings come from the DOMINANT OWNER's grid ONLY, and
+				// that is not a shortcut — it is the same ruling that decides
+				// the heights (1c196c8c5cea).  A crease carries ONE profile,
+				// the dominant owner's, so the vertices that profile needs are
+				// the ones its own breaklines ask for.  Taking BOTH sides was
+				// the first cut and it is REFUTED by the picture: on a
+				// wall↔floor edge the floor's flagstone grid crosses the base
+				// line at positions that mean nothing in the wall's field, and
+				// the extra samples turn the wall's base course into a fan of
+				// long facets (docs/img/p4/camA_base_*.png).  The non-dominant
+				// side loses nothing it had before: its own interior
+				// breaklines still terminate on the border exactly as they did
+				// through P2 and P3, which never produced an artifact.
+				const int32_t f0 = eFace[ei][0], f1 = eFace[ei][1];
+				int32_t fDom = f0;
+				if (f0 >= 0 && f1 >= 0 &&
+				    chartLess(T.faces[size_t(f1)].chart, T.faces[size_t(f0)].chart)) fDom = f1;
+				for (int s = 0; s < 1; ++s) {
+					const int32_t fi = fDom;
 					if (fi < 0) continue;
 					const P2Face &F = T.faces[size_t(fi)];
 					const MatGrid &G = grids[size_t(F.matIdx)];
