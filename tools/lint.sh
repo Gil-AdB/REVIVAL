@@ -50,6 +50,23 @@ if [ "$want_flags" = 1 ]; then
 	python3 "$ROOT/tools/flag_readers.py" || rc=1
 fi
 
+# ── 1b. zsh word-splitting: a bare $VAR holding "a b" is ONE argument ───────
+# (tools/zsh_split_lint.py; --staged narrows it to the staged scripts).
+if [ "$want_flags" = 1 ]; then
+	echo "== zsh_split_lint =="
+	if [ "$staged" = 1 ]; then
+		zsh_targets="$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(sh|zsh)$|^tools/' || true)"
+		if [ -n "$zsh_targets" ]; then
+			# shellcheck disable=SC2086
+			python3 "$ROOT/tools/zsh_split_lint.py" $zsh_targets || rc=1
+		else
+			echo "-- no staged scripts"
+		fi
+	else
+		python3 "$ROOT/tools/zsh_split_lint.py" || rc=1
+	fi
+fi
+
 # ── 2. the pattern rules ────────────────────────────────────────────────────
 enumerate_targets() {
 	# Tracked sources only (git ls-files), both case conventions, minus the

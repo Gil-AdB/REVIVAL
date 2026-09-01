@@ -4,6 +4,7 @@
 #include <Threads.h>
 #include <Base/RenderStats.h>
 #include <Base/FeatureFlags.h>
+#include <Base/Provenance.h>
 #include <FILLERS/TheOtherBarry.h>
 #include "FrameProfiler.h"
 
@@ -19,6 +20,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <vector>
+
+// FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp).
+void Xtrace_WriteFile(const char*);
 
 // Defined in FDS/RENDER/DeferredFastFog.cpp (global scope). The deferred
 // fountain tonemaps in its tick, so it runs the post-tonemap lens-drop pass
@@ -3039,18 +3043,60 @@ struct FountainScene : SceneDriver {
 		}
 		fds::g_hdrDeferTonemap = false;
 
-		// Debug labels at each stream-head omni's screen position.
-		for (int i = 0; i < kNumFollowerOmnis; ++i) {
-			const FollowerOmni& f = g_FntFollowerOmnis[i];
-			const Omni* O = f.omni;
-			if (!O) continue;
-			if (O->V.TPos_AOS.z < FntSc->NZP || O->V.TPos_AOS.z > FntSc->FZP) continue;
-			int px = int(O->V.PX);
-			int py = int(O->V.PY);
-			if (px < 0 || px >= XRes || py < 0 || py >= YRes) continue;
-			char label[32];
-			std::snprintf(label, sizeof(label), "H%d/%d", f.track, f.rotIdx);
-			OutTextXY(VPage, px, py, label, 255);
+		// 'G' (grab): one-shot frame dump to /tmp/fountain_dump_N_tT.ppm with
+		// its provenance sidecar, the FDS_XPAR_TRACE composite census beside
+		// it, and the pose + scene time in the exact form the headless
+		// snapshot takes back (FNTSNAP_POS/FWD/FOV env + --snapshot=fountain@t).
+		// Edge-triggered so a held key fires once. Same contract as greets' G.
+		{
+			static bool sGPrev = false;
+			static int  sDumpN = 0;
+			const bool  gNow   = Keyboard[ScG] != 0;
+			if (gNow && !sGPrev) {
+				const int dumpT = (int)g_FrameTime;
+				char path[80];
+				std::snprintf(path, sizeof(path),
+				              "/tmp/fountain_dump_%d_t%d.ppm", sDumpN++, dumpT);
+				std::FILE *f = std::fopen(path, "wb");
+				if (f) {
+					const int xr = (int)XRes, yr = (int)YRes;
+					std::fprintf(f, "P6\n%d %d\n255\n", xr, yr);
+					std::vector<unsigned char> row(xr * 3);
+					for (int y = 0; y < yr; ++y) {
+						const dword *src = (const dword*)((const byte*)VPage
+						                  + y * (int)VESA_BPSL);
+						for (int x = 0; x < xr; ++x) {
+							dword px = src[x];
+							row[x*3+0] = (px >> 16) & 0xFF;
+							row[x*3+1] = (px >>  8) & 0xFF;
+							row[x*3+2] = (px      ) & 0xFF;
+						}
+						std::fwrite(row.data(), 1, row.size(), f);
+					}
+					std::fclose(f);
+					fds::Provenance::SetScene("fountain");
+					fds::Provenance::SetTag("harness", "interactive-grab");
+					fds::Provenance::SetTimeOverride(dumpT);
+					fds::Provenance::WriteSidecar(path, xr, yr, "ppm");
+					fds::Provenance::SetTimeOverride(-1);
+					std::fprintf(stderr, "[FOUNTAIN] dumped %s (t=%d)\n", path, dumpT);
+				}
+				{
+					char tp[96];
+					std::snprintf(tp, sizeof tp, "/tmp/fountain_xtrace_%d_t%d.txt",
+					              sDumpN - 1, dumpT);
+					Xtrace_WriteFile(tp);
+				}
+				// %.9g: full float round-trip precision (see the greets note on
+				// facing-threshold flips inside 3-decimal truncation).
+				std::fprintf(stderr,
+					"[FOUNTAIN-CAM] FNTSNAP_POS=\"%.9g,%.9g,%.9g\" FNTSNAP_FWD=\"%.9g,%.9g,%.9g\" FNTSNAP_FOV=%.9g t=%d\n",
+					View->ISource.x, View->ISource.y, View->ISource.z,
+					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+					View->IFOV, dumpT);
+				std::fflush(stderr);
+			}
+			sGPrev = gNow;
 		}
 
 		prof.leave(PROF_RNDR);

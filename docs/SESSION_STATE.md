@@ -1,4 +1,29 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-01 — his M5 round filed; fountain G key; the corner-rule pictures were never evidence
+
+- **M5 transparent faces**: missing in BOTH arms at greets t=1043 (his answer); the dev box renders the
+  same recipe with the text panels present (`docs/img/m5/xpar_t1043_dev.png`, md5 `f96caaf9…`). The
+  xpar surfaces there are the half-silvered `screen2` text panels (columns are opaque marble — his
+  correction, verified in code; dispute e759f25d4440). Next: his M5 headless snapshot md5 + the
+  interactive grab with `FDS_XPAR_TRACE=1` — **press G, not F9** (F9 is Mission Control on macOS;
+  greets reads F9 OR G). Cards `platform.m5.greets_transparent_faces.m5_frame`,
+  `platform.m5.fountain_missing_polys` carry the M5 command lines.
+- **Fountain**: his sighting = polys vanish ~0.5 s into the scene. The unconditional stream-head
+  H-labels (since b3d8142b) are REMOVED at his ruling ("remove the h1/2/0/w/e"); in their place
+  **G** dumps `/tmp/fountain_dump_N_tT.ppm` + sidecar + xtrace and prints `[FOUNTAIN-CAM]` with
+  `FNTSNAP_POS/FWD/FOV` and `t` — the exact headless repro form. Fountain t=2500 ovec pin moves
+  `8db68ccb…` → `0222f903…` (label pixels; greets t=1588 unchanged in the same run).
+- **Trap**: `--snapshot` rows without `--force_xres/--force_yres` render at `Runtime/rev.cfg`
+  resolution, found from the REAL executable path (REV.CPP:526) — a locally edited cfg (1384×768 on
+  the dev box) fails every ovec row with no tree change. `tools/ovec/gates.sh` now forces 1920×1080.
+- **Corner rule (9e7cde227316)**: the committed `junction_*.png` pairs had one side 2.4× darker
+  (composite artifact — he caught it). Fresh renders: identical means; the arms differ in 638 /
+  1 643 px, none at the H6194 crease; **ref_step_px = 0 at all 8 battery poses** — no pose shows a
+  step. Rulings now go through the wipe-compare deck
+  (https://claude.ai/code/artifact/4438b364-1c0c-4518-878b-02a71d8e1a73), never loose images.
+- World-UV arm: ruled "both are shit" (ef6f65c1348f) — stays default OFF; the campaign lever is P4
+  pinning, gated on corner_rule + membership.
+
 ## 2026-08-31b — knife-edge landed (both hypotheses refuted); the queue is live
 
 - **M5** (rev-knifedge merged, 1d975e61, NO engine source): class 1 is ONE near-plane-clipped
