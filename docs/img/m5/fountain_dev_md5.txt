@@ -1,0 +1,5 @@
+7ad40083fae1f8a1a0aba3aabdeb8a95  fountain_t000100_color.ppm
+3987ffec2317b66a6cae11a296208254  fountain_t000300_color.ppm
+1e1725732abb5445ad78d517104f55d6  fountain_t000500_color.ppm
+4e1af70fb2397e78f8fee96451ba517a  fountain_t000800_color.ppm
+425fcf08585508967f264c938cce6439  fountain_t001200_color.ppm
