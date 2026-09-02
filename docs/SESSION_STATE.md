@@ -1,4 +1,29 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-02b — P4 junction rings merged (3a665e7a), STOPPED AT ITS GATE; the city single flip did not reproduce
+
+- **P4 is built and merged** (rev-p4 pinned `7978ab5c`, `--greets_displace_v4` default OFF, `--v4_rings`
+  default ON inside it; `docs/DISPLACEMENT_V4_DESIGN.md` §P4; ledger `b2dedcb218bd` supersedes the
+  proposal). Coordinator re-ran every gate on a fresh build of the pinned SHA: `render_gate` 4/4,
+  ovec 12/12, cam A off-arm `d92cb6f5…` = the 24-run pin, on-arm `79b9e309…` 3/3 (agent 24/24),
+  P3 control `--no-v4_rings` `7c259253…` = P3's own md5, lint 0 ERROR, tears 14 ≤ 15 with the wall
+  ends at 0. The FPCR fix (`ff76525d`) is inside the merge and byte-null there.
+- **Two exit criteria FAIL, stated**: faces 85 566 vs the 84 742 budget (+0.97 %, exactly the 824
+  groove-crossing border samples the round exists to place); dz p90 < 0.08 u **refused as
+  unreachable** (`b3b2139d736c`): the `--flat-deg` mask is the block interior P4 never touches, and
+  the ring vertices move p50 0.016 u against a 0.15–0.35 u residual that is P3's interior recession.
+  Instrument trap `a149cc880bbe`: 13.6 % of corner6097's crease band is reference-coverage
+  disagreement, identical in both arms. A stale committed picture (`docs/img/p4/camA_p4.png` at a
+  pre-fix SHA) was caught by provenance and all eight re-rendered at the tip.
+- **Whether the wall boundaries now look recessed is his eye's call** — nobody has claimed it.
+  Fly: `cd /Users/gil-ad/work/revival-fog/Runtime && ./DEMO --deferred --hdr --hdr-linear --texture-filter=2 --ssao --ssao-gtao --greets-displace --greets_displace_v4`
+  (add `--no-v4_rings` for the P3 control).
+- **City single flip closed as a measurement** (`6e2be8b5e19b` supersedes `92c790078de2`): 1 of 18
+  observations under numpy contention; 48 sequential dev runs launched during the P4 gate battery
+  read `bd4ffbf8…` ×48, 48 M5 runs read `0debc80a…` ×48 — 96/96 deterministic. If it recurs, keep
+  the PPM and sidecar of the differing run.
+- Still held at 104 of 155 corners (48 abutments, 56 against non-baked faces); `--v4_ring_abut`
+  lifts the first half, unmeasured.
+
 ## 2026-09-02 — THE M5 DIVERGENCE IS FOUND AND FIXED: FPCR.AH (FEAT_AFP), one line in `FPU_LPrecision`
 
 - **Cause** (ledger `10e91a31d5d8`, `platform.m5.divergence_mechanism`): `FDS/Base/FDS_VARS.H`
