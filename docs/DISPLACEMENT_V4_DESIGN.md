@@ -1196,3 +1196,212 @@ correlation.
   seam between them stays flat.
 * Open for him, `f35aa1ca69d9`: keep the arm default-OFF, drop it, re-project
   only the six near-45 trim planes, or go straight at the P4 pinning instead.
+
+---
+
+# §P4 — the round that built (e), the junction rings, and measured what they can and cannot reach
+
+P4 is stage (e): the junction ring vertices. It was written under three rulings
+Gil-Ad filed on 2026-09-02, and it is built to those rulings rather than to the
+proposal `d0b93e58e856` that predated them:
+
+* **corner rule = uniform dominant** (`1c196c8c5cea`, answering `9e7cde227316`) —
+  heights at *every* junction agree on the crease, and the value is the dominant
+  owner's. Not the census rule (dominant on phase-shifted junctions, steps on
+  unrelated-chart junctions) the proposal was written with. **No step face is
+  emitted anywhere**, so §2e's "steps → each side's own, joined by the planar
+  step face on the bisector" is dead code that was never written.
+* **membership = partition** (`1a6e9e61ec89`, answering `d746f3373da0`) —
+  nearest-plane ownership of the junction band, not union.
+* **P2 = ratified** (`b026b57d0962`) — the control-referenced tear gate stands and
+  the 15 hole px are capped debt.
+
+## What P4 does
+
+**The ring solve.** A ring point `P` lies on every incident authored plane, so
+plane *i*'s offset plane is `nᵢ·X = nᵢ·P + d` and the solve is for the `x` with
+`nᵢ·x = d` for all *i*; the vertex is `P + x`. Normals are de-duplicated first
+(`dot > 1 − 1e-9`), then:
+
+| independent planes | solution | count |
+|---|---|---|
+| 1 | `x = n₀·d` | 1021 |
+| 2 | `x = (n₀+n₁)·d/(1+n₀·n₁)` — never a normalised bisector (law `f713599ea11d`); a 180° fold (`1+c < 1e-6`) falls back to one plane | 382 |
+| 3 | the exact triple `d·(n₁×n₂ + n₂×n₃ + n₃×n₁)/det`, best-conditioned permutation | 22 |
+| **≥ 4** | **least squares, `(NᵀN)x = d·Nᵀ1` by 3×3 Cramer** | **12** |
+
+The four-or-more row is a **deviation the design did not cover**. §2e's invariant
+is "every ring vertex lies on both offset planes to 1e-5 u", which is only
+meaningful while a solution exists. Twelve vertices in this scene carry four or
+more independent planes, where in general there is none, and solving those with
+an exact triple that ignores the rest silently reported a residual of
+**8.872e-03 u** against a 1e-5 bar. Split honestly, the census now prints two
+numbers: `max_residual = 2.776e-17` over the 1425 vertices that have an exact
+solution (the invariant, met at machine precision) and
+`max_residual_over = 4.407e-03` over the 12 that do not (the least-squares
+residual, which is a property of the scene, not of the code).
+
+Mitre ratio is `1/cos(θ/2)`; past `--v4_mitre_limit` (4.0) the offset is clamped.
+`mitre_clamped = 0` in this scene — nothing reaches it, so the bevel-quad half of
+§2e is likewise unexercised and unwritten.
+
+**Unpinning.** P3 pinned every authored-edge vertex at `d = 0`
+(`if (pt[i].gid >= 0) { pt[i].d = 0.0; continue; }`), which is the standing
+mechanism suspect behind his three look verdicts — `41112ea861bd` (seam
+artifacts), `98b9eba830ec` (no recesses on wall boundaries), `7cec6b7a171d`
+(no inter-wall displacement). That line is now `if (pt[i].gid >= 0) continue;`:
+the border vertices keep their real height, and `[V4-RELIEF]` sees the surface
+that ships rather than a flattened copy of it.
+
+**Groove crossings on shared edges.** The other half of the same suspect is that
+`V4Border.cpp` cut each shared border into equal arc-length segments, so no
+vertex was ever placed where a mortar groove crosses a shared edge. `P2Edge` now
+carries an explicit parameter list (`tpar`, `tnum`): `EdgeGrooveCrossings` walks
+the row-template *y* boundaries and the per-band column lines of the height grid
+and returns every crossing on the edge, the list is thinned at
+`--v4_ring_min_sep` (0.35 of a segment), the remainder is filled with the R3
+exact-rational samples, sorted, and capped at `--v4_max_border_seg`.
+`BorderSampleT` evaluates a free parameter; the seal is not "exact `i/n`" but
+**one parameter list per edge and one shared vertex**, cited in the banner as
+`01c55f739bc3`. Census: `cross_samples = 1201`, `arc_samples = 705`,
+`arc_dropped = 789`, `edges_with_cross = 234`.
+
+**Crossings come from the dominant owner only** — the refuted alternative is kept
+as `--v4_ring_cross_both`, default OFF (`d6188ba3ae0a`). Taking them from both
+sides put the *floor's* flagstone grid on the wall base line, where the wall's
+field has no relief, and turned the base course into a visible fan of long
+facets. One flag on one binary localized it: `--no-v4_ring_grooves` removed it,
+`--v4_band_union` and `--v4_block_mid` did not, `--v4_mitre_limit=1.0` did not.
+
+**Partition without deleting material.** The ruling's known hazard is that the
+literal partition in the *reference raycaster* deletes the pier front over a
+~90 px band at cam A (`e43c035dbedf`). In the mesh bake the same rule is
+implemented as *each face displaces by its own plane's field only, and the crease
+is closed by the ring solve* — nothing is trimmed by a bisector, so there is
+nothing to delete. Measured, not asserted: the 54-pose tear battery reads
+`poses_with_holes = 8, TOTAL_HOLES = 14`, per-pose identical to the
+`--no-v4_rings` control, with the wall-end poses S6120 / S6150 / H6194 at 0;
+`use3plus = 0`; `use1 = 630 = expected_use1`; T-vertices `border_sample = 0`,
+`interior = 0`.
+
+## What P4 cannot unpin, and who holds it
+
+Of 155 authored stone corners, **51 are solved and 104 are held** — 48 on a
+use-count-1 abutment (a T-junction against a stone face the exact stitch cannot
+see: the host has no vertex on the line, so moving this side alone reopens the
+base junction `bc79e39d`) and 56 because the point coincides with a face of the
+same mesh this bake does not touch, by name **siling 50, teleporter 6**, which
+reproduces P1's own foreign-neighbour census exactly. Of 1906 shared-border
+samples, 1386 are solved, 246 held by an abutment, 274 held against a non-baked
+face. So the wall-to-wall creases now displace and the wall-to-**ceiling**
+boundary does not: moving a stone vertex away from an undisplaced `siling` face
+would tear that seam. That is a fact about the bake set, not about the solve.
+`--v4_ring_abut` (default OFF) is the arm that lifts the abutment half.
+
+## The flags
+
+All six live in `FDS/Base/FeatureFlags.def`; none is a raw `getenv`.
+
+| flag | default | what it is |
+|---|---|---|
+| `--v4_rings` | **1** (inside the v4 arm) | the phase. `--no-v4_rings` is the isolating control and reproduces P3 byte for byte |
+| `--v4_ring_grooves` | 1 | place border samples at mortar-groove crossings |
+| `--v4_mitre_limit` | 4.0 | offset clamp, `1/cos(θ/2)` |
+| `--v4_ring_min_sep` | 0.35 | crossing thinning, in segments |
+| `--v4_ring_abut` | 0 | also solve the 294 abutment-held vertices |
+| `--v4_ring_cross_both` | 0 | the refuted both-sides crossing rule, kept as evidence |
+
+## The gate
+
+| row | value | verdict |
+|---|---|---|
+| arm OFF, greets cam A t=5965 | `d92cb6f5eb19da4301588ae83af6a56e` | **PASS** — the pin, unmoved |
+| `tools/render_gate.sh` | 4/4 (`4ac809e5` / `826c09e6` / `b41894f9` / `166fa25a`) | **PASS** |
+| `tools/ovec/gates.sh` | **12 PASS / 0 FAIL** | **PASS** |
+| arm ON, 24 separate processes | `79b9e309b4185864e4576e4f6f795552` ×24, 0 flips | **PASS** |
+| `--no-v4_rings` control | `7c259253ca3b540de5c51e60417765f3` — P3's own md5, digit for digit | **PASS** |
+| `tools/lint.sh` | 0 findings on the touched files, 0 ERROR | **PASS** |
+| tear battery, 54 poses | `TOTAL_HOLES = 14` ≤ 15, per-pose identical to the control | **PASS** |
+
+## The exit criteria, measured
+
+| criterion | bar | measured | verdict |
+|---|---|---|---|
+| crease-dh reads dominant everywhere | 0 step px | no step face is emitted (the ruling); `ref_step_px = 0` at all 8 battery poses (`6e0cc1261ed6`); `use3plus = 0`, `border_sample`/`interior` T-vertices 0 | **PASS** |
+| tear battery at the wall-end poses | 0 | S6120 0, S6150 0, H6194 0 | **PASS** |
+| faces ≤ the P3b bake | 84742 | 85566 on the matching (band-union) arm, **+824**; 61430 on the shipped default | **FAIL by 0.97 %** |
+| sliver census not worse than P3b | min-angle p10 ≥ 4.8° | **4.8533°** band-union (control 4.8053), worst 0.9836 vs 0.9354, under1deg 2 vs 6 | **PASS** |
+| bake | ≤ 500 ms | **63.9 ms** min-of-5 (control 56.6 — the phase costs 7.3 ms) | **PASS** |
+| dz p90 vs the reference | < 0.08 u at H6194 / camA / corner6097 | block interior 0.347 / 0.151 / 0.159; crease band (tail-excluded) 0.260 / 0.217 / 0.124 | **FAIL — and not reachable by this phase** |
+
+The face row fails by exactly the 824 faces the phase adds, which are the
+groove-crossing border samples — the thing the round exists to place. It is a
+cost, not a defect, and it is flat in the interior density: the same 824 faces
+and 412 vertices whether the band union is on or off.
+
+## Why the dz row is not reachable, measured rather than argued
+
+Two instruments, one conclusion (`b3b2139d736c`).
+
+**The mask cannot see the phase.** `tools/v4_p3_ref.sh` scores dz through
+`--flat-deg`, the *block interior* — more than 10° of plane-normal agreement away
+from any junction — which is precisely the region P4 leaves alone. One binary,
+one flag apart: camA FLAT p90 0.3345 → 0.3470, H6194 0.1541 → 0.1510,
+corner6097 0.1591 → 0.1591. So `refrender_diff.py` grew the complementary
+**crease band** off the same reference and the same per-faceId plane table
+(4-neighbour faceId boundaries whose plane normals differ by more than
+`--crease-deg`, dilated by `--crease-band`; same-plane seams excluded on purpose
+— they are 64.5 % of junction length, `3eca6ffb3e40`, and the offset solve is an
+identity there by construction), and `tools/v4_p4_crease.sh` prints both masks
+for both arms at three radii.
+
+**The budget is smaller than the residual.** `[V4-RINGS] move` now prints the
+distribution, not only the max: over 1437 solved ring vertices the offset is
+**p50 0.015859 u**, p90 0.028126, p99 0.164141, max 0.205511, with 5.6 % under
+0.005 u. The crease-band residual is 0.038–0.057 u p50 at the three poses — two
+to four times the *median* ring offset. No placement of these vertices, not even
+an exact one, brings that band under 0.08 u.
+
+What the residual is, on file: the P3 block-interior recession (`256d9f38b114`).
+The crease band inherits it because the ring is placed on the **arm's own** offset
+plane — consistent with an interior that is itself displaced too little. P4 makes
+the mesh *self*-consistent at the junction; it cannot make it agree with the
+reference while the interior does not.
+
+Measured, tail-excluded, one flag apart (P3 control → P4):
+
+| pose | crease p50 | crease p90 | radius-2 p50 |
+|---|---|---|---|
+| camA | 0.0569 → 0.0540 | 0.2590 → 0.2598 | 0.0775 → 0.0764 (−1.3 %) |
+| H6194 | 0.0357 → 0.0341 | 0.2215 → 0.2169 | 0.0409 → 0.0408 (−0.3 %) |
+| corner6097 | 0.0386 → 0.0394 | 0.1221 → 0.1244 | 0.0534 → 0.0537 (+0.7 %) |
+
+## An instrument trap the round had to find first
+
+A dz percentile at corner6097 is **not a relief number** until the
+reference-coverage tail is removed (`afec3d5df0bb`). 8150 px of that pose's
+59738-px crease band — 13.6 %, so the p90 sits inside the tail by construction —
+are pixels where the reference raycaster resolves stone at z ≈ 0.83 u and the
+mesh has stone at z ≈ 5.92 u: a 5-unit disagreement in a field 0.164 u deep. One
+blob, `x = [0..429]`, five reference faceIds, **no** reference flag set (not
+skirt, not grow, not budget, not step), and **pixel-for-pixel identical in both
+arms** — a property of the reference renderer, same family as the cam A far-wall
+localization `6d633f210431`. Excluding `|dz| > 1 u`, corner6097's crease p90
+falls from 4.81 u to 0.124 u.
+
+## What P4 leaves
+
+* The phase is built, default ON inside `--greets_displace_v4` (itself default
+  OFF), byte-null with the flag off, and deterministic 24/24 with it on.
+* His three look verdicts are addressed **mechanically** — the authored-edge
+  vertices are unpinned, and border vertices are now placed where the grooves
+  cross — but whether the wall boundaries *look* recessed is his eye's call, not
+  a number this round can claim.
+* **The dz exit criterion is refused, with its reason measured.** It belongs to
+  the height field (P3's interior recession, `256d9f38b114`), not to the rings.
+* Unexercised in this scene, therefore unwritten: the step face, the bevel quad
+  past the mitre limit, and the 3×3 unequal-offset form (every junction here
+  carries one `d`, by the uniform-dominant ruling).
+* Still held: 104 of 155 corners and 520 of 1906 border samples, half by
+  abutments (`--v4_ring_abut` lifts them, unmeasured) and half by the
+  wall-to-ceiling boundary, which P5's free-edge/skirt work owns.

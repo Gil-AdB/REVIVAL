@@ -1057,6 +1057,13 @@ struct P2Edge {
 	double  length = 0.0;
 	int32_t nSeg = 1;              // R2: the border's own sample count
 	int32_t firstVert = -1;        // global id of interior sample 1 (contiguous)
+	// P4: the border's INTERIOR sample parameters, in the canonical a→b
+	// direction, formed once here so the two faces cannot derive two lists.
+	// `tnum[q] >= 0` marks an exact-rational R3 sample (tpar[q] == tnum[q]/nSeg
+	// and BorderSample takes the integer path); −1 marks a mortar-crossing
+	// sample from --v4_ring_grooves, which has no rational form.
+	std::vector<double>  tpar;
+	std::vector<int32_t> tnum;
 };
 
 struct P2Topo {
@@ -2081,6 +2088,213 @@ static void FaceLattice(const P2Topo &T, const P2Face &F, const MatGrid &G,
 	S.triEmitted += int64_t(tri.size());
 }
 
+// ═══ P4 (design §2e) — the JUNCTION RINGS ══════════════════════════════════
+// P3 pinned every vertex on an authored edge at 0 and said so out loud: §2e's
+// offset-plane solve is P4's.  Two of his standing verdicts ARE that pin —
+// 7cec6b7a171d (the wall-to-wall bands stay flat) and 98b9eba830ec (no recess
+// at a wall boundary) — and the second needs a second thing as well: even
+// unpinned, R2's equal-arc border samples put NO vertex where a mortar groove
+// crosses a shared edge, so a groove has nothing to end ON.  This block builds
+// both halves.
+//
+// The two rulings of 2026-09-02 shape it:
+//   * corner_rule = uniform_dominant (1c196c8c5cea) — the height at EVERY
+//     junction is the DOMINANT OWNER's, both sides, no castellation step
+//     anywhere.  So d₁ = d₂ at every ring point and the unequal-offset 3×3 the
+//     design allows for cannot arise on a two-plane crease; what remains of the
+//     3×3 is the chart-CORNER case, three or more planes meeting at a vertex.
+//   * membership = partition (1a6e9e61ec89) — in a mesh this is the statement
+//     that each face displaces by its OWN plane's height field and nothing
+//     else, and that the crease is closed by the ring solve.  It is NOT the
+//     reference raycaster's literal bisector partition, which deletes the pier
+//     front over a ~90 px band at cam A (trap e43c035dbedf): nothing here is
+//     trimmed by a bisector and no material is removed — every authored face
+//     keeps its full extent, every ring vertex is shared, so the surface cannot
+//     open and cannot lose a face.
+
+// Which block-row band of `G` a map row belongs to.  The same wrap arithmetic
+// ReliefClassAt uses, factored out so the two cannot disagree about a band.
+static int BandAtY(const MatGrid &G, double yTex)
+{
+	auto wrap = [](double x, double p) { double r = std::fmod(x, p); if (r < 0) r += p; return r; };
+	const double y = wrap(yTex, double(G.mipH));
+	for (size_t b = 0; b < G.grid.bandY.size(); ++b) {
+		const double a0 = wrap(double(G.grid.bandY[b].first), double(G.mipH));
+		const double w  = double(G.grid.bandY[b].second - G.grid.bandY[b].first);
+		if (wrap(y - a0, double(G.mipH)) <= w) return int(b);
+	}
+	return 0;
+}
+
+// Where a BREAKLINE of `G` crosses the segment uvA→uvB, as parameters in (0,1).
+// The lines are the lattice's own — the row template's boundaries in y, the
+// per-band column lines in x — so a border sample placed at one of these is the
+// continuation of an interior breakline and not a new line of its own.  A
+// column line only counts where the crossing actually lands in ITS band: the
+// four bands do not share a column phase on this map (22.0 / 62.5 / 27.0 / 0.5
+// texels on a 64-texel pitch, refutation 935f59476311), and taking every band's
+// columns everywhere is exactly the mistake --v4_band_union made.
+static void EdgeGrooveCrossings(const MatGrid &G, const double uvA[2],
+                                const double uvB[2], std::vector<double> &out)
+{
+	if (!G.ok) return;
+	const double perW = double(G.mipW), perH = double(G.mipH);
+	const double xA = uvA[0]*perW, xB = uvB[0]*perW;
+	const double yA = uvA[1]*perH, yB = uvB[1]*perH;
+	const double dx = xB - xA, dy = yB - yA;
+	const double tEps = 1e-6;
+	if (std::fabs(dy) > 1e-9) {
+		const double lo = std::min(yA, yB), hi = std::max(yA, yB);
+		const long k0 = long(std::floor((lo - perH - G.y0Base) / perH));
+		const long k1 = long(std::ceil ((hi + perH - G.y0Base) / perH));
+		if (k1 >= k0 && k1 - k0 < 4096)
+			for (long k = k0; k <= k1; ++k)
+				for (const StoneRowT &r : G.rowTpl) {
+					const double t = (double(r.y0) + double(k)*perH - yA) / dy;
+					if (t > tEps && t < 1.0 - tEps) out.push_back(t);
+				}
+	}
+	if (std::fabs(dx) > 1e-9) {
+		const double lo = std::min(xA, xB), hi = std::max(xA, xB);
+		const long j0 = long(std::floor((lo - perW) / perW));
+		const long j1 = long(std::ceil ((hi + perW) / perW));
+		if (j1 >= j0 && j1 - j0 < 4096)
+			for (size_t b = 0; b < G.colLine.size(); ++b)
+				for (long j = j0; j <= j1; ++j)
+					for (const auto &cl : G.colLine[b]) {
+						const double t = (cl.first + double(j)*perW - xA) / dx;
+						if (!(t > tEps && t < 1.0 - tEps)) continue;
+						if (BandAtY(G, yA + t*dy) != int(b)) continue;
+						out.push_back(t);
+					}
+	}
+}
+
+struct RingStats {
+	int64_t cornersSolved = 0, cornersHeldAbut = 0, cornersHeldSoup = 0, cornersNoField = 0;
+	int64_t bordersSolved = 0, bordersHeldAbut = 0, bordersHeldSoup = 0;
+	int64_t crossSamples = 0, arcSamples = 0, arcDropped = 0, edgesWithCross = 0;
+	int64_t planes1 = 0, planes2 = 0, planes3 = 0, planes4 = 0;
+	int64_t mitreClamped = 0, singular = 0, illCond = 0;
+	// The §2e invariant splits in two once it is measured: a ring vertex with
+	// one, two or exactly three independent planes has an EXACT solution and
+	// must satisfy every one of them; a vertex with four or more is
+	// over-determined and in general has none, so the honest report is the
+	// least-squares residual and its own count.
+	double  maxResidual = 0.0, maxResidualOver = 0.0;
+	double  dMin = 1e300, dMax = -1e300, maxMove = 0.0;
+	// The DISTRIBUTION of |x|, not only its max.  A max_move of 0.2 u says one
+	// ring vertex moved a fifth of a unit; it does not say whether the phase
+	// moved the junction as a whole, and the dz-vs-reference reading cannot be
+	// interpreted without that.  Every solved ring vertex appends one sample.
+	std::vector<float> moves;
+	int64_t soupTris = 0;
+	double  msRings = 0.0;
+};
+
+// Place a ring point.  `P` lies on every incident authored plane, so plane i's
+// OFFSET plane is n_i·X = n_i·P + d, and the solve is for the x with n_i·x = d
+// for every i; the vertex is P + x.  Two planes give the design's closed form
+// x = d(n₁+n₂)/(1+n₁·n₂) — never a normalised bisector (law f713599ea11d) —
+// and three give the 3×3 whose solution is d·(n₁×n₂ + n₂×n₃ + n₃×n₁)/det.
+static V3 RingSolve(const V3 &P, const V3 *nIn, int nInCount, double d,
+                    double mitreLimit, RingStats &RS)
+{
+	V3 n[16];
+	int m = 0;
+	for (int i = 0; i < nInCount && m < 16; ++i) {
+		bool dup = false;
+		for (int j = 0; j < m; ++j) if (dot(n[j], nIn[i]) > 1.0 - 1e-9) { dup = true; break; }
+		if (!dup) n[m++] = nIn[i];
+	}
+	if (m == 0) return P;
+	V3 x(0, 0, 0);
+	if (m == 1) { x = n[0] * d; ++RS.planes1; }
+	else if (m == 2) {
+		++RS.planes2;
+		const double c = dot(n[0], n[1]);
+		if (1.0 + c < 1e-6) { x = n[0] * d; ++RS.singular; }      // the 180° fold
+		else                  x = (n[0] + n[1]) * (d / (1.0 + c));
+	} else {
+		if (m == 3) ++RS.planes3; else ++RS.planes4;
+		// the best-conditioned triple (conditioning ∝ 1/|det|, §2e)
+		int bi = 0, bj = 1, bk = 2; double bd = 0.0;
+		for (int i = 0; i < m; ++i) for (int j = i+1; j < m; ++j) for (int k = j+1; k < m; ++k) {
+			const double dt = std::fabs(dot(n[i], cross(n[j], n[k])));
+			if (dt > bd) { bd = dt; bi = i; bj = j; bk = k; }
+		}
+		if (bd > 1e-4 && m == 3) {
+			x = (cross(n[bj], n[bk]) + cross(n[bk], n[bi]) + cross(n[bi], n[bj]))
+			    * (d / dot(n[bi], cross(n[bj], n[bk])));
+		} else if (bd > 1e-4) {
+			// FOUR OR MORE planes: the system is over-determined and in general
+			// has NO solution — §2e's "3-plane corner solve" silently assumed
+			// three.  Solving three exactly and ignoring the rest leaves the
+			// ignored ones off by whatever they happen to be (measured 8.9e-3 u
+			// on this scene); the least-squares point (NᵀN)x = d·Nᵀ1 spreads
+			// the same error over all of them, which is the right thing when
+			// there is no exact answer and the vertex is shared by all of them.
+			double A[3][3] = {{0,0,0},{0,0,0},{0,0,0}}, b[3] = {0,0,0};
+			for (int i = 0; i < m; ++i) {
+				const double nx = n[i].x, ny = n[i].y, nz = n[i].z;
+				A[0][0]+=nx*nx; A[0][1]+=nx*ny; A[0][2]+=nx*nz;
+				A[1][0]+=ny*nx; A[1][1]+=ny*ny; A[1][2]+=ny*nz;
+				A[2][0]+=nz*nx; A[2][1]+=nz*ny; A[2][2]+=nz*nz;
+				b[0]+=d*nx; b[1]+=d*ny; b[2]+=d*nz;
+			}
+			const double det =
+			      A[0][0]*(A[1][1]*A[2][2]-A[1][2]*A[2][1])
+			    - A[0][1]*(A[1][0]*A[2][2]-A[1][2]*A[2][0])
+			    + A[0][2]*(A[1][0]*A[2][1]-A[1][1]*A[2][0]);
+			if (std::fabs(det) > 1e-9) {
+				const double id = 1.0/det;
+				x = V3(( b[0]*(A[1][1]*A[2][2]-A[1][2]*A[2][1])
+				        -A[0][1]*(b[1]*A[2][2]-A[1][2]*b[2])
+				        +A[0][2]*(b[1]*A[2][1]-A[1][1]*b[2])) * id,
+				       ( A[0][0]*(b[1]*A[2][2]-A[1][2]*b[2])
+				        -b[0]*(A[1][0]*A[2][2]-A[1][2]*A[2][0])
+				        +A[0][2]*(A[1][0]*b[2]-b[1]*A[2][0])) * id,
+				       ( A[0][0]*(A[1][1]*b[2]-b[1]*A[2][1])
+				        -A[0][1]*(A[1][0]*b[2]-b[1]*A[2][0])
+				        +b[0]*(A[1][0]*A[2][1]-A[1][1]*A[2][0])) * id);
+			} else {
+				x = (cross(n[bj], n[bk]) + cross(n[bk], n[bi]) + cross(n[bi], n[bj]))
+				    * (d / dot(n[bi], cross(n[bj], n[bk])));
+			}
+		} else {
+			++RS.illCond;
+			// an ill-conditioned triple is three near-coplanar strips; the
+			// best-posed problem inside it is the most ORTHOGONAL pair
+			int pi = 0, pj = 1; double pc = 2.0;
+			for (int i = 0; i < m; ++i) for (int j = i+1; j < m; ++j) {
+				const double c2 = std::fabs(dot(n[i], n[j]));
+				if (c2 < pc) { pc = c2; pi = i; pj = j; }
+			}
+			const double c = dot(n[pi], n[pj]);
+			if (1.0 + c < 1e-6) { x = n[pi] * d; ++RS.singular; }
+			else                  x = (n[pi] + n[pj]) * (d / (1.0 + c));
+		}
+	}
+	// Mitre limit (§2e): the two-plane offset is |d|/cos(θ/2) and diverges as
+	// the planes fold back.  The design's alternative past the limit is a bevel
+	// QUAD (two vertices); the census reports how often the clamp binds, and a
+	// non-zero count is the signal to build the bevel — not to raise this.
+	const double ad = std::fabs(d);
+	if (ad > 1e-12) {
+		const double ratio = len(x) / ad;
+		if (ratio > mitreLimit) { x = x * (mitreLimit / ratio); ++RS.mitreClamped; }
+	}
+	double res = 0.0;
+	for (int i = 0; i < m; ++i) res = std::max(res, std::fabs(dot(n[i], x) - d));
+	if (m > 3) RS.maxResidualOver = std::max(RS.maxResidualOver, res);
+	else       RS.maxResidual     = std::max(RS.maxResidual, res);
+	RS.maxMove     = std::max(RS.maxMove, len(x));
+	RS.moves.push_back(float(len(x)));
+	RS.dMin = std::min(RS.dMin, d);
+	RS.dMax = std::max(RS.dMax, d);
+	return P + x;
+}
+
 }  // namespace
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2169,6 +2383,7 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 	const bool abutSplit = FeatureFlags::v4_abut_split();
 	for (P2Edge &E : T.edges) {
 		if (flat) { E.nSeg = 1; continue; }
+		E.tpar.clear(); E.tnum.clear();
 		// The 130 use-count-1 edges are ABUTMENTS, not boundaries (418c3bf6c9d7),
 		// and 74 of them already carry a T-junction in the authored mesh.
 		// Splitting one multiplies that pre-existing T-vertex, so by default the
@@ -2183,11 +2398,264 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 		if (n < 1) n = 1;
 		if (n > capSeg) { n = capSeg; ++S.borderCapped; }
 		E.nSeg = int32_t(n);
-		nBorderInterior += n - 1;
 		S.borderMin = std::min(S.borderMin, E.nSeg);
 		S.borderMax = std::max(S.borderMax, E.nSeg);
 	}
 	if (flat) { S.borderMin = S.borderMax = 1; }
+
+	// ══ P4 (§2e) — who may move, where to, and where the border samples go ══
+	const auto tRing0 = clock::now();
+	const bool  rings       = !flat && FeatureFlags::v4_rings();
+	const bool  ringGrooves = rings && FeatureFlags::v4_ring_grooves();
+	const bool  ringAbut    = FeatureFlags::v4_ring_abut();
+	const bool  crossBoth   = FeatureFlags::v4_ring_cross_both();
+	const double mitreLimit = std::max(1.0, double(FeatureFlags::v4_mitre_limit()));
+	const double minSepFrac = std::max(0.0, std::min(0.9, double(FeatureFlags::v4_ring_min_sep())));
+	RingStats RS;
+
+	// edge → its (up to two) faces, in the faces' own mesh order
+	std::vector<std::array<int32_t,2>> eFace(T.edges.size(), std::array<int32_t,2>{{-1,-1}});
+	for (size_t f = 0; f < T.faces.size(); ++f)
+		for (int k = 0; k < 3; ++k) {
+			const int32_t ei = T.faces[f].edge[k];
+			if (ei < 0) continue;
+			auto &e = eFace[size_t(ei)];
+			if      (e[0] < 0) e[0] = int32_t(f);
+			else if (e[1] < 0) e[1] = int32_t(f);
+		}
+
+	// The DOMINANT-OWNER key (his ruling 1c196c8c5cea).  Order-independent by
+	// construction — smaller material index, then smaller area-weighted chart
+	// centroid — which is the reference renderer's own `domOwner` rule lifted
+	// from the face to the chart, so the two implementations pick the same
+	// winner and the bake's crease heights are comparable to the reference's.
+	struct ChartKey { int32_t mat; double cx, cy, cz; };
+	std::vector<ChartKey> ckey(size_t(T.nCharts), ChartKey{ 1 << 30, 0, 0, 0 });
+	{
+		std::vector<double> aw(size_t(T.nCharts), 0.0);
+		std::vector<V3> cc(size_t(T.nCharts));
+		for (const P2Face &F : T.faces) {
+			const size_t c = size_t(F.chart);
+			ckey[c].mat = std::min(ckey[c].mat, F.matIdx);
+			cc[c] = cc[c] + (F.p[0] + F.p[1] + F.p[2]) * (F.area / 3.0);
+			aw[c] += F.area;
+		}
+		for (size_t c = 0; c < ckey.size(); ++c) {
+			const double w = aw[c] > 0 ? 1.0 / aw[c] : 0.0;
+			ckey[c].cx = cc[c].x * w; ckey[c].cy = cc[c].y * w; ckey[c].cz = cc[c].z * w;
+		}
+	}
+	auto chartLess = [&](int32_t a, int32_t b) -> bool {
+		if (a == b) return false;
+		const ChartKey &A = ckey[size_t(a)], &B = ckey[size_t(b)];
+		if (A.mat != B.mat) return A.mat < B.mat;
+		if (A.cx  != B.cx)  return A.cx  < B.cx;
+		if (A.cy  != B.cy)  return A.cy  < B.cy;
+		if (A.cz  != B.cz)  return A.cz  < B.cz;
+		return a < b;
+	};
+
+	// vertex → the distinct charts meeting there, with one representative face
+	// per chart (the first in mesh order, so the pick is deterministic)
+	std::vector<std::vector<int32_t>> vChart(T.vpos.size()), vFaceOf(T.vpos.size());
+	for (size_t f = 0; f < T.faces.size(); ++f)
+		for (int k = 0; k < 3; ++k) {
+			const size_t v = size_t(T.faces[f].v[k]);
+			const int32_t c = T.faces[f].chart;
+			bool have = false;
+			for (int32_t q : vChart[v]) if (q == c) { have = true; break; }
+			if (!have) { vChart[v].push_back(c); vFaceOf[v].push_back(int32_t(f)); }
+		}
+
+	// ── the HOLD set, measured rather than assumed ─────────────────────────
+	// bit 0 = the vertex is on a use-count-1 ABUTMENT.  An abutment is a
+	// T-junction against another stone face the stitch cannot see (418c3bf6c9d7):
+	// the host face has no vertex on the line, so moving this side alone opens
+	// the base junction (bc79e39d).  --v4_ring_abut lifts it as a measured arm.
+	// bit 1 = the point coincides with a face of the SAME mesh that this bake
+	// does NOT touch (siling, lintel, teleporter…).  Those faces stay authored,
+	// so a stone vertex that moves away from one tears the seam against it.
+	std::vector<uint8_t> vHold(T.vpos.size(), 0), eHold(T.edges.size(), 0);
+	std::vector<std::pair<std::string,int64_t>> holdMats;   // who holds them, by material
+	for (size_t ei = 0; ei < T.edges.size(); ++ei) {
+		const P2Edge &E = T.edges[ei];
+		if (E.use != 2) {
+			eHold[ei] |= 1;
+			vHold[size_t(E.a)] |= 1; vHold[size_t(E.b)] |= 1;
+		}
+	}
+	if (rings) {
+		std::vector<uint8_t> baked(size_t(T.mesh->FIndex), 0);
+		for (const P2Face &F : T.faces) baked[size_t(F.faceIdx)] = 1;
+		std::vector<SoupTri> soup;
+		for (int32_t i = 0; i < int32_t(T.mesh->FIndex); ++i) {
+			if (baked[size_t(i)]) continue;
+			const Face &F = T.mesh->Faces[i];
+			if (!F.A || !F.B || !F.C) continue;
+			SoupTri s;
+			s.p[0] = V3(F.A->Pos); s.p[1] = V3(F.B->Pos); s.p[2] = V3(F.C->Pos);
+			s.mat = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "?";
+			soup.push_back(s);
+		}
+		RS.soupTris = int64_t(soup.size());
+		if (!soup.empty()) {
+			SoupGrid SG; SG.build(soup, 0.4);
+			const double tol2 = 1e-4 * 1e-4;
+			auto touchesSoup = [&](const V3 &p) -> const char * {
+				const int x = SG.cx(p.x), y = SG.cy(p.y), z = SG.cz(p.z);
+				for (int dz = -1; dz <= 1; ++dz)
+				for (int dy = -1; dy <= 1; ++dy)
+				for (int dx = -1; dx <= 1; ++dx) {
+					const int xx = x+dx, yy = y+dy, zz = z+dz;
+					if (xx < 0 || yy < 0 || zz < 0 || xx >= SG.nx || yy >= SG.ny || zz >= SG.nz) continue;
+					for (int32_t ti : SG.b[size_t(SG.idx(xx, yy, zz))])
+						if (PointTriDist2(p, soup[size_t(ti)].p[0], soup[size_t(ti)].p[1],
+						                  soup[size_t(ti)].p[2]) <= tol2) return soup[size_t(ti)].mat;
+				}
+				return nullptr;
+			};
+			std::map<std::string,int64_t> hm;
+			for (size_t v = 0; v < T.vpos.size(); ++v)
+				if (const char *nm = touchesSoup(T.vpos[v])) { vHold[v] |= 2; ++hm[nm]; }
+			for (size_t ei = 0; ei < T.edges.size(); ++ei) {
+				const P2Edge &E = T.edges[ei];
+				const V3 mid = (T.vpos[size_t(E.a)] + T.vpos[size_t(E.b)]) * 0.5;
+				if (touchesSoup(mid)) eHold[ei] |= 2;
+			}
+			for (auto &kv : hm) holdMats.push_back({ kv.first, kv.second });
+		}
+	}
+	auto vFree = [&](size_t v) -> bool {
+		const uint8_t h = vHold[v];
+		if (h & 2) return false;
+		if ((h & 1) && !ringAbut) return false;
+		return true;
+	};
+	auto eFree = [&](size_t ei) -> bool {
+		const uint8_t h = eHold[ei];
+		if (h & 2) return false;
+		if ((h & 1) && !ringAbut) return false;
+		return true;
+	};
+
+	// ── the border sample PARAMETERS, per edge ─────────────────────────────
+	// R2's equal-arc i/n samples, plus (--v4_ring_grooves) one where every
+	// mortar run boundary of EITHER adjacent face crosses the edge, thinned so
+	// nothing lands closer than --v4_ring_min_sep of a nominal segment.
+	{
+		std::vector<double> cross;
+		for (size_t ei = 0; ei < T.edges.size(); ++ei) {
+			P2Edge &E = T.edges[ei];
+			if (flat) continue;
+			cross.clear();
+			if (ringGrooves && eFree(ei)) {
+				// The crossings come from the DOMINANT OWNER's grid ONLY, and
+				// that is not a shortcut — it is the same ruling that decides
+				// the heights (1c196c8c5cea).  A crease carries ONE profile,
+				// the dominant owner's, so the vertices that profile needs are
+				// the ones its own breaklines ask for.  Taking BOTH sides was
+				// the first cut and it is REFUTED by the picture: on a
+				// wall↔floor edge the floor's flagstone grid crosses the base
+				// line at positions that mean nothing in the wall's field, and
+				// the extra samples turn the wall's base course into a fan of
+				// long facets (docs/img/p4/camA_base_*.png).  The non-dominant
+				// side loses nothing it had before: its own interior
+				// breaklines still terminate on the border exactly as they did
+				// through P2 and P3, which never produced an artifact.
+				const int32_t f0 = eFace[ei][0], f1 = eFace[ei][1];
+				int32_t fDom = f0;
+				if (f0 >= 0 && f1 >= 0 &&
+				    chartLess(T.faces[size_t(f1)].chart, T.faces[size_t(f0)].chart)) fDom = f1;
+				for (int s = 0; s < (crossBoth ? 2 : 1); ++s) {
+					const int32_t fi = crossBoth ? eFace[ei][s] : fDom;
+					if (fi < 0) continue;
+					const P2Face &F = T.faces[size_t(fi)];
+					const MatGrid &G = grids[size_t(F.matIdx)];
+					int ka = -1, kb = -1;
+					for (int k = 0; k < 3; ++k) {
+						if (F.v[k] == E.a) ka = k;
+						if (F.v[k] == E.b) kb = k;
+					}
+					if (ka < 0 || kb < 0) continue;
+					const double uvA[2] = { F.uv[ka][0], F.uv[ka][1] };
+					const double uvB[2] = { F.uv[kb][0], F.uv[kb][1] };
+					EdgeGrooveCrossings(G, uvA, uvB, cross);
+				}
+			}
+			std::sort(cross.begin(), cross.end());
+			const double minSep = minSepFrac / double(std::max(1, E.nSeg));
+			std::vector<double> keep;
+			for (double t : cross) {
+				if (t < minSep || t > 1.0 - minSep) continue;
+				if (!keep.empty() && t - keep.back() < minSep) continue;
+				keep.push_back(t);
+			}
+			if (!keep.empty()) ++RS.edgesWithCross;
+			RS.crossSamples += int64_t(keep.size());
+			for (double t : keep) { E.tpar.push_back(t); E.tnum.push_back(-1); }
+			for (int q = 1; q < E.nSeg; ++q) {
+				const double t = double(q) / double(E.nSeg);
+				bool room = true;
+				for (double k2 : keep) if (std::fabs(k2 - t) < minSep) { room = false; break; }
+				if (!room) { ++RS.arcDropped; continue; }
+				E.tpar.push_back(t); E.tnum.push_back(int32_t(q));
+				++RS.arcSamples;
+			}
+			// one sort over both populations, carrying tnum with it
+			std::vector<int32_t> ord(E.tpar.size());
+			for (size_t q = 0; q < ord.size(); ++q) ord[q] = int32_t(q);
+			std::sort(ord.begin(), ord.end(), [&](int32_t a, int32_t b) {
+				if (E.tpar[size_t(a)] != E.tpar[size_t(b)]) return E.tpar[size_t(a)] < E.tpar[size_t(b)];
+				return a < b;
+			});
+			std::vector<double> tp; std::vector<int32_t> tn;
+			tp.reserve(ord.size()); tn.reserve(ord.size());
+			for (int32_t q : ord) { tp.push_back(E.tpar[size_t(q)]); tn.push_back(E.tnum[size_t(q)]); }
+			if (int(tp.size()) > capSeg - 1) {
+				tp.resize(size_t(std::max(0, capSeg - 1)));
+				tn.resize(tp.size());
+				++S.borderCapped;
+			}
+			E.tpar.swap(tp); E.tnum.swap(tn);
+			nBorderInterior += int64_t(E.tpar.size());
+		}
+	}
+
+	// ── the CORNER ring positions ──────────────────────────────────────────
+	// Solved here, once per stitched vertex, so every face that references the
+	// corner references the SAME moved point.  A corner's incident chart set is
+	// every chart meeting there, which is what makes the 3-plane case the
+	// chart-corner case rather than a special rule.
+	std::vector<V3> vRingPos(T.vpos);
+	std::vector<double> vRingD(T.vpos.size(), 0.0);
+	if (rings) {
+		for (size_t v = 0; v < T.vpos.size(); ++v) {
+			if (vChart[v].empty()) continue;
+			if (!vFree(v)) {
+				if (vHold[v] & 2) ++RS.cornersHeldSoup; else ++RS.cornersHeldAbut;
+				continue;
+			}
+			size_t best = 0;
+			for (size_t q = 1; q < vChart[v].size(); ++q)
+				if (chartLess(vChart[v][q], vChart[v][best])) best = q;
+			const P2Face &FD = T.faces[size_t(vFaceOf[v][best])];
+			const MatGrid &G = grids[size_t(FD.matIdx)];
+			int kk = -1;
+			for (int k = 0; k < 3; ++k) if (FD.v[k] == int32_t(v)) kk = k;
+			if (kk < 0 || !G.fieldOk) { ++RS.cornersNoField; continue; }
+			const double du = FD.uv[kk][0], dv = FD.uv[kk][1];
+			const int    cls = ReliefClassAt(G, du, dv);
+			const double d   = amp * (NodeH(G, du, dv, cls) - G.mipMean);
+			V3 nn[16]; int m = 0;
+			for (size_t q = 0; q < vChart[v].size() && m < 16; ++q)
+				nn[m++] = chartN[size_t(vChart[v][q])];
+			vRingPos[v] = RingSolve(T.vpos[v], nn, m, d, mitreLimit, RS);
+			vRingD[v]   = d;
+			++RS.cornersSolved;
+		}
+	}
+	RS.msRings = std::chrono::duration<double, std::milli>(clock::now() - tRing0).count();
+
 	S.borderSamples = nBorderInterior;
 
 	// ── output arrays ──────────────────────────────────────────────────────
@@ -2202,6 +2670,7 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 
 	T.vGlobal.assign(T.vpos.size(), -1);
 	std::unordered_map<int64_t, int32_t> borderVert;
+	std::unordered_map<int64_t, double>  borderD;   // P4: the ring height of each sample
 	// per emitted vertex: 0 = authored corner, 1 = sample on a use-1 abutment,
 	// 2 = sample on a shared (use-2) border, 3 = interior lattice node.  Used by
 	// the T-vertex census to say WHICH population any defect came from.
@@ -2222,6 +2691,11 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 		++nPinnedCorners;
 		const Vertex *proto = T.vsrc[size_t(sv)];
 		Vertex m = *proto;                       // authored record, position included
+		// P4 (§2e): the corner's OFFSET-PLANE position, solved once in the ring
+		// pre-pass.  Identical to the authored one when the corner is held or
+		// when the rings are off, so this line is byte-null in those arms.
+		const V3 &rp = vRingPos[size_t(sv)];
+		m.Pos = Vector{ float(rp.x), float(rp.y), float(rp.z) };
 		outV.push_back(m);
 		vClass.push_back(0);
 		T.vGlobal[size_t(sv)] = int32_t(outV.size()) - 1;
@@ -2271,38 +2745,84 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 			{
 				LatPt P; P.p = F.p[k]; P.u = F.uv[k][0]; P.v = F.uv[k][1];
 				P.x2 = dot(P.p - F.p[0], ex); P.y2 = dot(P.p - F.p[0], ey);
+				P.d = vRingD[size_t(vk)];
 				P.gid = int32_t(cornerVert(vk));
 				boundary.push_back(P);
 			}
 			const int32_t ei = F.edge[k];
 			if (ei < 0) continue;
 			const P2Edge &E = T.edges[size_t(ei)];
-			if (E.nSeg <= 1) continue;
+			if (E.tpar.empty()) continue;
 			const bool fwd = (vk == E.a);
 			const int   uvA = fwd ? k : (k+1)%3;         // corner that IS endpoint a
 			const int   uvB = fwd ? (k+1)%3 : k;
 			const double A3[3] = { T.vpos[size_t(E.a)].x, T.vpos[size_t(E.a)].y, T.vpos[size_t(E.a)].z };
 			const double B3[3] = { T.vpos[size_t(E.b)].x, T.vpos[size_t(E.b)].y, T.vpos[size_t(E.b)].z };
 			const V3 nA = V3(T.vsrc[size_t(E.a)]->N), nB = V3(T.vsrc[size_t(E.b)]->N);
-			for (int q = 1; q < E.nSeg; ++q) {
-				const int i = fwd ? q : (E.nSeg - q);
+			const size_t nPar = E.tpar.size();
+			for (size_t q = 0; q < nPar; ++q) {
+				// the parameter list is the EDGE's, in its canonical a→b order;
+				// a face traversing the edge the other way walks it backwards
+				const size_t qi = fwd ? q : (nPar - 1 - q);
+				const double t = E.tpar[qi];
 				double P3[3];
-				BorderSample(A3, B3, i, E.nSeg, P3);
-				const double t = double(i) / double(E.nSeg);
+				if (E.tnum[qi] >= 0) BorderSample(A3, B3, E.tnum[qi], E.nSeg, P3);
+				else                 BorderSampleT(A3, B3, t, P3);
 				LatPt P;
-				P.p = V3(P3[0], P3[1], P3[2]);
+				P.p = V3(P3[0], P3[1], P3[2]);          // the AUTHORED point on the line
 				P.u = F.uv[uvA][0] + (F.uv[uvB][0] - F.uv[uvA][0]) * t;
 				P.v = F.uv[uvA][1] + (F.uv[uvB][1] - F.uv[uvA][1]) * t;
 				P.x2 = dot(P.p - F.p[0], ex); P.y2 = dot(P.p - F.p[0], ey);
-				const int64_t key = (int64_t(ei) << 20) | int64_t(i);
+				const int64_t key = (int64_t(ei) << 20) | int64_t(qi);
 				auto it = borderVert.find(key);
+				auto dit = borderD.find(key);
 				if (it == borderVert.end()) {
+					// ── P4 (§2e): the sample's OFFSET-PLANE position ──────
+					// The height is the DOMINANT OWNER's (his ruling
+					// 1c196c8c5cea), read at THIS point in that chart's own UV,
+					// and the position is the point that lies on the offset
+					// plane of both charts.  Derived from the EDGE, not from
+					// the face that happened to reach it first, so the two
+					// sides cannot compute two answers — and there is only one
+					// vertex anyway, which is what keeps the crease closed.
+					V3 pOut = P.p;
+					double dRing = 0.0;
+					if (rings && eFree(ei)) {
+						const int32_t f0 = eFace[size_t(ei)][0], f1 = eFace[size_t(ei)][1];
+						int32_t fD = f0;
+						if (f1 >= 0 && chartLess(T.faces[size_t(f1)].chart, T.faces[size_t(f0)].chart))
+							fD = f1;
+						if (fD >= 0) {
+							const P2Face &FD = T.faces[size_t(fD)];
+							const MatGrid &GD = grids[size_t(FD.matIdx)];
+							int ka = -1, kb = -1;
+							for (int kx = 0; kx < 3; ++kx) {
+								if (FD.v[kx] == E.a) ka = kx;
+								if (FD.v[kx] == E.b) kb = kx;
+							}
+							if (ka >= 0 && kb >= 0 && GD.fieldOk) {
+								const double du = FD.uv[ka][0] + (FD.uv[kb][0] - FD.uv[ka][0]) * t;
+								const double dv = FD.uv[ka][1] + (FD.uv[kb][1] - FD.uv[ka][1]) * t;
+								const int cls = ReliefClassAt(GD, du, dv);
+								dRing = amp * (NodeH(GD, du, dv, cls) - GD.mipMean);
+								V3 nn2[2]; int m2 = 0;
+								nn2[m2++] = chartN[size_t(T.faces[size_t(f0)].chart)];
+								if (f1 >= 0) nn2[m2++] = chartN[size_t(T.faces[size_t(f1)].chart)];
+								pOut = RingSolve(P.p, nn2, m2, dRing, mitreLimit, RS);
+								++RS.bordersSolved;
+							}
+						}
+					} else if (rings) {
+						if (eHold[size_t(ei)] & 2) ++RS.bordersHeldSoup;
+						else                       ++RS.bordersHeldAbut;
+					}
 					const V3 nn = nA * (1.0 - t) + nB * t;
 					const Vertex *proto = T.vsrc[size_t(E.a)];
 					const double pu = double(proto->U), pv = double(proto->V);
-					const uint32_t g = mkVert(proto, P.p, nn, pu, pv);
+					const uint32_t g = mkVert(proto, pOut, nn, pu, pv);
 					vClass[size_t(g)] = uint8_t(E.use == 1 ? 1 : 2);
-					it = borderVert.emplace(key, int32_t(g)).first;
+					it  = borderVert.emplace(key, int32_t(g)).first;
+					dit = borderD.emplace(key, dRing).first;
 					// how far the shared sample sits off the exact authored line
 					const V3 d = P.p - T.vpos[size_t(E.a)];
 					const V3 e = T.vpos[size_t(E.b)] - T.vpos[size_t(E.a)];
@@ -2313,23 +2833,27 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 					}
 				}
 				P.gid = it->second;
+				P.d   = (dit != borderD.end()) ? dit->second : 0.0;
 				boundary.push_back(P);
 			}
 		}
 
 		FaceLattice(T, F, G, boundary, ex, ey, gref, flat, S, pt, tri);
 
-		// ── PHASE 3 (§2d + §2e): interior points get their vertices now, and
-		// their HEIGHT.  `gid >= 0` is a point that already has a vertex — a
-		// corner or a shared/abutment border sample — and those are PINNED at
-		// 0 for the whole phase: §2e places them by the offset-plane solve and
-		// that is P4.  So displacement here can never move a vertex two faces
-		// share, which is why no silhouette and no border moves in this phase
-		// and the watertightness P2 proved is carried forward untouched. ──
+		// ── PHASE 3 (§2d) + PHASE 4 (§2e): interior points get their vertices
+		// now, and their HEIGHT.  `gid >= 0` is a point that already has a
+		// vertex — a corner or a shared/abutment border sample.  Through P3
+		// those were PINNED at 0; as of P4 they carry the RING height from the
+		// offset-plane solve above (0 when they are held or when --no-v4_rings),
+		// which is already in `pt[i].d`, so the relief census sees the surface
+		// the mesh actually has.  Either way the position is decided once, per
+		// stitched vertex or per (edge, sample), and both faces index it — so
+		// nothing two faces share can take two values and the watertightness P2
+		// proved is carried forward untouched. ─────────────────────────────
 		const Vertex *pv[3] = { F.src->A, F.src->B, F.src->C };
 		const V3 dispDir = chartN[size_t(F.chart)];
 		for (size_t i = 0; i < pt.size(); ++i) {
-			if (pt[i].gid >= 0) { pt[i].d = 0.0; continue; }   // ring/border: PINNED
+			if (pt[i].gid >= 0) continue;                       // ring/border: placed
 			double b0, b1, b2;
 			{
 				const double u0 = F.uv[0][0], v0 = F.uv[0][1];
@@ -2513,6 +3037,56 @@ void RunP2Bake(Scene *Sc, const char *const *matNames, int nMats, int mipReq, fl
 		    grids[size_t(m)].h0, grids[size_t(m)].h1,
 		    amp * (grids[size_t(m)].h0 - grids[size_t(m)].mipMean),
 		    amp * (grids[size_t(m)].h1 - grids[size_t(m)].mipMean));
+	// ═══ [V4-RINGS] — design §2e, measured on the mesh that shipped ════════
+	// Printed in EVERY arm (not only under --v4_census): the ring solve is what
+	// P4 is, and its residual is the invariant §2e names — every ring vertex on
+	// both offset planes to 1e-5 u.  `held` is the population P4 does NOT move
+	// and why, which is the honest form of "the wall boundaries now recess".
+	std::fprintf(stderr,
+	    "[V4-RINGS] arm rings=%d grooves=%d cross_both=%d abut=%d mitre_limit=%.2f min_sep=%.3f "
+	    "soup_tris=%lld ms=%.3f\n",
+	    int(rings), int(ringGrooves), int(crossBoth), int(ringAbut), mitreLimit, minSepFrac,
+	    (long long)RS.soupTris, RS.msRings);
+	std::fprintf(stderr,
+	    "[V4-RINGS] corners solved=%lld held_abut=%lld held_soup=%lld no_field=%lld "
+	    "of=%zu\n",
+	    (long long)RS.cornersSolved, (long long)RS.cornersHeldAbut,
+	    (long long)RS.cornersHeldSoup, (long long)RS.cornersNoField, T.vpos.size());
+	std::fprintf(stderr,
+	    "[V4-RINGS] borders solved=%lld held_abut=%lld held_soup=%lld "
+	    "cross_samples=%lld arc_samples=%lld arc_dropped=%lld edges_with_cross=%lld\n",
+	    (long long)RS.bordersSolved, (long long)RS.bordersHeldAbut,
+	    (long long)RS.bordersHeldSoup, (long long)RS.crossSamples,
+	    (long long)RS.arcSamples, (long long)RS.arcDropped, (long long)RS.edgesWithCross);
+	std::fprintf(stderr,
+	    "[V4-RINGS] solve planes1=%lld planes2=%lld planes3=%lld planes4plus=%lld "
+	    "mitre_clamped=%lld singular=%lld ill_cond=%lld max_residual=%.3e "
+	    "max_residual_over=%.3e max_move=%.6f d=[%+.6f..%+.6f]\n",
+	    (long long)RS.planes1, (long long)RS.planes2, (long long)RS.planes3,
+	    (long long)RS.planes4, (long long)RS.mitreClamped, (long long)RS.singular,
+	    (long long)RS.illCond, RS.maxResidual, RS.maxResidualOver, RS.maxMove,
+	    RS.dMin > 1e299 ? 0.0 : RS.dMin, RS.dMax < -1e299 ? 0.0 : RS.dMax);
+	{
+		// How far the phase actually moved the junction, as a distribution.
+		// The dz-vs-reference gate reads a few hundredths of a unit at the
+		// crease; whether that is P4 failing or P4 having little to move is
+		// this line's question, not a narrative's.
+		std::vector<float> mv = RS.moves;
+		std::sort(mv.begin(), mv.end());
+		auto mq = [&](double q) -> double {
+			return mv.empty() ? 0.0 : double(mv[size_t(q * double(mv.size() - 1))]);
+		};
+		int64_t tiny = 0;
+		for (float v : mv) if (v < 0.005f) ++tiny;
+		std::fprintf(stderr,
+		    "[V4-RINGS] move n=%zu p50=%.6f p90=%.6f p99=%.6f max=%.6f under0.005=%lld (%.1f%%)\n",
+		    mv.size(), mq(0.50), mq(0.90), mq(0.99), mq(1.0), (long long)tiny,
+		    mv.empty() ? 0.0 : 100.0 * double(tiny) / double(mv.size()));
+	}
+	for (size_t q = 0; q < holdMats.size(); ++q)
+		std::fprintf(stderr, "[V4-RINGS] heldby mat=%s verts=%lld\n",
+		             holdMats[q].first.c_str(), (long long)holdMats[q].second);
+
 	if (!census) {
 		std::fprintf(stderr,
 		    "[V4-OUT] mesh verts=%d faces=%d stone_faces=%lld (add --v4_census for the "

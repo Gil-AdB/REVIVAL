@@ -153,6 +153,21 @@ def main():
                          "mortar floors pass; the groove walls and shoulders, "
                          "where the relief's own gradient tilts the normal, do "
                          "not. Needs no camera and no second reference arm.")
+    ap.add_argument("--crease-band", type=int, default=6,
+                    help="CREASE-BAND mask radius in pixels, 0 to disable. The "
+                         "complement of --flat-deg's question: P4 (design §2e) "
+                         "moves the JUNCTION RINGS and nothing else, so a "
+                         "block-interior number cannot see it at all. A pixel "
+                         "is on a crease boundary when a 4-neighbour belongs to "
+                         "a different reference faceId whose plane normal "
+                         "differs by more than --crease-deg; the band is that "
+                         "set dilated by this radius. Same reference, same "
+                         "faceId plane table as the flat mask, so the two "
+                         "masks are two questions about one render.")
+    ap.add_argument("--crease-deg", type=float, default=10.0,
+                    help="how far two faceId plane normals must differ for the "
+                         "boundary between them to count as a crease rather "
+                         "than a same-plane seam (the chart budget, 10°)")
     a = ap.parse_args()
     w, h = a.width, a.height
 
@@ -237,6 +252,7 @@ def main():
     # every face's area.  No camera, no amp=0 arm, no assumption about which
     # texels are mortar.
     flat = np.zeros((h, w), bool)
+    crease = np.zeros((h, w), bool)
     if refhit.any():
         fids = rfid[refhit]
         order = np.argsort(fids, kind="stable")
@@ -260,7 +276,38 @@ def main():
             pn = tbl[idx]
             cosang = np.clip((rn * pn).sum(-1), -1.0, 1.0)
             flat = known & (np.degrees(np.arccos(cosang)) < a.flat_deg)
+            # ── the CREASE BAND (P4, §2e) ─────────────────────────────────
+            # Two 4-neighbours on different faceIds whose PLANE normals differ
+            # by more than the chart budget are looking across a real dihedral
+            # junction; a same-plane seam (64.5% of all junction length,
+            # 3eca6ffb3e40) is excluded on purpose, because the ring solve is
+            # a no-op there by construction (both offset planes are one plane).
+            if a.crease_band > 0:
+                cosn = np.ones((h, w))
+                bnd = np.zeros((h, w), bool)
+                for ax, sh in ((0, 1), (0, -1), (1, 1), (1, -1)):
+                    onp = np.roll(pn, sh, axis=ax)
+                    ofid = np.roll(rfid, sh, axis=ax)
+                    okn = np.roll(known, sh, axis=ax)
+                    cosn = np.clip((pn * onp).sum(-1), -1.0, 1.0)
+                    bnd |= (known & okn & (ofid != rfid) &
+                            (np.degrees(np.arccos(cosn)) > a.crease_deg))
+                band = bnd.copy()
+                r = int(a.crease_band)
+                for dy in range(-r, r + 1):
+                    for dx in range(-r, r + 1):
+                        if dx * dx + dy * dy > r * r:
+                            continue
+                        band |= np.roll(np.roll(bnd, dy, axis=0), dx, axis=1)
+                crease = band & refhit
     bothflat = both & flat
+    bothcrease = both & crease
+    res["crease_band_px"] = int(a.crease_band)
+    res["crease_deg"] = a.crease_deg
+    res["crease_px"] = int(crease.sum())
+    res["crease_share_of_stone"] = float(crease.sum()) / max(1, stone_n)
+    res["dz_p50_crease"] = pct(np.abs(dz[bothcrease]), 50)
+    res["dz_p90_crease"] = pct(np.abs(dz[bothcrease]), 90)
     res["flat_deg"] = a.flat_deg
     res["flat_px"] = int(flat.sum())
     res["flat_share_of_stone"] = float(flat.sum()) / max(1, stone_n)

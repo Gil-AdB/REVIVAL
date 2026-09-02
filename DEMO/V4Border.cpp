@@ -36,5 +36,25 @@ void BorderSample(const double A[3], const double B[3], int i, int n, double out
 	out[2] = A[2] * s + B[2] * t;
 }
 
+// P4 (--v4_ring_grooves): the same position, at a parameter that is NOT a
+// rational i/n — a mortar run boundary crossing the edge lands wherever the
+// height map's grid puts it.  R3's exactness argument (01c55f739bc3: "exact i/n
+// in integer arithmetic", max deviation from the authored line 1.42e-14 u) does
+// not reach these, so what they get instead is the guarantee that actually
+// seals the mesh: the parameter is formed ONCE per edge in the edge's canonical
+// a→b direction, this function is the ONE place a position is derived from it,
+// in the same operand order and the same -ffp-contract=off translation unit,
+// and the caller creates the vertex once and indexes it from BOTH faces — so
+// the two sides cannot hold two different points even in principle.  The
+// deviation from the exact authored line is re-measured on the P4 census
+// (`border_max_dev`) rather than inherited.
+void BorderSampleT(const double A[3], const double B[3], double t, double out[3])
+{
+	const double s = 1.0 - t;
+	out[0] = A[0] * s + B[0] * t;
+	out[1] = A[1] * s + B[1] * t;
+	out[2] = A[2] * s + B[2] * t;
+}
+
 }  // namespace v4
 }  // namespace fds
