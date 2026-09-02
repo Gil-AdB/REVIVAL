@@ -5759,11 +5759,55 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 				Face* F = faces[i];
 				if (!F) continue;
 				tbrsplit::rasterFaces().fetch_add(1, std::memory_order_relaxed);
+				// FDS_XPAR_TRACE cross-section: what the strip clipper is handed
+				// for the first few text-panel / teleporter faces — the M5 hunt
+				// found the same clump sequence on both machines and an empty
+				// raster extent on one, so this prints the per-vertex inputs of
+				// that gate. Silent unless the tracer is armed.
+				if (xt_on && F->Txtr && F->Txtr->Name
+				    && (std::strcmp(F->Txtr->Name, "screen2") == 0
+				        || std::strcmp(F->Txtr->Name, "teleporter") == 0)) {
+					static std::atomic<int> sXtFace{0};
+					if (sXtFace.fetch_add(1, std::memory_order_relaxed) < 24) {
+						const Vertex *A = F->A, *B = F->B, *C = F->C;
+						const fds::ClipperTileRect &tr = fds::g_clipperTileRect;
+						std::fprintf(stderr,
+							"[XT-FACE] strip_y=%d h=%d mat=%s front=%d "
+							"A=(%.9g,%.9g z=%.9g f=%u) B=(%.9g,%.9g z=%.9g f=%u) C=(%.9g,%.9g z=%.9g f=%u) "
+							"tileRect=x%d..%d y%d..%d clamp=%d..%d xres=%d\n",
+							strip_y, strip_h, F->Txtr->Name, int(front),
+							A->PX, A->PY, A->TPos_AOS.z, unsigned(A->Flags),
+							B->PX, B->PY, B->TPos_AOS.z, unsigned(B->Flags),
+							C->PX, C->PY, C->TPos_AOS.z, unsigned(C->Flags),
+							tr.tile_mx_lo, tr.tile_mx_hi, tr.tile_my_lo, tr.tile_my_hi,
+							meka::g_rasterStripClamp.tileYMin, meka::g_rasterStripClamp.tileYMax,
+							(int)XRes);
+					}
+				}
 				if (front) clipper.Render(F, MekaleleTransparent,     false, rt, cam);
 				else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
 			}
 		}
 		const meka::RasterXExtent xext = meka::g_rasterXExtent;
+		// FDS_XPAR_TRACE cross-section (pairs with [XT-RAST]): the extent this
+		// site reads back, and the ADDRESSES of the two thread-locals as seen
+		// from here — the M5 hunt reads an empty extent after a raster that
+		// reported non-empty tiles, so the question is whether the two sites
+		// even share an instance. Silent unless the tracer is armed.
+		if (xt_on) {
+			static std::atomic<int> sXtExt{0};
+#if defined(__aarch64__) || defined(_M_ARM64)
+				const unsigned long long xtFpcr = (unsigned long long)GetFPCR();
+#else
+				const unsigned long long xtFpcr = 0ull;
+#endif
+			if (sXtExt.fetch_add(1, std::memory_order_relaxed) < 24)
+				std::fprintf(stderr,
+					"[XT-EXT] strip_y=%d faces=%d lo=%d hi=%d &ext=%p &clamp=%p thr=%p fpcr=%#llx AH=%llu\n",
+					strip_y, count, xext.lo, xext.hi,
+					(const void*)&meka::g_rasterXExtent, (const void*)&meka::g_rasterStripClamp,
+					(const void*)pthread_self(), xtFpcr, (xtFpcr >> 1) & 1ull);
+		}
 		meka::g_rasterStripClamp = savedClamp;
 
 		// Columns this clump's raster can have written. Empty when it wrote

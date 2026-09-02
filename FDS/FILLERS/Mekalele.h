@@ -32,6 +32,7 @@ extern thread_local bool g_xparPeelReverse;
 
 #include <atomic>
 #include <cstdlib>
+#include <pthread.h>   // [XT-RAST] thread id in the FDS_XPAR_TRACE cross-section
 #include <map>
 #include <mutex>
 #include <string>
@@ -3501,6 +3502,31 @@ struct TileRasterizer {
 		// in the threadpool) wipes them. Result: 1-row horizontal stripe
 		// every TILE_SIZE rows, exactly at strip boundaries.
 		if (g_rasterStripClamp.tileYMax < INT32_MAX) {
+			// FDS_XPAR_TRACE cross-section of this gate (see [XT-FACE] in
+			// DeferredSurfaceKernel.cpp): the tile range the strip raster
+			// computed from the clipped vertices, before and after the clamp.
+			// One getenv per process; silent unless the tracer is armed.
+			static const bool sXtRast = std::getenv("FDS_XPAR_TRACE") != nullptr;
+			if (sXtRast) {
+				static std::atomic<int> sN{0};
+				if (sN.fetch_add(1, std::memory_order_relaxed) < 24) {
+					int cMy = tile_My, cmy = tile_my;
+					if (cMy > g_rasterStripClamp.tileYMax) cMy = g_rasterStripClamp.tileYMax;
+					if (cmy < g_rasterStripClamp.tileYMin) cmy = g_rasterStripClamp.tileYMin;
+					std::fprintf(stderr,
+						"[XT-RAST] v=(%.9g,%.9g)(%.9g,%.9g)(%.9g,%.9g) ctr=x%d..%d y%d..%d "
+						"tiles x%d..%d y%d..%d clamp=%d..%d -> y%d..%d %s "
+						"ext-before=%d..%d &ext=%p &clamp=%p thr=%p\n",
+						v1.PX, v1.PY, v2.PX, v2.PY, v3.PX, v3.PY,
+						_ctr.tile_mx_lo, _ctr.tile_mx_hi, _ctr.tile_my_lo, _ctr.tile_my_hi,
+						tile_mx, tile_Mx, tile_my, tile_My,
+						g_rasterStripClamp.tileYMin, g_rasterStripClamp.tileYMax,
+						cmy, cMy, (cmy > cMy || tile_mx > tile_Mx) ? "EMPTY" : "ok",
+						g_rasterXExtent.lo, g_rasterXExtent.hi,
+						(const void*)&g_rasterXExtent, (const void*)&g_rasterStripClamp,
+						(const void*)pthread_self());
+				}
+			}
 			if (tile_My > g_rasterStripClamp.tileYMax) tile_My = g_rasterStripClamp.tileYMax;
 			if (tile_my < g_rasterStripClamp.tileYMin) tile_my = g_rasterStripClamp.tileYMin;
 			if (tile_my > tile_My) return;
