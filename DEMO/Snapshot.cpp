@@ -50,6 +50,11 @@ extern dword g_profilerActive;
 // ScaledBuf, OldBuf) for diffing native vs wasm output.
 extern "C" void Greets_DumpStageCentroids(FILE *out, const char *tag);
 
+// FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp): the
+// per-strip transparent-composite census of the last frame, written beside a
+// snapshot's PPM when the env var is set. Same declaration as FOUNTAIN.CPP's.
+void Xtrace_WriteFile(const char *path);
+
 namespace {
 
 bool starts_with(std::string_view s, std::string_view prefix) {
@@ -400,6 +405,14 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         std::snprintf(colorPath, sizeof(colorPath), "%s/fountain_t%06d_color.ppm",
                       cfg.outDir.c_str(), ts);
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        // FDS_XPAR_TRACE: composite census beside the PPM (see the greets
+        // dump site below for why). Env-gated → inert for every gate.
+        if (std::getenv("FDS_XPAR_TRACE")) {
+            char tp[1024];
+            std::snprintf(tp, sizeof(tp), "%s/fountain_t%06d_xtrace.txt",
+                          cfg.outDir.c_str(), ts);
+            Xtrace_WriteFile(tp);
+        }
         ++produced;
     }
 
@@ -778,6 +791,32 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                       cfg.outDir.c_str(), ts);
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
         std::fprintf(stderr, "[GREETSSNAP] t=%d -> %s\n", ts, colorPath);
+
+        // FDS_XPAR_TRACE: the transparent-composite census of the frame just
+        // dumped, beside the PPM — the same census the interactive G grab
+        // writes (GREETS.CPP), so a headless row can be z-order-forensicked
+        // without a key press (the M5 hunt: the panels are absent in the
+        // headless frame too, so the question is which stage drops them).
+        // Env-gated → inert for every gate.
+        if (std::getenv("FDS_XPAR_TRACE")) {
+            char tp[1024];
+            std::snprintf(tp, sizeof(tp), "%s/greets_t%06d_xtrace.txt",
+                          cfg.outDir.c_str(), ts);
+            Xtrace_WriteFile(tp);
+            // The projection state the frame was transformed with — the M5
+            // hunt found the near/far vertex classification firing on one
+            // machine and not the other with the same binary, so print the
+            // planes the transform actually read (%.9g: exact round-trip).
+            const fds::CameraContext &mc = fds::g_mainCamera;
+            std::fprintf(stderr,
+                "[GREETSSNAP-DIAG] cam near=%.9g invNear=%.9g far=%.9g invFar=%.9g "
+                "zScale=%.9g fov=%.9g,%.9g cntrE=%.9g,%.9g | scene NZP=%.9g FZP=%.9g "
+                "| XRes=%d YRes=%d IFOV=%.9g\n",
+                mc.nearZ, mc.invNearZ, mc.farZ, mc.invFarZ, mc.zScale,
+                mc.fovX, mc.fovY, mc.cntrEX, mc.cntrEY,
+                CurScene ? CurScene->NZP : -1.0f, CurScene ? CurScene->FZP : -1.0f,
+                (int)XRes, (int)YRes, View ? View->IFOV : -1.0f);
+        }
 
         // FDS_SNAPSHOT_ZDUMP: raw ZPage16 depth (word[xres*yres]) beside the color
         // PPM. Deterministic (geometry, not the noisy shading) — the far-z leak

@@ -1,4 +1,44 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-02 — THE M5 DIVERGENCE IS FOUND AND FIXED: FPCR.AH (FEAT_AFP), one line in `FPU_LPrecision`
+
+- **Cause** (ledger `10e91a31d5d8`, `platform.m5.divergence_mechanism`): `FDS/Base/FDS_VARS.H`
+  `FPU_LPrecision()` wrote FPCR = `FZ|AH` on every thread. `AH` (bit 1) is ARMv8.7 FEAT_AFP
+  "alternate handling". The M2 Max lacks FEAT_AFP — the bit is RES0, silently dropped, every pin
+  was measured under plain `FZ` (denormal inputs AND outputs flushed). The M5 Max honours it, and
+  with AH=1 **FNEG/FABS leave a NaN's sign bit unchanged**, FZ flushes outputs only, FRECPE/FRSQRTE
+  precision changes, FMIN/FMAX NaN propagation changes. The bite: clang materialises
+  `g_rasterXExtent = {INT32_MAX, -1}` as `mvni.2s v0,#0x80,lsl#24 ; fneg d0,d0 ; str d0` — a NaN
+  bit pattern negated — so on the M5 `hi` stayed INT32_MAX, the raster's max-update never fired,
+  `cx1=(hi+1)<<3` overflowed and **every transparent-clump composite range was empty**: the greets
+  text panels and the fountain spire orbs were rasterised but never composited. Found by the
+  same-binary protocol (his call: "just run same binary on both"), the `FDS_XPAR_TRACE` census
+  (154 identical clumps, `filled=0` on the M5), address prints refuting the thread-local-duplicate
+  hypothesis (same thread, same address, different VALUE), the disassembly of the arming store,
+  `scratchpad/fpprobe/ahprobe.c` (M5 AH=1 → `fneg(NaN)` UNCHANGED, AH=0 → FLIPPED; M2 cannot set
+  the bit; fresh threads FPCR=0 on both), then an in-demo FPCR readout: M5 workers `0x1000002 AH=1`,
+  dev `0x1000000 AH=0`.
+- **Fix**: `SetFPCR(base | FZ)` — AH and FIZ cleared, reason in the comment; `docs/BUILDING_WINDOWS.md`
+  x86 analogue corrected to FTZ=1 DAZ=1. **Dev is byte-null**: `tools/render_gate.sh` 4/4,
+  `tools/ovec/gates.sh` 12/12, greets t=1043 `f96caaf9…` and fountain t=500 `4d62d581…` unchanged.
+- **The M5 converges on the same binary** (dev build shipped as `Runtime/DEMO_dev`, `install_name_tool`
+  to `/opt/homebrew/opt/sdl2`, ad-hoc `codesign`): greets t=1043 `cbe52ab0…` → `f96caaf9…` = dev,
+  **24/24** (`cac95d63b7c9`); fountain t=500 `048f3905…` → `4d62d581…` = dev, sweep t=100..1200
+  identical 5/5 (`31c3617e958f`, `172cb8803514`); `render_gate.sh` 4/4 at the dev hashes where it
+  used to read 4043aaaa/88dd4632/ffa28566/1a98cdf6 (`0a6f5548d79a`); ovec 11/12 rows equal to the
+  dev pins; **cam A t=5965 `d92cb6f5…` = the 24-run pin** (`2ce6effc5f0a`) — the class-1 Piramid
+  face hole (`80f240d51a18`) and the three missing cyan omnis (`d6abf45f834e`, his `m5_diag4` run
+  is moot) are gone, in the judging arm and both bare candidates.
+- **Still apart**: the plain city pin row (`FDS_CITY_ENV_PIXEL=1 city@t=1961 --deferred`) reads
+  `0debc80a…` on the M5 vs `bd4ffbf8…` — deterministic, cache and thread count excluded on both
+  machines, 3.358 % of pixels, max 18, upper frame only (`ad4012153bce`; open `1dec19addb82`,
+  waiting on coordinator, z16 cross-section first). The three city-acc arms ARE identical.
+- **Global trap** (`~/.groundwork` `5158416a130a`): never set FPCR.AH; clang's `mvni+fneg` int-pair
+  idiom is only an integer store under AH=0.
+- **What the M5 needs from him**: `cd /Users/gil-ad/REVIVAL && git pull origin fog-wt && cmake --build build`,
+  then his own fly-through of greets and fountain. Diagnostic hooks kept, all env-gated
+  (`FDS_XPAR_TRACE=1`: `[XT-FACE]`/`[XT-EXT]`(+FPCR)/`[XT-RAST]` and the xtrace census from the
+  snapshot path; `[GREETSSNAP-DIAG]` camera planes).
+
 ## 2026-09-01 — his M5 round filed; fountain G key; the corner-rule pictures were never evidence
 
 - **M5 transparent faces**: missing in BOTH arms at greets t=1043 (his answer); the dev box renders the

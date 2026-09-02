@@ -773,7 +773,8 @@ inline void FPU_LPrecision()
 	_mm_setcsr(CurMXCSR);
 #elif defined(__ARM_ARCH)
 
-	// Effective FP spec: round-to-nearest-even + flush-to-zero on outputs.
+	// Effective FP spec: round-to-nearest-even + flush-to-zero (FZ=1 with
+	// AH=0: denormal inputs AND outputs flush — see the FPCR.AH note below).
 	// The 1998 Watcom build used round-toward-+infinity, but f4ad9ab
 	// (2023-08-29) silently dropped a `<< 22` shift when refactoring the
 	// rounding-mode setup, leaving RMode at its default RTNE. TheOtherBarry
@@ -782,8 +783,24 @@ inline void FPU_LPrecision()
 	// RTNE explicitly here aligns native with wasm (which has no FPCR
 	// equivalent) and matches what's actually been shipping for ~2.5 years.
 	//
-	// AH=1 means FZ controls only output flushing; FIZ would control input
-	// flushing (left zero — denormal inputs pass through unchanged).
+	// FPCR.AH (bit 1, FEAT_AFP "alternate handling") and FIZ (bit 0) are
+	// deliberately CLEARED, not set. Apple M1/M2 lack FEAT_AFP, so AH is
+	// RES0 there and the mode every pin was measured under is plain FZ=1:
+	// denormal INPUTS and outputs both flushed. The M5 implements FEAT_AFP,
+	// and until 2026-09-02 this line wrote FZ|AH, which on the M5 meant
+	// (a) FZ flushes outputs only, (b) FNEG/FABS leave a NaN's sign bit
+	// unchanged, (c) FRECPE/FRSQRTE gain precision (FEAT_RPRES), (d) FMIN/
+	// FMAX NaN propagation changes. (b) alone broke the transparent-strip
+	// raster: clang materialises `g_rasterXExtent = {INT32_MAX, -1}` as
+	// `mvni.2s v0,#0x80,lsl#24 ; fneg d0,d0 ; str d0` and the fneg on that
+	// NaN bit pattern is a no-op under AH=1, so hi stayed INT32_MAX and
+	// every composite range came out empty (greets text panels and fountain
+	// spire orbs vanished on the M5). Ledger subjects: platform.m5.*.
+	//
+	// Historical note on the old intent: AH=1 would have made FZ output-only,
+	// with FIZ (left zero) governing input
+	// flushing, so denormal inputs would have passed through unchanged. That
+	// mode was never in effect on any pinned machine.
 	uint64_t default_fpcr = GetFPCR();
 	OldMXCSR = default_fpcr;
 	constexpr uint32_t FZ = 1 << 24;
@@ -793,14 +810,14 @@ inline void FPU_LPrecision()
 	constexpr uint32_t rounding_mode_mask = 3 << 22;
 
 	const uint64_t base = default_fpcr & ~(flush_to_zero_mask | rounding_mode_mask);
-	SetFPCR(base | FZ | AH);
+	SetFPCR(base | FZ);
 #else
 	// x86-64 / anything else: NO-OP, and deliberately so.
 	//
 	// The arm64 arm above selects round-to-nearest-even (already the x86
-	// default) plus FZ|AH — flush DENORMAL OUTPUTS to zero, let denormal
-	// INPUTS through. The exact x86-64 analogue is MXCSR FTZ=1 with DAZ=0,
-	// i.e. `_mm_setcsr((_mm_getcsr() & ~0x6000u) | 0x8000u)`.
+	// default) plus FZ with AH clear — flush denormal INPUTS and OUTPUTS to
+	// zero. The exact x86-64 analogue is MXCSR FTZ=1 with DAZ=1, i.e.
+	// `_mm_setcsr(_mm_getcsr() | 0x8040u)`.
 	//
 	// It is NOT enabled here, because enabling it would silently change
 	// rendered output on a platform this engine has never been run on, and

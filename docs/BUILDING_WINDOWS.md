@@ -354,15 +354,19 @@ would ship Windows without music.
 ### Known behavioural gap on x86-64: the FP environment
 
 `FPU_LPrecision()` (`FDS/Base/FDS_VARS.H`) sets the arm64 FPCR to
-round-to-nearest-even **plus flush-denormal-outputs-to-zero** (`FZ|AH`). There
-is no x86-64 equivalent wired up — the function is a **no-op** there, and this
-port deliberately left it that way rather than change rendering math on a
-platform that has never been run.
+round-to-nearest-even **plus flush-denormals-to-zero** (`FZ`, with `AH` and
+`FIZ` clear — denormal inputs *and* outputs flush). Until 2026-09-02 it wrote
+`FZ|AH`; Apple M1/M2 lack FEAT_AFP and silently drop `AH`, but the M5 honours
+it and rendered differently (see `platform.m5.divergence_mechanism` in the
+ledger), so the bit is now deliberately cleared. There is no x86-64 equivalent
+wired up — the function is a **no-op** there, and this port deliberately left
+it that way rather than change rendering math on a platform that has never
+been run.
 
-The exact analogue, if you want to close the gap, is MXCSR `FTZ=1, DAZ=0`:
+The exact analogue, if you want to close the gap, is MXCSR `FTZ=1, DAZ=1`:
 
 ```c
-_mm_setcsr((_mm_getcsr() & ~0x6000u) | 0x8000u);
+_mm_setcsr(_mm_getcsr() | 0x8040u);
 ```
 
 Consequence as shipped: an x86-64 build computes denormals normally where the
