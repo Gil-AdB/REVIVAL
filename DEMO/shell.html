@@ -461,7 +461,10 @@
           if (canvasEl.height !== h) canvasEl.height = h;
         }
       }
-      window.addEventListener('resize', resizeCanvasToWindow);
+      window.addEventListener('resize', function(){
+        if (revEditorMode && typeof updateCanvasFit === 'function') updateCanvasFit();
+        else resizeCanvasToWindow();
+      });
       // iOS/Safari fires `orientationchange` slightly before the layout
       // settles; resize alone is sometimes missed. Belt and suspenders.
       window.addEventListener('orientationchange', function() {
@@ -1112,7 +1115,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b78";
+      var REV_BUILD = "b79";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1171,6 +1174,41 @@
       var currentInspectorTab = 'material';
       var currentOutlinerFilter = 'all';
 
+      function renderLightPlaceholder(){
+        var el = document.getElementById('editor-light-props');
+        if (!el) return;
+        el.innerHTML = '<div class="rev-card" style="text-align:center;padding:28px 16px;margin-top:12px;">' +
+          '<div style="font-size:24px;margin-bottom:8px;">💡</div>' +
+          '<div style="font-weight:600;color:#fff;margin-bottom:4px;font-size:13px;">No Light Selected</div>' +
+          '<div style="color:var(--rev-text-muted);margin-bottom:14px;font-size:11px;">Select a light in the Scene Outliner on the left, or click a light in the 3D canvas.</div>' +
+          (editorLights && editorLights.length ? '<button class="rev-btn rev-btn-primary" onclick="selectFirstLight()">Select Light ' + editorLights[0].i + '</button>' : '') +
+          '</div>';
+      }
+
+      function renderSurfacePlaceholder(){
+        var el = document.getElementById('editor-props');
+        if (!el) return;
+        el.innerHTML = '<div class="rev-card" style="text-align:center;padding:28px 16px;margin-top:12px;">' +
+          '<div style="font-size:24px;margin-bottom:8px;">🎨</div>' +
+          '<div style="font-weight:600;color:#fff;margin-bottom:4px;font-size:13px;">No Surface Selected</div>' +
+          '<div style="color:var(--rev-text-muted);margin-bottom:14px;font-size:11px;">Select an object or surface from the Scene Outliner, or click geometry in the 3D canvas.</div>' +
+          (editorSurfaces && editorSurfaces.length ? '<button class="rev-btn rev-btn-primary" onclick="selectFirstSurface()">Select Surface: ' + editorSurfaces[0].name + '</button>' : '') +
+          '</div>';
+      }
+
+      function selectFirstLight(){
+        if (editorLights && editorLights.length) {
+          editorLightSel = [editorLights[0].i];
+          applyLightSelection();
+        }
+      }
+
+      function selectFirstSurface(){
+        if (editorSurfaces && editorSurfaces.length) {
+          selectSurface(editorSurfaces[0], /*alsoFocus=*/false);
+        }
+      }
+
       function switchInspectorTab(tabId) {
         currentInspectorTab = tabId;
         ['outliner', 'material', 'light', 'render', 'changes'].forEach(function(t){
@@ -1179,6 +1217,18 @@
           var btn = document.getElementById('tab-btn-' + t);
           if (btn) btn.classList.toggle('active', t === tabId);
         });
+
+        if (tabId === 'light') {
+          var el = document.getElementById('editor-light-props');
+          if ((!editorLightSel.length || editorSelectedLight === null) && el && !el.children.length) {
+            renderLightPlaceholder();
+          }
+        } else if (tabId === 'material') {
+          var el = document.getElementById('editor-props');
+          if (!editorSelected && !editorGroup && el && !el.children.length) {
+            renderSurfacePlaceholder();
+          }
+        }
       }
 
       function filterOutliner(kind) {
@@ -1587,15 +1637,24 @@
         var ls = selectedLightObjs();
         if (!ls.length) {
           editorLightSel = [];
+          editorSelectedLight = null;
           renderLightList();
-          document.getElementById('editor-light-props').innerHTML = '';
+          renderLightPlaceholder();
           if (label) editorStatus(label);
           return;
         }
+        // Deselect surface & object to prevent confusing dual-selection
+        editorSelected = null;
+        editorGroup = null;
+        editorGroupObj = null;
+        renderSurfaceList();
+        renderObjectList();
+
         editorSelectedLight = ls[0].i;
         setEditorSel(ls.length > 1 ? (ls.length + ' lights') : ('light ' + ls[0].i));
         switchInspectorTab('light');
-        renderLightList(); renderLightProps(ls[0], ls);
+        renderLightList();
+        renderLightProps(ls[0], ls);
         if (label) editorStatus(label);
       }
       function renderLightList(){
@@ -1646,7 +1705,7 @@
               }
             }
             editorLightSel = [l.i];
-            editorSelectedLight = l.i; setEditorSel('light ' + l.i); renderLightList(); renderLightProps(l, [l]);
+            applyLightSelection();
             // Frame the orbit on the light (same as clicking a surface row).
             // rawI, not i: editorFocusLight counts the UNFILTERED
             // Omni_SceneAuthored walk (mirror clones included), while i is the
@@ -1681,12 +1740,12 @@
       function selectLightFromPick(i){
         var l = editorLights.find(function(x){ return x.i === i; });
         if (!l) return false;
+        if (currentOutlinerFilter === 'surfaces' || currentOutlinerFilter === 'objects') {
+          filterOutliner('all');
+        }
         editorLightSel = [l.i];
-        editorSelectedLight = l.i; setEditorSel('light ' + l.i);
-        switchInspectorTab('light');
+        applyLightSelection();
         var el = document.getElementById('editor-lights');
-        if (el) el.style.display = 'block';
-        renderLightList(); renderLightProps(l, [l]);
         var row = el && el.querySelector('.surf-item.sel');
         if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
         editorStatus('picked light ' + l.i + ' (' + l.x + ',' + l.y + ',' + l.z + ')');
@@ -1747,18 +1806,21 @@
       // single-light edit does.
       function renderLightProps(l, group){
         var ls = (group && group.length) ? group : [l];
-        var el = document.getElementById('editor-light-props'); el.innerHTML = '';
-        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin:4px 0;display:flex;justify-content:space-between;';
+        var el = document.getElementById('editor-light-props'); if (el) el.innerHTML = '';
+        var h = document.createElement('div');
+        h.className = 'rev-card-title';
+        h.style.cssText = 'color:#fff;margin:4px 0 8px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:6px;';
         var hn = document.createElement('span');
         hn.textContent = ls.length > 1
-          ? (ls.length + ' lights — absolute edit (sets every selected light)')
+          ? (ls.length + ' lights — multi-edit')
           : ('Light ' + l.i + (l.sizeKeys > 1 ? ' (animated — edits flatten keys)' : ''));
         if (ls.length > 1) hn.title = 'editing lights ' + ls.map(function(x){ return x.i; }).join(', ') +
           ' together. Values shown are light ' + l.i + '’s; moving a slider sets that ABSOLUTE value on all of them.';
         h.appendChild(hn);
         var rst = document.createElement('a');
         rst.textContent = 'reset'; rst.href = '#';
-        rst.style.cssText = 'color:#c96;font-size:10px;text-decoration:none;';
+        rst.className = 'rev-btn';
+        rst.style.cssText = 'color:#f87171;padding:1px 6px;font-size:10px;';
         rst.onclick = function(e){
           e.preventDefault();
           ls.forEach(function(g){
@@ -2677,12 +2739,22 @@
         var names = (editorGroup || []).filter(function(n){
           return editorSurfaces.some(function(s){ return s.name === n; });
         });
+        // Deselect lights to prevent dual active selections
+        if (editorLightSel.length || editorSelectedLight !== null) {
+          editorLightSel = [];
+          editorSelectedLight = null;
+          renderLightList();
+        }
         if (!names.length) {
           editorGroup = null; editorGroupObj = null;
           renderObjectList(); renderSurfaceList();
           setEditorSel('none');
           editorStatus('selection empty');
+          renderSurfacePlaceholder();
           return;
+        }
+        if (currentOutlinerFilter === 'lights') {
+          filterOutliner('all');
         }
         editorGroup = names;
         editorSelected = names[0];
@@ -2727,6 +2799,15 @@
       // canvas pick only selects/highlights (jumping the camera on every
       // viewport click would fight the user's framing).
       function selectSurface(s, alsoFocus){
+        // Deselect lights to prevent dual active selections
+        if (editorLightSel.length || editorSelectedLight !== null) {
+          editorLightSel = [];
+          editorSelectedLight = null;
+          renderLightList();
+        }
+        if (currentOutlinerFilter === 'lights') {
+          filterOutliner('all');
+        }
         editorGroup = null; editorGroupObj = null;   // single-surface mode
         editorSelected = s.name; setEditorSel('surf ' + s.name);
         switchInspectorTab('material');
