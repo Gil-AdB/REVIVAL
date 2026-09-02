@@ -20,17 +20,20 @@
          the viewport. */
       canvas { background: #000; display: block; image-rendering: pixelated;
                width: auto; height: auto;
-               max-width: calc(100vw - var(--rev-reserve, 0px)); max-height: 100vh; }
-      /* Editor mode: reserve the panel's width on the right so the render
-         canvas is letterboxed into the FREE region beside the panel instead of
-         sitting behind it. --rev-reserve is driven by updateCanvasFit() (0 when
-         the panel is hidden/collapsed/floated away from the right edge).
-         box-sizing:border-box shifts the flex-centered canvas left by the
-         reserve; the canvas max-width above caps its width to the free region.
-         Engine render resolution is unchanged (pure CSS scale) — see the
-         updateCanvasFit comment for the aspect caveat. */
+               max-width: calc(100vw - var(--rev-reserve, 0px));
+               max-height: calc(100vh - var(--rev-reserve-bottom, 0px)); }
+      /* Editor mode: reserve panel widths on left and right so the render
+         canvas is letterboxed into the FREE center region beside the panels instead of
+         sitting behind them. --rev-reserve is driven by updateCanvasFit(). */
       body.rev-editor { box-sizing: border-box; width: 100vw;
-                        padding-right: var(--rev-reserve, 0px); }
+                        padding-left: var(--rev-reserve-left, 0px);
+                        padding-right: var(--rev-reserve-right, 0px);
+                        padding-bottom: var(--rev-reserve-bottom, 0px); }
+      body.rev-editor #controls {
+        bottom: calc(var(--rev-reserve-bottom, 0px) + 8px);
+        right: calc(var(--rev-reserve-right, 0px) + 12px);
+        z-index: 10005;
+      }
       /* Bottom-right control bar: mute / HiDPI / fullscreen. Stays on top
          of the canvas (z-index) and ignores its own click events from
          reaching the demo (each button only flips its own state). */
@@ -436,13 +439,14 @@
         // moiré grid. --rev-reserve (set by updateCanvasFit, kept current on
         // panel show/collapse/dock) is the single source of truth for the
         // reserve; 0 outside the editor.
-        var reserve = 0;
+        var reserve = 0, reserveBottom = 0;
         if (revEditorMode) {
-          reserve = parseFloat(getComputedStyle(document.documentElement)
-                      .getPropertyValue('--rev-reserve')) || 0;
+          var cs = getComputedStyle(document.documentElement);
+          reserve = parseFloat(cs.getPropertyValue('--rev-reserve')) || 0;
+          reserveBottom = parseFloat(cs.getPropertyValue('--rev-reserve-bottom')) || 0;
         }
         var w = Math.max(1, Math.floor((window.innerWidth - reserve) * dpr));
-        var h = Math.max(1, Math.floor(window.innerHeight * dpr));
+        var h = Math.max(1, Math.floor((window.innerHeight - reserveBottom) * dpr));
         // Route through SDL_SetWindowSize once the wasm is ready — it
         // updates window->w/h, calls emscripten_set_canvas_element_size
         // (which sizes the canvas DOM), and fires SIZE_CHANGED so the
@@ -573,144 +577,528 @@
       showControls();
     </script>
 
-    <!-- ───────── LWO surface editor panel (shown only with ?editor) ───────── -->
+    <!-- ───────── LWO surface editor studio (shown only with ?editor) ───────── -->
     <style>
-      #editor-panel { position:fixed; top:0; right:0; width:340px; max-height:100vh;
-        overflow-y:auto; background:rgba(18,18,22,0.92); color:#ddd; box-sizing:border-box;
-        font:12px/1.4 system-ui,sans-serif; z-index:10000; padding:8px; border-left:1px solid #333; }
-      #editor-panel.hidden { display:none; }
-      #editor-panel h2 { font-size:13px; margin:4px 0 8px; color:#fff;
-        cursor:move; user-select:none; -webkit-user-select:none; }
-      /* Collapsed tool stack: just the header bar (drag handle + caret) */
-      #editor-panel.collapsed { overflow-y:hidden; }
-      #editor-panel.collapsed > *:not(h2) { display:none !important; }
-      #editor-panel.collapsed h2 { margin-bottom:4px; }
-      #editor-search { width:100%; box-sizing:border-box; margin-bottom:6px;
-        background:#222; color:#ddd; border:1px solid #444; padding:4px; }
-      #editor-list { max-height:40vh; overflow-y:auto; }
-      .surf-item { padding:3px 6px; cursor:pointer; border-radius:3px; }
-      .surf-item:hover { background:#2a2a33; }
-      .surf-item.sel { background:#3a3a4a; color:#fff; }
-      .surf-tex { color:#888; font-size:10px; }
-      #editor-props { border-top:1px solid #333; margin-top:6px; padding-top:6px; }
-      .prop-row { display:flex; align-items:center; gap:6px; margin:3px 0; }
-      .prop-row label { flex:0 0 64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .prop-row input[type=range], .prop-row select { flex:1 1 auto; min-width:90px; }
-      .prop-row input[type=number] { flex:0 0 46px; }
-      .prop-row .val { flex:0 0 36px; text-align:right; color:#9cf; }
-      #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
-      /* Persistent status strip: sticks to the top of the scrolling panel so
-         scene / time / selection / dirty / last-save stay visible while the
-         body scrolls. Hidden when the panel is collapsed (h2 still carries the
-         scene + build tag). */
-      #editor-statusbar { position:sticky; top:0; z-index:5; margin:0 0 6px;
-        padding:4px 6px; background:#0d0d12; border:1px solid #2a2a33;
-        border-radius:3px; font-size:10px; color:#89a; line-height:1.5; }
-      #editor-statusbar .sb-fields { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
-      #editor-statusbar b { color:#cde; font-weight:600; }
-      #editor-statusbar .sb-dirty { color:#fc8; }
-      #editor-statusbar .sb-msg { color:#6a8; margin-top:2px; overflow:hidden;
-        text-overflow:ellipsis; white-space:nowrap; }
+      :root {
+        --rev-topbar-h: 40px;
+        --rev-transport-h: 44px;
+        --rev-dock-left-w: 280px;
+        --rev-dock-right-w: 380px;
+        --rev-bg-panel: rgba(16, 18, 26, 0.96);
+        --rev-bg-card: #181a26;
+        --rev-bg-input: #12131b;
+        --rev-border: rgba(255, 255, 255, 0.08);
+        --rev-border-focus: #3b82f6;
+        --rev-text-main: #e2e8f0;
+        --rev-text-muted: #8e99ac;
+        --rev-accent-blue: #3b82f6;
+        --rev-accent-green: #10b981;
+        --rev-accent-amber: #f59e0b;
+      }
+
+      /* Root Studio Wrapper */
+      #editor-panel {
+        font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: var(--rev-text-main);
+        z-index: 10000;
+      }
+      #editor-panel.hidden { display: none !important; }
+
+      /* Top Application Bar */
+      #editor-topbar {
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        height: var(--rev-topbar-h);
+        background: rgba(18, 20, 29, 0.98);
+        border-bottom: 1px solid var(--rev-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 10px;
+        gap: 8px;
+        z-index: 10002;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+        box-sizing: border-box;
+      }
+      .topbar-section {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .topbar-brand {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 700;
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #f1f5f9;
+        user-select: none;
+      }
+      .topbar-brand .dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #10b981;
+        box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+      }
+      .topbar-chip {
+        background: var(--rev-bg-input);
+        border: 1px solid var(--rev-border);
+        border-radius: 4px;
+        padding: 2px 7px;
+        font-size: 11px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      /* Left Dock: Outliner */
+      #editor-left-dock {
+        position: fixed;
+        top: var(--rev-topbar-h);
+        left: 0;
+        bottom: var(--rev-transport-h);
+        width: var(--rev-dock-left-w);
+        background: var(--rev-bg-panel);
+        border-right: 1px solid var(--rev-border);
+        display: flex;
+        flex-direction: column;
+        z-index: 10001;
+        box-shadow: 2px 0 12px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(12px);
+        box-sizing: border-box;
+      }
+      #editor-left-dock.collapsed {
+        display: none !important;
+      }
+      .dock-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--rev-border);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .dock-title {
+        font-weight: 700;
+        font-size: 10px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: #94a3b8;
+      }
+
+      /* Right Dock: Inspector */
+      #editor-right-dock {
+        position: fixed;
+        top: var(--rev-topbar-h);
+        right: 0;
+        bottom: var(--rev-transport-h);
+        width: var(--rev-dock-right-w);
+        background: var(--rev-bg-panel);
+        border-left: 1px solid var(--rev-border);
+        display: flex;
+        flex-direction: column;
+        z-index: 10001;
+        box-shadow: -2px 0 12px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(12px);
+        box-sizing: border-box;
+      }
+      #editor-right-dock.collapsed {
+        display: none !important;
+      }
+
+      /* Bottom Persistent Transport Bar */
+      #editor-transport {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: var(--rev-transport-h);
+        background: rgba(14, 15, 22, 0.98);
+        border-top: 1px solid var(--rev-border);
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 12px;
+        z-index: 10002;
+        box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.5);
+        box-sizing: border-box;
+      }
+
+      /* Studio Collapsed state (minimal topbar only) */
+      #editor-panel.collapsed #editor-left-dock,
+      #editor-panel.collapsed #editor-right-dock,
+      #editor-panel.collapsed #editor-transport {
+        display: none !important;
+      }
+
+      /* Inspector Tabs Navigation */
+      .rev-tabs-header {
+        display: flex;
+        border-bottom: 1px solid var(--rev-border);
+        background: #141622;
+        flex-shrink: 0;
+      }
+      .rev-tab-btn {
+        flex: 1 1 auto;
+        padding: 8px 6px;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--rev-text-muted);
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        cursor: pointer;
+        text-align: center;
+        white-space: nowrap;
+        transition: color 0.15s, border-color 0.15s, background 0.15s;
+      }
+      .rev-tab-btn:hover {
+        color: #e2e8f0;
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .rev-tab-btn.active {
+        color: #60a5fa;
+        border-bottom-color: #3b82f6;
+        background: #1a1c2a;
+      }
+      .rev-tab-pane {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 10px;
+        box-sizing: border-box;
+      }
+      .rev-tab-pane.hidden {
+        display: none !important;
+      }
+
+      /* Subtab buttons (Outliner filter) */
+      .rev-subtab-btn {
+        flex: 1;
+        padding: 3px 6px;
+        font-size: 10px;
+        background: #151620;
+        border: 1px solid #282a3c;
+        border-radius: 3px;
+        color: #94a3b8;
+        cursor: pointer;
+        transition: background 0.1s, color 0.1s;
+      }
+      .rev-subtab-btn:hover {
+        color: #cbd5e1;
+        background: #1e202f;
+      }
+      .rev-subtab-btn.active {
+        background: #253356;
+        border-color: #3b82f6;
+        color: #fff;
+        font-weight: 600;
+      }
+
+      /* Outliner Lists */
+      #editor-list {
+        max-height: none;
+        overflow-y: visible;
+      }
+      .surf-item {
+        padding: 3px 6px;
+        cursor: pointer;
+        border-radius: 3px;
+        margin: 1px 0;
+        border: 1px solid transparent;
+      }
+      .surf-item:hover { background: #1e202f; border-color: #2b2e42; }
+      .surf-item.sel { background: #253356; border-color: #3b82f6; color: #fff; }
+      .surf-tex { color: #64748b; font-size: 10px; font-family: ui-monospace, monospace; }
+
+      /* Cards & Grouping */
+      .rev-card {
+        background: var(--rev-bg-card);
+        border: 1px solid var(--rev-border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        margin-bottom: 8px;
+      }
+      .rev-card-title {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #94a3b8;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        padding-bottom: 4px;
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      /* Prop rows & inputs */
+      .prop-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-size: 11px; }
+      .prop-row label { flex: 0 0 78px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .prop-row input[type=range] {
+        flex: 1 1 auto; min-width: 70px; height: 4px;
+        background: #25283a; border-radius: 2px; appearance: none; cursor: pointer;
+      }
+      .prop-row input[type=range]::-webkit-slider-thumb {
+        appearance: none; width: 12px; height: 12px; border-radius: 50%;
+        background: #3b82f6; border: 1px solid #60a5fa; box-shadow: 0 0 4px rgba(59,130,246,0.5); cursor: pointer;
+      }
+      .prop-row input[type=number] {
+        flex: 0 0 50px; background: var(--rev-bg-input); color: #93c5fd;
+        border: 1px solid #2e3247; border-radius: 3px; font-size: 11px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 2px 4px; text-align: right; box-sizing: border-box;
+      }
+      .prop-row input[type=number]:focus { outline: none; border-color: #3b82f6; }
+      .prop-row select, select.rev-select {
+        flex: 1 1 auto; background: var(--rev-bg-input); color: #93c5fd;
+        border: 1px solid #2e3247; border-radius: 3px; font-size: 11px; padding: 2px 6px; cursor: pointer;
+      }
+      .prop-row select:focus, select.rev-select:focus { outline: none; border-color: #3b82f6; }
+      .prop-row .val { flex: 0 0 36px; text-align: right; color: #93c5fd; font-family: ui-monospace, monospace; }
+
+      /* Buttons & Pills */
+      .rev-btn {
+        background: #1e2130; color: #cbd5e1; border: 1px solid #2e3247;
+        border-radius: 3px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+        display: inline-flex; align-items: center; gap: 4px; text-decoration: none;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+      }
+      .rev-btn:hover { background: #282c40; color: #fff; border-color: #3b425b; }
+      .rev-btn-primary { background: #065f46; color: #a7f3d0; border-color: #059669; font-weight: 600; }
+      .rev-btn-primary:hover { background: #047857; color: #fff; }
+      .rev-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+      .rev-pill {
+        display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px;
+        border-radius: 12px; font-size: 10px; font-weight: 600;
+      }
+      .rev-pill-dirty { background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd34d; }
+      .rev-pill-clean { background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; }
+      .rev-search-box {
+        width: 100%; box-sizing: border-box; background: var(--rev-bg-input);
+        color: #e2e8f0; border: 1px solid #2e3247; border-radius: 4px; padding: 4px 8px; font-size: 11px;
+      }
+      .rev-search-box:focus { outline: none; border-color: #3b82f6; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b77</span></h2>
-      <div id="editor-statusbar">
-        <div class="sb-fields">
-          <span>scene <b id="sb-scene">—</b></span>
-          <span>t <b id="sb-time">—</b></span>
-          <span>sel <b id="sb-sel">none</b></span>
-          <span class="sb-dirty">· <b id="sb-dirty">clean</b></span>
-          <span>save <b id="sb-save">—</b></span>
-          <span id="sb-build" style="margin-left:auto;color:#6c8;"></span>
+      <!-- Top Application Header Bar -->
+      <div id="editor-topbar">
+        <div class="topbar-section">
+          <div class="topbar-brand">
+            <span class="dot"></span>
+            <span>REVIVAL</span>
+            <span id="sb-build" style="color:#10b981;font-size:10px;font-family:ui-monospace,monospace;font-weight:normal;">b78</span>
+          </div>
+
+          <div style="height:16px;width:1px;background:rgba(255,255,255,0.12);"></div>
+
+          <div style="display:flex;align-items:center;gap:4px;font-size:11px;">
+            <span style="color:#8e99ac;">Scene:</span>
+            <select id="editor-scene-sel" title="switch scene (reloads the page)" class="rev-select"></select>
+          </div>
+
+          <div class="topbar-chip">
+            <span style="color:#8e99ac;">sel:</span>
+            <b id="sb-sel" style="color:#60a5fa;font-family:ui-monospace,monospace;">none</b>
+          </div>
         </div>
-        <div class="sb-msg" id="sb-msg"></div>
+
+        <div class="topbar-section" style="flex:1;min-width:0;justify-content:center;">
+          <div id="editor-statusbar" style="display:flex;align-items:center;gap:8px;font-size:11px;overflow:hidden;max-width:100%;">
+            <span style="display:none;">scene <b id="sb-scene">—</b></span>
+            <span style="display:none;">t <b id="sb-time">—</b></span>
+            <span style="display:none;">save <b id="sb-save">—</b></span>
+            <span id="sb-msg" style="display:none;"></span>
+            <div id="editor-status" style="color:#34d399;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+          </div>
+        </div>
+
+        <div class="topbar-section">
+          <button id="btn-layout-mode" class="rev-btn" title="Toggle between Split Studio (Outliner on left) and Single Sidebar" onclick="toggleLayoutMode()">
+            ◫ Dual Dock
+          </button>
+          <span id="sb-dirty" class="rev-pill rev-pill-clean" title="no unsaved changes">clean</span>
+          <button id="editor-save" class="rev-btn rev-btn-primary" disabled title="Save dirty properties, lights, and maps to authoring sources">
+            💾 Save to LWO
+          </button>
+          <button id="editor-reload" class="rev-btn" title="Reload scene">
+            ↺ Reload
+          </button>
+          <button id="editor-backups-hdr" class="rev-btn" style="color:#f59e0b;" title="View automatic backups">
+            Backups…
+          </button>
+          <a id="editor-collapse" href="#" class="rev-btn" title="Collapse / expand editor panels" style="padding:2px 7px;">▾</a>
+        </div>
       </div>
-      <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
-      <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
-        <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
-        <span style="font-weight:normal;">
-          <a id="editor-invert-sel" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="invert the multi-selection within its containing object (ctrl/cmd-click rows to multi-select)">invert</a>
-          <label style="font-size:10px;color:#aaa;cursor:pointer;" title="canvas click selects the whole object instead of one surface">
-            <input type="checkbox" id="editor-pickobj" style="vertical-align:-2px;"> pick=object
-          </label>
-        </span>
+
+      <!-- Left Dock: Outliner -->
+      <div id="editor-left-dock">
+        <div class="dock-header">
+          <div class="dock-title">
+            Scene Outliner <span id="editor-objects-count" style="color:#34d399;font-size:10px;"></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <a id="editor-invert-sel" href="#" class="rev-btn" style="padding:1px 6px;font-size:10px;color:#f59e0b;display:none;" title="invert selection">invert</a>
+            <label style="font-size:10px;color:#94a3b8;cursor:pointer;display:flex;align-items:center;gap:3px;" title="canvas click selects whole object">
+              <input type="checkbox" id="editor-pickobj" style="vertical-align:-1px;"> pick=obj
+            </label>
+          </div>
+        </div>
+
+        <div id="editor-left-dock-body" style="flex:1;display:flex;flex-direction:column;min-height:0;">
+          <div id="editor-outliner-content" style="display:flex;flex-direction:column;height:100%;">
+            <div style="padding:6px 8px;border-bottom:1px solid var(--rev-border);">
+              <input id="editor-search" class="rev-search-box" placeholder="Filter surfaces & objects…" oninput="renderOutliner()">
+              <div style="display:flex;margin-top:6px;gap:3px;">
+                <button class="rev-subtab-btn active" id="subtab-outliner-all" onclick="filterOutliner('all')">All</button>
+                <button class="rev-subtab-btn" id="subtab-outliner-objects" onclick="filterOutliner('objects')">Objects</button>
+                <button class="rev-subtab-btn" id="subtab-outliner-surfaces" onclick="filterOutliner('surfaces')">Surfaces</button>
+                <button class="rev-subtab-btn" id="subtab-outliner-lights" onclick="filterOutliner('lights')">Lights</button>
+              </div>
+            </div>
+
+            <div style="flex:1;overflow-y:auto;padding:6px;">
+              <div id="editor-objects-section">
+                <div id="editor-objects-hdr" class="rev-card-title" style="cursor:pointer;">
+                  <span>Objects</span>
+                </div>
+                <div id="editor-objects"></div>
+              </div>
+
+              <div id="editor-surfaces-section" style="margin-top:8px;">
+                <div class="rev-card-title">
+                  <span>Surfaces</span>
+                </div>
+                <div id="editor-list"></div>
+              </div>
+
+              <div id="editor-lights-section" style="margin-top:8px;">
+                <div id="editor-lights-hdr" class="rev-card-title" style="cursor:pointer;">
+                  <span>Lights <span id="editor-lights-count" style="color:#34d399;font-size:10px;"></span></span>
+                </div>
+                <div id="editor-lights"></div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div id="editor-objects"></div>
-      <div id="editor-list"></div>
-      <div id="editor-props"></div>
-      <div id="editor-lights-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;">Lights <span id="editor-lights-count" style="color:#6c8;font-size:10px;"></span></div>
-      <div id="editor-lights" style="display:none;"></div>
-      <div id="editor-light-props"></div>
-      <div id="editor-knobs-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
-        <span>Render knobs <span id="editor-knobs-count" style="color:#6c8;font-size:10px;"></span></span>
-        <span style="font-weight:normal;">
-          <select id="editor-bake-res" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:10px;margin-right:6px;vertical-align:-1px;cursor:pointer;" title="env-reflection bake resolution, pixels per cube face (env_bake_res render knob). Picking a size re-bakes EVERY panorama at the new resolution on the next frame (same as rebake refl). City per-building stores cap at their 512² source bake.">
-            <option value="128">128²</option>
-            <option value="256" selected>256²</option>
-            <option value="512">512²</option>
-            <option value="1024">1024²</option>
-          </select>
-          <a id="editor-rebake-env" href="#" style="color:#69c;font-size:10px;text-decoration:none;margin-right:8px;" title="re-bake the env-reflection panoramas with the CURRENT lights/materials (they capture the scene once, at first use)">rebake refl</a>
-          <a id="editor-pano-view" href="#" style="color:#6c9;font-size:10px;text-decoration:none;margin-right:8px;" title="page through the baked env-reflection panoramas as an on-screen overlay (env_refl_viz; click to cycle, shift-click to go back, reaches 'off' after the last one)">pano: off</a>
-          <a id="editor-knobs-resetall" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="reset every explicitly-set knob to its default">reset all</a>
-          <label style="font-size:10px;color:#aaa;cursor:pointer;" title="show every engine flag, grouped by category (default: the important ones)">
-            <input type="checkbox" id="editor-knobs-all" style="vertical-align:-2px;"> all
-          </label>
-        </span>
+
+      <!-- Right Dock: Inspector -->
+      <div id="editor-right-dock">
+        <div class="rev-tabs-header">
+          <button class="rev-tab-btn" id="tab-btn-outliner" style="display:none;" onclick="switchInspectorTab('outliner')">📂 Outliner</button>
+          <button class="rev-tab-btn active" id="tab-btn-material" onclick="switchInspectorTab('material')">🎨 Material</button>
+          <button class="rev-tab-btn" id="tab-btn-light" onclick="switchInspectorTab('light')">💡 Light</button>
+          <button class="rev-tab-btn" id="tab-btn-render" onclick="switchInspectorTab('render')">⚙️ Render</button>
+          <button class="rev-tab-btn" id="tab-btn-changes" onclick="switchInspectorTab('changes')">📋 Changes</button>
+        </div>
+
+        <div id="tab-pane-outliner" class="rev-tab-pane hidden" style="padding:0;">
+          <!-- Outliner moves here in Single Dock mode -->
+        </div>
+
+        <div id="tab-pane-material" class="rev-tab-pane">
+          <div id="editor-props"></div>
+        </div>
+
+        <div id="tab-pane-light" class="rev-tab-pane hidden">
+          <div id="editor-light-props"></div>
+        </div>
+
+        <div id="tab-pane-render" class="rev-tab-pane hidden">
+          <div class="rev-card">
+            <div class="rev-card-title">
+              <span>Environment Reflection</span>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+              <select id="editor-bake-res" class="rev-select" title="Bake resolution">
+                <option value="128">128²</option>
+                <option value="256" selected>256²</option>
+                <option value="512">512²</option>
+                <option value="1024">1024²</option>
+              </select>
+              <a id="editor-rebake-env" href="#" class="rev-btn" title="Rebake reflections">rebake refl</a>
+              <a id="editor-pano-view" href="#" class="rev-btn" title="Pano overlay view">pano: off</a>
+            </div>
+            <div id="editor-scene-env" style="display:flex;gap:6px;align-items:center;font-size:11px;color:#94a3b8;margin-top:8px;">
+              <span>Scene Env:</span>
+              <select id="editor-scene-envrefl" class="rev-select">
+                <option value="0">auto</option>
+                <option value="1">all</option>
+                <option value="-1">none</option>
+              </select>
+              <select id="editor-scene-envres" class="rev-select">
+                <option value="0">default res</option>
+                <option value="64">64²</option>
+                <option value="128">128²</option>
+                <option value="256">256²</option>
+                <option value="512">512²</option>
+                <option value="1024">1024²</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="rev-card">
+            <div id="editor-disp-hdr" class="rev-card-title" style="cursor:pointer;">
+              <span>Displacement <span id="editor-disp-mode" style="color:#34d399;font-size:10px;">—</span></span>
+              <a id="editor-disp-rebuild" href="#" class="rev-btn" style="padding:1px 6px;font-size:10px;">rebuild</a>
+            </div>
+            <div id="editor-disp"></div>
+          </div>
+
+          <div class="rev-card">
+            <div id="editor-knobs-hdr" class="rev-card-title" style="cursor:pointer;">
+              <span>Render Knobs <span id="editor-knobs-count" style="color:#34d399;font-size:10px;"></span></span>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <a id="editor-knobs-resetall" href="#" class="rev-btn" style="padding:1px 6px;font-size:10px;color:#f59e0b;">reset all</a>
+                <label style="font-size:10px;color:#94a3b8;cursor:pointer;">
+                  <input type="checkbox" id="editor-knobs-all" style="vertical-align:-1px;"> all
+                </label>
+              </div>
+            </div>
+            <div id="editor-knobs-controls" style="display:none;gap:6px;align-items:center;margin-bottom:6px;">
+              <input id="editor-knobs-search" class="rev-search-box" placeholder="Find flag name / help…">
+              <label style="font-size:10px;color:#94a3b8;cursor:pointer;white-space:nowrap;">
+                <input type="checkbox" id="editor-knobs-changed" style="vertical-align:-1px;"> changed only
+              </label>
+            </div>
+            <div id="editor-knobs"></div>
+          </div>
+        </div>
+
+        <div id="tab-pane-changes" class="rev-tab-pane hidden">
+          <div class="rev-card">
+            <div class="rev-card-title">Save Diff Receipt</div>
+            <div id="editor-save-changes">
+              <div class="surf-tex">No saves this session yet.</div>
+            </div>
+          </div>
+
+          <div class="rev-card">
+            <div class="rev-card-title">Scene Backups</div>
+            <div id="editor-backups" style="display:none;"></div>
+          </div>
+        </div>
       </div>
-      <div id="editor-scene-env" style="display:flex;gap:6px;align-items:center;font-size:10px;color:#aaa;margin-top:3px;">
-        <span title="AUTHORED scene-wide env-reflection defaults — persisted as LWS keywords (FdsSceneEnvRefl / FdsSceneEnvBakeRes) into the FLD scene header on Save. envRefl: default probe qualification for surfaces whose own envRefl is 'auto' (all = every auto surface bakes a probe, none = no auto surface does; per-surface envRefl always wins, and the env_refl master knob still gates the pass). res: the scene's default probe face resolution (per-surface envBakeRes and an explicit env_bake_res knob both win).">scene env defaults:</span>
-        <select id="editor-scene-envrefl" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:10px;cursor:pointer;">
-          <option value="0">auto</option>
-          <option value="1">all</option>
-          <option value="-1">none</option>
-        </select>
-        <select id="editor-scene-envres" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:10px;cursor:pointer;">
-          <option value="0">default res</option>
-          <option value="64">64²</option>
-          <option value="128">128²</option>
-          <option value="256">256²</option>
-          <option value="512">512²</option>
-          <option value="1024">1024²</option>
-        </select>
+
+      <!-- Bottom Persistent Transport Bar -->
+      <div id="editor-transport">
+        <div id="editor-time" style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:10px;font-weight:700;text-transform:uppercase;color:#64748b;letter-spacing:0.05em;margin-right:2px;">Time</span>
+          <button id="editor-time-back" class="rev-btn" title="Step back ([ key; shift = bigger step)">◀</button>
+          <button id="editor-time-play" class="rev-btn rev-btn-primary" title="Play / pause scene (Space)">▶ Play</button>
+          <button id="editor-time-fwd" class="rev-btn" title="Step forward (] key; shift = bigger step)">▶</button>
+          <div class="topbar-chip" style="min-width:55px;justify-content:center;">
+            <span id="editor-time-val" style="font-family:ui-monospace,monospace;color:#60a5fa;font-weight:600;">600</span>
+          </div>
+        </div>
+
+        <input type="range" id="editor-time-bar" min="0" max="2000" step="1" value="600" title="Scene time — drag to seek" style="flex:1;">
+
+        <div style="font-size:10px;color:#64748b;font-family:ui-monospace,monospace;white-space:nowrap;">
+          [ / ] step · space play
+        </div>
       </div>
-      <div id="editor-knobs-controls" style="display:none;gap:6px;align-items:center;margin-top:4px;">
-        <input id="editor-knobs-search" placeholder="find a flag…" title="filter flags by name or help text (live)" style="flex:1;min-width:0;background:#222;color:#ddd;border:1px solid #444;padding:3px 5px;font-size:11px;">
-        <label style="font-size:10px;color:#aaa;cursor:pointer;white-space:nowrap;" title="show only flags whose value differs from default (or explicitly set)">
-          <input type="checkbox" id="editor-knobs-changed" style="vertical-align:-2px;"> changed only
-        </label>
-      </div>
-      <div id="editor-knobs" style="display:none;"></div>
-      <!-- ── Displacement (S1 shell family) ──────────────────────────────
-           A MODE selector, not loose booleans: every mode has companions it
-           looks broken without (recess-only without pom_shell_world_amp_set
-           mottles the floor; without pom_normal the blocks read flat), so
-           picking a mode writes the whole coherent set. Dials are tagged LIVE
-           (next frame) or REBUILD (init-time — moves vertices or re-bakes a
-           map, and the rebuild fires automatically). -->
-      <div id="editor-disp-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
-        <span>Displacement <span id="editor-disp-mode" style="color:#6c8;font-size:10px;">—</span></span>
-        <span style="font-weight:normal;">
-          <a id="editor-disp-rebuild" href="#" style="color:#69c;font-size:10px;text-decoration:none;" title="restore the stone's pristine geometry and re-run the displacement bake with the CURRENT flags (--pom_shell moves vertices; the cone / horizon maps are baked once). Fires automatically when you change a REBUILD dial.">rebuild</a>
-        </span>
-      </div>
-      <div id="editor-disp" style="display:none;"></div>
-      <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
-        <span style="flex:0 0 64px;">scene time</span>
-        <button id="editor-time-back" title="step back ([ key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">◀</button>
-        <span id="editor-time-val" style="flex:1;text-align:center;color:#9cf;">600</span>
-        <button id="editor-time-fwd" title="step forward (] key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">▶</button>
-        <button id="editor-time-play" title="play the scene from the demo camera (space; loops at scene end — drag the canvas or press again to stop)" style="background:#232;color:#cfc;border:1px solid #464;border-radius:3px;padding:2px 10px;cursor:pointer;">▶ play</button>
-      </div>
-      <input type="range" id="editor-time-bar" min="0" max="2000" step="1" value="600" title="scene time — drag to seek (works during playback)" style="width:100%;margin-top:4px;accent-color:#4a8;cursor:pointer;">
-      <div id="editor-actions" style="margin-top:6px;display:flex;gap:6px;">
-        <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
-        <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
-      </div>
-      <div id="editor-save-changes" style="display:none;margin-top:6px;"></div>
-      <div id="editor-backups-hdr" style="margin-top:6px;color:#c96;font-size:10px;cursor:pointer;display:none;">Backups…</div>
-      <div id="editor-backups" style="display:none;"></div>
-      <div id="editor-status"></div>
     </div>
     <script>
       var editorSurfaces = [], editorSelected = null;
@@ -724,7 +1112,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b77";
+      var REV_BUILD = "b78";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -766,6 +1154,7 @@
           dEl.textContent = total
             ? (total + ' dirty')
             : 'clean';
+          dEl.className = 'rev-pill ' + (total ? 'rev-pill-dirty' : 'rev-pill-clean');
           dEl.title = c && total
             ? [c.surf ? c.surf + ' surf' : '', c.map ? c.map + ' map' : '', c.light ? c.light + ' light' : '',
                c.obj ? c.obj + ' obj' : '', c.split ? c.split + ' split' : '', c.env ? 'scene env' : '']
@@ -776,34 +1165,98 @@
         setT('sb-build', REV_BUILD);
         setT('sb-msg', window.editorLastMsg || '');
       }
-      // ── Canvas fit: keep the render view out from under the panel ────────
-      // Option (a): pure CSS. Reserve the panel's width on the right (via the
-      // --rev-reserve custom property, read by the canvas max-width + body
-      // padding rules) so the browser scales the render canvas to fit the FREE
-      // region beside the panel, correct-aspect and fully visible, instead of
-      // the panel covering its right edge. This is OPTION (b): the engine
-      // framebuffer is RESIZED to the free region (resizeCanvasToWindow feeds
-      // innerWidth-reserve into SDL2_RequestSize), so the canvas backing store
-      // equals its displayed size — 1:1 device pixels, no browser downsample.
-      // (The earlier option (a) left the backing at window size and CSS-scaled
-      // it down, which nearest-neighbour-downsampled the high-frequency editor
-      // passes — deferred-quarter checkerboard / grain / chromatic — into an
-      // RGB moiré grid. Fixed.) Reserve is 0 (full width) when the panel is
-      // hidden, collapsed, or floated away from the right edge, so a
-      // moved/minimized panel never shrinks the view.
+
+      // ── Studio layout & Tab switching ─────────────────────────────────
+      var currentLayoutMode = 'split'; // 'split' (dual-dock) or 'single' (right sidebar)
+      var currentInspectorTab = 'material';
+      var currentOutlinerFilter = 'all';
+
+      function switchInspectorTab(tabId) {
+        currentInspectorTab = tabId;
+        ['outliner', 'material', 'light', 'render', 'changes'].forEach(function(t){
+          var pane = document.getElementById('tab-pane-' + t);
+          if (pane) pane.classList.toggle('hidden', t !== tabId);
+          var btn = document.getElementById('tab-btn-' + t);
+          if (btn) btn.classList.toggle('active', t === tabId);
+        });
+      }
+
+      function filterOutliner(kind) {
+        currentOutlinerFilter = kind;
+        ['all', 'objects', 'surfaces', 'lights'].forEach(function(k){
+          var btn = document.getElementById('subtab-outliner-' + k);
+          if (btn) btn.classList.toggle('active', k === kind);
+        });
+        var secObj = document.getElementById('editor-objects-section');
+        var secSurf = document.getElementById('editor-surfaces-section');
+        var secLight = document.getElementById('editor-lights-section');
+        if (secObj) secObj.style.display = (kind === 'all' || kind === 'objects') ? '' : 'none';
+        if (secSurf) secSurf.style.display = (kind === 'all' || kind === 'surfaces') ? '' : 'none';
+        if (secLight) secLight.style.display = (kind === 'all' || kind === 'lights') ? '' : 'none';
+      }
+
+      function applyLayoutMode(mode) {
+        currentLayoutMode = mode;
+        try { localStorage.setItem('revEditorLayout', mode); } catch(e){}
+        var isSplit = (mode === 'split');
+        var leftDock = document.getElementById('editor-left-dock');
+        var btnMode = document.getElementById('btn-layout-mode');
+        var tabOutliner = document.getElementById('tab-btn-outliner');
+        var outlinerContent = document.getElementById('editor-outliner-content');
+        var leftBody = document.getElementById('editor-left-dock-body');
+        var tabPaneOutliner = document.getElementById('tab-pane-outliner');
+
+        if (btnMode) {
+          btnMode.textContent = isSplit ? '◫ Dual Dock' : '◧ Single Dock';
+          btnMode.title = isSplit ? 'Switch to Single Sidebar (Outliner as a tab in right dock)'
+                                  : 'Switch to Dual Dock (Outliner on left, Inspector on right)';
+        }
+
+        if (isSplit) {
+          if (leftDock) leftDock.classList.remove('collapsed');
+          if (tabOutliner) tabOutliner.style.display = 'none';
+          if (outlinerContent && leftBody && outlinerContent.parentElement !== leftBody) {
+            leftBody.appendChild(outlinerContent);
+          }
+          if (currentInspectorTab === 'outliner') switchInspectorTab('material');
+        } else {
+          if (leftDock) leftDock.classList.add('collapsed');
+          if (tabOutliner) tabOutliner.style.display = '';
+          if (outlinerContent && tabPaneOutliner && outlinerContent.parentElement !== tabPaneOutliner) {
+            tabPaneOutliner.appendChild(outlinerContent);
+          }
+        }
+        updateCanvasFit();
+      }
+
+      function toggleLayoutMode() {
+        applyLayoutMode(currentLayoutMode === 'split' ? 'single' : 'split');
+      }
+
+      // ── Canvas fit: keep the render view out from under the panels ──────
       function updateCanvasFit(){
         if (!revEditorMode) return;
         var panel = document.getElementById('editor-panel');
-        var reserve = 0;
+        var reserveLeft = 0, reserveRight = 0, reserveBottom = 0;
         if (panel && !panel.classList.contains('hidden') && !panel.classList.contains('collapsed')) {
-          var r = panel.getBoundingClientRect();
-          if (r.right >= window.innerWidth - 2)   // hugging the right edge
-            reserve = Math.min(r.width, window.innerWidth * 0.6);
+          var leftDock = document.getElementById('editor-left-dock');
+          var rightDock = document.getElementById('editor-right-dock');
+          var transport = document.getElementById('editor-transport');
+          if (leftDock && !leftDock.classList.contains('collapsed') && leftDock.offsetWidth > 0) {
+            reserveLeft = Math.min(leftDock.offsetWidth, window.innerWidth * 0.35);
+          }
+          if (rightDock && !rightDock.classList.contains('collapsed') && rightDock.offsetWidth > 0) {
+            reserveRight = Math.min(rightDock.offsetWidth, window.innerWidth * 0.45);
+          }
+          if (transport && transport.offsetHeight > 0) {
+            reserveBottom = transport.offsetHeight;
+          }
         }
-        document.documentElement.style.setProperty('--rev-reserve', reserve + 'px');
-        // Resize the ENGINE framebuffer to the free region (backing==display,
-        // no downsample moiré). Panel show/collapse/dock are infrequent, so
-        // an occasional EngineResize here is fine.
+        var totalReserveX = reserveLeft + reserveRight;
+        document.documentElement.style.setProperty('--rev-reserve-left', reserveLeft + 'px');
+        document.documentElement.style.setProperty('--rev-reserve-right', reserveRight + 'px');
+        document.documentElement.style.setProperty('--rev-reserve-bottom', reserveBottom + 'px');
+        document.documentElement.style.setProperty('--rev-reserve', totalReserveX + 'px');
         resizeCanvasToWindow();
       }
       // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
@@ -839,72 +1292,39 @@
         document.body.classList.add('rev-editor');   // reserve panel width for the canvas
         updateStatusBar();   // paint the strip as soon as the panel shows
         updateCanvasFit();
-        // ── Movable / collapsible tool stack ─────────────────────────────
-        // Drag the header (h2) to move the panel anywhere; ▾/▸ collapses it
-        // to just the header. Position + collapsed state persist per-browser
-        // (localStorage). Double-click the header re-docks it top-right.
+        // ── Studio layout & collapse management ─────────────────────────
         (function(){
           var panel = document.getElementById('editor-panel');
-          var h2 = panel.querySelector('h2');
-          var LS = 'revEditorPanel';
-          var st = {};
-          try { st = JSON.parse(localStorage.getItem(LS) || '{}') || {}; } catch(e){}
-          function save(){ try { localStorage.setItem(LS, JSON.stringify(st)); } catch(e){} }
-          var caret = document.createElement('a');
-          caret.href = '#'; caret.id = 'editor-collapse';
-          caret.style.cssText = 'float:right;color:#9cf;text-decoration:none;font-size:12px;padding:0 6px;';
-          caret.title = 'collapse / expand the editor tool stack (persists)';
-          h2.appendChild(caret);
+          var caret = document.getElementById('editor-collapse');
+          var LS_COLLAPSE = 'revEditorCollapsed';
+          var LS_LAYOUT = 'revEditorLayout';
+
+          var isCollapsed = false;
+          try { isCollapsed = localStorage.getItem(LS_COLLAPSE) === '1'; } catch(e){}
           function applyCollapsed(){
-            panel.classList.toggle('collapsed', !!st.collapsed);
-            caret.textContent = st.collapsed ? '▸' : '▾';
-            updateCanvasFit();   // collapsed panel frees the reserved width
+            panel.classList.toggle('collapsed', isCollapsed);
+            if (caret) caret.textContent = isCollapsed ? '▸' : '▾';
+            updateCanvasFit();
           }
-          caret.onclick = function(e){
-            e.preventDefault(); e.stopPropagation();
-            st.collapsed = !st.collapsed; save(); applyCollapsed();
-          };
-          function applyPos(){
-            if (typeof st.x === 'number' && typeof st.y === 'number'){
-              // Clamp so the drag handle can never leave the viewport.
-              var x = Math.min(Math.max(st.x, 60 - panel.offsetWidth), window.innerWidth - 60);
-              var y = Math.min(Math.max(st.y, 0), window.innerHeight - 28);
-              panel.style.left = x + 'px'; panel.style.top = y + 'px';
-              panel.style.right = 'auto';
-              panel.style.maxHeight = (window.innerHeight - Math.max(y, 0)) + 'px';
-            } else {   // default dock: top-right, full-height scroll
-              panel.style.left = ''; panel.style.top = '';
-              panel.style.right = ''; panel.style.maxHeight = '';
-            }
-            updateCanvasFit();   // dock/undock changes the free region
+          if (caret) {
+            caret.onclick = function(e){
+              e.preventDefault(); e.stopPropagation();
+              isCollapsed = !isCollapsed;
+              try { localStorage.setItem(LS_COLLAPSE, isCollapsed ? '1' : '0'); } catch(err){}
+              applyCollapsed();
+            };
           }
-          h2.addEventListener('mousedown', function(e){
-            // Header controls (scene <select>, the caret) keep their behavior.
-            if (e.button !== 0 || e.target.tagName === 'SELECT' ||
-                e.target.tagName === 'OPTION' || e.target.tagName === 'A') return;
-            e.preventDefault();
-            var r = panel.getBoundingClientRect();
-            var dx = e.clientX - r.left, dy = e.clientY - r.top;
-            // Capture-phase window listeners: they run BEFORE the panel's
-            // stopPropagation guards and keep tracking when the cursor
-            // crosses the canvas (canvas orbit stays off — its mode is only
-            // armed by a mousedown on the canvas itself).
-            function mv(ev){ st.x = ev.clientX - dx; st.y = ev.clientY - dy; applyPos(); }
-            function up(){
-              window.removeEventListener('mousemove', mv, true);
-              window.removeEventListener('mouseup', up, true);
-              save();
-            }
-            window.addEventListener('mousemove', mv, true);
-            window.addEventListener('mouseup', up, true);
+
+          var savedLayout = 'split';
+          try {
+            savedLayout = localStorage.getItem(LS_LAYOUT) || (window.innerWidth < 1200 ? 'single' : 'split');
+          } catch(e){}
+          applyLayoutMode(savedLayout);
+          applyCollapsed();
+
+          window.addEventListener('resize', function(){
+            updateCanvasFit();
           });
-          h2.addEventListener('dblclick', function(e){
-            if (e.target.tagName === 'SELECT' || e.target.tagName === 'A') return;
-            delete st.x; delete st.y; save(); applyPos();
-            editorStatus('tool stack re-docked (top-right)');
-          });
-          window.addEventListener('resize', applyPos);
-          applyCollapsed(); applyPos();
         })();
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
         // sidecar live-fetch and scene init are boot-time).
@@ -1174,10 +1594,12 @@
         }
         editorSelectedLight = ls[0].i;
         setEditorSel(ls.length > 1 ? (ls.length + ' lights') : ('light ' + ls[0].i));
+        switchInspectorTab('light');
         renderLightList(); renderLightProps(ls[0], ls);
         if (label) editorStatus(label);
       }
       function renderLightList(){
+        var q = (document.getElementById('editor-search').value || '').toLowerCase().trim();
         document.getElementById('editor-lights-count').textContent = editorLights.length ? ('(' + editorLights.length + ')') : '';
         var el = document.getElementById('editor-lights'); el.innerHTML = '';
         editorLightFlat = [];
@@ -1185,6 +1607,12 @@
         // lights are Object-tree nodes; '' = unparented).
         var groups = {}, order = [];
         editorLights.forEach(function(l){
+          if (q) {
+            var match = (String(l.i).indexOf(q) >= 0) ||
+                        (l.name && l.name.toLowerCase().indexOf(q) >= 0) ||
+                        (l.type && 'spot'.indexOf(q) >= 0);
+            if (!match) return;
+          }
           var p = l.parent || '';
           if (!(p in groups)) { groups[p] = []; order.push(p); }
           groups[p].push(l);
@@ -1255,6 +1683,7 @@
         if (!l) return false;
         editorLightSel = [l.i];
         editorSelectedLight = l.i; setEditorSel('light ' + l.i);
+        switchInspectorTab('light');
         var el = document.getElementById('editor-lights');
         if (el) el.style.display = 'block';
         renderLightList(); renderLightProps(l, [l]);
@@ -2099,8 +2528,13 @@
         refreshParams(); renderKnobList();
         editorStatus('reset ' + n + ' knob(s) to loaded values');
       };
+      function renderOutliner(){
+        renderSurfaceList();
+        renderObjectList();
+        renderLightList();
+      }
       function renderSurfaceList(){
-        var q = (document.getElementById('editor-search').value || '').toLowerCase();
+        var q = (document.getElementById('editor-search').value || '').toLowerCase().trim();
         var el = document.getElementById('editor-list'); el.innerHTML = '';
         editorSurfaces.forEach(function(s){
           if (q && s.name.toLowerCase().indexOf(q) < 0) return;
@@ -2134,7 +2568,13 @@
       // the engine promotes them out of the bucket (Editor_GetObjectsJSON).
       var editorShowEngine = false;
       function renderObjectList(){
-        var visObjs = editorObjects.filter(function(o){ return !o.engine || editorShowEngine; });
+        var q = (document.getElementById('editor-search').value || '').toLowerCase().trim();
+        var visObjs = editorObjects.filter(function(o){
+          if (o.engine && !editorShowEngine) return false;
+          if (!q) return true;
+          if (o.name && o.name.toLowerCase().indexOf(q) >= 0) return true;
+          return (o.surfaces || []).some(function(sn){ return sn.toLowerCase().indexOf(q) >= 0; });
+        });
         var engHidden = editorObjects.length - visObjs.length;
         var cnt = document.getElementById('editor-objects-count');
         if (cnt) cnt.textContent = visObjs.length ? ('(' + visObjs.length + ')') : '';
@@ -2249,6 +2689,7 @@
         setEditorSel(editorGroupObj ? ('obj ' + editorGroupObj.name + ' (' + names.length + ' surf)')
                                     : (names.length + ' surfaces'));
         var s = editorSurfaces.find(function(x){ return x.name === names[0]; });
+        switchInspectorTab('material');
         renderObjectList(); renderSurfaceList();
         renderSurfaceProps(s, { name: label, surfaces: names });
         if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
@@ -2288,6 +2729,7 @@
       function selectSurface(s, alsoFocus){
         editorGroup = null; editorGroupObj = null;   // single-surface mode
         editorSelected = s.name; setEditorSel('surf ' + s.name);
+        switchInspectorTab('material');
         renderObjectList(); renderSurfaceList(); renderSurfaceProps(s);
         if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
         if (Module.editorHighlight) Module.editorHighlight(s.name);                     // outline it in the render
@@ -2441,6 +2883,7 @@
         return groups;
       }
       function renderSaveReceipt(diffGroups, serverBits, failed){
+        switchInspectorTab('changes');
         var host = document.getElementById('editor-save-changes');
         if (!host) return;
         host.innerHTML = ''; host.style.display = 'block';
@@ -2672,9 +3115,10 @@
         bhdr.style.display = 'block';
         var bopen = false;
         bhdr.onclick = function(){
+          switchInspectorTab('changes');
           var el = document.getElementById('editor-backups');
-          bopen = !bopen;
-          el.style.display = bopen ? 'block' : 'none';
+          bopen = true;
+          el.style.display = 'block';
           if (!bopen) return;
           el.innerHTML = '<div class="surf-tex">loading…</div>';
           fetch('api/' + revEditorScene + '/backups').then(function(r){ return r.json(); }).then(function(res){
