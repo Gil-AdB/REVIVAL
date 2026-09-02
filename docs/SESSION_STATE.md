@@ -59,6 +59,34 @@
   cycle; `--mat_probe` appends `uv u,v / W×H mipN`. Byte-null off: H6194 `36cd059a…`, cam A `d92cb6f5…`,
   render_gate 4/4. At H6194 the UV is continuous across the door-head seam where the mesh is not.
 
+## 2026-09-02f — HIS READING of the UV viz: "the uv at the seam is not continous" (`8295209b2e97`), and the census that localises it
+
+- **MEASURED** (`34058c4a916f`, `tools/uv_seam_census.py` over the H6194 G-buffer dump, decode verified against
+  the on-screen `--mat_probe` readout at (960,540) = 860,227 mip0, silhouettes excluded by |dz| < 0.05 u):
+  of 83 181 world-adjacent stone seam pixel pairs, every SAME-material seam is UV-continuous — coplanar
+  (36 052 pairs) du p90 3 / max 10 texels, 5–30° (19 388) max 12, **crease ≥30° (27 241) p90 2 / max 10.5** —
+  against an in-face pixel gradient of p99 5 texels. Every one of the 500 `rooms` | `rooms::mirUV` BOUNDARY
+  pairs steps **405–443 texels in u (0.40–0.43 of the 1024 tile)**, dv ≤ 4, fraction > 32 texels = 1.000. Named:
+  the door jamb x=17.9 z=−62.94 (mirUV u0 −4.077 vs rooms u0 +0.497, 434–438 tx, dihedral 48–79°) and the pier
+  x≈9.96 z≈−59.0 (rooms −0.819 vs mirUV −3.422, 403–407 tx, dihedral 6–31°, shared vertex on both sides).
+- **What that boundary is**: `GreetsFixBitangentHandedness` (GREETS.CPP:1524, `--greets_tbn_fix`) re-points every
+  negative-UV-determinant face onto a `<mat>::mirUV` clone and changes NO UV — so the step is the AUTHORED
+  projection phase between a mirrored sheet and its unmirrored neighbour, ≈0.4 tile at both places. Consequence:
+  only those seams sample different height columns on their two sides (the double-valued profile
+  `ad0b8faf2405` is specific to them: mitre lines 8–9 and any line crossing a handedness boundary); every
+  same-family crease already samples the same column both sides. The T-junction hinge crack (`087a63970e4c`)
+  is a separate, coplanar, same-family defect — UV-continuous, vertex-discontinuous.
+- **"the viz only shows once"** (`5c093641b31e`, OPEN, waiting on him): NOT reproduced on the snapshot path —
+  one process rendering `--snapshot=greets@t=6194,6195,6230 --uv_viz=2` paints the checker on all three frames
+  (98.3 % of pixels each, `fe27618c4b3c`). The live X-cycle path has no headless frame dump for greets. Need from
+  him: CLI flag or X cycle, live window or snapshot, and whether "once" means one frame or one tile gradient
+  across a 6 u wall (u = z/6, so a 1024-texel tile is 6 world units wide).
+- Modes, for the record: 1 = u fraction in R and v fraction in G across the tile (one gradient per 6 u);
+  2 = the tile cut into 8×8 cells, alternating light/dark, so a jog or a step reads as a broken checker;
+  3 = u only, folded into 16 saw-tooth stripes per tile (each stripe 64 texels, so a 0.4-tile step is ~6 stripes
+  of phase); 4 = the same for v (the course direction). Dark grey = nothing rasterised, mid grey = no diffuse
+  map or forward-rendered.
+
 ## 2026-09-02c — his verdict on the tip is a FAIL; the density ladder is measured and on his deck
 
 - **His words** (verdict `43494afa5f5d`, verbatim): *"under the latest v4, walls are still wobbly, mesh
