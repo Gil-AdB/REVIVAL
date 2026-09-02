@@ -1,4 +1,32 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-02d — HIS RULING: every v4 rung is bad, the OLD bake ships; the defect is the high-angle junctions, and H6194 is dissected
+
+- **His words** (verdict `d98c40a5f377`, answer `02d53f6d37db` on the density card, verbatim): *"all are
+  bad. the old bake is very good almost everywhere, apart from where the high angle walls meet"*. v4 stays
+  built and default OFF; the campaign lever moves to the OLD bake's junctions. Then: *"this is starting to
+  get real old real fast. Please dispatch an agent to suggest how we should attack this issue from scratch.
+  not just the code itself, but what approach in general to use for attacking this general issue. and how
+  to actually get a test that actually tests for the correct output. and how to actually get the correct
+  output."* — a from-scratch proposal agent (`subagent:attack`) is dispatched with everything below; its
+  deliverable is `scratchpad/attack/PROPOSAL.md`, to be put in front of him before any code moves.
+- **H6194 anatomy** (`71704eb9e2b5`, `ec75f7f0d4d2`, `ad0b8faf2405`): the black wedge at his pose is a
+  HOLE — z16==0 at 5273 px, exactly the black pixels. It is the doorway on the west wall x=17.898 meeting a
+  **splayed reveal** (authored normal (−0.445,0,−0.896), dihedral ≈116.4°) = **mitre line 8**; the whole
+  "high-angle" class in greets is the ten `[STONE-MITRE]` lines (4 sloped near z≈−22, 4 vertical at
+  y 3.2–6.3, 2 door reveals). One-stage-off ladder at the pose (unrasterised px): shipping 5273 · bare 0 ·
+  `--no-greets_displace_free_edge` 0 (sealed, dead-straight arris) · `--no-greets_displace_mitre` 1444
+  (**the mitre makes it 3.7× worse**) · `--no-…seam_weld` 5273 byte-identical · `--no-…plane_normal` 5182 ·
+  `--no-…border_pin` 625 · `--no-…fold_relax` 5084.
+- **Why the weld is not watertight**: the two sheets sample different UV columns (u −4.0774 vs +0.5000),
+  their 105+105 verts interleave 1–4 mm apart, and the shared profile is their UNION (`profile_agree`
+  default 0) — double-valued, so each sheet takes its own dsp (course y 1.9–3.2: +0.031 vs −0.03…−0.055,
+  polylines 0.08 u apart). In-frame the mismatch is ≤0.037 u yet the wedge is ~0.09 u wide, so which sheet
+  is missing there is **open** (`a1588f2a3bda`, waiting on the attack agent).
+- **Instrument trap**: `--displace_viz` back-face-culls with the authored face normal and draws nothing on
+  flipped-winding walls (the x=17.898 wall). Renders/logs: `scratchpad/oldbake/h6194_*`.
+- Prior: rev-dispfix (46 commits, "still a lot of tears") is not merged and its merge question
+  `12a396dd0f85` is moot until the proposal lands.
+
 ## 2026-09-02c — his verdict on the tip is a FAIL; the density ladder is measured and on his deck
 
 - **His words** (verdict `43494afa5f5d`, verbatim): *"under the latest v4, walls are still wobbly, mesh
