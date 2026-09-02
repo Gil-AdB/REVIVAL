@@ -900,7 +900,7 @@
             <select id="editor-scene-sel" title="switch scene (reloads the page)" class="rev-select"></select>
           </div>
 
-          <div class="topbar-chip">
+          <div class="topbar-chip" title="Active selection. Click to deselect (Esc)" onclick="clearSelection()" style="cursor:pointer;">
             <span style="color:#8e99ac;">sel:</span>
             <b id="sb-sel" style="color:#60a5fa;font-family:ui-monospace,monospace;">none</b>
           </div>
@@ -1115,7 +1115,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b79";
+      var REV_BUILD = "b80";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1207,6 +1207,38 @@
         if (editorSurfaces && editorSurfaces.length) {
           selectSurface(editorSurfaces[0], /*alsoFocus=*/false);
         }
+      }
+
+      var editorShowOutline = true;
+      function updateHighlight(forceOff){
+        if (typeof Module === 'undefined' || !Module.editorHighlight) return;
+        if (forceOff || !editorShowOutline || (typeof scenePlaying !== 'undefined' && scenePlaying)) {
+          Module.editorHighlight('');
+          return;
+        }
+        if (editorGroup && editorGroup.length) {
+          Module.editorHighlight(editorGroup.join(';'));
+        } else if (editorSelected) {
+          Module.editorHighlight(editorSelected);
+        } else {
+          Module.editorHighlight('');
+        }
+      }
+
+      function clearSelection(){
+        editorSelected = null;
+        editorGroup = null;
+        editorGroupObj = null;
+        editorLightSel = [];
+        editorSelectedLight = null;
+        setEditorSel('none');
+        updateHighlight();
+        renderObjectList();
+        renderSurfaceList();
+        renderLightList();
+        renderSurfacePlaceholder();
+        renderLightPlaceholder();
+        editorStatus('selection cleared');
       }
 
       function switchInspectorTab(tabId) {
@@ -2765,7 +2797,7 @@
         renderObjectList(); renderSurfaceList();
         renderSurfaceProps(s, { name: label, surfaces: names });
         if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
-        if (Module.editorHighlight)    Module.editorHighlight(names.join(';'));
+        updateHighlight();
         editorStatus(label + ': editing ' + names.length + ' surface(s) together');
       }
       // Ctrl/cmd-click: toggle `names` in/out of the multi-selection. Starting
@@ -2813,7 +2845,7 @@
         switchInspectorTab('material');
         renderObjectList(); renderSurfaceList(); renderSurfaceProps(s);
         if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
-        if (Module.editorHighlight) Module.editorHighlight(s.name);                     // outline it in the render
+        updateHighlight();                                                              // outline it in the render
         var sel = document.querySelector('#editor-list .surf-item.sel');
         if (sel) sel.scrollIntoView({ block: 'nearest' });
       }
@@ -3172,6 +3204,7 @@
         btn.textContent = on ? '■ stop' : '▶ play';
         btn.style.background = on ? '#422' : '#232';
         updateTimeUI(t);
+        updateHighlight(); // Suspend 3D highlight outline during playback so demo renders cleanly
         if (on) {
           scenePlayPoll = setInterval(function(){
             if (Module.editorSceneTime) updateTimeUI(Module.editorSceneTime());
@@ -3185,6 +3218,7 @@
         if (e.key === '[') timeStep(e.shiftKey ? -500 : -50);
         else if (e.key === ']') timeStep(e.shiftKey ? 500 : 50);
         else if (e.key === ' ' && !e.repeat) { setScenePlaying(!scenePlaying); e.preventDefault(); }
+        else if (e.key === 'Escape') { clearSelection(); e.preventDefault(); }
       });
       // Backups: greets stashes its .lwo/.LWS authoring sources under
       // Authoring/greets/.backups (restore regens the FLD); the other scenes
@@ -4809,7 +4843,7 @@
           var li = pickLightAt(e);
           if (li >= 0 && selectLightFromPick(li)) return;
           var name = pickAt(e);
-          if (!name) { editorStatus('pick: no surface here'); return; }
+          if (!name) { clearSelection(); return; }
           // pick=object: promote the picked surface to its owning object so
           // the whole model (e.g. the mech) is selected/edited at once.
           var pickObj = document.getElementById('editor-pickobj');
