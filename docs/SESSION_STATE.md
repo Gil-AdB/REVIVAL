@@ -27,6 +27,38 @@
 - Prior: rev-dispfix (46 commits, "still a lot of tears") is not merged and its merge question
   `12a396dd0f85` is moot until the proposal lands.
 
+## 2026-09-02e — the from-scratch proposal landed (`docs/JUNCTION_ATTACK_PROPOSAL.md`), and it moves the defect off the crease
+
+- **The agent's headline, MEASURED with a `--face_id_dump` + z16 world decode** (`64e87ccec15d`, `087a63970e4c`):
+  the H6194 wedge is a **T-junction hinge crack on the coplanar far-wall/spandrel seam** of the jamb line, not
+  a crease failure. The far-wall sheet has no border vertex between the authored y=4.937 and y=6.202, so it
+  bounds itself with one chord from the pinned top to the mitred (17.840,4.810,−62.988); the spandrel owns the
+  y=4.937 vertex. Gap 0.062 u at the door head → 0.002 u at the top; lip-to-lip p50 0.031 / max 0.122 u.
+  69.2 % of hole-boundary pixels have all neighbouring faces within 30°; the splayed reveal bounds ~88 of 509.
+  The coordinator's earlier box census shows the same geometry (faces 5463/5464, `[STONE-PROV]` 4.937 pin →
+  4.810 free, nothing between) — filed as the answer to `a1588f2a3bda`. The mitre widens the crack ~10×
+  (`8e5c22727eec`). **Trap** `8fd6c6d41202`: min triangle-pair distance is blind to a hinge crack — that is how
+  rev-dispfix read "watertight at 99 % of hole pixels" on a hole visible across the room.
+- **Diagnosis**: continuity is a property of an EDGE; the bake decides per VERTEX (own UV grid per sheet + ~8
+  independent classifiers + fold-relax of 1 783 inverted faces). **Correct output** defined bake-free (§2):
+  height graph per authored plane; convex → intersection curve, trim both; concave → other branch; coplanar →
+  one continuous curve, no ride, no level; the jamb switches class at y=4.937, which must be a vertex of BOTH.
+- **Test**: T1 seam-consistency audit on a dumped mesh (per authored edge, symmetric Hausdorff of the two
+  boundary polylines, bar **0.000**, T-junctions 0; needs a `--greets_displace_mesh_dump` + `tools/seam_audit.py`),
+  T2 coverage vs the bare wall (`tools/v4_tear_cover.py` retargeted, pass 0 at H6194 + the 10 mitre lines + 8
+  split seams + controls), T3 an offline Python ray-cast of §2 last. `--greets_displace_ref` is NOT the oracle.
+- **Approach**: A — shared seam ladder (one canonical sample list per authored edge, created once, indexed by
+  both sheets, displaced once; 0 runtime ms, bake-only) with D (pin the arris, `--no-greets_displace_free_edge`,
+  0 holes today, as a one-cell band) as the bisect control. B true-mitre re-trim is refuted by §0 (undefined at
+  n₁=n₂); C per-pixel relief is 349–505 ms. **Delete, not tune**: mitre + satellites, fold_relax (once T1=0),
+  border_mean ×0.40, seam_weld (byte-identical here), the `--displace_viz` back-face cull, the tri-tri metric.
+- **Nothing built yet** — his call on the proposal first. Page (wipe deck of the four H6194 arms + the UV
+  strip + the proposal): https://claude.ai/code/artifact/bbb06c85-e255-469f-8e56-c5ff6cb76434
+- **New instrument, his ask** (`53c493538584`): `--uv_viz=1..4` paints each pixel's diffuse texel column/row
+  (decoded from the G-buffer txtr word, texel-exact): 1 R=u G=v, 2 8×8 checker, 3 u saw, 4 v saw; in the X
+  cycle; `--mat_probe` appends `uv u,v / W×H mipN`. Byte-null off: H6194 `36cd059a…`, cam A `d92cb6f5…`,
+  render_gate 4/4. At H6194 the UV is continuous across the door-head seam where the mesh is not.
+
 ## 2026-09-02c — his verdict on the tip is a FAIL; the density ladder is measured and on his deck
 
 - **His words** (verdict `43494afa5f5d`, verbatim): *"under the latest v4, walls are still wobbly, mesh

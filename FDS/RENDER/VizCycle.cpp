@@ -23,6 +23,7 @@ namespace fds {
 // early-outs they mirror (FDS/RENDER/LightmapBake.cpp, FDS/RENDER/EnvBake.cpp).
 bool LightmapViz_Available();
 bool NormalViz_Available();
+bool UvViz_Available();
 bool EnvReflectionViz_Available();
 bool EnvMapViz_Available();
 bool EnvMapGpuViz_Available();
@@ -45,6 +46,7 @@ using FF = FeatureFlags;
 bool availAlways()   { return true; }
 bool availAlbedo()   { return FF::deferred() && EngineGBuffer_HasAlbedoPlane(); }
 bool availGbNormal() { return FF::deferred() && NormalViz_Available(); }
+bool availUv()       { return FF::deferred() && UvViz_Available(); }
 bool availDisp1()    { return DisplaceViz_HasData(); }
 bool availDisp2()    { return DisplaceViz_HasErrorData(); }
 bool availSeam()     { return PomSeamViz_HasData(); }
@@ -107,6 +109,14 @@ const VizEntry kEntries[] = {
       "needs --deferred (reads the G-buffer normal plane)" },
     { "NORMAL raw texel",        "nmap_viz",            3, availGbNormal, false,
       "needs --deferred (reads the G-buffer normal plane)" },
+    { "UV fraction (R=u G=v)",   "uv_viz",              1, availUv,       false,
+      "needs --deferred (reads the G-buffer txtr plane)" },
+    { "UV checker 8x8",          "uv_viz",              2, availUv,       false,
+      "needs --deferred (reads the G-buffer txtr plane)" },
+    { "UV column saw (u)",       "uv_viz",              3, availUv,       false,
+      "needs --deferred (reads the G-buffer txtr plane)" },
+    { "UV row saw (v)",          "uv_viz",              4, availUv,       false,
+      "needs --deferred (reads the G-buffer txtr plane)" },
     { "SHADOW lightmap id",      "shadow_lightmap_viz", 1, availShadowLm, false,
       "needs --shadow-lightmap (the static lightmap bake) at STARTUP" },
     { "SHADOW lightmap faceIdx", "shadow_lightmap_viz", 2, availShadowLm, false,

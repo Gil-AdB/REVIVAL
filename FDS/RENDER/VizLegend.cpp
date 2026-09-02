@@ -178,6 +178,33 @@ int VizLegend_Build(VizLegendRow* rows, int maxRows, int* sigOut) {
 			break;
 		}
 		sig = (9 << 8) | FF::shadow_lightmap_viz();
+	} else if (FF::uv_viz() > 0) {
+		switch (FF::uv_viz()) {
+		case 2:
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "8x8 CHECKER over one tile of the surface's own diffuse UV (texel-exact)");
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "cell edges that JOG where two sheets meet = the sheets carry different UV");
+			break;
+		case 3:
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "grey saw = the U COLUMN: 16 stripes per tile, each restart = one stripe");
+			break;
+		case 4:
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "grey saw = the V ROW: 16 stripes per tile, each restart = one stripe");
+			break;
+		default: {
+			const uint32_t chips[2] = { 0x00FF0000u, 0x0000FF00u };
+			n = addRow(rows, n, maxRows, chips, 2,
+			    "RED = u, GREEN = v of the surface's diffuse UV here, wrapped to one tile");
+			n = addRow(rows, n, maxRows, nullptr, 0,
+			    "a wrap is a tile seam; a colour STEP along a junction = different UV per sheet");
+			break; }
+		}
+		n = addRow(rows, n, maxRows, nullptr, 0,
+		    "dark grey = nothing rasterised; mid grey = no diffuse map / forward-rendered");
+		sig = (15 << 8) | FF::uv_viz();
 	} else if (FF::pom_horizon_viz()) {
 		n = addRow(rows, n, maxRows, nullptr, 0,
 		    "grey = the horizon TERM itself, albedo and ambient removed:");

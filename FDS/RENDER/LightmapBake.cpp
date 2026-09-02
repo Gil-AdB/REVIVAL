@@ -3,6 +3,7 @@
 // docs/STATIC_SHADOW_LIGHTMAPS.md.
 
 #include "RENDER/LightmapBake.h"
+#include "RENDER/OffscreenView.h"   // g_offscreenViewDepth (the --uv_viz probe guard)
 
 // Match DeferredLighting.cpp's include order: legacy `.H` headers first
 // (they push/pop pack(1) in subtly-unbalanced ways across the chain),
@@ -976,6 +977,82 @@ void Render_NormalViz(Scene *Sc)
         float vz = tz*nmX + bz*nmY + nz*nmZ;
         const float inv = 1.0f / std::sqrt(vx*vx + vy*vy + vz*vz + 1e-12f);
         out[i] = pack(vx*inv, vy*inv, vz*inv);
+    }
+}
+
+// ── Per-pixel UV viz (--uv_viz) ────────────────────────────────────────────
+// Same post-tonemap slot as Render_NormalViz. The G-buffer's txtr word holds
+// the block-tiled texel ADDRESS the rasteriser sampled the diffuse at
+// (SimdHelpers.h: addr = (u&3) | ((v&vmask)<<2) | ((u>>2)<<(2+vbits)) with
+// vbits = log2 of the mip's height), so the UV the surface carries at the
+// pixel is recoverable to texel precision, wrapped to one tile. That is the
+// quantity the wall-junction hunt asks for: which UV column each sheet carries
+// where it meets its neighbour (2026-09-02, H6194: u -4.0774 vs +0.5000).
+bool UvViz_DecodeTexel(uint32_t mat32, const MatTable &mt,
+                       int &u, int &v, int &w, int &h, int &mip)
+{
+    if (mat32 == 0xFFFFFFFFu) return false;            // forward-raster sentinel
+    const uint32_t matId = (mat32 >> 20) & 0xFF;
+    const uint32_t addr  = mat32 & 0xFFFFFu;
+    mip = int(mat32 >> 28);
+    const Material *Mat = (matId < mt.count && mt.data) ? mt.data[matId] : nullptr;
+    const Texture *t = Mat ? Mat->Txtr : nullptr;
+    if (!t || t->SizeX <= 0 || t->SizeY <= 0 || !t->Mipmap[mip]) return false;
+    w = std::max(1, int(t->SizeX >> mip));
+    h = std::max(1, int(t->SizeY >> mip));
+    int vbits = 0;
+    while ((1 << vbits) < h) ++vbits;
+    v = int((addr >> 2) & uint32_t(h - 1));
+    u = int((addr & 3u) | ((addr >> (2 + vbits)) << 2));
+    if (u >= w) u &= (w - 1);
+    return true;
+}
+
+bool UvViz_Available() { return NormalViz_Available(); }
+
+void Render_UvViz(Scene *Sc)
+{
+    const int mode = fds::FeatureFlags::uv_viz();
+    if (mode == 0) return;
+    if (g_offscreenViewDepth > 0) return;              // never paint into a probe / mirror
+    meka::GBuffer *gb = g_gbuffer;
+    if (!Sc || !gb || gb->txtr.empty()) return;
+    MatTable mt = Scene_GetMatTable(Sc);
+    uint32_t *out = reinterpret_cast<uint32_t *>(VPage);
+    const size_t n = std::min(size_t(XRes) * size_t(YRes), gb->txtr.size());
+    const bool haveZ = ZPage16 != nullptr;
+    auto pack = [](int R, int G, int B) -> uint32_t {
+        R = R < 0 ? 0 : R > 255 ? 255 : R;
+        G = G < 0 ? 0 : G > 255 ? 255 : G;
+        B = B < 0 ? 0 : B > 255 ? 255 : B;
+        return uint32_t(B) | (uint32_t(G) << 8) | (uint32_t(R) << 16) | 0xFF000000u;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        if (haveZ && ZPage16[i] == 0) { out[i] = 0xFF101010u; continue; }   // untouched
+        int u, v, w, h, mip;
+        if (!UvViz_DecodeTexel(gb->txtr[i], mt, u, v, w, h, mip)) { out[i] = 0xFF303030u; continue; }
+        const float fu = (float(u) + 0.5f) / float(w);
+        const float fv = (float(v) + 0.5f) / float(h);
+        switch (mode) {
+        case 2: {   // 8x8 checker over the tile, faint u/v tint so the cells keep their phase
+            const int cell = ((u * 8 / w) + (v * 8 / h)) & 1;
+            const int base = cell ? 200 : 40;
+            out[i] = pack(base + int(fu * 55.0f), base + int(fv * 55.0f), base);
+            break; }
+        case 3: {   // u column: 16-stripe saw
+            const float s = fu * 16.0f;
+            const int g = int((s - std::floor(s)) * 255.0f);
+            out[i] = pack(g, g, g);
+            break; }
+        case 4: {   // v row: 16-stripe saw
+            const float s = fv * 16.0f;
+            const int g = int((s - std::floor(s)) * 255.0f);
+            out[i] = pack(g, g, g);
+            break; }
+        default:    // 1: R = u, G = v, wrapped to the tile
+            out[i] = pack(int(fu * 255.0f), int(fv * 255.0f), 0);
+            break;
+        }
     }
 }
 

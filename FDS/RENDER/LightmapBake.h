@@ -21,6 +21,7 @@
 struct Scene;
 struct CubeShadowRef;
 struct Vector;
+struct MatTable;   // Base/FDS_DECS.H (Scene_GetMatTable) — UvViz_DecodeTexel reads it
 
 namespace fds {
 
@@ -72,6 +73,14 @@ uint8_t LightmapBake_DebugSampleAtWorld(int cubeIdx, float wx, float wy, float w
 // 0 (default) = no-op.
 void Render_LightmapViz(Scene *Sc);
 void Render_NormalViz(Scene *Sc);   // --nmap_viz debug (post-tonemap, like LightmapViz)
+void Render_UvViz(Scene *Sc);       // --uv_viz debug (post-tonemap, same slot)
+bool UvViz_Available();             // runtime-cycle availability probe (VizCycle.cpp)
+// Decode a G-buffer txtr word (miplevel:4 | matID:8 | swizzled UV:20) to the
+// texel column/row it addresses inside the material's DIFFUSE map at that mip
+// (w,h = that mip's size). False for the forward-raster sentinel, an
+// out-of-table material, or a material without a diffuse map / that mip.
+bool UvViz_DecodeTexel(uint32_t mat32, const ::MatTable &mt,
+                       int &u, int &v, int &w, int &h, int &mip);
 
 }  // namespace fds
 

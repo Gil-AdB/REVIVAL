@@ -72,7 +72,7 @@ void Render_DeferredSkybox();
 void VolProf_Tick();
 
 // Defined in LightmapBake.cpp.
-namespace fds { void Render_LightmapViz(struct Scene *Sc); void Render_NormalViz(struct Scene *Sc); }
+namespace fds { void Render_LightmapViz(struct Scene *Sc); void Render_NormalViz(struct Scene *Sc); void Render_UvViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
 namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_HdrBrightPass(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_DoFPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Render_GradeGrainPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
 
@@ -1464,6 +1464,9 @@ xpar_done: ;
 	// Normal debug viz (--nmap_viz): geometric / TBN-shaded / raw-texel
 	// normals as RGB. Same post-tonemap slot for the same reason.
 	fds::Render_NormalViz(CurScene);
+	// Per-pixel UV viz (--uv_viz): the surface's diffuse texel column/row at
+	// every pixel, decoded from the G-buffer txtr word. Same slot.
+	fds::Render_UvViz(CurScene);
 	// Env-reflection pano viewer (--env_refl_viz=N): blit the Nth baked
 	// panorama over the frame's top-right corner. Same post-tonemap slot.
 	fds::EnvReflection_DrawViz(CurScene);

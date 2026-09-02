@@ -48,6 +48,7 @@ void Xtrace_WriteFile(const char*);
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/TailProf.h"   // phase-1 serial-glue breakdown (FDS_TAIL_PROF)
 #include "RENDER/LightmapBake.h"
+#include <cstring>             // std::strlen (the --mat_probe uv append)
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -4379,8 +4380,18 @@ struct GreetsScene : SceneDriver {
 					}
 					snprintf(MSGStr, sizeof(MSGStr),
 						"[MAT@(%d,%d)] id=%u %s", cx, cy, (unsigned)matID, name);
+					// --uv_viz: append the diffuse texel the surface carries here.
+					int tu, tv, tw, th, tmip;
+					if (fds::FeatureFlags::uv_viz() > 0
+					    && fds::UvViz_DecodeTexel(mat32, mt, tu, tv, tw, th, tmip)) {
+						const size_t l = std::strlen(MSGStr);
+						snprintf(MSGStr + l, sizeof(MSGStr) - l,
+							"  uv %d,%d / %dx%d mip%d", tu, tv, tw, th, tmip);
+					}
 				}
-				OutTextXY(VPage, 0, YRes - 30, MSGStr, 255);
+				// Under --uv_viz the legend owns the bottom-left, so the probe
+				// line moves to the top-left instead of overprinting it.
+				OutTextXY(VPage, 0, fds::FeatureFlags::uv_viz() > 0 ? 8 : YRes - 30, MSGStr, 255);
 				// FDS_GREETS_FACEFIND="x,y": find the ACTUAL faces covering a
 				// pixel by point-in-triangle over every transformed visible
 				// face (their screen PX/PY are set even for forward/xpar faces
