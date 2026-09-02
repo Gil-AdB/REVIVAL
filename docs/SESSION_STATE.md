@@ -1,4 +1,33 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-02c — his verdict on the tip is a FAIL; the density ladder is measured and on his deck
+
+- **His words** (verdict `43494afa5f5d`, verbatim): *"under the latest v4, walls are still wobbly, mesh
+  does not conform to the heightmap, and there are no view-through-adjacent-walls..."* — a fail on all
+  three, and the look ruling P4 was stopped at.
+- **Points 1+2 are one measured mechanism** (`256d9f38b114`): at `--v4_cpb=1` a block interior owns no
+  vertex, so every plateau is covered by triangles whose corners are mortar-deep — the block face bakes
+  as a skewed plane 0.106 u below the field. The 2× crop at cam A shows exactly that: tilted faces with
+  diagonal seams. **The ladder, re-measured at the tip with the rings on** (`ae78e6541f01`, per-arm
+  `greets.displace.v4.relief.plateau_bias {state=P4tip}`), cam A, interleaved min-of-5:
+
+  | rung | faces | plateau core e−r p50 | min-ang p10 | frame ms | Δ vs shipped |
+  |---|---|---|---|---|---|
+  | shipped `--v4_cpb=1` | 61 430 | −0.106 u | 2.4° | 48.63 | — |
+  | `--v4_block_mid` | 76 680 | −0.017 u | 6.2° | 48.54 | −0.1 |
+  | `--v4_cpb=2` | 111 721 | −0.023 u | 7.9° | 50.54 | +1.9 |
+  | `--v4_band_union --v4_cpb=2` | 148 255 | −0.003 u | 6.3° | 52.40 | +3.8 (5 known pinholes) |
+  | `--v4_cpb=4` | 229 826 | +0.000 u | 15.1° | 55.87 | +7.2 |
+  | old bake (v4 off) | — | — | — | 50.50 | +1.9 |
+
+- **Ruling card `a6816582fd62`** (`greets.displace.v4.density_rung`, waiting on him): the deck
+  https://claude.ai/code/artifact/af0a33e5-8c7a-4638-8c0d-adfb695a3cbe wipes each rung against the
+  shipped one at cam A, the corner pose and the panel pose, full frame and 2× crop, and builds the
+  answer command. Whatever he picks becomes the default under `--greets_displace_v4` after the gates.
+- **Point 3 is not in the ladder**: no recess / no view-through at wall boundaries is his earlier
+  `98b9eba830ec` + `7cec6b7a171d`; P4 unpinned the crease vertices but 104 of 155 corners and 520 of
+  1 906 border samples are still held (abutments → `--v4_ring_abut`, unmeasured; wall-to-ceiling →
+  P5 skirts). Separate lever, next after his rung.
+
 ## 2026-09-02b — P4 junction rings merged (3a665e7a), STOPPED AT ITS GATE; the city single flip did not reproduce
 
 - **P4 is built and merged** (rev-p4 pinned `7978ab5c`, `--greets_displace_v4` default OFF, `--v4_rings`
