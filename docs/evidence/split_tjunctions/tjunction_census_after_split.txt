@@ -1,0 +1,3 @@
+authored 165 verts / 270 faces -> 157 welded verts
+T-junctions (vertex strictly inside another face's edge): 0
+0 host lines

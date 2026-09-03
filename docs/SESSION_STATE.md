@@ -1,4 +1,45 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-04a — the T-junction split is built (his Antigravity session, rev-seam-audit → fog-wt), verified, and not enough at the joint
+
+He pointed me at `/Users/gil-ad/.gemini/antigravity/brain/d6b78fe3-c8b0-4698-b915-9df47c4e6ff9/walkthrough.md` and its
+transcript: "we did some work on the displacement, which fixed some things, and added debug viz helpful in analyzing".
+Then, after flying it: **"the pose there is not enough - artifacts are still existing on the wall joint and near it"**.
+
+- **What the branch is** (`rev-seam-audit`, 24ef6925 + dc37eac7, fast-forwarded into fog-wt after the gates):
+  `DEMO/SplitTJunctions.cpp` under `--greets_split_tjunctions` (default OFF) splits the 40 authored T-junctions at greets
+  init before `DisplaceStoneSubdiv` (226 → 270 faces incl. the doorway quads; runs BEFORE the seam-phase pass, so the
+  phase solve sees the split mesh); `RegularizeDoorwayQuads` under `--greets_regularize_doorway_walls` (default ON, only
+  reached from inside the split) re-cuts the two x=17.898 doorway panels into rectangular quads at lintel height y 4.9374
+  with hard-coded corner UVs (exact linear values). Tools: `tools/seam_audit.py` (T1 border Hausdorff audit),
+  `tools/split_tjunctions.py` (Python prototype). No new viz: the session used the existing `--nmap_viz=1`, `--uv_viz=2`,
+  `--wire_viz`. Its last turn ("how can I fly this?") was cut off by a stream error, so the fly command is in the deck.
+- **Verified on a fresh build** (`docs/evidence/split_tjunctions/battery.txt`): flag off, H6194 pin 36cd059a… and cam A
+  pin d92cb6f5… byte-identical (worktree binary and the merged main build), the other three off frames equal the
+  2026-09-03 md5s, render_gate 4/4. Holes, shipping → split → split+phase: H6194 5273 → 107 → 75, H5981 242 → 242 → 283,
+  corner 0, line5 1268 → 0 → 0, t6934 666 → 743 → 776 (443 without the doorway quads). The census on the engine's own
+  split dump reads 0 T-junctions.
+- **t=6934, his "bulge" pose** (FDS_GREETS_CAM 21.1321335,3.69573379,-62.3785057,-0.614380598,-0.115213886,0.780552626):
+  the doorway quads remove the soffit snout, the diagonal gouge and the sheared courses; the split removes the 412-px
+  base crack; the price is +523 px of 5–7 px wide slits along the RIGHT WALL'S FOOT (rooms|floor seam, bboxes in
+  `t6934_hole_components.txt`). A trade, not a free fix.
+- **Around the joint** (four synthetic poses P1–P4, `joint_census.txt`): split+phase vs off holes 1752 → 877, 1266 → 1605
+  (the foot, looking down: WORSE, five 95–180 px slits along the plinth), 326 → 0, 452 → 445; every residual component is
+  on the wall-to-floor seam. My reading against Blender at the same poses: two residual classes — dark slits along the
+  plinth band, and bright lips on the arris where each horizontal groove reaches the corner (Blender's groove wraps).
+  Mechanism (hypothesis, backed by their T1 audit reading FAIL before and after on 371/274 → 374/377 edges): the bake
+  still samples each sheet's border from its own UV grid (713 vs 88 vertices on the wall-to-floor edge), so borders
+  never coincide — the Phase B "shared seam ladder" is unbuilt. Their T1 scalar is not a yardstick yet (a third of the
+  edges read INF).
+- **Deck, rev 2** (same URL): https://claude.ai/code/artifact/993e64a7-cfdb-4fe9-ad8e-4a589be09c16 — the four junctions with
+  the FDS split arms added, his t6934 joint, P1–P4, Blender's split arm at every one of them, the hole table, the fly
+  command and the headless recipe.
+- Ledger (coordinator): 8a2154933361 holes, byte_null (md5_single), ae668938d701 doorway-quad trade at t6934, 0c594ca1c93a
+  0 T-junctions after the split, 8eaf97ffbda3 tool.seam_audit.t1, 4fe350c95698 joint residual, **9e261472803a his verdict**
+  (quoted), the topology ruling 4ab7684b5e65 answered as built (quoted). Open beside it: the seam-phase ruling
+  2ad45f7c403b; whether the split engages under `--greets-displace`.
+- Trap met: DEMO chdirs to its own `Runtime/` (d5d5ac74d34d), so `cd main/Runtime && worktree/build/DEMO/DEMO` renders the
+  WORKTREE's assets and writes its dumps there; the pins matched anyway.
+
 ## 2026-09-03b — external reference: Blender on the exact engine mesh says the junction defect is T-junction topology (his ruling pending)
 
 His words after the seam-phase deck: "everything you do just makes stuff worse in each iteration ... we don't have a

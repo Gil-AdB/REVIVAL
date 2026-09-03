@@ -1,0 +1,20 @@
+# four synthetic poses around the pillar joint (x 17.898, z -58.014, y 0..4.937), t=6934, judging flags, rev-seam-audit binary dc37eac7; off vs --greets_split_tjunctions --greets_uv_seam_phase (regularize default on)
+# P1 close mid-height FDS_GREETS_CAM=19.6,2.6,-60.2,-0.61,-0.07,0.79 | P2 foot looking down 19.8,1.6,-60.5,-0.55,-0.41,0.73 | P3 soffit looking up 19.8,3.2,-60.8,-0.50,0.45,0.74 | P4 square-on from back 23.5,2.4,-57.0,-0.98,0.02,-0.17
+off_p1         off_p1                   holes=  1752 comps= 142 top=[1332, 128, 23, 14, 10]
+off_p2         off_p2                   holes=  1266 comps= 214 top=[731, 235, 15, 8, 7]
+off_p3         off_p3                   holes=   326 comps=   1 top=[326]
+off_p4         off_p4                   holes=   452 comps= 111 top=[84, 77, 72, 12, 8]
+sp_p1          sp_p1                    holes=   877 comps= 278 top=[208, 114, 108, 37, 19]
+sp_p2          sp_p2                    holes=  1605 comps= 451 top=[180, 149, 144, 129, 100]
+sp_p3          sp_p3                    holes=     0 comps=   0 top=[]
+sp_p4          sp_p4                    holes=   445 comps= 101 top=[86, 51, 50, 35, 21]
+
+# hole components, top 6
+off_p1   holes= 1752 [1332 px x862-960 y868-1080] [128 px x943-953 y780-818] [23 px x533-541 y878-886] [14 px x590-594 y968-978] [10 px x609-610 y979-989] [10 px x608-609 y966-976]
+sp_p1    holes=  877 [208 px x1558-1575 y1023-1077] [114 px x543-569 y871-936] [108 px x1694-1702 y922-959] [37 px x666-668 y1054-1080] [19 px x517-521 y842-850] [15 px x571-576 y942-951]
+off_p2   holes= 1266 [731 px x819-893 y110-335] [235 px x910-941 y470-500] [15 px x913-920 y575-581] [8 px x886-891 y552-556] [7 px x609-610 y295-302] [5 px x229-230 y102-107]
+sp_p2    holes= 1605 [180 px x963-1003 y581-598] [149 px x1333-1404 y380-430] [144 px x1515-1522 y304-351] [129 px x957-964 y527-585] [100 px x1654-1659 y252-288] [95 px x670-674 y321-370]
+off_p3   holes=  326 [326 px x895-951 y619-757]
+sp_p3    holes=    0 
+off_p4   holes=  452 [84 px x403-411 y877-905] [77 px x76-84 y937-966] [72 px x96-105 y931-956] [12 px x639-640 y845-857] [8 px x814-815 y809-817] [6 px x645-646 y854-860]
+sp_p4    holes=  445 [86 px x77-86 y933-961] [51 px x384-391 y883-906] [50 px x371-375 y886-912] [35 px x796-798 y811-833] [21 px x52-56 y954-970] [7 px x607-608 y859-866]

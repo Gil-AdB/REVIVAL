@@ -1,0 +1,6 @@
+# t=6934 hole components (ZPage16==0), top 6 by size, bbox in frame pixels; arms one flag apart on the rev-seam-audit binary dc37eac7
+off              holes=  666 comps=166 [412 px x939-1012 y856-998] [32 px x1004-1009 y817-830] [12 px x758-759 y912-924] [8 px x684-689 y840-844] [6 px x102-103 y760-766] [6 px x757-758 y902-908]
+split_noreg      holes=  443 comps=289 [49 px x1374-1408 y954-966] [12 px x758-759 y912-924] [8 px x684-689 y840-844] [6 px x1615-1619 y827-830] [6 px x1611-1615 y824-827] [6 px x1607-1611 y821-824]
+split_reg        holes=  743 comps=294 [96 px x1841-1920 y789-800] [76 px x1303-1309 y997-1029] [62 px x1441-1446 y916-944] [21 px x1296-1308 y1029-1036] [17 px x1541-1545 y872-882] [17 px x1198-1208 y1072-1080]
+split_reg_phase  holes=  776 comps=327 [105 px x1261-1311 y1012-1056] [58 px x1398-1403 y947-971] [45 px x1513-1517 y877-899] [37 px x1236-1251 y1065-1073] [35 px x810-812 y962-989] [13 px x664-666 y809-817]
+added by regularization (in split_reg, not within 2 px of split_noreg): 523 px in 131 comps [96 px x1841-1920 y789-800] [76 px x1303-1309 y997-1029] [62 px x1441-1446 y916-944] [21 px x1296-1308 y1029-1036] [17 px x1198-1208 y1072-1080] [14 px x1541-1545 y872-880]

@@ -1,0 +1,28 @@
+# battery 2026-09-03T22:34:36Z binary /Users/gil-ad/work/revival-fog-seam-audit/build/DEMO/DEMO (dc37eac7)
+## pins, flag off (expect H6194 36cd059a6dec6d6bb2c74f880ca2d0c1, cam A d92cb6f5eb19da4301588ae83af6a56e)
+off_h6194              md5 36cd059a6dec6d6bb2c74f880ca2d0c1  tsplit-lines 0  off_h6194                holes=  5273 comps= 137 top=[4585, 254, 135, 30, 20]
+off_camA               md5 d92cb6f5eb19da4301588ae83af6a56e  tsplit-lines 0  off_camA                 holes=  1014 comps= 320 top=[296, 90, 45, 43, 30]
+## other off frames (earlier md5s: H5981 96449cfb…, corner e666035a…, line5 1f08874a…)
+off_h5981              md5 96449cfbe2181ece35d130621d2f7d2c  tsplit-lines 0  off_h5981                holes=   242 comps= 163 top=[11, 5, 4, 4, 4]
+off_corner             md5 e666035ac5ebca133a11e44905251663  tsplit-lines 0  off_corner               holes=     0 comps=   0 top=[]
+off_line5              md5 1f08874a1ad7666600b6c18e978a589e  tsplit-lines 0  off_line5                holes=  1268 comps= 123 top=[959, 55, 34, 6, 6]
+## split arm (--greets_split_tjunctions; regularize default on)
+split_h6194            md5 3b0fc8fc15e9657b50f463febb3a0fb7  tsplit-lines 3  split_h6194              holes=   107 comps=  75 top=[9, 5, 4, 4, 3]
+split_h5981            md5 1c401fe5738ae38119e62b415d4e2b39  tsplit-lines 3  split_h5981              holes=   242 comps= 163 top=[11, 5, 4, 4, 4]
+split_corner           md5 beea0aa1979b01730ca3a2efae39e269  tsplit-lines 3  split_corner             holes=     0 comps=   0 top=[]
+split_line5            md5 a1c7f694be2d8a63c706d03a0310bf4c  tsplit-lines 3  split_line5              holes=     0 comps=   0 top=[]
+split_t6934            md5 e69e02cab456d246bf16ec9e187c59a3  tsplit-lines 3  split_t6934              holes=   743 comps= 294 top=[96, 76, 62, 21, 17]
+## split + seam phase
+splitphase_h6194       md5 3b29fa858f3868c53ae315673d7806b1  tsplit-lines 3  splitphase_h6194         holes=    75 comps=  60 top=[6, 5, 2, 2, 2]
+splitphase_h5981       md5 1b70cc5c235fbed5e0bb30dfc2912397  tsplit-lines 3  splitphase_h5981         holes=   283 comps= 201 top=[20, 16, 5, 4, 4]
+splitphase_corner      md5 ea849b2036a69b24fb1d6dd02a2aa3c6  tsplit-lines 3  splitphase_corner        holes=     0 comps=   0 top=[]
+splitphase_line5       md5 299c610bd574bbc89ea0c7eb3e0beaa9  tsplit-lines 3  splitphase_line5         holes=     0 comps=   0 top=[]
+splitphase_t6934       md5 19454de47926648248c7a6be4b0a9a89  tsplit-lines 3  splitphase_t6934         holes=   776 comps= 327 top=[105, 58, 45, 37, 35]
+## split WITHOUT doorway regularization (one flag apart, t6934 + h6194)
+splitnoreg_t6934       md5 716f010a91f2426dbb4c14e258965907  tsplit-lines 1  splitnoreg_t6934         holes=   443 comps= 289 top=[49, 12, 8, 6, 6]
+splitnoreg_h6194       md5 f8cffa0b0c51591328e229bbd50dd104  tsplit-lines 1  splitnoreg_h6194         holes=   107 comps=  75 top=[9, 5, 4, 4, 3]
+## the split pass as printed
+[STONE-TSPLIT] regularized doorway right wall panel into 2 quads (4 tris)
+[STONE-TSPLIT] regularized doorway left wall panel into 2 quads (4 tris)
+[STONE-TSPLIT] 'rooms': split 40 T-junctions in 6 rounds (226 target faces -> 270)
+# done 22:36:00Z

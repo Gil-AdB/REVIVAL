@@ -1,0 +1,1143 @@
+Authored mesh: /private/tmp/claude-501/-Users-gil-ad-work-revival-fog/7ec4ee82-204d-4fb8-a259-a95020066560/scratchpad/blender/greets_stone_authored.obj (226 faces, 163 vertices)
+  Interior edges: 274, open borders: 130
+  Authored T-junction vertices: 40
+    T-vert (17.898,4.937,-58.014) at t=0.267 along (17.898,0.000,-58.014)--(17.898,18.515,-58.014)
+    T-vert (17.898,4.937,-62.952) at t=0.733 along (17.898,18.515,-62.952)--(17.898,0.000,-62.952)
+    T-vert (17.898,0.000,-58.014) at t=0.674 along (17.898,0.000,-75.913)--(17.898,0.000,-49.374)
+    T-vert (17.898,0.000,-62.952) at t=0.488 along (17.898,0.000,-75.913)--(17.898,0.000,-49.374)
+    T-vert (9.875,0.000,-37.030) at t=0.100 along (12.344,0.000,-37.030)--(-12.344,0.000,-37.030)
+    T-vert (4.937,0.000,-37.030) at t=0.300 along (12.344,0.000,-37.030)--(-12.344,0.000,-37.030)
+    T-vert (-9.875,0.000,-37.030) at t=0.900 along (12.344,0.000,-37.030)--(-12.344,0.000,-37.030)
+    T-vert (-4.937,0.000,-37.030) at t=0.700 along (12.344,0.000,-37.030)--(-12.344,0.000,-37.030)
+    T-vert (2.469,0.000,-37.030) at t=0.400 along (12.344,0.000,-37.030)--(-12.344,0.000,-37.030)
+    T-vert (-2.469,0.000,-37.030) at t=0.600 along (12.344,0.000,-37.030)--(-12.344,0.000,-37.030)
+    T-vert (12.344,4.937,-37.030) at t=0.600 along (12.344,12.344,-37.030)--(12.344,0.000,-37.030)
+    T-vert (-12.344,4.937,-37.030) at t=0.400 along (-12.344,0.000,-37.030)--(-12.344,12.344,-37.030)
+    T-vert (-12.344,7.406,-18.515) at t=0.600 along (-12.344,0.000,-18.515)--(-12.344,12.344,-18.515)
+    T-vert (-12.344,7.406,-24.687) at t=0.400 along (-12.344,12.344,-24.687)--(-12.344,0.000,-24.687)
+    T-vert (12.344,7.406,-18.515) at t=0.400 along (12.344,12.344,-18.515)--(12.344,0.000,-18.515)
+    T-vert (12.344,7.406,-24.687) at t=0.600 along (12.344,0.000,-24.687)--(12.344,12.344,-24.687)
+    T-vert (-12.344,3.086,-18.515) at t=0.250 along (-12.344,0.000,-18.515)--(-12.344,12.344,-18.515)
+    T-vert (-12.344,6.789,-18.515) at t=0.550 along (-12.344,0.000,-18.515)--(-12.344,12.344,-18.515)
+    T-vert (-12.344,7.406,-19.132) at t=0.100 along (-12.344,7.406,-18.515)--(-12.344,7.406,-24.687)
+    T-vert (-12.344,7.406,-24.070) at t=0.900 along (-12.344,7.406,-18.515)--(-12.344,7.406,-24.687)
+    T-vert (12.344,6.789,-18.515) at t=0.450 along (12.344,12.344,-18.515)--(12.344,0.000,-18.515)
+    T-vert (12.344,3.086,-18.515) at t=0.750 along (12.344,12.344,-18.515)--(12.344,0.000,-18.515)
+    T-vert (12.344,7.406,-24.070) at t=0.100 along (12.344,7.406,-24.687)--(12.344,7.406,-18.515)
+    T-vert (12.344,7.406,-19.132) at t=0.900 along (12.344,7.406,-24.687)--(12.344,7.406,-18.515)
+    T-vert (-12.344,2.469,-24.070) at t=0.100 along (-12.344,2.469,-24.687)--(-12.344,2.469,-18.515)
+    T-vert (-12.344,2.469,-19.132) at t=0.900 along (-12.344,2.469,-24.687)--(-12.344,2.469,-18.515)
+    T-vert (-12.344,2.469,-18.515) at t=0.200 along (-12.344,0.000,-18.515)--(-12.344,12.344,-18.515)
+    T-vert (12.344,2.469,-19.132) at t=0.100 along (12.344,2.469,-18.515)--(12.344,2.469,-24.687)
+    T-vert (12.344,2.469,-24.070) at t=0.900 along (12.344,2.469,-18.515)--(12.344,2.469,-24.687)
+    T-vert (12.344,2.469,-18.515) at t=0.800 along (12.344,12.344,-18.515)--(12.344,0.000,-18.515)
+    T-vert (-12.344,6.789,-24.687) at t=0.450 along (-12.344,12.344,-24.687)--(-12.344,0.000,-24.687)
+    T-vert (-12.344,3.086,-24.687) at t=0.750 along (-12.344,12.344,-24.687)--(-12.344,0.000,-24.687)
+    T-vert (12.344,3.086,-24.687) at t=0.250 along (12.344,0.000,-24.687)--(12.344,12.344,-24.687)
+    T-vert (12.344,6.789,-24.687) at t=0.550 along (12.344,0.000,-24.687)--(12.344,12.344,-24.687)
+    T-vert (-12.344,2.469,-24.687) at t=0.800 along (-12.344,12.344,-24.687)--(-12.344,0.000,-24.687)
+    T-vert (12.344,2.469,-24.687) at t=0.200 along (12.344,0.000,-24.687)--(12.344,12.344,-24.687)
+    T-vert (3.703,8.270,-5.555) at t=0.670 along (3.703,0.000,-5.555)--(3.703,12.344,-5.555)
+    T-vert (-3.703,8.270,-5.555) at t=0.330 along (-3.703,12.344,-5.555)--(-3.703,0.000,-5.555)
+    T-vert (-3.703,0.000,-5.555) at t=0.350 along (-12.344,0.000,-5.555)--(12.344,0.000,-5.555)
+    T-vert (3.703,0.000,-5.555) at t=0.650 along (-12.344,0.000,-5.555)--(12.344,0.000,-5.555)
+Baked mesh: /private/tmp/claude-501/-Users-gil-ad-work-revival-fog/7ec4ee82-204d-4fb8-a259-a95020066560/scratchpad/blender/greets_stone_baked.obj (90625 faces, 51348 vertices)
+  Baked boundary vertices: 12378
+=== SEAM AUDIT ===
+Authored mesh: /private/tmp/claude-501/-Users-gil-ad-work-revival-fog/7ec4ee82-204d-4fb8-a259-a95020066560/scratchpad/blender/greets_stone_authored.obj (226 faces, 163 vertices)
+Baked mesh:    /private/tmp/claude-501/-Users-gil-ad-work-revival-fog/7ec4ee82-204d-4fb8-a259-a95020066560/scratchpad/blender/greets_stone_baked.obj (90625 faces, 51348 vertices)
+Authored T-junctions: 40
+
+  edge mid=(33.636,9.258,-75.913) len=36.518  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(49.374,9.258,-49.374) len=18.515  rooms|rooms  dihedral=90.0deg
+    side1: 3 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(11.364,0.000,-56.971) len=4.937  floor|floor  dihedral=0.0deg
+    side1: 3 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(9.984,2.469,-59.017) len=4.937  rooms|rooms  dihedral=32.2deg
+    side1: 0 verts   side2: 2 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(5.515,2.469,-51.692) len=4.937  rooms|rooms  dihedral=29.1deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.745,2.469,-54.924) len=4.937  rooms|rooms  dihedral=31.7deg
+    side1: 4 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(9.875,2.469,-49.374) len=4.937  rooms|rooms  dihedral=27.3deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-7.406,5.555,-56.163) len=5.089  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-4.937,5.555,-56.163) len=1.234  rooms|rooms  dihedral=90.0deg
+    side1: 1 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-9.875,5.555,-56.163) len=1.234  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,5.555,-56.163) len=2.760  rooms|rooms  dihedral=0.0deg
+    side1: 0 verts   side2: 1 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.344,5.555,-56.163) len=1.234  rooms|rooms  dihedral=90.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.344,2.469,-56.163) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 6 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,2.469,-49.374) len=5.520  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.344,2.469,-49.374) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 8 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,4.937,-49.374) len=2.469  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-7.406,5.555,-49.374) len=5.089  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-4.937,5.555,-49.374) len=1.234  rooms|rooms  dihedral=90.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-9.875,5.555,-49.374) len=1.234  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.344,5.555,-49.374) len=1.234  rooms|rooms  dihedral=90.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-7.406,0.000,-49.374) len=4.937  floor|floor  dihedral=0.0deg
+    side1: 3 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.344,5.555,-52.768) len=6.900  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-4.937,4.937,-52.768) len=6.789  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-4.937,2.469,-49.374) len=4.937  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(4.937,6.789,-37.030) len=3.703  rooms|rooms  dihedral=0.0deg
+    side1: 10 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(11.109,4.937,-37.030) len=2.469  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 3  [FAIL]
+
+  edge mid=(3.703,8.023,-37.030) len=2.760  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.703,4.937,-37.030) len=2.469  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,6.172,-37.030) len=2.469  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-2.469,8.640,-37.030) len=7.406  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,4.937,-37.030) len=2.469  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 3  [FAIL]
+
+  edge mid=(7.406,11.726,-37.030) len=5.089  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(4.937,10.492,-37.030) len=3.703  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(9.875,11.726,-37.030) len=1.234  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.703,10.492,-37.030) len=4.451  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,9.875,-37.030) len=4.937  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-13.578,4.937,-21.601) len=6.172  rooms|rooms  dihedral=0.0deg
+    side1: 0 verts   side2: 4 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-13.578,6.789,-21.601) len=4.937  rooms|rooms  dihedral=63.4deg
+    side1: 0 verts   side2: 4 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-13.578,4.937,-19.132) len=3.703  rooms|rooms  dihedral=63.4deg
+    side1: 0 verts   side2: 4 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.961,7.098,-19.132) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 3  [FAIL]
+
+  edge mid=(-12.961,7.098,-18.824) len=1.512  rooms|rooms  dihedral=78.5deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 3  [FAIL]
+
+  edge mid=(13.578,3.086,-21.601) len=4.937  rooms|rooms  dihedral=63.4deg
+    side1: 0 verts   side2: 5 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(13.578,4.937,-19.132) len=3.703  rooms|rooms  dihedral=63.4deg
+    side1: 0 verts   side2: 3 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(13.578,6.789,-21.601) len=4.937  rooms|rooms  dihedral=63.4deg
+    side1: 0 verts   side2: 3 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.344,7.098,-18.824) len=0.873  rooms|rooms  dihedral=70.5deg
+    side1: 0 verts   side2: 6 verts
+    Hausdorff: INF u   T-junctions: 4  [FAIL]
+
+  edge mid=(-12.344,2.777,-18.824) len=0.873  rooms|rooms  dihedral=70.5deg
+    side1: 6 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 4  [FAIL]
+
+  edge mid=(-12.961,6.789,-24.378) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 0 verts   side2: 6 verts
+    Hausdorff: INF u   T-junctions: 3  [FAIL]
+
+  edge mid=(12.961,4.937,-24.378) len=3.952  rooms|rooms  dihedral=0.0deg
+    side1: 33 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 3  [FAIL]
+
+  edge mid=(0.000,0.000,-21.601) len=25.447  floor|floor  dihedral=0.0deg
+    side1: 5 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,0.000,-18.515) len=24.687  floor|floor  dihedral=0.0deg
+    side1: 6 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,10.307,-5.555) len=8.452  rooms|rooms  dihedral=0.0deg
+    side1: 0 verts   side2: 11 verts
+    Hausdorff: INF u   T-junctions: 3  [FAIL]
+
+  edge mid=(0.000,8.270,-5.555) len=7.406  rooms|rooms  dihedral=37.6deg
+    side1: 0 verts   side2: 4 verts
+    Hausdorff: INF u   T-junctions: 4  [FAIL]
+
+  edge mid=(-2.469,3.765,-4.937) len=2.469  rooms|rooms  dihedral=91.1deg
+    side1: 3 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,3.765,-4.937) len=2.469  rooms|rooms  dihedral=91.1deg
+    side1: 3 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.673,3.765,0.447) len=6.649  rooms|rooms  dihedral=0.0deg
+    side1: 0 verts   side2: 2 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-3.673,2.530,0.447) len=6.174  rooms|rooms  dihedral=25.5deg
+    side1: 0 verts   side2: 2 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(-3.673,3.765,-2.640) len=2.469  rooms|rooms  dihedral=27.7deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,3.765,-3.789) len=3.581  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,4.999,-3.789) len=2.594  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.673,3.765,0.447) len=6.649  rooms|rooms  dihedral=0.0deg
+    side1: 0 verts   side2: 2 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.673,3.765,-2.640) len=2.469  rooms|rooms  dihedral=27.7deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.673,2.530,0.447) len=6.174  rooms|rooms  dihedral=25.5deg
+    side1: 0 verts   side2: 2 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.071,2.530,-3.789) len=2.594  rooms|rooms  dihedral=0.0deg
+    side1: 0 verts   side2: 2 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.071,4.999,-3.789) len=2.594  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,1.265,-3.789) len=3.624  rooms|rooms  dihedral=36.9deg
+    side1: 0 verts   side2: 6 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.071,1.265,-3.789) len=3.624  rooms|rooms  dihedral=36.9deg
+    side1: 0 verts   side2: 6 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,2.530,4.236) len=1.850  rooms|rooms  dihedral=17.6deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.071,2.530,4.236) len=1.850  rooms|rooms  dihedral=17.6deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 1  [FAIL]
+
+  edge mid=(2.469,6.480,4.320) len=2.329  rooms|rooms  dihedral=50.3deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,5.246,4.937) len=0.494  rooms|rooms  dihedral=49.4deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,5.493,4.937) len=4.937  rooms|rooms  dihedral=32.0deg
+    side1: 2 verts   side2: 0 verts
+    Hausdorff: INF u   T-junctions: 2  [FAIL]
+
+  edge mid=(33.636,9.258,-49.374) len=36.518  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 1 verts
+    Hausdorff: 36.478046 u   T-junctions: 1  [FAIL]
+
+  edge mid=(49.374,9.258,-62.643) len=32.359  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 1 verts
+    Hausdorff: 32.359073 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,0.000,-30.859) len=27.601  floor|floor  dihedral=0.0deg
+    side1: 7 verts   side2: 4 verts
+    Hausdorff: 27.509200 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-2.469,2.469,-49.226) len=24.885  rooms|rooms  dihedral=0.0deg
+    side1: 12 verts   side2: 3 verts
+    Hausdorff: 24.384325 u   T-junctions: 3  [FAIL]
+
+  edge mid=(2.469,2.469,-49.226) len=24.885  rooms|rooms  dihedral=0.0deg
+    side1: 7 verts   side2: 24 verts
+    Hausdorff: 22.931326 u   T-junctions: 2  [FAIL]
+
+  edge mid=(17.898,9.258,-69.432) len=22.601  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 16 verts
+    Hausdorff: 22.299030 u   T-junctions: 1  [FAIL]
+
+  edge mid=(17.898,9.258,-53.694) len=20.432  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 7 verts
+    Hausdorff: 20.432127 u   T-junctions: 2  [FAIL]
+
+  edge mid=(49.374,9.258,-75.913) len=18.515  rooms|rooms  dihedral=90.0deg
+    side1: 1 verts   side2: 2 verts
+    Hausdorff: 18.515306 u   T-junctions: 1  [FAIL]
+
+  edge mid=(17.898,9.258,-49.374) len=18.515  rooms|rooms  dihedral=90.0deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 18.515255 u   T-junctions: 1  [FAIL]
+
+  edge mid=(17.898,9.258,-75.913) len=18.515  rooms|rooms  dihedral=90.0deg
+    side1: 1 verts   side2: 3 verts
+    Hausdorff: 18.515249 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.344,6.172,-12.035) len=17.898  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 5 verts
+    Hausdorff: 17.720334 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.344,6.172,-30.859) len=17.456  rooms|rooms  dihedral=0.0deg
+    side1: 10 verts   side2: 3 verts
+    Hausdorff: 17.274059 u   T-junctions: 2  [FAIL]
+
+  edge mid=(8.023,6.172,-5.555) len=15.067  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 6 verts
+    Hausdorff: 15.040941 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-8.023,6.172,-5.555) len=15.067  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 12 verts
+    Hausdorff: 14.959098 u   T-junctions: 1  [FAIL]
+
+  edge mid=(7.406,0.000,-43.202) len=13.294  floor|floor  dihedral=0.0deg
+    side1: 10 verts   side2: 4 verts
+    Hausdorff: 13.287606 u   T-junctions: 3  [FAIL]
+
+  edge mid=(9.875,2.469,-43.202) len=13.294  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 5 verts
+    Hausdorff: 13.283167 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-9.875,2.469,-43.202) len=13.294  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 2 verts
+    Hausdorff: 13.237984 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-4.937,1.852,-43.202) len=12.887  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 2 verts
+    Hausdorff: 12.912198 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-9.875,3.086,-43.202) len=12.887  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 12.911847 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.344,6.172,-5.555) len=12.344  rooms|rooms  dihedral=90.0deg
+    side1: 3 verts   side2: 1 verts
+    Hausdorff: 12.343788 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.344,6.172,-5.555) len=12.344  rooms|rooms  dihedral=90.0deg
+    side1: 3 verts   side2: 3 verts
+    Hausdorff: 12.343647 u   T-junctions: 2  [FAIL]
+
+  edge mid=(7.750,2.469,-55.355) len=9.900  rooms|rooms  dihedral=0.0deg
+    side1: 10 verts   side2: 1 verts
+    Hausdorff: 9.576365 u   T-junctions: 2  [FAIL]
+
+  edge mid=(13.941,2.469,-60.985) len=10.124  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 4 verts
+    Hausdorff: 9.178824 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-7.406,8.640,-37.030) len=8.901  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 2 verts
+    Hausdorff: 8.901102 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.703,8.640,-37.030) len=7.807  rooms|rooms  dihedral=0.0deg
+    side1: 7 verts   side2: 1 verts
+    Hausdorff: 8.161723 u   T-junctions: 1  [FAIL]
+
+  edge mid=(13.941,0.000,-58.516) len=7.977  floor|floor  dihedral=0.0deg
+    side1: 1 verts   side2: 11 verts
+    Hausdorff: 7.990786 u   T-junctions: 3  [FAIL]
+
+  edge mid=(11.310,2.469,-52.149) len=7.964  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 1 verts
+    Hausdorff: 7.951648 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,8.640,-37.030) len=7.807  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 3 verts
+    Hausdorff: 7.928054 u   T-junctions: 3  [FAIL]
+
+  edge mid=(9.130,0.000,-53.308) len=7.919  floor|floor  dihedral=0.0deg
+    side1: 4 verts   side2: 1 verts
+    Hausdorff: 7.907258 u   T-junctions: 1  [FAIL]
+
+  edge mid=(12.344,9.875,-21.601) len=7.904  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 6 verts
+    Hausdorff: 7.817883 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.344,9.875,-21.601) len=7.904  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 8 verts
+    Hausdorff: 7.686841 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-4.937,8.640,-37.030) len=7.406  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 7.483769 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-9.875,0.000,-52.768) len=6.789  floor|floor  dihedral=0.0deg
+    side1: 6 verts   side2: 1 verts
+    Hausdorff: 7.050469 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,2.469,-61.421) len=6.983  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 1 verts
+    Hausdorff: 6.982538 u   T-junctions: 2  [FAIL]
+
+  edge mid=(11.109,8.023,-37.030) len=6.647  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 6 verts
+    Hausdorff: 6.934643 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-4.937,5.555,-52.768) len=6.900  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 1 verts
+    Hausdorff: 6.900222 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.344,1.234,-21.601) len=6.647  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 19 verts
+    Hausdorff: 6.647022 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-3.071,6.233,0.533) len=6.601  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 6.624861 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.071,6.233,0.533) len=6.601  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 1 verts
+    Hausdorff: 6.611827 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.071,1.265,0.533) len=6.625  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 3 verts
+    Hausdorff: 6.456601 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-3.071,1.265,0.533) len=6.625  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 2 verts
+    Hausdorff: 6.454549 u   T-junctions: 1  [FAIL]
+
+  edge mid=(13.578,4.937,-21.601) len=6.172  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 3 verts
+    Hausdorff: 6.225856 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.673,4.999,0.447) len=6.174  rooms|rooms  dihedral=26.0deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 6.195011 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.673,4.999,0.447) len=6.174  rooms|rooms  dihedral=26.0deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 6.192856 u   T-junctions: 1  [FAIL]
+
+  edge mid=(9.875,8.023,-37.030) len=6.172  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 1 verts
+    Hausdorff: 6.171816 u   T-junctions: 2  [FAIL]
+
+  edge mid=(7.406,6.789,-37.030) len=6.172  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 2 verts
+    Hausdorff: 6.171791 u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.703,2.469,-37.030) len=5.520  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 4 verts
+    Hausdorff: 5.546431 u   T-junctions: 3  [FAIL]
+
+  edge mid=(11.109,2.469,-37.030) len=5.520  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 7 verts
+    Hausdorff: 5.482978 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,6.480,4.320) len=5.459  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 2 verts
+    Hausdorff: 5.460928 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.961,2.777,-21.601) len=5.127  rooms|rooms  dihedral=0.0deg
+    side1: 23 verts   side2: 9 verts
+    Hausdorff: 5.119432 u   T-junctions: 1  [FAIL]
+
+  edge mid=(0.000,0.000,4.320) len=5.089  floor|floor  dihedral=0.0deg
+    side1: 5 verts   side2: 1 verts
+    Hausdorff: 5.096001 u   T-junctions: 1  [FAIL]
+
+  edge mid=(12.961,7.098,-21.601) len=5.127  rooms|rooms  dihedral=0.0deg
+    side1: 9 verts   side2: 2 verts
+    Hausdorff: 5.072719 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-9.875,2.469,-49.374) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 2 verts   side2: 1 verts
+    Hausdorff: 4.937400 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-2.469,2.469,-61.421) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 2 verts   side2: 1 verts
+    Hausdorff: 4.937400 u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,2.469,-61.421) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 3 verts   side2: 1 verts
+    Hausdorff: 4.937400 u   T-junctions: 1  [FAIL]
+
+  edge mid=(7.406,9.875,-37.030) len=5.520  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 7 verts
+    Hausdorff: 4.830159 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-11.109,3.086,-37.030) len=4.451  rooms|rooms  dihedral=0.0deg
+    side1: 7 verts   side2: 2 verts
+    Hausdorff: 4.265892 u   T-junctions: 3  [FAIL]
+
+  edge mid=(12.961,4.937,-18.824) len=3.952  rooms|rooms  dihedral=0.0deg
+    side1: 29 verts   side2: 1 verts
+    Hausdorff: 3.944118 u   T-junctions: 3  [FAIL]
+
+  edge mid=(0.000,5.246,4.937) len=4.962  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 5 verts
+    Hausdorff: 3.824904 u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.071,3.765,-3.789) len=3.581  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 1 verts
+    Hausdorff: 3.591133 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,6.233,-3.789) len=3.581  rooms|rooms  dihedral=37.3deg
+    side1: 1 verts   side2: 2 verts
+    Hausdorff: 3.578720 u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.071,6.233,-3.789) len=3.581  rooms|rooms  dihedral=37.3deg
+    side1: 1 verts   side2: 2 verts
+    Hausdorff: 3.578492 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,6.172,-37.030) len=5.520  rooms|rooms  dihedral=0.0deg
+    side1: 9 verts   side2: 1 verts
+    Hausdorff: 3.450115 u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.071,3.765,4.236) len=3.085  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 1 verts
+    Hausdorff: 3.113324 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-3.071,3.765,4.236) len=3.085  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 1 verts
+    Hausdorff: 3.055818 u   T-junctions: 1  [FAIL]
+
+  edge mid=(2.469,1.265,4.320) len=2.815  rooms|rooms  dihedral=43.7deg
+    side1: 3 verts   side2: 1 verts
+    Hausdorff: 2.815427 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,5.555,-49.374) len=2.760  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 5 verts
+    Hausdorff: 2.760091 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-2.469,1.265,4.320) len=2.815  rooms|rooms  dihedral=43.7deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 2.759387 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,0.617,-37.030) len=2.760  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 11 verts
+    Hausdorff: 2.681270 u   T-junctions: 1  [FAIL]
+
+  edge mid=(0.000,9.875,-37.030) len=6.983  rooms|rooms  dihedral=0.0deg
+    side1: 7 verts   side2: 3 verts
+    Hausdorff: 2.618475 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-3.071,2.530,-3.789) len=2.594  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 1 verts
+    Hausdorff: 2.608117 u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,0.000,-3.703) len=2.469  rooms|floor  dihedral=64.5deg
+    side1: 9 verts   side2: 3 verts
+    Hausdorff: 2.534998 u   T-junctions: 1  [FAIL]
+
+  edge mid=(2.469,1.265,-4.937) len=2.530  rooms|rooms  dihedral=91.1deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 2.530702 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-2.469,1.265,-4.937) len=2.530  rooms|rooms  dihedral=91.1deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 2.530472 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.673,3.765,3.534) len=2.469  rooms|rooms  dihedral=40.6deg
+    side1: 1 verts   side2: 3 verts
+    Hausdorff: 2.500811 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-3.673,3.765,3.534) len=2.469  rooms|rooms  dihedral=40.6deg
+    side1: 1 verts   side2: 3 verts
+    Hausdorff: 2.500513 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-3.703,4.937,-37.030) len=2.469  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 2 verts
+    Hausdorff: 2.471288 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-2.469,6.480,4.320) len=2.329  rooms|rooms  dihedral=50.3deg
+    side1: 1 verts   side2: 2 verts
+    Hausdorff: 2.331399 u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.071,1.265,-2.554) len=2.808  rooms|rooms  dihedral=0.0deg
+    side1: 8 verts   side2: 4 verts
+    Hausdorff: 2.107530 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,1.265,-2.554) len=2.808  rooms|rooms  dihedral=0.0deg
+    side1: 7 verts   side2: 5 verts
+    Hausdorff: 2.107389 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.086,2.500,-5.246) len=5.186  rooms|rooms  dihedral=0.0deg
+    side1: 9 verts   side2: 7 verts
+    Hausdorff: 1.948143 u   T-junctions: 3  [FAIL]
+
+  edge mid=(3.086,2.500,-5.246) len=5.186  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 10 verts
+    Hausdorff: 1.947622 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-3.071,4.999,4.236) len=1.850  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 1 verts
+    Hausdorff: 1.894142 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.071,4.999,4.236) len=1.850  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 3 verts
+    Hausdorff: 1.884985 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.071,5.246,4.236) len=1.914  rooms|rooms  dihedral=20.5deg
+    side1: 2 verts   side2: 3 verts
+    Hausdorff: 1.850243 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.961,4.937,-24.378) len=3.952  rooms|rooms  dihedral=0.0deg
+    side1: 26 verts   side2: 2 verts
+    Hausdorff: 1.814430 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-3.086,6.635,-5.246) len=3.550  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 5 verts
+    Hausdorff: 1.780002 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-12.961,7.098,-24.378) len=1.512  rooms|rooms  dihedral=78.5deg
+    side1: 2 verts   side2: 1 verts
+    Hausdorff: 1.503320 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-12.961,2.777,-24.378) len=1.512  rooms|rooms  dihedral=78.5deg
+    side1: 3 verts   side2: 1 verts
+    Hausdorff: 1.495529 u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.086,1.265,-5.246) len=2.882  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 7 verts
+    Hausdorff: 1.447242 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-3.086,1.265,-5.246) len=2.882  rooms|rooms  dihedral=0.0deg
+    side1: 8 verts   side2: 4 verts
+    Hausdorff: 1.446702 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.961,7.098,-24.070) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 7 verts
+    Hausdorff: 1.429676 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.071,1.265,3.618) len=2.808  rooms|rooms  dihedral=38.5deg
+    side1: 9 verts   side2: 2 verts
+    Hausdorff: 1.414447 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-3.071,1.265,3.618) len=2.808  rooms|rooms  dihedral=38.5deg
+    side1: 9 verts   side2: 2 verts
+    Hausdorff: 1.413325 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-12.961,2.777,-24.070) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 3 verts
+    Hausdorff: 1.412858 u   T-junctions: 3  [FAIL]
+
+  edge mid=(49.374,0.000,-62.643) len=26.539  floor|rooms  dihedral=90.0deg
+    side1: 93 verts   side2: 569 verts
+    Hausdorff: 1.395586 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.703,4.320,-37.030) len=2.760  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 2 verts
+    Hausdorff: 1.385755 u   T-junctions: 2  [FAIL]
+
+  edge mid=(3.071,6.233,3.618) len=2.752  rooms|rooms  dihedral=32.9deg
+    side1: 7 verts   side2: 4 verts
+    Hausdorff: 1.381364 u   T-junctions: 1  [FAIL]
+
+  edge mid=(12.961,7.098,-24.070) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 11 verts   side2: 5 verts
+    Hausdorff: 1.380571 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.961,3.086,-24.378) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 8 verts   side2: 4 verts
+    Hausdorff: 1.379058 u   T-junctions: 3  [FAIL]
+
+  edge mid=(3.071,6.233,-2.554) len=2.752  rooms|rooms  dihedral=0.0deg
+    side1: 7 verts   side2: 2 verts
+    Hausdorff: 1.371406 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,6.233,-2.554) len=2.752  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 6 verts
+    Hausdorff: 1.371173 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.961,3.086,-18.824) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 13 verts   side2: 1 verts
+    Hausdorff: 1.369485 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-12.961,6.789,-18.824) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 1 verts
+    Hausdorff: 1.366586 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-12.344,1.234,-21.601) len=6.647  rooms|rooms  dihedral=0.0deg
+    side1: 10 verts   side2: 3 verts
+    Hausdorff: 1.344180 u   T-junctions: 3  [FAIL]
+
+  edge mid=(3.086,6.635,-5.246) len=3.550  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 6 verts
+    Hausdorff: 1.335482 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-2.469,6.233,-4.937) len=2.469  rooms|rooms  dihedral=91.1deg
+    side1: 5 verts   side2: 2 verts
+    Hausdorff: 1.234473 u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,6.233,-4.937) len=2.469  rooms|rooms  dihedral=91.1deg
+    side1: 5 verts   side2: 2 verts
+    Hausdorff: 1.234438 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.961,2.777,-24.378) len=1.512  rooms|rooms  dihedral=78.5deg
+    side1: 4 verts   side2: 6 verts
+    Hausdorff: 1.215192 u   T-junctions: 3  [FAIL]
+
+  edge mid=(12.961,7.098,-24.378) len=1.512  rooms|rooms  dihedral=78.5deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 1.214675 u   T-junctions: 3  [FAIL]
+
+  edge mid=(12.961,2.777,-18.824) len=1.512  rooms|rooms  dihedral=78.5deg
+    side1: 4 verts   side2: 2 verts
+    Hausdorff: 1.214025 u   T-junctions: 3  [FAIL]
+
+  edge mid=(2.469,0.000,0.617) len=6.172  rooms|floor  dihedral=64.5deg
+    side1: 118 verts   side2: 17 verts
+    Hausdorff: 1.125904 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-4.937,0.000,-52.768) len=6.789  floor|rooms  dihedral=90.0deg
+    side1: 37 verts   side2: 111 verts
+    Hausdorff: 1.124626 u   T-junctions: 2  [FAIL]
+
+  edge mid=(7.750,0.000,-55.355) len=8.581  floor|rooms  dihedral=90.0deg
+    side1: 27 verts   side2: 146 verts
+    Hausdorff: 1.118522 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-7.406,0.000,-56.163) len=4.937  rooms|floor  dihedral=90.0deg
+    side1: 66 verts   side2: 33 verts
+    Hausdorff: 1.087302 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.961,6.789,-18.824) len=1.380  rooms|rooms  dihedral=41.8deg
+    side1: 4 verts   side2: 2 verts
+    Hausdorff: 1.077318 u   T-junctions: 3  [FAIL]
+
+  edge mid=(12.961,7.098,-19.132) len=1.380  rooms|rooms  dihedral=41.8deg
+    side1: 4 verts   side2: 2 verts
+    Hausdorff: 1.076390 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-9.875,3.086,-37.030) len=3.703  rooms|rooms  dihedral=90.0deg
+    side1: 16 verts   side2: 3 verts
+    Hausdorff: 1.075829 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.961,2.777,-24.070) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 4 verts
+    Hausdorff: 1.035812 u   T-junctions: 3  [FAIL]
+
+  edge mid=(0.000,0.000,-61.421) len=4.937  rooms|floor  dihedral=90.0deg
+    side1: 87 verts   side2: 16 verts
+    Hausdorff: 0.985801 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-3.071,5.246,4.236) len=1.914  rooms|rooms  dihedral=20.5deg
+    side1: 1 verts   side2: 4 verts
+    Hausdorff: 0.974619 u   T-junctions: 1  [FAIL]
+
+  edge mid=(3.703,6.172,-37.030) len=3.491  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 0.872820 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-4.937,0.000,-43.202) len=12.344  rooms|floor  dihedral=90.0deg
+    side1: 253 verts   side2: 37 verts
+    Hausdorff: 0.787561 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-0.617,7.869,-5.246) len=6.254  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 4 verts
+    Hausdorff: 0.781409 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-3.086,0.000,-5.246) len=1.380  rooms|floor  dihedral=90.0deg
+    side1: 1 verts   side2: 10 verts
+    Hausdorff: 0.767793 u   T-junctions: 3  [FAIL]
+
+  edge mid=(3.086,0.000,-5.246) len=1.380  rooms|floor  dihedral=90.0deg
+    side1: 3 verts   side2: 10 verts
+    Hausdorff: 0.731862 u   T-junctions: 2  [FAIL]
+
+  edge mid=(11.109,11.726,-37.030) len=2.760  rooms|rooms  dihedral=0.0deg
+    side1: 9 verts   side2: 3 verts
+    Hausdorff: 0.690024 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.961,7.098,-21.601) len=5.127  rooms|rooms  dihedral=0.0deg
+    side1: 8 verts   side2: 2 verts
+    Hausdorff: 0.673321 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-11.109,0.000,-49.374) len=2.469  rooms|floor  dihedral=90.0deg
+    side1: 50 verts   side2: 13 verts
+    Hausdorff: 0.651243 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-11.109,0.000,-56.163) len=2.469  rooms|floor  dihedral=90.0deg
+    side1: 50 verts   side2: 10 verts
+    Hausdorff: 0.650946 u   T-junctions: 2  [FAIL]
+
+  edge mid=(2.469,0.000,4.320) len=1.234  rooms|floor  dihedral=90.0deg
+    side1: 4 verts   side2: 4 verts
+    Hausdorff: 0.644581 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.961,2.777,-19.132) len=1.380  rooms|rooms  dihedral=41.8deg
+    side1: 6 verts   side2: 3 verts
+    Hausdorff: 0.641113 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-2.469,0.000,4.320) len=1.234  rooms|floor  dihedral=90.0deg
+    side1: 2 verts   side2: 5 verts
+    Hausdorff: 0.636092 u   T-junctions: 1  [FAIL]
+
+  edge mid=(7.695,0.000,-50.533) len=4.937  floor|floor  dihedral=0.0deg
+    side1: 3 verts   side2: 6 verts
+    Hausdorff: 0.617194 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-9.875,0.617,-37.030) len=1.234  rooms|rooms  dihedral=90.0deg
+    side1: 16 verts   side2: 4 verts
+    Hausdorff: 0.614622 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-2.469,5.246,4.937) len=0.494  rooms|rooms  dihedral=49.4deg
+    side1: 1 verts   side2: 1 verts
+    Hausdorff: 0.498420 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.961,4.937,-18.824) len=3.952  rooms|rooms  dihedral=0.0deg
+    side1: 13 verts   side2: 2 verts
+    Hausdorff: 0.481824 u   T-junctions: 3  [FAIL]
+
+  edge mid=(17.898,11.726,-60.483) len=14.448  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 22 verts
+    Hausdorff: 0.424510 u   T-junctions: 1  [FAIL]
+
+  edge mid=(2.469,0.000,-49.226) len=24.391  floor|rooms  dihedral=90.0deg
+    side1: 157 verts   side2: 510 verts
+    Hausdorff: 0.413492 u   T-junctions: 1  [FAIL]
+
+  edge mid=(13.941,0.000,-60.985) len=8.838  floor|rooms  dihedral=90.0deg
+    side1: 42 verts   side2: 136 verts
+    Hausdorff: 0.403491 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-9.875,0.000,-43.202) len=12.344  rooms|floor  dihedral=90.0deg
+    side1: 269 verts   side2: 34 verts
+    Hausdorff: 0.395176 u   T-junctions: 3  [FAIL]
+
+  edge mid=(0.000,0.000,-49.226) len=24.885  floor|floor  dihedral=0.0deg
+    side1: 9 verts   side2: 24 verts
+    Hausdorff: 0.387081 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-2.469,0.000,-49.226) len=24.391  floor|rooms  dihedral=90.0deg
+    side1: 131 verts   side2: 549 verts
+    Hausdorff: 0.387081 u   T-junctions: 1  [FAIL]
+
+  edge mid=(0.617,0.000,-5.246) len=6.203  floor|floor  dihedral=0.0deg
+    side1: 10 verts   side2: 10 verts
+    Hausdorff: 0.365830 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-3.071,6.233,3.618) len=2.752  rooms|rooms  dihedral=32.9deg
+    side1: 8 verts   side2: 4 verts
+    Hausdorff: 0.346095 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,2.469,-56.163) len=5.520  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 8 verts
+    Hausdorff: 0.336176 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-7.406,0.000,-43.202) len=13.294  floor|floor  dihedral=0.0deg
+    side1: 5 verts   side2: 8 verts
+    Hausdorff: 0.334829 u   T-junctions: 1  [FAIL]
+
+  edge mid=(11.310,0.000,-52.149) len=6.248  floor|rooms  dihedral=90.0deg
+    side1: 12 verts   side2: 83 verts
+    Hausdorff: 0.332571 u   T-junctions: 1  [FAIL]
+
+  edge mid=(9.875,0.000,-43.202) len=12.344  floor|rooms  dihedral=90.0deg
+    side1: 62 verts   side2: 234 verts
+    Hausdorff: 0.331700 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-11.109,0.000,-52.768) len=7.224  floor|floor  dihedral=0.0deg
+    side1: 4 verts   side2: 7 verts
+    Hausdorff: 0.328356 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,0.000,0.617) len=7.904  floor|floor  dihedral=0.0deg
+    side1: 6 verts   side2: 2 verts
+    Hausdorff: 0.321847 u   T-junctions: 1  [FAIL]
+
+  edge mid=(5.226,0.000,-44.361) len=14.673  floor|rooms  dihedral=90.0deg
+    side1: 57 verts   side2: 285 verts
+    Hausdorff: 0.317799 u   T-junctions: 1  [FAIL]
+
+  edge mid=(5.226,2.469,-44.361) len=15.481  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 5 verts
+    Hausdorff: 0.317799 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-2.469,0.000,0.617) len=6.172  rooms|floor  dihedral=64.5deg
+    side1: 120 verts   side2: 15 verts
+    Hausdorff: 0.294725 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.344,6.172,-30.859) len=17.456  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 13 verts
+    Hausdorff: 0.280260 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-7.406,0.000,-52.768) len=8.394  floor|floor  dihedral=0.0deg
+    side1: 3 verts   side2: 2 verts
+    Hausdorff: 0.264299 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,0.000,-2.469) len=4.937  floor|floor  dihedral=0.0deg
+    side1: 6 verts   side2: 2 verts
+    Hausdorff: 0.263986 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-4.937,2.469,-52.768) len=8.394  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 1 verts
+    Hausdorff: 0.259167 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-4.937,2.469,-43.202) len=13.294  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 5 verts
+    Hausdorff: 0.259167 u   T-junctions: 2  [FAIL]
+
+  edge mid=(15.321,2.469,-56.469) len=7.777  rooms|rooms  dihedral=0.0deg
+    side1: 8 verts   side2: 4 verts
+    Hausdorff: 0.253446 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-2.469,0.000,-3.703) len=2.469  rooms|floor  dihedral=64.5deg
+    side1: 5 verts   side2: 7 verts
+    Hausdorff: 0.239160 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-9.875,8.640,-37.030) len=7.406  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 0.233012 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-3.703,1.852,-37.030) len=4.451  rooms|rooms  dihedral=0.0deg
+    side1: 7 verts   side2: 4 verts
+    Hausdorff: 0.230172 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-12.344,0.000,-30.859) len=12.343  rooms|floor  dihedral=90.0deg
+    side1: 305 verts   side2: 51 verts
+    Hausdorff: 0.223750 u   T-junctions: 1  [FAIL]
+
+  edge mid=(12.344,0.000,-30.859) len=12.343  rooms|floor  dihedral=90.0deg
+    side1: 307 verts   side2: 42 verts
+    Hausdorff: 0.223750 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.961,2.777,-21.601) len=5.127  rooms|rooms  dihedral=0.0deg
+    side1: 4 verts   side2: 5 verts
+    Hausdorff: 0.223445 u   T-junctions: 1  [FAIL]
+
+  edge mid=(12.344,6.172,-12.035) len=17.898  rooms|rooms  dihedral=0.0deg
+    side1: 6 verts   side2: 7 verts
+    Hausdorff: 0.217268 u   T-junctions: 0  [FAIL]
+
+  edge mid=(12.961,3.086,-24.378) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 14 verts   side2: 4 verts
+    Hausdorff: 0.208893 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-9.875,2.469,-56.163) len=4.937  rooms|rooms  dihedral=0.0deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 0.206127 u   T-junctions: 0  [FAIL]
+
+  edge mid=(3.086,7.869,-5.246) len=1.596  rooms|rooms  dihedral=44.9deg
+    side1: 4 verts   side2: 5 verts
+    Hausdorff: 0.200402 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-3.086,7.869,-5.246) len=1.596  rooms|rooms  dihedral=44.9deg
+    side1: 5 verts   side2: 4 verts
+    Hausdorff: 0.200020 u   T-junctions: 3  [FAIL]
+
+  edge mid=(0.000,0.000,-24.687) len=24.687  floor|floor  dihedral=0.0deg
+    side1: 2 verts   side2: 2 verts
+    Hausdorff: 0.198895 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,0.000,-3.703) len=5.520  floor|floor  dihedral=0.0deg
+    side1: 4 verts   side2: 5 verts
+    Hausdorff: 0.198894 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.344,0.000,-12.035) len=12.961  rooms|floor  dihedral=90.0deg
+    side1: 289 verts   side2: 44 verts
+    Hausdorff: 0.192867 u   T-junctions: 2  [FAIL]
+
+  edge mid=(0.000,0.000,-12.035) len=27.882  floor|floor  dihedral=0.0deg
+    side1: 7 verts   side2: 4 verts
+    Hausdorff: 0.189854 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.961,2.777,-19.132) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 10 verts   side2: 11 verts
+    Hausdorff: 0.189476 u   T-junctions: 1  [FAIL]
+
+  edge mid=(2.469,2.469,-37.030) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 3 verts   side2: 5 verts
+    Hausdorff: 0.171584 u   T-junctions: 0  [FAIL]
+
+  edge mid=(13.578,4.937,-24.070) len=3.703  rooms|rooms  dihedral=63.4deg
+    side1: 2 verts   side2: 3 verts
+    Hausdorff: 0.168512 u   T-junctions: 2  [FAIL]
+
+  edge mid=(12.961,6.789,-24.378) len=1.380  rooms|rooms  dihedral=0.0deg
+    side1: 5 verts   side2: 4 verts
+    Hausdorff: 0.168512 u   T-junctions: 3  [FAIL]
+
+  edge mid=(-12.344,2.469,-52.768) len=8.394  rooms|rooms  dihedral=0.0deg
+    side1: 3 verts   side2: 2 verts
+    Hausdorff: 0.161896 u   T-junctions: 1  [FAIL]
+
+  edge mid=(0.000,0.000,3.703) len=4.937  floor|floor  dihedral=0.0deg
+    side1: 4 verts   side2: 2 verts
+    Hausdorff: 0.160924 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.344,0.000,-52.768) len=6.789  floor|rooms  dihedral=90.0deg
+    side1: 40 verts   side2: 116 verts
+    Hausdorff: 0.160527 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-2.469,2.469,-37.030) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 3 verts   side2: 5 verts
+    Hausdorff: 0.159560 u   T-junctions: 0  [FAIL]
+
+  edge mid=(12.344,0.000,-12.035) len=12.961  rooms|floor  dihedral=90.0deg
+    side1: 265 verts   side2: 60 verts
+    Hausdorff: 0.156927 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-4.937,1.852,-37.030) len=3.703  rooms|rooms  dihedral=90.0deg
+    side1: 18 verts   side2: 6 verts
+    Hausdorff: 0.153449 u   T-junctions: 1  [FAIL]
+
+  edge mid=(0.000,0.000,-4.937) len=4.937  floor|floor  dihedral=0.0deg
+    side1: 18 verts   side2: 4 verts
+    Hausdorff: 0.144651 u   T-junctions: 0  [FAIL]
+
+  edge mid=(4.937,2.469,-37.030) len=4.937  rooms|rooms  dihedral=87.7deg
+    side1: 3 verts   side2: 4 verts
+    Hausdorff: 0.139829 u   T-junctions: 0  [FAIL]
+
+  edge mid=(9.875,2.469,-37.030) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 3 verts   side2: 4 verts
+    Hausdorff: 0.130186 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-12.961,3.086,-18.824) len=1.380  rooms|rooms  dihedral=41.8deg
+    side1: 6 verts   side2: 3 verts
+    Hausdorff: 0.118474 u   T-junctions: 3  [FAIL]
+
+  edge mid=(12.344,0.000,-21.601) len=6.172  rooms|floor  dihedral=90.0deg
+    side1: 126 verts   side2: 22 verts
+    Hausdorff: 0.116547 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-12.344,0.000,-21.601) len=6.172  rooms|floor  dihedral=90.0deg
+    side1: 132 verts   side2: 16 verts
+    Hausdorff: 0.116547 u   T-junctions: 2  [FAIL]
+
+  edge mid=(15.321,0.000,-56.469) len=6.009  floor|rooms  dihedral=90.0deg
+    side1: 16 verts   side2: 116 verts
+    Hausdorff: 0.087296 u   T-junctions: 0  [FAIL]
+
+  edge mid=(33.636,0.000,-75.913) len=31.476  rooms|floor  dihedral=90.0deg
+    side1: 636 verts   side2: 137 verts
+    Hausdorff: 0.086876 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-7.406,2.469,-56.163) len=6.983  rooms|rooms  dihedral=0.0deg
+    side1: 1 verts   side2: 1 verts
+    Hausdorff: 0.086790 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-4.937,2.469,-56.163) len=4.937  rooms|rooms  dihedral=90.0deg
+    side1: 1 verts   side2: 1 verts
+    Hausdorff: 0.086790 u   T-junctions: 1  [FAIL]
+
+  edge mid=(33.636,0.000,-49.374) len=31.476  rooms|floor  dihedral=90.0deg
+    side1: 713 verts   side2: 88 verts
+    Hausdorff: 0.083830 u   T-junctions: 0  [FAIL]
+
+  edge mid=(-4.937,4.320,-37.030) len=1.234  rooms|rooms  dihedral=90.0deg
+    side1: 14 verts   side2: 3 verts
+    Hausdorff: 0.077589 u   T-junctions: 2  [FAIL]
+
+  edge mid=(-13.578,4.937,-24.070) len=3.703  rooms|rooms  dihedral=63.4deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 0.060035 u   T-junctions: 1  [FAIL]
+
+  edge mid=(-13.578,3.086,-21.601) len=4.937  rooms|rooms  dihedral=63.4deg
+    side1: 2 verts   side2: 4 verts
+    Hausdorff: 0.059685 u   T-junctions: 1  [FAIL]
+
+  edge mid=(33.636,0.000,-62.643) len=41.171  floor|floor  dihedral=0.0deg
+    side1: 3 verts   side2: 2 verts
+    Hausdorff: 0.049577 u   T-junctions: 0  [FAIL]
+
+  (3 passing edges suppressed; use --verbose to show all)
+
+Scene-wide:
+  Interior edges:        274
+  Max finite Hausdorff:  36.478046 u  (at mid=(33.636,9.258,-49.374))
+  Edges with H > 0:      271
+  Edges with H = INF:    71
+  T-junction vertices:   481
+  RESULT: FAIL
