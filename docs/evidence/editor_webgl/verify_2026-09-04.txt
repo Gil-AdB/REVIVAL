@@ -1,0 +1,15 @@
+# improve_editor_ui_ux (his Antigravity editor session, brain 79905c20-65ba-45b5-b268-12f6ddeb20f9) verified 2026-09-04 by the coordinator
+# worktree /Users/gil-ad/.gemini/antigravity/worktrees/revival-fog/improve_editor_ui_ux at ef7a0a2e + UNCOMMITTED WebGL2 work (GpuWeb.cpp 1735 lines, 10 files modified)
+## native build of the uncommitted state (SceneIngest.cpp + GpuWeb.cpp now compiled into DEMO):
+rc=0
+## wasm target: ninja -C build-wasm DEMO.html rc=0, outputs up to date at 2026-09-03 23:09 (the session's last build = the uncommitted state)
+## pins with that binary (chdir trap: renders the worktree's own Runtime): H6194 36cd059a6dec6d6bb2c74f880ca2d0c1  camA d92cb6f5eb19da4301588ae83af6a56e  (= the 24-run pins)
+## render_gate with that binary: mirrortest 4ac809e5 rttslot 826c09e6 conetest b41894f9 halotest 166fa25a ALL PASS
+## fog-wt after merging the THREE COMMITTED editor commits (ac632bad): H6194 36cd059a…  camA d92cb6f5…  render_gate ALL PASS
+## review notes (verified in the worktree's code):
+- GpuWeb.cpp:1283/1307 reuses gpubench::Light::shadowRes (a RESOLUTION in SceneIngest.h:221 / Deferred.mm:977) as the shadow-map SLOT index 0..7; the Metal bench's ingest writes 256 there, which is why the WebGL path saw every spot as slot>=8 and drew no shadow. Local to GpuWeb's own Scene copy, but a semantic hijack of a shared field.
+- FeatureFlags.def adds a 'gpu' flag that nothing consults: MainLoop.cpp reads window.location.search.indexOf('gpu') directly and the URL-token parser drops 'gpu' before FeatureFlags sees it.
+- GpuWeb.cpp:709 cone density 0.035 is an eyeballed constant; the Metal bench's density is opt.coneStrength*0.001*hdrGlowScale (Deferred.mm:1180). 'Calibrated to match Metal' is not a derivation.
+- SDL2.cpp Wasm_InitGL now creates the WebGL2 context via emscripten_webgl_create_context with depth=true for EVERY wasm build (the CPU blit path too), replacing canvas.getContext('webgl2', depth:false).
+- SceneIngest.cpp acquireTexture reloads every file-backed texture from disk (Flags=0) instead of unswizzling the in-memory copy; shared with the Metal GpuBench, so the M5 bench's texture path changes too (untested there). delete[] on Load_Texture data: IMGCODE.CPP:1054 allocates the PNG path with malloc, the other paths with new[] - a mismatched delete[] on PNG textures.
+- walkthrough claims of parity are eyeballed from screenshots (cpu_compare_600.png vs gpu_compare_600.png); no numeric comparison against the CPU frame was made.

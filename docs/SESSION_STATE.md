@@ -1,4 +1,34 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-04b — his reference ruling, and the editor / WebGL2 session reviewed and half-merged
+
+- **His ruling (ledger e040ed41ebed, quoted):** "the blender - mesh as authored (welded) seems like a good refernce for all
+  the poses you have". The Blender WELDED arm (authored topology, hairlines on the T-junction host lines included) is the
+  reference at every deck pose. Rendered it at P1–P4 (`docs/evidence/split_tjunctions/blender_jointp*_welded_tex.jpg`);
+  deck rev 3 (same URL https://claude.ai/code/artifact/993e64a7-cfdb-4fe9-ad8e-4a589be09c16) opens every wipe with the
+  engine's split+phase arm against it.
+- **His second Antigravity session** (`/Users/gil-ad/.gemini/antigravity/brain/79905c20-65ba-45b5-b268-12f6ddeb20f9/`,
+  worktree `/Users/gil-ad/.gemini/antigravity/worktrees/revival-fog/improve_editor_ui_ux`, branch `improve_editor_ui_ux`):
+  his asks there, in order: "see the editor (make editor) let's think on how to improve the ux…"; "ok, please commit and
+  push"; "when choosing a light, the light panel needs to be chosen manually"; "when playing the demo, the last selected
+  object is always being shown selected"; **"can you create a version of the demo using the gpu on web?"**; "cute and all
+  that. but not even close to parity"; "take a look at winport-wt branch, it should have shaders implemented in non-metal";
+  "xpar surfaces aren't rendered, some textures are grabled…, no cones render, reflection/env mapping doesn't work…
+  'editor=' … prevents the page from loading"; "no dynamic lighting, floor/xpar swizzled, cones are way too bright and
+  doesn't cast shadows/being clipped wrong against geometry". The walkthrough claims the last four fixed (eyeballed).
+- **What is where:** three COMMITTED commits (4945aeca e92bfbbb ef7a0a2e: Studio Dock editor UI, shell.html + one
+  MainLoop line inside `__EMSCRIPTEN__`) → **merged into fog-wt as ac632bad**, pins + render_gate re-verified on the
+  merged build. The WebGL2 renderer itself (`DEMO/GpuWeb.cpp` 1735 lines, SceneIngest.cpp compiled into DEMO, GREETS.CPP
+  / GreetsDisco exports, SDL2.cpp context creation, FeatureFlags `gpu`, shell.html GPU toggle) is **UNCOMMITTED in
+  Antigravity's worktree** and NOT merged. Verified there anyway: native build rc 0, both pins byte-identical, render_gate
+  4/4, wasm target up to date (`docs/evidence/editor_webgl/verify_2026-09-04.txt`, ledger fd49ca0c03d5).
+- **Review findings (ledger 1d6ee6ec802c, read in code):** shadowRes (a resolution) hijacked as the shadow SLOT index;
+  the new `gpu` FeatureFlag is dead (URL read directly, token dropped by the parser); cone density 0.035 eyeballed vs
+  Metal's coneStrength·1e-3·hdrGlowScale; Wasm_InitGL now creates the context with depth=true for the CPU wasm path too;
+  acquireTexture reloads file-backed textures from disk (shared with the M5 Metal bench, untested there) and `delete[]`s
+  PNG data that IMGCODE.CPP:1054 malloc'd. Parity is asserted from screenshots; no numeric CPU-vs-GPU comparison.
+- **Open, waiting on him (c61b27658aa2):** commit the WebGL2 work on that branch (Antigravity or me), then merge after the
+  five findings; or leave it as an experiment beside the M5 Metal bench.
+
 ## 2026-09-04a — the T-junction split is built (his Antigravity session, rev-seam-audit → fog-wt), verified, and not enough at the joint
 
 He pointed me at `/Users/gil-ad/.gemini/antigravity/brain/d6b78fe3-c8b0-4698-b915-9df47c4e6ff9/walkthrough.md` and its
