@@ -307,7 +307,7 @@ void DemoBoot(ModplayerHandle modHandle)
 			"--shadow-lightmap", "--cone-strength=2", "--bloom", "--disco-bloom=0",
 			"--shard-deferred", "--greets-shard-fall-speed=0.8", "--greets-shard-randomness=0.8",
 			"--hdr-linear", "--deferred-quarter", "--greets-shard-res=64", "--bloom-intensity=2",
-			"--hdr-refl-gain=4", "--cone-fine-tiles", "--anamorphic", "--anamorphic_intensity=1.5",
+			"--hdr-refl-gain=4", "--anamorphic", "--anamorphic_intensity=1.5",
 			"--anamorphic_vert=0", "--anamorphic_decay=0.3", "--anamorphic_passes=3",
 			"--lens_ghosts", "--lens_ghost_intensity=0.05", "--lens_ghost_count=0",
 			"--lens_ghost_dispersal=0.01", "--lens_ghost_halo=0.01", "--chromatic",
