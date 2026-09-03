@@ -1,0 +1,675 @@
+] Vertigo GL (V0.85) - INITIALIZE
+] Hacking Random-seed.
+] Globals initialization.
+] Diffusing Materials.
+] FPU >> Low Precision.
+[TUNE] live tuning console: http://localhost:8666
+] Basic font.
+] Initializing Video system.
+[FLD] scene sky gradient: zenith=(0,40,80) nadir=(100,80,60)
+	Current Object: Piramid.lwo (0), Parent: 4294967295
+	Current Object: mech  null (1), Parent: 4294967295
+	Current Object: Hull.lwo (2), Parent: 3
+		Found Parent Object: Hull2.lwo (3)
+	Current Object: Hull2.lwo (3), Parent: 1
+		Found Parent Object: mech  null (1)
+	Current Object: L_leg1.lwo (4), Parent: 3
+		Found Parent Object: Hull2.lwo (3)
+	Current Object: L_leg2.lwo (5), Parent: 4
+		Found Parent Object: L_leg1.lwo (4)
+	Current Object: R_leg1.lwo (6), Parent: 3
+		Found Parent Object: Hull2.lwo (3)
+	Current Object: R_leg2.lwo (7), Parent: 6
+		Found Parent Object: R_leg1.lwo (6)
+	Current Object: Camera Target (8), Parent: 4294967295
+	Current Object: DiscoBall (9), Parent: 4294967295
+	Current Object: Light (10), Parent: 4294967295
+	Current Object: Light (11), Parent: 4294967295
+	Current Object: Light (12), Parent: 4294967295
+	Current Object: Light (13), Parent: 4294967295
+	Current Object: Light (14), Parent: 4294967295
+	Current Object: Light (15), Parent: 4294967295
+	Current Object: Light (16), Parent: 4294967295
+	Current Object: mech flare (17), Parent: 2
+		Found Parent Object: Hull.lwo (2)
+	Current Object: mech flare (18), Parent: 2
+		Found Parent Object: Hull.lwo (2)
+	Current Object: mech flare (19), Parent: 2
+		Found Parent Object: Hull.lwo (2)
+Camera Source:
+Key: 0: Frame: 0.000000(-3.840034, 0.000000, -9.043816)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 1: Frame: 81.000000(-3.840034, 4.173750, -9.043816)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 2: Frame: 137.000000(-6.568385, 3.406984, -20.413120)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 3: Frame: 232.000000(-5.332351, 4.510001, -32.127281)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 4: Frame: 311.000000(-0.889762, 2.790001, -27.749350)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 5: Frame: 357.000000(-0.617707, 2.790001, -25.532700)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 6: Frame: 420.000000(-0.616500, 2.790001, -24.582230)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 7: Frame: 720.000000(-0.616500, 2.790001, -24.582230)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 8: Frame: 721.000000(-10.066500, 2.790001, -55.052250)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 9: Frame: 891.000000(-10.066500, 2.790001, -55.052250)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 10: Frame: 924.000000(-8.391500, 1.985002, -50.792259)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 11: Frame: 1040.000000(-6.673739, 3.195001, -51.814610)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 12: Frame: 1200.000000(-6.673700, 3.195028, -51.814629)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 13: Frame: 1201.000000(-2.873739, 3.195001, -27.504601)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 14: Frame: 1557.000000(-2.873739, 3.195001, -27.504601)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 15: Frame: 1621.000000(7.299541, 3.195001, -30.775290)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 16: Frame: 1716.000000(8.539362, 3.195001, -51.822319)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 17: Frame: 1786.000000(18.115540, 3.210074, -58.669071)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 18: Frame: 1878.000000(32.877781, 3.195001, -59.459702)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 19: Frame: 2018.000000(32.911339, 2.930001, -56.984051)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Key: 20: Frame: 2174.000000(33.946800, 5.110003, -54.239559)(0.000000, 0.000000, 0.000000)(1.000000, 1.000000, 1.000000)
+Camera Target:
+Flags: 0
+0.006347 1.575064 -6.348068 0.000000
+0.000000 0.000000 0.000000 0.000000
+0.000000
+
+0.017509 1.540000 -11.462830 0.000000
+0.000000 0.000000 0.000000 0.000000
+48.000000
+
+-4.849336 1.594190 -18.383900 0.000000
+0.000000 0.000000 0.000000 0.000000
+100.000000
+
+-6.553478 1.594190 -28.831980 0.000000
+0.000000 0.000000 0.000000 0.000000
+159.000000
+
+-2.654046 1.594190 -31.298901 0.000000
+0.000000 0.000000 0.000000 0.000000
+209.000000
+
+-0.318536 1.594190 -27.601290 0.000000
+0.000000 0.000000 0.000000 0.000000
+272.000000
+
+-0.068536 1.594190 -24.346300 0.000000
+0.000000 0.000000 0.000000 0.000000
+300.000000
+
+0.006464 1.594190 -20.926300 0.000000
+0.000000 0.000000 0.000000 0.000000
+341.000000
+
+0.011400 1.594190 -20.927099 0.000000
+0.000000 0.000000 0.000000 0.000000
+400.000000
+
+0.006464 1.594190 -20.926300 0.000000
+0.000000 0.000000 0.000000 0.000000
+720.000000
+
+-4.368538 1.594190 -30.646311 0.000000
+0.000000 0.000000 0.000000 0.000000
+721.000000
+
+-6.018543 1.594190 -33.801311 0.000000
+0.000000 0.000000 0.000000 0.000000
+775.000000
+
+-7.413545 1.594190 -42.261311 0.000000
+0.000000 0.000000 0.000000 0.000000
+839.000000
+
+-7.908547 1.904190 -53.841320 0.000000
+0.000000 0.000000 0.000000 0.000000
+900.000000
+
+-6.983999 2.479190 -56.273911 0.000000
+0.000000 0.000000 0.000000 0.000000
+1040.000000
+
+-7.078687 2.535772 -56.106171 0.000000
+0.000000 0.000000 0.000000 0.000000
+1200.000000
+
+-7.959152 2.535765 -53.861580 0.000000
+0.000000 0.000000 0.000000 0.000000
+1201.000000
+
+-7.108999 2.479190 -34.653931 0.000000
+0.000000 0.000000 0.000000 0.000000
+1400.000000
+
+-1.273999 2.479190 -29.393921 0.000000
+0.000000 0.000000 0.000000 0.000000
+1491.000000
+
+7.146002 2.479190 -34.573898 0.000000
+0.000000 0.000000 0.000000 0.000000
+1557.000000
+
+7.881005 2.479190 -47.103889 0.000000
+0.000000 0.000000 0.000000 0.000000
+1713.000000
+
+9.181002 2.479190 -51.833889 0.000000
+0.000000 0.000000 0.000000 0.000000
+1761.000000
+
+12.176010 2.479190 -57.478889 0.000000
+0.000000 0.000000 0.000000 0.000000
+1824.000000
+
+17.670010 2.066314 -59.429729 0.000000
+0.000000 0.000000 0.000000 0.000000
+1872.000000
+
+25.054871 1.595755 -59.650860 0.000000
+0.000000 0.000000 0.000000 0.000000
+1924.000000
+
+32.498562 1.362707 -60.280819 0.000000
+0.000000 0.000000 0.000000 0.000000
+2008.000000
+
+34.568489 2.134817 -60.652161 0.000000
+0.000000 0.000000 0.000000 0.000000
+2039.000000
+
+35.155670 2.479190 -60.734219 0.000000
+0.000000 0.000000 0.000000 0.000000
+2044.000000
+
+69.054977 15.449190 -71.866966 0.000000
+0.000000 0.000000 0.000000 0.000000
+2188.000000
+
+Deleting scene...
+0 bytes were freed
+Attempting to read: texture file TEXTURES/greets_floor_r.png as 0 bpp tmap
+[GREETS] roughness 'floor' -> TEXTURES/greets_floor_r.png (8-bit)
+Attempting to read: texture file TEXTURES/greets_floor_h.png as 0 bpp tmap
+[GREETS] parallax 'floor' -> height TEXTURES/greets_floor_h.png (1024x1024 mips=9, 8-bit)
+Attempting to read: texture file TEXTURES/greets_floor_n.png as 0 bpp tmap
+[GREETS] stone-tex 'floor' -> TEXTURES/greets_floor.png + AUTHORED normal TEXTURES/greets_floor_n.png (flipG=0, 1024x1024 mips=9, 16-bit)
+Attempting to read: texture file TEXTURES/greets_wall_r.png as 0 bpp tmap
+[GREETS] roughness 'rooms' -> TEXTURES/greets_wall_r.png (8-bit)
+Attempting to read: texture file TEXTURES/greets_wall_h.png as 0 bpp tmap
+[GREETS] parallax 'rooms' -> height TEXTURES/greets_wall_h.png (1024x1024 mips=9, 8-bit)
+Attempting to read: texture file TEXTURES/greets_wall_n.png as 0 bpp tmap
+[GREETS] stone-tex 'rooms' -> TEXTURES/greets_wall.png + AUTHORED normal TEXTURES/greets_wall_n.png (flipG=0, 1024x1024 mips=9, 16-bit)
+[PREPROC] GREETS scene=0x1061228a0
+Attempting to read: texture file TEXTURES/MECH_COK.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/MECH_COK.JPG for cockpit)
+Attempting to read: texture file TEXTURES/MECH_HUL.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/MECH_HUL.JPG for hull not smooth)
+Attempting to read: texture file TEXTURES/PLIGHS.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/PLIGHS.JPG for linght)
+Attempting to read: texture file TEXTURES/PELLOW.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/PELLOW.JPG for momy-2)
+Attempting to read: texture file TEXTURES/P_TEXT.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/P_TEXT.JPG for screen 4)
+Attempting to read: texture file TEXTURES/greets_floor.png as 0 bpp tmap
+Loaded Texture OK (TEXTURES/greets_floor.png for floor)
+Attempting to read: texture file TEXTURES/PSILING.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/PSILING.JPG for siling)
+Attempting to read: texture file TEXTURES/greets_wall.png as 0 bpp tmap
+Loaded Texture OK (TEXTURES/greets_wall.png for rooms)
+Attempting to read: texture file TEXTURES/MARB1.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/MARB1.JPG for stairs)
+Attempting to read: texture file TEXTURES/PMETALL.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/PMETALL.JPG for screen emiter fance)
+Attempting to read: texture file TEXTURES/MARB4.JPG as 24 bpp tmap
+Loaded Texture OK (TEXTURES/MARB4.JPG for amudim)
+All textures loaded...
+[MAT] scene=0x1061228a0 matID=24 txtrID=13 (skipped: other_scene=0 untextured=4)
+[MAT] mip census: 24 chained, 0 single (0 Nomip-flagged)
+[MAT]       4 mats (0 with 'window' name) -> TEXTURES/PELLOW.JPG
+[MAT]       3 mats (0 with 'window' name) -> TEXTURES/PMETALL.JPG
+[MAT]       3 mats (0 with 'window' name) -> TEXTURES/P_TEXT.JPG
+[MAT]       3 mats (0 with 'window' name) -> TEXTURES/PLIGHS.JPG
+[MAT]       3 mats (0 with 'window' name) -> TEXTURES/MECH_HUL.JPG
+[MAT]       2 mats (0 with 'window' name) -> (no-filename)
+[MAT]       1 mats (0 with 'window' name) -> TEXTURES/MARB4.JPG
+[MAT]       1 mats (0 with 'window' name) -> TEXTURES/MARB1.JPG
+[MAT]       1 mats (0 with 'window' name) -> TEXTURES/greets_wall.png
+[MAT]       1 mats (0 with 'window' name) -> TEXTURES/PSILING.JPG
+[MAT]       1 mats (0 with 'window' name) -> TEXTURES/greets_floor.png
+[MAT]       1 mats (0 with 'window' name) -> TEXTURES/MECH_COK.JPG
+[MESH] 66 of 3704 verts have NO normal after Compute_Vertex_Normals (every incident face is zero-area) — first affected surface 'momy-2'
+Attempting to read: texture file TEXTURES/PBR/momy/albedo.png as 0 bpp tmap
+    [cap] TEXTURES/PBR/momy/albedo.png downsampled to 1024x1024 (20-bit UV limit)
+    [load] TEXTURES/PBR/momy/albedo.png (albedo) decoded + cached
+[MAT-IMPORT] 'momy-1' <- albedo map TEXTURES/PBR/momy/albedo.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy/ao.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy/ao.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy/ao.png (ao) decoded + cached
+[MAT-IMPORT] 'momy-1' <- ao map TEXTURES/PBR/momy/ao.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy/height.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy/height.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy/height.png (height) decoded + cached
+[MAT-IMPORT] 'momy-1' <- height map TEXTURES/PBR/momy/height.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy/metallic.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy/metallic.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy/metallic.png (metallic) decoded + cached
+[MAT-IMPORT] 'momy-1' <- metallic map TEXTURES/PBR/momy/metallic.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy/normal.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy/normal.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy/normal.png (normal) decoded + cached
+[MAT-IMPORT] 'momy-1' <- normal map TEXTURES/PBR/momy/normal.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy/roughness.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy/roughness.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy/roughness.png (roughness) decoded + cached
+[MAT-IMPORT] 'momy-1' <- roughness map TEXTURES/PBR/momy/roughness.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/amudim/albedo.png as 0 bpp tmap
+    [cap] TEXTURES/PBR/amudim/albedo.png downsampled to 1024x1024 (20-bit UV limit)
+    [load] TEXTURES/PBR/amudim/albedo.png (albedo) decoded + cached
+[MAT-IMPORT] 'amudim' <- albedo map TEXTURES/PBR/amudim/albedo.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/amudim/ao.png as 0 bpp tmap
+    [match] TEXTURES/PBR/amudim/ao.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/amudim/ao.png (ao) decoded + cached
+[MAT-IMPORT] 'amudim' <- ao map TEXTURES/PBR/amudim/ao.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/amudim/metallic.png as 0 bpp tmap
+    [match] TEXTURES/PBR/amudim/metallic.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/amudim/metallic.png (metallic) decoded + cached
+[MAT-IMPORT] 'amudim' <- metallic map TEXTURES/PBR/amudim/metallic.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/amudim/normal.png as 0 bpp tmap
+    [match] TEXTURES/PBR/amudim/normal.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/amudim/normal.png (normal) decoded + cached
+[MAT-IMPORT] 'amudim' <- normal map TEXTURES/PBR/amudim/normal.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/amudim/roughness.png as 0 bpp tmap
+    [match] TEXTURES/PBR/amudim/roughness.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/amudim/roughness.png (roughness) decoded + cached
+[MAT-IMPORT] 'amudim' <- roughness map TEXTURES/PBR/amudim/roughness.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/screen_emiter/albedo.png as 0 bpp tmap
+    [cap] TEXTURES/PBR/screen_emiter/albedo.png downsampled to 1024x1024 (20-bit UV limit)
+    [load] TEXTURES/PBR/screen_emiter/albedo.png (albedo) decoded + cached
+[MAT-IMPORT] 'screen emiter' <- albedo map TEXTURES/PBR/screen_emiter/albedo.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/screen_emiter/metallic.png as 0 bpp tmap
+    [match] TEXTURES/PBR/screen_emiter/metallic.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/screen_emiter/metallic.png (metallic) decoded + cached
+[MAT-IMPORT] 'screen emiter' <- metallic map TEXTURES/PBR/screen_emiter/metallic.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/screen_emiter/normal.png as 0 bpp tmap
+    [match] TEXTURES/PBR/screen_emiter/normal.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/screen_emiter/normal.png (normal) decoded + cached
+[MAT-IMPORT] 'screen emiter' <- normal map TEXTURES/PBR/screen_emiter/normal.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/screen_emiter/roughness.png as 0 bpp tmap
+    [match] TEXTURES/PBR/screen_emiter/roughness.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/screen_emiter/roughness.png (roughness) decoded + cached
+[MAT-IMPORT] 'screen emiter' <- roughness map TEXTURES/PBR/screen_emiter/roughness.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/stairs/albedo.png as 0 bpp tmap
+    [cap] TEXTURES/PBR/stairs/albedo.png downsampled to 1024x1024 (20-bit UV limit)
+    [load] TEXTURES/PBR/stairs/albedo.png (albedo) decoded + cached
+[MAT-IMPORT] 'stairs' <- albedo map TEXTURES/PBR/stairs/albedo.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/stairs/ao.png as 0 bpp tmap
+    [match] TEXTURES/PBR/stairs/ao.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/stairs/ao.png (ao) decoded + cached
+[MAT-IMPORT] 'stairs' <- ao map TEXTURES/PBR/stairs/ao.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/stairs/height.png as 0 bpp tmap
+    [match] TEXTURES/PBR/stairs/height.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/stairs/height.png (height) decoded + cached
+[MAT-IMPORT] 'stairs' <- height map TEXTURES/PBR/stairs/height.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/stairs/metallic.png as 0 bpp tmap
+    [match] TEXTURES/PBR/stairs/metallic.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/stairs/metallic.png (metallic) decoded + cached
+[MAT-IMPORT] 'stairs' <- metallic map TEXTURES/PBR/stairs/metallic.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/stairs/normal.png as 0 bpp tmap
+    [match] TEXTURES/PBR/stairs/normal.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/stairs/normal.png (normal) decoded + cached
+[MAT-IMPORT] 'stairs' <- normal map TEXTURES/PBR/stairs/normal.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/stairs/roughness.png as 0 bpp tmap
+    [match] TEXTURES/PBR/stairs/roughness.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/stairs/roughness.png (roughness) decoded + cached
+[MAT-IMPORT] 'stairs' <- roughness map TEXTURES/PBR/stairs/roughness.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/wall_stone3/albedo.png as 0 bpp tmap
+    [load] TEXTURES/PBR/wall_stone3/albedo.png (albedo) decoded + cached
+[MAT-IMPORT] 'rooms' <- albedo map TEXTURES/PBR/wall_stone3/albedo.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/wall_stone3/ao.png as 0 bpp tmap
+    [load] TEXTURES/PBR/wall_stone3/ao.png (ao) decoded + cached
+[MAT-IMPORT] 'rooms' <- ao map TEXTURES/PBR/wall_stone3/ao.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/wall_stone3/height.png as 0 bpp tmap
+    [load] TEXTURES/PBR/wall_stone3/height.png (height) decoded + cached
+[MAT-IMPORT] 'rooms' <- height map TEXTURES/PBR/wall_stone3/height.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/wall_stone3/normal.png as 0 bpp tmap
+    [load] TEXTURES/PBR/wall_stone3/normal.png (normal) decoded + cached
+[MAT-IMPORT] 'rooms' <- normal map TEXTURES/PBR/wall_stone3/normal.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/wall_stone3/roughness.png as 0 bpp tmap
+    [load] TEXTURES/PBR/wall_stone3/roughness.png (roughness) decoded + cached
+[MAT-IMPORT] 'rooms' <- roughness map TEXTURES/PBR/wall_stone3/roughness.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/teleporter/height.png as 0 bpp tmap
+    [load] TEXTURES/PBR/teleporter/height.png (height) decoded + cached
+[MAT-IMPORT] 'teleporter' <- height map TEXTURES/PBR/teleporter/height.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/teleporter/normal.png as 0 bpp tmap
+    [load] TEXTURES/PBR/teleporter/normal.png (normal) decoded + cached
+[MAT-IMPORT] 'teleporter' <- normal map TEXTURES/PBR/teleporter/normal.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy2/albedo.png as 0 bpp tmap
+    [cap] TEXTURES/PBR/momy2/albedo.png downsampled to 1024x1024 (20-bit UV limit)
+    [load] TEXTURES/PBR/momy2/albedo.png (albedo) decoded + cached
+[MAT-IMPORT] 'momy-2' <- albedo map TEXTURES/PBR/momy2/albedo.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy2/metallic.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy2/metallic.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy2/metallic.png (metallic) decoded + cached
+[MAT-IMPORT] 'momy-2' <- metallic map TEXTURES/PBR/momy2/metallic.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy2/normal.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy2/normal.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy2/normal.png (normal) decoded + cached
+[MAT-IMPORT] 'momy-2' <- normal map TEXTURES/PBR/momy2/normal.png (ok, 1 material(s))
+Attempting to read: texture file TEXTURES/PBR/momy2/roughness.png as 0 bpp tmap
+    [match] TEXTURES/PBR/momy2/roughness.png resampled to 1024x1024 (albedo texel layout)
+    [load] TEXTURES/PBR/momy2/roughness.png (roughness) decoded + cached
+[MAT-IMPORT] 'momy-2' <- roughness map TEXTURES/PBR/momy2/roughness.png (ok, 1 material(s))
+[MAT-REVMAP] greets: 32 LWO/FLD-authored map(s) applied
+[GREETS] seeded 5 authored per-surface smoothing angle(s) from native SMAN (sidecar-elim §1.5)
+[GREETS] floor retile: scale=1.50 detile=0.060 (30 faces)
+Attempting to read: texture file TEXTURES/CODE.JPG as 24 bpp tmap
+[GREETS] robot spotlight target = 'mech  null'
+[ROBOT-MAT] mesh 'Hull2.lwo' default-bins=1 cloned 1 materials
+[ROBOT-MAT] mesh 'Hull.lwo' default-bins=2 cloned 8 materials
+[ROBOT-MAT] mesh 'L_leg1.lwo' default-bins=1 cloned 2 materials
+[ROBOT-MAT] mesh 'L_leg2.lwo' default-bins=1 cloned 2 materials
+[ROBOT-MAT] mesh 'R_leg1.lwo' default-bins=1 cloned 2 materials
+[ROBOT-MAT] mesh 'R_leg2.lwo' default-bins=1 cloned 2 materials
+[ROBOT-MAT] Hull2 → 'Hull.lwo::hull' merge: 72 faces redirected
+[PIRAMID-SPLIT] mesh 'Piramid.lwo' 5532 faces → 2183 wall clusters (5460 tagged, 72 degen skipped)
+[PIRAMID-SPLIT] total clusters: 2183  tagged faces: 5460  (per-face F->ShadowMatID; no Material clones)
+[PIRAMID-CHUNKS] grid=8³ → 128 chunks  (orig 5532 faces / 16596 verts → 16596 total chunk verts; 0 faces with null vertex skipped)
+[GREETS-TBN] split 1030 mirrored-UV faces onto 7 handedness clones
+[ROBOT-MAT] total clones: 17
+[DISCO] anchored to authored 'DiscoBall' null (0.00 5.00 -21.00)
+[DISCO] room bbox (-13.6 -3.7 -75.9)-(49.4 18.5 4.9) ball at (0.00 5.00 -21.00) r=0.60
+[DISCO] ball: 560 verts 252 faces, 10 spots, glow=1
+[GREETS] greets_omni_shadows: marked 8 static @ 512² + 3 moving @ 128² / 21 Light_Omni (moving = per-frame full re-bake; no static bake or lightmap)
+[SHADOW] ShadowMaps_Rebuild: 10 shadow maps (R/G/B intensities from O->L):
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+  res=256x256  R=215 G=235 B=255  IRange=38.0
+[SHADOW] CubeShadowMaps_Rebuild: 11 cube maps (6 faces each):
+  res=512x512  R=210 G=225 B=255  IRange=6.0
+  res=512x512  R=255 G=255 B=0  IRange=30.0
+  res=512x512  R=255 G=255 B=0  IRange=30.0
+  res=512x512  R=255 G=255 B=0  IRange=30.0
+  res=512x512  R=255 G=255 B=0  IRange=30.0
+  res=512x512  R=255 G=255 B=0  IRange=30.0
+  res=512x512  R=255 G=255 B=0  IRange=30.0
+  res=512x512  R=255 G=255 B=0  IRange=30.0
+  res=128x128  R=0 G=128 B=255  IRange=30.0
+  res=128x128  R=0 G=128 B=255  IRange=30.0
+  res=128x128  R=0 G=128 B=255  IRange=30.0
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c126' Pos.NumKeys=0 Rot.NumKeys=0 Faces=19
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c126' Pos.NumKeys=0 Rot.NumKeys=0 Faces=19
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c125' Pos.NumKeys=0 Rot.NumKeys=0 Faces=23
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c124' Pos.NumKeys=0 Rot.NumKeys=0 Faces=393
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c126' Pos.NumKeys=0 Rot.NumKeys=0 Faces=19
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c125' Pos.NumKeys=0 Rot.NumKeys=0 Faces=23
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c126' Pos.NumKeys=0 Rot.NumKeys=0 Faces=19
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c125' Pos.NumKeys=0 Rot.NumKeys=0 Faces=23
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c124' Pos.NumKeys=0 Rot.NumKeys=0 Faces=393
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c123' Pos.NumKeys=0 Rot.NumKeys=0 Faces=395
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c122' Pos.NumKeys=0 Rot.NumKeys=0 Faces=7
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c121' Pos.NumKeys=0 Rot.NumKeys=0 Faces=16
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c125' Pos.NumKeys=0 Rot.NumKeys=0 Faces=23
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c124' Pos.NumKeys=0 Rot.NumKeys=0 Faces=393
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c124' Pos.NumKeys=0 Rot.NumKeys=0 Faces=393
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c123' Pos.NumKeys=0 Rot.NumKeys=0 Faces=395
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c122' Pos.NumKeys=0 Rot.NumKeys=0 Faces=7
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c120' Pos.NumKeys=0 Rot.NumKeys=0 Faces=1
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c123' Pos.NumKeys=0 Rot.NumKeys=0 Faces=395
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'Hull.lwo' Pos.NumKeys=12 Rot.NumKeys=12 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Rot.NumKeys=180 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Rot.NumKeys=217 parent='L_leg1.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Rot.NumKeys=209 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg2.lwo' Pos.NumKeys=177 Rot.NumKeys=177 parent='R_leg1.lwo'
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c127' Pos.NumKeys=0 Rot.NumKeys=0 Faces=5
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'Hull.lwo' Pos.NumKeys=12 Rot.NumKeys=12 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Rot.NumKeys=180 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Rot.NumKeys=217 parent='L_leg1.lwo'
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'Hull.lwo' Pos.NumKeys=12 Rot.NumKeys=12 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Rot.NumKeys=180 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Rot.NumKeys=217 parent='L_leg1.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Rot.NumKeys=209 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg2.lwo' Pos.NumKeys=177 Rot.NumKeys=177 parent='R_leg1.lwo'
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'Hull.lwo' Pos.NumKeys=12 Rot.NumKeys=12 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Rot.NumKeys=180 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Rot.NumKeys=217 parent='L_leg1.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Rot.NumKeys=209 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'Hull.lwo' Pos.NumKeys=12 Rot.NumKeys=12 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Rot.NumKeys=180 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Rot.NumKeys=209 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg2.lwo' Pos.NumKeys=177 Rot.NumKeys=177 parent='R_leg1.lwo'
+[STATIC-BAKE-SKIP-MESH] 'R_leg2.lwo' Pos.NumKeys=177 Rot.NumKeys=177 parent='R_leg1.lwo'
+[STATIC-BAKE-KEEP-MESH] 'Piramid.lwo:c126' Pos.NumKeys=0 Rot.NumKeys=0 Faces=19
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'Hull.lwo' Pos.NumKeys=12 Rot.NumKeys=12 parent='Hull2.lwo'
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Rot.NumKeys=284 parent='mech  null'
+[STATIC-BAKE-SKIP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Rot.NumKeys=217 parent='L_leg1.lwo'
+[SHADOW-MAT] 'siling' flags=0x00000004
+[SHADOW-MAT] 'amudim::mirUV' flags=0x00000004
+[SHADOW-MAT] 'floor::mirUV' flags=0x00000804
+[SHADOW-MAT] 'sss' flags=0x00000004
+[SHADOW-MAT] 'screen2' flags=0x00001034
+[SHADOW-MAT] 'rooms::mirUV' flags=0x00000804
+[SHADOW-MAT] 'amudim' flags=0x00000004
+[SHADOW-MAT] 'amudim' flags=0x00000004
+[SHADOW-MAT] 'floor::mirUV' flags=0x00000804
+[SHADOW-MAT] 'sh' flags=0x00000000
+[SHADOW-MAT] 'screen handle' flags=0x00000004
+[SHADOW-MAT] 'lamp' flags=0x00000004
+[SHADOW-MAT] 'teleporter' flags=0x00000000
+[SHADOW-MAT] 'amudim::mirUV' flags=0x00000004
+[SHADOW-MAT] 'lamp light' flags=0x00001024
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'momy-1' flags=0x00000004
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'momy-2' flags=0x00000004
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'rooms' flags=0x00000804
+[SHADOW-MAT] 'momy-2::mirUV' flags=0x00000004
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'stairs::mirUV' flags=0x00000004
+[SHADOW-MAT] 'momy-1::mirUV' flags=0x00000004
+[SHADOW-MAT] 'screen 4' flags=0x00001024
+[SHADOW-MAT] 'screen 3' flags=0x00000024
+[SHADOW-MAT] 'stairs' flags=0x00000004
+[SHADOW-MAT] 'screen emiter fance' flags=0x00000004
+[SHADOW-MAT] 'screen emiter green' flags=0x00000000
+[SHADOW-MAT] 'screen emiter' flags=0x00000004
+[SHADOW-MAT] 'screen emiter::mirUV' flags=0x00000004
+[SHADOW-MAT] 'screen emiter fance' flags=0x00000004
+[SHADOW-PYR] init uniformity build: 0.63 ms (48 maps)
+[SHADOW] ShadowMaps_BakeStatic: 8 static light(s) baked
+[MIRROR 'teleporter'] plane N=(0.000,0.000,-1.000) d=4.937 from 4/4 faces (0 outliers)
+[MIRROR 'teleporter'] cloned 27370 verts / 9198 faces (mirror bbox z=[4.9..85.8]); 4 wall faces (0 half-silvered, 4 portal); cloned 21 omnis
+[CLUSTER  0] mat='screen2' ctr=(-0,1,-21) N=(-1.00, 0.00, 0.00) d=  -0.494 faces=2 area=  1.00 ext=1.01x0.99 aspect=1.0 facesWall=0 -> unmarked
+[CLUSTER  1] mat='screen2' ctr=(0,1,-21) N=( 0.00, 0.00,-1.00) d= -21.478 faces=2 area=  0.98 ext=0.99x0.99 aspect=1.0 facesWall=0 -> unmarked
+[CLUSTER  2] mat='screen2' ctr=(0,1,-20) N=( 0.00, 0.00, 1.00) d=  20.466 faces=2 area=  0.98 ext=0.99x0.99 aspect=1.0 facesWall=0 -> unmarked
+[CLUSTER  3] mat='screen2' ctr=(0,1,-21) N=( 1.00, 0.00, 0.00) d=  -0.494 faces=2 area=  1.00 ext=1.01x0.99 aspect=1.0 facesWall=0 -> unmarked
+[CLUSTER  4] mat='screen 3' ctr=(49,11,-56) N=( 0.00, 0.00, 1.00) d=  55.574 faces=2 area=  3.19 ext=0.27x11.86 aspect=44.0 facesWall=0 -> edge
+[CLUSTER  5] mat='screen 3' ctr=(49,17,-63) N=( 0.00, 1.00, 0.00) d= -16.706 faces=2 area=  3.92 ext=0.27x14.55 aspect=54.0 facesWall=1 -> horizontal
+[CLUSTER  6] mat='screen 3' ctr=(49,11,-63) N=(-1.00, 0.00, 0.00) d=  48.795 faces=2 area=172.52 ext=14.55x11.86 aspect=1.2 facesWall=0 -> built
+[MIRROR 'P_TEXT.JPG#6'] plane N=(-1.000,0.000,0.000) d=48.795 from 2/2 faces (0 outliers)
+[MIRROR 'P_TEXT.JPG#6'] cloned 27274 verts / 9166 faces (mirror bbox z=[-75.9..4.9]); 2 wall faces (2 half-silvered, 0 portal); cloned 21 omnis
+[CLUSTER  7] mat='screen 3' ctr=(49,11,-63) N=( 1.00, 0.00, 0.00) d= -49.064 faces=2 area=172.52 ext=14.55x11.86 aspect=1.2 facesWall=1 -> occluded
+[CLUSTER  8] mat='screen 3' ctr=(49,5,-63) N=( 0.00,-1.00, 0.00) d=   4.850 faces=2 area=  3.92 ext=0.27x14.55 aspect=54.0 facesWall=1 -> horizontal
+[CLUSTER  9] mat='screen 4' ctr=(-9,2,-56) N=(-1.00, 0.00, 0.00) d=  -8.764 faces=2 area=  0.30 ext=0.12x2.47 aspect=20.0 facesWall=0 -> sliver
+[CLUSTER 10] mat='screen 4' ctr=(-7,2,-56) N=( 0.00, 0.00,-1.00) d= -56.163 faces=2 area=  6.40 ext=2.59x2.47 aspect=1.0 facesWall=0 -> built
+[MIRROR 'P_TEXT.JPG#10'] plane N=(0.000,0.000,-1.000) d=-56.163 from 2/2 faces (0 outliers)
+[MIRROR 'P_TEXT.JPG#10'] cloned 1926 verts / 642 faces (mirror bbox z=[-117.3..-36.4]); 2 wall faces (2 half-silvered, 0 portal); cloned 21 omnis
+[CLUSTER 11] mat='screen 4' ctr=(-7,4,-56) N=( 0.00, 1.00, 0.00) d=  -3.703 faces=2 area=  0.32 ext=2.59x0.12 aspect=21.0 facesWall=0 -> sliver
+[CLUSTER 12] mat='screen 4' ctr=(-7,2,-56) N=( 0.00, 0.00, 1.00) d=  56.039 faces=2 area=  6.40 ext=2.59x2.47 aspect=1.0 facesWall=0 -> built
+[MIRROR 'P_TEXT.JPG#12'] plane N=(0.000,0.000,1.000) d=56.039 from 2/2 faces (0 outliers)
+[MIRROR 'P_TEXT.JPG#12'] cloned 24922 verts / 8382 faces (mirror bbox z=[-117.0..-36.2]); 2 wall faces (2 half-silvered, 0 portal); cloned 21 omnis
+[CLUSTER 13] mat='screen 4' ctr=(-6,2,-56) N=( 1.00, 0.00, 0.00) d=   6.172 faces=2 area=  0.30 ext=0.12x2.47 aspect=20.0 facesWall=1 -> sliver
+[CLUSTER 14] mat='screen 4' ctr=(-7,1,-56) N=( 0.00,-1.00, 0.00) d=   1.234 faces=2 area=  0.32 ext=2.59x0.12 aspect=21.0 facesWall=1 -> sliver
+[CLUSTER 15] mat='screen 3' ctr=(49,11,-70) N=( 0.00, 0.00,-1.00) d= -70.124 faces=2 area=  3.19 ext=0.27x11.86 aspect=44.0 facesWall=0 -> edge
+[MIRROR-CLUSTER 'P_TEXT.JPG'] 32 faces -> 16 clusters -> 3 mirrors + 0 first-order RTT (8 slivers + 2 horizontal skipped)
+[MIRROR-RTT] slot m1->m2 512x512 (window 14.6x11.9 u=[-70.1..-55.6] v=[4.9..16.7] N=(-1.0,0.0,0.0) d=48.79)
+[MIRROR-RTT] slot m1->m3 512x512 (window 2.6x2.5 u=[6.2..8.8] v=[1.2..3.7] N=(0.0,0.0,-1.0) d=-56.16)
+[MIRROR-RTT] slot m1->m4 512x512 (window 2.6x2.5 u=[-8.8..-6.2] v=[1.2..3.7] N=(0.0,0.0,1.0) d=56.04)
+[MIRROR-RTT] slot m2->m1 512x512 (window 4.9x5.0 u=[-2.5..2.5] v=[0.0..5.0] N=(0.0,0.0,-1.0) d=4.94)
+[MIRROR-RTT] slot m2->m3 512x512 (window 2.6x2.5 u=[6.2..8.8] v=[1.2..3.7] N=(0.0,0.0,-1.0) d=-56.16)
+[MIRROR-RTT] slot m2->m4 512x512 (window 2.6x2.5 u=[-8.8..-6.2] v=[1.2..3.7] N=(0.0,0.0,1.0) d=56.04)
+[MIRROR-RTT] slot m3->m2 512x512 (window 14.6x11.9 u=[-70.1..-55.6] v=[4.9..16.7] N=(-1.0,0.0,0.0) d=48.79)
+[MIRROR-RTT] slot m4->m1 512x512 (window 4.9x5.0 u=[-2.5..2.5] v=[0.0..5.0] N=(0.0,0.0,-1.0) d=4.94)
+[MIRROR-RTT] prepared 8 slot(s)
+[GREETS-MIRROR] active mirrors: 4
+[SHARD-REFL] 238 shards: res=64 -> 1 atlas(es) of 1024x1024 (256 cells each)
+[GREETS-SHATTER] target mirror 1 area=172.5 grid=17x14 floorY=4.9 N=(-1.00,0.00,0.00)
+[GREETS-BAKE] static lightmap bake SKIPPED — the atlas has no reader (--shadow_lightmap off at G-buffer resize, so the lightmapMF/ST planes do not exist). Face indices stamped anyway (transparent-sort tie-break). Pass --shadow_lightmap to bake; --shadow_lightmap --shadow_lm_dynamic to sample it.
+[GREETS-CAM] applied pose src=(9.80,5.00,-21.30) fov=58.1092 deg (horizontal, CalcPersp) xres=1920 yres=1080
+[GREETSSNAP] override cam pos=(9.800,5.000,-21.300) fwd=(0.812,-0.030,-0.583) fov=0.0 (scene default)
+[DISCO] panorama baked at (0.00 5.00 -21.00)
+[DISCO] 8 glint lights
+[SHADOW-MAT] 'Hull.lwo::hull' flags=0x00000004
+[SHADOW-MAT] 'Hull.lwo::canons_body' flags=0x00000004
+[SHADOW-MAT] 'Hull.lwo::in canons_body' flags=0x00000000
+[SHADOW-MAT] 'Hull.lwo::sing_body' flags=0x00000004
+[SHADOW-MAT] 'Hull.lwo::linght_body' flags=0x00000004
+[SHADOW-MAT] 'Hull.lwo::linght_body' flags=0x00000004
+[SHADOW-MAT] 'Hull.lwo::hull not smooth_upper' flags=0x00000004
+[SHADOW-MAT] 'screen 4' flags=0x00001024
+[SHADOW-MAT] 'screen 4' flags=0x00001024
+[SHADOW-MAT] 'screen 3' flags=0x00000024
+[SHADOW-MAT] 'Hull.lwo::cockpit_upper' flags=0x00000004
+[SHADOW-MAT] 'Hull.lwo::cockpit_body' flags=0x00000004
+[SHADOW-MAT] 'L_leg2.lwo::hull not smooth' flags=0x00000004
+[SHADOW-MAT] 'R_leg2.lwo::hull' flags=0x00000004
+[SHADOW-MAT] 'R_leg2.lwo::hull not smooth' flags=0x00000004
+[SHADOW-MAT] 'L_leg1.lwo::hull' flags=0x00000004
+[SHADOW-MAT] 'L_leg1.lwo::hull not smooth' flags=0x00000004
+[SHADOW-MAT] 'R_leg1.lwo::hull' flags=0x00000004
+[SHADOW-MAT] 'R_leg1.lwo::hull not smooth' flags=0x00000004
+[SHADOW-MAT] 'L_leg2.lwo::hull' flags=0x00000004
+[SHADOW-PASS] mode=DynamicMeshesPerFrame  g_shadowMaps.size=76
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c126' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c126' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c125' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c126' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c125' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c124' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c123' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c122' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c121' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c120' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c119' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c118' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c126' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c125' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c126' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c125' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-KEEP-MESH] 'Hull.lwo' Pos.NumKeys=12 Faces=2400
+[DYN-BAKE-KEEP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Faces=186
+[DYN-BAKE-KEEP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Faces=288
+[DYN-BAKE-KEEP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Faces=186
+[DYN-BAKE-KEEP-MESH] 'R_leg2.lwo' Pos.NumKeys=177 Faces=288
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c124' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-KEEP-MESH] 'Hull.lwo' Pos.NumKeys=12 Faces=2400
+[DYN-BAKE-KEEP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Faces=186
+[DYN-BAKE-KEEP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Faces=288
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-KEEP-MESH] 'Hull.lwo' Pos.NumKeys=12 Faces=2400
+[DYN-BAKE-KEEP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Faces=186
+[DYN-BAKE-KEEP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Faces=288
+[DYN-BAKE-KEEP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Faces=186
+[DYN-BAKE-KEEP-MESH] 'R_leg2.lwo' Pos.NumKeys=177 Faces=288
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c125' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-KEEP-MESH] 'Hull.lwo' Pos.NumKeys=12 Faces=2400
+[DYN-BAKE-KEEP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Faces=186
+[DYN-BAKE-KEEP-MESH] 'L_leg2.lwo' Pos.NumKeys=217 Faces=288
+[DYN-BAKE-KEEP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Faces=186
+[DYN-BAKE-KEEP-MESH] 'R_leg2.lwo' Pos.NumKeys=177 Faces=288
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-KEEP-MESH] 'Hull.lwo' Pos.NumKeys=12 Faces=2400
+[DYN-BAKE-KEEP-MESH] 'L_leg1.lwo' Pos.NumKeys=180 Faces=186
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c124' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c117' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[DYN-BAKE-KEEP-MESH] 'Hull.lwo' Pos.NumKeys=12 Faces=2400
+[DYN-BAKE-KEEP-MESH] 'R_leg1.lwo' Pos.NumKeys=209 Faces=186
+[DYN-BAKE-KEEP-MESH] 'Hull.lwo' Pos.NumKeys=12 Faces=2400
+[DYN-BAKE-SKIP-MESH] 'Piramid.lwo:c127' (static)
+[DYN-BAKE-KEEP-MESH] 'Hull2.lwo' Pos.NumKeys=284 Faces=72
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=3272  skBbox=3272 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHADOW-TILE-EMPTY] cAll=2475  skBbox=2475 skNoTxtr=0 skXpar=0 skDegen=0 skBack=0
+[SHAMB] baked scene-center SH probe at (17.9 9.2 -35.5) res 32²×6; DC ambient B/G/R = 101.8/112.1/117.0 (flat was 32/32/32)
+[ENVDYN-CENSUS] 'momy-2': INVARIANT VIOLATED — 42 mover mesh submission(s), 22032 face(s), from {__discoBall, Hull2.lwo, Hull.lwo, L_leg1.lwo, L_leg2.lwo, R_leg1.lwo, R_leg2.lwo} baked into a static capture the overlay also draws live: that content is FROZEN at bake time and duplicates the live copy
+[ENVDYN] retained static Z+colour master for flagged probe 'momy-2' (9216 KB)
+[ENVREFL] baked 6 padded CUBE faces of 512x512 (+3 mips) for 'momy-2' at its centroid (-12.2 2.5 -34.7)
+[ENVREFL] 'stairs': 4 instance clusters — probe at the largest (45.4 2.3 -54.9), self-exclusion radius 8.4 (0 = whole surface); use split-instances for per-instance probes
+[ENVDYN-CENSUS] 'stairs': INVARIANT VIOLATED — 42 mover mesh submission(s), 22032 face(s), from {__discoBall, Hull2.lwo, Hull.lwo, L_leg1.lwo, L_leg2.lwo, R_leg1.lwo, R_leg2.lwo} baked into a static capture the overlay also draws live: that content is FROZEN at bake time and duplicates the live copy
+[ENVDYN] retained static Z+colour master for flagged probe 'stairs' (9216 KB)
+[ENVREFL] baked 6 padded CUBE faces of 512x512 (+3 mips) for 'stairs' at its centroid (45.4 2.3 -54.9)
+[ENVDYN-CENSUS] 'screen emiter': INVARIANT VIOLATED — 42 mover mesh submission(s), 22032 face(s), from {__discoBall, Hull2.lwo, Hull.lwo, L_leg1.lwo, L_leg2.lwo, R_leg1.lwo, R_leg2.lwo} baked into a static capture the overlay also draws live: that content is FROZEN at bake time and duplicates the live copy
+[ENVDYN] retained static Z+colour master for flagged probe 'screen emiter' (2304 KB)
+[ENVREFL] baked 6 padded CUBE faces of 256x256 (+3 mips) for 'screen emiter' at its centroid (47.1 3.0 -62.7)
+[ENVDYN-CENSUS] 'amudim': 42 mover mesh submission(s), 22032 face(s), from {__discoBall, Hull2.lwo, Hull.lwo, L_leg1.lwo, L_leg2.lwo, R_leg1.lwo, R_leg2.lwo} in a NON-overlaid static capture (legacy --env_bake_include_animated behaviour, frozen by design)
+[ENVREFL] baked 6 padded CUBE faces of 64x64 (+3 mips) for 'amudim' at its centroid (0.0 3.2 -21.0)
+[ENVDYN-CENSUS] 'momy-1': INVARIANT VIOLATED — 42 mover mesh submission(s), 22032 face(s), from {__discoBall, Hull2.lwo, Hull.lwo, L_leg1.lwo, L_leg2.lwo, R_leg1.lwo, R_leg2.lwo} baked into a static capture the overlay also draws live: that content is FROZEN at bake time and duplicates the live copy
+[ENVDYN] retained static Z+colour master for flagged probe 'momy-1' (9216 KB)
+[ENVREFL] baked 6 padded CUBE faces of 512x512 (+3 mips) for 'momy-1' at its centroid (12.0 2.5 -34.7)
+[ENVDYN-CENSUS] 'Hull.lwo::cockpit_upper': 42 mover mesh submission(s), 22032 face(s), from {__discoBall, Hull2.lwo, Hull.lwo, L_leg1.lwo, L_leg2.lwo, R_leg1.lwo, R_leg2.lwo} in a NON-overlaid static capture (legacy --env_bake_include_animated behaviour, frozen by design)
+[ENVREFL] baked 6 padded CUBE faces of 256x256 (+3 mips) for 'Hull.lwo::cockpit_upper' at its centroid (15.9 2.1 -59.3)
+[ENVREFL] 'stairs::mirUV': 4 instance clusters — probe at the largest (46.3 2.7 -70.8), self-exclusion radius 8.6 (0 = whole surface); use split-instances for per-instance probes
+[ENVDYN-CENSUS] 'stairs::mirUV': INVARIANT VIOLATED — 42 mover mesh submission(s), 22032 face(s), from {__discoBall, Hull2.lwo, Hull.lwo, L_leg1.lwo, L_leg2.lwo, R_leg1.lwo, R_leg2.lwo} baked into a static capture the overlay also draws live: that content is FROZEN at bake time and duplicates the live copy
+[ENVDYN] retained static Z+colour master for flagged probe 'stairs::mirUV' (9216 KB)
+[ENVREFL] baked 6 padded CUBE faces of 512x512 (+3 mips) for 'stairs::mirUV' at its centroid (46.3 2.7 -70.8)
+[REFRENDER] model: 892 authored stone faces (soup 36780), edges free/convex/concave 4/373/2299 (smooth 1477), non-stone neighbours 528, bevelled 1, ext capped 0, max margin 0.578 u, back 0.300 u, crease 30 deg, phi hist(10deg bins) 1369/16/92/92/92/24/218/66/703, partition union +mitre-trim(convex)
+[REFRENDER] zScale=395.636 (viewZ = (0xFF80 - z16)/zScale)
+[REFRENDER] 216 ms  cast 2073600  hit 2036589 (grow 0, step 0, skirt 0)  fallback 526  budget-hit 0  cells 58599979 (28.3/px)
+[REFRENDER-H1] events: cap 512, mean 10.6/px, dropped 0 (slab 0, bisector 0, other 0)
+[REFRENDER-H1] pixels: any-drop 0 (0.00% of cast), slab-drop 0, cand-cap 0; cands mean 1.9 max 11, hist(<8/<16/<24/<32/<48/<96/<192/192) 2072480/1120/0/0/0/0/0/0
+[REFRENDER-H1] MISS 526  =  slab-events-dropped 0 (0.0%) | any-events-dropped 0 (0.0%) | cand-cap 0 (0.0%) | march-budget 0 (0.0%) | no-candidate 0 (0.0%) | unexplained 526 (100.0%)
+[REFRENDER-MISS] 526 = empty-bin 0 (0.0%) | all-backfacing 0 (0.0%) | all-clipped 0 (0.0%) | never-inside 0 (0.0%) | margin-arrival-discard 526 (100.0%) | no-boundary-kind 0 (0.0%) | before-near 0 (0.0%) | other 0 (0.0%)   [any-backface-cull on the ray: 507]
+[REFRENDER-MISS] never-inside 0 by CLOSEST APPROACH to a slab top (world u): never-probed 0 | <1e-4 0 | <1e-3 0 | <1e-2 0 | <0.05 0 | <0.2 0 | >=0.2 0   (never-probed and rejected only by: mitre 0, back-plane 0, t-range 0)
+[REFRENDER-MISS] MITRE-TRIM vetoes on miss pixels: any 11 (2.1% of MISS) — by edge kind: convex 11, CONCAVE 0, soup-neighbour 0 (smooth-seam 11)
+[ssao] 1920x1080 /2 (960x540), GTAO+bitmask, HDR g_hdrBuf: 7.22 ms
+[SNAPSHOT] wrote /private/tmp/claude-501/-Users-gil-ad-work-revival-fog/7ec4ee82-204d-4fb8-a259-a95020066560/scratchpad/blender/line5_fdsref/greets_t006194_color.ppm
+[GREETSSNAP] t=6194 -> /private/tmp/claude-501/-Users-gil-ad-work-revival-fog/7ec4ee82-204d-4fb8-a259-a95020066560/scratchpad/blender/line5_fdsref/greets_t006194_color.ppm

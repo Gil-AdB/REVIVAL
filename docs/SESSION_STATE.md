@@ -1,4 +1,39 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-03b — external reference: Blender on the exact engine mesh says the junction defect is T-junction topology (his ruling pending)
+
+His words after the seam-phase deck: "everything you do just makes stuff worse in each iteration ... we don't have a
+working code on the non-working poses. Can we try to create a reference with some existing engine?" Built and delivered:
+
+- **Deck for his ruling**: https://claude.ai/code/artifact/993e64a7-cfdb-4fe9-ad8e-4a589be09c16 — "Blender Stone
+  Reference": the four junctions (H6194 door head, H5981 jamb, the 90° corner, mitre line 5), any two of FDS shipping /
+  FDS reference renderer / Blender welded / Blender T-junctions split on the wipe bar, crop locators, the calibration
+  table, the T-junction census, the full recipe. Open question `greets.displace.topology.ruling` (4ab7684b5e65,
+  waiting on him): split the T-junctions at load before the bake (approach A), fix them in the authoring source, or neither.
+- **The reference**: Blender 4.5.13 as `bpy` (`tools/blender_ref/ref.py`, README has the venv + per-pose commands)
+  displaces the engine's authored stone — dumped by the new byte-null flag `--greets_mesh_dump` (`DEMO/MeshDump.cpp`,
+  writes `Runtime/greets_stone_authored.obj` 226 faces and `greets_stone_baked.obj` 90625 faces) — with the same height
+  map at the bake's mip (1024→256 box), amp 0.3, mid 0.547, along the smooth vertex normal (Cycles adaptive
+  micro-displacement, 1 px dicing), through the engine's own camera (Kick_Camera basis, 58.1092° horizontal, 0.75
+  vertical scale). Calibration: high-pass luminance correlation at unit scale 0.32–0.56 whole-frame against the FDS
+  frames (same-engine control 0.53, wrong-pose control 0.00); the vertical-scale sweep peaks at 1.00 only
+  (`docs/evidence/blender_ref/calibration.txt`).
+- **What it shows** (my reading of the crops; his eyes rule): on the mesh as authored (welded only) Blender is watertight
+  everywhere EXCEPT along the T-junction host edges — a hairline at H6194 down the wall edge x 17.898 z −62.952 (the
+  line the shipping wedge sits on; it projects to frame x 1140–1153) and a dashed hairline at line 5 (host line
+  x 12.344 z −24.687, frame x ≈ 1500). With the 40 T-vertices (17 host lines, `docs/evidence/blender_ref/tjunction_census.txt`)
+  split into their host edges, all four poses render watertight: no wedge, no tab, the head course continues onto the
+  reveal. The in-tree reference renderer's H6194 tab and H5981 tan blob are absent in Blender → they belong to the
+  raycaster (consistent with 6d633f210431 / his verdict b678bfe78dde).
+- **Not measured**: what `DisplaceStoneSubdiv` does on a split mesh. Blender shows the surface is watertight once the
+  topology is; it says nothing about the bake's mitre / free-edge / border-pin stages on that topology.
+- Ledger (coordinator): 0d2c4639b5dd (welded arm), 09e57ac140d9 (split arm), 5afe6a2d48de (calibration),
+  54f55a6a48eb (pixel-aspect trap: Blender clamps pixel_aspect to ≥ 1, use pay 1.333; `--cam=` for a leading minus),
+  949a6c9dd730 (40 T-junctions), b7f2b781eece (vs the reference renderer), 4ab7684b5e65 (open ruling).
+- Traps met on the way: bpy Displace-modifier + Simple subsurf blurs the blocks (use adaptive micro-displacement); a
+  first T-splitter left sliver n-gons (re-triangulate BEAUTY after splitting); a shell loop lost `Runtime/` as cwd and
+  three FDS reference runs silently produced no frame (absolute paths, check for the ppm).
+- Still open beside this: the seam-phase ruling 2ad45f7c403b ("Stone Seam Phase" deck).
+
 ## 2026-09-03a — the seam UV step is scene-wide and a pure phase at 37 corners; `--greets_uv_seam_phase` closes it (built, byte-null off, his ruling pending)
 
 - **Deck for his ruling**: https://claude.ai/code/artifact/c44a668e-f342-4f37-8e4c-928f90fe3ec2 — four junctions

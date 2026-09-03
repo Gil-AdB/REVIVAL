@@ -37,6 +37,7 @@ void Xtrace_WriteFile(const char*);
 #include "V4Bake.h"           // v4 phase-1 census (docs/DISPLACEMENT_V4_DESIGN.md)
 #include "DisplaceRebuild.h"   // live shell rebuild (editor displacement panel)
 #include "SeamPhase.h"         // --greets_uv_seam_phase: per-patch u shift at stone creases
+#include "MeshDump.h"          // --greets_mesh_dump: authored + baked stone OBJ for the external reference
 #include "MaterialImport.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
@@ -2022,6 +2023,10 @@ void Initialize_Greets()
 			rev::SeamPhaseUV_Apply(GreetSc, kWorldUVMats, 2,
 			                       fds::FeatureFlags::greets_uv_seam_phase_sweeps(),
 			                       fds::FeatureFlags::greets_uv_seam_phase_scale());
+		// --greets_mesh_dump: the AUTHORED stone mesh (after the seam-phase
+		// pass if on, before the bake) for the external Blender reference.
+		if (fds::FeatureFlags::greets_mesh_dump())
+			rev::DumpStoneObj(GreetSc, kWorldUVMats, 2, "greets_stone_authored.obj", "authored, before the displacement bake");
 		if (displace && fds::FeatureFlags::greets_shadow_proxy())
 			CaptureStoneProxySnapshot(GreetSc, g_stoneProxySnap);
 		if (!displace && L > 0) {
@@ -2104,6 +2109,12 @@ void Initialize_Greets()
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	InitTimelineMark("greets: DisplaceStoneSubdiv block end");
+	// --greets_mesh_dump: the BAKED stone mesh (tessellated + displaced, what
+	// the frame draws) for the external Blender reference.
+	if (fds::FeatureFlags::greets_mesh_dump()) {
+		static const char *kDumpMats[2] = { "rooms", "floor" };
+		rev::DumpStoneObj(GreetSc, kDumpMats, 2, "greets_stone_baked.obj", "baked: tessellated + displaced, as drawn");
+	}
 	MeshOps_TangentNaNCensus(GreetSc, "post-DisplaceStoneSubdiv");
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 	InitTimelineMark("greets: MakeFacesIndependentByAngle end");
@@ -3425,8 +3436,8 @@ struct GreetsScene : SceneDriver {
 				FC.IFOV = fov;
 				CalcPersp(&FC);
 				View = &FC;
-				std::fprintf(stderr, "[GREETS-CAM] applied pose src=(%.2f,%.2f,%.2f)\n",
-					px, py, pz);
+				std::fprintf(stderr, "[GREETS-CAM] applied pose src=(%.2f,%.2f,%.2f) fov=%.4f deg (horizontal, CalcPersp) xres=%d yres=%d\n",
+					px, py, pz, fov, XRes, YRes);
 			} else if (!g_greetsMirrors.empty()) {
 				const fds::Mirror &m = g_greetsMirrors.front();
 				const Vector c = m.plane.centroid;

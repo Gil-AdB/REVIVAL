@@ -45,6 +45,7 @@ set(DEMO_SOURCES
     MeshOps.h
     DisplaceRebuild.cpp
     SeamPhase.cpp
+    MeshDump.cpp
     DisplaceRebuild.h
     MaterialEditor.cpp
     MaterialEditor.h

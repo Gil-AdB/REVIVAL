@@ -1,0 +1,16 @@
+# vertical-scale sweep (corr.py): high-pass luminance correlation of the Blender H6194 tfix frame (pax 1, pay 1.3333) against the FDS frames, region y 120-520 x 20-1100, best of a +-9 px shift, per hypothesised vertical scale f
+vs FDS shipping (phase/h6194_off5):   f=0.75:0.037(dx+3,dy-9)  f=0.87:0.097(dx+3,dy-9)  f=1.00:0.475(dx+0,dy+0)  f=1.15:0.141(dx+3,dy+9)  f=1.33:0.078(dx+3,dy+9)
+vs FDS reference (blender/h6194_fdsref):   f=0.75:0.064(dx-3,dy-9)  f=0.87:0.102(dx-3,dy-6)  f=1.00:0.618(dx-3,dy+0)  f=1.15:0.183(dx-3,dy+9)  f=1.33:0.089(dx+0,dy+9)
+
+# unit-scale correlation table (corr2.py): whole frame (y 40-1040, x 40-1880) and the crop box, best of +-6 px
+r_h6194_tfix_tex.png vs h6194_off5: whole 0.363 (dx-4 dy+0)  crop 0.339 (dx-6 dy+0)
+r_h6194_tfix_tex.png vs h6194_fdsref: whole 0.525 (dx-2 dy+0)  crop 0.506 (dx+0 dy+0)
+r_h6194_welded_tex.png vs h6194_off5: whole 0.356 (dx-4 dy+0)  crop 0.271 (dx-6 dy+0)
+r_h5981_tfix_tex.png vs plain: whole 0.322 (dx-6 dy+0)  crop 0.248 (dx-6 dy+0)
+r_h5981_tfix_tex.png vs h5981_fdsref: whole 0.341 (dx+0 dy+0)  crop 0.161 (dx+0 dy+0)
+r_corner_tfix_tex.png vs corner_off: whole 0.344 (dx+0 dy+0)  crop 0.392 (dx+0 dy+0)
+r_corner_tfix_tex.png vs corner_fdsref: whole 0.410 (dx+0 dy+2)  crop 0.357 (dx+2 dy+0)
+r_line5_tfix_tex.png vs line5_off: whole 0.353 (dx-4 dy+0)  crop 0.326 (dx+4 dy+0)
+r_line5_tfix_tex.png vs line5_fdsref: whole 0.555 (dx+0 dy+0)  crop 0.567 (dx+0 dy+0)
+greets_t006194_color.ppm vs h6194_off5: whole 0.534 (dx-4 dy+0)  crop 0.473 (dx-4 dy+0)
+r_h5981_tfix_tex.png vs h6194_off5: whole -0.003 (dx-6 dy+6)  crop -0.018 (dx-6 dy-6)
