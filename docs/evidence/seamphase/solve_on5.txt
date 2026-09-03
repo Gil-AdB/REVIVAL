@@ -1,0 +1,82 @@
+[STONE-UVPHASE] scale e% by patch (|e| > 0.5%, * = clamped at 2%): p5(a115)-2.00* p6(a92)+2.00* p7(a44)+2.00* p8(a30)-2.00* p17(a232)-0.51 p18(a358)-2.00* p19(a358)-2.00* p20(a18)+2.00* p21(a6)+2.00* p23(a18)+2.00* p24(a6)-2.00* p28(a6)-2.00* p29(a6)+2.00*
+[STONE-UVPHASE] faces 226 | seams (collinear overlaps) 290: 210 continuous (joined into 34 patches, 2 components), 210 intra-patch, 62 PHASE (constant step, solved), 18 VARYING (step changes along the seam: scale/direction, left alone) | max residual after tree 0.2221 tile, after 32 sweeps 0.0653 tile, after scale term 0.0533 tile (scale term solved: |e| p50 0.12% max 2.00%, 12 patches clamped)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih 120.95 A(17.898,4.937,-58.014) B(17.898,0.000,-58.014) was +0.246 now -0.006/-0.006 tile (patch 0 area 466.99 | patch 8 area 29.67)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.57 A(17.898,0.000,-62.952) B(17.898,4.937,-62.952) was +0.423 now +0.006/+0.006 tile (patch 0 area 466.99 | patch 7 area 43.64)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  32.18 A(9.984,4.937,-59.017) B(9.984,0.000,-59.017) was +0.397 now -0.006/-0.006 tile (patch 5 area 114.81 | patch 7 area 43.64)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  87.74 A(4.937,0.000,-37.030) B(4.937,4.937,-37.030) was -0.097 now +0.006/+0.006 tile (patch 5 area 114.81 | patch 17 area 231.59)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  31.70 A(12.745,0.000,-54.924) B(12.745,4.937,-54.924) was -0.381 now +0.006/+0.006 tile (patch 6 area 91.80 | patch 8 area 29.67)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  90.00 A(9.875,4.937,-37.030) B(9.875,0.000,-37.030) was +0.080 now -0.006/-0.006 tile (patch 6 area 91.80 | patch 17 area 231.59)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(-12.344,7.406,-24.070) B(-12.344,7.406,-19.132) du -0.057/-0.234 dv +0.212/+0.034 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(-12.344,7.406,-19.132) B(-12.344,7.406,-18.515) du -0.234/-0.131 dv +0.034/+0.137 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(-12.344,7.406,-24.687) B(-12.344,7.406,-24.070) du -0.160/-0.057 dv +0.109/+0.212 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(12.344,7.406,-19.132) B(12.344,7.406,-24.070) du -0.348/-0.171 dv +0.034/+0.212 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(12.344,7.406,-24.070) B(12.344,7.406,-24.687) du -0.171/-0.274 dv +0.212/+0.109 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(-13.578,6.789,-24.070) B(-13.578,3.086,-24.070) was +0.149 now +0.053/+0.053 tile (patch 20 area 18.28 | patch 28 area 5.96)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(-13.578,3.086,-24.070) B(-13.578,3.086,-19.132) du +0.149/-0.028 dv -0.068/-0.246 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(-13.578,3.086,-19.132) B(-13.578,6.789,-19.132) was -0.028 now -0.053/-0.053 tile (patch 20 area 18.28 | patch 21 area 5.54)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(-13.578,6.789,-19.132) B(-13.578,6.789,-24.070) du -0.028/+0.149 dv +0.137/+0.314 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  41.81 A(-13.578,3.086,-19.132) B(-12.344,3.086,-18.515) was +0.000 now -0.028/-0.024 tile (patch 21 area 5.54 | patch 26 area 7.81)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(-12.344,3.086,-18.515) B(-12.344,6.789,-18.515) was +0.131 now -0.029/-0.029 tile (patch 21 area 5.54 | patch 18 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(-12.344,6.789,-18.515) B(-12.344,7.406,-18.515) was +0.131 now -0.029/-0.029 tile (patch 21 area 5.54 | patch 18 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  78.46 A(-12.344,7.406,-18.515) B(-13.578,6.789,-19.132) was +0.000 now -0.023/-0.027 tile (patch 21 area 5.54 | patch 22 area 7.67)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(13.578,3.086,-19.132) B(13.578,3.086,-24.070) du +0.446/-0.377 dv -0.246/-0.068 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(13.578,3.086,-24.070) B(13.578,6.789,-24.070) was -0.377 now +0.053/+0.053 tile (patch 23 area 18.28 | patch 29 area 5.96)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(13.578,6.789,-24.070) B(13.578,6.789,-19.132) du -0.377/+0.446 dv +0.314/+0.137 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(13.578,6.789,-19.132) B(13.578,3.086,-19.132) was +0.446 now -0.053/-0.053 tile (patch 23 area 18.28 | patch 24 area 5.54)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  41.81 A(13.578,6.789,-19.132) B(12.344,6.789,-18.515) was +0.000 now -0.028/-0.024 tile (patch 24 area 5.54 | patch 25 area 7.81)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(12.344,6.789,-18.515) B(12.344,3.086,-18.515) was +0.246 now -0.029/-0.029 tile (patch 24 area 5.54 | patch 19 area 358.24)
+[STONE-UVPHASE] VARYING 'rooms' dih  70.53 A(12.344,6.789,-18.515) B(12.344,7.406,-19.132) du -0.246/-0.348 dv +0.240/+0.034 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(-12.344,2.469,-24.070) B(-12.344,2.469,-19.132) du +0.057/+0.234 dv -0.034/+0.143 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  70.53 A(-12.344,3.086,-18.515) B(-12.344,2.469,-19.132) du -0.131/-0.234 dv -0.143/-0.143 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(12.344,2.469,-19.132) B(12.344,2.469,-24.070) du +0.348/+0.171 dv +0.143/-0.034 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(12.344,3.086,-18.515) B(12.344,2.469,-18.515) was +0.246 now -0.029/-0.029 tile (patch 24 area 5.54 | patch 19 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  78.46 A(12.344,2.469,-18.515) B(13.578,3.086,-19.132) was +0.000 now -0.023/-0.027 tile (patch 24 area 5.54 | patch 27 area 7.67)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(12.344,2.469,-18.515) B(12.344,2.469,-19.132) du +0.246/+0.348 dv +0.040/+0.143 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(-12.344,6.789,-24.687) B(-12.344,3.086,-24.687) was +0.160 now +0.025/+0.025 tile (patch 28 area 5.96 | patch 18 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(-12.344,7.406,-24.687) B(-12.344,6.789,-24.687) was +0.160 now +0.025/+0.025 tile (patch 28 area 5.96 | patch 18 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  78.46 A(-13.578,6.789,-24.070) B(-12.344,7.406,-24.687) was +0.000 now +0.027/+0.023 tile (patch 28 area 5.96 | patch 22 area 7.67)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(12.344,3.086,-24.687) B(12.344,6.789,-24.687) was +0.274 now +0.025/+0.025 tile (patch 29 area 5.96 | patch 19 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(12.344,6.789,-24.687) B(12.344,7.406,-24.687) was +0.274 now +0.025/+0.025 tile (patch 29 area 5.96 | patch 19 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  78.46 A(12.344,7.406,-24.687) B(13.578,6.789,-24.070) was +0.000 now +0.022/+0.026 tile (patch 29 area 5.96 | patch 25 area 7.81)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(-12.344,3.086,-24.687) B(-12.344,2.469,-24.687) was +0.160 now +0.025/+0.025 tile (patch 28 area 5.96 | patch 18 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  78.46 A(-12.344,2.469,-24.687) B(-13.578,3.086,-24.070) was +0.000 now +0.022/+0.026 tile (patch 28 area 5.96 | patch 26 area 7.81)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(-12.344,2.469,-24.687) B(-12.344,2.469,-24.070) du +0.160/+0.057 dv +0.068/-0.034 (left alone)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  63.43 A(12.344,2.469,-24.687) B(12.344,3.086,-24.687) was +0.274 now +0.025/+0.025 tile (patch 29 area 5.96 | patch 19 area 358.24)
+[STONE-UVPHASE] RESIDUAL 'rooms' dih  78.46 A(13.578,3.086,-24.070) B(12.344,2.469,-24.687) was +0.000 now +0.027/+0.023 tile (patch 29 area 5.96 | patch 27 area 7.67)
+[STONE-UVPHASE] VARYING 'rooms' dih  63.43 A(12.344,2.469,-24.070) B(12.344,2.469,-24.687) du +0.171/+0.274 dv -0.034/+0.068 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  50.32 A(-2.469,5.493,4.937) B(-2.469,7.468,3.703) du +0.132/-0.074 dv +0.000/+0.000 (left alone)
+[STONE-UVPHASE] VARYING 'rooms' dih  50.32 A(2.469,7.468,3.703) B(2.469,5.493,4.937) du +0.103/+0.309 dv -0.000/+0.000 (left alone)
+[STONE-UVPHASE] shifted patches 32: |shift mod 1| p50 0.361 max 0.496 tile (roots: the largest patch of each component, offset-unmoved)
+[STONE-UVPHASE] applied: 196 faces' U1..U3 rewritten as s*u+o (v untouched), Vertex::U/V re-stamped from them
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  50.32  A(-2.469,5.493,4.937) B(-2.469,7.468,3.703) du 0.001/0.205 dv 0.000/0.000  uslope -0.206|+0.000  uA 7.429|-2.572
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  50.32  A(2.469,5.493,4.937) B(2.469,7.468,3.703) du 0.001/0.206 dv 0.000/0.000  uslope -0.206|+0.000  uA 8.249|-1.750
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  78.46  A(-12.344,7.406,-24.687) B(-13.578,6.789,-24.070) du 0.023/0.027 dv 0.109/0.314  uslope -0.202|-0.206  uA -3.954|-3.977
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  78.46  A(-12.344,7.406,-18.515) B(-13.578,6.789,-19.132) du 0.023/0.027 dv 0.137/0.137  uslope -0.210|-0.206  uA -3.999|-3.977
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  78.46  A(12.344,7.406,-24.687) B(13.578,6.789,-24.070) du 0.022/0.026 dv 0.109/0.314  uslope +0.210|+0.206  uA 0.140|0.119
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  78.46  A(-12.344,2.469,-24.687) B(-13.578,3.086,-24.070) du 0.022/0.026 dv 0.068/0.068  uslope -0.202|-0.206  uA -3.954|-3.975
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  78.46  A(12.344,2.469,-18.515) B(13.578,3.086,-19.132) du 0.023/0.027 dv 0.040/0.246  uslope +0.202|+0.206  uA 0.095|0.117
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  78.46  A(12.344,2.469,-24.687) B(13.578,3.086,-24.070) du 0.023/0.027 dv 0.068/0.068  uslope +0.210|+0.206  uA 0.140|0.117
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  41.81  A(-12.344,3.086,-18.515) B(-13.578,3.086,-19.132) du 0.024/0.028 dv 0.143/0.246  uslope -0.210|-0.206  uA -3.999|-3.975
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  70.53  A(-12.344,3.086,-18.515) B(-12.344,2.469,-19.132) du 0.005/0.096 dv 0.143/0.143  uslope -0.101|+0.000  uA 4.029|-3.975
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  41.81  A(12.344,6.789,-18.515) B(13.578,6.789,-19.132) du 0.024/0.028 dv 0.240/0.137  uslope +0.202|+0.206  uA 0.095|0.119
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  70.53  A(12.344,6.789,-18.515) B(12.344,7.406,-19.132) du 0.005/0.096 dv 0.240/0.034  uslope -0.101|+0.000  uA 4.123|0.119
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(-13.578,3.086,-24.070) B(-13.578,6.789,-24.070) du 0.053/0.053 dv 0.000/0.000  uslope +0.000|+0.000  uA 2.898|-4.155
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(-13.578,3.086,-24.070) B(-13.578,3.086,-19.132) du 0.079/0.081 dv 0.068/0.246  uslope +0.839|+0.000  uA 2.898|-4.181
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(-13.578,6.789,-24.070) B(-13.578,6.789,-19.132) du 0.080/0.080 dv 0.314/0.137  uslope +0.839|+0.000  uA 2.898|-4.182
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(13.578,3.086,-24.070) B(13.578,6.789,-24.070) du 0.053/0.053 dv 0.000/0.000  uslope +0.000|+0.000  uA 2.403|0.350
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(13.578,3.086,-24.070) B(13.578,3.086,-19.132) du 0.080/0.080 dv 0.068/0.246  uslope +0.839|+0.000  uA 2.403|0.323
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(13.578,6.789,-24.070) B(13.578,6.789,-19.132) du 0.079/0.081 dv 0.314/0.137  uslope +0.839|+0.000  uA 2.403|0.324
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(-13.578,6.789,-19.132) B(-13.578,3.086,-19.132) du 0.053/0.053 dv 0.000/0.000  uslope +0.000|+0.000  uA 3.737|-4.209
+[STONE-UVSEAM] 'rooms': WELD  rooms        |rooms         dih  63.43  A(13.578,6.789,-19.132) B(13.578,3.086,-19.132) du 0.053/0.053 dv 0.000/0.000  uslope +0.000|+0.000  uA 3.243|0.296
+[STONE-UVSEAM] 'rooms': same-family coplanar<5  edges  133  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'rooms': same-family 5-30deg     edges   12  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'rooms': same-family crease>=30  edges   72  with |du| or |dv| > 0.02 tile:   20  max du 0.206
+[STONE-UVSEAM] 'rooms': base|mirUV  coplanar<5  edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'rooms': base|mirUV  5-30deg     edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'rooms': base|mirUV  crease>=30  edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'floor': same-family coplanar<5  edges   24  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'floor': same-family 5-30deg     edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'floor': same-family crease>=30  edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'floor': base|mirUV  coplanar<5  edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'floor': base|mirUV  5-30deg     edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000
+[STONE-UVSEAM] 'floor': base|mirUV  crease>=30  edges    0  with |du| or |dv| > 0.02 tile:    0  max du 0.000

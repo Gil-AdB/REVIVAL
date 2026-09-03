@@ -181,10 +181,16 @@ int VizLegend_Build(VizLegendRow* rows, int maxRows, int* sigOut) {
 	} else if (FF::uv_viz() > 0) {
 		switch (FF::uv_viz()) {
 		case 2:
+			{
+				static const uint32_t hues[8] = { 0xE63C3Cu, 0xE69628u, 0xDCDC32u, 0x46C846u,
+				                                  0x3CC8C8u, 0x3C64E6u, 0xA046DCu, 0xE650B4u };
+				n = addRow(rows, n, maxRows, hues, 8,
+				    "8 u-CELLS per tile of the surface's own diffuse UV, one HUE each (texel-exact)");
+			}
 			n = addRow(rows, n, maxRows, nullptr, 0,
-			    "8x8 CHECKER over one tile of the surface's own diffuse UV (texel-exact)");
+			    "light/dark = alternate v rows; a HUE change along a junction = a u step");
 			n = addRow(rows, n, maxRows, nullptr, 0,
-			    "cell edges that JOG where two sheets meet = the sheets carry different UV");
+			    "(a light/dark-only checker was blind to even-cell steps: H5981 mitre line 9)");
 			break;
 		case 3:
 			n = addRow(rows, n, maxRows, nullptr, 0,

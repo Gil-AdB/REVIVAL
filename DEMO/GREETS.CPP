@@ -36,6 +36,7 @@ void Xtrace_WriteFile(const char*);
 #include "MeshOps.h"
 #include "V4Bake.h"           // v4 phase-1 census (docs/DISPLACEMENT_V4_DESIGN.md)
 #include "DisplaceRebuild.h"   // live shell rebuild (editor displacement panel)
+#include "SeamPhase.h"         // --greets_uv_seam_phase: per-patch u shift at stone creases
 #include "MaterialImport.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
@@ -2013,6 +2014,14 @@ void Initialize_Greets()
 		if (displace && fds::FeatureFlags::greets_displace_v4() &&
 		    fds::FeatureFlags::v4_world_uv())
 			fds::v4::WorldUV_Apply(GreetSc, kWorldUVMats, 2);
+		// --greets_uv_seam_phase: per-patch u shift so both sheets of every
+		// crease carry the same texture column along the shared edge (his
+		// reading of --uv_viz, 2026-09-02). Same slot, same reason: it must
+		// precede the proxy snapshot and every UV-derived table. Off = no-op.
+		if (displace && fds::FeatureFlags::greets_uv_seam_phase())
+			rev::SeamPhaseUV_Apply(GreetSc, kWorldUVMats, 2,
+			                       fds::FeatureFlags::greets_uv_seam_phase_sweeps(),
+			                       fds::FeatureFlags::greets_uv_seam_phase_scale());
 		if (displace && fds::FeatureFlags::greets_shadow_proxy())
 			CaptureStoneProxySnapshot(GreetSc, g_stoneProxySnap);
 		if (!displace && L > 0) {

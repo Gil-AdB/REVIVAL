@@ -1034,10 +1034,18 @@ void Render_UvViz(Scene *Sc)
         const float fu = (float(u) + 0.5f) / float(w);
         const float fv = (float(v) + 0.5f) / float(h);
         switch (mode) {
-        case 2: {   // 8x8 checker over the tile, faint u/v tint so the cells keep their phase
-            const int cell = ((u * 8 / w) + (v * 8 / h)) & 1;
-            const int base = cell ? 200 : 40;
-            out[i] = pack(base + int(fu * 55.0f), base + int(fv * 55.0f), base);
+        case 2: {   // 8x8 cells over the tile: HUE = u cell (8 distinct), LIGHT/DARK = v cell parity
+            // A plain light/dark checker is BLIND to a u step of an even number of
+            // cells (H5981, 2026-09-02: the 0.25-tile step at mitre line 9 shifted
+            // the pattern by exactly two cells and read as continuous). Eight hues,
+            // one per u cell, make every u shift of 1..7 cells a hue change at the
+            // seam; the v parity still shows a one-row jog.
+            static const uint8_t kHue[8][3] = {
+                {230, 60, 60}, {230,150, 40}, {220,220, 50}, { 70,200, 70},
+                { 60,200,200}, { 60,100,230}, {160, 70,220}, {230, 80,180} };
+            const int cu = (u * 8 / w) & 7, cv = (v * 8 / h) & 1;
+            const int s = cv ? 255 : 110;                      // v parity: light / dark row
+            out[i] = pack(kHue[cu][0] * s / 255, kHue[cu][1] * s / 255, kHue[cu][2] * s / 255);
             break; }
         case 3: {   // u column: 16-stripe saw
             const float s = fu * 16.0f;

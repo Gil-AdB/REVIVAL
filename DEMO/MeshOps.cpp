@@ -3062,6 +3062,101 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					double(0.5f*(PA.x+PB.x)), double(0.5f*(PA.y+PB.y)), double(0.5f*(PA.z+PB.z)),
 					double(std::sqrt(edgeLenSq2(PA,PB))), nbMat);
 			}
+
+			// [STONE-UVSEAM] — the UV STEP across every authored stone seam, from
+			// the mesh alone (2026-09-02, his reading of --uv_viz at H6194: "the uv
+			// at the seam is not continous"; the per-pixel census tools/
+			// uv_seam_census.py measured every rooms|rooms::mirUV boundary pair in
+			// view stepping 0.40-0.43 tile in u while every same-material seam,
+			// crease or coplanar, was continuous to <= 12 texels). Two faces that
+			// share an authored edge sample the height field along that edge at
+			// their OWN (u,v); if the two columns differ, the two sheets displace
+			// the same world line to two different heights - the double-valued
+			// profile that the mitre then tries to reconcile. This lists, per
+			// welded or split-vertex seam, the wrapped |du| and |dv| (tile
+			// fractions, 0..0.5) at BOTH endpoints and each side's u slope along the
+			// edge, so a pure phase offset (du equal at both ends, equal slopes) is
+			// distinguishable from a direction/scale mismatch (du varies along the
+			// edge). Summary by {same-family | base|mirUV} x {coplanar <5, 5-30,
+			// crease >=30}. Print-only, under the same flag: byte-null off.
+			{
+				auto faceUV = [&](int32_t f, uint32_t vi, float &u, float &v) -> bool {
+					const Face &F = T->Faces[f];
+					if (vidx(F.A) == vi) { u = F.U1; v = F.V1; return true; }
+					if (vidx(F.B) == vi) { u = F.U2; v = F.V2; return true; }
+					if (vidx(F.C) == vi) { u = F.U3; v = F.V3; return true; }
+					return false;
+				};
+				auto wrapDiff = [](float a, float b) {
+					float d = a - b; d -= std::floor(d); return d > 0.5f ? 1.0f - d : d;
+				};
+				auto fMat = [&](int32_t f) -> const char * {
+					const Material *M = T->Faces[f].Txtr; return (M && M->Name) ? M->Name : "?";
+				};
+				auto isMir = [&](int32_t f) {
+					const char *n = fMat(f); const size_t L = std::strlen(n);
+					return L >= 7 && !std::strcmp(n + L - 7, "::mirUV");
+				};
+				auto nearestIdx = [&](const Vector &P, uint32_t lo, uint32_t hi) -> uint32_t {
+					return edgeLenSq2(P, oldV[lo].Pos) <= edgeLenSq2(P, oldV[hi].Pos) ? lo : hi;
+				};
+				int nAll[2][3] = {{0,0,0},{0,0,0}}, nStep[2][3] = {{0,0,0},{0,0,0}};
+				float maxDu[2][3] = {{0,0,0},{0,0,0}};
+				const float kStep = 0.02f;   // 20 texels of a 1024 tile: above any in-face gradient
+				for (auto &kv : eFaces) {
+					const size_t use = kv.second.size();
+					if (use > 2) continue;
+					const uint32_t ia = kv.first.first, ib = kv.first.second;
+					int32_t f = kv.second[0], g = -1;
+					uint32_t ja = ia, jb = ib;          // g's indices at the same two positions
+					const char *cls = nullptr;
+					if (use == 2) { g = kv.second[1]; cls = "WELD "; }
+					else {
+						const uint64_t pk = edgeKey(oldV[ia].Pos, oldV[ib].Pos);
+						auto pit = posEdge.find(pk);
+						const uint64_t self = (uint64_t(ia)<<32) | ib;
+						if (pit != posEdge.end())
+							for (const auto &pe : pit->second)
+								if (pe.first != self) {
+									g = pe.second;
+									const uint32_t lo = uint32_t(pe.first >> 32), hi = uint32_t(pe.first & 0xFFFFFFFFu);
+									ja = nearestIdx(oldV[ia].Pos, lo, hi);
+									jb = nearestIdx(oldV[ib].Pos, lo, hi);
+									break;
+								}
+						if (g < 0) continue;          // open border: nothing opposite
+						if (f > g) continue;          // the split seam is visited from both halves; report once
+						cls = "SPLIT";
+					}
+					float ufa, vfa, ufb, vfb, uga, vga, ugb, vgb;
+					if (!faceUV(f, ia, ufa, vfa) || !faceUV(f, ib, ufb, vfb) ||
+					    !faceUV(g, ja, uga, vga) || !faceUV(g, jb, ugb, vgb)) continue;
+					const float duA = wrapDiff(ufa, uga), duB = wrapDiff(ufb, ugb);
+					const float dvA = wrapDiff(vfa, vga), dvB = wrapDiff(vfb, vgb);
+					const float ang = dihedral(f, g);
+					const int bnd = (isMir(f) != isMir(g)) ? 1 : 0;
+					const int dc  = ang < 5.0f ? 0 : (ang < 30.0f ? 1 : 2);
+					++nAll[bnd][dc];
+					const float m = std::max(std::max(duA, duB), std::max(dvA, dvB));
+					if (m > kStep) ++nStep[bnd][dc];
+					maxDu[bnd][dc] = std::max(maxDu[bnd][dc], std::max(duA, duB));
+					if (m > kStep) {
+						const Vector &PA = oldV[ia].Pos, &PB = oldV[ib].Pos;
+						std::fprintf(stderr,
+							"[STONE-UVSEAM] '%s': %s %-13s|%-13s dih %6.2f  A(%.3f,%.3f,%.3f) B(%.3f,%.3f,%.3f) "
+							"du %.3f/%.3f dv %.3f/%.3f  uslope %+.3f|%+.3f  uA %.3f|%.3f\n",
+							matName, cls, fMat(f), fMat(g), double(ang),
+							double(PA.x), double(PA.y), double(PA.z), double(PB.x), double(PB.y), double(PB.z),
+							double(duA), double(duB), double(dvA), double(dvB),
+							double(ufb - ufa), double(ugb - uga), double(ufa), double(uga));
+					}
+				}
+				static const char *kBnd[2] = { "same-family", "base|mirUV " };
+				static const char *kDc[3]  = { "coplanar<5 ", "5-30deg    ", "crease>=30 " };
+				for (int b = 0; b < 2; ++b) for (int d = 0; d < 3; ++d)
+					std::fprintf(stderr, "[STONE-UVSEAM] '%s': %s %s edges %4d  with |du| or |dv| > %.2f tile: %4d  max du %.3f\n",
+					             matName, kBnd[b], kDc[d], nAll[b][d], double(kStep), nStep[b][d], double(maxDu[b][d]));
+			}
 		}
 
 		// AUDIT (init-time census): the population the position-coincidence

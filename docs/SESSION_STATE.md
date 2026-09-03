@@ -1,4 +1,50 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-03a — the seam UV step is scene-wide and a pure phase at 37 corners; `--greets_uv_seam_phase` closes it (built, byte-null off, his ruling pending)
+
+- **Deck for his ruling**: https://claude.ai/code/artifact/c44a668e-f342-4f37-8e4c-928f90fe3ec2 — four junctions
+  (H6194 door head, H5981 jamb, the 90° corner at x −12.3 z −56.2, mitre line 5), shipping against the pass,
+  rendered-stone and 8-hue-checker layers, draggable. Open question `greets.displace.seam.phase_lever.ruling`
+  (`2ad45f7c403b`, waiting on him): take it (then engage it under `--greets-displace`), keep opt-in, or drop.
+  Evidence for every number below: `docs/evidence/seamphase/` (solve logs, censuses, hole counts, md5s, crops).
+- **MEASURED scene-wide** (`greets.displace.seam.uv_step.scene_census`, `[STONE-UVSEAM]` in `DEMO/MeshOps.cpp`
+  under `--greets_displace_junction_census`): of 72 crease edges (≥30°) on `rooms`, 53 step > 0.02 tile; **37 are
+  vertical corners whose u step is CONSTANT along the edge (pure phase, 0.03–0.49 tile; 28 corner lines, all ten
+  mitre lines among them)**; 16 sloped/horizontal joints step with a v step that varies along the edge (scale or
+  direction, not phase). What he read at H6194 is three of the 37; the earlier "same-family creases continuous"
+  pixel census had only horizontal same-family joints in view.
+- **BUILT** `--greets_uv_seam_phase` (`DEMO/SeamPhase.cpp`, `.h`; flags `greets_uv_seam_phase`, `_sweeps`=32,
+  `_scale`=1; called in GREETS.CPP in the v4 world-UV slot, before `CaptureStoneProxySnapshot`; default OFF):
+  faces of one material grouped into patches that already share a UV mapping (union over seams whose u AND v
+  agree at both ends), seams found by **collinear edge overlap** (the shared-vertex rule missed every T-junction:
+  the jamb was never a constraint and two faces of one wall got different shifts — trap
+  `greets.displace.seam.phase_lever.adjacency`), then one u offset per patch (BFS tree + 32 wrapped Gauss-Seidel
+  sweeps) and a u scale capped at ±2 % for the loops an offset cannot close (a ring of walls whose perimeter is not
+  a whole number of tiles; uncapped, the 0.6-tile roof rungs took 7–16 %). v never moves.
+- **MEASURED** (`greets.displace.seam.phase_lever`): 226 faces → 34 patches / 2 components; 62 phase seams solved,
+  18 varying left alone (all on the sloped roof + the two 50° joints at x ±2.5); max residual 0.222 tile after the
+  tree → 0.065 after sweeps → **0.053 after the scale term, and only on the roof loop; main rooms ≤ 0.006 tile**;
+  12 patches at the 2 % cap. Mesh census stepped creases **53 → 20**. Per-pixel at H6194: **no face pair with a
+  median u step > 32 texels** (before: every rooms|mirUV boundary 405–443); boundary pairs p50 7–9, max 17.
+  Holes (z16==0 px): H6194 5273 → 3125 (the 4585-px wedge → 2728 = the T-junction hinge crack, untouched by
+  design), H5981 242 → 222, corner 0 → 0, line5 1268 → 461 (largest 959 → 135).
+- **BYTE-NULL OFF** on every build: H6194 `36cd059a…`, cam A `d92cb6f5…` (**with its override pose** — trap
+  `tool.pins.camA_recipe`: t=5965 without `FDS_GREETS_CAM=22.5084476,3.87992334,-61.8882256,…` is a different
+  frame, `3a953d4f…`, not a regression), render_gate 4/4. ON md5s: H6194 `1b9f866e…`, H5981 `69782ebf…`,
+  corner `07869435…`, line5 `37cc6bd6…`; `--greets_uv_seam_phase_scale=0` at H6194 `dc764a82…`.
+- **H5981, his pose the seam-ladder agent skipped** (`greets.displace.seam.h5981`): no large hole — 242 px in
+  163 slivers ≤ 11 px (nofree 0, bare 0); the jamb is mirUV|mirUV with a 0.25-tile u step; the reveal reads as
+  the bright sliver of the double profile. On: 222 px, the course continues round the pillar.
+- **Checker trap** (`tool.uv_viz.checker_blind_spot`): a two-tone 8×8 checker is blind to even-cell u steps
+  (0.25 tile = mitre line 9). `--uv_viz=2` now paints 8 hues across u, light/dark for v parity; legend says so.
+- **"doesn't participate in the X cycle"** (`tool.uv_viz.cycle_harness`; `5c093641b31e` stays OPEN on him):
+  headless harness `FDS_VIZ_CYCLE_TEST=1` (Snapshot.cpp) steps the cycle once per snapshot frame — under the
+  judging flags the four UV modes are entries 12–15 of 19 and each renders. Not reproduced. Suspect: the list is
+  built once at the first X press (`VizCycle.cpp` `g_built`), so an X before greets was up caches it without the
+  UV entries. Need the `[VIZ]` stderr lines from his run.
+- **Still unbuilt**: the T-junction shared-ladder fix (proposal page approach A) — pending his ruling on that page.
+- Tools: `tools/hole_census.py <dir>…` (z16==0 pixels + components); `tools/uv_seam_census.py` (run from the
+  repo root, needs `FDS_SNAPSHOT_GBUFDUMP=1 --face_id_dump` dumps).
+
 ## 2026-09-02d — HIS RULING: every v4 rung is bad, the OLD bake ships; the defect is the high-angle junctions, and H6194 is dissected
 
 - **His words** (verdict `d98c40a5f377`, answer `02d53f6d37db` on the density card, verbatim): *"all are

@@ -1,0 +1,20 @@
+stone ids {10:rooms, 40:rooms::mirUV}  faces in table 908  probe (960,540): rooms::mirUV u,v 591,227 mip 0
+world-adjacent stone seam pixel pairs 83601: same material 82922, material boundary 679
+dihedral        materials      n  du texels p50/p90/max      dv p50/p90/max    frac du>32
+coplanar <5     same       37308     0.0/   3.0/ 269.0     0.0/  1.5/  5.5    0.004
+coplanar <5     boundary       6   339.0/ 339.0/ 339.0     1.0/  1.0/  1.0    1.000
+5-30            same       18855     1.0/   2.0/ 270.0     0.0/  1.5/ 17.0    0.002
+5-30            boundary     130     4.2/ 342.0/ 343.0     1.0/  2.0/  3.0    0.400
+crease >=30     same       26759     0.0/   2.0/  12.5     0.5/  2.0/ 13.0    0.000
+crease >=30     boundary     543     5.5/ 339.8/ 346.0     1.0/  2.5/  4.0    0.204
+in-face horizontal pixel gradient, texels: p50 1.00 p99 5.00
+
+face pairs with a median u step > 32 texels (n >= 10): 8
+  n=  18 du= 341.5 dv=  1.0 dih= 45.0  rooms::mirUV  fi294  A=(17.845, 4.810, -62.985) u0= -4.340  x  rooms         fi411  A=(17.756, 4.760, -63.015) u0=  0.991
+  n=  21 du= 341.0 dv=  0.0 dih= 21.1  rooms::mirUV  fi317  A=(17.766, 4.744, -63.036) u0= -4.343  x  rooms         fi554  A=(17.768, 4.747, -63.032) u0=  0.994
+  n=  13 du= 341.0 dv=  1.0 dih= 11.0  rooms::mirUV  fi550  A=(17.896, 4.686, -62.972) u0= -4.343  x  rooms         fi554  A=(17.768, 4.747, -63.032) u0=  0.994
+  n=  13 du= 338.0 dv=  1.0 dih= 58.8  rooms::mirUV  fi4    A=(17.907, 4.599, -62.946) u0= -4.340  x  rooms         fi469  A=(17.878, 4.655, -62.944) u0=  0.991
+  n=  10 du= 337.0 dv=  1.0 dih= 58.8  rooms::mirUV  fi29   A=(17.908, 4.557, -62.945) u0= -4.340  x  rooms         fi469  A=(17.878, 4.655, -62.944) u0=  0.991
+  n= 142 du= 269.0 dv=  0.0 dih=  2.2  rooms::mirUV  fi0    A=(17.898, 7.682, -62.952) u0= -4.077  x  rooms::mirUV  fi251  A=(17.897, 7.685, -63.205) u0= -4.382
+  n=  16 du= 269.0 dv=  0.0 dih= 21.3  rooms::mirUV  fi11   A=(17.898, 6.310, -62.952) u0= -4.077  x  rooms::mirUV  fi236  A=(17.861, 6.310, -63.205) u0= -4.382
+  n=  16 du= 269.0 dv=  0.0 dih= 14.9  rooms::mirUV  fi44   A=(17.898, 6.257, -62.952) u0= -4.077  x  rooms::mirUV  fi258  A=(17.898, 6.256, -62.952) u0= -4.340

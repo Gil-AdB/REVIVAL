@@ -18,6 +18,7 @@
 #include <FILLERS/Mekalele.h>
 #include <FILLERS/ShadowMap.h>
 #include <RENDER/LightmapBake.h>
+#include <RENDER/VizCycle.h>       // VizCycle_Step: FDS_VIZ_CYCLE_TEST headless X-cycle driver
 #include <Threads.h>
 #include <VESA/Vesa.h>
 
@@ -756,6 +757,21 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        // FDS_VIZ_CYCLE_TEST: headless exercise of the X-key debug-viz cycle
+        // (FDS/RENDER/VizCycle.cpp). One VizCycle_Step(+1) per timestamp AFTER
+        // the tick - exactly what the SDL pump does on an X press - then a
+        // second tick so the frame written below shows the cycled mode. Seed
+        // the position with a CLI viz flag (e.g. --nmap_viz=3 puts the first
+        // step on "UV fraction"). Written 2026-09-02 for his report that a
+        // command-line --uv_viz "doesn't participate in the x cycle": the cycle
+        // has no headless driver, so this is the only way to see the [VIZ]
+        // menu the first press builds under a given flag set. Env-gated ->
+        // inert for every gate.
+        if (std::getenv("FDS_VIZ_CYCLE_TEST")) {
+            fds::VizCycle_Step(+1);
+            driver->tick();
+        }
 
         // Native validation hook for the surface-editor core (Phase 1): with
         // DUMP_SURFACES=1 print the live surface list once after a tick (when

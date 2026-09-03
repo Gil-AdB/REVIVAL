@@ -1,0 +1,50 @@
+[VIZ-LEGEND]           RGB = the RAW normal-map texel at the sampled UV
+[VIZ-LEGEND]           dim flat grey = this material has no normal map
+[VIZ] runtime viz cycle: X = next, Shift+X = previous. 19 modes available in this run:
+[VIZ]   0/19  (off)
+[VIZ]   1/19  WIRE over image          (--wire_viz=1)
+[VIZ]   2/19  WIRE dimmed              (--wire_viz=2)
+[VIZ]   3/19  WIRE by material/chunk   (--wire_viz=3)
+[VIZ]   4/19  WIRE facing (back=red)   (--wire_viz=4)
+[VIZ]   5/19  POLY ownership           (--poly_viz=1)
+[VIZ]   6/19  POM height field         (--pom_viz=1)
+[VIZ]   7/19  POM per-face mip         (--pom_mip_viz=1)
+[VIZ]   8/19  POM march paths          (--pom_path_viz=1)
+[VIZ]   9/19  NORMAL geometric         (--nmap_viz=1)
+[VIZ]  10/19  NORMAL shaded (TBN)      (--nmap_viz=2)
+[VIZ]  11/19  NORMAL raw texel         (--nmap_viz=3)
+[VIZ]  12/19  UV fraction (R=u G=v)    (--uv_viz=1)
+[VIZ]  13/19  UV checker 8x8           (--uv_viz=2)
+[VIZ]  14/19  UV column saw (u)        (--uv_viz=3)
+[VIZ]  15/19  UV row saw (v)           (--uv_viz=4)
+[VIZ]  16/19  SSAO term                (--ssao_debug=1)
+[VIZ]  17/19  ENV pano #1              (--env_refl_viz=1)
+[VIZ]  18/19  ENV probe faces (3x2)    (--env_map_viz=1)
+[VIZ]  19/19  ENV probe mip chain      (--env_map_viz=2)
+[VIZ]   skipped  DISPLACE magnitude       (--displace_viz=1): no displacement bake recorded - needs --greets_displace plus --viz_arm (or --displace_viz=1) at STARTUP; the bake runs at scene init
+[VIZ]   skipped  DISPLACE height error    (--displace_viz=2): no height-error data - the bake computes it only when --displace_viz=2 was already set at STARTUP (MeshOps gates the whole computation)
+[VIZ]   skipped  POM horizon term         (--pom_horizon_viz=1): needs --pom_horizon (the horizon bake) at STARTUP
+[VIZ]   skipped  POM seam classes         (--pom_seam_viz=1): no classified seams recorded - needs --pom_shell at STARTUP
+[VIZ]   skipped  SHADOW lightmap id       (--shadow_lightmap_viz=1): needs --shadow-lightmap (the static lightmap bake) at STARTUP
+[VIZ]   skipped  SHADOW lightmap faceIdx  (--shadow_lightmap_viz=2): needs --shadow-lightmap at STARTUP
+[VIZ]   skipped  SHADOW bary world delta  (--shadow_lightmap_viz=9): needs --shadow-lightmap at STARTUP
+[VIZ]   skipped  AA edge map              (--aa_viz=1): needs --aa
+[VIZ]   skipped  ENV probe CPU|GPU        (--env_map_viz=3): no GpuBench atlas on disk - produce one with `../build-gpu/GpuBench/GpuBench --fld=SCENES/GREETS.FLD --pass=deferred --dump_env_cube`, which writes /tmp/gpuenv_<material>.ppm
+[VIZ] starting at 11 (already set on the command line)
+[VIZ] 12/19  UV fraction (R=u G=v)  (--uv_viz=1)
+[VIZ-LEGEND] FF0000 00FF00  RED = u, GREEN = v of the surface's diffuse UV here, wrapped to one tile
+[VIZ-LEGEND]           a wrap is a tile seam; a colour STEP along a junction = different UV per sheet
+[VIZ-LEGEND]           dark grey = nothing rasterised; mid grey = no diffuse map / forward-rendered
+[VIZ] 13/19  UV checker 8x8  (--uv_viz=2)
+[VIZ-LEGEND]           8x8 CHECKER over one tile of the surface's own diffuse UV (texel-exact)
+[VIZ-LEGEND]           cell edges that JOG where two sheets meet = the sheets carry different UV
+[VIZ-LEGEND]           dark grey = nothing rasterised; mid grey = no diffuse map / forward-rendered
+[VIZ] 14/19  UV column saw (u)  (--uv_viz=3)
+[VIZ-LEGEND]           grey saw = the U COLUMN: 16 stripes per tile, each restart = one stripe
+[VIZ-LEGEND]           dark grey = nothing rasterised; mid grey = no diffuse map / forward-rendered
+[VIZ] 15/19  UV row saw (v)  (--uv_viz=4)
+[VIZ-LEGEND]           grey saw = the V ROW: 16 stripes per tile, each restart = one stripe
+[VIZ-LEGEND]           dark grey = nothing rasterised; mid grey = no diffuse map / forward-rendered
+[VIZ] 16/19  SSAO term  (--ssao_debug=1)  [WARNING: --hdr tonemaps over it; relaunch with --no-hdr to see it]
+[VIZ] 17/19  ENV pano #1  (--env_refl_viz=1)
+[VIZ-LEGEND]           top-right inset = baked env panorama #1 (1-based; past the count clamps)

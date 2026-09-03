@@ -1,0 +1,12 @@
+stone ids {10:rooms, 40:rooms::mirUV}  faces in table 909  probe (960,540): rooms::mirUV u,v 574,227 mip 0
+world-adjacent stone seam pixel pairs 86276: same material 85363, material boundary 913
+dihedral        materials      n  du texels p50/p90/max      dv p50/p90/max    frac du>32
+coplanar <5     same       37643     0.0/   3.0/  10.0     0.0/  1.5/  6.0    0.000
+coplanar <5     boundary       5     7.0/   7.6/   8.0     1.0/  2.0/  2.0    0.000
+5-30            same       19933     1.0/   2.5/  10.5     0.0/  1.0/  9.0    0.000
+5-30            boundary     401     7.0/  11.0/  13.5     1.0/  2.0/  6.0    0.000
+crease >=30     same       27787     0.0/   2.0/  10.5     0.5/  1.5/  7.5    0.000
+crease >=30     boundary     507     9.0/  12.5/  17.0     1.0/  2.5/  7.0    0.000
+in-face horizontal pixel gradient, texels: p50 1.00 p99 5.00
+
+face pairs with a median u step > 32 texels (n >= 10): 0

@@ -1,0 +1,23 @@
+# md5 of greets_t*_color.ppm, judging flags, 1920x1080, 2026-09-02/03
+h6194_off3 36cd059a6dec6d6bb2c74f880ca2d0c1
+h6194_off4 36cd059a6dec6d6bb2c74f880ca2d0c1
+h6194_off5 36cd059a6dec6d6bb2c74f880ca2d0c1
+h6194_on3 dc764a824e2406e140c2992b94121de4
+h6194_on4 e4da6194ca5a01bde160aa5112fc4485
+h6194_on4_noscale dc764a824e2406e140c2992b94121de4
+h6194_on5 1b9f866e9a64e8c660d4664d540600a9
+h5981_on5 69782ebfc2a351cdb31f0aeec0ee0915
+corner_on5 07869435188369530f647cde85f095b3
+line5_on5 37cc6bd6e4b482d17518e25eab126404
+h6194_uv2hue_on5 9571cdfa4dedb50df9f1294079dece0d
+h5981_uv2hue_on5 9027e3320254e3ea15f2e806cc32dcc8
+corner_uv2hue_on5 020ef82160404e0cc1d10acbf0f05b6a
+line5_uv2hue_on5 a7033c4ca1b35dc310c5482abf63d2af
+bn_camA 3a953d4fc25ea14ed35bbf6ebff639bc
+bn_camA3 d92cb6f5eb19da4301588ae83af6a56e
+bn_camA5 d92cb6f5eb19da4301588ae83af6a56e
+# [GREETS-CAM] lines
+bn_camA: 
+bn_camA3: [GREETS-CAM] applied pose src=(22.51,3.88,-61.89)
+bn_camA5: [GREETS-CAM] applied pose src=(22.51,3.88,-61.89)
+# render_gate 2026-09-03: mirrortest rttslot conetest halotest ALL PASS
