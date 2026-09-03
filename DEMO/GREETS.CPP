@@ -38,6 +38,7 @@ void Xtrace_WriteFile(const char*);
 #include "DisplaceRebuild.h"   // live shell rebuild (editor displacement panel)
 #include "SeamPhase.h"         // --greets_uv_seam_phase: per-patch u shift at stone creases
 #include "MeshDump.h"          // --greets_mesh_dump: authored + baked stone OBJ for the external reference
+#include "SplitTJunctions.h"   // --greets_split_tjunctions: split authored T-junctions
 #include "MaterialImport.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
@@ -2012,6 +2013,8 @@ void Initialize_Greets()
 		// texel space, so one projection per plane turns 52 per-face lattices
 		// into one global one.
 		static const char *kWorldUVMats[2] = { "rooms", "floor" };
+		if (displace && fds::FeatureFlags::greets_split_tjunctions())
+			rev::SplitMeshTJunctions(GreetSc, kWorldUVMats, 2);
 		if (displace && fds::FeatureFlags::greets_displace_v4() &&
 		    fds::FeatureFlags::v4_world_uv())
 			fds::v4::WorldUV_Apply(GreetSc, kWorldUVMats, 2);

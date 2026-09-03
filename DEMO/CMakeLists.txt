@@ -46,6 +46,8 @@ set(DEMO_SOURCES
     DisplaceRebuild.cpp
     SeamPhase.cpp
     MeshDump.cpp
+    SplitTJunctions.cpp
+    SplitTJunctions.h
     DisplaceRebuild.h
     MaterialEditor.cpp
     MaterialEditor.h
