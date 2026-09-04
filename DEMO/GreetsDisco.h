@@ -22,11 +22,16 @@
 // re-mirror read).
 
 struct Scene;
+struct Texture;
 
 namespace fds {
 
 // Returns true if the ball was built (flag on + a donor env face was
 // found). Safe to call when --greets-disco is off: does nothing.
+// The disco ball's baked equirectangular panorama (nullptr until BuildDiscoBall
+// ran with the disco on). Read-only; the WebGL2 editor renderer uploads it.
+const Texture *GreetsDiscoPanoTexture();
+
 bool BuildDiscoBall(Scene *sc);
 
 // timerTicks: the greets music timer (~100 ticks/s) — keeps the spin

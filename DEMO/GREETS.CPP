@@ -584,6 +584,19 @@ struct GreetsGenerator
 
 GreetsGenerator *gg;
 
+#ifdef __EMSCRIPTEN__
+// Browser-editor WebGL2 renderer hooks (DEMO/GpuWeb.cpp): the live greets
+// screen as its linear 256x256 buffer, and a render tick for it while the
+// demo plays in the editor. Wasm-only; the native build carries neither.
+extern "C" void *Greets_GetDynamicScreenLinearBuffer() {
+	return (gg && gg->OldBuf) ? (void*)gg->OldBuf : nullptr;
+}
+
+extern "C" void Greets_RenderDynamicScreen() {
+	if (gg) gg->Render();
+}
+#endif
+
 // Test-harness hook: compute centroids of the major intermediate buffers
 // and write them to `out`. Centered greets should put the centroid near
 // (128.0, 128.0) on every stage. Used by --bench=greets-stage to diff

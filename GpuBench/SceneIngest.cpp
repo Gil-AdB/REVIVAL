@@ -29,9 +29,51 @@
 // engine file is touched. Anything else that reads `dTime` in this process is
 // reading the value FreeCamStep last wrote, which is correct — GpuBench has
 // exactly one camera integrator.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) float dTime = 0.0f;
+#else
 float dTime = 0.0f;
+#endif
 
 namespace gpubench {
+
+bool ExpandToRGBA(const ::Texture *tx, TextureImage &out) {
+    if (!tx || !tx->Data || tx->SizeX <= 0 || tx->SizeY <= 0) return false;
+    const int cpp = int(tx->BPP) / 8;
+    if (cpp != 1 && cpp != 3 && cpp != 4) return false;
+    out.w = tx->SizeX;
+    out.h = tx->SizeY;
+    out.rgba.resize(size_t(out.w) * size_t(out.h) * 4);
+    const uint8_t *src = tx->Data;
+    const bool isTiled = (tx->Flags & Txtr_Tiled) && (out.w >= 4) && (out.h >= 4) && ((out.w % 4) == 0) && ((out.h % 4) == 0);
+    const int blocksY = out.h >> 2;
+
+    for (size_t t = 0, n = size_t(out.w) * size_t(out.h); t < n; ++t) {
+        size_t dstIdx = t;
+        if (isTiled) {
+            int within = int(t) & 15;
+            int blk = int(t) >> 4;
+            int iu = (blk / blocksY) * 4 + (within & 3);
+            int iv = (blk % blocksY) * 4 + ((within >> 2) & 3);
+            dstIdx = size_t(iu + iv * out.w);
+        }
+
+        if (cpp == 1) {   // single-channel (height / roughness) — replicate
+            const uint8_t g = src[t];
+            out.rgba[dstIdx * 4 + 0] = g;
+            out.rgba[dstIdx * 4 + 1] = g;
+            out.rgba[dstIdx * 4 + 2] = g;
+            out.rgba[dstIdx * 4 + 3] = 255;
+        } else {
+            out.rgba[dstIdx * 4 + 0] = src[t * cpp + 2];   // R  (source lane 2)
+            out.rgba[dstIdx * 4 + 1] = src[t * cpp + 1];   // G
+            out.rgba[dstIdx * 4 + 2] = src[t * cpp + 0];   // B  (source lane 0)
+            out.rgba[dstIdx * 4 + 3] = (cpp == 4) ? src[t * cpp + 3] : 255;
+        }
+    }
+    return true;
+}
+
 namespace {
 
 // greets maps the demo timer to the engine's CurFrame as
@@ -90,41 +132,6 @@ bool FiniteVec(const Vector &v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-// Engine textures at this point are linear/row-major (Load_Texture, no
-// Generate_Mipmaps). Expand to tightly packed RGBA8.
-//
-// Byte order is NOT guessed. Both engine loaders produce B,G,R(,A):
-// LoadPNG (IMGCODE.CPP:1037) takes stb_image's RGBA and swaps lanes 0<->2, and
-// the 8/24-bit paths follow the same BGRA convention as VPage. So lane 0 is
-// blue and lane 2 is red for every format we touch here.
-//
-// ALPHA IS PRESERVED for 32-bit sources: the greets stone albedos carry a baked
-// AO map in alpha (Mat_AoInAlpha) and the deferred kernel reads occlusion from
-// it. Forcing alpha to 255 would silently discard that.
-bool ExpandToRGBA(const ::Texture *tx, TextureImage &out) {
-    if (!tx || !tx->Data || tx->SizeX <= 0 || tx->SizeY <= 0) return false;
-    const int cpp = int(tx->BPP) / 8;
-    if (cpp != 1 && cpp != 3 && cpp != 4) return false;
-    out.w = tx->SizeX;
-    out.h = tx->SizeY;
-    out.rgba.resize(size_t(out.w) * size_t(out.h) * 4);
-    const uint8_t *src = tx->Data;
-    for (size_t i = 0, n = size_t(out.w) * size_t(out.h); i < n; ++i) {
-        if (cpp == 1) {   // single-channel (height / roughness) — replicate
-            const uint8_t g = src[i];
-            out.rgba[i * 4 + 0] = g;
-            out.rgba[i * 4 + 1] = g;
-            out.rgba[i * 4 + 2] = g;
-            out.rgba[i * 4 + 3] = 255;
-        } else {
-            out.rgba[i * 4 + 0] = src[i * cpp + 2];   // R  (source lane 2)
-            out.rgba[i * 4 + 1] = src[i * cpp + 1];   // G
-            out.rgba[i * 4 + 2] = src[i * cpp + 0];   // B  (source lane 0)
-            out.rgba[i * 4 + 3] = (cpp == 4) ? src[i * cpp + 3] : 255;
-        }
-    }
-    return true;
-}
 
 // Replicates DEMO's --greets_stone_tex override (DEMO/GREETS.CPP:1508-1600).
 //
@@ -1082,7 +1089,16 @@ bool Load(Scene &out, const LoadOptions &opt) {
         auto it = texIndex.find(tx);
         if (it != texIndex.end()) return it->second;
         int idx = -1;
+        TextureImage img;
+        img.fileName = tx->FileName ? tx->FileName : "(unnamed)";
+        bool ok = false;
         if (!tx->Data) {
+            // The bench path (GpuBenchMain): nothing has touched this texture,
+            // so load it into the engine object exactly as before. What
+            // Load_Texture writes is linear, row-major - whatever a stale
+            // Txtr_Tiled bit on the material says (greets' ApplyStoneTex
+            // re-points a tiled texture at a PNG and leaves the flag), so the
+            // flag is masked for the expansion and restored.
             if (!Load_Texture(tx)) {
                 ++out.texturesMissing;
                 if (opt.verbose)
@@ -1091,10 +1107,36 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 texIndex[tx] = -1;
                 return -1;
             }
+            const auto savedFlags = tx->Flags;
+            tx->Flags &= ~Txtr_Tiled;
+            ok = ExpandToRGBA(tx, img);
+            tx->Flags = savedFlags;
+        } else if (tx->FileName && tx->FileName[0]) {
+            // The editor path (DEMO/GpuWeb.cpp, inside the running demo): the
+            // in-memory copy went through scene init - tiled mips, and
+            // AttachMatToScene rewrites Flags - so its Txtr_Tiled bit is not
+            // trustworthy in either direction. Read the file again into a
+            // private copy; a file is linear by definition. Released with
+            // delete[]: every loader in IMGCODE.CPP allocates Texture::Data
+            // with new[] (Imgproc.cpp:275 frees them the same way).
+            ::Texture fresh;
+            std::memset(&fresh, 0, sizeof(fresh));
+            fresh.FileName = tx->FileName;
+            if (Load_Texture(&fresh) && fresh.Data) {
+                fresh.Flags = 0;
+                ok = ExpandToRGBA(&fresh, img);
+                delete [] fresh.Data;
+                fresh.Data = nullptr;
+            } else if (opt.verbose) {
+                std::fprintf(stderr, "[INGEST] texture RELOAD failed, using the in-memory copy: %s\n", tx->FileName);
+            }
+            if (!ok) ok = ExpandToRGBA(tx, img);   // fall back to the flag
+        } else {
+            // Procedural (no file): the flag is the only truth there is, and
+            // ExpandToRGBA unswizzles when it says tiled.
+            ok = ExpandToRGBA(tx, img);
         }
-        TextureImage img;
-        img.fileName = tx->FileName ? tx->FileName : "(unnamed)";
-        if (ExpandToRGBA(tx, img)) {
+        if (ok) {
             idx = int(out.textures.size());
             out.textures.push_back(std::move(img));
             ++out.texturesLoaded;
@@ -1411,6 +1453,10 @@ bool Load(Scene &out, const LoadOptions &opt) {
                 b.heightTexIndex = acquireTexture(M->HeightMap);
                 b.aoTexIndex     = acquireTexture(M->AoMap);
                 b.metalTexIndex  = acquireTexture(M->MetallicMap);
+                if (M->EnvTexture) {
+                    int eIdx = acquireTexture(M->EnvTexture);
+                    if (eIdx >= 0 && out.envTexIndex < 0) out.envTexIndex = eIdx;
+                }
                 b.aoStrength     = M->AoStrength;
                 b.materialName = M->Name ? M->Name
                                : (M->Txtr && M->Txtr->FileName ? M->Txtr->FileName : "?");

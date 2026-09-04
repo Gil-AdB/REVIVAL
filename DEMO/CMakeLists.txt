@@ -80,6 +80,17 @@ set(DEMO_SOURCES
     V4Border.cpp
     V4Bake.h)
 
+if(EMSCRIPTEN)
+    # The browser editor's WebGL2 renderer (?editor&gpu) and the GpuBench scene
+    # ingest it reuses. WASM-ONLY: the native DEMO never compiles either, so
+    # the software path's binary is untouched by this feature.
+    list(APPEND DEMO_SOURCES
+        GpuWeb.cpp
+        GpuWeb.h
+        "${CMAKE_SOURCE_DIR}/GpuBench/SceneIngest.cpp"
+        "${CMAKE_SOURCE_DIR}/GpuBench/SceneIngest.h")
+endif()
+
 source_group("" FILES ${DEMO_SOURCES})
 
 add_executable(${PROJECT_NAME} ${DEMO_SOURCES})
@@ -121,6 +132,8 @@ if(EMSCRIPTEN)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         FDS
         Modplayer)
+    # SceneIngest.h for GpuWeb.cpp (see the EMSCRIPTEN-only sources above).
+    target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/GpuBench")
 
     # main() runs on the actual browser main thread (no PROXY_TO_PTHREAD).
     # The blocking demo loop has been replaced with a state machine in
@@ -190,6 +203,8 @@ if(EMSCRIPTEN)
         # keep firing. emscripten_cancel_main_loop tears down at DONE.
         -sEXIT_RUNTIME=0
         -sUSE_SDL=2
+        -sMAX_WEBGL_VERSION=2
+        -sMIN_WEBGL_VERSION=2
         # Emit a wasm name section so browser stack traces show function
         # names instead of wasm-function[N]. Cheap (no codegen impact) and
         # essential for diagnosing OOB / unreachable traps.
@@ -234,6 +249,7 @@ if(EMSCRIPTEN)
     add_executable(DEMO_snapshot ${DEMO_SOURCES})
     target_compile_definitions(DEMO_snapshot PRIVATE
         SIMDE_ENABLE_NATIVE_ALIASES)
+    target_include_directories(DEMO_snapshot PRIVATE "${CMAKE_SOURCE_DIR}/GpuBench")
     target_link_libraries(DEMO_snapshot PRIVATE
         FDS
         Modplayer)

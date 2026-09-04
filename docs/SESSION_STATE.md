@@ -1,4 +1,28 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
+## 2026-09-04c — the WebGL2 editor renderer reworked and landed; the joint's acceptance basis ruled
+
+- **His rulings (quoted in the ledger):** "fix the anti gravity work, make sure it doesn't pollute the main code, and
+  commit in our branch" (b9408539ba04 answers c61b27658aa2); "for the pose - teh pose you have + your tools should be
+  good enough for comparing - I don't really have another pose" (28975f474ad0): t=6934 + P1–P4 + the hole census +
+  the Blender welded reference are the basis for judging the joint; no more pose dumps are waited on.
+- **rev-gpuweb** (branched from fog-wt 07bad410, the Antigravity worktree untouched): Antigravity's uncommitted diff
+  (patch md5 98d130d1…) applied, then reworked. Isolation: `GpuWeb.cpp` + `GpuBench/SceneIngest.cpp` compile only
+  under EMSCRIPTEN (the native DEMO has 0 GpuWeb/gpubench symbols); the GREETS.CPP hooks sit under
+  `#ifdef __EMSCRIPTEN__`; GreetsDisco exposes `GreetsDiscoPanoTexture()` instead of its static; `Wasm_InitGL`
+  creates the emscripten context only under `Module.revGpuMode`, the CPU page keeps its old JS context; the dead
+  `gpu` FeatureFlag is gone (page mode like `?editor`). The five findings closed: `shadowSlot` field; the cone pass is
+  Metal's `fs_cones` term for term with density/nSamples/fadeFloor from FeatureFlags live; the ingest's bench path
+  unchanged and the editor path reloads file-backed textures into a private copy; `LoadPNG` now allocates with
+  `new[]` (the one malloc; `Imgproc.cpp:275` always freed with `delete[]`). `docs/EDITOR_WEBGL2.md`.
+- **Verified:** native pins 36cd059a / d92cb6f5 byte-identical + render_gate 4/4 with the rev-gpuweb binary; wasm
+  builds; the Metal GpuBench builds with the shared ingest change (not re-rendered); headless Chrome (`shoot.js`,
+  CDP, nothing on screen) renders `?editor&gpu` paused and playing with no shader errors, 21 lights / 8 shadow spots /
+  disco panorama uploaded (`docs/evidence/editor_webgl/`). **Parity is NOT measured** — the CPU viewport carries the
+  profiler overlay and its own bloom/fog/tonemap, so the page-vs-page correlation is not a parity number; the missing
+  metric is a headless CPU frame at the same View without the overlay.
+- Tools: `tools/editor_server.py --port <p>` serves `build-wasm/DEMO`; `docs/evidence/editor_webgl/shoot.js <url>
+  <png> <log> [t] [playSeconds]`; `compare_shots.py` for the canvas-crop correlation.
+
 ## 2026-09-04b — his reference ruling, and the editor / WebGL2 session reviewed and half-merged
 
 - **His ruling (ledger e040ed41ebed, quoted):** "the blender - mesh as authored (welded) seems like a good refernce for all

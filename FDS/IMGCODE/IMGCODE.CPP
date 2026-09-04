@@ -1051,7 +1051,10 @@ char* LoadPNG(Texture* Tx)
 	Tx->SizeX = x;
 	Tx->SizeY = y;
 	Tx->BPP = 32;
-	Tx->Data = (byte *)malloc(4 * x * y);
+	// new[], like every other loader here: Texture::Data is released with
+	// delete[] (Imgproc.cpp:275, and the GpuBench ingest's private reloads).
+	// This was the one malloc.
+	Tx->Data = new byte[4 * x * y];
 	memcpy(Tx->Data, Txtr, sizeof(DWord) * x * y);
 
 	auto ptr = (byte*)Tx->Data;

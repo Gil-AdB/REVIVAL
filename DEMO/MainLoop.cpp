@@ -20,6 +20,7 @@
 #include <SDL.h>
 
 #include "MainLoop.h"
+#include "GpuWeb.h"
 #include "Rev.h"
 #include "Resize.h"
 #include "SDL2.h"
@@ -119,7 +120,7 @@ static const EditorSceneDef kEditorScenes[] = {
 static const EditorSceneDef *g_editorScene = &kEditorScenes[0];
 static std::atomic<bool> g_editorSceneReady{false};
 static bool   g_editorCamSeeded = false; // first frame seeds orbit from scene cam
-static bool   g_editorPlaying = false;   // play mode: scene time runs, View = scene camera
+bool          g_editorPlaying = false;   // play mode: scene time runs, View = scene camera
 
 // Scancode translation: SDL2 reports HID, the legacy engine expects PS/2
 // set-1. Same table as native main() loop. Returned legacy code or -1.
@@ -281,6 +282,18 @@ void DemoBoot(ModplayerHandle modHandle)
 	// greets's setDefault can't re-enable it), then render a frozen overview
 	// frame each tick so live surface edits are visible.
 	g_editorMode = EM_ASM_INT({ return (Module.revEditorMode ? 1 : 0); });
+	// ?gpu → the WebGL2 renderer (GpuWeb.cpp) draws the editor viewport instead
+	// of the software rasterizer. shell.html parses the URL once into
+	// Module.revGpuMode (same pattern as revEditorMode); SDL2.cpp's Wasm_InitGL
+	// reads the same field to create the context those GLES3 calls need. It is
+	// a page mode, not a FeatureFlag: nothing in the engine consults it.
+	const int gpuMode = EM_ASM_INT({
+		return (typeof Module !== 'undefined' && Module.revGpuMode) ? 1 : 0;
+	});
+	if (gpuMode) {
+		rev::GpuWeb_SetEnabled(true);
+		std::fprintf(stderr, "[DEMO] WebGL2 hardware GPU mode active (?gpu)\n");
+	}
 	if (g_editorMode) {
 		// Apply the URL query string as feature flags via the SAME parser the CLI
 		// uses (dash→underscore, =value, no-): paste your flag set, e.g.
@@ -362,7 +375,8 @@ void DemoBoot(ModplayerHandle modHandle)
 						const std::string want = tok.substr(6);
 						for (const EditorSceneDef &s : kEditorScenes)
 							if (want == s.name) g_editorScene = &s;
-					} else if (!tok.empty() && tok != "editor") {
+					} else if (!tok.empty() && tok != "editor" && tok.rfind("editor=", 0) != 0 && tok != "gpu" && tok.rfind("gpu=", 0) != 0) {
+						// 'editor' and 'gpu' are page modes consumed by shell.html, never flags.
 						args.push_back("--" + tok);
 					}
 					tok.clear();
@@ -657,6 +671,9 @@ static void editorTick()
 		g_currentDriver = g_editorScene->create();
 		g_currentDriver->init();
 		g_currentDriverInitialized = true;
+		if (rev::GpuWeb_IsEnabled()) {
+			rev::GpuWeb_LoadScene(g_editorScene->name, (float)Timer.load());
+		}
 		EngineStartFadeIn(kFadeFrames);
 		g_editorRenderFrames = kFadeFrames + 1;   // play the fade-in
 		Init_FreeCamera();
@@ -668,6 +685,45 @@ static void editorTick()
 	Keyboard[ScESC] = 0;                          // don't let the scene self-exit
 	if (anyFreeCamKey()) rev::Editor_MarkDirty();  // keep rendering while flying
 	if (g_editorPlaying) rev::Editor_MarkDirty(); // play mode renders every frame
+
+	if (rev::GpuWeb_IsEnabled()) {
+		int canW = EM_ASM_INT({ return Module.canvas ? Module.canvas.width : 1280; });
+		int canH = EM_ASM_INT({ return Module.canvas ? Module.canvas.height : 720; });
+		if (g_editorPlaying && CurScene) {
+			const int32_t endT = g_currentDriver->partTime();
+			if (endT > 0 && Timer.load() >= endT)
+				Timer = 0;
+			if (CurScene->CameraHead) View = CurScene->CameraHead;
+			rev::GpuWeb_RenderFrame(canW, canH, (float)Timer.load());
+			g_editorFreezeTimer = Timer.load();
+			return;
+		}
+		Timer = g_editorFreezeTimer;
+		if (!g_editorCamSeeded) {
+			updateEditorCamera();
+			g_editorCamSeeded = true;
+			if (g_editorScene->autoFrame) {
+				editorAutoFrame();
+				updateEditorCamera();
+			}
+		} else if (anyFreeCamKey()) {
+			dTime = 0.25f;
+			FV.x = FV.y = FV.z = 0.0f;
+			FT.x = FT.y = FT.z = 0.0f;
+			const float velSaved = Vel_Speed;
+			const float kDecay = 1.0f - std::exp(-5.0f * Vel_Speed * dTime);
+			if (kDecay > 1e-6f && kDecay < 1.0f) Vel_Speed /= kDecay;
+			Dynamic_Camera();
+			Vel_Speed = velSaved;
+			CalcPersp(&FC);
+			View = &FC;
+			syncOrbitFromFC();
+		} else {
+			updateEditorCamera();
+		}
+		rev::GpuWeb_RenderFrame(canW, canH, (float)Timer.load());
+		return;
+	}
 
 	// Idle throttle: render only while something changed (edit / camera / key);
 	// otherwise RE-PRESENT the last frame so the WebGL canvas stays alive (it
@@ -1103,6 +1159,8 @@ EMSCRIPTEN_BINDINGS(rev_editor_camera)
 	emscripten::function("editorTimeSet",       &editorTimeSet);
 	emscripten::function("editorSceneLength",   &editorSceneLength);
 	emscripten::function("editorCamDebug",      &editorCamDebug);
+	emscripten::function("editorGetGpuMode",    &rev::GpuWeb_IsEnabled);
+	emscripten::function("editorSetGpuMode",    &rev::GpuWeb_SetEnabled);
 }
 
 #endif // __EMSCRIPTEN__

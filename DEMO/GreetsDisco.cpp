@@ -80,6 +80,11 @@ void BakePanorama(Scene *sc);
 
 }  // namespace
 
+// The baked panorama, read-only, for the browser editor's WebGL2 renderer
+// (DEMO/GpuWeb.cpp uploads it as the env map). nullptr until BuildDiscoBall
+// has run with the disco on.
+const Texture *GreetsDiscoPanoTexture() { return s_panoTex; }
+
 bool BuildDiscoBall(Scene *sc)
 {
     if (!FeatureFlags::greets_disco()) return false;

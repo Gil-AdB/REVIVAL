@@ -1,0 +1,23 @@
+# rev-gpuweb: Antigravity's WebGL2 renderer reworked, verified 2026-09-04 by the coordinator
+## native (fixed tree): build rc 0; nm count of GpuWeb|gpubench symbols in DEMO = 0
+## pins with the rev-gpuweb native binary: H6194 36cd059a6dec6d6bb2c74f880ca2d0c1  camA d92cb6f5eb19da4301588ae83af6a56e (= the 24-run pins)
+## render_gate: mirrortest 4ac809e5 rttslot 826c09e6 conetest b41894f9 halotest 166fa25a ALL PASS
+## wasm: emcmake configure + ninja DEMO.html rc 0 (DEMO.wasm 4982005 bytes)
+## Metal GpuBench (-DFDS_GPU_BENCH=ON) with the shared SceneIngest change: builds, rc 0 (not re-rendered)
+## headless Chrome (--headless=new, CDP; shoot.js), tools/editor_server.py --port 8123 serving build-wasm/DEMO:
+##   ?editor&gpu at t=600: scene ingested (26856 verts, 37 batches, 45 textures, 21 lights, 8 shadow spots), disco panorama 1024x1024 uploaded as env map, no shader/GL errors in the console; renders paused and after 3 s of playback (see the two JPEGs: left CPU page with its profiler overlay, right GPU page).
+##   parity NOT measured: the CPU viewport carries the profiler overlay and its own bloom/fog/tonemap; page-vs-page high-pass correlation (0.18 paused, 0.01 playing) is not a parity number. A headless CPU frame without the overlay at the same View is the missing metric.
+## the five review findings (1d6ee6ec802c) and how each was closed:
+- shadowRes hijack -> gpubench::Light::shadowSlot (new field, -1 default; the Metal bench never reads it)
+- dead FeatureFlags gpu -> removed; ?gpu is a page mode via Module.revGpuMode like ?editor (MainLoop reads only that)
+- cone density 0.035 -> the Metal fs_cones integrator ported term for term, constants from FeatureFlags live: cone_strength*1e-3*(hdr_cone_softknee?1:hdr_glow_scale), vol_n_samples, fadeFloor 12*farZ*1.1/65280
+- Wasm_InitGL depth=true for every wasm build -> emscripten context only under Module.revGpuMode; the CPU page keeps its original JS context (depth:false)
+- disk reload + delete[] of malloc'd PNG data -> bench path unchanged (load once into the engine object, flag masked for the expansion); editor path reloads file-backed textures into a private copy; LoadPNG now allocates with new[] like every other loader (Imgproc.cpp:275 already freed with delete[])
+- isolation: GpuWeb.cpp + SceneIngest.cpp compiled only under EMSCRIPTEN; GREETS.CPP hooks under #ifdef __EMSCRIPTEN__; GreetsDisco exposes a const accessor instead of its static; MainLoop's console.log probe removed
+## console: [GPU-WEB] Deferred PBR Full Hardware Pipeline Initialized Successfully!
+## console: [GPU-WEB] Ingesting scene 'greets' from SCENES/GREETS.FLD for Deferred PBR...
+## console: [INGEST] floor retile: scale=1.50 detile=0.060 (30 faces) -- parity with GreetsRetileFloor
+## console: [INGEST] stone-tex 'rooms' -> TEXTURES/greets_wall.png (+n/+r/+h), parallaxScale=0.10, AO-in-alpha
+## console: [INGEST] stone-tex 'floor' -> TEXTURES/greets_floor.png (+n/+r/+h), parallaxScale=0.25, AO-in-alpha
+## console: [GPU-WEB] Scene 'greets' ingested: 26856 verts, 37 batches, 45 textures, 21 lights, 8 shadow spots, envTex=-1
+## console: [GPU-WEB] Uploaded disco panorama reflection map 1024x1024

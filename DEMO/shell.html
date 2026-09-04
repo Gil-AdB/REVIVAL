@@ -187,6 +187,7 @@
       // ?editor in the URL → surface-editor mode. Read in C++ (DemoBoot) to
       // boot greets-only/mirror-off, and here to show the surface panel.
       var revEditorMode = /[?&]editor\b/.test(location.search);
+      var revGpuMode = /[?&]gpu\b/.test(location.search);
       // ?scene=<name> picks the edited scene (default greets). The C++ side
       // parses the same token (MainLoop's editor scene registry); here it
       // selects the live-fetch paths + the save API route.
@@ -197,6 +198,7 @@
         canvas: canvasEl,
         setStatus: setStatus,
         revEditorMode: revEditorMode ? 1 : 0,
+        revGpuMode: revGpuMode ? 1 : 0,
         totalDependencies: 0,
         monitorRunDependencies: function(left) {
           this.totalDependencies = Math.max(this.totalDependencies, left);
@@ -917,6 +919,9 @@
         </div>
 
         <div class="topbar-section">
+          <button id="btn-gpu-mode" class="rev-btn" title="Toggle between WebGL2 GPU hardware rasterizer and CPU software renderer" onclick="toggleGpuMode()">
+            ⚡ GPU
+          </button>
           <button id="btn-layout-mode" class="rev-btn" title="Toggle between Split Studio (Outliner on left) and Single Sidebar" onclick="toggleLayoutMode()">
             ◫ Dual Dock
           </button>
@@ -1115,7 +1120,38 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b80";
+      var REV_BUILD = "b81";
+
+      function updateGpuButton() {
+        var btn = document.getElementById('btn-gpu-mode');
+        if (!btn) return;
+        if (revGpuMode) {
+          btn.innerHTML = '⚡ GPU: ON';
+          btn.title = 'WebGL2 GPU Hardware rendering ACTIVE. Click to switch to CPU software rasterizer.';
+          btn.style.borderColor = '#10b981';
+          btn.style.color = '#34d399';
+          btn.style.background = 'rgba(16, 185, 129, 0.15)';
+        } else {
+          btn.innerHTML = '⚡ GPU: OFF';
+          btn.title = 'CPU Software rasterizer ACTIVE. Click to switch to WebGL2 GPU Hardware rendering.';
+          btn.style.borderColor = '';
+          btn.style.color = '#94a3b8';
+          btn.style.background = '';
+        }
+      }
+
+      function toggleGpuMode() {
+        var s = location.search;
+        if (/[?&]gpu\b/.test(s)) {
+          s = s.replace(/[?&]gpu(=[^&]*)?/g, '');
+        } else {
+          s += (s.indexOf('?') >= 0 ? '&' : '?') + 'gpu';
+        }
+        s = s.replace(/\?&/, '?').replace(/^&+/, '');
+        if (s === '?') s = '';
+        location.href = location.pathname + s + location.hash;
+      }
+
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1141,6 +1177,7 @@
       // bar exists in the DOM.
       function updateStatusBar(){
         var bar = document.getElementById('editor-statusbar'); if (!bar) return;
+        updateGpuButton();
         var setT = function(id, v){ var e = document.getElementById(id); if (e) e.textContent = v; };
         setT('sb-scene', revEditorScene);
         var t = '—';

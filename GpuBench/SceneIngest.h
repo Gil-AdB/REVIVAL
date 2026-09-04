@@ -26,7 +26,11 @@
 #include <string>
 #include <vector>
 
+struct Texture;
+
 namespace gpubench {
+
+bool ExpandToRGBA(const ::Texture *tx, struct TextureImage &out);
 
 // 48 bytes, interleaved. Positions/normals/tangents are OBJECT space; the
 // model matrix travels separately per batch so the GPU does the full
@@ -215,6 +219,10 @@ struct Light {
     float cosInner = 1.0f;        // Omni::HotSpot = cos(hotInnerDeg)
     float cosOuter = 1.0f;        // Omni::FallOff = cos(fallOuterDeg)
     int   shadowRes = 0;          // Omni::shadowMapRes (0 = use the class default)
+    // DEMO/GpuWeb.cpp only: which of its 8 spot shadow maps this light owns
+    // this frame (-1 = none). The Metal bench keys its maps by light index and
+    // never reads it.
+    int   shadowSlot = -1;
     bool  castsShadow = true;
     // SPOT shadow camera, built by FDS's own Kick_Camera exactly as
     // FDS/RENDER/Shadows.cpp:470-491 does it — look from IPos toward IPos+IDir,
@@ -249,6 +257,7 @@ struct Scene {
     std::vector<Light>        lights;
     std::vector<MirrorInfo>   mirrors;
     std::vector<EnvProbe>     envProbes;
+    int                       envTexIndex = -1;
     // Scene AABB, world. The parallax proxy the env lookup corrects against —
     // the CPU's EnvPanoLinear::boxMin/boxMax slab test.
     float                     aabbMin[3] = {0, 0, 0};

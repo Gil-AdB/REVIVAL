@@ -69,21 +69,55 @@ extern "C" void EngineStartFadeIn(int frames)
 //      fully transparent. We force alpha = 1.0 in the shader.
 static int Wasm_InitGL()
 {
+	// ?gpu (shell.html parses the URL once into Module.revGpuMode, the same
+	// way ?editor becomes revEditorMode): the WebGL2 renderer in GpuWeb.cpp
+	// issues GLES3 calls through emscripten's GL library, which only knows a
+	// context it created itself, and it needs a depth buffer. So in GPU mode
+	// the context is created here through emscripten and the blit below
+	// borrows it. The CPU path is untouched: its own JS-side context, no
+	// depth buffer, exactly as before.
+	const int gpuMode = EM_ASM_INT({
+		return (typeof Module !== 'undefined' && Module.revGpuMode) ? 1 : 0;
+	});
+	if (gpuMode) {
+		EmscriptenWebGLContextAttributes attrs;
+		emscripten_webgl_init_context_attributes(&attrs);
+		attrs.majorVersion = 2;
+		attrs.minorVersion = 0;
+		attrs.alpha = false;
+		attrs.depth = true;
+		attrs.stencil = false;
+		attrs.antialias = false;
+		attrs.preserveDrawingBuffer = false;
+		attrs.powerPreference = EM_WEBGL_POWER_PREFERENCE_HIGH_PERFORMANCE;
+		EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ctx = emscripten_webgl_create_context("#canvas", &attrs);
+		if (ctx <= 0) {
+			fprintf(stderr, "[SDL] emscripten_webgl_create_context failed: %d\n", (int)ctx);
+			return 2;
+		}
+		emscripten_webgl_make_context_current(ctx);
+	}
+
 	// V_Flip runs on the browser main thread (main() is no longer proxied
 	// to a pthread). WebGL state lives here too, so plain EM_ASM is fine
 	// — no cross-thread proxy.
 	return EM_ASM_INT({
 		var canvas = Module.canvas;
 		if (!canvas) return 1;
-		var gl = canvas.getContext('webgl2', {
-			alpha: false,
-			antialias: false,
-			depth: false,
-			stencil: false,
-			premultipliedAlpha: false,
-			preserveDrawingBuffer: false,
-			powerPreference: 'high-performance'
-		});
+		var gl = null;
+		if (Module.revGpuMode) {
+			gl = (typeof GL !== 'undefined' && GL.currentContext) ? GL.currentContext.GLctx : null;
+		} else {
+			gl = canvas.getContext('webgl2', {
+				alpha: false,
+				antialias: false,
+				depth: false,
+				stencil: false,
+				premultipliedAlpha: false,
+				preserveDrawingBuffer: false,
+				powerPreference: 'high-performance'
+			});
+		}
 		if (!gl) return 2;
 		Module.__floodGL = gl;
 
